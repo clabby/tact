@@ -1,14 +1,18 @@
 //! Nanocodex construction, turn execution, and graceful shutdown.
 
 use crate::{
-    config::{Config, ReasoningEffort},
+    config::{Config, ReasoningEffort, SkillsConfig},
     error::{Result, RuntimeError},
     mcp,
+    skills::{self, SkillCatalog},
     subagents::{self, AgentUpdate, SubagentControl},
 };
 use nanocodex::{
-    AgentEvents, Nanocodex, NanocodexError, Responses, SessionSnapshot, Tools, TurnControl,
+    AgentEvents, ContentItem, MessageRole, Nanocodex, NanocodexError, ResponseItem, Responses,
+    SessionSnapshot, Tools, TurnControl,
 };
+use nanocodex_core::ModelConfig;
+use serde::Deserialize;
 use std::{
     io,
     io::Write,
@@ -80,7 +84,12 @@ impl ConfiguredAgent {
             .tools_factory(move |agent| {
                 subagents::root_tools(tools.clone(), agent, Arc::clone(&subagents))
             });
-        if let Some(instructions) = agent_config.instructions() {
+        let instructions = session_instructions(
+            agent_config.instructions(),
+            config.skills(),
+            snapshot.as_ref(),
+        )?;
+        if let Some(instructions) = instructions {
             builder = builder.instructions(instructions);
         }
         if let Some(session_id) = session_id {
@@ -176,6 +185,69 @@ impl ConfiguredAgent {
     }
 }
 
+#[derive(Deserialize)]
+struct SnapshotRequestPrefix {
+    request_prefix: Vec<ResponseItem>,
+}
+
+fn session_instructions(
+    custom: Option<&str>,
+    skills: &SkillsConfig,
+    snapshot: Option<&SessionSnapshot>,
+) -> Result<Option<String>> {
+    let Some(snapshot) = snapshot else {
+        return Ok(fresh_instructions(custom, skills));
+    };
+    let stored = snapshot_developer_instructions(snapshot).map_err(|error| {
+        NanocodexError::InvalidSessionSnapshot(format!(
+            "failed to inspect stored instructions: {error}"
+        ))
+    })?;
+
+    Ok(restored_instructions(custom, stored.as_deref()))
+}
+
+fn fresh_instructions(custom: Option<&str>, skills: &SkillsConfig) -> Option<String> {
+    let catalog = SkillCatalog::load(skills);
+    let Some(skill_instructions) = catalog.rendered_instructions() else {
+        return custom.map(str::to_owned);
+    };
+    let base = custom
+        .map(str::to_owned)
+        .unwrap_or_else(|| ModelConfig::default().system_prompt.to_string());
+    Some(format!("{base}\n\n{skill_instructions}"))
+}
+
+fn restored_instructions(custom: Option<&str>, stored: Option<&str>) -> Option<String> {
+    stored
+        .filter(|instructions| skills::contains_catalog(instructions))
+        .map(str::to_owned)
+        .or_else(|| custom.map(str::to_owned))
+}
+
+fn snapshot_developer_instructions(
+    snapshot: &SessionSnapshot,
+) -> std::result::Result<Option<String>, serde_json::Error> {
+    let snapshot =
+        serde_json::from_value::<SnapshotRequestPrefix>(serde_json::to_value(snapshot)?)?;
+    Ok(snapshot.request_prefix.into_iter().find_map(|item| {
+        let ResponseItem::Message {
+            role: MessageRole::Developer,
+            content,
+            ..
+        } = item
+        else {
+            return None;
+        };
+        content.into_iter().find_map(|content| match content {
+            ContentItem::InputText { text } => Some(text.into_string()),
+            ContentItem::InputImage { .. }
+            | ContentItem::InputAudio { .. }
+            | ContentItem::OutputText { .. } => None,
+        })
+    }))
+}
+
 impl Cancellation {
     async fn request(control: &TurnControl) -> Self {
         match control.cancel().await {
@@ -188,8 +260,13 @@ impl Cancellation {
 
 #[cfg(test)]
 mod tests {
-    use super::ConfiguredAgent;
-    use crate::error::{Error, RuntimeError};
+    use super::{
+        ConfiguredAgent, fresh_instructions, session_instructions, snapshot_developer_instructions,
+    };
+    use crate::{
+        config::SkillsConfig,
+        error::{Error, RuntimeError},
+    };
     use nanocodex::{
         Nanocodex, NanocodexError, Responses, ResponsesAttempt, ResponsesServiceResponse,
     };
@@ -271,6 +348,181 @@ mod tests {
             error,
             Error::Runtime(RuntimeError::WorkspaceNotDirectory(path)) if path == file
         ));
+    }
+
+    #[test]
+    fn fresh_disabled_skills_do_not_change_instructions() {
+        let disabled = SkillsConfig::from_roots(false, Vec::new());
+
+        assert_eq!(fresh_instructions(None, &disabled), None);
+        assert_eq!(
+            fresh_instructions(Some("Custom instructions."), &disabled).as_deref(),
+            Some("Custom instructions.")
+        );
+    }
+
+    #[test]
+    fn enabled_skills_extend_the_current_default_with_metadata_only() {
+        let directory = tempdir().unwrap();
+        let skill_directory = directory.path().join("review");
+        fs::create_dir(&skill_directory).unwrap();
+        let skill_path = skill_directory.join("SKILL.md");
+        fs::write(
+            &skill_path,
+            "---\nname: review\ndescription: Review code carefully.\n---\nBODY-SENTINEL\n",
+        )
+        .unwrap();
+        let enabled = SkillsConfig::from_roots(true, vec![directory.path().to_path_buf()]);
+
+        let instructions = fresh_instructions(None, &enabled).unwrap();
+        let default = ModelConfig::default().system_prompt;
+
+        assert!(instructions.starts_with(default.as_ref()));
+        assert!(instructions.contains("Review code carefully."));
+        assert!(
+            instructions.contains(&fs::canonicalize(skill_path).unwrap().display().to_string())
+        );
+        assert!(!instructions.contains("BODY-SENTINEL"));
+    }
+
+    #[test]
+    fn enabled_skills_preserve_then_extend_custom_instructions() {
+        let directory = tempdir().unwrap();
+        let skill_directory = directory.path().join("test");
+        fs::create_dir(&skill_directory).unwrap();
+        fs::write(
+            skill_directory.join("SKILL.md"),
+            "---\nname: test\ndescription: Run focused tests.\n---\nSECRET-BODY\n",
+        )
+        .unwrap();
+        let enabled = SkillsConfig::from_roots(true, vec![directory.path().to_path_buf()]);
+
+        let instructions = fresh_instructions(Some("Keep this first."), &enabled).unwrap();
+
+        assert!(instructions.starts_with("Keep this first.\n\n## Available local skills"));
+        assert!(instructions.contains("Run focused tests."));
+        assert!(!instructions.contains("SECRET-BODY"));
+    }
+
+    #[test]
+    fn malformed_skills_do_not_hide_healthy_skills() {
+        let directory = tempdir().unwrap();
+        let malformed = directory.path().join("broken");
+        let healthy = directory.path().join("healthy");
+        fs::create_dir(&malformed).unwrap();
+        fs::create_dir(&healthy).unwrap();
+        fs::write(malformed.join("SKILL.md"), "invalid").unwrap();
+        fs::write(
+            healthy.join("SKILL.md"),
+            "---\nname: healthy\ndescription: Still available.\n---\n",
+        )
+        .unwrap();
+        let enabled = SkillsConfig::from_roots(true, vec![directory.path().to_path_buf()]);
+
+        let instructions = fresh_instructions(None, &enabled).unwrap();
+
+        assert!(instructions.contains("Still available."));
+    }
+
+    #[test]
+    fn restored_catalog_is_reused_after_skills_are_disabled_or_changed() {
+        let stored = "Original instructions.\n\n<!-- tact:skills-catalog:start -->\nold catalog\n<!-- tact:skills-catalog:end -->";
+        let snapshot = snapshot_with_instructions(stored);
+        let disabled = SkillsConfig::from_roots(false, Vec::new());
+
+        let directory = tempdir().unwrap();
+        let changed = directory.path().join("changed");
+        fs::create_dir(&changed).unwrap();
+        fs::write(
+            changed.join("SKILL.md"),
+            "---\nname: changed\ndescription: A changed catalog.\n---\n",
+        )
+        .unwrap();
+        let enabled = SkillsConfig::from_roots(true, vec![directory.path().to_path_buf()]);
+
+        assert_eq!(
+            session_instructions(Some("Changed instructions."), &disabled, Some(&snapshot))
+                .unwrap()
+                .as_deref(),
+            Some(stored)
+        );
+        assert_eq!(
+            session_instructions(None, &enabled, Some(&snapshot))
+                .unwrap()
+                .as_deref(),
+            Some(stored)
+        );
+    }
+
+    #[test]
+    fn restored_session_without_a_catalog_does_not_inject_one() {
+        let snapshot = snapshot_with_instructions("Old default.");
+        let directory = tempdir().unwrap();
+        let skill = directory.path().join("new");
+        fs::create_dir(&skill).unwrap();
+        fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: new\ndescription: Must not be injected.\n---\n",
+        )
+        .unwrap();
+        let enabled = SkillsConfig::from_roots(true, vec![directory.path().to_path_buf()]);
+
+        assert_eq!(
+            session_instructions(None, &enabled, Some(&snapshot)).unwrap(),
+            None
+        );
+        assert_eq!(
+            session_instructions(Some("Current custom."), &enabled, Some(&snapshot))
+                .unwrap()
+                .as_deref(),
+            Some("Current custom.")
+        );
+    }
+
+    #[test]
+    fn extracts_typed_developer_instructions_from_a_snapshot() {
+        let instructions = "Stored instructions.\n<!-- tact:skills-catalog:start -->\ncatalog\n<!-- tact:skills-catalog:end -->";
+        let snapshot = snapshot_with_instructions(instructions);
+
+        assert_eq!(
+            snapshot_developer_instructions(&snapshot)
+                .unwrap()
+                .as_deref(),
+            Some(instructions)
+        );
+    }
+
+    fn snapshot_with_instructions(instructions: &str) -> nanocodex::SessionSnapshot {
+        serde_json::from_value(serde_json::json!({
+            "version": 1,
+            "model": nanocodex_core::MODEL,
+            "lineage_id": "test-lineage",
+            "workspace": "/test/workspace",
+            "request_prefix": [
+                {
+                    "type": "additional_tools",
+                    "role": "developer",
+                    "tools": []
+                },
+                {
+                    "type": "message",
+                    "role": "developer",
+                    "content": [{ "type": "input_text", "text": instructions }]
+                }
+            ],
+            "canonical_context": {
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "test" }]
+            },
+            "history": [{
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "test" }]
+            }],
+            "checkpoint": null
+        }))
+        .unwrap()
     }
 
     #[test]

@@ -12,6 +12,7 @@ mod error;
 mod mcp;
 mod secret;
 mod shutdown;
+mod skills;
 mod subagents;
 mod tui;
 

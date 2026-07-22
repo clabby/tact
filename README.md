@@ -93,6 +93,10 @@ image_generation = true
 # websocket_url = "wss://example.com/v1/responses"
 # api_base_url = "https://example.com/v1"
 
+[skills]
+enabled = false
+# roots = ["skills", "/path/to/shared-skills"]
+
 [mcp_servers.filesystem]
 command = "npx"
 args = ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/workspace"]
@@ -128,6 +132,27 @@ Nanocodex retains non-zeroizing copies while the server is active because those 
 tact's memory ownership. MCP startup and discovery run independently for each server, so one failed
 server does not prevent healthy servers or the session from continuing.
 
+Local skills are disabled by default. A `SKILL.md` is a set of model instructions that can direct
+shell or tool execution, so enable only roots whose contents you trust. Skill information also uses
+persistent model context: tact initially adds only a compact catalog of each skill's frontmatter
+name and description plus its canonical path. The complete `SKILL.md` body is read from disk only
+when the model selects that skill. Both the catalog and any selected body then consume persistent
+context for that session.
+
+When enabled, tact searches `$CODEX_HOME/skills` (or `~/.codex/skills` when `CODEX_HOME` is unset),
+`~/.agents/skills`, and any configured `roots`. Relative extra roots are resolved from the directory
+containing the configuration file. Discovery follows directory links without revisiting cycles and
+requires every descendant symlink target to remain beneath its canonical root. It is limited to
+depth 8, 2,048 directories, 4,096 entries per directory, 4,096 skill files, 16 KiB of frontmatter
+per skill, and an 8 KiB rendered catalog. Unreadable, invalid, duplicate, out-of-root, and special
+filesystem entries are omitted, as are entries beyond these limits; one omitted skill does not
+prevent healthy skills from loading.
+
+Only fresh sessions discover the current skill roots. A restored session that was created with a
+skill catalog retains those exact stored instructions and catalog even if configuration or files
+have since changed. A restored session created without a catalog remains catalog-free, including
+after skills are enabled.
+
 Theme values accept Ratatui color names, indexed colors such as `239`, and RGB colors such as
 `"#AABBCC"`. Colors directly under `[theme]` apply to both palettes, while values under
 `[theme.light]` or `[theme.dark]` override one palette. Configurable colors are `text`, `border`,
@@ -136,11 +161,13 @@ mode follows the operating-system preference while the TUI is running.
 
 Use **Reload config** in the Actions menu to validate and reload the selected file. Theme changes
 apply immediately. Authentication and agent settings (including reasoning effort, instructions,
-tools, MCP servers, and endpoint overrides) apply when a new or restored session is started. In an
-active session, use **Change effort** or `Ctrl+S` to change the effort for subsequently accepted
-turns without resetting the conversation. Workspace changes require a process restart because the
-terminal, shell, and transcript paths are bound to the startup workspace. Command-line and
-environment overrides keep their original precedence when reloading.
+tools, MCP servers, and endpoint overrides) apply when a new or restored session is started. Skill
+configuration changes apply only when a fresh session starts; reloading does not change an active
+or restored session's catalog. In an active session, use **Change effort** or `Ctrl+S` to change the
+effort for subsequently accepted turns without resetting the conversation. Workspace changes
+require a process restart because the terminal, shell, and transcript paths are bound to the
+startup workspace. Command-line and environment overrides keep their original precedence when
+reloading.
 
 Every application-defined command-line option has an environment-variable equivalent:
 
