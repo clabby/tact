@@ -1140,14 +1140,45 @@ fn apply_pane_effect(
                 (pane, effort, restored)
             }));
         }
-        components::RootEffect::Copy(text) => {
-            let copied_natively = clipboard::copy_text(&text);
-            if let Err(error) = context.terminal.copy_to_clipboard(&text)
-                && !copied_natively
-            {
-                return Err(RuntimeError::Terminal(error).into());
+        components::RootEffect::Copy(text) => match clipboard::copy_text(&text) {
+            Ok(()) => schedule(
+                context.app.update(AppEvent::NotifySuccess {
+                    pane,
+                    message: "Copied selection to clipboard.".to_owned(),
+                }),
+                context.scheduler,
+            ),
+            Err(native_error) => {
+                #[cfg(target_os = "macos")]
+                schedule(
+                    context.app.update(AppEvent::NotifyError {
+                        pane,
+                        error: format!("Could not copy selection: {native_error}"),
+                    }),
+                    context.scheduler,
+                );
+
+                #[cfg(not(target_os = "macos"))]
+                    match context.terminal.copy_to_clipboard(&text) {
+                        Ok(()) => schedule(
+                            context.app.update(AppEvent::NotifySuccess {
+                                pane,
+                                message: "Sent selection to the terminal clipboard.".to_owned(),
+                            }),
+                            context.scheduler,
+                        ),
+                        Err(terminal_error) => schedule(
+                            context.app.update(AppEvent::NotifyError {
+                                pane,
+                                error: format!(
+                                    "Could not copy selection: {native_error}; terminal fallback failed: {terminal_error}"
+                                ),
+                            }),
+                            context.scheduler,
+                        ),
+                    }
             }
-        }
+        },
         components::RootEffect::Steer { id, prompt } => {
             let runtime = context.panes.get_mut(&pane).expect("steer pane must exist");
             let fallback_id = TurnId::new(runtime.next_turn);

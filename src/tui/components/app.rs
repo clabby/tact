@@ -95,6 +95,10 @@ pub(crate) enum AppEvent {
         pane: PaneId,
         error: String,
     },
+    NotifySuccess {
+        pane: PaneId,
+        message: String,
+    },
     ConfigReloaded {
         pane: PaneId,
         theme: Theme,
@@ -221,6 +225,9 @@ impl AppNode {
             } => self.update_root(pane, RootEvent::SessionRestored { records, effort }),
             AppEvent::NotifyError { pane, error } => {
                 self.update_root(pane, RootEvent::NotifyError(error))
+            }
+            AppEvent::NotifySuccess { pane, message } => {
+                self.update_root(pane, RootEvent::NotifySuccess(message))
             }
             AppEvent::ConfigReloaded {
                 pane,

@@ -42,7 +42,6 @@ use std::{
 const ESCAPE_CHORD_TIMEOUT: Duration = Duration::from_millis(500);
 const SELECTION_COPY_DELAY: Duration = Duration::from_millis(100);
 const BREADCRUMB_DURATION: Duration = Duration::from_secs(3);
-const COPIED_BREADCRUMB: &str = "Copied selection to clipboard.";
 
 struct Notification {
     message: String,
@@ -1135,14 +1134,7 @@ impl RootNode {
             .is_some_and(|deadline| now >= deadline)
         {
             self.selection_copy_deadline = None;
-            self.selection.take_text().map(|text| {
-                self.notification = Some(Notification {
-                    message: COPIED_BREADCRUMB.to_owned(),
-                    color: Color::Green,
-                    deadline: now + BREADCRUMB_DURATION,
-                });
-                RootEffect::Copy(text)
-            })
+            self.selection.take_text().map(RootEffect::Copy)
         } else {
             None
         };
@@ -2159,7 +2151,11 @@ mod tests {
         assert_eq!(update.effects, [RootEffect::Copy("copy me".to_owned())]);
         assert_eq!(update.render, super::RenderRequest::Immediate);
         assert!(!root.selection.is_active());
+        assert!(root.notification.is_none());
         assert_eq!(root.composer().draft(), "copy me");
+        root.update(super::RootEvent::NotifySuccess(
+            "Copied selection to clipboard.".to_owned(),
+        ));
         terminal
             .draw(|frame| root.render(frame, frame.area(), &Theme::default()))
             .unwrap();
@@ -2170,9 +2166,9 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(rendered.contains(super::COPIED_BREADCRUMB));
+        assert!(rendered.contains("Copied selection to clipboard."));
         let buffer = terminal.backend().buffer();
-        let left = (40 - (super::COPIED_BREADCRUMB.len() as u16 + 4)) / 2;
+        let left = (40 - ("Copied selection to clipboard.".len() as u16 + 4)) / 2;
         assert_eq!(buffer[(left, 0)].symbol(), "╭");
         assert_eq!(buffer[(left, 0)].fg, ratatui::style::Color::Green);
 
