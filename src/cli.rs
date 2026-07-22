@@ -200,8 +200,9 @@ impl Cli {
                 result
             }
         };
-        let session_id = result?;
-        print_resume_hint(&session_id);
+        if let Some(session_id) = result? {
+            print_resume_hint(&session_id);
+        }
         Ok(())
     }
 }

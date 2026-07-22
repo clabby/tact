@@ -120,8 +120,33 @@ struct PaneGeneration {
     generation: u64,
 }
 
+struct PaneSession<'a> {
+    id: &'a str,
+    parent_id: Option<&'a str>,
+    previously_persisted: bool,
+}
+
+impl<'a> PaneSession<'a> {
+    const fn new(id: &'a str, parent_id: Option<&'a str>) -> Self {
+        Self {
+            id,
+            parent_id,
+            previously_persisted: false,
+        }
+    }
+
+    const fn persisted(id: &'a str) -> Self {
+        Self {
+            id,
+            parent_id: None,
+            previously_persisted: true,
+        }
+    }
+}
+
 struct PaneRuntime {
     session_id: String,
+    previously_persisted: bool,
     journal: Option<TranscriptJournal>,
     writer_path: PathBuf,
     event_streams_open: usize,
@@ -148,13 +173,17 @@ impl PaneRuntime {
             .as_mut()
             .ok_or_else(|| TranscriptError::WriterStopped(self.writer_path.clone()).into())
     }
+
+    fn exit_session_id(&self) -> Option<String> {
+        (self.previously_persisted || self.writer_path.is_file()).then(|| self.session_id.clone())
+    }
 }
 
 pub(crate) async fn run(
     mut config: Config,
     resume_session_id: Option<String>,
     shutdown: CancellationToken,
-) -> Result<String> {
+) -> Result<Option<String>> {
     ensure_interactive()?;
 
     let restored_records;
@@ -188,8 +217,11 @@ pub(crate) async fn run(
                 pane: PaneId::Main,
                 generation: 0,
             },
-            &main_session_id,
-            None,
+            if resume_session_id.is_some() {
+                PaneSession::persisted(&main_session_id)
+            } else {
+                PaneSession::new(&main_session_id, None)
+            },
             &config,
             config.agent().thinking(),
             subagent_control,
@@ -386,7 +418,11 @@ pub(crate) async fn run(
                 match update {
                     WorkerEvent::Stopped { error } => {
                         for (&pane, runtime) in &mut panes {
-                            let record = runtime.journal_mut()?.append_local(LocalEvent::WorkerStopped {
+                            let journal = runtime.journal_mut()?;
+                            if journal.is_empty() {
+                                continue;
+                            }
+                            let record = journal.append_local(LocalEvent::WorkerStopped {
                                 error: error.as_ref().map(ToString::to_string),
                             })?;
                             schedule(app.update(AppEvent::Transcript { pane, record }), &mut scheduler);
@@ -473,8 +509,7 @@ pub(crate) async fn run(
                                     pane,
                                     generation: 0,
                                 },
-                                &session_id,
-                                parent_session_id.as_deref(),
+                                PaneSession::new(&session_id, parent_session_id.as_deref()),
                                 &config,
                                 effort,
                                 subagent_control,
@@ -492,11 +527,16 @@ pub(crate) async fn run(
                         result?;
                         let runtime = panes.get_mut(&pane).expect("effort pane must exist");
                         let previous_effort = runtime.current_effort;
-                        let record = runtime.journal_mut()?.append_local(LocalEvent::EffortChanged {
-                            from: previous_effort,
-                            to: effort,
-                        })?;
-                        schedule(app.update(AppEvent::Transcript { pane, record }), &mut scheduler);
+                        let journal = runtime.journal_mut()?;
+                        if journal.is_empty() {
+                            journal.set_initial_effort(effort);
+                        } else {
+                            let record = journal.append_local(LocalEvent::EffortChanged {
+                                from: previous_effort,
+                                to: effort,
+                            })?;
+                            schedule(app.update(AppEvent::Transcript { pane, record }), &mut scheduler);
+                        }
                         runtime.current_effort = effort;
                         config.set_thinking(effort);
                         input = Some(EventStream::new());
@@ -622,8 +662,7 @@ pub(crate) async fn run(
                             pane,
                             open_pane(
                                 PaneGeneration { pane, generation },
-                                &session_id,
-                                None,
+                                PaneSession::new(&session_id, None),
                                 &config,
                                 effort,
                                 subagent_control,
@@ -718,8 +757,7 @@ pub(crate) async fn run(
                             pane,
                             open_pane(
                                 PaneGeneration { pane, generation },
-                                &session_id,
-                                None,
+                                PaneSession::persisted(&session_id),
                                 &config,
                                 effort,
                                 subagent_control,
@@ -790,8 +828,7 @@ pub(crate) async fn run(
 
     let session_id = panes
         .get(&PaneId::Main)
-        .map(|pane| pane.session_id.clone())
-        .unwrap_or(main_session_id);
+        .and_then(PaneRuntime::exit_session_id);
     drop(terminal);
     if let Some(error) = writer_error {
         return Err(error.into());
@@ -812,24 +849,28 @@ fn validate_interactive(stdin: bool, stdout: bool) -> Result<()> {
 
 fn open_pane(
     identity: PaneGeneration,
-    session_id: &str,
-    parent_session_id: Option<&str>,
+    session: PaneSession<'_>,
     config: &Config,
     effort: crate::config::ReasoningEffort,
     subagent_control: SubagentControl,
     writer_updates: &mpsc::UnboundedSender<WriterCompletion>,
 ) -> Result<PaneRuntime> {
     let PaneGeneration { pane, generation } = identity;
+    let PaneSession {
+        id: session_id,
+        parent_id: parent_session_id,
+        previously_persisted,
+    } = session;
     let (mut journal, writer) = TranscriptJournal::open(config.path(), session_id)?;
     let writer_path = journal.path().to_path_buf();
-    journal.append_local(LocalEvent::SessionStarted(SessionStarted {
+    journal.defer_start(SessionStarted {
         session_id: session_id.to_owned(),
         parent_session_id: parent_session_id.map(str::to_owned),
         model: nanocodex::MODEL.to_owned(),
         effort,
         workspace: config.agent().workspace().to_path_buf(),
         application_version: env!("CARGO_PKG_VERSION").to_owned(),
-    }))?;
+    });
 
     let updates = writer_updates.clone();
     let completion_session_id = session_id.to_owned();
@@ -849,6 +890,7 @@ fn open_pane(
 
     Ok(PaneRuntime {
         session_id: session_id.to_owned(),
+        previously_persisted,
         journal: Some(journal),
         writer_path,
         event_streams_open: 1,
@@ -886,6 +928,9 @@ fn close_pane_journal(
     let Some(mut journal) = runtime.journal.take() else {
         return Ok(());
     };
+    if journal.is_empty() {
+        return Ok(());
+    }
     journal.append_local(LocalEvent::SessionEnded(SessionEnded { outcome, error }))?;
     drop(journal);
     Ok(())
@@ -1288,8 +1333,8 @@ fn request_render(request: RenderRequest, scheduler: &mut RenderScheduler) {
 #[cfg(test)]
 mod tests {
     use super::{
-        PaneGeneration, PendingSubmission, close_pane_journal, is_image_paste, local_link_path,
-        open_pane, send_submission, validate_interactive,
+        PaneGeneration, PaneSession, PendingSubmission, close_pane_journal, is_image_paste,
+        local_link_path, open_pane, send_submission, validate_interactive,
     };
     use crate::{
         config::{Config, ConfigOverrides, ReasoningEffort},
@@ -1390,8 +1435,7 @@ mod tests {
                 pane: PaneId::Main,
                 generation: 0,
             },
-            "main-session",
-            None,
+            PaneSession::new("main-session", None),
             &config,
             ReasoningEffort::Low,
             subagent_control.clone(),
@@ -1403,14 +1447,14 @@ mod tests {
                 pane: PaneId::Fork(1),
                 generation: 0,
             },
-            "fork-session",
-            Some("main-session"),
+            PaneSession::new("fork-session", Some("main-session")),
             &config,
             ReasoningEffort::Low,
             subagent_control,
             &sender,
         )
         .unwrap();
+        let main_path = main.writer_path.clone();
         let fork_path = fork.writer_path.clone();
         fork.journal_mut()
             .unwrap()
@@ -1429,6 +1473,9 @@ mod tests {
         for _ in 0..2 {
             completions.recv().await.unwrap().result.unwrap();
         }
+        assert!(!main_path.exists());
+        assert!(main.exit_session_id().is_none());
+        assert_eq!(fork.exit_session_id().as_deref(), Some("fork-session"));
         let records = load(&fork_path).unwrap();
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].kind(), "session.started");
@@ -1440,7 +1487,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn replacing_a_pane_closes_the_old_journal_and_starts_a_new_session() {
+    async fn replacing_a_pane_does_not_persist_the_new_session_until_it_has_transcript_items() {
         let directory = tempdir().unwrap();
         let config_path = directory.path().join("config.toml");
         fs::write(&config_path, "").unwrap();
@@ -1457,8 +1504,7 @@ mod tests {
                 pane: PaneId::Main,
                 generation: 0,
             },
-            "old-session",
-            None,
+            PaneSession::new("old-session", None),
             &config,
             ReasoningEffort::Medium,
             subagent_control.clone(),
@@ -1480,8 +1526,7 @@ mod tests {
                 pane: PaneId::Main,
                 generation: 1,
             },
-            "new-session",
-            None,
+            PaneSession::new("new-session", None),
             &config,
             ReasoningEffort::Medium,
             subagent_control,
@@ -1495,7 +1540,6 @@ mod tests {
             completions.recv().await.unwrap().result.unwrap();
         }
         let old_records = load(&old_path).unwrap();
-        let new_records = load(&new_path).unwrap();
 
         assert_eq!(old_records.last().unwrap().kind(), "session.ended");
         let ended = old_records
@@ -1504,12 +1548,7 @@ mod tests {
             .decode_payload::<crate::tui::transcript::SessionEnded>()
             .unwrap();
         assert_eq!(ended.outcome, super::SessionOutcome::Closed);
-        assert_eq!(new_records.len(), 1);
-        assert_eq!(new_records[0].kind(), "session.started");
-        let started = new_records[0]
-            .decode_payload::<crate::tui::transcript::SessionStarted>()
-            .unwrap();
-        assert_eq!(started.session_id, "new-session");
-        assert!(started.parent_session_id.is_none());
+        assert!(!new_path.exists());
+        assert!(new.exit_session_id().is_none());
     }
 }

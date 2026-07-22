@@ -1,5 +1,8 @@
 use super::{TranscriptError, record::SCHEMA_VERSION};
-use crate::tui::transcript::{LocalEvent, TranscriptRecord};
+use crate::{
+    config::ReasoningEffort,
+    tui::transcript::{LocalEvent, SessionStarted, TranscriptRecord},
+};
 use nanocodex::AgentEvent;
 use std::{
     fs::{self, File, OpenOptions},
@@ -20,6 +23,7 @@ use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 pub(crate) struct TranscriptJournal {
     path: PathBuf,
     sender: mpsc::UnboundedSender<Arc<TranscriptRecord>>,
+    pending_start: Option<SessionStarted>,
     next_sequence: u64,
 }
 
@@ -46,20 +50,18 @@ impl TranscriptJournal {
             .parent()
             .unwrap_or_else(|| Path::new("."))
             .join("transcripts");
-        create_private_directory(&directory)?;
-
         let started_at = unix_milliseconds();
         let filename = format!("{started_at}-{}.jsonl.zst", sanitize_filename(session_id));
         let path = directory.join(filename);
-        let file = create_private_file(&path)?;
         let (sender, receiver) = mpsc::unbounded_channel();
         let writer_path = path.clone();
-        let task = tokio::task::spawn_blocking(move || write_records(file, receiver, &writer_path));
+        let task = tokio::task::spawn_blocking(move || write_journal(receiver, &writer_path));
 
         Ok((
             Self {
                 path: path.clone(),
                 sender,
+                pending_start: None,
                 next_sequence: 1,
             },
             TranscriptWriter { task },
@@ -70,15 +72,46 @@ impl TranscriptJournal {
         &self.path
     }
 
+    pub(crate) fn defer_start(&mut self, started: SessionStarted) {
+        self.pending_start = Some(started);
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.next_sequence == 1
+    }
+
+    pub(crate) fn set_initial_effort(&mut self, effort: ReasoningEffort) {
+        if let Some(started) = &mut self.pending_start {
+            started.effort = effort;
+        }
+    }
+
     pub(crate) fn append_agent(
         &mut self,
         event: AgentEvent,
     ) -> Result<Arc<TranscriptRecord>, TranscriptError> {
+        self.start_if_needed()?;
         let record = TranscriptRecord::from_agent(self.take_sequence(), unix_milliseconds(), event);
         self.send(record)
     }
 
     pub(crate) fn append_local(
+        &mut self,
+        event: LocalEvent,
+    ) -> Result<Arc<TranscriptRecord>, TranscriptError> {
+        self.start_if_needed()?;
+        self.append_local_record(event)
+    }
+
+    fn start_if_needed(&mut self) -> Result<(), TranscriptError> {
+        let Some(started) = self.pending_start.take() else {
+            return Ok(());
+        };
+        self.append_local_record(LocalEvent::SessionStarted(started))?;
+        Ok(())
+    }
+
+    fn append_local_record(
         &mut self,
         event: LocalEvent,
     ) -> Result<Arc<TranscriptRecord>, TranscriptError> {
@@ -103,6 +136,19 @@ impl TranscriptJournal {
             .map_err(|_| TranscriptError::WriterStopped(self.path.clone()))?;
         Ok(record)
     }
+}
+
+fn write_journal(
+    mut receiver: mpsc::UnboundedReceiver<Arc<TranscriptRecord>>,
+    path: &Path,
+) -> Result<(), TranscriptError> {
+    let Some(first) = receiver.blocking_recv() else {
+        return Ok(());
+    };
+    let directory = path.parent().unwrap_or_else(|| Path::new("."));
+    create_private_directory(directory)?;
+    let file = create_private_file(path)?;
+    write_records_from(file, first, receiver, path)
 }
 
 impl TranscriptWriter {
@@ -182,8 +228,21 @@ fn incomplete_zstd_frame(error: &io::Error) -> bool {
     error.kind() == io::ErrorKind::UnexpectedEof || error.to_string().contains("incomplete frame")
 }
 
+#[cfg(test)]
 fn write_records<W: DurableWrite>(
     output: W,
+    mut receiver: mpsc::UnboundedReceiver<Arc<TranscriptRecord>>,
+    path: &Path,
+) -> Result<(), TranscriptError> {
+    let Some(first) = receiver.blocking_recv() else {
+        return Ok(());
+    };
+    write_records_from(output, first, receiver, path)
+}
+
+fn write_records_from<W: DurableWrite>(
+    output: W,
+    first: Arc<TranscriptRecord>,
     mut receiver: mpsc::UnboundedReceiver<Arc<TranscriptRecord>>,
     path: &Path,
 ) -> Result<(), TranscriptError> {
@@ -194,7 +253,8 @@ fn write_records<W: DurableWrite>(
             source,
         })?;
     let mut synchronized_last_record = false;
-    while let Some(record) = receiver.blocking_recv() {
+    let mut current = Some(first);
+    while let Some(record) = current {
         serde_json::to_writer(&mut output, &record).map_err(|source| TranscriptError::Encode {
             path: path.to_path_buf(),
             source,
@@ -210,6 +270,7 @@ fn write_records<W: DurableWrite>(
         if synchronized_last_record {
             synchronize(output.get_ref().get_ref(), path)?;
         }
+        current = receiver.blocking_recv();
     }
     let mut output = output.finish().map_err(|source| TranscriptError::Write {
         path: path.to_path_buf(),
@@ -354,6 +415,20 @@ mod tests {
         assert_eq!(load(&path).unwrap().len(), 3);
     }
 
+    #[tokio::test]
+    async fn empty_journal_does_not_create_a_transcript() {
+        let directory = tempdir().unwrap();
+        let config = directory.path().join("config.toml");
+        let (journal, writer) = TranscriptJournal::open(&config, "empty").unwrap();
+        let path = journal.path().to_path_buf();
+
+        drop(journal);
+        writer.into_task().await.unwrap().unwrap();
+
+        assert!(!path.exists());
+        assert!(!directory.path().join("transcripts").exists());
+    }
+
     #[test]
     fn corrupt_complete_middle_line_is_rejected() {
         let directory = tempdir().unwrap();
@@ -468,8 +543,14 @@ mod tests {
 
         let directory = tempdir().unwrap();
         let config = directory.path().join("config.toml");
-        let (journal, writer) = TranscriptJournal::open(&config, "private").unwrap();
+        let (mut journal, writer) = TranscriptJournal::open(&config, "private").unwrap();
         let path = journal.path().to_path_buf();
+        journal
+            .append_local(LocalEvent::UserSubmitted {
+                id: TurnId::new(1),
+                text: "persist me".to_owned(),
+            })
+            .unwrap();
         drop(journal);
         writer.into_task().await.unwrap().unwrap();
 
