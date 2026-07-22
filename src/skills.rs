@@ -102,6 +102,12 @@ struct Frontmatter {
     description: Option<String>,
 }
 
+struct TraversalDirectory {
+    path: PathBuf,
+    boundary: PathBuf,
+    depth: usize,
+}
+
 impl SkillCatalog {
     pub(crate) fn load(config: &SkillsConfig) -> Self {
         if !config.enabled() {
@@ -244,24 +250,28 @@ fn discover(roots: &[PathBuf], diagnostics: &mut DiagnosticCollector) -> BTreeSe
             }
         }
 
-        let mut queue = VecDeque::from([(canonical_root.clone(), 0)]);
+        let mut queue = VecDeque::from([TraversalDirectory {
+            path: canonical_root.clone(),
+            boundary: canonical_root.clone(),
+            depth: 0,
+        }]);
         let mut reported_depth_limit = false;
 
-        while let Some((directory, depth)) = queue.pop_front() {
-            let canonical = match fs::canonicalize(&directory) {
+        while let Some(directory) = queue.pop_front() {
+            let canonical = match fs::canonicalize(&directory.path) {
                 Ok(path) => path,
                 Err(source) => {
                     diagnostics.push(SkillDiagnostic::Inspect {
-                        path: directory,
+                        path: directory.path,
                         source,
                     });
                     continue;
                 }
             };
-            if !canonical.starts_with(&canonical_root) {
+            if !canonical.starts_with(&directory.boundary) {
                 diagnostics.push(SkillDiagnostic::OutsideRoot {
-                    root: canonical_root.clone(),
-                    path: directory,
+                    root: directory.boundary,
+                    path: directory.path,
                     target: canonical,
                 });
                 continue;
@@ -322,14 +332,6 @@ fn discover(roots: &[PathBuf], diagnostics: &mut DiagnosticCollector) -> BTreeSe
                             continue;
                         }
                     };
-                    if !target.starts_with(&canonical_root) {
-                        diagnostics.push(SkillDiagnostic::OutsideRoot {
-                            root: canonical_root.clone(),
-                            path,
-                            target,
-                        });
-                        continue;
-                    }
                     let metadata = match fs::metadata(&target) {
                         Ok(metadata) => metadata,
                         Err(source) => {
@@ -338,18 +340,47 @@ fn discover(roots: &[PathBuf], diagnostics: &mut DiagnosticCollector) -> BTreeSe
                         }
                     };
                     if metadata.is_dir() {
+                        let boundary = if target.starts_with(&directory.boundary) {
+                            directory.boundary.clone()
+                        } else if directory.depth == 0 {
+                            target.clone()
+                        } else {
+                            diagnostics.push(SkillDiagnostic::OutsideRoot {
+                                root: directory.boundary.clone(),
+                                path,
+                                target,
+                            });
+                            continue;
+                        };
                         enqueue_directory(
                             &mut queue,
                             &mut reported_depth_limit,
                             diagnostics,
                             root,
                             target,
-                            depth,
+                            boundary,
+                            directory.depth,
                         );
-                    } else if entry.file_name() == "SKILL.md"
-                        && add_skill_path(&mut skill_paths, diagnostics, path, target, &metadata)
-                    {
-                        return skill_paths;
+                    } else {
+                        if !target.starts_with(&directory.boundary) {
+                            diagnostics.push(SkillDiagnostic::OutsideRoot {
+                                root: directory.boundary.clone(),
+                                path,
+                                target,
+                            });
+                            continue;
+                        }
+                        if entry.file_name() == "SKILL.md"
+                            && add_skill_path(
+                                &mut skill_paths,
+                                diagnostics,
+                                path,
+                                target,
+                                &metadata,
+                            )
+                        {
+                            return skill_paths;
+                        }
                     }
                 } else if file_type.is_dir() {
                     enqueue_directory(
@@ -358,7 +389,8 @@ fn discover(roots: &[PathBuf], diagnostics: &mut DiagnosticCollector) -> BTreeSe
                         diagnostics,
                         root,
                         path,
-                        depth,
+                        directory.boundary.clone(),
+                        directory.depth,
                     );
                 } else if entry.file_name() == "SKILL.md" {
                     let target = match fs::canonicalize(&path) {
@@ -387,15 +419,20 @@ fn discover(roots: &[PathBuf], diagnostics: &mut DiagnosticCollector) -> BTreeSe
 }
 
 fn enqueue_directory(
-    queue: &mut VecDeque<(PathBuf, usize)>,
+    queue: &mut VecDeque<TraversalDirectory>,
     reported_depth_limit: &mut bool,
     diagnostics: &mut DiagnosticCollector,
     root: &Path,
     path: PathBuf,
+    boundary: PathBuf,
     depth: usize,
 ) {
     if depth < MAX_DEPTH {
-        queue.push_back((path, depth + 1));
+        queue.push_back(TraversalDirectory {
+            path,
+            boundary,
+            depth: depth + 1,
+        });
     } else if !*reported_depth_limit {
         diagnostics.push(SkillDiagnostic::DepthLimit {
             root: root.to_path_buf(),
@@ -846,6 +883,33 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn discovers_skill_directories_symlinked_into_a_root() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempdir().unwrap();
+        let installed = tempdir().unwrap();
+        let skill_path = write_skill(
+            installed.path(),
+            "linked",
+            "---\nname: linked\ndescription: Linked skill.\n---\n",
+        );
+        symlink(skill_path.parent().unwrap(), root.path().join("linked")).unwrap();
+        let config = SkillsConfig::from_roots(true, vec![root.path().to_path_buf()]);
+
+        let catalog = SkillCatalog::load(&config);
+
+        assert_eq!(catalog.len(), 1);
+        assert!(catalog.diagnostics().is_empty());
+        assert!(
+            catalog
+                .rendered_instructions()
+                .unwrap()
+                .contains(&fs::canonicalize(skill_path).unwrap().display().to_string())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn configured_root_may_itself_be_a_symlink() {
         use std::os::unix::fs::symlink;
 
@@ -909,19 +973,30 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn descendant_symlinks_cannot_escape_their_canonical_root() {
+    fn linked_skill_boundaries_reject_nested_escapes() {
         use std::os::unix::fs::symlink;
 
         let root = tempdir().unwrap();
         let outside = tempdir().unwrap();
+        let escaped = tempdir().unwrap();
         let outside_skill = write_skill(
             outside.path(),
             "external",
-            "---\nname: external\ndescription: Must stay outside.\n---\n",
+            "---\nname: external\ndescription: Linked skill.\n---\n",
+        );
+        let escaped_skill = write_skill(
+            escaped.path(),
+            "escaped",
+            "---\nname: escaped\ndescription: Must stay outside.\n---\n",
         );
         symlink(
             outside.path().join("external"),
             root.path().join("directory-link"),
+        )
+        .unwrap();
+        symlink(
+            escaped_skill.parent().unwrap(),
+            outside.path().join("external").join("nested-escape"),
         )
         .unwrap();
         let local_directory = root.path().join("file-link");
@@ -931,7 +1006,15 @@ mod tests {
 
         let catalog = SkillCatalog::load(&config);
 
-        assert!(catalog.is_empty());
+        assert_eq!(catalog.len(), 1);
+        assert!(
+            catalog.rendered_instructions().unwrap().contains(
+                &fs::canonicalize(outside_skill)
+                    .unwrap()
+                    .display()
+                    .to_string()
+            )
+        );
         assert_eq!(
             catalog
                 .diagnostics()
