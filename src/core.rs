@@ -3,6 +3,7 @@
 use crate::{
     config::{Config, ReasoningEffort},
     error::{Result, RuntimeError},
+    mcp,
     subagents::{self, AgentUpdate, SubagentControl},
 };
 use nanocodex::{
@@ -53,6 +54,7 @@ impl ConfiguredAgent {
     ) -> Result<Self> {
         let agent_config = config.agent();
         let workspace = Self::resolve_workspace(agent_config.workspace())?;
+        let mcp = mcp::provider(config)?;
         let auth = config.auth().load()?;
 
         let mut responses = Responses::builder();
@@ -63,11 +65,13 @@ impl ConfiguredAgent {
             responses = responses.api_base_url(url);
         }
 
-        let tools = Tools::builder()
+        let mut tools = Tools::builder()
             .web_search(agent_config.web_search())
-            .image_generation(agent_config.image_generation())
-            .build()
-            .map_err(NanocodexError::from)?;
+            .image_generation(agent_config.image_generation());
+        if let Some(mcp) = mcp {
+            tools = tools.provider(mcp);
+        }
+        let tools = tools.build().map_err(NanocodexError::from)?;
         let (subagents, subagent_control, subagent_updates) = subagents::channel();
         let mut builder = Nanocodex::builder(auth)
             .workspace(workspace)

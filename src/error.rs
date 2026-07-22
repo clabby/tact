@@ -2,7 +2,7 @@
 
 use crate::tui::{session::SessionError, transcript::TranscriptError};
 use miette::Diagnostic;
-use nanocodex::{ChatGptAuthError, NanocodexError};
+use nanocodex::{ChatGptAuthError, McpBuildError, NanocodexError};
 use nanocodex_core::EventError;
 use std::{env::VarError, io, path::PathBuf, result::Result as StdResult};
 use thiserror::Error;
@@ -22,6 +22,8 @@ pub(crate) enum Error {
     Event(#[from] EventError),
     #[error(transparent)]
     ExternalEditor(#[from] ExternalEditorError),
+    #[error("failed to configure MCP servers: {0}")]
+    Mcp(#[source] McpBuildError),
     #[error(transparent)]
     Runtime(#[from] RuntimeError),
     #[error(transparent)]

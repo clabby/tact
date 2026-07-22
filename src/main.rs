@@ -9,6 +9,7 @@ mod cli;
 mod config;
 mod core;
 mod error;
+mod mcp;
 mod secret;
 mod shutdown;
 mod subagents;

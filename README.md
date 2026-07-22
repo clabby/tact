@@ -93,6 +93,15 @@ image_generation = true
 # websocket_url = "wss://example.com/v1/responses"
 # api_base_url = "https://example.com/v1"
 
+[mcp_servers.filesystem]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/workspace"]
+# cwd = "/path/to/server"
+
+# Environment values are passed only to this server process.
+[mcp_servers.filesystem.env]
+# API_TOKEN = "secret"
+
 [theme]
 mode = "auto" # auto, light, or dark
 
@@ -111,6 +120,14 @@ from the file's directory. The workspace defaults to the current working directo
 overrides are optional so Nanocodex can choose the appropriate defaults for ChatGPT or API-key
 authentication.
 
+MCP servers currently use the local stdio transport. Each named server accepts `command`, `args`,
+`env`, and `cwd`; relative working directories are resolved from the configuration file's
+directory. Environment values are explicit credentials: `tact config show` and debug output replace
+them with `[REDACTED]`, but the configuration file itself still contains the original values.
+Nanocodex retains non-zeroizing copies while the server is active because those copies are outside
+tact's memory ownership. MCP startup and discovery run independently for each server, so one failed
+server does not prevent healthy servers or the session from continuing.
+
 Theme values accept Ratatui color names, indexed colors such as `239`, and RGB colors such as
 `"#AABBCC"`. Colors directly under `[theme]` apply to both palettes, while values under
 `[theme.light]` or `[theme.dark]` override one palette. Configurable colors are `text`, `border`,
@@ -119,11 +136,11 @@ mode follows the operating-system preference while the TUI is running.
 
 Use **Reload config** in the Actions menu to validate and reload the selected file. Theme changes
 apply immediately. Authentication and agent settings (including reasoning effort, instructions,
-tools, and endpoint overrides) apply when a new session is started. In an active session, use
-**Change effort** or `Ctrl+S` to change the effort for subsequently accepted turns without resetting
-the conversation. Workspace changes require a process restart because the terminal, shell, and
-transcript paths are bound to the startup workspace. Command-line and environment overrides keep
-their original precedence when reloading.
+tools, MCP servers, and endpoint overrides) apply when a new or restored session is started. In an
+active session, use **Change effort** or `Ctrl+S` to change the effort for subsequently accepted
+turns without resetting the conversation. Workspace changes require a process restart because the
+terminal, shell, and transcript paths are bound to the startup workspace. Command-line and
+environment overrides keep their original precedence when reloading.
 
 Every application-defined command-line option has an environment-variable equivalent:
 

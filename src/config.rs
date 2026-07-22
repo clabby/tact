@@ -8,14 +8,17 @@ use clap::ValueEnum;
 use nanocodex::Thinking;
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::BTreeMap,
     env,
     ffi::OsString,
-    fs,
+    fmt, fs,
     io::{ErrorKind, Write},
     path::{Path, PathBuf},
+    sync::Arc,
 };
 use tempfile::NamedTempFile;
 use toml_edit::{DocumentMut, Item, Table, value};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 /// Authentication method used by `tact`.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, ValueEnum)]
@@ -51,10 +54,32 @@ pub(crate) struct Config {
     path: PathBuf,
     auth: AuthConfig,
     agent: AgentConfig,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    mcp_servers: BTreeMap<String, McpServerConfig>,
     theme: Theme,
     #[serde(skip)]
     reload: ReloadSource,
 }
+
+/// Configuration for a local MCP server using the stdio transport.
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct McpServerConfig {
+    command: String,
+    args: Vec<String>,
+    #[serde(serialize_with = "serialize_mcp_environment")]
+    env: Arc<McpEnvironment>,
+    cwd: Option<PathBuf>,
+}
+
+#[derive(Zeroize, ZeroizeOnDrop)]
+struct McpSecretString(String);
+
+/// Application-owned MCP environment values.
+///
+/// Cloned configurations share this owner so secret bytes are not duplicated. The TOML parser's
+/// input buffer is separately zeroized after loading; allocations internal to the TOML parser are
+/// outside this crate's ownership.
+pub(crate) struct McpEnvironment(BTreeMap<String, McpSecretString>);
 
 /// Effective authentication configuration.
 #[derive(Clone, Debug, Serialize)]
@@ -102,12 +127,24 @@ pub(crate) struct ConfigReload {
     workspace_changed: bool,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct ConfigFile {
     auth: AuthConfigFile,
     agent: AgentConfigFile,
+    mcp_servers: BTreeMap<String, McpServerConfigFile>,
     theme: Theme,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct McpServerConfigFile {
+    command: String,
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(default)]
+    env: BTreeMap<String, String>,
+    cwd: Option<PathBuf>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -169,6 +206,12 @@ impl Config {
             current_dir,
         )
         .unwrap_or_else(|| current_dir.to_path_buf());
+        let config_dir = path.parent().unwrap_or(Path::new("."));
+        let mcp_servers = file
+            .mcp_servers
+            .into_iter()
+            .map(|(name, server)| (name, McpServerConfig::new(server, config_dir)))
+            .collect();
 
         Ok(Self {
             path,
@@ -194,6 +237,7 @@ impl Config {
                 websocket_url: overrides.websocket_url.or(file.agent.websocket_url),
                 api_base_url: overrides.api_base_url.or(file.agent.api_base_url),
             },
+            mcp_servers,
             theme: file.theme,
             reload,
         })
@@ -228,6 +272,10 @@ impl Config {
 
     pub(crate) fn agent(&self) -> &AgentConfig {
         &self.agent
+    }
+
+    pub(crate) fn mcp_servers(&self) -> &BTreeMap<String, McpServerConfig> {
+        &self.mcp_servers
     }
 
     pub(crate) const fn theme(&self) -> &Theme {
@@ -303,6 +351,100 @@ impl Config {
             })?;
         Ok(())
     }
+}
+
+impl McpServerConfig {
+    fn new(file: McpServerConfigFile, config_dir: &Path) -> Self {
+        Self {
+            command: file.command,
+            args: file.args,
+            env: Arc::new(McpEnvironment(
+                file.env
+                    .into_iter()
+                    .map(|(name, value)| (name, McpSecretString(value)))
+                    .collect(),
+            )),
+            cwd: file.cwd.map(|path| Config::resolve_path(path, config_dir)),
+        }
+    }
+
+    pub(crate) fn command(&self) -> &str {
+        &self.command
+    }
+
+    pub(crate) fn args(&self) -> &[String] {
+        &self.args
+    }
+
+    pub(crate) fn env(&self) -> &McpEnvironment {
+        &self.env
+    }
+
+    pub(crate) fn cwd(&self) -> Option<&Path> {
+        self.cwd.as_deref()
+    }
+}
+
+impl McpEnvironment {
+    /// Explicitly exposes environment values for the narrow scope of starting the server.
+    pub(crate) fn expose(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.0
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.expose()))
+    }
+}
+
+impl McpSecretString {
+    fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for McpSecretString {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("[REDACTED]")
+    }
+}
+
+impl Zeroize for McpEnvironment {
+    fn zeroize(&mut self) {
+        for value in self.0.values_mut() {
+            value.zeroize();
+        }
+    }
+}
+
+impl Drop for McpEnvironment {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
+}
+
+impl ZeroizeOnDrop for McpEnvironment {}
+
+impl fmt::Debug for McpEnvironment {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_map()
+            .entries(self.0.keys().map(|name| (name, "[REDACTED]")))
+            .finish()
+    }
+}
+
+fn serialize_mcp_environment<S>(
+    environment: &Arc<McpEnvironment>,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    use serde::ser::SerializeMap;
+
+    let mut map = serializer.serialize_map(Some(environment.0.len()))?;
+    for name in environment.0.keys() {
+        map.serialize_entry(name, "[REDACTED]")?;
+    }
+    map.end()
 }
 
 impl ConfigReload {
@@ -431,7 +573,7 @@ impl Config {
 impl ConfigFile {
     fn read(path: &Path, explicit: bool) -> Result<Self> {
         let contents = match fs::read_to_string(path) {
-            Ok(contents) => contents,
+            Ok(contents) => Zeroizing::new(contents),
             Err(source) if source.kind() == ErrorKind::NotFound && !explicit => {
                 return Ok(Self::default());
             }
@@ -444,7 +586,10 @@ impl ConfigFile {
             }
         };
 
-        toml::from_str(&contents).map_err(|source| {
+        toml::from_str(&contents).map_err(|mut source| {
+            // TOML errors retain the entire input in a non-zeroizing allocation and render the
+            // failing line. Remove it before the error can outlive this zeroizing buffer.
+            source.set_input(None);
             ConfigError::Parse {
                 path: path.to_path_buf(),
                 source,
@@ -503,11 +648,15 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
-    use super::{AuthMode, Config, ConfigOverrides, Environment, ReasoningEffort, ThemeMode};
+    use super::{
+        AuthMode, Config, ConfigOverrides, Environment, McpEnvironment, McpSecretString,
+        ReasoningEffort, ThemeMode,
+    };
     use crate::error::{ConfigError, Error};
     use ratatui::style::Color;
-    use std::{fs, path::Path};
+    use std::{collections::BTreeMap, fs, path::Path, sync::Arc};
     use tempfile::tempdir;
+    use zeroize::Zeroize;
 
     #[test]
     fn missing_default_file_materializes_all_defaults() {
@@ -739,6 +888,154 @@ mod tests {
             config.agent.api_base_url.as_deref(),
             Some("https://example.com/v1")
         );
+    }
+
+    #[test]
+    fn named_stdio_mcp_servers_are_loaded() {
+        let directory = tempdir().unwrap();
+        let config_dir = directory.path().join("settings");
+        let config_path = config_dir.join("config.toml");
+        fs::create_dir_all(&config_dir).unwrap();
+        fs::write(
+            &config_path,
+            "[mcp_servers.files]\ncommand = \"node\"\nargs = [\"server.js\", \"--stdio\"]\n\
+             cwd = \"servers/files\"\n\n[mcp_servers.files.env]\nTOKEN = \"secret-sentinel\"\n\
+             \n[mcp_servers.search]\ncommand = \"search-server\"\n",
+        )
+        .unwrap();
+
+        let config = Config::load_with(
+            ConfigOverrides {
+                path: Some(config_path),
+                ..ConfigOverrides::default()
+            },
+            Environment {
+                codex_home: Some(directory.path().join("codex")),
+                ..Environment::default()
+            },
+            directory.path(),
+        )
+        .unwrap();
+
+        let files = &config.mcp_servers()["files"];
+        assert_eq!(files.command(), "node");
+        assert_eq!(files.args(), ["server.js", "--stdio"]);
+        assert_eq!(
+            files.cwd(),
+            Some(config_dir.join("servers/files").as_path())
+        );
+        assert!(
+            files
+                .env()
+                .expose()
+                .any(|(name, value)| name == "TOKEN" && value == "secret-sentinel")
+        );
+
+        let search = &config.mcp_servers()["search"];
+        assert!(search.args().is_empty());
+        assert!(search.env().expose().next().is_none());
+        assert_eq!(search.cwd(), None);
+    }
+
+    #[test]
+    fn cloned_configs_share_mcp_secret_ownership() {
+        let directory = tempdir().unwrap();
+        let config_path = directory.path().join("config.toml");
+        fs::write(
+            &config_path,
+            "[mcp_servers.files]\ncommand = \"files-server\"\n\
+             \n[mcp_servers.files.env]\nTOKEN = \"secret-sentinel\"\n",
+        )
+        .unwrap();
+        let config = Config::load_with(
+            ConfigOverrides {
+                path: Some(config_path),
+                ..ConfigOverrides::default()
+            },
+            Environment {
+                codex_home: Some(directory.path().join("codex")),
+                ..Environment::default()
+            },
+            directory.path(),
+        )
+        .unwrap();
+
+        let cloned = config.clone();
+        assert!(Arc::ptr_eq(
+            &config.mcp_servers["files"].env,
+            &cloned.mcp_servers["files"].env,
+        ));
+    }
+
+    #[test]
+    fn mcp_environment_is_redacted_from_config_and_debug_output() {
+        let directory = tempdir().unwrap();
+        let config_path = directory.path().join("config.toml");
+        fs::write(
+            &config_path,
+            "[mcp_servers.files]\ncommand = \"files-server\"\n\
+             \n[mcp_servers.files.env]\nTOKEN = \"secret-sentinel\"\n",
+        )
+        .unwrap();
+        let config = Config::load_with(
+            ConfigOverrides {
+                path: Some(config_path),
+                ..ConfigOverrides::default()
+            },
+            Environment {
+                codex_home: Some(directory.path().join("codex")),
+                ..Environment::default()
+            },
+            directory.path(),
+        )
+        .unwrap();
+
+        let rendered = config.to_toml().unwrap();
+        let debug = format!("{config:?}");
+        assert!(!rendered.contains("secret-sentinel"));
+        assert!(!debug.contains("secret-sentinel"));
+        assert!(rendered.contains("TOKEN = \"[REDACTED]\""));
+        assert!(debug.contains("TOKEN"));
+        assert!(debug.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn config_parse_errors_do_not_retain_mcp_environment_values() {
+        let directory = tempdir().unwrap();
+        let config_path = directory.path().join("config.toml");
+        fs::write(
+            &config_path,
+            "[mcp_servers.files]\ncommand = \"files-server\"\n\
+             \n[mcp_servers.files.env]\nTOKEN = { value = \"secret-sentinel\" }\n",
+        )
+        .unwrap();
+
+        let error = Config::load_with(
+            ConfigOverrides {
+                path: Some(config_path),
+                ..ConfigOverrides::default()
+            },
+            Environment {
+                codex_home: Some(directory.path().join("codex")),
+                ..Environment::default()
+            },
+            directory.path(),
+        )
+        .unwrap_err();
+
+        assert!(!error.to_string().contains("secret-sentinel"));
+    }
+
+    #[test]
+    fn mcp_environment_values_can_be_explicitly_zeroized() {
+        let mut environment = McpEnvironment(BTreeMap::from([(
+            "TOKEN".into(),
+            McpSecretString("secret-sentinel".into()),
+        )]));
+
+        environment.zeroize();
+
+        assert!(environment.expose().all(|(_, value)| value.is_empty()));
     }
 
     #[test]
