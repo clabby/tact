@@ -5,10 +5,10 @@ use super::{
     node::{Component, ComponentUpdate, RenderRequest},
 };
 use crate::tui::theme::Theme;
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind};
 use ratatui::{
     Frame,
-    layout::{Position, Rect},
+    layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{List, ListItem, ListState, Paragraph},
@@ -17,17 +17,14 @@ use std::{cmp::Reverse, fs, path::Path};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-const RESULTS_KEY_BINDINGS: [&str; 4] =
-    ["tab focus", "↑↓ move", "enter focus results", "esc close"];
-const INSERT_KEY_BINDINGS: [&str; 4] = ["tab focus", "↑↓ move", "enter insert", "esc close"];
-const EMPTY_LIST_KEY_BINDINGS: [&str; 3] = ["tab focus", "↑↓ move", "esc close"];
-const NO_RESULTS_KEY_BINDINGS: [&str; 2] = ["tab focus", "esc close"];
+const KEY_BINDINGS: [&str; 3] = ["↑↓ move", "enter insert", "esc close"];
 const SEARCH_LABEL: &str = "Search: ";
 const FOCUS_MARKER: &str = "› ";
 const SKIPPED_DIRECTORIES: [&str; 4] = [".git", ".jj", "node_modules", "target"];
 
 pub(super) enum FileFinderEvent {
     Terminal(Event),
+    Query(String),
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -36,16 +33,9 @@ pub(super) enum FileFinderEffect {
     Insert(String),
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Focus {
-    Search,
-    List,
-}
-
 pub(super) struct FileFinder {
     files: Vec<String>,
     query: String,
-    focus: Focus,
     selected: usize,
     matches: Vec<usize>,
 }
@@ -57,7 +47,6 @@ impl FileFinder {
         Self {
             files,
             query: String::new(),
-            focus: Focus::Search,
             selected: 0,
             matches,
         }
@@ -70,45 +59,21 @@ impl FileFinder {
 
         match key.code {
             KeyCode::Esc => Self::dismiss(),
-            KeyCode::Backspace if self.focus == Focus::Search && !self.query.is_empty() => {
-                self.remove_last_grapheme();
-                ComponentUpdate::render(RenderRequest::Immediate)
-            }
-            KeyCode::Backspace => Self::dismiss(),
             KeyCode::Enter => self.handle_enter(),
-            KeyCode::Tab | KeyCode::BackTab => {
-                self.toggle_focus();
-                ComponentUpdate::render(RenderRequest::Immediate)
-            }
-            KeyCode::Up if self.focus == Focus::List => {
+            KeyCode::Up => {
                 self.select_previous();
                 ComponentUpdate::render(RenderRequest::Immediate)
             }
-            KeyCode::Down if self.focus == Focus::List => {
+            KeyCode::Down => {
                 self.select_next();
-                ComponentUpdate::render(RenderRequest::Immediate)
-            }
-            KeyCode::Char(character)
-                if self.focus == Focus::Search
-                    && !key
-                        .modifiers
-                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-            {
-                self.query.push(character);
-                self.refresh_matches();
                 ComponentUpdate::render(RenderRequest::Immediate)
             }
             _ => ComponentUpdate::none(),
         }
     }
 
-    fn insert_paste(&mut self, text: &str) -> ComponentUpdate<FileFinderEffect> {
-        if self.focus != Focus::Search {
-            return ComponentUpdate::none();
-        }
-
-        self.query
-            .extend(text.chars().filter(|character| !character.is_control()));
+    fn set_query(&mut self, query: String) -> ComponentUpdate<FileFinderEffect> {
+        self.query = query;
         self.refresh_matches();
         ComponentUpdate::render(RenderRequest::Immediate)
     }
@@ -121,11 +86,6 @@ impl FileFinder {
     }
 
     fn handle_enter(&mut self) -> ComponentUpdate<FileFinderEffect> {
-        if self.focus == Focus::Search && self.matches.len() != 1 {
-            self.toggle_focus();
-            return ComponentUpdate::render(RenderRequest::Immediate);
-        }
-
         let Some(index) = self.matches.get(self.selected) else {
             return ComponentUpdate::none();
         };
@@ -133,36 +93,6 @@ impl FileFinder {
             effects: vec![FileFinderEffect::Insert(self.files[*index].clone())],
             render: RenderRequest::Immediate,
         }
-    }
-
-    fn toggle_focus(&mut self) {
-        self.focus = match self.focus {
-            Focus::Search => Focus::List,
-            Focus::List => Focus::Search,
-        };
-    }
-
-    fn key_bindings(&self) -> &'static [&'static str] {
-        if self.focus == Focus::Search {
-            return match self.matches.len() {
-                0 => &NO_RESULTS_KEY_BINDINGS,
-                1 => &INSERT_KEY_BINDINGS,
-                _ => &RESULTS_KEY_BINDINGS,
-            };
-        }
-        if self.matches.is_empty() {
-            &EMPTY_LIST_KEY_BINDINGS
-        } else {
-            &INSERT_KEY_BINDINGS
-        }
-    }
-
-    fn remove_last_grapheme(&mut self) {
-        let Some((index, _)) = self.query.grapheme_indices(true).next_back() else {
-            return;
-        };
-        self.query.truncate(index);
-        self.refresh_matches();
     }
 
     fn refresh_matches(&mut self) {
@@ -193,35 +123,19 @@ impl FileFinder {
             return;
         }
 
-        let focused = self.focus == Focus::Search;
-        let marker = if focused { FOCUS_MARKER } else { "  " };
+        let marker = "  ";
         let prefix_width = marker.width() + SEARCH_LABEL.width();
         let query_width = usize::from(area.width).saturating_sub(prefix_width);
         let visible_query = visible_query_tail(&self.query, query_width);
-        let focus_style = if focused {
-            Style::default()
-                .fg(theme.accent())
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(theme.muted())
-        };
+        let label_style = Style::default().fg(theme.muted());
         frame.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled(marker, focus_style),
-                Span::styled(SEARCH_LABEL, focus_style),
+                Span::styled(marker, label_style),
+                Span::styled(SEARCH_LABEL, label_style),
                 Span::styled(visible_query, Style::default().fg(theme.text())),
             ])),
             area,
         );
-
-        if focused {
-            let cursor_offset = prefix_width + visible_query.width();
-            let cursor_x = area.x
-                + u16::try_from(cursor_offset)
-                    .unwrap_or(u16::MAX)
-                    .min(area.width.saturating_sub(1));
-            frame.set_cursor_position(Position::new(cursor_x, area.y));
-        }
     }
 
     fn render_files(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
@@ -232,23 +146,16 @@ impl FileFinder {
         let items = self.matches.iter().map(|index| {
             ListItem::new(self.files[*index].as_str()).style(Style::default().fg(theme.text()))
         });
-        let focused = self.focus == Focus::List;
         let list = List::new(items)
             .highlight_style(
                 Style::default()
                     .fg(theme.accent())
                     .add_modifier(Modifier::BOLD),
             )
-            .highlight_symbol(if focused { FOCUS_MARKER } else { "  " });
+            .highlight_symbol(FOCUS_MARKER);
         let selected = (!self.matches.is_empty()).then_some(self.selected);
         let mut state = ListState::default().with_selected(selected);
         frame.render_stateful_widget(list, area, &mut state);
-
-        if focused && selected.is_some() {
-            let visible_row = self.selected.saturating_sub(state.offset());
-            let cursor_y = area.y + u16::try_from(visible_row).unwrap_or(u16::MAX);
-            frame.set_cursor_position(Position::new(area.x, cursor_y.min(area.bottom() - 1)));
-        }
     }
 }
 
@@ -259,8 +166,8 @@ impl Component for FileFinder {
     fn update(&mut self, event: Self::Event) -> ComponentUpdate<Self::Effect> {
         match event {
             FileFinderEvent::Terminal(Event::Key(key)) => self.update_key(key),
-            FileFinderEvent::Terminal(Event::Paste(text)) => self.insert_paste(&text),
             FileFinderEvent::Terminal(_) => ComponentUpdate::none(),
+            FileFinderEvent::Query(query) => self.set_query(query),
         }
     }
 
@@ -269,7 +176,7 @@ impl Component for FileFinder {
             return;
         }
 
-        let layout = Floating::new("Files", 72, 14, self.key_bindings()).render(frame, area, theme);
+        let layout = Floating::new("Files", 72, 14, &KEY_BINDINGS).render(frame, area, theme);
         if layout.body.is_empty() {
             return;
         }
@@ -376,8 +283,7 @@ fn visible_query_tail(query: &str, width: usize) -> &str {
 #[cfg(test)]
 mod tests {
     use super::{
-        Component, FileFinder, FileFinderEffect, FileFinderEvent, Focus, discover_files,
-        fuzzy_score,
+        Component, FileFinder, FileFinderEffect, FileFinderEvent, discover_files, fuzzy_score,
     };
     use crate::tui::theme::Theme;
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
@@ -413,10 +319,7 @@ mod tests {
     fn fuzzy_search_matches_non_contiguous_characters_and_ranks_tight_matches_first() {
         let workspace = workspace();
         let mut finder = FileFinder::new(workspace.path());
-
-        for character in "ff".chars() {
-            finder.update(key(KeyCode::Char(character)));
-        }
+        finder.update(FileFinderEvent::Query("ff".to_owned()));
 
         assert_eq!(finder.matches.len(), 1);
         assert_eq!(
@@ -431,9 +334,7 @@ mod tests {
     fn enter_inserts_a_unique_search_result() {
         let workspace = workspace();
         let mut finder = FileFinder::new(workspace.path());
-        for character in "read".chars() {
-            finder.update(key(KeyCode::Char(character)));
-        }
+        finder.update(FileFinderEvent::Query("read".to_owned()));
 
         assert_eq!(
             finder.update(key(KeyCode::Enter)).effects,
@@ -442,13 +343,11 @@ mod tests {
     }
 
     #[test]
-    fn list_focus_supports_navigation_and_selection() {
+    fn arrows_navigate_results_before_selection() {
         let workspace = workspace();
         let mut finder = FileFinder::new(workspace.path());
-        finder.update(key(KeyCode::Tab));
         finder.update(key(KeyCode::Down));
 
-        assert_eq!(finder.focus, Focus::List);
         assert_eq!(
             finder.update(key(KeyCode::Enter)).effects,
             [FileFinderEffect::Insert(
@@ -458,20 +357,13 @@ mod tests {
     }
 
     #[test]
-    fn backspace_edits_search_then_dismisses_and_escape_always_dismisses() {
+    fn query_updates_filter_results_and_escape_dismisses() {
         let workspace = workspace();
         let mut finder = FileFinder::new(workspace.path());
-        finder.update(key(KeyCode::Char('x')));
+        finder.update(FileFinderEvent::Query("read".to_owned()));
 
-        assert!(finder.update(key(KeyCode::Backspace)).effects.is_empty());
-        assert_eq!(finder.query, "");
-        assert_eq!(
-            finder.update(key(KeyCode::Backspace)).effects,
-            [FileFinderEffect::Dismiss]
-        );
-
-        let mut finder = FileFinder::new(workspace.path());
-        finder.update(key(KeyCode::Char('x')));
+        assert_eq!(finder.matches.len(), 1);
+        assert_eq!(finder.files[finder.matches[0]], "README.md");
         assert_eq!(
             finder.update(key(KeyCode::Esc)).effects,
             [FileFinderEffect::Dismiss]
@@ -479,7 +371,7 @@ mod tests {
     }
 
     #[test]
-    fn popup_uses_file_finder_chrome_and_focus_styling() {
+    fn popup_uses_file_finder_chrome_and_selection_styling() {
         let workspace = workspace();
         let mut finder = FileFinder::new(workspace.path());
         let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
@@ -491,14 +383,14 @@ mod tests {
         let buffer = terminal.backend().buffer();
         assert_eq!(buffer[(4, 3)].symbol(), "╭");
         assert_eq!(buffer[(75, 16)].symbol(), "╯");
-        assert_eq!(buffer[(5, 4)].symbol(), "›");
-        assert_eq!(buffer[(5, 4)].fg, Theme::default().accent());
+        assert_eq!(buffer[(5, 5)].symbol(), "›");
+        assert_eq!(buffer[(5, 5)].fg, Theme::default().accent());
         assert!(buffer.content().chunks(80).any(|cells| {
             cells
                 .iter()
                 .map(|cell| cell.symbol())
                 .collect::<String>()
-                .contains("enter focus results")
+                .contains("enter insert")
         }));
     }
 
@@ -506,9 +398,7 @@ mod tests {
     fn footer_says_when_enter_will_insert() {
         let workspace = workspace();
         let mut finder = FileFinder::new(workspace.path());
-        for character in "read".chars() {
-            finder.update(key(KeyCode::Char(character)));
-        }
+        finder.update(FileFinderEvent::Query("read".to_owned()));
         let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
 
         terminal

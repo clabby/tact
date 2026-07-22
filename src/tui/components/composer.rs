@@ -47,7 +47,10 @@ pub(crate) enum ComposerEvent {
     Terminal(Event),
     PasteImage(String),
     ContextTokens(u64),
-    Insert(String),
+    ReplaceRange {
+        range: Range<usize>,
+        text: String,
+    },
     ReplaceDraft(String),
     SetEffort(ReasoningEffort),
     Activity {
@@ -144,8 +147,9 @@ impl Composer {
                 self.context_tokens = tokens;
                 ComposerUpdate::changed()
             }
-            ComposerEvent::Insert(text) => {
+            ComposerEvent::ReplaceRange { range, text } => {
                 self.history.detach();
+                self.remove_range(range);
                 self.insert(&text);
                 ComposerUpdate::changed()
             }
@@ -316,9 +320,15 @@ impl Composer {
         self.thinking
     }
 
-    #[cfg(test)]
-    const fn cursor(&self) -> usize {
+    pub(crate) const fn cursor(&self) -> usize {
         self.cursor
+    }
+
+    pub(crate) fn cursor_is_at_token_boundary(&self) -> bool {
+        self.draft[..self.cursor]
+            .chars()
+            .next_back()
+            .is_none_or(char::is_whitespace)
     }
 
     pub(crate) fn replace_draft(&mut self, draft: String) {
@@ -1072,7 +1082,7 @@ mod tests {
     #[test]
     fn pasted_images_render_as_numbered_blue_tokens_and_submit_as_images() {
         let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
-        composer.update(ComposerEvent::Insert("inspect ".to_owned()));
+        composer.update(ComposerEvent::Terminal(Event::Paste("inspect ".to_owned())));
         composer.update(ComposerEvent::PasteImage(
             "data:image/png;base64,first".to_owned(),
         ));

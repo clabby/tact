@@ -109,10 +109,15 @@ enum Overlay {
     Actions(Node<ActionsMenu>),
     Effort(Node<EffortSelector>),
     Theme(Node<ThemeSelector>),
-    FileFinder(Node<FileFinder>),
+    FileFinder(FileMention),
     Keybindings(Node<KeybindingsHelp>),
     Sessions(Node<SessionPicker>),
     Subagents(SubagentOverlay),
+}
+
+struct FileMention {
+    finder: Node<FileFinder>,
+    start: usize,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -318,7 +323,7 @@ impl RootNode {
                 Overlay::Actions(actions) => actions.render(frame, area, theme),
                 Overlay::Effort(selector) => selector.render(frame, area, theme),
                 Overlay::Theme(selector) => selector.render(frame, area, theme),
-                Overlay::FileFinder(finder) => finder.render(frame, area, theme),
+                Overlay::FileFinder(mention) => mention.finder.render(frame, area, theme),
                 Overlay::Keybindings(help) => help.render(frame, area, theme),
                 Overlay::Sessions(picker) => picker.render(frame, area, theme),
                 Overlay::Subagents(SubagentOverlay::Tree) => {
@@ -470,11 +475,16 @@ impl RootNode {
         {
             return self.update_queue(event);
         }
-        if is_file_finder_trigger(&event) {
-            self.overlay = Some(Overlay::FileFinder(Node::new(FileFinder::new(
-                &self.workspace,
-            ))));
-            return ComponentUpdate::render(RenderRequest::Immediate);
+        if is_file_finder_trigger(&event) && self.composer.component().cursor_is_at_token_boundary()
+        {
+            let start = self.composer.component().cursor();
+            let update =
+                self.update_composer(ComposerEvent::Terminal(event), RenderRequest::Immediate);
+            self.overlay = Some(Overlay::FileFinder(FileMention {
+                finder: Node::new(FileFinder::new(&self.workspace)),
+                start,
+            }));
+            return update;
         }
         if self.composer.component().draft().is_empty() && is_actions_trigger(&event) {
             let new_session_enabled = self.in_flight_turns == 0
@@ -608,10 +618,42 @@ impl RootNode {
     }
 
     fn update_file_finder(&mut self, event: Event) -> ComponentUpdate<RootEffect> {
-        let Some(Overlay::FileFinder(finder)) = &mut self.overlay else {
+        let Some(Overlay::FileFinder(mention)) = &self.overlay else {
             return ComponentUpdate::none();
         };
-        let update = finder.update(FileFinderEvent::Terminal(event));
+        let start = mention.start;
+
+        if is_file_mention_edit(&event) {
+            let keep_open = file_mention_edit_continues_query(&event);
+            let update =
+                self.update_composer(ComposerEvent::Terminal(event), RenderRequest::Immediate);
+            let query = if keep_open {
+                self.file_mention_query(start)
+            } else {
+                None
+            };
+            let Some(query) = query else {
+                self.overlay = None;
+                return update;
+            };
+            if let Some(Overlay::FileFinder(mention)) = &mut self.overlay {
+                let _ = mention.finder.update(FileFinderEvent::Query(query));
+            }
+            return update;
+        }
+
+        if !is_file_finder_navigation(&event) {
+            self.overlay = None;
+            if is_escape(&event) {
+                return ComponentUpdate::render(RenderRequest::Immediate);
+            }
+            return self.update_composer(ComposerEvent::Terminal(event), RenderRequest::Immediate);
+        }
+
+        let Some(Overlay::FileFinder(mention)) = &mut self.overlay else {
+            unreachable!("file mention was checked above");
+        };
+        let update = mention.finder.update(FileFinderEvent::Terminal(event));
         let Some(effect) = update.effects.into_iter().next() else {
             return ComponentUpdate {
                 effects: Vec::new(),
@@ -623,10 +665,22 @@ impl RootNode {
         match effect {
             FileFinderEffect::Dismiss => ComponentUpdate::render(RenderRequest::Immediate),
             FileFinderEffect::Insert(path) => self.update_composer(
-                ComposerEvent::Insert(format!("@{path} ")),
+                ComposerEvent::ReplaceRange {
+                    range: start..self.composer.component().cursor(),
+                    text: format!("@{path} "),
+                },
                 RenderRequest::Immediate,
             ),
         }
+    }
+
+    fn file_mention_query(&self, start: usize) -> Option<String> {
+        let composer = self.composer.component();
+        composer
+            .draft()
+            .get(start..composer.cursor())?
+            .strip_prefix('@')
+            .map(str::to_owned)
     }
 
     fn update_actions(&mut self, event: Event) -> ComponentUpdate<RootEffect> {
@@ -1285,6 +1339,47 @@ fn is_file_finder_trigger(event: &Event) -> bool {
             .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
 }
 
+fn is_file_finder_navigation(event: &Event) -> bool {
+    let Event::Key(key) = event else {
+        return false;
+    };
+    matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
+        && matches!(
+            key.code,
+            KeyCode::Enter | KeyCode::Up | KeyCode::Down | KeyCode::Esc
+        )
+}
+
+fn is_file_mention_edit(event: &Event) -> bool {
+    match event {
+        Event::Key(key) => {
+            matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
+                && (key.code == KeyCode::Backspace
+                    || matches!(key.code, KeyCode::Char(_))
+                        && !key
+                            .modifiers
+                            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT))
+        }
+        Event::Paste(_) => true,
+        _ => false,
+    }
+}
+
+fn file_mention_edit_continues_query(event: &Event) -> bool {
+    match event {
+        Event::Key(key) if key.code == KeyCode::Backspace => true,
+        Event::Key(key) => {
+            matches!(key.code, KeyCode::Char(character) if is_file_query_character(character))
+        }
+        Event::Paste(text) => text.chars().all(is_file_query_character),
+        _ => false,
+    }
+}
+
+fn is_file_query_character(character: char) -> bool {
+    character.is_alphanumeric() || matches!(character, '_' | '-' | '.' | '/')
+}
+
 fn is_focus_toggle(event: &Event) -> bool {
     let Event::Key(key) = event else {
         return false;
@@ -1624,7 +1719,7 @@ mod tests {
     }
 
     #[test]
-    fn at_opens_the_file_finder_without_changing_the_draft() {
+    fn at_at_a_token_boundary_opens_the_file_finder_and_remains_in_the_draft() {
         let workspace = tempfile::tempdir().unwrap();
         let mut root = RootNode::new(workspace.path(), ReasoningEffort::Medium);
         for character in "inspect ".chars() {
@@ -1634,8 +1729,20 @@ mod tests {
         let update = root.update(key(KeyCode::Char('@'), KeyModifiers::NONE));
 
         assert!(matches!(&root.overlay, Some(Overlay::FileFinder(_))));
-        assert_eq!(root.composer().draft(), "inspect ");
+        assert_eq!(root.composer().draft(), "inspect @");
         assert_eq!(update.render, super::RenderRequest::Immediate);
+    }
+
+    #[test]
+    fn at_inside_a_token_is_inserted_without_opening_the_file_finder() {
+        let workspace = tempfile::tempdir().unwrap();
+        let mut root = RootNode::new(workspace.path(), ReasoningEffort::Medium);
+        for character in "name@example.com".chars() {
+            root.update(key(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+
+        assert!(root.overlay.is_none());
+        assert_eq!(root.composer().draft(), "name@example.com");
     }
 
     #[test]
@@ -1658,16 +1765,54 @@ mod tests {
     }
 
     #[test]
-    fn backspace_and_escape_exit_an_empty_file_finder() {
+    fn selecting_a_file_replaces_the_query_in_the_middle_of_a_draft() {
+        let workspace = tempfile::tempdir().unwrap();
+        fs::write(workspace.path().join("notes.md"), "remember this").unwrap();
+        let mut root = RootNode::new(workspace.path(), ReasoningEffort::Medium);
+        for character in "inspect later".chars() {
+            root.update(key(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+        for _ in 0.."later".len() {
+            root.update(key(KeyCode::Left, KeyModifiers::NONE));
+        }
+        for character in "@notes".chars() {
+            root.update(key(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+
+        root.update(key(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(root.overlay.is_none());
+        assert_eq!(root.composer().draft(), "inspect @notes.md later");
+    }
+
+    #[test]
+    fn escape_preserves_a_literal_mention_and_backspace_removes_it() {
         let workspace = tempfile::tempdir().unwrap();
         let mut root = RootNode::new(workspace.path(), ReasoningEffort::Medium);
 
-        for dismiss in [KeyCode::Backspace, KeyCode::Esc] {
-            root.update(key(KeyCode::Char('@'), KeyModifiers::NONE));
-            root.update(key(dismiss, KeyModifiers::NONE));
-            assert!(root.overlay.is_none());
-            assert!(root.composer().draft().is_empty());
+        root.update(key(KeyCode::Char('@'), KeyModifiers::NONE));
+        root.update(key(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(root.overlay.is_none());
+        assert_eq!(root.composer().draft(), "@");
+
+        root.update(key(KeyCode::Backspace, KeyModifiers::NONE));
+        root.update(key(KeyCode::Char('@'), KeyModifiers::NONE));
+        root.update(key(KeyCode::Backspace, KeyModifiers::NONE));
+        assert!(root.overlay.is_none());
+        assert!(root.composer().draft().is_empty());
+    }
+
+    #[test]
+    fn mention_query_is_composer_text_and_space_closes_suggestions() {
+        let workspace = tempfile::tempdir().unwrap();
+        let mut root = RootNode::new(workspace.path(), ReasoningEffort::Medium);
+
+        for character in "@someone ".chars() {
+            root.update(key(KeyCode::Char(character), KeyModifiers::NONE));
         }
+
+        assert!(root.overlay.is_none());
+        assert_eq!(root.composer().draft(), "@someone ");
     }
 
     #[test]
