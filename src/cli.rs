@@ -11,10 +11,31 @@ use crossterm::style::{Color, Stylize};
 use std::path::PathBuf;
 use tokio_util::sync::CancellationToken;
 
+const BUILD_VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    "\ncommit: ",
+    env!("TACT_GIT_SHA"),
+    " (",
+    env!("TACT_GIT_BRANCH"),
+    ", ",
+    env!("TACT_GIT_DIRTY"),
+    ")\ncommit timestamp: ",
+    env!("TACT_GIT_COMMIT_TIMESTAMP"),
+    "\nbuild timestamp (Unix): ",
+    env!("TACT_BUILD_TIMESTAMP"),
+    "\ntarget: ",
+    env!("TACT_BUILD_TARGET"),
+    "\nprofile: ",
+    env!("TACT_BUILD_PROFILE"),
+    "\nrustc: ",
+    env!("TACT_RUSTC_VERSION"),
+);
+
 /// Command-line interface for `tact`.
 #[derive(Debug, Parser)]
 #[command(
     version,
+    long_version = BUILD_VERSION,
     about = "A terminal interface for Nanocodex",
     subcommand_negates_reqs = true
 )]
@@ -257,12 +278,24 @@ impl ConfigCommand {
 mod tests {
     use super::{Cli, resume_command};
     use crate::{cli::Command, config::AuthMode};
-    use clap::{CommandFactory, Parser};
+    use clap::{CommandFactory, Parser, error::ErrorKind};
     use std::path::PathBuf;
 
     #[test]
     fn clap_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn version_includes_build_metadata() {
+        let error = Cli::try_parse_from(["tact", "--version"]).unwrap_err();
+        let output = error.to_string();
+
+        assert_eq!(error.kind(), ErrorKind::DisplayVersion);
+        assert!(output.contains(env!("TACT_GIT_SHA")));
+        assert!(output.contains(env!("TACT_BUILD_TIMESTAMP")));
+        assert!(output.contains(env!("TACT_BUILD_TARGET")));
+        assert!(output.contains(env!("TACT_RUSTC_VERSION")));
     }
 
     #[test]
