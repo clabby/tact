@@ -1103,6 +1103,7 @@ fn apply_pane_effect(
         components::RootEffect::LoadSessions => {
             *context.input = None;
             let config_path = context.config.path().to_path_buf();
+            let workspace = context.workspace.to_path_buf();
             let active_session_id = context
                 .panes
                 .get(&pane)
@@ -1110,7 +1111,7 @@ fn apply_pane_effect(
                 .session_id
                 .clone();
             *context.session_list_task = Some(tokio::task::spawn_blocking(move || {
-                let sessions = session::list(&config_path).map(|mut sessions| {
+                let sessions = session::list(&config_path, &workspace).map(|mut sessions| {
                     sessions.retain(|session| session.session_id != active_session_id);
                     sessions
                 });

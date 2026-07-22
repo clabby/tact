@@ -147,9 +147,9 @@ Run `tact --help` for the full command-line reference.
 ## Resuming sessions
 
 After each completed turn, `tact` keeps one compressed checkpoint for the session alongside its
-append-only transcript segments. Open the Actions menu and choose **Resume session** to search by
-session ID, prompt preview, model, or workspace. The picker shows the session age, effort,
-workspace, and first prompt before restoring the conversation.
+append-only transcript segments. Open the Actions menu and choose **Resume session** to search the
+current workspace's sessions by session ID, prompt preview, or model. The picker shows the session
+age, effort, workspace, and first prompt before restoring the conversation.
 
 You can also resume a known session directly:
 

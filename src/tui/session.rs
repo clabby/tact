@@ -171,13 +171,19 @@ pub(crate) fn load_checkpoint(
         .map_err(|source| SessionError::DecodeCheckpoint { path, source })
 }
 
-pub(crate) fn list(config_path: &Path) -> Result<Vec<SessionSummary>, SessionError> {
+pub(crate) fn list(
+    config_path: &Path,
+    workspace: &Path,
+) -> Result<Vec<SessionSummary>, SessionError> {
     let mut sessions = HashMap::<String, SessionSummary>::new();
     for path in transcript_paths(config_path)? {
         let records = transcript::load(&path)?;
         let Some(started) = session_started(&records) else {
             continue;
         };
+        if started.workspace != workspace {
+            continue;
+        }
         if !checkpoint_path(config_path, &started.session_id).is_file() {
             continue;
         }
@@ -345,6 +351,7 @@ mod tests {
     };
     use nanocodex::SessionSnapshot;
     use serde_json::{Value, json};
+    use std::path::Path;
     use tempfile::tempdir;
 
     fn snapshot(lineage: &str) -> SessionSnapshot {
@@ -399,7 +406,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn catalog_is_derived_from_transcripts_without_an_index() {
+    async fn catalog_only_includes_sessions_from_the_requested_workspace() {
         let directory = tempdir().unwrap();
         let config = directory.path().join("config.toml");
         let (mut journal, writer) = TranscriptJournal::open(&config, "session/one").unwrap();
@@ -429,7 +436,22 @@ mod tests {
         writer.into_task().await.unwrap().unwrap();
         save_checkpoint(&config, "session/one", &snapshot("lineage")).unwrap();
 
-        let sessions = list(&config).unwrap();
+        let (mut journal, writer) = TranscriptJournal::open(&config, "other-session").unwrap();
+        journal
+            .append_local(LocalEvent::SessionStarted(SessionStarted {
+                session_id: "other-session".to_owned(),
+                parent_session_id: None,
+                model: "model".to_owned(),
+                effort: ReasoningEffort::Medium,
+                workspace: "/other-workspace".into(),
+                application_version: "test".to_owned(),
+            }))
+            .unwrap();
+        drop(journal);
+        writer.into_task().await.unwrap().unwrap();
+        save_checkpoint(&config, "other-session", &snapshot("other-lineage")).unwrap();
+
+        let sessions = list(&config, Path::new("/work")).unwrap();
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].session_id, "session/one");
         assert_eq!(sessions[0].preview, "inspect the workspace");
