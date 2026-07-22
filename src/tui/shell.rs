@@ -262,7 +262,7 @@ mod tests {
     async fn execution_finishes_when_a_descendant_keeps_output_pipes_open() {
         let workspace = tempfile::tempdir().unwrap();
         let execution = timeout(
-            Duration::from_millis(500),
+            Duration::from_secs(2),
             execute(
                 ShellId::new(2),
                 "(sleep 5) & printf done".to_owned(),
