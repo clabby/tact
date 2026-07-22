@@ -59,15 +59,27 @@ impl Selection {
         true
     }
 
-    pub(super) fn finish(&mut self) -> bool {
-        if self.range.is_none() {
+    pub(super) fn finish(&mut self, position: Position, area: Rect) -> bool {
+        let Some(anchor) = self
+            .pending
+            .or_else(|| self.range.map(|range| range.anchor))
+        else {
+            return false;
+        };
+        let head = Point {
+            surface: anchor.surface,
+            position: clamp(position, area),
+        };
+        if self.range.is_none() && head == anchor {
+            self.cancel_pending();
             return false;
         }
+        self.range = Some(Range { anchor, head });
         self.pending = None;
         true
     }
 
-    pub(super) fn cancel_pending(&mut self) {
+    fn cancel_pending(&mut self) {
         self.pending = None;
         if self.range.is_none() {
             self.snapshot = None;
@@ -232,8 +244,21 @@ mod tests {
         selection.begin(Surface::Composer, Position::new(1, 1));
 
         assert!(selection.is_pending());
-        assert!(!selection.finish());
+        assert!(!selection.finish(Position::new(1, 1), Rect::new(0, 0, 3, 3)));
         assert!(selection.take_text().is_none());
+    }
+
+    #[test]
+    fn displaced_release_finishes_without_a_drag_event() {
+        let area = Rect::new(0, 0, 7, 1);
+        let mut buffer = Buffer::empty(area);
+        buffer.set_string(0, 0, "copy me", Style::default());
+        let mut selection = Selection::default();
+        selection.begin(Surface::Composer, Position::new(0, 0));
+        selection.capture_and_render(&mut buffer, area);
+
+        assert!(selection.finish(Position::new(6, 0), area));
+        assert_eq!(selection.take_text().as_deref(), Some("copy me"));
     }
 
     #[test]

@@ -1,6 +1,5 @@
 //! Terminal lifecycle and synchronized Ratatui frames.
 
-#[cfg(any(not(target_os = "macos"), test))]
 use crossterm::clipboard::CopyToClipboard;
 use crossterm::{
     cursor::{Hide, Show},
@@ -141,7 +140,6 @@ impl TerminalSession {
         draw.and(end)
     }
 
-    #[cfg(not(target_os = "macos"))]
     pub(crate) fn copy_to_clipboard(&mut self, text: &str) -> io::Result<()> {
         copy_to_clipboard(self.terminal.backend_mut(), text)
     }
@@ -178,7 +176,6 @@ fn reset_after_resume<B: Backend>(terminal: &mut Terminal<B>) -> Result<(), B::E
     terminal.resize(area)
 }
 
-#[cfg(any(not(target_os = "macos"), test))]
 fn copy_to_clipboard(output: &mut impl Write, text: &str) -> io::Result<()> {
     execute!(output, CopyToClipboard::to_clipboard_from(text))
 }

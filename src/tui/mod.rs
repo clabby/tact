@@ -1149,34 +1149,24 @@ fn apply_pane_effect(
                 context.scheduler,
             ),
             Err(native_error) => {
-                #[cfg(target_os = "macos")]
-                schedule(
-                    context.app.update(AppEvent::NotifyError {
-                        pane,
-                        error: format!("Could not copy selection: {native_error}"),
-                    }),
-                    context.scheduler,
-                );
-
-                #[cfg(not(target_os = "macos"))]
-                    match context.terminal.copy_to_clipboard(&text) {
-                        Ok(()) => schedule(
-                            context.app.update(AppEvent::NotifySuccess {
-                                pane,
-                                message: "Sent selection to the terminal clipboard.".to_owned(),
-                            }),
-                            context.scheduler,
-                        ),
-                        Err(terminal_error) => schedule(
-                            context.app.update(AppEvent::NotifyError {
-                                pane,
-                                error: format!(
-                                    "Could not copy selection: {native_error}; terminal fallback failed: {terminal_error}"
-                                ),
-                            }),
-                            context.scheduler,
-                        ),
-                    }
+                match context.terminal.copy_to_clipboard(&text) {
+                    Ok(()) => schedule(
+                        context.app.update(AppEvent::NotifySuccess {
+                            pane,
+                            message: "Sent selection to the terminal clipboard.".to_owned(),
+                        }),
+                        context.scheduler,
+                    ),
+                    Err(terminal_error) => schedule(
+                        context.app.update(AppEvent::NotifyError {
+                            pane,
+                            error: format!(
+                                "Could not copy selection: {native_error}; terminal fallback failed: {terminal_error}"
+                            ),
+                        }),
+                        context.scheduler,
+                    ),
+                }
             }
         },
         components::RootEffect::Steer { id, prompt } => {

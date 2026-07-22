@@ -40,7 +40,6 @@ use std::{
 };
 
 const ESCAPE_CHORD_TIMEOUT: Duration = Duration::from_millis(500);
-const SELECTION_COPY_DELAY: Duration = Duration::from_millis(100);
 const BREADCRUMB_DURATION: Duration = Duration::from_secs(3);
 
 struct Notification {
@@ -136,7 +135,6 @@ pub(crate) struct RootNode {
     escape_deadline: Option<Instant>,
     notification: Option<Notification>,
     selection: Selection,
-    selection_copy_deadline: Option<Instant>,
     transcript_area: Rect,
     composer_area: Rect,
     composer_content_area: Rect,
@@ -161,7 +159,6 @@ impl RootNode {
             escape_deadline: None,
             notification: None,
             selection: Selection::default(),
-            selection_copy_deadline: None,
             transcript_area: Rect::default(),
             composer_area: Rect::default(),
             composer_content_area: Rect::default(),
@@ -255,7 +252,6 @@ impl RootNode {
             self.composer.component().animation_deadline(),
             self.queue.component().animation_deadline(),
             self.escape_deadline,
-            self.selection_copy_deadline,
             self.notification.as_ref().map(|notice| notice.deadline),
             self.subagents.animation_deadline(),
         ]
@@ -351,7 +347,6 @@ impl RootNode {
     fn update_terminal(&mut self, mut event: Event) -> ComponentUpdate<RootEffect> {
         if matches!(event, Event::Resize(_, _)) {
             self.selection.clear();
-            self.selection_copy_deadline = None;
             return ComponentUpdate::render(RenderRequest::Immediate);
         }
         if is_control_c(&event) {
@@ -397,7 +392,6 @@ impl RootNode {
         }
         if is_escape(&event) {
             if self.selection.clear() {
-                self.selection_copy_deadline = None;
                 return ComponentUpdate::render(RenderRequest::Immediate);
             }
             if self.queue.component().focused() {
@@ -519,7 +513,6 @@ impl RootNode {
             MouseEventKind::Down(MouseButton::Left) => {
                 let (surface, area) = self.surface_at(position)?;
                 self.selection.begin(surface, clamp_to(position, area));
-                self.selection_copy_deadline = None;
                 Some(ComponentUpdate::render(RenderRequest::Immediate))
             }
             MouseEventKind::Drag(MouseButton::Left) => {
@@ -527,17 +520,23 @@ impl RootNode {
                 self.selection.drag(position, area);
                 Some(ComponentUpdate::render(RenderRequest::Immediate))
             }
-            MouseEventKind::Up(MouseButton::Left) if self.selection.is_active() => {
+            MouseEventKind::Up(MouseButton::Left)
+                if self.selection.is_active() || self.selection.is_pending() =>
+            {
                 let area = self.selection_area()?;
-                self.selection.drag(position, area);
-                self.selection.finish();
-                self.selection_copy_deadline = Some(Instant::now() + SELECTION_COPY_DELAY);
-                Some(ComponentUpdate::render(RenderRequest::Immediate))
-            }
-            MouseEventKind::Up(MouseButton::Left) if self.selection.is_pending() => {
-                self.selection.cancel_pending();
-                mouse.kind = MouseEventKind::Down(MouseButton::Left);
-                None
+                if !self.selection.finish(position, area) {
+                    mouse.kind = MouseEventKind::Down(MouseButton::Left);
+                    return None;
+                }
+                Some(ComponentUpdate {
+                    effects: self
+                        .selection
+                        .take_text()
+                        .map(RootEffect::Copy)
+                        .into_iter()
+                        .collect(),
+                    render: RenderRequest::Immediate,
+                })
             }
             _ => None,
         }
@@ -1129,20 +1128,6 @@ impl RootNode {
         } else {
             RenderRequest::None
         };
-        let copy = if self
-            .selection_copy_deadline
-            .is_some_and(|deadline| now >= deadline)
-        {
-            self.selection_copy_deadline = None;
-            self.selection.take_text().map(RootEffect::Copy)
-        } else {
-            None
-        };
-        let selection = if copy.is_some() {
-            RenderRequest::Immediate
-        } else {
-            RenderRequest::None
-        };
         let notification = if self
             .notification
             .as_ref()
@@ -1154,19 +1139,13 @@ impl RootNode {
             RenderRequest::None
         };
         ComponentUpdate {
-            effects: effort
-                .effects
-                .into_iter()
-                .chain(composer.effects)
-                .chain(copy)
-                .collect(),
+            effects: effort.effects.into_iter().chain(composer.effects).collect(),
             render: effort
                 .render
                 .max(transcript.render)
                 .max(composer.render)
                 .max(queue.render)
                 .max(subagents)
-                .max(selection)
                 .max(notification),
         }
     }
@@ -2125,7 +2104,7 @@ mod tests {
     }
 
     #[test]
-    fn dragging_over_the_composer_copies_rendered_text_and_shows_a_breadcrumb() {
+    fn displaced_release_over_the_composer_copies_without_drag_events() {
         let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
         let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
         for character in "copy me".chars() {
@@ -2139,14 +2118,7 @@ mod tests {
         terminal
             .draw(|frame| root.render(frame, frame.area(), &Theme::default()))
             .unwrap();
-        root.update(mouse(MouseEventKind::Drag(MouseButton::Left), 7, 8));
-        terminal
-            .draw(|frame| root.render(frame, frame.area(), &Theme::default()))
-            .unwrap();
-        root.update(mouse(MouseEventKind::Up(MouseButton::Left), 7, 8));
-
-        let copy_deadline = root.selection_copy_deadline.unwrap();
-        let update = root.update(super::RootEvent::AnimationFrame(copy_deadline));
+        let update = root.update(mouse(MouseEventKind::Up(MouseButton::Left), 7, 8));
 
         assert_eq!(update.effects, [RootEffect::Copy("copy me".to_owned())]);
         assert_eq!(update.render, super::RenderRequest::Immediate);
@@ -2206,10 +2178,7 @@ mod tests {
         terminal
             .draw(|frame| root.render(frame, frame.area(), &Theme::default()))
             .unwrap();
-        root.update(mouse(MouseEventKind::Up(MouseButton::Left), 6, row));
-
-        let copy_deadline = root.selection_copy_deadline.unwrap();
-        let update = root.update(super::RootEvent::AnimationFrame(copy_deadline));
+        let update = root.update(mouse(MouseEventKind::Up(MouseButton::Left), 6, row));
 
         assert_eq!(update.effects, [RootEffect::Copy("hello".to_owned())]);
         assert!(!root.selection.is_active());
