@@ -688,6 +688,36 @@ fn wrap_graphemes(
     if graphemes.is_empty() {
         return vec![(Line::default(), Vec::new())];
     }
+    let mut lines = Vec::new();
+    let mut start = 0;
+    for (index, grapheme) in graphemes.iter().enumerate() {
+        if grapheme.text == "\n" {
+            lines.extend(wrap_visual_line(
+                &graphemes[start..index],
+                width,
+                prefer_words,
+            ));
+            start = index + 1;
+        }
+    }
+    if start < graphemes.len()
+        || graphemes
+            .last()
+            .is_some_and(|grapheme| grapheme.text == "\n")
+    {
+        lines.extend(wrap_visual_line(&graphemes[start..], width, prefer_words));
+    }
+    lines
+}
+
+fn wrap_visual_line(
+    graphemes: &[StyledGrapheme],
+    width: u16,
+    prefer_words: bool,
+) -> Vec<(Line<'static>, Vec<LinkSpan>)> {
+    if graphemes.is_empty() {
+        return vec![(Line::default(), Vec::new())];
+    }
 
     let mut lines = Vec::new();
     let mut start = 0_usize;

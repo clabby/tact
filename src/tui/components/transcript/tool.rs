@@ -443,6 +443,17 @@ mod tests {
     }
 
     #[test]
+    fn collapsed_shell_command_preserves_newlines() {
+        let shell = tool("exec_command", json!({"cmd": "printf one\nprintf two"}));
+
+        let lines = render(&shell, 80, &Theme::default());
+
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].to_string(), "  ▶ ✓ Shell  $ printf one");
+        assert_eq!(lines[1].to_string(), "      printf two · 1.2s");
+    }
+
+    #[test]
     fn collapsed_web_call_does_not_render_its_large_result() {
         let mut web = tool("web__run", json!({"search_query": [{"q": "rust ratatui"}]}));
         web.result = Some(json!("large result body\n".repeat(1_000)));
