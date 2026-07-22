@@ -6,7 +6,7 @@
 <!-- [![Crates.io Version](https://img.shields.io/crates/v/tact?style=for-the-badge)](https://crates.io/crates/tact) -->
 <!-- [![docs.rs](https://img.shields.io/docsrs/tact?style=for-the-badge)](https://docs.rs/tact) -->
 
-`tact` is a terminal interface for [Nanocodex](https://github.com/clabby/nanocodex).
+`tact` is a terminal interface for [Nanocodex](https://github.com/gakonst/nanocodex).
 Run it without a subcommand to open the interactive terminal interface:
 
 ```sh
