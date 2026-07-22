@@ -96,6 +96,12 @@ pub(crate) enum ConfigError {
     Serialize(#[source] toml::ser::Error),
     #[error("MCP server `{name}` is already configured")]
     McpServerExists { name: String },
+    #[error("MCP server `{name}` has an invalid URL: {source}")]
+    McpUrl {
+        name: String,
+        #[source]
+        source: McpUrlError,
+    },
     #[error("MCP environment variable {name} is not set")]
     McpEnvironmentNotPresent { name: String },
     #[error("MCP environment variable {name} is not valid Unicode")]
@@ -114,6 +120,18 @@ pub(crate) enum ConfigError {
         #[source]
         source: io::Error,
     },
+}
+
+#[derive(Debug, Error)]
+pub(crate) enum McpUrlError {
+    #[error("the URL must not be empty or whitespace-only")]
+    Empty,
+    #[error("the URL is not valid")]
+    Parse(#[source] url::ParseError),
+    #[error("the URL must use the http or https scheme")]
+    UnsupportedScheme,
+    #[error("the URL must not contain credentials")]
+    Credentials,
 }
 
 #[derive(Debug, Error)]

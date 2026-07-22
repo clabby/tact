@@ -8,9 +8,9 @@ use crate::{
 };
 use clap::{ArgAction, Parser, Subcommand, builder::NonEmptyStringValueParser};
 use crossterm::style::{Color, Stylize};
-use std::{env, env::VarError, path::PathBuf};
+use std::{env, env::VarError, fmt, path::PathBuf};
 use tokio_util::sync::CancellationToken;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 const BUILD_VERSION: &str = concat!(
     env!("CARGO_PKG_VERSION"),
@@ -164,25 +164,46 @@ enum ConfigCommand {
     Show,
 }
 
-#[derive(Debug, Subcommand)]
+#[derive(Subcommand)]
 enum McpCommand {
-    /// Add a local stdio MCP server.
+    /// Add a local stdio or remote Streamable HTTP MCP server.
+    #[command(group(
+        clap::ArgGroup::new("transport")
+            .required(true)
+            .args(["url", "command"])
+    ), override_usage = "tact mcp add [OPTIONS] <NAME> (--url <URL> | -- <COMMAND>...)")]
     Add {
         /// Name for the MCP server configuration.
         #[arg(value_parser = NonEmptyStringValueParser::new())]
         name: String,
 
         /// Environment variable copied into the server configuration.
-        #[arg(long, value_name = "NAME", value_parser = NonEmptyStringValueParser::new())]
+        #[arg(long, value_name = "NAME", value_parser = NonEmptyStringValueParser::new(), conflicts_with = "url")]
         env: Vec<String>,
 
         /// Working directory for the server process.
-        #[arg(long, value_name = "PATH")]
+        #[arg(long, value_name = "PATH", conflicts_with = "url")]
         cwd: Option<PathBuf>,
+
+        /// URL for a remote Streamable HTTP server.
+        #[arg(
+            long,
+            value_name = "URL",
+            conflicts_with = "command",
+            value_parser = NonEmptyStringValueParser::new()
+        )]
+        url: Option<String>,
+
+        /// Environment variable containing the remote server's bearer token.
+        #[arg(long, value_name = "NAME", requires = "url", conflicts_with = "command", value_parser = NonEmptyStringValueParser::new())]
+        bearer_token_env_var: Option<String>,
+
+        /// Resolve an HTTP header value from an environment variable (`HEADER=ENV_VAR`).
+        #[arg(long, value_name = "HEADER=ENV_VAR", requires = "url", conflicts_with = "command", value_parser = parse_header_env)]
+        header_env: Vec<(String, String)>,
 
         /// Command used to launch the server.
         #[arg(
-            required = true,
             trailing_var_arg = true,
             allow_hyphen_values = true,
             value_name = "COMMAND"
@@ -190,6 +211,48 @@ enum McpCommand {
         command: Vec<String>,
     },
 }
+
+impl fmt::Debug for McpCommand {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Add {
+                name,
+                env,
+                cwd,
+                url,
+                bearer_token_env_var,
+                header_env,
+                command,
+            } => formatter
+                .debug_struct("Add")
+                .field("name", name)
+                .field("env", env)
+                .field("cwd", cwd)
+                .field("url", &url.as_ref().map(|_| "[REDACTED URL]"))
+                .field("bearer_token_env_var", bearer_token_env_var)
+                .field("header_env", header_env)
+                .field("command", command)
+                .finish(),
+        }
+    }
+}
+
+impl Zeroize for McpCommand {
+    fn zeroize(&mut self) {
+        let Self::Add { url, .. } = self;
+        if let Some(url) = url {
+            url.zeroize();
+        }
+    }
+}
+
+impl Drop for McpCommand {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
+}
+
+impl ZeroizeOnDrop for McpCommand {}
 
 impl Cli {
     pub(crate) async fn run(self) -> Result<()> {
@@ -316,23 +379,38 @@ impl ConfigCommand {
 
 impl McpCommand {
     fn run(self, config: &Config) -> Result<()> {
-        match self {
+        match &self {
             Self::Add {
                 name,
                 env,
                 cwd,
-                mut command,
+                url,
+                bearer_token_env_var,
+                header_env,
+                command,
             } => {
-                let arguments = command.split_off(1);
-                let program = command.pop().expect("clap requires a command");
+                if let Some(url) = url {
+                    config.add_http_mcp_server(
+                        name,
+                        url,
+                        bearer_token_env_var.as_deref(),
+                        header_env
+                            .iter()
+                            .map(|(header, variable)| (header.as_str(), variable.as_str())),
+                    )?;
+                    println!("Added MCP server `{name}`.");
+                    return Ok(());
+                }
+
+                let (program, arguments) = command.split_first().expect("clap requires a command");
                 let environment = env
-                    .into_iter()
-                    .map(|name| read_mcp_environment(name, |name| env::var(name)))
+                    .iter()
+                    .map(|name| read_mcp_environment(name.clone(), |name| env::var(name)))
                     .collect::<std::result::Result<Vec<_>, _>>()?;
                 config.add_mcp_server(
-                    &name,
-                    &program,
-                    &arguments,
+                    name,
+                    program,
+                    arguments,
                     environment
                         .iter()
                         .map(|(name, value)| (name.as_str(), value.as_str())),
@@ -344,6 +422,16 @@ impl McpCommand {
 
         Ok(())
     }
+}
+
+fn parse_header_env(value: &str) -> std::result::Result<(String, String), String> {
+    let Some((header, variable)) = value.split_once('=') else {
+        return Err("expected HEADER=ENV_VAR".into());
+    };
+    if header.is_empty() || variable.is_empty() {
+        return Err("header and environment variable names must not be empty".into());
+    }
+    Ok((header.into(), variable.into()))
 }
 
 fn read_mcp_environment(
@@ -366,9 +454,14 @@ fn read_mcp_environment(
 #[cfg(test)]
 mod tests {
     use super::{Cli, McpCommand, read_mcp_environment, resume_command};
-    use crate::{cli::Command, config::AuthMode};
+    use crate::{
+        cli::Command,
+        config::{AuthMode, Config, ConfigOverrides},
+        error::{ConfigError, Error},
+    };
     use clap::{CommandFactory, Parser, error::ErrorKind};
-    use std::{env::VarError, ffi::OsString, path::PathBuf};
+    use std::{env::VarError, ffi::OsString, fs, path::PathBuf};
+    use tempfile::tempdir;
 
     #[test]
     fn clap_definition_is_valid() {
@@ -465,18 +558,144 @@ mod tests {
                     env,
                     cwd,
                     command,
+                    ..
                 },
-        }) = cli.command
+        }) = &cli.command
         else {
             panic!("expected mcp add command");
         };
         assert_eq!(name, "filesystem");
-        assert_eq!(env, ["TOKEN"]);
-        assert_eq!(cwd.unwrap(), PathBuf::from("servers/filesystem"));
+        assert_eq!(env.as_slice(), ["TOKEN"]);
         assert_eq!(
-            command,
+            cwd.as_deref(),
+            Some(PathBuf::from("servers/filesystem").as_path())
+        );
+        assert_eq!(
+            command.as_slice(),
             ["npx", "-y", "@modelcontextprotocol/server-filesystem", "."]
         );
+    }
+
+    #[test]
+    fn mcp_add_accepts_a_remote_server_with_environment_backed_auth() {
+        let cli = Cli::try_parse_from([
+            "tact",
+            "mcp",
+            "add",
+            "docs",
+            "--url",
+            "https://example.com/mcp",
+            "--bearer-token-env-var",
+            "MCP_TOKEN",
+            "--header-env",
+            "X-Tenant=TENANT_ID",
+        ])
+        .unwrap();
+
+        let Some(Command::Mcp {
+            command:
+                McpCommand::Add {
+                    url,
+                    bearer_token_env_var,
+                    header_env,
+                    command,
+                    ..
+                },
+        }) = &cli.command
+        else {
+            panic!("expected mcp add command");
+        };
+        assert_eq!(url.as_deref(), Some("https://example.com/mcp"));
+        assert_eq!(bearer_token_env_var.as_deref(), Some("MCP_TOKEN"));
+        assert_eq!(
+            header_env.as_slice(),
+            [("X-Tenant".into(), "TENANT_ID".into())]
+        );
+        assert!(command.is_empty());
+    }
+
+    #[test]
+    fn mcp_add_rejects_an_empty_remote_url_and_shows_transport_usage() {
+        let error = Cli::try_parse_from(["tact", "mcp", "add", "docs", "--url", ""]).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidValue);
+
+        let help = Cli::try_parse_from(["tact", "mcp", "add", "--help"])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            help.contains("Usage: tact mcp add [OPTIONS] <NAME> (--url <URL> | -- <COMMAND>...)")
+        );
+    }
+
+    #[test]
+    fn mcp_add_rejects_whitespace_and_credential_bearing_urls_without_persisting_them() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let original = "[auth]\nmode = \"api-key\"\nfile = \"auth.json\"\n";
+        fs::write(&path, original).unwrap();
+        let config = Config::load(ConfigOverrides {
+            path: Some(path.clone()),
+            ..ConfigOverrides::default()
+        })
+        .unwrap();
+
+        for url in [" ", "https://user:not-a-real-secret@example.com/mcp"] {
+            let cli = Cli::try_parse_from(["tact", "mcp", "add", "docs", "--url", url]).unwrap();
+            assert!(!format!("{cli:?}").contains("not-a-real-secret"));
+            let Some(Command::Mcp { command }) = cli.command else {
+                panic!("expected mcp command");
+            };
+            let error = command.run(&config).unwrap_err();
+            let rendered = format!("{error:?} {error}");
+            assert!(matches!(
+                error,
+                Error::Config(ConfigError::McpUrl { name, .. }) if name == "docs"
+            ));
+            assert!(!rendered.contains("not-a-real-secret"));
+            assert_eq!(fs::read_to_string(&path).unwrap(), original);
+        }
+    }
+
+    #[test]
+    fn mcp_add_requires_exactly_one_transport_and_transport_specific_options() {
+        for arguments in [
+            vec!["tact", "mcp", "add", "missing"],
+            vec![
+                "tact",
+                "mcp",
+                "add",
+                "mixed",
+                "--url",
+                "https://example.com/mcp",
+                "--",
+                "server",
+            ],
+            vec![
+                "tact",
+                "mcp",
+                "add",
+                "stdio",
+                "--header-env",
+                "X=Y",
+                "--",
+                "server",
+            ],
+            vec![
+                "tact",
+                "mcp",
+                "add",
+                "http",
+                "--url",
+                "https://example.com/mcp",
+                "--cwd",
+                ".",
+            ],
+        ] {
+            assert!(
+                Cli::try_parse_from(&arguments).is_err(),
+                "accepted invalid arguments: {arguments:?}"
+            );
+        }
     }
 
     #[test]

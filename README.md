@@ -106,6 +106,15 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/workspace"]
 [mcp_servers.filesystem.env]
 # API_TOKEN = "secret"
 
+# Remote servers use the Streamable HTTP transport. Authentication values are
+# resolved from the named environment variables and are never stored here.
+[mcp_servers.docs]
+url = "https://example.com/mcp"
+bearer_token_env_var = "DOCS_MCP_TOKEN"
+
+[mcp_servers.docs.header_env]
+X-Tenant-ID = "DOCS_TENANT_ID"
+
 [theme]
 mode = "auto" # auto, light, or dark
 
@@ -124,13 +133,22 @@ from the file's directory. The workspace defaults to the current working directo
 overrides are optional so Nanocodex can choose the appropriate defaults for ChatGPT or API-key
 authentication.
 
-MCP servers currently use the local stdio transport. Each named server accepts `command`, `args`,
-`env`, and `cwd`; relative working directories are resolved from the configuration file's
-directory. Environment values are explicit credentials: `tact config show` and debug output replace
-them with `[REDACTED]`, but the configuration file itself still contains the original values.
-Nanocodex retains non-zeroizing copies while the server is active because those copies are outside
-tact's memory ownership. MCP startup and discovery run independently for each server, so one failed
-server does not prevent healthy servers or the session from continuing.
+MCP servers use either local stdio or remote Streamable HTTP transport. A stdio server accepts
+`command`, `args`, `env`, and `cwd`; relative working directories are resolved from the
+configuration file's directory. Stdio environment values are explicit credentials: `tact config
+show` and debug output replace them with `[REDACTED]`, but the configuration file itself still
+contains the original values. Nanocodex retains non-zeroizing copies while the server is active
+because those copies are outside tact's memory ownership.
+
+A remote server accepts `url`, `bearer_token_env_var`, and a `header_env` table mapping HTTP header
+names to environment variable names. Only the variable names are persisted; tact snapshots valid
+values into Nanocodex when constructing the provider. Nanocodex retains its own non-zeroizing
+copies while the server is active. Missing or non-Unicode values fail only the affected server
+without exposing their contents. Remote URLs must use HTTP or HTTPS and must not contain userinfo;
+put credentials in the environment-backed authentication fields instead. Transport fields cannot
+be mixed. MCP startup and discovery run
+independently for each server, so one failed server does not prevent healthy servers or the session
+from continuing.
 
 Add a server without editing TOML by hand:
 
@@ -144,6 +162,18 @@ separates tact's options from the server command. Reading values from the enviro
 out of shell history and process arguments. Relative `--cwd` paths are resolved from the directory
 where tact is invoked. Server names must be unique; adding an existing name leaves the configuration
 unchanged.
+
+Add a remote server with environment-backed authentication:
+
+```sh
+tact mcp add docs --url https://example.com/mcp \
+  --bearer-token-env-var DOCS_MCP_TOKEN \
+  --header-env X-Tenant-ID=DOCS_TENANT_ID
+```
+
+`--url` and a command after `--` are mutually exclusive. `--bearer-token-env-var` and repeatable
+`--header-env HEADER=ENV_VAR` options apply only to remote servers and persist only environment
+variable names. Tact reads their values when constructing a provider for a new session.
 
 Local skills are disabled by default. A `SKILL.md` is a set of model instructions that can direct
 shell or tool execution, so enable only roots whose contents you trust. Skill information also uses

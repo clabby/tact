@@ -1,7 +1,7 @@
 //! Configuration loading, precedence, and effective runtime settings.
 
 use crate::{
-    error::{ConfigError, Result},
+    error::{ConfigError, McpUrlError, Result},
     tui::theme::{Theme, ThemeMode},
 };
 use clap::ValueEnum;
@@ -62,14 +62,28 @@ pub(crate) struct Config {
     reload: ReloadSource,
 }
 
-/// Configuration for a local MCP server using the stdio transport.
+/// Configuration for one MCP server transport.
 #[derive(Clone, Debug, Serialize)]
-pub(crate) struct McpServerConfig {
+#[serde(untagged)]
+pub(crate) enum McpServerConfig {
+    Stdio(McpStdioConfig),
+    Http(McpHttpConfig),
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct McpStdioConfig {
     command: String,
     args: Vec<String>,
     #[serde(serialize_with = "serialize_mcp_environment")]
     env: Arc<McpEnvironment>,
     cwd: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct McpHttpConfig {
+    url: String,
+    bearer_token_env_var: Option<String>,
+    header_env: BTreeMap<String, String>,
 }
 
 #[derive(Zeroize, ZeroizeOnDrop)]
@@ -157,14 +171,30 @@ struct SkillsConfigFile {
 }
 
 #[derive(Deserialize)]
+#[serde(untagged)]
+enum McpServerConfigFile {
+    Stdio(McpStdioConfigFile),
+    Http(McpHttpConfigFile),
+}
+
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct McpServerConfigFile {
+struct McpStdioConfigFile {
     command: String,
     #[serde(default)]
     args: Vec<String>,
     #[serde(default)]
     env: BTreeMap<String, String>,
     cwd: Option<PathBuf>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct McpHttpConfigFile {
+    url: String,
+    bearer_token_env_var: Option<String>,
+    #[serde(default)]
+    header_env: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -245,8 +275,10 @@ impl Config {
         let mcp_servers = file
             .mcp_servers
             .into_iter()
-            .map(|(name, server)| (name, McpServerConfig::new(server, config_dir)))
-            .collect();
+            .map(|(name, server)| {
+                McpServerConfig::new(&name, server, config_dir).map(|server| (name, server))
+            })
+            .collect::<Result<BTreeMap<_, _>>>()?;
         let skills = SkillsConfig::new(file.skills, config_dir, &environment);
 
         Ok(Self {
@@ -345,22 +377,6 @@ impl Config {
         environment: impl Iterator<Item = (&'a str, &'a str)>,
         cwd: Option<&Path>,
     ) -> Result<()> {
-        let mut document = Self::read_document(&self.path)?;
-        let document_contains_server = document
-            .get("mcp_servers")
-            .and_then(Item::as_table_like)
-            .is_some_and(|servers| servers.contains_key(name));
-        if self.mcp_servers.contains_key(name) || document_contains_server {
-            return Err(ConfigError::McpServerExists {
-                name: name.to_owned(),
-            }
-            .into());
-        }
-
-        if !document.contains_key("mcp_servers") {
-            document["mcp_servers"] = Item::Table(Table::new());
-        }
-
         let mut server = Table::new();
         server["command"] = value(command);
         if !arguments.is_empty() {
@@ -384,6 +400,53 @@ impl Config {
             server["env"] = Item::Table(environment_table);
         }
 
+        self.add_mcp_server_table(name, server)
+    }
+
+    pub(crate) fn add_http_mcp_server<'a>(
+        &self,
+        name: &str,
+        url: &str,
+        bearer_token_env_var: Option<&str>,
+        header_env: impl Iterator<Item = (&'a str, &'a str)>,
+    ) -> Result<()> {
+        validate_mcp_url(url).map_err(|source| ConfigError::McpUrl {
+            name: name.to_owned(),
+            source,
+        })?;
+        let mut server = Table::new();
+        server["url"] = value(url);
+        if let Some(variable) = bearer_token_env_var {
+            server["bearer_token_env_var"] = value(variable);
+        }
+
+        let mut headers = Table::new();
+        for (header, variable) in header_env {
+            headers[header] = value(variable);
+        }
+        if !headers.is_empty() {
+            server["header_env"] = Item::Table(headers);
+        }
+
+        self.add_mcp_server_table(name, server)
+    }
+
+    fn add_mcp_server_table(&self, name: &str, server: Table) -> Result<()> {
+        let mut document = Self::read_document(&self.path)?;
+        let document_contains_server = document
+            .get("mcp_servers")
+            .and_then(Item::as_table_like)
+            .is_some_and(|servers| servers.contains_key(name));
+        if self.mcp_servers.contains_key(name) || document_contains_server {
+            return Err(ConfigError::McpServerExists {
+                name: name.to_owned(),
+            }
+            .into());
+        }
+
+        if !document.contains_key("mcp_servers") {
+            document["mcp_servers"] = Item::Table(Table::new());
+        }
         document["mcp_servers"][name] = Item::Table(server);
         Self::write_document(&self.path, document)
     }
@@ -458,20 +521,75 @@ impl Config {
 }
 
 impl McpServerConfig {
-    fn new(file: McpServerConfigFile, config_dir: &Path) -> Self {
-        Self {
-            command: file.command,
-            args: file.args,
-            env: Arc::new(McpEnvironment(
-                file.env
-                    .into_iter()
-                    .map(|(name, value)| (name, McpSecretString(value)))
-                    .collect(),
-            )),
-            cwd: file.cwd.map(|path| Config::resolve_path(path, config_dir)),
-        }
+    fn new(name: &str, file: McpServerConfigFile, config_dir: &Path) -> Result<Self> {
+        let config = match file {
+            McpServerConfigFile::Stdio(file) => Self::Stdio(McpStdioConfig {
+                command: file.command,
+                args: file.args,
+                env: Arc::new(McpEnvironment(
+                    file.env
+                        .into_iter()
+                        .map(|(name, value)| (name, McpSecretString(value)))
+                        .collect(),
+                )),
+                cwd: file.cwd.map(|path| Config::resolve_path(path, config_dir)),
+            }),
+            McpServerConfigFile::Http(mut file) => {
+                if let Err(source) = validate_mcp_url(&file.url) {
+                    file.url.zeroize();
+                    return Err(ConfigError::McpUrl {
+                        name: name.to_owned(),
+                        source,
+                    }
+                    .into());
+                }
+                Self::Http(McpHttpConfig {
+                    url: file.url,
+                    bearer_token_env_var: file.bearer_token_env_var,
+                    header_env: file.header_env,
+                })
+            }
+        };
+        Ok(config)
     }
 
+    #[cfg(test)]
+    fn stdio(&self) -> &McpStdioConfig {
+        let Self::Stdio(config) = self else {
+            panic!("expected stdio MCP server");
+        };
+        config
+    }
+}
+
+pub(crate) fn validate_mcp_url(value: &str) -> std::result::Result<(), McpUrlError> {
+    if value.trim().is_empty() {
+        return Err(McpUrlError::Empty);
+    }
+    // Reject standard URL userinfo before parsing so the URL dependency never allocates its own
+    // non-zeroizing copy of embedded credentials.
+    let contains_userinfo = value.split_once(':').is_some_and(|(scheme, remainder)| {
+        (scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https"))
+            && remainder
+                .trim_start_matches('/')
+                .split(['/', '?', '#'])
+                .next()
+                .is_some_and(|authority| authority.contains('@'))
+    });
+    if contains_userinfo {
+        return Err(McpUrlError::Credentials);
+    }
+    let url = url::Url::parse(value).map_err(McpUrlError::Parse)?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(McpUrlError::UnsupportedScheme);
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(McpUrlError::Credentials);
+    }
+    Ok(())
+}
+
+impl McpStdioConfig {
     pub(crate) fn command(&self) -> &str {
         &self.command
     }
@@ -486,6 +604,20 @@ impl McpServerConfig {
 
     pub(crate) fn cwd(&self) -> Option<&Path> {
         self.cwd.as_deref()
+    }
+}
+
+impl McpHttpConfig {
+    pub(crate) fn url(&self) -> &str {
+        &self.url
+    }
+
+    pub(crate) fn bearer_token_env_var(&self) -> Option<&str> {
+        self.bearer_token_env_var.as_deref()
+    }
+
+    pub(crate) fn header_env(&self) -> &BTreeMap<String, String> {
+        &self.header_env
     }
 }
 
@@ -795,9 +927,9 @@ impl Config {
 mod tests {
     use super::{
         AuthMode, Config, ConfigOverrides, Environment, McpEnvironment, McpSecretString,
-        ReasoningEffort, ThemeMode,
+        McpServerConfig, ReasoningEffort, ThemeMode, validate_mcp_url,
     };
-    use crate::error::{ConfigError, Error};
+    use crate::error::{ConfigError, Error, McpUrlError};
     use ratatui::style::Color;
     use std::{collections::BTreeMap, fs, path::Path, sync::Arc};
     use tempfile::tempdir;
@@ -1161,7 +1293,7 @@ mod tests {
         )
         .unwrap();
 
-        let files = &config.mcp_servers()["files"];
+        let files = config.mcp_servers()["files"].stdio();
         assert_eq!(files.command(), "node");
         assert_eq!(files.args(), ["server.js", "--stdio"]);
         assert_eq!(
@@ -1175,10 +1307,194 @@ mod tests {
                 .any(|(name, value)| name == "TOKEN" && value == "secret-sentinel")
         );
 
-        let search = &config.mcp_servers()["search"];
+        let search = config.mcp_servers()["search"].stdio();
         assert!(search.args().is_empty());
         assert!(search.env().expose().next().is_none());
         assert_eq!(search.cwd(), None);
+    }
+
+    #[test]
+    fn remote_mcp_servers_round_trip_environment_references() {
+        let directory = tempdir().unwrap();
+        let config_path = directory.path().join("config.toml");
+        fs::write(
+            &config_path,
+            "[mcp_servers.docs]\nurl = \"https://example.com/mcp\"\n\
+             bearer_token_env_var = \"MCP_TOKEN\"\n\n\
+             [mcp_servers.docs.header_env]\nX-Tenant = \"TENANT_ID\"\n",
+        )
+        .unwrap();
+
+        let config = Config::load_with(
+            ConfigOverrides {
+                path: Some(config_path),
+                ..ConfigOverrides::default()
+            },
+            Environment {
+                codex_home: Some(directory.path().join("codex")),
+                ..Environment::default()
+            },
+            directory.path(),
+        )
+        .unwrap();
+        let McpServerConfig::Http(server) = &config.mcp_servers()["docs"] else {
+            panic!("expected HTTP MCP server");
+        };
+        assert_eq!(server.url(), "https://example.com/mcp");
+        assert_eq!(server.bearer_token_env_var(), Some("MCP_TOKEN"));
+        assert_eq!(server.header_env()["X-Tenant"], "TENANT_ID");
+
+        let rendered = config.to_toml().unwrap();
+        assert!(rendered.contains("bearer_token_env_var = \"MCP_TOKEN\""));
+        assert!(rendered.contains("X-Tenant = \"TENANT_ID\""));
+    }
+
+    #[test]
+    fn whitespace_remote_mcp_url_is_rejected_at_config_load() {
+        let directory = tempdir().unwrap();
+        let config_path = directory.path().join("config.toml");
+        fs::write(&config_path, "[mcp_servers.docs]\nurl = \" \"\n").unwrap();
+
+        let error = Config::load_with(
+            ConfigOverrides {
+                path: Some(config_path),
+                ..ConfigOverrides::default()
+            },
+            Environment {
+                codex_home: Some(directory.path().join("codex")),
+                ..Environment::default()
+            },
+            directory.path(),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            Error::Config(ConfigError::McpUrl { name, .. }) if name == "docs"
+        ));
+    }
+
+    #[test]
+    fn remote_mcp_urls_require_http_or_https() {
+        assert!(validate_mcp_url("http://localhost:8080/mcp?tenant=one").is_ok());
+        assert!(validate_mcp_url("https://example.com/mcp").is_ok());
+        assert!(matches!(
+            validate_mcp_url("file:///tmp/mcp.sock"),
+            Err(McpUrlError::UnsupportedScheme)
+        ));
+        assert!(matches!(
+            validate_mcp_url("http:user:not-a-real-secret@example.com/mcp"),
+            Err(McpUrlError::Credentials)
+        ));
+    }
+
+    #[test]
+    fn credential_bearing_remote_mcp_url_is_rejected_without_entering_diagnostics() {
+        let directory = tempdir().unwrap();
+        let config_path = directory.path().join("config.toml");
+        fs::write(
+            &config_path,
+            "[mcp_servers.docs]\nurl = \"https://user:not-a-real-secret@example.com/mcp\"\n",
+        )
+        .unwrap();
+
+        let error = Config::load_with(
+            ConfigOverrides {
+                path: Some(config_path),
+                ..ConfigOverrides::default()
+            },
+            Environment {
+                codex_home: Some(directory.path().join("codex")),
+                ..Environment::default()
+            },
+            directory.path(),
+        )
+        .unwrap_err();
+        let rendered = format!("{error:?} {error}");
+        assert!(matches!(
+            error,
+            Error::Config(ConfigError::McpUrl { name, .. }) if name == "docs"
+        ));
+        assert!(!rendered.contains("not-a-real-secret"));
+        assert!(rendered.contains("must not contain credentials"));
+    }
+
+    #[test]
+    fn invalid_mcp_transport_mixtures_are_rejected() {
+        for server in [
+            "command = \"server\"\nurl = \"https://example.com/mcp\"",
+            "url = \"https://example.com/mcp\"\nargs = [\"--invalid\"]",
+            "url = \"https://example.com/mcp\"\nenv = { TOKEN = \"secret\" }",
+            "url = \"https://example.com/mcp\"\ncwd = \".\"",
+            "command = \"server\"\nbearer_token_env_var = \"TOKEN\"",
+            "header_env = { X = \"TOKEN\" }",
+        ] {
+            let directory = tempdir().unwrap();
+            let config_path = directory.path().join("config.toml");
+            fs::write(&config_path, format!("[mcp_servers.invalid]\n{server}\n")).unwrap();
+
+            let error = Config::load_with(
+                ConfigOverrides {
+                    path: Some(config_path),
+                    ..ConfigOverrides::default()
+                },
+                Environment::default(),
+                directory.path(),
+            )
+            .unwrap_err();
+            assert!(matches!(error, Error::Config(ConfigError::Parse { .. })));
+        }
+    }
+
+    #[test]
+    fn adding_a_remote_mcp_server_preserves_unrelated_toml() {
+        let directory = tempdir().unwrap();
+        let config_path = directory.path().join("config.toml");
+        fs::write(
+            &config_path,
+            "# Keep this comment.\n[agent]\nthinking = \"high\"\n",
+        )
+        .unwrap();
+        let config = Config::load_with(
+            ConfigOverrides {
+                path: Some(config_path.clone()),
+                ..ConfigOverrides::default()
+            },
+            Environment {
+                codex_home: Some(directory.path().join("codex")),
+                ..Environment::default()
+            },
+            directory.path(),
+        )
+        .unwrap();
+
+        config
+            .add_http_mcp_server(
+                "docs",
+                "https://example.com/mcp",
+                Some("MCP_TOKEN"),
+                [("X-Tenant", "TENANT_ID")].into_iter(),
+            )
+            .unwrap();
+
+        let contents = fs::read_to_string(&config_path).unwrap();
+        assert!(contents.contains("# Keep this comment."));
+        assert!(contents.contains("url = \"https://example.com/mcp\""));
+        assert!(contents.contains("bearer_token_env_var = \"MCP_TOKEN\""));
+        assert!(contents.contains("X-Tenant = \"TENANT_ID\""));
+
+        let error = config
+            .add_http_mcp_server(
+                "docs",
+                "https://other.example.com/mcp",
+                None,
+                std::iter::empty(),
+            )
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            Error::Config(ConfigError::McpServerExists { name }) if name == "docs"
+        ));
+        assert_eq!(fs::read_to_string(config_path).unwrap(), contents);
     }
 
     #[test]
@@ -1227,7 +1543,7 @@ mod tests {
             directory.path(),
         )
         .unwrap();
-        let server = &loaded.mcp_servers()["files.v1"];
+        let server = loaded.mcp_servers()["files.v1"].stdio();
         assert_eq!(server.command(), "npx");
         assert_eq!(
             server.args(),
@@ -1307,8 +1623,8 @@ mod tests {
 
         let cloned = config.clone();
         assert!(Arc::ptr_eq(
-            &config.mcp_servers["files"].env,
-            &cloned.mcp_servers["files"].env,
+            &config.mcp_servers["files"].stdio().env,
+            &cloned.mcp_servers["files"].stdio().env,
         ));
     }
 
