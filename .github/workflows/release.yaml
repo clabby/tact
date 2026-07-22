@@ -58,10 +58,6 @@ jobs:
             target: x86_64-apple-darwin
             archive_ext: tar.gz
             use_cross: false
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            archive_ext: zip
-            use_cross: false
     steps:
       - name: Checkout sources
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
@@ -82,8 +78,7 @@ jobs:
       - name: Build with cross
         if: matrix.use_cross
         run: cross build --locked --release --target ${{ matrix.target }}
-      - name: Package Unix binary
-        if: runner.os != 'Windows'
+      - name: Package binary
         shell: bash
         run: |
           set -euo pipefail
@@ -94,20 +89,6 @@ jobs:
           cp README.md LICENSE.md "$package_name/"
           tar -czf "$package_name.${{ matrix.archive_ext }}" "$package_name"
           shasum -a 256 "$package_name.${{ matrix.archive_ext }}" > "$package_name.${{ matrix.archive_ext }}.sha256"
-      - name: Package Windows binary
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $PackageName = "$env:BINARY_NAME-${{ matrix.target }}-$env:GITHUB_REF_NAME"
-
-          New-Item -ItemType Directory -Path $PackageName | Out-Null
-          Copy-Item "target/${{ matrix.target }}/release/$env:BINARY_NAME.exe" "$PackageName/"
-          Copy-Item README.md, LICENSE.md "$PackageName/"
-          Compress-Archive -Path $PackageName -DestinationPath "$PackageName.${{ matrix.archive_ext }}"
-
-          $Archive = "$PackageName.${{ matrix.archive_ext }}"
-          $Hash = (Get-FileHash $Archive -Algorithm SHA256).Hash.ToLower()
-          "$Hash $Archive" | Out-File -Encoding ascii "$Archive.sha256"
       - name: Upload packaged binary
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -157,7 +138,6 @@ jobs:
           tag_name: ${{ github.ref_name }}
           files: |
             dist/*.tar.gz
-            dist/*.zip
             dist/*.sha256
           fail_on_unmatched_files: true
           generate_release_notes: true

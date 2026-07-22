@@ -76,9 +76,8 @@ with the approved signing process instead; the GitHub API command above creates 
 The tag publishes:
 
 - `.github/workflows/release.yaml`: validates the tag/version match; builds `tact` for Linux x86-64
-  and ARM64, macOS x86-64 and ARM64, and Windows x86-64; packages each binary with `README.md` and
-  `LICENSE.md`; writes SHA-256 sidecars; and creates a GitHub Release with generated notes and all
-  archives.
+  and ARM64 and macOS x86-64 and ARM64; packages each binary with `README.md` and `LICENSE.md`;
+  writes SHA-256 sidecars; and creates a GitHub Release with generated notes and all archives.
 - `.github/workflows/docker.yml`: builds the scratch-based binary-carrier image for `linux/amd64`
   and `linux/arm64`, then publishes a multi-platform manifest as `ghcr.io/clabby/tact:<version>`
   (without the leading `v`) and `ghcr.io/clabby/tact:latest`. The image contains only `/tact`; see
@@ -95,7 +94,7 @@ docker buildx imagetools inspect ghcr.io/clabby/tact:0.2.0
 docker buildx imagetools inspect ghcr.io/clabby/tact:latest
 ```
 
-Check that the release has five archives and five checksum files, and that the image manifest lists
+Check that the release has four archives and four checksum files, and that the image manifest lists
 both `linux/amd64` and `linux/arm64`. Download at least one archive, validate it against its sidecar,
 and run `tact --version` from the extracted binary.
 
