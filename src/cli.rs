@@ -8,8 +8,9 @@ use crate::{
 };
 use clap::{ArgAction, Parser, Subcommand, builder::NonEmptyStringValueParser};
 use crossterm::style::{Color, Stylize};
-use std::path::PathBuf;
+use std::{env, env::VarError, path::PathBuf};
 use tokio_util::sync::CancellationToken;
+use zeroize::Zeroizing;
 
 const BUILD_VERSION: &str = concat!(
     env!("CARGO_PKG_VERSION"),
@@ -132,6 +133,11 @@ enum Command {
         #[command(subcommand)]
         command: ConfigCommand,
     },
+    /// Manage MCP servers.
+    Mcp {
+        #[command(subcommand)]
+        command: McpCommand,
+    },
     /// Run one prompt and stream Nanocodex events as JSONL.
     Run {
         /// Prompt submitted to the agent.
@@ -158,6 +164,33 @@ enum ConfigCommand {
     Show,
 }
 
+#[derive(Debug, Subcommand)]
+enum McpCommand {
+    /// Add a local stdio MCP server.
+    Add {
+        /// Name for the MCP server configuration.
+        #[arg(value_parser = NonEmptyStringValueParser::new())]
+        name: String,
+
+        /// Environment variable copied into the server configuration.
+        #[arg(long, value_name = "NAME", value_parser = NonEmptyStringValueParser::new())]
+        env: Vec<String>,
+
+        /// Working directory for the server process.
+        #[arg(long, value_name = "PATH")]
+        cwd: Option<PathBuf>,
+
+        /// Command used to launch the server.
+        #[arg(
+            required = true,
+            trailing_var_arg = true,
+            allow_hyphen_values = true,
+            value_name = "COMMAND"
+        )]
+        command: Vec<String>,
+    },
+}
+
 impl Cli {
     pub(crate) async fn run(self) -> Result<()> {
         if self.resume.is_some() && self.command.is_some() {
@@ -167,7 +200,7 @@ impl Cli {
             tui::ensure_interactive()?;
         }
 
-        let config = Config::load(ConfigOverrides {
+        let overrides = ConfigOverrides {
             path: self.config,
             auth_mode: self.auth,
             auth_file: self.auth_file,
@@ -178,7 +211,12 @@ impl Cli {
             image_generation: self.image_generation,
             websocket_url: self.websocket_url,
             api_base_url: self.api_base_url,
-        })?;
+        };
+        let config = if matches!(&self.command, Some(Command::Mcp { .. })) {
+            Config::load_for_update(overrides)?
+        } else {
+            Config::load(overrides)?
+        };
 
         match self.command {
             Some(command) => command.run(&config).await,
@@ -233,6 +271,7 @@ impl Command {
         match self {
             Self::Auth { command } => command.run(config).await.map_err(Into::into),
             Self::Config { command } => command.run(config),
+            Self::Mcp { command } => command.run(config),
             Self::Run { prompt } => Self::run_agent(config, prompt).await,
         }
     }
@@ -275,12 +314,61 @@ impl ConfigCommand {
     }
 }
 
+impl McpCommand {
+    fn run(self, config: &Config) -> Result<()> {
+        match self {
+            Self::Add {
+                name,
+                env,
+                cwd,
+                mut command,
+            } => {
+                let arguments = command.split_off(1);
+                let program = command.pop().expect("clap requires a command");
+                let environment = env
+                    .into_iter()
+                    .map(|name| read_mcp_environment(name, |name| env::var(name)))
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                config.add_mcp_server(
+                    &name,
+                    &program,
+                    &arguments,
+                    environment
+                        .iter()
+                        .map(|(name, value)| (name.as_str(), value.as_str())),
+                    cwd.as_deref(),
+                )?;
+                println!("Added MCP server `{name}`.");
+            }
+        }
+
+        Ok(())
+    }
+}
+
+fn read_mcp_environment(
+    name: String,
+    read: impl FnOnce(&str) -> std::result::Result<String, VarError>,
+) -> std::result::Result<(String, Zeroizing<String>), crate::error::ConfigError> {
+    match read(&name) {
+        Ok(value) => Ok((name, Zeroizing::new(value))),
+        Err(VarError::NotPresent) => {
+            Err(crate::error::ConfigError::McpEnvironmentNotPresent { name })
+        }
+        // VarError owns and renders the non-Unicode value, so discard it before constructing the
+        // diagnostic. The process environment retains the original outside tact's ownership.
+        Err(VarError::NotUnicode(_)) => {
+            Err(crate::error::ConfigError::McpEnvironmentNotUnicode { name })
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Cli, resume_command};
+    use super::{Cli, McpCommand, read_mcp_environment, resume_command};
     use crate::{cli::Command, config::AuthMode};
     use clap::{CommandFactory, Parser, error::ErrorKind};
-    use std::path::PathBuf;
+    use std::{env::VarError, ffi::OsString, path::PathBuf};
 
     #[test]
     fn clap_definition_is_valid() {
@@ -349,6 +437,60 @@ mod tests {
 
             assert!(matches!(cli.command, Some(Command::Auth { .. })));
         }
+    }
+
+    #[test]
+    fn mcp_add_accepts_a_stdio_command_and_options() {
+        let cli = Cli::try_parse_from([
+            "tact",
+            "mcp",
+            "add",
+            "filesystem",
+            "--env",
+            "TOKEN",
+            "--cwd",
+            "servers/filesystem",
+            "--",
+            "npx",
+            "-y",
+            "@modelcontextprotocol/server-filesystem",
+            ".",
+        ])
+        .unwrap();
+
+        let Some(Command::Mcp {
+            command:
+                McpCommand::Add {
+                    name,
+                    env,
+                    cwd,
+                    command,
+                },
+        }) = cli.command
+        else {
+            panic!("expected mcp add command");
+        };
+        assert_eq!(name, "filesystem");
+        assert_eq!(env, ["TOKEN"]);
+        assert_eq!(cwd.unwrap(), PathBuf::from("servers/filesystem"));
+        assert_eq!(
+            command,
+            ["npx", "-y", "@modelcontextprotocol/server-filesystem", "."]
+        );
+    }
+
+    #[test]
+    fn non_unicode_mcp_environment_errors_are_redacted() {
+        let error = read_mcp_environment("TOKEN".into(), |_| {
+            Err(VarError::NotUnicode(OsString::from("secret-sentinel")))
+        })
+        .unwrap_err();
+        let debug = format!("{error:?}");
+        let display = error.to_string();
+
+        assert!(!debug.contains("secret-sentinel"));
+        assert!(!display.contains("secret-sentinel"));
+        assert!(display.contains("TOKEN"));
     }
 
     #[test]

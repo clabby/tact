@@ -94,6 +94,14 @@ pub(crate) enum ConfigError {
     },
     #[error("failed to serialize the effective configuration: {0}")]
     Serialize(#[source] toml::ser::Error),
+    #[error("MCP server `{name}` is already configured")]
+    McpServerExists { name: String },
+    #[error("MCP environment variable {name} is not set")]
+    McpEnvironmentNotPresent { name: String },
+    #[error("MCP environment variable {name} is not valid Unicode")]
+    McpEnvironmentNotUnicode { name: String },
+    #[error("MCP server working directory is not valid Unicode: {0}")]
+    McpWorkingDirectoryNotUnicode(PathBuf),
     #[error("failed to update configuration file {path}: {source}")]
     UpdateParse {
         path: PathBuf,

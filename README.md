@@ -132,6 +132,19 @@ Nanocodex retains non-zeroizing copies while the server is active because those 
 tact's memory ownership. MCP startup and discovery run independently for each server, so one failed
 server does not prevent healthy servers or the session from continuing.
 
+Add a server without editing TOML by hand:
+
+```sh
+tact mcp add filesystem -- npx -y @modelcontextprotocol/server-filesystem /path/to/workspace
+```
+
+Use `--env NAME` one or more times to copy values from tact's environment into the server-specific
+configuration, and `--cwd PATH` to set its working directory. Both options go before the `--` that
+separates tact's options from the server command. Reading values from the environment keeps secrets
+out of shell history and process arguments. Relative `--cwd` paths are resolved from the directory
+where tact is invoked. Server names must be unique; adding an existing name leaves the configuration
+unchanged.
+
 Local skills are disabled by default. A `SKILL.md` is a set of model instructions that can direct
 shell or tool execution, so enable only roots whose contents you trust. Skill information also uses
 persistent model context: tact initially adds only a compact catalog of each skill's frontmatter

@@ -17,7 +17,7 @@ use std::{
     sync::Arc,
 };
 use tempfile::NamedTempFile;
-use toml_edit::{DocumentMut, Item, Table, value};
+use toml_edit::{Array, DocumentMut, Item, Table, value};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 /// Authentication method used by `tact`.
@@ -199,10 +199,25 @@ impl Config {
         Self::load_with(overrides, Environment::read(), &current_dir)
     }
 
+    /// Loads configuration for a command that may create the selected file.
+    pub(crate) fn load_for_update(overrides: ConfigOverrides) -> Result<Self> {
+        let current_dir = env::current_dir().map_err(ConfigError::CurrentDirectory)?;
+        Self::load_with_options(overrides, Environment::read(), &current_dir, true)
+    }
+
     fn load_with(
         overrides: ConfigOverrides,
         environment: Environment,
         current_dir: &Path,
+    ) -> Result<Self> {
+        Self::load_with_options(overrides, environment, current_dir, false)
+    }
+
+    fn load_with_options(
+        overrides: ConfigOverrides,
+        environment: Environment,
+        current_dir: &Path,
+        allow_missing: bool,
     ) -> Result<Self> {
         let reload = ReloadSource {
             overrides: overrides.clone(),
@@ -211,7 +226,7 @@ impl Config {
         };
         let explicit_path = overrides.path.is_some();
         let path = Self::config_path(overrides.path, &environment, current_dir)?;
-        let file = ConfigFile::read(&path, explicit_path)?;
+        let file = ConfigFile::read(&path, explicit_path && !allow_missing)?;
         let auth_file = Self::auth_file_path(
             overrides.auth_file,
             file.auth.file,
@@ -322,14 +337,74 @@ impl Config {
         Self::persist_setting(&self.path, "theme", "mode", mode.as_str())
     }
 
+    pub(crate) fn add_mcp_server<'a>(
+        &self,
+        name: &str,
+        command: &str,
+        arguments: &[String],
+        environment: impl Iterator<Item = (&'a str, &'a str)>,
+        cwd: Option<&Path>,
+    ) -> Result<()> {
+        let mut document = Self::read_document(&self.path)?;
+        let document_contains_server = document
+            .get("mcp_servers")
+            .and_then(Item::as_table_like)
+            .is_some_and(|servers| servers.contains_key(name));
+        if self.mcp_servers.contains_key(name) || document_contains_server {
+            return Err(ConfigError::McpServerExists {
+                name: name.to_owned(),
+            }
+            .into());
+        }
+
+        if !document.contains_key("mcp_servers") {
+            document["mcp_servers"] = Item::Table(Table::new());
+        }
+
+        let mut server = Table::new();
+        server["command"] = value(command);
+        if !arguments.is_empty() {
+            let mut values = Array::new();
+            values.extend(arguments.iter().map(String::as_str));
+            server["args"] = value(values);
+        }
+        if let Some(cwd) = cwd {
+            let cwd = Self::resolve_path(cwd.to_path_buf(), &self.reload.current_dir);
+            let cwd = cwd
+                .to_str()
+                .ok_or_else(|| ConfigError::McpWorkingDirectoryNotUnicode(cwd.to_path_buf()))?;
+            server["cwd"] = value(cwd);
+        }
+
+        let mut environment_table = Table::new();
+        for (name, secret) in environment {
+            environment_table[name] = value(secret);
+        }
+        if !environment_table.is_empty() {
+            server["env"] = Item::Table(environment_table);
+        }
+
+        document["mcp_servers"][name] = Item::Table(server);
+        Self::write_document(&self.path, document)
+    }
+
     fn persist_thinking_at(path: &Path, effort: ReasoningEffort) -> Result<()> {
         Self::persist_setting(path, "agent", "thinking", effort.as_str())
     }
 
     fn persist_setting(path: &Path, section: &str, key: &str, setting: &str) -> Result<()> {
+        let mut document = Self::read_document(path)?;
+        if !document.contains_key(section) {
+            document[section] = Item::Table(Table::new());
+        }
+        document[section][key] = value(setting);
+        Self::write_document(path, document)
+    }
+
+    fn read_document(path: &Path) -> Result<DocumentMut> {
         let contents = match fs::read_to_string(path) {
-            Ok(contents) => contents,
-            Err(source) if source.kind() == ErrorKind::NotFound => String::new(),
+            Ok(contents) => Zeroizing::new(contents),
+            Err(source) if source.kind() == ErrorKind::NotFound => Zeroizing::new(String::new()),
             Err(source) => {
                 return Err(ConfigError::Read {
                     path: path.to_path_buf(),
@@ -338,17 +413,16 @@ impl Config {
                 .into());
             }
         };
-        let mut document =
-            contents
-                .parse::<DocumentMut>()
-                .map_err(|source| ConfigError::UpdateParse {
-                    path: path.to_path_buf(),
-                    source,
-                })?;
-        if !document.contains_key(section) {
-            document[section] = Item::Table(Table::new());
-        }
-        document[section][key] = value(setting);
+        contents
+            .parse::<DocumentMut>()
+            .map_err(|source| ConfigError::UpdateParse {
+                path: path.to_path_buf(),
+                source,
+            })
+            .map_err(Into::into)
+    }
+
+    fn write_document(path: &Path, document: DocumentMut) -> Result<()> {
         let parent = path.parent().ok_or_else(|| ConfigError::Write {
             path: path.to_path_buf(),
             source: std::io::Error::other("configuration path has no parent directory"),
@@ -362,8 +436,12 @@ impl Config {
             path: path.to_path_buf(),
             source,
         })?;
+        // toml_edit retains non-zeroizing copies of values while the document is alive. Secret
+        // guarantees therefore cover the parsed CLI values owned by tact, not toml_edit's
+        // transient representation used to update the configuration file.
+        let rendered = Zeroizing::new(document.to_string());
         temporary
-            .write_all(document.to_string().as_bytes())
+            .write_all(rendered.as_bytes())
             .and_then(|()| temporary.as_file().sync_all())
             .map_err(|source| ConfigError::Write {
                 path: path.to_path_buf(),
@@ -1101,6 +1179,107 @@ mod tests {
         assert!(search.args().is_empty());
         assert!(search.env().expose().next().is_none());
         assert_eq!(search.cwd(), None);
+    }
+
+    #[test]
+    fn adding_an_mcp_server_creates_and_preserves_configuration() {
+        let directory = tempdir().unwrap();
+        let config_dir = directory.path().join("settings");
+        let config_path = config_dir.join("config.toml");
+        let config = Config::load_with_options(
+            ConfigOverrides {
+                path: Some(config_path.clone()),
+                ..ConfigOverrides::default()
+            },
+            Environment {
+                codex_home: Some(directory.path().join("codex")),
+                ..Environment::default()
+            },
+            directory.path(),
+            true,
+        )
+        .unwrap();
+
+        config
+            .add_mcp_server(
+                "files.v1",
+                "npx",
+                &[
+                    "-y".to_owned(),
+                    "@modelcontextprotocol/server-filesystem".to_owned(),
+                ],
+                [("TOKEN", "configured-value")].into_iter(),
+                Some(Path::new("servers/files")),
+            )
+            .unwrap();
+
+        let contents = fs::read_to_string(&config_path).unwrap();
+        assert!(contents.contains("[mcp_servers.\"files.v1\"]"));
+        let loaded = Config::load_with(
+            ConfigOverrides {
+                path: Some(config_path),
+                ..ConfigOverrides::default()
+            },
+            Environment {
+                codex_home: Some(directory.path().join("codex")),
+                ..Environment::default()
+            },
+            directory.path(),
+        )
+        .unwrap();
+        let server = &loaded.mcp_servers()["files.v1"];
+        assert_eq!(server.command(), "npx");
+        assert_eq!(
+            server.args(),
+            ["-y", "@modelcontextprotocol/server-filesystem"]
+        );
+        assert_eq!(
+            server.cwd(),
+            Some(directory.path().join("servers/files").as_path())
+        );
+        assert_eq!(
+            server.env().expose().next(),
+            Some(("TOKEN", "configured-value"))
+        );
+    }
+
+    #[test]
+    fn adding_an_mcp_server_preserves_unrelated_toml_and_rejects_duplicates() {
+        let directory = tempdir().unwrap();
+        let config_path = directory.path().join("config.toml");
+        fs::write(
+            &config_path,
+            "# Keep this comment.\n[agent]\nthinking = \"high\"\n",
+        )
+        .unwrap();
+        let config = Config::load_with(
+            ConfigOverrides {
+                path: Some(config_path.clone()),
+                ..ConfigOverrides::default()
+            },
+            Environment {
+                codex_home: Some(directory.path().join("codex")),
+                ..Environment::default()
+            },
+            directory.path(),
+        )
+        .unwrap();
+        config
+            .add_mcp_server("search", "search-server", &[], std::iter::empty(), None)
+            .unwrap();
+        let before_duplicate = fs::read_to_string(&config_path).unwrap();
+
+        let error = config
+            .add_mcp_server("search", "other-server", &[], std::iter::empty(), None)
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            Error::Config(ConfigError::McpServerExists { name }) if name == "search"
+        ));
+        assert_eq!(fs::read_to_string(config_path).unwrap(), before_duplicate);
+        assert!(before_duplicate.contains("# Keep this comment."));
+        assert!(before_duplicate.contains("thinking = \"high\""));
     }
 
     #[test]
