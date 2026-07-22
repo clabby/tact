@@ -1,0 +1,7 @@
+# Build the binary carrier image.
+build:
+  cd .. && docker buildx bake --progress plain -f docker/docker-bake.hcl
+
+# Remove the locally built image.
+clean:
+  docker image rm -f tact:local || true
