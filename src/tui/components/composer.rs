@@ -29,6 +29,7 @@ const MODEL_WINDOW_TOKENS: u64 = 272_000;
 const MIN_CONTENT_ROWS: usize = 3;
 const MAX_CONTENT_ROWS: usize = 6;
 const ENTRY_HINT: &str = " / actions · @ files ";
+const DEVELOPMENT_BADGE: &str = " ◉ dev ";
 
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum ComposerEffect {
@@ -124,6 +125,10 @@ impl Composer {
             layout: None,
             history: PromptHistory::default(),
         }
+    }
+
+    pub(crate) const fn context_tokens(&self) -> u64 {
+        self.context_tokens
     }
 
     pub(crate) fn update(&mut self, event: ComposerEvent) -> ComposerUpdate {
@@ -779,7 +784,17 @@ impl Composer {
         let directory_width = directory.width().min(content_width);
         let directory_start =
             content_end.saturating_sub(u16::try_from(directory_width).unwrap_or(u16::MAX));
-        let hint_space = usize::from(directory_start.saturating_sub(content_start));
+        let development_width = if is_development_build()
+            && DEVELOPMENT_BADGE.width()
+                <= usize::from(directory_start.saturating_sub(content_start))
+        {
+            DEVELOPMENT_BADGE.width()
+        } else {
+            0
+        };
+        let development_start =
+            directory_start.saturating_sub(u16::try_from(development_width).unwrap_or(u16::MAX));
+        let hint_space = usize::from(development_start.saturating_sub(content_start));
         if self.draft.is_empty() && ENTRY_HINT.width() <= hint_space {
             buffer.set_stringn(
                 content_start,
@@ -789,6 +804,15 @@ impl Composer {
                 Style::default()
                     .fg(theme.muted())
                     .add_modifier(Modifier::DIM),
+            );
+        }
+        if development_width > 0 {
+            buffer.set_stringn(
+                development_start,
+                bottom,
+                DEVELOPMENT_BADGE,
+                development_width,
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
             );
         }
         buffer.set_stringn(
@@ -867,6 +891,10 @@ fn context_percent(tokens: u64) -> u64 {
         / MODEL_WINDOW_TOKENS
 }
 
+fn is_development_build() -> bool {
+    !matches!(env!("TACT_RELEASE_BUILD"), "true")
+}
+
 fn draw_symbol(buffer: &mut Buffer, x: u16, y: u16, symbol: &str, style: Style) {
     buffer[(x, y)].set_symbol(symbol).set_style(style);
 }
@@ -908,7 +936,7 @@ fn render_draft_line(
 
 #[cfg(test)]
 mod tests {
-    use super::{Composer, ComposerEffect, ComposerEvent, context_percent};
+    use super::{Composer, ComposerEffect, ComposerEvent, context_percent, is_development_build};
     use crate::{config::ReasoningEffort, tui::theme::Theme};
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use nanocodex::{PromptInput, UserInput};
@@ -941,6 +969,11 @@ mod tests {
     fn empty_composer_matches_the_pi_chrome() {
         let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
         let terminal = render(&mut composer, 60, 5);
+        let footer = if is_development_build() {
+            "╰─ / actions · @ files ───────────────────── ◉ dev  /work ─╯"
+        } else {
+            "╰─ / actions · @ files ──────────────────────────── /work ─╯"
+        };
 
         assert_eq!(
             rows(&terminal),
@@ -949,9 +982,31 @@ mod tests {
                 "│                                                          │",
                 "│                                                          │",
                 "│                                                          │",
-                "╰─ / actions · @ files ──────────────────────────── /work ─╯",
+                footer,
             ]
         );
+    }
+
+    #[test]
+    fn development_badge_matches_the_release_build_marker() {
+        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let terminal = render(&mut composer, 60, 5);
+        let row = &terminal.backend().buffer().content[4 * 60..5 * 60];
+        let rendered = row.iter().map(|cell| cell.symbol()).collect::<String>();
+        let badge_start = row.iter().position(|cell| cell.symbol() == "◉");
+
+        if !is_development_build() {
+            assert!(badge_start.is_none());
+            assert!(!rendered.contains("dev"));
+            return;
+        }
+
+        let badge_start = badge_start.unwrap();
+        assert!(rendered.contains("◉ dev  /work"));
+        for cell in &row[badge_start..badge_start + 5] {
+            assert_eq!(cell.fg, Color::Red);
+            assert!(cell.modifier.contains(ratatui::style::Modifier::BOLD));
+        }
     }
 
     #[test]

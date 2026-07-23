@@ -205,6 +205,11 @@ impl RootNode {
     pub(crate) fn fork(&self, workspace: &Path, thinking: ReasoningEffort) -> Self {
         let mut root = Self::new(workspace, thinking);
         root.transcript = Node::new(self.transcript.component().fork_snapshot());
+        root.composer
+            .component_mut()
+            .update(ComposerEvent::ContextTokens(
+                self.composer.component().context_tokens(),
+            ));
         root.thread = ThreadState::Started;
         root.fork_available = false;
         root.theme_mode = self.theme_mode;

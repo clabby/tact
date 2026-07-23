@@ -558,7 +558,7 @@ fn is_control_c(event: &Event) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{AppEffect, AppEvent, AppNode, RootNode, SPLIT_HINT};
+    use super::{AppEffect, AppEvent, AppNode, RootEvent, RootNode, SPLIT_HINT};
     use crate::{
         config::ReasoningEffort,
         tui::{
@@ -665,6 +665,22 @@ mod tests {
             .collect::<String>();
         assert_eq!(rendered.matches("inherited history").count(), 2);
         assert!(app.root(PaneId::Fork(1)).is_some());
+    }
+
+    #[test]
+    fn fork_inherits_the_primary_context_usage() {
+        let mut app = app();
+        app.update_root(PaneId::Main, RootEvent::ContextTokens(136_000));
+
+        app.update(control('f'));
+
+        assert_eq!(
+            app.root(PaneId::Fork(1))
+                .unwrap()
+                .composer()
+                .context_tokens(),
+            136_000
+        );
     }
 
     #[test]
