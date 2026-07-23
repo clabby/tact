@@ -101,6 +101,10 @@ impl TranscriptModel {
         !self.running_tools.is_empty()
     }
 
+    pub(crate) fn running_tool_ids(&self) -> impl Iterator<Item = EntryId> + '_ {
+        self.running_tools.iter().copied()
+    }
+
     pub(crate) fn apply(&mut self, record: &TranscriptRecord) -> ModelChange {
         if record.source() == "tact" {
             return self.apply_local(record);
@@ -121,7 +125,7 @@ impl TranscriptModel {
             }),
             "shell.started" => self
                 .decode_local::<ShellStarted>(record)
-                .map(|payload| self.shell_started(payload)),
+                .map(|payload| self.shell_started(payload, record.recorded_at_unix_ms())),
             "shell.finished" => self
                 .decode_local::<ShellFinished>(record)
                 .map(|payload| self.shell_finished(payload)),
@@ -174,13 +178,14 @@ impl TranscriptModel {
         }
     }
 
-    fn shell_started(&mut self, payload: ShellStarted) {
+    fn shell_started(&mut self, payload: ShellStarted, started_at_unix_ms: u64) {
         let id = self.push(EntryKind::Tool(ToolEntry {
             name: "exec_command".to_owned(),
             arguments: serde_json::json!({
                 "cmd": payload.command,
                 "workdir": payload.workspace,
             }),
+            started_at_unix_ms,
             state: ToolState::Running,
             duration_ns: None,
             result: None,
@@ -418,6 +423,7 @@ impl TranscriptModel {
             EntryKind::Tool(ToolEntry {
                 name: tool,
                 arguments,
+                started_at_unix_ms: record.recorded_at_unix_ms(),
                 state: ToolState::Running,
                 duration_ns: None,
                 result: None,
@@ -448,6 +454,7 @@ impl TranscriptModel {
                 let id = self.push(EntryKind::Tool(ToolEntry {
                     name: payload.tool.clone(),
                     arguments: Value::Null,
+                    started_at_unix_ms: record.recorded_at_unix_ms(),
                     state: ToolState::Running,
                     duration_ns: None,
                     result: None,
@@ -460,7 +467,12 @@ impl TranscriptModel {
         self.update(id, |kind| {
             if let EntryKind::Tool(tool) = kind {
                 tool.state = state;
-                tool.duration_ns = Some(payload.duration_ns);
+                tool.duration_ns = Some(if shell_followup {
+                    elapsed_nanoseconds(tool.started_at_unix_ms, record.recorded_at_unix_ms())
+                        .max(payload.duration_ns)
+                } else {
+                    payload.duration_ns
+                });
                 tool.result = Some(if shell_followup {
                     merge_shell_result(tool.result.take(), result)
                 } else {
@@ -755,6 +767,12 @@ fn tool_result_state(tool: &str, status: &str, result: &Value) -> ToolState {
     ToolState::Failed
 }
 
+fn elapsed_nanoseconds(started_at_unix_ms: u64, finished_at_unix_ms: u64) -> u64 {
+    finished_at_unix_ms
+        .saturating_sub(started_at_unix_ms)
+        .saturating_mul(1_000_000)
+}
+
 fn normalize_result(result: Value) -> Value {
     let Value::String(encoded) = result else {
         return result;
@@ -908,9 +926,17 @@ mod tests {
     use std::sync::Arc;
 
     fn agent(kind: AgentEventKind, payload: impl Serialize) -> TranscriptRecord {
+        agent_at(1, kind, payload)
+    }
+
+    fn agent_at(
+        recorded_at_unix_ms: u64,
+        kind: AgentEventKind,
+        payload: impl Serialize,
+    ) -> TranscriptRecord {
         TranscriptRecord::from_agent(
             1,
-            1,
+            recorded_at_unix_ms,
             AgentEvent {
                 protocol_version: 1,
                 request_id: Arc::from("session"),
@@ -1297,7 +1323,8 @@ mod tests {
     #[test]
     fn yielded_shell_sessions_remain_running_until_they_exit() {
         let mut model = TranscriptModel::default();
-        model.apply(&agent(
+        model.apply(&agent_at(
+            1_000,
             AgentEventKind::ToolCall,
             json!({
                 "call_id": "shell",
@@ -1305,7 +1332,8 @@ mod tests {
                 "arguments": {"cmd": "cargo test"},
             }),
         ));
-        model.apply(&agent(
+        model.apply(&agent_at(
+            2_000,
             AgentEventKind::ToolResult,
             json!({
                 "call_id": "shell",
@@ -1322,7 +1350,8 @@ mod tests {
             EntryKind::Tool(tool) if tool.state == ToolState::Running
         ));
 
-        model.apply(&agent(
+        model.apply(&agent_at(
+            3_000,
             AgentEventKind::ToolCall,
             json!({
                 "call_id": "stdin",
@@ -1330,7 +1359,8 @@ mod tests {
                 "arguments": {"session_id": 7},
             }),
         ));
-        model.apply(&agent(
+        model.apply(&agent_at(
+            4_500,
             AgentEventKind::ToolResult,
             json!({
                 "call_id": "stdin",
@@ -1346,6 +1376,7 @@ mod tests {
             &model.entries()[0].kind,
             EntryKind::Tool(tool)
                 if tool.state == ToolState::Succeeded
+                    && tool.duration_ns == Some(3_500_000_000)
                     && tool.result.as_ref().and_then(|result| result.get("output"))
                         == Some(&json!("running done"))
         ));

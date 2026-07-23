@@ -66,6 +66,7 @@ impl From<Option<&str>> for MessagePhase {
 pub(crate) struct ToolEntry {
     pub(crate) name: String,
     pub(crate) arguments: Value,
+    pub(crate) started_at_unix_ms: u64,
     pub(crate) state: ToolState,
     pub(crate) duration_ns: Option<u64>,
     pub(crate) result: Option<Value>,

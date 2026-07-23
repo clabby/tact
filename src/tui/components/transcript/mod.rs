@@ -10,7 +10,7 @@ use super::node::{Component, ComponentUpdate, RenderRequest};
 use crate::{
     config::ReasoningEffort,
     tui::{
-        format::format_duration,
+        format::{duration_display_tick, format_duration},
         spinner::Spinner,
         theme::Theme,
         transcript::{
@@ -30,7 +30,7 @@ use ratatui::{
 use std::{
     collections::{HashMap, hash_map::Entry},
     sync::Arc,
-    time::Instant,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 pub(crate) enum TranscriptEvent {
@@ -59,6 +59,7 @@ pub(crate) struct Transcript {
     viewport_height: u16,
     new_updates: u64,
     tool_spinner: Option<Spinner>,
+    running_tool_timers: HashMap<EntryId, RunningToolTimer>,
     tools_focused: bool,
     selected_tool: Option<EntryId>,
     tool_hits: Vec<ToolHitRegion>,
@@ -73,6 +74,8 @@ struct CachedEntry {
     revision: u64,
     width: u16,
     expanded: bool,
+    live_duration_ns: Option<u64>,
+    tool_summary_lines: usize,
     lines: Vec<Line<'static>>,
     links: Vec<Vec<markdown::LinkSpan>>,
 }
@@ -80,6 +83,7 @@ struct CachedEntry {
 #[derive(Default)]
 struct LayoutCache {
     entries: HashMap<EntryId, CachedEntry>,
+    live_tool_durations: HashMap<EntryId, u64>,
     expansion_overrides: HashMap<EntryId, bool>,
     expand_all: Option<bool>,
 }
@@ -122,6 +126,28 @@ enum PendingToolAnchor {
 }
 
 #[derive(Clone, Copy)]
+struct RunningToolTimer {
+    observed_at: Instant,
+    elapsed_at_observation: Duration,
+}
+
+impl RunningToolTimer {
+    fn new(started_at_unix_ms: u64, observed_at: Instant, observed_at_unix_ms: u64) -> Self {
+        Self {
+            observed_at,
+            elapsed_at_observation: Duration::from_millis(
+                observed_at_unix_ms.saturating_sub(started_at_unix_ms),
+            ),
+        }
+    }
+
+    fn elapsed(self, now: Instant) -> Duration {
+        self.elapsed_at_observation
+            .saturating_add(now.saturating_duration_since(self.observed_at))
+    }
+}
+
+#[derive(Clone, Copy)]
 pub(super) enum ToolCommand {
     Previous,
     Next,
@@ -154,6 +180,7 @@ impl Transcript {
             viewport_height: 0,
             new_updates: 0,
             tool_spinner: None,
+            running_tool_timers: HashMap::new(),
             tools_focused: false,
             selected_tool: None,
             tool_hits: Vec::new(),
@@ -191,9 +218,11 @@ impl Transcript {
         let previous_activity = self.activity();
         let change = self.model.apply(&record);
         let activity = self.activity();
+        let now = Instant::now();
+        self.sync_running_tool_timers(now);
         let tool_active = self.model.has_running_tools();
         if tool_active && self.tool_spinner.is_none() {
-            self.tool_spinner = Some(Spinner::new(Instant::now()));
+            self.tool_spinner = Some(Spinner::new(now));
         } else if !tool_active {
             self.tool_spinner = None;
         }
@@ -219,10 +248,9 @@ impl Transcript {
         if !self.model.agent_stream_closed() {
             return ComponentUpdate::none();
         }
-        self.tool_spinner = self
-            .model
-            .has_running_tools()
-            .then(|| Spinner::new(Instant::now()));
+        let now = Instant::now();
+        self.sync_running_tool_timers(now);
+        self.tool_spinner = self.model.has_running_tools().then(|| Spinner::new(now));
         let activity = self.activity();
         ComponentUpdate {
             effects: (previous_activity != activity)
@@ -241,16 +269,49 @@ impl Transcript {
     }
 
     fn update_animation(&mut self, now: Instant) -> ComponentUpdate<TranscriptEffect> {
+        let timer_changed = self.refresh_running_tool_durations(now);
         let tool_changed = self
             .tool_spinner
             .as_mut()
             .is_some_and(|spinner| spinner.advance(now));
         let logo_changed = self.is_empty() && self.empty_logo.advance(now);
-        ComponentUpdate::render(if tool_changed || logo_changed {
+        ComponentUpdate::render(if timer_changed || tool_changed || logo_changed {
             RenderRequest::Streaming
         } else {
             RenderRequest::None
         })
+    }
+
+    fn sync_running_tool_timers(&mut self, now: Instant) {
+        self.running_tool_timers
+            .retain(|id, _| self.model.entry(*id).is_some_and(is_running_tool));
+        let observed_at_unix_ms = unix_milliseconds();
+        for id in self.model.running_tool_ids() {
+            let Some(started_at_unix_ms) =
+                self.model.entry(id).and_then(|entry| match &entry.kind {
+                    EntryKind::Tool(tool) => Some(tool.started_at_unix_ms),
+                    _ => None,
+                })
+            else {
+                continue;
+            };
+            self.running_tool_timers.entry(id).or_insert_with(|| {
+                RunningToolTimer::new(started_at_unix_ms, now, observed_at_unix_ms)
+            });
+        }
+        self.refresh_running_tool_durations(now);
+    }
+
+    fn refresh_running_tool_durations(&mut self, now: Instant) -> bool {
+        let mut changed = false;
+        for (&id, &timer) in &self.running_tool_timers {
+            let elapsed = timer.elapsed(now);
+            let duration_ns = u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX);
+            changed |= self.cache.set_live_tool_duration(id, duration_ns);
+        }
+        self.cache
+            .retain_live_tool_durations(|id| self.running_tool_timers.contains_key(&id));
+        changed
     }
 
     fn is_empty(&self) -> bool {
@@ -721,6 +782,13 @@ impl Transcript {
     }
 }
 
+fn unix_milliseconds() -> u64 {
+    let elapsed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+}
+
 fn transient_label(status: &TransientStatus) -> String {
     match status {
         TransientStatus::Thinking => "Thinking…".to_owned(),
@@ -736,6 +804,13 @@ fn transient_label(status: &TransientStatus) -> String {
     }
 }
 
+fn is_running_tool(entry: &TranscriptEntry) -> bool {
+    matches!(
+        &entry.kind,
+        EntryKind::Tool(tool) if tool.state == crate::tui::transcript::ToolState::Running
+    )
+}
+
 impl LayoutCache {
     fn layout(&mut self, entry: &TranscriptEntry, width: u16, theme: &Theme) -> &[Line<'static>] {
         let expanded = self
@@ -744,6 +819,7 @@ impl LayoutCache {
             .copied()
             .or(self.expand_all)
             .unwrap_or_else(|| Self::expanded_by_default(entry));
+        let live_duration_ns = self.live_tool_durations.get(&entry.id).copied();
         let cached = match self.entries.entry(entry.id) {
             Entry::Occupied(mut occupied) => {
                 let cached = occupied.get();
@@ -751,13 +827,43 @@ impl LayoutCache {
                     || cached.width != width
                     || cached.expanded != expanded
                 {
-                    occupied.insert(CachedEntry::new(entry, width, theme, expanded));
+                    occupied.insert(CachedEntry::new(
+                        entry,
+                        live_duration_ns,
+                        width,
+                        theme,
+                        expanded,
+                    ));
+                } else if cached.live_duration_ns != live_duration_ns {
+                    occupied
+                        .get_mut()
+                        .update_live_duration(entry, live_duration_ns, theme);
                 }
                 occupied.into_mut()
             }
-            Entry::Vacant(vacant) => vacant.insert(CachedEntry::new(entry, width, theme, expanded)),
+            Entry::Vacant(vacant) => vacant.insert(CachedEntry::new(
+                entry,
+                live_duration_ns,
+                width,
+                theme,
+                expanded,
+            )),
         };
         &cached.lines
+    }
+
+    fn set_live_tool_duration(&mut self, id: EntryId, duration_ns: u64) -> bool {
+        let display_changed = self.live_tool_durations.get(&id).is_none_or(|previous| {
+            duration_display_tick(*previous) != duration_display_tick(duration_ns)
+        });
+        if display_changed {
+            self.live_tool_durations.insert(id, duration_ns);
+        }
+        display_changed
+    }
+
+    fn retain_live_tool_durations(&mut self, mut retain: impl FnMut(EntryId) -> bool) {
+        self.live_tool_durations.retain(|id, _| retain(*id));
     }
 
     fn toggle(&mut self, entry: &TranscriptEntry) {
@@ -796,15 +902,50 @@ impl LayoutCache {
 }
 
 impl CachedEntry {
-    fn new(entry: &TranscriptEntry, width: u16, theme: &Theme, expanded: bool) -> Self {
-        let layout = render_entry(entry, width, theme, expanded);
+    fn new(
+        entry: &TranscriptEntry,
+        live_duration_ns: Option<u64>,
+        width: u16,
+        theme: &Theme,
+        expanded: bool,
+    ) -> Self {
+        let layout = render_entry(entry, live_duration_ns, width, theme, expanded);
+        let tool_summary_lines = match (&entry.kind, live_duration_ns) {
+            (EntryKind::Tool(tool), Some(duration_ns)) => {
+                tool::render_live_summary(tool, duration_ns, width, theme, expanded).len()
+            }
+            _ => 0,
+        };
         Self {
             revision: entry.revision,
             width,
             expanded,
+            live_duration_ns,
+            tool_summary_lines,
             lines: layout.lines,
             links: layout.links,
         }
+    }
+
+    fn update_live_duration(
+        &mut self,
+        entry: &TranscriptEntry,
+        live_duration_ns: Option<u64>,
+        theme: &Theme,
+    ) {
+        let (EntryKind::Tool(tool), Some(duration_ns)) = (&entry.kind, live_duration_ns) else {
+            return;
+        };
+        let summary =
+            tool::render_live_summary(tool, duration_ns, self.width, theme, self.expanded);
+        let summary_len = summary.len();
+        self.lines.splice(0..self.tool_summary_lines, summary);
+        self.links.splice(
+            0..self.tool_summary_lines,
+            std::iter::repeat_with(Vec::new).take(summary_len),
+        );
+        self.live_duration_ns = live_duration_ns;
+        self.tool_summary_lines = summary_len;
     }
 }
 
@@ -930,6 +1071,7 @@ fn render_top_right_hint(frame: &mut Frame<'_>, area: Rect, labels: &[&str], col
 
 fn render_entry(
     entry: &TranscriptEntry,
+    live_duration_ns: Option<u64>,
     width: u16,
     theme: &Theme,
     expanded: bool,
@@ -950,10 +1092,16 @@ fn render_entry(
             }
             layout
         }
-        EntryKind::Tool(tool) if expanded => {
-            layout_without_links(tool::render_expanded(tool, width, theme))
+        EntryKind::Tool(tool) => {
+            let lines = if let Some(duration_ns) = live_duration_ns {
+                tool::render_live(tool, duration_ns, width, theme, expanded)
+            } else if expanded {
+                tool::render_expanded(tool, width, theme)
+            } else {
+                tool::render(tool, width, theme)
+            };
+            layout_without_links(lines)
         }
-        EntryKind::Tool(tool) => layout_without_links(tool::render(tool, width, theme)),
         EntryKind::Interrupted { count } => {
             let label = if *count == 0 {
                 "◇ Nothing to interrupt".to_owned()
@@ -1019,7 +1167,7 @@ fn line_width(text: &str) -> usize {
 mod tests {
     use super::{
         Anchor, Component, RenderRequest, ScrollCommand, ScrollState, ToolCommand, Transcript,
-        TranscriptEvent,
+        TranscriptEvent, unix_milliseconds,
     };
     use crate::tui::{
         theme::Theme,
@@ -1031,7 +1179,7 @@ mod tests {
     use nanocodex::{AgentEvent, AgentEventKind};
     use ratatui::{Terminal, backend::TestBackend};
     use serde_json::{json, value::to_raw_value};
-    use std::sync::Arc;
+    use std::{sync::Arc, time::Duration};
 
     fn user(sequence: u64, text: impl Into<String>) -> Arc<TranscriptRecord> {
         Arc::new(
@@ -1056,9 +1204,18 @@ mod tests {
         kind: AgentEventKind,
         payload: serde_json::Value,
     ) -> Arc<TranscriptRecord> {
+        agent_with_payload_at(sequence, sequence, kind, payload)
+    }
+
+    fn agent_with_payload_at(
+        sequence: u64,
+        recorded_at_unix_ms: u64,
+        kind: AgentEventKind,
+        payload: serde_json::Value,
+    ) -> Arc<TranscriptRecord> {
         Arc::new(TranscriptRecord::from_agent(
             sequence,
-            sequence,
+            recorded_at_unix_ms,
             AgentEvent {
                 protocol_version: 1,
                 request_id: Arc::from("test"),
@@ -1608,6 +1765,120 @@ mod tests {
                 .any(|cell| cell.symbol() == "⠋")
         );
         assert!(!rendered.contains("Running exec"));
+    }
+
+    #[test]
+    fn active_tool_uses_a_monotonic_timer_until_the_reported_duration_arrives() {
+        let mut transcript = Transcript::new();
+        transcript.update(TranscriptEvent::Record(agent_with_payload_at(
+            1,
+            unix_milliseconds().saturating_sub(10_000),
+            AgentEventKind::ToolCall,
+            json!({
+                "call_id": "call-1",
+                "tool": "exec_command",
+                "arguments": {"cmd": "cargo test", "workdir": "/work"},
+            }),
+        )));
+        let timer = *transcript
+            .running_tool_timers
+            .values()
+            .next()
+            .expect("running tool should have a timer");
+
+        let initial = render(&mut transcript, 50, 4)
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(initial.contains("10.0s"));
+
+        let update = transcript.update(TranscriptEvent::AnimationFrame(
+            timer.observed_at + Duration::from_millis(1_234),
+        ));
+        assert_eq!(update.render, super::RenderRequest::Streaming);
+        let running = render(&mut transcript, 50, 4)
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(running.contains("11.2s"));
+
+        transcript.update(TranscriptEvent::Record(agent_with_payload(
+            2,
+            AgentEventKind::ToolResult,
+            json!({
+                "call_id": "call-1",
+                "tool": "exec_command",
+                "status": "completed",
+                "duration_ns": 2_500_000_000_u64,
+                "result": {"output": "done", "exit_code": 0},
+                "metadata": null,
+            }),
+        )));
+        assert!(transcript.running_tool_timers.is_empty());
+        let completed = render(&mut transcript, 50, 4)
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(completed.contains("2.5s"));
+    }
+
+    #[test]
+    fn live_timer_rebuilds_only_the_cached_summary_of_an_expanded_tool() {
+        let mut transcript = Transcript::new();
+        let recorded_at = unix_milliseconds();
+        transcript.update(TranscriptEvent::Record(agent_with_payload_at(
+            1,
+            recorded_at,
+            AgentEventKind::ToolCall,
+            json!({
+                "call_id": "shell",
+                "tool": "exec_command",
+                "arguments": {"cmd": "cargo test", "workdir": "/work"},
+            }),
+        )));
+        transcript.update(TranscriptEvent::Record(agent_with_payload_at(
+            2,
+            recorded_at,
+            AgentEventKind::ToolResult,
+            json!({
+                "call_id": "shell",
+                "tool": "exec_command",
+                "status": "completed",
+                "duration_ns": 1_u64,
+                "result": {
+                    "output": "first output line\nsecond output line",
+                    "session_id": 7
+                },
+                "metadata": null,
+            }),
+        )));
+        let id = transcript
+            .model
+            .running_tool_ids()
+            .next()
+            .expect("yielded shell should remain active");
+        transcript.cache.expansion_overrides.insert(id, true);
+        drop(render(&mut transcript, 50, 10));
+        let cached = transcript.cache.entries.get(&id).unwrap();
+        let details = cached.lines[cached.tool_summary_lines..].to_vec();
+        let timer = transcript.running_tool_timers[&id];
+
+        let frame_at = timer.observed_at + Duration::from_millis(1_234);
+        transcript.update(TranscriptEvent::AnimationFrame(frame_at));
+        drop(render(&mut transcript, 50, 10));
+
+        let cached = transcript.cache.entries.get(&id).unwrap();
+        assert_eq!(cached.lines[cached.tool_summary_lines..], details);
+        assert_eq!(
+            cached.live_duration_ns,
+            Some(u64::try_from(timer.elapsed(frame_at).as_nanos()).unwrap())
+        );
     }
 
     #[test]

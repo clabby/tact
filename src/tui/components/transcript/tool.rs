@@ -20,33 +20,81 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 pub(super) fn render(tool: &ToolEntry, width: u16, theme: &Theme) -> Vec<Line<'static>> {
-    render_state(tool, width, theme, false)
+    render_state(tool, None, width, theme, false)
 }
 
 pub(super) fn render_expanded(tool: &ToolEntry, width: u16, theme: &Theme) -> Vec<Line<'static>> {
-    render_state(tool, width, theme, true)
+    render_state(tool, None, width, theme, true)
 }
 
-fn render_state(tool: &ToolEntry, width: u16, theme: &Theme, expanded: bool) -> Vec<Line<'static>> {
+pub(super) fn render_live(
+    tool: &ToolEntry,
+    duration_ns: u64,
+    width: u16,
+    theme: &Theme,
+    expanded: bool,
+) -> Vec<Line<'static>> {
+    render_state(tool, Some(duration_ns), width, theme, expanded)
+}
+
+fn render_state(
+    tool: &ToolEntry,
+    live_duration_ns: Option<u64>,
+    width: u16,
+    theme: &Theme,
+    expanded: bool,
+) -> Vec<Line<'static>> {
     if width == 0 {
         return Vec::new();
     }
     let detail_width = width.saturating_sub(6).max(1);
-    let presentation = match tool.name.as_str() {
-        "exec_command" | "write_stdin" => shell::present(tool, detail_width, theme, expanded),
-        "update_plan" => plan::present(tool, detail_width, theme, expanded),
-        "apply_patch" => patch::present(tool, detail_width, theme, expanded),
-        "web__run" => web::present(tool, detail_width, theme, expanded),
-        "view_image" | "image_gen__imagegen" => media::present(tool, detail_width, theme, expanded),
-        "exec" | "wait" => code::present(tool, detail_width, theme, expanded),
-        _ => generic(tool, detail_width, theme, expanded),
-    };
-    let mut lines = summary_lines(tool, &presentation, width, theme, expanded);
+    let presentation = present(tool, detail_width, theme, expanded);
+    let mut lines = summary_lines(
+        tool,
+        &presentation,
+        live_duration_ns,
+        width,
+        theme,
+        expanded,
+    );
     if !expanded {
         return lines;
     }
     append_details(&mut lines, presentation, width, theme);
     lines
+}
+
+pub(super) fn render_live_summary(
+    tool: &ToolEntry,
+    duration_ns: u64,
+    width: u16,
+    theme: &Theme,
+    expanded: bool,
+) -> Vec<Line<'static>> {
+    if width == 0 {
+        return Vec::new();
+    }
+    let presentation = present(tool, width.saturating_sub(6).max(1), theme, false);
+    summary_lines(
+        tool,
+        &presentation,
+        Some(duration_ns),
+        width,
+        theme,
+        expanded,
+    )
+}
+
+fn present(tool: &ToolEntry, width: u16, theme: &Theme, expanded: bool) -> Presentation {
+    match tool.name.as_str() {
+        "exec_command" | "write_stdin" => shell::present(tool, width, theme, expanded),
+        "update_plan" => plan::present(tool, width, theme, expanded),
+        "apply_patch" => patch::present(tool, width, theme, expanded),
+        "web__run" => web::present(tool, width, theme, expanded),
+        "view_image" | "image_gen__imagegen" => media::present(tool, width, theme, expanded),
+        "exec" | "wait" => code::present(tool, width, theme, expanded),
+        _ => generic(tool, width, theme, expanded),
+    }
 }
 
 pub(super) struct Presentation {
@@ -102,6 +150,7 @@ impl Presentation {
 fn summary_lines(
     tool: &ToolEntry,
     presentation: &Presentation,
+    live_duration_ns: Option<u64>,
     width: u16,
     theme: &Theme,
     expanded: bool,
@@ -138,7 +187,7 @@ fn summary_lines(
             Style::default().fg(theme.thinking_xhigh()),
         );
     }
-    if let Some(duration) = tool.duration_ns {
+    if let Some(duration) = live_duration_ns.or(tool.duration_ns) {
         append_span(
             &mut content,
             &format!(" · {}", format_duration(duration)),
@@ -380,6 +429,7 @@ mod tests {
         ToolEntry {
             name: name.to_owned(),
             arguments,
+            started_at_unix_ms: 0,
             state: ToolState::Succeeded,
             duration_ns: Some(1_200_000_000),
             result: None,
