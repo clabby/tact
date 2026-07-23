@@ -13,6 +13,11 @@ readme = "README.md"
 keywords = ["ai", "coding-agent", "llm", "terminal", "tui"]
 categories = ["command-line-interface", "development-tools"]
 
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ target }-v{ version }.tar.gz"
+bin-dir = "{ name }-{ target }-v{ version }/{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
+
 [dependencies]
 arboard = "3.6.1"
 base64 = "0.22.1"

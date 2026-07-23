@@ -98,27 +98,6 @@ jobs:
             ${{ env.BINARY_NAME }}-${{ matrix.target }}-${{ github.ref_name }}.${{ matrix.archive_ext }}.sha256
           if-no-files-found: error
 
-  publish-crate:
-    name: Publish to crates.io
-    if: ${{ false }} # Enable when Nanocodex is available from crates.io.
-    needs: build
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - name: Checkout sources
-        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
-        with:
-          persist-credentials: false
-      - name: Install Rust stable toolchain
-        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
-      - name: Verify crate package
-        run: cargo publish --locked --dry-run
-      - name: Publish crate
-        run: cargo publish --locked
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-
   release:
     name: Publish GitHub Release
     needs: build
@@ -126,11 +105,47 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Checkout sources
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
       - name: Download build artifacts
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
           path: dist
           merge-multiple: true
+      - name: Install rsign2
+        uses: taiki-e/install-action@c44f6b046f1c29ae5918b1e0bfdbb2f1813836fd # v2
+        with:
+          tool: rsign2
+      - name: Sign binary artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          trap 'rm -f minisign.key minisign.pub' EXIT
+          rsign generate -f -W -p minisign.pub -s minisign.key
+          echo "::add-mask::$(tail -n 1 minisign.key)"
+
+          printf '\n[package.metadata.binstall.signing]\n' >> Cargo.toml
+          printf 'algorithm = "minisign"\n' >> Cargo.toml
+          printf 'pubkey = "%s"\n' "$(tail -n 1 minisign.pub)" >> Cargo.toml
+          cp minisign.pub dist/minisign.pub
+
+          for archive in dist/*.tar.gz; do
+            rsign sign -W -s minisign.key -x "${archive}.sig" "${archive}"
+          done
+      - name: Install Rust stable toolchain
+        if: ${{ false }} # Enable with crate publishing when Nanocodex is available from crates.io.
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - name: Verify crate package
+        if: ${{ false }} # Enable with crate publishing when Nanocodex is available from crates.io.
+        run: cargo publish --locked --dry-run --allow-dirty
+      - name: Publish crate
+        if: ${{ false }} # Enable when Nanocodex is available from crates.io.
+        run: cargo publish --locked --allow-dirty
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
       - name: Publish release and generated changelog
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
@@ -139,5 +154,7 @@ jobs:
           files: |
             dist/*.tar.gz
             dist/*.sha256
+            dist/*.sig
+            dist/minisign.pub
           fail_on_unmatched_files: true
           generate_release_notes: true
