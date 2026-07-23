@@ -2241,7 +2241,7 @@ dependencies = [
 [[package]]
 name = "nanocodex"
 version = "0.1.0"
-source = "git+https://github.com/clabby/nanocodex?branch=cl%2Frestore-sessions#5a4ac47bce4ff9be9c3f0ec7ef66299722725177"
+source = "git+https://github.com/clabby/nanocodex?rev=5a4ac47bce4ff9be9c3f0ec7ef66299722725177#5a4ac47bce4ff9be9c3f0ec7ef66299722725177"
 dependencies = [
  "async-trait",
  "base64",
@@ -2274,7 +2274,7 @@ dependencies = [
 [[package]]
 name = "nanocodex-core"
 version = "0.1.0"
-source = "git+https://github.com/clabby/nanocodex?branch=cl%2Frestore-sessions#5a4ac47bce4ff9be9c3f0ec7ef66299722725177"
+source = "git+https://github.com/clabby/nanocodex?rev=5a4ac47bce4ff9be9c3f0ec7ef66299722725177#5a4ac47bce4ff9be9c3f0ec7ef66299722725177"
 dependencies = [
  "serde",
  "serde_json",
@@ -2287,7 +2287,7 @@ dependencies = [
 [[package]]
 name = "nanocodex-macros"
 version = "0.1.0"
-source = "git+https://github.com/clabby/nanocodex?branch=cl%2Frestore-sessions#5a4ac47bce4ff9be9c3f0ec7ef66299722725177"
+source = "git+https://github.com/clabby/nanocodex?rev=5a4ac47bce4ff9be9c3f0ec7ef66299722725177#5a4ac47bce4ff9be9c3f0ec7ef66299722725177"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -2298,7 +2298,7 @@ dependencies = [
 [[package]]
 name = "nanocodex-mcp"
 version = "0.1.0"
-source = "git+https://github.com/clabby/nanocodex?branch=cl%2Frestore-sessions#5a4ac47bce4ff9be9c3f0ec7ef66299722725177"
+source = "git+https://github.com/clabby/nanocodex?rev=5a4ac47bce4ff9be9c3f0ec7ef66299722725177#5a4ac47bce4ff9be9c3f0ec7ef66299722725177"
 dependencies = [
  "async-trait",
  "bm25",
@@ -2317,7 +2317,7 @@ dependencies = [
 [[package]]
 name = "nanocodex-service"
 version = "0.1.0"
-source = "git+https://github.com/clabby/nanocodex?branch=cl%2Frestore-sessions#5a4ac47bce4ff9be9c3f0ec7ef66299722725177"
+source = "git+https://github.com/clabby/nanocodex?rev=5a4ac47bce4ff9be9c3f0ec7ef66299722725177#5a4ac47bce4ff9be9c3f0ec7ef66299722725177"
 dependencies = [
  "base64",
  "futures-util",
@@ -2341,7 +2341,7 @@ dependencies = [
 [[package]]
 name = "nanocodex-tools"
 version = "0.1.0"
-source = "git+https://github.com/clabby/nanocodex?branch=cl%2Frestore-sessions#5a4ac47bce4ff9be9c3f0ec7ef66299722725177"
+source = "git+https://github.com/clabby/nanocodex?rev=5a4ac47bce4ff9be9c3f0ec7ef66299722725177#5a4ac47bce4ff9be9c3f0ec7ef66299722725177"
 dependencies = [
  "async-trait",
  "base64",
