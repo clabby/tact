@@ -21,7 +21,8 @@ use std::{sync::Arc, time::Instant};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-const TREE_KEYS: [&str; 3] = ["↑↓ select", "enter inspect", "esc close"];
+const RUNNING_TREE_KEYS: [&str; 4] = ["↑↓ select", "enter inspect", "f show all", "esc close"];
+const ALL_TREE_KEYS: [&str; 4] = ["↑↓ select", "enter inspect", "f show running", "esc close"];
 const TRANSCRIPT_KEYS: [&str; 4] = [
     "pgup/pgdn scroll",
     "ctrl+home/end",
@@ -44,6 +45,42 @@ struct VisibleNode {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AgentFilter {
+    Running,
+    All,
+}
+
+impl AgentFilter {
+    const fn includes(self, status: &AgentStatus) -> bool {
+        match self {
+            Self::Running => status.is_active(),
+            Self::All => true,
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::All => "all",
+        }
+    }
+
+    const fn keys(self) -> &'static [&'static str] {
+        match self {
+            Self::Running => &RUNNING_TREE_KEYS,
+            Self::All => &ALL_TREE_KEYS,
+        }
+    }
+
+    const fn toggled(self) -> Self {
+        match self {
+            Self::Running => Self::All,
+            Self::All => Self::Running,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum SubagentOverlay {
     Tree,
     Transcript(AgentId),
@@ -59,6 +96,7 @@ pub(super) enum SubagentEffect {
 pub(super) struct SubagentTree {
     nodes: Vec<AgentNode>,
     selected: usize,
+    filter: AgentFilter,
     effort: crate::config::ReasoningEffort,
 }
 
@@ -67,6 +105,7 @@ impl SubagentTree {
         Self {
             nodes: Vec::new(),
             selected: 0,
+            filter: AgentFilter::Running,
             effort,
         }
     }
@@ -99,7 +138,7 @@ impl SubagentTree {
                     return false;
                 };
                 node.status = status;
-                self.selected = self.selected.min(self.nodes.len().saturating_sub(1));
+                self.clamp_selection();
                 true
             }
         }
@@ -155,7 +194,13 @@ impl SubagentTree {
                 None
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                self.selected = (self.selected + 1).min(self.nodes.len().saturating_sub(1));
+                self.selected =
+                    (self.selected + 1).min(self.visible_nodes().len().saturating_sub(1));
+                None
+            }
+            KeyCode::Char('f') if key.modifiers.is_empty() => {
+                self.filter = self.filter.toggled();
+                self.clamp_selection();
                 None
             }
             KeyCode::Enter => self
@@ -213,13 +258,19 @@ impl SubagentTree {
         let height = u16::try_from(visible.len().saturating_mul(2).saturating_add(6))
             .unwrap_or(u16::MAX)
             .clamp(8, 22);
-        let layout = Floating::new("Subagents", 74, height, &TREE_KEYS).render(frame, area, theme);
+        let layout =
+            Floating::new("Subagents", 74, height, self.filter.keys()).render(frame, area, theme);
         if layout.body.is_empty() {
             return;
         }
         if visible.is_empty() {
+            let message = if self.nodes.is_empty() {
+                "No subagents have been delegated yet."
+            } else {
+                "No subagents are currently running. Press f to show all."
+            };
             frame.render_widget(
-                Paragraph::new("No subagents have been delegated yet.")
+                Paragraph::new(message)
                     .style(Style::default().fg(theme.muted()))
                     .wrap(Wrap { trim: true }),
                 inset(layout.body, 2, 1),
@@ -233,9 +284,10 @@ impl SubagentTree {
             Span::styled("main agent", Style::default().add_modifier(Modifier::BOLD)),
             Span::styled(
                 format!(
-                    "  ·  {} active · {} total",
+                    "  ·  {} active · {} total · {}",
                     self.active_count(),
-                    visible.len()
+                    self.nodes.len(),
+                    self.filter.label(),
                 ),
                 Style::default().fg(theme.muted()),
             ),
@@ -324,16 +376,25 @@ impl SubagentTree {
         self.nodes.iter_mut().find(|node| node.descriptor.id == id)
     }
 
+    fn clamp_selection(&mut self) {
+        self.selected = self
+            .selected
+            .min(self.visible_nodes().len().saturating_sub(1));
+    }
+
     fn visible_nodes(&self) -> Vec<VisibleNode> {
         let roots = self
             .nodes
             .iter()
             .enumerate()
             .filter_map(|(index, node)| {
+                if !self.filter.includes(&node.status) {
+                    return None;
+                }
                 let parent_exists = node.descriptor.parent.is_some_and(|parent| {
-                    self.nodes
-                        .iter()
-                        .any(|candidate| candidate.descriptor.id == parent)
+                    self.nodes.iter().any(|candidate| {
+                        candidate.descriptor.id == parent && self.filter.includes(&candidate.status)
+                    })
                 });
                 (!parent_exists).then_some(index)
             })
@@ -357,7 +418,8 @@ impl SubagentTree {
                 .iter()
                 .enumerate()
                 .filter_map(|(child_index, child)| {
-                    (child.descriptor.parent == Some(id)).then_some(child_index)
+                    (child.descriptor.parent == Some(id) && self.filter.includes(&child.status))
+                        .then_some(child_index)
                 })
                 .collect::<Vec<_>>();
             visible.push(VisibleNode {
@@ -568,7 +630,7 @@ mod tests {
     }
 
     #[test]
-    fn completed_agents_remain_visible_and_inspectable() {
+    fn running_filter_hides_completed_agents_until_show_all_is_selected() {
         let mut tree = SubagentTree::new(ReasoningEffort::Medium);
         tree.apply(AgentUpdate::Added(descriptor()));
         tree.apply(event(AgentEventKind::RunCompleted, json!({})));
@@ -579,10 +641,52 @@ mod tests {
             },
         });
 
+        assert!(tree.visible_nodes().is_empty());
+
+        tree.update_tree(Event::Key(KeyEvent::new(
+            KeyCode::Char('f'),
+            KeyModifiers::NONE,
+        )));
         let visible = tree.visible_nodes();
 
         assert_eq!(visible.len(), 1);
         assert_eq!(tree.nodes[visible[0].index].descriptor.id, AgentId::new(1));
+        assert!(matches!(
+            tree.update_tree(Event::Key(KeyEvent::new(
+                KeyCode::Enter,
+                KeyModifiers::NONE,
+            ))),
+            Some(SubagentEffect::Inspect(id)) if id == AgentId::new(1)
+        ));
+
+        tree.update_tree(Event::Key(KeyEvent::new(
+            KeyCode::Char('f'),
+            KeyModifiers::NONE,
+        )));
+        assert!(tree.visible_nodes().is_empty());
+    }
+
+    #[test]
+    fn running_child_becomes_a_root_when_its_parent_is_filtered_out() {
+        let mut tree = SubagentTree::new(ReasoningEffort::Medium);
+        let parent = descriptor();
+        let mut child = descriptor();
+        child.id = AgentId::new(2);
+        child.parent = Some(parent.id);
+        tree.apply(AgentUpdate::Added(parent));
+        tree.apply(AgentUpdate::Added(child));
+        tree.apply(AgentUpdate::Status {
+            id: AgentId::new(1),
+            status: AgentStatus::Completed {
+                report: "done".to_owned(),
+            },
+        });
+
+        let visible = tree.visible_nodes();
+
+        assert_eq!(visible.len(), 1);
+        assert_eq!(tree.nodes[visible[0].index].descriptor.id, AgentId::new(2));
+        assert!(visible[0].ancestor_is_last.is_empty());
     }
 
     #[test]

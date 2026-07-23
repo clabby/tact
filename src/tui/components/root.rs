@@ -1457,7 +1457,7 @@ mod tests {
     };
     use crate::{
         config::ReasoningEffort,
-        subagents::{AgentDescriptor, AgentId, AgentOrigin, AgentUpdate},
+        subagents::{AgentDescriptor, AgentId, AgentOrigin, AgentStatus, AgentUpdate},
         tui::{
             theme::{Theme, ThemeMode},
             transcript::{LocalEvent, TranscriptRecord, TurnId},
@@ -1592,6 +1592,41 @@ mod tests {
             root.overlay,
             Some(Overlay::Subagents(SubagentOverlay::Tree))
         ));
+    }
+
+    #[test]
+    fn composer_hides_subagents_after_they_stop_running() {
+        let mut terminal = Terminal::new(TestBackend::new(100, 16)).unwrap();
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        root.update(super::RootEvent::Subagent(AgentUpdate::Added(
+            AgentDescriptor {
+                id: AgentId::new(1),
+                session_id: "child".to_owned(),
+                role: "worker".to_owned(),
+                task: "work".to_owned(),
+                origin: AgentOrigin::Spawn,
+                parent: None,
+            },
+        )));
+        root.update(super::RootEvent::Subagent(AgentUpdate::Status {
+            id: AgentId::new(1),
+            status: AgentStatus::Completed {
+                report: "done".to_owned(),
+            },
+        }));
+
+        terminal
+            .draw(|frame| root.render(frame, frame.area(), &Theme::default()))
+            .unwrap();
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(!rendered.contains("subagents"));
     }
 
     #[test]
