@@ -3,8 +3,8 @@
 use crate::{
     config::{AuthMode, Config, ConfigOverrides, ReasoningEffort},
     core::ConfiguredAgent,
-    error::{AuthResult, Result, RuntimeError},
-    shutdown, tui,
+    error::{AuthResult, Error, Result, RuntimeError},
+    shutdown, tui, update,
 };
 use clap::{ArgAction, Parser, Subcommand, builder::NonEmptyStringValueParser};
 use crossterm::style::{Color, Stylize};
@@ -144,6 +144,8 @@ enum Command {
         #[arg(env = "TACT_PROMPT", value_parser = NonEmptyStringValueParser::new())]
         prompt: String,
     },
+    /// Download and install the latest signed tact release.
+    Update,
 }
 
 #[derive(Debug, Subcommand)]
@@ -262,6 +264,17 @@ impl Cli {
         if self.command.is_none() {
             tui::ensure_interactive()?;
         }
+        if self
+            .command
+            .as_ref()
+            .is_some_and(|command| !command.requires_config())
+        {
+            return self
+                .command
+                .expect("a config-independent command was checked above")
+                .run_without_config()
+                .await;
+        }
 
         let overrides = ConfigOverrides {
             path: self.config,
@@ -282,7 +295,7 @@ impl Cli {
         };
 
         match self.command {
-            Some(command) => command.run(&config).await,
+            Some(command) => command.run_with_config(&config).await,
             None => Self::run_tui(config, self.resume).await,
         }
     }
@@ -330,12 +343,35 @@ fn resume_command(session_id: &str) -> String {
 }
 
 impl Command {
-    async fn run(self, config: &Config) -> Result<()> {
+    const fn requires_config(&self) -> bool {
+        !matches!(self, Self::Update)
+    }
+
+    async fn run_without_config(self) -> Result<()> {
+        let Self::Update = self else {
+            unreachable!("only update is config-independent");
+        };
+        match update::install_latest().await.map_err(Error::update)? {
+            update::UpdateStatus::UpToDate { version } => {
+                println!("tact v{version} is already up to date.");
+            }
+            update::UpdateStatus::Updated { from, to } => {
+                println!("Updated tact from v{from} to v{to}.");
+            }
+            update::UpdateStatus::UseCargo { command } => {
+                println!("This tact binary is managed by Cargo. Update it with `{command}`.");
+            }
+        }
+        Ok(())
+    }
+
+    async fn run_with_config(self, config: &Config) -> Result<()> {
         match self {
             Self::Auth { command } => command.run(config).await.map_err(Into::into),
             Self::Config { command } => command.run(config),
             Self::Mcp { command } => command.run(config),
             Self::Run { prompt } => Self::run_agent(config, prompt).await,
+            Self::Update => unreachable!("update is dispatched before configuration is loaded"),
         }
     }
 
@@ -720,6 +756,15 @@ mod tests {
             cli.command,
             Some(Command::Run { prompt }) if prompt == "inspect the workspace"
         ));
+    }
+
+    #[test]
+    fn update_is_config_independent() {
+        let cli = Cli::try_parse_from(["tact", "update"]).unwrap();
+        let command = cli.command.expect("missing update command");
+
+        assert!(matches!(&command, Command::Update));
+        assert!(!command.requires_config());
     }
 
     #[test]

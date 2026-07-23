@@ -26,15 +26,43 @@ https://github.com/user-attachments/assets/5c634ae8-5c74-47c9-bb8c-9c18cb7fc97d
 
 ## Installation
 
+Install the latest release on x86-64 or ARM64 Linux and macOS with:
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://raw.githubusercontent.com/clabby/tact/main/install.sh | sh
+```
+
+The installer verifies the release's SHA-256 checksum and writes `tact` to
+`${TACT_INSTALL_DIR:-$HOME/.local/bin}` without requiring `sudo`. Set `TACT_INSTALL_DIR` to another
+absolute directory if needed.
+
 > [!WARNING]
-> `tact` is experimental and currently relies on a fork of Nanocodex. Install it from source
-> rather than crates.io.
+> `tact` is experimental and currently relies on a fork of Nanocodex. crates.io installation is
+> unavailable until that dependency can be published.
+
+To build and install the current source instead:
 
 ```sh
 git clone https://github.com/clabby/tact.git
 cd tact
 cargo install --path .
 ```
+
+Official release archives are published for x86-64 and ARM64 Linux GNU systems and for Intel and
+Apple Silicon Macs. After installing one of those binaries, update it to the latest signed release
+with:
+
+```sh
+tact update
+```
+
+For standalone binaries, the command verifies the release checksum and its ephemeral minisign
+signature against the public key published in that exact version's immutable crates.io package
+metadata before replacing the current executable. If Cargo installed `tact` from crates.io, the
+command instead recommends updating through `cargo install` so Cargo's ownership records remain
+accurate. Source and Cargo builds do not display automatic update notifications; only official
+release binaries check in the background.
 
 ## Authentication
 

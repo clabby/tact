@@ -8,6 +8,7 @@ fn main() {
     println!("cargo::rerun-if-changed=.git/HEAD");
     println!("cargo::rerun-if-changed=.git/index");
     println!("cargo::rerun-if-env-changed=SOURCE_DATE_EPOCH");
+    println!("cargo::rerun-if-env-changed=TACT_RELEASE_BUILD");
 
     set("TACT_GIT_SHA", git(&["rev-parse", "--short=12", "HEAD"]));
     set(
@@ -22,6 +23,10 @@ fn main() {
     set("TACT_BUILD_TIMESTAMP", Some(build_timestamp()));
     set("TACT_BUILD_TARGET", env::var("TARGET").ok());
     set("TACT_BUILD_PROFILE", env::var("PROFILE").ok());
+    println!(
+        "cargo::rustc-env=TACT_RELEASE_BUILD={}",
+        env::var("TACT_RELEASE_BUILD").is_ok_and(|value| value == "1")
+    );
     set(
         "TACT_RUSTC_VERSION",
         command_output(

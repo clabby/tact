@@ -31,8 +31,10 @@ use ratatui::{
     Frame,
     layout::{Position, Rect},
     style::{Color, Modifier, Style},
+    text::{Line, Span},
     widgets::{Paragraph, Wrap},
 };
+use semver::Version;
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
@@ -40,12 +42,39 @@ use std::{
 };
 
 const ESCAPE_CHORD_TIMEOUT: Duration = Duration::from_millis(500);
-const BREADCRUMB_DURATION: Duration = Duration::from_secs(3);
+const BREADCRUMB_DURATION: Duration = Duration::from_secs(10);
 
 struct Notification {
-    message: String,
+    message: Line<'static>,
     color: Color,
     deadline: Instant,
+}
+
+impl Notification {
+    fn plain(message: String, color: Color) -> Self {
+        Self {
+            message: Line::styled(
+                message,
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ),
+            color,
+            deadline: Instant::now() + BREADCRUMB_DURATION,
+        }
+    }
+
+    fn update_available(version: Version) -> Self {
+        let green = Style::default().fg(Color::Green);
+        Self {
+            message: Line::from(vec![
+                Span::styled("Update available · ", green),
+                Span::styled(format!("v{version}"), green.add_modifier(Modifier::BOLD)),
+                Span::styled(" · run ", green),
+                Span::styled("`tact update`", Style::default().fg(Color::Reset)),
+            ]),
+            color: Color::Green,
+            deadline: Instant::now() + BREADCRUMB_DURATION,
+        }
+    }
 }
 
 pub(crate) enum RootEvent {
@@ -73,6 +102,7 @@ pub(crate) enum RootEvent {
     },
     NotifyError(String),
     NotifySuccess(String),
+    UpdateAvailable(Version),
     SteerAdmitted(QueueId),
     SteerPromoted(QueueId),
     SteerFailed {
@@ -867,11 +897,7 @@ impl RootNode {
                 status: None,
                 now: Instant::now(),
             });
-        self.notification = Some(Notification {
-            message,
-            color: Color::Red,
-            deadline: Instant::now() + BREADCRUMB_DURATION,
-        });
+        self.notification = Some(Notification::plain(message, Color::Red));
         ComponentUpdate::render(RenderRequest::Immediate)
     }
 
@@ -885,11 +911,10 @@ impl RootNode {
                 status: None,
                 now: Instant::now(),
             });
-        self.notification = Some(Notification {
-            message: format!("Could not start a new session: {message}"),
-            color: Color::Red,
-            deadline: Instant::now() + BREADCRUMB_DURATION,
-        });
+        self.notification = Some(Notification::plain(
+            format!("Could not start a new session: {message}"),
+            Color::Red,
+        ));
         ComponentUpdate::render(RenderRequest::Immediate)
     }
 
@@ -1229,19 +1254,15 @@ impl Component for RootNode {
                 ComponentUpdate::render(RenderRequest::Immediate)
             }
             RootEvent::NotifyError(message) => {
-                self.notification = Some(Notification {
-                    message,
-                    color: Color::Red,
-                    deadline: Instant::now() + BREADCRUMB_DURATION,
-                });
+                self.notification = Some(Notification::plain(message, Color::Red));
                 ComponentUpdate::render(RenderRequest::Immediate)
             }
             RootEvent::NotifySuccess(message) => {
-                self.notification = Some(Notification {
-                    message,
-                    color: Color::Green,
-                    deadline: Instant::now() + BREADCRUMB_DURATION,
-                });
+                self.notification = Some(Notification::plain(message, Color::Green));
+                ComponentUpdate::render(RenderRequest::Immediate)
+            }
+            RootEvent::UpdateAvailable(version) => {
+                self.notification = Some(Notification::update_available(version));
                 ComponentUpdate::render(RenderRequest::Immediate)
             }
             RootEvent::SteerAdmitted(id) => self.steer_admitted(id),
@@ -1260,22 +1281,21 @@ fn render_notification(
     frame: &mut Frame<'_>,
     area: Rect,
     theme: &Theme,
-    message: &str,
+    message: &Line<'_>,
     color: Color,
 ) {
     if area.is_empty() {
         return;
     }
-    let text_width = unicode_width::UnicodeWidthStr::width(message);
+    let text_width = message.width();
     let width = u16::try_from(text_width.saturating_add(4)).unwrap_or(u16::MAX);
     let popup = Floating::new("", width, 3, &[])
         .at_top()
         .colors(color, color)
         .render(frame, area, theme);
     frame.render_widget(
-        Paragraph::new(message)
+        Paragraph::new(message.clone())
             .centered()
-            .style(Style::default().fg(color).add_modifier(Modifier::BOLD))
             .wrap(Wrap { trim: true }),
         popup.body,
     );
@@ -1416,7 +1436,13 @@ mod tests {
         Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     };
     use nanocodex::{AgentEvent, AgentEventKind};
-    use ratatui::{Terminal, backend::TestBackend, layout::Position, style::Color};
+    use ratatui::{
+        Terminal,
+        backend::TestBackend,
+        layout::Position,
+        style::{Color, Modifier},
+    };
+    use semver::Version;
     use serde_json::{json, value::to_raw_value};
     use std::{
         fs,
@@ -2143,6 +2169,60 @@ mod tests {
         let left = (40 - ("Copied selection to clipboard.".len() as u16 + 4)) / 2;
         assert_eq!(buffer[(left, 0)].symbol(), "╭");
         assert_eq!(buffer[(left, 0)].fg, ratatui::style::Color::Green);
+        assert!(buffer[(left + 2, 1)].modifier.contains(Modifier::BOLD));
+
+        let deadline = root.notification.as_ref().unwrap().deadline;
+        root.update(super::RootEvent::AnimationFrame(deadline));
+        assert!(root.notification.is_none());
+    }
+
+    #[test]
+    fn update_available_uses_the_success_frame_and_styles_version_and_command() {
+        let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        let version = Version::new(1, 2, 3);
+        let message = "Update available · v1.2.3 · run `tact update`";
+
+        root.update(super::RootEvent::UpdateAvailable(version));
+        terminal
+            .draw(|frame| root.render(frame, frame.area(), &Theme::default()))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let message_width = unicode_width::UnicodeWidthStr::width(message) as u16;
+        let left = (80 - (message_width + 4)) / 2;
+        let text_start = left + 2;
+        let prefix_width = unicode_width::UnicodeWidthStr::width("Update available · ") as u16;
+        let version_width = unicode_width::UnicodeWidthStr::width("v1.2.3") as u16;
+        let suffix_width = unicode_width::UnicodeWidthStr::width(" · run ") as u16;
+        let version_start = text_start + prefix_width;
+        let command_start = version_start + version_width + suffix_width;
+
+        assert_eq!(buffer[(left, 0)].symbol(), "╭");
+        assert_eq!(buffer[(left, 0)].fg, Color::Green);
+        for column in text_start..version_start {
+            assert_eq!(buffer[(column, 1)].fg, Color::Green);
+            assert!(!buffer[(column, 1)].modifier.contains(Modifier::BOLD));
+        }
+        for column in version_start..version_start + version_width {
+            assert_eq!(buffer[(column, 1)].fg, Color::Green);
+            assert!(buffer[(column, 1)].modifier.contains(Modifier::BOLD));
+        }
+        for column in version_start + version_width..command_start {
+            assert_eq!(buffer[(column, 1)].fg, Color::Green);
+            assert!(!buffer[(column, 1)].modifier.contains(Modifier::BOLD));
+        }
+        for column in command_start..text_start + message_width {
+            assert_eq!(buffer[(column, 1)].fg, Color::Reset);
+            assert!(!buffer[(column, 1)].modifier.contains(Modifier::BOLD));
+        }
+
+        let rendered = buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains(message));
 
         let deadline = root.notification.as_ref().unwrap().deadline;
         root.update(super::RootEvent::AnimationFrame(deadline));

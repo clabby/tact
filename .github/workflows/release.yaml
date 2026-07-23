@@ -75,9 +75,13 @@ jobs:
       - name: Build with Cargo
         if: ${{ !matrix.use_cross }}
         run: cargo build --locked --release --target ${{ matrix.target }}
+        env:
+          TACT_RELEASE_BUILD: "1"
       - name: Build with cross
         if: matrix.use_cross
         run: cross build --locked --release --target ${{ matrix.target }}
+        env:
+          TACT_RELEASE_BUILD: "1"
       - name: Package binary
         shell: bash
         run: |
@@ -98,12 +102,12 @@ jobs:
             ${{ env.BINARY_NAME }}-${{ matrix.target }}-${{ github.ref_name }}.${{ matrix.archive_ext }}.sha256
           if-no-files-found: error
 
-  release:
-    name: Publish GitHub Release
+  sign:
+    name: Sign Release Assets
     needs: build
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: read
     steps:
       - name: Checkout sources
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
@@ -135,6 +139,46 @@ jobs:
           for archive in dist/*.tar.gz; do
             rsign sign -W -s minisign.key -x "${archive}.sig" "${archive}"
           done
+      - name: Verify signed release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd dist
+          for archive in *.tar.gz; do
+            test -s "$archive"
+            test -s "${archive}.sha256"
+            test -s "${archive}.sig"
+            shasum -a 256 --check "${archive}.sha256"
+            rsign verify "$archive" -P "$(tail -n 1 minisign.pub)" -x "${archive}.sig"
+          done
+
+          test "$(find . -maxdepth 1 -name '*.tar.gz' | wc -l | tr -d ' ')" = "4"
+      - name: Upload signed release bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: signed-release
+          path: |
+            Cargo.toml
+            dist
+          if-no-files-found: error
+
+  publish_crate:
+    name: Publish Crate
+    needs: sign
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - name: Download signed release bundle
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          name: signed-release
+          path: .
       - name: Install Rust stable toolchain
         if: ${{ false }} # Enable with crate publishing when Nanocodex is available from crates.io.
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
@@ -146,6 +190,23 @@ jobs:
         run: cargo publish --locked --allow-dirty
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  release:
+    name: Publish GitHub Release
+    needs: publish_crate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - name: Download signed release bundle
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          name: signed-release
+          path: .
       - name: Publish release and generated changelog
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:

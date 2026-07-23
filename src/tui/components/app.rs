@@ -23,6 +23,7 @@ use ratatui::{
     style::{Modifier, Style},
     widgets::{Block, Borders},
 };
+use semver::Version;
 use std::{path::PathBuf, sync::Arc, time::Instant};
 use unicode_width::UnicodeWidthStr;
 
@@ -99,6 +100,7 @@ pub(crate) enum AppEvent {
         pane: PaneId,
         message: String,
     },
+    UpdateAvailable(Version),
     ConfigReloaded {
         pane: PaneId,
         theme: Theme,
@@ -228,6 +230,14 @@ impl AppNode {
             }
             AppEvent::NotifySuccess { pane, message } => {
                 self.update_root(pane, RootEvent::NotifySuccess(message))
+            }
+            AppEvent::UpdateAvailable(version) => {
+                let pane = if self.main.is_some() {
+                    PaneId::Main
+                } else {
+                    self.focus
+                };
+                self.update_root(pane, RootEvent::UpdateAvailable(version))
             }
             AppEvent::ConfigReloaded {
                 pane,
@@ -561,6 +571,7 @@ mod tests {
         Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     };
     use ratatui::{Terminal, backend::TestBackend};
+    use semver::Version;
     use std::{path::PathBuf, sync::Arc};
 
     fn app() -> AppNode {
@@ -605,6 +616,18 @@ mod tests {
         assert_eq!(
             app.theme.code_background(),
             ratatui::style::Color::Rgb(0x26, 0x26, 0x26)
+        );
+    }
+
+    #[test]
+    fn update_available_routes_to_the_primary_notification() {
+        let mut app = app();
+
+        let update = app.update(AppEvent::UpdateAvailable(Version::new(1, 2, 3)));
+
+        assert_eq!(update.render, super::RenderRequest::Immediate);
+        assert!(
+            rendered(&mut app, 80, 12).contains("Update available · v1.2.3 · run `tact update`")
         );
     }
 

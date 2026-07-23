@@ -77,11 +77,20 @@ The tag publishes:
 
 - `.github/workflows/release.yaml`: validates the tag/version match; builds `tact` for Linux x86-64
   and ARM64 and macOS x86-64 and ARM64; packages each binary with `README.md` and `LICENSE.md`;
-  writes SHA-256 sidecars; and creates a GitHub Release with generated notes and all archives.
+  writes SHA-256 sidecars; signs each archive with a just-in-time minisign key; verifies every
+  archive, checksum, and signature; saves that exact signed bundle as a workflow artifact; and
+  creates a GitHub Release with generated notes and all assets. Separating signing from publication
+  lets a failed publication job reuse the original ephemeral key and signatures. These matrix
+  builds set `TACT_RELEASE_BUILD=1`, which marks them as official release binaries. Local builds,
+  including `cargo build --release`, deliberately remain unmarked.
 - `.github/workflows/docker.yml`: builds the scratch-based binary-carrier image for `linux/amd64`
   and `linux/arm64`, then publishes a multi-platform manifest as `ghcr.io/clabby/tact:<version>`
   (without the leading `v`) and `ghcr.io/clabby/tact:latest`. The image contains only `/tact`; see
   `docker/README.md` for how to copy it into a runnable image.
+
+The root `install.sh` resolves the latest tag, selects one of the same four release targets,
+verifies its SHA-256 sidecar, and installs the archive's `tact` binary to a user-writable directory.
+Keep its asset naming and supported-target mapping synchronized with the release matrix.
 
 ## Verify
 
@@ -95,17 +104,36 @@ docker buildx imagetools inspect ghcr.io/clabby/tact:latest
 ```
 
 Check that the release has four archives and four checksum files, and that the image manifest lists
-both `linux/amd64` and `linux/arm64`. Download at least one archive, validate it against its sidecar,
-and run `tact --version` from the extracted binary.
+both `linux/amd64` and `linux/arm64`. Each archive must also have a `.sig` asset. Download at least
+one archive, validate it against its sidecar and signature, and run `tact --version` from the
+extracted binary.
+
+## Self-update eligibility
+
+A GitHub Release is eligible for `tact update` only when the exact same version has first been
+published to crates.io. The published crate must contain the
+`[package.metadata.binstall.signing]` table injected by the release workflow, including the
+ephemeral minisign public key used for that release's archives. The updater treats immutable
+crates.io metadata as the trust root; the `minisign.pub` file uploaded beside the GitHub assets is
+for manual verification and is not sufficient by itself.
+
+Crate publication remains disabled while the Nanocodex dependencies are unavailable from
+crates.io. Releases produced in that state may still contain checksums and signatures, but they are
+not self-update eligible. When publication becomes possible, enable the package verification and
+publication steps together and preserve their ordering before the GitHub Release step. The private
+minisign key is generated only in the signing job, used to produce the retained signed bundle, and
+removed by the existing shell trap.
 
 ## Failures and retries
 
 Do not delete and recreate a published tag to retry a transient failure: consumers may already have
 observed the original ref, and moving it can associate artifacts with different source. Re-run only
-the failed GitHub Actions jobs or the entire failed workflow for the same tag. The GitHub Release
-action and GHCR publication may have partially succeeded, so inspect existing release assets and
-image manifests before retrying. If the source itself is wrong, fix it on `main`, increment the
-version, and publish a new tag.
+the failed GitHub Actions jobs for the same tag. If crate publication succeeded but the GitHub
+Release step failed, rerun only the `release` job so it reuses the retained signed bundle; rerunning
+the signing job would generate a different ephemeral key. The GitHub Release action and GHCR
+publication may have partially succeeded, so inspect existing release assets and image manifests
+before retrying. If the source itself is wrong, fix it on `main`, increment the version, and publish
+a new tag.
 
 The Docker workflow also supports manual dispatch, but a branch dispatch produces a branch-named
 image rather than the release version and `latest`; it is useful for diagnosis, not for completing a

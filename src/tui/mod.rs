@@ -69,6 +69,22 @@ type ResumeSessionTask = JoinHandle<(
     crate::config::ReasoningEffort,
     Result<RestoredSession>,
 )>;
+type UpdateCheckTask =
+    JoinHandle<std::result::Result<Option<semver::Version>, crate::update::UpdateError>>;
+
+fn update_checks_enabled() -> bool {
+    crate::update::is_official_release_build()
+}
+
+fn spawn_update_check(config_path: &Path) -> Option<UpdateCheckTask> {
+    if !update_checks_enabled() {
+        return None;
+    }
+    let config_path = config_path.to_path_buf();
+    Some(tokio::spawn(async move {
+        crate::update::check_for_update(&config_path).await
+    }))
+}
 
 struct RestoredSession {
     configured: ConfiguredAgent,
@@ -249,6 +265,7 @@ pub(crate) async fn run(
         theme.set_system_scheme(scheme);
     }
     let mut app = AppNode::new(theme, workspace.clone(), root);
+    let mut update_check_task = spawn_update_check(config.path());
     let (system_theme_sender, mut system_theme_updates) = mpsc::unbounded_channel();
     theme::watch_system_scheme(system_theme_sender, shutdown.clone());
     let mut input = Some(EventStream::new());
@@ -291,6 +308,9 @@ pub(crate) async fn run(
     }
 
     loop {
+        if stopping && let Some(task) = update_check_task.take() {
+            task.abort();
+        }
         if stopping {
             shell_tasks.abort_all();
         }
@@ -356,6 +376,17 @@ pub(crate) async fn run(
             }
             Some(scheme) = system_theme_updates.recv(), if !stopping => {
                 schedule(app.update(AppEvent::SystemThemeChanged(scheme)), &mut scheduler);
+            }
+            result = async {
+                update_check_task
+                    .as_mut()
+                    .expect("update-check branch is disabled without a task")
+                    .await
+            }, if update_check_task.is_some() && !stopping => {
+                update_check_task = None;
+                if let Ok(Ok(Some(version))) = result {
+                    schedule(app.update(AppEvent::UpdateAvailable(version)), &mut scheduler);
+                }
             }
             event = agent_events.recv(), if panes.values().any(|pane| pane.event_streams_open > 0) => {
                 let Some(event) = event else {
@@ -1334,7 +1365,7 @@ fn request_render(request: RenderRequest, scheduler: &mut RenderScheduler) {
 mod tests {
     use super::{
         PaneGeneration, PaneSession, PendingSubmission, close_pane_journal, is_image_paste,
-        local_link_path, open_pane, send_submission, validate_interactive,
+        local_link_path, open_pane, send_submission, update_checks_enabled, validate_interactive,
     };
     use crate::{
         config::{Config, ConfigOverrides, ReasoningEffort},
@@ -1347,6 +1378,11 @@ mod tests {
     };
     use std::{fs, path::Path};
     use tempfile::tempdir;
+
+    #[test]
+    fn development_builds_do_not_enable_update_checks() {
+        assert!(!update_checks_enabled());
+    }
 
     #[test]
     fn control_or_super_v_requests_an_image_paste() {

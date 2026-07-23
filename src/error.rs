@@ -4,7 +4,9 @@ use crate::tui::{session::SessionError, transcript::TranscriptError};
 use miette::Diagnostic;
 use nanocodex::{ChatGptAuthError, McpBuildError, NanocodexError};
 use nanocodex_core::EventError;
-use std::{env::VarError, io, path::PathBuf, result::Result as StdResult};
+use std::{
+    env::VarError, error::Error as StdError, io, path::PathBuf, result::Result as StdResult,
+};
 use thiserror::Error;
 
 pub(crate) type Result<T> = StdResult<T, Error>;
@@ -30,6 +32,14 @@ pub(crate) enum Error {
     Session(#[from] SessionError),
     #[error(transparent)]
     Transcript(#[from] TranscriptError),
+    #[error("update failed: {0}")]
+    Update(#[source] Box<dyn StdError + Send + Sync>),
+}
+
+impl Error {
+    pub(crate) fn update(source: impl StdError + Send + Sync + 'static) -> Self {
+        Self::Update(Box::new(source))
+    }
 }
 
 #[derive(Debug, Error)]

@@ -15,6 +15,7 @@ mod shutdown;
 mod skills;
 mod subagents;
 mod tui;
+mod update;
 
 use clap::Parser;
 use cli::Cli;
