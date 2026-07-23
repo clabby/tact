@@ -32,6 +32,7 @@ use crate::{
         scheduler::{RenderScheduler, STREAM_FRAME_INTERVAL},
         session::SessionSummary,
         shell::ShellExecution,
+        subagent_updates::ForwardedSubagentUpdate,
         terminal::TerminalSession,
         transcript::{
             LocalEvent, SessionEnded, SessionOutcome, SessionStarted, ShellId, TranscriptError,
@@ -195,6 +196,17 @@ impl PaneRuntime {
     }
 }
 
+fn subagent_pane(
+    panes: &HashMap<PaneId, PaneRuntime>,
+    event: &ForwardedSubagentUpdate,
+) -> Option<PaneId> {
+    panes.iter().find_map(|(&pane, runtime)| {
+        (runtime.session_id == event.root_session_id
+            && runtime.subagent_control.runtime_id() == event.runtime_id)
+            .then_some(pane)
+    })
+}
+
 pub(crate) async fn run(
     mut config: Config,
     resume_session_id: Option<String>,
@@ -240,7 +252,7 @@ pub(crate) async fn run(
             },
             &config,
             config.agent().thinking(),
-            subagent_control,
+            subagent_control.clone(),
             &writer_sender,
         )?,
     );
@@ -250,9 +262,7 @@ pub(crate) async fn run(
     agent_events::forward(PaneId::Main, 0, events, agent_event_sender.clone());
     let (subagent_sender, mut subagent_events) = mpsc::unbounded_channel();
     subagent_updates::forward(
-        PaneId::Main,
-        main_session_id.clone(),
-        0,
+        subagent_control.runtime_id(),
         subagent_updates,
         subagent_sender.clone(),
     );
@@ -425,16 +435,10 @@ pub(crate) async fn run(
                 }
             }
             Some(event) = subagent_events.recv(), if !stopping => {
-                if panes
-                    .get(&event.pane)
-                    .is_some_and(|runtime| {
-                        runtime.session_id == event.root_session_id
-                            && runtime.generation == event.generation
-                    })
-                {
+                if let Some(pane) = subagent_pane(&panes, &event) {
                     schedule(
                         app.update(AppEvent::Subagent {
-                            pane: event.pane,
+                            pane,
                             update: event.update,
                         }),
                         &mut scheduler,
@@ -543,7 +547,7 @@ pub(crate) async fn run(
                                 PaneSession::new(&session_id, parent_session_id.as_deref()),
                                 &config,
                                 effort,
-                                subagent_control,
+                                subagent_control.clone(),
                                 &writer_sender,
                             )?,
                         );
@@ -569,7 +573,9 @@ pub(crate) async fn run(
                             schedule(app.update(AppEvent::Transcript { pane, record }), &mut scheduler);
                         }
                         runtime.current_effort = effort;
-                        config.set_thinking(effort);
+                        if pane == PaneId::Main {
+                            config.set_thinking(effort);
+                        }
                         input = Some(EventStream::new());
                         scheduler.request_immediate(Instant::now());
                     }
@@ -696,7 +702,7 @@ pub(crate) async fn run(
                                 PaneSession::new(&session_id, None),
                                 &config,
                                 effort,
-                                subagent_control,
+                                subagent_control.clone(),
                                 &writer_sender,
                             )?,
                         );
@@ -708,9 +714,7 @@ pub(crate) async fn run(
                             agent_event_sender.clone(),
                         );
                         subagent_updates::forward(
-                            pane,
-                            session_id.clone(),
-                            generation,
+                            subagent_control.runtime_id(),
                             subagent_updates,
                             subagent_sender.clone(),
                         );
@@ -791,7 +795,7 @@ pub(crate) async fn run(
                                 PaneSession::persisted(&session_id),
                                 &config,
                                 effort,
-                                subagent_control,
+                                subagent_control.clone(),
                                 &writer_sender,
                             )?,
                         );
@@ -803,9 +807,7 @@ pub(crate) async fn run(
                             agent_event_sender.clone(),
                         );
                         subagent_updates::forward(
-                            pane,
-                            session_id,
-                            generation,
+                            subagent_control.runtime_id(),
                             subagent_updates,
                             subagent_sender.clone(),
                         );
@@ -1133,9 +1135,11 @@ fn apply_pane_effect(
         }
         components::RootEffect::SetEffort(effort) => {
             *context.input = None;
-            let config = context.config.clone();
+            let config = (pane == PaneId::Main).then(|| context.config.clone());
             *context.effort_task = Some(tokio::task::spawn_blocking(move || {
-                config.persist_thinking(effort)?;
+                if let Some(config) = config {
+                    config.persist_thinking(effort)?;
+                }
                 Ok(EffortUpdate { pane, to: effort })
             }));
         }
@@ -1270,13 +1274,13 @@ fn apply_pane_effect(
             );
         }
         components::RootEffect::CancelTurns => {
-            let subagents = context
+            let runtime = context
                 .panes
                 .get(&pane)
-                .expect("cancelled pane must exist")
-                .subagent_control
-                .clone();
-            tokio::spawn(async move { subagents.cancel_all().await });
+                .expect("cancelled pane must exist");
+            let subagents = runtime.subagent_control.clone();
+            let root_session_id = runtime.session_id.clone();
+            tokio::spawn(async move { subagents.cancel_all(&root_session_id).await });
             context
                 .commands
                 .send(WorkerCommand::CancelAll(pane))
@@ -1365,18 +1369,21 @@ fn request_render(request: RenderRequest, scheduler: &mut RenderScheduler) {
 mod tests {
     use super::{
         PaneGeneration, PaneSession, PendingSubmission, close_pane_journal, is_image_paste,
-        local_link_path, open_pane, send_submission, update_checks_enabled, validate_interactive,
+        local_link_path, open_pane, send_submission, subagent_pane, update_checks_enabled,
+        validate_interactive,
     };
     use crate::{
         config::{Config, ConfigOverrides, ReasoningEffort},
         error::{Error, RuntimeError},
+        subagents::{AgentId, AgentUpdate},
         tui::{
             pane::PaneId,
+            subagent_updates::ForwardedSubagentUpdate,
             transcript::{LocalEvent, TurnId, load},
             worker::WorkerCommand,
         },
     };
-    use std::{fs, path::Path};
+    use std::{collections::HashMap, fs, path::Path};
     use tempfile::tempdir;
 
     #[test]
@@ -1466,7 +1473,7 @@ mod tests {
         .unwrap();
         let (sender, mut completions) = tokio::sync::mpsc::unbounded_channel();
         let (_subagents, subagent_control, _updates) = crate::subagents::channel();
-        let mut main = open_pane(
+        let main = open_pane(
             PaneGeneration {
                 pane: PaneId::Main,
                 generation: 0,
@@ -1478,7 +1485,7 @@ mod tests {
             &sender,
         )
         .unwrap();
-        let mut fork = open_pane(
+        let fork = open_pane(
             PaneGeneration {
                 pane: PaneId::Fork(1),
                 generation: 0,
@@ -1486,10 +1493,33 @@ mod tests {
             PaneSession::new("fork-session", Some("main-session")),
             &config,
             ReasoningEffort::Low,
-            subagent_control,
+            subagent_control.clone(),
             &sender,
         )
         .unwrap();
+        let mut panes = HashMap::from([(PaneId::Main, main), (PaneId::Fork(1), fork)]);
+        let fork_update = ForwardedSubagentUpdate {
+            runtime_id: subagent_control.runtime_id(),
+            root_session_id: "fork-session".to_owned(),
+            update: AgentUpdate::Closed {
+                id: AgentId::new(1),
+            },
+        };
+
+        assert_eq!(subagent_pane(&panes, &fork_update), Some(PaneId::Fork(1)));
+
+        let (_other_registry, other_control, _other_updates) = crate::subagents::channel();
+        let stale_update = ForwardedSubagentUpdate {
+            runtime_id: other_control.runtime_id(),
+            root_session_id: "fork-session".to_owned(),
+            update: AgentUpdate::Closed {
+                id: AgentId::new(1),
+            },
+        };
+        assert_eq!(subagent_pane(&panes, &stale_update), None);
+
+        let mut main = panes.remove(&PaneId::Main).unwrap();
+        let mut fork = panes.remove(&PaneId::Fork(1)).unwrap();
         let main_path = main.writer_path.clone();
         let fork_path = fork.writer_path.clone();
         fork.journal_mut()

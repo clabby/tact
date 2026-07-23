@@ -1,30 +1,26 @@
-//! Pane-tagged forwarding for subagent runtime updates.
+//! Forwarding from subagent runtimes into the TUI event loop.
 
-use crate::{subagents::AgentUpdate, tui::pane::PaneId};
+use crate::subagents::{AgentUpdate, ScopedAgentUpdate, SubagentRuntimeId};
 use tokio::sync::mpsc;
 
 pub(crate) struct ForwardedSubagentUpdate {
-    pub(crate) pane: PaneId,
+    pub(crate) runtime_id: SubagentRuntimeId,
     pub(crate) root_session_id: String,
-    pub(crate) generation: u64,
     pub(crate) update: AgentUpdate,
 }
 
 pub(crate) fn forward(
-    pane: PaneId,
-    root_session_id: String,
-    generation: u64,
-    mut updates: mpsc::UnboundedReceiver<AgentUpdate>,
+    runtime_id: SubagentRuntimeId,
+    mut updates: mpsc::UnboundedReceiver<ScopedAgentUpdate>,
     sender: mpsc::UnboundedSender<ForwardedSubagentUpdate>,
 ) {
     tokio::spawn(async move {
         while let Some(update) = updates.recv().await {
             if sender
                 .send(ForwardedSubagentUpdate {
-                    pane,
-                    root_session_id: root_session_id.clone(),
-                    generation,
-                    update,
+                    runtime_id,
+                    root_session_id: update.root_session_id,
+                    update: update.update,
                 })
                 .is_err()
             {

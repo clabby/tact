@@ -5,7 +5,7 @@ use crate::{
     error::{Result, RuntimeError},
     mcp,
     skills::{self, SkillCatalog},
-    subagents::{self, AgentUpdate, SubagentControl},
+    subagents::{self, ScopedAgentUpdate, SubagentControl},
 };
 use nanocodex::{
     AgentEvents, ContentItem, MessageRole, Nanocodex, NanocodexError, ResponseItem, Responses,
@@ -25,7 +25,7 @@ use tokio_util::sync::CancellationToken;
 pub(crate) struct ConfiguredAgent {
     pub(crate) agent: Nanocodex,
     pub(crate) events: AgentEvents,
-    pub(crate) subagent_updates: mpsc::UnboundedReceiver<AgentUpdate>,
+    pub(crate) subagent_updates: mpsc::UnboundedReceiver<ScopedAgentUpdate>,
     pub(crate) subagent_control: SubagentControl,
 }
 
@@ -133,20 +133,23 @@ impl ConfiguredAgent {
             }
         };
         let control = turn.control();
+        let root_session_id = self.events.request_id().to_owned();
         let mut cancellation = Cancellation::NotRequested;
         let event_result = tokio::select! {
             biased;
             result = self.events.write_turn_jsonl(&mut output) => result,
             () = shutdown.cancelled() => {
                 cancellation = Cancellation::request(&control).await;
-                self.subagent_control.cancel_all().await;
+                self.subagent_control
+                    .cancel_all(&root_session_id)
+                    .await;
                 self.events.write_turn_jsonl(&mut output).await
             }
         };
 
         if event_result.is_err() && matches!(cancellation, Cancellation::NotRequested) {
             cancellation = Cancellation::request(&control).await;
-            self.subagent_control.cancel_all().await;
+            self.subagent_control.cancel_all(&root_session_id).await;
         }
 
         let turn_result = turn.result().await;

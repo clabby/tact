@@ -688,6 +688,39 @@ mod tests {
     }
 
     #[test]
+    fn fork_effort_changes_do_not_change_the_primary_composer() {
+        let mut app = app();
+        app.update(control('f'));
+        app.update(AppEvent::ForkReady(PaneId::Fork(1)));
+        app.update(control('s'));
+        app.update(AppEvent::Terminal(Event::Key(KeyEvent::new(
+            KeyCode::Right,
+            KeyModifiers::NONE,
+        ))));
+
+        let update = app.update(AppEvent::Terminal(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        ))));
+
+        assert!(matches!(
+            update.effects.as_slice(),
+            [AppEffect::Pane {
+                pane: PaneId::Fork(1),
+                effect: super::RootEffect::SetEffort(ReasoningEffort::Medium),
+            }]
+        ));
+        assert_eq!(
+            app.root(PaneId::Main).unwrap().composer().effort(),
+            ReasoningEffort::Low
+        );
+        assert_eq!(
+            app.root(PaneId::Fork(1)).unwrap().composer().effort(),
+            ReasoningEffort::Medium
+        );
+    }
+
+    #[test]
     fn split_view_shows_mouse_focus_and_close_hint() {
         let mut app = app();
         assert!(!rendered(&mut app, 100, 20).contains(SPLIT_HINT.trim()));
