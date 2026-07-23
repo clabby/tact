@@ -7,6 +7,7 @@ use semver::Version;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
+    collections::BTreeMap,
     env, fs,
     io::{self, Cursor, Read, Seek, SeekFrom, Write},
     path::{Component, Path, PathBuf},
@@ -285,6 +286,11 @@ struct UpdateCache {
     version: Version,
 }
 
+#[derive(Deserialize)]
+struct CargoInstallMetadata {
+    v1: BTreeMap<String, Vec<String>>,
+}
+
 pub(crate) fn is_official_release_build() -> bool {
     matches!(env!("TACT_RELEASE_BUILD"), "true")
 }
@@ -376,6 +382,11 @@ pub(crate) async fn install_latest() -> Result<UpdateStatus, UpdateError> {
 fn crates_io_install_root() -> Option<PathBuf> {
     let executable = env::current_exe().ok()?;
     let root = candidate_cargo_install_root(&executable)?;
+    match cargo_metadata_tact_ownership(&root) {
+        Some(true) => return Some(root),
+        Some(false) => return None,
+        None => {}
+    }
     let output = Command::new("cargo")
         .args(["install", "--list", "--root"])
         .arg(&root)
@@ -387,6 +398,30 @@ fn crates_io_install_root() -> Option<PathBuf> {
     }
     let installed = std::str::from_utf8(&output.stdout).ok()?;
     cargo_list_owns_tact(installed).then_some(root)
+}
+
+#[cfg(test)]
+fn cargo_metadata_owns_tact(root: &Path) -> bool {
+    cargo_metadata_tact_ownership(root) == Some(true)
+}
+
+fn cargo_metadata_tact_ownership(root: &Path) -> Option<bool> {
+    let contents = fs::read_to_string(root.join(".crates.toml")).ok()?;
+    let metadata: CargoInstallMetadata = toml::from_str(&contents).ok()?;
+    Some(metadata.v1.iter().any(|(package, binaries)| {
+        crates_io_tact_package(package) && binaries.iter().any(|binary| binary == "tact")
+    }))
+}
+
+fn crates_io_tact_package(package: &str) -> bool {
+    let Some(package) = package.strip_prefix("tact ") else {
+        return false;
+    };
+    let Some((version, source)) = package.split_once(" (") else {
+        return false;
+    };
+    Version::parse(version).is_ok()
+        && source == "registry+https://github.com/rust-lang/crates.io-index)"
 }
 
 fn candidate_cargo_install_root(executable: &Path) -> Option<PathBuf> {
@@ -903,8 +938,9 @@ fn write_cache(config_path: &Path, target: SupportedTarget, version: &Version, n
 mod tests {
     use super::{
         GithubAsset, GithubReleaseResponse, Release, SupportedTarget, UpdateCache, UpdateError,
-        cache_is_fresh, candidate_cargo_install_root, cargo_list_owns_tact, cargo_update_command,
-        crate_manifest, extract_binary, parse_hex_checksum, verify_archive_checksum,
+        cache_is_fresh, candidate_cargo_install_root, cargo_list_owns_tact,
+        cargo_metadata_owns_tact, cargo_update_command, crate_manifest, extract_binary,
+        parse_hex_checksum, verify_archive_checksum,
     };
     use flate2::{Compression, write::GzEncoder};
     use semver::Version;
@@ -1107,6 +1143,39 @@ mod tests {
             "tact v1.2.3 (git+https://example.com/tact):\n    tact\n"
         ));
         assert!(!cargo_list_owns_tact("tact v1.2.3:\n    helper\n"));
+    }
+
+    #[test]
+    fn cargo_metadata_detects_crates_io_install_without_running_cargo() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join(".crates.toml"),
+            r#"[v1]
+"tact 1.2.3 (registry+https://github.com/rust-lang/crates.io-index)" = ["tact"]
+"helper 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)" = ["helper"]
+"#,
+        )
+        .unwrap();
+
+        assert!(cargo_metadata_owns_tact(root.path()));
+    }
+
+    #[test]
+    fn cargo_metadata_rejects_non_crates_io_installations() {
+        for source in [
+            "path+file:///work/tact",
+            "git+https://example.com/tact",
+            "registry+https://example.com/index",
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            std::fs::write(
+                root.path().join(".crates.toml"),
+                format!("[v1]\n\"tact 1.2.3 ({source})\" = [\"tact\"]\n"),
+            )
+            .unwrap();
+
+            assert!(!cargo_metadata_owns_tact(root.path()));
+        }
     }
 
     #[test]
