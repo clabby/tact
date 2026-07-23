@@ -27,7 +27,7 @@ use semver::Version;
 use std::{path::PathBuf, sync::Arc, time::Instant};
 use unicode_width::UnicodeWidthStr;
 
-const SPLIT_HINT: &str = " mouse: focus · Ctrl+C: close ";
+const SPLIT_HINT: &str = " mouse: focus · Ctrl+C: clear / close ";
 const MIN_SPLIT_HINT_WIDTH: u16 = 60;
 
 pub(crate) enum AppEvent {
@@ -362,6 +362,10 @@ impl AppNode {
         }
         if self.fork.is_some() && is_control_c(&event) {
             let pane = self.focus;
+            let update = self.update_root(pane, RootEvent::Terminal(event));
+            if !matches!(update.effects.as_slice(), [AppEffect::Shutdown]) {
+                return update;
+            }
             self.remove_pane(pane);
             return ComponentUpdate {
                 effects: vec![AppEffect::ClosePane(pane)],
@@ -716,6 +720,36 @@ mod tests {
             [AppEffect::ClosePane(PaneId::Fork(1))]
         ));
         assert!(app.root(PaneId::Main).is_some());
+        assert!(app.root(PaneId::Fork(1)).is_none());
+    }
+
+    #[test]
+    fn control_c_clears_the_focused_fork_composer_before_closing_it() {
+        let mut app = app();
+        app.update(control('f'));
+        app.update(AppEvent::ForkReady(PaneId::Fork(1)));
+        app.update(AppEvent::Terminal(Event::Key(KeyEvent::new(
+            KeyCode::Char('h'),
+            KeyModifiers::NONE,
+        ))));
+        app.update(AppEvent::Terminal(Event::Key(KeyEvent::new(
+            KeyCode::Char('i'),
+            KeyModifiers::NONE,
+        ))));
+
+        let update = app.update(control('c'));
+
+        assert!(update.effects.is_empty());
+        assert_eq!(update.render, super::RenderRequest::Immediate);
+        let fork = app.root(PaneId::Fork(1)).expect("fork should remain open");
+        assert!(fork.composer().draft().is_empty());
+
+        let close = app.update(control('c'));
+
+        assert!(matches!(
+            close.effects.as_slice(),
+            [AppEffect::ClosePane(PaneId::Fork(1))]
+        ));
         assert!(app.root(PaneId::Fork(1)).is_none());
     }
 
