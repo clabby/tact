@@ -152,6 +152,18 @@ struct PaneSession<'a> {
     previously_persisted: bool,
 }
 
+#[derive(Clone, Copy)]
+struct PaneSettings {
+    effort: crate::config::ReasoningEffort,
+    fast_mode: bool,
+}
+
+impl PaneSettings {
+    const fn new(effort: crate::config::ReasoningEffort, fast_mode: bool) -> Self {
+        Self { effort, fast_mode }
+    }
+}
+
 impl<'a> PaneSession<'a> {
     const fn new(id: &'a str, parent_id: Option<&'a str>) -> Self {
         Self {
@@ -265,8 +277,7 @@ pub(crate) async fn run(
                 PaneSession::new(&main_session_id, None)
             },
             &config,
-            initial_effort,
-            initial_fast_mode,
+            PaneSettings::new(initial_effort, initial_fast_mode),
             instructions,
             subagent_control.clone(),
             &writer_sender,
@@ -599,8 +610,7 @@ pub(crate) async fn run(
                                 },
                                 PaneSession::new(&session_id, parent_session_id.as_deref()),
                                 &config,
-                                effort,
-                                fast_mode,
+                                PaneSettings::new(effort, fast_mode),
                                 instructions,
                                 subagent_control.clone(),
                                 &writer_sender,
@@ -801,8 +811,7 @@ pub(crate) async fn run(
                                 PaneGeneration { pane, generation },
                                 PaneSession::new(&session_id, None),
                                 &config,
-                                effort,
-                                fast_mode,
+                                PaneSettings::new(effort, fast_mode),
                                 instructions,
                                 subagent_control.clone(),
                                 &writer_sender,
@@ -909,8 +918,7 @@ pub(crate) async fn run(
                                 PaneGeneration { pane, generation },
                                 PaneSession::persisted(&session_id),
                                 &config,
-                                effort,
-                                fast_mode,
+                                PaneSettings::new(effort, fast_mode),
                                 instructions,
                                 subagent_control.clone(),
                                 &writer_sender,
@@ -1006,13 +1014,13 @@ fn open_pane(
     identity: PaneGeneration,
     session: PaneSession<'_>,
     config: &Config,
-    effort: crate::config::ReasoningEffort,
-    fast_mode: bool,
+    settings: PaneSettings,
     instructions: Arc<str>,
     subagent_control: SubagentControl,
     writer_updates: &mpsc::UnboundedSender<WriterCompletion>,
 ) -> Result<PaneRuntime> {
     let PaneGeneration { pane, generation } = identity;
+    let PaneSettings { effort, fast_mode } = settings;
     let PaneSession {
         id: session_id,
         parent_id: parent_session_id,
@@ -1525,9 +1533,9 @@ fn request_render(request: RenderRequest, scheduler: &mut RenderScheduler) {
 #[cfg(test)]
 mod tests {
     use super::{
-        PaneGeneration, PaneSession, PendingSubmission, close_pane_journal, is_image_paste,
-        local_link_path, open_pane, send_submission, subagent_pane, update_checks_enabled,
-        validate_interactive,
+        PaneGeneration, PaneSession, PaneSettings, PendingSubmission, close_pane_journal,
+        is_image_paste, local_link_path, open_pane, send_submission, subagent_pane,
+        update_checks_enabled, validate_interactive,
     };
     use crate::{
         config::{Config, ConfigOverrides, ReasoningEffort},
@@ -1641,8 +1649,7 @@ mod tests {
             },
             PaneSession::new("main-session", None),
             &config,
-            ReasoningEffort::Low,
-            false,
+            PaneSettings::new(ReasoningEffort::Low, false),
             Arc::from("instructions"),
             subagent_control,
             &sender,
@@ -1674,8 +1681,7 @@ mod tests {
             },
             PaneSession::new("main-session", None),
             &config,
-            ReasoningEffort::Low,
-            false,
+            PaneSettings::new(ReasoningEffort::Low, false),
             Arc::from("instructions"),
             subagent_control.clone(),
             &sender,
@@ -1688,8 +1694,7 @@ mod tests {
             },
             PaneSession::new("fork-session", Some("main-session")),
             &config,
-            ReasoningEffort::Low,
-            false,
+            PaneSettings::new(ReasoningEffort::Low, false),
             Arc::from("instructions"),
             subagent_control.clone(),
             &sender,
@@ -1772,8 +1777,7 @@ mod tests {
             },
             PaneSession::new("old-session", None),
             &config,
-            ReasoningEffort::Medium,
-            false,
+            PaneSettings::new(ReasoningEffort::Medium, false),
             Arc::from("instructions"),
             subagent_control.clone(),
             &sender,
@@ -1796,8 +1800,7 @@ mod tests {
             },
             PaneSession::new("new-session", None),
             &config,
-            ReasoningEffort::Medium,
-            false,
+            PaneSettings::new(ReasoningEffort::Medium, false),
             Arc::from("instructions"),
             subagent_control,
             &sender,
