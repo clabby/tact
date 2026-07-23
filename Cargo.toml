@@ -28,8 +28,8 @@ flate2 = "1.1.9"
 futures-util = "0.3.33"
 miette = { version = "7.6.0", features = ["fancy"] }
 minisign-verify = "0.2.5"
-nanocodex = { git = "https://github.com/clabby/nanocodex", rev = "5a4ac47bce4ff9be9c3f0ec7ef66299722725177" }
-nanocodex-core = { git = "https://github.com/clabby/nanocodex", rev = "5a4ac47bce4ff9be9c3f0ec7ef66299722725177" }
+nanocodex = { version = "0.1.1", git = "https://github.com/gakonst/nanocodex", rev = "8b9af4e3b4d18bf8dd2f5cc67ae4d831a8682cdf" }
+nanocodex-core = { version = "0.1.1", git = "https://github.com/gakonst/nanocodex", rev = "8b9af4e3b4d18bf8dd2f5cc67ae4d831a8682cdf" }
 pulldown-cmark = { version = "0.13.4", default-features = false }
 png = "0.18.1"
 ratatui = "0.30.2"

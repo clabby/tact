@@ -74,6 +74,7 @@ pub(crate) enum AppEvent {
     NewSessionReady {
         pane: PaneId,
         effort: ReasoningEffort,
+        fast_mode: bool,
     },
     NewSessionFailed {
         pane: PaneId,
@@ -91,6 +92,7 @@ pub(crate) enum AppEvent {
         pane: PaneId,
         records: Vec<Arc<TranscriptRecord>>,
         effort: ReasoningEffort,
+        fast_mode: bool,
     },
     NotifyError {
         pane: PaneId,
@@ -203,12 +205,17 @@ impl AppNode {
                     RootEvent::NotifyError(format!("Could not fork session: {error}")),
                 )
             }
-            AppEvent::NewSessionReady { pane, effort } => {
+            AppEvent::NewSessionReady {
+                pane,
+                effort,
+                fast_mode,
+            } => {
                 let workspace = self.workspace.clone();
                 let Some(root) = self.pane_mut(pane) else {
                     return ComponentUpdate::none();
                 };
                 root.component_mut().reset_session(&workspace, effort);
+                root.component_mut().set_fast_mode(fast_mode);
                 ComponentUpdate::render(RenderRequest::Immediate)
             }
             AppEvent::NewSessionFailed { pane, error } => {
@@ -224,7 +231,15 @@ impl AppNode {
                 pane,
                 records,
                 effort,
-            } => self.update_root(pane, RootEvent::SessionRestored { records, effort }),
+                fast_mode,
+            } => self.update_root(
+                pane,
+                RootEvent::SessionRestored {
+                    records,
+                    effort,
+                    fast_mode,
+                },
+            ),
             AppEvent::NotifyError { pane, error } => {
                 self.update_root(pane, RootEvent::NotifyError(error))
             }

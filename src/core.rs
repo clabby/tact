@@ -4,15 +4,12 @@ use crate::{
     config::{Config, ReasoningEffort, SkillsConfig},
     error::{Result, RuntimeError},
     mcp,
-    skills::{self, SkillCatalog},
+    skills::SkillCatalog,
     subagents::{self, ScopedAgentUpdate, SubagentControl},
+    tui::session::ResumeState,
 };
-use nanocodex::{
-    AgentEvents, ContentItem, MessageRole, Nanocodex, NanocodexError, ResponseItem, Responses,
-    SessionSnapshot, Tools, TurnControl,
-};
+use nanocodex::{AgentEvents, Nanocodex, NanocodexError, Responses, Tools, TurnControl};
 use nanocodex_core::ModelConfig;
-use serde::Deserialize;
 use std::{
     io,
     io::Write,
@@ -25,6 +22,7 @@ use tokio_util::sync::CancellationToken;
 pub(crate) struct ConfiguredAgent {
     pub(crate) agent: Nanocodex,
     pub(crate) events: AgentEvents,
+    pub(crate) instructions: Arc<str>,
     pub(crate) subagent_updates: mpsc::UnboundedReceiver<ScopedAgentUpdate>,
     pub(crate) subagent_control: SubagentControl,
 }
@@ -54,7 +52,7 @@ impl ConfiguredAgent {
         config: &Config,
         thinking: ReasoningEffort,
         session_id: Option<&str>,
-        snapshot: Option<SessionSnapshot>,
+        resume: Option<ResumeState>,
     ) -> Result<Self> {
         let agent_config = config.agent();
         let workspace = Self::resolve_workspace(agent_config.workspace())?;
@@ -80,18 +78,22 @@ impl ConfiguredAgent {
         let mut builder = Nanocodex::builder(auth)
             .workspace(workspace)
             .thinking(thinking.into())
+            .fast_mode(agent_config.fast_mode())
             .responses(responses.build())
             .tools_factory(move |agent| {
                 subagents::root_tools(tools.clone(), agent, Arc::clone(&subagents))
             });
+        let (snapshot, restored_instructions) = resume
+            .map(ResumeState::into_parts)
+            .map_or((None, None), |(snapshot, instructions)| {
+                (Some(snapshot), Some(instructions))
+            });
         let instructions = session_instructions(
             agent_config.instructions(),
             config.skills(),
-            snapshot.as_ref(),
-        )?;
-        if let Some(instructions) = instructions {
-            builder = builder.instructions(instructions);
-        }
+            restored_instructions,
+        );
+        builder = builder.instructions(Arc::clone(&instructions));
         if let Some(session_id) = session_id {
             builder = builder.session_id(session_id);
         }
@@ -103,6 +105,7 @@ impl ConfiguredAgent {
         Ok(Self {
             agent,
             events,
+            instructions,
             subagent_updates,
             subagent_control,
         })
@@ -188,67 +191,24 @@ impl ConfiguredAgent {
     }
 }
 
-#[derive(Deserialize)]
-struct SnapshotRequestPrefix {
-    request_prefix: Vec<ResponseItem>,
-}
-
 fn session_instructions(
     custom: Option<&str>,
     skills: &SkillsConfig,
-    snapshot: Option<&SessionSnapshot>,
-) -> Result<Option<String>> {
-    let Some(snapshot) = snapshot else {
-        return Ok(fresh_instructions(custom, skills));
-    };
-    let stored = snapshot_developer_instructions(snapshot).map_err(|error| {
-        NanocodexError::InvalidSessionSnapshot(format!(
-            "failed to inspect stored instructions: {error}"
-        ))
-    })?;
-
-    Ok(restored_instructions(custom, stored.as_deref()))
+    restored: Option<String>,
+) -> Arc<str> {
+    restored.map_or_else(|| Arc::from(fresh_instructions(custom, skills)), Arc::from)
 }
 
-fn fresh_instructions(custom: Option<&str>, skills: &SkillsConfig) -> Option<String> {
+fn fresh_instructions(custom: Option<&str>, skills: &SkillsConfig) -> String {
     let catalog = SkillCatalog::load(skills);
-    let Some(skill_instructions) = catalog.rendered_instructions() else {
-        return custom.map(str::to_owned);
-    };
     let base = custom
         .map(str::to_owned)
         .unwrap_or_else(|| ModelConfig::default().system_prompt.to_string());
-    Some(format!("{base}\n\n{skill_instructions}"))
-}
-
-fn restored_instructions(custom: Option<&str>, stored: Option<&str>) -> Option<String> {
-    stored
-        .filter(|instructions| skills::contains_catalog(instructions))
-        .map(str::to_owned)
-        .or_else(|| custom.map(str::to_owned))
-}
-
-fn snapshot_developer_instructions(
-    snapshot: &SessionSnapshot,
-) -> std::result::Result<Option<String>, serde_json::Error> {
-    let snapshot =
-        serde_json::from_value::<SnapshotRequestPrefix>(serde_json::to_value(snapshot)?)?;
-    Ok(snapshot.request_prefix.into_iter().find_map(|item| {
-        let ResponseItem::Message {
-            role: MessageRole::Developer,
-            content,
-            ..
-        } = item
-        else {
-            return None;
-        };
-        content.into_iter().find_map(|content| match content {
-            ContentItem::InputText { text } => Some(text.into_string()),
-            ContentItem::InputImage { .. }
-            | ContentItem::InputAudio { .. }
-            | ContentItem::OutputText { .. } => None,
+    catalog
+        .rendered_instructions()
+        .map_or(base.clone(), |skill_instructions| {
+            format!("{base}\n\n{skill_instructions}")
         })
-    }))
 }
 
 impl Cancellation {
@@ -263,9 +223,7 @@ impl Cancellation {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        ConfiguredAgent, fresh_instructions, session_instructions, snapshot_developer_instructions,
-    };
+    use super::{ConfiguredAgent, fresh_instructions, session_instructions};
     use crate::{
         config::SkillsConfig,
         error::{Error, RuntimeError},
@@ -357,10 +315,13 @@ mod tests {
     fn fresh_disabled_skills_do_not_change_instructions() {
         let disabled = SkillsConfig::from_roots(false, Vec::new());
 
-        assert_eq!(fresh_instructions(None, &disabled), None);
         assert_eq!(
-            fresh_instructions(Some("Custom instructions."), &disabled).as_deref(),
-            Some("Custom instructions.")
+            fresh_instructions(None, &disabled),
+            ModelConfig::default().system_prompt.as_ref()
+        );
+        assert_eq!(
+            fresh_instructions(Some("Custom instructions."), &disabled),
+            "Custom instructions."
         );
     }
 
@@ -377,7 +338,7 @@ mod tests {
         .unwrap();
         let enabled = SkillsConfig::from_roots(true, vec![directory.path().to_path_buf()]);
 
-        let instructions = fresh_instructions(None, &enabled).unwrap();
+        let instructions = fresh_instructions(None, &enabled);
         let default = ModelConfig::default().system_prompt;
 
         assert!(instructions.starts_with(default.as_ref()));
@@ -400,7 +361,7 @@ mod tests {
         .unwrap();
         let enabled = SkillsConfig::from_roots(true, vec![directory.path().to_path_buf()]);
 
-        let instructions = fresh_instructions(Some("Keep this first."), &enabled).unwrap();
+        let instructions = fresh_instructions(Some("Keep this first."), &enabled);
 
         assert!(instructions.starts_with("Keep this first.\n\n## Available local skills"));
         assert!(instructions.contains("Run focused tests."));
@@ -422,7 +383,7 @@ mod tests {
         .unwrap();
         let enabled = SkillsConfig::from_roots(true, vec![directory.path().to_path_buf()]);
 
-        let instructions = fresh_instructions(None, &enabled).unwrap();
+        let instructions = fresh_instructions(None, &enabled);
 
         assert!(instructions.contains("Still available."));
     }
@@ -430,7 +391,6 @@ mod tests {
     #[test]
     fn restored_catalog_is_reused_after_skills_are_disabled_or_changed() {
         let stored = "Original instructions.\n\n<!-- tact:skills-catalog:start -->\nold catalog\n<!-- tact:skills-catalog:end -->";
-        let snapshot = snapshot_with_instructions(stored);
         let disabled = SkillsConfig::from_roots(false, Vec::new());
 
         let directory = tempdir().unwrap();
@@ -444,22 +404,22 @@ mod tests {
         let enabled = SkillsConfig::from_roots(true, vec![directory.path().to_path_buf()]);
 
         assert_eq!(
-            session_instructions(Some("Changed instructions."), &disabled, Some(&snapshot))
-                .unwrap()
-                .as_deref(),
-            Some(stored)
+            session_instructions(
+                Some("Changed instructions."),
+                &disabled,
+                Some(stored.to_owned())
+            )
+            .as_ref(),
+            stored
         );
         assert_eq!(
-            session_instructions(None, &enabled, Some(&snapshot))
-                .unwrap()
-                .as_deref(),
-            Some(stored)
+            session_instructions(None, &enabled, Some(stored.to_owned())).as_ref(),
+            stored
         );
     }
 
     #[test]
-    fn restored_session_without_a_catalog_does_not_inject_one() {
-        let snapshot = snapshot_with_instructions("Old default.");
+    fn restored_session_reuses_exact_instructions() {
         let directory = tempdir().unwrap();
         let skill = directory.path().join("new");
         fs::create_dir(&skill).unwrap();
@@ -471,61 +431,18 @@ mod tests {
         let enabled = SkillsConfig::from_roots(true, vec![directory.path().to_path_buf()]);
 
         assert_eq!(
-            session_instructions(None, &enabled, Some(&snapshot)).unwrap(),
-            None
+            session_instructions(None, &enabled, Some("Old default.".to_owned())).as_ref(),
+            "Old default."
         );
         assert_eq!(
-            session_instructions(Some("Current custom."), &enabled, Some(&snapshot))
-                .unwrap()
-                .as_deref(),
-            Some("Current custom.")
+            session_instructions(
+                Some("Current custom."),
+                &enabled,
+                Some("Old custom.".to_owned())
+            )
+            .as_ref(),
+            "Old custom."
         );
-    }
-
-    #[test]
-    fn extracts_typed_developer_instructions_from_a_snapshot() {
-        let instructions = "Stored instructions.\n<!-- tact:skills-catalog:start -->\ncatalog\n<!-- tact:skills-catalog:end -->";
-        let snapshot = snapshot_with_instructions(instructions);
-
-        assert_eq!(
-            snapshot_developer_instructions(&snapshot)
-                .unwrap()
-                .as_deref(),
-            Some(instructions)
-        );
-    }
-
-    fn snapshot_with_instructions(instructions: &str) -> nanocodex::SessionSnapshot {
-        serde_json::from_value(serde_json::json!({
-            "version": 1,
-            "model": nanocodex_core::MODEL,
-            "lineage_id": "test-lineage",
-            "workspace": "/test/workspace",
-            "request_prefix": [
-                {
-                    "type": "additional_tools",
-                    "role": "developer",
-                    "tools": []
-                },
-                {
-                    "type": "message",
-                    "role": "developer",
-                    "content": [{ "type": "input_text", "text": instructions }]
-                }
-            ],
-            "canonical_context": {
-                "type": "message",
-                "role": "user",
-                "content": [{ "type": "input_text", "text": "test" }]
-            },
-            "history": [{
-                "type": "message",
-                "role": "user",
-                "content": [{ "type": "input_text", "text": "test" }]
-            }],
-            "checkpoint": null
-        }))
-        .unwrap()
     }
 
     #[test]
@@ -533,6 +450,7 @@ mod tests {
         let auth = OpenAiAuth::managed_chatgpt(Arc::new(TestChatGptAuth));
         let config = ModelConfig {
             auth,
+            store_responses: false,
             ..ModelConfig::default()
         };
         let profile = RequestProfile::new("session", "lineage", Arc::from([]));
@@ -540,6 +458,7 @@ mod tests {
         let request = serde_json::to_value(ResponseCreate::warmup(
             &config,
             Thinking::Medium,
+            false,
             &profile,
             None,
         ))
@@ -565,6 +484,7 @@ mod tests {
         let configured = ConfiguredAgent {
             agent,
             events,
+            instructions: ModelConfig::default().system_prompt,
             subagent_updates,
             subagent_control,
         };

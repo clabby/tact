@@ -32,6 +32,10 @@ pub(crate) enum WorkerCommand {
         pane: PaneId,
         effort: ReasoningEffort,
     },
+    SetFastMode {
+        pane: PaneId,
+        enabled: bool,
+    },
     CancelAll(PaneId),
     OpenFork(PaneId),
     ClosePane(PaneId),
@@ -79,6 +83,11 @@ pub(crate) enum WorkerEvent {
     ThinkingUpdated {
         pane: PaneId,
         effort: ReasoningEffort,
+        result: Result<(), NanocodexError>,
+    },
+    FastModeUpdated {
+        pane: PaneId,
+        enabled: bool,
         result: Result<(), NanocodexError>,
     },
     Stopped {
@@ -186,6 +195,18 @@ async fn run(
                         drop(updates.send(WorkerEvent::ThinkingUpdated {
                             pane,
                             effort,
+                            result,
+                        }));
+                        continue;
+                    }
+                    WorkerCommand::SetFastMode { pane, enabled } => {
+                        let result = match agent_for(pane, main.as_ref(), fork.as_ref()) {
+                            Some(agent) => agent.set_fast_mode(enabled).await,
+                            None => Err(NanocodexError::AgentStopped),
+                        };
+                        drop(updates.send(WorkerEvent::FastModeUpdated {
+                            pane,
+                            enabled,
                             result,
                         }));
                         continue;
@@ -543,6 +564,57 @@ mod tests {
             Ok(Some(WorkerEvent::ThinkingUpdated {
                 pane: PaneId::Main,
                 effort: ReasoningEffort::High,
+                result: Ok(()),
+            }))
+        ));
+
+        shutdown.cancel();
+        timeout(Duration::from_secs(5), async {
+            while !matches!(updates.recv().await, Some(WorkerEvent::Stopped { .. })) {}
+        })
+        .await
+        .expect("the worker should stop");
+        timeout(Duration::from_secs(5), drain)
+            .await
+            .expect("the event stream should drain")
+            .expect("the drain task should not panic");
+    }
+
+    #[tokio::test]
+    async fn fast_mode_can_change_while_a_turn_is_active() {
+        let called = Arc::new(Notify::new());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (agent, mut events) = pending_agent(Arc::clone(&called), calls);
+        let shutdown = CancellationToken::new();
+        let (commands, mut updates) = spawn(agent, shutdown.clone());
+        let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
+
+        commands
+            .send(WorkerCommand::Submit {
+                pane: PaneId::Main,
+                id: TurnId::new(1),
+                prompt: "keep running".to_owned().into(),
+            })
+            .unwrap();
+        timeout(Duration::from_secs(5), called.notified())
+            .await
+            .expect("the model request should start");
+        assert!(matches!(
+            updates.recv().await,
+            Some(WorkerEvent::TurnAccepted { id, .. }) if id == TurnId::new(1)
+        ));
+
+        commands
+            .send(WorkerCommand::SetFastMode {
+                pane: PaneId::Main,
+                enabled: true,
+            })
+            .unwrap();
+        assert!(matches!(
+            timeout(Duration::from_secs(5), updates.recv()).await,
+            Ok(Some(WorkerEvent::FastModeUpdated {
+                pane: PaneId::Main,
+                enabled: true,
                 result: Ok(()),
             }))
         ));

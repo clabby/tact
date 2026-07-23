@@ -1,3 +1,4 @@
+use crate::config::ReasoningEffort;
 use serde_json::Value;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -41,6 +42,8 @@ pub(crate) enum EntryKind {
     Assistant { text: String, complete: bool },
     Reasoning { text: String },
     Tool(ToolEntry),
+    EffortChanged { to: ReasoningEffort },
+    FastModeChanged { enabled: bool },
     Interrupted { count: usize },
     ContextCompacted { duration_ns: u64 },
     ContextCompactionFailed { message: String },

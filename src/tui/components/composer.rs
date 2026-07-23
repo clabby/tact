@@ -54,6 +54,7 @@ pub(crate) enum ComposerEvent {
     },
     ReplaceDraft(String),
     SetEffort(ReasoningEffort),
+    SetFastMode(bool),
     Activity {
         active: bool,
         status: Option<String>,
@@ -77,6 +78,7 @@ pub(crate) struct Composer {
     context_tokens: u64,
     workspace: String,
     thinking: ReasoningEffort,
+    fast_mode: bool,
     activity_wave: Option<WavedText>,
     activity_status: Option<String>,
     active_subagents: usize,
@@ -116,6 +118,7 @@ impl Composer {
             context_tokens: 0,
             workspace: shorten_home(workspace),
             thinking,
+            fast_mode: false,
             activity_wave: None,
             activity_status: None,
             active_subagents: 0,
@@ -168,6 +171,13 @@ impl Composer {
                     return ComposerUpdate::unchanged();
                 }
                 self.thinking = effort;
+                ComposerUpdate::changed()
+            }
+            ComposerEvent::SetFastMode(enabled) => {
+                if self.fast_mode == enabled {
+                    return ComposerUpdate::unchanged();
+                }
+                self.fast_mode = enabled;
                 ComposerUpdate::changed()
             }
             ComposerEvent::Activity {
@@ -323,6 +333,10 @@ impl Composer {
 
     pub(crate) const fn effort(&self) -> ReasoningEffort {
         self.thinking
+    }
+
+    pub(crate) const fn fast_mode(&self) -> bool {
+        self.fast_mode
     }
 
     pub(crate) const fn cursor(&self) -> usize {
@@ -694,8 +708,12 @@ impl Composer {
         };
         let model = format!(" {MODEL} ");
         let effort = format!(" {} ", self.thinking.as_str());
+        let fast_mode = self.fast_mode.then_some("⚡ ");
         let shell = shell_mode.then_some(" shell ");
-        let right_width = model.width() + effort.width() + shell.map_or(0, UnicodeWidthStr::width);
+        let right_width = model.width()
+            + effort.width()
+            + fast_mode.map_or(0, UnicodeWidthStr::width)
+            + shell.map_or(0, UnicodeWidthStr::width);
         let right_start = content_start
             + u16::try_from(content_width.saturating_sub(right_width)).unwrap_or(u16::MAX);
 
@@ -765,8 +783,23 @@ impl Composer {
                     .add_modifier(Modifier::BOLD),
             );
         }
+        let fast_mode_start = effort_start + u16::try_from(effort.width()).unwrap_or(u16::MAX);
+        if let Some(fast_mode) = fast_mode
+            && fast_mode_start < content_end
+        {
+            buffer.set_stringn(
+                fast_mode_start,
+                top,
+                fast_mode,
+                usize::from(content_end - fast_mode_start),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            );
+        }
         if let Some(shell) = shell {
-            let shell_start = effort_start + u16::try_from(effort.width()).unwrap_or(u16::MAX);
+            let shell_start = fast_mode_start
+                + u16::try_from(fast_mode.map_or(0, UnicodeWidthStr::width)).unwrap_or(u16::MAX);
             if shell_start < content_end {
                 buffer.set_stringn(
                     shell_start,
@@ -985,6 +1018,24 @@ mod tests {
                 footer,
             ]
         );
+    }
+
+    #[test]
+    fn fast_mode_places_a_yellow_bolt_after_effort() {
+        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        composer.update(ComposerEvent::SetFastMode(true));
+
+        let terminal = render(&mut composer, 60, 5);
+        let top = &terminal.backend().buffer().content[..60];
+        let rendered = top.iter().map(|cell| cell.symbol()).collect::<String>();
+        let bolt = top
+            .iter()
+            .position(|cell| cell.symbol() == "⚡")
+            .expect("fast mode should render its indicator");
+
+        assert!(rendered.contains("medium ⚡"));
+        assert_eq!(top[bolt].fg, Color::Yellow);
+        assert!(top[bolt].modifier.contains(ratatui::style::Modifier::BOLD));
     }
 
     #[test]

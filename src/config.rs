@@ -108,6 +108,7 @@ pub(crate) struct AuthConfig {
 pub(crate) struct AgentConfig {
     workspace: PathBuf,
     thinking: ReasoningEffort,
+    fast_mode: bool,
     instructions: Option<String>,
     web_search: bool,
     image_generation: bool,
@@ -209,6 +210,7 @@ struct AuthConfigFile {
 struct AgentConfigFile {
     workspace: Option<PathBuf>,
     thinking: Option<ReasoningEffort>,
+    fast_mode: Option<bool>,
     instructions: Option<String>,
     web_search: Option<bool>,
     image_generation: Option<bool>,
@@ -293,6 +295,7 @@ impl Config {
                     .thinking
                     .or(file.agent.thinking)
                     .unwrap_or_default(),
+                fast_mode: file.agent.fast_mode.unwrap_or(false),
                 instructions: overrides.instructions.or(file.agent.instructions),
                 web_search: overrides
                     .web_search
@@ -331,6 +334,10 @@ impl Config {
         self.agent.thinking = effort;
     }
 
+    pub(crate) fn set_fast_mode(&mut self, enabled: bool) {
+        self.agent.fast_mode = enabled;
+    }
+
     pub(crate) fn path(&self) -> &Path {
         &self.path
     }
@@ -363,6 +370,10 @@ impl Config {
 
     pub(crate) fn persist_thinking(&self, effort: ReasoningEffort) -> Result<()> {
         Self::persist_thinking_at(&self.path, effort)
+    }
+
+    pub(crate) fn persist_fast_mode(&self, enabled: bool) -> Result<()> {
+        Self::persist_fast_mode_at(&self.path, enabled)
     }
 
     pub(crate) fn persist_theme_mode(&self, mode: ThemeMode) -> Result<()> {
@@ -453,6 +464,15 @@ impl Config {
 
     fn persist_thinking_at(path: &Path, effort: ReasoningEffort) -> Result<()> {
         Self::persist_setting(path, "agent", "thinking", effort.as_str())
+    }
+
+    fn persist_fast_mode_at(path: &Path, enabled: bool) -> Result<()> {
+        let mut document = Self::read_document(path)?;
+        if !document.contains_key("agent") {
+            document["agent"] = Item::Table(Table::new());
+        }
+        document["agent"]["fast_mode"] = value(enabled);
+        Self::write_document(path, document)
     }
 
     fn persist_setting(path: &Path, section: &str, key: &str, setting: &str) -> Result<()> {
@@ -712,6 +732,10 @@ impl AgentConfig {
         self.thinking
     }
 
+    pub(crate) const fn fast_mode(&self) -> bool {
+        self.fast_mode
+    }
+
     pub(crate) fn instructions(&self) -> Option<&str> {
         self.instructions.as_deref()
     }
@@ -954,6 +978,7 @@ mod tests {
         assert_eq!(config.auth.file, home.join(".codex/auth.json"));
         assert_eq!(config.agent.workspace, directory.path());
         assert_eq!(config.agent.thinking, ReasoningEffort::Medium);
+        assert!(!config.agent.fast_mode);
         assert!(config.agent.web_search);
         assert!(config.agent.image_generation);
         assert_eq!(config.theme.border(), Color::DarkGray);
@@ -969,6 +994,7 @@ mod tests {
             directory.path().to_str()
         );
         assert_eq!(rendered["agent"]["thinking"].as_str(), Some("medium"));
+        assert_eq!(rendered["agent"]["fast_mode"].as_bool(), Some(false));
         assert_eq!(rendered["theme"]["mode"].as_str(), Some("auto"));
         assert_eq!(rendered["theme"]["dark"]["accent"].as_str(), Some("blue"));
     }
@@ -1231,7 +1257,7 @@ mod tests {
         let config_path = directory.path().join("config.toml");
         fs::write(
             &config_path,
-            "[agent]\nworkspace = \"workspace\"\nthinking = \"xhigh\"\n\
+            "[agent]\nworkspace = \"workspace\"\nthinking = \"xhigh\"\nfast_mode = true\n\
              instructions = \"Be concise.\"\nweb_search = false\nimage_generation = false\n\
              websocket_url = \"wss://example.com/responses\"\n\
              api_base_url = \"https://example.com/v1\"\n",
@@ -1253,6 +1279,7 @@ mod tests {
 
         assert_eq!(config.agent.workspace, directory.path().join("workspace"));
         assert_eq!(config.agent.thinking, ReasoningEffort::Xhigh);
+        assert!(config.agent.fast_mode);
         assert_eq!(config.agent.instructions.as_deref(), Some("Be concise."));
         assert!(!config.agent.web_search);
         assert!(!config.agent.image_generation);
@@ -1789,6 +1816,27 @@ mod tests {
         let document = toml::from_str::<toml::Value>(&contents).unwrap();
         assert!(contents.contains("# Keep this comment."));
         assert_eq!(document["agent"]["thinking"].as_str(), Some("xhigh"));
+        assert_eq!(document["agent"]["web_search"].as_bool(), Some(false));
+        assert_eq!(document["theme"]["accent"].as_str(), Some("#AABBCC"));
+    }
+
+    #[test]
+    fn persisting_fast_mode_preserves_the_rest_of_the_config() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        fs::write(
+            &path,
+            "# Keep this comment.\n[agent]\nfast_mode = false\nweb_search = false\n\n\
+             [theme]\naccent = \"#AABBCC\"\n",
+        )
+        .unwrap();
+
+        Config::persist_fast_mode_at(&path, true).unwrap();
+
+        let contents = fs::read_to_string(&path).unwrap();
+        let document = toml::from_str::<toml::Value>(&contents).unwrap();
+        assert!(contents.contains("# Keep this comment."));
+        assert_eq!(document["agent"]["fast_mode"].as_bool(), Some(true));
         assert_eq!(document["agent"]["web_search"].as_bool(), Some(false));
         assert_eq!(document["theme"]["accent"].as_str(), Some("#AABBCC"));
     }

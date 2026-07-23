@@ -2,7 +2,10 @@ use super::{
     EntryId, EntryKind, MessagePhase, ShellId, ToolEntry, ToolState, TranscriptEntry,
     TranscriptRecord, TransientStatus,
 };
-use crate::tui::format::{format_duration, humanize_tool};
+use crate::{
+    config::ReasoningEffort,
+    tui::format::{format_duration, humanize_tool},
+};
 use serde::Deserialize;
 use serde_json::Value;
 use std::{
@@ -129,6 +132,14 @@ impl TranscriptModel {
             "shell.finished" => self
                 .decode_local::<ShellFinished>(record)
                 .map(|payload| self.shell_finished(payload)),
+            "effort.changed" => self.decode_local::<EffortChanged>(record).map(|payload| {
+                self.push(EntryKind::EffortChanged { to: payload.to });
+            }),
+            "fast_mode.changed" => self.decode_local::<FastModeChanged>(record).map(|payload| {
+                self.push(EntryKind::FastModeChanged {
+                    enabled: payload.to,
+                });
+            }),
             "worker.turn_finished" => {
                 self.decode_local::<WorkerTurnFinished>(record)
                     .map(|payload| {
@@ -704,8 +715,10 @@ impl TranscriptModel {
 fn visibility(source: &str, kind: &str) -> EventVisibility {
     if source == "tact" {
         return match kind {
-            "user.submitted" | "worker.turns_interrupted" => EventVisibility::Persistent,
-            "effort.changed" => EventVisibility::StateOnly,
+            "user.submitted"
+            | "worker.turns_interrupted"
+            | "effort.changed"
+            | "fast_mode.changed" => EventVisibility::Persistent,
             "worker.turn_finished" | "worker.stopped" | "session.ended" => {
                 EventVisibility::ErrorFallback
             }
@@ -823,6 +836,16 @@ struct ShellFinished {
     duration_ns: u64,
     truncated: bool,
     error: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct EffortChanged {
+    to: ReasoningEffort,
+}
+
+#[derive(Deserialize)]
+struct FastModeChanged {
+    to: bool,
 }
 
 #[derive(Deserialize)]
@@ -965,28 +988,6 @@ mod tests {
                 "{kind}"
             );
         }
-    }
-
-    #[test]
-    fn effort_changes_are_persisted_without_becoming_transcript_entries() {
-        let record = TranscriptRecord::from_local(
-            1,
-            1,
-            LocalEvent::EffortChanged {
-                from: ReasoningEffort::Low,
-                to: ReasoningEffort::High,
-            },
-        )
-        .unwrap();
-        let mut model = TranscriptModel::default();
-
-        model.apply(&record);
-
-        assert_eq!(
-            visibility("tact", "effort.changed"),
-            EventVisibility::StateOnly
-        );
-        assert!(model.entries().is_empty());
     }
 
     #[test]
@@ -1142,6 +1143,44 @@ mod tests {
         assert!(
             matches!(&model.entries()[0].kind, EntryKind::User { text, .. } if text == "hello")
         );
+    }
+
+    #[test]
+    fn applied_session_settings_are_visible_transcript_entries() {
+        let mut model = TranscriptModel::default();
+        model.apply(
+            &TranscriptRecord::from_local(
+                1,
+                1,
+                LocalEvent::EffortChanged {
+                    from: ReasoningEffort::Medium,
+                    to: ReasoningEffort::High,
+                },
+            )
+            .unwrap(),
+        );
+        model.apply(
+            &TranscriptRecord::from_local(
+                2,
+                2,
+                LocalEvent::FastModeChanged {
+                    from: false,
+                    to: true,
+                },
+            )
+            .unwrap(),
+        );
+
+        assert!(matches!(
+            model.entries()[0].kind,
+            EntryKind::EffortChanged {
+                to: ReasoningEffort::High
+            }
+        ));
+        assert!(matches!(
+            model.entries()[1].kind,
+            EntryKind::FastModeChanged { enabled: true }
+        ));
     }
 
     #[test]

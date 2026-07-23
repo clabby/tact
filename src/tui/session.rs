@@ -5,6 +5,7 @@ use crate::{
     tui::transcript::{self, SessionStarted, TranscriptRecord},
 };
 use nanocodex::SessionSnapshot;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     fs::{self, File},
@@ -18,6 +19,7 @@ use thiserror::Error;
 use zstd::stream::{read::Decoder, write::Encoder};
 
 const COMPRESSION_LEVEL: i32 = 3;
+const CHECKPOINT_FORMAT_VERSION: u32 = 1;
 
 #[cfg(unix)]
 use std::os::unix::fs::DirBuilderExt;
@@ -30,6 +32,41 @@ pub(crate) struct SessionSummary {
     pub(crate) effort: ReasoningEffort,
     pub(crate) workspace: PathBuf,
     pub(crate) preview: String,
+}
+
+#[derive(Serialize)]
+struct CheckpointEnvelope<'a> {
+    format_version: u32,
+    instructions: &'a str,
+    snapshot: &'a SessionSnapshot,
+}
+
+#[derive(Deserialize)]
+struct StoredCheckpoint {
+    #[serde(default)]
+    format_version: Option<u32>,
+    #[serde(default)]
+    instructions: Option<String>,
+    #[serde(default)]
+    snapshot: Option<SessionSnapshot>,
+}
+
+pub(crate) struct ResumeState {
+    snapshot: SessionSnapshot,
+    instructions: String,
+}
+
+impl ResumeState {
+    fn new(snapshot: SessionSnapshot, instructions: String) -> Self {
+        Self {
+            snapshot,
+            instructions,
+        }
+    }
+
+    pub(crate) fn into_parts(self) -> (SessionSnapshot, String) {
+        (self.snapshot, self.instructions)
+    }
 }
 
 #[derive(Debug, Error)]
@@ -70,8 +107,16 @@ pub(crate) enum SessionError {
         #[source]
         source: tempfile::PersistError,
     },
+    #[error("failed to remove obsolete checkpoint {path}: {source}")]
+    RemoveObsoleteCheckpoint {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
     #[error("no resumable checkpoint exists for session {session_id}")]
     MissingCheckpoint { session_id: String },
+    #[error("obsolete checkpoint {path} was removed; start a new session")]
+    ObsoleteCheckpointRemoved { path: PathBuf },
     #[error("failed to read checkpoint {path}: {source}")]
     ReadCheckpoint {
         path: PathBuf,
@@ -84,6 +129,10 @@ pub(crate) enum SessionError {
         #[source]
         source: serde_json::Error,
     },
+    #[error("checkpoint {path} was created by an incompatible tact version; start a new session")]
+    IncompatibleCheckpoint { path: PathBuf },
+    #[error("checkpoint {path} is incomplete or corrupt; start a new session")]
+    InvalidCheckpoint { path: PathBuf },
     #[error(transparent)]
     Transcript(#[from] transcript::TranscriptError),
 }
@@ -92,6 +141,7 @@ pub(crate) fn save_checkpoint(
     config_path: &Path,
     session_id: &str,
     snapshot: &SessionSnapshot,
+    instructions: &str,
 ) -> Result<(), SessionError> {
     let directory = checkpoint_directory(config_path);
     create_private_directory(&directory)?;
@@ -114,7 +164,12 @@ pub(crate) fn save_checkpoint(
             source,
         }
     })?;
-    serde_json::to_writer(&mut output, snapshot).map_err(|source| {
+    let checkpoint = CheckpointEnvelope {
+        format_version: CHECKPOINT_FORMAT_VERSION,
+        instructions,
+        snapshot,
+    };
+    serde_json::to_writer(&mut output, &checkpoint).map_err(|source| {
         SessionError::EncodeCheckpoint {
             path: path.clone(),
             source,
@@ -143,38 +198,59 @@ pub(crate) fn save_checkpoint(
     temporary
         .persist(&path)
         .map_err(|source| SessionError::PersistCheckpoint { path, source })?;
+    remove_obsolete_checkpoint(config_path, session_id)?;
     Ok(())
 }
 
 pub(crate) fn load_checkpoint(
     config_path: &Path,
     session_id: &str,
-) -> Result<SessionSnapshot, SessionError> {
+) -> Result<ResumeState, SessionError> {
     let path = checkpoint_path(config_path, session_id);
-    let file = File::open(&path).map_err(|source| {
-        if source.kind() == io::ErrorKind::NotFound {
-            SessionError::MissingCheckpoint {
-                session_id: session_id.to_owned(),
+    let file = match File::open(&path) {
+        Ok(file) => file,
+        Err(source) if source.kind() == io::ErrorKind::NotFound => {
+            let obsolete_path = obsolete_checkpoint_path(config_path, session_id);
+            if remove_obsolete_checkpoint(config_path, session_id)? {
+                return Err(SessionError::ObsoleteCheckpointRemoved {
+                    path: obsolete_path,
+                });
             }
-        } else {
-            SessionError::ReadCheckpoint {
+            return Err(SessionError::MissingCheckpoint {
+                session_id: session_id.to_owned(),
+            });
+        }
+        Err(source) => {
+            return Err(SessionError::ReadCheckpoint {
                 path: path.clone(),
                 source,
-            }
+            });
         }
-    })?;
+    };
     let decoder = Decoder::new(file).map_err(|source| SessionError::ReadCheckpoint {
         path: path.clone(),
         source,
     })?;
-    serde_json::from_reader(BufReader::new(decoder))
-        .map_err(|source| SessionError::DecodeCheckpoint { path, source })
+    let checkpoint = serde_json::from_reader::<_, StoredCheckpoint>(BufReader::new(decoder))
+        .map_err(|source| SessionError::DecodeCheckpoint {
+            path: path.clone(),
+            source,
+        })?;
+    if checkpoint.format_version != Some(CHECKPOINT_FORMAT_VERSION) {
+        return Err(SessionError::IncompatibleCheckpoint { path });
+    }
+    let (Some(snapshot), Some(instructions)) = (checkpoint.snapshot, checkpoint.instructions)
+    else {
+        return Err(SessionError::InvalidCheckpoint { path });
+    };
+    Ok(ResumeState::new(snapshot, instructions))
 }
 
 pub(crate) fn list(
     config_path: &Path,
     workspace: &Path,
 ) -> Result<Vec<SessionSummary>, SessionError> {
+    remove_obsolete_checkpoints(config_path)?;
     let mut sessions = HashMap::<String, SessionSummary>::new();
     for path in transcript_paths(config_path)? {
         let records = transcript::load(&path)?;
@@ -184,7 +260,7 @@ pub(crate) fn list(
         if started.workspace != workspace {
             continue;
         }
-        if !checkpoint_path(config_path, &started.session_id).is_file() {
+        if !has_checkpoint(config_path, &started.session_id)? {
             continue;
         }
         let started_at_unix_ms = records
@@ -247,7 +323,8 @@ pub(crate) fn format_age(started_at_unix_ms: u64) -> String {
 }
 
 fn transcript_paths(config_path: &Path) -> Result<Vec<PathBuf>, SessionError> {
-    let directory = data_directory(config_path).join("transcripts");
+    transcript::remove_obsolete(config_path)?;
+    let directory = transcript::storage_directory(config_path);
     let entries = match fs::read_dir(&directory) {
         Ok(entries) => entries,
         Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -307,11 +384,90 @@ fn first_user_message(records: &[Arc<TranscriptRecord>]) -> Option<String> {
 }
 
 fn checkpoint_directory(config_path: &Path) -> PathBuf {
-    data_directory(config_path).join("checkpoints")
+    checkpoint_root(config_path).join(format!("v{CHECKPOINT_FORMAT_VERSION}"))
 }
 
 fn checkpoint_path(config_path: &Path, session_id: &str) -> PathBuf {
     checkpoint_directory(config_path).join(format!("{}.json.zst", encode_filename(session_id)))
+}
+
+fn checkpoint_root(config_path: &Path) -> PathBuf {
+    data_directory(config_path).join("checkpoints")
+}
+
+fn obsolete_checkpoint_path(config_path: &Path, session_id: &str) -> PathBuf {
+    checkpoint_root(config_path).join(format!("{}.json.zst", encode_filename(session_id)))
+}
+
+fn remove_obsolete_checkpoint(config_path: &Path, session_id: &str) -> Result<bool, SessionError> {
+    let path = obsolete_checkpoint_path(config_path, session_id);
+    match fs::remove_file(&path) {
+        Ok(()) => Ok(true),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(source) => Err(SessionError::RemoveObsoleteCheckpoint { path, source }),
+    }
+}
+
+pub(super) fn remove_obsolete_checkpoints(config_path: &Path) -> Result<(), SessionError> {
+    let directory = checkpoint_root(config_path);
+    let entries = match fs::read_dir(&directory) {
+        Ok(entries) => entries,
+        Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(source) => {
+            return Err(SessionError::ReadDirectory {
+                path: directory,
+                source,
+            });
+        }
+    };
+    for entry in entries {
+        let entry = entry.map_err(|source| SessionError::ReadDirectory {
+            path: directory.clone(),
+            source,
+        })?;
+        let file_type = entry
+            .file_type()
+            .map_err(|source| SessionError::ReadDirectory {
+                path: directory.clone(),
+                source,
+            })?;
+        if !file_type.is_file() {
+            continue;
+        }
+        let path = entry.path();
+        if !is_unversioned_checkpoint(&path) {
+            continue;
+        }
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(source) if source.kind() == io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(SessionError::RemoveObsoleteCheckpoint { path, source });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn is_unversioned_checkpoint(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let Some(session_id) = name.strip_suffix(".json.zst") else {
+        return false;
+    };
+    !session_id.is_empty()
+        && session_id.len() % 2 == 0
+        && session_id.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn has_checkpoint(config_path: &Path, session_id: &str) -> Result<bool, SessionError> {
+    let path = checkpoint_path(config_path, session_id);
+    match fs::metadata(&path) {
+        Ok(metadata) => Ok(metadata.is_file()),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(source) => Err(SessionError::ReadCheckpoint { path, source }),
+    }
 }
 
 fn data_directory(config_path: &Path) -> &Path {
@@ -343,7 +499,8 @@ fn create_private_directory(path: &Path) -> Result<(), SessionError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        encode_filename, format_age, list, load_checkpoint, load_transcript, save_checkpoint,
+        encode_filename, format_age, list, load_checkpoint, load_transcript,
+        obsolete_checkpoint_path, save_checkpoint,
     };
     use crate::{
         config::ReasoningEffort,
@@ -359,14 +516,22 @@ mod tests {
             "version": 1,
             "model": nanocodex::MODEL,
             "lineage_id": lineage,
+            "prompt_cache_key": "test-cache-key",
             "workspace": "/work",
             "request_prefix": [
                 {"type": "additional_tools", "role": "developer", "tools": []},
                 {"type": "message", "role": "developer", "content": []}
             ],
-            "canonical_context": {"type": "message", "role": "developer", "content": []},
-            "history": [],
-            "checkpoint": null
+            "canonical_context": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "hello"}]
+            },
+            "history": [{
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "hello"}]
+            }]
         }))
         .unwrap()
     }
@@ -386,13 +551,25 @@ mod tests {
     fn checkpoint_is_compressed_and_atomically_replaced() {
         let directory = tempdir().unwrap();
         let config = directory.path().join("config.toml");
-        save_checkpoint(&config, "session", &snapshot("first")).unwrap();
-        save_checkpoint(&config, "session", &snapshot("second")).unwrap();
+        let obsolete = obsolete_checkpoint_path(&config, "session");
+        std::fs::create_dir_all(obsolete.parent().unwrap()).unwrap();
+        std::fs::write(&obsolete, b"obsolete checkpoint").unwrap();
+        save_checkpoint(&config, "session", &snapshot("first"), "first instructions").unwrap();
+        save_checkpoint(
+            &config,
+            "session",
+            &snapshot("second"),
+            "second instructions",
+        )
+        .unwrap();
 
         let restored = load_checkpoint(&config, "session").unwrap();
+        let (restored, instructions) = restored.into_parts();
         let restored = serde_json::to_value(restored).unwrap();
         assert_eq!(restored["lineage_id"], Value::String("second".to_owned()));
-        let checkpoints = std::fs::read_dir(directory.path().join("checkpoints"))
+        assert_eq!(instructions, "second instructions");
+        assert!(!obsolete.exists());
+        let checkpoints = std::fs::read_dir(directory.path().join("checkpoints/v1"))
             .unwrap()
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
@@ -416,6 +593,7 @@ mod tests {
                 parent_session_id: None,
                 model: "model".to_owned(),
                 effort: ReasoningEffort::High,
+                fast_mode: false,
                 workspace: "/work".into(),
                 application_version: "test".to_owned(),
             }))
@@ -434,7 +612,7 @@ mod tests {
             .unwrap();
         drop(journal);
         writer.into_task().await.unwrap().unwrap();
-        save_checkpoint(&config, "session/one", &snapshot("lineage")).unwrap();
+        save_checkpoint(&config, "session/one", &snapshot("lineage"), "instructions").unwrap();
 
         let (mut journal, writer) = TranscriptJournal::open(&config, "other-session").unwrap();
         journal
@@ -443,13 +621,20 @@ mod tests {
                 parent_session_id: None,
                 model: "model".to_owned(),
                 effort: ReasoningEffort::Medium,
+                fast_mode: false,
                 workspace: "/other-workspace".into(),
                 application_version: "test".to_owned(),
             }))
             .unwrap();
         drop(journal);
         writer.into_task().await.unwrap().unwrap();
-        save_checkpoint(&config, "other-session", &snapshot("other-lineage")).unwrap();
+        save_checkpoint(
+            &config,
+            "other-session",
+            &snapshot("other-lineage"),
+            "instructions",
+        )
+        .unwrap();
 
         let sessions = list(&config, Path::new("/work")).unwrap();
         assert_eq!(sessions.len(), 1);

@@ -2256,8 +2256,8 @@ dependencies = [
 
 [[package]]
 name = "nanocodex"
-version = "0.1.0"
-source = "git+https://github.com/clabby/nanocodex?rev=5a4ac47bce4ff9be9c3f0ec7ef66299722725177#5a4ac47bce4ff9be9c3f0ec7ef66299722725177"
+version = "0.1.1"
+source = "git+https://github.com/gakonst/nanocodex?rev=8b9af4e3b4d18bf8dd2f5cc67ae4d831a8682cdf#8b9af4e3b4d18bf8dd2f5cc67ae4d831a8682cdf"
 dependencies = [
  "async-trait",
  "base64",
@@ -2282,6 +2282,7 @@ dependencies = [
  "tower",
  "tracing",
  "url",
+ "uuid",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-time",
@@ -2289,8 +2290,8 @@ dependencies = [
 
 [[package]]
 name = "nanocodex-core"
-version = "0.1.0"
-source = "git+https://github.com/clabby/nanocodex?rev=5a4ac47bce4ff9be9c3f0ec7ef66299722725177#5a4ac47bce4ff9be9c3f0ec7ef66299722725177"
+version = "0.1.1"
+source = "git+https://github.com/gakonst/nanocodex?rev=8b9af4e3b4d18bf8dd2f5cc67ae4d831a8682cdf#8b9af4e3b4d18bf8dd2f5cc67ae4d831a8682cdf"
 dependencies = [
  "serde",
  "serde_json",
@@ -2302,8 +2303,8 @@ dependencies = [
 
 [[package]]
 name = "nanocodex-macros"
-version = "0.1.0"
-source = "git+https://github.com/clabby/nanocodex?rev=5a4ac47bce4ff9be9c3f0ec7ef66299722725177#5a4ac47bce4ff9be9c3f0ec7ef66299722725177"
+version = "0.1.1"
+source = "git+https://github.com/gakonst/nanocodex?rev=8b9af4e3b4d18bf8dd2f5cc67ae4d831a8682cdf#8b9af4e3b4d18bf8dd2f5cc67ae4d831a8682cdf"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -2313,8 +2314,8 @@ dependencies = [
 
 [[package]]
 name = "nanocodex-mcp"
-version = "0.1.0"
-source = "git+https://github.com/clabby/nanocodex?rev=5a4ac47bce4ff9be9c3f0ec7ef66299722725177#5a4ac47bce4ff9be9c3f0ec7ef66299722725177"
+version = "0.1.1"
+source = "git+https://github.com/gakonst/nanocodex?rev=8b9af4e3b4d18bf8dd2f5cc67ae4d831a8682cdf#8b9af4e3b4d18bf8dd2f5cc67ae4d831a8682cdf"
 dependencies = [
  "async-trait",
  "bm25",
@@ -2332,14 +2333,15 @@ dependencies = [
 
 [[package]]
 name = "nanocodex-service"
-version = "0.1.0"
-source = "git+https://github.com/clabby/nanocodex?rev=5a4ac47bce4ff9be9c3f0ec7ef66299722725177#5a4ac47bce4ff9be9c3f0ec7ef66299722725177"
+version = "0.1.1"
+source = "git+https://github.com/gakonst/nanocodex?rev=8b9af4e3b4d18bf8dd2f5cc67ae4d831a8682cdf#8b9af4e3b4d18bf8dd2f5cc67ae4d831a8682cdf"
 dependencies = [
  "base64",
  "futures-util",
  "http",
  "js-sys",
  "nanocodex-core",
+ "reqwest 0.12.28",
  "rustls",
  "serde",
  "serde_json",
@@ -2356,8 +2358,8 @@ dependencies = [
 
 [[package]]
 name = "nanocodex-tools"
-version = "0.1.0"
-source = "git+https://github.com/clabby/nanocodex?rev=5a4ac47bce4ff9be9c3f0ec7ef66299722725177#5a4ac47bce4ff9be9c3f0ec7ef66299722725177"
+version = "0.1.1"
+source = "git+https://github.com/gakonst/nanocodex?rev=8b9af4e3b4d18bf8dd2f5cc67ae4d831a8682cdf#8b9af4e3b4d18bf8dd2f5cc67ae4d831a8682cdf"
 dependencies = [
  "async-trait",
  "base64",

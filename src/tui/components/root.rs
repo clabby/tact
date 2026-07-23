@@ -99,6 +99,7 @@ pub(crate) enum RootEvent {
     SessionRestored {
         records: Vec<Arc<TranscriptRecord>>,
         effort: ReasoningEffort,
+        fast_mode: bool,
     },
     NotifyError(String),
     NotifySuccess(String),
@@ -127,6 +128,7 @@ pub(crate) enum RootEffect {
     PersistSteer(String),
     Copy(String),
     SetEffort(ReasoningEffort),
+    SetFastMode(bool),
     SetTheme(ThemeMode),
     Fork,
     CancelTurns,
@@ -210,6 +212,7 @@ impl RootNode {
             .update(ComposerEvent::ContextTokens(
                 self.composer.component().context_tokens(),
             ));
+        root.set_fast_mode(self.composer.component().fast_mode());
         root.thread = ThreadState::Started;
         root.fork_available = false;
         root.theme_mode = self.theme_mode;
@@ -232,6 +235,13 @@ impl RootNode {
         self.theme_mode = mode;
     }
 
+    pub(crate) fn set_fast_mode(&mut self, enabled: bool) {
+        let _ = self
+            .composer
+            .component_mut()
+            .update(ComposerEvent::SetFastMode(enabled));
+    }
+
     pub(crate) fn reset_session(&mut self, workspace: &Path, thinking: ReasoningEffort) {
         let fork_available = self.fork_available;
         let theme_mode = self.theme_mode;
@@ -244,9 +254,11 @@ impl RootNode {
         &mut self,
         workspace: &Path,
         thinking: ReasoningEffort,
+        fast_mode: bool,
         records: Vec<Arc<TranscriptRecord>>,
     ) {
         self.reset_session(workspace, thinking);
+        self.set_fast_mode(fast_mode);
         for record in records {
             if let Some(tokens) = completed_transcript_tokens(&record) {
                 let _ = self
@@ -522,6 +534,7 @@ impl RootNode {
                 ActionAvailability {
                     new_session: new_session_enabled,
                     fork: self.fork_available,
+                    fast_mode: self.composer.component().fast_mode(),
                 },
             ))));
             return ComponentUpdate::render(RenderRequest::Immediate);
@@ -728,6 +741,15 @@ impl RootNode {
             }
             Some(ActionsEffect::Trigger(Action::Effort)) => {
                 return self.open_effort();
+            }
+            Some(ActionsEffect::Trigger(Action::FastMode)) => {
+                self.overlay = None;
+                let enabled = !self.composer.component().fast_mode();
+                self.set_fast_mode(enabled);
+                return ComponentUpdate {
+                    effects: vec![RootEffect::SetFastMode(enabled)],
+                    render: RenderRequest::Immediate,
+                };
             }
             Some(ActionsEffect::Trigger(Action::Theme)) => {
                 self.overlay = Some(Overlay::Theme(Node::new(ThemeSelector::new(
@@ -1253,9 +1275,13 @@ impl Component for RootNode {
             RootEvent::NewSessionFailed(message) => self.new_session_failed(message),
             RootEvent::SessionsLoaded(sessions) => self.sessions_loaded(sessions),
             RootEvent::SessionLoadFailed(message) => self.session_load_failed(message),
-            RootEvent::SessionRestored { records, effort } => {
+            RootEvent::SessionRestored {
+                records,
+                effort,
+                fast_mode,
+            } => {
                 let workspace = self.workspace.clone();
-                self.restore_session(&workspace, effort, records);
+                self.restore_session(&workspace, effort, fast_mode, records);
                 ComponentUpdate::render(RenderRequest::Immediate)
             }
             RootEvent::NotifyError(message) => {
@@ -2331,6 +2357,30 @@ mod tests {
                 .iter()
                 .all(|cell| matches!(cell.fg, Color::Yellow) || cell.fg == theme.code_text())
         );
+    }
+
+    #[test]
+    fn fast_mode_action_toggles_the_runtime_setting() {
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        root.update(key(KeyCode::Char('/'), KeyModifiers::NONE));
+        for character in "fast mode".chars() {
+            root.update(key(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+
+        let enabled = root.update(key(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(enabled.effects, [RootEffect::SetFastMode(true)]);
+        assert!(root.composer().fast_mode());
+        assert!(root.overlay.is_none());
+
+        root.update(key(KeyCode::Char('/'), KeyModifiers::NONE));
+        for character in "priority".chars() {
+            root.update(key(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+        let disabled = root.update(key(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(disabled.effects, [RootEffect::SetFastMode(false)]);
+        assert!(!root.composer().fast_mode());
     }
 
     #[test]

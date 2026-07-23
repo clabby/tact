@@ -47,6 +47,7 @@ use std::{
     collections::HashMap,
     io::{self, IsTerminal},
     path::{Path, PathBuf},
+    sync::Arc,
     time::Instant,
 };
 use tokio::{
@@ -59,15 +60,18 @@ use tokio_util::sync::CancellationToken;
 type EditorTask =
     JoinHandle<std::result::Result<EditorCompletion, crate::error::ExternalEditorError>>;
 type EffortUpdateTask = JoinHandle<Result<EffortUpdate>>;
+type FastModeUpdateTask = JoinHandle<Result<FastModeUpdate>>;
 type NewSessionTask = JoinHandle<(
     PaneId,
     crate::config::ReasoningEffort,
+    bool,
     Result<ConfiguredAgent>,
 )>;
 type SessionListTask = JoinHandle<(PaneId, Result<Vec<SessionSummary>>)>;
 type ResumeSessionTask = JoinHandle<(
     PaneId,
     crate::config::ReasoningEffort,
+    bool,
     Result<RestoredSession>,
 )>;
 type UpdateCheckTask =
@@ -126,6 +130,11 @@ struct EffortUpdate {
     to: crate::config::ReasoningEffort,
 }
 
+struct FastModeUpdate {
+    pane: PaneId,
+    enabled: bool,
+}
+
 struct PendingSubmission {
     id: TurnId,
     prompt: Submission,
@@ -163,6 +172,7 @@ impl<'a> PaneSession<'a> {
 
 struct PaneRuntime {
     session_id: String,
+    instructions: Arc<str>,
     previously_persisted: bool,
     journal: Option<TranscriptJournal>,
     writer_path: PathBuf,
@@ -172,6 +182,7 @@ struct PaneRuntime {
     pending_shell_context: Vec<String>,
     pending_submission: Option<PendingSubmission>,
     current_effort: crate::config::ReasoningEffort,
+    current_fast_mode: bool,
     active_shells: usize,
     generation: u64,
     subagent_control: SubagentControl,
@@ -228,10 +239,13 @@ pub(crate) async fn run(
         restored_records = Vec::new();
         ConfiguredAgent::from_config(&config)?
     };
+    let initial_effort = config.agent().thinking();
+    let initial_fast_mode = config.agent().fast_mode();
     let mut terminal = TerminalSession::enter().map_err(RuntimeError::Terminal)?;
     let ConfiguredAgent {
         agent,
         events,
+        instructions,
         subagent_updates,
         subagent_control,
     } = configured;
@@ -251,7 +265,9 @@ pub(crate) async fn run(
                 PaneSession::new(&main_session_id, None)
             },
             &config,
-            config.agent().thinking(),
+            initial_effort,
+            initial_fast_mode,
+            instructions,
             subagent_control.clone(),
             &writer_sender,
         )?,
@@ -266,9 +282,15 @@ pub(crate) async fn run(
         subagent_updates,
         subagent_sender.clone(),
     );
-    let mut root = RootNode::new(&workspace, config.agent().thinking());
+    let mut root = RootNode::new(&workspace, initial_effort);
+    root.set_fast_mode(initial_fast_mode);
     if !restored_records.is_empty() {
-        root.restore_session(&workspace, config.agent().thinking(), restored_records);
+        root.restore_session(
+            &workspace,
+            initial_effort,
+            initial_fast_mode,
+            restored_records,
+        );
     }
     let mut theme = config.theme().clone();
     if let Some(scheme) = theme::detect_system_scheme() {
@@ -281,6 +303,7 @@ pub(crate) async fn run(
     let mut input = Some(EventStream::new());
     let mut editor_task = None::<EditorTask>;
     let mut effort_task = None::<EffortUpdateTask>;
+    let mut fast_mode_task = None::<FastModeUpdateTask>;
     let mut new_session_task = None::<NewSessionTask>;
     let mut session_list_task = None::<SessionListTask>;
     let mut resume_session_task = None::<ResumeSessionTask>;
@@ -305,6 +328,7 @@ pub(crate) async fn run(
                     input: &mut input,
                     editor_task: &mut editor_task,
                     effort_task: &mut effort_task,
+                    fast_mode_task: &mut fast_mode_task,
                     new_session_task: &mut new_session_task,
                     session_list_task: &mut session_list_task,
                     resume_session_task: &mut resume_session_task,
@@ -353,6 +377,10 @@ pub(crate) async fn run(
                     drop(task.await);
                 }
                 if let Some(task) = effort_task.take() {
+                    task.abort();
+                    drop(task.await);
+                }
+                if let Some(task) = fast_mode_task.take() {
                     task.abort();
                     drop(task.await);
                 }
@@ -475,7 +503,12 @@ pub(crate) async fn run(
                             continue;
                         };
                         if let Some(snapshot) = snapshot {
-                            session::save_checkpoint(config.path(), &runtime.session_id, &snapshot)?;
+                            session::save_checkpoint(
+                                config.path(),
+                                &runtime.session_id,
+                                &snapshot,
+                                &runtime.instructions,
+                            )?;
                         }
                         let record = runtime.journal_mut()?.append_local(LocalEvent::WorkerTurnFinished {
                             id,
@@ -532,11 +565,21 @@ pub(crate) async fn run(
                             .root(pane)
                             .map(|root| root.composer().effort())
                             .unwrap_or_else(|| config.agent().thinking());
+                        let fast_mode = panes
+                            .get(&PaneId::Main)
+                            .expect("main pane must exist")
+                            .current_fast_mode;
                         let subagent_control = panes
                             .get(&PaneId::Main)
                             .expect("main pane must exist")
                             .subagent_control
                             .clone();
+                        let instructions = Arc::clone(
+                            &panes
+                                .get(&PaneId::Main)
+                                .expect("main pane must exist")
+                                .instructions,
+                        );
                         panes.insert(
                             pane,
                             open_pane(
@@ -547,6 +590,8 @@ pub(crate) async fn run(
                                 PaneSession::new(&session_id, parent_session_id.as_deref()),
                                 &config,
                                 effort,
+                                fast_mode,
+                                instructions,
                                 subagent_control.clone(),
                                 &writer_sender,
                             )?,
@@ -575,6 +620,27 @@ pub(crate) async fn run(
                         runtime.current_effort = effort;
                         if pane == PaneId::Main {
                             config.set_thinking(effort);
+                        }
+                        input = Some(EventStream::new());
+                        scheduler.request_immediate(Instant::now());
+                    }
+                    WorkerEvent::FastModeUpdated { pane, enabled, result } => {
+                        result?;
+                        let runtime = panes.get_mut(&pane).expect("fast-mode pane must exist");
+                        let previous = runtime.current_fast_mode;
+                        let journal = runtime.journal_mut()?;
+                        if journal.is_empty() {
+                            journal.set_initial_fast_mode(enabled);
+                        } else {
+                            let record = journal.append_local(LocalEvent::FastModeChanged {
+                                from: previous,
+                                to: enabled,
+                            })?;
+                            schedule(app.update(AppEvent::Transcript { pane, record }), &mut scheduler);
+                        }
+                        runtime.current_fast_mode = enabled;
+                        if pane == PaneId::Main {
+                            config.set_fast_mode(enabled);
                         }
                         input = Some(EventStream::new());
                         scheduler.request_immediate(Instant::now());
@@ -668,6 +734,21 @@ pub(crate) async fn run(
                     .map_err(|_| RuntimeError::AgentWorkerStopped)?;
             }
             result = async {
+                fast_mode_task
+                    .as_mut()
+                    .expect("fast-mode branch is disabled without a task")
+                    .await
+            }, if fast_mode_task.is_some() && !stopping => {
+                fast_mode_task = None;
+                let update = result.map_err(RuntimeError::FastModeUpdateTask)??;
+                commands
+                    .send(WorkerCommand::SetFastMode {
+                        pane: update.pane,
+                        enabled: update.enabled,
+                    })
+                    .map_err(|_| RuntimeError::AgentWorkerStopped)?;
+            }
+            result = async {
                 new_session_task
                     .as_mut()
                     .expect("new-session branch is disabled without a task")
@@ -675,12 +756,14 @@ pub(crate) async fn run(
             }, if new_session_task.is_some() && !stopping => {
                 new_session_task = None;
                 input = Some(EventStream::new());
-                let (pane, effort, configured) = result.map_err(RuntimeError::NewSessionTask)?;
+                let (pane, effort, fast_mode, configured) =
+                    result.map_err(RuntimeError::NewSessionTask)?;
                 match configured {
                     Ok(configured) => {
                         let ConfiguredAgent {
                             agent,
                             events,
+                            instructions,
                             subagent_updates,
                             subagent_control,
                         } = configured;
@@ -702,6 +785,8 @@ pub(crate) async fn run(
                                 PaneSession::new(&session_id, None),
                                 &config,
                                 effort,
+                                fast_mode,
+                                instructions,
                                 subagent_control.clone(),
                                 &writer_sender,
                             )?,
@@ -722,7 +807,11 @@ pub(crate) async fn run(
                             .send(WorkerCommand::ReplaceAgent { pane, agent })
                             .map_err(|_| RuntimeError::AgentWorkerStopped)?;
                         schedule(
-                            app.update(AppEvent::NewSessionReady { pane, effort }),
+                            app.update(AppEvent::NewSessionReady {
+                                pane,
+                                effort,
+                                fast_mode,
+                            }),
                             &mut scheduler,
                         );
                     }
@@ -768,12 +857,17 @@ pub(crate) async fn run(
             }, if resume_session_task.is_some() && !stopping => {
                 resume_session_task = None;
                 input = Some(EventStream::new());
-                let (pane, effort, restored) = result.map_err(RuntimeError::SessionTask)?;
+                let (pane, effort, fast_mode, restored) =
+                    result.map_err(RuntimeError::SessionTask)?;
                 match restored {
-                    Ok(RestoredSession { configured, records }) => {
+                    Ok(RestoredSession {
+                        configured,
+                        records,
+                    }) => {
                         let ConfiguredAgent {
                             agent,
                             events,
+                            instructions,
                             subagent_updates,
                             subagent_control,
                         } = configured;
@@ -795,6 +889,8 @@ pub(crate) async fn run(
                                 PaneSession::persisted(&session_id),
                                 &config,
                                 effort,
+                                fast_mode,
+                                instructions,
                                 subagent_control.clone(),
                                 &writer_sender,
                             )?,
@@ -815,7 +911,12 @@ pub(crate) async fn run(
                             .send(WorkerCommand::ReplaceAgent { pane, agent })
                             .map_err(|_| RuntimeError::AgentWorkerStopped)?;
                         schedule(
-                            app.update(AppEvent::SessionRestored { pane, records, effort }),
+                            app.update(AppEvent::SessionRestored {
+                                pane,
+                                records,
+                                effort,
+                                fast_mode,
+                            }),
                             &mut scheduler,
                         );
                     }
@@ -885,6 +986,8 @@ fn open_pane(
     session: PaneSession<'_>,
     config: &Config,
     effort: crate::config::ReasoningEffort,
+    fast_mode: bool,
+    instructions: Arc<str>,
     subagent_control: SubagentControl,
     writer_updates: &mpsc::UnboundedSender<WriterCompletion>,
 ) -> Result<PaneRuntime> {
@@ -894,6 +997,9 @@ fn open_pane(
         parent_id: parent_session_id,
         previously_persisted,
     } = session;
+    if pane == PaneId::Main && generation == 0 {
+        session::remove_obsolete_checkpoints(config.path())?;
+    }
     let (mut journal, writer) = TranscriptJournal::open(config.path(), session_id)?;
     let writer_path = journal.path().to_path_buf();
     journal.defer_start(SessionStarted {
@@ -901,6 +1007,7 @@ fn open_pane(
         parent_session_id: parent_session_id.map(str::to_owned),
         model: nanocodex::MODEL.to_owned(),
         effort,
+        fast_mode,
         workspace: config.agent().workspace().to_path_buf(),
         application_version: env!("CARGO_PKG_VERSION").to_owned(),
     });
@@ -923,6 +1030,7 @@ fn open_pane(
 
     Ok(PaneRuntime {
         session_id: session_id.to_owned(),
+        instructions,
         previously_persisted,
         journal: Some(journal),
         writer_path,
@@ -932,6 +1040,7 @@ fn open_pane(
         pending_shell_context: Vec::new(),
         pending_submission: None,
         current_effort: effort,
+        current_fast_mode: fast_mode,
         active_shells: 0,
         generation,
         subagent_control,
@@ -978,6 +1087,7 @@ struct EffectContext<'a> {
     input: &'a mut Option<EventStream>,
     editor_task: &'a mut Option<EditorTask>,
     effort_task: &'a mut Option<EffortUpdateTask>,
+    fast_mode_task: &'a mut Option<FastModeUpdateTask>,
     new_session_task: &'a mut Option<NewSessionTask>,
     session_list_task: &'a mut Option<SessionListTask>,
     resume_session_task: &'a mut Option<ResumeSessionTask>,
@@ -1143,6 +1253,16 @@ fn apply_pane_effect(
                 Ok(EffortUpdate { pane, to: effort })
             }));
         }
+        components::RootEffect::SetFastMode(enabled) => {
+            *context.input = None;
+            let config = (pane == PaneId::Main).then(|| context.config.clone());
+            *context.fast_mode_task = Some(tokio::task::spawn_blocking(move || {
+                if let Some(config) = config {
+                    config.persist_fast_mode(enabled)?;
+                }
+                Ok(FastModeUpdate { pane, enabled })
+            }));
+        }
         components::RootEffect::ReloadConfig => match context.config.reload() {
             Ok(reload) => {
                 let (config, workspace_changed) = reload.into_parts();
@@ -1175,9 +1295,10 @@ fn apply_pane_effect(
             let effort = context.config.agent().thinking();
             let config = context.config.clone();
             *context.new_session_task = Some(tokio::task::spawn_blocking(move || {
+                let fast_mode = config.agent().fast_mode();
                 let configured =
                     ConfiguredAgent::from_config_with_session(&config, effort, None, None);
-                (pane, effort, configured)
+                (pane, effort, fast_mode, configured)
             }));
         }
         components::RootEffect::LoadSessions => {
@@ -1201,6 +1322,7 @@ fn apply_pane_effect(
         components::RootEffect::ResumeSession(session_id) => {
             *context.input = None;
             let effort = context.config.agent().thinking();
+            let fast_mode = context.config.agent().fast_mode();
             let config = context.config.clone();
             *context.resume_session_task = Some(tokio::task::spawn_blocking(move || {
                 let restored = (|| {
@@ -1217,7 +1339,7 @@ fn apply_pane_effect(
                         records,
                     })
                 })();
-                (pane, effort, restored)
+                (pane, effort, fast_mode, restored)
             }));
         }
         components::RootEffect::Copy(text) => match clipboard::copy_text(&text) {
@@ -1383,7 +1505,7 @@ mod tests {
             worker::WorkerCommand,
         },
     };
-    use std::{collections::HashMap, fs, path::Path};
+    use std::{collections::HashMap, fs, path::Path, sync::Arc};
     use tempfile::tempdir;
 
     #[test]
@@ -1461,6 +1583,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn opening_a_session_removes_obsolete_checkpoints() {
+        let directory = tempdir().unwrap();
+        let config_path = directory.path().join("config.toml");
+        fs::write(&config_path, "").unwrap();
+        let config = Config::load(ConfigOverrides {
+            path: Some(config_path),
+            workspace: Some(directory.path().to_path_buf()),
+            ..ConfigOverrides::default()
+        })
+        .unwrap();
+        let obsolete = directory.path().join("checkpoints/6161.json.zst");
+        fs::create_dir_all(obsolete.parent().unwrap()).unwrap();
+        fs::write(&obsolete, b"obsolete checkpoint").unwrap();
+        let (sender, mut completions) = tokio::sync::mpsc::unbounded_channel();
+        let (_subagents, subagent_control, _updates) = crate::subagents::channel();
+
+        let pane = open_pane(
+            PaneGeneration {
+                pane: PaneId::Main,
+                generation: 0,
+            },
+            PaneSession::new("main-session", None),
+            &config,
+            ReasoningEffort::Low,
+            false,
+            Arc::from("instructions"),
+            subagent_control,
+            &sender,
+        )
+        .unwrap();
+
+        assert!(!obsolete.exists());
+        drop(pane);
+        completions.recv().await.unwrap().result.unwrap();
+    }
+
+    #[tokio::test]
     async fn fork_pane_has_an_independent_session_and_persisted_transcript() {
         let directory = tempdir().unwrap();
         let config_path = directory.path().join("config.toml");
@@ -1481,6 +1640,8 @@ mod tests {
             PaneSession::new("main-session", None),
             &config,
             ReasoningEffort::Low,
+            false,
+            Arc::from("instructions"),
             subagent_control.clone(),
             &sender,
         )
@@ -1493,6 +1654,8 @@ mod tests {
             PaneSession::new("fork-session", Some("main-session")),
             &config,
             ReasoningEffort::Low,
+            false,
+            Arc::from("instructions"),
             subagent_control.clone(),
             &sender,
         )
@@ -1573,6 +1736,8 @@ mod tests {
             PaneSession::new("old-session", None),
             &config,
             ReasoningEffort::Medium,
+            false,
+            Arc::from("instructions"),
             subagent_control.clone(),
             &sender,
         )
@@ -1595,6 +1760,8 @@ mod tests {
             PaneSession::new("new-session", None),
             &config,
             ReasoningEffort::Medium,
+            false,
+            Arc::from("instructions"),
             subagent_control,
             &sender,
         )

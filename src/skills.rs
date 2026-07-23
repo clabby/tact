@@ -209,6 +209,7 @@ impl DiagnosticCollector {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn contains_catalog(instructions: &str) -> bool {
     instructions
         .split_once(CATALOG_START_MARKER)

@@ -16,6 +16,7 @@ use zstd::stream::{read::Decoder, write::Encoder};
 
 // Journals favor low-latency ingestion; repeated JSON keys still compress well at level 1.
 const COMPRESSION_LEVEL: i32 = 1;
+const FORMAT_VERSION: u32 = SCHEMA_VERSION;
 
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
@@ -46,10 +47,8 @@ impl TranscriptJournal {
         config_path: &Path,
         session_id: &str,
     ) -> Result<(Self, TranscriptWriter), TranscriptError> {
-        let directory = config_path
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .join("transcripts");
+        remove_obsolete(config_path)?;
+        let directory = storage_directory(config_path);
         let started_at = unix_milliseconds();
         let filename = format!("{started_at}-{}.jsonl.zst", sanitize_filename(session_id));
         let path = directory.join(filename);
@@ -83,6 +82,12 @@ impl TranscriptJournal {
     pub(crate) fn set_initial_effort(&mut self, effort: ReasoningEffort) {
         if let Some(started) = &mut self.pending_start {
             started.effort = effort;
+        }
+    }
+
+    pub(crate) fn set_initial_fast_mode(&mut self, enabled: bool) {
+        if let Some(started) = &mut self.pending_start {
+            started.fast_mode = enabled;
         }
     }
 
@@ -136,6 +141,74 @@ impl TranscriptJournal {
             .map_err(|_| TranscriptError::WriterStopped(self.path.clone()))?;
         Ok(record)
     }
+}
+
+pub(crate) fn storage_directory(config_path: &Path) -> PathBuf {
+    transcript_root(config_path).join(format!("v{FORMAT_VERSION}"))
+}
+
+pub(crate) fn remove_obsolete(config_path: &Path) -> Result<(), TranscriptError> {
+    let directory = transcript_root(config_path);
+    let entries = match fs::read_dir(&directory) {
+        Ok(entries) => entries,
+        Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(source) => {
+            return Err(TranscriptError::ReadDirectory {
+                path: directory,
+                source,
+            });
+        }
+    };
+    for entry in entries {
+        let entry = entry.map_err(|source| TranscriptError::ReadDirectory {
+            path: directory.clone(),
+            source,
+        })?;
+        let file_type = entry
+            .file_type()
+            .map_err(|source| TranscriptError::ReadDirectory {
+                path: directory.clone(),
+                source,
+            })?;
+        if !file_type.is_file() {
+            continue;
+        }
+        let path = entry.path();
+        if !is_unversioned_transcript(&path) {
+            continue;
+        }
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(source) if source.kind() == io::ErrorKind::NotFound => {}
+            Err(source) => return Err(TranscriptError::RemoveObsolete { path, source }),
+        }
+    }
+    Ok(())
+}
+
+fn transcript_root(config_path: &Path) -> PathBuf {
+    config_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("transcripts")
+}
+
+fn is_unversioned_transcript(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let Some(stem) = name.strip_suffix(".jsonl.zst") else {
+        return false;
+    };
+    let Some((started_at, session_id)) = stem.split_once('-') else {
+        return false;
+    };
+    !started_at.is_empty()
+        && started_at.bytes().all(|byte| byte.is_ascii_digit())
+        && !session_id.is_empty()
+        && session_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
 
 fn write_journal(
@@ -376,6 +449,7 @@ mod tests {
                 parent_session_id: None,
                 model: "model".to_owned(),
                 effort: ReasoningEffort::Medium,
+                fast_mode: false,
                 workspace: directory.path().to_path_buf(),
                 application_version: "test".to_owned(),
             }))
@@ -404,6 +478,10 @@ mod tests {
             path.extension().and_then(|extension| extension.to_str()),
             Some("zst")
         );
+        assert_eq!(
+            path.parent().unwrap(),
+            directory.path().join("transcripts/v1")
+        );
 
         let length = fs::metadata(&path).unwrap().len();
         fs::OpenOptions::new()
@@ -413,6 +491,45 @@ mod tests {
             .set_len(length - 3)
             .unwrap();
         assert_eq!(load(&path).unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn settings_changed_before_the_first_entry_update_session_metadata() {
+        let directory = tempdir().unwrap();
+        let config = directory.path().join("config.toml");
+        let (mut journal, writer) = TranscriptJournal::open(&config, "session").unwrap();
+        let path = journal.path().to_path_buf();
+        journal.defer_start(SessionStarted {
+            session_id: "session".to_owned(),
+            parent_session_id: None,
+            model: "model".to_owned(),
+            effort: ReasoningEffort::Medium,
+            fast_mode: false,
+            workspace: directory.path().to_path_buf(),
+            application_version: "test".to_owned(),
+        });
+
+        journal.set_initial_effort(ReasoningEffort::High);
+        journal.set_initial_fast_mode(true);
+        journal
+            .append_local(LocalEvent::UserSubmitted {
+                id: TurnId::new(1),
+                text: "hello".to_owned(),
+            })
+            .unwrap();
+        drop(journal);
+        writer.into_task().await.unwrap().unwrap();
+
+        let records = load(&path).unwrap();
+        let started = records[0].decode_payload::<SessionStarted>().unwrap();
+        assert_eq!(started.effort, ReasoningEffort::High);
+        assert!(started.fast_mode);
+        assert_eq!(records.len(), 2);
+        assert!(
+            records
+                .iter()
+                .all(|record| !matches!(record.kind(), "effort.changed" | "fast_mode.changed"))
+        );
     }
 
     #[tokio::test]

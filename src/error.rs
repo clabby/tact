@@ -158,6 +158,8 @@ pub(crate) enum RuntimeError {
     ExternalEditorTask(#[source] tokio::task::JoinError),
     #[error("the effort update task stopped unexpectedly: {0}")]
     EffortUpdateTask(#[source] tokio::task::JoinError),
+    #[error("the fast-mode update task stopped unexpectedly: {0}")]
+    FastModeUpdateTask(#[source] tokio::task::JoinError),
     #[error("the new-session task stopped unexpectedly: {0}")]
     NewSessionTask(#[source] tokio::task::JoinError),
     #[error("the session task stopped unexpectedly: {0}")]

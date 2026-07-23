@@ -111,6 +111,7 @@ file = "/path/to/.codex/auth.json"
 [agent]
 workspace = "/path/to/workspace"
 thinking = "medium" # low, medium, high, xhigh, or max
+fast_mode = false
 web_search = true
 image_generation = true
 # instructions = "Replace the standard Nanocodex instructions"
@@ -227,11 +228,13 @@ Theme values accept Ratatui color names, indexed colors such as `239`, and RGB c
 mode follows the operating-system preference while the TUI is running.
 
 Use **Reload config** in the Actions menu to validate and reload the selected file. Theme changes
-apply immediately. Authentication and agent settings (including reasoning effort, instructions,
-tools, MCP servers, and endpoint overrides) apply when a new or restored session is started. Skill
-configuration changes apply only when a fresh session starts; reloading does not change an active
-or restored session's catalog. In an active session, use **Change effort** or `Ctrl+S` to change the
-effort for subsequently accepted turns without resetting the conversation. Workspace changes
+apply immediately. Authentication and agent settings (including reasoning effort, fast mode,
+instructions, tools, MCP servers, and endpoint overrides) apply when a new or restored session is
+started. Skill configuration changes apply only when a fresh session starts; reloading does not
+change an active or restored session's catalog. In an active session, use **Change effort** or
+`Ctrl+S` to change the effort, and use **Enable fast mode** or **Disable fast mode** to change
+priority processing. Both settings are persisted and take effect on the next accepted turn without
+resetting the conversation. Workspace changes
 require a process restart because the terminal, shell, and transcript paths are bound to the
 startup workspace. Command-line and environment overrides keep their original precedence when
 reloading.
@@ -271,4 +274,7 @@ tact --resume SESSION_ID
 On exit, `tact` prints the active session's resume command. Checkpoints contain the complete
 unredacted model-visible conversation and are stored with private filesystem permissions under the
 same directory as the selected configuration file. A single rolling checkpoint is retained per
-session; transcripts remain segmented and are grouped by session ID when restored.
+session; transcripts remain segmented and are grouped by session ID when restored. Checkpoints and
+transcripts use separate versioned directories (`checkpoints/v1` and `transcripts/v1`) so breaking
+storage changes do not reinterpret older data. Tact removes obsolete unversioned storage while
+leaving unknown version directories untouched for downgrade safety.

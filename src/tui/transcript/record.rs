@@ -35,6 +35,8 @@ pub(crate) struct SessionStarted {
     pub(crate) parent_session_id: Option<String>,
     pub(crate) model: String,
     pub(crate) effort: ReasoningEffort,
+    #[serde(default)]
+    pub(crate) fast_mode: bool,
     pub(crate) workspace: PathBuf,
     pub(crate) application_version: String,
 }
@@ -80,6 +82,10 @@ pub(crate) enum LocalEvent {
     EffortChanged {
         from: ReasoningEffort,
         to: ReasoningEffort,
+    },
+    FastModeChanged {
+        from: bool,
+        to: bool,
     },
     WorkerTurnAccepted {
         id: TurnId,
@@ -184,6 +190,10 @@ impl TranscriptRecord {
             LocalEvent::EffortChanged { from, to } => {
                 ("effort.changed", to_raw_value(&EffortChanged { from, to })?)
             }
+            LocalEvent::FastModeChanged { from, to } => (
+                "fast_mode.changed",
+                to_raw_value(&FastModeChanged { from, to })?,
+            ),
             LocalEvent::WorkerTurnAccepted { id } => {
                 ("worker.turn_accepted", to_raw_value(&WorkerTurn { id })?)
             }
@@ -250,7 +260,11 @@ impl TranscriptRecord {
     }
 
     pub(crate) fn is_sync_boundary(&self) -> bool {
-        self.source == TACT_SOURCE && self.kind == "session.ended"
+        self.source == TACT_SOURCE
+            && matches!(
+                self.kind.as_str(),
+                "session.ended" | "effort.changed" | "fast_mode.changed"
+            )
             || self.source == AGENT_SOURCE
                 && matches!(self.kind.as_str(), "run.completed" | "run.failed")
     }
@@ -290,6 +304,12 @@ struct ShellFinished {
 struct EffortChanged {
     from: ReasoningEffort,
     to: ReasoningEffort,
+}
+
+#[derive(Serialize)]
+struct FastModeChanged {
+    from: bool,
+    to: bool,
 }
 
 #[derive(Serialize)]

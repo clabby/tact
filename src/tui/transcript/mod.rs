@@ -8,7 +8,7 @@ mod record;
 pub(crate) use entry::{
     EntryId, EntryKind, MessagePhase, ToolEntry, ToolState, TranscriptEntry, TransientStatus,
 };
-pub(crate) use journal::{TranscriptJournal, load};
+pub(crate) use journal::{TranscriptJournal, load, remove_obsolete, storage_directory};
 pub(crate) use model::TranscriptModel;
 pub(crate) use record::{
     LocalEvent, SessionEnded, SessionOutcome, SessionStarted, ShellId, TranscriptRecord, TurnId,
@@ -22,6 +22,18 @@ use thiserror::Error;
 pub(crate) enum TranscriptError {
     #[error("failed to create transcript directory {path}: {source}")]
     CreateDirectory {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("failed to inspect transcript directory {path}: {source}")]
+    ReadDirectory {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("failed to remove obsolete transcript {path}: {source}")]
+    RemoveObsolete {
         path: PathBuf,
         #[source]
         source: io::Error,

@@ -16,8 +16,9 @@ use ratatui::{
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-const ACTIONS: [Action; 9] = [
+const ACTIONS: [Action; 10] = [
     Action::Effort,
+    Action::FastMode,
     Action::Theme,
     Action::NewSession,
     Action::ResumeSession,
@@ -38,12 +39,14 @@ pub(super) enum ActionsEvent {
 pub(super) struct ActionAvailability {
     pub(super) new_session: bool,
     pub(super) fork: bool,
+    pub(super) fast_mode: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Action {
     Subagents,
     Effort,
+    FastMode,
     Theme,
     NewSession,
     ResumeSession,
@@ -310,6 +313,7 @@ impl ActionsMenu {
         match action {
             Action::Subagents => true,
             Action::Effort => true,
+            Action::FastMode => true,
             Action::Theme => true,
             Action::NewSession => self.availability.new_session,
             Action::ResumeSession => self.availability.new_session,
@@ -329,6 +333,7 @@ impl ActionsMenu {
                 "Resume session · finish active work first"
             }
             Action::Fork if !self.availability.fork => "Fork session · one fork at a time",
+            Action::FastMode if self.availability.fast_mode => "Disable fast mode",
             _ => action.label(),
         }
     }
@@ -339,6 +344,7 @@ impl Action {
         match self {
             Self::Subagents => "Subagents",
             Self::Effort => "Change effort",
+            Self::FastMode => "Enable fast mode",
             Self::Theme => "Select theme",
             Self::NewSession => "New session",
             Self::ResumeSession => "Resume session",
@@ -353,6 +359,7 @@ impl Action {
         match self {
             Self::Subagents => Some("agents"),
             Self::Effort => Some("thinking"),
+            Self::FastMode => Some("priority"),
             Self::Theme => Some("appearance"),
             Self::NewSession => Some("clear"),
             Self::ResumeSession => Some("restore"),
@@ -387,7 +394,7 @@ impl Component for ActionsMenu {
             return;
         }
 
-        let layout = Floating::new("Actions", 58, 13, &KEY_BINDINGS).render(frame, area, theme);
+        let layout = Floating::new("Actions", 58, 14, &KEY_BINDINGS).render(frame, area, theme);
         if layout.body.is_empty() {
             return;
         }
@@ -446,11 +453,12 @@ mod tests {
         ActionAvailability {
             new_session: true,
             fork: true,
+            fast_mode: false,
         }
     }
 
     fn render(menu: &mut ActionsMenu) -> Terminal<TestBackend> {
-        let mut terminal = Terminal::new(TestBackend::new(60, 15)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(60, 16)).unwrap();
         terminal
             .draw(|frame| menu.render(frame, frame.area(), &Theme::default()))
             .unwrap();
@@ -483,42 +491,46 @@ mod tests {
         );
         assert_eq!(
             row_segment(&terminal, 4, 1, 58),
-            "│  Select theme (alias: appearance)                      │"
+            "│  Enable fast mode (alias: priority)                    │"
         );
         assert_eq!(
             row_segment(&terminal, 5, 1, 58),
-            "│  New session (alias: clear)                            │"
+            "│  Select theme (alias: appearance)                      │"
         );
         assert_eq!(
             row_segment(&terminal, 6, 1, 58),
-            "│  Resume session (alias: restore)                       │"
+            "│  New session (alias: clear)                            │"
         );
         assert_eq!(
             row_segment(&terminal, 7, 1, 58),
-            "│  Fork session (alias: btw)                             │"
+            "│  Resume session (alias: restore)                       │"
         );
         assert_eq!(
             row_segment(&terminal, 8, 1, 58),
-            "│  Keyboard shortcuts                                    │"
+            "│  Fork session (alias: btw)                             │"
         );
         assert_eq!(
             row_segment(&terminal, 9, 1, 58),
-            "│  Reload config (alias: refresh)                        │"
+            "│  Keyboard shortcuts                                    │"
         );
         assert_eq!(
             row_segment(&terminal, 10, 1, 58),
-            "│  Edit config                                           │"
+            "│  Reload config (alias: refresh)                        │"
         );
         assert_eq!(
             row_segment(&terminal, 11, 1, 58),
-            "│  Subagents (alias: agents)                             │"
+            "│  Edit config                                           │"
         );
         assert_eq!(
             row_segment(&terminal, 12, 1, 58),
-            "│   tab focus · ↑↓ move · enter focus/open · esc close   │"
+            "│  Subagents (alias: agents)                             │"
         );
         assert_eq!(
             row_segment(&terminal, 13, 1, 58),
+            "│   tab focus · ↑↓ move · enter focus/open · esc close   │"
+        );
+        assert_eq!(
+            row_segment(&terminal, 14, 1, 58),
             "╰────────────────────────────────────────────────────────╯"
         );
         assert_eq!(terminal.backend().cursor_position(), Position::new(12, 2));
@@ -558,7 +570,8 @@ mod tests {
         menu.update(key(KeyCode::Down));
         menu.update(key(KeyCode::Down));
         menu.update(key(KeyCode::Down));
-        assert_eq!(menu.selected, 5);
+        menu.update(key(KeyCode::Down));
+        assert_eq!(menu.selected, 6);
 
         let terminal = render(&mut menu);
         assert_eq!(
@@ -566,10 +579,10 @@ mod tests {
             "│  Search:                                               │"
         );
         assert_eq!(
-            row_segment(&terminal, 8, 1, 58),
+            row_segment(&terminal, 9, 1, 58),
             "│› Keyboard shortcuts                                    │"
         );
-        assert_eq!(terminal.backend().cursor_position(), Position::new(2, 8));
+        assert_eq!(terminal.backend().cursor_position(), Position::new(2, 9));
 
         menu.update(key(KeyCode::BackTab));
         assert_eq!(menu.focus, Focus::Search);
@@ -584,6 +597,27 @@ mod tests {
         assert_eq!(
             enabled.update(key(KeyCode::Enter)).effects,
             [ActionsEffect::Trigger(Action::Effort)]
+        );
+    }
+
+    #[test]
+    fn fast_mode_action_reflects_the_current_setting() {
+        let mut enabled = ActionsMenu::new(available());
+        for character in "priority".chars() {
+            enabled.update(key(KeyCode::Char(character)));
+        }
+        assert_eq!(
+            enabled.update(key(KeyCode::Enter)).effects,
+            [ActionsEffect::Trigger(Action::FastMode)]
+        );
+
+        let mut availability = available();
+        availability.fast_mode = true;
+        let mut disabled = ActionsMenu::new(availability);
+        let terminal = render(&mut disabled);
+        assert_eq!(
+            row_segment(&terminal, 4, 1, 58),
+            "│  Disable fast mode (alias: priority)                   │"
         );
     }
 
@@ -626,13 +660,14 @@ mod tests {
         disabled.update(key(KeyCode::Tab));
         disabled.update(key(KeyCode::Down));
         disabled.update(key(KeyCode::Down));
+        disabled.update(key(KeyCode::Down));
         let terminal = render(&mut disabled);
         assert_eq!(
-            row_segment(&terminal, 5, 1, 58),
+            row_segment(&terminal, 6, 1, 58),
             "│› New session · finish active work first (alias: clear) │"
         );
         assert_eq!(
-            terminal.backend().buffer()[(4, 5)].fg,
+            terminal.backend().buffer()[(4, 6)].fg,
             Theme::default().muted()
         );
     }

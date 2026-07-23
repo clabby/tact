@@ -1102,6 +1102,40 @@ fn render_entry(
             };
             layout_without_links(lines)
         }
+        EntryKind::EffortChanged { to } => layout_without_links(vec![Line::from(vec![
+            Span::styled("◇ Effort changed to ", Style::default().fg(theme.muted())),
+            Span::styled(
+                to.as_str(),
+                Style::default()
+                    .fg(theme.effort(*to))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                " · takes effect on the next turn",
+                Style::default().fg(theme.muted()),
+            ),
+        ])]),
+        EntryKind::FastModeChanged { enabled } => {
+            let status = if *enabled { "enabled" } else { "disabled" };
+            layout_without_links(vec![Line::from(vec![
+                Span::styled(
+                    "⚡ ",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("Fast mode {status}"),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    " · takes effect on the next turn",
+                    Style::default().fg(theme.muted()),
+                ),
+            ])])
+        }
         EntryKind::Interrupted { count } => {
             let label = if *count == 0 {
                 "◇ Nothing to interrupt".to_owned()
@@ -1169,15 +1203,18 @@ mod tests {
         Anchor, Component, RenderRequest, ScrollCommand, ScrollState, ToolCommand, Transcript,
         TranscriptEvent, unix_milliseconds,
     };
-    use crate::tui::{
-        theme::Theme,
-        transcript::{LocalEvent, TranscriptRecord, TurnId},
+    use crate::{
+        config::ReasoningEffort,
+        tui::{
+            theme::Theme,
+            transcript::{LocalEvent, TranscriptRecord, TurnId},
+        },
     };
     use crossterm::event::{
         Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     };
     use nanocodex::{AgentEvent, AgentEventKind};
-    use ratatui::{Terminal, backend::TestBackend};
+    use ratatui::{Terminal, backend::TestBackend, style::Color};
     use serde_json::{json, value::to_raw_value};
     use std::{sync::Arc, time::Duration};
 
@@ -1277,6 +1314,55 @@ mod tests {
         assert_eq!(backend.buffer()[(2, 1)].symbol(), "h");
         assert_eq!(backend.buffer()[(0, 2)].symbol(), "┃");
         assert_eq!(backend.buffer()[(0, 0)].symbol(), " ");
+    }
+
+    #[test]
+    fn session_setting_notifications_are_distinct_and_styled() {
+        let mut transcript = Transcript::new();
+        transcript.update(TranscriptEvent::Record(Arc::new(
+            TranscriptRecord::from_local(
+                1,
+                1,
+                LocalEvent::EffortChanged {
+                    from: ReasoningEffort::Medium,
+                    to: ReasoningEffort::High,
+                },
+            )
+            .unwrap(),
+        )));
+        transcript.update(TranscriptEvent::Record(Arc::new(
+            TranscriptRecord::from_local(
+                2,
+                2,
+                LocalEvent::FastModeChanged {
+                    from: false,
+                    to: true,
+                },
+            )
+            .unwrap(),
+        )));
+
+        let backend = render(&mut transcript, 72, 6);
+        let cells = backend.buffer().content();
+        let rendered = cells.iter().map(|cell| cell.symbol()).collect::<String>();
+        let bolt = cells
+            .iter()
+            .find(|cell| cell.symbol() == "⚡")
+            .expect("fast-mode notification should include a bolt");
+        let high = cells
+            .windows(4)
+            .find(|cells| {
+                cells
+                    .iter()
+                    .map(|cell| cell.symbol())
+                    .eq(["h", "i", "g", "h"])
+            })
+            .expect("effort notification should include its value");
+
+        assert!(rendered.contains("Effort changed to high · takes effect on the next turn"));
+        assert!(rendered.contains("Fast mode enabled · takes effect on the next turn"));
+        assert_eq!(bolt.fg, Color::Yellow);
+        assert_eq!(high[0].fg, Theme::default().effort(ReasoningEffort::High));
     }
 
     #[test]
