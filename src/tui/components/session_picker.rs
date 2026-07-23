@@ -11,7 +11,7 @@ use crate::tui::{
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::{
     Frame,
-    layout::{Position, Rect},
+    layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{List, ListItem, ListState, Paragraph},
@@ -19,7 +19,7 @@ use ratatui::{
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-const KEY_BINDINGS: [&str; 4] = ["tab focus", "↑↓ move", "enter resume", "esc close"];
+const KEY_BINDINGS: [&str; 3] = ["↑↓ move", "enter resume", "esc close"];
 const SEARCH_LABEL: &str = "Search: ";
 
 pub(super) enum SessionPickerEvent {
@@ -32,18 +32,11 @@ pub(super) enum SessionPickerEffect {
     Resume(String),
 }
 
-#[derive(Clone, Copy, Eq, PartialEq)]
-enum Focus {
-    Search,
-    List,
-}
-
 pub(super) struct SessionPicker {
     sessions: Vec<SessionSummary>,
     query: String,
     matches: Vec<usize>,
     selected: usize,
-    focus: Focus,
 }
 
 impl SessionPicker {
@@ -54,7 +47,6 @@ impl SessionPicker {
             query: String::new(),
             matches,
             selected: 0,
-            focus: Focus::Search,
         }
     }
 
@@ -67,7 +59,7 @@ impl SessionPicker {
         }
         match key.code {
             KeyCode::Esc => Self::effect(SessionPickerEffect::Dismiss),
-            KeyCode::Backspace if self.focus == Focus::Search && !self.query.is_empty() => {
+            KeyCode::Backspace if !self.query.is_empty() => {
                 if let Some((index, _)) = self.query.grapheme_indices(true).next_back() {
                     self.query.truncate(index);
                     self.refresh_matches();
@@ -75,18 +67,11 @@ impl SessionPicker {
                 ComponentUpdate::render(RenderRequest::Immediate)
             }
             KeyCode::Backspace => Self::effect(SessionPickerEffect::Dismiss),
-            KeyCode::Tab | KeyCode::BackTab => {
-                self.focus = match self.focus {
-                    Focus::Search => Focus::List,
-                    Focus::List => Focus::Search,
-                };
-                ComponentUpdate::render(RenderRequest::Immediate)
-            }
-            KeyCode::Up if self.focus == Focus::List => {
+            KeyCode::Up => {
                 self.selected = self.selected.saturating_sub(1);
                 ComponentUpdate::render(RenderRequest::Immediate)
             }
-            KeyCode::Down if self.focus == Focus::List => {
+            KeyCode::Down => {
                 if !self.matches.is_empty() {
                     self.selected = (self.selected + 1).min(self.matches.len() - 1);
                 }
@@ -94,10 +79,9 @@ impl SessionPicker {
             }
             KeyCode::Enter => self.resume_selected(),
             KeyCode::Char(character)
-                if self.focus == Focus::Search
-                    && !key
-                        .modifiers
-                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
             {
                 self.query.push(character);
                 self.refresh_matches();
@@ -108,9 +92,6 @@ impl SessionPicker {
     }
 
     fn insert_paste(&mut self, text: &str) -> ComponentUpdate<SessionPickerEffect> {
-        if self.focus != Focus::Search {
-            return ComponentUpdate::none();
-        }
         self.query
             .extend(text.chars().filter(|character| !character.is_control()));
         self.refresh_matches();
@@ -118,10 +99,6 @@ impl SessionPicker {
     }
 
     fn resume_selected(&mut self) -> ComponentUpdate<SessionPickerEffect> {
-        if self.focus == Focus::Search && self.matches.len() != 1 {
-            self.focus = Focus::List;
-            return ComponentUpdate::render(RenderRequest::Immediate);
-        }
         let Some(index) = self.matches.get(self.selected) else {
             return ComponentUpdate::none();
         };
@@ -153,22 +130,11 @@ impl SessionPicker {
         if area.is_empty() {
             return;
         }
-        let focused = self.focus == Focus::Search;
-        let marker = if focused { "› " } else { "  " };
+        let marker = "  ";
         let prefix_width = marker.width() + SEARCH_LABEL.width();
         let query_width = usize::from(area.width).saturating_sub(prefix_width);
         let query = visible_tail(&self.query, query_width);
-        let label_style = Style::default()
-            .fg(if focused {
-                theme.accent()
-            } else {
-                theme.muted()
-            })
-            .add_modifier(if focused {
-                Modifier::BOLD
-            } else {
-                Modifier::empty()
-            });
+        let label_style = Style::default().fg(theme.muted());
         frame.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled(marker, label_style),
@@ -177,13 +143,6 @@ impl SessionPicker {
             ])),
             area,
         );
-        if focused {
-            let x = area.x
-                + u16::try_from(prefix_width + query.width())
-                    .unwrap_or(u16::MAX)
-                    .min(area.width.saturating_sub(1));
-            frame.set_cursor_position(Position::new(x, area.y));
-        }
     }
 
     fn render_sessions(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
@@ -222,22 +181,12 @@ impl SessionPicker {
                 Line::from(Span::styled(detail, Style::default().fg(theme.muted()))),
             ])
         });
-        let focused = self.focus == Focus::List;
         let list = List::new(items)
-            .highlight_symbol(if focused { "› " } else { "  " })
-            .highlight_style(if focused {
-                Style::default().fg(theme.accent())
-            } else {
-                Style::default()
-            });
+            .highlight_symbol("› ")
+            .highlight_style(Style::default().fg(theme.accent()));
         let selected = (!self.matches.is_empty()).then_some(self.selected);
         let mut state = ListState::default().with_selected(selected);
         frame.render_stateful_widget(list, area, &mut state);
-        if focused && selected.is_some() {
-            let visible = self.selected.saturating_sub(state.offset());
-            let row = area.y + u16::try_from(visible.saturating_mul(2)).unwrap_or(u16::MAX);
-            frame.set_cursor_position(Position::new(area.x, row.min(area.bottom() - 1)));
-        }
     }
 }
 
@@ -333,5 +282,26 @@ mod tests {
             picker.update(key(KeyCode::Enter)).effects,
             [SessionPickerEffect::Resume("two".to_owned())]
         );
+    }
+
+    #[test]
+    fn arrows_navigate_while_typing_continues_to_search() {
+        let mut picker = SessionPicker::new(vec![
+            summary("one", "fix parser"),
+            summary("two", "write docs"),
+        ]);
+
+        picker.update(key(KeyCode::Down));
+        assert_eq!(
+            picker.update(key(KeyCode::Enter)).effects,
+            [SessionPickerEffect::Resume("two".to_owned())]
+        );
+
+        for character in "fix".chars() {
+            picker.update(key(KeyCode::Char(character)));
+        }
+        assert_eq!(picker.query, "fix");
+        assert_eq!(picker.matches, [0]);
+        assert_eq!(picker.selected, 0);
     }
 }
