@@ -42,22 +42,18 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             archive_ext: tar.gz
-            use_cross: false
-          - os: ubuntu-latest
+          - os: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
             archive_ext: tar.gz
-            use_cross: true
           - os: macos-latest
             target: aarch64-apple-darwin
             archive_ext: tar.gz
-            use_cross: false
           - os: macos-latest
             target: x86_64-apple-darwin
             archive_ext: tar.gz
-            use_cross: false
     steps:
       - name: Checkout sources
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
@@ -67,19 +63,8 @@ jobs:
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           targets: ${{ matrix.target }}
-      - name: Install cross
-        if: matrix.use_cross
-        uses: taiki-e/install-action@c44f6b046f1c29ae5918b1e0bfdbb2f1813836fd # v2
-        with:
-          tool: cross
       - name: Build with Cargo
-        if: ${{ !matrix.use_cross }}
         run: cargo build --locked --release --target ${{ matrix.target }}
-        env:
-          TACT_RELEASE_BUILD: "1"
-      - name: Build with cross
-        if: matrix.use_cross
-        run: cross build --locked --release --target ${{ matrix.target }}
         env:
           TACT_RELEASE_BUILD: "1"
       - name: Package binary
@@ -131,9 +116,11 @@ jobs:
           rsign generate -f -W -p minisign.pub -s minisign.key
           echo "::add-mask::$(tail -n 1 minisign.key)"
 
-          printf '\n[package.metadata.binstall.signing]\n' >> Cargo.toml
-          printf 'algorithm = "minisign"\n' >> Cargo.toml
-          printf 'pubkey = "%s"\n' "$(tail -n 1 minisign.pub)" >> Cargo.toml
+          {
+            printf '\n[package.metadata.binstall.signing]\n'
+            printf 'algorithm = "minisign"\n'
+            printf 'pubkey = "%s"\n' "$(tail -n 1 minisign.pub)"
+          } >> Cargo.toml
           cp minisign.pub dist/minisign.pub
 
           for archive in dist/*.tar.gz; do
@@ -180,13 +167,10 @@ jobs:
           name: signed-release
           path: .
       - name: Install Rust stable toolchain
-        if: ${{ false }} # Enable with crate publishing when Nanocodex is available from crates.io.
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
       - name: Verify crate package
-        if: ${{ false }} # Enable with crate publishing when Nanocodex is available from crates.io.
         run: cargo publish --locked --dry-run --allow-dirty
       - name: Publish crate
-        if: ${{ false }} # Enable when Nanocodex is available from crates.io.
         run: cargo publish --locked --allow-dirty
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

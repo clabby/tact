@@ -37,10 +37,6 @@ The installer verifies the release's SHA-256 checksum and writes `tact` to
 `${TACT_INSTALL_DIR:-$HOME/.local/bin}` without requiring `sudo`. Set `TACT_INSTALL_DIR` to another
 absolute directory if needed.
 
-> [!WARNING]
-> `tact` is experimental and currently relies on a fork of Nanocodex. crates.io installation is
-> unavailable until that dependency can be published.
-
 To build and install the current source instead:
 
 ```sh

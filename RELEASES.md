@@ -78,11 +78,13 @@ The tag publishes:
 - `.github/workflows/release.yaml`: validates the tag/version match; builds `tact` for Linux x86-64
   and ARM64 and macOS x86-64 and ARM64; packages each binary with `README.md` and `LICENSE.md`;
   writes SHA-256 sidecars; signs each archive with a just-in-time minisign key; verifies every
-  archive, checksum, and signature; saves that exact signed bundle as a workflow artifact; and
-  creates a GitHub Release with generated notes and all assets. Separating signing from publication
-  lets a failed publication job reuse the original ephemeral key and signatures. These matrix
-  builds set `TACT_RELEASE_BUILD=1`, which marks them as official release binaries. Local builds,
-  including `cargo build --release`, deliberately remain unmarked.
+  archive, checksum, and signature; saves that exact signed bundle as a workflow artifact; publishes
+  the crate with that release's ephemeral public key; and creates a GitHub Release with generated
+  notes and all assets only after crate publication succeeds. Separating signing from publication
+  lets a failed publication job reuse the original ephemeral key and signatures. Linux artifacts
+  are built natively on Ubuntu 22.04 runners for a consistent glibc baseline. These matrix builds set
+  `TACT_RELEASE_BUILD=1`, which marks them as official release binaries. Local builds, including
+  `cargo build --release`, deliberately remain unmarked.
 - `.github/workflows/docker.yml`: builds the scratch-based binary-carrier image for `linux/amd64`
   and `linux/arm64`, then publishes a multi-platform manifest as `ghcr.io/clabby/tact:<version>`
   (without the leading `v`) and `ghcr.io/clabby/tact:latest`. The image contains only `/tact`; see
@@ -117,10 +119,7 @@ ephemeral minisign public key used for that release's archives. The updater trea
 crates.io metadata as the trust root; the `minisign.pub` file uploaded beside the GitHub assets is
 for manual verification and is not sufficient by itself.
 
-Crate publication remains disabled while the Nanocodex dependencies are unavailable from
-crates.io. Releases produced in that state may still contain checksums and signatures, but they are
-not self-update eligible. When publication becomes possible, enable the package verification and
-publication steps together and preserve their ordering before the GitHub Release step. The private
+Crate packaging and publication must both succeed before the GitHub Release job can run. The private
 minisign key is generated only in the signing job, used to produce the retained signed bundle, and
 removed by the existing shell trap.
 

@@ -21,6 +21,16 @@ esac
 
 operating_system=$(uname -s)
 architecture=$(uname -m)
+if [ "$operating_system" = Linux ]; then
+    libc=$(getconf GNU_LIBC_VERSION 2>/dev/null || true)
+    case "$libc" in
+        glibc\ *) ;;
+        *)
+            echo "error: tact releases require a glibc-based Linux system" >&2
+            exit 1
+            ;;
+    esac
+fi
 case "$operating_system:$architecture" in
     Linux:x86_64 | Linux:amd64) target="x86_64-unknown-linux-gnu" ;;
     Linux:aarch64 | Linux:arm64) target="aarch64-unknown-linux-gnu" ;;
@@ -120,6 +130,10 @@ if [ -d "$destination" ]; then
 fi
 staged_binary=$(mktemp "$install_dir/.tact.XXXXXX")
 install -m 755 "$binary" "$staged_binary"
+if ! "$staged_binary" --version >/dev/null 2>&1; then
+    echo "error: downloaded tact binary cannot run on this system" >&2
+    exit 1
+fi
 mv -f "$staged_binary" "$destination"
 staged_binary=
 
