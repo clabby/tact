@@ -6,11 +6,10 @@ use super::{
     transcript::{Transcript, TranscriptEvent},
 };
 use crate::{
-    subagents::{AgentDescriptor, AgentId, AgentOrigin, AgentUpdate},
+    subagents::{AgentDescriptor, AgentId, AgentOrigin, AgentStatus, AgentUpdate},
     tui::{theme::Theme, transcript::TranscriptRecord},
 };
 use crossterm::event::{Event, KeyCode, KeyEventKind};
-use nanocodex::AgentEventKind;
 use ratatui::{
     Frame,
     layout::Rect,
@@ -33,7 +32,7 @@ const FOCUSED_TOOL_KEYS: [&str; 3] = ["↑↓ tool", "enter toggle", "esc blur, 
 
 struct AgentNode {
     descriptor: AgentDescriptor,
-    active: bool,
+    status: AgentStatus,
     transcript: Node<Transcript>,
 }
 
@@ -77,40 +76,40 @@ impl SubagentTree {
             AgentUpdate::Added(descriptor) => {
                 if let Some(node) = self.node_mut(descriptor.id) {
                     node.descriptor = descriptor;
-                    node.active = true;
                 } else {
                     self.nodes.push(AgentNode {
                         descriptor,
-                        active: true,
+                        status: AgentStatus::Running,
                         transcript: Node::new(Transcript::with_effort(self.effort)),
                     });
                 }
                 true
             }
             AgentUpdate::Event { id, event } => {
-                let terminal = matches!(
-                    event.kind,
-                    AgentEventKind::RunCompleted | AgentEventKind::RunFailed
-                );
-                {
-                    let Some(node) = self.node_mut(id) else {
-                        return false;
-                    };
-                    let record = TranscriptRecord::from_agent(event.seq, unix_time_ms(), event);
-                    node.transcript
-                        .update(TranscriptEvent::Record(Arc::new(record)));
-                }
-                if terminal {
-                    self.deactivate(id);
-                }
+                let Some(node) = self.node_mut(id) else {
+                    return false;
+                };
+                let record = TranscriptRecord::from_agent(event.seq, unix_time_ms(), event);
+                node.transcript
+                    .update(TranscriptEvent::Record(Arc::new(record)));
                 true
             }
-            AgentUpdate::Closed { id } => self.deactivate(id),
+            AgentUpdate::Status { id, status } => {
+                let Some(node) = self.node_mut(id) else {
+                    return false;
+                };
+                node.status = status;
+                self.selected = self.selected.min(self.nodes.len().saturating_sub(1));
+                true
+            }
         }
     }
 
     pub(super) fn active_count(&self) -> usize {
-        self.nodes.iter().filter(|node| node.active).count()
+        self.nodes
+            .iter()
+            .filter(|node| node.status.is_active())
+            .count()
     }
 
     pub(super) fn set_effort(&mut self, effort: crate::config::ReasoningEffort) {
@@ -121,9 +120,7 @@ impl SubagentTree {
     }
 
     pub(super) fn contains(&self, id: AgentId) -> bool {
-        self.nodes
-            .iter()
-            .any(|node| node.descriptor.id == id && node.active)
+        self.nodes.iter().any(|node| node.descriptor.id == id)
     }
 
     pub(super) fn animation_deadline(&self) -> Option<Instant> {
@@ -158,7 +155,7 @@ impl SubagentTree {
                 None
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                self.selected = (self.selected + 1).min(self.active_count().saturating_sub(1));
+                self.selected = (self.selected + 1).min(self.nodes.len().saturating_sub(1));
                 None
             }
             KeyCode::Enter => self
@@ -235,13 +232,17 @@ impl SubagentTree {
             Span::styled("● ", Style::default().fg(theme.accent())),
             Span::styled("main agent", Style::default().add_modifier(Modifier::BOLD)),
             Span::styled(
-                format!("  ·  {} active", visible.len()),
+                format!(
+                    "  ·  {} active · {} total",
+                    self.active_count(),
+                    visible.len()
+                ),
                 Style::default().fg(theme.muted()),
             ),
         ])));
         for (selection_index, visible_node) in visible.iter().enumerate() {
             let node = &self.nodes[visible_node.index];
-            let (symbol, color, label) = state_style();
+            let (symbol, color, label) = state_style(&node.status);
             let selected = selection_index == self.selected;
             let text_color = if selected { Color::Black } else { theme.text() };
             let detail_color = if selected { Color::Black } else { color };
@@ -323,27 +324,18 @@ impl SubagentTree {
         self.nodes.iter_mut().find(|node| node.descriptor.id == id)
     }
 
-    fn deactivate(&mut self, id: AgentId) -> bool {
-        let Some(node) = self.node_mut(id) else {
-            return false;
-        };
-        node.active = false;
-        self.selected = self.selected.min(self.active_count().saturating_sub(1));
-        true
-    }
-
     fn visible_nodes(&self) -> Vec<VisibleNode> {
         let roots = self
             .nodes
             .iter()
             .enumerate()
             .filter_map(|(index, node)| {
-                let parent_is_active = node.descriptor.parent.is_some_and(|parent| {
+                let parent_exists = node.descriptor.parent.is_some_and(|parent| {
                     self.nodes
                         .iter()
-                        .any(|candidate| candidate.active && candidate.descriptor.id == parent)
+                        .any(|candidate| candidate.descriptor.id == parent)
                 });
-                (node.active && !parent_is_active).then_some(index)
+                (!parent_exists).then_some(index)
             })
             .collect::<Vec<_>>();
         let mut visible = Vec::new();
@@ -365,7 +357,7 @@ impl SubagentTree {
                 .iter()
                 .enumerate()
                 .filter_map(|(child_index, child)| {
-                    (child.active && child.descriptor.parent == Some(id)).then_some(child_index)
+                    (child.descriptor.parent == Some(id)).then_some(child_index)
                 })
                 .collect::<Vec<_>>();
             visible.push(VisibleNode {
@@ -399,8 +391,16 @@ fn tree_prefix(node: &VisibleNode, task_line: bool) -> String {
     prefix
 }
 
-const fn state_style() -> (&'static str, Color, &'static str) {
-    ("◐", Color::Yellow, "running")
+const fn state_style(status: &AgentStatus) -> (&'static str, Color, &'static str) {
+    match status {
+        AgentStatus::Pending => ("○", Color::Yellow, "pending"),
+        AgentStatus::Running => ("◐", Color::Yellow, "running"),
+        AgentStatus::Completed { .. } => ("●", Color::Green, "completed"),
+        AgentStatus::Interrupted => ("■", Color::Blue, "interrupted"),
+        AgentStatus::Failed { .. } => ("×", Color::Red, "failed"),
+        AgentStatus::Closing => ("◑", Color::Yellow, "closing"),
+        AgentStatus::Closed => ("■", Color::DarkGray, "closed"),
+    }
 }
 
 fn inset(area: Rect, horizontal: u16, vertical: u16) -> Rect {
@@ -444,7 +444,7 @@ mod tests {
     use super::{SubagentEffect, SubagentTree};
     use crate::{
         config::ReasoningEffort,
-        subagents::{AgentDescriptor, AgentId, AgentOrigin, AgentUpdate},
+        subagents::{AgentDescriptor, AgentId, AgentOrigin, AgentStatus, AgentUpdate},
         tui::theme::Theme,
     };
     use crossterm::event::{
@@ -546,12 +546,43 @@ mod tests {
         assert_eq!(tree.active_count(), 1);
 
         tree.apply(event(AgentEventKind::RunCompleted, json!({})));
+        tree.apply(AgentUpdate::Status {
+            id: AgentId::new(1),
+            status: AgentStatus::Completed {
+                report: "done".to_owned(),
+            },
+        });
         assert_eq!(tree.active_count(), 0);
-        assert!(!tree.nodes[0].active);
+        assert!(matches!(
+            tree.nodes[0].status,
+            AgentStatus::Completed { .. }
+        ));
 
         tree.apply(AgentUpdate::Added(descriptor()));
+        tree.apply(AgentUpdate::Status {
+            id: AgentId::new(1),
+            status: AgentStatus::Running,
+        });
         assert_eq!(tree.active_count(), 1);
         assert_eq!(tree.nodes.len(), 1);
+    }
+
+    #[test]
+    fn completed_agents_remain_visible_and_inspectable() {
+        let mut tree = SubagentTree::new(ReasoningEffort::Medium);
+        tree.apply(AgentUpdate::Added(descriptor()));
+        tree.apply(event(AgentEventKind::RunCompleted, json!({})));
+        tree.apply(AgentUpdate::Status {
+            id: AgentId::new(1),
+            status: AgentStatus::Completed {
+                report: "done".to_owned(),
+            },
+        });
+
+        let visible = tree.visible_nodes();
+
+        assert_eq!(visible.len(), 1);
+        assert_eq!(tree.nodes[visible[0].index].descriptor.id, AgentId::new(1));
     }
 
     #[test]

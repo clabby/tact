@@ -314,6 +314,8 @@ pub(crate) async fn run(
     let mut writer_error = None::<TranscriptError>;
     let mut writers_open = 1_usize;
     let mut shell_tasks = JoinSet::<(PaneId, ShellExecution)>::new();
+    let mut subagent_shutdowns = JoinSet::<()>::new();
+    let mut subagents_stopping = false;
 
     macro_rules! apply_app_update {
         ($update:expr) => {
@@ -336,6 +338,7 @@ pub(crate) async fn run(
                     scheduler: &mut scheduler,
                     panes: &mut panes,
                     shell_tasks: &mut shell_tasks,
+                    subagent_shutdowns: &mut subagent_shutdowns,
                 },
             )?;
         };
@@ -348,10 +351,17 @@ pub(crate) async fn run(
         if stopping {
             shell_tasks.abort_all();
         }
+        if stopping && !subagents_stopping {
+            for runtime in panes.values() {
+                schedule_subagent_shutdown(runtime, &mut subagent_shutdowns);
+            }
+            subagents_stopping = true;
+        }
         if stopping
             && worker_stopped
             && panes.values().all(|pane| pane.event_streams_open == 0)
             && shell_tasks.is_empty()
+            && subagent_shutdowns.is_empty()
         {
             close_journals(&mut panes, worker_error.as_ref())?;
             if writers_open == 0 {
@@ -684,6 +694,9 @@ pub(crate) async fn run(
                     )?;
                 }
             }
+            result = subagent_shutdowns.join_next(), if !subagent_shutdowns.is_empty() => {
+                drop(result);
+            }
             result = async {
                 editor_task
                     .as_mut()
@@ -773,6 +786,10 @@ pub(crate) async fn run(
                             .expect("new-session pane must exist")
                             .generation
                             .saturating_add(1);
+                        schedule_subagent_shutdown(
+                            panes.get(&pane).expect("new-session pane must exist"),
+                            &mut subagent_shutdowns,
+                        );
                         close_pane_journal(
                             panes.get_mut(&pane).expect("new-session pane must exist"),
                             SessionOutcome::Closed,
@@ -877,6 +894,10 @@ pub(crate) async fn run(
                             .expect("resumed pane must exist")
                             .generation
                             .saturating_add(1);
+                        schedule_subagent_shutdown(
+                            panes.get(&pane).expect("resumed pane must exist"),
+                            &mut subagent_shutdowns,
+                        );
                         close_pane_journal(
                             panes.get_mut(&pane).expect("resumed pane must exist"),
                             SessionOutcome::Closed,
@@ -1062,6 +1083,14 @@ fn close_journals(
     Ok(())
 }
 
+fn schedule_subagent_shutdown(runtime: &PaneRuntime, tasks: &mut JoinSet<()>) {
+    let control = runtime.subagent_control.clone();
+    let root_session_id = runtime.session_id.clone();
+    tasks.spawn(async move {
+        control.close_all(&root_session_id).await;
+    });
+}
+
 fn close_pane_journal(
     runtime: &mut PaneRuntime,
     outcome: SessionOutcome,
@@ -1095,6 +1124,7 @@ struct EffectContext<'a> {
     scheduler: &'a mut RenderScheduler,
     panes: &'a mut HashMap<PaneId, PaneRuntime>,
     shell_tasks: &'a mut JoinSet<(PaneId, ShellExecution)>,
+    subagent_shutdowns: &'a mut JoinSet<()>,
 }
 
 fn apply_update(update: ComponentUpdate<AppEffect>, mut context: EffectContext<'_>) -> Result<()> {
@@ -1104,10 +1134,15 @@ fn apply_update(update: ComponentUpdate<AppEffect>, mut context: EffectContext<'
                 .commands
                 .send(WorkerCommand::OpenFork(pane))
                 .map_err(|_| RuntimeError::AgentWorkerStopped)?,
-            AppEffect::ClosePane(pane) => context
-                .commands
-                .send(WorkerCommand::ClosePane(pane))
-                .map_err(|_| RuntimeError::AgentWorkerStopped)?,
+            AppEffect::ClosePane(pane) => {
+                if let Some(runtime) = context.panes.get(&pane) {
+                    schedule_subagent_shutdown(runtime, context.subagent_shutdowns);
+                }
+                context
+                    .commands
+                    .send(WorkerCommand::ClosePane(pane))
+                    .map_err(|_| RuntimeError::AgentWorkerStopped)?;
+            }
             AppEffect::SetTheme(mode) => context.config.persist_theme_mode(mode)?,
             AppEffect::Shutdown => context.shutdown.cancel(),
             AppEffect::Pane { pane, effect } => {
@@ -1497,7 +1532,7 @@ mod tests {
     use crate::{
         config::{Config, ConfigOverrides, ReasoningEffort},
         error::{Error, RuntimeError},
-        subagents::{AgentId, AgentUpdate},
+        subagents::{AgentId, AgentStatus, AgentUpdate},
         tui::{
             pane::PaneId,
             subagent_updates::ForwardedSubagentUpdate,
@@ -1664,8 +1699,9 @@ mod tests {
         let fork_update = ForwardedSubagentUpdate {
             runtime_id: subagent_control.runtime_id(),
             root_session_id: "fork-session".to_owned(),
-            update: AgentUpdate::Closed {
+            update: AgentUpdate::Status {
                 id: AgentId::new(1),
+                status: AgentStatus::Closed,
             },
         };
 
@@ -1675,8 +1711,9 @@ mod tests {
         let stale_update = ForwardedSubagentUpdate {
             runtime_id: other_control.runtime_id(),
             root_session_id: "fork-session".to_owned(),
-            update: AgentUpdate::Closed {
+            update: AgentUpdate::Status {
                 id: AgentId::new(1),
+                status: AgentStatus::Closed,
             },
         };
         assert_eq!(subagent_pane(&panes, &stale_update), None);

@@ -158,6 +158,7 @@ impl ConfiguredAgent {
         let turn_result = turn.result().await;
         let was_cancelled = matches!(cancellation, Cancellation::Requested);
         drop(control);
+        self.subagent_control.close_all(&root_session_id).await;
         self.shutdown().await;
         subagent_drain.abort();
 
