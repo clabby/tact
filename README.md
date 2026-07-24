@@ -91,6 +91,7 @@ mode = "auto" # auto, chatgpt, or api-key
 [agent]
 workspace = "/path/to/workspace"
 thinking = "medium" # low, medium, high, xhigh, or max
+reasoning_mode = "standard" # standard or pro
 fast_mode = false
 max_subagents = 32
 web_search = true

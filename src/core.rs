@@ -1,7 +1,7 @@
 //! Nanocodex construction, turn execution, and graceful shutdown.
 
 use crate::{
-    config::{Config, ReasoningEffort, SkillsConfig},
+    config::{Config, ReasoningEffort, ReasoningMode, SkillsConfig},
     error::{Result, RuntimeError},
     mcp,
     skills::SkillCatalog,
@@ -45,12 +45,19 @@ impl ConfiguredAgent {
     }
 
     pub(crate) fn from_config(config: &Config) -> Result<Self> {
-        Self::from_config_with_session(config, config.agent().thinking(), None, None)
+        Self::from_config_with_session(
+            config,
+            config.agent().thinking(),
+            config.agent().reasoning_mode(),
+            None,
+            None,
+        )
     }
 
     pub(crate) fn from_config_with_session(
         config: &Config,
         thinking: ReasoningEffort,
+        reasoning_mode: ReasoningMode,
         session_id: Option<&str>,
         resume: Option<ResumeState>,
     ) -> Result<Self> {
@@ -79,6 +86,7 @@ impl ConfiguredAgent {
         let mut builder = Nanocodex::builder(auth)
             .workspace(workspace)
             .thinking(thinking.into())
+            .reasoning_mode(reasoning_mode.into())
             .fast_mode(agent_config.fast_mode())
             .responses(responses.build())
             .tools_factory(move |agent| {

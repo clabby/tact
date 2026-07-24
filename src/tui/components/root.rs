@@ -19,7 +19,7 @@ use super::{
     transcript::{Transcript, TranscriptEvent},
 };
 use crate::{
-    config::ReasoningEffort,
+    config::{ReasoningEffort, ReasoningMode},
     subagents::AgentUpdate,
     tui::{
         context::{ContextDiagnostics, completed_transcript_tokens},
@@ -102,6 +102,8 @@ pub(crate) enum RootEvent {
     SessionRestored {
         records: Vec<Arc<TranscriptRecord>>,
         effort: ReasoningEffort,
+        reasoning_mode: ReasoningMode,
+        preferred_reasoning_mode: ReasoningMode,
         fast_mode: bool,
     },
     NotifyError(String),
@@ -120,17 +122,26 @@ pub(crate) enum RootEffect {
     Submit(Submission),
     RunShell(String),
     OpenDraftEditor,
-    OpenQueueEditor { index: usize, text: String },
+    OpenQueueEditor {
+        index: usize,
+        text: String,
+    },
     OpenConfigEditor,
     OpenLink(String),
     ReloadConfig,
     NewSession,
     LoadSessions,
     ResumeSession(String),
-    Steer { id: QueueId, prompt: Submission },
+    Steer {
+        id: QueueId,
+        prompt: Submission,
+    },
     PersistSteer(String),
     Copy(String),
-    SetEffort(ReasoningEffort),
+    SetEffort {
+        effort: ReasoningEffort,
+        reasoning_mode: ReasoningMode,
+    },
     SetFastMode(bool),
     SetMaxSubagents(usize),
     SetTheme(ThemeMode),
@@ -181,6 +192,7 @@ pub(crate) struct RootNode {
     fork_available: bool,
     interactive: bool,
     theme_mode: ThemeMode,
+    preferred_reasoning_mode: ReasoningMode,
     subagents: SubagentTree,
     context_diagnostics: ContextDiagnostics,
 }
@@ -206,6 +218,7 @@ impl RootNode {
             fork_available: true,
             interactive: true,
             theme_mode: ThemeMode::Auto,
+            preferred_reasoning_mode: ReasoningMode::Standard,
             subagents: SubagentTree::new(thinking),
             context_diagnostics: ContextDiagnostics::default(),
         }
@@ -220,6 +233,10 @@ impl RootNode {
                 self.composer.component().context_tokens(),
             ));
         root.set_fast_mode(self.composer.component().fast_mode());
+        root.set_reasoning_modes(
+            self.composer.component().reasoning_mode(),
+            self.preferred_reasoning_mode,
+        );
         root.set_max_subagents(self.subagents.max_subagents());
         root.thread = ThreadState::Started;
         root.fork_available = false;
@@ -251,15 +268,39 @@ impl RootNode {
             .update(ComposerEvent::SetFastMode(enabled));
     }
 
+    pub(crate) fn set_reasoning_modes(&mut self, actual: ReasoningMode, preferred: ReasoningMode) {
+        self.preferred_reasoning_mode = preferred;
+        let _ = self
+            .composer
+            .component_mut()
+            .update(ComposerEvent::SetReasoningMode(actual));
+    }
+
+    pub(crate) const fn set_preferred_reasoning_mode(&mut self, mode: ReasoningMode) {
+        self.preferred_reasoning_mode = mode;
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn preferred_reasoning_mode(&self) -> ReasoningMode {
+        self.preferred_reasoning_mode
+    }
+
     pub(crate) fn set_max_subagents(&mut self, limit: usize) {
         self.subagents.set_max_subagents(limit);
     }
 
-    pub(crate) fn reset_session(&mut self, workspace: &Path, thinking: ReasoningEffort) {
+    pub(crate) fn reset_session(
+        &mut self,
+        workspace: &Path,
+        thinking: ReasoningEffort,
+        reasoning_mode: ReasoningMode,
+        preferred_reasoning_mode: ReasoningMode,
+    ) {
         let fork_available = self.fork_available;
         let theme_mode = self.theme_mode;
         let max_subagents = self.subagents.max_subagents();
         *self = Self::new(workspace, thinking);
+        self.set_reasoning_modes(reasoning_mode, preferred_reasoning_mode);
         self.fork_available = fork_available;
         self.theme_mode = theme_mode;
         self.set_max_subagents(max_subagents);
@@ -269,10 +310,17 @@ impl RootNode {
         &mut self,
         workspace: &Path,
         thinking: ReasoningEffort,
+        reasoning_mode: ReasoningMode,
+        preferred_reasoning_mode: ReasoningMode,
         fast_mode: bool,
         records: Vec<Arc<TranscriptRecord>>,
     ) {
-        self.reset_session(workspace, thinking);
+        self.reset_session(
+            workspace,
+            thinking,
+            reasoning_mode,
+            preferred_reasoning_mode,
+        );
         self.set_fast_mode(fast_mode);
         for record in records {
             self.context_diagnostics.observe(&record);
@@ -842,6 +890,7 @@ impl RootNode {
     fn open_effort(&mut self) -> ComponentUpdate<RootEffect> {
         self.overlay = Some(Overlay::Effort(Node::new(EffortSelector::new(
             self.composer.component().effort(),
+            self.preferred_reasoning_mode == ReasoningMode::Pro,
         ))));
         ComponentUpdate::render(RenderRequest::Immediate)
     }
@@ -1036,7 +1085,24 @@ impl RootNode {
         self.overlay = None;
         match effect {
             EffortEffect::Dismiss => ComponentUpdate::render(RenderRequest::Immediate),
-            EffortEffect::Apply(effort) => {
+            EffortEffect::Apply(effort, pro) => {
+                let reasoning_mode = if pro {
+                    ReasoningMode::Pro
+                } else {
+                    ReasoningMode::Standard
+                };
+                let previous_reasoning_mode = self.preferred_reasoning_mode;
+                self.preferred_reasoning_mode = reasoning_mode;
+                if reasoning_mode != previous_reasoning_mode {
+                    let state = if pro { "enabled" } else { "disabled" };
+                    let suffix = if self.composer.component().reasoning_mode() != reasoning_mode {
+                        " · start a new session to apply."
+                    } else {
+                        "."
+                    };
+                    let message = format!("Pro {state} for new sessions{suffix}");
+                    self.notification = Some(Notification::plain(message, Color::Green));
+                }
                 self.transcript.component_mut().set_effort(effort);
                 self.subagents.set_effort(effort);
                 let _ = self
@@ -1044,7 +1110,10 @@ impl RootNode {
                     .component_mut()
                     .update(ComposerEvent::SetEffort(effort));
                 ComponentUpdate {
-                    effects: vec![RootEffect::SetEffort(effort)],
+                    effects: vec![RootEffect::SetEffort {
+                        effort,
+                        reasoning_mode,
+                    }],
                     render: RenderRequest::Immediate,
                 }
             }
@@ -1335,10 +1404,19 @@ impl Component for RootNode {
             RootEvent::SessionRestored {
                 records,
                 effort,
+                reasoning_mode,
+                preferred_reasoning_mode,
                 fast_mode,
             } => {
                 let workspace = self.workspace.clone();
-                self.restore_session(&workspace, effort, fast_mode, records);
+                self.restore_session(
+                    &workspace,
+                    effort,
+                    reasoning_mode,
+                    preferred_reasoning_mode,
+                    fast_mode,
+                    records,
+                );
                 ComponentUpdate::render(RenderRequest::Immediate)
             }
             RootEvent::NotifyError(message) => {
@@ -1377,16 +1455,18 @@ fn render_notification(
     }
     let text_width = message.width();
     let width = u16::try_from(text_width.saturating_add(4)).unwrap_or(u16::MAX);
-    let popup = Floating::new("", width, 3, &[])
+    let paragraph = Paragraph::new(message.clone())
+        .centered()
+        .wrap(Wrap { trim: true });
+    let body_width = width.min(area.width).saturating_sub(2).max(1);
+    let body_height = u16::try_from(text_width.div_ceil(usize::from(body_width)))
+        .unwrap_or(u16::MAX)
+        .max(1);
+    let popup = Floating::new("", width, body_height.saturating_add(2), &[])
         .at_top()
         .colors(color, color)
         .render(frame, area, theme);
-    frame.render_widget(
-        Paragraph::new(message.clone())
-            .centered()
-            .wrap(Wrap { trim: true }),
-        popup.body,
-    );
+    frame.render_widget(paragraph, popup.body);
 }
 
 fn clamp_to(position: Position, area: Rect) -> Position {
@@ -1513,7 +1593,7 @@ mod tests {
         ThreadState,
     };
     use crate::{
-        config::ReasoningEffort,
+        config::{ReasoningEffort, ReasoningMode},
         subagents::{AgentDescriptor, AgentId, AgentOrigin, AgentStatus, AgentUpdate},
         tui::{
             theme::{Theme, ThemeMode},
@@ -1621,6 +1701,8 @@ mod tests {
         root.restore_session(
             Path::new("/work"),
             ReasoningEffort::Medium,
+            ReasoningMode::Standard,
+            ReasoningMode::Standard,
             false,
             vec![outbound],
         );
@@ -2372,6 +2454,29 @@ mod tests {
     }
 
     #[test]
+    fn narrow_notifications_keep_wrapped_action_text_visible() {
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        root.update(super::RootEvent::NotifySuccess(
+            "Pro enabled for new sessions · start a new session to apply.".to_owned(),
+        ));
+        let mut terminal = Terminal::new(TestBackend::new(30, 10)).unwrap();
+
+        terminal
+            .draw(|frame| root.render(frame, frame.area(), &Theme::default()))
+            .unwrap();
+
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("start a new session"));
+        assert!(rendered.contains("apply."));
+    }
+
+    #[test]
     fn update_available_uses_the_success_frame_and_styles_version_and_command() {
         let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
         let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
@@ -2496,7 +2601,10 @@ mod tests {
 
         assert_eq!(
             update.effects,
-            [RootEffect::SetEffort(ReasoningEffort::High)]
+            [RootEffect::SetEffort {
+                effort: ReasoningEffort::High,
+                reasoning_mode: ReasoningMode::Standard,
+            }]
         );
         assert_eq!(root.composer().effort(), ReasoningEffort::High);
         assert!(root.overlay.is_none());
@@ -2521,6 +2629,64 @@ mod tests {
                 .iter()
                 .all(|cell| matches!(cell.fg, Color::Yellow) || cell.fg == theme.code_text())
         );
+    }
+
+    #[test]
+    fn pro_preference_does_not_change_the_running_session_mode() {
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        root.update(key(KeyCode::Char('/'), KeyModifiers::NONE));
+        for character in "effort".chars() {
+            root.update(key(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+        root.update(key(KeyCode::Enter, KeyModifiers::NONE));
+
+        root.update(key(KeyCode::Char('p'), KeyModifiers::NONE));
+        let update = root.update(key(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(
+            update.effects,
+            [RootEffect::SetEffort {
+                effort: ReasoningEffort::Medium,
+                reasoning_mode: ReasoningMode::Pro,
+            }]
+        );
+        assert_eq!(root.composer().reasoning_mode(), ReasoningMode::Standard);
+        let notification = root.notification.as_ref().unwrap();
+        let message = notification
+            .message
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert_eq!(
+            message,
+            "Pro enabled for new sessions · start a new session to apply."
+        );
+        assert_eq!(notification.color, Color::Green);
+
+        root.reset_session(
+            Path::new("/work"),
+            ReasoningEffort::Medium,
+            ReasoningMode::Pro,
+            ReasoningMode::Pro,
+        );
+        assert_eq!(root.composer().reasoning_mode(), ReasoningMode::Pro);
+
+        root.open_effort();
+        root.update(key(KeyCode::Char('p'), KeyModifiers::NONE));
+        root.update(key(KeyCode::Enter, KeyModifiers::NONE));
+        let notification = root.notification.as_ref().unwrap();
+        let message = notification
+            .message
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert_eq!(
+            message,
+            "Pro disabled for new sessions · start a new session to apply."
+        );
+        assert_eq!(notification.color, Color::Green);
     }
 
     #[test]
@@ -2697,7 +2863,12 @@ mod tests {
         assert!(root.overlay.is_none());
         assert!(!root.interactive);
 
-        root.reset_session(Path::new("/work"), ReasoningEffort::Medium);
+        root.reset_session(
+            Path::new("/work"),
+            ReasoningEffort::Medium,
+            ReasoningMode::Standard,
+            ReasoningMode::Standard,
+        );
 
         assert!(root.interactive);
         assert!(matches!(root.thread, ThreadState::New));

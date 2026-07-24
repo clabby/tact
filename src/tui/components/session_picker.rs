@@ -250,7 +250,10 @@ fn visible_tail(query: &str, width: usize) -> &str {
 #[cfg(test)]
 mod tests {
     use super::{Component, SessionPicker, SessionPickerEffect, SessionPickerEvent};
-    use crate::{config::ReasoningEffort, tui::session::SessionSummary};
+    use crate::{
+        config::{ReasoningEffort, ReasoningMode},
+        tui::session::SessionSummary,
+    };
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use std::path::PathBuf;
 
@@ -264,6 +267,7 @@ mod tests {
             started_at_unix_ms: 1,
             model: "gpt".to_owned(),
             effort: ReasoningEffort::Medium,
+            reasoning_mode: ReasoningMode::Standard,
             workspace: PathBuf::from("/work"),
             preview: preview.to_owned(),
         }

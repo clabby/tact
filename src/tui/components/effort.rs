@@ -10,7 +10,7 @@ use ratatui::{
     Frame,
     buffer::Buffer,
     layout::{Alignment, Position, Rect},
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::Paragraph,
 };
@@ -26,7 +26,7 @@ const ANIMATION_FRAME_INTERVAL: Duration = Duration::from_millis(16);
 const DIAL_WIDTH: u16 = 17;
 const DIAL_HEIGHT: u16 = 9;
 const DIAL_SAMPLES: usize = 96;
-const KEY_BINDINGS: [&str; 3] = ["arrows change", "enter apply", "esc cancel"];
+const KEY_BINDINGS: [&str; 4] = ["←/→ effort", "p pro", "enter apply", "esc cancel"];
 const FILLER_DOT: &str = "•";
 const THICK_DOT: &str = "●";
 
@@ -37,12 +37,13 @@ pub(super) enum EffortEvent {
 
 #[derive(Debug, Eq, PartialEq)]
 pub(super) enum EffortEffect {
-    Apply(ReasoningEffort),
+    Apply(ReasoningEffort, bool),
     Dismiss,
 }
 
 pub(super) struct EffortSelector {
     selected: usize,
+    pro: bool,
     displayed_phase: f64,
     displayed_fill: f64,
     target_phase: f64,
@@ -60,11 +61,12 @@ struct Animation {
 }
 
 impl EffortSelector {
-    pub(super) fn new(initial: ReasoningEffort) -> Self {
+    pub(super) fn new(initial: ReasoningEffort, pro: bool) -> Self {
         let selected = initial.index();
         let phase = selected as f64;
         Self {
             selected,
+            pro,
             displayed_phase: phase,
             displayed_fill: phase,
             target_phase: phase,
@@ -92,8 +94,12 @@ impl EffortSelector {
                 self.select_relative(1, now);
                 ComponentUpdate::render(RenderRequest::Immediate)
             }
+            KeyCode::Char('p') => {
+                self.pro = !self.pro;
+                ComponentUpdate::render(RenderRequest::Immediate)
+            }
             KeyCode::Enter => ComponentUpdate {
-                effects: vec![EffortEffect::Apply(self.selected_effort())],
+                effects: vec![EffortEffect::Apply(self.selected_effort(), self.pro)],
                 render: RenderRequest::Immediate,
             },
             KeyCode::Esc | KeyCode::Backspace => ComponentUpdate {
@@ -239,18 +245,29 @@ impl EffortSelector {
         );
     }
 
-    fn render_label(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
+    fn render_labels(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
         let effort = self.selected_effort();
-        let line = Line::from(vec![
-            Span::styled("Selected Effort:", Style::default().fg(theme.border())),
-            Span::styled(
-                format!(" {}", effort.as_str()),
-                Style::default()
-                    .fg(theme.effort(effort))
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]);
-        frame.render_widget(Paragraph::new(line).alignment(Alignment::Center), area);
+        let lines = vec![
+            Line::from(vec![
+                Span::styled("Selected Effort:", Style::default().fg(theme.border())),
+                Span::styled(
+                    format!(" {}", effort.as_str()),
+                    Style::default()
+                        .fg(theme.effort(effort))
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled("Pro: ", Style::default().fg(Color::Green)),
+                Span::styled(
+                    if self.pro { "on" } else { "off" },
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]),
+        ];
+        frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center), area);
     }
 }
 
@@ -290,13 +307,13 @@ impl Component for EffortSelector {
             return;
         }
 
-        let layout = Floating::new("Effort", 48, 15, &KEY_BINDINGS).render(frame, area, theme);
+        let layout = Floating::new("Effort", 48, 17, &KEY_BINDINGS).render(frame, area, theme);
         if layout.body.is_empty() {
             return;
         }
 
         let dial_width = DIAL_WIDTH.min(layout.body.width);
-        let dial_height = DIAL_HEIGHT.min(layout.body.height.saturating_sub(2));
+        let dial_height = DIAL_HEIGHT.min(layout.body.height.saturating_sub(4));
         let dial = Rect {
             x: layout.body.x + layout.body.width.saturating_sub(dial_width) / 2,
             y: layout.body.y.saturating_add(1),
@@ -305,13 +322,13 @@ impl Component for EffortSelector {
         }
         .intersection(layout.body);
         self.render_dial(frame, dial, theme);
-        let label = Rect {
-            y: dial.bottom().min(layout.body.bottom().saturating_sub(1)) + 1,
-            height: 1,
+        let labels = Rect {
+            y: dial.bottom().min(layout.body.bottom().saturating_sub(3)) + 1,
+            height: 2,
             ..layout.body
         }
         .intersection(layout.body);
-        self.render_label(frame, label, theme);
+        self.render_labels(frame, labels, theme);
     }
 }
 
@@ -360,7 +377,7 @@ mod tests {
 
     fn colored_dial_dots(terminal: &Terminal<TestBackend>, color: Color) -> usize {
         let buffer = terminal.backend().buffer();
-        (3..=11)
+        (2..=10)
             .flat_map(|y| (21..=37).map(move |x| (x, y)))
             .filter(|position| {
                 matches!(buffer[*position].symbol(), "•" | "●") && buffer[*position].fg == color
@@ -370,7 +387,7 @@ mod tests {
 
     #[test]
     fn dial_has_five_evenly_spaced_stops_with_one_at_the_top() {
-        let mut selector = EffortSelector::new(ReasoningEffort::Low);
+        let mut selector = EffortSelector::new(ReasoningEffort::Low, false);
         let mut terminal = Terminal::new(TestBackend::new(60, 18)).unwrap();
 
         terminal
@@ -384,20 +401,20 @@ mod tests {
             .filter(|cell| cell.symbol() == "●")
             .count();
         assert_eq!(thick_dots, 5);
-        assert_eq!(buffer[(29, 2)].symbol(), " ");
-        assert_eq!(buffer[(29, 3)].symbol(), "●");
-        assert_eq!(buffer[(29, 3)].fg, Color::Gray);
-        assert_eq!(buffer[(20, 13)].fg, Color::DarkGray);
-        assert_eq!(buffer[(37, 13)].fg, Color::Gray);
+        assert_eq!(buffer[(29, 1)].symbol(), " ");
+        assert_eq!(buffer[(29, 2)].symbol(), "●");
+        assert_eq!(buffer[(29, 2)].fg, Color::Gray);
+        assert_eq!(buffer[(20, 12)].fg, Color::DarkGray);
         let footer = (6..54)
-            .map(|x| buffer[(x, 14)].symbol())
+            .map(|x| buffer[(x, 15)].symbol())
             .collect::<String>();
-        assert_eq!(footer, "│   arrows change · enter apply · esc cancel   │");
+        assert_eq!(footer, "│ ←/→ effort · p pro · enter apply · esc cancel│");
+        assert!((7..53).all(|x| buffer[(x, 14)].symbol() == " "));
     }
 
     #[test]
     fn effort_selector_hides_the_terminal_cursor() {
-        let mut selector = EffortSelector::new(ReasoningEffort::Low);
+        let mut selector = EffortSelector::new(ReasoningEffort::Low, false);
         let mut terminal = Terminal::new(TestBackend::new(60, 18)).unwrap();
 
         terminal
@@ -409,20 +426,20 @@ mod tests {
 
     #[test]
     fn dial_is_symmetric_in_terminal_cells() {
-        let mut selector = EffortSelector::new(ReasoningEffort::Low);
+        let mut selector = EffortSelector::new(ReasoningEffort::Low, false);
         let mut terminal = Terminal::new(TestBackend::new(60, 18)).unwrap();
         terminal
             .draw(|frame| selector.render(frame, frame.area(), &Theme::default()))
             .unwrap();
         let buffer = terminal.backend().buffer();
 
-        for y in 3..=11 {
+        for y in 2..=10 {
             for x in 21..=37 {
                 if !matches!(buffer[(x, y)].symbol(), "•" | "●") {
                     continue;
                 }
                 assert!(matches!(buffer[(58 - x, y)].symbol(), "•" | "●"));
-                assert!(matches!(buffer[(x, 14 - y)].symbol(), "•" | "●"));
+                assert!(matches!(buffer[(x, 12 - y)].symbol(), "•" | "●"));
             }
         }
     }
@@ -430,34 +447,34 @@ mod tests {
     #[test]
     fn animation_fills_thick_dots_in_the_new_effort_color() {
         let start = Instant::now();
-        let mut selector = EffortSelector::new(ReasoningEffort::Medium);
+        let mut selector = EffortSelector::new(ReasoningEffort::Medium, false);
         let mut terminal = Terminal::new(TestBackend::new(60, 18)).unwrap();
 
         terminal
             .draw(|frame| selector.render(frame, frame.area(), &Theme::default()))
             .unwrap();
-        assert_eq!(terminal.backend().buffer()[(29, 3)].fg, Color::Cyan);
-        assert_eq!(terminal.backend().buffer()[(37, 8)].symbol(), "•");
-        assert_eq!(terminal.backend().buffer()[(37, 8)].fg, Color::DarkGray);
+        assert_eq!(terminal.backend().buffer()[(29, 2)].fg, Color::Cyan);
+        assert_eq!(terminal.backend().buffer()[(37, 7)].symbol(), "•");
+        assert_eq!(terminal.backend().buffer()[(37, 7)].fg, Color::DarkGray);
 
         selector.update(key(KeyCode::Right, start));
         terminal
             .draw(|frame| selector.render(frame, frame.area(), &Theme::default()))
             .unwrap();
-        assert_eq!(terminal.backend().buffer()[(29, 3)].fg, Color::Yellow);
-        assert_eq!(terminal.backend().buffer()[(37, 8)].fg, Color::DarkGray);
+        assert_eq!(terminal.backend().buffer()[(29, 2)].fg, Color::Yellow);
+        assert_eq!(terminal.backend().buffer()[(37, 7)].fg, Color::DarkGray);
 
         selector.update(EffortEvent::AnimationFrame(start + ANIMATION_DURATION / 2));
         terminal
             .draw(|frame| selector.render(frame, frame.area(), &Theme::default()))
             .unwrap();
-        assert_eq!(terminal.backend().buffer()[(37, 8)].fg, Color::Yellow);
+        assert_eq!(terminal.backend().buffer()[(37, 7)].fg, Color::Yellow);
     }
 
     #[test]
     fn arrows_wrap_around_the_effort_levels() {
         let now = Instant::now();
-        let mut selector = EffortSelector::new(ReasoningEffort::Low);
+        let mut selector = EffortSelector::new(ReasoningEffort::Low, false);
 
         selector.update(key(KeyCode::Left, now));
         assert_eq!(selector.selected_effort(), ReasoningEffort::Max);
@@ -472,7 +489,7 @@ mod tests {
     #[test]
     fn transitions_use_pi_timing_and_cubic_easing() {
         let start = Instant::now();
-        let mut selector = EffortSelector::new(ReasoningEffort::Low);
+        let mut selector = EffortSelector::new(ReasoningEffort::Low, false);
 
         selector.update(key(KeyCode::Right, start));
         assert_eq!(
@@ -491,7 +508,7 @@ mod tests {
     #[test]
     fn max_to_low_wraps_clockwise_through_the_top_anchor() {
         let start = Instant::now();
-        let mut selector = EffortSelector::new(ReasoningEffort::Max);
+        let mut selector = EffortSelector::new(ReasoningEffort::Max, false);
 
         selector.update(key(KeyCode::Right, start));
         selector.update(EffortEvent::AnimationFrame(start + ANIMATION_DURATION / 2));
@@ -508,7 +525,7 @@ mod tests {
     #[test]
     fn max_to_low_progressively_removes_the_colored_arc() {
         let start = Instant::now();
-        let mut selector = EffortSelector::new(ReasoningEffort::Max);
+        let mut selector = EffortSelector::new(ReasoningEffort::Max, false);
         let mut terminal = Terminal::new(TestBackend::new(60, 18)).unwrap();
         selector.update(key(KeyCode::Right, start));
 
@@ -527,13 +544,13 @@ mod tests {
         assert!(colored[0] > colored[1]);
         assert!(colored[1] > colored[2]);
         assert_eq!(colored[2], 1);
-        assert_eq!(terminal.backend().buffer()[(29, 3)].fg, Color::Gray);
+        assert_eq!(terminal.backend().buffer()[(29, 2)].fg, Color::Gray);
     }
 
     #[test]
     fn max_to_low_drains_clockwise_from_low_toward_max() {
         let start = Instant::now();
-        let mut selector = EffortSelector::new(ReasoningEffort::Max);
+        let mut selector = EffortSelector::new(ReasoningEffort::Max, false);
         let mut terminal = Terminal::new(TestBackend::new(60, 18)).unwrap();
         selector.update(key(KeyCode::Right, start));
         selector.update(EffortEvent::AnimationFrame(start + ANIMATION_DURATION / 2));
@@ -542,14 +559,14 @@ mod tests {
             .unwrap();
 
         let buffer = terminal.backend().buffer();
-        assert_eq!(buffer[(37, 6)].fg, Color::DarkGray);
-        assert_eq!(buffer[(21, 6)].fg, Color::Gray);
+        assert_eq!(buffer[(37, 5)].fg, Color::DarkGray);
+        assert_eq!(buffer[(21, 5)].fg, Color::Gray);
     }
 
     #[test]
     fn low_to_max_is_the_reverse_of_the_forward_wrap() {
         let start = Instant::now();
-        let mut selector = EffortSelector::new(ReasoningEffort::Low);
+        let mut selector = EffortSelector::new(ReasoningEffort::Low, false);
         let mut terminal = Terminal::new(TestBackend::new(60, 18)).unwrap();
         selector.update(key(KeyCode::Left, start));
 
@@ -573,7 +590,7 @@ mod tests {
     #[test]
     fn rapid_input_across_low_never_uses_wrapped_phase_as_fill() {
         let start = Instant::now();
-        let mut selector = EffortSelector::new(ReasoningEffort::Max);
+        let mut selector = EffortSelector::new(ReasoningEffort::Max, false);
         selector.update(key(KeyCode::Right, start));
         selector.update(EffortEvent::AnimationFrame(start + ANIMATION_DURATION / 2));
         selector.update(key(KeyCode::Right, start + ANIMATION_DURATION / 2));
@@ -589,7 +606,7 @@ mod tests {
     #[test]
     fn reversing_a_wrap_continues_from_the_current_fill_keyframe() {
         let start = Instant::now();
-        let mut selector = EffortSelector::new(ReasoningEffort::Low);
+        let mut selector = EffortSelector::new(ReasoningEffort::Low, false);
         selector.update(key(KeyCode::Left, start));
         selector.update(EffortEvent::AnimationFrame(start + ANIMATION_DURATION / 2));
         assert!((selector.displayed_fill - 3.5).abs() < f64::EPSILON);
@@ -604,12 +621,12 @@ mod tests {
     #[test]
     fn enter_applies_and_escape_cancels() {
         let now = Instant::now();
-        let mut selector = EffortSelector::new(ReasoningEffort::Medium);
+        let mut selector = EffortSelector::new(ReasoningEffort::Medium, false);
         selector.update(key(KeyCode::Right, now));
 
         assert_eq!(
             selector.update(key(KeyCode::Enter, now)).effects,
-            [EffortEffect::Apply(ReasoningEffort::High)]
+            [EffortEffect::Apply(ReasoningEffort::High, false)]
         );
         assert_eq!(
             selector.update(key(KeyCode::Esc, now)).effects,
@@ -618,8 +635,55 @@ mod tests {
     }
 
     #[test]
+    fn p_toggles_the_local_pro_preference_applied_with_effort() {
+        let now = Instant::now();
+        let mut selector = EffortSelector::new(ReasoningEffort::High, true);
+
+        selector.update(key(KeyCode::Char('p'), now));
+
+        assert_eq!(
+            selector.update(key(KeyCode::Enter, now)).effects,
+            [EffortEffect::Apply(ReasoningEffort::High, false)]
+        );
+    }
+
+    #[test]
+    fn pro_state_and_toggle_help_are_green() {
+        let now = Instant::now();
+        let mut selector = EffortSelector::new(ReasoningEffort::Medium, false);
+        let mut terminal = Terminal::new(TestBackend::new(60, 18)).unwrap();
+
+        terminal
+            .draw(|frame| selector.render(frame, frame.area(), &Theme::default()))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let label = (6..54)
+            .map(|x| buffer[(x, 13)].symbol())
+            .collect::<String>();
+        assert!(label.contains("Pro: off"));
+        let row = &buffer.content[13 * 60..14 * 60];
+        let pro_start = row
+            .windows(3)
+            .position(|cells| {
+                cells[0].symbol() == "P" && cells[1].symbol() == "r" && cells[2].symbol() == "o"
+            })
+            .unwrap();
+        assert!((pro_start..pro_start + 3).all(|x| row[x].fg == Color::Green));
+
+        selector.update(key(KeyCode::Char('p'), now));
+        terminal
+            .draw(|frame| selector.render(frame, frame.area(), &Theme::default()))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let label = (6..54)
+            .map(|x| buffer[(x, 13)].symbol())
+            .collect::<String>();
+        assert!(label.contains("Pro: on"));
+    }
+
+    #[test]
     fn narrow_terminals_do_not_overflow_the_selector() {
-        let mut selector = EffortSelector::new(ReasoningEffort::Medium);
+        let mut selector = EffortSelector::new(ReasoningEffort::Medium, false);
         let mut terminal = Terminal::new(TestBackend::new(3, 4)).unwrap();
 
         terminal

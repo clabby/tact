@@ -8,7 +8,7 @@ use super::{
     waved_text::WavedText,
 };
 use crate::{
-    config::ReasoningEffort,
+    config::{ReasoningEffort, ReasoningMode},
     tui::{context::MODEL_WINDOW_TOKENS, format::shorten_home, prompt::Submission, theme::Theme},
 };
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -53,6 +53,7 @@ pub(crate) enum ComposerEvent {
     },
     ReplaceDraft(String),
     SetEffort(ReasoningEffort),
+    SetReasoningMode(ReasoningMode),
     SetFastMode(bool),
     Activity {
         active: bool,
@@ -77,6 +78,7 @@ pub(crate) struct Composer {
     context_tokens: u64,
     workspace: String,
     thinking: ReasoningEffort,
+    reasoning_mode: ReasoningMode,
     fast_mode: bool,
     activity_wave: Option<WavedText>,
     activity_status: Option<String>,
@@ -117,6 +119,7 @@ impl Composer {
             context_tokens: 0,
             workspace: shorten_home(workspace),
             thinking,
+            reasoning_mode: ReasoningMode::Standard,
             fast_mode: false,
             activity_wave: None,
             activity_status: None,
@@ -170,6 +173,13 @@ impl Composer {
                     return ComposerUpdate::unchanged();
                 }
                 self.thinking = effort;
+                ComposerUpdate::changed()
+            }
+            ComposerEvent::SetReasoningMode(mode) => {
+                if self.reasoning_mode == mode {
+                    return ComposerUpdate::unchanged();
+                }
+                self.reasoning_mode = mode;
                 ComposerUpdate::changed()
             }
             ComposerEvent::SetFastMode(enabled) => {
@@ -336,6 +346,10 @@ impl Composer {
 
     pub(crate) const fn fast_mode(&self) -> bool {
         self.fast_mode
+    }
+
+    pub(crate) const fn reasoning_mode(&self) -> ReasoningMode {
+        self.reasoning_mode
     }
 
     pub(crate) const fn cursor(&self) -> usize {
@@ -708,10 +722,12 @@ impl Composer {
         let model = format!(" {MODEL} ");
         let effort = format!(" {} ", self.thinking.as_str());
         let fast_mode = self.fast_mode.then_some("⚡ ");
+        let pro_mode = (self.reasoning_mode == ReasoningMode::Pro).then_some("pro ");
         let shell = shell_mode.then_some(" shell ");
         let right_width = model.width()
             + effort.width()
             + fast_mode.map_or(0, UnicodeWidthStr::width)
+            + pro_mode.map_or(0, UnicodeWidthStr::width)
             + shell.map_or(0, UnicodeWidthStr::width);
         let right_start = content_start
             + u16::try_from(content_width.saturating_sub(right_width)).unwrap_or(u16::MAX);
@@ -783,8 +799,23 @@ impl Composer {
             );
         }
         let fast_mode_start = effort_start + u16::try_from(effort.width()).unwrap_or(u16::MAX);
+        let fast_mode_width =
+            u16::try_from(fast_mode.map_or(0, UnicodeWidthStr::width)).unwrap_or(u16::MAX);
+        let natural_pro_mode_start = fast_mode_start + fast_mode_width;
+        let pro_mode_width =
+            u16::try_from(pro_mode.map_or(0, UnicodeWidthStr::width)).unwrap_or(u16::MAX);
+        let pro_mode_start = if pro_mode.is_some() {
+            natural_pro_mode_start.min(
+                content_end
+                    .saturating_sub(pro_mode_width)
+                    .max(content_start),
+            )
+        } else {
+            natural_pro_mode_start
+        };
         if let Some(fast_mode) = fast_mode
             && fast_mode_start < content_end
+            && fast_mode_start.saturating_add(fast_mode_width) <= pro_mode_start
         {
             buffer.set_stringn(
                 fast_mode_start,
@@ -796,9 +827,22 @@ impl Composer {
                     .add_modifier(Modifier::BOLD),
             );
         }
+        if let Some(pro_mode) = pro_mode
+            && pro_mode_start < content_end
+        {
+            buffer.set_stringn(
+                pro_mode_start,
+                top,
+                pro_mode,
+                usize::from(content_end - pro_mode_start),
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            );
+        }
         if let Some(shell) = shell {
-            let shell_start = fast_mode_start
-                + u16::try_from(fast_mode.map_or(0, UnicodeWidthStr::width)).unwrap_or(u16::MAX);
+            let shell_start = pro_mode_start
+                + u16::try_from(pro_mode.map_or(0, UnicodeWidthStr::width)).unwrap_or(u16::MAX);
             if shell_start < content_end {
                 buffer.set_stringn(
                     shell_start,
@@ -969,7 +1013,10 @@ fn render_draft_line(
 #[cfg(test)]
 mod tests {
     use super::{Composer, ComposerEffect, ComposerEvent, context_percent, is_development_build};
-    use crate::{config::ReasoningEffort, tui::theme::Theme};
+    use crate::{
+        config::{ReasoningEffort, ReasoningMode},
+        tui::theme::Theme,
+    };
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use nanocodex::{PromptInput, UserInput};
     use ratatui::{Terminal, backend::TestBackend, layout::Position, style::Color};
@@ -1035,6 +1082,67 @@ mod tests {
         assert!(rendered.contains("medium ⚡"));
         assert_eq!(top[bolt].fg, Color::Yellow);
         assert!(top[bolt].modifier.contains(ratatui::style::Modifier::BOLD));
+    }
+
+    #[test]
+    fn pro_mode_places_a_green_badge_after_the_fast_mode_bolt() {
+        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        composer.update(ComposerEvent::SetFastMode(true));
+        composer.update(ComposerEvent::SetReasoningMode(ReasoningMode::Pro));
+
+        let terminal = render(&mut composer, 60, 5);
+        let top = &terminal.backend().buffer().content[..60];
+        let rendered = top.iter().map(|cell| cell.symbol()).collect::<String>();
+        let pro = top
+            .windows(3)
+            .position(|cells| {
+                cells[0].symbol() == "p" && cells[1].symbol() == "r" && cells[2].symbol() == "o"
+            })
+            .expect("Pro mode should render its badge");
+
+        assert!(rendered.contains("medium ⚡  pro"));
+        for cell in &top[pro..pro + 3] {
+            assert_eq!(cell.fg, Color::Green);
+            assert!(cell.modifier.contains(ratatui::style::Modifier::BOLD));
+        }
+    }
+
+    #[test]
+    fn narrow_composer_prioritizes_the_complete_pro_badge() {
+        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        composer.update(ComposerEvent::SetFastMode(true));
+        composer.update(ComposerEvent::SetReasoningMode(ReasoningMode::Pro));
+
+        let terminal = render(&mut composer, 30, 5);
+        let top = &terminal.backend().buffer().content[..30];
+        let rendered = top.iter().map(|cell| cell.symbol()).collect::<String>();
+        let pro = top
+            .windows(3)
+            .position(|cells| {
+                cells[0].symbol() == "p" && cells[1].symbol() == "r" && cells[2].symbol() == "o"
+            })
+            .expect("Pro mode should retain its complete badge");
+
+        assert!(!rendered.contains('⚡'));
+        assert!((pro..pro + 3).all(|index| top[index].fg == Color::Green));
+
+        let terminal = render(&mut composer, 6, 5);
+        let top = &terminal.backend().buffer().content[..6];
+        assert_eq!(top[0].symbol(), "╭");
+        assert_eq!(top[5].symbol(), "╮");
+    }
+
+    #[test]
+    fn standard_mode_does_not_render_the_pro_badge() {
+        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+
+        let terminal = render(&mut composer, 60, 5);
+        let rendered = terminal.backend().buffer().content[..60]
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(!rendered.contains("pro"));
     }
 
     #[test]

@@ -6,7 +6,7 @@ use super::{
     root::{RootEffect, RootEvent, RootNode},
 };
 use crate::{
-    config::ReasoningEffort,
+    config::{ReasoningEffort, ReasoningMode},
     subagents::AgentUpdate,
     tui::{
         context::completed_transcript_tokens,
@@ -74,6 +74,7 @@ pub(crate) enum AppEvent {
     NewSessionReady {
         pane: PaneId,
         effort: ReasoningEffort,
+        reasoning_mode: ReasoningMode,
         fast_mode: bool,
     },
     NewSessionFailed {
@@ -92,6 +93,8 @@ pub(crate) enum AppEvent {
         pane: PaneId,
         records: Vec<Arc<TranscriptRecord>>,
         effort: ReasoningEffort,
+        reasoning_mode: ReasoningMode,
+        preferred_reasoning_mode: ReasoningMode,
         fast_mode: bool,
     },
     NotifyError {
@@ -106,6 +109,7 @@ pub(crate) enum AppEvent {
     ConfigReloaded {
         pane: PaneId,
         theme: Theme,
+        preferred_reasoning_mode: ReasoningMode,
         message: String,
     },
     ConfigReloadFailed {
@@ -208,13 +212,19 @@ impl AppNode {
             AppEvent::NewSessionReady {
                 pane,
                 effort,
+                reasoning_mode,
                 fast_mode,
             } => {
                 let workspace = self.workspace.clone();
                 let Some(root) = self.pane_mut(pane) else {
                     return ComponentUpdate::none();
                 };
-                root.component_mut().reset_session(&workspace, effort);
+                root.component_mut().reset_session(
+                    &workspace,
+                    effort,
+                    reasoning_mode,
+                    reasoning_mode,
+                );
                 root.component_mut().set_fast_mode(fast_mode);
                 ComponentUpdate::render(RenderRequest::Immediate)
             }
@@ -231,12 +241,16 @@ impl AppNode {
                 pane,
                 records,
                 effort,
+                reasoning_mode,
+                preferred_reasoning_mode,
                 fast_mode,
             } => self.update_root(
                 pane,
                 RootEvent::SessionRestored {
                     records,
                     effort,
+                    reasoning_mode,
+                    preferred_reasoning_mode,
                     fast_mode,
                 },
             ),
@@ -257,6 +271,7 @@ impl AppNode {
             AppEvent::ConfigReloaded {
                 pane,
                 theme,
+                preferred_reasoning_mode,
                 message,
             } => {
                 self.theme.replace_from_config(theme);
@@ -267,6 +282,7 @@ impl AppNode {
                 if let Some((_, fork)) = &mut self.fork {
                     fork.component_mut().set_theme_mode(mode);
                 }
+                self.set_preferred_reasoning_mode(preferred_reasoning_mode);
                 self.update_root(pane, RootEvent::NotifySuccess(message))
             }
             AppEvent::ConfigReloadFailed { pane, error } => {
@@ -493,6 +509,15 @@ impl AppNode {
         }
     }
 
+    pub(crate) fn set_preferred_reasoning_mode(&mut self, mode: ReasoningMode) {
+        if let Some(main) = &mut self.main {
+            main.component_mut().set_preferred_reasoning_mode(mode);
+        }
+        if let Some((_, fork)) = &mut self.fork {
+            fork.component_mut().set_preferred_reasoning_mode(mode);
+        }
+    }
+
     fn begin_fork(&mut self) -> PaneId {
         if let Some(main) = &mut self.main {
             main.component_mut().set_fork_available(false);
@@ -588,7 +613,7 @@ fn is_control_c(event: &Event) -> bool {
 mod tests {
     use super::{AppEffect, AppEvent, AppNode, RootEvent, RootNode, SPLIT_HINT};
     use crate::{
-        config::ReasoningEffort,
+        config::{ReasoningEffort, ReasoningMode},
         tui::{
             pane::PaneId,
             theme::{ColorScheme, Theme, ThemeMode},
@@ -731,7 +756,10 @@ mod tests {
             update.effects.as_slice(),
             [AppEffect::Pane {
                 pane: PaneId::Fork(1),
-                effect: super::RootEffect::SetEffort(ReasoningEffort::Medium),
+                effect: super::RootEffect::SetEffort {
+                    effort: ReasoningEffort::Medium,
+                    reasoning_mode: ReasoningMode::Standard,
+                },
             }]
         ));
         assert_eq!(
@@ -742,6 +770,21 @@ mod tests {
             app.root(PaneId::Fork(1)).unwrap().composer().effort(),
             ReasoningEffort::Medium
         );
+    }
+
+    #[test]
+    fn preferred_reasoning_mode_is_shared_without_changing_running_sessions() {
+        let mut app = app();
+        app.update(control('f'));
+        app.update(AppEvent::ForkReady(PaneId::Fork(1)));
+
+        app.set_preferred_reasoning_mode(ReasoningMode::Pro);
+
+        for pane in [PaneId::Main, PaneId::Fork(1)] {
+            let root = app.root(pane).unwrap();
+            assert_eq!(root.preferred_reasoning_mode(), ReasoningMode::Pro);
+            assert_eq!(root.composer().reasoning_mode(), ReasoningMode::Standard);
+        }
     }
 
     #[test]

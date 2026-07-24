@@ -49,6 +49,33 @@ pub(crate) enum ReasoningEffort {
     Max,
 }
 
+/// Reasoning execution mode used by the model.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum ReasoningMode {
+    #[default]
+    Standard,
+    Pro,
+}
+
+impl ReasoningMode {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Standard => "standard",
+            Self::Pro => "pro",
+        }
+    }
+}
+
+impl From<ReasoningMode> for nanocodex::ReasoningMode {
+    fn from(mode: ReasoningMode) -> Self {
+        match mode {
+            ReasoningMode::Standard => Self::Standard,
+            ReasoningMode::Pro => Self::Pro,
+        }
+    }
+}
+
 /// Effective application configuration.
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct Config {
@@ -112,6 +139,7 @@ pub(crate) struct AuthConfig {
 pub(crate) struct AgentConfig {
     workspace: PathBuf,
     thinking: ReasoningEffort,
+    reasoning_mode: ReasoningMode,
     fast_mode: bool,
     max_subagents: usize,
     instructions: Option<String>,
@@ -140,6 +168,7 @@ pub(crate) struct ConfigOverrides {
     pub(crate) auth_file: Option<PathBuf>,
     pub(crate) workspace: Option<PathBuf>,
     pub(crate) thinking: Option<ReasoningEffort>,
+    pub(crate) reasoning_mode: Option<ReasoningMode>,
     pub(crate) max_subagents: Option<usize>,
     pub(crate) instructions: Option<String>,
     pub(crate) append_instructions: Option<String>,
@@ -218,6 +247,7 @@ struct AuthConfigFile {
 struct AgentConfigFile {
     workspace: Option<PathBuf>,
     thinking: Option<ReasoningEffort>,
+    reasoning_mode: Option<ReasoningMode>,
     fast_mode: Option<bool>,
     max_subagents: Option<usize>,
     instructions: Option<String>,
@@ -310,6 +340,10 @@ impl Config {
                     .thinking
                     .or(file.agent.thinking)
                     .unwrap_or_default(),
+                reasoning_mode: overrides
+                    .reasoning_mode
+                    .or(file.agent.reasoning_mode)
+                    .unwrap_or_default(),
                 fast_mode: file.agent.fast_mode.unwrap_or(false),
                 max_subagents: overrides
                     .max_subagents
@@ -356,6 +390,10 @@ impl Config {
         self.agent.thinking = effort;
     }
 
+    pub(crate) fn set_reasoning_mode(&mut self, mode: ReasoningMode) {
+        self.agent.reasoning_mode = mode;
+    }
+
     pub(crate) fn set_fast_mode(&mut self, enabled: bool) {
         self.agent.fast_mode = enabled;
     }
@@ -400,6 +438,10 @@ impl Config {
 
     pub(crate) fn persist_thinking(&self, effort: ReasoningEffort) -> Result<()> {
         Self::persist_thinking_at(&self.path, effort)
+    }
+
+    pub(crate) fn persist_reasoning_mode(&self, mode: ReasoningMode) -> Result<()> {
+        Self::persist_reasoning_mode_at(&self.path, mode)
     }
 
     pub(crate) fn persist_fast_mode(&self, enabled: bool) -> Result<()> {
@@ -498,6 +540,10 @@ impl Config {
 
     fn persist_thinking_at(path: &Path, effort: ReasoningEffort) -> Result<()> {
         Self::persist_setting(path, "agent", "thinking", effort.as_str())
+    }
+
+    fn persist_reasoning_mode_at(path: &Path, mode: ReasoningMode) -> Result<()> {
+        Self::persist_setting(path, "agent", "reasoning_mode", mode.as_str())
     }
 
     fn persist_fast_mode_at(path: &Path, enabled: bool) -> Result<()> {
@@ -775,6 +821,10 @@ impl AgentConfig {
         self.thinking
     }
 
+    pub(crate) const fn reasoning_mode(&self) -> ReasoningMode {
+        self.reasoning_mode
+    }
+
     pub(crate) const fn fast_mode(&self) -> bool {
         self.fast_mode
     }
@@ -1002,7 +1052,7 @@ impl Config {
 mod tests {
     use super::{
         AuthMode, Config, ConfigOverrides, Environment, McpEnvironment, McpSecretString,
-        McpServerConfig, ReasoningEffort, ThemeMode, validate_mcp_url,
+        McpServerConfig, ReasoningEffort, ReasoningMode, ThemeMode, validate_mcp_url,
     };
     use crate::error::{ConfigError, Error, McpUrlError};
     use ratatui::style::Color;
@@ -1029,6 +1079,7 @@ mod tests {
         assert_eq!(config.auth.file, home.join(".codex/auth.json"));
         assert_eq!(config.agent.workspace, directory.path());
         assert_eq!(config.agent.thinking, ReasoningEffort::Medium);
+        assert_eq!(config.agent.reasoning_mode, ReasoningMode::Standard);
         assert!(!config.agent.fast_mode);
         assert_eq!(config.agent.max_subagents, 32);
         assert!(config.agent.web_search);
@@ -1343,7 +1394,7 @@ mod tests {
         let config_path = directory.path().join("config.toml");
         fs::write(
             &config_path,
-            "[agent]\nworkspace = \"workspace\"\nthinking = \"xhigh\"\nfast_mode = true\nmax_subagents = 7\n\
+            "[agent]\nworkspace = \"workspace\"\nthinking = \"xhigh\"\nreasoning_mode = \"pro\"\nfast_mode = true\nmax_subagents = 7\n\
              instructions = \"Be concise.\"\nappend_instructions = \"Use project conventions.\"\n\
              web_search = false\nimage_generation = false\n\
              websocket_url = \"wss://example.com/responses\"\n\
@@ -1366,6 +1417,7 @@ mod tests {
 
         assert_eq!(config.agent.workspace, directory.path().join("workspace"));
         assert_eq!(config.agent.thinking, ReasoningEffort::Xhigh);
+        assert_eq!(config.agent.reasoning_mode, ReasoningMode::Pro);
         assert!(config.agent.fast_mode);
         assert_eq!(config.agent.max_subagents, 7);
         assert_eq!(config.agent.instructions.as_deref(), Some("Be concise."));
@@ -1910,6 +1962,25 @@ mod tests {
         assert_eq!(document["agent"]["thinking"].as_str(), Some("xhigh"));
         assert_eq!(document["agent"]["web_search"].as_bool(), Some(false));
         assert_eq!(document["theme"]["accent"].as_str(), Some("#AABBCC"));
+    }
+
+    #[test]
+    fn persisting_reasoning_mode_preserves_the_rest_of_the_config() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        fs::write(
+            &path,
+            "# Keep this comment.\n[agent]\nreasoning_mode = \"standard\"\nweb_search = false\n",
+        )
+        .unwrap();
+
+        Config::persist_reasoning_mode_at(&path, ReasoningMode::Pro).unwrap();
+
+        let contents = fs::read_to_string(&path).unwrap();
+        let document = toml::from_str::<toml::Value>(&contents).unwrap();
+        assert!(contents.contains("# Keep this comment."));
+        assert_eq!(document["agent"]["reasoning_mode"].as_str(), Some("pro"));
+        assert_eq!(document["agent"]["web_search"].as_bool(), Some(false));
     }
 
     #[test]

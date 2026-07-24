@@ -1,4 +1,4 @@
-use crate::config::ReasoningEffort;
+use crate::config::{ReasoningEffort, ReasoningMode};
 use nanocodex::{AgentEvent, AgentEventKind};
 use serde::{Deserialize, Serialize};
 use serde_json::value::{RawValue, to_raw_value};
@@ -35,6 +35,8 @@ pub(crate) struct SessionStarted {
     pub(crate) parent_session_id: Option<String>,
     pub(crate) model: String,
     pub(crate) effort: ReasoningEffort,
+    #[serde(default)]
+    pub(crate) reasoning_mode: ReasoningMode,
     #[serde(default)]
     pub(crate) fast_mode: bool,
     pub(crate) workspace: PathBuf,
@@ -375,7 +377,8 @@ const fn agent_kind(kind: AgentEventKind) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{LocalEvent, ShellId, TranscriptRecord, TurnId};
+    use super::{LocalEvent, SessionStarted, ShellId, TranscriptRecord, TurnId};
+    use crate::config::ReasoningMode;
     use nanocodex::{AgentEvent, AgentEventKind};
     use serde_json::{json, value::to_raw_value};
     use std::sync::Arc;
@@ -422,6 +425,29 @@ mod tests {
         assert_eq!(encoded["source"], "tact");
         assert_eq!(encoded["type"], "user.submitted");
         assert_eq!(encoded["payload"], json!({"id": 9, "text": "hello"}));
+    }
+
+    #[test]
+    fn historical_session_metadata_defaults_to_standard_reasoning() {
+        let record = serde_json::from_value::<TranscriptRecord>(json!({
+            "schema_version": 1,
+            "sequence": 1,
+            "recorded_at_unix_ms": 123,
+            "source": "tact",
+            "type": "session.started",
+            "payload": {
+                "session_id": "session-a",
+                "model": "model",
+                "effort": "medium",
+                "fast_mode": false,
+                "workspace": "/work",
+                "application_version": "0.0.1"
+            }
+        }))
+        .unwrap();
+
+        let started = record.decode_payload::<SessionStarted>().unwrap();
+        assert_eq!(started.reasoning_mode, ReasoningMode::Standard);
     }
 
     #[test]

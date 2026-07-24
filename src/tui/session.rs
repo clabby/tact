@@ -1,7 +1,7 @@
 //! Resumable Nanocodex checkpoints and transcript-derived session discovery.
 
 use crate::{
-    config::ReasoningEffort,
+    config::{ReasoningEffort, ReasoningMode},
     tui::transcript::{self, SessionStarted, TranscriptRecord},
 };
 use nanocodex::SessionSnapshot;
@@ -30,6 +30,7 @@ pub(crate) struct SessionSummary {
     pub(crate) started_at_unix_ms: u64,
     pub(crate) model: String,
     pub(crate) effort: ReasoningEffort,
+    pub(crate) reasoning_mode: ReasoningMode,
     pub(crate) workspace: PathBuf,
     pub(crate) preview: String,
 }
@@ -272,6 +273,7 @@ pub(crate) fn list(
             started_at_unix_ms,
             model: started.model,
             effort: latest_effort(&records, started.effort),
+            reasoning_mode: started.reasoning_mode,
             workspace: started.workspace,
             preview,
         };
@@ -281,6 +283,7 @@ pub(crate) fn list(
                 if summary.started_at_unix_ms > existing.started_at_unix_ms {
                     existing.started_at_unix_ms = summary.started_at_unix_ms;
                     existing.effort = summary.effort;
+                    existing.reasoning_mode = summary.reasoning_mode;
                 }
                 if existing.preview == "No user prompt" {
                     existing.preview.clone_from(&summary.preview);
@@ -348,6 +351,10 @@ fn session_started(records: &[Arc<TranscriptRecord>]) -> Option<SessionStarted> 
         .iter()
         .find(|record| record.source() == "tact" && record.kind() == "session.started")?;
     record.decode_payload().ok()
+}
+
+pub(crate) fn reasoning_mode(records: &[Arc<TranscriptRecord>]) -> ReasoningMode {
+    session_started(records).map_or(ReasoningMode::Standard, |started| started.reasoning_mode)
 }
 
 fn latest_effort(records: &[Arc<TranscriptRecord>], initial: ReasoningEffort) -> ReasoningEffort {
@@ -503,7 +510,7 @@ mod tests {
         obsolete_checkpoint_path, save_checkpoint,
     };
     use crate::{
-        config::ReasoningEffort,
+        config::{ReasoningEffort, ReasoningMode},
         tui::transcript::{LocalEvent, SessionStarted, TranscriptJournal, TurnId},
     };
     use nanocodex::SessionSnapshot;
@@ -593,6 +600,7 @@ mod tests {
                 parent_session_id: None,
                 model: "model".to_owned(),
                 effort: ReasoningEffort::High,
+                reasoning_mode: ReasoningMode::Pro,
                 fast_mode: false,
                 workspace: "/work".into(),
                 application_version: "test".to_owned(),
@@ -621,6 +629,7 @@ mod tests {
                 parent_session_id: None,
                 model: "model".to_owned(),
                 effort: ReasoningEffort::Medium,
+                reasoning_mode: ReasoningMode::Standard,
                 fast_mode: false,
                 workspace: "/other-workspace".into(),
                 application_version: "test".to_owned(),
@@ -641,6 +650,7 @@ mod tests {
         assert_eq!(sessions[0].session_id, "session/one");
         assert_eq!(sessions[0].preview, "inspect the workspace");
         assert_eq!(sessions[0].effort, ReasoningEffort::Low);
+        assert_eq!(sessions[0].reasoning_mode, ReasoningMode::Pro);
         assert_eq!(load_transcript(&config, "session/one").unwrap().len(), 3);
     }
 }

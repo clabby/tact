@@ -1,7 +1,7 @@
 //! Command-line parsing and dispatch.
 
 use crate::{
-    config::{AuthMode, Config, ConfigOverrides, ReasoningEffort},
+    config::{AuthMode, Config, ConfigOverrides, ReasoningEffort, ReasoningMode},
     core::ConfiguredAgent,
     error::{AuthResult, Error, Result, RuntimeError},
     shutdown, tui, update,
@@ -72,6 +72,16 @@ pub(crate) struct Cli {
         value_name = "LEVEL"
     )]
     thinking: Option<ReasoningEffort>,
+
+    /// Reasoning execution mode used for new sessions.
+    #[arg(
+        long,
+        global = true,
+        env = "TACT_REASONING_MODE",
+        value_enum,
+        value_name = "MODE"
+    )]
+    reasoning_mode: Option<ReasoningMode>,
 
     /// Maximum number of sub-agents that may run concurrently.
     #[arg(long, global = true, env = "TACT_MAX_SUBAGENTS", value_name = "COUNT")]
@@ -295,6 +305,7 @@ impl Cli {
             auth_file: self.auth_file,
             workspace: self.workspace,
             thinking: self.thinking,
+            reasoning_mode: self.reasoning_mode,
             max_subagents: self.max_subagents,
             instructions: self.instructions,
             append_instructions: self.append_instructions,
@@ -811,6 +822,7 @@ mod tests {
             ("auth_file", "TACT_AUTH_FILE"),
             ("workspace", "TACT_WORKSPACE"),
             ("thinking", "TACT_THINKING"),
+            ("reasoning_mode", "TACT_REASONING_MODE"),
             ("max_subagents", "TACT_MAX_SUBAGENTS"),
             ("instructions", "TACT_INSTRUCTIONS"),
             ("append_instructions", "TACT_APPEND_INSTRUCTIONS"),

@@ -422,7 +422,7 @@ fn unix_milliseconds() -> u64 {
 mod tests {
     use super::{DurableWrite, TranscriptJournal, load, write_records};
     use crate::{
-        config::ReasoningEffort,
+        config::{ReasoningEffort, ReasoningMode},
         tui::transcript::{
             LocalEvent, SessionEnded, SessionOutcome, SessionStarted, TranscriptError, TurnId,
         },
@@ -449,6 +449,7 @@ mod tests {
                 parent_session_id: None,
                 model: "model".to_owned(),
                 effort: ReasoningEffort::Medium,
+                reasoning_mode: ReasoningMode::Standard,
                 fast_mode: false,
                 workspace: directory.path().to_path_buf(),
                 application_version: "test".to_owned(),
@@ -504,6 +505,7 @@ mod tests {
             parent_session_id: None,
             model: "model".to_owned(),
             effort: ReasoningEffort::Medium,
+            reasoning_mode: ReasoningMode::Standard,
             fast_mode: false,
             workspace: directory.path().to_path_buf(),
             application_version: "test".to_owned(),
@@ -523,6 +525,7 @@ mod tests {
         let records = load(&path).unwrap();
         let started = records[0].decode_payload::<SessionStarted>().unwrap();
         assert_eq!(started.effort, ReasoningEffort::High);
+        assert_eq!(started.reasoning_mode, ReasoningMode::Standard);
         assert!(started.fast_mode);
         assert_eq!(records.len(), 2);
         assert!(
