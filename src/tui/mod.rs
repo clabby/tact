@@ -1447,8 +1447,10 @@ fn apply_pane_effect(
                 .expect("session-list pane must exist")
                 .session_id
                 .clone();
-            *context.session_list_task = Some(tokio::task::spawn_blocking(move || {
-                let sessions = session::list(&config_path, &workspace).map(|mut sessions| {
+            *context.session_list_task = Some(tokio::spawn(async move {
+                let sessions = session::list_async(config_path, workspace)
+                    .await
+                    .map(|mut sessions| {
                     sessions.retain(|session| session.session_id != active_session_id);
                     sessions
                 });

@@ -148,6 +148,10 @@ impl PersistenceFixture {
     fn load_transcript_parallel(&self) -> Vec<Arc<TranscriptRecord>> {
         session::load_transcript_parallel(&self.config_path, &self.session_id).unwrap()
     }
+
+    fn list_parallel(&self) -> Vec<session::SessionSummary> {
+        session::list_parallel(&self.config_path, &self.workspace).unwrap()
+    }
 }
 
 fn mixed_projection_records(turns: u64) -> Vec<Arc<TranscriptRecord>> {
@@ -651,6 +655,10 @@ fn benchmarks(criterion: &mut Criterion) {
         bencher.iter(|| {
             black_box(session::list(&fixture.config_path, &fixture.workspace).unwrap());
         });
+    });
+
+    sessions.bench_function("catalog_api_heavy_archive_parallel", |bencher| {
+        bencher.iter(|| black_box(fixture.list_parallel()));
     });
 
     sessions.bench_function("load_known_api_heavy_transcript", |bencher| {

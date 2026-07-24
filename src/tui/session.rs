@@ -251,17 +251,72 @@ pub(crate) fn load_checkpoint(
     Ok(ResumeState::new(snapshot, instructions))
 }
 
+#[allow(
+    dead_code,
+    reason = "used by compatibility tests and catalog benchmarks"
+)]
 pub(crate) fn list(
     config_path: &Path,
     workspace: &Path,
 ) -> Result<Vec<SessionSummary>, SessionError> {
     remove_obsolete_checkpoints(config_path)?;
+    let segments = transcript_paths(config_path)?
+        .into_iter()
+        .map(|path| load_catalog_segment(&path, workspace));
+    collect_catalog(config_path, workspace, segments)
+}
+
+pub(crate) async fn list_async(
+    config_path: PathBuf,
+    workspace: PathBuf,
+) -> Result<Vec<SessionSummary>, SessionError> {
+    let (sender, receiver) = oneshot::channel();
+    transcript_loader().spawn(move || {
+        drop(sender.send(list_parallel_inner(&config_path, &workspace)));
+    });
+    receiver
+        .await
+        .map_err(|_| SessionError::TranscriptLoaderStopped)?
+}
+
+#[allow(dead_code, reason = "used by session catalog benchmarks")]
+pub(crate) fn list_parallel(
+    config_path: &Path,
+    workspace: &Path,
+) -> Result<Vec<SessionSummary>, SessionError> {
+    transcript_loader().install(|| list_parallel_inner(config_path, workspace))
+}
+
+fn list_parallel_inner(
+    config_path: &Path,
+    workspace: &Path,
+) -> Result<Vec<SessionSummary>, SessionError> {
+    remove_obsolete_checkpoints(config_path)?;
+    let segments = transcript_paths(config_path)?
+        .into_par_iter()
+        .map(|path| load_catalog_segment(&path, workspace))
+        .collect::<Vec<_>>();
+    collect_catalog(config_path, workspace, segments)
+}
+
+fn load_catalog_segment(
+    path: &Path,
+    workspace: &Path,
+) -> Result<Option<Vec<Arc<TranscriptRecord>>>, SessionError> {
+    transcript::load_matching(path, |first| {
+        session_started_record(first).is_none_or(|started| started.workspace == workspace)
+    })
+    .map_err(Into::into)
+}
+
+fn collect_catalog(
+    config_path: &Path,
+    workspace: &Path,
+    segments: impl IntoIterator<Item = Result<Option<Vec<Arc<TranscriptRecord>>>, SessionError>>,
+) -> Result<Vec<SessionSummary>, SessionError> {
     let mut sessions = HashMap::<String, SessionSummary>::new();
-    for path in transcript_paths(config_path)? {
-        let Some(records) = transcript::load_matching(&path, |first| {
-            session_started_record(first).is_none_or(|started| started.workspace == workspace)
-        })?
-        else {
+    for segment in segments {
+        let Some(records) = segment? else {
             continue;
         };
         let Some(started) = session_started(&records) else {
@@ -586,8 +641,8 @@ fn create_private_directory(path: &Path) -> Result<(), SessionError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        encode_filename, format_age, list, load_checkpoint, load_transcript, load_transcript_async,
-        obsolete_checkpoint_path, save_checkpoint,
+        encode_filename, format_age, list, list_async, load_checkpoint, load_transcript,
+        load_transcript_async, obsolete_checkpoint_path, save_checkpoint,
     };
     use crate::{
         config::{ReasoningEffort, ReasoningMode},
@@ -731,6 +786,11 @@ mod tests {
         assert_eq!(sessions[0].preview, "inspect the workspace");
         assert_eq!(sessions[0].effort, ReasoningEffort::Low);
         assert_eq!(sessions[0].reasoning_mode, ReasoningMode::Pro);
+        let async_sessions = list_async(config.clone(), Path::new("/work").to_path_buf())
+            .await
+            .unwrap();
+        assert_eq!(async_sessions.len(), 1);
+        assert_eq!(async_sessions[0].session_id, "session/one");
         assert_eq!(load_transcript(&config, "session/one").unwrap().len(), 3);
         let loaded = load_transcript_async(config.clone(), "session/one".to_owned())
             .await
