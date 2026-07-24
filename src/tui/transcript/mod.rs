@@ -8,7 +8,9 @@ mod record;
 pub(crate) use entry::{
     EntryId, EntryKind, MessagePhase, ToolEntry, ToolState, TranscriptEntry, TransientStatus,
 };
-pub(crate) use journal::{TranscriptJournal, load, remove_obsolete, storage_directory};
+#[cfg(test)]
+pub(crate) use journal::load;
+pub(crate) use journal::{TranscriptJournal, load_matching, remove_obsolete, storage_directory};
 pub(crate) use model::TranscriptModel;
 pub(crate) use record::{
     LocalEvent, SessionEnded, SessionOutcome, SessionStarted, ShellId, TranscriptRecord, TurnId,

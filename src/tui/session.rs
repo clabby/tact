@@ -254,7 +254,12 @@ pub(crate) fn list(
     remove_obsolete_checkpoints(config_path)?;
     let mut sessions = HashMap::<String, SessionSummary>::new();
     for path in transcript_paths(config_path)? {
-        let records = transcript::load(&path)?;
+        let Some(records) = transcript::load_matching(&path, |first| {
+            session_started_record(first).is_none_or(|started| started.workspace == workspace)
+        })?
+        else {
+            continue;
+        };
         let Some(started) = session_started(&records) else {
             continue;
         };
@@ -302,7 +307,12 @@ pub(crate) fn load_transcript(
 ) -> Result<Vec<Arc<TranscriptRecord>>, SessionError> {
     let mut records = Vec::new();
     for path in transcript_paths(config_path)? {
-        let segment = transcript::load(&path)?;
+        let Some(segment) = transcript::load_matching(&path, |first| {
+            session_started_record(first).is_none_or(|started| started.session_id == session_id)
+        })?
+        else {
+            continue;
+        };
         if session_started(&segment).is_some_and(|started| started.session_id == session_id) {
             records.extend(segment);
         }
@@ -350,7 +360,12 @@ fn session_started(records: &[Arc<TranscriptRecord>]) -> Option<SessionStarted> 
     let record = records
         .iter()
         .find(|record| record.source() == "tact" && record.kind() == "session.started")?;
-    record.decode_payload().ok()
+    session_started_record(record)
+}
+
+fn session_started_record(record: &TranscriptRecord) -> Option<SessionStarted> {
+    (record.source() == "tact" && record.kind() == "session.started")
+        .then(|| record.decode_payload().ok())?
 }
 
 pub(crate) fn reasoning_mode(records: &[Arc<TranscriptRecord>]) -> ReasoningMode {

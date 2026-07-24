@@ -230,7 +230,15 @@ impl TranscriptWriter {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn load(path: &Path) -> Result<Vec<Arc<TranscriptRecord>>, TranscriptError> {
+    Ok(load_matching(path, |_| true)?.unwrap_or_default())
+}
+
+pub(crate) fn load_matching(
+    path: &Path,
+    matches_first: impl FnOnce(&TranscriptRecord) -> bool,
+) -> Result<Option<Vec<Arc<TranscriptRecord>>>, TranscriptError> {
     let file = File::open(path).map_err(|source| TranscriptError::Read {
         path: path.to_path_buf(),
         source,
@@ -243,6 +251,7 @@ pub(crate) fn load(path: &Path) -> Result<Vec<Arc<TranscriptRecord>>, Transcript
     let mut records = Vec::new();
     let mut bytes = Vec::new();
     let mut line = 0_usize;
+    let mut matches_first = Some(matches_first);
 
     loop {
         bytes.clear();
@@ -291,10 +300,15 @@ pub(crate) fn load(path: &Path) -> Result<Vec<Arc<TranscriptRecord>>, Transcript
                 expected,
             });
         }
+        if let Some(matches_first) = matches_first.take()
+            && !matches_first(&record)
+        {
+            return Ok(None);
+        }
         records.push(Arc::new(record));
     }
 
-    Ok(records)
+    Ok(Some(records))
 }
 
 fn incomplete_zstd_frame(error: &io::Error) -> bool {
@@ -420,7 +434,7 @@ fn unix_milliseconds() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{DurableWrite, TranscriptJournal, load, write_records};
+    use super::{DurableWrite, TranscriptJournal, load, load_matching, write_records};
     use crate::{
         config::{ReasoningEffort, ReasoningMode},
         tui::transcript::{
@@ -558,6 +572,29 @@ mod tests {
 
         let error = load(&path).unwrap_err();
         assert!(matches!(error, TranscriptError::Decode { line: 1, .. }));
+    }
+
+    #[test]
+    fn rejected_segment_does_not_decode_later_records() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("transcript.jsonl.zst");
+        let first = super::super::record::TranscriptRecord::from_local(
+            1,
+            1,
+            LocalEvent::WorkerTurnAccepted { id: TurnId::new(1) },
+        )
+        .unwrap();
+        let mut contents = serde_json::to_vec(&first).unwrap();
+        contents.extend_from_slice(b"\nnot-json\n");
+        fs::write(&path, zstd::encode_all(contents.as_slice(), 1).unwrap()).unwrap();
+
+        let records = load_matching(&path, |_| false).unwrap();
+
+        assert!(records.is_none());
+        assert!(matches!(
+            load(&path).unwrap_err(),
+            TranscriptError::Decode { line: 2, .. }
+        ));
     }
 
     #[test]

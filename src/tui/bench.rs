@@ -635,7 +635,6 @@ fn benchmarks(criterion: &mut Criterion) {
             BatchSize::SmallInput,
         );
     });
-
     let fixture = PersistenceFixture::api_heavy_archive();
     let multi_segment_fixture = PersistenceFixture::multi_segment_archive();
     let mixed_fixture = PersistenceFixture::mixed_archive();
