@@ -690,6 +690,17 @@ fn benchmarks(criterion: &mut Criterion) {
         );
     });
 
+    sessions.bench_function(
+        "load_known_multi_segment_transcript_parallel_cold",
+        |bencher| {
+            bencher.iter_batched(
+                || multi_segment_fixture.clear_projection_cache(),
+                |()| black_box(multi_segment_fixture.load_transcript_parallel()),
+                BatchSize::LargeInput,
+            );
+        },
+    );
+
     sessions.bench_function("load_mixed_transcript", |bencher| {
         bencher.iter(|| black_box(mixed_fixture.load_transcript()));
     });
@@ -701,6 +712,7 @@ fn benchmarks(criterion: &mut Criterion) {
             BatchSize::LargeInput,
         );
     });
+
     sessions.bench_function("project_api_heavy_transcript", |bencher| {
         bencher.iter_batched(
             || {
