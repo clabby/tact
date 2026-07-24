@@ -111,6 +111,10 @@ resolved from the configuration file's directory; relative command-line paths ar
 current directory. Command-line options take precedence over environment variables, which take
 precedence over the file.
 
+Tact loads global instructions from `AGENTS.override.md` or `AGENTS.md` in `CODEX_HOME`, which
+defaults to `~/.codex`, followed by project instructions from the Git repository root through the
+configured workspace.
+
 The main agent options can also come from the environment. For example, `--workspace`,
 `--thinking`, and `--resume` correspond to `TACT_WORKSPACE`, `TACT_THINKING`, and `TACT_RESUME`.
 The prompt for `tact run` can be supplied through `TACT_PROMPT`. Run `tact --help` for the complete

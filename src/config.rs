@@ -54,6 +54,8 @@ pub(crate) enum ReasoningEffort {
 pub(crate) struct Config {
     #[serde(skip)]
     path: PathBuf,
+    #[serde(skip)]
+    codex_home: Option<PathBuf>,
     auth: AuthConfig,
     agent: AgentConfig,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
@@ -290,9 +292,14 @@ impl Config {
             })
             .collect::<Result<BTreeMap<_, _>>>()?;
         let skills = SkillsConfig::new(file.skills, config_dir, &environment);
+        let codex_home = environment
+            .codex_home
+            .clone()
+            .or_else(|| environment.home.as_ref().map(|home| home.join(".codex")));
 
         Ok(Self {
             path,
+            codex_home,
             auth: AuthConfig::new(
                 overrides.auth_mode.or(file.auth.mode).unwrap_or_default(),
                 auth_file,
@@ -363,6 +370,10 @@ impl Config {
 
     pub(crate) fn auth(&self) -> &AuthConfig {
         &self.auth
+    }
+
+    pub(crate) fn codex_home(&self) -> Option<&Path> {
+        self.codex_home.as_deref()
     }
 
     pub(crate) fn agent(&self) -> &AgentConfig {
@@ -1109,6 +1120,39 @@ mod tests {
         assert!(config.skills.roots().is_empty());
         let rendered: toml::Value = toml::from_str(&config.to_toml().unwrap()).unwrap();
         assert_eq!(rendered["skills"]["enabled"].as_bool(), Some(false));
+    }
+
+    #[test]
+    fn codex_home_uses_environment_override_or_home_default() {
+        let directory = tempdir().unwrap();
+        let home = directory.path().join("home");
+        let default_codex_home = home.join(".codex");
+        let configured_codex_home = directory.path().join("configured-codex");
+        let overridden = Config::load_with(
+            ConfigOverrides::default(),
+            Environment {
+                codex_home: Some(configured_codex_home.clone()),
+                home: Some(home.clone()),
+                ..Environment::default()
+            },
+            directory.path(),
+        )
+        .unwrap();
+        let defaulted = Config::load_with(
+            ConfigOverrides::default(),
+            Environment {
+                home: Some(home.clone()),
+                ..Environment::default()
+            },
+            directory.path(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            overridden.codex_home(),
+            Some(configured_codex_home.as_path())
+        );
+        assert_eq!(defaulted.codex_home(), Some(default_codex_home.as_path()));
     }
 
     #[test]

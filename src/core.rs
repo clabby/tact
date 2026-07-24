@@ -84,6 +84,9 @@ impl ConfiguredAgent {
             .tools_factory(move |agent| {
                 subagents::root_tools(tools.clone(), agent, Arc::clone(&subagents))
             });
+        if let Some(codex_home) = config.codex_home() {
+            builder = builder.codex_home(codex_home);
+        }
         let (snapshot, restored_instructions) = resume
             .map(ResumeState::into_parts)
             .map_or((None, None), |(snapshot, instructions)| {
