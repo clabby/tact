@@ -9,7 +9,7 @@ use super::{
 };
 use crate::{
     config::ReasoningEffort,
-    tui::{format::shorten_home, prompt::Submission, theme::Theme},
+    tui::{context::MODEL_WINDOW_TOKENS, format::shorten_home, prompt::Submission, theme::Theme},
 };
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use history::PromptHistory;
@@ -25,7 +25,6 @@ use std::{ops::Range, path::Path, time::Instant};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-const MODEL_WINDOW_TOKENS: u64 = 272_000;
 const MIN_CONTENT_ROWS: usize = 3;
 const MAX_CONTENT_ROWS: usize = 6;
 const ENTRY_HINT: &str = " / actions · @ files ";

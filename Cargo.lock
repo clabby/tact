@@ -4114,6 +4114,7 @@ version = "0.0.1"
 dependencies = [
  "arboard",
  "base64",
+ "chrono",
  "clap",
  "criterion",
  "crossterm",

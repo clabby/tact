@@ -3,6 +3,9 @@
 use super::{
     actions::{Action, ActionAvailability, ActionsEffect, ActionsEvent, ActionsMenu},
     composer::{Composer, ComposerChromeTarget, ComposerEffect, ComposerEvent},
+    context_diagnostics::{
+        ContextDiagnosticsEffect, ContextDiagnosticsEvent, ContextDiagnosticsPanel,
+    },
     effort::{EffortEffect, EffortEvent, EffortSelector},
     file_finder::{FileFinder, FileFinderEffect, FileFinderEvent},
     floating::Floating,
@@ -19,7 +22,7 @@ use crate::{
     config::ReasoningEffort,
     subagents::AgentUpdate,
     tui::{
-        context::completed_transcript_tokens,
+        context::{ContextDiagnostics, completed_transcript_tokens},
         prompt::Submission,
         session::SessionSummary,
         theme::{Theme, ThemeMode},
@@ -138,6 +141,7 @@ pub(crate) enum RootEffect {
 
 enum Overlay {
     Actions(Node<ActionsMenu>),
+    ContextDiagnostics(Node<ContextDiagnosticsPanel>),
     Effort(Node<EffortSelector>),
     Theme(Node<ThemeSelector>),
     FileFinder(FileMention),
@@ -178,6 +182,7 @@ pub(crate) struct RootNode {
     interactive: bool,
     theme_mode: ThemeMode,
     subagents: SubagentTree,
+    context_diagnostics: ContextDiagnostics,
 }
 
 impl RootNode {
@@ -202,6 +207,7 @@ impl RootNode {
             interactive: true,
             theme_mode: ThemeMode::Auto,
             subagents: SubagentTree::new(thinking),
+            context_diagnostics: ContextDiagnostics::default(),
         }
     }
 
@@ -218,6 +224,7 @@ impl RootNode {
         root.thread = ThreadState::Started;
         root.fork_available = false;
         root.theme_mode = self.theme_mode;
+        root.context_diagnostics = self.context_diagnostics.clone();
         root.interactive = false;
         root.composer
             .component_mut()
@@ -268,6 +275,7 @@ impl RootNode {
         self.reset_session(workspace, thinking);
         self.set_fast_mode(fast_mode);
         for record in records {
+            self.context_diagnostics.observe(&record);
             if let Some(tokens) = completed_transcript_tokens(&record) {
                 let _ = self
                     .composer
@@ -371,6 +379,7 @@ impl RootNode {
         if let Some(overlay) = &mut self.overlay {
             match overlay {
                 Overlay::Actions(actions) => actions.render(frame, area, theme),
+                Overlay::ContextDiagnostics(panel) => panel.render(frame, area, theme),
                 Overlay::Effort(selector) => selector.render(frame, area, theme),
                 Overlay::Theme(selector) => selector.render(frame, area, theme),
                 Overlay::FileFinder(mention) => mention.finder.render(frame, area, theme),
@@ -629,6 +638,7 @@ impl RootNode {
     fn update_overlay(&mut self, event: Event, now: Instant) -> ComponentUpdate<RootEffect> {
         match &self.overlay {
             Some(Overlay::Actions(_)) => self.update_actions(event),
+            Some(Overlay::ContextDiagnostics(_)) => self.update_context_diagnostics(event),
             Some(Overlay::Effort(_)) => self.update_effort(EffortEvent::Terminal { event, now }),
             Some(Overlay::Theme(_)) => {
                 self.update_theme_selector(ThemeSelectorEvent::Terminal(event))
@@ -793,6 +803,33 @@ impl RootNode {
                     effects: vec![RootEffect::OpenConfigEditor],
                     render: RenderRequest::Immediate,
                 };
+            }
+            Some(ActionsEffect::Trigger(Action::DebugContext)) => {
+                self.overlay = Some(Overlay::ContextDiagnostics(Node::new(
+                    ContextDiagnosticsPanel::new(self.context_diagnostics.clone()),
+                )));
+            }
+            None => {}
+        }
+        ComponentUpdate {
+            effects: Vec::new(),
+            render: update.render,
+        }
+    }
+
+    fn update_context_diagnostics(&mut self, event: Event) -> ComponentUpdate<RootEffect> {
+        let Some(Overlay::ContextDiagnostics(panel)) = &mut self.overlay else {
+            return ComponentUpdate::none();
+        };
+        let update = panel.update(ContextDiagnosticsEvent::Terminal(event));
+        match update.effects.into_iter().next() {
+            Some(ContextDiagnosticsEffect::Dismiss) => self.overlay = None,
+            Some(ContextDiagnosticsEffect::Refresh) => {
+                if let Some(Overlay::ContextDiagnostics(panel)) = &mut self.overlay {
+                    panel
+                        .component_mut()
+                        .replace(self.context_diagnostics.clone());
+                }
             }
             None => {}
         }
@@ -1263,6 +1300,12 @@ impl Component for RootNode {
             ),
             RootEvent::Transcript(record) => {
                 let steer_applied = record.kind() == "run.steered";
+                self.context_diagnostics.observe(&record);
+                if let Some(Overlay::ContextDiagnostics(panel)) = &mut self.overlay {
+                    panel
+                        .component_mut()
+                        .replace(self.context_diagnostics.clone());
+                }
                 let mut update = self.update_transcript(TranscriptEvent::Record(record));
                 if steer_applied {
                     let applied = self.steer_applied();
@@ -1540,6 +1583,78 @@ mod tests {
                 .unwrap(),
             },
         )))
+    }
+
+    fn agent_record(
+        sequence: u64,
+        kind: AgentEventKind,
+        payload: serde_json::Value,
+    ) -> Arc<TranscriptRecord> {
+        Arc::new(TranscriptRecord::from_agent(
+            sequence,
+            sequence,
+            AgentEvent {
+                protocol_version: 1,
+                request_id: Arc::from("opaque-test-id"),
+                seq: sequence,
+                kind,
+                payload: to_raw_value(&payload).unwrap(),
+            },
+        ))
+    }
+
+    #[test]
+    fn context_diagnostics_tracks_restored_and_live_records() {
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        let outbound = agent_record(
+            1,
+            AgentEventKind::ApiEvent,
+            json!({
+                "direction": "outbound",
+                "phase": "generation",
+                "event": {
+                    "previous_response_id": "opaque-response-id",
+                    "prompt_cache_key": "opaque-cache-key"
+                }
+            }),
+        );
+        root.restore_session(
+            Path::new("/work"),
+            ReasoningEffort::Medium,
+            false,
+            vec![outbound],
+        );
+        assert_eq!(
+            root.context_diagnostics.continuation,
+            Some(crate::tui::context::ContinuationMode::PreviousResponse)
+        );
+
+        let completed = agent_record(
+            2,
+            AgentEventKind::ModelCallCompleted,
+            json!({
+                "usage": {
+                    "input_tokens": 1_000,
+                    "input_tokens_details": {"cached_tokens": 800},
+                    "output_tokens": 50,
+                    "total_tokens": 1_050
+                }
+            }),
+        );
+        root.update(super::RootEvent::Transcript(completed));
+        assert_eq!(root.context_diagnostics.usage.unwrap().cached_input, 800);
+
+        root.update(key(KeyCode::Char('/'), KeyModifiers::NONE));
+        for character in "debug context".chars() {
+            root.update(key(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+        root.update(key(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(root.overlay, Some(Overlay::ContextDiagnostics(_))));
+
+        root.update(key(KeyCode::Char('r'), KeyModifiers::NONE));
+        assert_eq!(root.context_diagnostics.usage.unwrap().total, 1_050);
+        root.update(key(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(root.overlay.is_none());
     }
 
     #[test]

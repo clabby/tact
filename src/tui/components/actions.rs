@@ -16,7 +16,7 @@ use ratatui::{
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-const ACTIONS: [Action; 10] = [
+const ACTIONS: [Action; 11] = [
     Action::Effort,
     Action::FastMode,
     Action::Theme,
@@ -27,6 +27,7 @@ const ACTIONS: [Action; 10] = [
     Action::ReloadConfig,
     Action::EditConfig,
     Action::Subagents,
+    Action::DebugContext,
 ];
 const KEY_BINDINGS: [&str; 3] = ["↑↓ move", "enter open", "esc close"];
 const SEARCH_LABEL: &str = "Search: ";
@@ -54,6 +55,7 @@ pub(super) enum Action {
     Keybindings,
     ReloadConfig,
     EditConfig,
+    DebugContext,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -254,6 +256,7 @@ impl ActionsMenu {
             Action::Keybindings => true,
             Action::ReloadConfig => true,
             Action::EditConfig => true,
+            Action::DebugContext => true,
         }
     }
 
@@ -285,6 +288,7 @@ impl Action {
             Self::Keybindings => "Keyboard shortcuts",
             Self::ReloadConfig => "Reload config",
             Self::EditConfig => "Edit config",
+            Self::DebugContext => "Debug context",
         }
     }
 
@@ -298,7 +302,7 @@ impl Action {
             Self::ResumeSession => Some("restore"),
             Self::Fork => Some("btw"),
             Self::ReloadConfig => Some("refresh"),
-            Self::Keybindings | Self::EditConfig => None,
+            Self::Keybindings | Self::EditConfig | Self::DebugContext => None,
         }
     }
 
@@ -327,7 +331,7 @@ impl Component for ActionsMenu {
             return;
         }
 
-        let layout = Floating::new("Actions", 58, 14, &KEY_BINDINGS).render(frame, area, theme);
+        let layout = Floating::new("Actions", 58, 15, &KEY_BINDINGS).render(frame, area, theme);
         if layout.body.is_empty() {
             return;
         }
@@ -389,7 +393,7 @@ mod tests {
     }
 
     fn render(menu: &mut ActionsMenu) -> Terminal<TestBackend> {
-        let mut terminal = Terminal::new(TestBackend::new(60, 16)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(60, 17)).unwrap();
         terminal
             .draw(|frame| menu.render(frame, frame.area(), &Theme::default()))
             .unwrap();
@@ -458,10 +462,14 @@ mod tests {
         );
         assert_eq!(
             row_segment(&terminal, 13, 1, 58),
-            "│            ↑↓ move · enter open · esc close            │"
+            "│  Debug context                                         │"
         );
         assert_eq!(
             row_segment(&terminal, 14, 1, 58),
+            "│            ↑↓ move · enter open · esc close            │"
+        );
+        assert_eq!(
+            row_segment(&terminal, 15, 1, 58),
             "╰────────────────────────────────────────────────────────╯"
         );
         assert_eq!(
@@ -624,6 +632,19 @@ mod tests {
         assert_eq!(
             menu.update(key(KeyCode::Enter)).effects,
             [ActionsEffect::Trigger(Action::Keybindings)]
+        );
+    }
+
+    #[test]
+    fn debug_context_action_is_searchable_and_triggers() {
+        let mut menu = ActionsMenu::new(available());
+        for character in "debug context".chars() {
+            menu.update(key(KeyCode::Char(character)));
+        }
+
+        assert_eq!(
+            menu.update(key(KeyCode::Enter)).effects,
+            [ActionsEffect::Trigger(Action::DebugContext)]
         );
     }
 

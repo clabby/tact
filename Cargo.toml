@@ -21,6 +21,7 @@ pkg-fmt = "tgz"
 [dependencies]
 arboard = "3.6.1"
 base64 = "0.22.1"
+chrono = { version = "0.4.45", default-features = false, features = ["std"] }
 clap = { version = "4.6.4", features = ["derive", "env"] }
 crossterm = { version = "0.29.0", features = ["event-stream", "osc52"] }
 dark-light = "2.0.0"

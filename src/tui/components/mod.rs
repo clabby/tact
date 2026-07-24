@@ -3,6 +3,7 @@
 mod actions;
 mod app;
 mod composer;
+mod context_diagnostics;
 mod effort;
 mod file_finder;
 mod floating;
