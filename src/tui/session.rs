@@ -22,11 +22,12 @@ use zstd::stream::{read::Decoder, write::Encoder};
 
 const COMPRESSION_LEVEL: i32 = 3;
 const CHECKPOINT_FORMAT_VERSION: u32 = 1;
+const SEGMENT_SUMMARY_FORMAT_VERSION: u32 = 1;
 
 #[cfg(unix)]
 use std::os::unix::fs::DirBuilderExt;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct SessionSummary {
     pub(crate) session_id: String,
     pub(crate) started_at_unix_ms: u64,
@@ -35,6 +36,13 @@ pub(crate) struct SessionSummary {
     pub(crate) reasoning_mode: ReasoningMode,
     pub(crate) workspace: PathBuf,
     pub(crate) preview: String,
+}
+
+#[derive(Deserialize, Serialize)]
+struct StoredSegmentSummary {
+    format_version: u32,
+    transcript_bytes: u64,
+    summary: SessionSummary,
 }
 
 #[derive(Serialize)]
@@ -302,47 +310,43 @@ fn list_parallel_inner(
 fn load_catalog_segment(
     path: &Path,
     workspace: &Path,
-) -> Result<Option<Vec<Arc<TranscriptRecord>>>, SessionError> {
-    transcript::load_matching(path, |first| {
+) -> Result<Option<SessionSummary>, SessionError> {
+    if let Some(summary) = read_segment_summary(path) {
+        return Ok((summary.workspace == workspace).then_some(summary));
+    }
+    let segment = transcript::load_matching_segment(path, |first| {
         session_started_record(first).is_none_or(|started| started.workspace == workspace)
-    })
-    .map_err(Into::into)
+    })?;
+    let Some(segment) = segment else {
+        return Ok(None);
+    };
+    let summary = summarize_segment(&segment.records);
+    if segment.complete
+        && let Some(summary) = &summary
+    {
+        write_segment_summary(path, summary);
+    }
+    Ok(summary.filter(|summary| summary.workspace == workspace))
 }
 
 fn collect_catalog(
     config_path: &Path,
     workspace: &Path,
-    segments: impl IntoIterator<Item = Result<Option<Vec<Arc<TranscriptRecord>>>, SessionError>>,
+    segments: impl IntoIterator<Item = Result<Option<SessionSummary>, SessionError>>,
 ) -> Result<Vec<SessionSummary>, SessionError> {
     let mut sessions = HashMap::<String, SessionSummary>::new();
     for segment in segments {
-        let Some(records) = segment? else {
+        let Some(summary) = segment? else {
             continue;
         };
-        let Some(started) = session_started(&records) else {
-            continue;
-        };
-        if started.workspace != workspace {
+        if summary.workspace != workspace {
             continue;
         }
-        if !has_checkpoint(config_path, &started.session_id)? {
+        if !has_checkpoint(config_path, &summary.session_id)? {
             continue;
         }
-        let started_at_unix_ms = records
-            .first()
-            .map_or(0, |record| record.recorded_at_unix_ms());
-        let preview = first_user_message(&records).unwrap_or_else(|| "No user prompt".to_owned());
-        let summary = SessionSummary {
-            session_id: started.session_id.clone(),
-            started_at_unix_ms,
-            model: started.model,
-            effort: latest_effort(&records, started.effort),
-            reasoning_mode: started.reasoning_mode,
-            workspace: started.workspace,
-            preview,
-        };
         sessions
-            .entry(started.session_id)
+            .entry(summary.session_id.clone())
             .and_modify(|existing| {
                 if summary.started_at_unix_ms > existing.started_at_unix_ms {
                     existing.started_at_unix_ms = summary.started_at_unix_ms;
@@ -370,15 +374,10 @@ pub(crate) fn load_transcript(
 ) -> Result<Vec<Arc<TranscriptRecord>>, SessionError> {
     let mut records = Vec::new();
     for path in transcript_paths(config_path)? {
-        let Some(segment) = transcript::load_matching(&path, |first| {
-            session_started_record(first).is_none_or(|started| started.session_id == session_id)
-        })?
-        else {
+        let Some(segment) = load_session_segment(&path, session_id)? else {
             continue;
         };
-        if session_started(&segment).is_some_and(|started| started.session_id == session_id) {
-            records.extend(segment);
-        }
+        records.extend(segment);
     }
     Ok(records)
 }
@@ -410,22 +409,40 @@ fn load_transcript_parallel_inner(
 ) -> Result<Vec<Arc<TranscriptRecord>>, SessionError> {
     let segments = transcript_paths(config_path)?
         .into_par_iter()
-        .map(|path| {
-            transcript::load_matching(&path, |first| {
-                session_started_record(first).is_none_or(|started| started.session_id == session_id)
-            })
-            .map_err(SessionError::from)
-        })
+        .map(|path| load_session_segment(&path, session_id))
         .collect::<Vec<_>>()
         .into_iter()
         .collect::<Result<Vec<_>, SessionError>>()?;
     let mut records = Vec::new();
     for segment in segments.into_iter().flatten() {
-        if session_started(&segment).is_some_and(|started| started.session_id == session_id) {
-            records.extend(segment);
-        }
+        records.extend(segment);
     }
     Ok(records)
+}
+
+fn load_session_segment(
+    path: &Path,
+    session_id: &str,
+) -> Result<Option<Vec<Arc<TranscriptRecord>>>, SessionError> {
+    if let Some(summary) = read_segment_summary(path)
+        && summary.session_id != session_id
+    {
+        return Ok(None);
+    }
+    let segment = transcript::load_matching_segment(path, |first| {
+        session_started_record(first).is_none_or(|started| started.session_id == session_id)
+    })?;
+    let Some(segment) = segment else {
+        return Ok(None);
+    };
+    let matches =
+        session_started(&segment.records).is_some_and(|started| started.session_id == session_id);
+    if segment.complete
+        && let Some(summary) = summarize_segment(&segment.records)
+    {
+        write_segment_summary(path, &summary);
+    }
+    Ok(matches.then_some(segment.records))
 }
 
 fn transcript_loader() -> &'static rayon::ThreadPool {
@@ -523,6 +540,60 @@ fn first_user_message(records: &[Arc<TranscriptRecord>]) -> Option<String> {
                 .join(" ")
         })
         .filter(|preview| !preview.is_empty())
+}
+
+fn summarize_segment(records: &[Arc<TranscriptRecord>]) -> Option<SessionSummary> {
+    let started = session_started(records)?;
+    Some(SessionSummary {
+        session_id: started.session_id,
+        started_at_unix_ms: records
+            .first()
+            .map_or(0, |record| record.recorded_at_unix_ms()),
+        model: started.model,
+        effort: latest_effort(records, started.effort),
+        reasoning_mode: started.reasoning_mode,
+        workspace: started.workspace,
+        preview: first_user_message(records).unwrap_or_else(|| "No user prompt".to_owned()),
+    })
+}
+
+fn read_segment_summary(transcript_path: &Path) -> Option<SessionSummary> {
+    let transcript_bytes = fs::metadata(transcript_path).ok()?.len();
+    let stored = serde_json::from_slice::<StoredSegmentSummary>(
+        &fs::read(segment_summary_path(transcript_path)).ok()?,
+    )
+    .ok()?;
+    (stored.format_version == SEGMENT_SUMMARY_FORMAT_VERSION
+        && stored.transcript_bytes == transcript_bytes)
+        .then_some(stored.summary)
+}
+
+fn write_segment_summary(transcript_path: &Path, summary: &SessionSummary) {
+    let Some(directory) = transcript_path.parent() else {
+        return;
+    };
+    let Ok(transcript_bytes) = fs::metadata(transcript_path).map(|metadata| metadata.len()) else {
+        return;
+    };
+    let stored = StoredSegmentSummary {
+        format_version: SEGMENT_SUMMARY_FORMAT_VERSION,
+        transcript_bytes,
+        summary: summary.clone(),
+    };
+    let Ok(encoded) = serde_json::to_vec(&stored) else {
+        return;
+    };
+    let Ok(mut temporary) = NamedTempFile::new_in(directory) else {
+        return;
+    };
+    if temporary.write_all(&encoded).is_err() {
+        return;
+    }
+    drop(temporary.persist(segment_summary_path(transcript_path)));
+}
+
+fn segment_summary_path(transcript_path: &Path) -> PathBuf {
+    transcript_path.with_extension("summary.json")
 }
 
 fn checkpoint_directory(config_path: &Path) -> PathBuf {
@@ -650,7 +721,7 @@ mod tests {
     };
     use nanocodex::SessionSnapshot;
     use serde_json::{Value, json};
-    use std::path::Path;
+    use std::{fs, path::Path};
     use tempfile::tempdir;
 
     fn snapshot(lineage: &str) -> SessionSnapshot {
@@ -786,6 +857,14 @@ mod tests {
         assert_eq!(sessions[0].preview, "inspect the workspace");
         assert_eq!(sessions[0].effort, ReasoningEffort::Low);
         assert_eq!(sessions[0].reasoning_mode, ReasoningMode::Pro);
+        let summaries = fs::read_dir(directory.path().join("transcripts/v1"))
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.to_string_lossy().ends_with(".summary.json"))
+            .collect::<Vec<_>>();
+        assert_eq!(summaries.len(), 1);
+        fs::write(&summaries[0], b"invalid cache").unwrap();
         let async_sessions = list_async(config.clone(), Path::new("/work").to_path_buf())
             .await
             .unwrap();

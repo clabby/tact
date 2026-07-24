@@ -32,6 +32,11 @@ pub(crate) struct TranscriptWriter {
     task: JoinHandle<Result<(), TranscriptError>>,
 }
 
+pub(crate) struct LoadedSegment {
+    pub(crate) records: Vec<Arc<TranscriptRecord>>,
+    pub(crate) complete: bool,
+}
+
 trait DurableWrite: Write + Send + 'static {
     fn synchronize(&self) -> io::Result<()>;
 }
@@ -235,10 +240,18 @@ pub(crate) fn load(path: &Path) -> Result<Vec<Arc<TranscriptRecord>>, Transcript
     Ok(load_matching(path, |_| true)?.unwrap_or_default())
 }
 
+#[cfg(test)]
 pub(crate) fn load_matching(
     path: &Path,
     matches_first: impl FnOnce(&TranscriptRecord) -> bool,
 ) -> Result<Option<Vec<Arc<TranscriptRecord>>>, TranscriptError> {
+    Ok(load_matching_segment(path, matches_first)?.map(|segment| segment.records))
+}
+
+pub(crate) fn load_matching_segment(
+    path: &Path,
+    matches_first: impl FnOnce(&TranscriptRecord) -> bool,
+) -> Result<Option<LoadedSegment>, TranscriptError> {
     let file = File::open(path).map_err(|source| TranscriptError::Read {
         path: path.to_path_buf(),
         source,
@@ -252,6 +265,7 @@ pub(crate) fn load_matching(
     let mut bytes = Vec::new();
     let mut line = 0_usize;
     let mut matches_first = Some(matches_first);
+    let mut complete = false;
 
     loop {
         bytes.clear();
@@ -266,6 +280,7 @@ pub(crate) fn load_matching(
             }
         };
         if read == 0 {
+            complete = true;
             break;
         }
         line += 1;
@@ -308,7 +323,7 @@ pub(crate) fn load_matching(
         records.push(Arc::new(record));
     }
 
-    Ok(Some(records))
+    Ok(Some(LoadedSegment { records, complete }))
 }
 
 fn incomplete_zstd_frame(error: &io::Error) -> bool {
@@ -434,7 +449,9 @@ fn unix_milliseconds() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{DurableWrite, TranscriptJournal, load, load_matching, write_records};
+    use super::{
+        DurableWrite, TranscriptJournal, load, load_matching, load_matching_segment, write_records,
+    };
     use crate::{
         config::{ReasoningEffort, ReasoningMode},
         tui::transcript::{
@@ -497,6 +514,12 @@ mod tests {
             path.parent().unwrap(),
             directory.path().join("transcripts/v1")
         );
+        assert!(
+            load_matching_segment(&path, |_| true)
+                .unwrap()
+                .unwrap()
+                .complete
+        );
 
         let length = fs::metadata(&path).unwrap().len();
         fs::OpenOptions::new()
@@ -506,6 +529,12 @@ mod tests {
             .set_len(length - 3)
             .unwrap();
         assert_eq!(load(&path).unwrap().len(), 3);
+        assert!(
+            !load_matching_segment(&path, |_| true)
+                .unwrap()
+                .unwrap()
+                .complete
+        );
     }
 
     #[tokio::test]
