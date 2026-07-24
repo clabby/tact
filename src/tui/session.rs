@@ -11,7 +11,7 @@ use nanocodex::SessionSnapshot;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs::{self, File},
     io::{self, BufReader, BufWriter, Write},
     path::{Path, PathBuf},
@@ -674,6 +674,7 @@ fn segment_summary_path(transcript_path: &Path) -> PathBuf {
 }
 
 fn compact_projection_records(records: Vec<Arc<TranscriptRecord>>) -> Vec<Arc<TranscriptRecord>> {
+    let records = discard_completed_assistant_deltas(records);
     let latest_outbound = records
         .iter()
         .rposition(|record| api_event_projection(record) == ApiEventProjection::LatestOutbound);
@@ -699,6 +700,56 @@ fn compact_projection_records(records: Vec<Arc<TranscriptRecord>>) -> Vec<Arc<Tr
             ApiEventProjection::LatestOutbound => None,
         })
         .collect()
+}
+
+fn discard_completed_assistant_deltas(
+    records: Vec<Arc<TranscriptRecord>>,
+) -> Vec<Arc<TranscriptRecord>> {
+    let mut completed_messages = HashSet::new();
+    let mut compacted = Vec::with_capacity(records.len());
+    for record in records.into_iter().rev() {
+        match record.kind() {
+            "assistant.message" => {
+                if let Some(key) = assistant_message_key(&record) {
+                    completed_messages.insert(key);
+                }
+                compacted.push(record);
+            }
+            "assistant.delta" => {
+                let completed = assistant_message_key(&record)
+                    .is_some_and(|key| completed_messages.contains(&key));
+                if !completed {
+                    compacted.push(record);
+                }
+            }
+            _ => compacted.push(record),
+        }
+    }
+    compacted.reverse();
+    compacted
+}
+
+fn assistant_message_key(record: &TranscriptRecord) -> Option<AssistantMessageKey> {
+    let payload = record.decode_payload::<AssistantMessageIdentity>().ok()?;
+    Some(AssistantMessageKey {
+        model_call_index: payload.model_call_index,
+        item_id: payload.item_id,
+        commentary: payload.phase.as_deref() == Some("commentary"),
+    })
+}
+
+#[derive(Eq, Hash, PartialEq)]
+struct AssistantMessageKey {
+    model_call_index: u32,
+    item_id: Option<String>,
+    commentary: bool,
+}
+
+#[derive(Deserialize)]
+struct AssistantMessageIdentity {
+    model_call_index: u32,
+    item_id: Option<String>,
+    phase: Option<String>,
 }
 
 fn read_transcript_projection(
@@ -1159,15 +1210,71 @@ mod tests {
                 })
                 .unwrap();
         }
+        for (sequence, kind, payload) in [
+            (
+                4,
+                AgentEventKind::AssistantDelta,
+                json!({
+                    "model_call_index": 1,
+                    "item_id": "message",
+                    "phase": "final_answer",
+                    "text": "partial"
+                }),
+            ),
+            (
+                5,
+                AgentEventKind::AssistantDelta,
+                json!({
+                    "model_call_index": 1,
+                    "item_id": "message",
+                    "phase": "final_answer",
+                    "text": " response"
+                }),
+            ),
+            (
+                6,
+                AgentEventKind::AssistantMessage,
+                json!({
+                    "model_call_index": 1,
+                    "item_id": "message",
+                    "phase": "final_answer",
+                    "text": "complete response"
+                }),
+            ),
+        ] {
+            journal
+                .append_agent(AgentEvent {
+                    protocol_version: 1,
+                    request_id: Arc::from("request"),
+                    seq: sequence,
+                    kind,
+                    payload: to_raw_value(&payload).unwrap(),
+                })
+                .unwrap();
+        }
         drop(journal);
         writer.into_task().await.unwrap().unwrap();
 
         let projected = load_transcript(&config, "session").unwrap();
-        assert_eq!(projected.len(), 3);
+        assert_eq!(projected.len(), 4);
         assert_eq!(
             projected
                 .iter()
                 .filter(|record| record.kind() == "api.event")
+                .count(),
+            1
+        );
+        assert_eq!(
+            projected
+                .iter()
+                .filter(|record| record.kind() == "assistant.delta")
+                .count(),
+            0
+        );
+        assert_eq!(
+            projected
+                .iter()
+                .filter(|record| record.kind() == "assistant.message")
                 .count(),
             1
         );
