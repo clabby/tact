@@ -32,6 +32,12 @@ pub(crate) struct TranscriptWriter {
     task: JoinHandle<Result<(), TranscriptError>>,
 }
 
+pub(crate) struct LoadedSegment {
+    pub(crate) records: Vec<Arc<TranscriptRecord>>,
+    pub(crate) complete: bool,
+    pub(crate) observed_records: usize,
+}
+
 trait DurableWrite: Write + Send + 'static {
     fn synchronize(&self) -> io::Result<()>;
 }
@@ -230,7 +236,32 @@ impl TranscriptWriter {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn load(path: &Path) -> Result<Vec<Arc<TranscriptRecord>>, TranscriptError> {
+    Ok(load_matching(path, |_| true)?.unwrap_or_default())
+}
+
+#[cfg(test)]
+pub(crate) fn load_matching(
+    path: &Path,
+    matches_first: impl FnOnce(&TranscriptRecord) -> bool,
+) -> Result<Option<Vec<Arc<TranscriptRecord>>>, TranscriptError> {
+    Ok(load_matching_segment(path, matches_first)?.map(|segment| segment.records))
+}
+
+#[cfg(test)]
+pub(crate) fn load_matching_segment(
+    path: &Path,
+    matches_first: impl FnOnce(&TranscriptRecord) -> bool,
+) -> Result<Option<LoadedSegment>, TranscriptError> {
+    load_matching_segment_filtered(path, matches_first, |_| true)
+}
+
+pub(crate) fn load_matching_segment_filtered(
+    path: &Path,
+    matches_first: impl FnOnce(&TranscriptRecord) -> bool,
+    mut retain: impl FnMut(&TranscriptRecord) -> bool,
+) -> Result<Option<LoadedSegment>, TranscriptError> {
     let file = File::open(path).map_err(|source| TranscriptError::Read {
         path: path.to_path_buf(),
         source,
@@ -243,6 +274,8 @@ pub(crate) fn load(path: &Path) -> Result<Vec<Arc<TranscriptRecord>>, Transcript
     let mut records = Vec::new();
     let mut bytes = Vec::new();
     let mut line = 0_usize;
+    let mut matches_first = Some(matches_first);
+    let mut complete = false;
 
     loop {
         bytes.clear();
@@ -257,6 +290,7 @@ pub(crate) fn load(path: &Path) -> Result<Vec<Arc<TranscriptRecord>>, Transcript
             }
         };
         if read == 0 {
+            complete = true;
             break;
         }
         line += 1;
@@ -282,7 +316,7 @@ pub(crate) fn load(path: &Path) -> Result<Vec<Arc<TranscriptRecord>>, Transcript
                 supported: SCHEMA_VERSION,
             });
         }
-        let expected = u64::try_from(records.len()).unwrap_or(u64::MAX) + 1;
+        let expected = u64::try_from(line).unwrap_or(u64::MAX);
         if record.sequence() != expected {
             return Err(TranscriptError::Sequence {
                 path: path.to_path_buf(),
@@ -291,10 +325,21 @@ pub(crate) fn load(path: &Path) -> Result<Vec<Arc<TranscriptRecord>>, Transcript
                 expected,
             });
         }
-        records.push(Arc::new(record));
+        if let Some(matches_first) = matches_first.take()
+            && !matches_first(&record)
+        {
+            return Ok(None);
+        }
+        if retain(&record) {
+            records.push(Arc::new(record));
+        }
     }
 
-    Ok(records)
+    Ok(Some(LoadedSegment {
+        records,
+        complete,
+        observed_records: line,
+    }))
 }
 
 fn incomplete_zstd_frame(error: &io::Error) -> bool {
@@ -420,7 +465,9 @@ fn unix_milliseconds() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{DurableWrite, TranscriptJournal, load, write_records};
+    use super::{
+        DurableWrite, TranscriptJournal, load, load_matching, load_matching_segment, write_records,
+    };
     use crate::{
         config::{ReasoningEffort, ReasoningMode},
         tui::transcript::{
@@ -483,6 +530,12 @@ mod tests {
             path.parent().unwrap(),
             directory.path().join("transcripts/v1")
         );
+        assert!(
+            load_matching_segment(&path, |_| true)
+                .unwrap()
+                .unwrap()
+                .complete
+        );
 
         let length = fs::metadata(&path).unwrap().len();
         fs::OpenOptions::new()
@@ -492,6 +545,12 @@ mod tests {
             .set_len(length - 3)
             .unwrap();
         assert_eq!(load(&path).unwrap().len(), 3);
+        assert!(
+            !load_matching_segment(&path, |_| true)
+                .unwrap()
+                .unwrap()
+                .complete
+        );
     }
 
     #[tokio::test]
@@ -558,6 +617,29 @@ mod tests {
 
         let error = load(&path).unwrap_err();
         assert!(matches!(error, TranscriptError::Decode { line: 1, .. }));
+    }
+
+    #[test]
+    fn rejected_segment_does_not_decode_later_records() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("transcript.jsonl.zst");
+        let first = super::super::record::TranscriptRecord::from_local(
+            1,
+            1,
+            LocalEvent::WorkerTurnAccepted { id: TurnId::new(1) },
+        )
+        .unwrap();
+        let mut contents = serde_json::to_vec(&first).unwrap();
+        contents.extend_from_slice(b"\nnot-json\n");
+        fs::write(&path, zstd::encode_all(contents.as_slice(), 1).unwrap()).unwrap();
+
+        let records = load_matching(&path, |_| false).unwrap();
+
+        assert!(records.is_none());
+        assert!(matches!(
+            load(&path).unwrap_err(),
+            TranscriptError::Decode { line: 2, .. }
+        ));
     }
 
     #[test]

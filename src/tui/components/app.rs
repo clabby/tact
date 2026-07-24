@@ -3,13 +3,12 @@
 use super::{
     node::{ComponentUpdate, Node, RenderRequest},
     queue::QueueId,
-    root::{RootEffect, RootEvent, RootNode},
+    root::{RestoredSessionProjection, RootEffect, RootEvent, RootNode},
 };
 use crate::{
     config::{ReasoningEffort, ReasoningMode},
     subagents::AgentUpdate,
     tui::{
-        context::completed_transcript_tokens,
         pane::PaneId,
         session::SessionSummary,
         theme::{ColorScheme, Theme, ThemeMode},
@@ -91,7 +90,7 @@ pub(crate) enum AppEvent {
     },
     SessionRestored {
         pane: PaneId,
-        records: Vec<Arc<TranscriptRecord>>,
+        projection: Box<RestoredSessionProjection>,
         effort: ReasoningEffort,
         reasoning_mode: ReasoningMode,
         preferred_reasoning_mode: ReasoningMode,
@@ -161,14 +160,7 @@ impl AppNode {
                 self.update_root(self.focus, RootEvent::PasteImage(data_url))
             }
             AppEvent::Transcript { pane, record } => {
-                let tokens = completed_transcript_tokens(&record);
-                let mut update = self.update_root(pane, RootEvent::Transcript(record));
-                if let Some(tokens) = tokens {
-                    let context = self.update_root(pane, RootEvent::ContextTokens(tokens));
-                    update.effects.extend(context.effects);
-                    update.render = update.render.max(context.render);
-                }
-                update
+                self.update_root(pane, RootEvent::Transcript(record))
             }
             AppEvent::AgentStreamClosed(pane) => {
                 self.update_root(pane, RootEvent::AgentStreamClosed)
@@ -239,7 +231,7 @@ impl AppNode {
             }
             AppEvent::SessionRestored {
                 pane,
-                records,
+                projection,
                 effort,
                 reasoning_mode,
                 preferred_reasoning_mode,
@@ -247,7 +239,7 @@ impl AppNode {
             } => self.update_root(
                 pane,
                 RootEvent::SessionRestored {
-                    records,
+                    projection,
                     effort,
                     reasoning_mode,
                     preferred_reasoning_mode,

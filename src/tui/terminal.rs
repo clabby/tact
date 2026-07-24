@@ -1,7 +1,7 @@
 //! Terminal lifecycle and synchronized Ratatui frames.
 
-use crossterm::clipboard::CopyToClipboard;
 use crossterm::{
+    clipboard::CopyToClipboard,
     cursor::{Hide, Show},
     event::{
         DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,

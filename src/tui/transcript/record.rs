@@ -89,6 +89,10 @@ pub(crate) enum LocalEvent {
         from: bool,
         to: bool,
     },
+    ContextObserved {
+        prompt_cache: bool,
+        previous_response: bool,
+    },
     WorkerTurnAccepted {
         id: TurnId,
     },
@@ -196,6 +200,16 @@ impl TranscriptRecord {
                 "fast_mode.changed",
                 to_raw_value(&FastModeChanged { from, to })?,
             ),
+            LocalEvent::ContextObserved {
+                prompt_cache,
+                previous_response,
+            } => (
+                "context.observed",
+                to_raw_value(&ContextObserved {
+                    prompt_cache,
+                    previous_response,
+                })?,
+            ),
             LocalEvent::WorkerTurnAccepted { id } => {
                 ("worker.turn_accepted", to_raw_value(&WorkerTurn { id })?)
             }
@@ -255,9 +269,10 @@ impl TranscriptRecord {
         &self.source
     }
 
-    pub(crate) fn decode_payload<T: serde::de::DeserializeOwned>(
-        &self,
-    ) -> Result<T, serde_json::Error> {
+    pub(crate) fn decode_payload<'a, T>(&'a self) -> Result<T, serde_json::Error>
+    where
+        T: serde::Deserialize<'a>,
+    {
         serde_json::from_str(self.payload.get())
     }
 
@@ -312,6 +327,12 @@ struct EffortChanged {
 struct FastModeChanged {
     from: bool,
     to: bool,
+}
+
+#[derive(Serialize)]
+struct ContextObserved {
+    prompt_cache: bool,
+    previous_response: bool,
 }
 
 #[derive(Serialize)]

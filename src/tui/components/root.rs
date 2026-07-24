@@ -22,7 +22,7 @@ use crate::{
     config::{ReasoningEffort, ReasoningMode},
     subagents::AgentUpdate,
     tui::{
-        context::{ContextDiagnostics, completed_transcript_tokens},
+        context::ContextDiagnostics,
         prompt::Submission,
         session::SessionSummary,
         theme::{Theme, ThemeMode},
@@ -83,6 +83,7 @@ impl Notification {
 pub(crate) enum RootEvent {
     Terminal(Event),
     PasteImage(String),
+    #[cfg(test)]
     ContextTokens(u64),
     Transcript(Arc<TranscriptRecord>),
     AgentStreamClosed,
@@ -100,7 +101,7 @@ pub(crate) enum RootEvent {
     SessionsLoaded(Vec<SessionSummary>),
     SessionLoadFailed(String),
     SessionRestored {
-        records: Vec<Arc<TranscriptRecord>>,
+        projection: Box<RestoredSessionProjection>,
         effort: ReasoningEffort,
         reasoning_mode: ReasoningMode,
         preferred_reasoning_mode: ReasoningMode,
@@ -115,6 +116,12 @@ pub(crate) enum RootEvent {
         id: QueueId,
     },
     AnimationFrame(Instant),
+}
+
+pub(crate) struct RestoredSessionProjection {
+    transcript: Transcript,
+    context_diagnostics: ContextDiagnostics,
+    context_tokens: Option<u64>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -306,6 +313,7 @@ impl RootNode {
         self.set_max_subagents(max_subagents);
     }
 
+    #[allow(dead_code, reason = "used by restoration benchmarks and focused tests")]
     pub(crate) fn restore_session(
         &mut self,
         workspace: &Path,
@@ -315,6 +323,47 @@ impl RootNode {
         fast_mode: bool,
         records: Vec<Arc<TranscriptRecord>>,
     ) {
+        let projection = Self::project_session(thinking, records);
+        self.install_session_projection(
+            workspace,
+            thinking,
+            reasoning_mode,
+            preferred_reasoning_mode,
+            fast_mode,
+            projection,
+        );
+    }
+
+    pub(crate) fn project_session(
+        thinking: ReasoningEffort,
+        records: Vec<Arc<TranscriptRecord>>,
+    ) -> RestoredSessionProjection {
+        let mut transcript = Transcript::with_effort(thinking);
+        let mut context_diagnostics = ContextDiagnostics::default();
+        let mut context_tokens = None;
+        for record in records {
+            let observation = context_diagnostics.observe(&record);
+            if observation.completed_tokens.is_some() {
+                context_tokens = observation.completed_tokens;
+            }
+            let _ = transcript.update(TranscriptEvent::Record(record));
+        }
+        RestoredSessionProjection {
+            transcript,
+            context_diagnostics,
+            context_tokens,
+        }
+    }
+
+    pub(crate) fn install_session_projection(
+        &mut self,
+        workspace: &Path,
+        thinking: ReasoningEffort,
+        reasoning_mode: ReasoningMode,
+        preferred_reasoning_mode: ReasoningMode,
+        fast_mode: bool,
+        projection: RestoredSessionProjection,
+    ) {
         self.reset_session(
             workspace,
             thinking,
@@ -322,18 +371,13 @@ impl RootNode {
             preferred_reasoning_mode,
         );
         self.set_fast_mode(fast_mode);
-        for record in records {
-            self.context_diagnostics.observe(&record);
-            if let Some(tokens) = completed_transcript_tokens(&record) {
-                let _ = self
-                    .composer
-                    .component_mut()
-                    .update(ComposerEvent::ContextTokens(tokens));
-            }
+        self.transcript = Node::new(projection.transcript);
+        self.context_diagnostics = projection.context_diagnostics;
+        if let Some(tokens) = projection.context_tokens {
             let _ = self
-                .transcript
+                .composer
                 .component_mut()
-                .update(TranscriptEvent::Record(record));
+                .update(ComposerEvent::ContextTokens(tokens));
         }
         self.thread = ThreadState::Started;
     }
@@ -1363,19 +1407,28 @@ impl Component for RootNode {
                     )
                 }
             }
+            #[cfg(test)]
             RootEvent::ContextTokens(tokens) => self.update_composer(
                 ComposerEvent::ContextTokens(tokens),
                 RenderRequest::Streaming,
             ),
             RootEvent::Transcript(record) => {
                 let steer_applied = record.kind() == "run.steered";
-                self.context_diagnostics.observe(&record);
+                let observation = self.context_diagnostics.observe(&record);
                 if let Some(Overlay::ContextDiagnostics(panel)) = &mut self.overlay {
                     panel
                         .component_mut()
                         .replace(self.context_diagnostics.clone());
                 }
                 let mut update = self.update_transcript(TranscriptEvent::Record(record));
+                if let Some(tokens) = observation.completed_tokens {
+                    let context = self.update_composer(
+                        ComposerEvent::ContextTokens(tokens),
+                        RenderRequest::Streaming,
+                    );
+                    update.effects.extend(context.effects);
+                    update.render = update.render.max(context.render);
+                }
                 if steer_applied {
                     let applied = self.steer_applied();
                     update.effects.extend(applied.effects);
@@ -1402,20 +1455,20 @@ impl Component for RootNode {
             RootEvent::SessionsLoaded(sessions) => self.sessions_loaded(sessions),
             RootEvent::SessionLoadFailed(message) => self.session_load_failed(message),
             RootEvent::SessionRestored {
-                records,
+                projection,
                 effort,
                 reasoning_mode,
                 preferred_reasoning_mode,
                 fast_mode,
             } => {
                 let workspace = self.workspace.clone();
-                self.restore_session(
+                self.install_session_projection(
                     &workspace,
                     effort,
                     reasoning_mode,
                     preferred_reasoning_mode,
                     fast_mode,
-                    records,
+                    *projection,
                 );
                 ComponentUpdate::render(RenderRequest::Immediate)
             }

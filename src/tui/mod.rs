@@ -25,7 +25,10 @@ use crate::{
     subagents::SubagentControl,
     tui::{
         agent_events::ForwardedAgentEvent,
-        components::{AppEffect, AppEvent, AppNode, ComponentUpdate, RenderRequest, RootNode},
+        components::{
+            AppEffect, AppEvent, AppNode, ComponentUpdate, RenderRequest,
+            RestoredSessionProjection, RootNode,
+        },
         editor::EditorOutcome,
         pane::PaneId,
         prompt::Submission,
@@ -95,7 +98,7 @@ fn spawn_update_check(config_path: &Path) -> Option<UpdateCheckTask> {
 
 struct RestoredSession {
     configured: ConfiguredAgent,
-    records: Vec<std::sync::Arc<transcript::TranscriptRecord>>,
+    projection: RestoredSessionProjection,
     reasoning_mode: ReasoningMode,
 }
 
@@ -247,28 +250,47 @@ pub(crate) async fn run(
 ) -> Result<Option<String>> {
     ensure_interactive()?;
 
-    let restored_records;
-    let preferred_reasoning_mode = config.agent().reasoning_mode();
-    let reasoning_mode;
-    let configured = if let Some(session_id) = resume_session_id.as_deref() {
-        let snapshot = session::load_checkpoint(config.path(), session_id)?;
-        restored_records = session::load_transcript(config.path(), session_id)?;
-        reasoning_mode = session::reasoning_mode(&restored_records);
-        ConfiguredAgent::from_config_with_session(
-            &config,
-            config.agent().thinking(),
-            reasoning_mode,
-            Some(session_id),
-            Some(snapshot),
-        )?
-    } else {
-        restored_records = Vec::new();
-        reasoning_mode = preferred_reasoning_mode;
-        ConfiguredAgent::from_config(&config)?
-    };
     let initial_effort = config.agent().thinking();
     let initial_fast_mode = config.agent().fast_mode();
     let initial_max_subagents = config.agent().max_subagents();
+    let preferred_reasoning_mode = config.agent().reasoning_mode();
+    let resuming = resume_session_id.is_some();
+    let (configured, restored_projection, reasoning_mode) =
+        if let Some(session_id) = resume_session_id {
+            let restored_config = config.clone();
+            let config_path = restored_config.path().to_path_buf();
+            let checkpoint_session_id = session_id.clone();
+            let checkpoint = tokio::task::spawn_blocking(move || {
+                session::load_checkpoint(&config_path, &checkpoint_session_id)
+            });
+            let transcript = session::load_transcript_async(
+                restored_config.path().to_path_buf(),
+                session_id.clone(),
+            );
+            let (snapshot, records) = tokio::join!(checkpoint, transcript);
+            let snapshot = snapshot.map_err(RuntimeError::SessionTask)??;
+            let records = records?;
+            tokio::task::spawn_blocking(move || -> Result<_> {
+                let reasoning_mode = session::reasoning_mode(&records);
+                let projection = RootNode::project_session(initial_effort, records);
+                let configured = ConfiguredAgent::from_config_with_session(
+                    &restored_config,
+                    initial_effort,
+                    reasoning_mode,
+                    Some(&session_id),
+                    Some(snapshot),
+                )?;
+                Ok((configured, Some(projection), reasoning_mode))
+            })
+            .await
+            .map_err(RuntimeError::SessionTask)??
+        } else {
+            (
+                ConfiguredAgent::from_config(&config)?,
+                None,
+                preferred_reasoning_mode,
+            )
+        };
     let mut terminal = TerminalSession::enter().map_err(RuntimeError::Terminal)?;
     let ConfiguredAgent {
         agent,
@@ -287,7 +309,7 @@ pub(crate) async fn run(
                 pane: PaneId::Main,
                 generation: 0,
             },
-            if resume_session_id.is_some() {
+            if resuming {
                 PaneSession::persisted(&main_session_id)
             } else {
                 PaneSession::new(&main_session_id, None)
@@ -313,14 +335,14 @@ pub(crate) async fn run(
     root.set_reasoning_modes(reasoning_mode, preferred_reasoning_mode);
     root.set_fast_mode(initial_fast_mode);
     root.set_max_subagents(initial_max_subagents);
-    if !restored_records.is_empty() {
-        root.restore_session(
+    if let Some(projection) = restored_projection {
+        root.install_session_projection(
             &workspace,
             initial_effort,
             reasoning_mode,
             preferred_reasoning_mode,
             initial_fast_mode,
-            restored_records,
+            projection,
         );
     }
     let mut theme = config.theme().clone();
@@ -919,7 +941,7 @@ pub(crate) async fn run(
                 match restored {
                     Ok(RestoredSession {
                         configured,
-                        records,
+                        projection,
                         reasoning_mode,
                     }) => {
                         let ConfiguredAgent {
@@ -974,7 +996,7 @@ pub(crate) async fn run(
                         schedule(
                             app.update(AppEvent::SessionRestored {
                                 pane,
-                                records,
+                                projection: Box::new(projection),
                                 effort,
                                 reasoning_mode,
                                 preferred_reasoning_mode,
@@ -1425,8 +1447,10 @@ fn apply_pane_effect(
                 .expect("session-list pane must exist")
                 .session_id
                 .clone();
-            *context.session_list_task = Some(tokio::task::spawn_blocking(move || {
-                let sessions = session::list(&config_path, &workspace).map(|mut sessions| {
+            *context.session_list_task = Some(tokio::spawn(async move {
+                let sessions = session::list_async(config_path, workspace)
+                    .await
+                    .map(|mut sessions| {
                     sessions.retain(|session| session.session_id != active_session_id);
                     sessions
                 });
@@ -1439,11 +1463,21 @@ fn apply_pane_effect(
             let preferred_reasoning_mode = context.config.agent().reasoning_mode();
             let fast_mode = context.config.agent().fast_mode();
             let config = context.config.clone();
-            *context.resume_session_task = Some(tokio::task::spawn_blocking(move || {
-                let restored = (|| {
-                    let snapshot = session::load_checkpoint(config.path(), &session_id)?;
-                    let records = session::load_transcript(config.path(), &session_id)?;
+            *context.resume_session_task = Some(tokio::spawn(async move {
+                let config_path = config.path().to_path_buf();
+                let checkpoint_session_id = session_id.clone();
+                let checkpoint = tokio::task::spawn_blocking(move || {
+                    session::load_checkpoint(&config_path, &checkpoint_session_id)
+                });
+                let transcript =
+                    session::load_transcript_async(config.path().to_path_buf(), session_id.clone());
+                let restored = async {
+                    let (snapshot, records) = tokio::join!(checkpoint, transcript);
+                    let snapshot = snapshot.map_err(RuntimeError::SessionTask)??;
+                    let records = records?;
+                    tokio::task::spawn_blocking(move || -> Result<_> {
                     let reasoning_mode = session::reasoning_mode(&records);
+                    let projection = RootNode::project_session(effort, records);
                     let configured = ConfiguredAgent::from_config_with_session(
                         &config,
                         effort,
@@ -1453,10 +1487,14 @@ fn apply_pane_effect(
                     )?;
                     Ok(RestoredSession {
                         configured,
-                        records,
+                        projection,
                         reasoning_mode,
                     })
-                })();
+                    })
+                    .await
+                    .map_err(RuntimeError::SessionTask)?
+                }
+                .await;
                 (
                     pane,
                     effort,

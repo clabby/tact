@@ -145,6 +145,14 @@ impl PersistenceFixture {
             Err(error) => panic!("failed to clear projection cache: {error}"),
         }
     }
+
+    fn load_transcript_parallel(&self) -> Vec<Arc<TranscriptRecord>> {
+        session::load_transcript_parallel(&self.config_path, &self.session_id).unwrap()
+    }
+
+    fn list_parallel(&self) -> Vec<session::SessionSummary> {
+        session::list_parallel(&self.config_path, &self.workspace).unwrap()
+    }
 }
 
 fn mixed_projection_records(turns: u64) -> Vec<Arc<TranscriptRecord>> {
@@ -635,7 +643,6 @@ fn benchmarks(criterion: &mut Criterion) {
             BatchSize::SmallInput,
         );
     });
-
     let fixture = PersistenceFixture::api_heavy_archive();
     let multi_segment_fixture = PersistenceFixture::multi_segment_archive();
     let mixed_fixture = PersistenceFixture::mixed_archive();
@@ -649,6 +656,10 @@ fn benchmarks(criterion: &mut Criterion) {
         bencher.iter(|| {
             black_box(session::list(&fixture.config_path, &fixture.workspace).unwrap());
         });
+    });
+
+    sessions.bench_function("catalog_api_heavy_archive_parallel", |bencher| {
+        bencher.iter(|| black_box(fixture.list_parallel()));
     });
 
     sessions.bench_function("load_known_api_heavy_transcript", |bencher| {
@@ -667,6 +678,10 @@ fn benchmarks(criterion: &mut Criterion) {
         bencher.iter(|| black_box(multi_segment_fixture.load_transcript()));
     });
 
+    sessions.bench_function("load_known_multi_segment_transcript_parallel", |bencher| {
+        bencher.iter(|| black_box(multi_segment_fixture.load_transcript_parallel()));
+    });
+
     sessions.bench_function("load_known_multi_segment_transcript_cold", |bencher| {
         bencher.iter_batched(
             || multi_segment_fixture.clear_projection_cache(),
@@ -674,6 +689,17 @@ fn benchmarks(criterion: &mut Criterion) {
             BatchSize::LargeInput,
         );
     });
+
+    sessions.bench_function(
+        "load_known_multi_segment_transcript_parallel_cold",
+        |bencher| {
+            bencher.iter_batched(
+                || multi_segment_fixture.clear_projection_cache(),
+                |()| black_box(multi_segment_fixture.load_transcript_parallel()),
+                BatchSize::LargeInput,
+            );
+        },
+    );
 
     sessions.bench_function("load_mixed_transcript", |bencher| {
         bencher.iter(|| black_box(mixed_fixture.load_transcript()));
@@ -748,7 +774,6 @@ fn benchmarks(criterion: &mut Criterion) {
             black_box(root);
         });
     });
-
     sessions.bench_function("resume_api_heavy_transcript_cold", |bencher| {
         bencher.iter_batched(
             || fixture.clear_projection_cache(),
