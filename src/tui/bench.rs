@@ -28,23 +28,207 @@ mod tui {
 }
 
 use components::{AppEvent, AppNode, RootNode};
-use config::ReasoningEffort;
+use config::{ReasoningEffort, ReasoningMode};
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use nanocodex::{AgentEvent, AgentEventKind};
 use pane::PaneId;
 use ratatui::{Terminal, backend::TestBackend};
 use serde_json::{json, value::to_raw_value};
-use std::{hint::black_box, path::Path, sync::Arc};
+use std::{
+    fs::{self, File},
+    hint::black_box,
+    io::BufWriter,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
+use tempfile::TempDir;
 use theme::Theme;
-use transcript::{LocalEvent, TranscriptRecord, TurnId};
+use transcript::{LocalEvent, SessionStarted, TranscriptRecord, TurnId};
+use zstd::stream::write::Encoder;
 
 const WIDTH: u16 = 120;
 const HEIGHT: u16 = 40;
+const TARGET_API_EVENTS: u64 = 15_000;
+const UNRELATED_SESSIONS: u64 = 6;
+const UNRELATED_API_EVENTS: u64 = 4_000;
 
 struct Harness {
     app: AppNode,
     terminal: Terminal<TestBackend>,
+}
+
+struct PersistenceFixture {
+    _directory: TempDir,
+    config_path: PathBuf,
+    workspace: PathBuf,
+    session_id: String,
+}
+
+impl PersistenceFixture {
+    fn api_heavy_archive() -> Self {
+        Self::archive_with_target_segments(1)
+    }
+
+    fn multi_segment_archive() -> Self {
+        Self::archive_with_target_segments(4)
+    }
+
+    fn mixed_archive() -> Self {
+        let directory = tempfile::tempdir().unwrap();
+        let config_path = directory.path().join("config.toml");
+        let workspace = PathBuf::from("/benchmark-workspace");
+        let session_id = "mixed-session".to_owned();
+        write_mixed_session_segment(&config_path, &session_id, &workspace, 1_000);
+        save_benchmark_checkpoint(&config_path, &session_id);
+
+        Self {
+            _directory: directory,
+            config_path,
+            workspace,
+            session_id,
+        }
+    }
+
+    fn archive_with_target_segments(target_segments: u64) -> Self {
+        let directory = tempfile::tempdir().unwrap();
+        let config_path = directory.path().join("config.toml");
+        let workspace = PathBuf::from("/benchmark-workspace");
+        let session_id = "target-session".to_owned();
+
+        let events_per_segment = TARGET_API_EVENTS / target_segments;
+        for index in 0..target_segments {
+            write_session_segment(
+                &config_path,
+                index.saturating_add(1),
+                &session_id,
+                &workspace,
+                events_per_segment,
+            );
+        }
+        save_benchmark_checkpoint(&config_path, &session_id);
+
+        for index in 0..UNRELATED_SESSIONS {
+            let unrelated = format!("unrelated-session-{index}");
+            write_session_segment(
+                &config_path,
+                target_segments.saturating_add(index).saturating_add(1),
+                &unrelated,
+                &workspace,
+                UNRELATED_API_EVENTS,
+            );
+            save_benchmark_checkpoint(&config_path, &unrelated);
+        }
+
+        Self {
+            _directory: directory,
+            config_path,
+            workspace,
+            session_id,
+        }
+    }
+
+    fn load_transcript(&self) -> Vec<Arc<TranscriptRecord>> {
+        session::load_transcript(&self.config_path, &self.session_id).unwrap()
+    }
+
+    fn clear_projection_cache(&self) {
+        let path = self
+            .config_path
+            .parent()
+            .unwrap()
+            .join("transcript-projections");
+        match fs::remove_dir_all(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => panic!("failed to clear projection cache: {error}"),
+        }
+    }
+}
+
+fn mixed_projection_records(turns: u64) -> Vec<Arc<TranscriptRecord>> {
+    let mut records = Vec::new();
+    let mut sequence = 2_u64;
+    for turn in 0..turns {
+        records.push(local_record(
+            sequence,
+            LocalEvent::UserSubmitted {
+                id: TurnId::new(turn.saturating_add(1)),
+                text: format!("inspect subsystem {turn} and summarize the relevant behavior"),
+            },
+        ));
+        sequence = sequence.saturating_add(1);
+        records.push(agent_record(
+            sequence,
+            AgentEventKind::RunStarted,
+            json!({}),
+        ));
+        sequence = sequence.saturating_add(1);
+
+        for delta in 0..4 {
+            records.push(agent_record(
+                sequence,
+                AgentEventKind::AssistantDelta,
+                json!({
+                    "model_call_index": turn,
+                    "item_id": format!("message-{turn}"),
+                    "phase": "final_answer",
+                    "text": format!("turn {turn} response chunk {delta} with useful detail. "),
+                }),
+            ));
+            sequence = sequence.saturating_add(1);
+        }
+        records.push(agent_record(
+            sequence,
+            AgentEventKind::AssistantMessage,
+            json!({
+                "model_call_index": turn,
+                "item_id": format!("message-{turn}"),
+                "phase": "final_answer",
+                "text": format!("completed response for turn {turn}"),
+            }),
+        ));
+        sequence = sequence.saturating_add(1);
+
+        if turn % 4 == 0 {
+            let call_id = format!("tool-{turn}");
+            records.push(agent_record(
+                sequence,
+                AgentEventKind::ToolCall,
+                json!({
+                    "call_id": call_id,
+                    "tool": "exec_command",
+                    "arguments": {"cmd": format!("cargo test package-{turn}")},
+                }),
+            ));
+            sequence = sequence.saturating_add(1);
+            records.push(agent_record(
+                sequence,
+                AgentEventKind::ToolResult,
+                json!({
+                    "call_id": format!("tool-{turn}"),
+                    "tool": "exec_command",
+                    "status": "completed",
+                    "duration_ns": 1_000_000_u64,
+                    "result": {
+                        "output": format!("test output for package {turn}\n").repeat(16),
+                        "exit_code": 0,
+                    },
+                    "metadata": null,
+                }),
+            ));
+            sequence = sequence.saturating_add(1);
+        }
+
+        records.push(agent_record(
+            sequence,
+            AgentEventKind::RunCompleted,
+            json!({}),
+        ));
+        sequence = sequence.saturating_add(1);
+    }
+    records
 }
 
 impl Harness {
@@ -177,6 +361,113 @@ fn agent_record(
             payload: to_raw_value(&payload).unwrap(),
         },
     ))
+}
+
+fn write_session_segment(
+    config_path: &Path,
+    started_at: u64,
+    session_id: &str,
+    workspace: &Path,
+    api_events: u64,
+) {
+    let directory = transcript::storage_directory(config_path);
+    fs::create_dir_all(&directory).unwrap();
+    let path = directory.join(format!("{started_at}-{session_id}.jsonl.zst"));
+    let output = BufWriter::new(File::create(path).unwrap());
+    let mut output = Encoder::new(output, 1).unwrap();
+    let started = local_record(
+        1,
+        LocalEvent::SessionStarted(SessionStarted {
+            session_id: session_id.to_owned(),
+            parent_session_id: None,
+            model: nanocodex::MODEL.to_owned(),
+            effort: ReasoningEffort::Medium,
+            reasoning_mode: ReasoningMode::Standard,
+            fast_mode: false,
+            workspace: workspace.to_path_buf(),
+            application_version: "benchmark".to_owned(),
+        }),
+    );
+    serde_json::to_writer(&mut output, started.as_ref()).unwrap();
+    std::io::Write::write_all(&mut output, b"\n").unwrap();
+
+    let padding = "x".repeat(512);
+    for index in 0..api_events {
+        let sequence = index.saturating_add(2);
+        let record = agent_record(
+            sequence,
+            AgentEventKind::ApiEvent,
+            json!({
+                "direction": "inbound",
+                "phase": "generation",
+                "event": {
+                    "type": "response.output_text.delta",
+                    "delta": "token",
+                    "metadata": {
+                        "padding": padding,
+                        "sequence": index,
+                    },
+                },
+            }),
+        );
+        serde_json::to_writer(&mut output, record.as_ref()).unwrap();
+        std::io::Write::write_all(&mut output, b"\n").unwrap();
+    }
+    output.finish().unwrap();
+}
+
+fn write_mixed_session_segment(config_path: &Path, session_id: &str, workspace: &Path, turns: u64) {
+    let directory = transcript::storage_directory(config_path);
+    fs::create_dir_all(&directory).unwrap();
+    let path = directory.join(format!("1-{session_id}.jsonl.zst"));
+    let output = BufWriter::new(File::create(path).unwrap());
+    let mut output = Encoder::new(output, 1).unwrap();
+    let started = local_record(
+        1,
+        LocalEvent::SessionStarted(SessionStarted {
+            session_id: session_id.to_owned(),
+            parent_session_id: None,
+            model: nanocodex::MODEL.to_owned(),
+            effort: ReasoningEffort::Medium,
+            reasoning_mode: ReasoningMode::Standard,
+            fast_mode: false,
+            workspace: workspace.to_path_buf(),
+            application_version: "benchmark".to_owned(),
+        }),
+    );
+    serde_json::to_writer(&mut output, started.as_ref()).unwrap();
+    std::io::Write::write_all(&mut output, b"\n").unwrap();
+    for record in mixed_projection_records(turns) {
+        serde_json::to_writer(&mut output, record.as_ref()).unwrap();
+        std::io::Write::write_all(&mut output, b"\n").unwrap();
+    }
+    output.finish().unwrap();
+}
+
+fn save_benchmark_checkpoint(config_path: &Path, session_id: &str) {
+    let snapshot = serde_json::from_value(json!({
+        "version": 1,
+        "model": nanocodex::MODEL,
+        "lineage_id": session_id,
+        "prompt_cache_key": "benchmark-cache-key",
+        "workspace": "/benchmark-workspace",
+        "request_prefix": [
+            {"type": "additional_tools", "role": "developer", "tools": []},
+            {"type": "message", "role": "developer", "content": []}
+        ],
+        "canonical_context": {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "benchmark"}]
+        },
+        "history": [{
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "benchmark"}]
+        }]
+    }))
+    .unwrap();
+    session::save_checkpoint(config_path, session_id, &snapshot, "benchmark instructions").unwrap();
 }
 
 fn benchmarks(criterion: &mut Criterion) {
@@ -344,6 +635,176 @@ fn benchmarks(criterion: &mut Criterion) {
             BatchSize::SmallInput,
         );
     });
+
+    let fixture = PersistenceFixture::api_heavy_archive();
+    let multi_segment_fixture = PersistenceFixture::multi_segment_archive();
+    let mixed_fixture = PersistenceFixture::mixed_archive();
+    let restored_records = fixture.load_transcript();
+    let mixed_records = mixed_projection_records(1_000);
+    let mut sessions = criterion.benchmark_group("session");
+    sessions.sample_size(10);
+    sessions.measurement_time(Duration::from_secs(5));
+
+    sessions.bench_function("catalog_api_heavy_archive", |bencher| {
+        bencher.iter(|| {
+            black_box(session::list(&fixture.config_path, &fixture.workspace).unwrap());
+        });
+    });
+
+    sessions.bench_function("load_known_api_heavy_transcript", |bencher| {
+        bencher.iter(|| black_box(fixture.load_transcript()));
+    });
+
+    sessions.bench_function("load_known_api_heavy_transcript_cold", |bencher| {
+        bencher.iter_batched(
+            || fixture.clear_projection_cache(),
+            |()| black_box(fixture.load_transcript()),
+            BatchSize::LargeInput,
+        );
+    });
+
+    sessions.bench_function("load_known_multi_segment_transcript", |bencher| {
+        bencher.iter(|| black_box(multi_segment_fixture.load_transcript()));
+    });
+
+    sessions.bench_function("load_known_multi_segment_transcript_cold", |bencher| {
+        bencher.iter_batched(
+            || multi_segment_fixture.clear_projection_cache(),
+            |()| black_box(multi_segment_fixture.load_transcript()),
+            BatchSize::LargeInput,
+        );
+    });
+
+    sessions.bench_function("load_mixed_transcript", |bencher| {
+        bencher.iter(|| black_box(mixed_fixture.load_transcript()));
+    });
+
+    sessions.bench_function("load_mixed_transcript_cold", |bencher| {
+        bencher.iter_batched(
+            || mixed_fixture.clear_projection_cache(),
+            |()| black_box(mixed_fixture.load_transcript()),
+            BatchSize::LargeInput,
+        );
+    });
+
+    sessions.bench_function("project_api_heavy_transcript", |bencher| {
+        bencher.iter_batched(
+            || {
+                (
+                    RootNode::new(&fixture.workspace, ReasoningEffort::Medium),
+                    restored_records.clone(),
+                )
+            },
+            |(mut root, records)| {
+                root.restore_session(
+                    &fixture.workspace,
+                    ReasoningEffort::Medium,
+                    ReasoningMode::Standard,
+                    ReasoningMode::Standard,
+                    false,
+                    records,
+                );
+                black_box(root);
+            },
+            BatchSize::LargeInput,
+        );
+    });
+
+    sessions.bench_function("project_mixed_transcript", |bencher| {
+        bencher.iter_batched(
+            || {
+                (
+                    RootNode::new(&fixture.workspace, ReasoningEffort::Medium),
+                    mixed_records.clone(),
+                )
+            },
+            |(mut root, records)| {
+                root.restore_session(
+                    &fixture.workspace,
+                    ReasoningEffort::Medium,
+                    ReasoningMode::Standard,
+                    ReasoningMode::Standard,
+                    false,
+                    records,
+                );
+                black_box(root);
+            },
+            BatchSize::LargeInput,
+        );
+    });
+
+    sessions.bench_function("resume_api_heavy_transcript", |bencher| {
+        bencher.iter(|| {
+            let records = fixture.load_transcript();
+            let mut root = RootNode::new(&fixture.workspace, ReasoningEffort::Medium);
+            root.restore_session(
+                &fixture.workspace,
+                ReasoningEffort::Medium,
+                ReasoningMode::Standard,
+                ReasoningMode::Standard,
+                false,
+                records,
+            );
+            black_box(root);
+        });
+    });
+
+    sessions.bench_function("resume_api_heavy_transcript_cold", |bencher| {
+        bencher.iter_batched(
+            || fixture.clear_projection_cache(),
+            |()| {
+                let records = fixture.load_transcript();
+                let mut root = RootNode::new(&fixture.workspace, ReasoningEffort::Medium);
+                root.restore_session(
+                    &fixture.workspace,
+                    ReasoningEffort::Medium,
+                    ReasoningMode::Standard,
+                    ReasoningMode::Standard,
+                    false,
+                    records,
+                );
+                black_box(root);
+            },
+            BatchSize::LargeInput,
+        );
+    });
+
+    sessions.bench_function("resume_mixed_transcript", |bencher| {
+        bencher.iter(|| {
+            let records = mixed_fixture.load_transcript();
+            let mut root = RootNode::new(&mixed_fixture.workspace, ReasoningEffort::Medium);
+            root.restore_session(
+                &mixed_fixture.workspace,
+                ReasoningEffort::Medium,
+                ReasoningMode::Standard,
+                ReasoningMode::Standard,
+                false,
+                records,
+            );
+            black_box(root);
+        });
+    });
+
+    sessions.bench_function("resume_mixed_transcript_cold", |bencher| {
+        bencher.iter_batched(
+            || mixed_fixture.clear_projection_cache(),
+            |()| {
+                let records = mixed_fixture.load_transcript();
+                let mut root = RootNode::new(&mixed_fixture.workspace, ReasoningEffort::Medium);
+                root.restore_session(
+                    &mixed_fixture.workspace,
+                    ReasoningEffort::Medium,
+                    ReasoningMode::Standard,
+                    ReasoningMode::Standard,
+                    false,
+                    records,
+                );
+                black_box(root);
+            },
+            BatchSize::LargeInput,
+        );
+    });
+    sessions.finish();
 }
 
 criterion_group!(tui, benchmarks);
