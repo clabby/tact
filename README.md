@@ -2,7 +2,7 @@
 
 `tact` is a terminal interface for [Nanocodex](https://github.com/gakonst/nanocodex).
 
-https://github.com/user-attachments/assets/5c634ae8-5c74-47c9-bb8c-9c18cb7fc97d
+<https://github.com/user-attachments/assets/5c634ae8-5c74-47c9-bb8c-9c18cb7fc97d>
 
 ## Execution environment
 
@@ -25,6 +25,12 @@ curl --proto '=https' --tlsv1.2 -LsSf \
 It verifies the release checksum and installs `tact` in `~/.local/bin` without `sudo`. Set
 `TACT_INSTALL_DIR` to another absolute directory if you prefer a different location.
 
+You can also install the published crate with Cargo:
+
+```sh
+cargo install tact --locked
+```
+
 To build the current source instead:
 
 ```sh
@@ -41,9 +47,10 @@ Official release binaries can update themselves:
 tact update
 ```
 
-The updater verifies both the release checksum and signature before replacing the executable. If
-Cargo owns the installation, tact instead prints the appropriate `cargo install` command so Cargo's
-records stay accurate. Automatic update notifications are shown only by official release builds.
+The updater verifies both the release checksum and signature before replacing a release-installer
+binary. If Cargo owns the installation, tact instead prints `cargo install tact --locked` so
+Cargo's records stay accurate. Automatic update notifications are shown only by official release
+builds.
 
 ## Sign in
 

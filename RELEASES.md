@@ -1,139 +1,61 @@
 # Releases
 
-Releases are driven by a `v`-prefixed Git tag. The same tag starts the binary release and container
-workflows, so publish it only after the release commit is on `main` and all checks pass.
+Releases are driven by a `v`-prefixed Git tag. The release workflow validates, builds, signs, and
+publishes every distribution from that tag.
 
-## Prerequisites
+## One-time setup
 
-- Push access to `clabby/tact` and permission to create tags and releases.
-- A current Rust stable toolchain, `jj`, and the GitHub CLI (`gh`) authenticated with permission to
-  create repository refs. The GitHub CLI is needed because `jj git push` does not push tags.
-- GitHub Actions must have read/write workflow permissions. The workflows use the automatic
-  `GITHUB_TOKEN` to create the GitHub Release and push to GHCR; no maintainer-managed secret is
-  needed for those jobs.
+- Add a repository Actions secret named `CARGO_REGISTRY_TOKEN` containing a crates.io API token
+  with permission to publish the `tact` crate.
+- Give GitHub Actions read/write workflow permissions so `GITHUB_TOKEN` can create GitHub Releases
+  and publish images to GHCR.
+- Ensure the releaser can push `main` and create repository tags.
 
-Start from an up-to-date, clean `main`. If `@` already contains work, finish it rather than mixing
-unrelated changes into the release revision. Otherwise create a revision for the release:
+## Publish a release
+
+Start from a clean, up-to-date `main`. Bump the package version in `Cargo.toml` and refresh the root
+package entry in `Cargo.lock`:
 
 ```sh
-jj git fetch --remote origin
-jj new main@origin
+cargo check
 ```
 
-## Prepare the release
-
-1. Choose a semantic version such as `0.2.0`. Set the package `version` in `Cargo.toml`, then update
-   and verify the lockfile:
-
-   ```sh
-   cargo check
-   cargo metadata --locked --no-deps --format-version 1 >/dev/null
-   ```
-
-   The first command refreshes the root package entry in `Cargo.lock`. Review the lockfile and do
-   not accept unrelated dependency updates accidentally.
-
-2. Run the release checks:
-
-   ```sh
-   cargo fmt --all --check
-   cargo clippy --all-targets --all-features --locked -- -D warnings
-   cargo test --all-targets --all-features --locked
-   cargo build --release --locked
-   ```
-
-   Also confirm that `cargo metadata --no-deps --format-version 1` reports the intended `tact`
-   version. The release workflow rejects a tag whose version does not exactly match it.
-
-3. Describe and publish the release revision:
-
-   ```sh
-   jj describe -m "chore: release 0.2.0"
-   jj bookmark set main -r @
-   jj git push --remote origin --bookmark main
-   ```
-
-   Wait for the `main` CI run to pass before tagging. Confirm that `main@origin` resolves to the
-   release commit.
-
-## Tag and publish
-
-Create the local tag with `jj`, then create the corresponding lightweight tag ref on GitHub. Replace
-the version in both commands and ensure `@` is still the release commit:
+Commit and push that version bump, then wait for the `main` CI run to pass. Create the matching tag
+from the release commit and publish it to GitHub:
 
 ```sh
-jj tag set v0.2.0 -r @
+release_revision=main@origin
+version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "tact") | .version')
+release_commit=$(jj log -r "$release_revision" --no-graph -T 'commit_id')
+jj tag set "v${version}" -r "$release_revision"
 gh api repos/clabby/tact/git/refs \
   --method POST \
-  -f ref=refs/tags/v0.2.0 \
-  -f sha="$(jj log -r @ --no-graph -T 'commit_id')"
+  -f ref="refs/tags/v${version}" \
+  -f sha="$release_commit"
 ```
 
-Creating the remote tag is the point of no return: it starts both workflows. Never reuse or move a
-published release tag. If repository policy requires signed annotated tags, create the remote tag
-with the approved signing process instead; the GitHub API command above creates a lightweight tag.
+Creating the remote tag is the point of no return. Never reuse or move a published release tag.
 
-The tag publishes:
+## What CI publishes
 
-- `.github/workflows/release.yaml`: validates the tag/version match; builds `tact` for Linux x86-64
-  and ARM64 and macOS x86-64 and ARM64; packages each binary with `README.md` and `LICENSE.md`;
-  writes SHA-256 sidecars; signs each archive with a just-in-time minisign key; verifies every
-  archive, checksum, and signature; saves that exact signed bundle as a workflow artifact; publishes
-  the crate with that release's ephemeral public key; and creates a GitHub Release with generated
-  notes and all assets only after crate publication succeeds. Separating signing from publication
-  lets a failed publication job reuse the original ephemeral key and signatures. Linux artifacts
-  are built natively on Ubuntu 22.04 runners for a consistent glibc baseline. These matrix builds set
-  `TACT_RELEASE_BUILD=1`, which marks them as official release binaries. Local builds, including
-  `cargo build --release`, deliberately remain unmarked.
-- `.github/workflows/docker.yml`: builds the scratch-based binary-carrier image for `linux/amd64`
-  and `linux/arm64`, then publishes a multi-platform manifest as `ghcr.io/clabby/tact:<version>`
-  (without the leading `v`) and `ghcr.io/clabby/tact:latest`. The image contains only `/tact`; see
-  `docker/README.md` for how to copy it into a runnable image.
+`.github/workflows/release.yaml` performs the complete release:
 
-The root `install.sh` resolves the latest tag, selects one of the same four release targets,
-verifies its SHA-256 sidecar, and installs the archive's `tact` binary to a user-writable directory.
-Keep its asset naming and supported-target mapping synchronized with the release matrix.
+- verifies that the tagged commit belongs to `main` and the tag exactly matches the Cargo package
+  version;
+- builds official Linux x86-64 and ARM64 and macOS Intel and Apple Silicon binaries;
+- packages, checksums, and signs all four archives with an ephemeral minisign key;
+- injects the public key into the crate metadata and publishes the crate to crates.io;
+- creates the GitHub Release with the archives, checksums, signatures, and public key;
+- builds the `linux/amd64` and `linux/arm64` GHCR images from the exact signed Linux binaries;
+- verifies each image binary byte-for-byte against its release archive; and
+- publishes `ghcr.io/clabby/tact:<version>` and `ghcr.io/clabby/tact:latest`.
 
-## Verify
+GitHub Release publication waits for crates.io publication, and container publication waits for the
+GitHub Release. A release is complete only when every job in the tag-triggered workflow succeeds.
 
-Watch both tag-triggered runs in GitHub Actions and require every job to succeed. Then verify:
+## Retries
 
-```sh
-gh release view v0.2.0
-gh release download v0.2.0 --pattern '*.sha256' --dir /tmp/tact-v0.2.0-checksums
-docker buildx imagetools inspect ghcr.io/clabby/tact:0.2.0
-docker buildx imagetools inspect ghcr.io/clabby/tact:latest
-```
-
-Check that the release has four archives and four checksum files, and that the image manifest lists
-both `linux/amd64` and `linux/arm64`. Each archive must also have a `.sig` asset. Download at least
-one archive, validate it against its sidecar and signature, and run `tact --version` from the
-extracted binary.
-
-## Self-update eligibility
-
-A GitHub Release is eligible for `tact update` only when the exact same version has first been
-published to crates.io. The published crate must contain the
-`[package.metadata.binstall.signing]` table injected by the release workflow, including the
-ephemeral minisign public key used for that release's archives. The updater treats immutable
-crates.io metadata as the trust root; the `minisign.pub` file uploaded beside the GitHub assets is
-for manual verification and is not sufficient by itself.
-
-Crate packaging and publication must both succeed before the GitHub Release job can run. The private
-minisign key is generated only in the signing job, used to produce the retained signed bundle, and
-removed by the existing shell trap.
-
-## Failures and retries
-
-Do not delete and recreate a published tag to retry a transient failure: consumers may already have
-observed the original ref, and moving it can associate artifacts with different source. Re-run only
-the failed GitHub Actions jobs for the same tag. If crate publication succeeded but the GitHub
-Release step failed, rerun only the `release` job so it reuses the retained signed bundle; rerunning
-the signing job would generate a different ephemeral key. The GitHub Release action and GHCR
-publication may have partially succeeded, so inspect existing release assets and image manifests
-before retrying. If the source itself is wrong, fix it on `main`, increment the version, and publish
-a new tag.
-
-The Docker workflow also supports manual dispatch, but a branch dispatch produces a branch-named
-image rather than the release version and `latest`; it is useful for diagnosis, not for completing a
-tagged release. A rerun of the original tag workflow preserves the intended tags.
+Rerun failed jobs against the original tag. The signing job retains its signed bundle as a workflow
+artifact so later publication jobs can reuse the same key and signatures. Before rerunning a
+partially completed release, check whether crates.io, the GitHub Release, or GHCR already accepted
+its publication. If the source itself is wrong, bump to a new version and create a new tag.

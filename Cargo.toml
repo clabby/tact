@@ -1,6 +1,6 @@
 [package]
 name = "tact"
-version = "0.0.1"
+version = "0.0.2"
 edition = "2024"
 rust-version = "1.97.0"
 authors = ["Ben Clabby"]
@@ -13,6 +13,7 @@ readme = "README.md"
 exclude = ["evals/**"]
 keywords = ["ai", "coding-agent", "llm", "terminal", "tui"]
 categories = ["command-line-interface", "development-tools"]
+publish = ["crates-io"]
 
 [package.metadata.binstall]
 pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ target }-v{ version }.tar.gz"
