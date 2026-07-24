@@ -73,6 +73,10 @@ pub(crate) struct Cli {
     )]
     thinking: Option<ReasoningEffort>,
 
+    /// Maximum number of sub-agents that may run concurrently.
+    #[arg(long, global = true, env = "TACT_MAX_SUBAGENTS", value_name = "COUNT")]
+    max_subagents: Option<usize>,
+
     /// Replace Nanocodex's standard instructions.
     #[arg(
         long,
@@ -282,6 +286,7 @@ impl Cli {
             auth_file: self.auth_file,
             workspace: self.workspace,
             thinking: self.thinking,
+            max_subagents: self.max_subagents,
             instructions: self.instructions,
             web_search: self.web_search,
             image_generation: self.image_generation,
@@ -543,12 +548,15 @@ mod tests {
             "chatgpt",
             "--auth-file",
             "auth.json",
+            "--max-subagents",
+            "12",
         ])
         .unwrap();
 
         assert_eq!(cli.config.unwrap(), PathBuf::from("tact.toml"));
         assert_eq!(cli.auth, Some(AuthMode::ChatGpt));
         assert_eq!(cli.auth_file.unwrap(), PathBuf::from("auth.json"));
+        assert_eq!(cli.max_subagents, Some(12));
         assert!(matches!(cli.command, Some(Command::Config { .. })));
     }
 
@@ -776,6 +784,7 @@ mod tests {
             ("auth_file", "TACT_AUTH_FILE"),
             ("workspace", "TACT_WORKSPACE"),
             ("thinking", "TACT_THINKING"),
+            ("max_subagents", "TACT_MAX_SUBAGENTS"),
             ("instructions", "TACT_INSTRUCTIONS"),
             ("web_search", "TACT_WEB_SEARCH"),
             ("image_generation", "TACT_IMAGE_GENERATION"),

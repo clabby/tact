@@ -484,6 +484,15 @@ impl AppNode {
         }
     }
 
+    pub(crate) fn set_max_subagents(&mut self, limit: usize) {
+        if let Some(main) = &mut self.main {
+            main.component_mut().set_max_subagents(limit);
+        }
+        if let Some((_, fork)) = &mut self.fork {
+            fork.component_mut().set_max_subagents(limit);
+        }
+    }
+
     fn begin_fork(&mut self) -> PaneId {
         if let Some(main) = &mut self.main {
             main.component_mut().set_fork_available(false);

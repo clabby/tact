@@ -253,6 +253,7 @@ pub(crate) async fn run(
     };
     let initial_effort = config.agent().thinking();
     let initial_fast_mode = config.agent().fast_mode();
+    let initial_max_subagents = config.agent().max_subagents();
     let mut terminal = TerminalSession::enter().map_err(RuntimeError::Terminal)?;
     let ConfiguredAgent {
         agent,
@@ -295,6 +296,7 @@ pub(crate) async fn run(
     );
     let mut root = RootNode::new(&workspace, initial_effort);
     root.set_fast_mode(initial_fast_mode);
+    root.set_max_subagents(initial_max_subagents);
     if !restored_records.is_empty() {
         root.restore_session(
             &workspace,
@@ -1306,10 +1308,25 @@ fn apply_pane_effect(
                 Ok(FastModeUpdate { pane, enabled })
             }));
         }
+        components::RootEffect::SetMaxSubagents(limit) => {
+            context.config.persist_max_subagents(limit)?;
+            context.config.set_max_subagents(limit);
+            context.app.set_max_subagents(limit);
+            for runtime in context.panes.values() {
+                runtime.subagent_control.set_max_concurrency(limit);
+            }
+        }
         components::RootEffect::ReloadConfig => match context.config.reload() {
             Ok(reload) => {
                 let (config, workspace_changed) = reload.into_parts();
                 let theme = config.theme().clone();
+                let max_subagents = config.agent().max_subagents();
+                context.app.set_max_subagents(max_subagents);
+                for runtime in context.panes.values() {
+                    runtime
+                        .subagent_control
+                        .set_max_concurrency(max_subagents);
+                }
                 *context.config = config;
                 let message = if workspace_changed {
                     "Reloaded config · theme applied · agent/auth settings apply to new sessions · workspace requires restart"
@@ -1640,7 +1657,7 @@ mod tests {
         fs::create_dir_all(obsolete.parent().unwrap()).unwrap();
         fs::write(&obsolete, b"obsolete checkpoint").unwrap();
         let (sender, mut completions) = tokio::sync::mpsc::unbounded_channel();
-        let (_subagents, subagent_control, _updates) = crate::subagents::channel();
+        let (_subagents, subagent_control, _updates) = crate::subagents::channel(32);
 
         let pane = open_pane(
             PaneGeneration {
@@ -1673,7 +1690,7 @@ mod tests {
         })
         .unwrap();
         let (sender, mut completions) = tokio::sync::mpsc::unbounded_channel();
-        let (_subagents, subagent_control, _updates) = crate::subagents::channel();
+        let (_subagents, subagent_control, _updates) = crate::subagents::channel(32);
         let main = open_pane(
             PaneGeneration {
                 pane: PaneId::Main,
@@ -1712,7 +1729,7 @@ mod tests {
 
         assert_eq!(subagent_pane(&panes, &fork_update), Some(PaneId::Fork(1)));
 
-        let (_other_registry, other_control, _other_updates) = crate::subagents::channel();
+        let (_other_registry, other_control, _other_updates) = crate::subagents::channel(32);
         let stale_update = ForwardedSubagentUpdate {
             runtime_id: other_control.runtime_id(),
             root_session_id: "fork-session".to_owned(),
@@ -1769,7 +1786,7 @@ mod tests {
         })
         .unwrap();
         let (sender, mut completions) = tokio::sync::mpsc::unbounded_channel();
-        let (_subagents, subagent_control, _updates) = crate::subagents::channel();
+        let (_subagents, subagent_control, _updates) = crate::subagents::channel(32);
         let mut old = open_pane(
             PaneGeneration {
                 pane: PaneId::Main,

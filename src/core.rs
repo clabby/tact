@@ -74,7 +74,8 @@ impl ConfiguredAgent {
             tools = tools.provider(mcp);
         }
         let tools = tools.build().map_err(NanocodexError::from)?;
-        let (subagents, subagent_control, subagent_updates) = subagents::channel();
+        let (subagents, subagent_control, subagent_updates) =
+            subagents::channel(agent_config.max_subagents());
         let mut builder = Nanocodex::builder(auth)
             .workspace(workspace)
             .thinking(thinking.into())
@@ -481,7 +482,7 @@ mod tests {
             .responses(responses)
             .build()
             .unwrap();
-        let (_registry, subagent_control, subagent_updates) = crate::subagents::channel();
+        let (_registry, subagent_control, subagent_updates) = crate::subagents::channel(32);
         let configured = ConfiguredAgent {
             agent,
             events,

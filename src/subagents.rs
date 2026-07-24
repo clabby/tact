@@ -12,7 +12,7 @@ use std::{
     collections::HashMap,
     fmt,
     sync::{
-        Arc, Weak,
+        Arc, Mutex, Weak,
         atomic::{AtomicU64, Ordering},
     },
     time::Duration,
@@ -172,6 +172,25 @@ struct ActiveTurn {
     generation: u64,
     cancellation: CancellationToken,
     control: Option<TurnControl>,
+    _capacity: TurnCapacity,
+}
+
+struct TurnCapacity {
+    state: Arc<Mutex<CapacityState>>,
+}
+
+struct CapacityState {
+    active: usize,
+    limit: usize,
+}
+
+impl Drop for TurnCapacity {
+    fn drop(&mut self) {
+        self.state
+            .lock()
+            .expect("subagent capacity lock should not be poisoned")
+            .active -= 1;
+    }
 }
 
 pub(crate) struct Registry {
@@ -179,6 +198,7 @@ pub(crate) struct Registry {
     state: tokio::sync::Mutex<RegistryState>,
     updates: mpsc::UnboundedSender<ScopedAgentUpdate>,
     revision: watch::Sender<u64>,
+    capacity: Arc<Mutex<CapacityState>>,
 }
 
 #[derive(Default)]
@@ -236,14 +256,43 @@ const DEFAULT_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_WAIT_TIMEOUT: Duration = Duration::from_secs(300);
 
 impl Registry {
-    fn new(updates: mpsc::UnboundedSender<ScopedAgentUpdate>) -> Self {
+    fn new(updates: mpsc::UnboundedSender<ScopedAgentUpdate>, max_concurrency: usize) -> Self {
         let (revision, _) = watch::channel(0);
         Self {
             id: SubagentRuntimeId::next(),
             state: tokio::sync::Mutex::new(RegistryState::default()),
             updates,
             revision,
+            capacity: Arc::new(Mutex::new(CapacityState {
+                active: 0,
+                limit: max_concurrency,
+            })),
         }
+    }
+
+    fn reserve_turn(&self) -> std::io::Result<TurnCapacity> {
+        let mut capacity = self
+            .capacity
+            .lock()
+            .expect("subagent capacity lock should not be poisoned");
+        if capacity.active >= capacity.limit {
+            return Err(std::io::Error::other(format!(
+                "sub-agent concurrency limit of {} has been reached; try delegation again later",
+                capacity.limit
+            )));
+        }
+        capacity.active += 1;
+        drop(capacity);
+        Ok(TurnCapacity {
+            state: Arc::clone(&self.capacity),
+        })
+    }
+
+    fn set_max_concurrency(&self, limit: usize) {
+        self.capacity
+            .lock()
+            .expect("subagent capacity lock should not be poisoned")
+            .limit = limit;
     }
 
     async fn reserve(&self, session_id: &str) -> std::io::Result<AgentReservation> {
@@ -280,12 +329,13 @@ impl Registry {
         root_session_id: &str,
         id: AgentId,
         prompt: String,
+        capacity: TurnCapacity,
     ) -> std::io::Result<()> {
         let launch = self
             .state
             .lock()
             .await
-            .begin_turn_in_scope(root_session_id, id)?;
+            .begin_turn_in_scope(root_session_id, id, capacity)?;
         self.turn_started(&launch.root_session_id, launch.id);
         self.drive_turn(launch, prompt);
         Ok(())
@@ -297,11 +347,12 @@ impl Registry {
         id: AgentId,
         task: String,
     ) -> std::io::Result<()> {
+        let capacity = self.reserve_turn()?;
         let (launch, descriptor) = self
             .state
             .lock()
             .await
-            .begin_follow_up(session_id, id, &task)?;
+            .begin_follow_up(session_id, id, &task, capacity)?;
         self.send(&launch.root_session_id, AgentUpdate::Added(descriptor));
         self.turn_started(&launch.root_session_id, launch.id);
         self.drive_turn(launch, task);
@@ -815,6 +866,7 @@ impl RegistryState {
         session_id: &str,
         id: AgentId,
         task: &str,
+        capacity: TurnCapacity,
     ) -> std::io::Result<(TurnLaunch, AgentDescriptor)> {
         let root_session_id = self.authorize(session_id, id)?;
         let scope = self
@@ -827,7 +879,7 @@ impl RegistryState {
             .ok_or_else(|| std::io::Error::other(format!("unknown agent_id {id}")))?;
         session.descriptor.task = task.to_owned();
         let descriptor = session.descriptor.clone();
-        let launch = session.begin_turn(root_session_id, id)?;
+        let launch = session.begin_turn(root_session_id, id, capacity)?;
         Ok((launch, descriptor))
     }
 
@@ -835,12 +887,13 @@ impl RegistryState {
         &mut self,
         root_session_id: &str,
         id: AgentId,
+        capacity: TurnCapacity,
     ) -> std::io::Result<TurnLaunch> {
         self.scopes
             .get_mut(root_session_id)
             .and_then(|scope| scope.sessions.get_mut(&id))
             .ok_or_else(|| std::io::Error::other(format!("unknown agent_id {id}")))?
-            .begin_turn(root_session_id.to_owned(), id)
+            .begin_turn(root_session_id.to_owned(), id, capacity)
     }
 
     fn list(&self, session_id: &str) -> std::io::Result<Vec<AgentSummary>> {
@@ -1151,7 +1204,12 @@ impl AgentScope {
 }
 
 impl ChildSession {
-    fn begin_turn(&mut self, root_session_id: String, id: AgentId) -> std::io::Result<TurnLaunch> {
+    fn begin_turn(
+        &mut self,
+        root_session_id: String,
+        id: AgentId,
+        capacity: TurnCapacity,
+    ) -> std::io::Result<TurnLaunch> {
         if !self.status.can_start_turn() || self.active.is_some() {
             return Err(std::io::Error::other(format!(
                 "agent {id} is not idle ({:?})",
@@ -1169,6 +1227,7 @@ impl ChildSession {
             generation,
             cancellation: cancellation.clone(),
             control: None,
+            _capacity: capacity,
         });
         self.status = AgentStatus::Running;
         Ok(TurnLaunch {
@@ -1203,6 +1262,10 @@ pub(crate) struct SubagentControl {
 }
 
 impl SubagentControl {
+    pub(crate) fn set_max_concurrency(&self, limit: usize) {
+        self.registry.set_max_concurrency(limit);
+    }
+
     pub(crate) async fn cancel_all(&self, root_session_id: &str) {
         self.registry.cancel_all(root_session_id).await;
     }
@@ -1325,6 +1388,7 @@ impl Tool for StartAgent {
             .registry
             .upgrade()
             .ok_or_else(|| std::io::Error::other("subagent runtime is closed"))?;
+        let capacity = registry.reserve_turn()?;
         let reservation = registry.reserve(context.session_id).await?;
         let id = reservation.id;
         let (child, events) = match self.origin {
@@ -1365,6 +1429,7 @@ impl Tool for StartAgent {
                 &reservation.root_session_id,
                 id,
                 self.origin.prompt(id, &task),
+                capacity,
             )
             .await?;
         Ok(ToolExecution::json(&AgentStartReport {
@@ -1660,13 +1725,15 @@ fn send_update(
         .is_ok()
 }
 
-pub(crate) fn channel() -> (
+pub(crate) fn channel(
+    max_concurrency: usize,
+) -> (
     Arc<Registry>,
     SubagentControl,
     mpsc::UnboundedReceiver<ScopedAgentUpdate>,
 ) {
     let (updates, receiver) = mpsc::unbounded_channel();
-    let registry = Arc::new(Registry::new(updates));
+    let registry = Arc::new(Registry::new(updates, max_concurrency));
     let control = SubagentControl {
         registry: Arc::clone(&registry),
     };
@@ -1889,6 +1956,33 @@ mod tests {
         assert_eq!(child.parent, Some(parent.id));
     }
 
+    #[test]
+    fn concurrency_capacity_is_released_for_later_delegation() {
+        let (registry, _control, _updates) = super::channel(1);
+        let capacity = registry.reserve_turn().unwrap();
+
+        let error = registry.reserve_turn().err().unwrap();
+        assert_eq!(
+            error.to_string(),
+            "sub-agent concurrency limit of 1 has been reached; try delegation again later"
+        );
+
+        drop(capacity);
+        assert!(registry.reserve_turn().is_ok());
+    }
+
+    #[test]
+    fn concurrency_limit_can_change_while_turns_are_active() {
+        let (registry, control, _updates) = super::channel(1);
+        let _first = registry.reserve_turn().unwrap();
+
+        control.set_max_concurrency(2);
+        let _second = registry.reserve_turn().unwrap();
+        control.set_max_concurrency(1);
+
+        assert!(registry.reserve_turn().is_err());
+    }
+
     #[tokio::test]
     async fn subagents_can_manage_descendants_but_not_siblings_or_ancestors() {
         let mut registry = RegistryState::default();
@@ -1958,7 +2052,7 @@ mod tests {
 
     #[tokio::test]
     async fn closed_agent_summaries_keep_the_last_completed_report() {
-        let (registry, _control, _updates) = super::channel();
+        let (registry, _control, _updates) = super::channel(32);
         let reservation = registry.reserve("main").await.unwrap();
         let mut session = test_session(reservation.id, "child-session", None);
         session.status = AgentStatus::Completed {
@@ -2019,7 +2113,7 @@ mod tests {
 
     #[tokio::test]
     async fn interrupt_and_close_stop_recursive_turns_and_preserve_continuation() {
-        let (registry, _control, _updates) = super::channel();
+        let (registry, _control, _updates) = super::channel(32);
         let parent_called = Arc::new(Notify::new());
         let child_called = Arc::new(Notify::new());
         let sibling_called = Arc::new(Notify::new());
@@ -2029,7 +2123,12 @@ mod tests {
         let parent_session =
             insert_runtime_session(&registry, &parent, None, parent_agent, parent_events).await;
         registry
-            .launch_initial_turn(&parent.root_session_id, parent.id, "parent work".to_owned())
+            .launch_initial_turn(
+                &parent.root_session_id,
+                parent.id,
+                "parent work".to_owned(),
+                registry.reserve_turn().unwrap(),
+            )
             .await
             .unwrap();
 
@@ -2044,7 +2143,12 @@ mod tests {
         )
         .await;
         registry
-            .launch_initial_turn(&child.root_session_id, child.id, "child work".to_owned())
+            .launch_initial_turn(
+                &child.root_session_id,
+                child.id,
+                "child work".to_owned(),
+                registry.reserve_turn().unwrap(),
+            )
             .await
             .unwrap();
 
@@ -2056,6 +2160,7 @@ mod tests {
                 &sibling.root_session_id,
                 sibling.id,
                 "sibling work".to_owned(),
+                registry.reserve_turn().unwrap(),
             )
             .await
             .unwrap();

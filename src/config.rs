@@ -20,6 +20,8 @@ use tempfile::NamedTempFile;
 use toml_edit::{Array, DocumentMut, Item, Table, value};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
+pub(crate) const DEFAULT_MAX_SUBAGENTS: usize = 32;
+
 /// Authentication method used by `tact`.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, ValueEnum)]
 #[serde(rename_all = "kebab-case")]
@@ -109,6 +111,7 @@ pub(crate) struct AgentConfig {
     workspace: PathBuf,
     thinking: ReasoningEffort,
     fast_mode: bool,
+    max_subagents: usize,
     instructions: Option<String>,
     web_search: bool,
     image_generation: bool,
@@ -134,6 +137,7 @@ pub(crate) struct ConfigOverrides {
     pub(crate) auth_file: Option<PathBuf>,
     pub(crate) workspace: Option<PathBuf>,
     pub(crate) thinking: Option<ReasoningEffort>,
+    pub(crate) max_subagents: Option<usize>,
     pub(crate) instructions: Option<String>,
     pub(crate) web_search: Option<bool>,
     pub(crate) image_generation: Option<bool>,
@@ -211,6 +215,7 @@ struct AgentConfigFile {
     workspace: Option<PathBuf>,
     thinking: Option<ReasoningEffort>,
     fast_mode: Option<bool>,
+    max_subagents: Option<usize>,
     instructions: Option<String>,
     web_search: Option<bool>,
     image_generation: Option<bool>,
@@ -296,6 +301,10 @@ impl Config {
                     .or(file.agent.thinking)
                     .unwrap_or_default(),
                 fast_mode: file.agent.fast_mode.unwrap_or(false),
+                max_subagents: overrides
+                    .max_subagents
+                    .or(file.agent.max_subagents)
+                    .unwrap_or(DEFAULT_MAX_SUBAGENTS),
                 instructions: overrides.instructions.or(file.agent.instructions),
                 web_search: overrides
                     .web_search
@@ -338,6 +347,10 @@ impl Config {
         self.agent.fast_mode = enabled;
     }
 
+    pub(crate) fn set_max_subagents(&mut self, limit: usize) {
+        self.agent.max_subagents = limit;
+    }
+
     pub(crate) fn path(&self) -> &Path {
         &self.path
     }
@@ -374,6 +387,10 @@ impl Config {
 
     pub(crate) fn persist_fast_mode(&self, enabled: bool) -> Result<()> {
         Self::persist_fast_mode_at(&self.path, enabled)
+    }
+
+    pub(crate) fn persist_max_subagents(&self, limit: usize) -> Result<()> {
+        Self::persist_max_subagents_at(&self.path, limit)
     }
 
     pub(crate) fn persist_theme_mode(&self, mode: ThemeMode) -> Result<()> {
@@ -472,6 +489,15 @@ impl Config {
             document["agent"] = Item::Table(Table::new());
         }
         document["agent"]["fast_mode"] = value(enabled);
+        Self::write_document(path, document)
+    }
+
+    fn persist_max_subagents_at(path: &Path, limit: usize) -> Result<()> {
+        let mut document = Self::read_document(path)?;
+        if !document.contains_key("agent") {
+            document["agent"] = Item::Table(Table::new());
+        }
+        document["agent"]["max_subagents"] = value(i64::try_from(limit).unwrap_or(i64::MAX));
         Self::write_document(path, document)
     }
 
@@ -736,6 +762,10 @@ impl AgentConfig {
         self.fast_mode
     }
 
+    pub(crate) const fn max_subagents(&self) -> usize {
+        self.max_subagents
+    }
+
     pub(crate) fn instructions(&self) -> Option<&str> {
         self.instructions.as_deref()
     }
@@ -979,6 +1009,7 @@ mod tests {
         assert_eq!(config.agent.workspace, directory.path());
         assert_eq!(config.agent.thinking, ReasoningEffort::Medium);
         assert!(!config.agent.fast_mode);
+        assert_eq!(config.agent.max_subagents, 32);
         assert!(config.agent.web_search);
         assert!(config.agent.image_generation);
         assert_eq!(config.theme.border(), Color::DarkGray);
@@ -995,6 +1026,7 @@ mod tests {
         );
         assert_eq!(rendered["agent"]["thinking"].as_str(), Some("medium"));
         assert_eq!(rendered["agent"]["fast_mode"].as_bool(), Some(false));
+        assert_eq!(rendered["agent"]["max_subagents"].as_integer(), Some(32));
         assert_eq!(rendered["theme"]["mode"].as_str(), Some("auto"));
         assert_eq!(rendered["theme"]["dark"]["accent"].as_str(), Some("blue"));
     }
@@ -1257,7 +1289,7 @@ mod tests {
         let config_path = directory.path().join("config.toml");
         fs::write(
             &config_path,
-            "[agent]\nworkspace = \"workspace\"\nthinking = \"xhigh\"\nfast_mode = true\n\
+            "[agent]\nworkspace = \"workspace\"\nthinking = \"xhigh\"\nfast_mode = true\nmax_subagents = 7\n\
              instructions = \"Be concise.\"\nweb_search = false\nimage_generation = false\n\
              websocket_url = \"wss://example.com/responses\"\n\
              api_base_url = \"https://example.com/v1\"\n",
@@ -1280,6 +1312,7 @@ mod tests {
         assert_eq!(config.agent.workspace, directory.path().join("workspace"));
         assert_eq!(config.agent.thinking, ReasoningEffort::Xhigh);
         assert!(config.agent.fast_mode);
+        assert_eq!(config.agent.max_subagents, 7);
         assert_eq!(config.agent.instructions.as_deref(), Some("Be concise."));
         assert!(!config.agent.web_search);
         assert!(!config.agent.image_generation);
@@ -1839,6 +1872,25 @@ mod tests {
         assert_eq!(document["agent"]["fast_mode"].as_bool(), Some(true));
         assert_eq!(document["agent"]["web_search"].as_bool(), Some(false));
         assert_eq!(document["theme"]["accent"].as_str(), Some("#AABBCC"));
+    }
+
+    #[test]
+    fn persisting_max_subagents_preserves_the_rest_of_the_config() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        fs::write(
+            &path,
+            "# Keep this comment.\n[agent]\nmax_subagents = 32\nweb_search = false\n",
+        )
+        .unwrap();
+
+        Config::persist_max_subagents_at(&path, 8).unwrap();
+
+        let contents = fs::read_to_string(&path).unwrap();
+        let document = toml::from_str::<toml::Value>(&contents).unwrap();
+        assert!(contents.contains("# Keep this comment."));
+        assert_eq!(document["agent"]["max_subagents"].as_integer(), Some(8));
+        assert_eq!(document["agent"]["web_search"].as_bool(), Some(false));
     }
 
     #[test]

@@ -6,6 +6,7 @@ use super::{
     transcript::{Transcript, TranscriptEvent},
 };
 use crate::{
+    config::DEFAULT_MAX_SUBAGENTS,
     subagents::{AgentDescriptor, AgentId, AgentOrigin, AgentStatus, AgentUpdate},
     tui::{theme::Theme, transcript::TranscriptRecord},
 };
@@ -21,8 +22,20 @@ use std::{sync::Arc, time::Instant};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-const RUNNING_TREE_KEYS: [&str; 4] = ["↑↓ select", "enter inspect", "f show all", "esc close"];
-const ALL_TREE_KEYS: [&str; 4] = ["↑↓ select", "enter inspect", "f show running", "esc close"];
+const RUNNING_TREE_KEYS: [&str; 5] = [
+    "↑↓ select",
+    "enter inspect",
+    "-/+ concurrency",
+    "f show all",
+    "esc close",
+];
+const ALL_TREE_KEYS: [&str; 5] = [
+    "↑↓ select",
+    "enter inspect",
+    "-/+ concurrency",
+    "f show running",
+    "esc close",
+];
 const TRANSCRIPT_KEYS: [&str; 4] = [
     "pgup/pgdn scroll",
     "ctrl+home/end",
@@ -86,11 +99,13 @@ pub(super) enum SubagentOverlay {
     Transcript(AgentId),
 }
 
+#[derive(Debug, Eq, PartialEq)]
 pub(super) enum SubagentEffect {
     Dismiss,
     Inspect(AgentId),
     Back,
     OpenLink(String),
+    SetMaxSubagents(usize),
 }
 
 pub(super) struct SubagentTree {
@@ -98,6 +113,7 @@ pub(super) struct SubagentTree {
     selected: usize,
     filter: AgentFilter,
     effort: crate::config::ReasoningEffort,
+    max_subagents: usize,
 }
 
 impl SubagentTree {
@@ -107,6 +123,7 @@ impl SubagentTree {
             selected: 0,
             filter: AgentFilter::Running,
             effort,
+            max_subagents: DEFAULT_MAX_SUBAGENTS,
         }
     }
 
@@ -158,6 +175,14 @@ impl SubagentTree {
         }
     }
 
+    pub(super) fn set_max_subagents(&mut self, limit: usize) {
+        self.max_subagents = limit;
+    }
+
+    pub(super) const fn max_subagents(&self) -> usize {
+        self.max_subagents
+    }
+
     pub(super) fn contains(&self, id: AgentId) -> bool {
         self.nodes.iter().any(|node| node.descriptor.id == id)
     }
@@ -202,6 +227,14 @@ impl SubagentTree {
                 self.filter = self.filter.toggled();
                 self.clamp_selection();
                 None
+            }
+            KeyCode::Char('-') if key.modifiers.is_empty() => {
+                self.max_subagents = self.max_subagents.saturating_sub(1);
+                Some(SubagentEffect::SetMaxSubagents(self.max_subagents))
+            }
+            KeyCode::Char('+') | KeyCode::Char('=') if key.modifiers.is_empty() => {
+                self.max_subagents = self.max_subagents.saturating_add(1);
+                Some(SubagentEffect::SetMaxSubagents(self.max_subagents))
             }
             KeyCode::Enter => self
                 .visible_nodes()
@@ -265,9 +298,17 @@ impl SubagentTree {
         }
         if visible.is_empty() {
             let message = if self.nodes.is_empty() {
-                "No subagents have been delegated yet."
+                format!(
+                    "Concurrency: {} / {} active. No subagents have been delegated yet.",
+                    self.active_count(),
+                    self.max_subagents
+                )
             } else {
-                "No subagents are currently running. Press f to show all."
+                format!(
+                    "Concurrency: {} / {} active. No subagents are currently running. Press f to show all.",
+                    self.active_count(),
+                    self.max_subagents
+                )
             };
             frame.render_widget(
                 Paragraph::new(message)
@@ -284,8 +325,9 @@ impl SubagentTree {
             Span::styled("main agent", Style::default().add_modifier(Modifier::BOLD)),
             Span::styled(
                 format!(
-                    "  ·  {} active · {} total · {}",
+                    "  ·  {} / {} active · {} total · {}",
                     self.active_count(),
+                    self.max_subagents,
                     self.nodes.len(),
                     self.filter.label(),
                 ),
@@ -551,6 +593,14 @@ mod tests {
         terminal.backend().clone()
     }
 
+    fn render_tree(tree: &mut SubagentTree) -> TestBackend {
+        let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+        terminal
+            .draw(|frame| tree.render_tree(frame, frame.area(), &Theme::default()))
+            .unwrap();
+        terminal.backend().clone()
+    }
+
     fn rendered_text(backend: &TestBackend) -> String {
         backend
             .buffer()
@@ -599,6 +649,28 @@ mod tests {
         assert_eq!(tree.effort, ReasoningEffort::High);
         assert_eq!(tree.active_count(), 1);
         assert!(tree.contains(AgentId::new(1)));
+    }
+
+    #[test]
+    fn concurrency_limit_is_visible_and_editable() {
+        let mut tree = SubagentTree::new(ReasoningEffort::Medium);
+        tree.set_max_subagents(4);
+
+        assert!(rendered_text(&render_tree(&mut tree)).contains("Concurrency: 0 / 4 active"));
+        assert_eq!(
+            tree.update_tree(Event::Key(KeyEvent::new(
+                KeyCode::Char('-'),
+                KeyModifiers::NONE,
+            ))),
+            Some(SubagentEffect::SetMaxSubagents(3))
+        );
+        assert_eq!(
+            tree.update_tree(Event::Key(KeyEvent::new(
+                KeyCode::Char('+'),
+                KeyModifiers::NONE,
+            ))),
+            Some(SubagentEffect::SetMaxSubagents(4))
+        );
     }
 
     #[test]

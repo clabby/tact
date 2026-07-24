@@ -92,6 +92,7 @@ mode = "auto" # auto, chatgpt, or api-key
 workspace = "/path/to/workspace"
 thinking = "medium" # low, medium, high, xhigh, or max
 fast_mode = false
+max_subagents = 32
 web_search = true
 image_generation = true
 # instructions = "Replace the standard Nanocodex instructions"
@@ -113,6 +114,8 @@ The main agent options can also come from the environment. For example, `--works
 `--thinking`, and `--resume` correspond to `TACT_WORKSPACE`, `TACT_THINKING`, and `TACT_RESUME`.
 The prompt for `tact run` can be supplied through `TACT_PROMPT`. Run `tact --help` for the complete
 command-line reference.
+
+The `/subagents` panel shows the current concurrency limit. Use `-` and `+` there to update it.
 
 Use **Reload config** in the Actions menu after editing the file. Theme changes apply immediately.
 Most agent settings apply when a session starts or is restored, while effort and fast mode can also

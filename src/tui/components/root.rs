@@ -129,6 +129,7 @@ pub(crate) enum RootEffect {
     Copy(String),
     SetEffort(ReasoningEffort),
     SetFastMode(bool),
+    SetMaxSubagents(usize),
     SetTheme(ThemeMode),
     Fork,
     CancelTurns,
@@ -213,6 +214,7 @@ impl RootNode {
                 self.composer.component().context_tokens(),
             ));
         root.set_fast_mode(self.composer.component().fast_mode());
+        root.set_max_subagents(self.subagents.max_subagents());
         root.thread = ThreadState::Started;
         root.fork_available = false;
         root.theme_mode = self.theme_mode;
@@ -242,12 +244,18 @@ impl RootNode {
             .update(ComposerEvent::SetFastMode(enabled));
     }
 
+    pub(crate) fn set_max_subagents(&mut self, limit: usize) {
+        self.subagents.set_max_subagents(limit);
+    }
+
     pub(crate) fn reset_session(&mut self, workspace: &Path, thinking: ReasoningEffort) {
         let fork_available = self.fork_available;
         let theme_mode = self.theme_mode;
+        let max_subagents = self.subagents.max_subagents();
         *self = Self::new(workspace, thinking);
         self.fork_available = fork_available;
         self.theme_mode = theme_mode;
+        self.set_max_subagents(max_subagents);
     }
 
     pub(crate) fn restore_session(
@@ -656,6 +664,12 @@ impl RootNode {
                 return ComponentUpdate {
                     effects: vec![RootEffect::OpenLink(destination)],
                     render: RenderRequest::None,
+                };
+            }
+            Some(SubagentEffect::SetMaxSubagents(limit)) => {
+                return ComponentUpdate {
+                    effects: vec![RootEffect::SetMaxSubagents(limit)],
+                    render: RenderRequest::Immediate,
                 };
             }
             None => {}
