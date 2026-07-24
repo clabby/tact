@@ -77,6 +77,7 @@ struct TranscriptProjectionEnvelope<'a> {
 struct LoadedSessionSegment {
     records: Vec<Arc<TranscriptRecord>>,
     complete: bool,
+    observed_records: usize,
 }
 
 #[derive(Serialize)]
@@ -420,16 +421,20 @@ pub(crate) fn load_transcript(
     let source_fingerprint = transcript_fingerprint(config_path)?;
     let mut records = Vec::new();
     let mut complete = true;
+    let mut observed_records = 0;
     for path in transcript_paths(config_path)? {
         let Some(segment) = load_session_segment(&path, session_id)? else {
             continue;
         };
         complete &= segment.complete;
+        observed_records += segment.observed_records;
         records.extend(segment.records);
     }
-    if complete {
+    if complete && observed_records > records.len() {
         records = compact_projection_records(records);
-        write_transcript_projection(config_path, session_id, &source_fingerprint, &records);
+        if projection_cache_worthwhile(observed_records, records.len()) {
+            write_transcript_projection(config_path, session_id, &source_fingerprint, &records);
+        }
     }
     Ok(records)
 }
@@ -471,13 +476,17 @@ fn load_transcript_parallel_inner(
         .collect::<Result<Vec<_>, SessionError>>()?;
     let mut records = Vec::new();
     let mut complete = true;
+    let mut observed_records = 0;
     for segment in segments.into_iter().flatten() {
         complete &= segment.complete;
+        observed_records += segment.observed_records;
         records.extend(segment.records);
     }
-    if complete {
+    if complete && observed_records > records.len() {
         records = compact_projection_records(records);
-        write_transcript_projection(config_path, session_id, &source_fingerprint, &records);
+        if projection_cache_worthwhile(observed_records, records.len()) {
+            write_transcript_projection(config_path, session_id, &source_fingerprint, &records);
+        }
     }
     Ok(records)
 }
@@ -511,6 +520,7 @@ fn load_session_segment(
     Ok(matches.then_some(LoadedSessionSegment {
         records: segment.records,
         complete: segment.complete,
+        observed_records: segment.observed_records,
     }))
 }
 
@@ -700,6 +710,10 @@ fn compact_projection_records(records: Vec<Arc<TranscriptRecord>>) -> Vec<Arc<Tr
             ApiEventProjection::LatestOutbound => None,
         })
         .collect()
+}
+
+fn projection_cache_worthwhile(observed_records: usize, projected_records: usize) -> bool {
+    observed_records > 0 && projected_records.saturating_mul(2) <= observed_records
 }
 
 fn discard_completed_assistant_deltas(
@@ -1022,6 +1036,12 @@ mod tests {
         writer.into_task().await.unwrap().unwrap();
     }
 
+    fn write_projection_cache(config: &Path, session_id: &str) {
+        let records = load_transcript(config, session_id).unwrap();
+        let source_fingerprint = transcript_fingerprint(config).unwrap();
+        write_transcript_projection(config, session_id, &source_fingerprint, &records);
+    }
+
     #[test]
     fn checkpoint_filenames_are_distinct_and_path_safe() {
         assert_eq!(encode_filename("a/b"), "612f62");
@@ -1293,13 +1313,85 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn visible_transcript_does_not_create_projection_cache() {
+        let directory = tempdir().unwrap();
+        let config = directory.path().join("config.toml");
+        let (mut journal, writer) = TranscriptJournal::open(&config, "session").unwrap();
+        journal
+            .append_local(LocalEvent::SessionStarted(SessionStarted {
+                session_id: "session".to_owned(),
+                parent_session_id: None,
+                model: "model".to_owned(),
+                effort: ReasoningEffort::Medium,
+                reasoning_mode: ReasoningMode::Standard,
+                fast_mode: false,
+                workspace: "/work".into(),
+                application_version: "test".to_owned(),
+            }))
+            .unwrap();
+        journal
+            .append_local(LocalEvent::UserSubmitted {
+                id: TurnId::new(1),
+                text: "inspect the workspace".to_owned(),
+            })
+            .unwrap();
+        for (sequence, kind, payload) in [
+            (0, AgentEventKind::RunStarted, json!({})),
+            (
+                1,
+                AgentEventKind::AssistantDelta,
+                json!({
+                    "model_call_index": 1,
+                    "item_id": "message",
+                    "phase": "final_answer",
+                    "text": "partial response"
+                }),
+            ),
+            (
+                2,
+                AgentEventKind::AssistantMessage,
+                json!({
+                    "model_call_index": 1,
+                    "item_id": "message",
+                    "phase": "final_answer",
+                    "text": "complete response"
+                }),
+            ),
+            (3, AgentEventKind::RunCompleted, json!({})),
+        ] {
+            journal
+                .append_agent(AgentEvent {
+                    protocol_version: 1,
+                    request_id: Arc::from("request"),
+                    seq: sequence,
+                    kind,
+                    payload: to_raw_value(&payload).unwrap(),
+                })
+                .unwrap();
+        }
+        drop(journal);
+        writer.into_task().await.unwrap().unwrap();
+
+        let projected = load_transcript(&config, "session").unwrap();
+
+        assert_eq!(
+            projected
+                .iter()
+                .filter(|record| record.kind() == "assistant.delta")
+                .count(),
+            1
+        );
+        assert!(!transcript_projection_path(&config, "session").exists());
+    }
+
+    #[tokio::test]
     async fn projection_cache_is_bound_to_its_session() {
         let directory = tempdir().unwrap();
         let config = directory.path().join("config.toml");
         write_minimal_session(&config, "session-one").await;
         write_minimal_session(&config, "session-two").await;
-        load_transcript(&config, "session-one").unwrap();
-        load_transcript(&config, "session-two").unwrap();
+        write_projection_cache(&config, "session-one");
+        write_projection_cache(&config, "session-two");
         let first = transcript_projection_path(&config, "session-one");
         let second = transcript_projection_path(&config, "session-two");
         let first_bytes = fs::read(&first).unwrap();
@@ -1320,7 +1412,7 @@ mod tests {
         let records = load_transcript(&config, "session-one").unwrap();
         let source_fingerprint = transcript_fingerprint(&config).unwrap();
         let cache = transcript_projection_path(&config, "session-one");
-        fs::remove_file(&cache).unwrap();
+        assert!(!cache.exists());
 
         let transcript = transcript_paths(&config).unwrap().remove(0);
         std::fs::OpenOptions::new()
@@ -1341,7 +1433,7 @@ mod tests {
         let config = directory.path().join("config.toml");
         write_minimal_session(&config, "session-one").await;
         load_transcript(&config, "session-one").unwrap();
-        fs::remove_dir_all(directory.path().join("transcript-projections")).unwrap();
+        assert!(!directory.path().join("transcript-projections").exists());
         let summaries = fs::read_dir(directory.path().join("transcripts/v1"))
             .unwrap()
             .filter_map(Result::ok)

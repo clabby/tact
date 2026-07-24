@@ -35,6 +35,7 @@ pub(crate) struct TranscriptWriter {
 pub(crate) struct LoadedSegment {
     pub(crate) records: Vec<Arc<TranscriptRecord>>,
     pub(crate) complete: bool,
+    pub(crate) observed_records: usize,
 }
 
 trait DurableWrite: Write + Send + 'static {
@@ -334,7 +335,11 @@ pub(crate) fn load_matching_segment_filtered(
         }
     }
 
-    Ok(Some(LoadedSegment { records, complete }))
+    Ok(Some(LoadedSegment {
+        records,
+        complete,
+        observed_records: line,
+    }))
 }
 
 fn incomplete_zstd_frame(error: &io::Error) -> bool {
