@@ -255,9 +255,10 @@ impl TranscriptRecord {
         &self.source
     }
 
-    pub(crate) fn decode_payload<T: serde::de::DeserializeOwned>(
-        &self,
-    ) -> Result<T, serde_json::Error> {
+    pub(crate) fn decode_payload<'a, T>(&'a self) -> Result<T, serde_json::Error>
+    where
+        T: serde::Deserialize<'a>,
+    {
         serde_json::from_str(self.payload.get())
     }
 

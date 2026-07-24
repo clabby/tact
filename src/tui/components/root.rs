@@ -22,7 +22,7 @@ use crate::{
     config::{ReasoningEffort, ReasoningMode},
     subagents::AgentUpdate,
     tui::{
-        context::{ContextDiagnostics, completed_transcript_tokens},
+        context::ContextDiagnostics,
         prompt::Submission,
         session::SessionSummary,
         theme::{Theme, ThemeMode},
@@ -83,6 +83,7 @@ impl Notification {
 pub(crate) enum RootEvent {
     Terminal(Event),
     PasteImage(String),
+    #[cfg(test)]
     ContextTokens(u64),
     Transcript(Arc<TranscriptRecord>),
     AgentStreamClosed,
@@ -323,8 +324,8 @@ impl RootNode {
         );
         self.set_fast_mode(fast_mode);
         for record in records {
-            self.context_diagnostics.observe(&record);
-            if let Some(tokens) = completed_transcript_tokens(&record) {
+            let observation = self.context_diagnostics.observe(&record);
+            if let Some(tokens) = observation.completed_tokens {
                 let _ = self
                     .composer
                     .component_mut()
@@ -1363,19 +1364,28 @@ impl Component for RootNode {
                     )
                 }
             }
+            #[cfg(test)]
             RootEvent::ContextTokens(tokens) => self.update_composer(
                 ComposerEvent::ContextTokens(tokens),
                 RenderRequest::Streaming,
             ),
             RootEvent::Transcript(record) => {
                 let steer_applied = record.kind() == "run.steered";
-                self.context_diagnostics.observe(&record);
+                let observation = self.context_diagnostics.observe(&record);
                 if let Some(Overlay::ContextDiagnostics(panel)) = &mut self.overlay {
                     panel
                         .component_mut()
                         .replace(self.context_diagnostics.clone());
                 }
                 let mut update = self.update_transcript(TranscriptEvent::Record(record));
+                if let Some(tokens) = observation.completed_tokens {
+                    let context = self.update_composer(
+                        ComposerEvent::ContextTokens(tokens),
+                        RenderRequest::Streaming,
+                    );
+                    update.effects.extend(context.effects);
+                    update.render = update.render.max(context.render);
+                }
                 if steer_applied {
                     let applied = self.steer_applied();
                     update.effects.extend(applied.effects);

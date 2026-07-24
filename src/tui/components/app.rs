@@ -9,7 +9,6 @@ use crate::{
     config::{ReasoningEffort, ReasoningMode},
     subagents::AgentUpdate,
     tui::{
-        context::completed_transcript_tokens,
         pane::PaneId,
         session::SessionSummary,
         theme::{ColorScheme, Theme, ThemeMode},
@@ -161,14 +160,7 @@ impl AppNode {
                 self.update_root(self.focus, RootEvent::PasteImage(data_url))
             }
             AppEvent::Transcript { pane, record } => {
-                let tokens = completed_transcript_tokens(&record);
-                let mut update = self.update_root(pane, RootEvent::Transcript(record));
-                if let Some(tokens) = tokens {
-                    let context = self.update_root(pane, RootEvent::ContextTokens(tokens));
-                    update.effects.extend(context.effects);
-                    update.render = update.render.max(context.render);
-                }
-                update
+                self.update_root(pane, RootEvent::Transcript(record))
             }
             AppEvent::AgentStreamClosed(pane) => {
                 self.update_root(pane, RootEvent::AgentStreamClosed)
