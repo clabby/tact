@@ -86,6 +86,15 @@ pub(crate) struct Cli {
     )]
     instructions: Option<String>,
 
+    /// Append to the standard or replacement instructions.
+    #[arg(
+        long,
+        global = true,
+        env = "TACT_APPEND_INSTRUCTIONS",
+        value_parser = NonEmptyStringValueParser::new()
+    )]
+    append_instructions: Option<String>,
+
     /// Expose standalone web search to the model.
     #[arg(long, global = true, env = "TACT_WEB_SEARCH", action = ArgAction::Set)]
     web_search: Option<bool>,
@@ -288,6 +297,7 @@ impl Cli {
             thinking: self.thinking,
             max_subagents: self.max_subagents,
             instructions: self.instructions,
+            append_instructions: self.append_instructions,
             web_search: self.web_search,
             image_generation: self.image_generation,
             websocket_url: self.websocket_url,
@@ -767,6 +777,23 @@ mod tests {
     }
 
     #[test]
+    fn append_instructions_are_accepted() {
+        let cli = Cli::try_parse_from([
+            "tact",
+            "--append-instructions",
+            "Follow project conventions.",
+            "run",
+            "inspect the workspace",
+        ])
+        .unwrap();
+
+        assert_eq!(
+            cli.append_instructions.as_deref(),
+            Some("Follow project conventions.")
+        );
+    }
+
+    #[test]
     fn update_is_config_independent() {
         let cli = Cli::try_parse_from(["tact", "update"]).unwrap();
         let command = cli.command.expect("missing update command");
@@ -786,6 +813,7 @@ mod tests {
             ("thinking", "TACT_THINKING"),
             ("max_subagents", "TACT_MAX_SUBAGENTS"),
             ("instructions", "TACT_INSTRUCTIONS"),
+            ("append_instructions", "TACT_APPEND_INSTRUCTIONS"),
             ("web_search", "TACT_WEB_SEARCH"),
             ("image_generation", "TACT_IMAGE_GENERATION"),
             ("websocket_url", "TACT_WEBSOCKET_URL"),

@@ -96,6 +96,7 @@ max_subagents = 32
 web_search = true
 image_generation = true
 # instructions = "Replace the standard Nanocodex instructions"
+# append_instructions = "Append to the standard or replacement instructions"
 
 [skills]
 enabled = false

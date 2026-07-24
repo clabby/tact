@@ -113,6 +113,7 @@ pub(crate) struct AgentConfig {
     fast_mode: bool,
     max_subagents: usize,
     instructions: Option<String>,
+    append_instructions: Option<String>,
     web_search: bool,
     image_generation: bool,
     websocket_url: Option<String>,
@@ -139,6 +140,7 @@ pub(crate) struct ConfigOverrides {
     pub(crate) thinking: Option<ReasoningEffort>,
     pub(crate) max_subagents: Option<usize>,
     pub(crate) instructions: Option<String>,
+    pub(crate) append_instructions: Option<String>,
     pub(crate) web_search: Option<bool>,
     pub(crate) image_generation: Option<bool>,
     pub(crate) websocket_url: Option<String>,
@@ -217,6 +219,7 @@ struct AgentConfigFile {
     fast_mode: Option<bool>,
     max_subagents: Option<usize>,
     instructions: Option<String>,
+    append_instructions: Option<String>,
     web_search: Option<bool>,
     image_generation: Option<bool>,
     websocket_url: Option<String>,
@@ -306,6 +309,9 @@ impl Config {
                     .or(file.agent.max_subagents)
                     .unwrap_or(DEFAULT_MAX_SUBAGENTS),
                 instructions: overrides.instructions.or(file.agent.instructions),
+                append_instructions: overrides
+                    .append_instructions
+                    .or(file.agent.append_instructions),
                 web_search: overrides
                     .web_search
                     .or(file.agent.web_search)
@@ -768,6 +774,10 @@ impl AgentConfig {
 
     pub(crate) fn instructions(&self) -> Option<&str> {
         self.instructions.as_deref()
+    }
+
+    pub(crate) fn append_instructions(&self) -> Option<&str> {
+        self.append_instructions.as_deref()
     }
 
     pub(crate) const fn web_search(&self) -> bool {
@@ -1290,7 +1300,8 @@ mod tests {
         fs::write(
             &config_path,
             "[agent]\nworkspace = \"workspace\"\nthinking = \"xhigh\"\nfast_mode = true\nmax_subagents = 7\n\
-             instructions = \"Be concise.\"\nweb_search = false\nimage_generation = false\n\
+             instructions = \"Be concise.\"\nappend_instructions = \"Use project conventions.\"\n\
+             web_search = false\nimage_generation = false\n\
              websocket_url = \"wss://example.com/responses\"\n\
              api_base_url = \"https://example.com/v1\"\n",
         )
@@ -1314,6 +1325,10 @@ mod tests {
         assert!(config.agent.fast_mode);
         assert_eq!(config.agent.max_subagents, 7);
         assert_eq!(config.agent.instructions.as_deref(), Some("Be concise."));
+        assert_eq!(
+            config.agent.append_instructions.as_deref(),
+            Some("Use project conventions.")
+        );
         assert!(!config.agent.web_search);
         assert!(!config.agent.image_generation);
         assert_eq!(

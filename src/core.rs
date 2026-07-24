@@ -91,6 +91,7 @@ impl ConfiguredAgent {
             });
         let instructions = session_instructions(
             agent_config.instructions(),
+            agent_config.append_instructions(),
             config.skills(),
             restored_instructions,
         );
@@ -195,21 +196,33 @@ impl ConfiguredAgent {
 
 fn session_instructions(
     custom: Option<&str>,
+    appended: Option<&str>,
     skills: &SkillsConfig,
     restored: Option<String>,
 ) -> Arc<str> {
-    restored.map_or_else(|| Arc::from(fresh_instructions(custom, skills)), Arc::from)
+    restored.map_or_else(
+        || Arc::from(fresh_instructions(custom, appended, skills)),
+        Arc::from,
+    )
 }
 
-fn fresh_instructions(custom: Option<&str>, skills: &SkillsConfig) -> String {
+fn fresh_instructions(
+    custom: Option<&str>,
+    appended: Option<&str>,
+    skills: &SkillsConfig,
+) -> String {
     let catalog = SkillCatalog::load(skills);
-    let base = custom
+    let mut instructions = custom
         .map(str::to_owned)
         .unwrap_or_else(|| ModelConfig::default().system_prompt.to_string());
+    if let Some(appended) = appended {
+        instructions.push_str("\n\n");
+        instructions.push_str(appended);
+    }
     catalog
         .rendered_instructions()
-        .map_or(base.clone(), |skill_instructions| {
-            format!("{base}\n\n{skill_instructions}")
+        .map_or(instructions.clone(), |skill_instructions| {
+            format!("{instructions}\n\n{skill_instructions}")
         })
 }
 
@@ -318,12 +331,29 @@ mod tests {
         let disabled = SkillsConfig::from_roots(false, Vec::new());
 
         assert_eq!(
-            fresh_instructions(None, &disabled),
+            fresh_instructions(None, None, &disabled),
             ModelConfig::default().system_prompt.as_ref()
         );
         assert_eq!(
-            fresh_instructions(Some("Custom instructions."), &disabled),
+            fresh_instructions(Some("Custom instructions."), None, &disabled),
             "Custom instructions."
+        );
+    }
+
+    #[test]
+    fn appended_instructions_extend_the_default_or_replacement() {
+        let disabled = SkillsConfig::from_roots(false, Vec::new());
+        let default = ModelConfig::default().system_prompt;
+
+        let instructions = fresh_instructions(None, Some("Project instructions."), &disabled);
+        assert_eq!(instructions, format!("{default}\n\nProject instructions."));
+        assert_eq!(
+            fresh_instructions(
+                Some("Replacement."),
+                Some("Project instructions."),
+                &disabled
+            ),
+            "Replacement.\n\nProject instructions."
         );
     }
 
@@ -340,7 +370,7 @@ mod tests {
         .unwrap();
         let enabled = SkillsConfig::from_roots(true, vec![directory.path().to_path_buf()]);
 
-        let instructions = fresh_instructions(None, &enabled);
+        let instructions = fresh_instructions(None, None, &enabled);
         let default = ModelConfig::default().system_prompt;
 
         assert!(instructions.starts_with(default.as_ref()));
@@ -363,7 +393,7 @@ mod tests {
         .unwrap();
         let enabled = SkillsConfig::from_roots(true, vec![directory.path().to_path_buf()]);
 
-        let instructions = fresh_instructions(Some("Keep this first."), &enabled);
+        let instructions = fresh_instructions(Some("Keep this first."), None, &enabled);
 
         assert!(instructions.starts_with("Keep this first.\n\n## Available local skills"));
         assert!(instructions.contains("Run focused tests."));
@@ -385,7 +415,7 @@ mod tests {
         .unwrap();
         let enabled = SkillsConfig::from_roots(true, vec![directory.path().to_path_buf()]);
 
-        let instructions = fresh_instructions(None, &enabled);
+        let instructions = fresh_instructions(None, None, &enabled);
 
         assert!(instructions.contains("Still available."));
     }
@@ -408,6 +438,7 @@ mod tests {
         assert_eq!(
             session_instructions(
                 Some("Changed instructions."),
+                Some("Changed appendix."),
                 &disabled,
                 Some(stored.to_owned())
             )
@@ -415,7 +446,7 @@ mod tests {
             stored
         );
         assert_eq!(
-            session_instructions(None, &enabled, Some(stored.to_owned())).as_ref(),
+            session_instructions(None, None, &enabled, Some(stored.to_owned())).as_ref(),
             stored
         );
     }
@@ -433,12 +464,13 @@ mod tests {
         let enabled = SkillsConfig::from_roots(true, vec![directory.path().to_path_buf()]);
 
         assert_eq!(
-            session_instructions(None, &enabled, Some("Old default.".to_owned())).as_ref(),
+            session_instructions(None, None, &enabled, Some("Old default.".to_owned())).as_ref(),
             "Old default."
         );
         assert_eq!(
             session_instructions(
                 Some("Current custom."),
+                Some("Current appendix."),
                 &enabled,
                 Some("Old custom.".to_owned())
             )
