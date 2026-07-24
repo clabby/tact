@@ -145,6 +145,9 @@ impl PersistenceFixture {
             Err(error) => panic!("failed to clear projection cache: {error}"),
         }
     }
+    fn load_transcript_parallel(&self) -> Vec<Arc<TranscriptRecord>> {
+        session::load_transcript_parallel(&self.config_path, &self.session_id).unwrap()
+    }
 }
 
 fn mixed_projection_records(turns: u64) -> Vec<Arc<TranscriptRecord>> {
@@ -664,6 +667,10 @@ fn benchmarks(criterion: &mut Criterion) {
 
     sessions.bench_function("load_known_multi_segment_transcript", |bencher| {
         bencher.iter(|| black_box(multi_segment_fixture.load_transcript()));
+    });
+
+    sessions.bench_function("load_known_multi_segment_transcript_parallel", |bencher| {
+        bencher.iter(|| black_box(multi_segment_fixture.load_transcript_parallel()));
     });
 
     sessions.bench_function("load_known_multi_segment_transcript_cold", |bencher| {

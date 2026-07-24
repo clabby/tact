@@ -34,6 +34,7 @@ nanocodex-core = { version = "0.1.1", git = "https://github.com/gakonst/nanocode
 pulldown-cmark = { version = "0.13.4", default-features = false }
 png = "0.18.1"
 ratatui = "0.30.2"
+rayon = "1.12.0"
 reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls"] }
 self-replace = "1.5.0"
 semver = { version = "1.0.28", features = ["serde"] }

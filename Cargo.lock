@@ -4172,6 +4172,7 @@ dependencies = [
  "png",
  "pulldown-cmark",
  "ratatui",
+ "rayon",
  "reqwest 0.12.28",
  "rstest",
  "self-replace",

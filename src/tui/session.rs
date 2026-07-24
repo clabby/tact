@@ -5,17 +5,19 @@ use crate::{
     tui::transcript::{self, SessionStarted, TranscriptRecord},
 };
 use nanocodex::SessionSnapshot;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     fs::{self, File},
     io::{self, BufReader, BufWriter, Write},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, OnceLock},
     time::{SystemTime, UNIX_EPOCH},
 };
 use tempfile::NamedTempFile;
 use thiserror::Error;
+use tokio::sync::oneshot;
 use zstd::stream::{read::Decoder, write::Encoder};
 
 const COMPRESSION_LEVEL: i32 = 3;
@@ -136,6 +138,8 @@ pub(crate) enum SessionError {
     InvalidCheckpoint { path: PathBuf },
     #[error(transparent)]
     Transcript(#[from] transcript::TranscriptError),
+    #[error("the transcript loading worker stopped unexpectedly")]
+    TranscriptLoaderStopped,
 }
 
 pub(crate) fn save_checkpoint(
@@ -301,6 +305,10 @@ pub(crate) fn list(
     Ok(sessions)
 }
 
+#[allow(
+    dead_code,
+    reason = "used by compatibility tests and restoration benchmarks"
+)]
 pub(crate) fn load_transcript(
     config_path: &Path,
     session_id: &str,
@@ -318,6 +326,63 @@ pub(crate) fn load_transcript(
         }
     }
     Ok(records)
+}
+
+pub(crate) async fn load_transcript_async(
+    config_path: PathBuf,
+    session_id: String,
+) -> Result<Vec<Arc<TranscriptRecord>>, SessionError> {
+    let (sender, receiver) = oneshot::channel();
+    transcript_loader().spawn(move || {
+        drop(sender.send(load_transcript_parallel_inner(&config_path, &session_id)));
+    });
+    receiver
+        .await
+        .map_err(|_| SessionError::TranscriptLoaderStopped)?
+}
+
+#[allow(dead_code, reason = "used by restoration benchmarks")]
+pub(crate) fn load_transcript_parallel(
+    config_path: &Path,
+    session_id: &str,
+) -> Result<Vec<Arc<TranscriptRecord>>, SessionError> {
+    transcript_loader().install(|| load_transcript_parallel_inner(config_path, session_id))
+}
+
+fn load_transcript_parallel_inner(
+    config_path: &Path,
+    session_id: &str,
+) -> Result<Vec<Arc<TranscriptRecord>>, SessionError> {
+    let segments = transcript_paths(config_path)?
+        .into_par_iter()
+        .map(|path| {
+            transcript::load_matching(&path, |first| {
+                session_started_record(first).is_none_or(|started| started.session_id == session_id)
+            })
+            .map_err(SessionError::from)
+        })
+        .collect::<Vec<_>>()
+        .into_iter()
+        .collect::<Result<Vec<_>, SessionError>>()?;
+    let mut records = Vec::new();
+    for segment in segments.into_iter().flatten() {
+        if session_started(&segment).is_some_and(|started| started.session_id == session_id) {
+            records.extend(segment);
+        }
+    }
+    Ok(records)
+}
+
+fn transcript_loader() -> &'static rayon::ThreadPool {
+    static POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
+    POOL.get_or_init(|| {
+        let available = std::thread::available_parallelism().map_or(1, usize::from);
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(available.min(4))
+            .thread_name(|index| format!("tact-transcript-loader-{index}"))
+            .build()
+            .expect("the transcript loading thread pool should initialize")
+    })
 }
 
 pub(crate) fn format_age(started_at_unix_ms: u64) -> String {
@@ -521,7 +586,7 @@ fn create_private_directory(path: &Path) -> Result<(), SessionError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        encode_filename, format_age, list, load_checkpoint, load_transcript,
+        encode_filename, format_age, list, load_checkpoint, load_transcript, load_transcript_async,
         obsolete_checkpoint_path, save_checkpoint,
     };
     use crate::{
@@ -667,5 +732,11 @@ mod tests {
         assert_eq!(sessions[0].effort, ReasoningEffort::Low);
         assert_eq!(sessions[0].reasoning_mode, ReasoningMode::Pro);
         assert_eq!(load_transcript(&config, "session/one").unwrap().len(), 3);
+        let loaded = load_transcript_async(config.clone(), "session/one".to_owned())
+            .await
+            .unwrap();
+        assert_eq!(loaded.len(), 3);
+        assert_eq!(loaded[0].kind(), "session.started");
+        assert_eq!(loaded[2].kind(), "effort.changed");
     }
 }

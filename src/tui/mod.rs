@@ -258,9 +258,19 @@ pub(crate) async fn run(
     let (configured, restored_projection, reasoning_mode) =
         if let Some(session_id) = resume_session_id {
             let restored_config = config.clone();
+            let config_path = restored_config.path().to_path_buf();
+            let checkpoint_session_id = session_id.clone();
+            let checkpoint = tokio::task::spawn_blocking(move || {
+                session::load_checkpoint(&config_path, &checkpoint_session_id)
+            });
+            let transcript = session::load_transcript_async(
+                restored_config.path().to_path_buf(),
+                session_id.clone(),
+            );
+            let (snapshot, records) = tokio::join!(checkpoint, transcript);
+            let snapshot = snapshot.map_err(RuntimeError::SessionTask)??;
+            let records = records?;
             tokio::task::spawn_blocking(move || -> Result<_> {
-                let snapshot = session::load_checkpoint(restored_config.path(), &session_id)?;
-                let records = session::load_transcript(restored_config.path(), &session_id)?;
                 let reasoning_mode = session::reasoning_mode(&records);
                 let projection = RootNode::project_session(initial_effort, records);
                 let configured = ConfiguredAgent::from_config_with_session(
@@ -1451,10 +1461,19 @@ fn apply_pane_effect(
             let preferred_reasoning_mode = context.config.agent().reasoning_mode();
             let fast_mode = context.config.agent().fast_mode();
             let config = context.config.clone();
-            *context.resume_session_task = Some(tokio::task::spawn_blocking(move || {
-                let restored = (|| {
-                    let snapshot = session::load_checkpoint(config.path(), &session_id)?;
-                    let records = session::load_transcript(config.path(), &session_id)?;
+            *context.resume_session_task = Some(tokio::spawn(async move {
+                let config_path = config.path().to_path_buf();
+                let checkpoint_session_id = session_id.clone();
+                let checkpoint = tokio::task::spawn_blocking(move || {
+                    session::load_checkpoint(&config_path, &checkpoint_session_id)
+                });
+                let transcript =
+                    session::load_transcript_async(config.path().to_path_buf(), session_id.clone());
+                let restored = async {
+                    let (snapshot, records) = tokio::join!(checkpoint, transcript);
+                    let snapshot = snapshot.map_err(RuntimeError::SessionTask)??;
+                    let records = records?;
+                    tokio::task::spawn_blocking(move || -> Result<_> {
                     let reasoning_mode = session::reasoning_mode(&records);
                     let projection = RootNode::project_session(effort, records);
                     let configured = ConfiguredAgent::from_config_with_session(
@@ -1469,7 +1488,11 @@ fn apply_pane_effect(
                         projection,
                         reasoning_mode,
                     })
-                })();
+                    })
+                    .await
+                    .map_err(RuntimeError::SessionTask)?
+                }
+                .await;
                 (
                     pane,
                     effort,
