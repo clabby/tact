@@ -21,4 +21,4 @@ mod waved_text;
 pub(crate) use app::{AppEffect, AppEvent, AppNode};
 pub(crate) use node::{ComponentUpdate, RenderRequest};
 pub(crate) use queue::QueueId;
-pub(crate) use root::{RootEffect, RootNode};
+pub(crate) use root::{RestoredSessionProjection, RootEffect, RootNode};

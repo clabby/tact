@@ -3,7 +3,7 @@
 use super::{
     node::{ComponentUpdate, Node, RenderRequest},
     queue::QueueId,
-    root::{RootEffect, RootEvent, RootNode},
+    root::{RestoredSessionProjection, RootEffect, RootEvent, RootNode},
 };
 use crate::{
     config::{ReasoningEffort, ReasoningMode},
@@ -90,7 +90,7 @@ pub(crate) enum AppEvent {
     },
     SessionRestored {
         pane: PaneId,
-        records: Vec<Arc<TranscriptRecord>>,
+        projection: RestoredSessionProjection,
         effort: ReasoningEffort,
         reasoning_mode: ReasoningMode,
         preferred_reasoning_mode: ReasoningMode,
@@ -231,7 +231,7 @@ impl AppNode {
             }
             AppEvent::SessionRestored {
                 pane,
-                records,
+                projection,
                 effort,
                 reasoning_mode,
                 preferred_reasoning_mode,
@@ -239,7 +239,7 @@ impl AppNode {
             } => self.update_root(
                 pane,
                 RootEvent::SessionRestored {
-                    records,
+                    projection,
                     effort,
                     reasoning_mode,
                     preferred_reasoning_mode,

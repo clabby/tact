@@ -25,7 +25,10 @@ use crate::{
     subagents::SubagentControl,
     tui::{
         agent_events::ForwardedAgentEvent,
-        components::{AppEffect, AppEvent, AppNode, ComponentUpdate, RenderRequest, RootNode},
+        components::{
+            AppEffect, AppEvent, AppNode, ComponentUpdate, RenderRequest,
+            RestoredSessionProjection, RootNode,
+        },
         editor::EditorOutcome,
         pane::PaneId,
         prompt::Submission,
@@ -95,7 +98,7 @@ fn spawn_update_check(config_path: &Path) -> Option<UpdateCheckTask> {
 
 struct RestoredSession {
     configured: ConfiguredAgent,
-    records: Vec<std::sync::Arc<transcript::TranscriptRecord>>,
+    projection: RestoredSessionProjection,
     reasoning_mode: ReasoningMode,
 }
 
@@ -247,28 +250,37 @@ pub(crate) async fn run(
 ) -> Result<Option<String>> {
     ensure_interactive()?;
 
-    let restored_records;
-    let preferred_reasoning_mode = config.agent().reasoning_mode();
-    let reasoning_mode;
-    let configured = if let Some(session_id) = resume_session_id.as_deref() {
-        let snapshot = session::load_checkpoint(config.path(), session_id)?;
-        restored_records = session::load_transcript(config.path(), session_id)?;
-        reasoning_mode = session::reasoning_mode(&restored_records);
-        ConfiguredAgent::from_config_with_session(
-            &config,
-            config.agent().thinking(),
-            reasoning_mode,
-            Some(session_id),
-            Some(snapshot),
-        )?
-    } else {
-        restored_records = Vec::new();
-        reasoning_mode = preferred_reasoning_mode;
-        ConfiguredAgent::from_config(&config)?
-    };
     let initial_effort = config.agent().thinking();
     let initial_fast_mode = config.agent().fast_mode();
     let initial_max_subagents = config.agent().max_subagents();
+    let preferred_reasoning_mode = config.agent().reasoning_mode();
+    let resuming = resume_session_id.is_some();
+    let (configured, restored_projection, reasoning_mode) =
+        if let Some(session_id) = resume_session_id {
+            let restored_config = config.clone();
+            tokio::task::spawn_blocking(move || -> Result<_> {
+                let snapshot = session::load_checkpoint(restored_config.path(), &session_id)?;
+                let records = session::load_transcript(restored_config.path(), &session_id)?;
+                let reasoning_mode = session::reasoning_mode(&records);
+                let projection = RootNode::project_session(initial_effort, records);
+                let configured = ConfiguredAgent::from_config_with_session(
+                    &restored_config,
+                    initial_effort,
+                    reasoning_mode,
+                    Some(&session_id),
+                    Some(snapshot),
+                )?;
+                Ok((configured, Some(projection), reasoning_mode))
+            })
+            .await
+            .map_err(RuntimeError::SessionTask)??
+        } else {
+            (
+                ConfiguredAgent::from_config(&config)?,
+                None,
+                preferred_reasoning_mode,
+            )
+        };
     let mut terminal = TerminalSession::enter().map_err(RuntimeError::Terminal)?;
     let ConfiguredAgent {
         agent,
@@ -287,7 +299,7 @@ pub(crate) async fn run(
                 pane: PaneId::Main,
                 generation: 0,
             },
-            if resume_session_id.is_some() {
+            if resuming {
                 PaneSession::persisted(&main_session_id)
             } else {
                 PaneSession::new(&main_session_id, None)
@@ -313,14 +325,14 @@ pub(crate) async fn run(
     root.set_reasoning_modes(reasoning_mode, preferred_reasoning_mode);
     root.set_fast_mode(initial_fast_mode);
     root.set_max_subagents(initial_max_subagents);
-    if !restored_records.is_empty() {
-        root.restore_session(
+    if let Some(projection) = restored_projection {
+        root.install_session_projection(
             &workspace,
             initial_effort,
             reasoning_mode,
             preferred_reasoning_mode,
             initial_fast_mode,
-            restored_records,
+            projection,
         );
     }
     let mut theme = config.theme().clone();
@@ -919,7 +931,7 @@ pub(crate) async fn run(
                 match restored {
                     Ok(RestoredSession {
                         configured,
-                        records,
+                        projection,
                         reasoning_mode,
                     }) => {
                         let ConfiguredAgent {
@@ -974,7 +986,7 @@ pub(crate) async fn run(
                         schedule(
                             app.update(AppEvent::SessionRestored {
                                 pane,
-                                records,
+                                projection,
                                 effort,
                                 reasoning_mode,
                                 preferred_reasoning_mode,
@@ -1444,6 +1456,7 @@ fn apply_pane_effect(
                     let snapshot = session::load_checkpoint(config.path(), &session_id)?;
                     let records = session::load_transcript(config.path(), &session_id)?;
                     let reasoning_mode = session::reasoning_mode(&records);
+                    let projection = RootNode::project_session(effort, records);
                     let configured = ConfiguredAgent::from_config_with_session(
                         &config,
                         effort,
@@ -1453,7 +1466,7 @@ fn apply_pane_effect(
                     )?;
                     Ok(RestoredSession {
                         configured,
-                        records,
+                        projection,
                         reasoning_mode,
                     })
                 })();
