@@ -2,7 +2,10 @@
 
 use crate::{
     config::{ReasoningEffort, ReasoningMode},
-    tui::transcript::{self, SessionStarted, TranscriptRecord},
+    tui::{
+        context::{ApiEventProjection, api_event_projection},
+        transcript::{self, SessionStarted, TranscriptRecord},
+    },
 };
 use nanocodex::SessionSnapshot;
 use rayon::prelude::*;
@@ -23,6 +26,7 @@ use zstd::stream::{read::Decoder, write::Encoder};
 const COMPRESSION_LEVEL: i32 = 3;
 const CHECKPOINT_FORMAT_VERSION: u32 = 1;
 const SEGMENT_SUMMARY_FORMAT_VERSION: u32 = 1;
+const PROJECTION_FORMAT_VERSION: u32 = 1;
 
 #[cfg(unix)]
 use std::os::unix::fs::DirBuilderExt;
@@ -43,6 +47,32 @@ struct StoredSegmentSummary {
     format_version: u32,
     transcript_bytes: u64,
     summary: SessionSummary,
+}
+
+#[derive(Deserialize, Eq, PartialEq, Serialize)]
+struct TranscriptFingerprint {
+    filename: String,
+    bytes: u64,
+    modified_unix_ns: u128,
+}
+
+#[derive(Deserialize, Serialize)]
+struct StoredTranscriptProjection {
+    format_version: u32,
+    transcript_fingerprint: Vec<TranscriptFingerprint>,
+    records: Vec<Arc<TranscriptRecord>>,
+}
+
+#[derive(Serialize)]
+struct TranscriptProjectionEnvelope<'a> {
+    format_version: u32,
+    transcript_fingerprint: Vec<TranscriptFingerprint>,
+    records: &'a [Arc<TranscriptRecord>],
+}
+
+struct LoadedSessionSegment {
+    records: Vec<Arc<TranscriptRecord>>,
+    complete: bool,
 }
 
 #[derive(Serialize)]
@@ -372,12 +402,21 @@ pub(crate) fn load_transcript(
     config_path: &Path,
     session_id: &str,
 ) -> Result<Vec<Arc<TranscriptRecord>>, SessionError> {
+    if let Some(records) = read_transcript_projection(config_path, session_id) {
+        return Ok(records);
+    }
     let mut records = Vec::new();
+    let mut complete = true;
     for path in transcript_paths(config_path)? {
         let Some(segment) = load_session_segment(&path, session_id)? else {
             continue;
         };
-        records.extend(segment);
+        complete &= segment.complete;
+        records.extend(segment.records);
+    }
+    if complete {
+        records = compact_projection_records(records);
+        write_transcript_projection(config_path, session_id, &records);
     }
     Ok(records)
 }
@@ -407,6 +446,9 @@ fn load_transcript_parallel_inner(
     config_path: &Path,
     session_id: &str,
 ) -> Result<Vec<Arc<TranscriptRecord>>, SessionError> {
+    if let Some(records) = read_transcript_projection(config_path, session_id) {
+        return Ok(records);
+    }
     let segments = transcript_paths(config_path)?
         .into_par_iter()
         .map(|path| load_session_segment(&path, session_id))
@@ -414,8 +456,14 @@ fn load_transcript_parallel_inner(
         .into_iter()
         .collect::<Result<Vec<_>, SessionError>>()?;
     let mut records = Vec::new();
+    let mut complete = true;
     for segment in segments.into_iter().flatten() {
-        records.extend(segment);
+        complete &= segment.complete;
+        records.extend(segment.records);
+    }
+    if complete {
+        records = compact_projection_records(records);
+        write_transcript_projection(config_path, session_id, &records);
     }
     Ok(records)
 }
@@ -423,7 +471,7 @@ fn load_transcript_parallel_inner(
 fn load_session_segment(
     path: &Path,
     session_id: &str,
-) -> Result<Option<Vec<Arc<TranscriptRecord>>>, SessionError> {
+) -> Result<Option<LoadedSessionSegment>, SessionError> {
     if let Some(summary) = read_segment_summary(path)
         && summary.session_id != session_id
     {
@@ -442,7 +490,10 @@ fn load_session_segment(
     {
         write_segment_summary(path, &summary);
     }
-    Ok(matches.then_some(segment.records))
+    Ok(matches.then_some(LoadedSessionSegment {
+        records: segment.records,
+        complete: segment.complete,
+    }))
 }
 
 fn transcript_loader() -> &'static rayon::ThreadPool {
@@ -596,6 +647,109 @@ fn segment_summary_path(transcript_path: &Path) -> PathBuf {
     transcript_path.with_extension("summary.json")
 }
 
+fn compact_projection_records(records: Vec<Arc<TranscriptRecord>>) -> Vec<Arc<TranscriptRecord>> {
+    let latest_outbound = records
+        .iter()
+        .rposition(|record| api_event_projection(record) == ApiEventProjection::LatestOutbound);
+    records
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, record)| match api_event_projection(&record) {
+            ApiEventProjection::Discard => None,
+            ApiEventProjection::Retain => Some(record),
+            ApiEventProjection::LatestOutbound if Some(index) == latest_outbound => Some(record),
+            ApiEventProjection::LatestOutbound => None,
+        })
+        .collect()
+}
+
+fn read_transcript_projection(
+    config_path: &Path,
+    session_id: &str,
+) -> Option<Vec<Arc<TranscriptRecord>>> {
+    let path = transcript_projection_path(config_path, session_id);
+    let decoder = Decoder::new(File::open(path).ok()?).ok()?;
+    let stored =
+        serde_json::from_reader::<_, StoredTranscriptProjection>(BufReader::new(decoder)).ok()?;
+    if stored.format_version != PROJECTION_FORMAT_VERSION {
+        return None;
+    }
+    let fingerprint = transcript_fingerprint(config_path).ok()?;
+    (stored.transcript_fingerprint == fingerprint).then_some(stored.records)
+}
+
+fn write_transcript_projection(
+    config_path: &Path,
+    session_id: &str,
+    records: &[Arc<TranscriptRecord>],
+) {
+    let _ = try_write_transcript_projection(config_path, session_id, records);
+}
+
+fn try_write_transcript_projection(
+    config_path: &Path,
+    session_id: &str,
+    records: &[Arc<TranscriptRecord>],
+) -> Option<()> {
+    let fingerprint = transcript_fingerprint(config_path).ok()?;
+    let directory = transcript_projection_directory(config_path);
+    create_private_directory(&directory).ok()?;
+    let path = transcript_projection_path(config_path, session_id);
+    let mut temporary = NamedTempFile::new_in(&directory).ok()?;
+    {
+        let mut output = Encoder::new(&mut temporary, COMPRESSION_LEVEL).ok()?;
+        serde_json::to_writer(
+            &mut output,
+            &TranscriptProjectionEnvelope {
+                format_version: PROJECTION_FORMAT_VERSION,
+                transcript_fingerprint: fingerprint,
+                records,
+            },
+        )
+        .ok()?;
+        output.finish().ok()?;
+    }
+    temporary.flush().ok()?;
+    temporary.persist(path).ok()?;
+    Some(())
+}
+
+fn transcript_fingerprint(config_path: &Path) -> Result<Vec<TranscriptFingerprint>, SessionError> {
+    transcript_paths(config_path)?
+        .into_iter()
+        .map(|path| {
+            let metadata = fs::metadata(&path).map_err(|source| SessionError::ReadDirectory {
+                path: path.clone(),
+                source,
+            })?;
+            let modified_unix_ns = metadata
+                .modified()
+                .unwrap_or(UNIX_EPOCH)
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            Ok(TranscriptFingerprint {
+                filename: path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned(),
+                bytes: metadata.len(),
+                modified_unix_ns,
+            })
+        })
+        .collect()
+}
+
+fn transcript_projection_directory(config_path: &Path) -> PathBuf {
+    data_directory(config_path).join("transcript-projections/v1")
+}
+
+fn transcript_projection_path(config_path: &Path, session_id: &str) -> PathBuf {
+    transcript_projection_directory(config_path)
+        .join(format!("{}.json.zst", encode_filename(session_id)))
+}
+
 fn checkpoint_directory(config_path: &Path) -> PathBuf {
     checkpoint_root(config_path).join(format!("v{CHECKPOINT_FORMAT_VERSION}"))
 }
@@ -714,14 +868,15 @@ mod tests {
     use super::{
         encode_filename, format_age, list, list_async, load_checkpoint, load_transcript,
         load_transcript_async, obsolete_checkpoint_path, save_checkpoint,
+        transcript_projection_path,
     };
     use crate::{
         config::{ReasoningEffort, ReasoningMode},
         tui::transcript::{LocalEvent, SessionStarted, TranscriptJournal, TurnId},
     };
-    use nanocodex::SessionSnapshot;
-    use serde_json::{Value, json};
-    use std::{fs, path::Path};
+    use nanocodex::{AgentEvent, AgentEventKind, SessionSnapshot};
+    use serde_json::{Value, json, value::to_raw_value};
+    use std::{fs, path::Path, sync::Arc};
     use tempfile::tempdir;
 
     fn snapshot(lineage: &str) -> SessionSnapshot {
@@ -877,5 +1032,84 @@ mod tests {
         assert_eq!(loaded.len(), 3);
         assert_eq!(loaded[0].kind(), "session.started");
         assert_eq!(loaded[2].kind(), "effort.changed");
+    }
+
+    #[tokio::test]
+    async fn projection_cache_discards_streaming_api_events_and_recovers_from_corruption() {
+        let directory = tempdir().unwrap();
+        let config = directory.path().join("config.toml");
+        let (mut journal, writer) = TranscriptJournal::open(&config, "session").unwrap();
+        journal
+            .append_local(LocalEvent::SessionStarted(SessionStarted {
+                session_id: "session".to_owned(),
+                parent_session_id: None,
+                model: "model".to_owned(),
+                effort: ReasoningEffort::Medium,
+                reasoning_mode: ReasoningMode::Standard,
+                fast_mode: false,
+                workspace: "/work".into(),
+                application_version: "test".to_owned(),
+            }))
+            .unwrap();
+        for (sequence, payload) in [
+            json!({
+                "direction": "outbound",
+                "phase": "generation",
+                "event": {"prompt_cache_key": "first"}
+            }),
+            json!({
+                "direction": "inbound",
+                "phase": "generation",
+                "event": {"type": "response.output_text.delta", "delta": "discard me"}
+            }),
+            json!({
+                "direction": "outbound",
+                "phase": "generation",
+                "event": {"prompt_cache_key": "latest", "previous_response_id": "response"}
+            }),
+            json!({
+                "direction": "inbound",
+                "phase": "generation",
+                "event": {
+                    "type": "response.completed",
+                    "response": {"usage": {"total_tokens": 42}}
+                }
+            }),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            journal
+                .append_agent(AgentEvent {
+                    protocol_version: 1,
+                    request_id: Arc::from("request"),
+                    seq: u64::try_from(sequence).unwrap(),
+                    kind: AgentEventKind::ApiEvent,
+                    payload: to_raw_value(&payload).unwrap(),
+                })
+                .unwrap();
+        }
+        drop(journal);
+        writer.into_task().await.unwrap().unwrap();
+
+        let projected = load_transcript(&config, "session").unwrap();
+        assert_eq!(projected.len(), 3);
+        assert_eq!(
+            projected
+                .iter()
+                .filter(|record| record.kind() == "api.event")
+                .count(),
+            2
+        );
+
+        let cache = transcript_projection_path(&config, "session");
+        assert!(cache.is_file());
+        let cached = load_transcript(&config, "session").unwrap();
+        assert_eq!(cached.len(), projected.len());
+
+        fs::write(&cache, b"invalid cache").unwrap();
+        let recovered = load_transcript(&config, "session").unwrap();
+        assert_eq!(recovered.len(), projected.len());
+        assert!(fs::metadata(cache).unwrap().len() > b"invalid cache".len() as u64);
     }
 }

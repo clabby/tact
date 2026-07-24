@@ -55,6 +55,13 @@ pub(crate) struct ContextObservation {
     pub(crate) completed_tokens: Option<u64>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ApiEventProjection {
+    Discard,
+    Retain,
+    LatestOutbound,
+}
+
 impl Default for ContextDiagnostics {
     fn default() -> Self {
         Self {
@@ -273,6 +280,31 @@ struct InputTokenDetails {
 
 fn raw_value_is_string(value: &RawValue) -> bool {
     value.get().trim_start().starts_with('"')
+}
+
+pub(crate) fn api_event_projection(record: &TranscriptRecord) -> ApiEventProjection {
+    if record.source() != "agent" || record.kind() != "api.event" {
+        return ApiEventProjection::Retain;
+    }
+    let Ok(payload) = record.decode_payload::<ApiEvent>() else {
+        return ApiEventProjection::Retain;
+    };
+    if payload.phase != "generation" {
+        return ApiEventProjection::Discard;
+    }
+    match payload.direction {
+        "outbound" => ApiEventProjection::LatestOutbound,
+        "inbound" => {
+            let completed = serde_json::from_str::<ResponseEvent>(payload.event.get())
+                .is_ok_and(|event| event.kind == "response.completed");
+            if completed {
+                ApiEventProjection::Retain
+            } else {
+                ApiEventProjection::Discard
+            }
+        }
+        _ => ApiEventProjection::Discard,
+    }
 }
 
 #[cfg(test)]
