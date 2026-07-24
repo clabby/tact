@@ -103,6 +103,10 @@ impl ContextDiagnostics {
                 self.observe_compaction_completed(record);
                 ContextObservation::default()
             }
+            ("tact", "context.observed") => {
+                self.observe_context_snapshot(record);
+                ContextObservation::default()
+            }
             _ => ContextObservation::default(),
         }
     }
@@ -162,6 +166,18 @@ impl ContextDiagnostics {
             return;
         };
         self.set_usage(payload.usage.map(Usage::into_tokens));
+    }
+
+    fn observe_context_snapshot(&mut self, record: &TranscriptRecord) {
+        let Ok(snapshot) = record.decode_payload::<ContextSnapshot>() else {
+            return;
+        };
+        self.prompt_cache = Some(snapshot.prompt_cache);
+        self.continuation = Some(if snapshot.previous_response {
+            ContinuationMode::PreviousResponse
+        } else {
+            ContinuationMode::FullContext
+        });
     }
 
     fn set_usage(&mut self, usage: Option<TokenUsage>) {
@@ -231,6 +247,12 @@ struct ResponseEvent<'a> {
 #[derive(Deserialize)]
 struct Response {
     usage: Option<Usage>,
+}
+
+#[derive(Deserialize)]
+struct ContextSnapshot {
+    prompt_cache: bool,
+    previous_response: bool,
 }
 
 #[derive(Deserialize)]
@@ -305,6 +327,20 @@ pub(crate) fn api_event_projection(record: &TranscriptRecord) -> ApiEventProject
         }
         _ => ApiEventProjection::Discard,
     }
+}
+
+pub(crate) fn outbound_context_snapshot(record: &TranscriptRecord) -> Option<(bool, bool)> {
+    let payload = record.decode_payload::<ApiEvent>().ok()?;
+    if payload.direction != "outbound" || payload.phase != "generation" {
+        return None;
+    }
+    let request = serde_json::from_str::<ApiRequest>(payload.event.get()).ok()?;
+    Some((
+        request.prompt_cache_key.is_some_and(raw_value_is_string),
+        request
+            .previous_response_id
+            .is_some_and(raw_value_is_string),
+    ))
 }
 
 #[cfg(test)]

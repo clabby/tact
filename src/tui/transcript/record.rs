@@ -89,6 +89,10 @@ pub(crate) enum LocalEvent {
         from: bool,
         to: bool,
     },
+    ContextObserved {
+        prompt_cache: bool,
+        previous_response: bool,
+    },
     WorkerTurnAccepted {
         id: TurnId,
     },
@@ -195,6 +199,16 @@ impl TranscriptRecord {
             LocalEvent::FastModeChanged { from, to } => (
                 "fast_mode.changed",
                 to_raw_value(&FastModeChanged { from, to })?,
+            ),
+            LocalEvent::ContextObserved {
+                prompt_cache,
+                previous_response,
+            } => (
+                "context.observed",
+                to_raw_value(&ContextObserved {
+                    prompt_cache,
+                    previous_response,
+                })?,
             ),
             LocalEvent::WorkerTurnAccepted { id } => {
                 ("worker.turn_accepted", to_raw_value(&WorkerTurn { id })?)
@@ -313,6 +327,12 @@ struct EffortChanged {
 struct FastModeChanged {
     from: bool,
     to: bool,
+}
+
+#[derive(Serialize)]
+struct ContextObserved {
+    prompt_cache: bool,
+    previous_response: bool,
 }
 
 #[derive(Serialize)]
