@@ -101,7 +101,7 @@ pub(crate) enum RootEvent {
     SessionsLoaded(Vec<SessionSummary>),
     SessionLoadFailed(String),
     SessionRestored {
-        projection: RestoredSessionProjection,
+        projection: Box<RestoredSessionProjection>,
         effort: ReasoningEffort,
         reasoning_mode: ReasoningMode,
         preferred_reasoning_mode: ReasoningMode,
@@ -1468,7 +1468,7 @@ impl Component for RootNode {
                     reasoning_mode,
                     preferred_reasoning_mode,
                     fast_mode,
-                    projection,
+                    *projection,
                 );
                 ComponentUpdate::render(RenderRequest::Immediate)
             }

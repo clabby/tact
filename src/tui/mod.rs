@@ -996,7 +996,7 @@ pub(crate) async fn run(
                         schedule(
                             app.update(AppEvent::SessionRestored {
                                 pane,
-                                projection,
+                                projection: Box::new(projection),
                                 effort,
                                 reasoning_mode,
                                 preferred_reasoning_mode,

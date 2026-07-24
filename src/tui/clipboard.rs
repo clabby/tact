@@ -3,13 +3,11 @@
 use arboard::Clipboard;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use png::{BitDepth, ColorType, Encoder, EncodingError};
-
 #[cfg(target_os = "macos")]
 use std::{
     io::{self, Write},
     process::{Command, ExitStatus, Stdio},
 };
-
 #[cfg(target_os = "macos")]
 use thiserror::Error;
 
@@ -119,10 +117,9 @@ fn encode_png(width: usize, height: usize, pixels: &[u8]) -> Result<Vec<u8>, Enc
 
 #[cfg(test)]
 mod tests {
-    use super::encode_png;
-
     #[cfg(target_os = "macos")]
     use super::copy_with_pbcopy;
+    use super::encode_png;
 
     #[test]
     fn clipboard_pixels_are_encoded_as_png() {

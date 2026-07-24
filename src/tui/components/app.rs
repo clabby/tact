@@ -90,7 +90,7 @@ pub(crate) enum AppEvent {
     },
     SessionRestored {
         pane: PaneId,
-        projection: RestoredSessionProjection,
+        projection: Box<RestoredSessionProjection>,
         effort: ReasoningEffort,
         reasoning_mode: ReasoningMode,
         preferred_reasoning_mode: ReasoningMode,
