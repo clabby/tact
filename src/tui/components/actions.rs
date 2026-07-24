@@ -29,7 +29,7 @@ const ACTIONS: [Action; 11] = [
     Action::Subagents,
     Action::DebugContext,
 ];
-const KEY_BINDINGS: [&str; 3] = ["↑↓ move", "enter open", "esc close"];
+const KEY_BINDINGS: [&str; 3] = ["↑↓ move", "enter/tab open", "esc close"];
 const SEARCH_LABEL: &str = "Search: ";
 const SELECTION_MARKER: &str = "› ";
 
@@ -93,7 +93,7 @@ impl ActionsMenu {
                 ComponentUpdate::render(RenderRequest::Immediate)
             }
             KeyCode::Backspace => Self::dismiss(),
-            KeyCode::Enter => self.trigger_selected(),
+            KeyCode::Enter | KeyCode::Tab => self.trigger_selected(),
             KeyCode::Up => {
                 self.select_previous();
                 ComponentUpdate::render(RenderRequest::Immediate)
@@ -466,7 +466,7 @@ mod tests {
         );
         assert_eq!(
             row_segment(&terminal, 14, 1, 58),
-            "│            ↑↓ move · enter open · esc close            │"
+            "│          ↑↓ move · enter/tab open · esc close          │"
         );
         assert_eq!(
             row_segment(&terminal, 15, 1, 58),
@@ -512,6 +512,17 @@ mod tests {
         menu.update(key(KeyCode::Char('h')));
         assert_eq!(menu.query, "th");
         assert_eq!(menu.selected, 0);
+    }
+
+    #[test]
+    fn tab_triggers_the_selected_action() {
+        let mut menu = ActionsMenu::new(available());
+        menu.update(key(KeyCode::Down));
+
+        assert_eq!(
+            menu.update(key(KeyCode::Tab)).effects,
+            [ActionsEffect::Trigger(Action::FastMode)]
+        );
     }
 
     #[test]

@@ -19,7 +19,7 @@ use ratatui::{
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-const KEY_BINDINGS: [&str; 3] = ["↑↓ move", "enter resume", "esc close"];
+const KEY_BINDINGS: [&str; 3] = ["↑↓ move", "enter/tab resume", "esc close"];
 const SEARCH_LABEL: &str = "Search: ";
 
 pub(super) enum SessionPickerEvent {
@@ -77,7 +77,7 @@ impl SessionPicker {
                 }
                 ComponentUpdate::render(RenderRequest::Immediate)
             }
-            KeyCode::Enter => self.resume_selected(),
+            KeyCode::Enter | KeyCode::Tab => self.resume_selected(),
             KeyCode::Char(character)
                 if !key
                     .modifiers
@@ -284,6 +284,22 @@ mod tests {
         }
         assert_eq!(
             picker.update(key(KeyCode::Enter)).effects,
+            [SessionPickerEffect::Resume("two".to_owned())]
+        );
+    }
+
+    #[test]
+    fn tab_resumes_the_selected_session() {
+        let mut picker = SessionPicker::new(vec![
+            summary("one", "fix parser"),
+            summary("two", "write docs"),
+        ]);
+        for character in "docs".chars() {
+            picker.update(key(KeyCode::Char(character)));
+        }
+
+        assert_eq!(
+            picker.update(key(KeyCode::Tab)).effects,
             [SessionPickerEffect::Resume("two".to_owned())]
         );
     }
