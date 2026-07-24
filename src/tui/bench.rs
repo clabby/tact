@@ -685,7 +685,6 @@ fn benchmarks(criterion: &mut Criterion) {
             BatchSize::LargeInput,
         );
     });
-
     sessions.bench_function("project_api_heavy_transcript", |bencher| {
         bencher.iter_batched(
             || {
