@@ -145,6 +145,7 @@ impl PersistenceFixture {
             Err(error) => panic!("failed to clear projection cache: {error}"),
         }
     }
+
     fn load_transcript_parallel(&self) -> Vec<Arc<TranscriptRecord>> {
         session::load_transcript_parallel(&self.config_path, &self.session_id).unwrap()
     }
@@ -761,7 +762,6 @@ fn benchmarks(criterion: &mut Criterion) {
             black_box(root);
         });
     });
-
     sessions.bench_function("resume_api_heavy_transcript_cold", |bencher| {
         bencher.iter_batched(
             || fixture.clear_projection_cache(),

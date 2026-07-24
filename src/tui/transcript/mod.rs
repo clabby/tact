@@ -11,7 +11,7 @@ pub(crate) use entry::{
 #[cfg(test)]
 pub(crate) use journal::load;
 pub(crate) use journal::{
-    TranscriptJournal, load_matching_segment, remove_obsolete, storage_directory,
+    TranscriptJournal, load_matching_segment_filtered, remove_obsolete, storage_directory,
 };
 pub(crate) use model::TranscriptModel;
 pub(crate) use record::{

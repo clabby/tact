@@ -344,9 +344,17 @@ fn load_catalog_segment(
     if let Some(summary) = read_segment_summary(path) {
         return Ok((summary.workspace == workspace).then_some(summary));
     }
-    let segment = transcript::load_matching_segment(path, |first| {
-        session_started_record(first).is_none_or(|started| started.workspace == workspace)
-    })?;
+    let segment = transcript::load_matching_segment_filtered(
+        path,
+        |first| session_started_record(first).is_none_or(|started| started.workspace == workspace),
+        |record| {
+            record.source() == "tact"
+                && matches!(
+                    record.kind(),
+                    "session.started" | "user.submitted" | "effort.changed"
+                )
+        },
+    )?;
     let Some(segment) = segment else {
         return Ok(None);
     };
@@ -477,9 +485,13 @@ fn load_session_segment(
     {
         return Ok(None);
     }
-    let segment = transcript::load_matching_segment(path, |first| {
-        session_started_record(first).is_none_or(|started| started.session_id == session_id)
-    })?;
+    let segment = transcript::load_matching_segment_filtered(
+        path,
+        |first| {
+            session_started_record(first).is_none_or(|started| started.session_id == session_id)
+        },
+        |record| api_event_projection(record) != ApiEventProjection::Discard,
+    )?;
     let Some(segment) = segment else {
         return Ok(None);
     };

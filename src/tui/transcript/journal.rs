@@ -248,9 +248,18 @@ pub(crate) fn load_matching(
     Ok(load_matching_segment(path, matches_first)?.map(|segment| segment.records))
 }
 
+#[cfg(test)]
 pub(crate) fn load_matching_segment(
     path: &Path,
     matches_first: impl FnOnce(&TranscriptRecord) -> bool,
+) -> Result<Option<LoadedSegment>, TranscriptError> {
+    load_matching_segment_filtered(path, matches_first, |_| true)
+}
+
+pub(crate) fn load_matching_segment_filtered(
+    path: &Path,
+    matches_first: impl FnOnce(&TranscriptRecord) -> bool,
+    mut retain: impl FnMut(&TranscriptRecord) -> bool,
 ) -> Result<Option<LoadedSegment>, TranscriptError> {
     let file = File::open(path).map_err(|source| TranscriptError::Read {
         path: path.to_path_buf(),
@@ -306,7 +315,7 @@ pub(crate) fn load_matching_segment(
                 supported: SCHEMA_VERSION,
             });
         }
-        let expected = u64::try_from(records.len()).unwrap_or(u64::MAX) + 1;
+        let expected = u64::try_from(line).unwrap_or(u64::MAX);
         if record.sequence() != expected {
             return Err(TranscriptError::Sequence {
                 path: path.to_path_buf(),
@@ -320,7 +329,9 @@ pub(crate) fn load_matching_segment(
         {
             return Ok(None);
         }
-        records.push(Arc::new(record));
+        if retain(&record) {
+            records.push(Arc::new(record));
+        }
     }
 
     Ok(Some(LoadedSegment { records, complete }))
