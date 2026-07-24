@@ -17,7 +17,7 @@ use std::{cmp::Reverse, fs, path::Path};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-const KEY_BINDINGS: [&str; 3] = ["↑↓ move", "enter insert", "esc close"];
+const KEY_BINDINGS: [&str; 3] = ["↑↓ move", "enter/tab insert", "esc close"];
 const SEARCH_LABEL: &str = "Search: ";
 const FOCUS_MARKER: &str = "› ";
 const SKIPPED_DIRECTORIES: [&str; 4] = [".git", ".jj", "node_modules", "target"];
@@ -59,7 +59,7 @@ impl FileFinder {
 
         match key.code {
             KeyCode::Esc => Self::dismiss(),
-            KeyCode::Enter => self.handle_enter(),
+            KeyCode::Enter | KeyCode::Tab => self.handle_enter(),
             KeyCode::Up => {
                 self.select_previous();
                 ComponentUpdate::render(RenderRequest::Immediate)
@@ -343,6 +343,18 @@ mod tests {
     }
 
     #[test]
+    fn tab_inserts_the_selected_search_result() {
+        let workspace = workspace();
+        let mut finder = FileFinder::new(workspace.path());
+        finder.update(FileFinderEvent::Query("read".to_owned()));
+
+        assert_eq!(
+            finder.update(key(KeyCode::Tab)).effects,
+            [FileFinderEffect::Insert("README.md".to_owned())]
+        );
+    }
+
+    #[test]
     fn arrows_navigate_results_before_selection() {
         let workspace = workspace();
         let mut finder = FileFinder::new(workspace.path());
@@ -390,12 +402,12 @@ mod tests {
                 .iter()
                 .map(|cell| cell.symbol())
                 .collect::<String>()
-                .contains("enter insert")
+                .contains("enter/tab insert")
         }));
     }
 
     #[test]
-    fn footer_says_when_enter_will_insert() {
+    fn footer_says_when_enter_or_tab_will_insert() {
         let workspace = workspace();
         let mut finder = FileFinder::new(workspace.path());
         finder.update(FileFinderEvent::Query("read".to_owned()));
@@ -416,7 +428,7 @@ mod tests {
                         .iter()
                         .map(|cell| cell.symbol())
                         .collect::<String>()
-                        .contains("enter insert")
+                        .contains("enter/tab insert")
                 })
         );
     }

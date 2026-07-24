@@ -1558,7 +1558,7 @@ fn is_file_finder_navigation(event: &Event) -> bool {
     matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
         && matches!(
             key.code,
-            KeyCode::Enter | KeyCode::Up | KeyCode::Down | KeyCode::Esc
+            KeyCode::Enter | KeyCode::Tab | KeyCode::Up | KeyCode::Down | KeyCode::Esc
         )
 }
 
@@ -2072,8 +2072,7 @@ mod tests {
         assert_eq!(root.composer().draft(), "name@example.com");
     }
 
-    #[test]
-    fn selecting_a_file_inserts_its_relative_path_at_the_composer_cursor() {
+    fn assert_file_selection(key_code: KeyCode) {
         let workspace = tempfile::tempdir().unwrap();
         fs::write(workspace.path().join("notes.md"), "remember this").unwrap();
         let mut root = RootNode::new(workspace.path(), ReasoningEffort::Medium);
@@ -2085,10 +2084,20 @@ mod tests {
             root.update(key(KeyCode::Char(character), KeyModifiers::NONE));
         }
 
-        root.update(key(KeyCode::Enter, KeyModifiers::NONE));
+        root.update(key(key_code, KeyModifiers::NONE));
 
         assert!(root.overlay.is_none());
         assert_eq!(root.composer().draft(), "inspect @notes.md ");
+    }
+
+    #[test]
+    fn enter_selects_a_file_at_the_composer_cursor() {
+        assert_file_selection(KeyCode::Enter);
+    }
+
+    #[test]
+    fn tab_selects_a_file_at_the_composer_cursor() {
+        assert_file_selection(KeyCode::Tab);
     }
 
     #[test]
