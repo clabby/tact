@@ -90,7 +90,7 @@ pub(crate) struct Cli {
     #[arg(long, global = true, env = "TACT_MAX_SUBAGENTS", value_name = "COUNT")]
     max_subagents: Option<usize>,
 
-    /// Replace Nanocodex's standard instructions.
+    /// Replace Nanocodex's standard instructions, before Tact's built-in appendix.
     #[arg(
         long,
         global = true,
@@ -99,7 +99,7 @@ pub(crate) struct Cli {
     )]
     instructions: Option<String>,
 
-    /// Append to the standard or replacement instructions.
+    /// Append after Tact's built-in instructions.
     #[arg(
         long,
         global = true,

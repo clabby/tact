@@ -97,7 +97,7 @@ max_subagents = 32
 web_search = true
 image_generation = true
 # instructions = "Replace the standard Nanocodex instructions"
-# append_instructions = "Append to the standard or replacement instructions"
+# append_instructions = "Append after Tact's built-in instructions"
 
 [skills]
 enabled = false
@@ -111,6 +111,9 @@ The workspace defaults to the directory where tact starts. Relative paths in the
 resolved from the configuration file's directory; relative command-line paths are resolved from the
 current directory. Command-line options take precedence over environment variables, which take
 precedence over the file.
+
+New sessions append concise built-in guidance for delegating and orchestrating sub-agents after the
+standard or replacement instructions. Configured `append_instructions` follow that guidance.
 
 Tact loads global instructions from `AGENTS.override.md` or `AGENTS.md` in `CODEX_HOME`, which
 defaults to `~/.codex`, followed by project instructions from the Git repository root through the

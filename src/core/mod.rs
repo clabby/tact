@@ -24,6 +24,14 @@ use std::{
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+const DEFAULT_APPEND_INSTRUCTIONS: &str = concat!(
+    "For larger tasks, delegate meaningful, separable work to subagents; handle trivial or tightly ",
+    "coupled work directly. Use code mode to build multi-agent pipelines: map independent subtasks ",
+    "across agents in parallel, await and reduce their results, then dispatch dependent stages. Use ",
+    "loops to iterate until the completion condition is met. Keep concurrent write scopes disjoint. ",
+    "You own final synthesis and verification."
+);
+
 pub(crate) struct ConfiguredAgent {
     pub(crate) agent: Nanocodex,
     pub(crate) events: AgentEvents,
@@ -231,6 +239,8 @@ fn fresh_instructions(
     let mut instructions = custom
         .map(str::to_owned)
         .unwrap_or_else(|| ModelConfig::default().system_prompt.to_string());
+    instructions.push_str("\n\n");
+    instructions.push_str(DEFAULT_APPEND_INSTRUCTIONS);
     if let Some(appended) = appended {
         instructions.push_str("\n\n");
         instructions.push_str(appended);
@@ -254,7 +264,9 @@ impl Cancellation {
 
 #[cfg(test)]
 mod tests {
-    use super::{ConfiguredAgent, fresh_instructions, session_instructions};
+    use super::{
+        ConfiguredAgent, DEFAULT_APPEND_INSTRUCTIONS, fresh_instructions, session_instructions,
+    };
     use crate::app::{
         config::SkillsConfig,
         error::{Error, RuntimeError},
@@ -343,16 +355,17 @@ mod tests {
     }
 
     #[test]
-    fn fresh_disabled_skills_do_not_change_instructions() {
+    fn fresh_instructions_include_the_default_append() {
         let disabled = SkillsConfig::from_roots(false, Vec::new());
+        let default = ModelConfig::default().system_prompt;
 
         assert_eq!(
             fresh_instructions(None, None, &disabled),
-            ModelConfig::default().system_prompt.as_ref()
+            format!("{default}\n\n{DEFAULT_APPEND_INSTRUCTIONS}")
         );
         assert_eq!(
             fresh_instructions(Some("Custom instructions."), None, &disabled),
-            "Custom instructions."
+            format!("Custom instructions.\n\n{DEFAULT_APPEND_INSTRUCTIONS}")
         );
     }
 
@@ -362,14 +375,17 @@ mod tests {
         let default = ModelConfig::default().system_prompt;
 
         let instructions = fresh_instructions(None, Some("Project instructions."), &disabled);
-        assert_eq!(instructions, format!("{default}\n\nProject instructions."));
+        assert_eq!(
+            instructions,
+            format!("{default}\n\n{DEFAULT_APPEND_INSTRUCTIONS}\n\nProject instructions.")
+        );
         assert_eq!(
             fresh_instructions(
                 Some("Replacement."),
                 Some("Project instructions."),
                 &disabled
             ),
-            "Replacement.\n\nProject instructions."
+            format!("Replacement.\n\n{DEFAULT_APPEND_INSTRUCTIONS}\n\nProject instructions.")
         );
     }
 
@@ -411,7 +427,9 @@ mod tests {
 
         let instructions = fresh_instructions(Some("Keep this first."), None, &enabled);
 
-        assert!(instructions.starts_with("Keep this first.\n\n## Available local skills"));
+        assert!(instructions.starts_with(&format!(
+            "Keep this first.\n\n{DEFAULT_APPEND_INSTRUCTIONS}\n\n## Available local skills"
+        )));
         assert!(instructions.contains("Run focused tests."));
         assert!(!instructions.contains("SECRET-BODY"));
     }
