@@ -1369,11 +1369,7 @@ impl RootNode {
     fn apply_subagent_update(&mut self, update: AgentUpdate) -> ComponentUpdate<RootEffect> {
         let previous_active = self.subagents.active_count();
         let root_message = match &update {
-            AgentUpdate::Message(update)
-                if update.thread.participants.contains(&MessageSender::Root) =>
-            {
-                Some(update.clone())
-            }
+            AgentUpdate::Message(update) => Some(update.clone()),
             _ => None,
         };
         let subagents_changed = self.subagents.apply(update);
@@ -1720,6 +1716,21 @@ mod tests {
             .expect("rendered text should be present")
     }
 
+    fn render_root_text(root: &mut RootNode, width: u16, height: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| root.render(frame, frame.area(), &Theme::default()))
+            .unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .chunks(usize::from(width))
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     fn run_steered() -> super::RootEvent {
         super::RootEvent::Transcript(Arc::new(TranscriptRecord::from_agent(
             1,
@@ -1912,17 +1923,7 @@ mod tests {
         .unwrap();
         root.update(RootEvent::Subagent(AgentUpdate::Message(message)));
 
-        let mut main = Terminal::new(TestBackend::new(100, 20)).unwrap();
-        main.draw(|frame| root.render(frame, frame.area(), &Theme::default()))
-            .unwrap();
-        let main = main
-            .backend()
-            .buffer()
-            .content
-            .chunks(100)
-            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
-            .collect::<Vec<_>>()
-            .join("\n");
+        let main = render_root_text(&mut root, 100, 20);
 
         let mut child = Terminal::new(TestBackend::new(100, 40)).unwrap();
         child
@@ -1949,6 +1950,48 @@ mod tests {
         assert!(main.contains("Please verify the ordering."));
         assert!(child.contains("Please verify"));
         assert!(child.contains("ordering."));
+    }
+
+    #[test]
+    fn peer_messages_are_projected_into_the_main_transcript() {
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        for (id, role) in [(1, "sender"), (2, "recipient")] {
+            root.update(RootEvent::Subagent(AgentUpdate::Added(AgentDescriptor {
+                id: AgentId::new(id),
+                session_id: format!("child-{id}"),
+                role: role.to_owned(),
+                task: "coordinate with a peer".to_owned(),
+                origin: AgentOrigin::Spawn,
+                parent: None,
+            })));
+        }
+        let message = serde_json::from_value::<AgentMessageUpdate>(json!({
+            "message_id": 1,
+            "thread": {
+                "id": 1,
+                "participants": [
+                    {"kind": "agent", "agent_id": 1},
+                    {"kind": "agent", "agent_id": 2}
+                ],
+                "messages": [{
+                    "id": 1,
+                    "thread_id": 1,
+                    "from": {"kind": "agent", "agent_id": 1},
+                    "to": 2,
+                    "priority": "deferred",
+                    "purpose": "coordinate",
+                    "body": "Peer coordination is visible."
+                }]
+            },
+            "delivery": {"state": "delivered", "disposition": "started"}
+        }))
+        .unwrap();
+
+        root.update(RootEvent::Subagent(AgentUpdate::Message(message)));
+
+        let main = render_root_text(&mut root, 100, 20);
+        assert!(main.contains("← Message  #1 → #2"));
+        assert!(main.contains("Peer coordination is visible."));
     }
 
     #[test]
