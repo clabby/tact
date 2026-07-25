@@ -39,7 +39,6 @@ impl MessageId {
         Self(value)
     }
 
-    #[cfg(any(feature = "agent-messaging", test))]
     pub(super) fn next(counter: &mut u64) -> Self {
         *counter = counter.saturating_add(1);
         Self(*counter)
@@ -62,7 +61,6 @@ impl ThreadId {
         Self(value)
     }
 
-    #[cfg(any(feature = "agent-messaging", test))]
     pub(super) const fn for_message(message: MessageId) -> Self {
         Self(message.0)
     }
@@ -82,7 +80,6 @@ pub(crate) enum MessageSender {
 }
 
 impl MessageSender {
-    #[cfg(any(feature = "agent-messaging", test))]
     pub(super) const fn agent_id(self) -> Option<AgentId> {
         match self {
             Self::Root => None,
@@ -100,7 +97,6 @@ pub(crate) enum MessagePriority {
 }
 
 impl MessagePriority {
-    #[cfg(feature = "agent-messaging")]
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Deferred => "deferred",
@@ -121,7 +117,6 @@ pub(crate) enum MessagePurpose {
 }
 
 impl MessagePurpose {
-    #[cfg(feature = "agent-messaging")]
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Delegate => "delegate",
@@ -155,7 +150,6 @@ pub(crate) struct AgentMessage {
 }
 
 impl AgentMessage {
-    #[cfg(feature = "agent-messaging")]
     pub(super) fn prompt(&self) -> String {
         let (sender, response_guidance) = match self.from {
             MessageSender::Root => (
@@ -251,16 +245,19 @@ impl AgentOrigin {
             Self::Spawn => "You have no inherited conversation context.",
             Self::Fork => "Use the inherited conversation only as context for this delegation.",
         };
-        #[cfg(feature = "agent-messaging")]
-        let coordination = " You may exchange bounded directed messages with any other agent in \
-                            this task tree through send_agent_message. Deferred messages start an \
-                            idle agent or wait for its active turn to finish. If a send is queued, \
-                            do not wait for it inside your current turn: finish the turn so queued \
-                            messages can be delivered. Urgent messages steer active turns. \
-                            Ordinary messages provide coordination context; only a delegate \
-                            message from an authorized manager replaces your assigned task.";
-        #[cfg(not(feature = "agent-messaging"))]
-        let coordination = "";
+        let coordination = " Other agents may be working concurrently in the same workspace. Use \
+                            list_agents to discover relevant peers. Communicate when doing so \
+                            prevents duplicated work, coordinates shared dependencies or \
+                            overlapping files, or surfaces findings that materially affect another \
+                            agent's task. Treat concurrent changes as owned by their authors and \
+                            avoid overwriting them. You may exchange bounded directed messages with \
+                            any other agent in this task tree through send_agent_message. Deferred \
+                            messages start an idle agent or wait for its active turn to finish. If \
+                            a send is queued, do not wait for it inside your current turn: finish \
+                            the turn so queued messages can be delivered. Urgent messages steer \
+                            active turns. Ordinary messages provide coordination context; only a \
+                            delegate message from an authorized manager replaces your assigned \
+                            task.";
         format!(
             "Act as a specialist subagent. {context} Work only on the delegated task and return a \
              compact, evidence-backed report to the parent agent. Your agent ID is {id}. The \
@@ -316,21 +313,8 @@ pub(crate) struct AgentDescriptor {
 #[derive(Debug)]
 pub(crate) enum AgentUpdate {
     Added(AgentDescriptor),
-    Event {
-        id: AgentId,
-        event: AgentEvent,
-    },
-    Status {
-        id: AgentId,
-        status: AgentStatus,
-    },
-    #[cfg_attr(
-        not(feature = "agent-messaging"),
-        allow(
-            dead_code,
-            reason = "constructed by the feature-gated messaging runtime"
-        )
-    )]
+    Event { id: AgentId, event: AgentEvent },
+    Status { id: AgentId, status: AgentStatus },
     Message(AgentMessageUpdate),
 }
 
@@ -348,7 +332,7 @@ impl SubagentRuntimeId {
     }
 }
 
-#[cfg(all(test, feature = "agent-messaging"))]
+#[cfg(test)]
 mod tests {
     use super::{AgentId, AgentOrigin, MessagePriority};
 
@@ -362,9 +346,13 @@ mod tests {
     }
 
     #[test]
-    fn agent_prompt_explains_how_to_release_queued_messages() {
+    fn agent_prompt_explains_peer_coordination_and_queued_delivery() {
         let prompt = AgentOrigin::Spawn.prompt(AgentId::new(1), "coordinate with a peer");
 
+        assert!(prompt.contains("Other agents may be working concurrently"));
+        assert!(prompt.contains("list_agents"));
+        assert!(prompt.contains("prevents duplicated work"));
+        assert!(prompt.contains("avoid overwriting them"));
         assert!(prompt.contains("If a send is queued"));
         assert!(prompt.contains("finish the turn"));
     }

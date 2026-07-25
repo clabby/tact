@@ -54,7 +54,6 @@ impl Capacity {
         self.changed();
     }
 
-    #[cfg(feature = "agent-messaging")]
     pub(super) fn subscribe(&self) -> watch::Receiver<u64> {
         self.revision.subscribe()
     }

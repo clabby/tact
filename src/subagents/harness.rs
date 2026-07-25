@@ -1,6 +1,5 @@
 //! Per-agent actor that exclusively owns a child runtime and its active turn.
 
-#[cfg(feature = "agent-messaging")]
 use super::{
     capacity::Capacity,
     model::{AgentMessage, MessageDisposition, MessageId, MessagePriority},
@@ -8,10 +7,8 @@ use super::{
 };
 use super::{capacity::TurnCapacity, model::AgentId, runtime::Registry};
 use nanocodex::{Nanocodex, NanocodexError, TurnControl};
-#[cfg(feature = "agent-messaging")]
 use std::collections::VecDeque;
 use std::sync::Weak;
-#[cfg(feature = "agent-messaging")]
 use tokio::sync::watch;
 use tokio::{
     sync::{mpsc, oneshot},
@@ -19,28 +16,22 @@ use tokio::{
 };
 
 const COMMAND_CAPACITY: usize = 8;
-#[cfg(feature = "agent-messaging")]
 pub(super) const DEFERRED_CAPACITY: usize = 8;
-#[cfg(feature = "agent-messaging")]
 pub(super) const URGENT_CAPACITY: usize = 4;
 
 #[derive(Clone)]
 pub(super) struct HarnessHandle {
     commands: mpsc::Sender<HarnessCommand>,
-    #[cfg(feature = "agent-messaging")]
     deferred: mpsc::Sender<DeliveryCommand>,
-    #[cfg(feature = "agent-messaging")]
     urgent: mpsc::Sender<DeliveryCommand>,
 }
 
-#[cfg(feature = "agent-messaging")]
 struct DeliveryCommand {
     message: AgentMessage,
     committed: Option<oneshot::Receiver<()>>,
     response: oneshot::Sender<std::io::Result<MessageDisposition>>,
 }
 
-#[cfg(feature = "agent-messaging")]
 impl DeliveryCommand {
     async fn wait_for_commit(&mut self) -> bool {
         let Some(committed) = self.committed.take() else {
@@ -50,13 +41,11 @@ impl DeliveryCommand {
     }
 }
 
-#[cfg(feature = "agent-messaging")]
 pub(super) struct EnqueuedDelivery {
     committed: oneshot::Sender<()>,
     response: oneshot::Receiver<std::io::Result<MessageDisposition>>,
 }
 
-#[cfg(feature = "agent-messaging")]
 impl EnqueuedDelivery {
     pub(super) async fn release(self) -> std::io::Result<MessageDisposition> {
         self.committed
@@ -74,11 +63,6 @@ enum HarnessCommand {
         capacity: TurnCapacity,
         response: oneshot::Sender<std::io::Result<()>>,
     },
-    #[cfg(any(not(feature = "agent-messaging"), test))]
-    Steer {
-        message: String,
-        response: oneshot::Sender<std::io::Result<()>>,
-    },
     Interrupt {
         response: oneshot::Sender<std::io::Result<()>>,
     },
@@ -93,17 +77,11 @@ struct Harness {
     agent: Option<Nanocodex>,
     active: Option<ActiveTurn>,
     commands: mpsc::Receiver<HarnessCommand>,
-    #[cfg(feature = "agent-messaging")]
     deferred: mpsc::Receiver<DeliveryCommand>,
-    #[cfg(feature = "agent-messaging")]
     urgent: mpsc::Receiver<DeliveryCommand>,
-    #[cfg(feature = "agent-messaging")]
     pending_deferred: VecDeque<AgentMessage>,
-    #[cfg(feature = "agent-messaging")]
     pending_urgent: VecDeque<AgentMessage>,
-    #[cfg(feature = "agent-messaging")]
     capacity: Capacity,
-    #[cfg(feature = "agent-messaging")]
     capacity_revision: watch::Receiver<u64>,
     registry: Weak<Registry>,
 }
@@ -116,11 +94,8 @@ struct ActiveTurn {
 
 enum HarnessEvent {
     Command(Option<HarnessCommand>),
-    #[cfg(feature = "agent-messaging")]
     Deferred(Option<DeliveryCommand>),
-    #[cfg(feature = "agent-messaging")]
     Urgent(Option<DeliveryCommand>),
-    #[cfg(feature = "agent-messaging")]
     CapacityChanged,
     TurnFinished(Result<nanocodex::Result<nanocodex::TurnResult>, JoinError>),
 }
@@ -139,12 +114,6 @@ impl HarnessHandle {
         .await
     }
 
-    #[cfg(any(not(feature = "agent-messaging"), test))]
-    pub(super) async fn steer(&self, message: String) -> std::io::Result<()> {
-        self.request(|response| HarnessCommand::Steer { message, response })
-            .await
-    }
-
     pub(super) async fn interrupt(&self) -> std::io::Result<()> {
         self.request(|response| HarnessCommand::Interrupt { response })
             .await
@@ -155,7 +124,6 @@ impl HarnessHandle {
             .await
     }
 
-    #[cfg(feature = "agent-messaging")]
     pub(super) fn enqueue_delivery(
         &self,
         message: AgentMessage,
@@ -205,22 +173,17 @@ pub(super) fn spawn(
     root_session_id: String,
     id: AgentId,
     agent: Nanocodex,
-    #[cfg(feature = "agent-messaging")] capacity: Capacity,
+    capacity: Capacity,
     registry: Weak<Registry>,
 ) -> (HarnessHandle, JoinHandle<()>) {
     let (commands, receiver) = mpsc::channel(COMMAND_CAPACITY);
-    #[cfg(feature = "agent-messaging")]
     let (deferred, deferred_receiver) = mpsc::channel(DEFERRED_CAPACITY);
-    #[cfg(feature = "agent-messaging")]
     let (urgent, urgent_receiver) = mpsc::channel(URGENT_CAPACITY);
     let handle = HarnessHandle {
         commands,
-        #[cfg(feature = "agent-messaging")]
         deferred,
-        #[cfg(feature = "agent-messaging")]
         urgent,
     };
-    #[cfg(feature = "agent-messaging")]
     let capacity_revision = capacity.subscribe();
     let task = tokio::spawn(
         Harness {
@@ -229,17 +192,11 @@ pub(super) fn spawn(
             agent: Some(agent),
             active: None,
             commands: receiver,
-            #[cfg(feature = "agent-messaging")]
             deferred: deferred_receiver,
-            #[cfg(feature = "agent-messaging")]
             urgent: urgent_receiver,
-            #[cfg(feature = "agent-messaging")]
             pending_deferred: VecDeque::new(),
-            #[cfg(feature = "agent-messaging")]
             pending_urgent: VecDeque::new(),
-            #[cfg(feature = "agent-messaging")]
             capacity,
-            #[cfg(feature = "agent-messaging")]
             capacity_revision,
             registry,
         }
@@ -258,30 +215,24 @@ impl Harness {
                     }
                 }
                 HarnessEvent::Command(None) => {
-                    #[cfg(feature = "agent-messaging")]
                     self.fail_pending("subagent harness stopped").await;
                     drop(self.stop_active().await);
                     return;
                 }
-                #[cfg(feature = "agent-messaging")]
                 HarnessEvent::Deferred(Some(command)) => {
                     self.accept_delivery(command, MessagePriority::Deferred)
                         .await;
                 }
-                #[cfg(feature = "agent-messaging")]
                 HarnessEvent::Urgent(Some(command)) => {
                     self.accept_delivery(command, MessagePriority::Urgent).await;
                 }
-                #[cfg(feature = "agent-messaging")]
                 HarnessEvent::Deferred(None) | HarnessEvent::Urgent(None) => {}
-                #[cfg(feature = "agent-messaging")]
                 HarnessEvent::CapacityChanged => self.start_pending().await,
                 HarnessEvent::TurnFinished(result) => self.turn_finished(result).await,
             }
         }
     }
 
-    #[cfg(feature = "agent-messaging")]
     async fn next_event(&mut self) -> HarnessEvent {
         let Some(active) = self.active.as_mut() else {
             if self.pending_deferred.is_empty() && self.pending_urgent.is_empty() {
@@ -309,18 +260,6 @@ impl Harness {
         }
     }
 
-    #[cfg(not(feature = "agent-messaging"))]
-    async fn next_event(&mut self) -> HarnessEvent {
-        let Some(active) = self.active.as_mut() else {
-            return HarnessEvent::Command(self.commands.recv().await);
-        };
-        tokio::select! {
-            biased;
-            command = self.commands.recv() => HarnessEvent::Command(command),
-            result = &mut active.result => HarnessEvent::TurnFinished(result),
-        }
-    }
-
     async fn handle(&mut self, command: HarnessCommand) -> bool {
         match command {
             HarnessCommand::Start {
@@ -331,13 +270,7 @@ impl Harness {
                 let _ = response.send(self.start_turn(prompt, capacity).await);
                 false
             }
-            #[cfg(any(not(feature = "agent-messaging"), test))]
-            HarnessCommand::Steer { message, response } => {
-                let _ = response.send(self.steer(message).await);
-                false
-            }
             HarnessCommand::Interrupt { response } => {
-                #[cfg(feature = "agent-messaging")]
                 {
                     self.reject_waiting_deliveries("message rejected by agent interruption")
                         .await;
@@ -348,7 +281,6 @@ impl Harness {
                 false
             }
             HarnessCommand::Close { response } => {
-                #[cfg(feature = "agent-messaging")]
                 {
                     self.reject_waiting_deliveries("message rejected because the agent closed")
                         .await;
@@ -362,7 +294,6 @@ impl Harness {
         }
     }
 
-    #[cfg(feature = "agent-messaging")]
     async fn accept_delivery(&mut self, mut command: DeliveryCommand, priority: MessagePriority) {
         if !command.wait_for_commit().await {
             return;
@@ -419,7 +350,6 @@ impl Harness {
         self.queue_delivery(command, priority).await;
     }
 
-    #[cfg(feature = "agent-messaging")]
     async fn queue_delivery(&mut self, command: DeliveryCommand, priority: MessagePriority) {
         let queue = match priority {
             MessagePriority::Deferred => &mut self.pending_deferred,
@@ -443,7 +373,6 @@ impl Harness {
             .await;
     }
 
-    #[cfg(feature = "agent-messaging")]
     async fn start_pending(&mut self) {
         while self.active.is_none() {
             let Some(message) = self
@@ -484,7 +413,6 @@ impl Harness {
         }
     }
 
-    #[cfg(feature = "agent-messaging")]
     async fn fail_pending(&mut self, reason: &str) {
         let pending = self
             .pending_urgent
@@ -497,7 +425,6 @@ impl Harness {
         }
     }
 
-    #[cfg(feature = "agent-messaging")]
     async fn reject_waiting_deliveries(&mut self, reason: &str) {
         while let Ok(command) = self.urgent.try_recv() {
             self.reject(command, reason.to_owned()).await;
@@ -507,7 +434,6 @@ impl Harness {
         }
     }
 
-    #[cfg(feature = "agent-messaging")]
     async fn reject(&self, mut command: DeliveryCommand, reason: String) {
         if !command.wait_for_commit().await {
             return;
@@ -520,7 +446,6 @@ impl Harness {
         let _ = command.response.send(Err(std::io::Error::other(reason)));
     }
 
-    #[cfg(feature = "agent-messaging")]
     async fn publish_message_failure(&self, id: MessageId, error: String) {
         if let Some(registry) = self.registry.upgrade() {
             registry
@@ -529,7 +454,6 @@ impl Harness {
         }
     }
 
-    #[cfg(feature = "agent-messaging")]
     async fn admit(
         &self,
         id: MessageId,
@@ -548,7 +472,6 @@ impl Harness {
         let _ = response.send(Ok(disposition));
     }
 
-    #[cfg(feature = "agent-messaging")]
     async fn begin_delegation(&self, id: MessageId) -> Option<DelegationChange> {
         let registry = self.registry.upgrade()?;
         registry
@@ -556,7 +479,6 @@ impl Harness {
             .await
     }
 
-    #[cfg(feature = "agent-messaging")]
     async fn rollback_delegation(&self, change: Option<DelegationChange>) {
         let (Some(registry), Some(change)) = (self.registry.upgrade(), change) else {
             return;
@@ -603,17 +525,6 @@ impl Harness {
                 .await;
         }
         Ok(())
-    }
-
-    #[cfg(any(not(feature = "agent-messaging"), test))]
-    async fn steer(&self, message: String) -> std::io::Result<()> {
-        let active = self
-            .active
-            .as_ref()
-            .ok_or_else(|| std::io::Error::other(format!("agent {} is not running", self.id)))?;
-        active.control.steer(message).await.map_err(|error| {
-            std::io::Error::other(format!("could not steer agent {}: {error}", self.id))
-        })
     }
 
     async fn stop_active(&mut self) -> std::io::Result<()> {

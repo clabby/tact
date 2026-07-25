@@ -8,7 +8,6 @@ use super::{
     },
     task_tree::TaskTree,
 };
-#[cfg(feature = "agent-messaging")]
 use super::{
     message::MessageThreads,
     model::{
@@ -59,7 +58,6 @@ pub(super) struct RegistryState {
 struct AgentScope {
     topology: TaskTree,
     sessions: HashMap<AgentId, ChildSession>,
-    #[cfg(feature = "agent-messaging")]
     messages: MessageThreads,
 }
 
@@ -93,7 +91,6 @@ pub(super) struct AgentSummary {
     pub(super) last_report: Option<String>,
 }
 
-#[cfg(feature = "agent-messaging")]
 #[derive(Serialize)]
 pub(super) struct AgentDirectoryEntry {
     pub(super) agent_id: AgentId,
@@ -105,7 +102,6 @@ pub(super) struct AgentDirectoryEntry {
     pub(super) can_manage: bool,
 }
 
-#[cfg(feature = "agent-messaging")]
 #[derive(Debug, Serialize)]
 pub(super) struct MessageReceipt {
     pub(super) message_id: MessageId,
@@ -115,14 +111,12 @@ pub(super) struct MessageReceipt {
     pub(super) disposition: MessageDisposition,
 }
 
-#[cfg(feature = "agent-messaging")]
 struct PreparedMessage {
     root_session_id: String,
     message: AgentMessage,
     harness: HarnessHandle,
 }
 
-#[cfg(feature = "agent-messaging")]
 pub(super) struct DelegationChange {
     target: AgentId,
     previous_task: String,
@@ -214,58 +208,6 @@ impl RegistryState {
             .ok_or_else(|| std::io::Error::other(format!("agent {id} is closed")))
     }
 
-    #[cfg(any(not(feature = "agent-messaging"), test))]
-    fn harness_for(&self, session_id: &str, id: AgentId) -> std::io::Result<HarnessHandle> {
-        let root_session_id = self.authorize(session_id, id)?;
-        let session = self
-            .scopes
-            .get(&root_session_id)
-            .and_then(|scope| scope.sessions.get(&id))
-            .ok_or_else(|| std::io::Error::other(format!("unknown agent_id {id}")))?;
-        if !session.status.can_start_turn() || session.active {
-            return Err(std::io::Error::other(format!(
-                "agent {id} is not idle ({:?})",
-                session.status
-            )));
-        }
-        session
-            .harness
-            .clone()
-            .ok_or_else(|| std::io::Error::other(format!("agent {id} is closed")))
-    }
-
-    #[cfg(any(not(feature = "agent-messaging"), test))]
-    fn update_task(
-        &mut self,
-        session_id: &str,
-        id: AgentId,
-        task: String,
-    ) -> std::io::Result<(String, AgentDescriptor)> {
-        let root_session_id = self.authorize(session_id, id)?;
-        let session = self
-            .scopes
-            .get_mut(&root_session_id)
-            .and_then(|scope| scope.sessions.get_mut(&id))
-            .ok_or_else(|| std::io::Error::other(format!("unknown agent_id {id}")))?;
-        session.descriptor.task = task;
-        Ok((root_session_id, session.descriptor.clone()))
-    }
-
-    #[cfg(any(not(feature = "agent-messaging"), test))]
-    fn list(&self, session_id: &str) -> std::io::Result<Vec<AgentSummary>> {
-        let root_session_id = self.root_session_id(session_id);
-        let Some(scope) = self.scopes.get(root_session_id) else {
-            return Ok(Vec::new());
-        };
-        Ok(scope
-            .topology
-            .visible_ids(session_id)
-            .into_iter()
-            .filter_map(|id| scope.sessions.get(&id).map(ChildSession::summary))
-            .collect())
-    }
-
-    #[cfg(feature = "agent-messaging")]
     fn directory(
         &self,
         session_id: &str,
@@ -307,7 +249,6 @@ impl RegistryState {
             .collect()
     }
 
-    #[cfg(feature = "agent-messaging")]
     fn prepare_message(
         &mut self,
         session_id: &str,
@@ -363,7 +304,6 @@ impl RegistryState {
         })
     }
 
-    #[cfg(feature = "agent-messaging")]
     fn commit_message(
         &mut self,
         root_session_id: &str,
@@ -376,14 +316,12 @@ impl RegistryState {
         Ok(scope.messages.commit(message))
     }
 
-    #[cfg(feature = "agent-messaging")]
     fn rollback_message(&mut self, root_session_id: &str, id: MessageId) {
         if let Some(scope) = self.scopes.get_mut(root_session_id) {
             scope.messages.rollback(id);
         }
     }
 
-    #[cfg(feature = "agent-messaging")]
     fn begin_delegation(
         &mut self,
         root_session_id: &str,
@@ -405,7 +343,6 @@ impl RegistryState {
         ))
     }
 
-    #[cfg(feature = "agent-messaging")]
     fn rollback_delegation(
         &mut self,
         root_session_id: &str,
@@ -420,14 +357,12 @@ impl RegistryState {
         Some(target.descriptor.clone())
     }
 
-    #[cfg(feature = "agent-messaging")]
     fn thread_for_message(&self, root_session_id: &str, id: MessageId) -> Option<AgentThread> {
         self.scopes
             .get(root_session_id)
             .and_then(|scope| scope.messages.thread_for_message(id))
     }
 
-    #[cfg(feature = "agent-messaging")]
     fn mark_message_admitted(
         &mut self,
         root_session_id: &str,
@@ -439,7 +374,6 @@ impl RegistryState {
         }
     }
 
-    #[cfg(feature = "agent-messaging")]
     fn mark_message_terminal(&mut self, root_session_id: &str, id: MessageId) {
         if let Some(scope) = self.scopes.get_mut(root_session_id) {
             scope.messages.mark_terminal(id);
@@ -472,23 +406,6 @@ impl RegistryState {
                     .ok_or_else(|| std::io::Error::other(format!("unknown agent_id {id}")))
             })
             .collect()
-    }
-
-    #[cfg(any(not(feature = "agent-messaging"), test))]
-    fn active_harness(&self, session_id: &str, id: AgentId) -> std::io::Result<HarnessHandle> {
-        let root_session_id = self.authorize(session_id, id)?;
-        let session = self
-            .scopes
-            .get(&root_session_id)
-            .and_then(|scope| scope.sessions.get(&id))
-            .ok_or_else(|| std::io::Error::other(format!("unknown agent_id {id}")))?;
-        if !session.active {
-            return Err(std::io::Error::other(format!("agent {id} is not running")));
-        }
-        session
-            .harness
-            .clone()
-            .ok_or_else(|| std::io::Error::other(format!("agent {id} is closed")))
     }
 
     fn request_interrupt(
@@ -708,7 +625,6 @@ impl Registry {
             root_session_id.clone(),
             descriptor.id,
             agent,
-            #[cfg(feature = "agent-messaging")]
             self.capacity.clone(),
             Arc::downgrade(self),
         );
@@ -743,23 +659,6 @@ impl Registry {
             .await
             .harness_in_scope(root_session_id, id)?;
         harness.start(prompt, capacity).await
-    }
-
-    #[cfg(any(not(feature = "agent-messaging"), test))]
-    pub(super) async fn launch_follow_up(
-        self: &Arc<Self>,
-        session_id: &str,
-        id: AgentId,
-        task: String,
-    ) -> std::io::Result<()> {
-        let capacity = self.reserve_turn()?;
-        let harness = self.state.lock().await.harness_for(session_id, id)?;
-        harness.start(task.clone(), capacity).await?;
-        let (root_session_id, descriptor) =
-            self.state.lock().await.update_task(session_id, id, task)?;
-        self.send(&root_session_id, AgentUpdate::Added(descriptor));
-        self.changed();
-        Ok(())
     }
 
     pub(super) async fn harness_turn_started(&self, root_session_id: &str, id: AgentId) {
@@ -897,12 +796,6 @@ impl Registry {
         let _ = send_update(&self.updates, root_session_id, update);
     }
 
-    #[cfg(any(not(feature = "agent-messaging"), test))]
-    pub(super) async fn list(&self, session_id: &str) -> std::io::Result<Vec<AgentSummary>> {
-        self.state.lock().await.list(session_id)
-    }
-
-    #[cfg(feature = "agent-messaging")]
     pub(super) async fn directory(
         &self,
         session_id: &str,
@@ -915,7 +808,6 @@ impl Registry {
             .directory(session_id, include_completed, include_self)
     }
 
-    #[cfg(feature = "agent-messaging")]
     pub(super) async fn send_message(
         &self,
         session_id: &str,
@@ -960,7 +852,6 @@ impl Registry {
         })
     }
 
-    #[cfg(feature = "agent-messaging")]
     pub(super) async fn message_admitted(
         &self,
         root_session_id: &str,
@@ -987,7 +878,6 @@ impl Registry {
         self.changed();
     }
 
-    #[cfg(feature = "agent-messaging")]
     pub(super) async fn message_rejected(&self, root_session_id: &str, id: MessageId) {
         self.state
             .lock()
@@ -995,7 +885,6 @@ impl Registry {
             .rollback_message(root_session_id, id);
     }
 
-    #[cfg(feature = "agent-messaging")]
     pub(super) async fn message_delivered(
         &self,
         root_session_id: &str,
@@ -1010,7 +899,6 @@ impl Registry {
         .await;
     }
 
-    #[cfg(feature = "agent-messaging")]
     pub(super) async fn begin_message_delivery(
         &self,
         root_session_id: &str,
@@ -1026,7 +914,6 @@ impl Registry {
         Some(change)
     }
 
-    #[cfg(feature = "agent-messaging")]
     pub(super) async fn rollback_message_delivery(
         &self,
         root_session_id: &str,
@@ -1043,13 +930,11 @@ impl Registry {
         }
     }
 
-    #[cfg(feature = "agent-messaging")]
     pub(super) async fn message_failed(&self, root_session_id: &str, id: MessageId, error: String) {
         self.publish_message_state(root_session_id, id, MessageDeliveryState::Failed { error })
             .await;
     }
 
-    #[cfg(feature = "agent-messaging")]
     async fn publish_message_state(
         &self,
         root_session_id: &str,
@@ -1077,24 +962,6 @@ impl Registry {
             .lock()
             .await
             .mark_message_terminal(root_session_id, message_id);
-    }
-
-    #[cfg(any(not(feature = "agent-messaging"), test))]
-    pub(super) async fn steer(
-        &self,
-        session_id: &str,
-        id: AgentId,
-        message: String,
-    ) -> std::io::Result<AgentSummary> {
-        let harness = self.state.lock().await.active_harness(session_id, id)?;
-        harness.steer(message).await?;
-        self.state
-            .lock()
-            .await
-            .summaries(session_id, &[id])?
-            .into_iter()
-            .next()
-            .ok_or_else(|| std::io::Error::other(format!("unknown agent_id {id}")))
     }
 
     pub(super) async fn wait(
@@ -1355,7 +1222,6 @@ fn first_error(results: Vec<std::io::Result<()>>) -> std::io::Result<()> {
     results.into_iter().find(Result::is_err).unwrap_or(Ok(()))
 }
 
-#[cfg(feature = "agent-messaging")]
 fn bounded_summary(value: &str) -> String {
     const MAX_BYTES: usize = 160;
     if value.len() <= MAX_BYTES {
@@ -1469,7 +1335,6 @@ mod tests {
         forward_events,
     };
     use crate::subagents::AgentOrigin;
-    #[cfg(feature = "agent-messaging")]
     use crate::subagents::{
         AgentUpdate, MessageDeliveryState, MessageDisposition, MessagePriority, MessagePurpose,
     };
@@ -1559,7 +1424,6 @@ mod tests {
         session_id
     }
 
-    #[cfg(feature = "agent-messaging")]
     async fn insert_pending_runtime_session(
         registry: &Arc<Registry>,
         root_session_id: &str,
@@ -1574,7 +1438,6 @@ mod tests {
         (id, session_id)
     }
 
-    #[cfg(feature = "agent-messaging")]
     async fn next_message_update(
         updates: &mut tokio::sync::mpsc::UnboundedReceiver<super::ScopedAgentUpdate>,
     ) -> crate::subagents::AgentMessageUpdate {
@@ -1593,7 +1456,6 @@ mod tests {
         .expect("a message update should arrive")
     }
 
-    #[cfg(feature = "agent-messaging")]
     async fn mark_reusable(registry: &Arc<Registry>, root_session_id: &str, id: AgentId) {
         registry
             .state
@@ -1732,10 +1594,6 @@ mod tests {
                 .all(|summary| summary.status == AgentStatus::Running)
         );
 
-        registry
-            .steer("main", child.id, "report sooner".to_owned())
-            .await
-            .unwrap();
         let interrupted = registry.interrupt("main", parent.id).await.unwrap();
         assert_eq!(
             interrupted
@@ -1764,10 +1622,18 @@ mod tests {
             AgentStatus::Running
         );
 
-        registry
-            .launch_follow_up("main", parent.id, "continue".to_owned())
+        let receipt = registry
+            .send_message(
+                "main",
+                parent.id,
+                MessagePriority::Deferred,
+                MessagePurpose::Delegate,
+                None,
+                "continue".to_owned(),
+            )
             .await
             .unwrap();
+        assert_eq!(receipt.disposition, MessageDisposition::Started);
         timeout(Duration::from_secs(5), parent_called.notified())
             .await
             .unwrap();
@@ -1783,7 +1649,7 @@ mod tests {
                 (&parent.id, &AgentStatus::Closed),
             ]
         );
-        assert_eq!(registry.list("main").await.unwrap().len(), 3);
+        assert_eq!(registry.directory("main", true, false).await.len(), 3);
 
         let all_closed = registry.close_all("main").await.unwrap();
         assert_eq!(all_closed.len(), 3);
@@ -1803,7 +1669,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "agent-messaging")]
     #[tokio::test]
     async fn same_root_agents_can_message_across_sibling_branches() {
         let (registry, _control, mut updates) = super::channel(32);
@@ -1846,7 +1711,6 @@ mod tests {
         registry.close_all("main").await.unwrap();
     }
 
-    #[cfg(feature = "agent-messaging")]
     #[tokio::test]
     async fn pending_agents_cannot_receive_messages_before_their_initial_turn() {
         let (registry, _control, _updates) = super::channel(32);
@@ -1871,7 +1735,6 @@ mod tests {
         registry.close_all("main").await.unwrap();
     }
 
-    #[cfg(feature = "agent-messaging")]
     #[tokio::test]
     async fn sibling_messages_cannot_take_management_authority() {
         let (registry, _control, _updates) = super::channel(32);
@@ -1896,9 +1759,8 @@ mod tests {
         registry.close_all("main").await.unwrap();
     }
 
-    #[cfg(feature = "agent-messaging")]
     #[tokio::test]
-    async fn delegate_messages_replace_prompt_agent_for_descendants() {
+    async fn delegate_messages_replace_assigned_tasks_for_descendants() {
         let (registry, _control, _updates) = super::channel(32);
         let (parent, parent_session) =
             insert_pending_runtime_session(&registry, "main", None, Arc::new(Notify::new())).await;
@@ -1939,7 +1801,6 @@ mod tests {
         registry.close_all("main").await.unwrap();
     }
 
-    #[cfg(feature = "agent-messaging")]
     #[tokio::test]
     async fn urgent_messages_steer_running_agents() {
         let (registry, _control, _updates) = super::channel(32);
@@ -1978,7 +1839,6 @@ mod tests {
         registry.close_all("main").await.unwrap();
     }
 
-    #[cfg(feature = "agent-messaging")]
     #[tokio::test]
     async fn interruption_marks_queued_messages_as_failed() {
         let (registry, _control, mut updates) = super::channel(32);
@@ -2027,7 +1887,6 @@ mod tests {
         registry.close_all("main").await.unwrap();
     }
 
-    #[cfg(feature = "agent-messaging")]
     #[tokio::test]
     async fn queued_delegation_changes_the_task_only_when_delivery_starts() {
         let (registry, _control, _updates) = super::channel(32);
@@ -2075,7 +1934,6 @@ mod tests {
         registry.close_all("main").await.unwrap();
     }
 
-    #[cfg(feature = "agent-messaging")]
     #[tokio::test]
     async fn message_priorities_have_independent_mailbox_bounds() {
         let (registry, _control, _updates) = super::channel(0);
@@ -2141,7 +1999,6 @@ mod tests {
         registry.close_all("main").await.unwrap();
     }
 
-    #[cfg(feature = "agent-messaging")]
     #[tokio::test]
     async fn messages_do_not_cross_root_scopes() {
         let (registry, _control, _updates) = super::channel(32);
@@ -2262,7 +2119,6 @@ mod tests {
         assert_eq!(registry.summaries("main", &[child.id]).unwrap().len(), 1);
     }
 
-    #[cfg(feature = "agent-messaging")]
     #[tokio::test]
     async fn directory_separates_same_tree_messaging_from_management() {
         let mut registry = RegistryState::default();

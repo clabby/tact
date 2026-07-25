@@ -71,19 +71,6 @@ impl TaskTree {
         Ok(())
     }
 
-    #[cfg(any(not(feature = "agent-messaging"), test))]
-    pub(super) fn visible_ids(&self, session_id: &str) -> Vec<AgentId> {
-        let caller = self.agent_for_session(session_id);
-        let mut ids = self
-            .nodes
-            .keys()
-            .copied()
-            .filter(|id| caller.is_none_or(|caller| self.is_descendant(*id, caller)))
-            .collect::<Vec<_>>();
-        ids.sort_unstable();
-        ids
-    }
-
     pub(super) fn ids(&self) -> Vec<AgentId> {
         self.nodes.keys().copied().collect()
     }
@@ -151,15 +138,14 @@ mod tests {
     }
 
     #[test]
-    fn sessions_resolve_to_agents_and_visible_descendants() {
+    fn sessions_resolve_to_agents() {
         let mut tree = TaskTree::default();
         let parent = insert(&mut tree, "parent", None);
         let child = insert(&mut tree, "child", Some(parent));
-        let sibling = insert(&mut tree, "sibling", None);
+        insert(&mut tree, "sibling", None);
 
         assert_eq!(tree.agent_for_session("child"), Some(child));
-        assert_eq!(tree.visible_ids("parent"), [child]);
-        assert_eq!(tree.visible_ids("root"), [parent, child, sibling]);
+        assert_eq!(tree.agent_for_session("parent"), Some(parent));
     }
 
     #[test]

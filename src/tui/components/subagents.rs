@@ -42,10 +42,7 @@ const TRANSCRIPT_KEYS: [&str; 4] = [
     "ctrl+o expand all",
     "esc back",
 ];
-#[cfg(feature = "agent-messaging")]
 const FOCUSED_ENTRY_KEYS: [&str; 3] = ["↑↓ item", "enter toggle", "esc blur, then back"];
-#[cfg(not(feature = "agent-messaging"))]
-const FOCUSED_ENTRY_KEYS: [&str; 3] = ["↑↓ tool", "enter toggle", "esc blur, then back"];
 
 struct AgentNode {
     descriptor: AgentDescriptor,
@@ -793,11 +790,7 @@ mod tests {
         assert!(expanded.contains("▼"), "{expanded}");
         assert!(expanded.contains("Can you verify the event ordering?"));
         assert!(expanded.contains("thread #1 · 2 messages"));
-        assert!(expanded.contains(if cfg!(feature = "agent-messaging") {
-            "↑↓ item"
-        } else {
-            "↑↓ tool"
-        }));
+        assert!(expanded.contains("↑↓ item"));
     }
 
     #[test]
@@ -1002,11 +995,7 @@ mod tests {
 
         focus_tool(&mut tree);
         let focused = rendered_text(&render_transcript(&mut tree));
-        assert!(focused.contains(if cfg!(feature = "agent-messaging") {
-            "↑↓ item"
-        } else {
-            "↑↓ tool"
-        }));
+        assert!(focused.contains("↑↓ item"));
         assert!(focused.contains("enter toggle"));
         assert!(focused.contains("esc blur, then back"));
         assert!(!focused.contains("pgup/pgdn scroll"));

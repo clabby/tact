@@ -1,4 +1,3 @@
-#[cfg(feature = "agent-messaging")]
 use super::{
     message::MAX_MESSAGE_BYTES,
     model::{MessageId, MessagePriority, MessagePurpose},
@@ -30,34 +29,11 @@ struct AgentTask {
     task: String,
 }
 
-#[cfg(not(feature = "agent-messaging"))]
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct FollowUpTask {
-    agent_id: AgentId,
-    task: String,
-}
-
-#[cfg(not(feature = "agent-messaging"))]
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SteerTask {
-    agent_id: AgentId,
-    message: String,
-}
-
 #[derive(Serialize)]
 struct AgentStartReport {
     agent_id: AgentId,
     kind: &'static str,
     role: String,
-    status: AgentStatus,
-}
-
-#[cfg(not(feature = "agent-messaging"))]
-#[derive(Serialize)]
-struct PromptAccepted {
-    agent_id: AgentId,
     status: AgentStatus,
 }
 
@@ -75,18 +51,6 @@ struct TargetAgent {
     agent_id: AgentId,
 }
 
-#[cfg(not(feature = "agent-messaging"))]
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct EmptyTask {}
-
-#[cfg(not(feature = "agent-messaging"))]
-#[derive(Serialize)]
-struct AgentList {
-    agents: Vec<AgentSummary>,
-}
-
-#[cfg(feature = "agent-messaging")]
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DirectoryTask {
@@ -96,13 +60,11 @@ struct DirectoryTask {
     include_self: bool,
 }
 
-#[cfg(feature = "agent-messaging")]
 #[derive(Serialize)]
 struct AgentDirectory {
     agents: Vec<AgentDirectoryEntry>,
 }
 
-#[cfg(feature = "agent-messaging")]
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SendMessageTask {
@@ -220,111 +182,10 @@ impl Tool for StartAgent {
     }
 }
 
-#[cfg(not(feature = "agent-messaging"))]
-struct PromptAgent {
-    registry: Weak<Registry>,
-}
-
-#[cfg(not(feature = "agent-messaging"))]
-#[async_trait]
-impl Tool for PromptAgent {
-    fn name(&self) -> &'static str {
-        "prompt_agent"
-    }
-
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition::function(
-            self.name(),
-            "Starts a follow-up turn on an idle reusable subagent while preserving its conversation and immediately returns.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "agent_id": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "description": "The agent_id returned by spawn_agent or fork_agent."
-                    },
-                    "task": {
-                        "type": "string",
-                        "description": "The next focused task for that subagent."
-                    }
-                },
-                "required": ["agent_id", "task"],
-                "additionalProperties": false
-            }),
-        )
-    }
-
-    async fn execute(&self, input: ToolInput, context: ToolContext<'_>) -> ToolResult {
-        let FollowUpTask { agent_id, task } = input.decode_json()?;
-        let registry = self
-            .registry
-            .upgrade()
-            .ok_or_else(|| std::io::Error::other("subagent runtime is closed"))?;
-        registry
-            .launch_follow_up(context.session_id, agent_id, task)
-            .await?;
-        Ok(ToolExecution::json(&PromptAccepted {
-            agent_id,
-            status: AgentStatus::Running,
-        }))
-    }
-}
-
-#[cfg(not(feature = "agent-messaging"))]
-struct SteerAgent {
-    registry: Weak<Registry>,
-}
-
-#[cfg(not(feature = "agent-messaging"))]
-#[async_trait]
-impl Tool for SteerAgent {
-    fn name(&self) -> &'static str {
-        "steer_agent"
-    }
-
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition::function(
-            self.name(),
-            "Urgently steers a running subagent at its next safe model boundary without interrupting or replacing its current turn.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "agent_id": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "description": "The running agent to steer."
-                    },
-                    "message": {
-                        "type": "string",
-                        "description": "The urgent instruction to inject into the current turn."
-                    }
-                },
-                "required": ["agent_id", "message"],
-                "additionalProperties": false
-            }),
-        )
-    }
-
-    async fn execute(&self, input: ToolInput, context: ToolContext<'_>) -> ToolResult {
-        let SteerTask { agent_id, message } = input.decode_json()?;
-        let registry = self
-            .registry
-            .upgrade()
-            .ok_or_else(|| std::io::Error::other("subagent runtime is closed"))?;
-        let agent = registry
-            .steer(context.session_id, agent_id, message)
-            .await?;
-        Ok(ToolExecution::json(&agent))
-    }
-}
-
-#[cfg(feature = "agent-messaging")]
 struct SendAgentMessage {
     registry: Weak<Registry>,
 }
 
-#[cfg(feature = "agent-messaging")]
 #[async_trait]
 impl Tool for SendAgentMessage {
     fn name(&self) -> &'static str {
@@ -410,8 +271,7 @@ impl Tool for ListAgents {
     }
 
     fn definition(&self) -> ToolDefinition {
-        #[cfg(feature = "agent-messaging")]
-        return ToolDefinition::function(
+        ToolDefinition::function(
             self.name(),
             "Lists a compact directory of agents in the same task tree. Active recipients are returned by default; completed agents can be included when a follow-up message is needed.",
             json!({
@@ -430,49 +290,23 @@ impl Tool for ListAgents {
                 },
                 "additionalProperties": false
             }),
-        );
-
-        #[cfg(not(feature = "agent-messaging"))]
-        ToolDefinition::function(
-            self.name(),
-            "Lists every subagent visible to the current session, including completed, interrupted, failed, and closed agents.",
-            json!({
-                "type": "object",
-                "properties": {},
-                "additionalProperties": false
-            }),
         )
     }
 
     async fn execute(&self, input: ToolInput, context: ToolContext<'_>) -> ToolResult {
-        #[cfg(feature = "agent-messaging")]
-        {
-            let DirectoryTask {
-                include_completed,
-                include_self,
-            } = input.decode_json()?;
-            let registry = self
-                .registry
-                .upgrade()
-                .ok_or_else(|| std::io::Error::other("subagent runtime is closed"))?;
-            return Ok(ToolExecution::json(&AgentDirectory {
-                agents: registry
-                    .directory(context.session_id, include_completed, include_self)
-                    .await,
-            }));
-        }
-
-        #[cfg(not(feature = "agent-messaging"))]
-        {
-            let EmptyTask {} = input.decode_json()?;
-            let registry = self
-                .registry
-                .upgrade()
-                .ok_or_else(|| std::io::Error::other("subagent runtime is closed"))?;
-            Ok(ToolExecution::json(&AgentList {
-                agents: registry.list(context.session_id).await?,
-            }))
-        }
+        let DirectoryTask {
+            include_completed,
+            include_self,
+        } = input.decode_json()?;
+        let registry = self
+            .registry
+            .upgrade()
+            .ok_or_else(|| std::io::Error::other("subagent runtime is closed"))?;
+        Ok(ToolExecution::json(&AgentDirectory {
+            agents: registry
+                .directory(context.session_id, include_completed, include_self)
+                .await,
+        }))
     }
 }
 
@@ -612,18 +446,9 @@ pub(crate) fn root_tools(
             registry: Arc::downgrade(&registry),
             origin: AgentOrigin::Fork,
         });
-    #[cfg(feature = "agent-messaging")]
     let builder = builder.tool(SendAgentMessage {
         registry: Arc::downgrade(&registry),
     });
-    #[cfg(not(feature = "agent-messaging"))]
-    let builder = builder
-        .tool(PromptAgent {
-            registry: Arc::downgrade(&registry),
-        })
-        .tool(SteerAgent {
-            registry: Arc::downgrade(&registry),
-        });
     builder
         .tool(ListAgents {
             registry: Arc::downgrade(&registry),
@@ -642,7 +467,7 @@ pub(crate) fn root_tools(
         .build()
 }
 
-#[cfg(all(test, feature = "agent-messaging"))]
+#[cfg(test)]
 mod tests {
     use super::SendAgentMessage;
     use crate::subagents::runtime::Registry;

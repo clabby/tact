@@ -2,7 +2,6 @@
 
 mod capacity;
 mod harness;
-#[cfg(any(feature = "agent-messaging", test))]
 mod message;
 mod model;
 mod runtime;

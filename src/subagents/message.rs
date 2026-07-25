@@ -68,7 +68,6 @@ impl MessageThreads {
         thread.clone()
     }
 
-    #[cfg(any(feature = "agent-messaging", test))]
     pub(super) fn mark_admitted(&mut self, id: MessageId, disposition: MessageDisposition) {
         if disposition == MessageDisposition::Queued {
             return;
@@ -77,13 +76,11 @@ impl MessageThreads {
         self.trim_history();
     }
 
-    #[cfg(any(feature = "agent-messaging", test))]
     pub(super) fn mark_terminal(&mut self, id: MessageId) {
         self.pending.remove(&id);
         self.trim_history();
     }
 
-    #[cfg(any(feature = "agent-messaging", test))]
     pub(super) fn thread_for_message(&self, id: MessageId) -> Option<AgentThread> {
         self.thread_by_message
             .get(&id)
@@ -91,7 +88,6 @@ impl MessageThreads {
             .cloned()
     }
 
-    #[cfg(feature = "agent-messaging")]
     pub(super) fn message(&self, id: MessageId) -> Option<AgentMessage> {
         let thread_id = self.thread_by_message.get(&id)?;
         self.threads
@@ -102,7 +98,6 @@ impl MessageThreads {
             .cloned()
     }
 
-    #[cfg(feature = "agent-messaging")]
     pub(super) fn rollback(&mut self, id: MessageId) {
         self.pending.remove(&id);
         self.retained_order.retain(|retained| *retained != id);
@@ -145,7 +140,6 @@ impl MessageThreads {
         Ok(*thread_id)
     }
 
-    #[cfg(any(feature = "agent-messaging", test))]
     fn trim_history(&mut self) {
         while self.retained_order.len() > MAX_RETAINED_MESSAGES {
             let Some(index) = self
@@ -163,7 +157,6 @@ impl MessageThreads {
         }
     }
 
-    #[cfg(any(feature = "agent-messaging", test))]
     fn remove_message(&mut self, id: MessageId) {
         let Some(thread_id) = self.thread_by_message.remove(&id) else {
             return;

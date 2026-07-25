@@ -35,12 +35,8 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-#[cfg(feature = "agent-messaging")]
 const EXPANDABLE_FOCUS_HINTS: [&str; 2] =
     ["↑↓ item · Enter toggle · Esc back", "↑↓ item · Enter · Esc"];
-#[cfg(not(feature = "agent-messaging"))]
-const EXPANDABLE_FOCUS_HINTS: [&str; 2] =
-    ["↑↓ tool · Enter toggle · Esc back", "↑↓ tool · Enter · Esc"];
 
 pub(crate) enum TranscriptEvent {
     Record(Arc<TranscriptRecord>),
@@ -1738,11 +1734,7 @@ mod tests {
         assert!(transcript.expandables_focused());
         assert!(rendered.contains("▼"));
         assert!(rendered.contains("done"));
-        assert!(rendered.contains(if cfg!(feature = "agent-messaging") {
-            "↑↓ item · Enter toggle · Esc back"
-        } else {
-            "↑↓ tool · Enter toggle · Esc back"
-        }));
+        assert!(rendered.contains("↑↓ item · Enter toggle · Esc back"));
     }
 
     #[test]
