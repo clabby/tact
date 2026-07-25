@@ -251,7 +251,7 @@ fn visible_tail(query: &str, width: usize) -> &str {
 mod tests {
     use super::{Component, SessionPicker, SessionPickerEffect, SessionPickerEvent};
     use crate::{
-        config::{ReasoningEffort, ReasoningMode},
+        app::config::{ReasoningEffort, ReasoningMode},
         tui::session::SessionSummary,
     };
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};

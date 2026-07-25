@@ -1,6 +1,6 @@
 use super::{TranscriptError, record::SCHEMA_VERSION};
 use crate::{
-    config::ReasoningEffort,
+    app::config::ReasoningEffort,
     tui::transcript::{LocalEvent, SessionStarted, TranscriptRecord},
 };
 use nanocodex::AgentEvent;
@@ -469,7 +469,7 @@ mod tests {
         DurableWrite, TranscriptJournal, load, load_matching, load_matching_segment, write_records,
     };
     use crate::{
-        config::{ReasoningEffort, ReasoningMode},
+        app::config::{ReasoningEffort, ReasoningMode},
         tui::transcript::{
             LocalEvent, SessionEnded, SessionOutcome, SessionStarted, TranscriptError, TurnId,
         },

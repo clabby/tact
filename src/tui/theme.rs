@@ -1,6 +1,6 @@
 //! Configurable terminal colors and light/dark mode selection.
 
-use crate::config::ReasoningEffort;
+use crate::app::config::ReasoningEffort;
 use ratatui::style::Color;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use std::{fmt, str::FromStr};

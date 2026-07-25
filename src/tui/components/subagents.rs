@@ -6,8 +6,10 @@ use super::{
     transcript::{Transcript, TranscriptEvent},
 };
 use crate::{
-    config::DEFAULT_MAX_SUBAGENTS,
-    subagents::{AgentDescriptor, AgentId, AgentOrigin, AgentStatus, AgentUpdate},
+    app::config::DEFAULT_MAX_SUBAGENTS,
+    core::extensions::subagents::{
+        AgentDescriptor, AgentId, AgentOrigin, AgentStatus, AgentUpdate, MessageSender,
+    },
     tui::{theme::Theme, transcript::TranscriptRecord},
 };
 use crossterm::event::{Event, KeyCode, KeyEventKind};
@@ -42,7 +44,7 @@ const TRANSCRIPT_KEYS: [&str; 4] = [
     "ctrl+o expand all",
     "esc back",
 ];
-const FOCUSED_TOOL_KEYS: [&str; 3] = ["↑↓ tool", "enter toggle", "esc blur, then back"];
+const FOCUSED_ENTRY_KEYS: [&str; 3] = ["↑↓ item", "enter toggle", "esc blur, then back"];
 
 struct AgentNode {
     descriptor: AgentDescriptor,
@@ -112,12 +114,12 @@ pub(super) struct SubagentTree {
     nodes: Vec<AgentNode>,
     selected: usize,
     filter: AgentFilter,
-    effort: crate::config::ReasoningEffort,
+    effort: crate::app::config::ReasoningEffort,
     max_subagents: usize,
 }
 
 impl SubagentTree {
-    pub(super) const fn new(effort: crate::config::ReasoningEffort) -> Self {
+    pub(super) const fn new(effort: crate::app::config::ReasoningEffort) -> Self {
         Self {
             nodes: Vec::new(),
             selected: 0,
@@ -158,6 +160,28 @@ impl SubagentTree {
                 self.clamp_selection();
                 true
             }
+            AgentUpdate::Message(update) => {
+                let mut projected = false;
+                let mut previous = None;
+                for participant in update.thread.participants {
+                    let MessageSender::Agent { agent_id } = participant else {
+                        continue;
+                    };
+                    if previous == Some(agent_id) {
+                        continue;
+                    }
+                    previous = Some(agent_id);
+                    let Some(node) = self.node_mut(agent_id) else {
+                        continue;
+                    };
+                    node.transcript.update(TranscriptEvent::DirectedMessage {
+                        perspective: participant,
+                        update: update.clone(),
+                    });
+                    projected = true;
+                }
+                projected
+            }
         }
     }
 
@@ -168,7 +192,7 @@ impl SubagentTree {
             .count()
     }
 
-    pub(super) fn set_effort(&mut self, effort: crate::config::ReasoningEffort) {
+    pub(super) fn set_effort(&mut self, effort: crate::app::config::ReasoningEffort) {
         self.effort = effort;
         for node in &mut self.nodes {
             node.transcript.component_mut().set_effort(effort);
@@ -258,8 +282,8 @@ impl SubagentTree {
             let Some(node) = self.node_mut(id) else {
                 return Some(SubagentEffect::Back);
             };
-            if node.transcript.component().tools_focused() {
-                node.transcript.update(TranscriptEvent::BlurTools);
+            if node.transcript.component().expandables_focused() {
+                node.transcript.update(TranscriptEvent::BlurExpandables);
                 return None;
             }
             return Some(SubagentEffect::Back);
@@ -272,8 +296,8 @@ impl SubagentTree {
         }
         if let Some(command) = node.transcript.component().scroll_command(&event) {
             node.transcript.update(TranscriptEvent::Scroll(command));
-        } else if let Some(command) = node.transcript.component().tool_command(&event) {
-            node.transcript.update(TranscriptEvent::Tool(command));
+        } else if let Some(command) = node.transcript.component().expandable_command(&event) {
+            node.transcript.update(TranscriptEvent::Expandable(command));
         }
         None
     }
@@ -403,8 +427,8 @@ impl SubagentTree {
         let title = format!("{} · #{}", node.descriptor.role, node.descriptor.id);
         let width = area.width.saturating_mul(4) / 5;
         let height = area.height.saturating_mul(4) / 5;
-        let keys: &[&str] = if node.transcript.component().tools_focused() {
-            &FOCUSED_TOOL_KEYS
+        let keys: &[&str] = if node.transcript.component().expandables_focused() {
+            &FOCUSED_ENTRY_KEYS
         } else {
             &TRANSCRIPT_KEYS
         };
@@ -547,8 +571,10 @@ fn unix_time_ms() -> u64 {
 mod tests {
     use super::{SubagentEffect, SubagentTree};
     use crate::{
-        config::ReasoningEffort,
-        subagents::{AgentDescriptor, AgentId, AgentOrigin, AgentStatus, AgentUpdate},
+        app::config::ReasoningEffort,
+        core::extensions::subagents::{
+            AgentDescriptor, AgentId, AgentMessageUpdate, AgentOrigin, AgentStatus, AgentUpdate,
+        },
         tui::theme::Theme,
     };
     use crossterm::event::{
@@ -584,13 +610,69 @@ mod tests {
     }
 
     fn render_transcript(tree: &mut SubagentTree) -> TestBackend {
+        render_agent_transcript(tree, AgentId::new(1))
+    }
+
+    fn render_agent_transcript(tree: &mut SubagentTree, id: AgentId) -> TestBackend {
         let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
         terminal
-            .draw(|frame| {
-                tree.render_transcript(AgentId::new(1), frame, frame.area(), &Theme::default());
-            })
+            .draw(|frame| tree.render_transcript(id, frame, frame.area(), &Theme::default()))
             .unwrap();
         terminal.backend().clone()
+    }
+
+    fn message_update(reply: bool) -> AgentUpdate {
+        let messages = if reply {
+            json!([
+                {
+                    "id": 1,
+                    "thread_id": 1,
+                    "from": {"kind": "agent", "agent_id": 1},
+                    "to": 2,
+                    "priority": "deferred",
+                    "purpose": "question",
+                    "body": "Can you verify the event ordering?"
+                },
+                {
+                    "id": 2,
+                    "thread_id": 1,
+                    "from": {"kind": "agent", "agent_id": 2},
+                    "to": 1,
+                    "priority": "deferred",
+                    "purpose": "reply",
+                    "in_reply_to": 1,
+                    "body": "Verified: delivery precedes projection."
+                }
+            ])
+        } else {
+            json!([
+                {
+                    "id": 1,
+                    "thread_id": 1,
+                    "from": {"kind": "agent", "agent_id": 1},
+                    "to": 2,
+                    "priority": "deferred",
+                    "purpose": "question",
+                    "body": "Can you verify the event ordering?"
+                }
+            ])
+        };
+        let message_id = if reply { 2 } else { 1 };
+        AgentUpdate::Message(
+            serde_json::from_value::<AgentMessageUpdate>(json!({
+                "message_id": message_id,
+                "thread": {
+                    "id": 1,
+                    "participants": [
+                        {"kind": "agent", "agent_id": 1},
+                        {"kind": "agent", "agent_id": 2}
+                    ],
+                    "messages": messages
+                },
+                "delivery": {"state": "delivered", "disposition": "started"}
+            }))
+            .unwrap(),
+        )
     }
 
     fn render_tree(tree: &mut SubagentTree) -> TestBackend {
@@ -636,7 +718,18 @@ mod tests {
                 modifiers: KeyModifiers::NONE,
             }),
         );
-        assert!(tree.nodes[0].transcript.component().tools_focused());
+        assert!(tree.nodes[0].transcript.component().expandables_focused());
+    }
+
+    fn second_descriptor() -> AgentDescriptor {
+        AgentDescriptor {
+            id: AgentId::new(2),
+            session_id: "second-session".to_owned(),
+            role: "reviewer".to_owned(),
+            task: "Verify the event ordering".to_owned(),
+            origin: AgentOrigin::Fork,
+            parent: None,
+        }
     }
 
     #[test]
@@ -649,6 +742,57 @@ mod tests {
         assert_eq!(tree.effort, ReasoningEffort::High);
         assert_eq!(tree.active_count(), 1);
         assert!(tree.contains(AgentId::new(1)));
+    }
+
+    #[test]
+    fn directed_messages_are_upserted_into_both_agent_transcripts() {
+        let mut tree = SubagentTree::new(ReasoningEffort::Medium);
+        tree.apply(AgentUpdate::Added(descriptor()));
+        tree.apply(AgentUpdate::Added(second_descriptor()));
+
+        assert!(tree.apply(message_update(false)));
+        assert!(tree.apply(message_update(true)));
+
+        let sender = rendered_text(&render_agent_transcript(&mut tree, AgentId::new(1)));
+        let recipient = rendered_text(&render_agent_transcript(&mut tree, AgentId::new(2)));
+        assert!(sender.contains("← Message  #2 → you"));
+        assert!(recipient.contains("→ Message  you → #1"));
+        assert!(sender.contains("2 messages"));
+        assert!(recipient.contains("2 messages"));
+        assert_eq!(sender.matches('▶').count(), 1);
+        assert_eq!(recipient.matches('▶').count(), 1);
+    }
+
+    #[test]
+    fn directed_message_threads_share_inline_focus_and_expansion() {
+        let mut tree = SubagentTree::new(ReasoningEffort::Medium);
+        tree.apply(AgentUpdate::Added(descriptor()));
+        tree.apply(AgentUpdate::Added(second_descriptor()));
+        tree.apply(message_update(true));
+        let collapsed = render_agent_transcript(&mut tree, AgentId::new(1));
+        let row = collapsed
+            .buffer()
+            .content
+            .chunks(100)
+            .position(|row| row.iter().any(|cell| cell.symbol() == "▶"))
+            .expect("message summary should render");
+
+        tree.update_transcript(
+            AgentId::new(1),
+            Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 20,
+                row: u16::try_from(row).unwrap(),
+                modifiers: KeyModifiers::NONE,
+            }),
+        );
+
+        let expanded = rendered_text(&render_agent_transcript(&mut tree, AgentId::new(1)));
+        assert!(tree.nodes[0].transcript.component().expandables_focused());
+        assert!(expanded.contains("▼"), "{expanded}");
+        assert!(expanded.contains("Can you verify the event ordering?"));
+        assert!(expanded.contains("thread #1 · 2 messages"));
+        assert!(expanded.contains("↑↓ item"));
     }
 
     #[test]
@@ -842,7 +986,7 @@ mod tests {
     }
 
     #[test]
-    fn transcript_footer_reflects_tool_focus_without_permanent_mouse_help() {
+    fn transcript_footer_reflects_expandable_focus_without_permanent_mouse_help() {
         let mut tree = SubagentTree::new(ReasoningEffort::Medium);
         tree.apply(AgentUpdate::Added(descriptor()));
 
@@ -853,7 +997,7 @@ mod tests {
 
         focus_tool(&mut tree);
         let focused = rendered_text(&render_transcript(&mut tree));
-        assert!(focused.contains("↑↓ tool"));
+        assert!(focused.contains("↑↓ item"));
         assert!(focused.contains("enter toggle"));
         assert!(focused.contains("esc blur, then back"));
         assert!(!focused.contains("pgup/pgdn scroll"));
@@ -861,14 +1005,14 @@ mod tests {
     }
 
     #[test]
-    fn escape_blurs_focused_tool_before_returning_to_tree() {
+    fn escape_blurs_focused_item_before_returning_to_tree() {
         let mut tree = SubagentTree::new(ReasoningEffort::Medium);
         tree.apply(AgentUpdate::Added(descriptor()));
         focus_tool(&mut tree);
         let escape = || Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
 
         assert!(tree.update_transcript(AgentId::new(1), escape()).is_none());
-        assert!(!tree.nodes[0].transcript.component().tools_focused());
+        assert!(!tree.nodes[0].transcript.component().expandables_focused());
         assert!(matches!(
             tree.update_transcript(AgentId::new(1), escape()),
             Some(SubagentEffect::Back)

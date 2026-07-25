@@ -1,4 +1,7 @@
-use crate::config::ReasoningEffort;
+use crate::{
+    app::config::ReasoningEffort,
+    core::extensions::subagents::{AgentThread, MessageDeliveryState, MessageId, MessageSender},
+};
 use serde_json::Value;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -7,10 +10,6 @@ pub(crate) struct EntryId(usize);
 impl EntryId {
     pub(super) const fn from_index(index: usize) -> Self {
         Self(index)
-    }
-
-    pub(super) const fn index(self) -> usize {
-        self.0
     }
 }
 
@@ -42,12 +41,35 @@ pub(crate) enum EntryKind {
     Assistant { text: String, complete: bool },
     Reasoning { text: String },
     Tool(ToolEntry),
+    DirectedMessage(DirectedMessageEntry),
     EffortChanged { to: ReasoningEffort },
     FastModeChanged { enabled: bool },
     Interrupted { count: usize },
     ContextCompacted { duration_ns: u64 },
     ContextCompactionFailed { message: String },
     Error { message: String },
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct DirectedMessageEntry {
+    pub(crate) perspective: MessageSender,
+    pub(crate) thread: AgentThread,
+    pub(crate) deliveries: Vec<MessageDelivery>,
+}
+
+impl DirectedMessageEntry {
+    pub(crate) fn delivery(&self, message_id: MessageId) -> Option<&MessageDeliveryState> {
+        self.deliveries
+            .iter()
+            .find(|delivery| delivery.message_id == message_id)
+            .map(|delivery| &delivery.state)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct MessageDelivery {
+    pub(crate) message_id: MessageId,
+    pub(crate) state: MessageDeliveryState,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]

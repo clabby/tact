@@ -8,7 +8,7 @@ use super::{
     waved_text::WavedText,
 };
 use crate::{
-    config::{ReasoningEffort, ReasoningMode},
+    app::config::{ReasoningEffort, ReasoningMode},
     tui::{context::MODEL_WINDOW_TOKENS, format::shorten_home, prompt::Submission, theme::Theme},
 };
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -1014,7 +1014,7 @@ fn render_draft_line(
 mod tests {
     use super::{Composer, ComposerEffect, ComposerEvent, context_percent, is_development_build};
     use crate::{
-        config::{ReasoningEffort, ReasoningMode},
+        app::config::{ReasoningEffort, ReasoningMode},
         tui::theme::Theme,
     };
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};

@@ -1,0 +1,12 @@
+//! Application boundaries for configuration, authentication, and command dispatch.
+
+mod auth;
+pub(crate) mod browser;
+mod cli;
+pub(crate) mod config;
+pub(crate) mod error;
+mod secret;
+mod shutdown;
+pub(crate) mod update;
+
+pub(crate) use cli::Cli;

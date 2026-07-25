@@ -2,12 +2,28 @@
 
 #![allow(dead_code, unused_imports)]
 
-#[path = "../config.rs"]
-mod config;
-#[path = "../error.rs"]
-mod error;
-#[path = "../subagents.rs"]
-mod subagents;
+#[path = "../app/config.rs"]
+pub(crate) mod config;
+#[path = "../app/error.rs"]
+pub(crate) mod error;
+#[path = "../core/extensions/subagents/model.rs"]
+mod subagent_model;
+
+mod app {
+    pub(crate) use crate::{config, error};
+}
+
+mod core {
+    pub(crate) mod extensions {
+        pub(crate) mod subagents {
+            pub(crate) use crate::subagent_model::{
+                AgentDescriptor, AgentId, AgentMessage, AgentMessageUpdate, AgentOrigin,
+                AgentStatus, AgentThread, AgentUpdate, MessageDeliveryState, MessageDisposition,
+                MessageId, MessagePriority, MessagePurpose, MessageSender, ThreadId,
+            };
+        }
+    }
+}
 
 #[path = "components/mod.rs"]
 mod components;

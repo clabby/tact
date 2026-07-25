@@ -6,7 +6,8 @@ mod model;
 mod record;
 
 pub(crate) use entry::{
-    EntryId, EntryKind, MessagePhase, ToolEntry, ToolState, TranscriptEntry, TransientStatus,
+    DirectedMessageEntry, EntryId, EntryKind, MessageDelivery, MessagePhase, ToolEntry, ToolState,
+    TranscriptEntry, TransientStatus,
 };
 #[cfg(test)]
 pub(crate) use journal::load;

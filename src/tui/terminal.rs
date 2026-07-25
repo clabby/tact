@@ -263,7 +263,7 @@ mod tests {
         reset_after_resume, restore_commands,
     };
     use crate::{
-        config::ReasoningEffort,
+        app::config::ReasoningEffort,
         tui::{
             components::{AppNode, RootNode},
             theme::Theme,

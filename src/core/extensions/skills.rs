@@ -1,6 +1,6 @@
 //! Bounded discovery and model-facing metadata for local filesystem skills.
 
-use crate::config::SkillsConfig;
+use crate::app::config::SkillsConfig;
 use serde::Deserialize;
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -656,7 +656,7 @@ mod tests {
         CATALOG_END_MARKER, CATALOG_START_MARKER, DiagnosticCollector, MAX_DIAGNOSTICS,
         MAX_RENDERED_BYTES, SkillCatalog, SkillDiagnostic, contains_catalog,
     };
-    use crate::config::SkillsConfig;
+    use crate::app::config::SkillsConfig;
     use std::{fs, path::Path};
     use tempfile::tempdir;
 

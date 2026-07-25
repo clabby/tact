@@ -3,22 +3,12 @@
 
 //! Binary entry point and top-level diagnostic reporting.
 
-mod auth;
-mod browser;
-mod cli;
-mod config;
+mod app;
 mod core;
-mod error;
-mod mcp;
-mod secret;
-mod shutdown;
-mod skills;
-mod subagents;
 mod tui;
-mod update;
 
+use app::Cli;
 use clap::Parser;
-use cli::Cli;
 use miette::{Report, Result};
 
 #[tokio::main]

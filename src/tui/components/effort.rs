@@ -4,7 +4,7 @@ use super::{
     floating::Floating,
     node::{Component, ComponentUpdate, RenderRequest},
 };
-use crate::{config::ReasoningEffort, tui::theme::Theme};
+use crate::{app::config::ReasoningEffort, tui::theme::Theme};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind};
 use ratatui::{
     Frame,
@@ -363,7 +363,7 @@ mod tests {
         ANIMATION_DURATION, ANIMATION_FRAME_INTERVAL, Component, EffortEffect, EffortEvent,
         EffortSelector,
     };
-    use crate::{config::ReasoningEffort, tui::theme::Theme};
+    use crate::{app::config::ReasoningEffort, tui::theme::Theme};
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use ratatui::{Terminal, backend::TestBackend, style::Color};
     use std::time::{Duration, Instant};

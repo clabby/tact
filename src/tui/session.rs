@@ -1,7 +1,7 @@
 //! Resumable Nanocodex checkpoints and transcript-derived session discovery.
 
 use crate::{
-    config::{ReasoningEffort, ReasoningMode},
+    app::config::{ReasoningEffort, ReasoningMode},
     tui::{
         context::{ApiEventProjection, api_event_projection, outbound_context_snapshot},
         transcript::{self, LocalEvent, SessionStarted, TranscriptRecord},
@@ -985,7 +985,7 @@ mod tests {
         transcript_paths, transcript_projection_path, write_transcript_projection,
     };
     use crate::{
-        config::{ReasoningEffort, ReasoningMode},
+        app::config::{ReasoningEffort, ReasoningMode},
         tui::transcript::{LocalEvent, SessionStarted, TranscriptJournal, TurnId},
     };
     use nanocodex::{AgentEvent, AgentEventKind, SessionSnapshot};

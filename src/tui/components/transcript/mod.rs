@@ -4,11 +4,13 @@ mod diff;
 mod empty;
 mod highlight;
 mod markdown;
+mod message;
 mod tool;
 
 use super::node::{Component, ComponentUpdate, RenderRequest};
 use crate::{
-    config::ReasoningEffort,
+    app::config::ReasoningEffort,
+    core::extensions::subagents::{AgentMessageUpdate, MessageSender},
     tui::{
         format::{duration_display_tick, format_duration},
         spinner::Spinner,
@@ -33,13 +35,20 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+const EXPANDABLE_FOCUS_HINTS: [&str; 2] =
+    ["↑↓ item · Enter toggle · Esc back", "↑↓ item · Enter · Esc"];
+
 pub(crate) enum TranscriptEvent {
     Record(Arc<TranscriptRecord>),
+    DirectedMessage {
+        perspective: MessageSender,
+        update: AgentMessageUpdate,
+    },
     AgentStreamClosed,
     Scroll(ScrollCommand),
     FollowTail,
-    BlurTools,
-    Tool(ToolCommand),
+    BlurExpandables,
+    Expandable(ExpandableCommand),
     ToggleExpandAll,
     AnimationFrame(Instant),
 }
@@ -60,12 +69,12 @@ pub(crate) struct Transcript {
     new_updates: u64,
     tool_spinner: Option<Spinner>,
     running_tool_timers: HashMap<EntryId, RunningToolTimer>,
-    tools_focused: bool,
-    selected_tool: Option<EntryId>,
-    tool_hits: Vec<ToolHitRegion>,
+    expandables_focused: bool,
+    selected_expandable: Option<EntryId>,
+    expandable_hits: Vec<ExpandableHitRegion>,
     link_hits: Vec<LinkHitRegion>,
     transcript_y: u16,
-    pending_tool_anchor: Option<PendingToolAnchor>,
+    pending_expandable_anchor: Option<PendingExpandableAnchor>,
     empty_logo: EmptyLogo,
     effort: ReasoningEffort,
 }
@@ -107,7 +116,7 @@ struct Anchor {
 }
 
 #[derive(Clone, Copy)]
-struct ToolHitRegion {
+struct ExpandableHitRegion {
     entry: EntryId,
     row: u16,
 }
@@ -120,7 +129,7 @@ struct LinkHitRegion {
 }
 
 #[derive(Clone, Copy)]
-enum PendingToolAnchor {
+enum PendingExpandableAnchor {
     Reveal(EntryId),
     Preserve { entry: EntryId, row: u16 },
 }
@@ -148,7 +157,7 @@ impl RunningToolTimer {
 }
 
 #[derive(Clone, Copy)]
-pub(super) enum ToolCommand {
+pub(super) enum ExpandableCommand {
     Previous,
     Next,
     Toggle,
@@ -181,12 +190,12 @@ impl Transcript {
             new_updates: 0,
             tool_spinner: None,
             running_tool_timers: HashMap::new(),
-            tools_focused: false,
-            selected_tool: None,
-            tool_hits: Vec::new(),
+            expandables_focused: false,
+            selected_expandable: None,
+            expandable_hits: Vec::new(),
             link_hits: Vec::new(),
             transcript_y: 0,
-            pending_tool_anchor: None,
+            pending_expandable_anchor: None,
             empty_logo: EmptyLogo::new(Instant::now()),
             effort,
         }
@@ -241,6 +250,48 @@ impl Transcript {
             RenderRequest::Streaming
         };
         ComponentUpdate { effects, render }
+    }
+
+    fn update_message(
+        &mut self,
+        perspective: MessageSender,
+        update: AgentMessageUpdate,
+    ) -> ComponentUpdate<TranscriptEffect> {
+        let change = self.model.apply_message(perspective, update);
+        if let Some(id) = change.removed {
+            self.forget_entry(id);
+        }
+        if !change.changed {
+            return ComponentUpdate::none();
+        }
+        if matches!(self.scroll, ScrollState::Detached(_)) {
+            self.new_updates = self.new_updates.saturating_add(1);
+        }
+        ComponentUpdate::render(RenderRequest::Immediate)
+    }
+
+    fn forget_entry(&mut self, id: EntryId) {
+        self.cache.forget(id);
+        self.running_tool_timers.remove(&id);
+        self.expandable_hits.retain(|hit| hit.entry != id);
+        if self.selected_expandable == Some(id) {
+            self.selected_expandable = None;
+        }
+        if self.last_top.is_some_and(|anchor| anchor.entry == id) {
+            self.last_top = None;
+        }
+        if matches!(self.scroll, ScrollState::Detached(anchor) if anchor.entry == id) {
+            self.scroll = ScrollState::Follow;
+        }
+        if matches!(
+            self.pending_expandable_anchor,
+            Some(PendingExpandableAnchor::Reveal(entry)) if entry == id
+        ) || matches!(
+            self.pending_expandable_anchor,
+            Some(PendingExpandableAnchor::Preserve { entry, .. }) if entry == id
+        ) {
+            self.pending_expandable_anchor = None;
+        }
     }
 
     fn agent_stream_closed(&mut self) -> ComponentUpdate<TranscriptEffect> {
@@ -345,21 +396,21 @@ impl Transcript {
         Some(command)
     }
 
-    pub(super) fn tool_command(&self, event: &Event) -> Option<ToolCommand> {
+    pub(super) fn expandable_command(&self, event: &Event) -> Option<ExpandableCommand> {
         match event {
             Event::Mouse(mouse) if mouse.kind == MouseEventKind::Down(MouseButton::Left) => self
-                .tool_hits
+                .expandable_hits
                 .iter()
                 .any(|hit| hit.row == mouse.row)
-                .then_some(ToolCommand::Click { row: mouse.row }),
+                .then_some(ExpandableCommand::Click { row: mouse.row }),
             Event::Key(key)
-                if self.tools_focused
+                if self.expandables_focused
                     && matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
             {
                 match key.code {
-                    KeyCode::Up => Some(ToolCommand::Previous),
-                    KeyCode::Down => Some(ToolCommand::Next),
-                    KeyCode::Enter => Some(ToolCommand::Toggle),
+                    KeyCode::Up => Some(ExpandableCommand::Previous),
+                    KeyCode::Down => Some(ExpandableCommand::Next),
+                    KeyCode::Enter => Some(ExpandableCommand::Toggle),
                     _ => None,
                 }
             }
@@ -380,8 +431,8 @@ impl Transcript {
             .map(|hit| Arc::clone(&hit.destination))
     }
 
-    pub(super) const fn tools_focused(&self) -> bool {
-        self.tools_focused
+    pub(super) const fn expandables_focused(&self) -> bool {
+        self.expandables_focused
     }
 
     fn update_scroll(&mut self, command: ScrollCommand) -> ComponentUpdate<TranscriptEffect> {
@@ -402,89 +453,92 @@ impl Transcript {
         }
     }
 
-    fn blur_tools(&mut self) -> ComponentUpdate<TranscriptEffect> {
-        if !self.tools_focused {
+    fn blur_expandables(&mut self) -> ComponentUpdate<TranscriptEffect> {
+        if !self.expandables_focused {
             return ComponentUpdate::none();
         }
-        self.tools_focused = false;
+        self.expandables_focused = false;
         ComponentUpdate::render(RenderRequest::Immediate)
     }
 
     #[cfg(test)]
-    pub(super) fn focus_tools(&mut self) -> ComponentUpdate<TranscriptEffect> {
-        self.tools_focused = true;
-        if self.selected_tool.is_none() {
-            self.selected_tool = self.tool_hits.last().map(|hit| hit.entry);
+    pub(super) fn focus_expandables(&mut self) -> ComponentUpdate<TranscriptEffect> {
+        self.expandables_focused = true;
+        if self.selected_expandable.is_none() {
+            self.selected_expandable = self.expandable_hits.last().map(|hit| hit.entry);
         }
         ComponentUpdate::render(RenderRequest::Immediate)
     }
 
-    fn update_tool(&mut self, command: ToolCommand) -> ComponentUpdate<TranscriptEffect> {
+    fn update_expandable(
+        &mut self,
+        command: ExpandableCommand,
+    ) -> ComponentUpdate<TranscriptEffect> {
         match command {
-            ToolCommand::Previous => self.select_tool(-1),
-            ToolCommand::Next => self.select_tool(1),
-            ToolCommand::Toggle => self.toggle_selected_tool(),
-            ToolCommand::Click { row } => {
+            ExpandableCommand::Previous => self.select_expandable(-1),
+            ExpandableCommand::Next => self.select_expandable(1),
+            ExpandableCommand::Toggle => self.toggle_selected_expandable(),
+            ExpandableCommand::Click { row } => {
                 let Some(entry) = self
-                    .tool_hits
+                    .expandable_hits
                     .iter()
                     .find(|hit| hit.row == row)
                     .map(|hit| hit.entry)
                 else {
                     return ComponentUpdate::none();
                 };
-                self.tools_focused = true;
-                self.selected_tool = Some(entry);
-                self.toggle_selected_tool()
+                self.expandables_focused = true;
+                self.selected_expandable = Some(entry);
+                self.toggle_selected_expandable()
             }
         }
     }
 
-    fn select_tool(&mut self, direction: i32) -> ComponentUpdate<TranscriptEffect> {
+    fn select_expandable(&mut self, direction: i32) -> ComponentUpdate<TranscriptEffect> {
         let entries = self.model.entries();
         let selected = self
-            .selected_tool
+            .selected_expandable
             .and_then(|selected| self.model.index_of(selected));
         let next = if direction < 0 {
             let end = selected.unwrap_or(entries.len());
             entries[..end]
                 .iter()
                 .rev()
-                .find(|entry| !entry.hidden && matches!(entry.kind, EntryKind::Tool(_)))
+                .find(|entry| !entry.hidden && is_expandable(entry))
         } else if let Some(selected) = selected {
             entries[selected.saturating_add(1)..]
                 .iter()
-                .find(|entry| !entry.hidden && matches!(entry.kind, EntryKind::Tool(_)))
+                .find(|entry| !entry.hidden && is_expandable(entry))
         } else {
             entries
                 .iter()
                 .rev()
-                .find(|entry| !entry.hidden && matches!(entry.kind, EntryKind::Tool(_)))
+                .find(|entry| !entry.hidden && is_expandable(entry))
         };
         let Some(selected) = next.map(|entry| entry.id) else {
             return ComponentUpdate::none();
         };
-        self.selected_tool = Some(selected);
-        if !self.tool_hits.iter().any(|hit| hit.entry == selected) {
-            self.pending_tool_anchor = Some(PendingToolAnchor::Reveal(selected));
+        self.selected_expandable = Some(selected);
+        if !self.expandable_hits.iter().any(|hit| hit.entry == selected) {
+            self.pending_expandable_anchor = Some(PendingExpandableAnchor::Reveal(selected));
         }
         ComponentUpdate::render(RenderRequest::Immediate)
     }
 
-    fn toggle_selected_tool(&mut self) -> ComponentUpdate<TranscriptEffect> {
-        let Some(entry_id) = self.selected_tool else {
+    fn toggle_selected_expandable(&mut self) -> ComponentUpdate<TranscriptEffect> {
+        let Some(entry_id) = self.selected_expandable else {
             return ComponentUpdate::none();
         };
         let Some(entry_index) = self.model.index_of(entry_id) else {
             return ComponentUpdate::none();
         };
         let row = self
-            .tool_hits
+            .expandable_hits
             .iter()
             .find(|hit| hit.entry == entry_id)
             .map_or(0, |hit| hit.row.saturating_sub(self.transcript_y));
         self.cache.toggle(&self.model.entries()[entry_index]);
-        self.pending_tool_anchor = Some(PendingToolAnchor::Preserve {
+        self.pending_expandable_anchor = Some(PendingExpandableAnchor::Preserve {
             entry: entry_id,
             row,
         });
@@ -499,7 +553,7 @@ impl Transcript {
         if width == 0 || height == 0 {
             return RenderPlan::default();
         }
-        self.apply_pending_tool_anchor(width, theme);
+        self.apply_pending_expandable_anchor(width, theme);
         self.apply_pending_scroll(width, height, theme);
         let top = match self.scroll {
             ScrollState::Follow => self.tail_top(width, height, theme),
@@ -533,13 +587,13 @@ impl Transcript {
         }
     }
 
-    fn apply_pending_tool_anchor(&mut self, width: u16, theme: &Theme) {
-        let Some(request) = self.pending_tool_anchor.take() else {
+    fn apply_pending_expandable_anchor(&mut self, width: u16, theme: &Theme) {
+        let Some(request) = self.pending_expandable_anchor.take() else {
             return;
         };
         let (entry, row) = match request {
-            PendingToolAnchor::Reveal(entry) => (entry, 0),
-            PendingToolAnchor::Preserve { entry, row } => (entry, row),
+            PendingExpandableAnchor::Reveal(entry) => (entry, 0),
+            PendingExpandableAnchor::Preserve { entry, row } => (entry, row),
         };
         let anchor = Anchor { entry, line: 0 };
         let (top, _) = self.move_anchor(anchor, -i32::from(row), width, theme);
@@ -811,7 +865,20 @@ fn is_running_tool(entry: &TranscriptEntry) -> bool {
     )
 }
 
+fn is_expandable(entry: &TranscriptEntry) -> bool {
+    matches!(
+        entry.kind,
+        EntryKind::Tool(_) | EntryKind::DirectedMessage(_)
+    )
+}
+
 impl LayoutCache {
+    fn forget(&mut self, id: EntryId) {
+        self.entries.remove(&id);
+        self.live_tool_durations.remove(&id);
+        self.expansion_overrides.remove(&id);
+    }
+
     fn layout(&mut self, entry: &TranscriptEntry, width: u16, theme: &Theme) -> &[Line<'static>] {
         let expanded = self
             .expansion_overrides
@@ -956,11 +1023,15 @@ impl Component for Transcript {
     fn update(&mut self, event: Self::Event) -> ComponentUpdate<Self::Effect> {
         match event {
             TranscriptEvent::Record(record) => self.update_record(record),
+            TranscriptEvent::DirectedMessage {
+                perspective,
+                update,
+            } => self.update_message(perspective, update),
             TranscriptEvent::AgentStreamClosed => self.agent_stream_closed(),
             TranscriptEvent::Scroll(command) => self.update_scroll(command),
             TranscriptEvent::FollowTail => self.follow_tail(),
-            TranscriptEvent::BlurTools => self.blur_tools(),
-            TranscriptEvent::Tool(command) => self.update_tool(command),
+            TranscriptEvent::BlurExpandables => self.blur_expandables(),
+            TranscriptEvent::Expandable(command) => self.update_expandable(command),
             TranscriptEvent::ToggleExpandAll => {
                 self.cache.toggle_all();
                 ComponentUpdate::render(RenderRequest::Immediate)
@@ -972,7 +1043,7 @@ impl Component for Transcript {
     fn render(&mut self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
         self.viewport_height = area.height;
         self.transcript_y = area.y;
-        self.tool_hits.clear();
+        self.expandable_hits.clear();
         self.link_hits.clear();
         Clear.render(area, frame.buffer_mut());
         if self.is_empty() {
@@ -997,14 +1068,17 @@ impl Component for Transcript {
                 }));
             if anchor.line == 0
                 && let Some(entry) = self.model.entry(anchor.entry)
-                && let EntryKind::Tool(tool) = &entry.kind
+                && is_expandable(entry)
             {
-                self.tool_hits.push(ToolHitRegion {
+                self.expandable_hits.push(ExpandableHitRegion {
                     entry: anchor.entry,
                     row: y,
                 });
-                if tool.state == crate::tui::transcript::ToolState::Running
-                    && let Some(spinner) = self.tool_spinner
+                if matches!(
+                    &entry.kind,
+                    EntryKind::Tool(tool)
+                        if tool.state == crate::tui::transcript::ToolState::Running
+                ) && let Some(spinner) = self.tool_spinner
                 {
                     frame.buffer_mut().set_string(
                         area.x.saturating_add(4),
@@ -1015,7 +1089,7 @@ impl Component for Transcript {
                             .add_modifier(Modifier::BOLD),
                     );
                 }
-                if self.tools_focused && self.selected_tool == Some(anchor.entry) {
+                if self.expandables_focused && self.selected_expandable == Some(anchor.entry) {
                     frame.buffer_mut().set_string(
                         area.x,
                         y,
@@ -1028,13 +1102,8 @@ impl Component for Transcript {
             }
             y = y.saturating_add(1);
         }
-        if self.tools_focused {
-            render_top_right_hint(
-                frame,
-                area,
-                &["↑↓ tool · Enter toggle · Esc back", "↑↓ tool · Enter · Esc"],
-                theme.accent(),
-            );
+        if self.expandables_focused {
+            render_top_right_hint(frame, area, &EXPANDABLE_FOCUS_HINTS, theme.accent());
         } else if matches!(self.scroll, ScrollState::Detached(_)) && self.new_updates > 0 {
             let noun = if self.new_updates == 1 {
                 "update"
@@ -1101,6 +1170,9 @@ fn render_entry(
                 tool::render(tool, width, theme)
             };
             layout_without_links(lines)
+        }
+        EntryKind::DirectedMessage(thread) => {
+            layout_without_links(message::render(thread, width, theme, expanded))
         }
         EntryKind::EffortChanged { to } => layout_without_links(vec![Line::from(vec![
             Span::styled("◇ Effort changed to ", Style::default().fg(theme.muted())),
@@ -1200,14 +1272,15 @@ fn line_width(text: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{
-        Anchor, Component, RenderRequest, ScrollCommand, ScrollState, ToolCommand, Transcript,
-        TranscriptEvent, unix_milliseconds,
+        Anchor, Component, ExpandableCommand, RenderRequest, ScrollCommand, ScrollState,
+        Transcript, TranscriptEvent, unix_milliseconds,
     };
     use crate::{
-        config::ReasoningEffort,
+        app::config::ReasoningEffort,
+        core::extensions::subagents::{AgentMessageUpdate, MessageSender},
         tui::{
             theme::Theme,
-            transcript::{LocalEvent, TranscriptRecord, TurnId},
+            transcript::{EntryKind, LocalEvent, TranscriptRecord, TurnId},
         },
     };
     use crossterm::event::{
@@ -1285,6 +1358,34 @@ mod tests {
                 "metadata": null,
             }),
         )));
+    }
+
+    fn directed_message(transcript: &mut Transcript) {
+        let update = serde_json::from_value::<AgentMessageUpdate>(json!({
+            "message_id": 1,
+            "thread": {
+                "id": 1,
+                "participants": [
+                    {"kind": "root"},
+                    {"kind": "agent", "agent_id": 1}
+                ],
+                "messages": [{
+                    "id": 1,
+                    "thread_id": 1,
+                    "from": {"kind": "root"},
+                    "to": 1,
+                    "priority": "deferred",
+                    "purpose": "coordinate",
+                    "body": "verify the ordering"
+                }]
+            },
+            "delivery": {"state": "delivered", "disposition": "started"}
+        }))
+        .unwrap();
+        transcript.update(TranscriptEvent::DirectedMessage {
+            perspective: MessageSender::Root,
+            update,
+        });
     }
 
     fn render(transcript: &mut Transcript, width: u16, height: u16) -> TestBackend {
@@ -1465,7 +1566,7 @@ mod tests {
         assert!(collapsed.contains("▶"));
         assert!(!collapsed.contains("all tests passed"));
 
-        transcript.focus_tools();
+        transcript.focus_expandables();
         let focused = render(&mut transcript, 60, 8);
         assert!(
             focused
@@ -1475,7 +1576,7 @@ mod tests {
                 .any(|cell| cell.symbol() == "›")
         );
 
-        transcript.update(TranscriptEvent::Tool(ToolCommand::Toggle));
+        transcript.update(TranscriptEvent::Expandable(ExpandableCommand::Toggle));
         let expanded = render(&mut transcript, 60, 8);
         let expanded = expanded
             .buffer()
@@ -1486,8 +1587,8 @@ mod tests {
         assert!(expanded.contains("▼"));
         assert!(expanded.contains("all tests passed"));
 
-        transcript.update(TranscriptEvent::BlurTools);
-        assert!(!transcript.tools_focused());
+        transcript.update(TranscriptEvent::BlurExpandables);
+        assert!(!transcript.expandables_focused());
         let blurred = render(&mut transcript, 60, 8);
         assert!(
             blurred
@@ -1496,6 +1597,54 @@ mod tests {
                 .iter()
                 .all(|cell| cell.symbol() != "›")
         );
+    }
+
+    #[test]
+    fn focus_navigation_moves_between_tools_and_message_threads() {
+        let mut transcript = Transcript::new();
+        shell(&mut transcript, 1, "done");
+        directed_message(&mut transcript);
+        drop(render(&mut transcript, 80, 12));
+
+        transcript.focus_expandables();
+        let message = transcript.selected_expandable.unwrap();
+        assert!(matches!(
+            transcript.model.entry(message).unwrap().kind,
+            EntryKind::DirectedMessage(_)
+        ));
+
+        transcript.update(TranscriptEvent::Expandable(ExpandableCommand::Previous));
+        let tool = transcript.selected_expandable.unwrap();
+        assert!(matches!(
+            transcript.model.entry(tool).unwrap().kind,
+            EntryKind::Tool(_)
+        ));
+
+        transcript.update(TranscriptEvent::Expandable(ExpandableCommand::Next));
+        assert_eq!(transcript.selected_expandable, Some(message));
+    }
+
+    #[test]
+    fn expand_all_includes_directed_message_threads() {
+        let mut transcript = Transcript::new();
+        directed_message(&mut transcript);
+
+        let collapsed = render(&mut transcript, 80, 10)
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(!collapsed.contains("thread #1 · 1 message"));
+
+        transcript.update(TranscriptEvent::ToggleExpandAll);
+        let expanded = render(&mut transcript, 80, 10)
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(expanded.contains("thread #1 · 1 message"));
     }
 
     #[test]
@@ -1564,16 +1713,16 @@ mod tests {
         let mut transcript = Transcript::new();
         shell(&mut transcript, 1, "done");
         drop(render(&mut transcript, 60, 8));
-        let row = transcript.tool_hits[0].row;
+        let row = transcript.expandable_hits[0].row;
         let event = Event::Mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: 10,
             row,
             modifiers: KeyModifiers::NONE,
         });
-        let command = transcript.tool_command(&event).unwrap();
+        let command = transcript.expandable_command(&event).unwrap();
 
-        transcript.update(TranscriptEvent::Tool(command));
+        transcript.update(TranscriptEvent::Expandable(command));
         let backend = render(&mut transcript, 60, 8);
         let rendered = backend
             .buffer()
@@ -1582,10 +1731,10 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
 
-        assert!(transcript.tools_focused());
+        assert!(transcript.expandables_focused());
         assert!(rendered.contains("▼"));
         assert!(rendered.contains("done"));
-        assert!(rendered.contains("↑↓ tool · Enter toggle · Esc back"));
+        assert!(rendered.contains("↑↓ item · Enter toggle · Esc back"));
     }
 
     #[test]
@@ -1641,14 +1790,14 @@ mod tests {
             line: 0,
         });
         drop(render(&mut transcript, 60, 10));
-        transcript.focus_tools();
+        transcript.focus_expandables();
         drop(render(&mut transcript, 60, 10));
-        let before = transcript.tool_hits[0].row;
+        let before = transcript.expandable_hits[0].row;
 
-        transcript.update(TranscriptEvent::Tool(ToolCommand::Toggle));
+        transcript.update(TranscriptEvent::Expandable(ExpandableCommand::Toggle));
         drop(render(&mut transcript, 60, 10));
 
-        assert_eq!(transcript.tool_hits[0].row, before);
+        assert_eq!(transcript.expandable_hits[0].row, before);
     }
 
     #[test]

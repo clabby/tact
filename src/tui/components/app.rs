@@ -6,8 +6,8 @@ use super::{
     root::{RestoredSessionProjection, RootEffect, RootEvent, RootNode},
 };
 use crate::{
-    config::{ReasoningEffort, ReasoningMode},
-    subagents::AgentUpdate,
+    app::config::{ReasoningEffort, ReasoningMode},
+    core::extensions::subagents::AgentUpdate,
     tui::{
         pane::PaneId,
         session::SessionSummary,
@@ -605,7 +605,7 @@ fn is_control_c(event: &Event) -> bool {
 mod tests {
     use super::{AppEffect, AppEvent, AppNode, RootEvent, RootNode, SPLIT_HINT};
     use crate::{
-        config::{ReasoningEffort, ReasoningMode},
+        app::config::{ReasoningEffort, ReasoningMode},
         tui::{
             pane::PaneId,
             theme::{ColorScheme, Theme, ThemeMode},

@@ -1,7 +1,7 @@
 //! Independently scheduled Nanocodex turn worker.
 
 use crate::{
-    config::ReasoningEffort,
+    app::config::ReasoningEffort,
     tui::{components::QueueId, pane::PaneId, prompt::Submission, transcript::TurnId},
 };
 use nanocodex::{AgentEvents, Nanocodex, NanocodexError, SessionSnapshot, TurnControl};
@@ -473,7 +473,7 @@ async fn cancel_pane(
 mod tests {
     use super::{WorkerCommand, WorkerEvent, spawn};
     use crate::{
-        config::ReasoningEffort,
+        app::config::ReasoningEffort,
         tui::{components::QueueId, pane::PaneId, transcript::TurnId},
     };
     use nanocodex::{

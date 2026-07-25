@@ -1,4 +1,4 @@
-use crate::config::{ReasoningEffort, ReasoningMode};
+use crate::app::config::{ReasoningEffort, ReasoningMode};
 use nanocodex::{AgentEvent, AgentEventKind};
 use serde::{Deserialize, Serialize};
 use serde_json::value::{RawValue, to_raw_value};
@@ -399,7 +399,7 @@ const fn agent_kind(kind: AgentEventKind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{LocalEvent, SessionStarted, ShellId, TranscriptRecord, TurnId};
-    use crate::config::ReasoningMode;
+    use crate::app::config::ReasoningMode;
     use nanocodex::{AgentEvent, AgentEventKind};
     use serde_json::{json, value::to_raw_value};
     use std::sync::Arc;

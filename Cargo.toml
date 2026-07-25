@@ -62,8 +62,6 @@ criterion = { package = "codspeed-criterion-compat", version = "5.0.1" }
 rstest = "0.26.1"
 tower = "0.5.3"
 
-[features]
-
 [[bin]]
 name = "tact"
 path = "src/main.rs"

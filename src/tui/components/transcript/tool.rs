@@ -2,6 +2,7 @@ mod code;
 mod media;
 mod patch;
 mod plan;
+mod send_message;
 mod shell;
 mod web;
 
@@ -89,6 +90,7 @@ fn present(tool: &ToolEntry, width: u16, theme: &Theme, expanded: bool) -> Prese
     match tool.name.as_str() {
         "exec_command" | "write_stdin" => shell::present(tool, width, theme, expanded),
         "update_plan" => plan::present(tool, width, theme, expanded),
+        "send_agent_message" => send_message::present(tool, width, theme, expanded),
         "apply_patch" => patch::present(tool, width, theme, expanded),
         "web__run" => web::present(tool, width, theme, expanded),
         "view_image" | "image_gen__imagegen" => media::present(tool, width, theme, expanded),

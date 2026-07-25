@@ -19,10 +19,11 @@ pub(crate) mod transcript;
 mod worker;
 
 use crate::{
-    config::{Config, ReasoningEffort, ReasoningMode},
-    core::ConfiguredAgent,
-    error::{Result, RuntimeError},
-    subagents::SubagentControl,
+    app::{
+        config::{Config, ReasoningEffort, ReasoningMode},
+        error::{Result, RuntimeError},
+    },
+    core::{ConfiguredAgent, extensions::subagents::SubagentControl},
     tui::{
         agent_events::ForwardedAgentEvent,
         components::{
@@ -61,7 +62,7 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 type EditorTask =
-    JoinHandle<std::result::Result<EditorCompletion, crate::error::ExternalEditorError>>;
+    JoinHandle<std::result::Result<EditorCompletion, crate::app::error::ExternalEditorError>>;
 type EffortUpdateTask = JoinHandle<Result<EffortUpdate>>;
 type FastModeUpdateTask = JoinHandle<Result<FastModeUpdate>>;
 type NewSessionTask = JoinHandle<(
@@ -80,10 +81,10 @@ type ResumeSessionTask = JoinHandle<(
     Result<RestoredSession>,
 )>;
 type UpdateCheckTask =
-    JoinHandle<std::result::Result<Option<semver::Version>, crate::update::UpdateError>>;
+    JoinHandle<std::result::Result<Option<semver::Version>, crate::app::update::UpdateError>>;
 
 fn update_checks_enabled() -> bool {
-    crate::update::is_official_release_build()
+    crate::app::update::is_official_release_build()
 }
 
 fn spawn_update_check(config_path: &Path) -> Option<UpdateCheckTask> {
@@ -92,7 +93,7 @@ fn spawn_update_check(config_path: &Path) -> Option<UpdateCheckTask> {
     }
     let config_path = config_path.to_path_buf();
     Some(tokio::spawn(async move {
-        crate::update::check_for_update(&config_path).await
+        crate::app::update::check_for_update(&config_path).await
     }))
 }
 
@@ -1285,7 +1286,7 @@ fn apply_pane_effect(
                 .spawn(async move { (pane, shell::execute(id, command, workspace).await) });
         }
         components::RootEffect::OpenLink(destination) if is_web_link(&destination) => {
-            if let Err(error) = crate::browser::open(&destination) {
+            if let Err(error) = crate::app::browser::open(&destination) {
                 schedule(
                     context.app.update(AppEvent::NotifyError {
                         pane,
@@ -1657,9 +1658,11 @@ mod tests {
         update_checks_enabled, validate_interactive,
     };
     use crate::{
-        config::{Config, ConfigOverrides, ReasoningEffort, ReasoningMode},
-        error::{Error, RuntimeError},
-        subagents::{AgentId, AgentStatus, AgentUpdate},
+        app::{
+            config::{Config, ConfigOverrides, ReasoningEffort, ReasoningMode},
+            error::{Error, RuntimeError},
+        },
+        core::extensions::subagents::{AgentId, AgentStatus, AgentUpdate},
         tui::{
             pane::PaneId,
             subagent_updates::ForwardedSubagentUpdate,
@@ -1759,7 +1762,8 @@ mod tests {
         fs::create_dir_all(obsolete.parent().unwrap()).unwrap();
         fs::write(&obsolete, b"obsolete checkpoint").unwrap();
         let (sender, mut completions) = tokio::sync::mpsc::unbounded_channel();
-        let (_subagents, subagent_control, _updates) = crate::subagents::channel(32);
+        let (_subagents, subagent_control, _updates) =
+            crate::core::extensions::subagents::channel(32);
 
         let pane = open_pane(
             PaneGeneration {
@@ -1792,7 +1796,8 @@ mod tests {
         })
         .unwrap();
         let (sender, mut completions) = tokio::sync::mpsc::unbounded_channel();
-        let (_subagents, subagent_control, _updates) = crate::subagents::channel(32);
+        let (_subagents, subagent_control, _updates) =
+            crate::core::extensions::subagents::channel(32);
         let main = open_pane(
             PaneGeneration {
                 pane: PaneId::Main,
@@ -1831,7 +1836,8 @@ mod tests {
 
         assert_eq!(subagent_pane(&panes, &fork_update), Some(PaneId::Fork(1)));
 
-        let (_other_registry, other_control, _other_updates) = crate::subagents::channel(32);
+        let (_other_registry, other_control, _other_updates) =
+            crate::core::extensions::subagents::channel(32);
         let stale_update = ForwardedSubagentUpdate {
             runtime_id: other_control.runtime_id(),
             root_session_id: "fork-session".to_owned(),
@@ -1888,7 +1894,8 @@ mod tests {
         })
         .unwrap();
         let (sender, mut completions) = tokio::sync::mpsc::unbounded_channel();
-        let (_subagents, subagent_control, _updates) = crate::subagents::channel(32);
+        let (_subagents, subagent_control, _updates) =
+            crate::core::extensions::subagents::channel(32);
         let mut old = open_pane(
             PaneGeneration {
                 pane: PaneId::Main,
