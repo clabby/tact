@@ -10,6 +10,7 @@ repository = "https://github.com/clabby/tact"
 homepage = "https://github.com/clabby/tact"
 documentation = "https://docs.rs/tact"
 readme = "README.md"
+exclude = ["evals/**"]
 keywords = ["ai", "coding-agent", "llm", "terminal", "tui"]
 categories = ["command-line-interface", "development-tools"]
 
@@ -29,8 +30,8 @@ flate2 = "1.1.9"
 futures-util = "0.3.33"
 miette = { version = "7.6.0", features = ["fancy"] }
 minisign-verify = "0.2.5"
-nanocodex = { version = "0.1.1", git = "https://github.com/gakonst/nanocodex", rev = "4cef15d4c06f2a355de4347688a31c3fb28b07d2" }
-nanocodex-core = { version = "0.1.1", git = "https://github.com/gakonst/nanocodex", rev = "4cef15d4c06f2a355de4347688a31c3fb28b07d2" }
+nanocodex = { version = "0.1.1", git = "https://github.com/gakonst/nanocodex", rev = "0759b83a5ab7d1e2f4c19270508ef59113c011b3" }
+nanocodex-core = { version = "0.1.1", git = "https://github.com/gakonst/nanocodex", rev = "0759b83a5ab7d1e2f4c19270508ef59113c011b3" }
 pulldown-cmark = { version = "0.13.4", default-features = false }
 png = "0.18.1"
 ratatui = "0.30.2"
@@ -61,6 +62,9 @@ zstd = "0.13.3"
 criterion = { package = "codspeed-criterion-compat", version = "5.0.1" }
 rstest = "0.26.1"
 tower = "0.5.3"
+
+[features]
+harbor-evals = []
 
 [[bin]]
 name = "tact"

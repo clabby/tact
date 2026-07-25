@@ -2,3 +2,9 @@
 .jj
 .github
 target
+.tact
+.venv
+**/.codex
+**/auth.json
+**/__pycache__
+**/*.pyc

@@ -174,6 +174,30 @@ pub(crate) enum RuntimeError {
     },
     #[error("workspace is not a directory: {0}")]
     WorkspaceNotDirectory(PathBuf),
+    #[cfg(feature = "harbor-evals")]
+    #[error("failed to create orchestration log {path}: {source}")]
+    CreateOrchestrationLog {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[cfg(feature = "harbor-evals")]
+    #[error("failed to encode orchestration log {path}: {source}")]
+    EncodeOrchestrationLog {
+        path: PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[cfg(feature = "harbor-evals")]
+    #[error("failed to write orchestration log {path}: {source}")]
+    WriteOrchestrationLog {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[cfg(feature = "harbor-evals")]
+    #[error("the orchestration log task stopped unexpectedly: {0}")]
+    OrchestrationLogTask(#[source] tokio::task::JoinError),
     #[error("failed to listen for a shutdown signal: {0}")]
     ShutdownSignal(#[source] io::Error),
 }
