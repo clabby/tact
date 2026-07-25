@@ -6,8 +6,14 @@
 mod config;
 #[path = "../error.rs"]
 mod error;
-#[path = "../subagents.rs"]
-mod subagents;
+#[path = "../subagents/model.rs"]
+mod subagent_model;
+
+mod subagents {
+    pub(crate) use crate::subagent_model::{
+        AgentDescriptor, AgentId, AgentOrigin, AgentStatus, AgentUpdate,
+    };
+}
 
 #[path = "components/mod.rs"]
 mod components;
