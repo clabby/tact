@@ -2,7 +2,7 @@
 name = "tact"
 version = "0.0.1"
 edition = "2024"
-rust-version = "1.90.0"
+rust-version = "1.97.0"
 authors = ["Ben Clabby"]
 description = "Terminal interface for Nanocodex"
 license = "Apache-2.0"
