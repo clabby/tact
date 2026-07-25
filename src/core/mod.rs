@@ -28,8 +28,9 @@ const DEFAULT_APPEND_INSTRUCTIONS: &str = concat!(
     "For larger tasks, delegate meaningful, separable work to subagents; handle trivial or tightly ",
     "coupled work directly. Use code mode to build multi-agent pipelines: map independent subtasks ",
     "across agents in parallel, await and reduce their results, then dispatch dependent stages. Use ",
-    "loops to iterate until the completion condition is met. Keep concurrent write scopes disjoint. ",
-    "You own final synthesis and verification."
+    "schemas that expose the fields downstream stages need, and use loops to iterate until the ",
+    "completion condition is met. Keep concurrent write scopes disjoint. You own final synthesis ",
+    "and verification."
 );
 
 pub(crate) struct ConfiguredAgent {
@@ -103,7 +104,7 @@ impl ConfiguredAgent {
             .fast_mode(agent_config.fast_mode())
             .responses(responses.build())
             .tools_factory(move |agent| {
-                subagents::root_tools(tools.clone(), agent, Arc::clone(&subagents))
+                subagents::install_tools(tools.clone(), agent, Arc::clone(&subagents))
             });
         if let Some(codex_home) = config.codex_home() {
             builder = builder.codex_home(codex_home);

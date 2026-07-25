@@ -154,8 +154,8 @@ impl AgentMessage {
         let (sender, response_guidance) = match self.from {
             MessageSender::Root => (
                 "the root agent".to_owned(),
-                "Return any response through your normal final report; the root does not accept \
-                 inbound agent messages in this experiment."
+                "Return any response through your required structured result; the root does not \
+                 accept inbound agent messages in this experiment."
                     .to_owned(),
             ),
             MessageSender::Agent { agent_id } => (
@@ -207,65 +207,25 @@ pub(crate) struct AgentMessageUpdate {
     pub(crate) delivery: MessageDeliveryState,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum AgentOrigin {
-    Spawn,
-    Fork,
-}
-
-impl AgentOrigin {
-    pub(super) const fn tool_name(self) -> &'static str {
-        match self {
-            Self::Spawn => "spawn_agent",
-            Self::Fork => "fork_agent",
-        }
-    }
-
-    pub(super) const fn result_name(self) -> &'static str {
-        match self {
-            Self::Spawn => "independent",
-            Self::Fork => "fork",
-        }
-    }
-
-    pub(super) const fn description(self) -> &'static str {
-        match self {
-            Self::Spawn => {
-                "Starts a reusable clean-room subagent without inherited conversation history and immediately returns its ID."
-            }
-            Self::Fork => {
-                "Starts a reusable subagent from the latest safe model boundary and immediately returns its ID."
-            }
-        }
-    }
-
-    pub(super) fn prompt(self, id: AgentId, task: &str) -> String {
-        let context = match self {
-            Self::Spawn => "You have no inherited conversation context.",
-            Self::Fork => "Use the inherited conversation only as context for this delegation.",
-        };
-        let coordination = " Other agents may be working concurrently in the same workspace. Use \
-                            list_agents to discover relevant peers. Communicate when doing so \
-                            prevents duplicated work, coordinates shared dependencies or \
-                            overlapping files, or surfaces findings that materially affect another \
-                            agent's task. Treat concurrent changes as owned by their authors and \
-                            avoid overwriting them. You may exchange bounded directed messages with \
-                            any other agent in this task tree through send_agent_message. Deferred \
-                            messages start an idle agent or wait for its active turn to finish. If \
-                            a send is queued, do not wait for it inside your current turn: finish \
-                            the turn so queued messages can be delivered. Urgent messages steer \
-                            active turns. Ordinary messages provide coordination context; only a \
-                            delegate message from an authorized manager replaces your assigned \
-                            task.";
-        format!(
-            "Act as a specialist subagent. {context} Work only on the delegated task and return a \
-             compact, evidence-backed report to the parent agent. Your agent ID is {id}. The \
-             runtime automatically places agents you delegate beneath you in the task \
-             tree.{coordination}\n\n\
-             Delegated task:\n{task}"
-        )
-    }
+pub(super) fn agent_prompt(id: AgentId, task: &str) -> String {
+    let coordination = " Other agents may be working concurrently in the same workspace. Use \
+                        list_agents to discover relevant peers. Communicate when doing so prevents \
+                        duplicated work, coordinates shared dependencies or overlapping files, or \
+                        surfaces findings that materially affect another agent's task. Treat \
+                        concurrent changes as owned by their authors and avoid overwriting them. \
+                        You may exchange bounded directed messages with any other agent in this \
+                        task tree through send_agent_message. Deferred messages start an idle \
+                        agent or wait for its active turn to finish. If a send is queued, do not \
+                        wait for it inside your current turn: finish the turn so queued messages \
+                        can be delivered. Urgent messages steer active turns. Ordinary messages \
+                        provide coordination context; only a delegate message from an authorized \
+                        manager replaces your assigned task.";
+    format!(
+        "Act as a specialist subagent. You have no inherited conversation context. Work only on \
+         the delegated task and produce the required evidence-backed structured result. Your \
+         agent ID is {id}. The runtime automatically places agents you delegate beneath you in \
+         the task tree.{coordination}\n\nDelegated task:\n{task}"
+    )
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -273,7 +233,7 @@ impl AgentOrigin {
 pub(crate) enum AgentStatus {
     Pending,
     Running,
-    Completed { report: String },
+    Completed { output: serde_json::Value },
     Interrupted,
     Failed { error: String },
     Closing,
@@ -306,7 +266,6 @@ pub(crate) struct AgentDescriptor {
     pub(crate) session_id: String,
     pub(crate) role: String,
     pub(crate) task: String,
-    pub(crate) origin: AgentOrigin,
     pub(crate) parent: Option<AgentId>,
 }
 
@@ -334,7 +293,7 @@ impl SubagentRuntimeId {
 
 #[cfg(test)]
 mod tests {
-    use super::{AgentId, AgentOrigin, MessagePriority};
+    use super::{AgentId, AgentStatus, MessagePriority, agent_prompt};
 
     #[test]
     fn deferred_is_the_default_serialized_message_priority() {
@@ -347,7 +306,7 @@ mod tests {
 
     #[test]
     fn agent_prompt_explains_peer_coordination_and_queued_delivery() {
-        let prompt = AgentOrigin::Spawn.prompt(AgentId::new(1), "coordinate with a peer");
+        let prompt = agent_prompt(AgentId::new(1), "coordinate with a peer");
 
         assert!(prompt.contains("Other agents may be working concurrently"));
         assert!(prompt.contains("list_agents"));
@@ -355,5 +314,20 @@ mod tests {
         assert!(prompt.contains("avoid overwriting them"));
         assert!(prompt.contains("If a send is queued"));
         assert!(prompt.contains("finish the turn"));
+    }
+
+    #[test]
+    fn completed_status_serializes_structured_output_without_stringifying_it() {
+        let status = AgentStatus::Completed {
+            output: serde_json::json!({ "findings": [{ "line": 42 }] }),
+        };
+
+        assert_eq!(
+            serde_json::to_value(status).unwrap(),
+            serde_json::json!({
+                "state": "completed",
+                "output": { "findings": [{ "line": 42 }] }
+            })
+        );
     }
 }

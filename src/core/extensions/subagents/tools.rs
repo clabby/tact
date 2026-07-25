@@ -4,15 +4,15 @@ use super::{
     runtime::AgentDirectoryEntry,
 };
 use super::{
-    model::{AgentDescriptor, AgentId, AgentOrigin, AgentStatus, AgentUpdate},
-    runtime::{AgentSummary, Registry, forward_events},
+    model::{AgentDescriptor, AgentId, AgentStatus, AgentUpdate, agent_prompt},
+    runtime::{AgentSummary, OutputContract, Registry, forward_events},
 };
 use nanocodex::{
     AgentHandle, Tool, ToolContext, ToolDefinition, ToolExecution, ToolInput, ToolResult, Tools,
     ToolsBuildError, async_trait,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Value, json};
 use std::{
     sync::{Arc, Weak},
     time::Duration,
@@ -27,12 +27,12 @@ const MAX_WAIT_TIMEOUT: Duration = Duration::from_secs(300);
 struct AgentTask {
     role: String,
     task: String,
+    output_schema: Value,
 }
 
 #[derive(Serialize)]
 struct AgentStartReport {
     agent_id: AgentId,
-    kind: &'static str,
     role: String,
     status: AgentStatus,
 }
@@ -89,22 +89,25 @@ struct LifecycleReport {
     agents: Vec<AgentSummary>,
 }
 
-struct StartAgent {
+fn json_output(value: &impl Serialize) -> ToolResult {
+    Ok(ToolExecution::from_json(serde_json::to_value(value)?, true))
+}
+
+struct SpawnAgent {
     parent: AgentHandle,
     registry: Weak<Registry>,
-    origin: AgentOrigin,
 }
 
 #[async_trait]
-impl Tool for StartAgent {
+impl Tool for SpawnAgent {
     fn name(&self) -> &'static str {
-        self.origin.tool_name()
+        "spawn_agent"
     }
 
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::function(
             self.name(),
-            self.origin.description(),
+            "Starts a reusable clean-room subagent without inherited conversation history and immediately returns its ID.",
             json!({
                 "type": "object",
                 "properties": {
@@ -115,16 +118,25 @@ impl Tool for StartAgent {
                     "task": {
                         "type": "string",
                         "description": "A complete, focused task for the subagent."
+                    },
+                    "output_schema": {
+                        "description": "The JSON Schema that every successful result from this agent must satisfy. Use an object with one string field for a free-form report."
                     }
                 },
-                "required": ["role", "task"],
+                "required": ["role", "task", "output_schema"],
                 "additionalProperties": false
             }),
         )
+        .with_output_schema(spawn_agent_output_schema())
     }
 
     async fn execute(&self, input: ToolInput, context: ToolContext<'_>) -> ToolResult {
-        let AgentTask { role, task } = input.decode_json()?;
+        let AgentTask {
+            role,
+            task,
+            output_schema,
+        } = input.decode_json()?;
+        let contract = OutputContract::compile(&output_schema)?;
         let registry = self
             .registry
             .upgrade()
@@ -132,17 +144,13 @@ impl Tool for StartAgent {
         let capacity = registry.reserve_turn()?;
         let reservation = registry.reserve(context.session_id).await?;
         let id = reservation.id;
-        let (child, events) = match self.origin {
-            AgentOrigin::Spawn => self.parent.spawn().await,
-            AgentOrigin::Fork => self.parent.fork().await,
-        }?;
+        let (child, events) = self.parent.spawn().await?;
         let session_id = events.request_id().to_owned();
         let descriptor = AgentDescriptor {
             id,
             session_id,
             role: role.clone(),
             task: task.clone(),
-            origin: self.origin,
             parent: reservation.parent,
         };
         let (start_events, events_ready) = oneshot::channel();
@@ -158,8 +166,9 @@ impl Tool for StartAgent {
             .insert(
                 reservation.root_session_id.clone(),
                 descriptor.clone(),
-                child.clone(),
+                child,
                 event_task,
+                contract,
             )
             .await?;
         registry.send(&reservation.root_session_id, AgentUpdate::Added(descriptor));
@@ -169,16 +178,75 @@ impl Tool for StartAgent {
             .launch_initial_turn(
                 &reservation.root_session_id,
                 id,
-                self.origin.prompt(id, &task),
+                agent_prompt(id, &task),
                 capacity,
             )
             .await?;
-        Ok(ToolExecution::json(&AgentStartReport {
+        json_output(&AgentStartReport {
             agent_id: id,
-            kind: self.origin.result_name(),
             role,
             status: AgentStatus::Running,
+        })
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SubmitResultArgs {
+    turn_token: u64,
+    output: Value,
+}
+
+struct SubmitResult {
+    registry: Weak<Registry>,
+}
+
+#[async_trait]
+impl Tool for SubmitResult {
+    fn name(&self) -> &'static str {
+        "submit_result"
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::function(
+            self.name(),
+            "Submits the current subagent turn's final JSON output. Call exactly once with a value matching the output schema in the task prompt. Invalid values can be corrected and retried.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "output": {
+                        "description": "The final JSON value required by this agent's output schema."
+                    },
+                    "turn_token": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "The current turn token stated in the task prompt."
+                    }
+                },
+                "required": ["turn_token", "output"],
+                "additionalProperties": false
+            }),
+        )
+        .with_output_schema(json!({
+            "type": "object",
+            "properties": {
+                "accepted": { "type": "boolean", "const": true }
+            },
+            "required": ["accepted"],
+            "additionalProperties": false
         }))
+    }
+
+    async fn execute(&self, input: ToolInput, context: ToolContext<'_>) -> ToolResult {
+        let SubmitResultArgs { turn_token, output } = input.decode_json()?;
+        let registry = self
+            .registry
+            .upgrade()
+            .ok_or_else(|| std::io::Error::other("subagent runtime is closed"))?;
+        registry
+            .submit_result(context.session_id, turn_token, output)
+            .await?;
+        Ok(ToolExecution::from_json(json!({ "accepted": true }), true))
     }
 }
 
@@ -195,7 +263,7 @@ impl Tool for SendAgentMessage {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::function(
             self.name(),
-            "Sends a bounded directed message to any other agent in the same task tree. Deferred messages start an idle agent or queue behind its active turn. If a send is queued, do not wait for it inside the current turn; finish the turn so queued messages can be delivered. Urgent messages steer a running agent at its next safe model boundary. Delegate messages replace the recipient's assigned task and require management authority.",
+            "Sends a bounded directed message to any other agent in the same task tree. Deferred messages start an idle agent or queue behind its active turn. If a send is queued, do not wait for it inside the current turn; finish the turn so queued messages can be delivered. Urgent messages steer a running agent at its next safe model boundary. Delegate messages replace the recipient's assigned task, retain its output schema, and require management authority.",
             json!({
                 "type": "object",
                 "properties": {
@@ -256,7 +324,7 @@ impl Tool for SendAgentMessage {
                 message,
             )
             .await?;
-        Ok(ToolExecution::json(&receipt))
+        json_output(&receipt)
     }
 }
 
@@ -302,11 +370,11 @@ impl Tool for ListAgents {
             .registry
             .upgrade()
             .ok_or_else(|| std::io::Error::other("subagent runtime is closed"))?;
-        Ok(ToolExecution::json(&AgentDirectory {
+        json_output(&AgentDirectory {
             agents: registry
                 .directory(context.session_id, include_completed, include_self)
                 .await,
-        }))
+        })
     }
 }
 
@@ -331,7 +399,7 @@ impl Tool for WaitAgent {
                         "type": "array",
                         "items": { "type": "integer", "minimum": 1 },
                         "minItems": 1,
-                        "description": "Agent IDs returned by spawn_agent or fork_agent. Waiting returns when any one becomes terminal."
+                        "description": "Agent IDs returned by spawn_agent. Waiting returns when any one becomes terminal."
                     },
                     "timeout_ms": {
                         "type": "integer",
@@ -344,6 +412,7 @@ impl Tool for WaitAgent {
                 "additionalProperties": false
             }),
         )
+        .with_output_schema(wait_agent_output_schema())
     }
 
     async fn execute(&self, input: ToolInput, context: ToolContext<'_>) -> ToolResult {
@@ -362,7 +431,7 @@ impl Tool for WaitAgent {
         let (agents, timed_out) = registry
             .wait(context.session_id, &agent_ids, duration)
             .await?;
-        Ok(ToolExecution::json(&WaitReport { agents, timed_out }))
+        json_output(&WaitReport { agents, timed_out })
     }
 }
 
@@ -425,31 +494,27 @@ impl Tool for ChangeAgentLifecycle {
             }
             LifecycleOperation::Close => registry.close(context.session_id, agent_id).await?,
         };
-        Ok(ToolExecution::json(&LifecycleReport { agents }))
+        json_output(&LifecycleReport { agents })
     }
 }
 
-pub(crate) fn root_tools(
+pub(crate) fn install_tools(
     tools: Tools,
     parent: AgentHandle,
     registry: Arc<Registry>,
 ) -> Result<Tools, ToolsBuildError> {
-    let builder = tools
+    tools
         .into_builder()
-        .tool(StartAgent {
-            parent: parent.clone(),
-            registry: Arc::downgrade(&registry),
-            origin: AgentOrigin::Spawn,
-        })
-        .tool(StartAgent {
+        .tool(SpawnAgent {
             parent,
             registry: Arc::downgrade(&registry),
-            origin: AgentOrigin::Fork,
-        });
-    let builder = builder.tool(SendAgentMessage {
-        registry: Arc::downgrade(&registry),
-    });
-    builder
+        })
+        .tool(SubmitResult {
+            registry: Arc::downgrade(&registry),
+        })
+        .tool(SendAgentMessage {
+            registry: Arc::downgrade(&registry),
+        })
         .tool(ListAgents {
             registry: Arc::downgrade(&registry),
         })
@@ -467,9 +532,85 @@ pub(crate) fn root_tools(
         .build()
 }
 
+fn spawn_agent_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "agent_id": { "type": "integer" },
+            "role": { "type": "string" },
+            "status": {
+                "type": "object",
+                "properties": { "state": { "type": "string", "const": "running" } },
+                "required": ["state"],
+                "additionalProperties": false
+            }
+        },
+        "required": ["agent_id", "role", "status"],
+        "additionalProperties": false
+    })
+}
+
+fn wait_agent_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "agents": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "agent_id": { "type": "integer" },
+                        "role": { "type": "string" },
+                        "task": { "type": "string" },
+                        "parent_agent_id": { "type": ["integer", "null"] },
+                        "status": agent_status_schema(),
+                        "last_output": {}
+                    },
+                    "required": ["agent_id", "role", "task", "parent_agent_id", "status"],
+                    "additionalProperties": false
+                }
+            },
+            "timed_out": { "type": "boolean" }
+        },
+        "required": ["agents", "timed_out"],
+        "additionalProperties": false
+    })
+}
+
+fn agent_status_schema() -> Value {
+    let state_only = ["pending", "running", "interrupted", "closing", "closed"].map(|state| {
+        json!({
+            "type": "object",
+            "properties": { "state": { "type": "string", "const": state } },
+            "required": ["state"],
+            "additionalProperties": false
+        })
+    });
+    let mut variants = state_only.into_iter().collect::<Vec<_>>();
+    variants.push(json!({
+        "type": "object",
+        "properties": {
+            "state": { "type": "string", "const": "completed" },
+            "output": {}
+        },
+        "required": ["state", "output"],
+        "additionalProperties": false
+    }));
+    variants.push(json!({
+        "type": "object",
+        "properties": {
+            "state": { "type": "string", "const": "failed" },
+            "error": { "type": "string" }
+        },
+        "required": ["state", "error"],
+        "additionalProperties": false
+    }));
+    json!({ "oneOf": variants })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::SendAgentMessage;
+    use super::{SendAgentMessage, SubmitResult, WaitAgent};
     use crate::core::extensions::subagents::runtime::Registry;
     use nanocodex::Tool;
     use serde_json::json;
@@ -487,5 +628,31 @@ mod tests {
         assert_eq!(priority["default"], json!("deferred"));
         assert!(definition.description().contains("do not wait"));
         assert!(definition.description().contains("finish the turn"));
+    }
+
+    #[test]
+    fn submit_result_requires_the_turn_token_and_one_output_value() {
+        let definition = SubmitResult {
+            registry: Weak::<Registry>::new(),
+        }
+        .definition();
+        let parameters = definition.parameters().unwrap().as_value();
+
+        assert_eq!(parameters["required"], json!(["turn_token", "output"]));
+        assert_eq!(parameters["additionalProperties"], json!(false));
+        assert_eq!(parameters["properties"].as_object().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn wait_agent_only_refers_to_clean_spawns() {
+        let definition = WaitAgent {
+            registry: Weak::<Registry>::new(),
+        }
+        .definition();
+        let description =
+            &definition.parameters().unwrap().as_value()["properties"]["agent_ids"]["description"];
+
+        assert!(description.as_str().unwrap().contains("spawn_agent"));
+        assert!(!description.as_str().unwrap().contains("fork_agent"));
     }
 }

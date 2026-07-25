@@ -16,8 +16,10 @@ use super::{
     },
 };
 use futures_util::future::join_all;
+use jsonschema::Validator;
 use nanocodex::{AgentEvents, Nanocodex, NanocodexError};
 use serde::Serialize;
+use serde_json::Value;
 use std::{
     collections::HashMap,
     sync::{Arc, Weak},
@@ -36,7 +38,37 @@ pub(super) struct ChildSession {
     pub(super) harness_task: Option<JoinHandle<()>>,
     pub(super) status: AgentStatus,
     pub(super) active: bool,
-    pub(super) last_report: Option<String>,
+    pub(super) output_validator: Validator,
+    pub(super) next_turn_token: u64,
+    pub(super) active_turn_token: Option<u64>,
+    pub(super) steering: bool,
+    pub(super) submitted_output: Option<Value>,
+    pub(super) last_output: Option<Value>,
+}
+
+pub(super) struct OutputContract {
+    validator: Validator,
+    schema: String,
+}
+
+impl OutputContract {
+    pub(super) fn compile(schema: &Value) -> std::io::Result<Self> {
+        let validator = jsonschema::validator_for(schema)
+            .map_err(|error| std::io::Error::other(format!("invalid output_schema: {error}")))?;
+        let schema = serde_json::to_string_pretty(schema)
+            .map_err(|error| std::io::Error::other(format!("could not render schema: {error}")))?;
+        Ok(Self { validator, schema })
+    }
+}
+
+pub(super) fn completion_instructions(schema: &str, turn_token: u64) -> String {
+    format!(
+        "Your contractual result is not prose. Before finishing, use Code Mode to call \
+         `await tools.submit_result({{ turn_token: {turn_token}, output: ... }})` exactly once \
+         with a JSON value matching the output schema below. If validation rejects the value, \
+         correct it and retry. A turn that ends without an accepted result fails.\n\nOutput \
+         schema:\n{schema}"
+    )
 }
 
 pub(crate) struct Registry {
@@ -88,7 +120,7 @@ pub(super) struct AgentSummary {
     pub(super) parent_agent_id: Option<AgentId>,
     pub(super) status: AgentStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(super) last_report: Option<String>,
+    pub(super) last_output: Option<Value>,
 }
 
 #[derive(Serialize)]
@@ -122,7 +154,112 @@ pub(super) struct DelegationChange {
     previous_task: String,
 }
 
+pub(super) struct TurnSteer {
+    id: AgentId,
+    previous_token: u64,
+    token: u64,
+}
+
+impl TurnSteer {
+    pub(super) const fn token(&self) -> u64 {
+        self.token
+    }
+}
+
 impl RegistryState {
+    fn submit_result(
+        &mut self,
+        session_id: &str,
+        turn_token: u64,
+        output: Value,
+    ) -> std::io::Result<()> {
+        let root_session_id = self.root_session_id(session_id).to_owned();
+        let scope = self
+            .scopes
+            .get_mut(&root_session_id)
+            .ok_or_else(|| std::io::Error::other("submit_result is only available to subagents"))?;
+        let id = scope
+            .topology
+            .agent_for_session(session_id)
+            .ok_or_else(|| std::io::Error::other("submit_result is only available to subagents"))?;
+        let session = scope
+            .sessions
+            .get_mut(&id)
+            .ok_or_else(|| std::io::Error::other("subagent session disappeared"))?;
+        if !session.active {
+            return Err(std::io::Error::other(
+                "submit_result is only available during an active subagent turn",
+            ));
+        }
+        if session.steering {
+            return Err(std::io::Error::other(
+                "the subagent turn is being steered; retry submit_result",
+            ));
+        }
+        if session.active_turn_token != Some(turn_token) {
+            return Err(std::io::Error::other(
+                "submit_result used a stale or unknown turn_token",
+            ));
+        }
+        if session.submitted_output.is_some() {
+            return Err(std::io::Error::other(
+                "submit_result already accepted one result for this turn",
+            ));
+        }
+        let errors = session
+            .output_validator
+            .iter_errors(&output)
+            .take(4)
+            .map(|error| error.to_string())
+            .collect::<Vec<_>>();
+        if !errors.is_empty() {
+            return Err(std::io::Error::other(format!(
+                "submitted output does not match the required schema: {}",
+                errors.join("; ")
+            )));
+        }
+        session.submitted_output = Some(output);
+        Ok(())
+    }
+
+    fn begin_turn_steer(&mut self, root_session_id: &str, id: AgentId) -> Option<TurnSteer> {
+        let session = self
+            .scopes
+            .get_mut(root_session_id)?
+            .sessions
+            .get_mut(&id)?;
+        if !session.active || session.steering || session.submitted_output.is_some() {
+            return None;
+        }
+        let previous_token = session.active_turn_token?;
+        let token = session.next_turn_token.checked_add(1)?;
+        session.next_turn_token = token;
+        session.active_turn_token = Some(token);
+        session.steering = true;
+        Some(TurnSteer {
+            id,
+            previous_token,
+            token,
+        })
+    }
+
+    fn finish_turn_steer(&mut self, root_session_id: &str, steer: TurnSteer, committed: bool) {
+        let Some(session) = self
+            .scopes
+            .get_mut(root_session_id)
+            .and_then(|scope| scope.sessions.get_mut(&steer.id))
+        else {
+            return;
+        };
+        if session.active_turn_token != Some(steer.token) {
+            return;
+        }
+        if !committed {
+            session.active_turn_token = Some(steer.previous_token);
+        }
+        session.steering = false;
+    }
+
     fn reserve_for(&mut self, session_id: &str) -> std::io::Result<AgentReservation> {
         let root_session_id = self.root_session_id(session_id).to_owned();
         let parent = self
@@ -614,19 +751,57 @@ impl Registry {
         self.state.lock().await.reserve_for(session_id)
     }
 
+    pub(super) async fn submit_result(
+        &self,
+        session_id: &str,
+        turn_token: u64,
+        output: Value,
+    ) -> std::io::Result<()> {
+        self.state
+            .lock()
+            .await
+            .submit_result(session_id, turn_token, output)
+    }
+
+    pub(super) async fn begin_turn_steer(
+        &self,
+        root_session_id: &str,
+        id: AgentId,
+    ) -> Option<TurnSteer> {
+        self.state
+            .lock()
+            .await
+            .begin_turn_steer(root_session_id, id)
+    }
+
+    pub(super) async fn finish_turn_steer(
+        &self,
+        root_session_id: &str,
+        steer: TurnSteer,
+        committed: bool,
+    ) {
+        self.state
+            .lock()
+            .await
+            .finish_turn_steer(root_session_id, steer, committed);
+    }
+
     pub(super) async fn insert(
         self: &Arc<Self>,
         root_session_id: String,
         descriptor: AgentDescriptor,
         agent: Nanocodex,
         event_task: JoinHandle<()>,
+        contract: OutputContract,
     ) -> std::io::Result<()> {
+        let OutputContract { validator, schema } = contract;
         let (harness, harness_task) = harness::spawn(
             root_session_id.clone(),
             descriptor.id,
             agent,
             self.capacity.clone(),
             Arc::downgrade(self),
+            schema,
         );
         self.state.lock().await.insert(
             root_session_id,
@@ -639,7 +814,12 @@ impl Registry {
                 harness_task: Some(harness_task),
                 status: AgentStatus::Pending,
                 active: false,
-                last_report: None,
+                output_validator: validator,
+                next_turn_token: 0,
+                active_turn_token: None,
+                steering: false,
+                submitted_output: None,
+                last_output: None,
             },
         )?;
         self.changed();
@@ -661,25 +841,31 @@ impl Registry {
         harness.start(prompt, capacity).await
     }
 
-    pub(super) async fn harness_turn_started(&self, root_session_id: &str, id: AgentId) {
-        let changed = {
+    pub(super) async fn harness_turn_started(
+        &self,
+        root_session_id: &str,
+        id: AgentId,
+    ) -> Option<u64> {
+        let token = {
             let mut state = self.state.lock().await;
-            let Some(session) = state
+            let session = state
                 .scopes
                 .get_mut(root_session_id)
-                .and_then(|scope| scope.sessions.get_mut(&id))
-            else {
-                return;
-            };
-            if matches!(session.status, AgentStatus::Closing | AgentStatus::Closed) {
-                false
+                .and_then(|scope| scope.sessions.get_mut(&id))?;
+            if !session.status.can_start_turn() || session.active {
+                None
             } else {
+                let token = session.next_turn_token.checked_add(1)?;
+                session.next_turn_token = token;
+                session.active_turn_token = Some(token);
                 session.active = true;
+                session.steering = false;
+                session.submitted_output = None;
                 session.status = AgentStatus::Running;
-                true
+                Some(token)
             }
         };
-        if changed {
+        if token.is_some() {
             self.send(
                 root_session_id,
                 AgentUpdate::Status {
@@ -689,16 +875,35 @@ impl Registry {
             );
             self.changed();
         }
+        token
     }
 
-    pub(super) async fn harness_can_start(&self, root_session_id: &str, id: AgentId) -> bool {
-        self.state
-            .lock()
-            .await
-            .scopes
-            .get(root_session_id)
-            .and_then(|scope| scope.sessions.get(&id))
-            .is_some_and(|session| session.status.can_start_turn() && !session.active)
+    pub(super) async fn harness_turn_start_failed(
+        &self,
+        root_session_id: &str,
+        id: AgentId,
+        error: String,
+    ) {
+        let status = {
+            let mut state = self.state.lock().await;
+            let Some(session) = state
+                .scopes
+                .get_mut(root_session_id)
+                .and_then(|scope| scope.sessions.get_mut(&id))
+            else {
+                return;
+            };
+            session.active = false;
+            session.active_turn_token = None;
+            session.steering = false;
+            session.submitted_output = None;
+            if !matches!(session.status, AgentStatus::Closing | AgentStatus::Closed) {
+                session.status = AgentStatus::Failed { error };
+            }
+            session.status.clone()
+        };
+        self.send(root_session_id, AgentUpdate::Status { id, status });
+        self.changed();
     }
 
     pub(super) async fn harness_turn_finished(
@@ -720,16 +925,14 @@ impl Registry {
                 return;
             }
             session.active = false;
+            session.active_turn_token = None;
+            session.steering = false;
+            let submitted_output = session.submitted_output.take();
             if matches!(session.status, AgentStatus::Closing | AgentStatus::Closed) {
                 session.status.clone()
             } else {
                 match result {
-                    Ok(result) => {
-                        session.last_report = Some(result.final_message.clone());
-                        AgentStatus::Completed {
-                            report: result.final_message,
-                        }
-                    }
+                    Ok(_) => complete_session(session, submitted_output),
                     Err(NanocodexError::TurnCancelled) => AgentStatus::Interrupted,
                     Err(error) => AgentStatus::Failed {
                         error: error.to_string(),
@@ -757,6 +960,9 @@ impl Registry {
                 false
             } else {
                 session.active = false;
+                session.active_turn_token = None;
+                session.steering = false;
+                session.submitted_output = None;
                 session.status = AgentStatus::Closed;
                 true
             }
@@ -1218,6 +1424,16 @@ impl Registry {
     }
 }
 
+fn complete_session(session: &mut ChildSession, output: Option<Value>) -> AgentStatus {
+    let Some(output) = output else {
+        return AgentStatus::Failed {
+            error: "subagent turn ended without a valid submit_result call".to_owned(),
+        };
+    };
+    session.last_output = Some(output.clone());
+    AgentStatus::Completed { output }
+}
+
 fn first_error(results: Vec<std::io::Result<()>>) -> std::io::Result<()> {
     results.into_iter().find(Result::is_err).unwrap_or(Ok(()))
 }
@@ -1238,10 +1454,10 @@ fn bounded_summary(value: &str) -> String {
 
 impl ChildSession {
     pub(super) fn summary(&self) -> AgentSummary {
-        let last_report = if matches!(self.status, AgentStatus::Completed { .. }) {
+        let last_output = if matches!(self.status, AgentStatus::Completed { .. }) {
             None
         } else {
-            self.last_report.clone()
+            self.last_output.clone()
         };
         AgentSummary {
             agent_id: self.descriptor.id,
@@ -1249,7 +1465,7 @@ impl ChildSession {
             task: self.descriptor.task.clone(),
             parent_agent_id: self.descriptor.parent,
             status: self.status.clone(),
-            last_report,
+            last_output,
         }
     }
 }
@@ -1331,16 +1547,16 @@ pub(crate) fn channel(
 #[cfg(test)]
 mod tests {
     use super::{
-        AgentDescriptor, AgentId, AgentStatus, ChildSession, Registry, RegistryState,
-        forward_events,
+        AgentDescriptor, AgentId, AgentStatus, ChildSession, OutputContract, Registry,
+        RegistryState, complete_session, completion_instructions, forward_events,
     };
-    use crate::core::extensions::subagents::AgentOrigin;
     use crate::core::extensions::subagents::{
         AgentUpdate, MessageDeliveryState, MessageDisposition, MessagePriority, MessagePurpose,
     };
     use nanocodex::{
         Nanocodex, NanocodexError, Responses, ResponsesAttempt, ResponsesServiceResponse,
     };
+    use serde_json::json;
     use std::{
         future::{Pending, pending},
         result::Result as StdResult,
@@ -1386,6 +1602,31 @@ mod tests {
             .unwrap()
     }
 
+    fn test_contract() -> OutputContract {
+        OutputContract {
+            validator: jsonschema::validator_for(&json!({})).unwrap(),
+            schema: "{}".to_owned(),
+        }
+    }
+
+    #[test]
+    fn output_contract_renders_the_schema_for_every_turn() {
+        let schema = json!({
+            "type": "object",
+            "properties": { "report": { "type": "string" } },
+            "required": ["report"]
+        });
+
+        let contract = OutputContract::compile(&schema).unwrap();
+        let instructions = completion_instructions(&contract.schema, 7);
+
+        assert!(instructions.contains("tools.submit_result"));
+        assert!(instructions.contains("turn_token: 7"));
+        assert!(instructions.contains("exactly once"));
+        assert!(instructions.contains("\"report\""));
+        assert!(contract.validator.is_valid(&json!({ "report": "done" })));
+    }
+
     async fn insert_runtime_session(
         registry: &Arc<Registry>,
         reservation: &super::AgentReservation,
@@ -1399,7 +1640,6 @@ mod tests {
             session_id: session_id.clone(),
             role: format!("agent-{}", reservation.id),
             task: "wait forever".to_owned(),
-            origin: AgentOrigin::Spawn,
             parent,
         };
         let (start_events, events_ready) = oneshot::channel();
@@ -1417,6 +1657,7 @@ mod tests {
                 descriptor,
                 agent,
                 event_task,
+                test_contract(),
             )
             .await
             .unwrap();
@@ -1468,7 +1709,7 @@ mod tests {
             .get_mut(&id)
             .unwrap()
             .status = AgentStatus::Completed {
-            report: "ready for another turn".to_owned(),
+            output: json!({ "report": "ready for another turn" }),
         };
     }
 
@@ -1478,7 +1719,6 @@ mod tests {
             session_id: session_id.to_owned(),
             role: format!("agent-{id}"),
             task: "test lifecycle".to_owned(),
-            origin: AgentOrigin::Spawn,
             parent,
         };
         ChildSession {
@@ -1488,19 +1728,177 @@ mod tests {
             harness_task: None,
             status: AgentStatus::Pending,
             active: false,
-            last_report: None,
+            output_validator: test_contract().validator,
+            next_turn_token: 0,
+            active_turn_token: None,
+            steering: false,
+            submitted_output: None,
+            last_output: None,
         }
     }
 
     #[tokio::test]
-    async fn closed_agent_summaries_keep_the_last_completed_report() {
+    async fn submitted_outputs_are_validated_and_completed_as_json() {
+        let mut registry = RegistryState::default();
+        let reservation = registry.reserve("main", None).unwrap();
+        let mut session = test_session(reservation.id, "child-session", None);
+        session.active = true;
+        session.next_turn_token = 1;
+        session.active_turn_token = Some(1);
+        session.status = AgentStatus::Running;
+        session.output_validator = jsonschema::validator_for(&json!({
+            "type": "object",
+            "properties": { "answer": { "type": "integer" } },
+            "required": ["answer"],
+            "additionalProperties": false
+        }))
+        .unwrap();
+        registry
+            .insert(
+                reservation.root_session_id,
+                reservation.id,
+                session.descriptor.session_id.clone(),
+                session,
+            )
+            .unwrap();
+
+        let invalid = registry.submit_result("child-session", 1, json!({ "answer": "42" }));
+        assert!(invalid.unwrap_err().to_string().contains("required schema"));
+        registry
+            .submit_result("child-session", 1, json!({ "answer": 42 }))
+            .unwrap();
+        assert!(
+            registry
+                .submit_result("child-session", 1, json!({ "answer": 43 }))
+                .unwrap_err()
+                .to_string()
+                .contains("already accepted")
+        );
+
+        let session = registry
+            .scopes
+            .get_mut("main")
+            .unwrap()
+            .sessions
+            .get_mut(&reservation.id)
+            .unwrap();
+        let output = session.submitted_output.take();
+        let status = complete_session(session, output);
+
+        assert_eq!(
+            status,
+            AgentStatus::Completed {
+                output: json!({ "answer": 42 })
+            }
+        );
+        assert_eq!(session.last_output, Some(json!({ "answer": 42 })));
+    }
+
+    #[test]
+    fn root_cannot_submit_a_subagent_result() {
+        let mut registry = RegistryState::default();
+
+        let error = registry.submit_result("main", 1, json!({ "report": "no" }));
+
+        assert!(
+            error
+                .unwrap_err()
+                .to_string()
+                .contains("only available to subagents")
+        );
+    }
+
+    #[tokio::test]
+    async fn successful_turn_without_submission_fails_completion() {
+        let mut session = test_session(AgentId::new(1), "child-session", None);
+
+        let status = complete_session(&mut session, None);
+
+        assert!(matches!(status, AgentStatus::Failed { error } if error.contains("submit_result")));
+        assert_eq!(session.last_output, None);
+    }
+
+    #[tokio::test]
+    async fn submission_from_completed_turn_cannot_satisfy_next_turn() {
+        let mut registry = RegistryState::default();
+        let reservation = registry.reserve("main", None).unwrap();
+        let mut session = test_session(reservation.id, "child-session", None);
+        session.active = true;
+        session.next_turn_token = 1;
+        session.active_turn_token = Some(1);
+        session.status = AgentStatus::Running;
+        registry
+            .insert(
+                reservation.root_session_id,
+                reservation.id,
+                session.descriptor.session_id.clone(),
+                session,
+            )
+            .unwrap();
+        let stale_output = json!({ "report": "result from the completed turn" });
+
+        let session = registry
+            .scopes
+            .get_mut("main")
+            .unwrap()
+            .sessions
+            .get_mut(&reservation.id)
+            .unwrap();
+        session.active = false;
+        session.active = true;
+        session.next_turn_token = 2;
+        session.active_turn_token = Some(2);
+        session.status = AgentStatus::Running;
+
+        assert!(
+            registry
+                .submit_result("child-session", 1, stale_output)
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn steering_rotates_the_token_and_stops_after_submission() {
+        let mut registry = RegistryState::default();
+        let reservation = registry.reserve("main", None).unwrap();
+        let mut session = test_session(reservation.id, "child-session", None);
+        session.active = true;
+        session.next_turn_token = 1;
+        session.active_turn_token = Some(1);
+        session.status = AgentStatus::Running;
+        registry
+            .insert(
+                reservation.root_session_id,
+                reservation.id,
+                session.descriptor.session_id.clone(),
+                session,
+            )
+            .unwrap();
+
+        let steer = registry.begin_turn_steer("main", reservation.id).unwrap();
+        assert_eq!(steer.token(), 2);
+        registry.finish_turn_steer("main", steer, true);
+        assert!(
+            registry
+                .submit_result("child-session", 1, json!({ "report": "stale" }))
+                .is_err()
+        );
+        registry
+            .submit_result("child-session", 2, json!({ "report": "current" }))
+            .unwrap();
+
+        assert!(registry.begin_turn_steer("main", reservation.id).is_none());
+    }
+
+    #[tokio::test]
+    async fn closed_agent_summaries_keep_the_last_completed_output() {
         let (registry, _control, _updates) = super::channel(32);
         let reservation = registry.reserve("main").await.unwrap();
         let mut session = test_session(reservation.id, "child-session", None);
         session.status = AgentStatus::Completed {
-            report: "completed work".to_owned(),
+            output: json!({ "report": "completed work" }),
         };
-        session.last_report = Some("completed work".to_owned());
+        session.last_output = Some(json!({ "report": "completed work" }));
         registry
             .state
             .lock()
@@ -1516,7 +1914,10 @@ mod tests {
         let summaries = registry.close("main", reservation.id).await.unwrap();
 
         assert_eq!(summaries[0].status, AgentStatus::Closed);
-        assert_eq!(summaries[0].last_report.as_deref(), Some("completed work"));
+        assert_eq!(
+            summaries[0].last_output,
+            Some(json!({ "report": "completed work" }))
+        );
     }
 
     #[tokio::test]
@@ -2155,7 +2556,7 @@ mod tests {
             .values_mut()
         {
             session.status = AgentStatus::Completed {
-                report: "ready".to_owned(),
+                output: json!({ "report": "ready" }),
             };
         }
 

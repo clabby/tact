@@ -9,9 +9,9 @@ mod task_tree;
 mod tools;
 
 pub(crate) use model::{
-    AgentDescriptor, AgentId, AgentMessage, AgentMessageUpdate, AgentOrigin, AgentStatus,
-    AgentThread, AgentUpdate, MessageDeliveryState, MessageDisposition, MessageId, MessagePriority,
+    AgentDescriptor, AgentId, AgentMessage, AgentMessageUpdate, AgentStatus, AgentThread,
+    AgentUpdate, MessageDeliveryState, MessageDisposition, MessageId, MessagePriority,
     MessagePurpose, MessageSender, ScopedAgentUpdate, SubagentRuntimeId, ThreadId,
 };
 pub(crate) use runtime::{SubagentControl, channel};
-pub(crate) use tools::root_tools;
+pub(crate) use tools::install_tools;

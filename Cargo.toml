@@ -27,6 +27,7 @@ crossterm = { version = "0.29.0", features = ["event-stream", "osc52"] }
 dark-light = "2.0.0"
 flate2 = "1.1.9"
 futures-util = "0.3.33"
+jsonschema = { version = "0.48.5", default-features = false }
 miette = { version = "7.6.0", features = ["fancy"] }
 minisign-verify = "0.2.5"
 nanocodex = { version = "0.1.1", git = "https://github.com/gakonst/nanocodex", rev = "50a51c7c112c6384e123d012912c917368d59133" }

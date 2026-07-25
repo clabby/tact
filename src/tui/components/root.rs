@@ -1669,7 +1669,7 @@ mod tests {
     use crate::{
         app::config::{ReasoningEffort, ReasoningMode},
         core::extensions::subagents::{
-            AgentDescriptor, AgentId, AgentMessageUpdate, AgentOrigin, AgentStatus, AgentUpdate,
+            AgentDescriptor, AgentId, AgentMessageUpdate, AgentStatus, AgentUpdate,
         },
         tui::{
             theme::{Theme, ThemeMode},
@@ -1876,7 +1876,6 @@ mod tests {
                 session_id: "child".to_owned(),
                 role: "worker".to_owned(),
                 task: "work".to_owned(),
-                origin: AgentOrigin::Spawn,
                 parent: None,
             },
         )));
@@ -1904,7 +1903,6 @@ mod tests {
             session_id: "child".to_owned(),
             role: "worker".to_owned(),
             task: "verify ordering".to_owned(),
-            origin: AgentOrigin::Spawn,
             parent: None,
         })));
         root.update(RootEvent::Transcript(Arc::new(
@@ -1990,7 +1988,6 @@ mod tests {
                 session_id: format!("child-{id}"),
                 role: role.to_owned(),
                 task: "coordinate with a peer".to_owned(),
-                origin: AgentOrigin::Spawn,
                 parent: None,
             })));
         }
@@ -2033,14 +2030,13 @@ mod tests {
                 session_id: "child".to_owned(),
                 role: "worker".to_owned(),
                 task: "work".to_owned(),
-                origin: AgentOrigin::Spawn,
                 parent: None,
             },
         )));
         root.update(super::RootEvent::Subagent(AgentUpdate::Status {
             id: AgentId::new(1),
             status: AgentStatus::Completed {
-                report: "done".to_owned(),
+                output: json!({ "report": "done" }),
             },
         }));
 

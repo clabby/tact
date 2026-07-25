@@ -3,7 +3,7 @@
 use super::{
     capacity::Capacity,
     model::{AgentMessage, MessageDisposition, MessageId, MessagePriority},
-    runtime::DelegationChange,
+    runtime::{DelegationChange, completion_instructions},
 };
 use super::{capacity::TurnCapacity, model::AgentId, runtime::Registry};
 use nanocodex::{Nanocodex, NanocodexError, TurnControl};
@@ -81,6 +81,7 @@ struct Harness {
     urgent: mpsc::Receiver<DeliveryCommand>,
     pending_deferred: VecDeque<AgentMessage>,
     pending_urgent: VecDeque<AgentMessage>,
+    output_schema: String,
     capacity: Capacity,
     capacity_revision: watch::Receiver<u64>,
     registry: Weak<Registry>,
@@ -175,6 +176,7 @@ pub(super) fn spawn(
     agent: Nanocodex,
     capacity: Capacity,
     registry: Weak<Registry>,
+    output_schema: String,
 ) -> (HarnessHandle, JoinHandle<()>) {
     let (commands, receiver) = mpsc::channel(COMMAND_CAPACITY);
     let (deferred, deferred_receiver) = mpsc::channel(DEFERRED_CAPACITY);
@@ -196,6 +198,7 @@ pub(super) fn spawn(
             urgent: urgent_receiver,
             pending_deferred: VecDeque::new(),
             pending_urgent: VecDeque::new(),
+            output_schema,
             capacity,
             capacity_revision,
             registry,
@@ -298,11 +301,38 @@ impl Harness {
         if !command.wait_for_commit().await {
             return;
         }
-        if priority == MessagePriority::Urgent
-            && let Some(active) = &self.active
-        {
+        let steer = if priority == MessagePriority::Urgent && self.active.is_some() {
+            match self.registry.upgrade() {
+                Some(registry) => {
+                    registry
+                        .begin_turn_steer(&self.root_session_id, self.id)
+                        .await
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
+        if let Some(steer) = steer {
             let delegation = self.begin_delegation(command.message.id).await;
-            match active.control.steer(command.message.prompt()).await {
+            let prompt = format!(
+                "{}\n\n{}",
+                command.message.prompt(),
+                completion_instructions(&self.output_schema, steer.token())
+            );
+            let result = self
+                .active
+                .as_ref()
+                .expect("steering requires an active turn")
+                .control
+                .steer(prompt)
+                .await;
+            if let Some(registry) = self.registry.upgrade() {
+                registry
+                    .finish_turn_steer(&self.root_session_id, steer, result.is_ok())
+                    .await;
+            }
+            match result {
                 Ok(()) => {
                     self.admit(
                         command.message.id,
@@ -495,23 +525,37 @@ impl Harness {
                 self.id
             )));
         }
-        if let Some(registry) = self.registry.upgrade()
-            && !registry
-                .harness_can_start(&self.root_session_id, self.id)
-                .await
-        {
-            return Err(std::io::Error::other(format!(
-                "agent {} cannot start another turn",
-                self.id
-            )));
-        }
+        let registry = self
+            .registry
+            .upgrade()
+            .ok_or_else(|| std::io::Error::other("subagent runtime is closed"))?;
         let agent = self
             .agent
             .as_ref()
             .ok_or_else(|| std::io::Error::other(format!("agent {} is closed", self.id)))?;
-        let turn = agent.prompt(prompt).await.map_err(|error| {
-            std::io::Error::other(format!("could not start agent {}: {error}", self.id))
-        })?;
+        let Some(turn_token) = registry
+            .harness_turn_started(&self.root_session_id, self.id)
+            .await
+        else {
+            return Err(std::io::Error::other(format!(
+                "agent {} cannot start another turn",
+                self.id
+            )));
+        };
+        let prompt = format!(
+            "{prompt}\n\n{}",
+            completion_instructions(&self.output_schema, turn_token)
+        );
+        let turn = match agent.prompt(prompt).await {
+            Ok(turn) => turn,
+            Err(error) => {
+                let error = format!("could not start agent {}: {error}", self.id);
+                registry
+                    .harness_turn_start_failed(&self.root_session_id, self.id, error.clone())
+                    .await;
+                return Err(std::io::Error::other(error));
+            }
+        };
         let control = turn.control();
         let result = tokio::spawn(async move { turn.result().await });
         self.active = Some(ActiveTurn {
@@ -519,11 +563,6 @@ impl Harness {
             result,
             _capacity: capacity,
         });
-        if let Some(registry) = self.registry.upgrade() {
-            registry
-                .harness_turn_started(&self.root_session_id, self.id)
-                .await;
-        }
         Ok(())
     }
 

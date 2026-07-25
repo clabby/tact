@@ -8,7 +8,7 @@ use super::{
 use crate::{
     app::config::DEFAULT_MAX_SUBAGENTS,
     core::extensions::subagents::{
-        AgentDescriptor, AgentId, AgentOrigin, AgentStatus, AgentUpdate, MessageSender,
+        AgentDescriptor, AgentId, AgentStatus, AgentUpdate, MessageSender,
     },
     tui::{theme::Theme, transcript::TranscriptRecord},
 };
@@ -374,10 +374,6 @@ impl SubagentTree {
             } else {
                 theme.border()
             };
-            let origin = match node.descriptor.origin {
-                AgentOrigin::Spawn => "spawn",
-                AgentOrigin::Fork => "fork",
-            };
             let branch_prefix = tree_prefix(visible_node, false);
             let task_prefix = tree_prefix(visible_node, true);
             let indentation = u16::try_from(visible_node.ancestor_is_last.len())
@@ -394,7 +390,7 @@ impl SubagentTree {
                         Style::default().fg(text_color).add_modifier(Modifier::BOLD),
                     ),
                     Span::styled(
-                        format!("  {label} · {origin} · #{}", node.descriptor.id),
+                        format!("  {label} · #{}", node.descriptor.id),
                         Style::default().fg(detail_color),
                     ),
                 ]),
@@ -573,7 +569,7 @@ mod tests {
     use crate::{
         app::config::ReasoningEffort,
         core::extensions::subagents::{
-            AgentDescriptor, AgentId, AgentMessageUpdate, AgentOrigin, AgentStatus, AgentUpdate,
+            AgentDescriptor, AgentId, AgentMessageUpdate, AgentStatus, AgentUpdate,
         },
         tui::theme::Theme,
     };
@@ -591,7 +587,6 @@ mod tests {
             session_id: "child-session".to_owned(),
             role: "researcher".to_owned(),
             task: "Trace the event lifecycle".to_owned(),
-            origin: AgentOrigin::Fork,
             parent: None,
         }
     }
@@ -727,7 +722,6 @@ mod tests {
             session_id: "second-session".to_owned(),
             role: "reviewer".to_owned(),
             task: "Verify the event ordering".to_owned(),
-            origin: AgentOrigin::Fork,
             parent: None,
         }
     }
@@ -827,7 +821,7 @@ mod tests {
         tree.apply(AgentUpdate::Status {
             id: AgentId::new(1),
             status: AgentStatus::Completed {
-                report: "done".to_owned(),
+                output: json!({ "report": "done" }),
             },
         });
         assert_eq!(tree.active_count(), 0);
@@ -853,7 +847,7 @@ mod tests {
         tree.apply(AgentUpdate::Status {
             id: AgentId::new(1),
             status: AgentStatus::Completed {
-                report: "done".to_owned(),
+                output: json!({ "report": "done" }),
             },
         });
 
@@ -894,7 +888,7 @@ mod tests {
         tree.apply(AgentUpdate::Status {
             id: AgentId::new(1),
             status: AgentStatus::Completed {
-                report: "done".to_owned(),
+                output: json!({ "report": "done" }),
             },
         });
 
@@ -906,7 +900,7 @@ mod tests {
     }
 
     #[test]
-    fn tree_renders_role_task_origin_and_state_as_one_joined_branch() {
+    fn tree_renders_role_task_and_state_as_one_joined_branch() {
         let mut tree = SubagentTree::new(ReasoningEffort::Medium);
         tree.apply(AgentUpdate::Added(descriptor()));
         let mut terminal = Terminal::new(TestBackend::new(90, 24)).unwrap();
@@ -925,7 +919,7 @@ mod tests {
 
         assert!(rendered.contains("main agent"));
         assert!(rendered.contains("researcher"));
-        assert!(rendered.contains("running · fork · #1"));
+        assert!(rendered.contains("running · #1"));
         assert!(rendered.contains("Trace the event lifecycle"));
     }
 
