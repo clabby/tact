@@ -1,6 +1,6 @@
 //! Forwarding from subagent runtimes into the TUI event loop.
 
-use crate::subagents::{AgentUpdate, ScopedAgentUpdate, SubagentRuntimeId};
+use crate::core::extensions::subagents::{AgentUpdate, ScopedAgentUpdate, SubagentRuntimeId};
 use tokio::sync::mpsc;
 
 pub(crate) struct ForwardedSubagentUpdate {

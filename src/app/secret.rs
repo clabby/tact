@@ -1,6 +1,6 @@
 //! Application-owned secret storage with redaction and zeroization.
 
-use crate::error::SecretError;
+use crate::app::error::SecretError;
 use std::{
     env::{self, VarError},
     fmt,

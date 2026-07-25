@@ -6,8 +6,10 @@ use super::{
     transcript::{Transcript, TranscriptEvent},
 };
 use crate::{
-    config::DEFAULT_MAX_SUBAGENTS,
-    subagents::{AgentDescriptor, AgentId, AgentOrigin, AgentStatus, AgentUpdate, MessageSender},
+    app::config::DEFAULT_MAX_SUBAGENTS,
+    core::extensions::subagents::{
+        AgentDescriptor, AgentId, AgentOrigin, AgentStatus, AgentUpdate, MessageSender,
+    },
     tui::{theme::Theme, transcript::TranscriptRecord},
 };
 use crossterm::event::{Event, KeyCode, KeyEventKind};
@@ -112,12 +114,12 @@ pub(super) struct SubagentTree {
     nodes: Vec<AgentNode>,
     selected: usize,
     filter: AgentFilter,
-    effort: crate::config::ReasoningEffort,
+    effort: crate::app::config::ReasoningEffort,
     max_subagents: usize,
 }
 
 impl SubagentTree {
-    pub(super) const fn new(effort: crate::config::ReasoningEffort) -> Self {
+    pub(super) const fn new(effort: crate::app::config::ReasoningEffort) -> Self {
         Self {
             nodes: Vec::new(),
             selected: 0,
@@ -190,7 +192,7 @@ impl SubagentTree {
             .count()
     }
 
-    pub(super) fn set_effort(&mut self, effort: crate::config::ReasoningEffort) {
+    pub(super) fn set_effort(&mut self, effort: crate::app::config::ReasoningEffort) {
         self.effort = effort;
         for node in &mut self.nodes {
             node.transcript.component_mut().set_effort(effort);
@@ -569,8 +571,8 @@ fn unix_time_ms() -> u64 {
 mod tests {
     use super::{SubagentEffect, SubagentTree};
     use crate::{
-        config::ReasoningEffort,
-        subagents::{
+        app::config::ReasoningEffort,
+        core::extensions::subagents::{
             AgentDescriptor, AgentId, AgentMessageUpdate, AgentOrigin, AgentStatus, AgentUpdate,
         },
         tui::theme::Theme,

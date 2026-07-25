@@ -3,8 +3,8 @@ use super::{
     ToolState, TranscriptEntry, TranscriptRecord, TransientStatus,
 };
 use crate::{
-    config::ReasoningEffort,
-    subagents::{
+    app::config::ReasoningEffort,
+    core::extensions::subagents::{
         AgentMessageUpdate, MessageDeliveryState, MessageDisposition, MessageSender, ThreadId,
     },
     tui::format::{format_duration, humanize_tool},
@@ -1088,8 +1088,8 @@ mod tests {
         merge_shell_result, visibility,
     };
     use crate::{
-        config::ReasoningEffort,
-        subagents::{AgentId, AgentMessageUpdate, MessageSender, ThreadId},
+        app::config::ReasoningEffort,
+        core::extensions::subagents::{AgentId, AgentMessageUpdate, MessageSender, ThreadId},
         tui::transcript::{
             LocalEvent, SessionEnded, SessionOutcome, ShellId, TranscriptRecord, TurnId,
         },
@@ -1180,7 +1180,7 @@ mod tests {
         assert_eq!(thread.deliveries.len(), 1);
         assert!(matches!(
             thread.deliveries[0].state,
-            crate::subagents::MessageDeliveryState::Delivered { .. }
+            crate::core::extensions::subagents::MessageDeliveryState::Delivered { .. }
         ));
 
         let mut snapshot = model.fork_snapshot();

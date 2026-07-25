@@ -19,8 +19,8 @@ use super::{
     transcript::{Transcript, TranscriptEvent},
 };
 use crate::{
-    config::{ReasoningEffort, ReasoningMode},
-    subagents::{AgentUpdate, MessageSender},
+    app::config::{ReasoningEffort, ReasoningMode},
+    core::extensions::subagents::{AgentUpdate, MessageSender},
     tui::{
         context::ContextDiagnostics,
         prompt::Submission,
@@ -1667,8 +1667,8 @@ mod tests {
         ThreadState,
     };
     use crate::{
-        config::{ReasoningEffort, ReasoningMode},
-        subagents::{
+        app::config::{ReasoningEffort, ReasoningMode},
+        core::extensions::subagents::{
             AgentDescriptor, AgentId, AgentMessageUpdate, AgentOrigin, AgentStatus, AgentUpdate,
         },
         tui::{

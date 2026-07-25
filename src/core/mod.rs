@@ -1,11 +1,16 @@
 //! Nanocodex construction, turn execution, and graceful shutdown.
 
+pub(crate) mod extensions;
+
 use crate::{
-    config::{Config, ReasoningEffort, ReasoningMode, SkillsConfig},
-    error::{Result, RuntimeError},
-    mcp,
-    skills::SkillCatalog,
-    subagents::{self, ScopedAgentUpdate, SubagentControl},
+    app::{
+        config::{Config, ReasoningEffort, ReasoningMode, SkillsConfig},
+        error::{Result, RuntimeError},
+    },
+    core::extensions::{
+        SkillCatalog, mcp_provider,
+        subagents::{self, ScopedAgentUpdate, SubagentControl},
+    },
     tui::session::ResumeState,
 };
 use nanocodex::{AgentEvents, Nanocodex, NanocodexError, Responses, Tools, TurnControl};
@@ -63,7 +68,7 @@ impl ConfiguredAgent {
     ) -> Result<Self> {
         let agent_config = config.agent();
         let workspace = Self::resolve_workspace(agent_config.workspace())?;
-        let mcp = mcp::provider(config)?;
+        let mcp = mcp_provider(config)?;
         let auth = config.auth().load()?;
 
         let mut responses = Responses::builder();
@@ -250,7 +255,7 @@ impl Cancellation {
 #[cfg(test)]
 mod tests {
     use super::{ConfiguredAgent, fresh_instructions, session_instructions};
-    use crate::{
+    use crate::app::{
         config::SkillsConfig,
         error::{Error, RuntimeError},
     };
@@ -525,7 +530,8 @@ mod tests {
             .responses(responses)
             .build()
             .unwrap();
-        let (_registry, subagent_control, subagent_updates) = crate::subagents::channel(32);
+        let (_registry, subagent_control, subagent_updates) =
+            crate::core::extensions::subagents::channel(32);
         let configured = ConfiguredAgent {
             agent,
             events,

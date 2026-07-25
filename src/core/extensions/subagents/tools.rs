@@ -470,7 +470,7 @@ pub(crate) fn root_tools(
 #[cfg(test)]
 mod tests {
     use super::SendAgentMessage;
-    use crate::subagents::runtime::Registry;
+    use crate::core::extensions::subagents::runtime::Registry;
     use nanocodex::Tool;
     use serde_json::json;
     use std::sync::Weak;

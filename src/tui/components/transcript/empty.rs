@@ -1,6 +1,6 @@
 //! Demand-driven empty transcript animation.
 
-use crate::{config::ReasoningEffort, tui::theme::Theme};
+use crate::{app::config::ReasoningEffort, tui::theme::Theme};
 use ratatui::{
     Frame,
     layout::{Position, Rect},
@@ -144,7 +144,7 @@ fn mask(area: Rect) -> Option<Rect> {
 #[cfg(test)]
 mod tests {
     use super::{EmptyLogo, FRAME_INTERVAL, WORDMARK, corner_inset, mask};
-    use crate::{config::ReasoningEffort, tui::theme::Theme};
+    use crate::{app::config::ReasoningEffort, tui::theme::Theme};
     use ratatui::{Terminal, backend::TestBackend, layout::Rect};
     use std::time::Instant;
 

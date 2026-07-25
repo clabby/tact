@@ -9,8 +9,8 @@ mod tool;
 
 use super::node::{Component, ComponentUpdate, RenderRequest};
 use crate::{
-    config::ReasoningEffort,
-    subagents::{AgentMessageUpdate, MessageSender},
+    app::config::ReasoningEffort,
+    core::extensions::subagents::{AgentMessageUpdate, MessageSender},
     tui::{
         format::{duration_display_tick, format_duration},
         spinner::Spinner,
@@ -1276,8 +1276,8 @@ mod tests {
         Transcript, TranscriptEvent, unix_milliseconds,
     };
     use crate::{
-        config::ReasoningEffort,
-        subagents::{AgentMessageUpdate, MessageSender},
+        app::config::ReasoningEffort,
+        core::extensions::subagents::{AgentMessageUpdate, MessageSender},
         tui::{
             theme::Theme,
             transcript::{EntryKind, LocalEvent, TranscriptRecord, TurnId},

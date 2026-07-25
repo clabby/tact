@@ -1,10 +1,13 @@
 //! Command-line parsing and dispatch.
 
 use crate::{
-    config::{AuthMode, Config, ConfigOverrides, ReasoningEffort, ReasoningMode},
+    app::{
+        config::{AuthMode, Config, ConfigOverrides, ReasoningEffort, ReasoningMode},
+        error::{AuthResult, Error, Result, RuntimeError},
+        shutdown, update,
+    },
     core::ConfiguredAgent,
-    error::{AuthResult, Error, Result, RuntimeError},
-    shutdown, tui, update,
+    tui,
 };
 use clap::{ArgAction, Parser, Subcommand, builder::NonEmptyStringValueParser};
 use crossterm::style::{Color, Stylize};
@@ -499,16 +502,16 @@ fn parse_header_env(value: &str) -> std::result::Result<(String, String), String
 fn read_mcp_environment(
     name: String,
     read: impl FnOnce(&str) -> std::result::Result<String, VarError>,
-) -> std::result::Result<(String, Zeroizing<String>), crate::error::ConfigError> {
+) -> std::result::Result<(String, Zeroizing<String>), crate::app::error::ConfigError> {
     match read(&name) {
         Ok(value) => Ok((name, Zeroizing::new(value))),
         Err(VarError::NotPresent) => {
-            Err(crate::error::ConfigError::McpEnvironmentNotPresent { name })
+            Err(crate::app::error::ConfigError::McpEnvironmentNotPresent { name })
         }
         // VarError owns and renders the non-Unicode value, so discard it before constructing the
         // diagnostic. The process environment retains the original outside tact's ownership.
         Err(VarError::NotUnicode(_)) => {
-            Err(crate::error::ConfigError::McpEnvironmentNotUnicode { name })
+            Err(crate::app::error::ConfigError::McpEnvironmentNotUnicode { name })
         }
     }
 }
@@ -517,9 +520,9 @@ fn read_mcp_environment(
 mod tests {
     use super::{Cli, McpCommand, read_mcp_environment, resume_command};
     use crate::{
-        cli::Command,
-        config::{AuthMode, Config, ConfigOverrides},
-        error::{ConfigError, Error},
+        app::cli::Command,
+        app::config::{AuthMode, Config, ConfigOverrides},
+        app::error::{ConfigError, Error},
     };
     use clap::{CommandFactory, Parser, error::ErrorKind};
     use std::{env::VarError, ffi::OsString, fs, path::PathBuf};

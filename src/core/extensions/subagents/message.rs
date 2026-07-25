@@ -198,7 +198,7 @@ fn validate_body(body: &str) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{MAX_MESSAGE_BYTES, MAX_RETAINED_MESSAGES, MessageThreads};
-    use crate::subagents::{
+    use crate::core::extensions::subagents::{
         AgentId, MessageDisposition, MessagePriority, MessagePurpose, MessageSender,
     };
 
@@ -310,7 +310,7 @@ mod tests {
                 AgentId::new(2),
                 MessagePriority::Deferred,
                 MessagePurpose::Coordinate,
-                Some(crate::subagents::MessageId::new(1)),
+                Some(crate::core::extensions::subagents::MessageId::new(1)),
                 "answer".to_owned(),
             )
             .unwrap_err();

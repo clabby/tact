@@ -129,7 +129,7 @@ impl TaskTree {
 #[cfg(test)]
 mod tests {
     use super::TaskTree;
-    use crate::subagents::AgentId;
+    use crate::core::extensions::subagents::AgentId;
 
     fn insert(tree: &mut TaskTree, session_id: &str, parent: Option<AgentId>) -> AgentId {
         let id = tree.reserve(parent).unwrap();

@@ -1334,8 +1334,8 @@ mod tests {
         AgentDescriptor, AgentId, AgentStatus, ChildSession, Registry, RegistryState,
         forward_events,
     };
-    use crate::subagents::AgentOrigin;
-    use crate::subagents::{
+    use crate::core::extensions::subagents::AgentOrigin;
+    use crate::core::extensions::subagents::{
         AgentUpdate, MessageDeliveryState, MessageDisposition, MessagePriority, MessagePurpose,
     };
     use nanocodex::{
@@ -1440,7 +1440,7 @@ mod tests {
 
     async fn next_message_update(
         updates: &mut tokio::sync::mpsc::UnboundedReceiver<super::ScopedAgentUpdate>,
-    ) -> crate::subagents::AgentMessageUpdate {
+    ) -> crate::core::extensions::subagents::AgentMessageUpdate {
         timeout(Duration::from_secs(5), async {
             loop {
                 let update = updates
@@ -1943,7 +1943,7 @@ mod tests {
             insert_pending_runtime_session(&registry, "main", None, Arc::new(Notify::new())).await;
         mark_reusable(&registry, "main", target).await;
 
-        for index in 0..crate::subagents::harness::DEFERRED_CAPACITY {
+        for index in 0..crate::core::extensions::subagents::harness::DEFERRED_CAPACITY {
             let receipt = registry
                 .send_message(
                     &sender_session,
@@ -1970,7 +1970,7 @@ mod tests {
             .unwrap_err();
         assert!(normal_error.to_string().contains("mailbox"));
 
-        for index in 0..crate::subagents::harness::URGENT_CAPACITY {
+        for index in 0..crate::core::extensions::subagents::harness::URGENT_CAPACITY {
             let receipt = registry
                 .send_message(
                     &sender_session,

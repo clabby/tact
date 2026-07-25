@@ -1,9 +1,9 @@
 //! Authentication selection and shared ChatGPT credential management.
 
 use crate::{
-    config::{AuthConfig, AuthMode},
-    error::{AuthError, AuthResult, SecretError},
-    secret::SecretString,
+    app::config::{AuthConfig, AuthMode},
+    app::error::{AuthError, AuthResult, SecretError},
+    app::secret::SecretString,
 };
 use nanocodex::{
     ChatGptAuthStatus, ChatGptLogin, OpenAiAuth, chatgpt_auth_status, load_chatgpt_auth,
@@ -26,7 +26,7 @@ impl AuthConfig {
             "Open this URL to sign in with ChatGPT:\n\n{}\n",
             login.authorization_url()
         );
-        if let Err(error) = crate::browser::open(login.authorization_url()) {
+        if let Err(error) = crate::app::browser::open(login.authorization_url()) {
             eprintln!(
                 "Could not open a browser automatically ({error}). Open the URL above manually."
             );
@@ -146,9 +146,9 @@ impl SelectedAuth {
 mod tests {
     use super::SelectedAuth;
     use crate::{
-        config::{AuthConfig, AuthMode},
-        error::AuthError,
-        secret::SecretString,
+        app::config::{AuthConfig, AuthMode},
+        app::error::AuthError,
+        app::secret::SecretString,
     };
     use nanocodex::OpenAiAuthMode;
     use std::{cell::Cell, fs};

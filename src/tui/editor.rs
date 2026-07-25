@@ -1,6 +1,6 @@
 //! Asynchronous external-editor handoff.
 
-use crate::error::ExternalEditorError;
+use crate::app::error::ExternalEditorError;
 use std::{
     env, fs,
     path::Path,
@@ -134,7 +134,7 @@ mod tests {
         EditorOutcome, edit_config_with, edit_with, parse_editor_command,
         remove_one_trailing_newline,
     };
-    use crate::error::ExternalEditorError;
+    use crate::app::error::ExternalEditorError;
     use std::path::Path;
 
     #[test]

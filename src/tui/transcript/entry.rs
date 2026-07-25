@@ -1,6 +1,6 @@
 use crate::{
-    config::ReasoningEffort,
-    subagents::{AgentThread, MessageDeliveryState, MessageId, MessageSender},
+    app::config::ReasoningEffort,
+    core::extensions::subagents::{AgentThread, MessageDeliveryState, MessageId, MessageSender},
 };
 use serde_json::Value;
 

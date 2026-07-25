@@ -1,7 +1,7 @@
 //! Configuration loading, precedence, and effective runtime settings.
 
 use crate::{
-    error::{ConfigError, McpUrlError, Result},
+    app::error::{ConfigError, McpUrlError, Result},
     tui::theme::{Theme, ThemeMode},
 };
 use clap::ValueEnum;
@@ -1054,7 +1054,7 @@ mod tests {
         AuthMode, Config, ConfigOverrides, Environment, McpEnvironment, McpSecretString,
         McpServerConfig, ReasoningEffort, ReasoningMode, ThemeMode, validate_mcp_url,
     };
-    use crate::error::{ConfigError, Error, McpUrlError};
+    use crate::app::error::{ConfigError, Error, McpUrlError};
     use ratatui::style::Color;
     use std::{collections::BTreeMap, fs, path::Path, sync::Arc};
     use tempfile::tempdir;

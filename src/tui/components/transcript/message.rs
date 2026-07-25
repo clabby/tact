@@ -2,7 +2,7 @@
 
 use super::markdown::{sanitize, wrap_plain, wrap_spans};
 use crate::{
-    subagents::{
+    core::extensions::subagents::{
         AgentId, AgentMessage, MessageDeliveryState, MessageDisposition, MessagePriority,
         MessagePurpose, MessageSender,
     },
@@ -317,7 +317,7 @@ fn first_line(text: &str) -> String {
 mod tests {
     use super::render;
     use crate::{
-        subagents::{AgentMessageUpdate, MessageDeliveryState},
+        core::extensions::subagents::{AgentMessageUpdate, MessageDeliveryState},
         tui::{theme::Theme, transcript::DirectedMessageEntry},
     };
     use serde_json::json;
