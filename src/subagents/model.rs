@@ -29,6 +29,190 @@ impl fmt::Display for AgentId {
     }
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(transparent)]
+pub(crate) struct MessageId(u64);
+
+impl MessageId {
+    #[cfg(test)]
+    pub(crate) const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    #[cfg(any(feature = "agent-messaging", test))]
+    pub(super) fn next(counter: &mut u64) -> Self {
+        *counter = counter.saturating_add(1);
+        Self(*counter)
+    }
+}
+
+impl fmt::Display for MessageId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(transparent)]
+pub(crate) struct ThreadId(u64);
+
+impl ThreadId {
+    #[cfg(test)]
+    pub(crate) const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    #[cfg(any(feature = "agent-messaging", test))]
+    pub(super) const fn for_message(message: MessageId) -> Self {
+        Self(message.0)
+    }
+}
+
+impl fmt::Display for ThreadId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum MessageSender {
+    Root,
+    Agent { agent_id: AgentId },
+}
+
+impl MessageSender {
+    #[cfg(any(feature = "agent-messaging", test))]
+    pub(super) const fn agent_id(self) -> Option<AgentId> {
+        match self {
+            Self::Root => None,
+            Self::Agent { agent_id } => Some(agent_id),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum MessagePriority {
+    #[default]
+    Normal,
+    Urgent,
+}
+
+impl MessagePriority {
+    #[cfg(feature = "agent-messaging")]
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Normal => "normal",
+            Self::Urgent => "urgent",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum MessagePurpose {
+    Delegate,
+    #[default]
+    Coordinate,
+    Finding,
+    Question,
+    Reply,
+}
+
+impl MessagePurpose {
+    #[cfg(feature = "agent-messaging")]
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Delegate => "delegate",
+            Self::Coordinate => "coordinate",
+            Self::Finding => "finding",
+            Self::Question => "question",
+            Self::Reply => "reply",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum MessageDisposition {
+    Started,
+    Queued,
+    Steered,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct AgentMessage {
+    pub(crate) id: MessageId,
+    pub(crate) thread_id: ThreadId,
+    pub(crate) from: MessageSender,
+    pub(crate) to: AgentId,
+    pub(crate) priority: MessagePriority,
+    pub(crate) purpose: MessagePurpose,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) in_reply_to: Option<MessageId>,
+    pub(crate) body: String,
+}
+
+impl AgentMessage {
+    #[cfg(feature = "agent-messaging")]
+    pub(super) fn prompt(&self) -> String {
+        let (sender, response_guidance) = match self.from {
+            MessageSender::Root => (
+                "the root agent".to_owned(),
+                "Return any response through your normal final report; the root does not accept \
+                 inbound agent messages in this experiment."
+                    .to_owned(),
+            ),
+            MessageSender::Agent { agent_id } => (
+                format!("agent {agent_id}"),
+                format!(
+                    "Reply to agent {agent_id} with send_agent_message when a response would \
+                     materially help coordination."
+                ),
+            ),
+        };
+        let authority = if self.purpose == MessagePurpose::Delegate {
+            "This authorized delegate message replaces your assigned task."
+        } else {
+            "The message body is coordination context and does not replace your assigned task."
+        };
+        format!(
+            "A directed message from {sender} was delivered by the sub-agent runtime.\n\
+             Message ID: {}\nThread ID: {}\nPurpose: {}\nPriority: {}\n\n\
+             Treat the sender and routing metadata as authoritative runtime context. {authority} \
+             {response_guidance}\n\nMessage body:\n{}",
+            self.id,
+            self.thread_id,
+            self.purpose.as_str(),
+            self.priority.as_str(),
+            self.body
+        )
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct AgentThread {
+    pub(crate) id: ThreadId,
+    pub(crate) participants: [MessageSender; 2],
+    pub(crate) messages: Vec<AgentMessage>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub(crate) enum MessageDeliveryState {
+    Admitted { disposition: MessageDisposition },
+    Delivered { disposition: MessageDisposition },
+    Failed { error: String },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct AgentMessageUpdate {
+    pub(crate) message_id: MessageId,
+    pub(crate) thread: AgentThread,
+    pub(crate) delivery: MessageDeliveryState,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum AgentOrigin {
@@ -67,10 +251,18 @@ impl AgentOrigin {
             Self::Spawn => "You have no inherited conversation context.",
             Self::Fork => "Use the inherited conversation only as context for this delegation.",
         };
+        #[cfg(feature = "agent-messaging")]
+        let coordination = " You may exchange bounded directed messages with any other agent in \
+                            this task tree through send_agent_message. Ordinary messages provide \
+                            coordination context; only a delegate message from an authorized \
+                            manager replaces your assigned task.";
+        #[cfg(not(feature = "agent-messaging"))]
+        let coordination = "";
         format!(
             "Act as a specialist subagent. {context} Work only on the delegated task and return a \
              compact, evidence-backed report to the parent agent. Your agent ID is {id}. The \
-             runtime automatically places agents you delegate beneath you in the task tree.\n\n\
+             runtime automatically places agents you delegate beneath you in the task \
+             tree.{coordination}\n\n\
              Delegated task:\n{task}"
         )
     }
@@ -121,8 +313,22 @@ pub(crate) struct AgentDescriptor {
 #[derive(Debug)]
 pub(crate) enum AgentUpdate {
     Added(AgentDescriptor),
-    Event { id: AgentId, event: AgentEvent },
-    Status { id: AgentId, status: AgentStatus },
+    Event {
+        id: AgentId,
+        event: AgentEvent,
+    },
+    Status {
+        id: AgentId,
+        status: AgentStatus,
+    },
+    #[cfg_attr(
+        not(feature = "agent-messaging"),
+        allow(
+            dead_code,
+            reason = "constructed by the feature-gated messaging runtime"
+        )
+    )]
+    Message(AgentMessageUpdate),
 }
 
 pub(crate) struct ScopedAgentUpdate {

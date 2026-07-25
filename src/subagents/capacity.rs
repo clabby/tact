@@ -1,7 +1,10 @@
 use std::sync::{Arc, Mutex};
+use tokio::sync::watch;
 
+#[derive(Clone)]
 pub(super) struct Capacity {
     state: Arc<Mutex<CapacityState>>,
+    revision: watch::Sender<u64>,
 }
 
 struct CapacityState {
@@ -11,12 +14,15 @@ struct CapacityState {
 
 pub(super) struct TurnCapacity {
     state: Arc<Mutex<CapacityState>>,
+    revision: watch::Sender<u64>,
 }
 
 impl Capacity {
     pub(super) fn new(limit: usize) -> Self {
+        let (revision, _) = watch::channel(0);
         Self {
             state: Arc::new(Mutex::new(CapacityState { active: 0, limit })),
+            revision,
         }
     }
 
@@ -36,6 +42,7 @@ impl Capacity {
 
         Ok(TurnCapacity {
             state: Arc::clone(&self.state),
+            revision: self.revision.clone(),
         })
     }
 
@@ -44,6 +51,18 @@ impl Capacity {
             .lock()
             .expect("subagent capacity lock should not be poisoned")
             .limit = limit;
+        self.changed();
+    }
+
+    #[cfg(feature = "agent-messaging")]
+    pub(super) fn subscribe(&self) -> watch::Receiver<u64> {
+        self.revision.subscribe()
+    }
+
+    fn changed(&self) {
+        self.revision.send_modify(|revision| {
+            *revision = revision.wrapping_add(1);
+        });
     }
 }
 
@@ -53,6 +72,9 @@ impl Drop for TurnCapacity {
             .lock()
             .expect("subagent capacity lock should not be poisoned")
             .active -= 1;
+        self.revision.send_modify(|revision| {
+            *revision = revision.wrapping_add(1);
+        });
     }
 }
 

@@ -11,7 +11,9 @@ mod subagent_model;
 
 mod subagents {
     pub(crate) use crate::subagent_model::{
-        AgentDescriptor, AgentId, AgentOrigin, AgentStatus, AgentUpdate,
+        AgentDescriptor, AgentId, AgentMessage, AgentMessageUpdate, AgentOrigin, AgentStatus,
+        AgentThread, AgentUpdate, MessageDeliveryState, MessageDisposition, MessageId,
+        MessagePriority, MessagePurpose, MessageSender, ThreadId,
     };
 }
 

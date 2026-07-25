@@ -1,17 +1,22 @@
 use super::{
-    EntryId, EntryKind, MessagePhase, ShellId, ToolEntry, ToolState, TranscriptEntry,
-    TranscriptRecord, TransientStatus,
+    DirectedMessageEntry, EntryId, EntryKind, MessageDelivery, MessagePhase, ShellId, ToolEntry,
+    ToolState, TranscriptEntry, TranscriptRecord, TransientStatus,
 };
 use crate::{
     config::ReasoningEffort,
+    subagents::{
+        AgentMessageUpdate, MessageDeliveryState, MessageDisposition, MessageSender, ThreadId,
+    },
     tui::format::{format_duration, humanize_tool},
 };
 use serde::Deserialize;
 use serde_json::Value;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     path::PathBuf,
 };
+
+const MAX_RETAINED_MESSAGE_THREADS: usize = 256;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum EventVisibility {
@@ -21,20 +26,25 @@ enum EventVisibility {
     ErrorFallback,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct ModelChange {
     pub(crate) changed: bool,
+    pub(crate) removed: Option<EntryId>,
 }
 
 #[derive(Default)]
 pub(crate) struct TranscriptModel {
     entries: Vec<TranscriptEntry>,
+    entry_indices: HashMap<EntryId, usize>,
+    next_entry_id: usize,
     assistants: HashMap<AssistantKey, EntryId>,
     active_assistants: HashMap<(u32, MessagePhase), EntryId>,
     reasoning: HashMap<u32, EntryId>,
     tools: HashMap<String, EntryId>,
     shell_sessions: HashMap<i64, EntryId>,
     local_shells: HashMap<ShellId, EntryId>,
+    message_threads: HashMap<ThreadId, EntryId>,
+    message_order: VecDeque<ThreadId>,
     running_tools: HashSet<EntryId>,
     active_runs: usize,
     transient: Option<TransientStatus>,
@@ -68,14 +78,32 @@ impl TranscriptModel {
                 _ => true,
             })
             .cloned()
+            .collect::<Vec<_>>();
+        let entry_indices = entries
+            .iter()
             .enumerate()
-            .map(|(index, mut entry)| {
-                entry.id = EntryId::from_index(index);
-                entry
+            .map(|(index, entry)| (entry.id, index))
+            .collect();
+        let message_threads = entries
+            .iter()
+            .filter_map(|entry| match &entry.kind {
+                EntryKind::DirectedMessage(message) => Some((message.thread.id, entry.id)),
+                _ => None,
+            })
+            .collect();
+        let message_order = entries
+            .iter()
+            .filter_map(|entry| match &entry.kind {
+                EntryKind::DirectedMessage(message) => Some(message.thread.id),
+                _ => None,
             })
             .collect();
         Self {
             entries,
+            entry_indices,
+            next_entry_id: self.next_entry_id,
+            message_threads,
+            message_order,
             ..Self::default()
         }
     }
@@ -85,11 +113,11 @@ impl TranscriptModel {
     }
 
     pub(crate) fn entry(&self, id: EntryId) -> Option<&TranscriptEntry> {
-        self.entries.get(id.index())
+        self.index_of(id).and_then(|index| self.entries.get(index))
     }
 
     pub(crate) fn index_of(&self, id: EntryId) -> Option<usize> {
-        (id.index() < self.entries.len()).then_some(id.index())
+        self.entry_indices.get(&id).copied()
     }
 
     pub(crate) fn transient(&self) -> Option<&TransientStatus> {
@@ -116,6 +144,78 @@ impl TranscriptModel {
             return ModelChange::default();
         }
         self.apply_agent(record)
+    }
+
+    pub(crate) fn apply_message(
+        &mut self,
+        perspective: MessageSender,
+        update: AgentMessageUpdate,
+    ) -> ModelChange {
+        let Some(id) = self.message_threads.get(&update.thread.id).copied() else {
+            let thread_id = update.thread.id;
+            let id = self.push(EntryKind::DirectedMessage(DirectedMessageEntry {
+                perspective,
+                thread: update.thread,
+                deliveries: vec![MessageDelivery {
+                    message_id: update.message_id,
+                    state: update.delivery,
+                }],
+            }));
+            self.message_threads.insert(thread_id, id);
+            self.message_order.push_back(thread_id);
+            return ModelChange {
+                changed: true,
+                removed: self.trim_message_history(),
+            };
+        };
+
+        let Some(index) = self.index_of(id) else {
+            return ModelChange::default();
+        };
+        let EntryKind::DirectedMessage(message) = &self.entries[index].kind else {
+            return ModelChange::default();
+        };
+        let previous_delivery = message
+            .deliveries
+            .iter()
+            .find(|delivery| delivery.message_id == update.message_id);
+        let changed = message.thread != update.thread
+            || previous_delivery
+                .is_none_or(|delivery| delivery_advances(&delivery.state, &update.delivery));
+        if !changed {
+            return ModelChange::default();
+        }
+
+        let EntryKind::DirectedMessage(message) = &mut self.entries[index].kind else {
+            return ModelChange::default();
+        };
+        message.thread = update.thread;
+        message.deliveries.retain(|delivery| {
+            message
+                .thread
+                .messages
+                .iter()
+                .any(|retained| retained.id == delivery.message_id)
+        });
+        let delivery = message
+            .deliveries
+            .iter_mut()
+            .find(|delivery| delivery.message_id == update.message_id);
+        match delivery {
+            Some(delivery) if delivery_advances(&delivery.state, &update.delivery) => {
+                delivery.state = update.delivery;
+            }
+            None => message.deliveries.push(MessageDelivery {
+                message_id: update.message_id,
+                state: update.delivery,
+            }),
+            Some(_) => {}
+        }
+        self.entries[index].revision = self.entries[index].revision.saturating_add(1);
+        ModelChange {
+            changed: true,
+            removed: self.trim_message_history(),
+        }
     }
 
     fn apply_local(&mut self, record: &TranscriptRecord) -> ModelChange {
@@ -184,7 +284,10 @@ impl TranscriptModel {
             _ => return ModelChange::default(),
         };
         match changed {
-            Ok(()) => ModelChange { changed: true },
+            Ok(()) => ModelChange {
+                changed: true,
+                ..ModelChange::default()
+            },
             Err(error) => self.projection_error(record, error, true),
         }
     }
@@ -297,6 +400,7 @@ impl TranscriptModel {
         match result {
             Ok(changed) => ModelChange {
                 changed: changed || activity_changed,
+                ..ModelChange::default()
             },
             Err(error) => self.projection_error(
                 record,
@@ -678,7 +782,10 @@ impl TranscriptModel {
         } else {
             self.pending_error = Some(message);
         }
-        ModelChange { changed: visible }
+        ModelChange {
+            changed: visible,
+            ..ModelChange::default()
+        }
     }
 
     fn decode_local<T: serde::de::DeserializeOwned>(
@@ -693,7 +800,9 @@ impl TranscriptModel {
     }
 
     fn push_with_visibility(&mut self, kind: EntryKind, hidden: bool) -> EntryId {
-        let id = EntryId::from_index(self.entries.len());
+        let id = EntryId::from_index(self.next_entry_id);
+        self.next_entry_id = self.next_entry_id.saturating_add(1);
+        self.entry_indices.insert(id, self.entries.len());
         self.entries.push(TranscriptEntry {
             id,
             revision: 1,
@@ -703,6 +812,42 @@ impl TranscriptModel {
         id
     }
 
+    fn trim_message_history(&mut self) -> Option<EntryId> {
+        if self.message_order.len() <= MAX_RETAINED_MESSAGE_THREADS {
+            return None;
+        }
+        let position = self.message_order.iter().position(|thread_id| {
+            let Some(id) = self.message_threads.get(thread_id) else {
+                return true;
+            };
+            let Some(entry) = self.entry(*id) else {
+                return true;
+            };
+            let EntryKind::DirectedMessage(message) = &entry.kind else {
+                return true;
+            };
+            !message.deliveries.iter().any(|delivery| {
+                matches!(
+                    delivery.state,
+                    MessageDeliveryState::Admitted {
+                        disposition: MessageDisposition::Queued
+                    }
+                )
+            })
+        })?;
+        let thread_id = self
+            .message_order
+            .remove(position)
+            .expect("the retained message thread should still exist");
+        let id = self.message_threads.remove(&thread_id)?;
+        let removed_index = self.entry_indices.remove(&id)?;
+        self.entries.remove(removed_index);
+        for (index, entry) in self.entries.iter().enumerate().skip(removed_index) {
+            self.entry_indices.insert(entry.id, index);
+        }
+        Some(id)
+    }
+
     fn update(&mut self, id: EntryId, update: impl FnOnce(&mut EntryKind)) {
         let Some(index) = self.index_of(id) else {
             return;
@@ -710,6 +855,10 @@ impl TranscriptModel {
         update(&mut self.entries[index].kind);
         self.entries[index].revision = self.entries[index].revision.saturating_add(1);
     }
+}
+
+fn delivery_advances(current: &MessageDeliveryState, next: &MessageDeliveryState) -> bool {
+    current != next && matches!(current, MessageDeliveryState::Admitted { .. })
 }
 
 fn visibility(source: &str, kind: &str) -> EventVisibility {
@@ -935,10 +1084,12 @@ struct ConnectionPayload {
 #[cfg(test)]
 mod tests {
     use super::{
-        EntryKind, EventVisibility, ToolState, TranscriptModel, merge_shell_result, visibility,
+        EntryKind, EventVisibility, MAX_RETAINED_MESSAGE_THREADS, ToolState, TranscriptModel,
+        merge_shell_result, visibility,
     };
     use crate::{
         config::ReasoningEffort,
+        subagents::{AgentId, AgentMessageUpdate, MessageSender, ThreadId},
         tui::transcript::{
             LocalEvent, SessionEnded, SessionOutcome, ShellId, TranscriptRecord, TurnId,
         },
@@ -968,6 +1119,102 @@ mod tests {
                 payload: to_raw_value(&payload).unwrap(),
             },
         )
+    }
+
+    fn message_update(state: &str) -> AgentMessageUpdate {
+        message_update_with_id(1, state)
+    }
+
+    fn message_update_with_id(id: u64, state: &str) -> AgentMessageUpdate {
+        serde_json::from_value(json!({
+            "message_id": id,
+            "thread": {
+                "id": id,
+                "participants": [
+                    {"kind": "agent", "agent_id": 1},
+                    {"kind": "agent", "agent_id": 2}
+                ],
+                "messages": [{
+                    "id": id,
+                    "thread_id": id,
+                    "from": {"kind": "agent", "agent_id": 1},
+                    "to": 2,
+                    "priority": "normal",
+                    "purpose": "coordinate",
+                    "body": "status update"
+                }]
+            },
+            "delivery": {
+                "state": state,
+                "disposition": "queued"
+            }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn message_delivery_updates_upsert_one_entry_per_thread() {
+        let mut model = TranscriptModel::default();
+        let perspective = MessageSender::Agent {
+            agent_id: AgentId::new(1),
+        };
+        let admitted = message_update("admitted");
+
+        assert!(model.apply_message(perspective, admitted.clone()).changed);
+        assert!(!model.apply_message(perspective, admitted).changed);
+        assert!(
+            model
+                .apply_message(perspective, message_update("delivered"))
+                .changed
+        );
+        assert!(
+            !model
+                .apply_message(perspective, message_update("admitted"))
+                .changed
+        );
+
+        assert_eq!(model.entries().len(), 1);
+        let EntryKind::DirectedMessage(thread) = &model.entries()[0].kind else {
+            panic!("message update should create a directed-message entry");
+        };
+        assert_eq!(thread.deliveries.len(), 1);
+        assert!(matches!(
+            thread.deliveries[0].state,
+            crate::subagents::MessageDeliveryState::Delivered { .. }
+        ));
+
+        let mut snapshot = model.fork_snapshot();
+        assert!(
+            !snapshot
+                .apply_message(perspective, message_update("delivered"))
+                .changed
+        );
+        assert_eq!(snapshot.entries().len(), 1);
+    }
+
+    #[test]
+    fn completed_directed_message_history_is_bounded() {
+        let mut model = TranscriptModel::default();
+        let perspective = MessageSender::Agent {
+            agent_id: AgentId::new(1),
+        };
+
+        for id in 1..=u64::try_from(MAX_RETAINED_MESSAGE_THREADS + 1).unwrap() {
+            assert!(
+                model
+                    .apply_message(perspective, message_update_with_id(id, "delivered"))
+                    .changed
+            );
+        }
+
+        assert_eq!(model.entries().len(), MAX_RETAINED_MESSAGE_THREADS);
+        assert_eq!(model.message_threads.len(), MAX_RETAINED_MESSAGE_THREADS);
+        assert!(model.entries().iter().all(|entry| {
+            matches!(
+                &entry.kind,
+                EntryKind::DirectedMessage(message) if message.thread.id != ThreadId::new(1)
+            )
+        }));
     }
 
     #[test]

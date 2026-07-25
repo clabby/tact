@@ -1,3 +1,9 @@
+#[cfg(feature = "agent-messaging")]
+use super::{
+    message::MAX_MESSAGE_BYTES,
+    model::{MessageId, MessagePriority, MessagePurpose},
+    runtime::AgentDirectoryEntry,
+};
 use super::{
     model::{AgentDescriptor, AgentId, AgentOrigin, AgentStatus, AgentUpdate},
     runtime::{AgentSummary, Registry, forward_events},
@@ -24,6 +30,7 @@ struct AgentTask {
     task: String,
 }
 
+#[cfg(not(feature = "agent-messaging"))]
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FollowUpTask {
@@ -31,6 +38,7 @@ struct FollowUpTask {
     task: String,
 }
 
+#[cfg(not(feature = "agent-messaging"))]
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SteerTask {
@@ -46,6 +54,7 @@ struct AgentStartReport {
     status: AgentStatus,
 }
 
+#[cfg(not(feature = "agent-messaging"))]
 #[derive(Serialize)]
 struct PromptAccepted {
     agent_id: AgentId,
@@ -66,13 +75,45 @@ struct TargetAgent {
     agent_id: AgentId,
 }
 
+#[cfg(not(feature = "agent-messaging"))]
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct EmptyTask {}
 
+#[cfg(not(feature = "agent-messaging"))]
 #[derive(Serialize)]
 struct AgentList {
     agents: Vec<AgentSummary>,
+}
+
+#[cfg(feature = "agent-messaging")]
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DirectoryTask {
+    #[serde(default)]
+    include_completed: bool,
+    #[serde(default)]
+    include_self: bool,
+}
+
+#[cfg(feature = "agent-messaging")]
+#[derive(Serialize)]
+struct AgentDirectory {
+    agents: Vec<AgentDirectoryEntry>,
+}
+
+#[cfg(feature = "agent-messaging")]
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SendMessageTask {
+    agent_id: AgentId,
+    message: String,
+    #[serde(default)]
+    priority: MessagePriority,
+    #[serde(default)]
+    purpose: MessagePurpose,
+    #[serde(default)]
+    in_reply_to: Option<MessageId>,
 }
 
 #[derive(Serialize)]
@@ -179,10 +220,12 @@ impl Tool for StartAgent {
     }
 }
 
+#[cfg(not(feature = "agent-messaging"))]
 struct PromptAgent {
     registry: Weak<Registry>,
 }
 
+#[cfg(not(feature = "agent-messaging"))]
 #[async_trait]
 impl Tool for PromptAgent {
     fn name(&self) -> &'static str {
@@ -228,10 +271,12 @@ impl Tool for PromptAgent {
     }
 }
 
+#[cfg(not(feature = "agent-messaging"))]
 struct SteerAgent {
     registry: Weak<Registry>,
 }
 
+#[cfg(not(feature = "agent-messaging"))]
 #[async_trait]
 impl Tool for SteerAgent {
     fn name(&self) -> &'static str {
@@ -274,6 +319,86 @@ impl Tool for SteerAgent {
     }
 }
 
+#[cfg(feature = "agent-messaging")]
+struct SendAgentMessage {
+    registry: Weak<Registry>,
+}
+
+#[cfg(feature = "agent-messaging")]
+#[async_trait]
+impl Tool for SendAgentMessage {
+    fn name(&self) -> &'static str {
+        "send_agent_message"
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::function(
+            self.name(),
+            "Sends a bounded directed message to any other agent in the same task tree. Normal messages start an idle agent or queue behind its active turn. Urgent messages steer a running agent at its next safe model boundary. Delegate messages replace the recipient's assigned task and require management authority.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "agent_id": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "The recipient from list_agents. Any non-closing agent in the same task tree can receive coordination messages."
+                    },
+                    "message": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": MAX_MESSAGE_BYTES,
+                        "description": "The focused message body. The runtime enforces a 2048-byte UTF-8 limit."
+                    },
+                    "priority": {
+                        "type": "string",
+                        "enum": ["normal", "urgent"],
+                        "default": "normal",
+                        "description": "Urgent steers an active turn; normal preserves turn boundaries."
+                    },
+                    "purpose": {
+                        "type": "string",
+                        "enum": ["delegate", "coordinate", "finding", "question", "reply"],
+                        "default": "coordinate",
+                        "description": "A typed coordination intent. Delegate is restricted to agents the sender can manage."
+                    },
+                    "in_reply_to": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "A message ID from the same two-party thread. Replies must reverse the original direction."
+                    }
+                },
+                "required": ["agent_id", "message"],
+                "additionalProperties": false
+            }),
+        )
+    }
+
+    async fn execute(&self, input: ToolInput, context: ToolContext<'_>) -> ToolResult {
+        let SendMessageTask {
+            agent_id,
+            message,
+            priority,
+            purpose,
+            in_reply_to,
+        } = input.decode_json()?;
+        let registry = self
+            .registry
+            .upgrade()
+            .ok_or_else(|| std::io::Error::other("subagent runtime is closed"))?;
+        let receipt = registry
+            .send_message(
+                context.session_id,
+                agent_id,
+                priority,
+                purpose,
+                in_reply_to,
+                message,
+            )
+            .await?;
+        Ok(ToolExecution::json(&receipt))
+    }
+}
+
 struct ListAgents {
     registry: Weak<Registry>,
 }
@@ -285,6 +410,29 @@ impl Tool for ListAgents {
     }
 
     fn definition(&self) -> ToolDefinition {
+        #[cfg(feature = "agent-messaging")]
+        return ToolDefinition::function(
+            self.name(),
+            "Lists a compact directory of agents in the same task tree. Active recipients are returned by default; completed agents can be included when a follow-up message is needed.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "include_completed": {
+                        "type": "boolean",
+                        "default": false,
+                        "description": "Includes completed, interrupted, failed, and closed agents."
+                    },
+                    "include_self": {
+                        "type": "boolean",
+                        "default": false,
+                        "description": "Includes the calling agent for topology inspection. Self-messaging remains unavailable."
+                    }
+                },
+                "additionalProperties": false
+            }),
+        );
+
+        #[cfg(not(feature = "agent-messaging"))]
         ToolDefinition::function(
             self.name(),
             "Lists every subagent visible to the current session, including completed, interrupted, failed, and closed agents.",
@@ -297,14 +445,34 @@ impl Tool for ListAgents {
     }
 
     async fn execute(&self, input: ToolInput, context: ToolContext<'_>) -> ToolResult {
-        let EmptyTask {} = input.decode_json()?;
-        let registry = self
-            .registry
-            .upgrade()
-            .ok_or_else(|| std::io::Error::other("subagent runtime is closed"))?;
-        Ok(ToolExecution::json(&AgentList {
-            agents: registry.list(context.session_id).await?,
-        }))
+        #[cfg(feature = "agent-messaging")]
+        {
+            let DirectoryTask {
+                include_completed,
+                include_self,
+            } = input.decode_json()?;
+            let registry = self
+                .registry
+                .upgrade()
+                .ok_or_else(|| std::io::Error::other("subagent runtime is closed"))?;
+            return Ok(ToolExecution::json(&AgentDirectory {
+                agents: registry
+                    .directory(context.session_id, include_completed, include_self)
+                    .await,
+            }));
+        }
+
+        #[cfg(not(feature = "agent-messaging"))]
+        {
+            let EmptyTask {} = input.decode_json()?;
+            let registry = self
+                .registry
+                .upgrade()
+                .ok_or_else(|| std::io::Error::other("subagent runtime is closed"))?;
+            Ok(ToolExecution::json(&AgentList {
+                agents: registry.list(context.session_id).await?,
+            }))
+        }
     }
 }
 
@@ -432,7 +600,7 @@ pub(crate) fn root_tools(
     parent: AgentHandle,
     registry: Arc<Registry>,
 ) -> Result<Tools, ToolsBuildError> {
-    tools
+    let builder = tools
         .into_builder()
         .tool(StartAgent {
             parent: parent.clone(),
@@ -443,13 +611,20 @@ pub(crate) fn root_tools(
             parent,
             registry: Arc::downgrade(&registry),
             origin: AgentOrigin::Fork,
-        })
+        });
+    #[cfg(feature = "agent-messaging")]
+    let builder = builder.tool(SendAgentMessage {
+        registry: Arc::downgrade(&registry),
+    });
+    #[cfg(not(feature = "agent-messaging"))]
+    let builder = builder
         .tool(PromptAgent {
             registry: Arc::downgrade(&registry),
         })
         .tool(SteerAgent {
             registry: Arc::downgrade(&registry),
-        })
+        });
+    builder
         .tool(ListAgents {
             registry: Arc::downgrade(&registry),
         })

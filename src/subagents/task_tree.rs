@@ -71,6 +71,7 @@ impl TaskTree {
         Ok(())
     }
 
+    #[cfg(any(not(feature = "agent-messaging"), test))]
     pub(super) fn visible_ids(&self, session_id: &str) -> Vec<AgentId> {
         let caller = self.agent_for_session(session_id);
         let mut ids = self

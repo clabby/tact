@@ -20,7 +20,7 @@ use super::{
 };
 use crate::{
     config::{ReasoningEffort, ReasoningMode},
-    subagents::AgentUpdate,
+    subagents::{AgentUpdate, MessageSender},
     tui::{
         context::ContextDiagnostics,
         prompt::Submission,
@@ -465,7 +465,7 @@ impl RootNode {
             composer_area,
             theme,
             focused
-                && !self.transcript.component().tools_focused()
+                && !self.transcript.component().expandables_focused()
                 && !self.queue.component().focused(),
         );
         if let Some(overlay) = &mut self.overlay {
@@ -508,7 +508,7 @@ impl RootNode {
         if is_control_c(&event) {
             if self.overlay.is_none()
                 && !self.queue.component().focused()
-                && !self.transcript.component().tools_focused()
+                && !self.transcript.component().expandables_focused()
                 && !self.composer.component().draft().is_empty()
             {
                 return self.update_composer(
@@ -553,9 +553,9 @@ impl RootNode {
             if self.queue.component().focused() {
                 return self.update_queue(event);
             }
-            if self.transcript.component().tools_focused() {
+            if self.transcript.component().expandables_focused() {
                 self.escape_deadline = None;
-                return self.update_transcript(TranscriptEvent::BlurTools);
+                return self.update_transcript(TranscriptEvent::BlurExpandables);
             }
             return self.update_escape_chord(Instant::now());
         }
@@ -596,22 +596,22 @@ impl RootNode {
             let _ = self
                 .transcript
                 .component_mut()
-                .update(TranscriptEvent::BlurTools);
+                .update(TranscriptEvent::BlurExpandables);
             return ComponentUpdate::render(RenderRequest::Immediate);
         }
         if is_left_click_in(&event, self.composer_area) {
             let queue_was_focused = self.queue.component().focused();
             self.queue.component_mut().set_focused(false);
-            if self.transcript.component().tools_focused() {
-                return self.update_transcript(TranscriptEvent::BlurTools);
+            if self.transcript.component().expandables_focused() {
+                return self.update_transcript(TranscriptEvent::BlurExpandables);
             }
             if queue_was_focused {
                 return ComponentUpdate::render(RenderRequest::Immediate);
             }
         }
-        if let Some(command) = self.transcript.component().tool_command(&event) {
+        if let Some(command) = self.transcript.component().expandable_command(&event) {
             self.queue.component_mut().set_focused(false);
-            return self.update_transcript(TranscriptEvent::Tool(command));
+            return self.update_transcript(TranscriptEvent::Expandable(command));
         }
         if self.queue.component().focused() {
             return self.update_queue(event);
@@ -655,7 +655,7 @@ impl RootNode {
                 render: transcript.render,
             };
         }
-        if self.transcript.component().tools_focused() {
+        if self.transcript.component().expandables_focused() {
             return ComponentUpdate::none();
         }
         self.update_composer(ComposerEvent::Terminal(event), RenderRequest::Immediate)
@@ -1167,7 +1167,7 @@ impl RootNode {
     fn update_focus(&mut self) -> ComponentUpdate<RootEffect> {
         let focus_queue = !self.queue.component().focused() && !self.queue.component().is_empty();
         self.queue.component_mut().set_focused(focus_queue);
-        let transcript = self.transcript.update(TranscriptEvent::BlurTools);
+        let transcript = self.transcript.update(TranscriptEvent::BlurExpandables);
         ComponentUpdate::render(if focus_queue || transcript.render != RenderRequest::None {
             RenderRequest::Immediate
         } else {
@@ -1368,8 +1368,23 @@ impl RootNode {
 
     fn apply_subagent_update(&mut self, update: AgentUpdate) -> ComponentUpdate<RootEffect> {
         let previous_active = self.subagents.active_count();
-        if !self.subagents.apply(update) {
-            return ComponentUpdate::none();
+        let root_message = match &update {
+            AgentUpdate::Message(update)
+                if update.thread.participants.contains(&MessageSender::Root) =>
+            {
+                Some(update.clone())
+            }
+            _ => None,
+        };
+        let subagents_changed = self.subagents.apply(update);
+        let mut result = root_message.map_or_else(ComponentUpdate::none, |update| {
+            self.update_transcript(TranscriptEvent::DirectedMessage {
+                perspective: MessageSender::Root,
+                update,
+            })
+        });
+        if !subagents_changed && result.render == RenderRequest::None {
+            return result;
         }
         if let Some(Overlay::Subagents(SubagentOverlay::Transcript(id))) = self.overlay
             && !self.subagents.contains(id)
@@ -1386,7 +1401,10 @@ impl RootNode {
                     now: Instant::now(),
                 });
         }
-        ComponentUpdate::render(RenderRequest::Immediate)
+        if subagents_changed {
+            result.render = result.render.max(RenderRequest::Immediate);
+        }
+        result
     }
 }
 
@@ -1642,12 +1660,14 @@ fn is_plain_enter(event: &Event) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        Component, ComposerChromeTarget, Overlay, RootEffect, RootNode, SubagentOverlay,
+        Component, ComposerChromeTarget, Overlay, RootEffect, RootEvent, RootNode, SubagentOverlay,
         ThreadState,
     };
     use crate::{
         config::{ReasoningEffort, ReasoningMode},
-        subagents::{AgentDescriptor, AgentId, AgentOrigin, AgentStatus, AgentUpdate},
+        subagents::{
+            AgentDescriptor, AgentId, AgentMessageUpdate, AgentOrigin, AgentStatus, AgentUpdate,
+        },
         tui::{
             theme::{Theme, ThemeMode},
             transcript::{LocalEvent, TranscriptRecord, TurnId},
@@ -1856,6 +1876,79 @@ mod tests {
             root.overlay,
             Some(Overlay::Subagents(SubagentOverlay::Tree))
         ));
+    }
+
+    #[test]
+    fn root_messages_are_projected_into_the_main_and_child_transcripts() {
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        root.update(RootEvent::Subagent(AgentUpdate::Added(AgentDescriptor {
+            id: AgentId::new(1),
+            session_id: "child".to_owned(),
+            role: "worker".to_owned(),
+            task: "verify ordering".to_owned(),
+            origin: AgentOrigin::Spawn,
+            parent: None,
+        })));
+        let message = serde_json::from_value::<AgentMessageUpdate>(json!({
+            "message_id": 1,
+            "thread": {
+                "id": 1,
+                "participants": [
+                    {"kind": "root"},
+                    {"kind": "agent", "agent_id": 1}
+                ],
+                "messages": [{
+                    "id": 1,
+                    "thread_id": 1,
+                    "from": {"kind": "root"},
+                    "to": 1,
+                    "priority": "normal",
+                    "purpose": "coordinate",
+                    "body": "Please verify the ordering."
+                }]
+            },
+            "delivery": {"state": "delivered", "disposition": "started"}
+        }))
+        .unwrap();
+        root.update(RootEvent::Subagent(AgentUpdate::Message(message)));
+
+        let mut main = Terminal::new(TestBackend::new(100, 20)).unwrap();
+        main.draw(|frame| root.render(frame, frame.area(), &Theme::default()))
+            .unwrap();
+        let main = main
+            .backend()
+            .buffer()
+            .content
+            .chunks(100)
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let mut child = Terminal::new(TestBackend::new(100, 40)).unwrap();
+        child
+            .draw(|frame| {
+                root.subagents.render_transcript(
+                    AgentId::new(1),
+                    frame,
+                    frame.area(),
+                    &Theme::default(),
+                );
+            })
+            .unwrap();
+        let child = child
+            .backend()
+            .buffer()
+            .content
+            .chunks(100)
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(main.contains("→ Message  you → #1"));
+        assert!(child.contains("← Message  root → you"));
+        assert!(main.contains("Please verify the ordering."));
+        assert!(child.contains("Please verify"));
+        assert!(child.contains("ordering."));
     }
 
     #[test]
@@ -2832,14 +2925,14 @@ mod tests {
     }
 
     #[test]
-    fn escape_that_blurs_tools_does_not_start_the_interrupt_chord() {
+    fn escape_that_blurs_expandable_items_does_not_start_the_interrupt_chord() {
         let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
-        root.transcript.component_mut().focus_tools();
+        root.transcript.component_mut().focus_expandables();
 
         let blurred = root.update(key(KeyCode::Esc, KeyModifiers::NONE));
 
         assert!(blurred.effects.is_empty());
-        assert!(!root.transcript.component().tools_focused());
+        assert!(!root.transcript.component().expandables_focused());
         assert!(root.escape_deadline.is_none());
 
         let chord_started = root.update(key(KeyCode::Esc, KeyModifiers::NONE));

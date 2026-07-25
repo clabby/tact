@@ -63,6 +63,7 @@ rstest = "0.26.1"
 tower = "0.5.3"
 
 [features]
+agent-messaging = []
 
 [[bin]]
 name = "tact"
