@@ -10,6 +10,7 @@ repository = "https://github.com/clabby/tact"
 homepage = "https://github.com/clabby/tact"
 documentation = "https://docs.rs/tact"
 readme = "README.md"
+exclude = ["evals/**"]
 keywords = ["ai", "coding-agent", "llm", "terminal", "tui"]
 categories = ["command-line-interface", "development-tools"]
 
@@ -62,6 +63,9 @@ zstd = "0.13.3"
 criterion = { package = "codspeed-criterion-compat", version = "5.0.1" }
 rstest = "0.26.1"
 tower = "0.5.3"
+
+[features]
+harbor-evals = []
 
 [[bin]]
 name = "tact"

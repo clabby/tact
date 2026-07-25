@@ -166,6 +166,11 @@ enum Command {
     },
     /// Run one prompt and stream Nanocodex events as JSONL.
     Run {
+        #[cfg(feature = "harbor-evals")]
+        /// Write child-agent events and the final cleanup state as JSONL.
+        #[arg(long, env = "TACT_ORCHESTRATION_LOG", value_name = "PATH")]
+        orchestration_log: Option<PathBuf>,
+
         /// Prompt submitted to the agent.
         #[arg(env = "TACT_PROMPT", value_parser = NonEmptyStringValueParser::new())]
         prompt: String,
@@ -399,14 +404,36 @@ impl Command {
             Self::Auth { command } => command.run(config).await.map_err(Into::into),
             Self::Config { command } => command.run(config),
             Self::Mcp { command } => command.run(config),
-            Self::Run { prompt } => Self::run_agent(config, prompt).await,
+            Self::Run {
+                prompt,
+                #[cfg(feature = "harbor-evals")]
+                orchestration_log,
+            } => {
+                Self::run_agent(
+                    config,
+                    prompt,
+                    #[cfg(feature = "harbor-evals")]
+                    orchestration_log,
+                )
+                .await
+            }
             Self::Update => unreachable!("update is dispatched before configuration is loaded"),
         }
     }
 
-    async fn run_agent(config: &Config, prompt: String) -> Result<()> {
+    async fn run_agent(
+        config: &Config,
+        prompt: String,
+        #[cfg(feature = "harbor-evals")] orchestration_log: Option<PathBuf>,
+    ) -> Result<()> {
         let shutdown = CancellationToken::new();
-        let run = ConfiguredAgent::run_from_config(config, prompt, shutdown.clone());
+        let run = ConfiguredAgent::run_from_config(
+            config,
+            prompt,
+            shutdown.clone(),
+            #[cfg(feature = "harbor-evals")]
+            orchestration_log,
+        );
         tokio::pin!(run);
 
         tokio::select! {
@@ -525,7 +552,12 @@ mod tests {
         error::{ConfigError, Error},
     };
     use clap::{CommandFactory, Parser, error::ErrorKind};
-    use std::{env::VarError, ffi::OsString, fs, path::PathBuf};
+    use std::{
+        env::VarError,
+        ffi::OsString,
+        fs,
+        path::PathBuf,
+    };
     use tempfile::tempdir;
 
     #[test]
@@ -786,7 +818,28 @@ mod tests {
 
         assert!(matches!(
             cli.command,
-            Some(Command::Run { prompt }) if prompt == "inspect the workspace"
+            Some(Command::Run { prompt, .. }) if prompt == "inspect the workspace"
+        ));
+    }
+
+    #[cfg(feature = "harbor-evals")]
+    #[test]
+    fn run_accepts_an_orchestration_log() {
+        let cli = Cli::try_parse_from([
+            "tact",
+            "run",
+            "--orchestration-log",
+            "/logs/agent/orchestration.jsonl",
+            "inspect the workspace",
+        ])
+        .unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Some(Command::Run {
+                orchestration_log: Some(path),
+                ..
+            }) if path == PathBuf::from("/logs/agent/orchestration.jsonl")
         ));
     }
 
@@ -864,7 +917,22 @@ mod tests {
                     && !matches!(argument.get_id().as_str(), "help" | "version")
             })
             .collect::<Vec<_>>();
-        assert_eq!(arguments.len(), 1);
+        assert_eq!(
+            arguments.len(),
+            if cfg!(feature = "harbor-evals") { 2 } else { 1 }
+        );
+        #[cfg(feature = "harbor-evals")]
+        {
+            let orchestration_log = arguments
+                .iter()
+                .copied()
+                .find(|argument| argument.get_id() == "orchestration_log")
+                .expect("missing orchestration log argument");
+            assert_eq!(
+                orchestration_log.get_env().and_then(|value| value.to_str()),
+                Some("TACT_ORCHESTRATION_LOG")
+            );
+        }
         let prompt = arguments
             .into_iter()
             .find(|argument| argument.get_id() == "prompt")

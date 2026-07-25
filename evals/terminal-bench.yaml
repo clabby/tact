@@ -1,0 +1,23 @@
+# Terminal-Bench 2.1 release 6 contains the complete 89-task suite.
+jobs_dir: .tact/harbor/jobs
+
+agents:
+  - import_path: harbor_adapter.agent:TactAgent
+    model_name: openai/gpt-5.6-sol
+    kwargs:
+      binary_path: .tact/installed/tact
+      effort: low
+      reasoning_mode: standard
+      max_subagents: 32
+      web_search: false
+      image_generation: false
+      minimum_subagents: 0
+      fail_on_subagent_error: false
+      require_wait: false
+
+environment:
+  type: docker
+
+datasets:
+  - name: terminal-bench/terminal-bench-2-1
+    ref: "6"

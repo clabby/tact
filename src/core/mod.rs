@@ -1,6 +1,8 @@
 //! Nanocodex construction, turn execution, and graceful shutdown.
 
 pub(crate) mod extensions;
+#[cfg(feature = "harbor-evals")]
+mod orchestration;
 
 use crate::{
     app::{
@@ -15,6 +17,8 @@ use crate::{
 };
 use nanocodex::{AgentEvents, Nanocodex, NanocodexError, Responses, Tools, TurnControl};
 use nanocodex_core::ModelConfig;
+#[cfg(feature = "harbor-evals")]
+use orchestration::{OrchestrationRecorder, RunOutcome};
 use std::{
     io,
     io::Write,
@@ -52,9 +56,16 @@ impl ConfiguredAgent {
         config: &Config,
         prompt: String,
         shutdown: CancellationToken,
+        #[cfg(feature = "harbor-evals")] orchestration_log: Option<PathBuf>,
     ) -> Result<()> {
         Self::from_config(config)?
-            .run(prompt, shutdown, io::stdout())
+            .run(
+                prompt,
+                shutdown,
+                io::stdout(),
+                #[cfg(feature = "harbor-evals")]
+                orchestration_log,
+            )
             .await
     }
 
@@ -143,13 +154,25 @@ impl ConfiguredAgent {
         prompt: String,
         shutdown: CancellationToken,
         mut output: impl Write,
+        #[cfg(feature = "harbor-evals")] orchestration_log: Option<PathBuf>,
     ) -> Result<()> {
         let (_unused_sender, empty_updates) = mpsc::unbounded_channel();
-        let mut subagent_updates = std::mem::replace(&mut self.subagent_updates, empty_updates);
+        let subagent_updates = std::mem::replace(&mut self.subagent_updates, empty_updates);
+        #[cfg(feature = "harbor-evals")]
+        let recorder = OrchestrationRecorder::start(subagent_updates, orchestration_log)?;
+        #[cfg(not(feature = "harbor-evals"))]
+        let mut subagent_updates = subagent_updates;
+        #[cfg(not(feature = "harbor-evals"))]
         let subagent_drain =
             tokio::spawn(async move { while subagent_updates.recv().await.is_some() {} });
+        let root_session_id = self.events.request_id().to_owned();
         if shutdown.is_cancelled() {
             self.shutdown().await;
+            #[cfg(feature = "harbor-evals")]
+            recorder
+                .finish(&root_session_id, RunOutcome::Cancelled)
+                .await?;
+            #[cfg(not(feature = "harbor-evals"))]
             subagent_drain.abort();
             return Ok(());
         }
@@ -158,12 +181,16 @@ impl ConfiguredAgent {
             Ok(turn) => turn,
             Err(error) => {
                 self.shutdown().await;
+                #[cfg(feature = "harbor-evals")]
+                recorder
+                    .finish(&root_session_id, RunOutcome::Failed)
+                    .await?;
+                #[cfg(not(feature = "harbor-evals"))]
                 subagent_drain.abort();
                 return Err(error.into());
             }
         };
         let control = turn.control();
-        let root_session_id = self.events.request_id().to_owned();
         let mut cancellation = Cancellation::NotRequested;
         let event_result = tokio::select! {
             biased;
@@ -187,6 +214,18 @@ impl ConfiguredAgent {
         drop(control);
         self.subagent_control.close_all(&root_session_id).await;
         self.shutdown().await;
+        #[cfg(feature = "harbor-evals")]
+        {
+            let outcome = if was_cancelled {
+                RunOutcome::Cancelled
+            } else if event_result.is_err() || turn_result.is_err() {
+                RunOutcome::Failed
+            } else {
+                RunOutcome::Completed
+            };
+            recorder.finish(&root_session_id, outcome).await?;
+        }
+        #[cfg(not(feature = "harbor-evals"))]
         subagent_drain.abort();
 
         event_result?;
@@ -562,7 +601,13 @@ mod tests {
         let task_shutdown = shutdown.clone();
         let task = tokio::spawn(async move {
             configured
-                .run("keep running".to_owned(), task_shutdown, Vec::new())
+                .run(
+                    "keep running".to_owned(),
+                    task_shutdown,
+                    Vec::new(),
+                    #[cfg(feature = "harbor-evals")]
+                    None,
+                )
                 .await
         });
 
