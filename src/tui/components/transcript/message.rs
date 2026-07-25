@@ -288,7 +288,7 @@ const fn purpose_label(purpose: MessagePurpose) -> &'static str {
 
 const fn priority_label(priority: MessagePriority) -> &'static str {
     match priority {
-        MessagePriority::Normal => "normal",
+        MessagePriority::Deferred => "deferred",
         MessagePriority::Urgent => "urgent",
     }
 }
@@ -337,7 +337,7 @@ mod tests {
                         "thread_id": 1,
                         "from": {"kind": "agent", "agent_id": 1},
                         "to": 2,
-                        "priority": "normal",
+                        "priority": "deferred",
                         "purpose": "question",
                         "body": "Can you verify the ordering?"
                     },
@@ -395,7 +395,7 @@ mod tests {
                 .count(),
             1
         );
-        assert!(rendered.contains("you → #2 · question · normal · pending"));
+        assert!(rendered.contains("you → #2 · question · deferred · pending"));
         assert!(rendered.contains("#2 → you · reply · urgent · delivered · steered"));
         assert!(rendered.contains("thread #1 · 2 messages"));
     }

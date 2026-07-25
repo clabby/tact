@@ -1821,7 +1821,7 @@ mod tests {
             .send_message(
                 &sender_session,
                 target,
-                MessagePriority::Normal,
+                MessagePriority::Deferred,
                 MessagePurpose::Coordinate,
                 None,
                 "Compare our findings before either of us edits.".to_owned(),
@@ -1859,7 +1859,7 @@ mod tests {
             .send_message(
                 &sender_session,
                 target,
-                MessagePriority::Normal,
+                MessagePriority::Deferred,
                 MessagePurpose::Coordinate,
                 None,
                 "Do not overtake the assigned initial task.".to_owned(),
@@ -1884,7 +1884,7 @@ mod tests {
             .send_message(
                 &sender_session,
                 target,
-                MessagePriority::Normal,
+                MessagePriority::Deferred,
                 MessagePurpose::Delegate,
                 None,
                 "Replace the sibling's assigned task.".to_owned(),
@@ -1916,7 +1916,7 @@ mod tests {
             .send_message(
                 &parent_session,
                 child,
-                MessagePriority::Normal,
+                MessagePriority::Deferred,
                 MessagePurpose::Delegate,
                 None,
                 "Own the parser tests and report every uncovered branch.".to_owned(),
@@ -2005,7 +2005,7 @@ mod tests {
             .send_message(
                 &sender_session,
                 target,
-                MessagePriority::Normal,
+                MessagePriority::Deferred,
                 MessagePurpose::Question,
                 None,
                 "What remains in your investigation?".to_owned(),
@@ -2052,7 +2052,7 @@ mod tests {
             .send_message(
                 "main",
                 target,
-                MessagePriority::Normal,
+                MessagePriority::Deferred,
                 MessagePurpose::Delegate,
                 None,
                 "This task must not become current before delivery.".to_owned(),
@@ -2085,12 +2085,12 @@ mod tests {
             insert_pending_runtime_session(&registry, "main", None, Arc::new(Notify::new())).await;
         mark_reusable(&registry, "main", target).await;
 
-        for index in 0..crate::subagents::harness::NORMAL_CAPACITY {
+        for index in 0..crate::subagents::harness::DEFERRED_CAPACITY {
             let receipt = registry
                 .send_message(
                     &sender_session,
                     target,
-                    MessagePriority::Normal,
+                    MessagePriority::Deferred,
                     MessagePurpose::Coordinate,
                     None,
                     format!("queued message {index}"),
@@ -2103,7 +2103,7 @@ mod tests {
             .send_message(
                 &sender_session,
                 target,
-                MessagePriority::Normal,
+                MessagePriority::Deferred,
                 MessagePurpose::Coordinate,
                 None,
                 "one message too many".to_owned(),
@@ -2152,7 +2152,7 @@ mod tests {
             .send_message(
                 "other-root",
                 target,
-                MessagePriority::Normal,
+                MessagePriority::Deferred,
                 MessagePurpose::Coordinate,
                 None,
                 "This must not reach the main tree.".to_owned(),

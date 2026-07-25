@@ -334,7 +334,7 @@ impl Tool for SendAgentMessage {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::function(
             self.name(),
-            "Sends a bounded directed message to any other agent in the same task tree. Normal messages start an idle agent or queue behind its active turn. Urgent messages steer a running agent at its next safe model boundary. Delegate messages replace the recipient's assigned task and require management authority.",
+            "Sends a bounded directed message to any other agent in the same task tree. Deferred messages start an idle agent or queue behind its active turn. If a send is queued, do not wait for it inside the current turn; finish the turn so queued messages can be delivered. Urgent messages steer a running agent at its next safe model boundary. Delegate messages replace the recipient's assigned task and require management authority.",
             json!({
                 "type": "object",
                 "properties": {
@@ -351,9 +351,9 @@ impl Tool for SendAgentMessage {
                     },
                     "priority": {
                         "type": "string",
-                        "enum": ["normal", "urgent"],
-                        "default": "normal",
-                        "description": "Urgent steers an active turn; normal preserves turn boundaries."
+                        "enum": ["deferred", "urgent"],
+                        "default": "deferred",
+                        "description": "Urgent steers an active turn; deferred preserves turn boundaries. A queued deferred send requires the current turn to finish before delivery."
                     },
                     "purpose": {
                         "type": "string",
@@ -640,4 +640,27 @@ pub(crate) fn root_tools(
             operation: LifecycleOperation::Close,
         })
         .build()
+}
+
+#[cfg(all(test, feature = "agent-messaging"))]
+mod tests {
+    use super::SendAgentMessage;
+    use crate::subagents::runtime::Registry;
+    use nanocodex::Tool;
+    use serde_json::json;
+    use std::sync::Weak;
+
+    #[test]
+    fn send_message_definition_names_deferred_delivery_and_queued_waiting() {
+        let definition = SendAgentMessage {
+            registry: Weak::<Registry>::new(),
+        }
+        .definition();
+        let priority = &definition.parameters().unwrap().as_value()["properties"]["priority"];
+
+        assert_eq!(priority["enum"], json!(["deferred", "urgent"]));
+        assert_eq!(priority["default"], json!("deferred"));
+        assert!(definition.description().contains("do not wait"));
+        assert!(definition.description().contains("finish the turn"));
+    }
 }

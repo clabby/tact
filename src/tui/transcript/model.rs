@@ -1139,7 +1139,7 @@ mod tests {
                     "thread_id": id,
                     "from": {"kind": "agent", "agent_id": 1},
                     "to": 2,
-                    "priority": "normal",
+                    "priority": "deferred",
                     "purpose": "coordinate",
                     "body": "status update"
                 }]

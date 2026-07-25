@@ -1902,7 +1902,7 @@ mod tests {
                     "thread_id": 1,
                     "from": {"kind": "root"},
                     "to": 1,
-                    "priority": "normal",
+                    "priority": "deferred",
                     "purpose": "coordinate",
                     "body": "Please verify the ordering."
                 }]

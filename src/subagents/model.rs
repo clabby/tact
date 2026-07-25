@@ -95,7 +95,7 @@ impl MessageSender {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum MessagePriority {
     #[default]
-    Normal,
+    Deferred,
     Urgent,
 }
 
@@ -103,7 +103,7 @@ impl MessagePriority {
     #[cfg(feature = "agent-messaging")]
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
-            Self::Normal => "normal",
+            Self::Deferred => "deferred",
             Self::Urgent => "urgent",
         }
     }
@@ -253,9 +253,12 @@ impl AgentOrigin {
         };
         #[cfg(feature = "agent-messaging")]
         let coordination = " You may exchange bounded directed messages with any other agent in \
-                            this task tree through send_agent_message. Ordinary messages provide \
-                            coordination context; only a delegate message from an authorized \
-                            manager replaces your assigned task.";
+                            this task tree through send_agent_message. Deferred messages start an \
+                            idle agent or wait for its active turn to finish. If a send is queued, \
+                            do not wait for it inside your current turn: finish the turn so queued \
+                            messages can be delivered. Urgent messages steer active turns. \
+                            Ordinary messages provide coordination context; only a delegate \
+                            message from an authorized manager replaces your assigned task.";
         #[cfg(not(feature = "agent-messaging"))]
         let coordination = "";
         format!(
@@ -342,5 +345,27 @@ pub(crate) struct SubagentRuntimeId(u64);
 impl SubagentRuntimeId {
     pub(super) fn next() -> Self {
         Self(NEXT_RUNTIME_ID.fetch_add(1, Ordering::Relaxed) + 1)
+    }
+}
+
+#[cfg(all(test, feature = "agent-messaging"))]
+mod tests {
+    use super::{AgentId, AgentOrigin, MessagePriority};
+
+    #[test]
+    fn deferred_is_the_default_serialized_message_priority() {
+        assert_eq!(MessagePriority::default(), MessagePriority::Deferred);
+        assert_eq!(
+            serde_json::to_value(MessagePriority::default()).unwrap(),
+            serde_json::json!("deferred")
+        );
+    }
+
+    #[test]
+    fn agent_prompt_explains_how_to_release_queued_messages() {
+        let prompt = AgentOrigin::Spawn.prompt(AgentId::new(1), "coordinate with a peer");
+
+        assert!(prompt.contains("If a send is queued"));
+        assert!(prompt.contains("finish the turn"));
     }
 }

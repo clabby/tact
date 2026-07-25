@@ -630,7 +630,7 @@ mod tests {
                     "thread_id": 1,
                     "from": {"kind": "agent", "agent_id": 1},
                     "to": 2,
-                    "priority": "normal",
+                    "priority": "deferred",
                     "purpose": "question",
                     "body": "Can you verify the event ordering?"
                 },
@@ -639,7 +639,7 @@ mod tests {
                     "thread_id": 1,
                     "from": {"kind": "agent", "agent_id": 2},
                     "to": 1,
-                    "priority": "normal",
+                    "priority": "deferred",
                     "purpose": "reply",
                     "in_reply_to": 1,
                     "body": "Verified: delivery precedes projection."
@@ -652,7 +652,7 @@ mod tests {
                     "thread_id": 1,
                     "from": {"kind": "agent", "agent_id": 1},
                     "to": 2,
-                    "priority": "normal",
+                    "priority": "deferred",
                     "purpose": "question",
                     "body": "Can you verify the event ordering?"
                 }

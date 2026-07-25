@@ -20,7 +20,7 @@ pub(super) fn present(tool: &ToolEntry, width: u16, theme: &Theme, expanded: boo
         .arguments
         .get("priority")
         .and_then(Value::as_str)
-        .unwrap_or("normal");
+        .unwrap_or("deferred");
     let receipt = tool.result.as_ref().and_then(decoded_result);
     let disposition = receipt
         .as_deref()
@@ -28,7 +28,7 @@ pub(super) fn present(tool: &ToolEntry, width: u16, theme: &Theme, expanded: boo
         .and_then(Value::as_str);
     let outcome = [
         Some(purpose),
-        (priority != "normal").then_some(priority),
+        (priority != "deferred").then_some(priority),
         disposition,
     ]
     .into_iter()

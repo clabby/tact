@@ -20,7 +20,7 @@ use tokio::{
 
 const COMMAND_CAPACITY: usize = 8;
 #[cfg(feature = "agent-messaging")]
-pub(super) const NORMAL_CAPACITY: usize = 8;
+pub(super) const DEFERRED_CAPACITY: usize = 8;
 #[cfg(feature = "agent-messaging")]
 pub(super) const URGENT_CAPACITY: usize = 4;
 
@@ -28,7 +28,7 @@ pub(super) const URGENT_CAPACITY: usize = 4;
 pub(super) struct HarnessHandle {
     commands: mpsc::Sender<HarnessCommand>,
     #[cfg(feature = "agent-messaging")]
-    normal: mpsc::Sender<DeliveryCommand>,
+    deferred: mpsc::Sender<DeliveryCommand>,
     #[cfg(feature = "agent-messaging")]
     urgent: mpsc::Sender<DeliveryCommand>,
 }
@@ -94,11 +94,11 @@ struct Harness {
     active: Option<ActiveTurn>,
     commands: mpsc::Receiver<HarnessCommand>,
     #[cfg(feature = "agent-messaging")]
-    normal: mpsc::Receiver<DeliveryCommand>,
+    deferred: mpsc::Receiver<DeliveryCommand>,
     #[cfg(feature = "agent-messaging")]
     urgent: mpsc::Receiver<DeliveryCommand>,
     #[cfg(feature = "agent-messaging")]
-    pending_normal: VecDeque<AgentMessage>,
+    pending_deferred: VecDeque<AgentMessage>,
     #[cfg(feature = "agent-messaging")]
     pending_urgent: VecDeque<AgentMessage>,
     #[cfg(feature = "agent-messaging")]
@@ -117,7 +117,7 @@ struct ActiveTurn {
 enum HarnessEvent {
     Command(Option<HarnessCommand>),
     #[cfg(feature = "agent-messaging")]
-    Normal(Option<DeliveryCommand>),
+    Deferred(Option<DeliveryCommand>),
     #[cfg(feature = "agent-messaging")]
     Urgent(Option<DeliveryCommand>),
     #[cfg(feature = "agent-messaging")]
@@ -169,7 +169,7 @@ impl HarnessHandle {
             response,
         };
         let sender = match command.message.priority {
-            MessagePriority::Normal => &self.normal,
+            MessagePriority::Deferred => &self.deferred,
             MessagePriority::Urgent => &self.urgent,
         };
         sender.try_send(command).map_err(|error| match error {
@@ -210,13 +210,13 @@ pub(super) fn spawn(
 ) -> (HarnessHandle, JoinHandle<()>) {
     let (commands, receiver) = mpsc::channel(COMMAND_CAPACITY);
     #[cfg(feature = "agent-messaging")]
-    let (normal, normal_receiver) = mpsc::channel(NORMAL_CAPACITY);
+    let (deferred, deferred_receiver) = mpsc::channel(DEFERRED_CAPACITY);
     #[cfg(feature = "agent-messaging")]
     let (urgent, urgent_receiver) = mpsc::channel(URGENT_CAPACITY);
     let handle = HarnessHandle {
         commands,
         #[cfg(feature = "agent-messaging")]
-        normal,
+        deferred,
         #[cfg(feature = "agent-messaging")]
         urgent,
     };
@@ -230,11 +230,11 @@ pub(super) fn spawn(
             active: None,
             commands: receiver,
             #[cfg(feature = "agent-messaging")]
-            normal: normal_receiver,
+            deferred: deferred_receiver,
             #[cfg(feature = "agent-messaging")]
             urgent: urgent_receiver,
             #[cfg(feature = "agent-messaging")]
-            pending_normal: VecDeque::new(),
+            pending_deferred: VecDeque::new(),
             #[cfg(feature = "agent-messaging")]
             pending_urgent: VecDeque::new(),
             #[cfg(feature = "agent-messaging")]
@@ -264,15 +264,16 @@ impl Harness {
                     return;
                 }
                 #[cfg(feature = "agent-messaging")]
-                HarnessEvent::Normal(Some(command)) => {
-                    self.accept_delivery(command, MessagePriority::Normal).await;
+                HarnessEvent::Deferred(Some(command)) => {
+                    self.accept_delivery(command, MessagePriority::Deferred)
+                        .await;
                 }
                 #[cfg(feature = "agent-messaging")]
                 HarnessEvent::Urgent(Some(command)) => {
                     self.accept_delivery(command, MessagePriority::Urgent).await;
                 }
                 #[cfg(feature = "agent-messaging")]
-                HarnessEvent::Normal(None) | HarnessEvent::Urgent(None) => {}
+                HarnessEvent::Deferred(None) | HarnessEvent::Urgent(None) => {}
                 #[cfg(feature = "agent-messaging")]
                 HarnessEvent::CapacityChanged => self.start_pending().await,
                 HarnessEvent::TurnFinished(result) => self.turn_finished(result).await,
@@ -283,19 +284,19 @@ impl Harness {
     #[cfg(feature = "agent-messaging")]
     async fn next_event(&mut self) -> HarnessEvent {
         let Some(active) = self.active.as_mut() else {
-            if self.pending_normal.is_empty() && self.pending_urgent.is_empty() {
+            if self.pending_deferred.is_empty() && self.pending_urgent.is_empty() {
                 return tokio::select! {
                     biased;
                     command = self.commands.recv() => HarnessEvent::Command(command),
                     urgent = self.urgent.recv() => HarnessEvent::Urgent(urgent),
-                    normal = self.normal.recv() => HarnessEvent::Normal(normal),
+                    deferred = self.deferred.recv() => HarnessEvent::Deferred(deferred),
                 };
             }
             return tokio::select! {
                 biased;
                 command = self.commands.recv() => HarnessEvent::Command(command),
                 urgent = self.urgent.recv() => HarnessEvent::Urgent(urgent),
-                normal = self.normal.recv() => HarnessEvent::Normal(normal),
+                deferred = self.deferred.recv() => HarnessEvent::Deferred(deferred),
                 _ = self.capacity_revision.changed() => HarnessEvent::CapacityChanged,
             };
         };
@@ -303,7 +304,7 @@ impl Harness {
             biased;
             command = self.commands.recv() => HarnessEvent::Command(command),
             urgent = self.urgent.recv() => HarnessEvent::Urgent(urgent),
-            normal = self.normal.recv() => HarnessEvent::Normal(normal),
+            deferred = self.deferred.recv() => HarnessEvent::Deferred(deferred),
             result = &mut active.result => HarnessEvent::TurnFinished(result),
         }
     }
@@ -396,7 +397,7 @@ impl Harness {
         }
 
         if self.active.is_none()
-            && self.pending_normal.is_empty()
+            && self.pending_deferred.is_empty()
             && self.pending_urgent.is_empty()
             && let Ok(capacity) = self.capacity.reserve()
         {
@@ -421,11 +422,11 @@ impl Harness {
     #[cfg(feature = "agent-messaging")]
     async fn queue_delivery(&mut self, command: DeliveryCommand, priority: MessagePriority) {
         let queue = match priority {
-            MessagePriority::Normal => &mut self.pending_normal,
+            MessagePriority::Deferred => &mut self.pending_deferred,
             MessagePriority::Urgent => &mut self.pending_urgent,
         };
         let limit = match priority {
-            MessagePriority::Normal => NORMAL_CAPACITY,
+            MessagePriority::Deferred => DEFERRED_CAPACITY,
             MessagePriority::Urgent => URGENT_CAPACITY,
         };
         if queue.len() >= limit {
@@ -448,7 +449,7 @@ impl Harness {
             let Some(message) = self
                 .pending_urgent
                 .front()
-                .or_else(|| self.pending_normal.front())
+                .or_else(|| self.pending_deferred.front())
             else {
                 return;
             };
@@ -459,7 +460,7 @@ impl Harness {
             let message = if self.pending_urgent.front().is_some() {
                 self.pending_urgent.pop_front()
             } else {
-                self.pending_normal.pop_front()
+                self.pending_deferred.pop_front()
             }
             .expect("a pending message should still exist");
             let delegation = self.begin_delegation(id).await;
@@ -488,7 +489,7 @@ impl Harness {
         let pending = self
             .pending_urgent
             .drain(..)
-            .chain(self.pending_normal.drain(..))
+            .chain(self.pending_deferred.drain(..))
             .map(|message| message.id)
             .collect::<Vec<_>>();
         for id in pending {
@@ -501,7 +502,7 @@ impl Harness {
         while let Ok(command) = self.urgent.try_recv() {
             self.reject(command, reason.to_owned()).await;
         }
-        while let Ok(command) = self.normal.try_recv() {
+        while let Ok(command) = self.deferred.try_recv() {
             self.reject(command, reason.to_owned()).await;
         }
     }
