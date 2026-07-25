@@ -1369,7 +1369,14 @@ impl RootNode {
     fn apply_subagent_update(&mut self, update: AgentUpdate) -> ComponentUpdate<RootEffect> {
         let previous_active = self.subagents.active_count();
         let root_message = match &update {
-            AgentUpdate::Message(update) => Some(update.clone()),
+            AgentUpdate::Message(update)
+                if update.thread.messages.iter().any(|message| {
+                    message.id == update.message_id
+                        && matches!(message.from, MessageSender::Agent { .. })
+                }) =>
+            {
+                Some(update.clone())
+            }
             _ => None,
         };
         let subagents_changed = self.subagents.apply(update);
@@ -1890,7 +1897,7 @@ mod tests {
     }
 
     #[test]
-    fn root_messages_are_projected_into_the_main_and_child_transcripts() {
+    fn root_messages_render_once_in_main_and_are_projected_into_child_transcripts() {
         let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
         root.update(RootEvent::Subagent(AgentUpdate::Added(AgentDescriptor {
             id: AgentId::new(1),
@@ -1900,6 +1907,29 @@ mod tests {
             origin: AgentOrigin::Spawn,
             parent: None,
         })));
+        root.update(RootEvent::Transcript(Arc::new(
+            TranscriptRecord::from_agent(
+                1,
+                1,
+                AgentEvent {
+                    protocol_version: 1,
+                    request_id: Arc::from("test"),
+                    seq: 1,
+                    kind: AgentEventKind::ToolCall,
+                    payload: to_raw_value(&json!({
+                        "call_id": "message-1",
+                        "tool": "send_agent_message",
+                        "arguments": {
+                            "agent_id": 1,
+                            "message": "Please verify the ordering.",
+                            "priority": "deferred",
+                            "purpose": "coordinate"
+                        }
+                    }))
+                    .unwrap(),
+                },
+            ),
+        )));
         let message = serde_json::from_value::<AgentMessageUpdate>(json!({
             "message_id": 1,
             "thread": {
@@ -1945,9 +1975,8 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
 
-        assert!(main.contains("→ Message  you → #1"));
+        assert_eq!(main.matches("Message").count(), 1);
         assert!(child.contains("← Message  root → you"));
-        assert!(main.contains("Please verify the ordering."));
         assert!(child.contains("Please verify"));
         assert!(child.contains("ordering."));
     }
