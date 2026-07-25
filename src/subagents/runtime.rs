@@ -2,13 +2,14 @@
 
 use super::{
     capacity::{Capacity, TurnCapacity},
+    harness::{self, HarnessHandle},
     model::{
         AgentDescriptor, AgentId, AgentStatus, AgentUpdate, ScopedAgentUpdate, SubagentRuntimeId,
     },
     task_tree::TaskTree,
 };
 use futures_util::future::join_all;
-use nanocodex::{AgentEvents, Nanocodex, NanocodexError, TurnControl};
+use nanocodex::{AgentEvents, Nanocodex, NanocodexError};
 use serde::Serialize;
 use std::{
     collections::HashMap,
@@ -20,23 +21,15 @@ use tokio::{
     task::JoinHandle,
     time::{Instant, timeout_at},
 };
-use tokio_util::sync::CancellationToken;
 
 pub(super) struct ChildSession {
-    pub(super) agent: Option<Nanocodex>,
     pub(super) descriptor: AgentDescriptor,
     pub(super) event_task: Option<JoinHandle<()>>,
+    pub(super) harness: Option<HarnessHandle>,
+    pub(super) harness_task: Option<JoinHandle<()>>,
     pub(super) status: AgentStatus,
-    pub(super) active: Option<ActiveTurn>,
-    pub(super) next_generation: u64,
+    pub(super) active: bool,
     pub(super) last_report: Option<String>,
-}
-
-pub(super) struct ActiveTurn {
-    pub(super) generation: u64,
-    pub(super) cancellation: CancellationToken,
-    pub(super) control: Option<TurnControl>,
-    pub(super) _capacity: TurnCapacity,
 }
 
 pub(crate) struct Registry {
@@ -45,14 +38,6 @@ pub(crate) struct Registry {
     pub(super) updates: mpsc::UnboundedSender<ScopedAgentUpdate>,
     revision: watch::Sender<u64>,
     capacity: Capacity,
-}
-
-pub(super) struct TurnLaunch {
-    pub(super) root_session_id: String,
-    pub(super) id: AgentId,
-    pub(super) generation: u64,
-    pub(super) agent: Nanocodex,
-    pub(super) cancellation: CancellationToken,
 }
 
 #[derive(Default)]
@@ -76,13 +61,13 @@ pub(super) struct AgentReservation {
 pub(super) struct CloseRequest {
     pub(super) root_session_id: String,
     pub(super) ids: Vec<AgentId>,
-    pub(super) controls: Vec<TurnControl>,
+    pub(super) harnesses: Vec<HarnessHandle>,
     pub(super) status_updates: Vec<(AgentId, AgentStatus)>,
 }
 
 pub(super) struct ClosedSessions {
     pub(super) summaries: Vec<AgentSummary>,
-    pub(super) agents: Vec<Nanocodex>,
+    pub(super) harness_tasks: Vec<JoinHandle<()>>,
     pub(super) event_tasks: Vec<JoinHandle<()>>,
 }
 
@@ -171,39 +156,51 @@ impl RegistryState {
         Ok(())
     }
 
-    fn begin_follow_up(
+    fn harness_in_scope(
+        &self,
+        root_session_id: &str,
+        id: AgentId,
+    ) -> std::io::Result<HarnessHandle> {
+        self.scopes
+            .get(root_session_id)
+            .and_then(|scope| scope.sessions.get(&id))
+            .and_then(|session| session.harness.clone())
+            .ok_or_else(|| std::io::Error::other(format!("agent {id} is closed")))
+    }
+
+    fn harness_for(&self, session_id: &str, id: AgentId) -> std::io::Result<HarnessHandle> {
+        let root_session_id = self.authorize(session_id, id)?;
+        let session = self
+            .scopes
+            .get(&root_session_id)
+            .and_then(|scope| scope.sessions.get(&id))
+            .ok_or_else(|| std::io::Error::other(format!("unknown agent_id {id}")))?;
+        if !session.status.can_start_turn() || session.active {
+            return Err(std::io::Error::other(format!(
+                "agent {id} is not idle ({:?})",
+                session.status
+            )));
+        }
+        session
+            .harness
+            .clone()
+            .ok_or_else(|| std::io::Error::other(format!("agent {id} is closed")))
+    }
+
+    fn update_task(
         &mut self,
         session_id: &str,
         id: AgentId,
-        task: &str,
-        capacity: TurnCapacity,
-    ) -> std::io::Result<(TurnLaunch, AgentDescriptor)> {
+        task: String,
+    ) -> std::io::Result<(String, AgentDescriptor)> {
         let root_session_id = self.authorize(session_id, id)?;
-        let scope = self
+        let session = self
             .scopes
             .get_mut(&root_session_id)
-            .ok_or_else(|| std::io::Error::other("subagent scope disappeared"))?;
-        let session = scope
-            .sessions
-            .get_mut(&id)
-            .ok_or_else(|| std::io::Error::other(format!("unknown agent_id {id}")))?;
-        session.descriptor.task = task.to_owned();
-        let descriptor = session.descriptor.clone();
-        let launch = session.begin_turn(root_session_id, id, capacity)?;
-        Ok((launch, descriptor))
-    }
-
-    fn begin_turn_in_scope(
-        &mut self,
-        root_session_id: &str,
-        id: AgentId,
-        capacity: TurnCapacity,
-    ) -> std::io::Result<TurnLaunch> {
-        self.scopes
-            .get_mut(root_session_id)
             .and_then(|scope| scope.sessions.get_mut(&id))
-            .ok_or_else(|| std::io::Error::other(format!("unknown agent_id {id}")))?
-            .begin_turn(root_session_id.to_owned(), id, capacity)
+            .ok_or_else(|| std::io::Error::other(format!("unknown agent_id {id}")))?;
+        session.descriptor.task = task;
+        Ok((root_session_id, session.descriptor.clone()))
     }
 
     fn list(&self, session_id: &str) -> std::io::Result<Vec<AgentSummary>> {
@@ -247,38 +244,37 @@ impl RegistryState {
             .collect()
     }
 
-    fn active_control(
-        &self,
-        session_id: &str,
-        id: AgentId,
-    ) -> std::io::Result<Option<TurnControl>> {
+    fn active_harness(&self, session_id: &str, id: AgentId) -> std::io::Result<HarnessHandle> {
         let root_session_id = self.authorize(session_id, id)?;
         let session = self
             .scopes
             .get(&root_session_id)
             .and_then(|scope| scope.sessions.get(&id))
             .ok_or_else(|| std::io::Error::other(format!("unknown agent_id {id}")))?;
-        let Some(active) = &session.active else {
+        if !session.active {
             return Err(std::io::Error::other(format!("agent {id} is not running")));
-        };
-        Ok(active.control.clone())
+        }
+        session
+            .harness
+            .clone()
+            .ok_or_else(|| std::io::Error::other(format!("agent {id} is closed")))
     }
 
     fn request_interrupt(
         &mut self,
         session_id: &str,
         id: AgentId,
-    ) -> std::io::Result<(String, Vec<AgentId>, Vec<TurnControl>)> {
+    ) -> std::io::Result<(String, Vec<AgentId>, Vec<HarnessHandle>)> {
         let root_session_id = self.authorize(session_id, id)?;
         let ids = self.subtree_shutdown_order(&root_session_id, id)?;
-        let controls = self.request_cancellation(&root_session_id, &ids, false)?;
-        Ok((root_session_id, ids, controls))
+        let harnesses = self.harnesses(&root_session_id, &ids, false)?;
+        Ok((root_session_id, ids, harnesses))
     }
 
     fn request_close(&mut self, session_id: &str, id: AgentId) -> std::io::Result<CloseRequest> {
         let root_session_id = self.authorize(session_id, id)?;
         let ids = self.subtree_shutdown_order(&root_session_id, id)?;
-        let controls = self.request_cancellation(&root_session_id, &ids, true)?;
+        let harnesses = self.harnesses(&root_session_id, &ids, true)?;
         let status_updates = ids
             .iter()
             .copied()
@@ -287,7 +283,7 @@ impl RegistryState {
         Ok(CloseRequest {
             root_session_id,
             ids,
-            controls,
+            harnesses,
             status_updates,
         })
     }
@@ -298,12 +294,12 @@ impl RegistryState {
             return Ok(CloseRequest {
                 root_session_id,
                 ids: Vec::new(),
-                controls: Vec::new(),
+                harnesses: Vec::new(),
                 status_updates: Vec::new(),
             });
         };
         let ids = scope.topology.all_postorder();
-        let controls = self.request_cancellation(&root_session_id, &ids, true)?;
+        let harnesses = self.harnesses(&root_session_id, &ids, true)?;
         let status_updates = ids
             .iter()
             .copied()
@@ -312,7 +308,7 @@ impl RegistryState {
         Ok(CloseRequest {
             root_session_id,
             ids,
-            controls,
+            harnesses,
             status_updates,
         })
     }
@@ -320,30 +316,30 @@ impl RegistryState {
     fn request_interrupt_all(
         &mut self,
         session_id: &str,
-    ) -> (String, Vec<AgentId>, Vec<TurnControl>) {
+    ) -> (String, Vec<AgentId>, Vec<HarnessHandle>) {
         let root_session_id = self.root_session_id(session_id).to_owned();
         let ids = self
             .scopes
             .get(&root_session_id)
             .map(|scope| scope.topology.ids())
             .unwrap_or_default();
-        let controls = self
-            .request_cancellation(&root_session_id, &ids, false)
+        let harnesses = self
+            .harnesses(&root_session_id, &ids, false)
             .unwrap_or_default();
-        (root_session_id, ids, controls)
+        (root_session_id, ids, harnesses)
     }
 
-    fn request_cancellation(
+    fn harnesses(
         &mut self,
         root_session_id: &str,
         ids: &[AgentId],
         closing: bool,
-    ) -> std::io::Result<Vec<TurnControl>> {
+    ) -> std::io::Result<Vec<HarnessHandle>> {
         let scope = self
             .scopes
             .get_mut(root_session_id)
             .ok_or_else(|| std::io::Error::other("subagent scope disappeared"))?;
-        let mut controls = Vec::new();
+        let mut harnesses = Vec::new();
         for id in ids {
             let session = scope
                 .sessions
@@ -352,12 +348,9 @@ impl RegistryState {
             if closing {
                 session.status = AgentStatus::Closing;
             }
-            if let Some(active) = &session.active {
-                active.cancellation.cancel();
-                controls.extend(active.control.iter().cloned());
-            }
+            harnesses.extend(session.harness.iter().cloned());
         }
-        Ok(controls)
+        Ok(harnesses)
     }
 
     fn finish_close(
@@ -369,19 +362,20 @@ impl RegistryState {
             .scopes
             .get_mut(root_session_id)
             .ok_or_else(|| std::io::Error::other("subagent scope disappeared"))?;
-        let mut agents = Vec::new();
+        let mut harness_tasks = Vec::new();
         let mut event_tasks = Vec::new();
         for id in ids {
             let session = scope
                 .sessions
                 .get_mut(id)
                 .ok_or_else(|| std::io::Error::other(format!("unknown agent_id {id}")))?;
-            if session.active.is_some() {
+            if session.active {
                 return Err(std::io::Error::other(format!(
                     "agent {id} is still running"
                 )));
             }
-            agents.extend(session.agent.take());
+            session.harness = None;
+            harness_tasks.extend(session.harness_task.take());
             event_tasks.extend(session.event_task.take());
             session.status = AgentStatus::Closed;
         }
@@ -391,7 +385,7 @@ impl RegistryState {
             .collect();
         Ok(ClosedSessions {
             summaries,
-            agents,
+            harness_tasks,
             event_tasks,
         })
     }
@@ -405,7 +399,7 @@ impl RegistryState {
             scope
                 .sessions
                 .get(id)
-                .is_some_and(|session| session.active.is_none())
+                .is_some_and(|session| !session.active)
         }))
     }
 
@@ -472,23 +466,29 @@ impl Registry {
     }
 
     pub(super) async fn insert(
-        &self,
+        self: &Arc<Self>,
         root_session_id: String,
         descriptor: AgentDescriptor,
         agent: Nanocodex,
         event_task: JoinHandle<()>,
     ) -> std::io::Result<()> {
+        let (harness, harness_task) = harness::spawn(
+            root_session_id.clone(),
+            descriptor.id,
+            agent,
+            Arc::downgrade(self),
+        );
         self.state.lock().await.insert(
             root_session_id,
             descriptor.id,
             descriptor.session_id.clone(),
             ChildSession {
-                agent: Some(agent),
                 descriptor,
                 event_task: Some(event_task),
+                harness: Some(harness),
+                harness_task: Some(harness_task),
                 status: AgentStatus::Pending,
-                active: None,
-                next_generation: 0,
+                active: false,
                 last_report: None,
             },
         )?;
@@ -503,14 +503,12 @@ impl Registry {
         prompt: String,
         capacity: TurnCapacity,
     ) -> std::io::Result<()> {
-        let launch = self
+        let harness = self
             .state
             .lock()
             .await
-            .begin_turn_in_scope(root_session_id, id, capacity)?;
-        self.turn_started(&launch.root_session_id, launch.id);
-        self.drive_turn(launch, prompt);
-        Ok(())
+            .harness_in_scope(root_session_id, id)?;
+        harness.start(prompt, capacity).await
     }
 
     pub(super) async fn launch_follow_up(
@@ -520,83 +518,49 @@ impl Registry {
         task: String,
     ) -> std::io::Result<()> {
         let capacity = self.reserve_turn()?;
-        let (launch, descriptor) = self
-            .state
-            .lock()
-            .await
-            .begin_follow_up(session_id, id, &task, capacity)?;
-        self.send(&launch.root_session_id, AgentUpdate::Added(descriptor));
-        self.turn_started(&launch.root_session_id, launch.id);
-        self.drive_turn(launch, task);
+        let harness = self.state.lock().await.harness_for(session_id, id)?;
+        harness.start(task.clone(), capacity).await?;
+        let (root_session_id, descriptor) =
+            self.state.lock().await.update_task(session_id, id, task)?;
+        self.send(&root_session_id, AgentUpdate::Added(descriptor));
+        self.changed();
         Ok(())
     }
 
-    fn drive_turn(self: &Arc<Self>, launch: TurnLaunch, prompt: String) {
-        let registry = Arc::clone(self);
-        tokio::spawn(async move {
-            let result = match launch.agent.prompt(prompt).await {
-                Ok(turn) => {
-                    let control = turn.control();
-                    let should_cancel = registry
-                        .attach_control(
-                            &launch.root_session_id,
-                            launch.id,
-                            launch.generation,
-                            control.clone(),
-                        )
-                        .await;
-                    if should_cancel || launch.cancellation.is_cancelled() {
-                        drop(control.cancel().await);
-                    }
-                    turn.result().await
-                }
-                Err(error) => Err(error),
+    pub(super) async fn harness_turn_started(&self, root_session_id: &str, id: AgentId) {
+        let changed = {
+            let mut state = self.state.lock().await;
+            let Some(session) = state
+                .scopes
+                .get_mut(root_session_id)
+                .and_then(|scope| scope.sessions.get_mut(&id))
+            else {
+                return;
             };
-            registry
-                .turn_finished(
-                    &launch.root_session_id,
-                    launch.id,
-                    launch.generation,
-                    result,
-                )
-                .await;
-        });
+            if matches!(session.status, AgentStatus::Closing | AgentStatus::Closed) {
+                false
+            } else {
+                session.active = true;
+                session.status = AgentStatus::Running;
+                true
+            }
+        };
+        if changed {
+            self.send(
+                root_session_id,
+                AgentUpdate::Status {
+                    id,
+                    status: AgentStatus::Running,
+                },
+            );
+            self.changed();
+        }
     }
 
-    async fn attach_control(
+    pub(super) async fn harness_turn_finished(
         &self,
         root_session_id: &str,
         id: AgentId,
-        generation: u64,
-        control: TurnControl,
-    ) -> bool {
-        let mut state = self.state.lock().await;
-        let Some(session) = state
-            .scopes
-            .get_mut(root_session_id)
-            .and_then(|scope| scope.sessions.get_mut(&id))
-        else {
-            return true;
-        };
-        let Some(active) = session
-            .active
-            .as_mut()
-            .filter(|active| active.generation == generation)
-        else {
-            return true;
-        };
-        active.control = Some(control);
-        let cancelled = active.cancellation.is_cancelled();
-        drop(state);
-        self.changed();
-        cancelled
-    }
-
-    async fn turn_finished(
-        &self,
-        root_session_id: &str,
-        id: AgentId,
-        generation: u64,
         result: nanocodex::Result<nanocodex::TurnResult>,
     ) {
         let status = {
@@ -608,16 +572,12 @@ impl Registry {
             else {
                 return;
             };
-            if session
-                .active
-                .as_ref()
-                .is_none_or(|active| active.generation != generation)
-            {
+            if !session.active {
                 return;
             }
-            session.active = None;
-            if matches!(session.status, AgentStatus::Closing) {
-                AgentStatus::Closing
+            session.active = false;
+            if matches!(session.status, AgentStatus::Closing | AgentStatus::Closed) {
+                session.status.clone()
             } else {
                 match result {
                     Ok(result) => {
@@ -639,7 +599,7 @@ impl Registry {
         self.changed();
     }
 
-    async fn runtime_closed(&self, root_session_id: &str, id: AgentId) {
+    pub(super) async fn harness_closed(&self, root_session_id: &str, id: AgentId) {
         let changed = {
             let mut state = self.state.lock().await;
             let Some(session) = state
@@ -652,8 +612,7 @@ impl Registry {
             if matches!(session.status, AgentStatus::Closed) {
                 false
             } else {
-                session.agent = None;
-                session.active = None;
+                session.active = false;
                 session.status = AgentStatus::Closed;
                 true
             }
@@ -670,6 +629,10 @@ impl Registry {
         }
     }
 
+    async fn runtime_closed(&self, root_session_id: &str, id: AgentId) {
+        self.harness_closed(root_session_id, id).await;
+    }
+
     pub(super) fn send(&self, root_session_id: &str, update: AgentUpdate) {
         let _ = send_update(&self.updates, root_session_id, update);
     }
@@ -684,25 +647,8 @@ impl Registry {
         id: AgentId,
         message: String,
     ) -> std::io::Result<AgentSummary> {
-        let mut revision = self.revision.subscribe();
-        let deadline = Instant::now() + AGENT_STOP_TIMEOUT;
-        let control = loop {
-            if let Some(control) = self.state.lock().await.active_control(session_id, id)? {
-                break control;
-            }
-            timeout_at(deadline, revision.changed())
-                .await
-                .map_err(|_| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::TimedOut,
-                        format!("timed out waiting to steer agent {id}"),
-                    )
-                })?
-                .map_err(|_| std::io::Error::other("subagent runtime is closed"))?;
-        };
-        control.steer(message).await.map_err(|error| {
-            std::io::Error::other(format!("could not steer agent {id}: {error}"))
-        })?;
+        let harness = self.state.lock().await.active_harness(session_id, id)?;
+        harness.steer(message).await?;
         self.state
             .lock()
             .await
@@ -743,13 +689,13 @@ impl Registry {
         session_id: &str,
         id: AgentId,
     ) -> std::io::Result<Vec<AgentSummary>> {
-        let (root_session_id, ids, controls) = {
+        let (root_session_id, ids, harnesses) = {
             let mut state = self.state.lock().await;
             state.request_interrupt(session_id, id)?
         };
         self.changed();
         let deadline = Instant::now() + AGENT_STOP_TIMEOUT;
-        self.stop_turns(&root_session_id, &ids, controls, deadline)
+        self.interrupt_harnesses(&root_session_id, &ids, harnesses, deadline)
             .await?;
         self.state
             .lock()
@@ -765,7 +711,7 @@ impl Registry {
         let CloseRequest {
             root_session_id,
             ids,
-            controls,
+            harnesses,
             status_updates,
         } = {
             let mut state = self.state.lock().await;
@@ -775,14 +721,14 @@ impl Registry {
             self.send(&root_session_id, AgentUpdate::Status { id, status });
         }
         self.changed();
-        self.stop_and_close(root_session_id, ids, controls).await
+        self.stop_and_close(root_session_id, ids, harnesses).await
     }
 
     async fn close_all(&self, session_id: &str) -> std::io::Result<Vec<AgentSummary>> {
         let CloseRequest {
             root_session_id,
             ids,
-            controls,
+            harnesses,
             status_updates,
         } = {
             let mut state = self.state.lock().await;
@@ -792,31 +738,35 @@ impl Registry {
             self.send(&root_session_id, AgentUpdate::Status { id, status });
         }
         self.changed();
-        self.stop_and_close(root_session_id, ids, controls).await
+        self.stop_and_close(root_session_id, ids, harnesses).await
     }
 
     async fn stop_and_close(
         &self,
         root_session_id: String,
         ids: Vec<AgentId>,
-        controls: Vec<TurnControl>,
+        harnesses: Vec<HarnessHandle>,
     ) -> std::io::Result<Vec<AgentSummary>> {
         if ids.is_empty() {
             return Ok(Vec::new());
         }
         let deadline = Instant::now() + AGENT_STOP_TIMEOUT;
-        self.stop_turns(&root_session_id, &ids, controls, deadline)
+        let closing_result = self.close_harnesses(harnesses, deadline).await;
+        self.wait_until_inactive(&root_session_id, &ids, deadline)
             .await?;
+        // Closing an already-finished driver can race with its natural shutdown.
+        // Once every harness reports inactive, command errors no longer identify
+        // a live resource and must not prevent task handles from being joined.
+        drop(closing_result);
         let ClosedSessions {
             summaries,
-            agents,
+            harness_tasks,
             event_tasks,
         } = self
             .state
             .lock()
             .await
             .finish_close(&root_session_id, &ids)?;
-        drop(agents);
         for summary in &summaries {
             self.send(
                 &root_session_id,
@@ -827,76 +777,81 @@ impl Registry {
             );
         }
         self.changed();
-        self.wait_for_event_tasks(event_tasks, deadline).await?;
+        self.wait_for_tasks(harness_tasks, deadline, "subagent harnesses")
+            .await?;
+        self.wait_for_tasks(event_tasks, deadline, "subagent event streams")
+            .await?;
         Ok(summaries)
     }
 
     async fn cancel_all(&self, session_id: &str) {
-        let (root_session_id, ids, controls) = {
+        let (root_session_id, ids, harnesses) = {
             let mut state = self.state.lock().await;
             state.request_interrupt_all(session_id)
         };
         self.changed();
         let deadline = Instant::now() + AGENT_STOP_TIMEOUT;
         drop(
-            self.stop_turns(&root_session_id, &ids, controls, deadline)
+            self.interrupt_harnesses(&root_session_id, &ids, harnesses, deadline)
                 .await,
         );
     }
 
-    async fn stop_turns(
+    async fn interrupt_harnesses(
         &self,
         root_session_id: &str,
         ids: &[AgentId],
-        controls: Vec<TurnControl>,
+        harnesses: Vec<HarnessHandle>,
         deadline: Instant,
     ) -> std::io::Result<()> {
-        let cancellation_result = self.cancel_controls(controls, deadline).await;
+        let interruption = async move {
+            let results = join_all(
+                harnesses
+                    .into_iter()
+                    .map(|harness| async move { harness.interrupt().await }),
+            )
+            .await;
+            first_error(results)
+        };
+        let interruption_result = timeout_at(deadline, interruption).await.map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "timed out interrupting subagent harnesses",
+            )
+        })?;
         self.wait_until_inactive(root_session_id, ids, deadline)
             .await?;
-        // A cancellation command can race with natural turn completion or driver
-        // shutdown. Once every turn is inactive, the command error no longer
-        // indicates a live resource and must not prevent lifecycle completion.
-        drop(cancellation_result);
+        drop(interruption_result);
         Ok(())
     }
 
-    async fn cancel_controls(
+    async fn close_harnesses(
         &self,
-        controls: Vec<TurnControl>,
+        harnesses: Vec<HarnessHandle>,
         deadline: Instant,
     ) -> std::io::Result<()> {
-        let cancellation = async move {
+        let closing = async move {
             let results = join_all(
-                controls
+                harnesses
                     .into_iter()
-                    .map(|control| async move { control.cancel().await }),
+                    .map(|harness| async move { harness.close().await }),
             )
             .await;
-            results
-                .into_iter()
-                .find_map(|result| match result {
-                    Ok(()) | Err(NanocodexError::TurnNotCancellable) => None,
-                    Err(error) => Some(error),
-                })
-                .map_or(Ok(()), |error| {
-                    Err(std::io::Error::other(format!(
-                        "could not stop subagent turn: {error}"
-                    )))
-                })
+            first_error(results)
         };
-        timeout_at(deadline, cancellation).await.map_err(|_| {
+        timeout_at(deadline, closing).await.map_err(|_| {
             std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
-                "timed out stopping subagent turns",
+                "timed out closing subagent harnesses",
             )
         })?
     }
 
-    async fn wait_for_event_tasks(
+    async fn wait_for_tasks(
         &self,
         mut tasks: Vec<JoinHandle<()>>,
         deadline: Instant,
+        description: &str,
     ) -> std::io::Result<()> {
         if tasks.is_empty() {
             return Ok(());
@@ -908,7 +863,7 @@ impl Registry {
                 .find_map(Result::err)
                 .map_or(Ok(()), |error| {
                     Err(std::io::Error::other(format!(
-                        "subagent event task failed during shutdown: {error}"
+                        "{description} failed during shutdown: {error}"
                     )))
                 }),
             Err(_) => {
@@ -917,7 +872,7 @@ impl Registry {
                 }
                 Err(std::io::Error::new(
                     std::io::ErrorKind::TimedOut,
-                    "timed out waiting for subagent runtimes to close",
+                    format!("timed out waiting for {description} to close"),
                 ))
             }
         }
@@ -946,17 +901,6 @@ impl Registry {
         }
     }
 
-    fn turn_started(&self, root_session_id: &str, id: AgentId) {
-        self.send(
-            root_session_id,
-            AgentUpdate::Status {
-                id,
-                status: AgentStatus::Running,
-            },
-        );
-        self.changed();
-    }
-
     fn changed(&self) {
         self.revision.send_modify(|revision| {
             *revision = revision.wrapping_add(1);
@@ -964,42 +908,11 @@ impl Registry {
     }
 }
 
-impl ChildSession {
-    pub(super) fn begin_turn(
-        &mut self,
-        root_session_id: String,
-        id: AgentId,
-        capacity: TurnCapacity,
-    ) -> std::io::Result<TurnLaunch> {
-        if !self.status.can_start_turn() || self.active.is_some() {
-            return Err(std::io::Error::other(format!(
-                "agent {id} is not idle ({:?})",
-                self.status
-            )));
-        }
-        let agent = self
-            .agent
-            .clone()
-            .ok_or_else(|| std::io::Error::other(format!("agent {id} is closed")))?;
-        self.next_generation = self.next_generation.saturating_add(1);
-        let generation = self.next_generation;
-        let cancellation = CancellationToken::new();
-        self.active = Some(ActiveTurn {
-            generation,
-            cancellation: cancellation.clone(),
-            control: None,
-            _capacity: capacity,
-        });
-        self.status = AgentStatus::Running;
-        Ok(TurnLaunch {
-            root_session_id,
-            id,
-            generation,
-            agent,
-            cancellation,
-        })
-    }
+fn first_error(results: Vec<std::io::Result<()>>) -> std::io::Result<()> {
+    results.into_iter().find(Result::is_err).unwrap_or(Ok(()))
+}
 
+impl ChildSession {
     pub(super) fn summary(&self) -> AgentSummary {
         let last_report = if matches!(self.status, AgentStatus::Completed { .. }) {
             None
@@ -1185,7 +1098,6 @@ mod tests {
     }
 
     fn test_session(id: AgentId, session_id: &str, parent: Option<AgentId>) -> ChildSession {
-        let (agent, _events) = nanocodex::Nanocodex::builder("test-key").build().unwrap();
         let descriptor = AgentDescriptor {
             id,
             session_id: session_id.to_owned(),
@@ -1195,12 +1107,12 @@ mod tests {
             parent,
         };
         ChildSession {
-            agent: Some(agent),
             descriptor,
             event_task: Some(tokio::spawn(async {})),
+            harness: None,
+            harness_task: None,
             status: AgentStatus::Pending,
-            active: None,
-            next_generation: 0,
+            active: false,
             last_report: None,
         }
     }
@@ -1372,7 +1284,9 @@ mod tests {
             state.scopes["main"]
                 .sessions
                 .values()
-                .all(|session| session.agent.is_none() && session.event_task.is_none())
+                .all(|session| session.harness.is_none()
+                    && session.harness_task.is_none()
+                    && session.event_task.is_none())
         );
     }
 

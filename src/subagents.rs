@@ -1,6 +1,7 @@
 //! Reusable child-agent tools and the typed runtime/UI update boundary.
 
 mod capacity;
+mod harness;
 mod model;
 mod runtime;
 mod task_tree;
