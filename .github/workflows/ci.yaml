@@ -36,7 +36,7 @@ jobs:
     runs-on: ubuntu-latest
     name: Build (${{ matrix.toolchain }})
     timeout-minutes: 20
-    continue-on-error: ${{ matrix.toolchain != '1.90.0' }}
+    continue-on-error: ${{ matrix.toolchain != '1.97.0' }}
     strategy:
       fail-fast: false
       matrix:

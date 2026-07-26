@@ -292,7 +292,7 @@ jobs:
 
           package_name="${BINARY_NAME}-${TARGET}-${GITHUB_REF_NAME}"
           archive="${package_name}.tar.gz"
-          mkdir -p "${RUNNER_TEMP}/image-context" "${RUNNER_TEMP}/release-package"
+          mkdir -p "${GITHUB_WORKSPACE}/target/image-context" "${RUNNER_TEMP}/release-package"
 
           cd release-bundle/dist
           shasum -a 256 --check "${archive}.sha256"
@@ -300,7 +300,7 @@ jobs:
           tar -xzf "$archive" -C "${RUNNER_TEMP}/release-package" "${package_name}/${BINARY_NAME}"
           install -m 0755 \
             "${RUNNER_TEMP}/release-package/${package_name}/${BINARY_NAME}" \
-            "${RUNNER_TEMP}/image-context/${BINARY_NAME}"
+            "${GITHUB_WORKSPACE}/target/image-context/${BINARY_NAME}"
       - name: Authenticate with container registry
         uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
         with:
@@ -311,19 +311,21 @@ jobs:
         uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
       - name: Package and push image by digest
         id: build
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        uses: docker/bake-action@3acf805d94d93a86cce4ca44798a76464a75b88c # v6.9.0
+        env:
+          RELEASE_BINARY_CONTEXT: target/image-context
+          RELEASE_REVISION: ${{ github.sha }}
+          RELEASE_VERSION: ${{ github.ref_name }}
         with:
-          context: ${{ runner.temp }}/image-context
-          file: docker/tact-release.dockerfile
-          platforms: ${{ matrix.platform }}
-          outputs: type=image,name=${{ env.REGISTRY_IMAGE }},push-by-digest=true,name-canonical=true,push=true
-          labels: |
-            org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.version=${{ github.ref_name }}
+          files: docker/docker-bake.hcl
+          targets: release
+          set: |
+            release.platform=${{ matrix.platform }}
+            release.output=type=image,name=${{ env.REGISTRY_IMAGE }},push-by-digest=true,name-canonical=true,push=true
       - name: Verify image binary matches release binary
         shell: bash
         env:
-          DIGEST: ${{ steps.build.outputs.digest }}
+          DIGEST: ${{ fromJSON(steps.build.outputs.metadata)['release']['containerimage.digest'] }}
           PLATFORM: ${{ matrix.platform }}
         run: |
           set -euo pipefail
@@ -331,11 +333,11 @@ jobs:
           container_id=$(docker create --platform "$PLATFORM" "${REGISTRY_IMAGE}@${DIGEST}" /tact)
           trap 'docker rm -f "$container_id" >/dev/null' EXIT
           docker cp "${container_id}:/tact" "${RUNNER_TEMP}/image-tact"
-          cmp "${RUNNER_TEMP}/image-context/tact" "${RUNNER_TEMP}/image-tact"
+          cmp "${GITHUB_WORKSPACE}/target/image-context/tact" "${RUNNER_TEMP}/image-tact"
       - name: Export image digest
         shell: bash
         env:
-          DIGEST: ${{ steps.build.outputs.digest }}
+          DIGEST: ${{ fromJSON(steps.build.outputs.metadata)['release']['containerimage.digest'] }}
         run: |
           mkdir -p "${RUNNER_TEMP}/digests"
           touch "${RUNNER_TEMP}/digests/${DIGEST#sha256:}"

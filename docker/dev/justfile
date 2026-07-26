@@ -2,7 +2,7 @@ dev_dir := justfile_directory()
 
 # Build the local development image without publishing it.
 build:
-    cd "{{ dev_dir }}/../.." && docker buildx bake --progress plain -f docker/dev/docker-bake.hcl
+    cd "{{ dev_dir }}/../.." && docker buildx bake --progress plain -f docker/docker-bake.hcl dev
 
 # Start Tact in the current workspace. Additional arguments are passed to Tact.
 run *args:
