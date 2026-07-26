@@ -1,0 +1,74 @@
+services:
+  tact-dev:
+    image: "${TACT_DEV_IMAGE:-tact-dev:local}"
+    working_dir: /workspace
+    user: "${TACT_DEV_UID:?set TACT_DEV_UID}:${TACT_DEV_GID:?set TACT_DEV_GID}"
+    stdin_open: true
+    tty: true
+    network_mode: service:iron-proxy
+    depends_on:
+      iron-proxy:
+        condition: service_started
+    environment:
+      HOME: /home/tact
+      XDG_CACHE_HOME: /home/tact/.cache
+      TACT_HOME: /run/tact-state
+      CODEX_HOME: /run/tact-public/codex
+      TACT_AUTH: "${TACT_DEV_AUTH:?set TACT_DEV_AUTH}"
+      TACT_AUTH_FILE: /run/tact-public/auth.json
+      TACT_CONFIG: "/run/tact-state/${TACT_DEV_CONFIG_NAME:?set TACT_DEV_CONFIG_NAME}"
+      TACT_WORKSPACE: /workspace
+      OPENAI_API_KEY: tact-dev-placeholder-api-key
+      HTTP_PROXY: http://127.0.0.1:8080
+      HTTPS_PROXY: http://127.0.0.1:8080
+      http_proxy: http://127.0.0.1:8080
+      https_proxy: http://127.0.0.1:8080
+      NO_PROXY: localhost,127.0.0.1,::1
+      no_proxy: localhost,127.0.0.1,::1
+      TACT_PROXY_CA_FILE: /run/tact-public/ca.crt
+    volumes:
+      - type: bind
+        source: "${TACT_DEV_WORKSPACE:?set TACT_DEV_WORKSPACE}"
+        target: /workspace
+      - type: bind
+        source: "${TACT_DEV_STATE_DIR:?set TACT_DEV_STATE_DIR}"
+        target: /run/tact-state
+      - type: bind
+        source: "${TACT_DEV_PUBLIC_DIR:?set TACT_DEV_PUBLIC_DIR}"
+        target: /run/tact-public
+        read_only: true
+      - type: volume
+        source: dev-state
+        target: /home/tact
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 4096
+    stop_grace_period: 10s
+
+  iron-proxy:
+    image: "${TACT_DEV_IRON_IMAGE:?set TACT_DEV_IRON_IMAGE}"
+    command:
+      - --config
+      - /run/tact-auth/proxy.yaml
+    user: "${TACT_DEV_UID:?set TACT_DEV_UID}:${TACT_DEV_GID:?set TACT_DEV_GID}"
+    volumes:
+      - type: bind
+        source: "${TACT_DEV_PRIVATE_DIR:?set TACT_DEV_PRIVATE_DIR}"
+        target: /run/tact-auth
+        read_only: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    stop_grace_period: 5s
+
+volumes:
+  dev-state:
+    name: tact-dev-state
+    external: true
