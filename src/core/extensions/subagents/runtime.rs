@@ -3,17 +3,13 @@
 use super::{
     capacity::{Capacity, TurnCapacity},
     harness::{self, HarnessHandle},
-    model::{
-        AgentDescriptor, AgentId, AgentStatus, AgentUpdate, ScopedAgentUpdate, SubagentRuntimeId,
-    },
-    task_tree::TaskTree,
-};
-use super::{
     message::MessageThreads,
     model::{
-        AgentMessage, AgentMessageUpdate, AgentThread, MessageDeliveryState, MessageDisposition,
-        MessageId, MessagePriority, MessagePurpose, MessageSender, ThreadId,
+        AgentDescriptor, AgentId, AgentMessage, AgentMessageUpdate, AgentStatus, AgentThread,
+        AgentUpdate, MessageDeliveryState, MessageDisposition, MessageId, MessagePriority,
+        MessagePurpose, MessageSender, ScopedAgentUpdate, SubagentRuntimeId, ThreadId,
     },
+    task_tree::TaskTree,
 };
 use futures_util::future::join_all;
 use jsonschema::Validator;

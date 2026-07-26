@@ -1,17 +1,14 @@
 //! Per-agent actor that exclusively owns a child runtime and its active turn.
 
 use super::{
-    capacity::Capacity,
-    model::{AgentMessage, MessageDisposition, MessageId, MessagePriority},
-    runtime::{DelegationChange, completion_instructions},
+    capacity::{Capacity, TurnCapacity},
+    model::{AgentId, AgentMessage, MessageDisposition, MessageId, MessagePriority},
+    runtime::{DelegationChange, Registry, completion_instructions},
 };
-use super::{capacity::TurnCapacity, model::AgentId, runtime::Registry};
 use nanocodex::{Nanocodex, NanocodexError, TurnControl};
-use std::collections::VecDeque;
-use std::sync::Weak;
-use tokio::sync::watch;
+use std::{collections::VecDeque, sync::Weak};
 use tokio::{
-    sync::{mpsc, oneshot},
+    sync::{mpsc, oneshot, watch},
     task::{JoinError, JoinHandle},
 };
 

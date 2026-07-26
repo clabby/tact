@@ -1,11 +1,10 @@
 use super::{
     message::MAX_MESSAGE_BYTES,
-    model::{MessageId, MessagePriority, MessagePurpose},
-    runtime::AgentDirectoryEntry,
-};
-use super::{
-    model::{AgentDescriptor, AgentId, AgentStatus, AgentUpdate, agent_prompt},
-    runtime::{AgentSummary, OutputContract, Registry, forward_events},
+    model::{
+        AgentDescriptor, AgentId, AgentStatus, AgentUpdate, MessageId, MessagePriority,
+        MessagePurpose, agent_prompt,
+    },
+    runtime::{AgentDirectoryEntry, AgentSummary, OutputContract, Registry, forward_events},
 };
 use nanocodex::{
     AgentHandle, Tool, ToolContext, ToolDefinition, ToolExecution, ToolInput, ToolResult, Tools,

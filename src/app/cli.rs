@@ -519,10 +519,10 @@ fn read_mcp_environment(
 #[cfg(test)]
 mod tests {
     use super::{Cli, McpCommand, read_mcp_environment, resume_command};
-    use crate::{
-        app::cli::Command,
-        app::config::{AuthMode, Config, ConfigOverrides},
-        app::error::{ConfigError, Error},
+    use crate::app::{
+        cli::Command,
+        config::{AuthMode, Config, ConfigOverrides},
+        error::{ConfigError, Error},
     };
     use clap::{CommandFactory, Parser, error::ErrorKind};
     use std::{env::VarError, ffi::OsString, fs, path::PathBuf};

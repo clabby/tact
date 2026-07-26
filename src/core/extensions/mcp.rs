@@ -1,8 +1,8 @@
 //! Conversion from application MCP configuration to the Nanocodex provider.
 
-use crate::{
-    app::config::{Config, McpServerConfig},
-    app::error::{Error, Result},
+use crate::app::{
+    config::{Config, McpServerConfig},
+    error::{Error, Result},
 };
 use nanocodex::{Mcp, McpServer};
 use std::{env, env::VarError};
@@ -90,9 +90,9 @@ fn remote_secret(
 #[cfg(test)]
 mod tests {
     use super::{RemoteSecret, UNAVAILABLE_REMOTE_SECRET_ENV, provider, remote_secret};
-    use crate::{
-        app::config::{Config, ConfigOverrides},
-        app::error::Error,
+    use crate::app::{
+        config::{Config, ConfigOverrides},
+        error::Error,
     };
     use nanocodex::McpBuildError;
     #[cfg(unix)]

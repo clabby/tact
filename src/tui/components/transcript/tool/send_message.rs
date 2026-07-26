@@ -1,5 +1,4 @@
-use super::super::markdown::wrap_plain;
-use super::Presentation;
+use super::{super::markdown::wrap_plain, Presentation};
 use crate::tui::{theme::Theme, transcript::ToolEntry};
 use ratatui::style::Style;
 use serde_json::Value;

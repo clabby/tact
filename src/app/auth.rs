@@ -1,9 +1,9 @@
 //! Authentication selection and shared ChatGPT credential management.
 
-use crate::{
-    app::config::{AuthConfig, AuthMode},
-    app::error::{AuthError, AuthResult, SecretError},
-    app::secret::SecretString,
+use crate::app::{
+    config::{AuthConfig, AuthMode},
+    error::{AuthError, AuthResult, SecretError},
+    secret::SecretString,
 };
 use nanocodex::{
     ChatGptAuthStatus, ChatGptLogin, OpenAiAuth, chatgpt_auth_status, load_chatgpt_auth,
@@ -145,10 +145,10 @@ impl SelectedAuth {
 #[cfg(test)]
 mod tests {
     use super::SelectedAuth;
-    use crate::{
-        app::config::{AuthConfig, AuthMode},
-        app::error::AuthError,
-        app::secret::SecretString,
+    use crate::app::{
+        config::{AuthConfig, AuthMode},
+        error::AuthError,
+        secret::SecretString,
     };
     use nanocodex::OpenAiAuthMode;
     use std::{cell::Cell, fs};
