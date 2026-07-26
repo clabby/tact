@@ -13,6 +13,7 @@ mod queue;
 mod root;
 mod selection;
 mod session_picker;
+mod subagent_tree_layout;
 mod subagents;
 mod theme_selector;
 mod transcript;

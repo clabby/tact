@@ -755,8 +755,12 @@ impl RootNode {
         effect: Option<SubagentEffect>,
     ) -> ComponentUpdate<RootEffect> {
         match effect {
-            Some(SubagentEffect::Dismiss) => self.overlay = None,
+            Some(SubagentEffect::Dismiss) => {
+                self.subagents.finish_camera_animation();
+                self.overlay = None;
+            }
             Some(SubagentEffect::Inspect(id)) => {
+                self.subagents.finish_camera_animation();
                 self.overlay = Some(Overlay::Subagents(SubagentOverlay::Transcript(id)));
             }
             Some(SubagentEffect::Back) => {

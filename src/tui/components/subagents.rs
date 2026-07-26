@@ -1,8 +1,11 @@
-//! Presentation model for the subagent tree and read-only transcript inspector.
+//! Camera-centered subagent hierarchy and read-only transcript inspector.
 
 use super::{
     floating::Floating,
     node::Node,
+    subagent_tree_layout::{
+        LayoutNode, NODE_HEIGHT, NODE_WIDTH, NodePosition, TreeLayout, VERTICAL_GAP, WorldPoint,
+    },
     transcript::{Transcript, TranscriptEvent},
 };
 use crate::{
@@ -18,24 +21,23 @@ use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{Block, BorderType, Borders, Paragraph, Wrap},
 };
-use std::{sync::Arc, time::Instant};
+use std::{
+    collections::HashMap,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-const RUNNING_TREE_KEYS: [&str; 5] = [
-    "↑↓ select",
+const TREE_KEYS: [&str; 7] = [
+    "←/→ row",
+    "↑ parent",
+    "↓ child",
     "enter inspect",
-    "-/+ concurrency",
-    "f show all",
-    "esc close",
-];
-const ALL_TREE_KEYS: [&str; 5] = [
-    "↑↓ select",
-    "enter inspect",
-    "-/+ concurrency",
-    "f show running",
+    "-/+ limit",
+    "f filter",
     "esc close",
 ];
 const TRANSCRIPT_KEYS: [&str; 4] = [
@@ -45,18 +47,15 @@ const TRANSCRIPT_KEYS: [&str; 4] = [
     "esc back",
 ];
 const FOCUSED_ENTRY_KEYS: [&str; 3] = ["↑↓ item", "enter toggle", "esc blur, then back"];
+const CAMERA_FRAME_INTERVAL: Duration = Duration::from_millis(16);
+const CAMERA_MIN_DURATION: Duration = Duration::from_millis(120);
+const CAMERA_MAX_DURATION: Duration = Duration::from_millis(240);
+const INSPECTOR_HEIGHT: u16 = 6;
 
 struct AgentNode {
     descriptor: AgentDescriptor,
     status: AgentStatus,
     transcript: Node<Transcript>,
-}
-
-struct VisibleNode {
-    index: usize,
-    ancestor_is_last: Vec<bool>,
-    is_last: bool,
-    has_children: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -77,13 +76,6 @@ impl AgentFilter {
         match self {
             Self::Running => "running",
             Self::All => "all",
-        }
-    }
-
-    const fn keys(self) -> &'static [&'static str] {
-        match self {
-            Self::Running => &RUNNING_TREE_KEYS,
-            Self::All => &ALL_TREE_KEYS,
         }
     }
 
@@ -110,20 +102,38 @@ pub(super) enum SubagentEffect {
     SetMaxSubagents(usize),
 }
 
+struct CameraAnimation {
+    from: WorldPoint,
+    to: WorldPoint,
+    started_at: Instant,
+    duration: Duration,
+    next_frame: Instant,
+}
+
+#[derive(Default)]
+struct Camera {
+    center: Option<WorldPoint>,
+    animation: Option<CameraAnimation>,
+}
+
 pub(super) struct SubagentTree {
     nodes: Vec<AgentNode>,
-    selected: usize,
+    focused: Option<AgentId>,
+    remembered_children: HashMap<AgentId, AgentId>,
+    camera: Camera,
     filter: AgentFilter,
     effort: crate::app::config::ReasoningEffort,
     max_subagents: usize,
 }
 
 impl SubagentTree {
-    pub(super) const fn new(effort: crate::app::config::ReasoningEffort) -> Self {
+    pub(super) fn new(effort: crate::app::config::ReasoningEffort) -> Self {
         Self {
             nodes: Vec::new(),
-            selected: 0,
-            filter: AgentFilter::Running,
+            focused: None,
+            remembered_children: HashMap::new(),
+            camera: Camera::default(),
+            filter: AgentFilter::All,
             effort,
             max_subagents: DEFAULT_MAX_SUBAGENTS,
         }
@@ -135,11 +145,13 @@ impl SubagentTree {
                 if let Some(node) = self.node_mut(descriptor.id) {
                     node.descriptor = descriptor;
                 } else {
+                    let id = descriptor.id;
                     self.nodes.push(AgentNode {
                         descriptor,
                         status: AgentStatus::Running,
                         transcript: Node::new(Transcript::with_effort(self.effort)),
                     });
+                    self.focused.get_or_insert(id);
                 }
                 true
             }
@@ -157,7 +169,6 @@ impl SubagentTree {
                     return false;
                 };
                 node.status = status;
-                self.clamp_selection();
                 true
             }
             AgentUpdate::Message(update) => {
@@ -215,11 +226,18 @@ impl SubagentTree {
         self.nodes
             .iter()
             .filter_map(|node| node.transcript.component().animation_deadline())
+            .chain(
+                self.camera
+                    .animation
+                    .as_ref()
+                    .map(|animation| animation.next_frame),
+            )
             .min()
     }
 
     pub(super) fn advance(&mut self, now: Instant) -> bool {
-        self.nodes.iter_mut().fold(false, |changed, node| {
+        let camera_changed = self.advance_camera(now);
+        self.nodes.iter_mut().fold(camera_changed, |changed, node| {
             let node_changed = node
                 .transcript
                 .update(TranscriptEvent::AnimationFrame(now))
@@ -229,27 +247,52 @@ impl SubagentTree {
         })
     }
 
+    pub(super) fn finish_camera_animation(&mut self) {
+        let Some(animation) = self.camera.animation.take() else {
+            return;
+        };
+        self.camera.center = Some(animation.to);
+    }
+
     pub(super) fn update_tree(&mut self, event: Event) -> Option<SubagentEffect> {
+        self.update_tree_at(event, Instant::now())
+    }
+
+    fn update_tree_at(&mut self, event: Event, now: Instant) -> Option<SubagentEffect> {
         let Event::Key(key) = event else {
             return None;
         };
         if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
             return None;
         }
+
         match key.code {
             KeyCode::Esc => Some(SubagentEffect::Dismiss),
             KeyCode::Up | KeyCode::Char('k') => {
-                self.selected = self.selected.saturating_sub(1);
+                self.move_focus(Direction::Parent, now);
                 None
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                self.selected =
-                    (self.selected + 1).min(self.visible_nodes().len().saturating_sub(1));
+                self.move_focus(Direction::Child, now);
+                None
+            }
+            KeyCode::Left | KeyCode::Char('h') => {
+                self.move_focus(Direction::PreviousOnLevel, now);
+                None
+            }
+            KeyCode::Right | KeyCode::Char('l') => {
+                self.move_focus(Direction::NextOnLevel, now);
+                None
+            }
+            KeyCode::Home => {
+                self.move_focus(Direction::Root, now);
                 None
             }
             KeyCode::Char('f') if key.modifiers.is_empty() => {
                 self.filter = self.filter.toggled();
-                self.clamp_selection();
+                let layout = self.layout();
+                self.ensure_focus(&layout);
+                self.recenter_on_focus(&layout, now);
                 None
             }
             KeyCode::Char('-') if key.modifiers.is_empty() => {
@@ -260,10 +303,7 @@ impl SubagentTree {
                 self.max_subagents = self.max_subagents.saturating_add(1);
                 Some(SubagentEffect::SetMaxSubagents(self.max_subagents))
             }
-            KeyCode::Enter => self
-                .visible_nodes()
-                .get(self.selected)
-                .map(|visible| SubagentEffect::Inspect(self.nodes[visible.index].descriptor.id)),
+            KeyCode::Enter => self.focused.map(SubagentEffect::Inspect),
             _ => None,
         }
     }
@@ -311,16 +351,15 @@ impl SubagentTree {
     }
 
     pub(super) fn render_tree(&mut self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
-        let visible = self.visible_nodes();
-        let height = u16::try_from(visible.len().saturating_mul(2).saturating_add(6))
-            .unwrap_or(u16::MAX)
-            .clamp(8, 22);
-        let layout =
-            Floating::new("Subagents", 74, height, self.filter.keys()).render(frame, area, theme);
+        let layout = Floating::new("Sub-agent tree", area.width, area.height, &TREE_KEYS)
+            .render(frame, area, theme);
         if layout.body.is_empty() {
             return;
         }
-        if visible.is_empty() {
+
+        let tree_layout = self.layout();
+        self.ensure_focus(&tree_layout);
+        let Some(focused) = self.focused else {
             let message = if self.nodes.is_empty() {
                 format!(
                     "Concurrency: {} / {} active. No subagents have been delegated yet.",
@@ -341,73 +380,37 @@ impl SubagentTree {
                 inset(layout.body, 2, 1),
             );
             return;
-        }
+        };
 
-        let mut items = Vec::with_capacity(visible.len() + 1);
-        items.push(ListItem::new(Line::from(vec![
-            Span::styled("● ", Style::default().fg(theme.accent())),
-            Span::styled("main agent", Style::default().add_modifier(Modifier::BOLD)),
-            Span::styled(
-                format!(
-                    "  ·  {} / {} active · {} total · {}",
-                    self.active_count(),
-                    self.max_subagents,
-                    self.nodes.len(),
-                    self.filter.label(),
-                ),
-                Style::default().fg(theme.muted()),
-            ),
-        ])));
-        for (selection_index, visible_node) in visible.iter().enumerate() {
-            let node = &self.nodes[visible_node.index];
-            let (symbol, color, label) = state_style(&node.status);
-            let selected = selection_index == self.selected;
-            let text_color = if selected { Color::Black } else { theme.text() };
-            let detail_color = if selected { Color::Black } else { color };
-            let muted_color = if selected {
-                Color::Black
-            } else {
-                theme.muted()
-            };
-            let branch_color = if selected {
-                Color::Black
-            } else {
-                theme.border()
-            };
-            let branch_prefix = tree_prefix(visible_node, false);
-            let task_prefix = tree_prefix(visible_node, true);
-            let indentation = u16::try_from(visible_node.ancestor_is_last.len())
-                .unwrap_or(u16::MAX)
-                .saturating_mul(3);
-            let task_width = layout.body.width.saturating_sub(9 + indentation);
-            let task = truncate_with_ellipsis(&node.descriptor.task, task_width);
-            items.push(ListItem::new(vec![
-                Line::from(vec![
-                    Span::styled(branch_prefix, Style::default().fg(branch_color)),
-                    Span::styled(format!("{symbol} "), Style::default().fg(detail_color)),
-                    Span::styled(
-                        node.descriptor.role.clone(),
-                        Style::default().fg(text_color).add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        format!("  {label} · #{}", node.descriptor.id),
-                        Style::default().fg(detail_color),
-                    ),
-                ]),
-                Line::from(vec![
-                    Span::styled(task_prefix, Style::default().fg(branch_color)),
-                    Span::styled(task, Style::default().fg(muted_color)),
-                ]),
-            ]));
+        let (canvas, inspector) = split_inspector(layout.body);
+        if canvas.is_empty() {
+            return;
         }
-        let mut state = ListState::default().with_selected(Some(self.selected + 1));
-        let list = List::new(items).highlight_symbol("  ").highlight_style(
-            Style::default()
-                .fg(Color::Black)
-                .bg(theme.accent())
-                .add_modifier(Modifier::BOLD),
-        );
-        frame.render_stateful_widget(list, layout.body, &mut state);
+        let focus_center = tree_layout
+            .center(focused)
+            .expect("focused agent should have a layout position");
+        self.sync_camera_target(focus_center, Instant::now());
+        let camera_center = self.camera.center.unwrap_or(focus_center);
+
+        render_edges(frame, canvas, theme, &tree_layout, camera_center);
+        for (id, position) in tree_layout.positioned_nodes() {
+            let Some(node) = self.node(id) else {
+                continue;
+            };
+            render_node(
+                frame,
+                canvas,
+                theme,
+                camera_center,
+                NodeRender {
+                    node,
+                    position,
+                    focused: id == focused,
+                    child_count: tree_layout.children(id).len(),
+                },
+            );
+        }
+        self.render_inspector(frame, inspector, theme, focused, &tree_layout);
     }
 
     pub(super) fn render_transcript(
@@ -421,98 +424,570 @@ impl SubagentTree {
             return;
         };
         let title = format!("{} · #{}", node.descriptor.role, node.descriptor.id);
-        let width = area.width.saturating_mul(4) / 5;
-        let height = area.height.saturating_mul(4) / 5;
         let keys: &[&str] = if node.transcript.component().expandables_focused() {
             &FOCUSED_ENTRY_KEYS
         } else {
             &TRANSCRIPT_KEYS
         };
-        let layout = Floating::new(&title, width, height, keys)
+        let layout = Floating::new(&title, area.width, area.height, keys)
             .colors(theme.border(), theme.accent())
             .render(frame, area, theme);
         node.transcript.render(frame, layout.body, theme);
     }
 
+    fn layout(&self) -> TreeLayout {
+        let visible = self.visible_ids();
+        let nodes = self
+            .nodes
+            .iter()
+            .filter(|node| visible.contains(&node.descriptor.id))
+            .map(|node| LayoutNode {
+                id: node.descriptor.id,
+                parent: node.descriptor.parent,
+            })
+            .collect::<Vec<_>>();
+        TreeLayout::new(&nodes)
+    }
+
+    fn visible_ids(&self) -> Vec<AgentId> {
+        if self.filter == AgentFilter::All {
+            return self.nodes.iter().map(|node| node.descriptor.id).collect();
+        }
+
+        let mut visible = self
+            .nodes
+            .iter()
+            .filter(|node| self.filter.includes(&node.status))
+            .map(|node| node.descriptor.id)
+            .collect::<Vec<_>>();
+        let mut cursor = 0;
+        while cursor < visible.len() {
+            let Some(parent) = self
+                .node(visible[cursor])
+                .and_then(|node| node.descriptor.parent)
+            else {
+                cursor += 1;
+                continue;
+            };
+            if !visible.contains(&parent) {
+                visible.push(parent);
+            }
+            cursor += 1;
+        }
+        self.nodes
+            .iter()
+            .map(|node| node.descriptor.id)
+            .filter(|id| visible.contains(id))
+            .collect()
+    }
+
+    fn ensure_focus(&mut self, layout: &TreeLayout) {
+        if self
+            .focused
+            .is_some_and(|focused| layout.position(focused).is_some())
+        {
+            return;
+        }
+        self.focused = layout.roots().first().copied();
+        self.camera.center = self.focused.and_then(|id| layout.center(id));
+        self.camera.animation = None;
+    }
+
+    fn move_focus(&mut self, direction: Direction, now: Instant) {
+        let layout = self.layout();
+        self.ensure_focus(&layout);
+        let Some(current) = self.focused else {
+            return;
+        };
+
+        let target = match direction {
+            Direction::Parent => layout.parent(current),
+            Direction::Child => {
+                let children = layout.children(current);
+                self.remembered_children
+                    .get(&current)
+                    .copied()
+                    .filter(|child| children.contains(child))
+                    .or_else(|| {
+                        let parent_x = layout.position(current)?.center_x;
+                        children.iter().copied().min_by_key(|child| {
+                            layout
+                                .position(*child)
+                                .map_or(i32::MAX, |position| (position.center_x - parent_x).abs())
+                        })
+                    })
+            }
+            Direction::PreviousOnLevel => {
+                previous_or_next_on_level(&layout, current, HorizontalDirection::Previous)
+            }
+            Direction::NextOnLevel => {
+                previous_or_next_on_level(&layout, current, HorizontalDirection::Next)
+            }
+            Direction::Root => layout.roots().first().copied(),
+        };
+        let Some(target) = target else {
+            return;
+        };
+
+        if let Some(parent) = layout.parent(target) {
+            self.remembered_children.insert(parent, target);
+        }
+        if direction == Direction::Parent {
+            self.remembered_children.insert(target, current);
+        }
+        self.focused = Some(target);
+        self.recenter_on_focus(&layout, now);
+    }
+
+    fn recenter_on_focus(&mut self, layout: &TreeLayout, now: Instant) {
+        self.advance_camera(now);
+        let Some(target) = self.focused.and_then(|id| layout.center(id)) else {
+            return;
+        };
+        self.start_camera_animation(target, now);
+    }
+
+    fn sync_camera_target(&mut self, target: WorldPoint, now: Instant) {
+        if self
+            .camera
+            .animation
+            .as_ref()
+            .is_some_and(|animation| distance(animation.to, target) < f64::EPSILON)
+        {
+            return;
+        }
+        if self
+            .camera
+            .center
+            .is_some_and(|center| distance(center, target) < f64::EPSILON)
+        {
+            return;
+        }
+        self.advance_camera(now);
+        self.start_camera_animation(target, now);
+    }
+
+    fn start_camera_animation(&mut self, target: WorldPoint, now: Instant) {
+        let Some(from) = self.camera.center else {
+            self.camera.center = Some(target);
+            return;
+        };
+        if distance(from, target) < f64::EPSILON {
+            self.camera.animation = None;
+            return;
+        }
+
+        let duration_ms = (CAMERA_MIN_DURATION.as_millis() as f64 + distance(from, target))
+            .min(CAMERA_MAX_DURATION.as_millis() as f64);
+        let duration = Duration::from_millis(duration_ms.round() as u64);
+        self.camera.animation = Some(CameraAnimation {
+            from,
+            to: target,
+            started_at: now,
+            duration,
+            next_frame: now + CAMERA_FRAME_INTERVAL,
+        });
+    }
+
+    fn advance_camera(&mut self, now: Instant) -> bool {
+        let Some(animation) = &mut self.camera.animation else {
+            return false;
+        };
+        if now < animation.next_frame {
+            return false;
+        }
+        let elapsed = now.saturating_duration_since(animation.started_at);
+        let progress = (elapsed.as_secs_f64() / animation.duration.as_secs_f64()).min(1.0);
+        let eased = 1.0 - (1.0 - progress).powi(3);
+        self.camera.center = Some(WorldPoint {
+            x: animation.from.x + (animation.to.x - animation.from.x) * eased,
+            y: animation.from.y + (animation.to.y - animation.from.y) * eased,
+        });
+
+        if progress >= 1.0 {
+            self.camera.center = Some(animation.to);
+            self.camera.animation = None;
+        } else {
+            animation.next_frame = now + CAMERA_FRAME_INTERVAL;
+        }
+        true
+    }
+
+    fn render_inspector(
+        &self,
+        frame: &mut Frame<'_>,
+        area: Rect,
+        theme: &Theme,
+        focused: AgentId,
+        layout: &TreeLayout,
+    ) {
+        if area.is_empty() {
+            return;
+        }
+        let Some(node) = self.node(focused) else {
+            return;
+        };
+        let (symbol, color, status) = state_style(&node.status);
+        let title = format!(
+            " {symbol} #{} · {} · {status} ",
+            focused, node.descriptor.role
+        );
+        let block = Block::new()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(color))
+            .title(title)
+            .title_style(Style::default().fg(color).add_modifier(Modifier::BOLD));
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        if inner.is_empty() {
+            return;
+        }
+
+        let parent = layout
+            .parent(focused)
+            .map_or_else(|| "root".to_owned(), |id| format!("parent #{id}"));
+        let children = layout.children(focused).len();
+        let task = truncate_with_ellipsis(&node.descriptor.task, inner.width.saturating_sub(6));
+        let lines = vec![
+            Line::from(vec![
+                Span::styled("Task  ", Style::default().fg(theme.muted())),
+                Span::styled(task, Style::default().fg(theme.text())),
+            ]),
+            Line::from(vec![
+                Span::styled("Tree  ", Style::default().fg(theme.muted())),
+                Span::raw(format!("{parent} · {children} children")),
+                Span::styled(
+                    format!(
+                        "    Concurrency  {} / {} active",
+                        self.active_count(),
+                        self.max_subagents
+                    ),
+                    Style::default().fg(theme.muted()),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled("View  ", Style::default().fg(theme.muted())),
+                Span::raw(format!(
+                    "{} agents · {} filter",
+                    self.nodes.len(),
+                    self.filter.label()
+                )),
+            ]),
+            Line::from(vec![
+                Span::styled("Session  ", Style::default().fg(theme.muted())),
+                Span::raw(truncate_with_ellipsis(
+                    &node.descriptor.session_id,
+                    inner.width.saturating_sub(9),
+                )),
+            ]),
+        ];
+        frame.render_widget(Paragraph::new(lines), inner);
+    }
+
+    fn node(&self, id: AgentId) -> Option<&AgentNode> {
+        self.nodes.iter().find(|node| node.descriptor.id == id)
+    }
+
     fn node_mut(&mut self, id: AgentId) -> Option<&mut AgentNode> {
         self.nodes.iter_mut().find(|node| node.descriptor.id == id)
     }
+}
 
-    fn clamp_selection(&mut self) {
-        self.selected = self
-            .selected
-            .min(self.visible_nodes().len().saturating_sub(1));
-    }
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum Direction {
+    Parent,
+    Child,
+    PreviousOnLevel,
+    NextOnLevel,
+    Root,
+}
 
-    fn visible_nodes(&self) -> Vec<VisibleNode> {
-        let roots = self
-            .nodes
-            .iter()
-            .enumerate()
-            .filter_map(|(index, node)| {
-                if !self.filter.includes(&node.status) {
-                    return None;
-                }
-                let parent_exists = node.descriptor.parent.is_some_and(|parent| {
-                    self.nodes.iter().any(|candidate| {
-                        candidate.descriptor.id == parent && self.filter.includes(&candidate.status)
-                    })
-                });
-                (!parent_exists).then_some(index)
-            })
-            .collect::<Vec<_>>();
-        let mut visible = Vec::new();
-        self.append_visible(&roots, &[], &mut visible);
-        visible
-    }
+#[derive(Clone, Copy)]
+enum HorizontalDirection {
+    Previous,
+    Next,
+}
 
-    fn append_visible(
-        &self,
-        siblings: &[usize],
-        ancestors: &[bool],
-        visible: &mut Vec<VisibleNode>,
-    ) {
-        for (position, &index) in siblings.iter().enumerate() {
-            let is_last = position + 1 == siblings.len();
-            let id = self.nodes[index].descriptor.id;
-            let children = self
-                .nodes
-                .iter()
-                .enumerate()
-                .filter_map(|(child_index, child)| {
-                    (child.descriptor.parent == Some(id) && self.filter.includes(&child.status))
-                        .then_some(child_index)
-                })
-                .collect::<Vec<_>>();
-            visible.push(VisibleNode {
-                index,
-                ancestor_is_last: ancestors.to_vec(),
-                is_last,
-                has_children: !children.is_empty(),
-            });
-            let mut child_ancestors = ancestors.to_vec();
-            child_ancestors.push(is_last);
-            self.append_visible(&children, &child_ancestors, visible);
-        }
+fn previous_or_next_on_level(
+    layout: &TreeLayout,
+    current: AgentId,
+    direction: HorizontalDirection,
+) -> Option<AgentId> {
+    let current_position = layout.position(current)?;
+    let mut level = layout
+        .positioned_nodes()
+        .filter(|(_, position)| position.top == current_position.top)
+        .collect::<Vec<_>>();
+    level.sort_unstable_by_key(|(id, position)| (position.center_x, *id));
+    let index = level.iter().position(|&(id, _)| id == current)?;
+    match direction {
+        HorizontalDirection::Previous => index.checked_sub(1).map(|index| level[index].0),
+        HorizontalDirection::Next => level.get(index + 1).map(|(id, _)| *id),
     }
 }
 
-fn tree_prefix(node: &VisibleNode, task_line: bool) -> String {
-    let mut prefix = String::new();
-    for &is_last in &node.ancestor_is_last {
-        prefix.push_str(if is_last { "   " } else { "│  " });
+fn split_inspector(area: Rect) -> (Rect, Rect) {
+    if area.height <= 4 {
+        return (area, Rect::default());
     }
-    if task_line {
-        prefix.push_str(match (node.is_last, node.has_children) {
-            (true, true) => "   ├─ ",
-            (true, false) => "   ╰─ ",
-            (false, true) => "│  ├─ ",
-            (false, false) => "│  ╰─ ",
-        });
+    let inspector_height = INSPECTOR_HEIGHT.min(area.height.saturating_sub(3));
+    let canvas = Rect {
+        height: area.height - inspector_height,
+        ..area
+    };
+    let inspector = Rect {
+        y: canvas.bottom(),
+        height: inspector_height,
+        ..area
+    };
+    (canvas, inspector)
+}
+
+struct NodeRender<'a> {
+    node: &'a AgentNode,
+    position: NodePosition,
+    focused: bool,
+    child_count: usize,
+}
+
+fn render_node(
+    frame: &mut Frame<'_>,
+    canvas: Rect,
+    theme: &Theme,
+    camera: WorldPoint,
+    render: NodeRender<'_>,
+) {
+    let NodeRender {
+        node,
+        position,
+        focused,
+        child_count,
+    } = render;
+    let left = position.center_x - NODE_WIDTH / 2;
+    let border_style = if focused {
+        Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD)
     } else {
-        prefix.push_str(if node.is_last { "└─ " } else { "├─ " });
+        Style::default().fg(theme.border())
+    };
+    let text_style = Style::default().fg(theme.text());
+    let (symbol, status_color, status) = state_style(&node.status);
+    let detail_style = Style::default().fg(status_color);
+    let role_width = u16::try_from(NODE_WIDTH.saturating_sub(4)).unwrap_or_default();
+    let role = truncate_with_ellipsis(&node.descriptor.role, role_width);
+    let title = centered_text(
+        &format!("{symbol} #{} {role}", node.descriptor.id),
+        NODE_WIDTH - 2,
+    );
+    let detail = centered_text(
+        &format!("{status} · {child_count} children"),
+        NODE_WIDTH - 2,
+    );
+    let top = format!(
+        "╭{}╮",
+        "─".repeat(usize::try_from(NODE_WIDTH - 2).unwrap_or_default())
+    );
+    let bottom = format!(
+        "╰{}╯",
+        "─".repeat(usize::try_from(NODE_WIDTH - 2).unwrap_or_default())
+    );
+    draw_world_string(
+        frame,
+        canvas,
+        left,
+        position.top,
+        camera,
+        &top,
+        border_style,
+    );
+    for (row, (text, style)) in [(title, text_style), (detail, detail_style)]
+        .into_iter()
+        .enumerate()
+    {
+        let y = position.top + i32::try_from(row).unwrap_or_default() + 1;
+        draw_world_string(frame, canvas, left, y, camera, "│", border_style);
+        draw_world_string(frame, canvas, left + 1, y, camera, &text, style);
+        draw_world_string(
+            frame,
+            canvas,
+            left + NODE_WIDTH - 1,
+            y,
+            camera,
+            "│",
+            border_style,
+        );
     }
-    prefix
+    draw_world_string(
+        frame,
+        canvas,
+        left,
+        position.top + NODE_HEIGHT - 1,
+        camera,
+        &bottom,
+        border_style,
+    );
+}
+
+fn render_edges(
+    frame: &mut Frame<'_>,
+    canvas: Rect,
+    theme: &Theme,
+    layout: &TreeLayout,
+    camera: WorldPoint,
+) {
+    let mut cells = HashMap::<(i32, i32), u8>::new();
+    let mut arrows = Vec::new();
+    for (parent, position) in layout.positioned_nodes() {
+        let children = layout.children(parent);
+        if children.is_empty() {
+            continue;
+        }
+        let child_centers = children
+            .iter()
+            .filter_map(|&id| layout.position(id).map(|position| position.center_x))
+            .collect::<Vec<_>>();
+        if child_centers.is_empty() {
+            continue;
+        }
+
+        let start_y = position.top + NODE_HEIGHT;
+        let junction_y = start_y + VERTICAL_GAP / 2;
+        if child_centers.len() == 1 {
+            let child_top = layout.position(children[0]).unwrap().top;
+            add_vertical(&mut cells, position.center_x, start_y, child_top - 2);
+            arrows.push((child_centers[0], child_top - 1));
+            continue;
+        }
+        add_vertical(&mut cells, position.center_x, start_y, junction_y);
+        let first = child_centers[0].min(position.center_x);
+        let last = child_centers[child_centers.len() - 1].max(position.center_x);
+        add_horizontal(&mut cells, first, last, junction_y);
+        for (index, child_x) in child_centers.into_iter().enumerate() {
+            let child_top = layout.position(children[index]).unwrap().top;
+            add_vertical(&mut cells, child_x, junction_y, child_top - 2);
+            arrows.push((child_x, child_top - 1));
+        }
+    }
+
+    let style = Style::default().fg(theme.border());
+    for ((x, y), connections) in cells {
+        draw_world_string(frame, canvas, x, y, camera, edge_symbol(connections), style);
+    }
+    for (x, y) in arrows {
+        draw_world_string(frame, canvas, x, y, camera, "↓", style);
+    }
+}
+
+const UP: u8 = 1;
+const RIGHT: u8 = 2;
+const DOWN: u8 = 4;
+const LEFT: u8 = 8;
+
+fn add_vertical(cells: &mut HashMap<(i32, i32), u8>, x: i32, start: i32, end: i32) {
+    if start > end {
+        return;
+    }
+    for y in start..=end {
+        let mut connections = 0;
+        if y > start {
+            connections |= UP;
+        }
+        if y < end {
+            connections |= DOWN;
+        }
+        if connections == 0 {
+            connections = UP | DOWN;
+        }
+        *cells.entry((x, y)).or_default() |= connections;
+    }
+}
+
+fn add_horizontal(cells: &mut HashMap<(i32, i32), u8>, start: i32, end: i32, y: i32) {
+    if start > end {
+        return;
+    }
+    for x in start..=end {
+        let mut connections = 0;
+        if x > start {
+            connections |= LEFT;
+        }
+        if x < end {
+            connections |= RIGHT;
+        }
+        if connections == 0 {
+            connections = LEFT | RIGHT;
+        }
+        *cells.entry((x, y)).or_default() |= connections;
+    }
+}
+
+const fn edge_symbol(connections: u8) -> &'static str {
+    match connections {
+        5 => "│",
+        10 => "─",
+        6 => "╭",
+        12 => "╮",
+        3 => "╰",
+        9 => "╯",
+        7 => "├",
+        13 => "┤",
+        14 => "┬",
+        11 => "┴",
+        15 => "┼",
+        _ if connections & (LEFT | RIGHT) != 0 => "─",
+        _ => "│",
+    }
+}
+
+fn draw_world_string(
+    frame: &mut Frame<'_>,
+    canvas: Rect,
+    world_x: i32,
+    world_y: i32,
+    camera: WorldPoint,
+    text: &str,
+    style: Style,
+) {
+    let screen_x = i32::from(canvas.x)
+        + i32::from(canvas.width) / 2
+        + (f64::from(world_x) - camera.x).round() as i32;
+    let screen_y = i32::from(canvas.y)
+        + i32::from(canvas.height) / 2
+        + (f64::from(world_y) - camera.y).round() as i32;
+    if screen_y < i32::from(canvas.y) || screen_y >= i32::from(canvas.bottom()) {
+        return;
+    }
+
+    let mut x = screen_x;
+    for grapheme in text.graphemes(true) {
+        let width = i32::try_from(UnicodeWidthStr::width(grapheme)).unwrap_or(i32::MAX);
+        if x >= i32::from(canvas.x) && x.saturating_add(width) <= i32::from(canvas.right()) {
+            let position = (
+                u16::try_from(x).unwrap_or_default(),
+                u16::try_from(screen_y).unwrap_or_default(),
+            );
+            frame.buffer_mut()[position]
+                .set_symbol(grapheme)
+                .set_style(style);
+        }
+        x = x.saturating_add(width);
+    }
+}
+
+fn centered_text(text: &str, width: i32) -> String {
+    let width = u16::try_from(width).unwrap_or_default();
+    let text = truncate_with_ellipsis(text, width);
+    let text_width = u16::try_from(UnicodeWidthStr::width(text.as_str())).unwrap_or(u16::MAX);
+    let padding = width.saturating_sub(text_width);
+    let left = padding / 2;
+    let right = padding - left;
+    format!(
+        "{}{text}{}",
+        " ".repeat(usize::from(left)),
+        " ".repeat(usize::from(right))
+    )
 }
 
 const fn state_style(status: &AgentStatus) -> (&'static str, Color, &'static str) {
@@ -540,6 +1015,9 @@ fn truncate_with_ellipsis(text: &str, width: u16) -> String {
     if UnicodeWidthStr::width(text) <= usize::from(width) {
         return text.to_owned();
     }
+    if width == 0 {
+        return String::new();
+    }
     let target = width.saturating_sub(1);
     let mut rendered = String::new();
     let mut used = 0_u16;
@@ -553,6 +1031,10 @@ fn truncate_with_ellipsis(text: &str, width: u16) -> String {
     }
     rendered.push('…');
     rendered
+}
+
+fn distance(from: WorldPoint, to: WorldPoint) -> f64 {
+    (to.x - from.x).hypot(to.y - from.y)
 }
 
 fn unix_time_ms() -> u64 {
@@ -577,9 +1059,12 @@ mod tests {
         Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     };
     use nanocodex::{AgentEvent, AgentEventKind};
-    use ratatui::{Terminal, backend::TestBackend};
+    use ratatui::{Terminal, backend::TestBackend, style::Color};
     use serde_json::{json, value::to_raw_value};
-    use std::sync::Arc;
+    use std::{
+        sync::Arc,
+        time::{Duration, Instant},
+    };
 
     fn descriptor() -> AgentDescriptor {
         AgentDescriptor {
@@ -726,6 +1211,16 @@ mod tests {
         }
     }
 
+    fn tree_descriptor(id: u64, parent: Option<u64>, role: &str) -> AgentDescriptor {
+        AgentDescriptor {
+            id: AgentId::new(id),
+            session_id: format!("agent-{id}"),
+            role: role.to_owned(),
+            task: format!("Task for {role}"),
+            parent: parent.map(AgentId::new),
+        }
+    }
+
     #[test]
     fn changing_effort_preserves_active_subagents() {
         let mut tree = SubagentTree::new(ReasoningEffort::Medium);
@@ -851,16 +1346,22 @@ mod tests {
             },
         });
 
-        assert!(tree.visible_nodes().is_empty());
+        assert_eq!(tree.visible_ids(), [AgentId::new(1)]);
 
         tree.update_tree(Event::Key(KeyEvent::new(
             KeyCode::Char('f'),
             KeyModifiers::NONE,
         )));
-        let visible = tree.visible_nodes();
+        assert!(tree.visible_ids().is_empty());
+
+        tree.update_tree(Event::Key(KeyEvent::new(
+            KeyCode::Char('f'),
+            KeyModifiers::NONE,
+        )));
+        let visible = tree.visible_ids();
 
         assert_eq!(visible.len(), 1);
-        assert_eq!(tree.nodes[visible[0].index].descriptor.id, AgentId::new(1));
+        assert_eq!(visible[0], AgentId::new(1));
         assert!(matches!(
             tree.update_tree(Event::Key(KeyEvent::new(
                 KeyCode::Enter,
@@ -868,16 +1369,10 @@ mod tests {
             ))),
             Some(SubagentEffect::Inspect(id)) if id == AgentId::new(1)
         ));
-
-        tree.update_tree(Event::Key(KeyEvent::new(
-            KeyCode::Char('f'),
-            KeyModifiers::NONE,
-        )));
-        assert!(tree.visible_nodes().is_empty());
     }
 
     #[test]
-    fn running_child_becomes_a_root_when_its_parent_is_filtered_out() {
+    fn running_filter_retains_a_completed_ancestor_for_context() {
         let mut tree = SubagentTree::new(ReasoningEffort::Medium);
         let parent = descriptor();
         let mut child = descriptor();
@@ -891,19 +1386,22 @@ mod tests {
                 output: json!({ "report": "done" }),
             },
         });
+        tree.update_tree(Event::Key(KeyEvent::new(
+            KeyCode::Char('f'),
+            KeyModifiers::NONE,
+        )));
 
-        let visible = tree.visible_nodes();
+        let visible = tree.visible_ids();
 
-        assert_eq!(visible.len(), 1);
-        assert_eq!(tree.nodes[visible[0].index].descriptor.id, AgentId::new(2));
-        assert!(visible[0].ancestor_is_last.is_empty());
+        assert_eq!(visible, [AgentId::new(1), AgentId::new(2)]);
+        assert_eq!(tree.layout().parent(AgentId::new(2)), Some(AgentId::new(1)));
     }
 
     #[test]
-    fn tree_renders_role_task_and_state_as_one_joined_branch() {
+    fn tree_renders_a_rounded_focused_node_and_anchored_task_details() {
         let mut tree = SubagentTree::new(ReasoningEffort::Medium);
         tree.apply(AgentUpdate::Added(descriptor()));
-        let mut terminal = Terminal::new(TestBackend::new(90, 24)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(90, 40)).unwrap();
 
         terminal
             .draw(|frame| tree.render_tree(frame, frame.area(), &Theme::default()))
@@ -917,10 +1415,13 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
 
-        assert!(rendered.contains("main agent"));
+        assert!(rendered.contains("╭──────────────────────╮"));
         assert!(rendered.contains("researcher"));
-        assert!(rendered.contains("running · #1"));
+        assert!(rendered.contains("running · 0 children"));
         assert!(rendered.contains("Trace the event lifecycle"));
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(0, 0)].symbol(), "╭");
+        assert_eq!(buffer[(89, 39)].symbol(), "╯");
     }
 
     #[test]
@@ -935,12 +1436,10 @@ mod tests {
         tree.apply(AgentUpdate::Added(parent));
         tree.apply(AgentUpdate::Added(child));
 
-        let visible = tree.visible_nodes();
-        assert_eq!(visible.len(), 2);
-        assert!(visible[0].ancestor_is_last.is_empty());
-        assert_eq!(visible[1].ancestor_is_last, [true]);
+        let layout = tree.layout();
+        assert_eq!(layout.parent(AgentId::new(2)), Some(AgentId::new(1)));
 
-        let mut terminal = Terminal::new(TestBackend::new(90, 24)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(90, 40)).unwrap();
         terminal
             .draw(|frame| tree.render_tree(frame, frame.area(), &Theme::default()))
             .unwrap();
@@ -952,14 +1451,266 @@ mod tests {
             .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
             .collect::<Vec<_>>()
             .join("\n");
+        assert!(rendered.contains("#1 parent"));
+        assert!(rendered.contains("#2 child"));
+        assert!(rendered.contains('↓'));
+        let buffer = terminal.backend().buffer();
+        let arrow = buffer
+            .content
+            .iter()
+            .find(|cell| cell.symbol() == "↓")
+            .unwrap();
+        assert_eq!(arrow.fg, Theme::default().border());
 
-        assert!(rendered.contains("└─ ◐ parent"));
-        assert!(rendered.contains("   ├─ Trace the event lifecycle"));
-        assert!(rendered.contains("   └─ ◐ child"));
+        let child_row = buffer
+            .content
+            .chunks(90)
+            .find(|row| {
+                row.iter()
+                    .map(|cell| cell.symbol())
+                    .collect::<String>()
+                    .contains("#2 child")
+            })
+            .unwrap();
+        let child_text = child_row
+            .iter()
+            .position(|cell| cell.symbol() == "#")
+            .unwrap();
+        let child_border = child_row[..child_text]
+            .iter()
+            .rposition(|cell| cell.symbol() == "│")
+            .unwrap();
+        assert_eq!(child_row[child_border].fg, Theme::default().border());
     }
 
     #[test]
-    fn transcript_inspector_uses_ten_percent_margins() {
+    fn arrows_navigate_the_hierarchy_and_remember_the_last_child() {
+        let mut tree = SubagentTree::new(ReasoningEffort::Medium);
+        tree.apply(AgentUpdate::Added(tree_descriptor(1, None, "root")));
+        tree.apply(AgentUpdate::Added(tree_descriptor(2, Some(1), "left")));
+        tree.apply(AgentUpdate::Added(tree_descriptor(3, Some(1), "right")));
+        let start = Instant::now();
+
+        tree.update_tree_at(
+            Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+            start,
+        );
+        assert_eq!(tree.focused, Some(AgentId::new(2)));
+
+        tree.update_tree_at(
+            Event::Key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)),
+            start,
+        );
+        assert_eq!(tree.focused, Some(AgentId::new(3)));
+
+        tree.update_tree_at(
+            Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)),
+            start,
+        );
+        assert_eq!(tree.focused, Some(AgentId::new(1)));
+
+        tree.update_tree_at(
+            Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+            start,
+        );
+        assert_eq!(tree.focused, Some(AgentId::new(3)));
+    }
+
+    #[test]
+    fn horizontal_navigation_crosses_cousins_and_separate_trees() {
+        let mut tree = SubagentTree::new(ReasoningEffort::Medium);
+        tree.apply(AgentUpdate::Added(tree_descriptor(1, None, "first root")));
+        tree.apply(AgentUpdate::Added(tree_descriptor(
+            2,
+            Some(1),
+            "left branch",
+        )));
+        tree.apply(AgentUpdate::Added(tree_descriptor(
+            3,
+            Some(1),
+            "right branch",
+        )));
+        tree.apply(AgentUpdate::Added(tree_descriptor(
+            4,
+            Some(2),
+            "left cousin",
+        )));
+        tree.apply(AgentUpdate::Added(tree_descriptor(
+            5,
+            Some(3),
+            "right cousin",
+        )));
+        tree.apply(AgentUpdate::Added(tree_descriptor(10, None, "second root")));
+        tree.apply(AgentUpdate::Added(tree_descriptor(
+            11,
+            Some(10),
+            "second child",
+        )));
+        tree.apply(AgentUpdate::Added(tree_descriptor(
+            12,
+            Some(11),
+            "second leaf",
+        )));
+        let now = Instant::now();
+
+        tree.focused = Some(AgentId::new(4));
+        tree.update_tree_at(
+            Event::Key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)),
+            now,
+        );
+        assert_eq!(tree.focused, Some(AgentId::new(5)));
+        tree.update_tree_at(
+            Event::Key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)),
+            now,
+        );
+        assert_eq!(tree.focused, Some(AgentId::new(12)));
+        tree.update_tree_at(
+            Event::Key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE)),
+            now,
+        );
+        assert_eq!(tree.focused, Some(AgentId::new(5)));
+
+        tree.focused = Some(AgentId::new(1));
+        tree.update_tree_at(
+            Event::Key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)),
+            now,
+        );
+        assert_eq!(tree.focused, Some(AgentId::new(10)));
+    }
+
+    #[test]
+    fn camera_animation_is_interruptible_and_settles_on_the_latest_focus() {
+        let mut tree = SubagentTree::new(ReasoningEffort::Medium);
+        tree.apply(AgentUpdate::Added(tree_descriptor(1, None, "root")));
+        tree.apply(AgentUpdate::Added(tree_descriptor(2, Some(1), "left")));
+        tree.apply(AgentUpdate::Added(tree_descriptor(3, Some(1), "right")));
+        render_tree(&mut tree);
+        let start = Instant::now();
+
+        tree.update_tree_at(
+            Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+            start,
+        );
+        let first_deadline = tree.animation_deadline().unwrap();
+        assert!(!tree.advance(first_deadline - Duration::from_millis(1)));
+
+        let first_duration = tree.camera.animation.as_ref().unwrap().duration;
+        let interruption = start + first_duration / 2;
+        assert!(tree.advance(interruption));
+        let interrupted_center = tree.camera.center.unwrap();
+
+        tree.update_tree_at(
+            Event::Key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)),
+            interruption,
+        );
+        let retargeted = tree.camera.animation.as_ref().unwrap();
+        assert_eq!(retargeted.from, interrupted_center);
+        assert_eq!(tree.focused, Some(AgentId::new(3)));
+
+        assert!(tree.advance(interruption + Duration::from_secs(1)));
+        assert_eq!(tree.camera.center, tree.layout().center(AgentId::new(3)));
+        assert!(tree.camera.animation.is_none());
+    }
+
+    #[test]
+    fn focused_green_border_straddles_the_usable_canvas_center() {
+        let mut tree = SubagentTree::new(ReasoningEffort::Medium);
+        tree.apply(AgentUpdate::Added(descriptor()));
+        let backend = render_tree(&mut tree);
+        let mut focused_cells = Vec::new();
+        for y in 0..40 {
+            for x in 0..100 {
+                if backend.buffer()[(x, y)].fg == Color::Green {
+                    focused_cells.push((x, y));
+                }
+            }
+        }
+
+        let min_x = focused_cells.iter().map(|(x, _)| *x).min().unwrap();
+        let max_x = focused_cells.iter().map(|(x, _)| *x).max().unwrap();
+        let min_y = focused_cells.iter().map(|(_, y)| *y).min().unwrap();
+        let max_y = focused_cells.iter().map(|(_, y)| *y).max().unwrap();
+        assert!(min_x <= 49 && max_x >= 49);
+        assert!(min_y <= 16 && max_y >= 16);
+        assert!(
+            focused_cells
+                .iter()
+                .all(|&(x, y)| backend.buffer()[(x, y)].bg != Theme::default().accent())
+        );
+    }
+
+    #[test]
+    fn three_children_render_as_an_even_fan_out() {
+        let mut tree = SubagentTree::new(ReasoningEffort::Medium);
+        tree.apply(AgentUpdate::Added(tree_descriptor(1, None, "root")));
+        tree.apply(AgentUpdate::Added(tree_descriptor(2, Some(1), "left")));
+        tree.apply(AgentUpdate::Added(tree_descriptor(3, Some(1), "middle")));
+        tree.apply(AgentUpdate::Added(tree_descriptor(4, Some(1), "right")));
+        let mut terminal = Terminal::new(TestBackend::new(140, 50)).unwrap();
+        terminal
+            .draw(|frame| tree.render_tree(frame, frame.area(), &Theme::default()))
+            .unwrap();
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content
+            .chunks(140)
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let arrows = (0..35)
+            .flat_map(|y| (0..140).map(move |x| (x, y)))
+            .filter(|&(x, y)| terminal.backend().buffer()[(x, y)].symbol() == "↓")
+            .count();
+        assert_eq!(arrows, 3);
+        assert!(rendered.contains('┼'));
+        assert!(rendered.contains("#2 left"));
+        assert!(rendered.contains("#3 middle"));
+        assert!(rendered.contains("#4 right"));
+    }
+
+    #[test]
+    fn connector_turns_use_rounded_unicode_corners() {
+        assert_eq!(super::edge_symbol(super::RIGHT | super::DOWN), "╭");
+        assert_eq!(super::edge_symbol(super::LEFT | super::DOWN), "╮");
+        assert_eq!(super::edge_symbol(super::RIGHT | super::UP), "╰");
+        assert_eq!(super::edge_symbol(super::LEFT | super::UP), "╯");
+    }
+
+    #[test]
+    fn narrow_tree_clips_without_panicking() {
+        let mut tree = SubagentTree::new(ReasoningEffort::Medium);
+        tree.apply(AgentUpdate::Added(descriptor()));
+        let mut terminal = Terminal::new(TestBackend::new(20, 8)).unwrap();
+
+        terminal
+            .draw(|frame| tree.render_tree(frame, frame.area(), &Theme::default()))
+            .unwrap();
+
+        assert_eq!(terminal.backend().buffer().area.width, 20);
+    }
+
+    #[test]
+    fn hiding_the_tree_finishes_camera_motion() {
+        let mut tree = SubagentTree::new(ReasoningEffort::Medium);
+        tree.apply(AgentUpdate::Added(tree_descriptor(1, None, "root")));
+        tree.apply(AgentUpdate::Added(tree_descriptor(2, Some(1), "child")));
+        render_tree(&mut tree);
+        tree.update_tree_at(
+            Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+            Instant::now(),
+        );
+        assert!(tree.camera.animation.is_some());
+
+        tree.finish_camera_animation();
+
+        assert!(tree.camera.animation.is_none());
+        assert_eq!(tree.camera.center, tree.layout().center(AgentId::new(2)));
+    }
+
+    #[test]
+    fn transcript_inspector_uses_the_full_screen() {
         let mut tree = SubagentTree::new(ReasoningEffort::Medium);
         tree.apply(AgentUpdate::Added(descriptor()));
         tree.apply(event(
@@ -975,8 +1726,8 @@ mod tests {
             .unwrap();
         let buffer = terminal.backend().buffer();
 
-        assert_eq!(buffer[(10, 4)].symbol(), "╭");
-        assert_eq!(buffer[(89, 35)].symbol(), "╯");
+        assert_eq!(buffer[(0, 0)].symbol(), "╭");
+        assert_eq!(buffer[(99, 39)].symbol(), "╯");
     }
 
     #[test]
