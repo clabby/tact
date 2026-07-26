@@ -33,6 +33,11 @@ fn release_tag_must_be_on_main() {
 
 #[test]
 fn publish_recovery_requires_the_exact_packaged_crate() {
+    assert_contains(
+        RELEASE_WORKFLOW,
+        "run: cargo package --locked --allow-dirty",
+    );
+
     for expected in [
         "target/package/tact-${version}.crate",
         "sha256sum \"$crate\"",
@@ -40,6 +45,8 @@ fn publish_recovery_requires_the_exact_packaged_crate() {
         "--user-agent \"tact-release-workflow/${version} (https://github.com/clabby/tact)\"",
         ".version.checksum",
         "\"$published_checksum\" != \"$local_checksum\"",
+        "for attempt in {1..5}",
+        "sleep $((attempt * 15))",
     ] {
         assert_contains(RELEASE_WORKFLOW, expected);
     }

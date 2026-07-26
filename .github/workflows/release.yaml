@@ -181,7 +181,7 @@ jobs:
       - name: Install Rust stable toolchain
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
       - name: Verify crate package
-        run: cargo publish --locked --dry-run --allow-dirty
+        run: cargo package --locked --allow-dirty
       - name: Publish crate
         shell: bash
         run: |
@@ -192,27 +192,25 @@ jobs:
           test -f "$crate"
           local_checksum=$(sha256sum "$crate" | cut -d ' ' -f 1)
 
-          set +e
-          cargo publish --locked --allow-dirty
-          publish_status=$?
-          set -e
+          for attempt in {1..5}; do
+            if cargo publish --locked --allow-dirty --no-verify; then
+              exit 0
+            fi
 
-          if [[ "$publish_status" -eq 0 ]]; then
-            exit 0
-          fi
+            if [[ "$attempt" -lt 5 ]]; then
+              sleep $((attempt * 15))
+            fi
+          done
 
-          if ! published_checksum=$(curl --fail --silent --show-error \
+          published_checksum=$(curl --fail --silent --show-error \
             --retry 6 --retry-delay 5 --retry-all-errors \
             --user-agent "tact-release-workflow/${version} (https://github.com/clabby/tact)" \
             "https://crates.io/api/v1/crates/tact/${version}" \
-            | jq -er '.version.checksum'); then
-            echo "cargo publish failed and tact ${version} is not available from crates.io" >&2
-            exit "$publish_status"
-          fi
+            | jq -er '.version.checksum')
 
           if [[ "$published_checksum" != "$local_checksum" ]]; then
-            echo "cargo publish failed and crates.io has different contents for tact ${version}" >&2
-            exit "$publish_status"
+            echo "crates.io has different contents for tact ${version}" >&2
+            exit 1
           fi
 
           echo "cargo publish reported failure, but crates.io has the exact packaged crate"
