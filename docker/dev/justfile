@@ -1,0 +1,22 @@
+dev_dir := justfile_directory()
+
+# Build the local development image without publishing it.
+build:
+    cd "{{ dev_dir }}/../.." && docker buildx bake --progress plain -f docker/dev/docker-bake.hcl
+
+# Start Tact in the current workspace. Additional arguments are passed to Tact.
+run *args:
+    python3 "{{ dev_dir }}/run.py" --workspace "{{ invocation_directory() }}" -- {{ args }}
+
+# Run launcher unit tests and the container smoke test.
+test:
+    PYTHONDONTWRITEBYTECODE=1 python3 "{{ dev_dir }}/test.py"
+
+# Start an interactive development shell through the supported launcher.
+shell:
+    python3 "{{ dev_dir }}/run.py" --workspace "{{ invocation_directory() }}" --shell
+
+# Remove this example's local image and persistent development volumes.
+clean:
+    python3 "{{ dev_dir }}/run.py" --clean
+    docker image rm -f tact-dev:local || true
