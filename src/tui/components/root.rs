@@ -41,7 +41,7 @@ use semver::Version;
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 const ESCAPE_CHORD_TIMEOUT: Duration = Duration::from_millis(500);
@@ -1435,6 +1435,7 @@ impl Component for RootNode {
             ),
             RootEvent::Transcript(record) => {
                 let steer_applied = record.kind() == "run.steered";
+                let turn_timer = turn_timer_event(&record);
                 let observation = self.context_diagnostics.observe(&record);
                 if let Some(Overlay::ContextDiagnostics(panel)) = &mut self.overlay {
                     panel
@@ -1442,6 +1443,11 @@ impl Component for RootNode {
                         .replace(self.context_diagnostics.clone());
                 }
                 let mut update = self.update_transcript(TranscriptEvent::Record(record));
+                if let Some(event) = turn_timer {
+                    let timer = self.update_composer(event, RenderRequest::Streaming);
+                    update.effects.extend(timer.effects);
+                    update.render = update.render.max(timer.render);
+                }
                 if let Some(tokens) = observation.completed_tokens {
                     let context = self.update_composer(
                         ComposerEvent::ContextTokens(tokens),
@@ -1458,7 +1464,12 @@ impl Component for RootNode {
                 update
             }
             RootEvent::AgentStreamClosed => {
-                self.update_transcript(TranscriptEvent::AgentStreamClosed)
+                let mut update = self.update_transcript(TranscriptEvent::AgentStreamClosed);
+                let timer =
+                    self.update_composer(ComposerEvent::TurnsCleared, RenderRequest::Immediate);
+                update.effects.extend(timer.effects);
+                update.render = update.render.max(timer.render);
+                update
             }
             RootEvent::Subagent(update) => self.apply_subagent_update(update),
             RootEvent::ReplaceDraft(draft) => {
@@ -1515,6 +1526,27 @@ impl Component for RootNode {
     fn render(&mut self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
         self.render_root(frame, area, theme, true);
     }
+}
+
+fn turn_timer_event(record: &TranscriptRecord) -> Option<ComposerEvent> {
+    if record.source() != "agent" {
+        return None;
+    }
+    if record.kind() == "run.started" {
+        let now = Instant::now();
+        let now_unix_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        let elapsed_ms = u64::try_from(now_unix_ms)
+            .unwrap_or(u64::MAX)
+            .saturating_sub(record.recorded_at_unix_ms());
+        return Some(ComposerEvent::TurnStarted {
+            elapsed: Duration::from_millis(elapsed_ms),
+            now,
+        });
+    }
+    matches!(record.kind(), "run.completed" | "run.failed").then_some(ComposerEvent::TurnFinished)
 }
 
 fn render_notification(

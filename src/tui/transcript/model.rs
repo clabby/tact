@@ -47,6 +47,7 @@ pub(crate) struct TranscriptModel {
     message_order: VecDeque<ThreadId>,
     running_tools: HashSet<EntryId>,
     active_runs: usize,
+    run_started_at_unix_ms: VecDeque<u64>,
     transient: Option<TransientStatus>,
     pending_error: Option<String>,
     pending_compaction_error: Option<String>,
@@ -342,6 +343,8 @@ impl TranscriptModel {
             "reasoning.summary.delta" => self.reasoning_delta(record),
             "run.started" => {
                 self.active_runs = self.active_runs.saturating_add(1);
+                self.run_started_at_unix_ms
+                    .push_back(record.recorded_at_unix_ms());
                 self.transient = Some(TransientStatus::Thinking);
                 Ok(true)
             }
@@ -351,10 +354,11 @@ impl TranscriptModel {
                 true
             }),
             "run.completed" => {
-                self.finish_success();
+                self.complete_turn(record);
                 Ok(true)
             }
             "run.failed" => {
+                self.run_started_at_unix_ms.pop_front();
                 self.finish_failed(None);
                 Ok(true)
             }
@@ -669,6 +673,25 @@ impl TranscriptModel {
         self.pending_error = None;
     }
 
+    fn complete_turn(&mut self, record: &TranscriptRecord) {
+        let payload_duration_ns = record
+            .decode_payload::<RunDurationPayload>()
+            .ok()
+            .and_then(|payload| payload.duration_ns);
+        let recorded_duration_ns = self.run_started_at_unix_ms.pop_front().map(|started_at| {
+            record
+                .recorded_at_unix_ms()
+                .saturating_sub(started_at)
+                .saturating_mul(1_000_000)
+        });
+        let duration_ns = payload_duration_ns.or(recorded_duration_ns);
+        self.finish_success();
+        let Some(duration_ns) = duration_ns else {
+            return;
+        };
+        self.push(EntryKind::TurnCompleted { duration_ns });
+    }
+
     fn finish_failed(&mut self, error: Option<String>) {
         self.pending_compaction_error = None;
         if error.is_none()
@@ -738,6 +761,7 @@ impl TranscriptModel {
                     .any(|local_shell| local_shell == id)
             });
         self.active_runs = 0;
+        self.run_started_at_unix_ms.clear();
         self.fail_orphaned_tools();
         self.transient = self.is_active().then_some(TransientStatus::Thinking);
         changed
@@ -1066,6 +1090,12 @@ struct DurationPayload {
 }
 
 #[derive(Deserialize)]
+struct RunDurationPayload {
+    #[serde(default)]
+    duration_ns: Option<u64>,
+}
+
+#[derive(Deserialize)]
 struct ErrorPayload {
     error: String,
 }
@@ -1190,6 +1220,65 @@ mod tests {
                 .changed
         );
         assert_eq!(snapshot.entries().len(), 1);
+    }
+
+    #[test]
+    fn completed_turn_records_the_full_run_duration() {
+        let mut model = TranscriptModel::default();
+        model.apply(&agent_at(1_000, AgentEventKind::RunStarted, json!({})));
+        model.apply(&agent_at(
+            66_432,
+            AgentEventKind::RunCompleted,
+            json!({"duration_ns": 70_123_000_000_u64}),
+        ));
+
+        assert!(matches!(
+            model.entries().last().map(|entry| &entry.kind),
+            Some(EntryKind::TurnCompleted {
+                duration_ns: 70_123_000_000
+            })
+        ));
+    }
+
+    #[test]
+    fn failed_turn_does_not_claim_completion() {
+        let mut model = TranscriptModel::default();
+        model.apply(&agent_at(1_000, AgentEventKind::RunStarted, json!({})));
+        model.apply(&agent_at(2_000, AgentEventKind::RunFailed, json!({})));
+
+        assert!(
+            !model
+                .entries()
+                .iter()
+                .any(|entry| matches!(entry.kind, EntryKind::TurnCompleted { .. }))
+        );
+    }
+
+    #[test]
+    fn malformed_completion_timing_does_not_leave_the_run_active() {
+        let mut model = TranscriptModel::default();
+        model.apply(&agent_at(1_000, AgentEventKind::RunStarted, json!({})));
+        model.apply(&agent_at(
+            2_000,
+            AgentEventKind::RunCompleted,
+            json!("invalid"),
+        ));
+
+        assert!(!model.is_active());
+
+        model.apply(&agent_at(3_000, AgentEventKind::RunStarted, json!({})));
+        model.apply(&agent_at(
+            4_000,
+            AgentEventKind::RunCompleted,
+            json!({"duration_ns": 1_000_000_000_u64}),
+        ));
+        assert!(!model.is_active());
+        assert!(matches!(
+            model.entries().last().map(|entry| &entry.kind),
+            Some(EntryKind::TurnCompleted {
+                duration_ns: 1_000_000_000
+            })
+        ));
     }
 
     #[test]

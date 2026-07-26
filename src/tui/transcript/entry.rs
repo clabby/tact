@@ -46,6 +46,7 @@ pub(crate) enum EntryKind {
     FastModeChanged { enabled: bool },
     Interrupted { count: usize },
     ContextCompacted { duration_ns: u64 },
+    TurnCompleted { duration_ns: u64 },
     ContextCompactionFailed { message: String },
     Error { message: String },
 }

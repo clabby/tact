@@ -12,7 +12,7 @@ use crate::{
     app::config::ReasoningEffort,
     core::extensions::subagents::{AgentMessageUpdate, MessageSender},
     tui::{
-        format::{duration_display_tick, format_duration},
+        format::{duration_display_tick, format_duration, format_turn_duration},
         spinner::Spinner,
         theme::Theme,
         transcript::{
@@ -1227,6 +1227,12 @@ fn render_entry(
                 Style::default().fg(theme.muted()),
             ))])
         }
+        EntryKind::TurnCompleted { duration_ns } => {
+            layout_without_links(vec![Line::from(Span::styled(
+                format!("◇ Turn completed · {}", format_turn_duration(*duration_ns)),
+                Style::default().fg(theme.muted()),
+            ))])
+        }
         EntryKind::ContextCompactionFailed { message } => {
             layout_without_links(vec![Line::from(Span::styled(
                 format!("◇ Context compaction failed · continuing · {message}"),
@@ -1415,6 +1421,31 @@ mod tests {
         assert_eq!(backend.buffer()[(2, 1)].symbol(), "h");
         assert_eq!(backend.buffer()[(0, 2)].symbol(), "┃");
         assert_eq!(backend.buffer()[(0, 0)].symbol(), " ");
+    }
+
+    #[test]
+    fn completed_turn_is_rendered_like_other_transcript_milestones() {
+        let mut transcript = Transcript::new();
+        transcript.update(TranscriptEvent::Record(agent_with_payload_at(
+            1,
+            1_000,
+            AgentEventKind::RunStarted,
+            json!({}),
+        )));
+        transcript.update(TranscriptEvent::Record(agent_with_payload_at(
+            2,
+            66_432,
+            AgentEventKind::RunCompleted,
+            json!({"duration_ns": 65_432_000_000_u64}),
+        )));
+
+        let rendered = render(&mut transcript, 60, 4)
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("◇ Turn completed · 1m 5s"));
     }
 
     #[test]

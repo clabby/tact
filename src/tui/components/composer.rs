@@ -9,7 +9,12 @@ use super::{
 };
 use crate::{
     app::config::{ReasoningEffort, ReasoningMode},
-    tui::{context::MODEL_WINDOW_TOKENS, format::shorten_home, prompt::Submission, theme::Theme},
+    tui::{
+        context::MODEL_WINDOW_TOKENS,
+        format::{format_turn_duration, shorten_home},
+        prompt::Submission,
+        theme::Theme,
+    },
 };
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use history::PromptHistory;
@@ -21,7 +26,12 @@ use ratatui::{
     layout::{Position, Rect},
     style::{Color, Modifier, Style},
 };
-use std::{ops::Range, path::Path, time::Instant};
+use std::{
+    collections::VecDeque,
+    ops::Range,
+    path::Path,
+    time::{Duration, Instant},
+};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -64,6 +74,12 @@ pub(crate) enum ComposerEvent {
         count: usize,
         now: Instant,
     },
+    TurnStarted {
+        elapsed: Duration,
+        now: Instant,
+    },
+    TurnFinished,
+    TurnsCleared,
     AnimationFrame(Instant),
 }
 
@@ -84,6 +100,7 @@ pub(crate) struct Composer {
     activity_status: Option<String>,
     active_subagents: usize,
     subagent_wave: Option<WavedText>,
+    turn_timers: VecDeque<TurnTimer>,
     effort_hit_area: Option<Rect>,
     subagent_hit_area: Option<Rect>,
     layout: Option<CachedLayout>,
@@ -99,6 +116,51 @@ struct CachedLayout {
     width: usize,
     cursor: usize,
     value: VisualLayout,
+}
+
+struct TurnTimer {
+    observed_at: Instant,
+    elapsed_at_observation: Duration,
+    displayed_seconds: u64,
+}
+
+impl TurnTimer {
+    fn new(elapsed: Duration, now: Instant) -> Self {
+        Self {
+            observed_at: now,
+            elapsed_at_observation: elapsed,
+            displayed_seconds: elapsed.as_secs(),
+        }
+    }
+
+    fn advance(&mut self, now: Instant) -> bool {
+        let displayed_seconds = self.elapsed(now).as_secs();
+        if self.displayed_seconds == displayed_seconds {
+            return false;
+        }
+        self.displayed_seconds = displayed_seconds;
+        true
+    }
+
+    fn elapsed(&self, now: Instant) -> Duration {
+        self.elapsed_at_observation
+            .saturating_add(now.saturating_duration_since(self.observed_at))
+    }
+
+    fn deadline(&self) -> Instant {
+        let elapsed_subsecond = self.elapsed_at_observation.subsec_nanos();
+        let until_next_second = Duration::from_nanos(1_000_000_000 - u64::from(elapsed_subsecond));
+        self.observed_at
+            + until_next_second
+            + Duration::from_secs(
+                self.displayed_seconds
+                    .saturating_sub(self.elapsed_at_observation.as_secs()),
+            )
+    }
+
+    fn label(&self) -> String {
+        format_turn_duration(self.displayed_seconds.saturating_mul(1_000_000_000))
+    }
 }
 
 pub(crate) struct ComposerUpdate {
@@ -125,6 +187,7 @@ impl Composer {
             activity_status: None,
             active_subagents: 0,
             subagent_wave: None,
+            turn_timers: VecDeque::new(),
             effort_hit_area: None,
             subagent_hit_area: None,
             layout: None,
@@ -218,6 +281,23 @@ impl Composer {
                 });
                 ComposerUpdate::changed()
             }
+            ComposerEvent::TurnStarted { elapsed, now } => {
+                self.turn_timers.push_back(TurnTimer::new(elapsed, now));
+                ComposerUpdate::changed()
+            }
+            ComposerEvent::TurnFinished => {
+                if self.turn_timers.pop_front().is_none() {
+                    return ComposerUpdate::unchanged();
+                }
+                ComposerUpdate::changed()
+            }
+            ComposerEvent::TurnsCleared => {
+                if self.turn_timers.is_empty() {
+                    return ComposerUpdate::unchanged();
+                }
+                self.turn_timers.clear();
+                ComposerUpdate::changed()
+            }
             ComposerEvent::AnimationFrame(now) => {
                 let activity_changed = self
                     .activity_wave
@@ -227,7 +307,11 @@ impl Composer {
                     .subagent_wave
                     .as_mut()
                     .is_some_and(|wave| wave.advance(now));
-                ComposerUpdate::from_change(activity_changed || subagent_changed)
+                let mut timer_changed = false;
+                for timer in &mut self.turn_timers {
+                    timer_changed |= timer.advance(now);
+                }
+                ComposerUpdate::from_change(activity_changed || subagent_changed || timer_changed)
             }
         }
     }
@@ -254,6 +338,7 @@ impl Composer {
                     .as_ref()
                     .and_then(WavedText::animation_deadline),
             )
+            .chain(self.turn_timers.iter().map(TurnTimer::deadline))
             .min()
     }
 
@@ -720,11 +805,17 @@ impl Composer {
             format!("{usage_before_subagents}{} ", subagent_segment.trim_start())
         };
         let model = format!(" {MODEL} ");
+        let timer = self
+            .turn_timers
+            .front()
+            .map(|timer| format!(" {} ", timer.label()))
+            .unwrap_or_default();
         let effort = format!(" {} ", self.thinking.as_str());
         let fast_mode = self.fast_mode.then_some("⚡ ");
         let pro_mode = (self.reasoning_mode == ReasoningMode::Pro).then_some("pro ");
         let shell = shell_mode.then_some(" shell ");
-        let right_width = model.width()
+        let right_width = timer.width()
+            + model.width()
             + effort.width()
             + fast_mode.map_or(0, UnicodeWidthStr::width)
             + pro_mode.map_or(0, UnicodeWidthStr::width)
@@ -774,11 +865,19 @@ impl Composer {
         buffer.set_stringn(
             right_start,
             top,
-            &model,
+            &timer,
             usize::from(content_end.saturating_sub(right_start)),
+            Style::default().fg(theme.muted()),
+        );
+        let model_start = right_start + u16::try_from(timer.width()).unwrap_or(u16::MAX);
+        buffer.set_stringn(
+            model_start,
+            top,
+            &model,
+            usize::from(content_end.saturating_sub(model_start)),
             Style::default().fg(theme.accent()),
         );
-        let effort_start = right_start + u16::try_from(model.width()).unwrap_or(u16::MAX);
+        let effort_start = model_start + u16::try_from(model.width()).unwrap_or(u16::MAX);
         if effort_start < content_end {
             self.effort_hit_area = Some(Rect::new(
                 effort_start,
@@ -1020,7 +1119,10 @@ mod tests {
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use nanocodex::{PromptInput, UserInput};
     use ratatui::{Terminal, backend::TestBackend, layout::Position, style::Color};
-    use std::{path::Path, time::Instant};
+    use std::{
+        path::Path,
+        time::{Duration, Instant},
+    };
 
     fn key(code: KeyCode, modifiers: KeyModifiers) -> ComposerEvent {
         ComposerEvent::Terminal(Event::Key(KeyEvent::new(code, modifiers)))
@@ -1064,6 +1166,51 @@ mod tests {
                 footer,
             ]
         );
+    }
+
+    #[test]
+    fn turn_timer_is_rendered_immediately_before_the_model() {
+        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let started_at = Instant::now();
+        composer.update(ComposerEvent::TurnStarted {
+            elapsed: Duration::from_secs(65),
+            now: started_at,
+        });
+
+        let terminal = render(&mut composer, 72, 5);
+        assert!(rows(&terminal)[0].contains(" 1m 5s  gpt-5.6-sol "));
+
+        let update = composer.update(ComposerEvent::AnimationFrame(
+            started_at + Duration::from_secs(2),
+        ));
+        assert!(update.changed);
+        let terminal = render(&mut composer, 72, 5);
+        assert!(rows(&terminal)[0].contains(" 1m 7s  gpt-5.6-sol "));
+
+        composer.update(ComposerEvent::TurnFinished);
+        let terminal = render(&mut composer, 72, 5);
+        assert!(!rows(&terminal)[0].contains("1m 7s"));
+    }
+
+    #[test]
+    fn completing_one_run_keeps_the_next_active_run_timed() {
+        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let now = Instant::now();
+        composer.update(ComposerEvent::TurnStarted {
+            elapsed: Duration::from_secs(65),
+            now,
+        });
+        composer.update(ComposerEvent::TurnStarted {
+            elapsed: Duration::from_secs(5),
+            now,
+        });
+        composer.update(ComposerEvent::AnimationFrame(now + Duration::from_secs(2)));
+
+        composer.update(ComposerEvent::TurnFinished);
+
+        let terminal = render(&mut composer, 72, 5);
+        assert!(rows(&terminal)[0].contains(" 7s  gpt-5.6-sol "));
+        assert!(composer.animation_deadline().is_some());
     }
 
     #[test]
