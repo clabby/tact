@@ -3,8 +3,7 @@
 use crate::{
     app::error::RuntimeError,
     core::extensions::subagents::{
-        AgentDescriptor, AgentId, AgentMessageUpdate, AgentOrigin, AgentStatus, AgentUpdate,
-        ScopedAgentUpdate,
+        AgentDescriptor, AgentId, AgentMessageUpdate, AgentStatus, AgentUpdate, ScopedAgentUpdate,
     },
 };
 use nanocodex::{AgentEvent, AgentEventKind};
@@ -21,6 +20,12 @@ use tokio::{
 };
 
 const PROTOCOL_VERSION: u32 = 1;
+
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum AgentOrigin {
+    Spawn,
+}
 
 #[derive(Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -288,7 +293,7 @@ impl Recorder {
                 id: agent.descriptor.id,
                 role: agent.descriptor.role.clone(),
                 parent_id: agent.descriptor.parent,
-                origin: agent.descriptor.origin,
+                origin: AgentOrigin::Spawn,
                 final_status: agent.final_status.clone(),
                 outcome: agent.outcome.clone(),
             })
@@ -379,7 +384,7 @@ impl<'a> From<&'a AgentDescriptor> for AgentRecord<'a> {
             session_id: &descriptor.session_id,
             role: &descriptor.role,
             task: &descriptor.task,
-            origin: descriptor.origin,
+            origin: AgentOrigin::Spawn,
             parent_id: descriptor.parent,
         }
     }
@@ -389,7 +394,7 @@ impl<'a> From<&'a AgentDescriptor> for AgentRecord<'a> {
 mod tests {
     use super::{OrchestrationRecorder, RunOutcome};
     use crate::core::extensions::subagents::{
-        AgentDescriptor, AgentId, AgentOrigin, AgentStatus, AgentUpdate, ScopedAgentUpdate,
+        AgentDescriptor, AgentId, AgentStatus, AgentUpdate, ScopedAgentUpdate,
     };
     use nanocodex::{AgentEvent, AgentEventKind};
     use serde_json::{Value, json, value::to_raw_value};
@@ -412,7 +417,6 @@ mod tests {
                     session_id: "child".to_owned(),
                     role: "researcher".to_owned(),
                     task: "inspect the task".to_owned(),
-                    origin: AgentOrigin::Spawn,
                     parent: None,
                 }),
             })
@@ -449,7 +453,7 @@ mod tests {
         for status in [
             AgentStatus::Running,
             AgentStatus::Completed {
-                report: "done".to_owned(),
+                output: json!("done"),
             },
             AgentStatus::Closed,
         ] {
