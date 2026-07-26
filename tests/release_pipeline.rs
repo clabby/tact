@@ -43,3 +43,22 @@ fn publish_recovery_requires_the_exact_packaged_crate() {
         assert_contains(RELEASE_WORKFLOW, expected);
     }
 }
+
+#[test]
+fn container_build_uses_the_verified_local_binary() {
+    let workflow: serde_yaml::Value =
+        serde_yaml::from_str(RELEASE_WORKFLOW).expect("release workflow should be valid YAML");
+    let steps = workflow["jobs"]["container_build"]["steps"]
+        .as_sequence()
+        .expect("container_build should contain steps");
+    let bake = steps
+        .iter()
+        .find(|step| step["name"] == "Package and push image by digest")
+        .expect("container_build should package the image with Docker Bake");
+
+    assert_eq!(bake["with"]["source"], ".");
+    assert_eq!(
+        bake["env"]["RELEASE_BINARY_CONTEXT"],
+        "target/image-context"
+    );
+}

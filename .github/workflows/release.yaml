@@ -317,6 +317,7 @@ jobs:
           RELEASE_REVISION: ${{ github.sha }}
           RELEASE_VERSION: ${{ github.ref_name }}
         with:
+          source: .
           files: docker/docker-bake.hcl
           targets: release
           set: |
