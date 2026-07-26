@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 626 626" role="img" aria-label="t">
+  <style>
+    path { fill: #000; }
+    @media (prefers-color-scheme: dark) { path { fill: #fff; } }
+  </style>
+  <path transform="translate(118.5 615) scale(1 -1)" d="M332 124V181H307V126C307 52 277 14 240 14C173 14 173 105 173 122V400H316V431H173V615H148C147 533 117 426 19 422V400H104V124C104 1 197-11 233-11C304-11 332 60 332 124Z"/>
+</svg>
