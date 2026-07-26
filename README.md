@@ -4,6 +4,14 @@
 
 https://github.com/user-attachments/assets/5c634ae8-5c74-47c9-bb8c-9c18cb7fc97d
 
+## Execution environment
+
+Tact does not sandbox agent commands by default. The agent can read and modify files and run
+processes with the same permissions as the user running Tact. For a containerized, credential-
+isolated setup, see the example [development environment](docker/dev/README.md), which keeps real
+OpenAI credentials outside the development container while mounting the workspace and Tact state
+read-write.
+
 ## Installation
 
 The release installer supports x86-64 and ARM64 glibc-based Linux, as well as Intel and Apple
