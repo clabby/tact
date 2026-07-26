@@ -118,8 +118,9 @@ cleared on exit, but the launcher cannot promise zeroization inside that depende
 ## Customization and troubleshooting
 
 Tool versions and executable mappings live in `tools.toml`; build packages and Rust components
-remain beside their installers in the Dockerfile. Pin changes and rebuild. Add project tools to the
-Dockerfile instead of mounting host package caches, sockets, or home directories.
+remain beside their installers in `docker/development.dockerfile`. Pin changes and rebuild. Add
+project tools to that Dockerfile instead of mounting host package caches, sockets, or home
+directories.
 
 Run every launcher and image test with:
 

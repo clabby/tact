@@ -36,7 +36,7 @@ jobs:
     runs-on: ubuntu-latest
     name: Build (${{ matrix.toolchain }})
     timeout-minutes: 20
-    continue-on-error: true
+    continue-on-error: ${{ matrix.toolchain != '1.97.0' }}
     strategy:
       fail-fast: false
       matrix:
@@ -55,7 +55,7 @@ jobs:
           cache-on-failure: true
       - uses: taiki-e/install-action@just
       - name: build
-        run: just build --locked
+        run: just build --locked --all-features
 
   cargo-lint:
     runs-on: ubuntu-latest

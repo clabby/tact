@@ -8,6 +8,8 @@ on:
 env:
   BINARY_NAME: tact
   CARGO_TERM_COLOR: always
+  REGISTRY: ghcr.io
+  REGISTRY_IMAGE: ghcr.io/clabby/tact
 
 jobs:
   validate:
@@ -19,11 +21,19 @@ jobs:
       - name: Checkout sources
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
+          fetch-depth: 0
           persist-credentials: false
-      - name: Verify tag matches crate version
+      - name: Verify tag matches crate version on main
         shell: bash
         run: |
           set -euo pipefail
+          git fetch --no-tags origin main:refs/remotes/origin/main
+
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "Tagged commit $GITHUB_SHA is not on main" >&2
+            exit 1
+          fi
+
           crate_version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "tact") | .version')
           tag_version="${GITHUB_REF_NAME#v}"
 
@@ -171,7 +181,43 @@ jobs:
       - name: Verify crate package
         run: cargo publish --locked --dry-run --allow-dirty
       - name: Publish crate
-        run: cargo publish --locked --allow-dirty
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          set +e
+          cargo publish --locked --allow-dirty
+          publish_status=$?
+          set -e
+
+          if [[ "$publish_status" -eq 0 ]]; then
+            exit 0
+          fi
+
+          version=$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "tact") | .version')
+          crate="target/package/tact-${version}.crate"
+
+          if [[ ! -f "$crate" ]]; then
+            echo "cargo publish failed before packaging tact ${version}" >&2
+            exit "$publish_status"
+          fi
+
+          local_checksum=$(sha256sum "$crate" | cut -d ' ' -f 1)
+          if ! published_checksum=$(curl --fail --silent --show-error \
+            --retry 6 --retry-delay 5 --retry-all-errors \
+            --user-agent "tact-release-workflow/${version} (https://github.com/clabby/tact)" \
+            "https://crates.io/api/v1/crates/tact/${version}" \
+            | jq -er '.version.checksum'); then
+            echo "cargo publish failed and tact ${version} is not available from crates.io" >&2
+            exit "$publish_status"
+          fi
+
+          if [[ "$published_checksum" != "$local_checksum" ]]; then
+            echo "cargo publish failed and crates.io has different contents for tact ${version}" >&2
+            exit "$publish_status"
+          fi
+
+          echo "cargo publish reported failure, but crates.io has the exact packaged crate"
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
@@ -203,3 +249,143 @@ jobs:
             dist/minisign.pub
           fail_on_unmatched_files: true
           generate_release_notes: true
+
+  container_build:
+    name: Package Image (${{ matrix.platform }})
+    needs: release
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            platform: linux/amd64
+            platform_pair: linux-amd64
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-22.04-arm
+            platform: linux/arm64
+            platform_pair: linux-arm64
+            target: aarch64-unknown-linux-gnu
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - name: Download signed release bundle
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          name: signed-release
+          path: release-bundle
+      - name: Install rsign2
+        uses: taiki-e/install-action@c44f6b046f1c29ae5918b1e0bfdbb2f1813836fd # v2
+        with:
+          tool: rsign2
+      - name: Extract verified release binary
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+
+          package_name="${BINARY_NAME}-${TARGET}-${GITHUB_REF_NAME}"
+          archive="${package_name}.tar.gz"
+          mkdir -p "${GITHUB_WORKSPACE}/target/image-context" "${RUNNER_TEMP}/release-package"
+
+          cd release-bundle/dist
+          shasum -a 256 --check "${archive}.sha256"
+          rsign verify "$archive" -P "$(tail -n 1 minisign.pub)" -x "${archive}.sig"
+          tar -xzf "$archive" -C "${RUNNER_TEMP}/release-package" "${package_name}/${BINARY_NAME}"
+          install -m 0755 \
+            "${RUNNER_TEMP}/release-package/${package_name}/${BINARY_NAME}" \
+            "${GITHUB_WORKSPACE}/target/image-context/${BINARY_NAME}"
+      - name: Authenticate with container registry
+        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+      - name: Package and push image by digest
+        id: build
+        uses: docker/bake-action@3acf805d94d93a86cce4ca44798a76464a75b88c # v6.9.0
+        env:
+          RELEASE_BINARY_CONTEXT: target/image-context
+          RELEASE_REVISION: ${{ github.sha }}
+          RELEASE_VERSION: ${{ github.ref_name }}
+        with:
+          source: .
+          files: docker/docker-bake.hcl
+          targets: release
+          set: |
+            release.platform=${{ matrix.platform }}
+            release.output=type=image,name=${{ env.REGISTRY_IMAGE }},push-by-digest=true,name-canonical=true,push=true
+      - name: Verify image binary matches release binary
+        shell: bash
+        env:
+          DIGEST: ${{ fromJSON(steps.build.outputs.metadata)['release']['containerimage.digest'] }}
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          set -euo pipefail
+
+          container_id=$(docker create --platform "$PLATFORM" "${REGISTRY_IMAGE}@${DIGEST}" /tact)
+          trap 'docker rm -f "$container_id" >/dev/null' EXIT
+          docker cp "${container_id}:/tact" "${RUNNER_TEMP}/image-tact"
+          cmp "${GITHUB_WORKSPACE}/target/image-context/tact" "${RUNNER_TEMP}/image-tact"
+      - name: Export image digest
+        shell: bash
+        env:
+          DIGEST: ${{ fromJSON(steps.build.outputs.metadata)['release']['containerimage.digest'] }}
+        run: |
+          mkdir -p "${RUNNER_TEMP}/digests"
+          touch "${RUNNER_TEMP}/digests/${DIGEST#sha256:}"
+      - name: Upload image digest
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-image-digest-${{ matrix.platform_pair }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  container_publish:
+    name: Publish Release Image
+    needs: container_build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Download image digests
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: release-image-digest-*
+          merge-multiple: true
+      - name: Authenticate with container registry
+        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+      - name: Create and inspect release manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          version="${GITHUB_REF_NAME#v}"
+          images=()
+          for digest in "${RUNNER_TEMP}"/digests/*; do
+            images+=("${REGISTRY_IMAGE}@sha256:${digest##*/}")
+          done
+
+          test "${#images[@]}" = 2
+          docker buildx imagetools create \
+            --tag "${REGISTRY_IMAGE}:${version}" \
+            --tag "${REGISTRY_IMAGE}:latest" \
+            "${images[@]}"
+          docker buildx imagetools inspect "${REGISTRY_IMAGE}:${version}"

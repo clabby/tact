@@ -1,27 +1,33 @@
-# Binary carrier image. Buildx Bake resolves relative paths against the
-# caller's working directory, so invoke this file from the repository root.
-
-variable "REGISTRY" {
-  default = "ghcr.io"
+variable "RELEASE_BINARY_CONTEXT" {
+  default = "."
 }
 
-variable "REPOSITORY" {
-  default = "clabby/tact"
+variable "RELEASE_REVISION" {
+  default = "local"
 }
 
-variable "DEFAULT_TAG" {
+variable "RELEASE_VERSION" {
   default = "local"
 }
 
 group "default" {
-  targets = ["tact"]
+  targets = ["dev"]
 }
 
-target "tact" {
+target "dev" {
   context = "."
-  dockerfile = "docker/tact.dockerfile"
-  tags = [
-    "tact:${DEFAULT_TAG}",
-    "${REGISTRY}/${REPOSITORY}:${DEFAULT_TAG}",
-  ]
+  dockerfile = "docker/development.dockerfile"
+  tags = ["tact-dev:local"]
+}
+
+target "release" {
+  context = "docker"
+  contexts = {
+    binary = "${RELEASE_BINARY_CONTEXT}"
+  }
+  dockerfile = "release.dockerfile"
+  labels = {
+    "org.opencontainers.image.revision" = "${RELEASE_REVISION}"
+    "org.opencontainers.image.version" = "${RELEASE_VERSION}"
+  }
 }

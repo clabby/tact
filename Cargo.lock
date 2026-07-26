@@ -2474,8 +2474,9 @@ dependencies = [
 
 [[package]]
 name = "nanocodex"
-version = "0.1.1"
-source = "git+https://github.com/gakonst/nanocodex?rev=50a51c7c112c6384e123d012912c917368d59133#50a51c7c112c6384e123d012912c917368d59133"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e36bac98daeca2b8ad2d8acd55762d1faba4f1f0281f19fdad444168fca5733e"
 dependencies = [
  "async-trait",
  "base64",
@@ -2508,8 +2509,9 @@ dependencies = [
 
 [[package]]
 name = "nanocodex-core"
-version = "0.1.1"
-source = "git+https://github.com/gakonst/nanocodex?rev=50a51c7c112c6384e123d012912c917368d59133#50a51c7c112c6384e123d012912c917368d59133"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7e8e3c02544e505783e6acaa3ada2b805a1b1aa9cdd4b75cd1669f6cfd74aad6"
 dependencies = [
  "serde",
  "serde_json",
@@ -2521,8 +2523,9 @@ dependencies = [
 
 [[package]]
 name = "nanocodex-macros"
-version = "0.1.1"
-source = "git+https://github.com/gakonst/nanocodex?rev=50a51c7c112c6384e123d012912c917368d59133#50a51c7c112c6384e123d012912c917368d59133"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aaf401faacbda9597f3b04cfcc9550847024d763d737933ab0c5ebc28575a5a7"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -2532,8 +2535,9 @@ dependencies = [
 
 [[package]]
 name = "nanocodex-mcp"
-version = "0.1.1"
-source = "git+https://github.com/gakonst/nanocodex?rev=50a51c7c112c6384e123d012912c917368d59133#50a51c7c112c6384e123d012912c917368d59133"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f25c764076b92d39be6961e58e5b4c4fbbdd3d7700a6743dc390fa4c7c606c57"
 dependencies = [
  "async-trait",
  "bm25",
@@ -2553,8 +2557,9 @@ dependencies = [
 
 [[package]]
 name = "nanocodex-service"
-version = "0.1.1"
-source = "git+https://github.com/gakonst/nanocodex?rev=50a51c7c112c6384e123d012912c917368d59133#50a51c7c112c6384e123d012912c917368d59133"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5b08086f54424a74263e4a6574c97bbf9796adb6f10cd4cae7d7d8571dbfd5a2"
 dependencies = [
  "base64",
  "futures-util",
@@ -2578,8 +2583,9 @@ dependencies = [
 
 [[package]]
 name = "nanocodex-tools"
-version = "0.1.1"
-source = "git+https://github.com/gakonst/nanocodex?rev=50a51c7c112c6384e123d012912c917368d59133#50a51c7c112c6384e123d012912c917368d59133"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c4e4f71ca57cf504e785cc8d87e16ace90915456826e052f309b5255d10308b4"
 dependencies = [
  "async-trait",
  "base64",
@@ -4509,7 +4515,7 @@ dependencies = [
 
 [[package]]
 name = "tact"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "arboard",
  "base64",

@@ -1,8 +1,17 @@
 # `docker`
 
-The `tact` image is a minimal binary carrier. It contains `/tact` and no runtime, entrypoint, or
-supporting files. Copy the binary into a broader glibc-based image that provides the shell, CA
-certificates, and other tools the agent should be able to use:
+This directory contains two distinct container resources:
+
+- [`dev/`](dev/README.md) provides the batteries-included local development environment, including
+  credential isolation through `iron-proxy`.
+- The published `ghcr.io/clabby/tact` image is a minimal binary carrier for downstream images.
+
+The published image contains `/tact` and no runtime, entrypoint, or supporting files. This makes it
+a composable build stage rather than a prescribed development environment.
+
+Copy the binary into an image suited to the developer's needs. That downstream image can provide
+the preferred shell, CA certificates, language toolchains, package managers, source-control tools,
+and any other utilities the agent should be able to use:
 
 ```dockerfile
 FROM ghcr.io/clabby/tact:latest AS tact
@@ -15,10 +24,11 @@ RUN apt-get update \
 ENTRYPOINT ["tact"]
 ```
 
-## Build
+Versioned and `latest` images contain the exact signed Linux binaries attached to the corresponding
+GitHub Release. The release workflow verifies the archive checksum and signature, then compares the
+binary copied back out of each image byte-for-byte with the archived binary before publishing the
+multi-platform manifest.
 
-From the repository root:
-
-```sh
-docker buildx bake -f docker/docker-bake.hcl
-```
+`docker/docker-bake.hcl` owns both image builds. Its default `dev` target builds the local
+development image from `docker/development.dockerfile`. The release workflow supplies a verified
+binary to the `release` target, which packages it with `docker/release.dockerfile`.
