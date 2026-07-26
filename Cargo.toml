@@ -64,6 +64,9 @@ criterion = { package = "codspeed-criterion-compat", version = "5.0.1" }
 rstest = "0.26.1"
 tower = "0.5.3"
 
+[build-dependencies]
+chrono = { version = "0.4.45", default-features = false, features = ["std"] }
+
 [features]
 harbor-evals = []
 

@@ -4,6 +4,8 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use chrono::{DateTime, Utc};
+
 fn main() {
     println!("cargo::rerun-if-changed=.git/HEAD");
     println!("cargo::rerun-if-changed=.git/index");
@@ -54,13 +56,24 @@ fn dirty_state() -> Option<String> {
 }
 
 fn build_timestamp() -> String {
-    env::var("SOURCE_DATE_EPOCH").unwrap_or_else(|_| {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock is before the Unix epoch")
-            .as_secs()
-            .to_string()
-    })
+    let unix_timestamp = env::var("SOURCE_DATE_EPOCH")
+        .map(|value| {
+            value
+                .parse()
+                .expect("SOURCE_DATE_EPOCH must be a Unix timestamp")
+        })
+        .unwrap_or_else(|_| {
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock is before the Unix epoch")
+                .as_secs()
+                .try_into()
+                .expect("build timestamp exceeds the supported range")
+        });
+
+    DateTime::<Utc>::from_timestamp(unix_timestamp, 0)
+        .expect("build timestamp exceeds the supported range")
+        .to_rfc3339()
 }
 
 fn set(name: &str, value: Option<String>) {

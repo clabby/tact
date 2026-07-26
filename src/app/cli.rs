@@ -25,7 +25,7 @@ const BUILD_VERSION: &str = concat!(
     env!("TACT_GIT_DIRTY"),
     ")\ncommit timestamp: ",
     env!("TACT_GIT_COMMIT_TIMESTAMP"),
-    "\nbuild timestamp (Unix): ",
+    "\nbuild timestamp: ",
     env!("TACT_BUILD_TIMESTAMP"),
     "\ntarget: ",
     env!("TACT_BUILD_TARGET"),
@@ -575,6 +575,22 @@ mod tests {
         assert!(output.contains(env!("TACT_BUILD_TIMESTAMP")));
         assert!(output.contains(env!("TACT_BUILD_TARGET")));
         assert!(output.contains(env!("TACT_RUSTC_VERSION")));
+    }
+
+    #[test]
+    fn version_displays_human_readable_timestamps() {
+        let error = Cli::try_parse_from(["tact", "--version"]).unwrap_err();
+        let output = error.to_string();
+
+        for label in ["commit timestamp: ", "build timestamp: "] {
+            let timestamp = output
+                .lines()
+                .find_map(|line| line.strip_prefix(label))
+                .unwrap_or_else(|| panic!("version should include {label}"));
+
+            chrono::DateTime::parse_from_rfc3339(timestamp)
+                .unwrap_or_else(|_| panic!("{label}should use RFC 3339 format"));
+        }
     }
 
     #[test]
