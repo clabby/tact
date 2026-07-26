@@ -28,6 +28,7 @@ use ratatui::{
 };
 use std::{
     collections::VecDeque,
+    mem,
     ops::Range,
     path::Path,
     time::{Duration, Instant},
@@ -105,6 +106,13 @@ pub(crate) struct Composer {
     subagent_hit_area: Option<Rect>,
     layout: Option<CachedLayout>,
     history: PromptHistory,
+}
+
+pub(crate) struct ComposerDraft {
+    text: String,
+    images: Vec<PastedImage>,
+    next_image: u64,
+    cursor: usize,
 }
 
 struct PastedImage {
@@ -453,6 +461,35 @@ impl Composer {
         self.images.clear();
         self.next_image = 1;
         self.cursor = self.draft.len();
+        self.preferred_column = None;
+        self.scroll = 0;
+        self.layout = None;
+    }
+
+    pub(crate) fn take_draft(&mut self) -> Option<ComposerDraft> {
+        if self.draft.is_empty() {
+            return None;
+        }
+
+        let draft = ComposerDraft {
+            text: mem::take(&mut self.draft),
+            images: mem::take(&mut self.images),
+            next_image: mem::replace(&mut self.next_image, 1),
+            cursor: mem::take(&mut self.cursor),
+        };
+        self.history.detach();
+        self.preferred_column = None;
+        self.scroll = 0;
+        self.layout = None;
+        Some(draft)
+    }
+
+    pub(crate) fn restore_draft(&mut self, draft: ComposerDraft) {
+        self.draft = draft.text;
+        self.images = draft.images;
+        self.next_image = draft.next_image;
+        self.cursor = draft.cursor;
+        self.history.detach();
         self.preferred_column = None;
         self.scroll = 0;
         self.layout = None;

@@ -2,7 +2,7 @@
 
 use super::{
     actions::{Action, ActionAvailability, ActionsEffect, ActionsEvent, ActionsMenu},
-    composer::{Composer, ComposerChromeTarget, ComposerEffect, ComposerEvent},
+    composer::{Composer, ComposerChromeTarget, ComposerDraft, ComposerEffect, ComposerEvent},
     context_diagnostics::{
         ContextDiagnosticsEffect, ContextDiagnosticsEvent, ContextDiagnosticsPanel,
     },
@@ -189,6 +189,7 @@ pub(crate) struct RootNode {
     thread: ThreadState,
     escape_deadline: Option<Instant>,
     notification: Option<Notification>,
+    discarded_draft: Option<ComposerDraft>,
     selection: Selection,
     transcript_area: Rect,
     composer_area: Rect,
@@ -215,6 +216,7 @@ impl RootNode {
             thread: ThreadState::New,
             escape_deadline: None,
             notification: None,
+            discarded_draft: None,
             selection: Selection::default(),
             transcript_area: Rect::default(),
             composer_area: Rect::default(),
@@ -303,14 +305,21 @@ impl RootNode {
         reasoning_mode: ReasoningMode,
         preferred_reasoning_mode: ReasoningMode,
     ) {
+        let current_draft = self.composer.component_mut().take_draft();
+        let replaced_draft = current_draft.is_some();
+        let discarded_draft = current_draft.or_else(|| self.discarded_draft.take());
         let fork_available = self.fork_available;
         let theme_mode = self.theme_mode;
         let max_subagents = self.subagents.max_subagents();
         *self = Self::new(workspace, thinking);
         self.set_reasoning_modes(reasoning_mode, preferred_reasoning_mode);
+        self.discarded_draft = discarded_draft;
         self.fork_available = fork_available;
         self.theme_mode = theme_mode;
         self.set_max_subagents(max_subagents);
+        if replaced_draft {
+            self.show_draft_saved();
+        }
     }
 
     #[allow(dead_code, reason = "used by restoration benchmarks and focused tests")]
@@ -511,10 +520,7 @@ impl RootNode {
                 && !self.transcript.component().expandables_focused()
                 && !self.composer.component().draft().is_empty()
             {
-                return self.update_composer(
-                    ComposerEvent::ReplaceDraft(String::new()),
-                    RenderRequest::Immediate,
-                );
+                return self.discard_draft();
             }
             return ComponentUpdate {
                 effects: vec![RootEffect::Shutdown],
@@ -536,6 +542,12 @@ impl RootNode {
         }
         if self.overlay.is_some() {
             return self.update_overlay(event, Instant::now());
+        }
+        if is_control_key(&event, 'z')
+            && !self.queue.component().focused()
+            && !self.transcript.component().expandables_focused()
+        {
+            return self.restore_discarded_draft();
         }
         if is_control_key(&event, 'o') {
             return self.update_transcript(TranscriptEvent::ToggleExpandAll);
@@ -1239,6 +1251,37 @@ impl RootNode {
         ComponentUpdate { effects, render }
     }
 
+    fn discard_draft(&mut self) -> ComponentUpdate<RootEffect> {
+        let Some(draft) = self.composer.component_mut().take_draft() else {
+            return ComponentUpdate::none();
+        };
+        self.discarded_draft = Some(draft);
+        self.show_draft_saved();
+        ComponentUpdate::render(RenderRequest::Immediate)
+    }
+
+    fn restore_discarded_draft(&mut self) -> ComponentUpdate<RootEffect> {
+        if !self.composer.component().draft().is_empty() {
+            return ComponentUpdate::none();
+        }
+        let Some(draft) = self.discarded_draft.take() else {
+            return ComponentUpdate::none();
+        };
+        self.composer.component_mut().restore_draft(draft);
+        self.notification = Some(Notification::plain(
+            "Draft restored.".to_owned(),
+            Color::Green,
+        ));
+        ComponentUpdate::render(RenderRequest::Immediate)
+    }
+
+    fn show_draft_saved(&mut self) {
+        self.notification = Some(Notification::plain(
+            "Draft cleared · Ctrl+Z to restore".to_owned(),
+            Color::Yellow,
+        ));
+    }
+
     fn turn_finished(&mut self) -> ComponentUpdate<RootEffect> {
         self.in_flight_turns = self.in_flight_turns.saturating_sub(1);
         self.submit_next_queued()
@@ -1715,7 +1758,7 @@ mod tests {
     use crossterm::event::{
         Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     };
-    use nanocodex::{AgentEvent, AgentEventKind};
+    use nanocodex::{AgentEvent, AgentEventKind, PromptInput, UserInput};
     use ratatui::{
         Terminal,
         backend::TestBackend,
@@ -2386,6 +2429,82 @@ mod tests {
         let shutdown = root.update(key(KeyCode::Char('c'), KeyModifiers::CONTROL));
 
         assert_eq!(shutdown.effects, [RootEffect::Shutdown]);
+    }
+
+    #[test]
+    fn control_z_restores_the_last_cleared_draft() {
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        root.update(RootEvent::ReplaceDraft("first\nλright".to_owned()));
+        for _ in 0..5 {
+            root.update(key(KeyCode::Left, KeyModifiers::NONE));
+        }
+
+        root.update(key(KeyCode::Char('c'), KeyModifiers::CONTROL));
+
+        assert!(root.composer().draft().is_empty());
+        assert!(root.discarded_draft.is_some());
+
+        let restored = root.update(key(KeyCode::Char('z'), KeyModifiers::CONTROL));
+        root.update(key(KeyCode::Char('|'), KeyModifiers::NONE));
+
+        assert_eq!(restored.render, super::RenderRequest::Immediate);
+        assert_eq!(root.composer().draft(), "first\nλ|right");
+        assert!(root.discarded_draft.is_none());
+    }
+
+    #[test]
+    fn restored_draft_keeps_pasted_images() {
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        root.update(RootEvent::ReplaceDraft("inspect ".to_owned()));
+        root.update(RootEvent::PasteImage(
+            "data:image/png;base64,restored".to_owned(),
+        ));
+        root.update(key(KeyCode::Char('c'), KeyModifiers::CONTROL));
+
+        root.update(key(KeyCode::Char('z'), KeyModifiers::CONTROL));
+        let submitted = root.update(key(KeyCode::Enter, KeyModifiers::NONE));
+
+        let [RootEffect::Submit(prompt)] = submitted.effects.as_slice() else {
+            panic!("restored draft should submit");
+        };
+        let PromptInput::Content(content) = prompt.agent_prompt().instruction else {
+            panic!("restored image should produce multimodal input");
+        };
+        assert!(matches!(&content[0], UserInput::Text { text } if text == "inspect "));
+        assert!(matches!(
+            &content[1],
+            UserInput::Image { image_url, .. } if image_url.ends_with("restored")
+        ));
+    }
+
+    #[test]
+    fn control_z_does_not_overwrite_a_nonempty_draft() {
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        root.update(RootEvent::ReplaceDraft("recover me".to_owned()));
+        root.update(key(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        root.update(RootEvent::ReplaceDraft("keep me".to_owned()));
+
+        let update = root.update(key(KeyCode::Char('z'), KeyModifiers::CONTROL));
+
+        assert_eq!(update.render, super::RenderRequest::None);
+        assert_eq!(root.composer().draft(), "keep me");
+        assert!(root.discarded_draft.is_some());
+    }
+
+    #[test]
+    fn successful_session_replacement_preserves_the_displaced_draft() {
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        root.update(RootEvent::ReplaceDraft("continue later".to_owned()));
+
+        root.reset_session(
+            Path::new("/work"),
+            ReasoningEffort::High,
+            ReasoningMode::Standard,
+            ReasoningMode::Standard,
+        );
+        root.update(key(KeyCode::Char('z'), KeyModifiers::CONTROL));
+
+        assert_eq!(root.composer().draft(), "continue later");
     }
 
     #[test]

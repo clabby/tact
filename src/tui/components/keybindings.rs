@@ -15,10 +15,11 @@ use ratatui::{
 };
 
 const FOOTER: [&str; 1] = ["esc close"];
-const BINDINGS: [(&str, &str); 17] = [
+const BINDINGS: [(&str, &str); 18] = [
     ("ctrl+s", "change reasoning effort"),
     ("ctrl+f", "fork session · when available"),
     ("ctrl+g", "edit prompt in $EDITOR"),
+    ("ctrl+z", "restore the last cleared draft"),
     ("ctrl/cmd+v", "paste clipboard image"),
     ("ctrl+o", "expand · collapse all tool calls"),
     (
@@ -70,7 +71,7 @@ impl Component for KeybindingsHelp {
 
     fn render(&mut self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
         let layout =
-            Floating::new("Keyboard shortcuts", 72, 21, &FOOTER).render(frame, area, theme);
+            Floating::new("Keyboard shortcuts", 72, 22, &FOOTER).render(frame, area, theme);
         if layout.body.is_empty() {
             return;
         }
@@ -152,6 +153,7 @@ mod tests {
             .collect::<Vec<_>>();
         for expected in [
             "ctrl/cmd+v",
+            "ctrl+z",
             "clear focused draft · split closes pane · else exit",
             "shift+enter/ctrl+j",
             "prompt history at edge",
