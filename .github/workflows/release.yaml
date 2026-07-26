@@ -175,7 +175,9 @@ jobs:
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
           name: signed-release
-          path: .
+          path: ${{ runner.temp }}/signed-release
+      - name: Install signed crate manifest
+        run: cp "${RUNNER_TEMP}/signed-release/Cargo.toml" Cargo.toml
       - name: Install Rust stable toolchain
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
       - name: Verify crate package
@@ -184,6 +186,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
+          version=$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "tact") | .version')
+          crate="target/package/tact-${version}.crate"
+          test -f "$crate"
+          local_checksum=$(sha256sum "$crate" | cut -d ' ' -f 1)
 
           set +e
           cargo publish --locked --allow-dirty
@@ -194,15 +201,6 @@ jobs:
             exit 0
           fi
 
-          version=$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "tact") | .version')
-          crate="target/package/tact-${version}.crate"
-
-          if [[ ! -f "$crate" ]]; then
-            echo "cargo publish failed before packaging tact ${version}" >&2
-            exit "$publish_status"
-          fi
-
-          local_checksum=$(sha256sum "$crate" | cut -d ' ' -f 1)
           if ! published_checksum=$(curl --fail --silent --show-error \
             --retry 6 --retry-delay 5 --retry-all-errors \
             --user-agent "tact-release-workflow/${version} (https://github.com/clabby/tact)" \

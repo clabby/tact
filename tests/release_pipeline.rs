@@ -1,5 +1,6 @@
 const RELEASE_WORKFLOW: &str = include_str!("../.github/workflows/release.yaml");
 const RELEASE_INSTRUCTIONS: &str = include_str!("../RELEASES.md");
+const CARGO_MANIFEST: &str = include_str!("../Cargo.toml");
 
 fn assert_contains(document: &str, expected: &str) {
     assert!(
@@ -42,6 +43,42 @@ fn publish_recovery_requires_the_exact_packaged_crate() {
     ] {
         assert_contains(RELEASE_WORKFLOW, expected);
     }
+
+    let checksum = RELEASE_WORKFLOW
+        .find("local_checksum=$(sha256sum \"$crate\"")
+        .expect("publish recovery should checksum the packaged crate");
+    let publish = RELEASE_WORKFLOW
+        .find("cargo publish --locked --allow-dirty")
+        .expect("the workflow should publish the crate");
+    assert!(
+        checksum < publish,
+        "the crate checksum must be retained before cargo attempts the upload"
+    );
+}
+
+#[test]
+fn signed_release_assets_stay_outside_the_crate_package() {
+    let workflow: serde_yaml::Value =
+        serde_yaml::from_str(RELEASE_WORKFLOW).expect("release workflow should be valid YAML");
+    let steps = workflow["jobs"]["publish_crate"]["steps"]
+        .as_sequence()
+        .expect("publish_crate should contain steps");
+    let download = steps
+        .iter()
+        .find(|step| step["name"] == "Download signed release bundle")
+        .expect("publish_crate should download the signed release bundle");
+
+    assert_eq!(
+        download["with"]["path"],
+        "${{ runner.temp }}/signed-release"
+    );
+
+    let manifest: toml::Value =
+        toml::from_str(CARGO_MANIFEST).expect("Cargo.toml should be valid TOML");
+    let excluded = manifest["package"]["exclude"]
+        .as_array()
+        .expect("the package should define exclusions");
+    assert!(excluded.iter().any(|path| path.as_str() == Some("dist/**")));
 }
 
 #[test]
