@@ -1,8 +1,5 @@
 #![doc = include_str!("../README.md")]
-#![doc(
-    html_logo_url = "https://raw.githubusercontent.com/clabby/tact/main/assets/logo.svg",
-    html_favicon_url = "https://raw.githubusercontent.com/clabby/tact/main/assets/favicon.svg"
-)]
+#![doc(html_favicon_url = "https://raw.githubusercontent.com/clabby/tact/main/assets/favicon.svg")]
 
 //! Binary entry point and top-level diagnostic reporting.
 
