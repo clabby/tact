@@ -35,8 +35,20 @@ pub(crate) async fn open_file(path: &Path, workspace: &Path) -> Result<(), Exter
 }
 
 fn resolve_editor_command() -> Result<Vec<String>, ExternalEditorError> {
-    let raw = env::var("EDITOR").map_err(ExternalEditorError::Unavailable)?;
-    parse_editor_command(&raw)
+    match env::var("EDITOR") {
+        Ok(editor) => resolve_editor_command_from(Some(&editor)),
+        Err(env::VarError::NotPresent) => resolve_editor_command_from(None),
+        Err(error) => Err(ExternalEditorError::Unavailable(error)),
+    }
+}
+
+fn resolve_editor_command_from(editor: Option<&str>) -> Result<Vec<String>, ExternalEditorError> {
+    #[cfg(not(windows))]
+    const DEFAULT_EDITOR: &str = "vi";
+    #[cfg(windows)]
+    const DEFAULT_EDITOR: &str = "notepad";
+
+    parse_editor_command(editor.unwrap_or(DEFAULT_EDITOR))
 }
 
 #[cfg(not(windows))]
@@ -132,10 +144,17 @@ fn remove_one_trailing_newline(mut draft: String) -> String {
 mod tests {
     use super::{
         EditorOutcome, edit_config_with, edit_with, parse_editor_command,
-        remove_one_trailing_newline,
+        remove_one_trailing_newline, resolve_editor_command_from,
     };
     use crate::app::error::ExternalEditorError;
     use std::path::Path;
+
+    #[test]
+    fn missing_editor_uses_platform_default() {
+        let default = if cfg!(windows) { "notepad" } else { "vi" };
+
+        assert_eq!(resolve_editor_command_from(None).unwrap(), [default]);
+    }
 
     #[test]
     #[cfg(not(windows))]

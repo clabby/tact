@@ -552,12 +552,7 @@ mod tests {
         error::{ConfigError, Error},
     };
     use clap::{CommandFactory, Parser, error::ErrorKind};
-    use std::{
-        env::VarError,
-        ffi::OsString,
-        fs,
-        path::PathBuf,
-    };
+    use std::{env::VarError, ffi::OsString, fs, path::PathBuf};
     use tempfile::tempdir;
 
     #[test]
