@@ -813,13 +813,11 @@ impl Composer {
         let effort = format!(" {} ", self.thinking.as_str());
         let fast_mode = self.fast_mode.then_some("⚡ ");
         let pro_mode = (self.reasoning_mode == ReasoningMode::Pro).then_some("pro ");
-        let shell = shell_mode.then_some(" shell ");
         let right_width = timer.width()
             + model.width()
             + effort.width()
             + fast_mode.map_or(0, UnicodeWidthStr::width)
-            + pro_mode.map_or(0, UnicodeWidthStr::width)
-            + shell.map_or(0, UnicodeWidthStr::width);
+            + pro_mode.map_or(0, UnicodeWidthStr::width);
         let right_start = content_start
             + u16::try_from(content_width.saturating_sub(right_width)).unwrap_or(u16::MAX);
 
@@ -939,22 +937,6 @@ impl Composer {
                     .add_modifier(Modifier::BOLD),
             );
         }
-        if let Some(shell) = shell {
-            let shell_start = pro_mode_start
-                + u16::try_from(pro_mode.map_or(0, UnicodeWidthStr::width)).unwrap_or(u16::MAX);
-            if shell_start < content_end {
-                buffer.set_stringn(
-                    shell_start,
-                    top,
-                    shell,
-                    usize::from(content_end - shell_start),
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                );
-            }
-        }
-
         let directory = format!(" {} ", self.workspace);
         let directory_width = directory.width().min(content_width);
         let directory_start =
@@ -979,6 +961,17 @@ impl Composer {
                 Style::default()
                     .fg(theme.muted())
                     .add_modifier(Modifier::DIM),
+            );
+        }
+        if shell_mode {
+            buffer.set_stringn(
+                content_start,
+                bottom,
+                " shell ",
+                hint_space,
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
             );
         }
         if development_width > 0 {
@@ -1515,7 +1508,8 @@ mod tests {
         for position in [(0, 0), (79, 0), (0, 2), (79, 2), (0, 4), (79, 4)] {
             assert_eq!(buffer[position].fg, Color::Yellow);
         }
-        assert!(rows(&terminal)[0].contains("medium  shell"));
+        assert!(!rows(&terminal)[0].contains("shell"));
+        assert!(rows(&terminal)[4].starts_with("╰─ shell "));
 
         let update = composer.update(key(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(
