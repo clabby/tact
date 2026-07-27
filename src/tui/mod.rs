@@ -613,11 +613,15 @@ pub(crate) async fn run(
                         let Some(runtime) = panes.get_mut(&pane) else {
                             continue;
                         };
-                        let record = runtime.journal_mut()?.append_local(LocalEvent::WorkerTurnsInterrupted {
-                            count,
-                            error,
-                        })?;
-                        schedule(app.update(AppEvent::Transcript { pane, record }), &mut scheduler);
+                        if count > 0 || error.is_some() {
+                            let record = runtime.journal_mut()?.append_local(
+                                LocalEvent::WorkerTurnsInterrupted { count, error },
+                            )?;
+                            schedule(
+                                app.update(AppEvent::Transcript { pane, record }),
+                                &mut scheduler,
+                            );
+                        }
                         schedule(app.update(AppEvent::TurnsCancelled(pane)), &mut scheduler);
                     }
                     WorkerEvent::ForkOpened { pane, events } => {

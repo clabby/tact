@@ -249,20 +249,7 @@ impl TranscriptModel {
                         }
                     })
             }
-            "worker.turns_interrupted" => {
-                self.decode_local::<WorkerTurnsInterrupted>(record)
-                    .map(|payload| {
-                        if let Some(error) = payload.error {
-                            self.push(EntryKind::Error {
-                                message: format!("Could not interrupt response: {error}"),
-                            });
-                        } else {
-                            self.push(EntryKind::Interrupted {
-                                count: payload.count,
-                            });
-                        }
-                    })
-            }
+            "worker.turns_interrupted" => return self.apply_interruption(record),
             "worker.steer_failed" => {
                 self.decode_local::<WorkerSteerFailed>(record)
                     .map(|payload| {
@@ -290,6 +277,32 @@ impl TranscriptModel {
                 ..ModelChange::default()
             },
             Err(error) => self.projection_error(record, error, true),
+        }
+    }
+
+    fn apply_interruption(&mut self, record: &TranscriptRecord) -> ModelChange {
+        let payload = match self.decode_local::<WorkerTurnsInterrupted>(record) {
+            Ok(payload) => payload,
+            Err(error) => return self.projection_error(record, error, true),
+        };
+        if let Some(error) = payload.error {
+            self.push(EntryKind::Error {
+                message: format!("Could not interrupt response: {error}"),
+            });
+            return ModelChange {
+                changed: true,
+                ..ModelChange::default()
+            };
+        }
+        if payload.count == 0 {
+            return ModelChange::default();
+        }
+        self.push(EntryKind::Interrupted {
+            count: payload.count,
+        });
+        ModelChange {
+            changed: true,
+            ..ModelChange::default()
         }
     }
 
@@ -1238,6 +1251,25 @@ mod tests {
                 duration_ns: 70_123_000_000
             })
         ));
+    }
+
+    #[test]
+    fn interrupting_without_active_turns_is_a_no_op() {
+        let mut model = TranscriptModel::default();
+        let record = TranscriptRecord::from_local(
+            1,
+            1,
+            LocalEvent::WorkerTurnsInterrupted {
+                count: 0,
+                error: None,
+            },
+        )
+        .unwrap();
+
+        let update = model.apply(&record);
+
+        assert!(!update.changed);
+        assert!(model.entries().is_empty());
     }
 
     #[test]

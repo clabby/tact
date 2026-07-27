@@ -1209,9 +1209,7 @@ fn render_entry(
             ])])
         }
         EntryKind::Interrupted { count } => {
-            let label = if *count == 0 {
-                "◇ Nothing to interrupt".to_owned()
-            } else if *count == 1 {
+            let label = if *count == 1 {
                 "◇ Interrupted response".to_owned()
             } else {
                 format!("◇ Interrupted {count} responses")
