@@ -90,6 +90,15 @@ fn changelog_includes_only_standard_conventional_commit_types() {
     assert_eq!(git["filter_commits"].as_bool(), Some(true));
     assert_eq!(git["tag_pattern"].as_str(), Some("v[0-9]*"));
 
+    let body = config["changelog"]["body"]
+        .as_str()
+        .expect("git-cliff should define a changelog body");
+    assert_contains(body, "commit.id | truncate(length=7, end=\"\")");
+    assert_contains(
+        body,
+        "github.com/{{ remote.github.owner }}/{{ remote.github.repo }}/commit/{{ commit.id }}",
+    );
+
     let parsers = git["commit_parsers"]
         .as_array()
         .expect("git-cliff should define changelog groups");
