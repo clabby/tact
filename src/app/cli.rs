@@ -552,7 +552,12 @@ mod tests {
         error::{ConfigError, Error},
     };
     use clap::{CommandFactory, Parser, error::ErrorKind};
-    use std::{env::VarError, ffi::OsString, fs, path::PathBuf};
+    use std::{
+        env::VarError,
+        ffi::OsString,
+        fs,
+        path::{Path, PathBuf},
+    };
     use tempfile::tempdir;
 
     #[test]
@@ -850,7 +855,7 @@ mod tests {
             Some(Command::Run {
                 orchestration_log: Some(path),
                 ..
-            }) if path == PathBuf::from("/logs/agent/orchestration.jsonl")
+            }) if path == Path::new("/logs/agent/orchestration.jsonl")
         ));
     }
 
