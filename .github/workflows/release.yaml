@@ -223,28 +223,45 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      pull-requests: read
     steps:
       - name: Checkout sources
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
+          fetch-depth: 0
           persist-credentials: false
       - name: Download signed release bundle
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
           name: signed-release
           path: .
-      - name: Publish release and generated changelog
+      - name: Install git-cliff
+        uses: taiki-e/install-action@c44f6b046f1c29ae5918b1e0bfdbb2f1813836fd # v2
+        with:
+          tool: git-cliff@2.13.1
+          fallback: none
+      - name: Generate release notes
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          cp .github/RELEASE_TEMPLATE.md release-notes.md
+          printf '\n\n' >> release-notes.md
+          git cliff --current --strip all >> release-notes.md
+      - name: Publish release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           name: ${{ github.ref_name }}
           tag_name: ${{ github.ref_name }}
+          body_path: release-notes.md
           files: |
             dist/*.tar.gz
             dist/*.sha256
             dist/*.sig
             dist/minisign.pub
           fail_on_unmatched_files: true
-          generate_release_notes: true
 
   container_build:
     name: Package Image (${{ matrix.platform }})

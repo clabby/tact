@@ -1,4 +1,6 @@
 const RELEASE_WORKFLOW: &str = include_str!("../.github/workflows/release.yaml");
+const RELEASE_TEMPLATE: &str = include_str!("../.github/RELEASE_TEMPLATE.md");
+const CHANGELOG_CONFIG: &str = include_str!("../cliff.toml");
 const RELEASE_INSTRUCTIONS: &str = include_str!("../RELEASES.md");
 const CARGO_MANIFEST: &str = include_str!("../Cargo.toml");
 
@@ -28,6 +30,90 @@ fn release_tag_must_be_on_main() {
     assert_contains(
         RELEASE_WORKFLOW,
         "git merge-base --is-ancestor \"$GITHUB_SHA\" origin/main",
+    );
+}
+
+#[test]
+fn generated_changelog_uses_the_template_and_tagged_history() {
+    let workflow: serde_yaml::Value =
+        serde_yaml::from_str(RELEASE_WORKFLOW).expect("release workflow should be valid YAML");
+    let steps = workflow["jobs"]["release"]["steps"]
+        .as_sequence()
+        .expect("release should contain steps");
+
+    let checkout = steps
+        .iter()
+        .find(|step| step["name"] == "Checkout sources")
+        .expect("release should check out its sources");
+    assert_eq!(checkout["with"]["fetch-depth"], 0);
+
+    let install = steps
+        .iter()
+        .find(|step| step["name"] == "Install git-cliff")
+        .expect("release should install git-cliff");
+    assert_eq!(install["with"]["tool"], "git-cliff@2.13.1");
+    assert_eq!(install["with"]["fallback"], "none");
+
+    let generate = steps
+        .iter()
+        .find(|step| step["name"] == "Generate release notes")
+        .expect("release should generate release notes");
+    let command = generate["run"]
+        .as_str()
+        .expect("release note generation should be a shell command");
+    assert_contains(command, "cp .github/RELEASE_TEMPLATE.md release-notes.md");
+    assert_contains(command, "git cliff --current --strip all");
+    assert_eq!(generate["env"]["GITHUB_TOKEN"], "${{ github.token }}");
+
+    let publish = steps
+        .iter()
+        .find(|step| step["name"] == "Publish release")
+        .expect("release should publish its generated notes");
+    assert_eq!(publish["with"]["body_path"], "release-notes.md");
+    assert!(publish["with"]["generate_release_notes"].is_null());
+
+    assert_contains(RELEASE_TEMPLATE, "clabby/tact/main/install.sh");
+    assert_contains(RELEASE_TEMPLATE, "tact update");
+    assert_contains(RELEASE_INSTRUCTIONS, "`git-cliff`");
+}
+
+#[test]
+fn changelog_includes_only_standard_conventional_commit_types() {
+    let config: toml::Value =
+        toml::from_str(CHANGELOG_CONFIG).expect("cliff.toml should be valid TOML");
+    let git = &config["git"];
+
+    assert_eq!(config["remote"]["github"]["owner"].as_str(), Some("clabby"));
+    assert_eq!(config["remote"]["github"]["repo"].as_str(), Some("tact"));
+    assert_eq!(git["conventional_commits"].as_bool(), Some(true));
+    assert_eq!(git["filter_unconventional"].as_bool(), Some(true));
+    assert_eq!(git["filter_commits"].as_bool(), Some(true));
+    assert_eq!(git["tag_pattern"].as_str(), Some("v[0-9]*"));
+
+    let parsers = git["commit_parsers"]
+        .as_array()
+        .expect("git-cliff should define changelog groups");
+    let patterns: Vec<_> = parsers
+        .iter()
+        .map(|parser| {
+            parser["message"]
+                .as_str()
+                .expect("each git-cliff parser should match a commit type")
+        })
+        .collect();
+    assert_eq!(
+        patterns,
+        [
+            "^feat",
+            "^fix",
+            "^perf",
+            "^docs",
+            "^refactor",
+            "^style",
+            "^test",
+            "^build|^chore|^ci",
+            "^revert",
+        ]
     );
 }
 
