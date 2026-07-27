@@ -35,7 +35,7 @@ use ratatui::{
     layout::{Position, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Paragraph, Wrap},
+    widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap},
 };
 use semver::Version;
 use std::{
@@ -44,8 +44,42 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-const ESCAPE_CHORD_TIMEOUT: Duration = Duration::from_millis(500);
+const KEY_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(2);
 const BREADCRUMB_DURATION: Duration = Duration::from_secs(10);
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum ConfirmationAction {
+    Interrupt,
+    Exit,
+}
+
+impl ConfirmationAction {
+    const fn title_key(self) -> &'static str {
+        match self {
+            Self::Interrupt => "Esc",
+            Self::Exit => "Ctrl+C",
+        }
+    }
+
+    const fn action_label(self) -> &'static str {
+        match self {
+            Self::Interrupt => "Interrupt",
+            Self::Exit => "Quit",
+        }
+    }
+
+    const fn effect(self) -> RootEffect {
+        match self {
+            Self::Interrupt => RootEffect::CancelTurns,
+            Self::Exit => RootEffect::Shutdown,
+        }
+    }
+}
+
+struct KeyConfirmation {
+    action: ConfirmationAction,
+    deadline: Instant,
+}
 
 struct Notification {
     message: Line<'static>,
@@ -187,7 +221,7 @@ pub(crate) struct RootNode {
     workspace: PathBuf,
     overlay: Option<Overlay>,
     thread: ThreadState,
-    escape_deadline: Option<Instant>,
+    key_confirmation: Option<KeyConfirmation>,
     notification: Option<Notification>,
     discarded_draft: Option<ComposerDraft>,
     selection: Selection,
@@ -214,7 +248,7 @@ impl RootNode {
             workspace: workspace.to_path_buf(),
             overlay: None,
             thread: ThreadState::New,
-            escape_deadline: None,
+            key_confirmation: None,
             notification: None,
             discarded_draft: None,
             selection: Selection::default(),
@@ -415,7 +449,9 @@ impl RootNode {
             self.transcript.component().animation_deadline(),
             self.composer.component().animation_deadline(),
             self.queue.component().animation_deadline(),
-            self.escape_deadline,
+            self.key_confirmation
+                .as_ref()
+                .map(|confirmation| confirmation.deadline),
             self.notification.as_ref().map(|notice| notice.deadline),
             self.subagents.animation_deadline(),
         ]
@@ -507,12 +543,18 @@ impl RootNode {
                 notification.color,
             );
         }
+        if let Some(confirmation) = &self.key_confirmation {
+            render_key_confirmation(frame, area, composer_area, theme, confirmation.action);
+        }
     }
 
-    fn update_terminal(&mut self, mut event: Event) -> ComponentUpdate<RootEffect> {
+    fn update_terminal(&mut self, event: Event) -> ComponentUpdate<RootEffect> {
         if matches!(event, Event::Resize(_, _)) {
             self.selection.clear();
             return ComponentUpdate::render(RenderRequest::Immediate);
+        }
+        if is_confirmation_key_repeat(&event) {
+            return ComponentUpdate::none();
         }
         if is_control_c(&event) {
             if self.overlay.is_none()
@@ -520,13 +562,33 @@ impl RootNode {
                 && !self.transcript.component().expandables_focused()
                 && !self.composer.component().draft().is_empty()
             {
+                self.key_confirmation = None;
                 return self.discard_draft();
             }
-            return ComponentUpdate {
-                effects: vec![RootEffect::Shutdown],
-                render: RenderRequest::None,
-            };
+            return self.update_key_confirmation(ConfirmationAction::Exit, Instant::now());
         }
+        if is_escape(&event)
+            && self
+                .key_confirmation
+                .as_ref()
+                .is_some_and(|confirmation| confirmation.action == ConfirmationAction::Exit)
+        {
+            self.key_confirmation = None;
+            return ComponentUpdate::render(RenderRequest::Immediate);
+        }
+        let confirmation_cleared =
+            !is_escape(&event) && !is_key_release(&event) && self.key_confirmation.take().is_some();
+        let mut update = self.update_terminal_without_confirmation(event);
+        if confirmation_cleared {
+            update.render = update.render.max(RenderRequest::Immediate);
+        }
+        update
+    }
+
+    fn update_terminal_without_confirmation(
+        &mut self,
+        mut event: Event,
+    ) -> ComponentUpdate<RootEffect> {
         if !self.interactive {
             return ComponentUpdate::none();
         }
@@ -560,16 +622,18 @@ impl RootNode {
         }
         if is_escape(&event) {
             if self.selection.clear() {
+                self.key_confirmation = None;
                 return ComponentUpdate::render(RenderRequest::Immediate);
             }
             if self.queue.component().focused() {
+                self.key_confirmation = None;
                 return self.update_queue(event);
             }
             if self.transcript.component().expandables_focused() {
-                self.escape_deadline = None;
+                self.key_confirmation = None;
                 return self.update_transcript(TranscriptEvent::BlurExpandables);
             }
-            return self.update_escape_chord(Instant::now());
+            return self.update_key_confirmation(ConfirmationAction::Interrupt, Instant::now());
         }
         if let Some(update) = self.update_selection_mouse(&mut event) {
             return update;
@@ -593,7 +657,6 @@ impl RootNode {
                 None => {}
             }
         }
-        self.escape_deadline = None;
         if is_focus_toggle(&event) {
             return self.update_focus();
         }
@@ -727,16 +790,26 @@ impl RootNode {
         }
     }
 
-    fn update_escape_chord(&mut self, now: Instant) -> ComponentUpdate<RootEffect> {
-        if self.escape_deadline.is_some_and(|deadline| now <= deadline) {
-            self.escape_deadline = None;
+    fn update_key_confirmation(
+        &mut self,
+        action: ConfirmationAction,
+        now: Instant,
+    ) -> ComponentUpdate<RootEffect> {
+        let confirmed = self.key_confirmation.as_ref().is_some_and(|confirmation| {
+            confirmation.action == action && now <= confirmation.deadline
+        });
+        if confirmed {
+            self.key_confirmation = None;
             return ComponentUpdate {
-                effects: vec![RootEffect::CancelTurns],
-                render: RenderRequest::None,
+                effects: vec![action.effect()],
+                render: RenderRequest::Immediate,
             };
         }
-        self.escape_deadline = Some(now + ESCAPE_CHORD_TIMEOUT);
-        ComponentUpdate::none()
+        self.key_confirmation = Some(KeyConfirmation {
+            action,
+            deadline: now + KEY_CONFIRMATION_TIMEOUT,
+        });
+        ComponentUpdate::render(RenderRequest::Immediate)
     }
 
     fn update_overlay(&mut self, event: Event, now: Instant) -> ComponentUpdate<RootEffect> {
@@ -1377,9 +1450,16 @@ impl RootNode {
     }
 
     fn update_animation(&mut self, now: Instant) -> ComponentUpdate<RootEffect> {
-        if self.escape_deadline.is_some_and(|deadline| now >= deadline) {
-            self.escape_deadline = None;
-        }
+        let confirmation = if self
+            .key_confirmation
+            .as_ref()
+            .is_some_and(|confirmation| now >= confirmation.deadline)
+        {
+            self.key_confirmation = None;
+            RenderRequest::Immediate
+        } else {
+            RenderRequest::None
+        };
         let effort = self.update_effort(EffortEvent::AnimationFrame(now));
         let transcript = self.update_transcript(TranscriptEvent::AnimationFrame(now));
         let composer =
@@ -1409,6 +1489,7 @@ impl RootNode {
                 .max(composer.render)
                 .max(queue.render)
                 .max(subagents)
+                .max(confirmation)
                 .max(notification),
         }
     }
@@ -1622,6 +1703,77 @@ fn render_notification(
     frame.render_widget(paragraph, popup.body);
 }
 
+fn render_key_confirmation(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    composer_area: Rect,
+    theme: &Theme,
+    action: ConfirmationAction,
+) {
+    const HEIGHT: u16 = 4;
+    const WIDTH: u16 = 28;
+
+    let available_height = composer_area.y.saturating_sub(area.y);
+    if available_height < HEIGHT {
+        return;
+    }
+
+    let width = WIDTH.min(composer_area.width).min(area.width);
+    let gap = u16::from(available_height > HEIGHT);
+    let popup = Rect {
+        x: composer_area.right().saturating_sub(width).max(area.x),
+        y: composer_area.y.saturating_sub(HEIGHT + gap),
+        width,
+        height: HEIGHT,
+    };
+    let title = Line::from(vec![
+        Span::styled(
+            format!(" {} ", action.title_key()),
+            Style::default()
+                .fg(theme.accent())
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("then ", Style::default().fg(theme.muted())),
+    ]);
+    let block = Block::new()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme.border()))
+        .title(title);
+    let body = block.inner(popup);
+
+    frame.render_widget(Clear, popup);
+    frame.render_widget(block, popup);
+    frame.render_widget(
+        Paragraph::new(vec![
+            confirmation_line(action.title_key(), action.action_label(), theme),
+            confirmation_line(
+                if action == ConfirmationAction::Exit {
+                    "Esc"
+                } else {
+                    "Any other key"
+                },
+                "cancel",
+                theme,
+            ),
+        ]),
+        body,
+    );
+}
+
+fn confirmation_line(key: &'static str, label: &'static str, theme: &Theme) -> Line<'static> {
+    Line::from(vec![
+        Span::raw(" "),
+        Span::styled(
+            key,
+            Style::default()
+                .fg(theme.code_text())
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(format!(" {label}"), Style::default().fg(theme.muted())),
+    ])
+}
+
 fn clamp_to(position: Position, area: Rect) -> Position {
     Position::new(
         position.x.clamp(area.x, area.right().saturating_sub(1)),
@@ -1712,6 +1864,20 @@ fn is_control_c(event: &Event) -> bool {
     is_control_key(event, 'c')
 }
 
+fn is_confirmation_key_repeat(event: &Event) -> bool {
+    let Event::Key(key) = event else {
+        return false;
+    };
+    if key.kind != KeyEventKind::Repeat {
+        return false;
+    }
+    is_control_c(event) || is_escape(event)
+}
+
+fn is_key_release(event: &Event) -> bool {
+    matches!(event, Event::Key(key) if key.kind == KeyEventKind::Release)
+}
+
 fn is_control_key(event: &Event, character: char) -> bool {
     let Event::Key(key) = event else {
         return false;
@@ -1742,8 +1908,8 @@ fn is_plain_enter(event: &Event) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        Component, ComposerChromeTarget, Overlay, RootEffect, RootEvent, RootNode, SubagentOverlay,
-        ThreadState,
+        Component, ComposerChromeTarget, ConfirmationAction, Overlay, RootEffect, RootEvent,
+        RootNode, SubagentOverlay, ThreadState,
     };
     use crate::{
         app::config::{ReasoningEffort, ReasoningMode},
@@ -1756,7 +1922,8 @@ mod tests {
         },
     };
     use crossterm::event::{
-        Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+        Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
+        MouseEventKind,
     };
     use nanocodex::{AgentEvent, AgentEventKind, PromptInput, UserInput};
     use ratatui::{
@@ -1776,6 +1943,16 @@ mod tests {
 
     fn key(code: KeyCode, modifiers: KeyModifiers) -> super::RootEvent {
         super::RootEvent::Terminal(Event::Key(KeyEvent::new(code, modifiers)))
+    }
+
+    fn key_with_kind(
+        code: KeyCode,
+        modifiers: KeyModifiers,
+        kind: KeyEventKind,
+    ) -> super::RootEvent {
+        let mut key = KeyEvent::new(code, modifiers);
+        key.kind = kind;
+        super::RootEvent::Terminal(Event::Key(key))
     }
 
     fn mouse(kind: MouseEventKind, column: u16, row: u16) -> super::RootEvent {
@@ -2405,13 +2582,85 @@ mod tests {
     }
 
     #[test]
-    fn control_c_still_shuts_down_while_actions_are_open() {
+    fn control_c_requires_confirmation_while_actions_are_open() {
         let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
         root.update(key(KeyCode::Char('/'), KeyModifiers::NONE));
 
-        let update = root.update(key(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        let first = root.update(key(KeyCode::Char('c'), KeyModifiers::CONTROL));
 
-        assert_eq!(update.effects, [super::RootEffect::Shutdown]);
+        assert!(first.effects.is_empty());
+        assert!(root.overlay.is_some());
+        let rendered = render_root_text(&mut root, 60, 12);
+        assert!(rendered.contains("Ctrl+C then"));
+        assert!(rendered.contains("Ctrl+C Quit"));
+        assert!(rendered.contains("Esc cancel"));
+
+        let second = root.update(key(KeyCode::Char('c'), KeyModifiers::CONTROL));
+
+        assert_eq!(second.effects, [super::RootEffect::Shutdown]);
+    }
+
+    #[test]
+    fn escape_cancels_a_pending_exit() {
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        root.update(key(KeyCode::Char('c'), KeyModifiers::CONTROL));
+
+        let cancel = root.update(key(KeyCode::Esc, KeyModifiers::NONE));
+        let next_control_c = root.update(key(KeyCode::Char('c'), KeyModifiers::CONTROL));
+
+        assert!(cancel.effects.is_empty());
+        assert_eq!(cancel.render, super::RenderRequest::Immediate);
+        assert!(next_control_c.effects.is_empty());
+    }
+
+    #[test]
+    fn control_c_requires_two_distinct_presses() {
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        root.update(key(KeyCode::Char('c'), KeyModifiers::CONTROL));
+
+        let release = root.update(key_with_kind(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL,
+            KeyEventKind::Release,
+        ));
+        let repeat = root.update(key_with_kind(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL,
+            KeyEventKind::Repeat,
+        ));
+
+        assert!(release.effects.is_empty());
+        assert!(repeat.effects.is_empty());
+        assert!(root.key_confirmation.is_some());
+
+        let second_press = root.update(key(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert_eq!(second_press.effects, [RootEffect::Shutdown]);
+    }
+
+    #[test]
+    fn confirmation_floats_above_the_composer_top_right() {
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        root.update(key(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        let mut terminal = Terminal::new(TestBackend::new(60, 12)).unwrap();
+
+        terminal
+            .draw(|frame| root.render(frame, frame.area(), &Theme::default()))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let popup_bottom = root.composer_area.y - 2;
+        assert_eq!(
+            buffer[(root.composer_area.right() - 28, popup_bottom)].symbol(),
+            "╰"
+        );
+        assert_eq!(
+            buffer[(root.composer_area.right() - 1, popup_bottom)].symbol(),
+            "╯"
+        );
+        assert_eq!(
+            buffer[(root.composer_area.right() - 1, root.composer_area.y)].symbol(),
+            "╮"
+        );
     }
 
     #[test]
@@ -2425,6 +2674,11 @@ mod tests {
         assert!(clear.effects.is_empty());
         assert_eq!(clear.render, super::RenderRequest::Immediate);
         assert!(root.composer().draft().is_empty());
+
+        let confirmation = root.update(key(KeyCode::Char('c'), KeyModifiers::CONTROL));
+
+        assert!(confirmation.effects.is_empty());
+        assert!(render_root_text(&mut root, 60, 12).contains("Ctrl+C Quit"));
 
         let shutdown = root.update(key(KeyCode::Char('c'), KeyModifiers::CONTROL));
 
@@ -2512,10 +2766,38 @@ mod tests {
         let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
 
         let first = root.update(key(KeyCode::Esc, KeyModifiers::NONE));
+        let rendered = render_root_text(&mut root, 60, 12);
         let second = root.update(key(KeyCode::Esc, KeyModifiers::NONE));
 
         assert!(first.effects.is_empty());
+        assert!(rendered.contains("Esc then"));
+        assert!(rendered.contains("Esc Interrupt"));
+        assert!(rendered.contains("Any other key cancel"));
         assert_eq!(second.effects, [RootEffect::CancelTurns]);
+    }
+
+    #[test]
+    fn escape_requires_two_distinct_presses() {
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        root.update(key(KeyCode::Esc, KeyModifiers::NONE));
+
+        let release = root.update(key_with_kind(
+            KeyCode::Esc,
+            KeyModifiers::NONE,
+            KeyEventKind::Release,
+        ));
+        let repeat = root.update(key_with_kind(
+            KeyCode::Esc,
+            KeyModifiers::NONE,
+            KeyEventKind::Repeat,
+        ));
+
+        assert!(release.effects.is_empty());
+        assert!(repeat.effects.is_empty());
+        assert!(root.key_confirmation.is_some());
+
+        let second_press = root.update(key(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(second_press.effects, [RootEffect::CancelTurns]);
     }
 
     #[test]
@@ -2943,15 +3225,22 @@ mod tests {
     }
 
     #[test]
-    fn escape_chord_expires_and_unrelated_input_resets_it() {
+    fn key_confirmation_expires_and_unrelated_input_resets_it() {
         let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
         let now = Instant::now();
 
-        assert!(root.update_escape_chord(now).effects.is_empty());
         assert!(
-            root.update_escape_chord(now + Duration::from_millis(501))
+            root.update_key_confirmation(ConfirmationAction::Interrupt, now)
                 .effects
                 .is_empty()
+        );
+        assert!(
+            root.update_key_confirmation(
+                ConfirmationAction::Interrupt,
+                now + super::KEY_CONFIRMATION_TIMEOUT + Duration::from_millis(1),
+            )
+            .effects
+            .is_empty()
         );
         root.update(key(KeyCode::Char('x'), KeyModifiers::NONE));
         assert!(
@@ -2959,6 +3248,20 @@ mod tests {
                 .effects
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn expired_confirmation_is_removed_immediately() {
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        let now = Instant::now();
+        root.update_key_confirmation(ConfirmationAction::Exit, now);
+
+        let update = root.update(super::RootEvent::AnimationFrame(
+            now + super::KEY_CONFIRMATION_TIMEOUT,
+        ));
+
+        assert!(root.key_confirmation.is_none());
+        assert_eq!(update.render, super::RenderRequest::Immediate);
     }
 
     #[test]
@@ -3156,11 +3459,11 @@ mod tests {
 
         assert!(blurred.effects.is_empty());
         assert!(!root.transcript.component().expandables_focused());
-        assert!(root.escape_deadline.is_none());
+        assert!(root.key_confirmation.is_none());
 
         let chord_started = root.update(key(KeyCode::Esc, KeyModifiers::NONE));
         assert!(chord_started.effects.is_empty());
-        assert!(root.escape_deadline.is_some());
+        assert!(root.key_confirmation.is_some());
     }
 
     #[test]

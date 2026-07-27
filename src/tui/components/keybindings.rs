@@ -15,17 +15,15 @@ use ratatui::{
 };
 
 const FOOTER: [&str; 1] = ["esc close"];
-const BINDINGS: [(&str, &str); 18] = [
+const BINDINGS: [(&str, &str); 19] = [
     ("ctrl+s", "change reasoning effort"),
     ("ctrl+f", "fork session · when available"),
     ("ctrl+g", "edit prompt in $EDITOR"),
     ("ctrl+z", "restore the last cleared draft"),
     ("ctrl/cmd+v", "paste clipboard image"),
     ("ctrl+o", "expand · collapse all tool calls"),
-    (
-        "ctrl+c",
-        "clear focused draft · split closes pane · else exit",
-    ),
+    ("ctrl+c", "clear focused draft"),
+    ("ctrl+c ctrl+c", "split closes pane · else exit"),
     ("esc esc", "interrupt the active response"),
     ("enter", "submit prompt"),
     ("shift+enter/ctrl+j", "insert newline"),
@@ -154,7 +152,9 @@ mod tests {
         for expected in [
             "ctrl/cmd+v",
             "ctrl+z",
-            "clear focused draft · split closes pane · else exit",
+            "ctrl+c ctrl+c",
+            "clear focused draft",
+            "split closes pane · else exit",
             "shift+enter/ctrl+j",
             "prompt history at edge",
             "focus queue · when present",

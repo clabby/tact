@@ -26,7 +26,7 @@ use semver::Version;
 use std::{path::PathBuf, sync::Arc, time::Instant};
 use unicode_width::UnicodeWidthStr;
 
-const SPLIT_HINT: &str = " mouse: focus · Ctrl+C: clear / close ";
+const SPLIT_HINT: &str = " mouse: focus · Ctrl+C: clear · Ctrl+C×2: close ";
 const MIN_SPLIT_HINT_WIDTH: u16 = 60;
 
 pub(crate) enum AppEvent {
@@ -805,10 +805,15 @@ mod tests {
         let mut app = app();
         app.update(control('f'));
 
-        let update = app.update(control('c'));
+        let confirmation = app.update(control('c'));
+
+        assert!(confirmation.effects.is_empty());
+        assert!(app.root(PaneId::Fork(1)).is_some());
+
+        let close = app.update(control('c'));
 
         assert!(matches!(
-            update.effects.as_slice(),
+            close.effects.as_slice(),
             [AppEffect::ClosePane(PaneId::Fork(1))]
         ));
         assert!(app.root(PaneId::Main).is_some());
@@ -836,6 +841,11 @@ mod tests {
         let fork = app.root(PaneId::Fork(1)).expect("fork should remain open");
         assert!(fork.composer().draft().is_empty());
 
+        let confirmation = app.update(control('c'));
+
+        assert!(confirmation.effects.is_empty());
+        assert!(app.root(PaneId::Fork(1)).is_some());
+
         let close = app.update(control('c'));
 
         assert!(matches!(
@@ -858,10 +868,15 @@ mod tests {
             modifiers: KeyModifiers::NONE,
         })));
 
-        let update = app.update(control('c'));
+        let confirmation = app.update(control('c'));
+
+        assert!(confirmation.effects.is_empty());
+        assert!(app.root(PaneId::Main).is_some());
+
+        let close = app.update(control('c'));
 
         assert!(matches!(
-            update.effects.as_slice(),
+            close.effects.as_slice(),
             [AppEffect::ClosePane(PaneId::Main)]
         ));
         assert!(app.root(PaneId::Main).is_none());
