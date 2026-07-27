@@ -13,6 +13,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::Paragraph,
 };
+use unicode_width::UnicodeWidthStr;
 
 const FOOTER: [&str; 1] = ["esc close"];
 const BINDINGS: [(&str, &str); 19] = [
@@ -22,7 +23,10 @@ const BINDINGS: [(&str, &str); 19] = [
     ("ctrl+z", "restore the last cleared draft"),
     ("ctrl/cmd+v", "paste clipboard image"),
     ("ctrl+o", "expand · collapse all tool calls"),
-    ("ctrl+c", "clear focused draft"),
+    (
+        "ctrl+c",
+        "clear input · when composer is focused and nonempty",
+    ),
     ("ctrl+c ctrl+c", "split closes pane · else exit"),
     ("esc esc", "interrupt the active response"),
     ("enter", "submit prompt"),
@@ -75,20 +79,30 @@ impl Component for KeybindingsHelp {
         }
         let lines = BINDINGS
             .iter()
-            .map(|&(key, description)| {
-                Line::from(vec![
-                    Span::styled(
-                        format!(" {key:<18}"),
-                        Style::default()
-                            .fg(Color::Green)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(description, Style::default().fg(theme.muted())),
-                ])
-            })
+            .map(|&(key, description)| binding_line(key, description, layout.body.width, theme))
             .collect::<Vec<_>>();
         frame.render_widget(Paragraph::new(lines), layout.body);
     }
+}
+
+fn binding_line(
+    key: &'static str,
+    description: &'static str,
+    width: u16,
+    theme: &Theme,
+) -> Line<'static> {
+    let occupied = 1 + key.width() + description.width();
+    let gap = usize::from(width).saturating_sub(occupied).max(1);
+    Line::from(vec![
+        Span::styled(
+            format!(" {key}"),
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" ".repeat(gap)),
+        Span::styled(description, Style::default().fg(theme.muted())),
+    ])
 }
 
 #[cfg(test)]
@@ -99,7 +113,7 @@ mod tests {
     use ratatui::{Terminal, backend::TestBackend, style::Color};
 
     #[test]
-    fn popup_centers_green_keys_with_muted_descriptions() {
+    fn popup_right_aligns_muted_descriptions() {
         let mut help = KeybindingsHelp;
         let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
 
@@ -108,27 +122,28 @@ mod tests {
             .unwrap();
 
         let buffer = terminal.backend().buffer();
-        let row = buffer
+        let rendered = buffer
             .content()
             .chunks(80)
-            .position(|cells| {
-                cells
-                    .iter()
-                    .map(|cell| cell.symbol())
-                    .collect::<String>()
-                    .contains("ctrl+s")
-            })
+            .map(|cells| cells.iter().map(|cell| cell.symbol()).collect::<String>())
+            .collect::<Vec<_>>();
+        let row = rendered
+            .iter()
+            .position(|line| line.contains("ctrl+s"))
             .expect("effort shortcut should render");
-        assert!(buffer.content().chunks(80).any(|cells| {
-            cells
+        for description in ["change reasoning effort", "paste clipboard image"] {
+            let line = rendered
                 .iter()
-                .map(|cell| cell.symbol())
-                .collect::<String>()
-                .contains("ctrl+o")
-        }));
+                .find(|line| line.contains(description))
+                .expect("description should render");
+            let start = line.find(description).unwrap();
+            let end = unicode_width::UnicodeWidthStr::width(&line[..start])
+                + unicode_width::UnicodeWidthStr::width(description);
+            assert_eq!(end, 75);
+        }
         assert_eq!(buffer[(5, u16::try_from(row).unwrap())].fg, Color::Green);
         assert_eq!(
-            buffer[(24, u16::try_from(row).unwrap())].fg,
+            buffer[(74, u16::try_from(row).unwrap())].fg,
             Color::DarkGray
         );
     }
@@ -153,7 +168,7 @@ mod tests {
             "ctrl/cmd+v",
             "ctrl+z",
             "ctrl+c ctrl+c",
-            "clear focused draft",
+            "clear input · when composer is focused and nonempty",
             "split closes pane · else exit",
             "shift+enter/ctrl+j",
             "prompt history at edge",
