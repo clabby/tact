@@ -30,6 +30,10 @@
 - Write documentation for readers who are new to the repository but understand the project's purpose.
 - Keep documentation close to the behavior it describes and update it with behavioral changes.
 
+## Revisions
+
+- Write every revision description using Conventional Commits.
+
 ## Testing
 
 - Test externally meaningful behavior and important failure modes, not private implementation details.
