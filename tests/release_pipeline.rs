@@ -98,6 +98,24 @@ fn changelog_includes_only_standard_conventional_commit_types() {
         body,
         "github.com/{{ remote.github.owner }}/{{ remote.github.repo }}/commit/{{ commit.id }}",
     );
+    assert_contains(
+        body,
+        "github.com/{{ remote.github.owner }}/{{ remote.github.repo }}/pull/{{ commit.remote.pr_number }}",
+    );
+
+    let pull_request = body
+        .find("{% if commit.remote.pr_number %}")
+        .expect("the changelog should prefer pull request links");
+    let fallback = body[pull_request..]
+        .find("{% else %}")
+        .map(|index| pull_request + index)
+        .expect("the changelog should fall back when no pull request exists");
+    let commit = body
+        .find(
+            "github.com/{{ remote.github.owner }}/{{ remote.github.repo }}/commit/{{ commit.id }}",
+        )
+        .expect("the changelog should link fallback commits");
+    assert!(pull_request < fallback && fallback < commit);
 
     let parsers = git["commit_parsers"]
         .as_array()

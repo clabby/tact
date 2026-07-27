@@ -8,9 +8,11 @@ body = """
 ### {{ group | striptags | trim }}
 
 {% for commit in commits -%}
-- {% if commit.scope %}[{{ commit.scope }}] {% endif %}{{ commit.message | upper_first | split(pat="\n") | first }} ([{{ commit.id | truncate(length=7, end="") }}](https://github.com/{{ remote.github.owner }}/{{ remote.github.repo }}/commit/{{ commit.id }}))\
+- {% if commit.scope %}[{{ commit.scope }}] {% endif %}{{ commit.message | upper_first | split(pat="\n") | first }}\
 {% if commit.remote.username %} by @{{ commit.remote.username }}{% endif %}\
-{% if commit.remote.pr_number %} in [#{{ commit.remote.pr_number }}](https://github.com/{{ remote.github.owner }}/{{ remote.github.repo }}/pull/{{ commit.remote.pr_number }}){% endif %}
+{% if commit.remote.pr_number %} in [#{{ commit.remote.pr_number }}](https://github.com/{{ remote.github.owner }}/{{ remote.github.repo }}/pull/{{ commit.remote.pr_number }})\
+{% else %} ([{{ commit.id | truncate(length=7, end="") }}](https://github.com/{{ remote.github.owner }}/{{ remote.github.repo }}/commit/{{ commit.id }}))\
+{% endif %}
 {% endfor %}
 {% endfor -%}
 {% if previous.version %}
