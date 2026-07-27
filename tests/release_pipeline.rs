@@ -72,7 +72,7 @@ fn generated_changelog_uses_the_template_and_tagged_history() {
     assert_eq!(publish["with"]["body_path"], "release-notes.md");
     assert!(publish["with"]["generate_release_notes"].is_null());
 
-    assert_contains(RELEASE_TEMPLATE, "clabby/tact/main/install.sh");
+    assert_contains(RELEASE_TEMPLATE, "https://tact.clab.by/install.sh");
     assert_contains(RELEASE_TEMPLATE, "tact update");
     assert_contains(RELEASE_INSTRUCTIONS, "`git-cliff`");
 }

@@ -24,7 +24,7 @@ Silicon Macs:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf \
-  https://raw.githubusercontent.com/clabby/tact/main/install.sh | sh
+  https://tact.clab.by/install.sh | sh
 ```
 
 It verifies the release checksum and installs `tact` in `~/.local/bin` without `sudo`. Set
