@@ -231,7 +231,7 @@ fn scan(
     let outcome = if abstained {
         "abstained".to_owned()
     } else {
-        count_label(candidates.len(), "candidate")
+        count_label(candidates.len(), "candidate", "candidates")
     };
     let presentation = Presentation::new("Memory scan", query).outcome(outcome);
     if !expanded {
@@ -258,7 +258,7 @@ fn scan(
     } else if shown < candidates.len() {
         format!("{shown} of {} candidates", candidates.len())
     } else {
-        count_label(candidates.len(), "candidate")
+        count_label(candidates.len(), "candidate", "candidates")
     };
     presentation.details(details).footer(footer)
 }
@@ -278,7 +278,7 @@ fn read(
     let ResultValue::Read { memories } = result else {
         return Presentation::new("Memory read", subject);
     };
-    let count = count_label(memories.len(), "memory");
+    let count = count_label(memories.len(), "memory", "memories");
     let presentation = Presentation::new("Memory read", subject).outcome(&count);
     if !expanded {
         return presentation;
@@ -434,12 +434,8 @@ fn wrap(text: &str, width: u16, style: Style) -> Vec<Line<'static>> {
     super::super::markdown::wrap_plain(text, width, style)
 }
 
-fn count_label(count: usize, singular: &str) -> String {
-    let label = if count == 1 {
-        singular.to_owned()
-    } else {
-        format!("{singular}s")
-    };
+fn count_label(count: usize, singular: &str, plural: &str) -> String {
+    let label = if count == 1 { singular } else { plural };
     format!("{count} {label}")
 }
 
@@ -522,6 +518,21 @@ mod tests {
                     ),
                 ),
                 "Memory read  7@v2 · 1 memory",
+            ),
+            (
+                memory(
+                    json!({"operation": "read", "ids": [7, 8, 9]}),
+                    ToolState::Succeeded,
+                    Some(json!({
+                        "operation": "read",
+                        "memories": [
+                            record(7, 1, "First."),
+                            record(8, 1, "Second."),
+                            record(9, 1, "Third."),
+                        ]
+                    })),
+                ),
+                "Memory read  7, 8, 9 · 3 memories",
             ),
             (
                 memory(
