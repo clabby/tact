@@ -21,10 +21,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-const LIST_KEYS: [&str; 4] = [
+const LIST_KEYS: [&str; 5] = [
     "↑↓ move",
-    "enter/tab inspect",
-    "ctrl+d/delete remove",
+    "enter inspect",
+    "f sort",
+    "ctrl+d remove",
     "ctrl+r refresh · esc close",
 ];
 const DETAIL_KEYS: [&str; 3] = ["↑↓/pgup/pgdn scroll", "d delete", "r refresh · esc back"];
@@ -57,7 +58,51 @@ pub(super) struct MemoryBrowser {
     query: String,
     matches: Vec<usize>,
     selected_id: Option<i64>,
+    sort: SortMode,
     state: BrowserState,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SortMode {
+    MostUseful,
+    Newest,
+    Oldest,
+    LeastUseful,
+}
+
+impl SortMode {
+    const fn next(self) -> Self {
+        match self {
+            Self::MostUseful => Self::Newest,
+            Self::Newest => Self::Oldest,
+            Self::Oldest => Self::LeastUseful,
+            Self::LeastUseful => Self::MostUseful,
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::MostUseful => "Most useful",
+            Self::Newest => "Newest",
+            Self::Oldest => "Oldest",
+            Self::LeastUseful => "Least useful",
+        }
+    }
+
+    fn compare(self, left: &MemoryRecord, right: &MemoryRecord) -> std::cmp::Ordering {
+        match self {
+            Self::MostUseful => right
+                .use_count
+                .cmp(&left.use_count)
+                .then_with(|| compare_newest(left, right)),
+            Self::Newest => compare_newest(left, right),
+            Self::Oldest => compare_oldest(left, right),
+            Self::LeastUseful => left
+                .use_count
+                .cmp(&right.use_count)
+                .then_with(|| compare_oldest(left, right)),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -102,6 +147,7 @@ impl MemoryBrowser {
             query: String::new(),
             matches: Vec::new(),
             selected_id: None,
+            sort: SortMode::MostUseful,
             state: BrowserState::Loading,
         }
     }
@@ -165,6 +211,7 @@ impl MemoryBrowser {
                 }
                 ComponentUpdate::render(RenderRequest::Immediate)
             }
+            KeyCode::Char('f') if key.modifiers == KeyModifiers::NONE => self.cycle_sort(),
             KeyCode::Char('r') if key.modifiers == KeyModifiers::CONTROL => self.refresh(),
             KeyCode::Char('d') if key.modifiers == KeyModifiers::CONTROL => {
                 self.confirm_selected(ReturnView::List)
@@ -312,6 +359,13 @@ impl MemoryBrowser {
         self.rebuild_matches(fallback);
     }
 
+    fn cycle_sort(&mut self) -> ComponentUpdate<MemoryBrowserEffect> {
+        let fallback = self.selected_match_index().unwrap_or_default();
+        self.sort = self.sort.next();
+        self.rebuild_matches(fallback);
+        ComponentUpdate::render(RenderRequest::Immediate)
+    }
+
     fn rebuild_matches(&mut self, fallback: usize) {
         let query = self.query.to_lowercase();
         self.matches = self
@@ -321,6 +375,10 @@ impl MemoryBrowser {
             .filter(|(_, record)| record_matches(record, &query))
             .map(|(index, _)| index)
             .collect();
+        self.matches.sort_by(|left, right| {
+            self.sort
+                .compare(&self.records[*left], &self.records[*right])
+        });
 
         if self.selected_match_index().is_some() {
             return;
@@ -411,12 +469,16 @@ impl MemoryBrowser {
         if area.is_empty() {
             return;
         }
-        let query_width = usize::from(area.width).saturating_sub(FILTER_LABEL.width());
+        let sort = format!("  Sort: {}", self.sort.label());
+        let query_width = usize::from(area.width)
+            .saturating_sub(FILTER_LABEL.width())
+            .saturating_sub(sort.width());
         let query = visible_tail(&self.query, query_width);
         frame.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled(FILTER_LABEL, Style::default().fg(theme.muted())),
                 Span::styled(query, Style::default().fg(theme.text())),
+                Span::styled(sort, Style::default().fg(theme.muted())),
             ])),
             area,
         );
@@ -653,6 +715,19 @@ fn record_matches(record: &MemoryRecord, query: &str) -> bool {
     query.is_empty()
         || record.key.id.to_string().contains(query)
         || record.content.to_lowercase().contains(query)
+}
+
+fn compare_newest(left: &MemoryRecord, right: &MemoryRecord) -> std::cmp::Ordering {
+    right
+        .updated_at_ms
+        .cmp(&left.updated_at_ms)
+        .then_with(|| right.key.id.cmp(&left.key.id))
+}
+
+fn compare_oldest(left: &MemoryRecord, right: &MemoryRecord) -> std::cmp::Ordering {
+    left.updated_at_ms
+        .cmp(&right.updated_at_ms)
+        .then_with(|| left.key.id.cmp(&right.key.id))
 }
 
 fn list_metadata(record: &MemoryRecord) -> String {
@@ -909,7 +984,8 @@ fn place_word(word_width: usize, width: usize, lines: &mut usize, used: &mut usi
 #[cfg(test)]
 mod tests {
     use super::{
-        BrowserState, Component, MemoryBrowser, MemoryBrowserEffect, MemoryBrowserEvent, ReturnView,
+        BrowserState, Component, MemoryBrowser, MemoryBrowserEffect, MemoryBrowserEvent,
+        ReturnView, SortMode,
     };
     use crate::{
         core::extensions::memory::{MemoryKey, MemoryRecord},
@@ -930,6 +1006,22 @@ mod tests {
             use_count: 3,
             probation_until_ms: None,
         }
+    }
+
+    fn record_with_stats(id: i64, updated_at_ms: i64, use_count: u64) -> MemoryRecord {
+        MemoryRecord {
+            updated_at_ms,
+            use_count,
+            ..record(id, 1, &format!("memory {id}"))
+        }
+    }
+
+    fn ordered_ids(browser: &MemoryBrowser) -> Vec<i64> {
+        browser
+            .matches
+            .iter()
+            .map(|index| browser.records[*index].key.id)
+            .collect()
     }
 
     fn key(code: KeyCode) -> MemoryBrowserEvent {
@@ -972,21 +1064,62 @@ mod tests {
     fn filtering_and_reloads_preserve_selection_by_id() {
         let mut browser = loaded(vec![record(1, 1, "cafe moon"), record(42, 2, "cafe sun")]);
         browser.update(key(KeyCode::Down));
-        for character in "cafe".chars() {
-            browser.update(key(KeyCode::Char(character)));
-        }
-        assert_eq!(browser.selected_id, Some(42));
+        browser.update(MemoryBrowserEvent::Terminal(Event::Paste(
+            "cafe".to_owned(),
+        )));
+        assert_eq!(browser.selected_id, Some(1));
 
         browser.update(MemoryBrowserEvent::Loaded(vec![
             record(42, 2, "cafe sun"),
             record(1, 1, "cafe moon"),
         ]));
-        assert_eq!(browser.selected_id, Some(42));
+        assert_eq!(browser.selected_id, Some(1));
 
         browser.query.clear();
         browser.refresh_matches();
         browser.update(MemoryBrowserEvent::Deleted { id: 42 });
         assert_eq!(browser.selected_id, Some(1));
+    }
+
+    #[test]
+    fn sort_modes_cycle_from_usefulness_through_age_and_back() {
+        let mut browser = loaded(vec![
+            record_with_stats(1, 100, 5),
+            record_with_stats(2, 300, 1),
+            record_with_stats(3, 200, 5),
+            record_with_stats(4, 50, 0),
+        ]);
+
+        assert_eq!(browser.sort, SortMode::MostUseful);
+        assert_eq!(ordered_ids(&browser), [3, 1, 2, 4]);
+        assert!(render(&mut browser, 80, 16).contains("Sort: Most useful"));
+
+        browser.update(key(KeyCode::Char('f')));
+        assert_eq!(browser.sort, SortMode::Newest);
+        assert_eq!(ordered_ids(&browser), [2, 3, 1, 4]);
+        browser.update(MemoryBrowserEvent::Terminal(Event::Paste(
+            "memory".to_owned(),
+        )));
+        browser.update(MemoryBrowserEvent::Loaded(vec![
+            record_with_stats(4, 50, 0),
+            record_with_stats(3, 200, 5),
+            record_with_stats(2, 300, 1),
+            record_with_stats(1, 100, 5),
+        ]));
+        assert_eq!(browser.sort, SortMode::Newest);
+        assert_eq!(ordered_ids(&browser), [2, 3, 1, 4]);
+
+        browser.update(key(KeyCode::Char('f')));
+        assert_eq!(browser.sort, SortMode::Oldest);
+        assert_eq!(ordered_ids(&browser), [4, 1, 3, 2]);
+
+        browser.update(key(KeyCode::Char('f')));
+        assert_eq!(browser.sort, SortMode::LeastUseful);
+        assert_eq!(ordered_ids(&browser), [4, 2, 1, 3]);
+
+        browser.update(key(KeyCode::Char('f')));
+        assert_eq!(browser.sort, SortMode::MostUseful);
+        assert_eq!(ordered_ids(&browser), [3, 1, 2, 4]);
     }
 
     #[test]
