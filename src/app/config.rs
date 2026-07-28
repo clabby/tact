@@ -88,6 +88,7 @@ pub(crate) struct Config {
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     mcp_servers: BTreeMap<String, McpServerConfig>,
     skills: SkillsConfig,
+    memory: MemoryConfig,
     theme: Theme,
     #[serde(skip)]
     reload: ReloadSource,
@@ -161,6 +162,12 @@ pub(crate) struct SkillsConfig {
     roots: Vec<PathBuf>,
 }
 
+/// Effective global memory configuration.
+#[derive(Clone, Debug, Default, Serialize)]
+pub(crate) struct MemoryConfig {
+    enabled: bool,
+}
+
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ConfigOverrides {
     pub(crate) path: Option<PathBuf>,
@@ -198,6 +205,7 @@ struct ConfigFile {
     agent: AgentConfigFile,
     mcp_servers: BTreeMap<String, McpServerConfigFile>,
     skills: SkillsConfigFile,
+    memory: MemoryConfigFile,
     theme: Theme,
 }
 
@@ -206,6 +214,12 @@ struct ConfigFile {
 struct SkillsConfigFile {
     enabled: bool,
     roots: Vec<PathBuf>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct MemoryConfigFile {
+    enabled: bool,
 }
 
 #[derive(Deserialize)]
@@ -366,6 +380,9 @@ impl Config {
             },
             mcp_servers,
             skills,
+            memory: MemoryConfig {
+                enabled: file.memory.enabled,
+            },
             theme: file.theme,
             reload,
         })
@@ -424,6 +441,17 @@ impl Config {
 
     pub(crate) const fn skills(&self) -> &SkillsConfig {
         &self.skills
+    }
+
+    pub(crate) const fn memory(&self) -> &MemoryConfig {
+        &self.memory
+    }
+
+    pub(crate) fn memory_path(&self) -> PathBuf {
+        self.path
+            .parent()
+            .unwrap_or(Path::new("."))
+            .join("memory/v1.sqlite3")
     }
 
     pub(crate) const fn theme(&self) -> &Theme {
@@ -899,6 +927,12 @@ impl SkillsConfig {
     }
 }
 
+impl MemoryConfig {
+    pub(crate) const fn enabled(&self) -> bool {
+        self.enabled
+    }
+}
+
 impl ReasoningEffort {
     pub(crate) const ALL: [Self; 5] = [Self::Low, Self::Medium, Self::High, Self::Xhigh, Self::Max];
 
@@ -1101,6 +1135,114 @@ mod tests {
         assert_eq!(rendered["agent"]["max_subagents"].as_integer(), Some(32));
         assert_eq!(rendered["theme"]["mode"].as_str(), Some("auto"));
         assert_eq!(rendered["theme"]["dark"]["accent"].as_str(), Some("blue"));
+    }
+
+    #[test]
+    fn memory_is_disabled_by_default() {
+        let directory = tempdir().unwrap();
+        let home = directory.path().join("home");
+        let config = Config::load_with(
+            ConfigOverrides::default(),
+            Environment {
+                home: Some(home),
+                ..Environment::default()
+            },
+            directory.path(),
+        )
+        .unwrap();
+
+        assert!(!config.memory().enabled());
+
+        let rendered: toml::Value = toml::from_str(&config.to_toml().unwrap()).unwrap();
+        assert_eq!(rendered["memory"]["enabled"].as_bool(), Some(false));
+    }
+
+    #[test]
+    fn memory_can_be_enabled_from_the_config_file() {
+        let directory = tempdir().unwrap();
+        let config_path = directory.path().join("config.toml");
+        fs::write(&config_path, "[memory]\nenabled = true\n").unwrap();
+
+        let config = Config::load_with(
+            ConfigOverrides {
+                path: Some(config_path),
+                ..ConfigOverrides::default()
+            },
+            Environment {
+                codex_home: Some(directory.path().join("codex")),
+                ..Environment::default()
+            },
+            directory.path(),
+        )
+        .unwrap();
+
+        assert!(config.memory().enabled());
+
+        let rendered: toml::Value = toml::from_str(&config.to_toml().unwrap()).unwrap();
+        assert_eq!(rendered["memory"]["enabled"].as_bool(), Some(true));
+    }
+
+    #[test]
+    fn unknown_memory_fields_are_rejected() {
+        let directory = tempdir().unwrap();
+        let config_path = directory.path().join("config.toml");
+        fs::write(&config_path, "[memory]\nenabled = true\nworkspace = true\n").unwrap();
+
+        let error = Config::load_with(
+            ConfigOverrides {
+                path: Some(config_path),
+                ..ConfigOverrides::default()
+            },
+            Environment::default(),
+            directory.path(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, Error::Config(ConfigError::Parse { .. })));
+    }
+
+    #[test]
+    fn memory_path_is_global_across_workspace_changes_and_reload() {
+        let directory = tempdir().unwrap();
+        let config_dir = directory.path().join("settings");
+        let config_path = config_dir.join("config.toml");
+        fs::create_dir_all(&config_dir).unwrap();
+        fs::write(
+            &config_path,
+            "[agent]\nworkspace = \"first-workspace\"\n\n[memory]\nenabled = false\n",
+        )
+        .unwrap();
+        let config = Config::load_with(
+            ConfigOverrides {
+                path: Some(config_path.clone()),
+                ..ConfigOverrides::default()
+            },
+            Environment {
+                codex_home: Some(directory.path().join("codex")),
+                ..Environment::default()
+            },
+            directory.path(),
+        )
+        .unwrap();
+        let expected_path = config_dir.join("memory/v1.sqlite3");
+
+        assert_eq!(config.memory_path(), expected_path);
+        assert_ne!(
+            config.memory_path(),
+            config.agent().workspace().join("memory/v1.sqlite3")
+        );
+
+        fs::write(
+            &config_path,
+            "[agent]\nworkspace = \"second-workspace\"\n\n[memory]\nenabled = true\n",
+        )
+        .unwrap();
+        let (reloaded, workspace_changed) = config.reload().unwrap().into_parts();
+
+        assert!(workspace_changed);
+        assert_eq!(reloaded.agent().workspace(), config.agent().workspace());
+        assert!(reloaded.memory().enabled());
+        assert_eq!(reloaded.memory_path(), expected_path);
     }
 
     #[test]
