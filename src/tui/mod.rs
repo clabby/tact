@@ -23,7 +23,13 @@ use crate::{
         config::{Config, ReasoningEffort, ReasoningMode},
         error::{Result, RuntimeError},
     },
-    core::{ConfiguredAgent, extensions::subagents::SubagentControl},
+    core::{
+        ConfiguredAgent,
+        extensions::{
+            memory::{MemoryError, MemoryKey, MemoryRecord, MemoryStore},
+            subagents::SubagentControl,
+        },
+    },
     tui::{
         agent_events::ForwardedAgentEvent,
         components::{
@@ -52,7 +58,7 @@ use std::{
     io::{self, IsTerminal},
     path::{Path, PathBuf},
     sync::Arc,
-    time::Instant,
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
     sync::mpsc,
@@ -221,6 +227,117 @@ struct WriterCompletion {
     result: std::result::Result<(), TranscriptError>,
 }
 
+enum MemoryOperation {
+    List,
+    Delete(MemoryKey),
+}
+
+enum MemoryCompletion {
+    Listed {
+        pane: PaneId,
+        generation: u64,
+        result: std::result::Result<Vec<MemoryRecord>, String>,
+    },
+    Deleted {
+        pane: PaneId,
+        generation: u64,
+        id: i64,
+        conflict: bool,
+        result: std::result::Result<(), String>,
+    },
+}
+
+impl MemoryCompletion {
+    const fn identity(&self) -> (PaneId, u64) {
+        match self {
+            Self::Listed {
+                pane, generation, ..
+            }
+            | Self::Deleted {
+                pane, generation, ..
+            } => (*pane, *generation),
+        }
+    }
+
+    fn into_event(self) -> AppEvent {
+        match self {
+            Self::Listed {
+                pane,
+                result: Ok(records),
+                ..
+            } => AppEvent::MemoriesLoaded { pane, records },
+            Self::Listed {
+                pane,
+                result: Err(error),
+                ..
+            } => AppEvent::MemoryLoadFailed { pane, error },
+            Self::Deleted {
+                pane,
+                id,
+                result: Ok(()),
+                ..
+            } => AppEvent::MemoryDeleted { pane, id },
+            Self::Deleted {
+                pane,
+                conflict,
+                result: Err(error),
+                ..
+            } => AppEvent::MemoryDeleteFailed {
+                pane,
+                error,
+                conflict,
+            },
+        }
+    }
+}
+
+fn configured_memory_store(config: &Config) -> Option<MemoryStore> {
+    config
+        .memory()
+        .enabled()
+        .then(|| MemoryStore::new(config.memory_path()))
+}
+
+fn current_unix_ms() -> i64 {
+    let milliseconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    i64::try_from(milliseconds).unwrap_or(i64::MAX)
+}
+
+fn run_memory_operation(
+    pane: PaneId,
+    generation: u64,
+    store: &MemoryStore,
+    operation: MemoryOperation,
+) -> MemoryCompletion {
+    let now_ms = current_unix_ms();
+    match operation {
+        MemoryOperation::List => MemoryCompletion::Listed {
+            pane,
+            generation,
+            result: store.list(now_ms).map_err(|error| error.to_string()),
+        },
+        MemoryOperation::Delete(key) => {
+            let result = store.delete(key, now_ms);
+            MemoryCompletion::Deleted {
+                pane,
+                generation,
+                id: key.id,
+                conflict: matches!(result, Err(MemoryError::Conflict)),
+                result: result.map_err(|error| error.to_string()),
+            }
+        }
+    }
+}
+
+fn next_memory_generation(generations: &mut HashMap<PaneId, u64>, pane: PaneId) -> u64 {
+    let generation = generations.entry(pane).or_default();
+    *generation = generation.wrapping_add(1).max(1);
+    *generation
+}
+
 impl PaneRuntime {
     fn journal_mut(&mut self) -> Result<&mut TranscriptJournal> {
         self.journal
@@ -336,6 +453,8 @@ pub(crate) async fn run(
     root.set_reasoning_modes(reasoning_mode, preferred_reasoning_mode);
     root.set_fast_mode(initial_fast_mode);
     root.set_max_subagents(initial_max_subagents);
+    let mut memory_store = configured_memory_store(&config);
+    root.set_memory_enabled(memory_store.is_some());
     if let Some(projection) = restored_projection {
         root.install_session_projection(
             &workspace,
@@ -368,6 +487,8 @@ pub(crate) async fn run(
     let mut writer_error = None::<TranscriptError>;
     let mut writers_open = 1_usize;
     let mut shell_tasks = JoinSet::<(PaneId, ShellExecution)>::new();
+    let mut memory_tasks = JoinSet::<MemoryCompletion>::new();
+    let mut memory_generations = HashMap::<PaneId, u64>::new();
     let mut subagent_shutdowns = JoinSet::<()>::new();
     let mut subagents_stopping = false;
 
@@ -392,6 +513,9 @@ pub(crate) async fn run(
                     scheduler: &mut scheduler,
                     panes: &mut panes,
                     shell_tasks: &mut shell_tasks,
+                    memory_store: &mut memory_store,
+                    memory_tasks: &mut memory_tasks,
+                    memory_generations: &mut memory_generations,
                     subagent_shutdowns: &mut subagent_shutdowns,
                 },
             )?;
@@ -404,6 +528,7 @@ pub(crate) async fn run(
         }
         if stopping {
             shell_tasks.abort_all();
+            memory_tasks.abort_all();
         }
         if stopping && !subagents_stopping {
             for runtime in panes.values() {
@@ -758,6 +883,16 @@ pub(crate) async fn run(
                         submission,
                     )?;
                 }
+            }
+            result = memory_tasks.join_next(), if !memory_tasks.is_empty() && !stopping => {
+                let Some(Ok(completion)) = result else {
+                    continue;
+                };
+                let (pane, generation) = completion.identity();
+                if memory_generations.get(&pane) != Some(&generation) {
+                    continue;
+                }
+                schedule(app.update(completion.into_event()), &mut scheduler);
             }
             result = subagent_shutdowns.join_next(), if !subagent_shutdowns.is_empty() => {
                 drop(result);
@@ -1199,6 +1334,9 @@ struct EffectContext<'a> {
     scheduler: &'a mut RenderScheduler,
     panes: &'a mut HashMap<PaneId, PaneRuntime>,
     shell_tasks: &'a mut JoinSet<(PaneId, ShellExecution)>,
+    memory_store: &'a mut Option<MemoryStore>,
+    memory_tasks: &'a mut JoinSet<MemoryCompletion>,
+    memory_generations: &'a mut HashMap<PaneId, u64>,
     subagent_shutdowns: &'a mut JoinSet<()>,
 }
 
@@ -1389,12 +1527,48 @@ fn apply_pane_effect(
                 runtime.subagent_control.set_max_concurrency(limit);
             }
         }
+        components::RootEffect::LoadMemories => {
+            let Some(store) = context.memory_store.clone() else {
+                schedule(
+                    context.app.update(AppEvent::MemoryLoadFailed {
+                        pane,
+                        error: "Memory is disabled. Enable it with memory.enabled = true."
+                            .to_owned(),
+                    }),
+                    context.scheduler,
+                );
+                return Ok(());
+            };
+            let generation = next_memory_generation(context.memory_generations, pane);
+            context.memory_tasks.spawn_blocking(move || {
+                run_memory_operation(pane, generation, &store, MemoryOperation::List)
+            });
+        }
+        components::RootEffect::DeleteMemory(key) => {
+            let Some(store) = context.memory_store.clone() else {
+                schedule(
+                    context.app.update(AppEvent::MemoryDeleteFailed {
+                        pane,
+                        error: "Memory was disabled before the deletion completed.".to_owned(),
+                        conflict: false,
+                    }),
+                    context.scheduler,
+                );
+                return Ok(());
+            };
+            let generation = next_memory_generation(context.memory_generations, pane);
+            context.memory_tasks.spawn_blocking(move || {
+                run_memory_operation(pane, generation, &store, MemoryOperation::Delete(key))
+            });
+        }
         components::RootEffect::ReloadConfig => match context.config.reload() {
             Ok(reload) => {
                 let (config, workspace_changed) = reload.into_parts();
                 let theme = config.theme().clone();
                 let max_subagents = config.agent().max_subagents();
                 let preferred_reasoning_mode = config.agent().reasoning_mode();
+                let memory_enabled = config.memory().enabled();
+                *context.memory_store = configured_memory_store(&config);
                 context.app.set_max_subagents(max_subagents);
                 for runtime in context.panes.values() {
                     runtime
@@ -1403,15 +1577,16 @@ fn apply_pane_effect(
                 }
                 *context.config = config;
                 let message = if workspace_changed {
-                    "Reloaded config · theme applied · agent/auth settings apply to new sessions · workspace requires restart"
+                    "Reloaded config · theme and memory browser applied · agent/auth/tool settings apply to new sessions · workspace requires restart"
                 } else {
-                    "Reloaded config · theme applied · agent/auth settings apply to new sessions"
+                    "Reloaded config · theme and memory browser applied · agent/auth/tool settings apply to new sessions"
                 };
                 schedule(
                     context.app.update(AppEvent::ConfigReloaded {
                         pane,
                         theme,
                         preferred_reasoning_mode,
+                        memory_enabled,
                         message: message.to_owned(),
                     }),
                     context.scheduler,
@@ -1657,16 +1832,20 @@ fn request_render(request: RenderRequest, scheduler: &mut RenderScheduler) {
 #[cfg(test)]
 mod tests {
     use super::{
-        PaneGeneration, PaneSession, PaneSettings, PendingSubmission, close_pane_journal,
-        is_image_paste, local_link_path, open_pane, send_submission, subagent_pane,
-        update_checks_enabled, validate_interactive,
+        MemoryCompletion, MemoryOperation, PaneGeneration, PaneSession, PaneSettings,
+        PendingSubmission, close_pane_journal, configured_memory_store, current_unix_ms,
+        is_image_paste, local_link_path, next_memory_generation, open_pane, run_memory_operation,
+        send_submission, subagent_pane, update_checks_enabled, validate_interactive,
     };
     use crate::{
         app::{
             config::{Config, ConfigOverrides, ReasoningEffort, ReasoningMode},
             error::{Error, RuntimeError},
         },
-        core::extensions::subagents::{AgentId, AgentStatus, AgentUpdate},
+        core::extensions::{
+            memory::MemoryStore,
+            subagents::{AgentId, AgentStatus, AgentUpdate},
+        },
         tui::{
             pane::PaneId,
             subagent_updates::ForwardedSubagentUpdate,
@@ -1748,6 +1927,102 @@ mod tests {
                 if id == TurnId::new(3)
                     && prompt.display_text()
                         == "<local_shell_result>done</local_shell_result>\n\nexplain it"
+        ));
+    }
+
+    #[test]
+    fn disabled_memory_does_not_construct_or_open_the_database() {
+        let directory = tempdir().unwrap();
+        let config_path = directory.path().join("config.toml");
+        fs::write(&config_path, "").unwrap();
+        let config = Config::load(ConfigOverrides {
+            path: Some(config_path),
+            workspace: Some(directory.path().to_path_buf()),
+            ..ConfigOverrides::default()
+        })
+        .unwrap();
+        let memory_path = config.memory_path();
+
+        assert!(configured_memory_store(&config).is_none());
+        assert!(!memory_path.exists());
+    }
+
+    #[test]
+    fn enabled_memory_constructs_the_global_store_without_eagerly_opening_it() {
+        let directory = tempdir().unwrap();
+        let config_path = directory.path().join("config.toml");
+        fs::write(&config_path, "[memory]\nenabled = true\n").unwrap();
+        let config = Config::load(ConfigOverrides {
+            path: Some(config_path),
+            workspace: Some(directory.path().to_path_buf()),
+            ..ConfigOverrides::default()
+        })
+        .unwrap();
+        let memory_path = config.memory_path();
+
+        assert!(configured_memory_store(&config).is_some());
+        assert!(!memory_path.exists());
+    }
+
+    #[test]
+    fn memory_list_inspection_does_not_change_use_telemetry() {
+        let directory = tempdir().unwrap();
+        let store = MemoryStore::new(directory.path().join("memory.sqlite3"));
+        let now_ms = current_unix_ms();
+        store.put("inspect without using", None, now_ms).unwrap();
+
+        let MemoryCompletion::Listed {
+            pane: PaneId::Fork(4),
+            result: Ok(records),
+            ..
+        } = run_memory_operation(PaneId::Fork(4), 1, &store, MemoryOperation::List)
+        else {
+            panic!("list should complete for the originating pane");
+        };
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].scan_count, 0);
+        assert_eq!(records[0].last_scanned_at_ms, None);
+        assert_eq!(records[0].use_count, 0);
+        assert_eq!(records[0].last_used_at_ms, None);
+    }
+
+    #[test]
+    fn newer_memory_operations_supersede_older_pane_completions() {
+        let mut generations = HashMap::new();
+
+        assert_eq!(next_memory_generation(&mut generations, PaneId::Main), 1);
+        assert_eq!(next_memory_generation(&mut generations, PaneId::Fork(1)), 1);
+        assert_eq!(next_memory_generation(&mut generations, PaneId::Main), 2);
+        assert_eq!(generations[&PaneId::Main], 2);
+    }
+
+    #[test]
+    fn stale_human_delete_is_reported_to_the_originating_pane() {
+        let directory = tempdir().unwrap();
+        let store = MemoryStore::new(directory.path().join("memory.sqlite3"));
+        let now_ms = current_unix_ms();
+        let original = store.put("old value", None, now_ms).unwrap();
+        store
+            .put("new value", Some(original.key), now_ms.saturating_add(1))
+            .unwrap();
+
+        let completion = run_memory_operation(
+            PaneId::Fork(9),
+            1,
+            &store,
+            MemoryOperation::Delete(original.key),
+        );
+
+        assert!(matches!(
+            completion,
+            MemoryCompletion::Deleted {
+                pane: PaneId::Fork(9),
+                id,
+                conflict: true,
+                result: Err(error),
+                ..
+            } if id == original.key.id && error.contains("changed since it was read")
         ));
     }
 

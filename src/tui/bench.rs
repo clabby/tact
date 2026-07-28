@@ -15,6 +15,27 @@ mod app {
 
 mod core {
     pub(crate) mod extensions {
+        pub(crate) mod memory {
+            #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+            pub(crate) struct MemoryKey {
+                pub(crate) id: i64,
+                pub(crate) version: u64,
+            }
+
+            #[derive(Clone, Debug, Eq, PartialEq)]
+            pub(crate) struct MemoryRecord {
+                pub(crate) key: MemoryKey,
+                pub(crate) content: String,
+                pub(crate) created_at_ms: i64,
+                pub(crate) updated_at_ms: i64,
+                pub(crate) last_scanned_at_ms: Option<i64>,
+                pub(crate) scan_count: u64,
+                pub(crate) last_used_at_ms: Option<i64>,
+                pub(crate) use_count: u64,
+                pub(crate) probation_until_ms: Option<i64>,
+            }
+        }
+
         pub(crate) mod subagents {
             pub(crate) use crate::subagent_model::{
                 AgentDescriptor, AgentId, AgentMessage, AgentMessageUpdate, AgentStatus,

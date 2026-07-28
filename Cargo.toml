@@ -38,6 +38,7 @@ png = "0.18.1"
 ratatui = "0.30.2"
 rayon = "1.12.0"
 reqwest = { version = "0.13.4", default-features = false, features = ["rustls"] }
+rusqlite = { version = "0.40.1", features = ["bundled"] }
 self-replace = "1.5.0"
 semver = { version = "1.0.28", features = ["serde"] }
 serde = { version = "1.0.229", features = ["derive", "rc"] }

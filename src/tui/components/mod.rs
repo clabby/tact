@@ -8,6 +8,7 @@ mod effort;
 mod file_finder;
 mod floating;
 mod keybindings;
+mod memory;
 mod node;
 mod queue;
 mod root;

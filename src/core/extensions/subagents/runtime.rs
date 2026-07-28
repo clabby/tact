@@ -76,6 +76,15 @@ pub(crate) struct Registry {
     message_lock: tokio::sync::Mutex<()>,
 }
 
+/// Identifies whether a tool call belongs to a coordinating root agent.
+///
+/// Clean subagents are registered by session before they can execute a turn. Root sessions and
+/// user-created forks are intentionally absent from that map and retain mutation authority.
+#[derive(Clone)]
+pub(crate) struct RootAgentGuard {
+    registry: Weak<Registry>,
+}
+
 #[derive(Default)]
 pub(super) struct RegistryState {
     root_by_session: HashMap<String, String>,
@@ -741,6 +750,15 @@ impl Registry {
 
     pub(super) fn set_max_concurrency(&self, limit: usize) {
         self.capacity.set_limit(limit);
+    }
+
+    async fn is_root_session(&self, session_id: &str) -> bool {
+        !self
+            .state
+            .lock()
+            .await
+            .root_by_session
+            .contains_key(session_id)
     }
 
     pub(super) async fn reserve(&self, session_id: &str) -> std::io::Result<AgentReservation> {
@@ -1420,6 +1438,27 @@ impl Registry {
     }
 }
 
+impl RootAgentGuard {
+    pub(crate) fn new(registry: &Arc<Registry>) -> Self {
+        Self {
+            registry: Arc::downgrade(registry),
+        }
+    }
+
+    pub(crate) async fn require_root(&self, session_id: &str) -> std::io::Result<()> {
+        let registry = self
+            .registry
+            .upgrade()
+            .ok_or_else(|| std::io::Error::other("subagent runtime is closed"))?;
+        if registry.is_root_session(session_id).await {
+            return Ok(());
+        }
+        Err(std::io::Error::other(
+            "memory mutation is only available to root agents",
+        ))
+    }
+}
+
 fn complete_session(session: &mut ChildSession, output: Option<Value>) -> AgentStatus {
     let Some(output) = output else {
         return AgentStatus::Failed {
@@ -1544,7 +1583,7 @@ pub(crate) fn channel(
 mod tests {
     use super::{
         AgentDescriptor, AgentId, AgentStatus, ChildSession, OutputContract, Registry,
-        RegistryState, complete_session, completion_instructions, forward_events,
+        RegistryState, RootAgentGuard, complete_session, completion_instructions, forward_events,
     };
     use crate::core::extensions::subagents::{
         AgentUpdate, MessageDeliveryState, MessageDisposition, MessagePriority, MessagePurpose,
@@ -1565,7 +1604,7 @@ mod tests {
         time::Duration,
     };
     use tokio::{
-        sync::{Notify, oneshot},
+        sync::{Notify, mpsc, oneshot},
         time::timeout,
     };
     use tower::Service;
@@ -1605,6 +1644,26 @@ mod tests {
             validator: jsonschema::validator_for(&json!({})).unwrap(),
             schema: "{}".to_owned(),
         }
+    }
+
+    #[tokio::test]
+    async fn root_agent_guard_rejects_registered_child_sessions() {
+        let (updates, _updates_receiver) = mpsc::unbounded_channel();
+        let registry = Arc::new(Registry::new(updates, 1));
+        registry
+            .state
+            .lock()
+            .await
+            .root_by_session
+            .insert("child".to_owned(), "root".to_owned());
+        let guard = RootAgentGuard::new(&registry);
+
+        assert!(guard.require_root("root").await.is_ok());
+        assert!(guard.require_root("fork").await.is_ok());
+        assert_eq!(
+            guard.require_root("child").await.unwrap_err().to_string(),
+            "memory mutation is only available to root agents"
+        );
     }
 
     #[test]
