@@ -170,6 +170,11 @@ The TUI provides a direct memory browser. It reads records from the local store 
 through the model or synthesizing a memory-tool event. Browsing therefore consumes no model tokens
 and does not increment scan or read telemetry, graduate probation, or affect ranking.
 
+The browser defaults to most-useful-first order, where usefulness is the deliberate read count, not
+the number of times a scan returned the memory as a candidate. Press `f` to cycle through most
+useful, newest, oldest, and least useful. Newest and oldest use the current record version's update
+time; deterministic age ordering breaks usefulness ties.
+
 Deleting from the browser requires explicit confirmation. The browser submits the displayed
 record's expected version; if the row changed while the confirmation was open, deletion fails and
 the view reloads rather than deleting the newer value. This trusted user action bypasses the
