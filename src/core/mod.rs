@@ -323,11 +323,13 @@ mod tests {
         config::SkillsConfig,
         error::{Error, RuntimeError},
     };
-    use nanocodex::oai::{
-        ResponseError,
-        tower::{ResponsesAttempt, ResponsesServiceConfig, ResponsesServiceResponse},
+    use nanocodex::{
+        Nanocodex, OpenAi,
+        oai::{
+            ResponseError,
+            tower::{ResponsesAttempt, ResponsesServiceConfig, ResponsesServiceResponse},
+        },
     };
-    use nanocodex::{Nanocodex, OpenAi};
     use std::{
         fs,
         future::{Pending, pending},

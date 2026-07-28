@@ -1549,11 +1549,13 @@ mod tests {
     use crate::core::extensions::subagents::{
         AgentUpdate, MessageDeliveryState, MessageDisposition, MessagePriority, MessagePurpose,
     };
-    use nanocodex::oai::{
-        ResponseError,
-        tower::{ResponsesAttempt, ResponsesServiceResponse},
+    use nanocodex::{
+        Nanocodex, OpenAi,
+        oai::{
+            ResponseError,
+            tower::{ResponsesAttempt, ResponsesServiceResponse},
+        },
     };
-    use nanocodex::{Nanocodex, OpenAi};
     use serde_json::json;
     use std::{
         future::{Pending, pending},

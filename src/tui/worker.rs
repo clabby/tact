@@ -494,11 +494,13 @@ mod tests {
         app::config::ReasoningEffort,
         tui::{components::QueueId, pane::PaneId, transcript::TurnId},
     };
-    use nanocodex::oai::{
-        ResponseError,
-        tower::{ResponsesAttempt, ResponsesServiceResponse},
+    use nanocodex::{
+        AgentEvents, Nanocodex, OpenAi,
+        oai::{
+            ResponseError,
+            tower::{ResponsesAttempt, ResponsesServiceResponse},
+        },
     };
-    use nanocodex::{AgentEvents, Nanocodex, OpenAi};
     use std::{
         future::{Pending, pending},
         result::Result as StdResult,
