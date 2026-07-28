@@ -16,7 +16,7 @@ use ratatui::{
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-const ACTIONS: [Action; 12] = [
+const ACTIONS: [Action; 13] = [
     Action::Effort,
     Action::FastMode,
     Action::Theme,
@@ -26,6 +26,7 @@ const ACTIONS: [Action; 12] = [
     Action::Keybindings,
     Action::ReloadConfig,
     Action::EditConfig,
+    Action::Memory,
     Action::Subagents,
     Action::DebugContext,
     Action::Review,
@@ -42,6 +43,7 @@ pub(super) struct ActionAvailability {
     pub(super) new_session: bool,
     pub(super) fork: bool,
     pub(super) fast_mode: bool,
+    pub(super) memory: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -57,6 +59,7 @@ pub(super) enum Action {
     Keybindings,
     ReloadConfig,
     EditConfig,
+    Memory,
     DebugContext,
 }
 
@@ -220,7 +223,10 @@ impl ActionsMenu {
                 self.display_label(action),
                 Style::default().fg(label_color),
             )];
-            if let Some(alias) = action.alias() {
+            if let Some(alias) = action
+                .alias()
+                .filter(|_| enabled || action != Action::Memory)
+            {
                 spans.push(Span::styled(
                     format!(" (alias: {alias})"),
                     Style::default().fg(theme.muted()),
@@ -259,6 +265,7 @@ impl ActionsMenu {
             Action::Keybindings => true,
             Action::ReloadConfig => true,
             Action::EditConfig => true,
+            Action::Memory => self.availability.memory,
             Action::DebugContext => true,
         }
     }
@@ -276,6 +283,9 @@ impl ActionsMenu {
                 "Review changes · finish active work first"
             }
             Action::FastMode if self.availability.fast_mode => "Disable fast mode",
+            Action::Memory if !self.availability.memory => {
+                "Memory · enable in config: memory.enabled = true"
+            }
             _ => action.label(),
         }
     }
@@ -295,6 +305,7 @@ impl Action {
             Self::Keybindings => "Keyboard shortcuts",
             Self::ReloadConfig => "Reload config",
             Self::EditConfig => "Edit config",
+            Self::Memory => "Memory",
             Self::DebugContext => "Debug context",
         }
     }
@@ -310,6 +321,7 @@ impl Action {
             Self::ResumeSession => Some("restore"),
             Self::Fork => Some("btw"),
             Self::ReloadConfig => Some("refresh"),
+            Self::Memory => Some("remember/forget"),
             Self::Keybindings | Self::EditConfig | Self::DebugContext => None,
         }
     }
@@ -339,7 +351,7 @@ impl Component for ActionsMenu {
             return;
         }
 
-        let layout = Floating::new("Actions", 58, 16, &KEY_BINDINGS).render(frame, area, theme);
+        let layout = Floating::new("Actions", 58, 17, &KEY_BINDINGS).render(frame, area, theme);
         if layout.body.is_empty() {
             return;
         }
@@ -397,11 +409,12 @@ mod tests {
             new_session: true,
             fork: true,
             fast_mode: false,
+            memory: true,
         }
     }
 
     fn render(menu: &mut ActionsMenu) -> Terminal<TestBackend> {
-        let mut terminal = Terminal::new(TestBackend::new(60, 18)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(60, 19)).unwrap();
         terminal
             .draw(|frame| menu.render(frame, frame.area(), &Theme::default()))
             .unwrap();
@@ -466,22 +479,26 @@ mod tests {
         );
         assert_eq!(
             row_segment(&terminal, 12, 1, 58),
-            "│  Subagents (alias: agents)                             │"
+            "│  Memory (alias: remember/forget)                       │"
         );
         assert_eq!(
             row_segment(&terminal, 13, 1, 58),
-            "│  Debug context                                         │"
+            "│  Subagents (alias: agents)                             │"
         );
         assert_eq!(
             row_segment(&terminal, 14, 1, 58),
-            "│  Review changes (alias: review)                        │"
+            "│  Debug context                                         │"
         );
         assert_eq!(
             row_segment(&terminal, 15, 1, 58),
-            "│          ↑↓ move · enter/tab open · esc close          │"
+            "│  Review changes (alias: review)                        │"
         );
         assert_eq!(
             row_segment(&terminal, 16, 1, 58),
+            "│          ↑↓ move · enter/tab open · esc close          │"
+        );
+        assert_eq!(
+            row_segment(&terminal, 17, 1, 58),
             "╰────────────────────────────────────────────────────────╯"
         );
         assert_eq!(
@@ -681,6 +698,38 @@ mod tests {
         assert_eq!(
             menu.update(key(KeyCode::Enter)).effects,
             [ActionsEffect::Trigger(Action::DebugContext)]
+        );
+    }
+
+    #[test]
+    fn memory_aliases_are_searchable_and_disabled_state_explains_configuration() {
+        for alias in ["remember", "forget"] {
+            let mut enabled = ActionsMenu::new(available());
+            for character in alias.chars() {
+                enabled.update(key(KeyCode::Char(character)));
+            }
+            assert_eq!(
+                enabled.update(key(KeyCode::Enter)).effects,
+                [ActionsEffect::Trigger(Action::Memory)]
+            );
+        }
+
+        let mut availability = available();
+        availability.memory = false;
+        let mut disabled = ActionsMenu::new(availability);
+        for character in "memory".chars() {
+            disabled.update(key(KeyCode::Char(character)));
+        }
+        assert!(disabled.update(key(KeyCode::Enter)).effects.is_empty());
+
+        let terminal = render(&mut disabled);
+        assert_eq!(
+            row_segment(&terminal, 3, 1, 58),
+            "│› Memory · enable in config: memory.enabled = true      │"
+        );
+        assert_eq!(
+            terminal.backend().buffer()[(4, 3)].fg,
+            Theme::default().muted()
         );
     }
 

@@ -4,8 +4,11 @@ use super::{
         AgentDescriptor, AgentId, AgentStatus, AgentUpdate, MessageId, MessagePriority,
         MessagePurpose, agent_prompt,
     },
-    runtime::{AgentDirectoryEntry, AgentSummary, OutputContract, Registry, forward_events},
+    runtime::{
+        AgentDirectoryEntry, AgentSummary, OutputContract, Registry, RootAgentGuard, forward_events,
+    },
 };
+use crate::core::extensions::memory::{MemoryStore, MemoryTool};
 use nanocodex::{
     Tool, Tools,
     agent::AgentHandle,
@@ -492,8 +495,9 @@ pub(crate) fn install_tools(
     tools: Tools,
     parent: AgentHandle,
     registry: Arc<Registry>,
+    memory: Option<MemoryStore>,
 ) -> Result<Tools, ToolsBuildError> {
-    tools
+    let mut tools = tools
         .into_builder()
         .tool(SpawnAgent {
             parent,
@@ -518,8 +522,11 @@ pub(crate) fn install_tools(
         .tool(ChangeAgentLifecycle {
             registry: Arc::downgrade(&registry),
             operation: LifecycleOperation::Close,
-        })
-        .build()
+        });
+    if let Some(store) = memory {
+        tools = tools.tool(MemoryTool::new(store, RootAgentGuard::new(&registry)));
+    }
+    tools.build()
 }
 
 fn spawn_agent_output_schema() -> Value {

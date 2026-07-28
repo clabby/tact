@@ -1,5 +1,6 @@
 mod code;
 mod media;
+mod memory;
 mod patch;
 mod plan;
 mod send_message;
@@ -94,6 +95,7 @@ fn present(tool: &ToolEntry, width: u16, theme: &Theme, expanded: bool) -> Prese
         "apply_patch" => patch::present(tool, width, theme, expanded),
         "web__run" => web::present(tool, width, theme, expanded),
         "view_image" | "image_gen__imagegen" => media::present(tool, width, theme, expanded),
+        "memory" => memory::present(tool, width, theme, expanded),
         "exec" | "wait" => code::present(tool, width, theme, expanded),
         _ => generic(tool, width, theme, expanded),
     }

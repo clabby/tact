@@ -1,6 +1,7 @@
 //! Agent extensions exposed to the core runtime.
 
 mod mcp;
+pub(crate) mod memory;
 mod skills;
 pub(crate) mod subagents;
 

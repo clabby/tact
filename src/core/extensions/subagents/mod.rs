@@ -13,5 +13,5 @@ pub(crate) use model::{
     AgentUpdate, MessageDeliveryState, MessageDisposition, MessageId, MessagePriority,
     MessagePurpose, MessageSender, ScopedAgentUpdate, SubagentRuntimeId, ThreadId,
 };
-pub(crate) use runtime::{SubagentControl, channel};
+pub(crate) use runtime::{RootAgentGuard, SubagentControl, channel};
 pub(crate) use tools::install_tools;
