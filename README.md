@@ -123,6 +123,9 @@ image_generation = true
 enabled = false
 # roots = ["skills", "/path/to/shared-skills"]
 
+[memory]
+enabled = false
+
 [theme]
 mode = "auto" # auto, light, or dark
 ```
@@ -226,6 +229,25 @@ roots = ["skills", "/path/to/shared-skills"]
 When enabled, tact also searches `$CODEX_HOME/skills` (or `~/.codex/skills`) and
 `~/.agents/skills`. A new session discovers the current set of skills. Restored sessions keep the
 skill catalog they started with so their instructions remain stable.
+
+## Shared memory
+
+Tact's bounded cross-session memory is disabled by default. Opt in explicitly:
+
+```toml
+[memory]
+enabled = true
+```
+
+Memory is global to the selected Tact configuration, not scoped to a workspace. Tact stores it in
+`memory/v1.sqlite3` beside the selected `config.toml`, and agents access it only through explicit
+memory tool calls; the corpus is never inserted into prompts automatically. See the
+[global memory design](docs/memory.md) for the tool contract, limits, privacy model, and evaluation
+criteria.
+
+Config reload applies memory-browser availability immediately. Like other agent tool and prompt
+settings, the agent-facing memory setting applies when a new session starts or is restored; an
+already-running agent retains the tool surface and instructions with which it was created.
 
 ## Review changes
 
