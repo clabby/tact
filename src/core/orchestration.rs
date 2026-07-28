@@ -6,7 +6,7 @@ use crate::{
         AgentDescriptor, AgentId, AgentMessageUpdate, AgentStatus, AgentUpdate, ScopedAgentUpdate,
     },
 };
-use nanocodex::{AgentEvent, AgentEventKind};
+use nanocodex::agent::events::{AgentEvent, AgentEventKind};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -396,7 +396,7 @@ mod tests {
     use crate::core::extensions::subagents::{
         AgentDescriptor, AgentId, AgentStatus, AgentUpdate, ScopedAgentUpdate,
     };
-    use nanocodex::{AgentEvent, AgentEventKind};
+    use nanocodex::agent::events::{AgentEvent, AgentEventKind};
     use serde_json::{Value, json, value::to_raw_value};
     use std::{fs, sync::Arc};
     use tempfile::tempdir;
@@ -445,7 +445,8 @@ mod tests {
                                 "total_tokens": 10
                             }
                         }))
-                        .unwrap(),
+                        .unwrap()
+                        .into(),
                     },
                 },
             })
@@ -510,7 +511,7 @@ mod tests {
                         request_id: Arc::from("child"),
                         seq: 1,
                         kind: AgentEventKind::RunCompleted,
-                        payload: to_raw_value(&json!({ "model_calls": 1 })).unwrap(),
+                        payload: to_raw_value(&json!({ "model_calls": 1 })).unwrap().into(),
                     },
                 },
             })

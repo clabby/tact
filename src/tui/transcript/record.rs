@@ -1,5 +1,5 @@
 use crate::app::config::{ReasoningEffort, ReasoningMode};
-use nanocodex::{AgentEvent, AgentEventKind};
+use nanocodex::agent::events::{AgentEvent, AgentEventKind};
 use serde::{Deserialize, Serialize};
 use serde_json::value::{RawValue, to_raw_value};
 use std::{path::PathBuf, sync::Arc};
@@ -123,7 +123,7 @@ pub(crate) struct TranscriptRecord {
     kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     agent: Option<AgentMetadata>,
-    payload: Box<RawValue>,
+    payload: Arc<RawValue>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -237,7 +237,7 @@ impl TranscriptRecord {
             source: TACT_SOURCE.to_owned(),
             kind: kind.to_owned(),
             agent: None,
-            payload,
+            payload: payload.into(),
         })
     }
 
@@ -400,7 +400,7 @@ const fn agent_kind(kind: AgentEventKind) -> &'static str {
 mod tests {
     use super::{LocalEvent, SessionStarted, ShellId, TranscriptRecord, TurnId};
     use crate::app::config::ReasoningMode;
-    use nanocodex::{AgentEvent, AgentEventKind};
+    use nanocodex::agent::events::{AgentEvent, AgentEventKind};
     use serde_json::{json, value::to_raw_value};
     use std::sync::Arc;
 
@@ -415,7 +415,7 @@ mod tests {
                 request_id: Arc::from("session-a"),
                 seq: 4,
                 kind: AgentEventKind::AssistantDelta,
-                payload: to_raw_value(&payload).unwrap(),
+                payload: to_raw_value(&payload).unwrap().into(),
             },
         );
         let encoded = serde_json::to_value(record).unwrap();

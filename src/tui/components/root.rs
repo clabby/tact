@@ -1928,7 +1928,10 @@ mod tests {
         Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
         MouseEventKind,
     };
-    use nanocodex::{AgentEvent, AgentEventKind, PromptInput, UserInput};
+    use nanocodex::agent::{
+        events::{AgentEvent, AgentEventKind},
+        input::{PromptInput, UserInput},
+    };
     use ratatui::{
         Terminal,
         backend::TestBackend,
@@ -2010,7 +2013,8 @@ mod tests {
                     "steer_index": 1,
                     "instruction_bytes": 5,
                 }))
-                .unwrap(),
+                .unwrap()
+                .into(),
             },
         )))
     }
@@ -2028,7 +2032,7 @@ mod tests {
                 request_id: Arc::from("opaque-test-id"),
                 seq: sequence,
                 kind,
-                payload: to_raw_value(&payload).unwrap(),
+                payload: to_raw_value(&payload).unwrap().into(),
             },
         ))
     }
@@ -2183,7 +2187,8 @@ mod tests {
                             "purpose": "coordinate"
                         }
                     }))
-                    .unwrap(),
+                    .unwrap()
+                    .into(),
                 },
             ),
         )));
@@ -2356,7 +2361,8 @@ mod tests {
                     "phase": "final_answer",
                     "text": "Open [the site](https://example.com).",
                 }))
-                .unwrap(),
+                .unwrap()
+                .into(),
             },
         );
         root.update(super::RootEvent::Transcript(Arc::new(record)));

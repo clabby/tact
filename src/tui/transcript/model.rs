@@ -1137,7 +1137,7 @@ mod tests {
             LocalEvent, SessionEnded, SessionOutcome, ShellId, TranscriptRecord, TurnId,
         },
     };
-    use nanocodex::{AgentEvent, AgentEventKind};
+    use nanocodex::agent::events::{AgentEvent, AgentEventKind};
     use serde::Serialize;
     use serde_json::{json, value::to_raw_value};
     use std::sync::Arc;
@@ -1159,7 +1159,7 @@ mod tests {
                 request_id: Arc::from("session"),
                 seq: 1,
                 kind,
-                payload: to_raw_value(&payload).unwrap(),
+                payload: to_raw_value(&payload).unwrap().into(),
             },
         )
     }

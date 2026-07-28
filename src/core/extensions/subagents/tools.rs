@@ -7,8 +7,12 @@ use super::{
     runtime::{AgentDirectoryEntry, AgentSummary, OutputContract, Registry, forward_events},
 };
 use nanocodex::{
-    AgentHandle, Tool, ToolContext, ToolDefinition, ToolExecution, ToolInput, ToolResult, Tools,
-    ToolsBuildError, async_trait,
+    Tool, Tools,
+    agent::AgentHandle,
+    tools::{
+        ToolsBuildError,
+        contract::{ToolContext, ToolDefinition, ToolInput, ToolOutput, ToolResult, async_trait},
+    },
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -20,6 +24,11 @@ use tokio::sync::oneshot;
 
 const DEFAULT_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_WAIT_TIMEOUT: Duration = Duration::from_secs(300);
+const SPAWN_AGENT_TOOL: &str = "spawn_agent";
+const SUBMIT_RESULT_TOOL: &str = "submit_result";
+const SEND_AGENT_MESSAGE_TOOL: &str = "send_agent_message";
+const LIST_AGENTS_TOOL: &str = "list_agents";
+const WAIT_AGENT_TOOL: &str = "wait_agent";
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -89,7 +98,7 @@ struct LifecycleReport {
 }
 
 fn json_output(value: &impl Serialize) -> ToolResult {
-    Ok(ToolExecution::from_json(serde_json::to_value(value)?, true))
+    Ok(ToolOutput::from_json(serde_json::to_value(value)?, true))
 }
 
 struct SpawnAgent {
@@ -99,13 +108,9 @@ struct SpawnAgent {
 
 #[async_trait]
 impl Tool for SpawnAgent {
-    fn name(&self) -> &'static str {
-        "spawn_agent"
-    }
-
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::function(
-            self.name(),
+            SPAWN_AGENT_TOOL,
             "Starts a reusable clean-room subagent without inherited conversation history and immediately returns its ID.",
             json!({
                 "type": "object",
@@ -141,7 +146,7 @@ impl Tool for SpawnAgent {
             .upgrade()
             .ok_or_else(|| std::io::Error::other("subagent runtime is closed"))?;
         let capacity = registry.reserve_turn()?;
-        let reservation = registry.reserve(context.session_id).await?;
+        let reservation = registry.reserve(context.session_id()).await?;
         let id = reservation.id;
         let (child, events) = self.parent.spawn().await?;
         let session_id = events.request_id().to_owned();
@@ -202,13 +207,9 @@ struct SubmitResult {
 
 #[async_trait]
 impl Tool for SubmitResult {
-    fn name(&self) -> &'static str {
-        "submit_result"
-    }
-
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::function(
-            self.name(),
+            SUBMIT_RESULT_TOOL,
             "Submits the current subagent turn's final JSON output. Call exactly once with a value matching the output schema in the task prompt. Invalid values can be corrected and retried.",
             json!({
                 "type": "object",
@@ -243,9 +244,9 @@ impl Tool for SubmitResult {
             .upgrade()
             .ok_or_else(|| std::io::Error::other("subagent runtime is closed"))?;
         registry
-            .submit_result(context.session_id, turn_token, output)
+            .submit_result(context.session_id(), turn_token, output)
             .await?;
-        Ok(ToolExecution::from_json(json!({ "accepted": true }), true))
+        Ok(ToolOutput::from_json(json!({ "accepted": true }), true))
     }
 }
 
@@ -255,13 +256,9 @@ struct SendAgentMessage {
 
 #[async_trait]
 impl Tool for SendAgentMessage {
-    fn name(&self) -> &'static str {
-        "send_agent_message"
-    }
-
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::function(
-            self.name(),
+            SEND_AGENT_MESSAGE_TOOL,
             "Sends a bounded directed message to any other agent in the same task tree. Deferred messages start an idle agent or queue behind its active turn. If a send is queued, do not wait for it inside the current turn; finish the turn so queued messages can be delivered. Urgent messages steer a running agent at its next safe model boundary. Delegate messages replace the recipient's assigned task, retain its output schema, and require management authority.",
             json!({
                 "type": "object",
@@ -315,7 +312,7 @@ impl Tool for SendAgentMessage {
             .ok_or_else(|| std::io::Error::other("subagent runtime is closed"))?;
         let receipt = registry
             .send_message(
-                context.session_id,
+                context.session_id(),
                 agent_id,
                 priority,
                 purpose,
@@ -333,13 +330,9 @@ struct ListAgents {
 
 #[async_trait]
 impl Tool for ListAgents {
-    fn name(&self) -> &'static str {
-        "list_agents"
-    }
-
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::function(
-            self.name(),
+            LIST_AGENTS_TOOL,
             "Lists a compact directory of agents in the same task tree. Active recipients are returned by default; completed agents can be included when a follow-up message is needed.",
             json!({
                 "type": "object",
@@ -371,7 +364,7 @@ impl Tool for ListAgents {
             .ok_or_else(|| std::io::Error::other("subagent runtime is closed"))?;
         json_output(&AgentDirectory {
             agents: registry
-                .directory(context.session_id, include_completed, include_self)
+                .directory(context.session_id(), include_completed, include_self)
                 .await,
         })
     }
@@ -383,13 +376,9 @@ struct WaitAgent {
 
 #[async_trait]
 impl Tool for WaitAgent {
-    fn name(&self) -> &'static str {
-        "wait_agent"
-    }
-
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::function(
-            self.name(),
+            WAIT_AGENT_TOOL,
             "Waits until any requested subagent reaches a terminal status and returns current statuses and reports. Use one call with multiple IDs instead of polling the workspace.",
             json!({
                 "type": "object",
@@ -428,7 +417,7 @@ impl Tool for WaitAgent {
             .unwrap_or(DEFAULT_WAIT_TIMEOUT)
             .min(MAX_WAIT_TIMEOUT);
         let (agents, timed_out) = registry
-            .wait(context.session_id, &agent_ids, duration)
+            .wait(context.session_id(), &agent_ids, duration)
             .await?;
         json_output(&WaitReport { agents, timed_out })
     }
@@ -445,15 +434,17 @@ struct ChangeAgentLifecycle {
     operation: LifecycleOperation,
 }
 
-#[async_trait]
-impl Tool for ChangeAgentLifecycle {
-    fn name(&self) -> &'static str {
+impl ChangeAgentLifecycle {
+    fn tool_name(&self) -> &'static str {
         match self.operation {
             LifecycleOperation::Interrupt => "interrupt_agent",
             LifecycleOperation::Close => "close_agent",
         }
     }
+}
 
+#[async_trait]
+impl Tool for ChangeAgentLifecycle {
     fn definition(&self) -> ToolDefinition {
         let description = match self.operation {
             LifecycleOperation::Interrupt => {
@@ -464,7 +455,7 @@ impl Tool for ChangeAgentLifecycle {
             }
         };
         ToolDefinition::function(
-            self.name(),
+            self.tool_name(),
             description,
             json!({
                 "type": "object",
@@ -489,9 +480,9 @@ impl Tool for ChangeAgentLifecycle {
             .ok_or_else(|| std::io::Error::other("subagent runtime is closed"))?;
         let agents = match self.operation {
             LifecycleOperation::Interrupt => {
-                registry.interrupt(context.session_id, agent_id).await?
+                registry.interrupt(context.session_id(), agent_id).await?
             }
-            LifecycleOperation::Close => registry.close(context.session_id, agent_id).await?,
+            LifecycleOperation::Close => registry.close(context.session_id(), agent_id).await?,
         };
         json_output(&LifecycleReport { agents })
     }

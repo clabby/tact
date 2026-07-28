@@ -47,7 +47,7 @@ use components::{AppEvent, AppNode, RootNode};
 use config::{ReasoningEffort, ReasoningMode};
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
-use nanocodex::{AgentEvent, AgentEventKind};
+use nanocodex::agent::events::{AgentEvent, AgentEventKind};
 use pane::PaneId;
 use ratatui::{Terminal, backend::TestBackend};
 use serde_json::{json, value::to_raw_value};
@@ -382,7 +382,7 @@ fn agent_record(
             request_id: Arc::from("benchmark"),
             seq: sequence,
             kind,
-            payload: to_raw_value(&payload).unwrap(),
+            payload: to_raw_value(&payload).unwrap().into(),
         },
     ))
 }
@@ -404,7 +404,7 @@ fn write_session_segment(
         LocalEvent::SessionStarted(SessionStarted {
             session_id: session_id.to_owned(),
             parent_session_id: None,
-            model: nanocodex::MODEL.to_owned(),
+            model: nanocodex::oai::MODEL.to_owned(),
             effort: ReasoningEffort::Medium,
             reasoning_mode: ReasoningMode::Standard,
             fast_mode: false,
@@ -451,7 +451,7 @@ fn write_mixed_session_segment(config_path: &Path, session_id: &str, workspace: 
         LocalEvent::SessionStarted(SessionStarted {
             session_id: session_id.to_owned(),
             parent_session_id: None,
-            model: nanocodex::MODEL.to_owned(),
+            model: nanocodex::oai::MODEL.to_owned(),
             effort: ReasoningEffort::Medium,
             reasoning_mode: ReasoningMode::Standard,
             fast_mode: false,
@@ -471,7 +471,7 @@ fn write_mixed_session_segment(config_path: &Path, session_id: &str, workspace: 
 fn save_benchmark_checkpoint(config_path: &Path, session_id: &str) {
     let snapshot = serde_json::from_value(json!({
         "version": 1,
-        "model": nanocodex::MODEL,
+        "model": nanocodex::oai::MODEL,
         "lineage_id": session_id,
         "prompt_cache_key": "benchmark-cache-key",
         "workspace": "/benchmark-workspace",

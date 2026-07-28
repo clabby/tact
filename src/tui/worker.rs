@@ -4,7 +4,9 @@ use crate::{
     app::config::ReasoningEffort,
     tui::{components::QueueId, pane::PaneId, prompt::Submission, transcript::TurnId},
 };
-use nanocodex::{AgentEvents, Nanocodex, NanocodexError, SessionSnapshot, TurnControl};
+use nanocodex::{
+    AgentEvents, Nanocodex, NanocodexError, TurnControl, agent::session::SessionSnapshot,
+};
 use std::collections::{HashMap, HashSet};
 use tokio::{
     sync::mpsc,
@@ -476,10 +478,11 @@ mod tests {
         app::config::ReasoningEffort,
         tui::{components::QueueId, pane::PaneId, transcript::TurnId},
     };
-    use nanocodex::{
-        AgentEvents, Nanocodex, NanocodexError, Responses, ResponsesAttempt,
-        ResponsesServiceResponse,
+    use nanocodex::oai::{
+        ResponseError,
+        tower::{ResponsesAttempt, ResponsesServiceResponse},
     };
+    use nanocodex::{AgentEvents, Nanocodex, OpenAi};
     use std::{
         future::{Pending, pending},
         result::Result as StdResult,
@@ -502,7 +505,7 @@ mod tests {
 
     impl Service<ResponsesAttempt> for PendingService {
         type Response = ResponsesServiceResponse;
-        type Error = NanocodexError;
+        type Error = ResponseError;
         type Future = Pending<StdResult<Self::Response, Self::Error>>;
 
         fn poll_ready(&mut self, _context: &mut Context<'_>) -> Poll<StdResult<(), Self::Error>> {
@@ -517,16 +520,14 @@ mod tests {
     }
 
     fn pending_agent(called: Arc<Notify>, calls: Arc<AtomicUsize>) -> (Nanocodex, AgentEvents) {
-        let responses = Responses::builder()
+        let openai = OpenAi::builder("test-key")
             .service(move || PendingService {
                 called: Arc::clone(&called),
                 calls: Arc::clone(&calls),
             })
-            .build();
-        Nanocodex::builder("test-key")
-            .responses(responses)
             .build()
-            .unwrap()
+            .unwrap();
+        Nanocodex::builder(openai).build().unwrap()
     }
 
     #[tokio::test]

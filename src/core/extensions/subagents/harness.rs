@@ -86,7 +86,7 @@ struct Harness {
 
 struct ActiveTurn {
     control: TurnControl,
-    result: JoinHandle<nanocodex::Result<nanocodex::TurnResult>>,
+    result: JoinHandle<nanocodex::agent::Result<nanocodex::TurnResult>>,
     _capacity: TurnCapacity,
 }
 
@@ -95,7 +95,7 @@ enum HarnessEvent {
     Deferred(Option<DeliveryCommand>),
     Urgent(Option<DeliveryCommand>),
     CapacityChanged,
-    TurnFinished(Result<nanocodex::Result<nanocodex::TurnResult>, JoinError>),
+    TurnFinished(Result<nanocodex::agent::Result<nanocodex::TurnResult>, JoinError>),
 }
 
 impl HarnessHandle {
@@ -581,7 +581,7 @@ impl Harness {
 
     async fn turn_finished(
         &mut self,
-        result: Result<nanocodex::Result<nanocodex::TurnResult>, JoinError>,
+        result: Result<nanocodex::agent::Result<nanocodex::TurnResult>, JoinError>,
     ) {
         self.active = None;
         self.publish_turn_result(result).await;
@@ -589,7 +589,7 @@ impl Harness {
 
     async fn publish_turn_result(
         &self,
-        result: Result<nanocodex::Result<nanocodex::TurnResult>, JoinError>,
+        result: Result<nanocodex::agent::Result<nanocodex::TurnResult>, JoinError>,
     ) {
         let result = result.unwrap_or_else(|error| {
             Err(NanocodexError::InvalidRequest(format!(

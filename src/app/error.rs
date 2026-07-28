@@ -2,8 +2,11 @@
 
 use crate::tui::{session::SessionError, transcript::TranscriptError};
 use miette::Diagnostic;
-use nanocodex::{ChatGptAuthError, McpBuildError, NanocodexError};
-use nanocodex_core::EventError;
+use nanocodex::{
+    NanocodexError,
+    oai::{OpenAiError, auth::ChatGptAuthError, events::EventError},
+    tools::mcp::McpBuildError,
+};
 use std::{
     env::VarError, error::Error as StdError, io, path::PathBuf, result::Result as StdResult,
 };
@@ -26,6 +29,8 @@ pub(crate) enum Error {
     ExternalEditor(#[from] ExternalEditorError),
     #[error("failed to configure MCP servers: {0}")]
     Mcp(#[source] McpBuildError),
+    #[error(transparent)]
+    OpenAi(#[from] OpenAiError),
     #[error(transparent)]
     Runtime(#[from] RuntimeError),
     #[error(transparent)]
@@ -166,6 +171,8 @@ pub(crate) enum RuntimeError {
     SessionTask(#[source] tokio::task::JoinError),
     #[error("the Nanocodex worker stopped before accepting a command")]
     AgentWorkerStopped,
+    #[error("invalid Nanocodex session ID: {0}")]
+    InvalidSessionId(#[source] nanocodex::oai::session::SessionIdError),
     #[error("failed to resolve workspace {path}: {source}")]
     ResolveWorkspace {
         path: PathBuf,

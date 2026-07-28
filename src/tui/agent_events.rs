@@ -1,7 +1,7 @@
 //! Lossless forwarding for active and retiring Nanocodex event streams.
 
 use crate::tui::pane::PaneId;
-use nanocodex::{AgentEvent, AgentEvents};
+use nanocodex::{AgentEvents, agent::events::AgentEvent};
 use tokio::sync::mpsc;
 
 pub(crate) enum ForwardedAgentEvent {

@@ -906,7 +906,7 @@ impl Registry {
         &self,
         root_session_id: &str,
         id: AgentId,
-        result: nanocodex::Result<nanocodex::TurnResult>,
+        result: nanocodex::agent::Result<nanocodex::TurnResult>,
     ) {
         let status = {
             let mut state = self.state.lock().await;
@@ -1549,9 +1549,11 @@ mod tests {
     use crate::core::extensions::subagents::{
         AgentUpdate, MessageDeliveryState, MessageDisposition, MessagePriority, MessagePurpose,
     };
-    use nanocodex::{
-        Nanocodex, NanocodexError, Responses, ResponsesAttempt, ResponsesServiceResponse,
+    use nanocodex::oai::{
+        ResponseError,
+        tower::{ResponsesAttempt, ResponsesServiceResponse},
     };
+    use nanocodex::{Nanocodex, OpenAi};
     use serde_json::json;
     use std::{
         future::{Pending, pending},
@@ -1573,7 +1575,7 @@ mod tests {
 
     impl Service<ResponsesAttempt> for PendingService {
         type Response = ResponsesServiceResponse;
-        type Error = NanocodexError;
+        type Error = ResponseError;
         type Future = Pending<StdResult<Self::Response, Self::Error>>;
 
         fn poll_ready(&mut self, _context: &mut Context<'_>) -> Poll<StdResult<(), Self::Error>> {
@@ -1587,15 +1589,13 @@ mod tests {
     }
 
     fn pending_agent(called: Arc<Notify>) -> (Nanocodex, nanocodex::AgentEvents) {
-        let responses = Responses::builder()
+        let openai = OpenAi::builder("test-key")
             .service(move || PendingService {
                 called: Arc::clone(&called),
             })
-            .build();
-        Nanocodex::builder("test-key")
-            .responses(responses)
             .build()
-            .unwrap()
+            .unwrap();
+        Nanocodex::builder(openai).build().unwrap()
     }
 
     fn test_contract() -> OutputContract {

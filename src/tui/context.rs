@@ -347,7 +347,7 @@ pub(crate) fn outbound_context_snapshot(record: &TranscriptRecord) -> Option<(bo
 mod tests {
     use super::{ContextDiagnostics, ContinuationMode};
     use crate::tui::transcript::TranscriptRecord;
-    use nanocodex::{AgentEvent, AgentEventKind};
+    use nanocodex::agent::events::{AgentEvent, AgentEventKind};
     use serde_json::{Value, json, value::to_raw_value};
     use std::sync::Arc;
 
@@ -360,7 +360,7 @@ mod tests {
                 request_id: Arc::from("secret-request-id"),
                 seq: sequence,
                 kind,
-                payload: to_raw_value(&payload).unwrap(),
+                payload: to_raw_value(&payload).unwrap().into(),
             },
         )
     }

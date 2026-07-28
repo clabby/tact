@@ -15,8 +15,10 @@ use crate::{
     },
     tui::session::ResumeState,
 };
-use nanocodex::{AgentEvents, Nanocodex, NanocodexError, Responses, Tools, TurnControl};
-use nanocodex_core::ModelConfig;
+use nanocodex::{
+    AgentEvents, Nanocodex, NanocodexError, OpenAi, Tools, TurnControl, agent::session::SessionId,
+    oai::tower::ResponsesServiceConfig,
+};
 #[cfg(feature = "harbor-evals")]
 use orchestration::{OrchestrationRecorder, RunOutcome};
 use std::{
@@ -91,13 +93,14 @@ impl ConfiguredAgent {
         let mcp = mcp_provider(config)?;
         let auth = config.auth().load()?;
 
-        let mut responses = Responses::builder();
+        let mut openai = OpenAi::builder(auth);
         if let Some(url) = agent_config.websocket_url() {
-            responses = responses.websocket_url(url);
+            openai = openai.websocket_url(url);
         }
         if let Some(url) = agent_config.api_base_url() {
-            responses = responses.api_base_url(url);
+            openai = openai.api_base_url(url);
         }
+        let openai = openai.build()?;
 
         let mut tools = Tools::builder()
             .web_search(agent_config.web_search())
@@ -108,12 +111,11 @@ impl ConfiguredAgent {
         let tools = tools.build().map_err(NanocodexError::from)?;
         let (subagents, subagent_control, subagent_updates) =
             subagents::channel(agent_config.max_subagents());
-        let mut builder = Nanocodex::builder(auth)
+        let mut builder = Nanocodex::builder(openai)
             .workspace(workspace)
             .thinking(thinking.into())
             .reasoning_mode(reasoning_mode.into())
             .fast_mode(agent_config.fast_mode())
-            .responses(responses.build())
             .tools_factory(move |agent| {
                 subagents::install_tools(tools.clone(), agent, Arc::clone(&subagents))
             });
@@ -133,6 +135,9 @@ impl ConfiguredAgent {
         );
         builder = builder.instructions(Arc::clone(&instructions));
         if let Some(session_id) = session_id {
+            let session_id = session_id
+                .parse::<SessionId>()
+                .map_err(RuntimeError::InvalidSessionId)?;
             builder = builder.session_id(session_id);
         }
         if let Some(snapshot) = snapshot {
@@ -278,7 +283,7 @@ fn fresh_instructions(
     let catalog = SkillCatalog::load(skills);
     let mut instructions = custom
         .map(str::to_owned)
-        .unwrap_or_else(|| ModelConfig::default().system_prompt.to_string());
+        .unwrap_or_else(|| ResponsesServiceConfig::default().system_prompt.to_string());
     instructions.push_str("\n\n");
     instructions.push_str(DEFAULT_APPEND_INSTRUCTIONS);
     if let Some(appended) = appended {
@@ -311,14 +316,15 @@ mod tests {
         config::SkillsConfig,
         error::{Error, RuntimeError},
     };
-    use nanocodex::{
-        Nanocodex, NanocodexError, Responses, ResponsesAttempt, ResponsesServiceResponse,
+    use nanocodex::oai::{
+        ResponseError,
+        auth::{
+            OpenAiAuth, OpenAiAuthError, OpenAiAuthFuture, OpenAiAuthMode, OpenAiAuthSnapshot,
+            OpenAiAuthSource,
+        },
+        tower::{ResponsesAttempt, ResponsesServiceConfig, ResponsesServiceResponse},
     };
-    use nanocodex_core::{
-        ModelConfig, OpenAiAuth, OpenAiAuthError, OpenAiAuthFuture, OpenAiAuthMode,
-        OpenAiAuthSnapshot, OpenAiAuthSource, Thinking,
-        responses::{RequestProfile, ResponseCreate},
-    };
+    use nanocodex::{Nanocodex, OpenAi};
     use std::{
         fs,
         future::{Pending, pending},
@@ -366,7 +372,7 @@ mod tests {
 
     impl Service<ResponsesAttempt> for PendingService {
         type Response = ResponsesServiceResponse;
-        type Error = NanocodexError;
+        type Error = ResponseError;
         type Future = Pending<StdResult<Self::Response, Self::Error>>;
 
         fn poll_ready(&mut self, _context: &mut Context<'_>) -> Poll<StdResult<(), Self::Error>> {
@@ -397,7 +403,7 @@ mod tests {
     #[test]
     fn fresh_instructions_include_the_default_append() {
         let disabled = SkillsConfig::from_roots(false, Vec::new());
-        let default = ModelConfig::default().system_prompt;
+        let default = ResponsesServiceConfig::default().system_prompt;
 
         assert_eq!(
             fresh_instructions(None, None, &disabled),
@@ -412,7 +418,7 @@ mod tests {
     #[test]
     fn appended_instructions_extend_the_default_or_replacement() {
         let disabled = SkillsConfig::from_roots(false, Vec::new());
-        let default = ModelConfig::default().system_prompt;
+        let default = ResponsesServiceConfig::default().system_prompt;
 
         let instructions = fresh_instructions(None, Some("Project instructions."), &disabled);
         assert_eq!(
@@ -443,7 +449,7 @@ mod tests {
         let enabled = SkillsConfig::from_roots(true, vec![directory.path().to_path_buf()]);
 
         let instructions = fresh_instructions(None, None, &enabled);
-        let default = ModelConfig::default().system_prompt;
+        let default = ResponsesServiceConfig::default().system_prompt;
 
         assert!(instructions.starts_with(default.as_ref()));
         assert!(instructions.contains("Review code carefully."));
@@ -554,46 +560,33 @@ mod tests {
     }
 
     #[test]
-    fn chatgpt_requests_disable_response_storage() {
+    fn chatgpt_rejects_response_storage() {
         let auth = OpenAiAuth::managed_chatgpt(Arc::new(TestChatGptAuth));
-        let config = ModelConfig {
-            auth,
-            store_responses: false,
-            ..ModelConfig::default()
+        let error = match OpenAi::builder(auth).store(true).build() {
+            Ok(_) => panic!("ChatGPT response storage must be rejected"),
+            Err(error) => error,
         };
-        let profile = RequestProfile::new("session", "lineage", Arc::from([]));
 
-        let request = serde_json::to_value(ResponseCreate::warmup(
-            &config,
-            Thinking::Medium,
-            false,
-            &profile,
-            None,
-        ))
-        .unwrap();
-
-        assert_eq!(request["store"], false);
+        assert!(error.to_string().contains("does not support store: true"));
     }
 
     #[tokio::test]
     async fn cancellation_stops_the_turn_and_waits_for_the_driver() {
         let called = Arc::new(Notify::new());
         let service_called = Arc::clone(&called);
-        let responses = Responses::builder()
+        let openai = OpenAi::builder("test-key")
             .service(move || PendingService {
                 called: Arc::clone(&service_called),
             })
-            .build();
-        let (agent, events) = Nanocodex::builder("test-key")
-            .responses(responses)
             .build()
             .unwrap();
+        let (agent, events) = Nanocodex::builder(openai).build().unwrap();
         let (_registry, subagent_control, subagent_updates) =
             crate::core::extensions::subagents::channel(32);
         let configured = ConfiguredAgent {
             agent,
             events,
-            instructions: ModelConfig::default().system_prompt,
+            instructions: ResponsesServiceConfig::default().system_prompt,
             subagent_updates,
             subagent_control,
         };

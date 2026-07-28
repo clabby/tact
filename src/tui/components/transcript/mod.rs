@@ -1298,7 +1298,7 @@ mod tests {
     use crossterm::event::{
         Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     };
-    use nanocodex::{AgentEvent, AgentEventKind};
+    use nanocodex::agent::events::{AgentEvent, AgentEventKind};
     use ratatui::{Terminal, backend::TestBackend, style::Color};
     use serde_json::{json, value::to_raw_value};
     use std::{sync::Arc, time::Duration};
@@ -1343,7 +1343,7 @@ mod tests {
                 request_id: Arc::from("test"),
                 seq: sequence,
                 kind,
-                payload: to_raw_value(&payload).unwrap(),
+                payload: to_raw_value(&payload).unwrap().into(),
             },
         ))
     }
