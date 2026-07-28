@@ -211,6 +211,26 @@ impl Transcript {
         self.effort = effort;
     }
 
+    pub(super) fn render_chrome(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
+        if self.expandables_focused {
+            render_top_right_hint(frame, area, &EXPANDABLE_FOCUS_HINTS, theme.accent());
+            return;
+        }
+
+        if !matches!(self.scroll, ScrollState::Detached(_)) || self.new_updates == 0 {
+            return;
+        }
+
+        let noun = if self.new_updates == 1 {
+            "update"
+        } else {
+            "updates"
+        };
+        let label = format!("↓ {} {noun} · Ctrl+End to follow", self.new_updates);
+        let compact_label = format!("↓ {} {noun} · Ctrl+End", self.new_updates);
+        render_top_right_hint(frame, area, &[&label, &compact_label], theme.border());
+    }
+
     pub(crate) fn animation_deadline(&self) -> Option<Instant> {
         let empty = self.is_empty().then(|| self.empty_logo.deadline());
         self.tool_spinner
@@ -1102,18 +1122,6 @@ impl Component for Transcript {
             }
             y = y.saturating_add(1);
         }
-        if self.expandables_focused {
-            render_top_right_hint(frame, area, &EXPANDABLE_FOCUS_HINTS, theme.accent());
-        } else if matches!(self.scroll, ScrollState::Detached(_)) && self.new_updates > 0 {
-            let noun = if self.new_updates == 1 {
-                "update"
-            } else {
-                "updates"
-            };
-            let label = format!("↓ {} {noun} · Ctrl+End to follow", self.new_updates);
-            let compact_label = format!("↓ {} {noun} · Ctrl+End", self.new_updates);
-            render_top_right_hint(frame, area, &[&label, &compact_label], theme.border());
-        }
     }
 }
 
@@ -1396,7 +1404,10 @@ mod tests {
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
-            .draw(|frame| transcript.render(frame, frame.area(), &Theme::default()))
+            .draw(|frame| {
+                transcript.render(frame, frame.area(), &Theme::default());
+                transcript.render_chrome(frame, frame.area(), &Theme::default());
+            })
             .unwrap();
         terminal.backend().clone()
     }

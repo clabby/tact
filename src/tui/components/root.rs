@@ -513,6 +513,13 @@ impl RootNode {
                 && !self.transcript.component().expandables_focused()
                 && !self.queue.component().focused(),
         );
+        if let Some(selection_area) = self.selection_area() {
+            self.selection
+                .capture_and_render(frame.buffer_mut(), selection_area);
+        }
+        self.transcript
+            .component()
+            .render_chrome(frame, transcript_area, theme);
         if let Some(overlay) = &mut self.overlay {
             match overlay {
                 Overlay::Actions(actions) => actions.render(frame, area, theme),
@@ -529,10 +536,6 @@ impl RootNode {
                     self.subagents.render_transcript(*id, frame, area, theme);
                 }
             }
-        }
-        if let Some(selection_area) = self.selection_area() {
-            self.selection
-                .capture_and_render(frame.buffer_mut(), selection_area);
         }
         if let Some(notification) = &self.notification {
             render_notification(
@@ -3222,6 +3225,41 @@ mod tests {
 
         assert_eq!(update.effects, [RootEffect::Copy("hello".to_owned())]);
         assert!(!root.selection.is_active());
+    }
+
+    #[test]
+    fn transcript_selection_excludes_the_top_right_hint() {
+        let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        let record = TranscriptRecord::from_local(
+            1,
+            1,
+            LocalEvent::UserSubmitted {
+                id: TurnId::new(1),
+                text: ["copy this prompt"; 8].join("\n"),
+            },
+        )
+        .unwrap();
+        root.update(super::RootEvent::Transcript(Arc::new(record)));
+        root.transcript.component_mut().focus_expandables();
+        terminal
+            .draw(|frame| root.render(frame, frame.area(), &Theme::default()))
+            .unwrap();
+
+        root.update(mouse(MouseEventKind::Down(MouseButton::Left), 2, 0));
+        terminal
+            .draw(|frame| root.render(frame, frame.area(), &Theme::default()))
+            .unwrap();
+        root.update(mouse(MouseEventKind::Drag(MouseButton::Left), 39, 0));
+        terminal
+            .draw(|frame| root.render(frame, frame.area(), &Theme::default()))
+            .unwrap();
+        let update = root.update(mouse(MouseEventKind::Up(MouseButton::Left), 39, 0));
+
+        assert_eq!(
+            update.effects,
+            [RootEffect::Copy("copy this prompt".to_owned())]
+        );
     }
 
     #[test]
