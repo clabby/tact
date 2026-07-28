@@ -37,7 +37,7 @@ pulldown-cmark = { version = "0.13.4", default-features = false }
 png = "0.18.1"
 ratatui = "0.30.2"
 rayon = "1.12.0"
-reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls"] }
+reqwest = { version = "0.13.4", default-features = false, features = ["rustls"] }
 self-replace = "1.5.0"
 semver = { version = "1.0.28", features = ["serde"] }
 serde = { version = "1.0.229", features = ["derive", "rc"] }
@@ -62,6 +62,7 @@ zstd = "0.13.3"
 [dev-dependencies]
 criterion = { package = "codspeed-criterion-compat", version = "5.0.1" }
 rstest = "0.26.1"
+rustls = { version = "0.23.42", default-features = false, features = ["std"] }
 tower = "0.5.3"
 
 [build-dependencies]
