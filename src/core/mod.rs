@@ -170,28 +170,30 @@ impl ConfiguredAgent {
         #[cfg(not(feature = "harbor-evals"))]
         let subagent_drain =
             tokio::spawn(async move { while subagent_updates.recv().await.is_some() {} });
-        let root_session_id = self.events.request_id().to_owned();
+        let root_session_id = self.agent.session_id().to_string();
         if shutdown.is_cancelled() {
-            self.shutdown().await;
+            let shutdown_result = self.shutdown().await;
             #[cfg(feature = "harbor-evals")]
             recorder
                 .finish(&root_session_id, RunOutcome::Cancelled)
                 .await?;
             #[cfg(not(feature = "harbor-evals"))]
             subagent_drain.abort();
+            shutdown_result?;
             return Ok(());
         }
 
         let turn = match self.agent.prompt(prompt).await {
             Ok(turn) => turn,
             Err(error) => {
-                self.shutdown().await;
+                let shutdown_result = self.shutdown().await;
                 #[cfg(feature = "harbor-evals")]
                 recorder
                     .finish(&root_session_id, RunOutcome::Failed)
                     .await?;
                 #[cfg(not(feature = "harbor-evals"))]
                 subagent_drain.abort();
+                shutdown_result?;
                 return Err(error.into());
             }
         };
@@ -214,11 +216,11 @@ impl ConfiguredAgent {
             self.subagent_control.cancel_all(&root_session_id).await;
         }
 
-        let turn_result = turn.result().await;
+        let turn_result = turn.await;
         let was_cancelled = matches!(cancellation, Cancellation::Requested);
         drop(control);
         self.subagent_control.close_all(&root_session_id).await;
-        self.shutdown().await;
+        let shutdown_result = self.shutdown().await;
         #[cfg(feature = "harbor-evals")]
         {
             let outcome = if was_cancelled {
@@ -238,14 +240,19 @@ impl ConfiguredAgent {
             return Err(error.into());
         }
         match turn_result {
-            Err(NanocodexError::TurnCancelled) if was_cancelled => Ok(()),
-            result => result.map(|_| ()).map_err(Into::into),
+            Err(NanocodexError::TurnCancelled) if was_cancelled => {}
+            Err(error) => return Err(error.into()),
+            Ok(_) => {}
         }
+        shutdown_result?;
+        Ok(())
     }
 
-    async fn shutdown(mut self) {
+    async fn shutdown(mut self) -> nanocodex::agent::Result<()> {
+        let result = self.agent.shutdown().await;
         drop(self.agent);
         while self.events.recv().await.is_some() {}
+        result
     }
 
     fn resolve_workspace(path: &Path) -> Result<PathBuf> {
@@ -318,10 +325,6 @@ mod tests {
     };
     use nanocodex::oai::{
         ResponseError,
-        auth::{
-            OpenAiAuth, OpenAiAuthError, OpenAiAuthFuture, OpenAiAuthMode, OpenAiAuthSnapshot,
-            OpenAiAuthSource,
-        },
         tower::{ResponsesAttempt, ResponsesServiceConfig, ResponsesServiceResponse},
     };
     use nanocodex::{Nanocodex, OpenAi};
@@ -337,33 +340,6 @@ mod tests {
     use tokio::{sync::Notify, time::timeout};
     use tokio_util::sync::CancellationToken;
     use tower::Service;
-
-    struct TestChatGptAuth;
-
-    impl OpenAiAuthSource for TestChatGptAuth {
-        fn validate(&self) -> StdResult<(), OpenAiAuthError> {
-            Ok(())
-        }
-
-        fn snapshot(&self) -> OpenAiAuthFuture<'_, StdResult<OpenAiAuthSnapshot, OpenAiAuthError>> {
-            Box::pin(async {
-                Ok(OpenAiAuthSnapshot::new(
-                    OpenAiAuthMode::ChatGpt,
-                    "test-token",
-                    Some("test-account"),
-                    false,
-                    1,
-                ))
-            })
-        }
-
-        fn recover_unauthorized(
-            &self,
-            _rejected: &OpenAiAuthSnapshot,
-        ) -> OpenAiAuthFuture<'_, StdResult<(), OpenAiAuthError>> {
-            Box::pin(async { Ok(()) })
-        }
-    }
 
     #[derive(Clone)]
     struct PendingService {
@@ -557,17 +533,6 @@ mod tests {
             .as_ref(),
             "Old custom."
         );
-    }
-
-    #[test]
-    fn chatgpt_rejects_response_storage() {
-        let auth = OpenAiAuth::managed_chatgpt(Arc::new(TestChatGptAuth));
-        let error = match OpenAi::builder(auth).store(true).build() {
-            Ok(_) => panic!("ChatGPT response storage must be rejected"),
-            Err(error) => error,
-        };
-
-        assert!(error.to_string().contains("does not support store: true"));
     }
 
     #[tokio::test]

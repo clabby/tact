@@ -2069,6 +2069,15 @@ mod tests {
             2,
             AgentEventKind::ModelCallCompleted,
             json!({
+                "call_index": 1,
+                "model": "gpt-5.6-sol",
+                "attempt": 1,
+                "connection_generation": 1,
+                "status": "completed",
+                "duration_ns": 1,
+                "time_to_first_event_ns": 1,
+                "time_to_first_output_ns": 1,
+                "tool_calls": 0,
                 "usage": {
                     "input_tokens": 1_000,
                     "input_tokens_details": {"cached_tokens": 800},

@@ -6,8 +6,10 @@ use crate::{
         AgentDescriptor, AgentId, AgentMessageUpdate, AgentStatus, AgentUpdate, ScopedAgentUpdate,
     },
 };
-use nanocodex::agent::events::{AgentEvent, AgentEventKind};
-use serde::{Deserialize, Serialize};
+use nanocodex::agent::events::{
+    AgentEvent, AgentEventData, AgentEventKind, EventUsage, RunEvent, RunTerminal,
+};
+use serde::Serialize;
 use std::{
     collections::BTreeMap,
     fs::File,
@@ -128,31 +130,21 @@ struct ChildMetrics {
     model_calls: u64,
     tool_calls: u64,
     cost_usd: Option<f64>,
-    usage: TokenUsage,
-    warmup_usage: TokenUsage,
+    #[serde(with = "SerializableEventUsage")]
+    usage: EventUsage,
+    #[serde(with = "SerializableEventUsage")]
+    warmup_usage: EventUsage,
 }
 
-#[derive(Clone, Default, Deserialize, Serialize)]
-#[serde(default)]
-struct TokenUsage {
+#[derive(Serialize)]
+#[serde(remote = "EventUsage")]
+struct SerializableEventUsage {
     input_tokens: u64,
     cached_input_tokens: u64,
     cache_write_input_tokens: u64,
     output_tokens: u64,
     reasoning_output_tokens: u64,
     total_tokens: u64,
-}
-
-#[derive(Deserialize)]
-struct TerminalMetrics {
-    #[serde(default)]
-    model_calls: u64,
-    #[serde(default)]
-    cost_usd: Option<f64>,
-    #[serde(default)]
-    usage: TokenUsage,
-    #[serde(default)]
-    warmup_usage: TokenUsage,
 }
 
 impl OrchestrationRecorder {
@@ -347,34 +339,44 @@ impl ChildMetrics {
         if !event.kind.is_terminal() {
             return;
         }
-        let Ok(metrics) = event.decode_payload::<TerminalMetrics>() else {
+
+        let Ok(AgentEventData::Run(run)) = event.data() else {
             return;
         };
+        let terminal = match run {
+            RunEvent::Completed(terminal) | RunEvent::Failed(terminal) => terminal,
+            _ => return,
+        };
+
+        self.observe_terminal(&terminal);
+    }
+
+    fn observe_terminal(&mut self, terminal: &RunTerminal) {
         self.turns = self.turns.saturating_add(1);
-        self.model_calls = self.model_calls.saturating_add(metrics.model_calls);
-        if let Some(cost_usd) = metrics.cost_usd {
+        self.model_calls = self
+            .model_calls
+            .saturating_add(u64::from(terminal.metrics.model_calls));
+        if let Some(cost_usd) = terminal.cost_usd {
             *self.cost_usd.get_or_insert(0.0) += cost_usd;
         }
-        self.usage.add(&metrics.usage);
-        self.warmup_usage.add(&metrics.warmup_usage);
+        add_usage(&mut self.usage, &terminal.metrics.usage);
+        add_usage(&mut self.warmup_usage, &terminal.metrics.warmup_usage);
     }
 }
 
-impl TokenUsage {
-    fn add(&mut self, usage: &Self) {
-        self.input_tokens = self.input_tokens.saturating_add(usage.input_tokens);
-        self.cached_input_tokens = self
-            .cached_input_tokens
-            .saturating_add(usage.cached_input_tokens);
-        self.cache_write_input_tokens = self
-            .cache_write_input_tokens
-            .saturating_add(usage.cache_write_input_tokens);
-        self.output_tokens = self.output_tokens.saturating_add(usage.output_tokens);
-        self.reasoning_output_tokens = self
-            .reasoning_output_tokens
-            .saturating_add(usage.reasoning_output_tokens);
-        self.total_tokens = self.total_tokens.saturating_add(usage.total_tokens);
-    }
+fn add_usage(total: &mut EventUsage, usage: &EventUsage) {
+    total.input_tokens = total.input_tokens.saturating_add(usage.input_tokens);
+    total.cached_input_tokens = total
+        .cached_input_tokens
+        .saturating_add(usage.cached_input_tokens);
+    total.cache_write_input_tokens = total
+        .cache_write_input_tokens
+        .saturating_add(usage.cache_write_input_tokens);
+    total.output_tokens = total.output_tokens.saturating_add(usage.output_tokens);
+    total.reasoning_output_tokens = total
+        .reasoning_output_tokens
+        .saturating_add(usage.reasoning_output_tokens);
+    total.total_tokens = total.total_tokens.saturating_add(usage.total_tokens);
 }
 
 impl<'a> From<&'a AgentDescriptor> for AgentRecord<'a> {
@@ -401,6 +403,52 @@ mod tests {
     use std::{fs, sync::Arc};
     use tempfile::tempdir;
     use tokio::sync::mpsc;
+
+    fn run_terminal(model_calls: u32, cost_usd: Option<f64>) -> Value {
+        json!({
+            "status": "completed",
+            "model": "gpt-5.6-sol",
+            "reasoning_mode": "summary",
+            "effort": "high",
+            "transport": "responses_websocket_v2",
+            "orchestration": "local",
+            "duration_ms": 1,
+            "duration_ns": 1_000_000,
+            "model_calls": model_calls,
+            "steers": 0,
+            "compactions": 0,
+            "tool_calls": 0,
+            "connection_attempts": 1,
+            "websocket_reconnects": 0,
+            "response_attempts": model_calls,
+            "response_retries": 0,
+            "connection_duration_ns": 100,
+            "retry_backoff_duration_ns": 0,
+            "model_duration_ns": 900_000,
+            "compaction_duration_ns": 0,
+            "warmup_duration_ns": 100_000,
+            "tool_work_duration_ns": 0,
+            "tool_wall_duration_ns": 0,
+            "usage": {
+                "input_tokens": 100,
+                "cached_input_tokens": 60,
+                "cache_write_input_tokens": 0,
+                "output_tokens": 20,
+                "reasoning_output_tokens": 0,
+                "total_tokens": 120
+            },
+            "warmup_usage": {
+                "input_tokens": 10,
+                "cached_input_tokens": 0,
+                "cache_write_input_tokens": 0,
+                "output_tokens": 0,
+                "reasoning_output_tokens": 0,
+                "total_tokens": 10
+            },
+            "estimated_cost": null,
+            "cost_usd": cost_usd
+        })
+    }
 
     #[tokio::test]
     async fn records_child_lifecycle_and_final_cleanup_state() {
@@ -431,22 +479,7 @@ mod tests {
                         request_id: Arc::from("child"),
                         seq: 1,
                         kind: AgentEventKind::RunCompleted,
-                        payload: to_raw_value(&json!({
-                            "model_calls": 2,
-                            "cost_usd": 0.25,
-                            "usage": {
-                                "input_tokens": 100,
-                                "cached_input_tokens": 60,
-                                "output_tokens": 20,
-                                "total_tokens": 120
-                            },
-                            "warmup_usage": {
-                                "input_tokens": 10,
-                                "total_tokens": 10
-                            }
-                        }))
-                        .unwrap()
-                        .into(),
+                        payload: to_raw_value(&run_terminal(2, Some(0.25))).unwrap().into(),
                     },
                 },
             })
@@ -511,7 +544,7 @@ mod tests {
                         request_id: Arc::from("child"),
                         seq: 1,
                         kind: AgentEventKind::RunCompleted,
-                        payload: to_raw_value(&json!({ "model_calls": 1 })).unwrap().into(),
+                        payload: to_raw_value(&run_terminal(1, None)).unwrap().into(),
                     },
                 },
             })

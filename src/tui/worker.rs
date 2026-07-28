@@ -175,17 +175,21 @@ async fn run(
                     }
                     WorkerCommand::ReplaceAgent { pane, agent } => {
                         debug_assert!(!controls.keys().any(|key| key.pane == pane));
-                        match pane {
-                            PaneId::Main => main = Some(agent),
+                        let retired = match pane {
+                            PaneId::Main => main.replace(agent),
                             PaneId::Fork(_) if fork.as_ref().is_some_and(|(id, _)| *id == pane) => {
-                                fork = Some((pane, agent));
+                                fork.replace((pane, agent)).map(|(_, agent)| agent)
                             }
                             PaneId::Fork(_) => {
                                 drop(updates.send(WorkerEvent::ForkFailed {
                                     pane,
                                     error: "session pane is no longer available".to_owned(),
                                 }));
+                                Some(agent)
                             }
+                        };
+                        if let Some(retired) = retired {
+                            drop(retired.shutdown().await);
                         }
                         continue;
                     }
@@ -245,14 +249,14 @@ async fn run(
                         continue;
                     }
                     WorkerCommand::ClosePane(pane) => {
-                        cancel_pane(pane, &controls, &mut cancelled, &updates).await;
-                        match pane {
-                            PaneId::Main => main = None,
+                        let agent = match pane {
+                            PaneId::Main => main.take(),
                             PaneId::Fork(_) if fork.as_ref().is_some_and(|(id, _)| *id == pane) => {
-                                fork = None;
+                                fork.take().map(|(_, agent)| agent)
                             }
-                            PaneId::Fork(_) => {}
-                        }
+                            PaneId::Fork(_) => None,
+                        };
+                        close_pane(pane, agent, &controls, &mut cancelled, &updates).await;
                         continue;
                     }
                 };
@@ -272,7 +276,7 @@ async fn run(
                         turns.spawn(async move {
                             (
                                 key,
-                                turn.result().await.map(|result| Box::new(result.snapshot())),
+                                turn.await.map(|result| Box::new(result.snapshot())),
                             )
                         });
                         drop(updates.send(WorkerEvent::TurnAccepted { pane, id }));
@@ -293,22 +297,16 @@ async fn run(
     commands.close();
     while commands.try_recv().is_ok() {}
 
-    let pending_controls = controls.values().cloned().collect::<Vec<_>>();
-    let mut shutdown_error = None;
-    for control in pending_controls {
-        match control.cancel().await {
-            Ok(()) | Err(NanocodexError::TurnNotCancellable) => {}
-            Err(error) if shutdown_error.is_none() => shutdown_error = Some(error),
-            Err(_) => {}
-        }
-    }
+    let (main_shutdown, fork_shutdown) = tokio::join!(
+        shutdown_agent(main.take()),
+        shutdown_agent(fork.take().map(|(_, agent)| agent)),
+    );
+    let shutdown_error = main_shutdown.err().or_else(|| fork_shutdown.err());
 
     while let Some(result) = turns.join_next().await {
         finish_turn(Some(result), true, &mut controls, &mut cancelled, &updates);
     }
 
-    drop(main);
-    drop(fork);
     drop(updates.send(WorkerEvent::Stopped {
         error: shutdown_error,
     }));
@@ -357,14 +355,7 @@ async fn steer_turn(
                 pane,
                 id: fallback_id,
             };
-            turns.spawn(async move {
-                (
-                    key,
-                    turn.result()
-                        .await
-                        .map(|result| Box::new(result.snapshot())),
-                )
-            });
+            turns.spawn(async move { (key, turn.await.map(|result| Box::new(result.snapshot()))) });
             controls.insert(key, control);
             drop(updates.send(WorkerEvent::TurnAccepted {
                 pane,
@@ -469,6 +460,31 @@ async fn cancel_pane(
     let count = keys.len();
     cancelled.extend(keys);
     drop(updates.send(WorkerEvent::TurnsCancelled { pane, count, error }));
+}
+
+async fn close_pane(
+    pane: PaneId,
+    agent: Option<Nanocodex>,
+    controls: &HashMap<TurnKey, TurnControl>,
+    cancelled: &mut HashSet<TurnKey>,
+    updates: &mpsc::UnboundedSender<WorkerEvent>,
+) {
+    let (keys, mut error) = cancel_turns(controls, Some(pane)).await;
+    let count = keys.len();
+    cancelled.extend(keys);
+    if let Err(shutdown_error) = shutdown_agent(agent).await
+        && error.is_none()
+    {
+        error = Some(shutdown_error.to_string());
+    }
+    drop(updates.send(WorkerEvent::TurnsCancelled { pane, count, error }));
+}
+
+async fn shutdown_agent(agent: Option<Nanocodex>) -> Result<(), NanocodexError> {
+    let Some(agent) = agent else {
+        return Ok(());
+    };
+    agent.shutdown().await
 }
 
 #[cfg(test)]
@@ -859,6 +875,65 @@ mod tests {
             .await
             .expect("the event stream should drain")
             .expect("the drain task should not panic");
+    }
+
+    #[tokio::test]
+    async fn closing_a_pane_waits_for_agent_cleanup() {
+        let called = Arc::new(Notify::new());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (agent, mut events) = pending_agent(Arc::clone(&called), calls);
+        let shutdown = CancellationToken::new();
+        let (commands, mut updates) = spawn(agent, shutdown.clone());
+        let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
+
+        commands
+            .send(WorkerCommand::Submit {
+                pane: PaneId::Main,
+                id: TurnId::new(1),
+                prompt: "close this pane".to_owned().into(),
+            })
+            .unwrap();
+        timeout(Duration::from_secs(5), called.notified())
+            .await
+            .expect("the model request should start");
+        assert!(matches!(
+            updates.recv().await,
+            Some(WorkerEvent::TurnAccepted { id, .. }) if id == TurnId::new(1)
+        ));
+
+        commands
+            .send(WorkerCommand::ClosePane(PaneId::Main))
+            .unwrap();
+        timeout(Duration::from_secs(5), async {
+            let mut acknowledged = false;
+            let mut finished = false;
+            while !acknowledged || !finished {
+                match updates.recv().await {
+                    Some(WorkerEvent::TurnsCancelled {
+                        count: 1,
+                        error: None,
+                        ..
+                    }) => acknowledged = true,
+                    Some(WorkerEvent::TurnFinished {
+                        id, error: None, ..
+                    }) if id == TurnId::new(1) => finished = true,
+                    Some(_) => {}
+                    None => panic!("worker stopped before the pane closed"),
+                }
+            }
+        })
+        .await
+        .expect("the pane should close");
+        timeout(Duration::from_secs(5), drain)
+            .await
+            .expect("the event stream should close after agent shutdown")
+            .expect("the drain task should not panic");
+
+        shutdown.cancel();
+        assert!(matches!(
+            timeout(Duration::from_secs(5), updates.recv()).await,
+            Ok(Some(WorkerEvent::Stopped { error: None }))
+        ));
     }
 
     #[tokio::test]

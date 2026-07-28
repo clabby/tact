@@ -1,6 +1,11 @@
 //! Content-free context diagnostics projected from transcript telemetry.
 
 use crate::tui::transcript::TranscriptRecord;
+use nanocodex::oai::{
+    self,
+    events::{CompactionStarted, ModelCallCompleted},
+    responses::Usage,
+};
 use serde::Deserialize;
 use serde_json::value::RawValue;
 
@@ -10,7 +15,7 @@ pub(crate) enum ContinuationMode {
     PreviousResponse,
 }
 
-pub(crate) const MODEL_WINDOW_TOKENS: u64 = 272_000;
+pub(crate) const MODEL_WINDOW_TOKENS: u64 = oai::CONTEXT_WINDOW_TOKENS;
 pub(crate) const AUTO_COMPACT_TOKEN_LIMIT: u64 = 244_800;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -155,7 +160,7 @@ impl ContextDiagnostics {
         let usage = event
             .response
             .and_then(|response| response.usage)
-            .map(Usage::into_tokens);
+            .map(usage_into_tokens);
         let completed_tokens = usage.map(|usage| usage.total);
         self.set_usage(usage);
         ContextObservation { completed_tokens }
@@ -165,7 +170,7 @@ impl ContextDiagnostics {
         let Ok(payload) = record.decode_payload::<ModelCallCompleted>() else {
             return;
         };
-        self.set_usage(payload.usage.map(Usage::into_tokens));
+        self.set_usage(payload.usage.map(usage_into_tokens));
     }
 
     fn observe_context_snapshot(&mut self, record: &TranscriptRecord) {
@@ -198,8 +203,8 @@ impl ContextDiagnostics {
         let before_tokens = payload
             .as_ref()
             .map(|payload| payload.active_context_tokens);
-        if let Some(limit) = payload.and_then(|payload| payload.auto_compact_token_limit) {
-            self.auto_compact_token_limit = limit;
+        if let Some(payload) = payload {
+            self.auto_compact_token_limit = payload.auto_compact_token_limit;
         }
         self.compactions_started = self.compactions_started.saturating_add(1);
         self.last_compaction = Some(CompactionDiagnostics {
@@ -255,49 +260,17 @@ struct ContextSnapshot {
     previous_response: bool,
 }
 
-#[derive(Deserialize)]
-struct ModelCallCompleted {
-    usage: Option<Usage>,
-}
-
-#[derive(Deserialize)]
-struct CompactionStarted {
-    active_context_tokens: u64,
-    #[serde(default)]
-    auto_compact_token_limit: Option<u64>,
-}
-
-#[derive(Clone, Copy, Deserialize)]
-struct Usage {
-    #[serde(default)]
-    input_tokens: u64,
-    #[serde(default)]
-    input_tokens_details: Option<InputTokenDetails>,
-    #[serde(default)]
-    output_tokens: u64,
-    #[serde(default)]
-    total_tokens: u64,
-}
-
-impl Usage {
-    fn into_tokens(self) -> TokenUsage {
-        let cached_input = self
-            .input_tokens_details
-            .map_or(0, |details| details.cached_tokens);
-        TokenUsage {
-            input: self.input_tokens,
-            cached_input,
-            uncached_input: self.input_tokens.saturating_sub(cached_input),
-            output: self.output_tokens,
-            total: self.total_tokens,
-        }
+fn usage_into_tokens(usage: Usage) -> TokenUsage {
+    let cached_input = usage
+        .input_tokens_details
+        .map_or(0, |details| details.cached_tokens);
+    TokenUsage {
+        input: usage.input_tokens,
+        cached_input,
+        uncached_input: usage.input_tokens.saturating_sub(cached_input),
+        output: usage.output_tokens,
+        total: usage.total_tokens,
     }
-}
-
-#[derive(Clone, Copy, Deserialize)]
-struct InputTokenDetails {
-    #[serde(default)]
-    cached_tokens: u64,
 }
 
 fn raw_value_is_string(value: &RawValue) -> bool {
@@ -369,6 +342,22 @@ mod tests {
         json!({"direction": direction, "phase": "generation", "event": event})
     }
 
+    fn model_call_completed(usage: Value) -> Value {
+        json!({
+            "call_index": 1,
+            "model": "gpt-5.6-sol",
+            "response_id": "secret-continuation-token",
+            "attempt": 1,
+            "connection_generation": 1,
+            "status": "completed",
+            "duration_ns": 1,
+            "time_to_first_event_ns": 1,
+            "time_to_first_output_ns": 1,
+            "tool_calls": 0,
+            "usage": usage
+        })
+    }
+
     #[test]
     fn complete_telemetry_projects_only_safe_facts_and_counts() {
         let records = [
@@ -389,21 +378,19 @@ mod tests {
                 2,
                 2,
                 AgentEventKind::ModelCallCompleted,
-                json!({
-                    "response_id": "secret-continuation-token",
-                    "usage": {
+                model_call_completed(json!({
                         "input_tokens": 1_000,
                         "input_tokens_details": {"cached_tokens": 750},
                         "output_tokens": 80,
                         "total_tokens": 1_080
-                    }
-                }),
+                })),
             ),
             agent(
                 3,
                 100,
                 AgentEventKind::ModelCompactionStarted,
                 json!({
+                    "after_model_call_index": 1,
                     "active_context_tokens": 900,
                     "auto_compact_token_limit": 200_000,
                     "previous_response_id": "secret-response-id"
@@ -421,9 +408,9 @@ mod tests {
                 5,
                 120,
                 AgentEventKind::ModelCallCompleted,
-                json!({
-                    "usage": {"input_tokens": 400, "output_tokens": 20, "total_tokens": 420}
-                }),
+                model_call_completed(
+                    json!({"input_tokens": 400, "output_tokens": 20, "total_tokens": 420}),
+                ),
             ),
         ];
         let diagnostics = ContextDiagnostics::rebuild(records.iter());
@@ -436,7 +423,10 @@ mod tests {
         assert_eq!(diagnostics.usage.unwrap().total, 420);
         assert_eq!(diagnostics.compactions_started, 1);
         assert_eq!(diagnostics.compactions_completed, 1);
-        assert_eq!(diagnostics.model_window_tokens, 272_000);
+        assert_eq!(
+            diagnostics.model_window_tokens,
+            nanocodex::oai::CONTEXT_WINDOW_TOKENS
+        );
         assert_eq!(diagnostics.auto_compact_token_limit, 200_000);
         assert_eq!(
             diagnostics.last_compaction.unwrap().before_tokens,

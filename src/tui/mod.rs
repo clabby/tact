@@ -300,7 +300,7 @@ pub(crate) async fn run(
         subagent_updates,
         subagent_control,
     } = configured;
-    let main_session_id = events.request_id().to_owned();
+    let main_session_id = agent.session_id().to_string();
     let (writer_sender, mut writer_updates) = mpsc::unbounded_channel();
     let mut panes = HashMap::new();
     panes.insert(

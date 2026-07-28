@@ -216,7 +216,7 @@ impl Harness {
                 }
                 HarnessEvent::Command(None) => {
                     self.fail_pending("subagent harness stopped").await;
-                    drop(self.stop_active().await);
+                    drop(self.close().await);
                     return;
                 }
                 HarnessEvent::Deferred(Some(command)) => {
@@ -554,7 +554,7 @@ impl Harness {
             }
         };
         let control = turn.control();
-        let result = tokio::spawn(async move { turn.result().await });
+        let result = tokio::spawn(turn);
         self.active = Some(ActiveTurn {
             control,
             result,
@@ -564,12 +564,11 @@ impl Harness {
     }
 
     async fn stop_active(&mut self) -> std::io::Result<()> {
-        let Some(mut active) = self.active.take() else {
+        let Some(active) = self.active.as_ref() else {
             return Ok(());
         };
         let cancellation = active.control.cancel().await;
-        let result = (&mut active.result).await;
-        self.publish_turn_result(result).await;
+        self.finish_active().await;
         match cancellation {
             Ok(()) | Err(NanocodexError::TurnNotCancellable) => Ok(()),
             Err(error) => Err(std::io::Error::other(format!(
@@ -577,6 +576,14 @@ impl Harness {
                 self.id
             ))),
         }
+    }
+
+    async fn finish_active(&mut self) {
+        let Some(mut active) = self.active.take() else {
+            return;
+        };
+        let result = (&mut active.result).await;
+        self.publish_turn_result(result).await;
     }
 
     async fn turn_finished(
@@ -604,13 +611,18 @@ impl Harness {
     }
 
     async fn close(&mut self) -> std::io::Result<()> {
-        let stop_result = self.stop_active().await;
-        self.agent = None;
+        let shutdown_result = match self.agent.take() {
+            Some(agent) => agent.shutdown().await.map_err(|error| {
+                std::io::Error::other(format!("could not close agent {}: {error}", self.id))
+            }),
+            None => Ok(()),
+        };
+        self.finish_active().await;
         if let Some(registry) = self.registry.upgrade() {
             registry
                 .harness_closed(&self.root_session_id, self.id)
                 .await;
         }
-        stop_result
+        shutdown_result
     }
 }

@@ -149,7 +149,7 @@ impl Tool for SpawnAgent {
         let reservation = registry.reserve(context.session_id()).await?;
         let id = reservation.id;
         let (child, events) = self.parent.spawn().await?;
-        let session_id = events.request_id().to_owned();
+        let session_id = child.session_id().to_string();
         let descriptor = AgentDescriptor {
             id,
             session_id,
