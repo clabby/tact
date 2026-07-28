@@ -3,7 +3,7 @@ use crate::{
     app::config::ReasoningEffort,
     tui::transcript::{LocalEvent, SessionStarted, TranscriptRecord},
 };
-use nanocodex::AgentEvent;
+use nanocodex::agent::events::AgentEvent;
 use std::{
     fs::{self, File, OpenOptions},
     io::{self, BufRead, BufReader, BufWriter, Write},

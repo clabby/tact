@@ -4,7 +4,7 @@ use crate::app::{
     config::{Config, McpServerConfig},
     error::{Error, Result},
 };
-use nanocodex::{Mcp, McpServer};
+use nanocodex::tools::mcp::{Mcp, McpServer};
 use std::{env, env::VarError};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
@@ -94,7 +94,7 @@ mod tests {
         config::{Config, ConfigOverrides},
         error::Error,
     };
-    use nanocodex::McpBuildError;
+    use nanocodex::tools::mcp::McpBuildError;
     #[cfg(unix)]
     use std::os::unix::ffi::OsStringExt;
     use std::{env::VarError, ffi::OsString, fs};

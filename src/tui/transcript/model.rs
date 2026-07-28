@@ -9,6 +9,13 @@ use crate::{
     },
     tui::format::{format_duration, humanize_tool},
 };
+use nanocodex::{
+    agent::events::{
+        AssistantDelta, AssistantMessage, CompactionCompleted, CompactionFailed,
+        ReasoningSummaryDelta, RunError,
+    },
+    oai::responses::MessagePhase as AgentMessagePhase,
+};
 use serde::Deserialize;
 use serde_json::Value;
 use std::{
@@ -428,8 +435,8 @@ impl TranscriptModel {
     }
 
     fn assistant_delta(&mut self, record: &TranscriptRecord) -> Result<bool, serde_json::Error> {
-        let payload = record.decode_payload::<AssistantPayload>()?;
-        let phase = MessagePhase::from(payload.phase.as_deref());
+        let payload = record.decode_payload::<AssistantDelta>()?;
+        let phase = message_phase(payload.phase);
         let key = AssistantKey {
             call: payload.model_call_index,
             item: payload.item_id,
@@ -457,8 +464,8 @@ impl TranscriptModel {
     }
 
     fn assistant_message(&mut self, record: &TranscriptRecord) -> Result<bool, serde_json::Error> {
-        let payload = record.decode_payload::<AssistantPayload>()?;
-        let phase = MessagePhase::from(payload.phase.as_deref());
+        let payload = record.decode_payload::<AssistantMessage>()?;
+        let phase = message_phase(payload.phase);
         let key = AssistantKey {
             call: payload.model_call_index,
             item: payload.item_id,
@@ -492,7 +499,7 @@ impl TranscriptModel {
     }
 
     fn reasoning_delta(&mut self, record: &TranscriptRecord) -> Result<bool, serde_json::Error> {
-        let payload = record.decode_payload::<ReasoningPayload>()?;
+        let payload = record.decode_payload::<ReasoningSummaryDelta>()?;
         let id = self
             .reasoning
             .get(&payload.model_call_index)
@@ -640,7 +647,7 @@ impl TranscriptModel {
         &mut self,
         record: &TranscriptRecord,
     ) -> Result<bool, serde_json::Error> {
-        let payload = record.decode_payload::<DurationPayload>()?;
+        let payload = record.decode_payload::<CompactionCompleted>()?;
         self.push(EntryKind::ContextCompacted {
             duration_ns: payload.duration_ns,
         });
@@ -649,7 +656,7 @@ impl TranscriptModel {
     }
 
     fn compaction_failed(&mut self, record: &TranscriptRecord) -> Result<bool, serde_json::Error> {
-        let payload = record.decode_payload::<ErrorPayload>()?;
+        let payload = record.decode_payload::<CompactionFailed>()?;
         self.pending_compaction_error = Some(payload.error.clone());
         self.pending_error = Some(payload.error);
         self.transient = self.is_active().then_some(TransientStatus::Thinking);
@@ -898,6 +905,13 @@ fn delivery_advances(current: &MessageDeliveryState, next: &MessageDeliveryState
     current != next && matches!(current, MessageDeliveryState::Admitted { .. })
 }
 
+fn message_phase(phase: Option<AgentMessagePhase>) -> MessagePhase {
+    match phase {
+        Some(AgentMessagePhase::Commentary) => MessagePhase::Commentary,
+        Some(AgentMessagePhase::FinalAnswer) | None => MessagePhase::Final,
+    }
+}
+
 fn visibility(source: &str, kind: &str) -> EventVisibility {
     if source == "tact" {
         return match kind {
@@ -1062,25 +1076,6 @@ struct SessionEnded {
 }
 
 #[derive(Deserialize)]
-struct AssistantPayload {
-    model_call_index: u32,
-    item_id: Option<String>,
-    phase: Option<String>,
-    text: String,
-}
-
-#[derive(Deserialize)]
-struct ReasoningPayload {
-    model_call_index: u32,
-    text: String,
-}
-
-#[derive(Deserialize)]
-struct RunError {
-    message: String,
-}
-
-#[derive(Deserialize)]
 struct ToolCallPayload {
     call_id: String,
     tool: String,
@@ -1095,11 +1090,6 @@ struct ToolResultPayload {
     duration_ns: u64,
     result: Value,
     metadata: Option<Value>,
-}
-
-#[derive(Deserialize)]
-struct DurationPayload {
-    duration_ns: u64,
 }
 
 #[derive(Deserialize)]
@@ -1137,7 +1127,7 @@ mod tests {
             LocalEvent, SessionEnded, SessionOutcome, ShellId, TranscriptRecord, TurnId,
         },
     };
-    use nanocodex::{AgentEvent, AgentEventKind};
+    use nanocodex::agent::events::{AgentEvent, AgentEventKind};
     use serde::Serialize;
     use serde_json::{json, value::to_raw_value};
     use std::sync::Arc;
@@ -1159,7 +1149,7 @@ mod tests {
                 request_id: Arc::from("session"),
                 seq: 1,
                 kind,
-                payload: to_raw_value(&payload).unwrap(),
+                payload: to_raw_value(&payload).unwrap().into(),
             },
         )
     }
@@ -1429,6 +1419,30 @@ mod tests {
         assert!(matches!(
             &model.entries()[0].kind,
             EntryKind::Reasoning { text } if text == "Inspecting the request and event ordering"
+        ));
+    }
+
+    #[test]
+    fn canonical_compaction_events_use_typed_projection() {
+        let mut model = TranscriptModel::default();
+        model.apply(&agent(AgentEventKind::RunStarted, json!({})));
+        model.apply(&agent(
+            AgentEventKind::ModelCompactionCompleted,
+            json!({
+                "after_model_call_index": 1,
+                "attempt": 1,
+                "connection_generation": 1,
+                "status": "completed",
+                "duration_ns": 42,
+                "time_to_first_event_ns": 10,
+                "time_to_first_output_ns": 20,
+                "usage": null
+            }),
+        ));
+
+        assert!(matches!(
+            model.entries().last().map(|entry| &entry.kind),
+            Some(EntryKind::ContextCompacted { duration_ns: 42 })
         ));
     }
 

@@ -981,6 +981,11 @@ mod tests {
     }
 
     #[test]
+    fn resolves_one_process_tls_provider() {
+        rustls::ClientConfig::builder();
+    }
+
+    #[test]
     fn parses_v_prefixed_semver_and_compares_by_semver() {
         let release = release("v1.2.3", &[]);
         assert_eq!(release.version, Version::new(1, 2, 3));

@@ -1,4 +1,4 @@
-use nanocodex::AgentEvent;
+use nanocodex::agent::events::AgentEvent;
 use serde::{Deserialize, Serialize};
 use std::{
     fmt,

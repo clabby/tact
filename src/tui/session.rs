@@ -7,7 +7,7 @@ use crate::{
         transcript::{self, LocalEvent, SessionStarted, TranscriptRecord},
     },
 };
-use nanocodex::SessionSnapshot;
+use nanocodex::agent::session::SessionSnapshot;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -988,7 +988,10 @@ mod tests {
         app::config::{ReasoningEffort, ReasoningMode},
         tui::transcript::{LocalEvent, SessionStarted, TranscriptJournal, TurnId},
     };
-    use nanocodex::{AgentEvent, AgentEventKind, SessionSnapshot};
+    use nanocodex::agent::{
+        events::{AgentEvent, AgentEventKind},
+        session::SessionSnapshot,
+    };
     use serde_json::{Value, json, value::to_raw_value};
     use std::{fs, io::Write, path::Path, sync::Arc};
     use tempfile::tempdir;
@@ -996,7 +999,7 @@ mod tests {
     fn snapshot(lineage: &str) -> SessionSnapshot {
         serde_json::from_value(json!({
             "version": 1,
-            "model": nanocodex::MODEL,
+            "model": nanocodex::oai::MODEL,
             "lineage_id": lineage,
             "prompt_cache_key": "test-cache-key",
             "workspace": "/work",
@@ -1046,6 +1049,16 @@ mod tests {
     fn checkpoint_filenames_are_distinct_and_path_safe() {
         assert_eq!(encode_filename("a/b"), "612f62");
         assert_ne!(encode_filename("a/b"), encode_filename("a_b"));
+    }
+
+    #[test]
+    fn nanocodex_0_2_snapshot_shape_remains_compatible() {
+        let snapshot = serde_json::to_value(snapshot("legacy-lineage")).unwrap();
+
+        assert_eq!(snapshot["version"], 1);
+        assert_eq!(snapshot["lineage_id"], "legacy-lineage");
+        assert!(snapshot.get("base_instructions").is_none());
+        assert!(snapshot.get("context_snapshot").is_none());
     }
 
     #[test]
@@ -1226,7 +1239,7 @@ mod tests {
                     request_id: Arc::from("request"),
                     seq: u64::try_from(sequence).unwrap(),
                     kind: AgentEventKind::ApiEvent,
-                    payload: to_raw_value(&payload).unwrap(),
+                    payload: to_raw_value(&payload).unwrap().into(),
                 })
                 .unwrap();
         }
@@ -1268,7 +1281,7 @@ mod tests {
                     request_id: Arc::from("request"),
                     seq: sequence,
                     kind,
-                    payload: to_raw_value(&payload).unwrap(),
+                    payload: to_raw_value(&payload).unwrap().into(),
                 })
                 .unwrap();
         }
@@ -1365,7 +1378,7 @@ mod tests {
                     request_id: Arc::from("request"),
                     seq: sequence,
                     kind,
-                    payload: to_raw_value(&payload).unwrap(),
+                    payload: to_raw_value(&payload).unwrap().into(),
                 })
                 .unwrap();
         }

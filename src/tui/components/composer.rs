@@ -19,7 +19,7 @@ use crate::{
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use history::PromptHistory;
 use layout::{VisualLayout, byte_at_column};
-use nanocodex::MODEL;
+use nanocodex::oai::MODEL;
 use ratatui::{
     Frame,
     buffer::Buffer,
@@ -1147,7 +1147,7 @@ mod tests {
         tui::theme::Theme,
     };
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
-    use nanocodex::{PromptInput, UserInput};
+    use nanocodex::agent::input::{PromptInput, UserInput};
     use ratatui::{Terminal, backend::TestBackend, layout::Position, style::Color};
     use std::{
         path::Path,

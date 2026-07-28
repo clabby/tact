@@ -1,6 +1,6 @@
 //! Displayable prompt text paired with model-only image content.
 
-use nanocodex::{Prompt, UserInput};
+use nanocodex::agent::input::{Prompt, UserInput};
 use std::{fmt, ops::Range};
 
 #[derive(Clone, Eq, PartialEq)]
@@ -113,7 +113,7 @@ impl From<String> for Submission {
 #[cfg(test)]
 mod tests {
     use super::Submission;
-    use nanocodex::{PromptInput, UserInput};
+    use nanocodex::agent::input::{PromptInput, UserInput};
 
     #[test]
     fn multimodal_prompt_replaces_markers_with_ordered_images() {
