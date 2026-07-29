@@ -49,6 +49,14 @@ test("the changed-file wrapper owns the tree's available height", async () => {
   expect(navigation).toMatch(/height:\s*100%/);
 });
 
+test("the desktop file tree has room for paths and change totals", async () => {
+  const styles = await Bun.file(new URL("styles.css", import.meta.url)).text();
+  const changesPanel = styles.match(/\.changes-panel\.active\s*{([^}]*)}/)?.[1];
+
+  expect(changesPanel).toBeDefined();
+  expect(changesPanel).toMatch(/grid-template-columns:\s*320px\s+minmax\(0,\s*1fr\)/);
+});
+
 test("dark surfaces are neutral while green remains an accent", async () => {
   const styles = await Bun.file(new URL("styles.css", import.meta.url)).text();
 
