@@ -127,6 +127,7 @@ pub(crate) enum RootEvent {
     Subagent(AgentUpdate),
     ReplaceDraft(String),
     ReviewStarted,
+    ReviewOverviewStarted,
     ReviewCancelled,
     ReviewFinished(String),
     ReviewFailed(String),
@@ -752,6 +753,9 @@ impl RootNode {
             };
         }
         if self.transcript.component().expandables_focused() {
+            return ComponentUpdate::none();
+        }
+        if self.review_active && is_plain_enter(&event) {
             return ComponentUpdate::none();
         }
         self.update_composer(ComposerEvent::Terminal(event), RenderRequest::Immediate)
@@ -1617,6 +1621,8 @@ impl Component for RootNode {
             ),
             RootEvent::Transcript(record) => {
                 let steer_applied = record.kind() == "run.steered";
+                let review_started = self.review_active && record.kind() == "run.started";
+                let review_completed = self.review_active && record.kind() == "run.completed";
                 let turn_timer = turn_timer_event(&record);
                 let observation = self.context_diagnostics.observe(&record);
                 if let Some(Overlay::ContextDiagnostics(panel)) = &mut self.overlay {
@@ -1625,6 +1631,12 @@ impl Component for RootNode {
                         .replace(self.context_diagnostics.clone());
                 }
                 let mut update = self.update_transcript(TranscriptEvent::Record(record));
+                if review_started || review_completed {
+                    let waiting =
+                        self.update_transcript(TranscriptEvent::ReviewWaiting(review_completed));
+                    update.effects.extend(waiting.effects);
+                    update.render = update.render.max(waiting.render);
+                }
                 if let Some(event) = turn_timer {
                     let timer = self.update_composer(event, RenderRequest::Streaming);
                     update.effects.extend(timer.effects);
@@ -1665,8 +1677,13 @@ impl Component for RootNode {
                 ));
                 ComponentUpdate::render(RenderRequest::Immediate)
             }
+            RootEvent::ReviewOverviewStarted => {
+                self.in_flight_turns = self.in_flight_turns.saturating_add(1);
+                self.update_transcript(TranscriptEvent::ReviewWaiting(false))
+            }
             RootEvent::ReviewFinished(markdown) => {
                 self.review_active = false;
+                let waiting = self.update_transcript(TranscriptEvent::ReviewWaiting(false));
                 let cursor = self.composer.component().cursor();
                 let draft = self.composer.component().draft();
                 let before = if draft[..cursor].is_empty() {
@@ -1679,13 +1696,16 @@ impl Component for RootNode {
                 } else {
                     "\n\n"
                 };
-                self.update_composer(
+                let mut update = self.update_composer(
                     ComposerEvent::ReplaceRange {
                         range: cursor..cursor,
                         text: format!("{before}{markdown}{after}"),
                     },
                     RenderRequest::Immediate,
-                )
+                );
+                update.effects.extend(waiting.effects);
+                update.render = update.render.max(waiting.render);
+                update
             }
             RootEvent::ReviewCancelled => {
                 self.review_active = false;
@@ -1693,12 +1713,20 @@ impl Component for RootNode {
                     "Review cancelled.".to_owned(),
                     Color::Yellow,
                 ));
-                ComponentUpdate::render(RenderRequest::Immediate)
+                let waiting = self.update_transcript(TranscriptEvent::ReviewWaiting(false));
+                ComponentUpdate {
+                    effects: waiting.effects,
+                    render: waiting.render.max(RenderRequest::Immediate),
+                }
             }
             RootEvent::ReviewFailed(message) => {
                 self.review_active = false;
                 self.notification = Some(Notification::plain(message, Color::Red));
-                ComponentUpdate::render(RenderRequest::Immediate)
+                let waiting = self.update_transcript(TranscriptEvent::ReviewWaiting(false));
+                ComponentUpdate {
+                    effects: waiting.effects,
+                    render: waiting.render.max(RenderRequest::Immediate),
+                }
             }
             RootEvent::RestoreQueued { index, text } => self.restore_queued(index, text),
             RootEvent::WorkerTurnFinished => self.turn_finished(),
@@ -3765,5 +3793,39 @@ mod tests {
             "existing draft\n\n## Review: Approved"
         );
         assert!(!root.review_active);
+    }
+
+    #[test]
+    fn completed_overview_waits_for_the_browser_in_the_transcript() {
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        root.update(RootEvent::ReviewStarted);
+        root.update(RootEvent::ReviewOverviewStarted);
+        root.update(RootEvent::Transcript(agent_record(
+            1,
+            AgentEventKind::RunStarted,
+            json!({}),
+        )));
+        root.update(RootEvent::Transcript(agent_record(
+            2,
+            AgentEventKind::RunCompleted,
+            json!({}),
+        )));
+
+        assert!(render_root_text(&mut root, 80, 20).contains("Waiting for browser review"));
+
+        root.update(RootEvent::ReviewCancelled);
+        assert!(!render_root_text(&mut root, 80, 20).contains("Waiting for browser review"));
+    }
+
+    #[test]
+    fn review_keeps_the_root_agent_exclusive_without_clearing_the_draft() {
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        root.update(RootEvent::ReplaceDraft("keep this draft".to_owned()));
+        root.update(RootEvent::ReviewStarted);
+
+        let update = root.update(key(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(update.effects.is_empty());
+        assert_eq!(root.composer().draft(), "keep this draft");
     }
 }

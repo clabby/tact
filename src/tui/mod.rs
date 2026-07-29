@@ -77,6 +77,14 @@ type ReviewTask = JoinHandle<(
     PaneId,
     std::result::Result<Option<String>, crate::review::ReviewError>,
 )>;
+struct ReviewOverviewRequest {
+    pane: PaneId,
+    prompt: String,
+    shutdown: CancellationToken,
+    completion: tokio::sync::oneshot::Sender<
+        std::result::Result<String, crate::review::OverviewGenerationError>,
+    >,
+}
 type ResumeSessionTask = JoinHandle<(
     PaneId,
     ReasoningEffort,
@@ -87,14 +95,10 @@ type ResumeSessionTask = JoinHandle<(
 type UpdateCheckTask =
     JoinHandle<std::result::Result<Option<semver::Version>, crate::app::update::UpdateError>>;
 
-fn stop_review_tasks(
-    review_agent: &mut Option<nanocodex::Nanocodex>,
-    review_task: &mut Option<ReviewTask>,
-) {
+fn stop_review_task(review_task: &mut Option<ReviewTask>) {
     if let Some(task) = review_task.take() {
         task.abort();
     }
-    review_agent.take();
 }
 
 fn update_checks_enabled() -> bool {
@@ -336,7 +340,6 @@ pub(crate) async fn run(
             &writer_sender,
         )?,
     );
-    let mut review_agent = Some(agent.clone());
     let (commands, mut worker_updates) = worker::spawn(agent, shutdown.clone());
     let workspace = config.agent().workspace().to_path_buf();
     let (agent_event_sender, mut agent_events) = mpsc::unbounded_channel();
@@ -376,6 +379,7 @@ pub(crate) async fn run(
     let mut new_session_task = None::<NewSessionTask>;
     let mut session_list_task = None::<SessionListTask>;
     let mut review_task = None::<ReviewTask>;
+    let (review_overview_sender, mut review_overviews) = mpsc::unbounded_channel();
     let mut resume_session_task = None::<ResumeSessionTask>;
     let mut scheduler = RenderScheduler::new(STREAM_FRAME_INTERVAL, Instant::now());
     let mut stopping = false;
@@ -404,7 +408,7 @@ pub(crate) async fn run(
                     new_session_task: &mut new_session_task,
                     session_list_task: &mut session_list_task,
                     review_task: &mut review_task,
-                    review_agent: &mut review_agent,
+                    review_overview_sender: &review_overview_sender,
                     resume_session_task: &mut resume_session_task,
                     terminal: &mut terminal,
                     scheduler: &mut scheduler,
@@ -422,7 +426,7 @@ pub(crate) async fn run(
         }
         if stopping {
             shell_tasks.abort_all();
-            stop_review_tasks(&mut review_agent, &mut review_task);
+            stop_review_task(&mut review_task);
         }
         if stopping && !subagents_stopping {
             for runtime in panes.values() {
@@ -555,6 +559,39 @@ pub(crate) async fn run(
                         &mut scheduler,
                     );
                 }
+            }
+            Some(request) = review_overviews.recv(), if !stopping => {
+                let ReviewOverviewRequest {
+                    pane,
+                    prompt,
+                    shutdown,
+                    completion,
+                } = request;
+                let Some(runtime) = panes.get_mut(&pane) else {
+                    drop(completion.send(Err(
+                        crate::review::OverviewGenerationError::Failed(
+                            "review pane is no longer available".to_owned(),
+                        ),
+                    )));
+                    continue;
+                };
+                let id = TurnId::new(runtime.next_turn);
+                runtime.next_turn = runtime.next_turn.saturating_add(1);
+                let record = runtime.journal_mut()?.append_local(LocalEvent::UserSubmitted {
+                    id,
+                    text: prompt.clone(),
+                })?;
+                schedule(app.update(AppEvent::Transcript { pane, record }), &mut scheduler);
+                schedule(app.update(AppEvent::ReviewOverviewStarted(pane)), &mut scheduler);
+                commands
+                    .send(WorkerCommand::ReviewOverview {
+                        pane,
+                        id,
+                        prompt: prompt.into(),
+                        shutdown,
+                        completion,
+                    })
+                    .map_err(|_| RuntimeError::AgentWorkerStopped)?;
             }
             update = worker_updates.recv(), if !worker_stopped => {
                 let Some(update) = update else {
@@ -905,9 +942,6 @@ pub(crate) async fn run(
                             subagent_updates,
                             subagent_sender.clone(),
                         );
-                        if pane == PaneId::Main {
-                            review_agent = Some(agent.clone());
-                        }
                         commands
                             .send(WorkerCommand::ReplaceAgent { pane, agent })
                             .map_err(|_| RuntimeError::AgentWorkerStopped)?;
@@ -1044,9 +1078,6 @@ pub(crate) async fn run(
                             subagent_updates,
                             subagent_sender.clone(),
                         );
-                        if pane == PaneId::Main {
-                            review_agent = Some(agent.clone());
-                        }
                         commands
                             .send(WorkerCommand::ReplaceAgent { pane, agent })
                             .map_err(|_| RuntimeError::AgentWorkerStopped)?;
@@ -1247,7 +1278,7 @@ struct EffectContext<'a> {
     new_session_task: &'a mut Option<NewSessionTask>,
     session_list_task: &'a mut Option<SessionListTask>,
     review_task: &'a mut Option<ReviewTask>,
-    review_agent: &'a mut Option<nanocodex::Nanocodex>,
+    review_overview_sender: &'a mpsc::UnboundedSender<ReviewOverviewRequest>,
     resume_session_task: &'a mut Option<ResumeSessionTask>,
     terminal: &'a mut TerminalSession,
     scheduler: &'a mut RenderScheduler,
@@ -1532,11 +1563,7 @@ fn apply_pane_effect(
                 Ok(crate::review::AssetAvailability::Ready(assets)) => {
                     *context.review_task = Some(spawn_review(
                         pane,
-                        context
-                            .review_agent
-                            .as_ref()
-                            .expect("review agent is available while the UI is running")
-                            .clone(),
+                        context.review_overview_sender.clone(),
                         context.workspace.to_path_buf(),
                         Some(assets),
                     ));
@@ -1553,11 +1580,7 @@ fn apply_pane_effect(
                 Ok(crate::review::AssetAvailability::DownloadRequired) => {
                     *context.review_task = Some(spawn_review(
                         pane,
-                        context
-                            .review_agent
-                            .as_ref()
-                            .expect("review agent is available while the UI is running")
-                            .clone(),
+                        context.review_overview_sender.clone(),
                         context.workspace.to_path_buf(),
                         None,
                     ));
@@ -1567,7 +1590,7 @@ fn apply_pane_effect(
                         context.app.update(AppEvent::NotifyError {
                             pane,
                             error: format!(
-                                "Review assets are not installed. Run `cd web/review && bun install --frozen-lockfile && bun run build`, then set TACT_REVIEW_ASSETS to the absolute `web/review/dist` path, or copy that directory to {}.",
+                                "Review assets are not installed. Run `cd web/review && bun install --frozen-lockfile && just install-dev`, or set TACT_REVIEW_ASSETS to the absolute `web/review/dist` path. The development install path is {}.",
                                 path.display()
                             ),
                         }),
@@ -1715,7 +1738,7 @@ fn apply_pane_effect(
 
 fn spawn_review(
     pane: PaneId,
-    agent: nanocodex::Nanocodex,
+    overview_requests: mpsc::UnboundedSender<ReviewOverviewRequest>,
     workspace: PathBuf,
     assets: Option<crate::review::ReviewAssets>,
 ) -> ReviewTask {
@@ -1725,7 +1748,34 @@ fn spawn_review(
                 Some(assets) => assets,
                 None => crate::review::ReviewAssets::download().await?,
             };
-            crate::review::run(agent, &workspace, assets).await
+            let overview_generator: crate::review::OverviewGenerator =
+                Arc::new(move |prompt, shutdown| {
+                    let overview_requests = overview_requests.clone();
+                    Box::pin(async move {
+                        if shutdown.is_cancelled() {
+                            return Err(crate::review::OverviewGenerationError::Cancelled);
+                        }
+                        let (completion, result) = tokio::sync::oneshot::channel();
+                        overview_requests
+                            .send(ReviewOverviewRequest {
+                                pane,
+                                prompt,
+                                shutdown,
+                                completion,
+                            })
+                            .map_err(|_| {
+                                crate::review::OverviewGenerationError::Failed(
+                                    "review overview worker stopped".to_owned(),
+                                )
+                            })?;
+                        result.await.map_err(|_| {
+                            crate::review::OverviewGenerationError::Failed(
+                                "review overview worker stopped".to_owned(),
+                            )
+                        })?
+                    })
+                });
+            crate::review::run(overview_generator, &workspace, assets).await
         }
         .await;
         (pane, result)
@@ -1805,9 +1855,9 @@ fn request_render(request: RenderRequest, scheduler: &mut RenderScheduler) {
 #[cfg(test)]
 mod tests {
     use super::{
-        PaneGeneration, PaneSession, PaneSettings, PendingSubmission, close_pane_journal,
-        is_image_paste, local_link_path, open_pane, send_submission, stop_review_tasks,
-        subagent_pane, update_checks_enabled, validate_interactive,
+        PaneGeneration, PaneSession, PaneSettings, PendingSubmission, ReviewTask,
+        close_pane_journal, is_image_paste, local_link_path, open_pane, send_submission,
+        stop_review_task, subagent_pane, update_checks_enabled, validate_interactive,
     };
     use crate::{
         app::{
@@ -1822,10 +1872,8 @@ mod tests {
             worker::WorkerCommand,
         },
     };
-    use nanocodex::{Nanocodex, OpenAi};
-    use std::{collections::HashMap, fs, path::Path, sync::Arc, time::Duration};
+    use std::{collections::HashMap, fs, path::Path, sync::Arc};
     use tempfile::tempdir;
-    use tokio::time::timeout;
 
     #[test]
     fn development_builds_do_not_enable_update_checks() {
@@ -1851,26 +1899,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stopping_review_tasks_releases_the_agent_event_stream() {
-        let openai = OpenAi::new("test-key").unwrap();
-        let (agent, mut events) = Nanocodex::builder(openai).build().unwrap();
-        let mut review_agent = Some(agent.clone());
-        let mut review_task = None;
+    async fn stopping_aborts_the_review_task() {
+        let task: ReviewTask = tokio::spawn(std::future::pending());
+        let abort = task.abort_handle();
+        let mut review_task = Some(task);
 
-        agent.shutdown().await.unwrap();
-        drop(agent);
-        assert!(
-            timeout(Duration::from_millis(10), events.recv())
-                .await
-                .is_err()
-        );
+        stop_review_task(&mut review_task);
+        tokio::task::yield_now().await;
 
-        stop_review_tasks(&mut review_agent, &mut review_task);
-
-        assert!(matches!(
-            timeout(Duration::from_secs(1), events.recv()).await,
-            Ok(None)
-        ));
+        assert!(review_task.is_none());
+        assert!(abort.is_finished());
     }
 
     #[test]

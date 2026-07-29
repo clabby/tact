@@ -349,6 +349,21 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn validates_assets_through_a_directory_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let assets = tempfile::tempdir().unwrap();
+        write_valid_assets(assets.path());
+
+        let install_root = tempfile::tempdir().unwrap();
+        let installed = install_root.path().join("v-test");
+        symlink(assets.path(), &installed).unwrap();
+
+        validate_directory(&installed).unwrap();
+    }
+
     #[test]
     fn extracts_the_directory_entry_created_by_release_packaging() {
         let source = tempfile::tempdir().unwrap();

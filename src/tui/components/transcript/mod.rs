@@ -45,6 +45,7 @@ pub(crate) enum TranscriptEvent {
         update: AgentMessageUpdate,
     },
     AgentStreamClosed,
+    ReviewWaiting(bool),
     Scroll(ScrollCommand),
     FollowTail,
     BlurExpandables,
@@ -68,6 +69,7 @@ pub(crate) struct Transcript {
     viewport_height: u16,
     new_updates: u64,
     tool_spinner: Option<Spinner>,
+    review_spinner: Option<Spinner>,
     running_tool_timers: HashMap<EntryId, RunningToolTimer>,
     expandables_focused: bool,
     selected_expandable: Option<EntryId>,
@@ -189,6 +191,7 @@ impl Transcript {
             viewport_height: 0,
             new_updates: 0,
             tool_spinner: None,
+            review_spinner: None,
             running_tool_timers: HashMap::new(),
             expandables_focused: false,
             selected_expandable: None,
@@ -236,6 +239,7 @@ impl Transcript {
         self.tool_spinner
             .map(Spinner::deadline)
             .into_iter()
+            .chain(self.review_spinner.map(Spinner::deadline))
             .chain(empty)
             .min()
     }
@@ -284,6 +288,21 @@ impl Transcript {
         if !change.changed {
             return ComponentUpdate::none();
         }
+        if matches!(self.scroll, ScrollState::Detached(_)) {
+            self.new_updates = self.new_updates.saturating_add(1);
+        }
+        ComponentUpdate::render(RenderRequest::Immediate)
+    }
+
+    fn update_review_waiting(&mut self, waiting: bool) -> ComponentUpdate<TranscriptEffect> {
+        let change = self.model.set_review_waiting(waiting);
+        if let Some(id) = change.removed {
+            self.forget_entry(id);
+        }
+        if !change.changed {
+            return ComponentUpdate::none();
+        }
+        self.review_spinner = waiting.then(|| Spinner::new(Instant::now()));
         if matches!(self.scroll, ScrollState::Detached(_)) {
             self.new_updates = self.new_updates.saturating_add(1);
         }
@@ -345,12 +364,18 @@ impl Transcript {
             .tool_spinner
             .as_mut()
             .is_some_and(|spinner| spinner.advance(now));
+        let review_changed = self
+            .review_spinner
+            .as_mut()
+            .is_some_and(|spinner| spinner.advance(now));
         let logo_changed = self.is_empty() && self.empty_logo.advance(now);
-        ComponentUpdate::render(if timer_changed || tool_changed || logo_changed {
-            RenderRequest::Streaming
-        } else {
-            RenderRequest::None
-        })
+        ComponentUpdate::render(
+            if timer_changed || tool_changed || review_changed || logo_changed {
+                RenderRequest::Streaming
+            } else {
+                RenderRequest::None
+            },
+        )
     }
 
     fn sync_running_tool_timers(&mut self, now: Instant) {
@@ -1048,6 +1073,7 @@ impl Component for Transcript {
                 update,
             } => self.update_message(perspective, update),
             TranscriptEvent::AgentStreamClosed => self.agent_stream_closed(),
+            TranscriptEvent::ReviewWaiting(waiting) => self.update_review_waiting(waiting),
             TranscriptEvent::Scroll(command) => self.update_scroll(command),
             TranscriptEvent::FollowTail => self.follow_tail(),
             TranscriptEvent::BlurExpandables => self.blur_expandables(),
@@ -1088,8 +1114,23 @@ impl Component for Transcript {
                 }));
             if anchor.line == 0
                 && let Some(entry) = self.model.entry(anchor.entry)
-                && is_expandable(entry)
             {
+                if matches!(&entry.kind, EntryKind::ReviewWaiting)
+                    && let Some(spinner) = self.review_spinner
+                {
+                    frame.buffer_mut().set_string(
+                        area.x,
+                        y,
+                        spinner.symbol(),
+                        Style::default()
+                            .fg(theme.accent())
+                            .add_modifier(Modifier::BOLD),
+                    );
+                }
+                if !is_expandable(entry) {
+                    y = y.saturating_add(1);
+                    continue;
+                }
                 self.expandable_hits.push(ExpandableHitRegion {
                     entry: anchor.entry,
                     row: y,
@@ -1239,6 +1280,10 @@ fn render_entry(
                 Style::default().fg(theme.muted()),
             ))])
         }
+        EntryKind::ReviewWaiting => layout_without_links(vec![Line::from(Span::styled(
+            "  Waiting for browser review…",
+            Style::default().fg(theme.muted()),
+        ))]),
         EntryKind::ContextCompactionFailed { message } => {
             layout_without_links(vec![Line::from(Span::styled(
                 format!("◇ Context compaction failed · continuing · {message}"),
@@ -2003,6 +2048,38 @@ mod tests {
             .collect::<String>();
         assert!(rendered.chars().any(|character| character != ' '));
         assert!(!rendered.contains("Thinking"));
+    }
+
+    #[test]
+    fn browser_review_wait_is_an_inline_transcript_spinner() {
+        let mut transcript = Transcript::new();
+        transcript.update(TranscriptEvent::Record(user(1, "Generate the overview")));
+        transcript.update(TranscriptEvent::ReviewWaiting(true));
+
+        let backend = render(&mut transcript, 50, 5);
+        let rendered = backend
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("Waiting for browser review"));
+        assert!(
+            backend
+                .buffer()
+                .content()
+                .iter()
+                .any(|cell| cell.symbol() == "⠋")
+        );
+
+        transcript.update(TranscriptEvent::ReviewWaiting(false));
+        let rendered = render(&mut transcript, 50, 5)
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(!rendered.contains("Waiting for browser review"));
     }
 
     #[test]

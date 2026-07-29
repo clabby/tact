@@ -53,10 +53,15 @@ pub(super) type ScopeLoader = Arc<
     dyn Fn(
             super::diff::ReviewScope,
             CancellationToken,
-        ) -> BoxFuture<'static, Result<ReviewPage, String>>
+        ) -> BoxFuture<'static, Result<ReviewPage, ScopeLoadError>>
         + Send
         + Sync,
 >;
+
+pub(super) enum ScopeLoadError {
+    Cancelled,
+    Failed(String),
+}
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -214,7 +219,18 @@ async fn load_scope(
 
     let page = match (state.scope_loader)(request.scope, state.scope_shutdown.clone()).await {
         Ok(page) => page,
-        Err(error) => {
+        Err(ScopeLoadError::Cancelled) => {
+            if let Some(sender) = state.outcome.lock().await.take() {
+                let _ = sender.send(ReviewOutcome::Cancelled);
+            }
+            return secure_json(
+                StatusCode::GONE,
+                ScopeError {
+                    error: "review overview generation was cancelled".to_owned(),
+                },
+            );
+        }
+        Err(ScopeLoadError::Failed(error)) => {
             return secure_json(StatusCode::UNPROCESSABLE_ENTITY, ScopeError { error });
         }
     };
@@ -313,7 +329,10 @@ pub(crate) enum ServerError {
 
 #[cfg(test)]
 mod tests {
-    use super::{Decision, ReviewBootstrap, ReviewOutcome, ReviewPage, ReviewServer, ScopeLoader};
+    use super::{
+        Decision, ReviewBootstrap, ReviewOutcome, ReviewPage, ReviewServer, ScopeLoadError,
+        ScopeLoader,
+    };
     use crate::review::diff::{DiffSnapshot, ReviewScope};
     use std::{sync::Arc, time::Duration};
     use tokio::sync::Notify;
@@ -399,6 +418,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn interrupted_overview_cancels_the_review() {
+        let assets = tempfile::tempdir().unwrap();
+        for name in ["index.html", "app.js", "app.css"] {
+            std::fs::write(assets.path().join(name), "").unwrap();
+        }
+        let loader: ScopeLoader =
+            Arc::new(|_scope, _shutdown| Box::pin(async { Err(ScopeLoadError::Cancelled) }));
+        let server = start_server_with_loader(&assets, loader).await;
+
+        let response = reqwest::Client::new()
+            .post(format!("{}api/scope", server.url()))
+            .json(&serde_json::json!({ "scope": "uncommitted" }))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), reqwest::StatusCode::GONE);
+        assert!(matches!(
+            server.wait().await.unwrap(),
+            ReviewOutcome::Cancelled
+        ));
+    }
+
+    #[tokio::test]
     async fn cancelling_stops_an_active_scope_load() {
         let assets = tempfile::tempdir().unwrap();
         for name in ["index.html", "app.js", "app.css"] {
@@ -412,7 +455,7 @@ mod tests {
                 Box::pin(async move {
                     started.notify_one();
                     shutdown.cancelled().await;
-                    Err("scope load cancelled".to_owned())
+                    Err(ScopeLoadError::Cancelled)
                 })
             }
         });

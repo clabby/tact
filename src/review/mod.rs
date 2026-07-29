@@ -8,8 +8,10 @@ pub(crate) use assets::{AssetAvailability, ReviewAssets};
 pub(crate) use diff::ReviewScope;
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use futures_util::future::BoxFuture;
 use server::{
-    ReviewBootstrap, ReviewDecision, ReviewOutcome, ReviewPage, ReviewServer, ScopeLoader,
+    ReviewBootstrap, ReviewDecision, ReviewOutcome, ReviewPage, ReviewServer, ScopeLoadError,
+    ScopeLoader,
 };
 use sha2::{Digest, Sha256};
 use std::{
@@ -18,11 +20,24 @@ use std::{
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
+use tokio_util::sync::CancellationToken;
 
 const MAX_OVERVIEW_BYTES: usize = 1024 * 1024;
 
+pub(crate) type OverviewGenerator = Arc<
+    dyn Fn(String, CancellationToken) -> BoxFuture<'static, Result<String, OverviewGenerationError>>
+        + Send
+        + Sync,
+>;
+
+#[derive(Debug)]
+pub(crate) enum OverviewGenerationError {
+    Cancelled,
+    Failed(String),
+}
+
 pub(crate) async fn run(
-    agent: nanocodex::Nanocodex,
+    overview_generator: OverviewGenerator,
     workspace: &Path,
     assets: ReviewAssets,
 ) -> Result<Option<String>, ReviewError> {
@@ -37,12 +52,15 @@ pub(crate) async fn run(
     let loader_context = context.clone();
     let scope_loader: ScopeLoader = Arc::new(move |scope, shutdown| {
         let context = loader_context.clone();
-        let agent = agent.clone();
+        let overview_generator = overview_generator.clone();
         let title = title.clone();
         Box::pin(async move {
-            prepare_page(agent, context, title, scope, shutdown)
+            prepare_page(overview_generator, context, title, scope, shutdown)
                 .await
-                .map_err(|error| error.to_string())
+                .map_err(|error| match error {
+                    ReviewError::Cancelled => ScopeLoadError::Cancelled,
+                    error => ScopeLoadError::Failed(error.to_string()),
+                })
         })
     });
     let token = review_token(context.repository(), SystemTime::now());
@@ -57,17 +75,18 @@ pub(crate) async fn run(
 }
 
 async fn prepare_page(
-    agent: nanocodex::Nanocodex,
+    overview_generator: OverviewGenerator,
     context: diff::ReviewContext,
     title: String,
     scope: ReviewScope,
-    shutdown: tokio_util::sync::CancellationToken,
+    shutdown: CancellationToken,
 ) -> Result<ReviewPage, ReviewError> {
     let snapshot = tokio::select! {
         result = context.collect(scope) => result?,
         () = shutdown.cancelled() => return Err(ReviewError::Cancelled),
     };
-    let overview_html = generate_overview(agent, scope, &snapshot.patch, shutdown).await?;
+    let overview_html =
+        generate_overview(overview_generator, scope, &snapshot.patch, shutdown).await?;
     Ok(ReviewPage {
         title,
         overview_html,
@@ -77,10 +96,10 @@ async fn prepare_page(
 }
 
 async fn generate_overview(
-    agent: nanocodex::Nanocodex,
+    overview_generator: OverviewGenerator,
     scope: ReviewScope,
     patch: &str,
-    shutdown: tokio_util::sync::CancellationToken,
+    shutdown: CancellationToken,
 ) -> Result<String, ReviewError> {
     let mut snapshot = tempfile::NamedTempFile::new().map_err(ReviewError::OverviewSnapshot)?;
     snapshot
@@ -91,23 +110,12 @@ async fn generate_overview(
         "Prepare a concise HTML overview for a human reviewing `{label}`. The exact, immutable Git patch is at `{path}`. Read it without modifying the workspace. Return only a self-contained HTML fragment with the change's purpose, architecture/data flow, most important files, and concrete review risks. Do not include scripts, external resources, markdown fences, or a full code review.",
         label = scope.label(),
     );
-    let (child, mut events) = agent.spawn().await?;
-    let event_task = tokio::spawn(async move { while events.recv().await.is_some() {} });
-    let result = tokio::select! {
-        result = async {
-            let turn = child.prompt(prompt).await?;
-            turn.result().await
-        } => Some(result),
-        () = shutdown.cancelled() => None,
+    let result = match overview_generator(prompt, shutdown).await {
+        Ok(result) => result,
+        Err(OverviewGenerationError::Cancelled) => return Err(ReviewError::Cancelled),
+        Err(OverviewGenerationError::Failed(error)) => return Err(ReviewError::Overview(error)),
     };
-    let agent_shutdown = child.shutdown().await;
-    event_task.await.map_err(ReviewError::OverviewEvents)?;
-    agent_shutdown?;
-    let Some(result) = result else {
-        return Err(ReviewError::Cancelled);
-    };
-    let result = result?;
-    let overview = strip_html_fence(result.final_message().trim());
+    let overview = strip_html_fence(result.trim());
     if overview.is_empty() {
         return Err(ReviewError::EmptyOverview);
     }
@@ -191,9 +199,7 @@ pub(crate) enum ReviewError {
     #[error("failed to create the review overview snapshot: {0}")]
     OverviewSnapshot(std::io::Error),
     #[error("failed to generate the review overview: {0}")]
-    Agent(#[from] nanocodex::NanocodexError),
-    #[error("review overview event task failed: {0}")]
-    OverviewEvents(tokio::task::JoinError),
+    Overview(String),
     #[error("review overview generation was cancelled")]
     Cancelled,
     #[error("the agent returned an empty review overview")]
@@ -205,6 +211,44 @@ pub(crate) enum ReviewError {
 #[cfg(test)]
 mod tests {
     use super::server::{CommentSide, Decision, ReviewComment, ReviewDecision};
+    use super::{OverviewGenerator, ReviewScope, generate_overview};
+    use std::sync::{Arc, Mutex};
+    use tokio_util::sync::CancellationToken;
+
+    #[tokio::test]
+    async fn overview_generator_reads_the_immutable_patch_and_returns_html() {
+        let observed_patch = Arc::new(Mutex::new(String::new()));
+        let generator: OverviewGenerator = Arc::new({
+            let observed_patch = Arc::clone(&observed_patch);
+            move |prompt, _shutdown| {
+                let observed_patch = Arc::clone(&observed_patch);
+                Box::pin(async move {
+                    let path = prompt
+                        .split("at `")
+                        .nth(1)
+                        .and_then(|value| value.split('`').next())
+                        .expect("prompt should contain the snapshot path");
+                    *observed_patch.lock().unwrap() = std::fs::read_to_string(path).unwrap();
+                    Ok("```html\n<section>Overview</section>\n```".to_owned())
+                })
+            }
+        });
+
+        let overview = generate_overview(
+            generator,
+            ReviewScope::Uncommitted,
+            "diff --git a/file b/file\n",
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(overview, "<section>Overview</section>");
+        assert_eq!(
+            *observed_patch.lock().unwrap(),
+            "diff --git a/file b/file\n"
+        );
+    }
 
     #[test]
     fn review_decision_renders_as_composer_markdown() {

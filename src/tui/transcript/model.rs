@@ -53,6 +53,7 @@ pub(crate) struct TranscriptModel {
     message_threads: HashMap<ThreadId, EntryId>,
     message_order: VecDeque<ThreadId>,
     running_tools: HashSet<EntryId>,
+    review_waiting: Option<EntryId>,
     active_runs: usize,
     run_started_at_unix_ms: VecDeque<u64>,
     transient: Option<TransientStatus>,
@@ -83,6 +84,7 @@ impl TranscriptModel {
             .filter(|entry| match &entry.kind {
                 EntryKind::Assistant { complete, .. } => *complete,
                 EntryKind::Tool(tool) => tool.state != ToolState::Running,
+                EntryKind::ReviewWaiting => false,
                 _ => true,
             })
             .cloned()
@@ -142,6 +144,26 @@ impl TranscriptModel {
 
     pub(crate) fn running_tool_ids(&self) -> impl Iterator<Item = EntryId> + '_ {
         self.running_tools.iter().copied()
+    }
+
+    pub(crate) fn set_review_waiting(&mut self, waiting: bool) -> ModelChange {
+        match (waiting, self.review_waiting) {
+            (true, None) => {
+                self.review_waiting = Some(self.push(EntryKind::ReviewWaiting));
+                ModelChange {
+                    changed: true,
+                    ..ModelChange::default()
+                }
+            }
+            (false, Some(id)) => {
+                self.review_waiting = None;
+                ModelChange {
+                    changed: self.remove(id),
+                    removed: Some(id),
+                }
+            }
+            _ => ModelChange::default(),
+        }
     }
 
     pub(crate) fn apply(&mut self, record: &TranscriptRecord) -> ModelChange {
@@ -890,6 +912,17 @@ impl TranscriptModel {
             self.entry_indices.insert(entry.id, index);
         }
         Some(id)
+    }
+
+    fn remove(&mut self, id: EntryId) -> bool {
+        let Some(removed_index) = self.entry_indices.remove(&id) else {
+            return false;
+        };
+        self.entries.remove(removed_index);
+        for (index, entry) in self.entries.iter().enumerate().skip(removed_index) {
+            self.entry_indices.insert(entry.id, index);
+        }
+        true
     }
 
     fn update(&mut self, id: EntryId, update: impl FnOnce(&mut EntryKind)) {
