@@ -22,10 +22,6 @@ await Bun.write(
   Bun.file(join(import.meta.dir, "index.html")),
 );
 await Bun.write(
-  join(outputDirectory, "THIRD_PARTY_NOTICES.md"),
-  Bun.file(join(import.meta.dir, "..", "..", "THIRD_PARTY_NOTICES.md")),
-);
-await Bun.write(
   join(outputDirectory, "LICENSE.md"),
   Bun.file(join(import.meta.dir, "..", "..", "LICENSE.md")),
 );
@@ -35,7 +31,6 @@ const contentTypes: Record<string, string> = {
   "app.css": "text/css; charset=utf-8",
   "app.js": "text/javascript; charset=utf-8",
   "LICENSE.md": "text/markdown; charset=utf-8",
-  "THIRD_PARTY_NOTICES.md": "text/markdown; charset=utf-8",
 };
 const files = await Promise.all(
   Object.keys(contentTypes).map(async (path) => {

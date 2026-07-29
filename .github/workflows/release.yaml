@@ -85,7 +85,7 @@ jobs:
 
           mkdir "$package_name"
           cp "target/${{ matrix.target }}/release/${BINARY_NAME}" "$package_name/"
-          cp README.md LICENSE.md THIRD_PARTY_NOTICES.md "$package_name/"
+          cp README.md LICENSE.md "$package_name/"
           tar -czf "$package_name.${{ matrix.archive_ext }}" "$package_name"
           shasum -a 256 "$package_name.${{ matrix.archive_ext }}" > "$package_name.${{ matrix.archive_ext }}.sha256"
       - name: Upload packaged binary
@@ -129,7 +129,7 @@ jobs:
 
           archive="tact-review-${GITHUB_REF_NAME}.tar.gz"
           mkdir review
-          cp dist/index.html dist/app.js dist/app.css dist/LICENSE.md dist/THIRD_PARTY_NOTICES.md dist/manifest.json review/
+          cp dist/index.html dist/app.js dist/app.css dist/LICENSE.md dist/manifest.json review/
           tar -czf "$archive" review
           shasum -a 256 "$archive" > "${archive}.sha256"
       - name: Upload packaged review assets
