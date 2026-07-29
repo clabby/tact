@@ -204,29 +204,41 @@ button:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2p
 .comment-markdown > :first-child, .markdown-preview > :first-child { margin-top: 0; }
 .comment-markdown > :last-child, .markdown-preview > :last-child { margin-bottom: 0; }
 
-.inline-comment-editor { overflow: hidden; border: 1px solid color-mix(in srgb, var(--blue) 60%, var(--line)); border-radius: 10px; background: var(--surface-raised); box-shadow: 0 8px 24px color-mix(in srgb, #000 10%, transparent); }
-.editor-topbar { display: flex; align-items: center; justify-content: space-between; min-height: 39px; padding: 4px 6px; border-bottom: 1px solid var(--line); }
-.formatting-tools { display: flex; align-items: center; gap: 1px; }
-.format-button { width: 29px; height: 29px; border-radius: 6px; }
+.inline-comment-editor { overflow: hidden; border: 1px solid color-mix(in srgb, var(--blue) 48%, var(--line)); border-radius: 12px; background: var(--surface-raised); box-shadow: 0 12px 32px color-mix(in srgb, #000 12%, transparent), 0 1px 0 color-mix(in srgb, #fff 20%, transparent) inset; }
+.editor-heading { display: flex; align-items: center; min-height: 48px; padding: 8px 13px; border-bottom: 1px solid var(--line); }
+.editor-heading > div { min-width: 0; }
+.editor-heading strong, .editor-heading span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.editor-heading strong { color: var(--text); font-size: 13px; font-weight: 650; letter-spacing: -.01em; }
+.editor-heading span { margin-top: 2px; color: var(--muted); font: 10px ui-monospace, SFMono-Regular, monospace; }
+.editor-topbar { display: flex; align-items: stretch; min-height: 42px; padding: 0 8px 0 10px; border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--surface) 76%, transparent); }
+.formatting-tools { display: flex; align-items: center; gap: 1px; margin-left: auto; }
+.format-button { width: 30px; height: 30px; border-radius: 6px; }
 .format-button svg { width: 15px; height: 15px; }
-.editor-tabs { display: flex; align-self: stretch; gap: 2px; }
-.editor-tabs button { padding: 0 9px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--muted); cursor: pointer; font-size: 12px; }
+.editor-tabs { display: flex; align-self: stretch; gap: 1px; }
+.editor-tabs button { padding: 0 11px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--muted); cursor: pointer; font-size: 12px; }
 .editor-tabs button:hover { color: var(--text); }
 .editor-tabs button.active { border-color: var(--blue); color: var(--text); font-weight: 600; }
-.editor-context { padding: 8px 11px 0; color: var(--muted); font: 11px ui-monospace, SFMono-Regular, monospace; }
-.comment-input { display: block; width: calc(100% - 20px); min-height: 116px; margin: 8px 10px 0; resize: vertical; padding: 10px 11px; border: 1px solid var(--line-strong); border-radius: 8px; outline: 0; background: var(--bg); color: var(--text); }
-.comment-input:focus { border-color: var(--blue); box-shadow: 0 0 0 3px color-mix(in srgb, var(--blue) 15%, transparent); }
+.comment-input { display: block; width: 100%; min-height: 142px; resize: vertical; padding: 14px 15px; border: 0; border-bottom: 1px solid var(--line); outline: 0; background: var(--bg); color: var(--text); font: 13px/1.55 ui-sans-serif, system-ui, sans-serif; }
+.comment-input:focus { box-shadow: 0 0 0 2px color-mix(in srgb, var(--blue) 26%, transparent) inset; }
 .comment-input[hidden], .markdown-preview[hidden] { display: none; }
-.markdown-preview { min-height: 116px; margin: 8px 10px 0; padding: 10px 11px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); }
+.markdown-preview { min-height: 142px; padding: 14px 15px; border-bottom: 1px solid var(--line); background: var(--bg); }
 .comment-markdown p, .markdown-preview p { margin: 0 0 .8em; }
 .comment-markdown ul, .comment-markdown ol, .markdown-preview ul, .markdown-preview ol { margin: .5em 0 .9em; padding-left: 24px; }
 .comment-markdown blockquote, .markdown-preview blockquote { margin: .8em 0; padding-left: 12px; border-left: 2px solid var(--line-strong); color: var(--muted); }
 .comment-markdown code:not(pre code), .markdown-preview code:not(pre code) { padding: 2px 5px; border-radius: 5px; background: var(--surface); font: 12px ui-monospace, SFMono-Regular, monospace; }
 .comment-markdown pre, .markdown-preview pre { overflow: auto; margin: .8em 0; padding: 12px !important; border: 1px solid var(--line); border-radius: 8px; font-size: 12px; }
 .comment-markdown a, .markdown-preview a { color: var(--blue); }
-.composer-actions { display: flex; justify-content: flex-end; gap: 8px; padding: 10px; }
+.editor-footer { display: flex; align-items: center; gap: 12px; min-height: 54px; padding: 8px 10px 8px 13px; }
+.editor-shortcut { display: flex; align-items: center; gap: 4px; color: var(--muted); font-size: 10px; }
+.editor-shortcut kbd { min-width: 20px; padding: 2px 5px; border: 1px solid var(--line-strong); border-bottom-width: 2px; border-radius: 5px; background: var(--surface); color: var(--text); font: 10px ui-monospace, SFMono-Regular, monospace; text-align: center; }
+.composer-actions { display: flex; justify-content: flex-end; gap: 8px; margin-left: auto; }
 .text-button { border: 0; background: none; color: var(--muted); cursor: pointer; }
 .text-button:hover { color: var(--text); }
+
+.mark-seen-button { display: inline-flex; align-items: center; gap: 5px; height: 26px; margin-left: 7px; padding: 0 8px; border: 1px solid var(--line-strong); border-radius: 7px; background: var(--surface); color: var(--muted); cursor: pointer; font: 600 10px ui-sans-serif, system-ui, sans-serif; white-space: nowrap; }
+.mark-seen-button:hover { border-color: color-mix(in srgb, var(--accent-solid) 48%, var(--line)); color: var(--text); background: color-mix(in srgb, var(--accent-solid) 6%, var(--surface)); }
+.mark-seen-button.seen { border-color: color-mix(in srgb, var(--accent-solid) 34%, var(--line)); color: var(--accent); }
+.mark-seen-button svg { width: 13px; height: 13px; }
 
 .review-bar { display: flex; align-items: center; gap: 12px; padding: 11px 16px; border-top: 1px solid var(--line); background: var(--surface); box-shadow: 0 -8px 24px color-mix(in srgb, #000 5%, transparent); }
 .review-bar textarea { flex: 1; height: 42px; resize: none; padding: 10px 12px; border: 1px solid var(--line-strong); border-radius: 8px; outline: none; background: var(--bg); color: var(--text); }

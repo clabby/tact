@@ -34,13 +34,26 @@ import {
 } from "./range-selection";
 import "./styles.css";
 
-const COMMENT_ICON_SPRITE = `
+const TREE_ICON_SPRITE = `
   <svg aria-hidden="true" style="display:none" xmlns="http://www.w3.org/2000/svg">
     <symbol id="tact-comment" viewBox="0 0 16 16">
       <path fill="#4b8cff" d="M3.25 2.25h9.5c.97 0 1.75.78 1.75 1.75v6c0 .97-.78 1.75-1.75 1.75H7.1l-3.53 2.06a.55.55 0 0 1-.82-.47V11.7A1.75 1.75 0 0 1 1.5 10V4c0-.97.78-1.75 1.75-1.75Z"/>
     </symbol>
+    <symbol id="tact-comment-seen" viewBox="0 0 16 16">
+      <path fill="#4b8cff" d="M3.25 2.25h9.5c.97 0 1.75.78 1.75 1.75v6c0 .97-.78 1.75-1.75 1.75H7.1l-3.53 2.06a.55.55 0 0 1-.82-.47V11.7A1.75 1.75 0 0 1 1.5 10V4c0-.97.78-1.75 1.75-1.75Z"/>
+    </symbol>
+    <symbol id="tact-seen" viewBox="0 0 16 16">
+      <path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.7" d="m3 8.5 3 3 7-7"/>
+    </symbol>
   </svg>`;
-const TREE_ICONS = { set: "minimal", spriteSheet: COMMENT_ICON_SPRITE } as const;
+const TREE_ICONS = { set: "minimal", spriteSheet: TREE_ICON_SPRITE } as const;
+const TREE_SEEN_STYLES = `
+  [data-type="item"]:has([data-icon-name="tact-seen"], [data-icon-name="tact-comment-seen"]) [data-item-section="content"] {
+    opacity: .56;
+    text-decoration: line-through;
+  }
+  [data-icon-name="tact-seen"] { color: var(--accent); }
+`;
 
 type ReviewBootstrap = {
   title: string;
@@ -121,6 +134,7 @@ class ReviewApp {
   private readonly pathToItem = new Map<string, string>();
   private readonly comments: CommentMetadata[] = [];
   private readonly overviews = new Map<string, string>();
+  private readonly seenFilesByRange = new Map<string, Set<string>>();
   private draft?: CommentDraft;
   private pendingRange?: ReviewRange;
   private previewRange?: ReviewRange;
@@ -156,15 +170,15 @@ class ReviewApp {
             </div>
           </div>
           <div class="topbar-actions">
+            <button class="refresh-notice" id="refresh-notice" hidden>
+              <i aria-hidden="true"></i><span>New changes available</span><strong>Refresh</strong>
+            </button>
             <button class="range-button" id="range-button" aria-haspopup="dialog" aria-controls="range-dialog" aria-expanded="false">
               <span class="range-button-icon">${icon("git-branch")}</span>
               <span><small>Change range</small><strong id="range-label">Full branch</strong></span>
               <span class="range-chevron">${icon("chevron-down")}</span>
             </button>
             <div class="change-stats" id="change-stats" aria-label="Change statistics"></div>
-            <button class="refresh-notice" id="refresh-notice" hidden>
-              <i aria-hidden="true"></i><span>New changes available</span><strong>Refresh</strong>
-            </button>
             <button class="icon-button settings-button" id="settings-button" aria-label="Review settings" aria-expanded="false">
               ${icon("settings")}
             </button>
@@ -308,6 +322,7 @@ class ReviewApp {
 
   private installPage(page: ReviewPage) {
     this.page = page;
+    const seenFiles = this.seenFiles();
     const cacheKey = `tact-review-${rangeKey(page.selected_range)}`;
     const patchFiles = parsePatchFiles(page.patch, cacheKey, true).flatMap(
       (patch) => patch.files,
@@ -317,7 +332,14 @@ class ReviewApp {
     this.items = this.files.map((file, index) => {
       const id = `${rangeKey(page.selected_range)}:${index}:${file.name}`;
       this.pathToItem.set(file.name, id);
-      return { id, type: "diff", fileDiff: file, annotations: [], version: 1 };
+      return {
+        id,
+        type: "diff",
+        fileDiff: file,
+        annotations: [],
+        collapsed: seenFiles.has(file.name),
+        version: 1,
+      };
     });
 
     const description = this.root.querySelector<HTMLElement>("#scope-description");
@@ -480,6 +502,10 @@ class ReviewApp {
       enableLineSelection: true,
       stickyHeaders: true,
       lineHoverHighlight: "both" as const,
+      renderHeaderMetadata: (_file, context) => {
+        if (context.item.type !== "diff") return null;
+        return this.seenButton(context.item);
+      },
       ...commentSelectionCallbacks((selection) => this.openCommentComposer(selection)),
       renderAnnotation: (annotation: DiffLineAnnotation<AnnotationMetadata>) => this.annotationElement(annotation),
     };
@@ -496,14 +522,23 @@ class ReviewApp {
       initialExpansion: "open",
       density: "compact",
       icons: TREE_ICONS,
+      unsafeCSS: TREE_SEEN_STYLES,
       gitStatus: this.treeGitStatus(),
       renderRowDecoration: ({ item }) => {
         if (item.kind !== "file") return null;
         const count = pendingCommentCount(this.comments, item.path);
-        if (count === 0) return null;
+        const seen = this.seenFiles().has(item.path);
+        if (count === 0 && !seen) return null;
         return {
-          icon: { name: "tact-comment", width: 14, height: 14, viewBox: "0 0 16 16" },
-          title: `${count} pending ${count === 1 ? "comment" : "comments"}`,
+          icon: {
+            name: count > 0 ? (seen ? "tact-comment-seen" : "tact-comment") : "tact-seen",
+            width: 14,
+            height: 14,
+            viewBox: "0 0 16 16",
+          },
+          title: count > 0
+            ? `${count} pending ${count === 1 ? "comment" : "comments"}`
+            : "Seen",
         };
       },
       onSelectionChange: (paths) => {
@@ -520,6 +555,45 @@ class ReviewApp {
       path: file.name,
       status: treeStatus(file.type),
     }));
+  }
+
+  private seenFiles() {
+    if (!this.page) return new Set<string>();
+    const key = rangeKey(this.page.selected_range);
+    let files = this.seenFilesByRange.get(key);
+    if (!files) {
+      files = new Set<string>();
+      this.seenFilesByRange.set(key, files);
+    }
+    return files;
+  }
+
+  private seenButton(item: CodeViewDiffItem<AnnotationMetadata>) {
+    const seen = this.seenFiles().has(item.fileDiff.name);
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `mark-seen-button${seen ? " seen" : ""}`;
+    button.innerHTML = `${icon("check")}<span>${seen ? "Seen" : "Mark as Seen"}</span>`;
+    button.setAttribute("aria-pressed", String(seen));
+    button.title = seen ? "Mark as unseen and expand file" : "Mark as seen and collapse file";
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      this.toggleSeen(item);
+    });
+    return button;
+  }
+
+  private toggleSeen(item: CodeViewDiffItem<AnnotationMetadata>) {
+    const files = this.seenFiles();
+    const path = item.fileDiff.name;
+    const seen = !files.has(path);
+    if (seen) files.add(path);
+    else files.delete(path);
+
+    item.collapsed = seen;
+    item.version = (item.version ?? 0) + 1;
+    this.viewer?.updateItem(item);
+    this.refreshTreeDecorations();
   }
 
   private bindEvents() {
@@ -655,6 +729,7 @@ class ReviewApp {
       this.bootstrap = payload.bootstrap;
       this.clearPendingComments();
       this.overviews.clear();
+      this.seenFilesByRange.clear();
       const timeline = this.root.querySelector<HTMLElement>("#commit-timeline");
       if (timeline) {
         timeline.innerHTML = this.rangeTimelineMarkup();
@@ -1043,8 +1118,20 @@ class ReviewApp {
   private commentComposerElement(draft: CommentDraft) {
     const element = document.createElement("section");
     element.className = "inline-comment-editor";
+    const range = formatRange(draft.startLine, draft.endLine);
+    const editorId = `comment-editor-${draft.itemId.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
     element.innerHTML = `
-      <div class="editor-topbar">
+      <header class="editor-heading">
+        <div>
+          <strong>${draft.editingId === undefined ? "Add a comment" : "Edit comment"} on ${draft.startLine === draft.endLine ? "line" : "lines"} ${escapeHtml(range)}</strong>
+          <span title="${escapeHtml(draft.path)}">${escapeHtml(draft.path)}</span>
+        </div>
+      </header>
+      <div class="editor-topbar" role="tablist" aria-label="Comment editor">
+        <div class="editor-tabs">
+          <button id="${editorId}-comment" role="tab" aria-controls="${editorId}-input" aria-selected="${draft.tab === "comment"}" tabindex="${draft.tab === "comment" ? "0" : "-1"}" class="${draft.tab === "comment" ? "active" : ""}" data-editor-tab="comment">Comment</button>
+          <button id="${editorId}-preview-tab" role="tab" aria-controls="${editorId}-preview" aria-selected="${draft.tab === "preview"}" tabindex="${draft.tab === "preview" ? "0" : "-1"}" class="${draft.tab === "preview" ? "active" : ""}" data-editor-tab="preview">Preview</button>
+        </div>
         <div class="formatting-tools" aria-label="Markdown formatting">
           ${formatButton("bold", "Bold")}
           ${formatButton("italic", "Italic")}
@@ -1054,24 +1141,24 @@ class ReviewApp {
           ${formatButton("list", "Bulleted list")}
           ${formatButton("quote", "Quote")}
         </div>
-        <div class="editor-tabs" role="tablist">
-          <button class="${draft.tab === "comment" ? "active" : ""}" data-editor-tab="comment">Comment</button>
-          <button class="${draft.tab === "preview" ? "active" : ""}" data-editor-tab="preview">Preview</button>
-        </div>
       </div>
-      <div class="editor-context">${escapeHtml(draft.path)}:${formatRange(draft.startLine, draft.endLine)}</div>
-      <textarea class="comment-input" rows="5" placeholder="Leave a comment" ${draft.tab === "preview" ? "hidden" : ""}></textarea>
-      <div class="markdown-preview" ${draft.tab === "comment" ? "hidden" : ""}></div>
-      <div class="composer-actions">
-        <button class="text-button" data-comment-action="cancel">Cancel</button>
-        <button class="button primary" data-comment-action="save">${draft.editingId === undefined ? "Add comment" : "Save changes"}</button>
+      <textarea id="${editorId}-input" role="tabpanel" aria-labelledby="${editorId}-comment" class="comment-input" rows="6" placeholder="Leave a comment" ${draft.tab === "preview" ? "hidden" : ""}></textarea>
+      <div id="${editorId}-preview" role="tabpanel" aria-labelledby="${editorId}-preview-tab" class="markdown-preview" ${draft.tab === "comment" ? "hidden" : ""}></div>
+      <div class="editor-footer">
+        <span class="editor-shortcut"><kbd>⌘</kbd><kbd>Enter</kbd> to save</span>
+        <div class="composer-actions">
+          <button class="button quiet" data-comment-action="cancel">Cancel</button>
+          <button class="button primary" data-comment-action="save" ${draft.body.trim() ? "" : "disabled"}>${draft.editingId === undefined ? "Add comment" : "Save changes"}</button>
+        </div>
       </div>`;
 
     const textarea = element.querySelector<HTMLTextAreaElement>(".comment-input");
+    const saveButton = element.querySelector<HTMLButtonElement>("[data-comment-action=save]");
     if (textarea) {
       textarea.value = draft.body;
       textarea.addEventListener("input", () => {
         if (this.draft === draft) draft.body = textarea.value;
+        if (saveButton) saveButton.disabled = textarea.value.trim().length === 0;
       });
       textarea.addEventListener("keydown", (event) => {
         if ((event.metaKey || event.ctrlKey) && event.key === "Enter") this.saveComment();
@@ -1116,7 +1203,10 @@ class ReviewApp {
     if (this.draft !== draft) return;
     draft.tab = tab;
     for (const button of element.querySelectorAll<HTMLButtonElement>("[data-editor-tab]")) {
-      button.classList.toggle("active", button.dataset.editorTab === tab);
+      const active = button.dataset.editorTab === tab;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-selected", String(active));
+      button.tabIndex = active ? 0 : -1;
     }
     const textarea = element.querySelector<HTMLTextAreaElement>(".comment-input");
     const preview = element.querySelector<HTMLElement>(".markdown-preview");
@@ -1349,6 +1439,7 @@ function icon(name: string) {
     link: '<path d="M10 13a5 5 0 0 0 7.5.5l2-2a5 5 0 0 0-7-7l-1.15 1.15M14 11a5 5 0 0 0-7.5-.5l-2 2a5 5 0 0 0 7 7l1.15-1.15"/>',
     list: '<path d="M9 6h11M9 12h11M9 18h11M4 6h.01M4 12h.01M4 18h.01"/>',
     quote: '<path d="M7 17H4a2 2 0 0 1-2-2v-3a5 5 0 0 1 5-5v2a3 3 0 0 0-3 3h3Zm10 0h-3a2 2 0 0 1-2-2v-3a5 5 0 0 1 5-5v2a3 3 0 0 0-3 3h3Z"/>',
+    check: '<path d="m5 12 4 4L19 6"/>',
     edit: '<path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4Z"/>',
     trash: '<path d="M4 7h16M9 11v6m6-6v6M6 7l1 14h10l1-14M9 7V4h6v3"/>',
   };
