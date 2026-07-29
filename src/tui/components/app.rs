@@ -170,6 +170,14 @@ impl AppNode {
         }
     }
 
+    pub(crate) fn open_resume_selector(&mut self) -> ComponentUpdate<AppEffect> {
+        let Some(root) = self.main.as_mut() else {
+            return ComponentUpdate::none();
+        };
+        let update = root.component_mut().load_sessions();
+        self.map_root_update(PaneId::Main, update)
+    }
+
     pub(crate) fn update(&mut self, event: AppEvent) -> ComponentUpdate<AppEffect> {
         match event {
             AppEvent::Terminal(event) => self.update_terminal(event),
@@ -634,7 +642,7 @@ fn is_control_c(event: &Event) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{AppEffect, AppEvent, AppNode, RootEvent, RootNode, SPLIT_HINT};
+    use super::{AppEffect, AppEvent, AppNode, RootEffect, RootEvent, RootNode, SPLIT_HINT};
     use crate::{
         app::config::{ReasoningEffort, ReasoningMode},
         tui::{
@@ -705,6 +713,23 @@ mod tests {
         assert!(
             rendered(&mut app, 80, 12).contains("Update available · v1.2.3 · run `tact update`")
         );
+    }
+
+    #[test]
+    fn resume_selector_starts_loading_sessions_in_the_primary_pane() {
+        let mut app = app();
+
+        let update = app.open_resume_selector();
+
+        assert!(matches!(
+            update.effects.as_slice(),
+            [AppEffect::Pane {
+                pane: PaneId::Main,
+                effect: RootEffect::LoadSessions,
+            }]
+        ));
+        assert_eq!(update.render, super::RenderRequest::Immediate);
+        assert!(rendered(&mut app, 80, 12).contains("Loading sessions…"));
     }
 
     #[test]

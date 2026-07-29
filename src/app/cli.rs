@@ -175,6 +175,8 @@ enum Command {
         #[arg(env = "TACT_PROMPT", value_parser = NonEmptyStringValueParser::new())]
         prompt: String,
     },
+    /// Open the interactive session picker.
+    Resume,
     /// Download and install the latest signed tact release.
     Update,
 }
@@ -292,7 +294,7 @@ impl Cli {
         if self.resume.is_some() && self.command.is_some() {
             return Err(RuntimeError::ResumeWithCommand.into());
         }
-        if self.command.is_none() {
+        if matches!(&self.command, None | Some(Command::Resume)) {
             tui::ensure_interactive()?;
         }
         if self
@@ -329,14 +331,22 @@ impl Cli {
         };
 
         match self.command {
+            Some(Command::Resume) => Self::run_tui(config, tui::StartupMode::ResumeSelector).await,
             Some(command) => command.run_with_config(&config).await,
-            None => Self::run_tui(config, self.resume).await,
+            None => {
+                let startup = self
+                    .resume
+                    .map_or(tui::StartupMode::NewSession, |session_id| {
+                        tui::StartupMode::ResumeSession(session_id)
+                    });
+                Self::run_tui(config, startup).await
+            }
         }
     }
 
-    async fn run_tui(config: Config, resume: Option<String>) -> Result<()> {
+    async fn run_tui(config: Config, startup: tui::StartupMode) -> Result<()> {
         let shutdown = CancellationToken::new();
-        let run = tui::run(config, resume, shutdown.clone());
+        let run = tui::run(config, startup, shutdown.clone());
         tokio::pin!(run);
 
         let result = tokio::select! {
@@ -417,6 +427,7 @@ impl Command {
                 )
                 .await
             }
+            Self::Resume => unreachable!("resume is dispatched to the TUI"),
             Self::Update => unreachable!("update is dispatched before configuration is loaded"),
         }
     }
@@ -601,6 +612,14 @@ mod tests {
 
         assert_eq!(cli.resume.as_deref(), Some("session one"));
         assert_eq!(resume_command("session one"), "tact --resume 'session one'");
+    }
+
+    #[test]
+    fn resume_subcommand_selects_the_session_picker() {
+        let cli = Cli::try_parse_from(["tact", "resume"]).unwrap();
+
+        assert!(matches!(cli.command, Some(Command::Resume)));
+        assert!(cli.resume.is_none());
     }
 
     #[test]

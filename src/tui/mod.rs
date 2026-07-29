@@ -63,6 +63,12 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
+pub(crate) enum StartupMode {
+    NewSession,
+    ResumeSession(String),
+    ResumeSelector,
+}
+
 type EditorTask =
     JoinHandle<std::result::Result<EditorCompletion, crate::app::error::ExternalEditorError>>;
 
@@ -262,7 +268,7 @@ fn subagent_pane(
 
 pub(crate) async fn run(
     mut config: Config,
-    resume_session_id: Option<String>,
+    startup: StartupMode,
     shutdown: CancellationToken,
 ) -> Result<Option<String>> {
     ensure_interactive()?;
@@ -271,6 +277,11 @@ pub(crate) async fn run(
     let initial_fast_mode = config.agent().fast_mode();
     let initial_max_subagents = config.agent().max_subagents();
     let preferred_reasoning_mode = config.agent().reasoning_mode();
+    let open_resume_selector = matches!(&startup, StartupMode::ResumeSelector);
+    let resume_session_id = match startup {
+        StartupMode::ResumeSession(session_id) => Some(session_id),
+        StartupMode::NewSession | StartupMode::ResumeSelector => None,
+    };
     let resuming = resume_session_id.is_some();
     let (configured, restored_projection, reasoning_mode) =
         if let Some(session_id) = resume_session_id {
@@ -418,6 +429,10 @@ pub(crate) async fn run(
                 },
             )?;
         };
+    }
+
+    if open_resume_selector {
+        apply_app_update!(app.open_resume_selector());
     }
 
     loop {
