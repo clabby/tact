@@ -6,6 +6,7 @@ const RELEASE_INSTRUCTIONS: &str = include_str!("../RELEASES.md");
 const CARGO_MANIFEST: &str = include_str!("../Cargo.toml");
 const REVIEW_BUILD: &str = include_str!("../web/review/build.ts");
 const REVIEW_ASSETS: &str = include_str!("../src/review/assets.rs");
+const JUSTFILE: &str = include_str!("../justfile");
 
 fn assert_contains(document: &str, expected: &str) {
     assert!(
@@ -30,6 +31,19 @@ fn number_after(document: &str, marker: &str) -> u32 {
     digits
         .parse()
         .unwrap_or_else(|_| panic!("expected `{marker}` to be followed by a number"))
+}
+
+#[test]
+fn just_recipes_forward_command_arguments() {
+    for command in [
+        "cargo build {{args}}",
+        "cargo +nightly fmt --all -- {{args}}",
+        "cargo +stable clippy --all-targets {{args}} -- -D warnings",
+        "cargo nextest run {{args}}",
+        "cargo bench {{args}}",
+    ] {
+        assert_contains(JUSTFILE, command);
+    }
 }
 
 #[test]
