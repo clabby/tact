@@ -10,8 +10,8 @@ pub(crate) use diff::ReviewScope;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use futures_util::future::BoxFuture;
 use server::{
-    ReviewBootstrap, ReviewDecision, ReviewOutcome, ReviewPage, ReviewServer, ScopeLoadError,
-    ScopeLoader,
+    OverviewLoader, ReviewBootstrap, ReviewDecision, ReviewOutcome, ReviewPage, ReviewServer,
+    ScopeLoadError, ScopeLoader,
 };
 use sha2::{Digest, Sha256};
 use std::{
@@ -46,7 +46,6 @@ pub(crate) async fn run(
     let preparation_shutdown = CancellationToken::new();
     let _cancel_preparation_on_drop = CancelOnDrop(preparation_shutdown.clone());
     let initial_page = prepare_page(
-        overview_generator.clone(),
         context.clone(),
         title.clone(),
         ReviewScope::Uncommitted,
@@ -62,10 +61,20 @@ pub(crate) async fn run(
     let loader_context = context.clone();
     let scope_loader: ScopeLoader = Arc::new(move |scope, shutdown| {
         let context = loader_context.clone();
-        let overview_generator = overview_generator.clone();
         let title = title.clone();
         Box::pin(async move {
-            prepare_page(overview_generator, context, title, scope, shutdown)
+            prepare_page(context, title, scope, shutdown)
+                .await
+                .map_err(|error| match error {
+                    ReviewError::Cancelled => ScopeLoadError::Cancelled,
+                    error => ScopeLoadError::Failed(error.to_string()),
+                })
+        })
+    });
+    let overview_loader: OverviewLoader = Arc::new(move |scope, patch, shutdown| {
+        let overview_generator = overview_generator.clone();
+        Box::pin(async move {
+            generate_overview(overview_generator, scope, &patch, shutdown)
                 .await
                 .map_err(|error| match error {
                     ReviewError::Cancelled => ScopeLoadError::Cancelled,
@@ -78,6 +87,7 @@ pub(crate) async fn run(
         bootstrap,
         initial_page,
         scope_loader,
+        overview_loader,
         token,
         assets.path().to_owned(),
     )
@@ -99,7 +109,6 @@ impl Drop for CancelOnDrop {
 }
 
 async fn prepare_page(
-    overview_generator: OverviewGenerator,
     context: diff::ReviewContext,
     title: String,
     scope: ReviewScope,
@@ -109,11 +118,8 @@ async fn prepare_page(
         result = context.collect(scope) => result?,
         () = shutdown.cancelled() => return Err(ReviewError::Cancelled),
     };
-    let overview_html =
-        generate_overview(overview_generator, scope, &snapshot.patch, shutdown).await?;
     Ok(ReviewPage {
         title,
-        overview_html,
         selected_scope: scope,
         diff: snapshot,
     })

@@ -1,6 +1,6 @@
 import { mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
-import { reviewBootstrap, reviewFixtures } from "./dev-fixture";
+import { overviewFixtures, reviewBootstrap, reviewFixtures } from "./dev-fixture";
 
 const outputDirectory = join(import.meta.dir, ".dev");
 await rm(outputDirectory, { recursive: true, force: true });
@@ -36,6 +36,13 @@ const server = Bun.serve({
       if (!fixture) return Response.json({ error: "Unknown review scope" }, { status: 422 });
       await Bun.sleep(350);
       return Response.json(fixture);
+    }
+    if (request.method === "POST" && url.pathname === "/api/overview") {
+      const body = await request.json() as { scope?: keyof typeof overviewFixtures };
+      const overview = body.scope ? overviewFixtures[body.scope] : undefined;
+      if (!overview) return Response.json({ error: "Unknown review scope" }, { status: 422 });
+      await Bun.sleep(900);
+      return Response.json({ selected_scope: body.scope, overview_html: overview });
     }
     if (request.method === "POST" && url.pathname === "/api/decision") {
       console.log("\nReview result:\n", JSON.stringify(await request.json(), null, 2));

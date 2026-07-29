@@ -7,4 +7,5 @@ test("standalone review fixtures contain valid patches", () => {
     expect(() => parsePatchFiles(fixture.patch, "dev-fixture", true)).not.toThrow();
   }
   expect(reviewFixtures[reviewBootstrap.default_scope].selected_scope).toBe("uncommitted");
+  expect(reviewFixtures.uncommitted).not.toHaveProperty("overview_html");
 });

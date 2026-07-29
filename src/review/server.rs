@@ -24,7 +24,6 @@ const MAX_PATH_BYTES: usize = 4096;
 #[derive(Clone, Serialize)]
 pub(super) struct ReviewPage {
     pub(super) title: String,
-    pub(super) overview_html: String,
     pub(super) selected_scope: super::diff::ReviewScope,
     #[serde(flatten)]
     pub(super) diff: super::diff::DiffSnapshot,
@@ -45,6 +44,12 @@ struct ScopeRequest {
 }
 
 #[derive(Serialize)]
+struct OverviewResponse {
+    selected_scope: super::diff::ReviewScope,
+    overview_html: String,
+}
+
+#[derive(Serialize)]
 struct ScopeError {
     error: String,
 }
@@ -54,6 +59,16 @@ pub(super) type ScopeLoader = Arc<
             super::diff::ReviewScope,
             CancellationToken,
         ) -> BoxFuture<'static, Result<ReviewPage, ScopeLoadError>>
+        + Send
+        + Sync,
+>;
+
+pub(super) type OverviewLoader = Arc<
+    dyn Fn(
+            super::diff::ReviewScope,
+            String,
+            CancellationToken,
+        ) -> BoxFuture<'static, Result<String, ScopeLoadError>>
         + Send
         + Sync,
 >;
@@ -101,7 +116,10 @@ struct ServerState {
     assets: PathBuf,
     bootstrap: ReviewBootstrap,
     scope_loader: ScopeLoader,
+    overview_loader: OverviewLoader,
     scope_pages: Mutex<HashMap<super::diff::ReviewScope, ReviewPage>>,
+    overviews: Mutex<HashMap<super::diff::ReviewScope, String>>,
+    overview_generation: Mutex<()>,
     scope_shutdown: CancellationToken,
     outcome: Mutex<Option<oneshot::Sender<ReviewOutcome>>>,
 }
@@ -125,6 +143,7 @@ impl ReviewServer {
         bootstrap: ReviewBootstrap,
         initial_page: ReviewPage,
         scope_loader: ScopeLoader,
+        overview_loader: OverviewLoader,
         token: String,
         assets: PathBuf,
     ) -> Result<Self, std::io::Error> {
@@ -136,7 +155,10 @@ impl ReviewServer {
             assets,
             bootstrap,
             scope_loader,
+            overview_loader,
             scope_pages: Mutex::new(HashMap::from([(initial_page.selected_scope, initial_page)])),
+            overviews: Mutex::new(HashMap::new()),
+            overview_generation: Mutex::new(()),
             scope_shutdown: scope_shutdown.clone(),
             outcome: Mutex::new(Some(outcome_tx)),
         });
@@ -192,6 +214,7 @@ fn router(state: Arc<ServerState>) -> Router {
         .route("/app.css", get(stylesheet))
         .route("/api/review", get(review))
         .route("/api/scope", post(load_scope))
+        .route("/api/overview", post(load_overview))
         .route("/api/decision", post(submit))
         .route("/api/cancel", post(cancel))
         .layer(DefaultBodyLimit::max(MAX_DECISION_BYTES))
@@ -247,6 +270,73 @@ async fn load_scope(
         .await
         .insert(request.scope, page.clone());
     secure_json(StatusCode::OK, page)
+}
+
+async fn load_overview(
+    State(state): State<Arc<ServerState>>,
+    Json(request): Json<ScopeRequest>,
+) -> Response<Body> {
+    if let Some(overview_html) = state.overviews.lock().await.get(&request.scope).cloned() {
+        return secure_json(
+            StatusCode::OK,
+            OverviewResponse {
+                selected_scope: request.scope,
+                overview_html,
+            },
+        );
+    }
+    let _generation = state.overview_generation.lock().await;
+    if let Some(overview_html) = state.overviews.lock().await.get(&request.scope).cloned() {
+        return secure_json(
+            StatusCode::OK,
+            OverviewResponse {
+                selected_scope: request.scope,
+                overview_html,
+            },
+        );
+    }
+
+    let patch = match state.scope_pages.lock().await.get(&request.scope) {
+        Some(page) => page.diff.patch.clone(),
+        None => {
+            return secure_json(
+                StatusCode::CONFLICT,
+                ScopeError {
+                    error: "load this change range before requesting its overview".to_owned(),
+                },
+            );
+        }
+    };
+    let overview_html =
+        match (state.overview_loader)(request.scope, patch, state.scope_shutdown.clone()).await {
+            Ok(overview) => overview,
+            Err(ScopeLoadError::Cancelled) => {
+                if let Some(sender) = state.outcome.lock().await.take() {
+                    let _ = sender.send(ReviewOutcome::Cancelled);
+                }
+                return secure_json(
+                    StatusCode::GONE,
+                    ScopeError {
+                        error: "review overview generation was cancelled".to_owned(),
+                    },
+                );
+            }
+            Err(ScopeLoadError::Failed(error)) => {
+                return secure_json(StatusCode::UNPROCESSABLE_ENTITY, ScopeError { error });
+            }
+        };
+    state
+        .overviews
+        .lock()
+        .await
+        .insert(request.scope, overview_html.clone());
+    secure_json(
+        StatusCode::OK,
+        OverviewResponse {
+            selected_scope: request.scope,
+            overview_html,
+        },
+    )
 }
 
 async fn submit(
@@ -337,8 +427,8 @@ pub(crate) enum ServerError {
 #[cfg(test)]
 mod tests {
     use super::{
-        Decision, ReviewBootstrap, ReviewOutcome, ReviewPage, ReviewServer, ScopeLoadError,
-        ScopeLoader,
+        Decision, OverviewLoader, ReviewBootstrap, ReviewOutcome, ReviewPage, ReviewServer,
+        ScopeLoadError, ScopeLoader,
     };
     use crate::review::diff::{DiffSnapshot, ReviewScope};
     use std::{
@@ -472,18 +562,113 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn overview_is_generated_only_when_requested_and_then_cached() {
+        let assets = tempfile::tempdir().unwrap();
+        for name in ["index.html", "app.js", "app.css"] {
+            std::fs::write(assets.path().join(name), "").unwrap();
+        }
+        let loads = Arc::new(AtomicUsize::new(0));
+        let overview_loader: OverviewLoader = Arc::new({
+            let loads = Arc::clone(&loads);
+            move |_scope, patch, _shutdown| {
+                loads.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async move { Ok(format!("<p>{patch}</p>")) })
+            }
+        });
+        let server = start_server_with_loaders(&assets, loader(), overview_loader).await;
+
+        assert_eq!(loads.load(Ordering::SeqCst), 0);
+        for _ in 0..2 {
+            let response = reqwest::Client::new()
+                .post(server.endpoint_url("api/overview"))
+                .json(&serde_json::json!({ "scope": "uncommitted" }))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            assert_eq!(
+                response.json::<serde_json::Value>().await.unwrap()["overview_html"],
+                "<p>patch</p>"
+            );
+        }
+        assert_eq!(loads.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn concurrent_overview_requests_share_one_generation() {
+        let assets = tempfile::tempdir().unwrap();
+        for name in ["index.html", "app.js", "app.css"] {
+            std::fs::write(assets.path().join(name), "").unwrap();
+        }
+        let loads = Arc::new(AtomicUsize::new(0));
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let overview_loader: OverviewLoader = Arc::new({
+            let loads = Arc::clone(&loads);
+            let started = Arc::clone(&started);
+            let release = Arc::clone(&release);
+            move |_scope, _patch, _shutdown| {
+                let started = Arc::clone(&started);
+                let release = Arc::clone(&release);
+                loads.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async move {
+                    started.notify_one();
+                    release.notified().await;
+                    Ok("<p>Overview</p>".to_owned())
+                })
+            }
+        });
+        let server = start_server_with_loaders(&assets, loader(), overview_loader).await;
+        let url = server.endpoint_url("api/overview");
+        let first = tokio::spawn(request_overview(url.clone(), ReviewScope::Uncommitted));
+        started.notified().await;
+        let second = tokio::spawn(request_overview(url, ReviewScope::Uncommitted));
+        tokio::task::yield_now().await;
+
+        release.notify_waiters();
+
+        assert_eq!(first.await.unwrap(), reqwest::StatusCode::OK);
+        assert_eq!(second.await.unwrap(), reqwest::StatusCode::OK);
+        assert_eq!(loads.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn overview_requires_the_scope_to_be_loaded() {
+        let assets = tempfile::tempdir().unwrap();
+        for name in ["index.html", "app.js", "app.css"] {
+            std::fs::write(assets.path().join(name), "").unwrap();
+        }
+        let loads = Arc::new(AtomicUsize::new(0));
+        let overview_loader: OverviewLoader = Arc::new({
+            let loads = Arc::clone(&loads);
+            move |_scope, _patch, _shutdown| {
+                loads.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async { Ok("<p>Overview</p>".to_owned()) })
+            }
+        });
+        let server = start_server_with_loaders(&assets, loader(), overview_loader).await;
+
+        let status =
+            request_overview(server.endpoint_url("api/overview"), ReviewScope::FullBranch).await;
+
+        assert_eq!(status, reqwest::StatusCode::CONFLICT);
+        assert_eq!(loads.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
     async fn interrupted_overview_cancels_the_review() {
         let assets = tempfile::tempdir().unwrap();
         for name in ["index.html", "app.js", "app.css"] {
             std::fs::write(assets.path().join(name), "").unwrap();
         }
-        let loader: ScopeLoader =
-            Arc::new(|_scope, _shutdown| Box::pin(async { Err(ScopeLoadError::Cancelled) }));
-        let server = start_server_with_loader(&assets, loader).await;
+        let overview_loader: OverviewLoader = Arc::new(|_scope, _patch, _shutdown| {
+            Box::pin(async { Err(ScopeLoadError::Cancelled) })
+        });
+        let server = start_server_with_loaders(&assets, loader(), overview_loader).await;
 
         let response = reqwest::Client::new()
-            .post(server.endpoint_url("api/scope"))
-            .json(&serde_json::json!({ "scope": "full_branch" }))
+            .post(server.endpoint_url("api/overview"))
+            .json(&serde_json::json!({ "scope": "uncommitted" }))
             .send()
             .await
             .unwrap();
@@ -540,6 +725,45 @@ mod tests {
         scope_request.await.unwrap().unwrap();
     }
 
+    #[tokio::test]
+    async fn cancelling_stops_an_active_overview_load() {
+        let assets = tempfile::tempdir().unwrap();
+        for name in ["index.html", "app.js", "app.css"] {
+            std::fs::write(assets.path().join(name), "").unwrap();
+        }
+        let started = Arc::new(Notify::new());
+        let overview_loader: OverviewLoader = Arc::new({
+            let started = Arc::clone(&started);
+            move |_scope, _patch, shutdown| {
+                let started = Arc::clone(&started);
+                Box::pin(async move {
+                    started.notify_one();
+                    shutdown.cancelled().await;
+                    Err(ScopeLoadError::Cancelled)
+                })
+            }
+        });
+        let server = start_server_with_loaders(&assets, loader(), overview_loader).await;
+        let overview_request = tokio::spawn({
+            let url = server.endpoint_url("api/overview");
+            async move { request_overview(url, ReviewScope::Uncommitted).await }
+        });
+        started.notified().await;
+
+        reqwest::Client::new()
+            .post(server.endpoint_url("api/cancel"))
+            .send()
+            .await
+            .unwrap();
+
+        let outcome = tokio::time::timeout(Duration::from_secs(1), server.wait())
+            .await
+            .expect("server should stop without waiting for the overview")
+            .unwrap();
+        assert!(matches!(outcome, ReviewOutcome::Cancelled));
+        assert_eq!(overview_request.await.unwrap(), reqwest::StatusCode::GONE);
+    }
+
     async fn start_server(assets: &tempfile::TempDir) -> ReviewServer {
         start_server_with_loader(assets, loader()).await
     }
@@ -547,6 +771,14 @@ mod tests {
     async fn start_server_with_loader(
         assets: &tempfile::TempDir,
         loader: ScopeLoader,
+    ) -> ReviewServer {
+        start_server_with_loaders(assets, loader, overview_loader()).await
+    }
+
+    async fn start_server_with_loaders(
+        assets: &tempfile::TempDir,
+        loader: ScopeLoader,
+        overview_loader: OverviewLoader,
     ) -> ReviewServer {
         ReviewServer::start(
             ReviewBootstrap {
@@ -557,6 +789,7 @@ mod tests {
             },
             page(ReviewScope::Uncommitted),
             loader,
+            overview_loader,
             "test-token".to_owned(),
             assets.path().to_owned(),
         )
@@ -568,10 +801,23 @@ mod tests {
         Arc::new(|scope, _shutdown| Box::pin(async move { Ok(page(scope)) }))
     }
 
+    fn overview_loader() -> OverviewLoader {
+        Arc::new(|_scope, _patch, _shutdown| Box::pin(async { Ok("<p>Overview</p>".to_owned()) }))
+    }
+
+    async fn request_overview(url: String, scope: ReviewScope) -> reqwest::StatusCode {
+        reqwest::Client::new()
+            .post(url)
+            .json(&serde_json::json!({ "scope": scope }))
+            .send()
+            .await
+            .unwrap()
+            .status()
+    }
+
     fn page(scope: ReviewScope) -> ReviewPage {
         ReviewPage {
             title: "Review".to_owned(),
-            overview_html: "<p>Overview</p>".to_owned(),
             selected_scope: scope,
             diff: DiffSnapshot {
                 patch: "patch".to_owned(),

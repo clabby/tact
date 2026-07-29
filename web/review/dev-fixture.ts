@@ -69,7 +69,6 @@ export const reviewFixtures = {
     selected_scope: "uncommitted" as const,
     scope: "Uncommitted changes",
     base: "HEAD",
-    overview_html: overview,
     patch,
   },
   full_branch: {
@@ -78,9 +77,13 @@ export const reviewFixtures = {
     selected_scope: "full_branch" as const,
     scope: "Full branch",
     base: "9d3b745",
-    overview_html: `${overview}<h2>Branch-only release work</h2><p>The full branch also packages the browser bundle in the release workflow.</p>`,
     patch: branchPatch,
   },
+};
+
+export const overviewFixtures = {
+  uncommitted: overview,
+  full_branch: `${overview}<h2>Branch-only release work</h2><p>The full branch also packages the browser bundle in the release workflow.</p>`,
 };
 
 export const reviewFixture = reviewFixtures.uncommitted;
