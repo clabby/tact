@@ -25,11 +25,16 @@ await Bun.write(
   join(outputDirectory, "LICENSE.md"),
   Bun.file(join(import.meta.dir, "..", "..", "LICENSE.md")),
 );
+await Bun.write(
+  join(outputDirectory, "favicon.svg"),
+  Bun.file(join(import.meta.dir, "..", "..", "assets", "favicon.svg")),
+);
 
 const contentTypes: Record<string, string> = {
   "index.html": "text/html; charset=utf-8",
   "app.css": "text/css; charset=utf-8",
   "app.js": "text/javascript; charset=utf-8",
+  "favicon.svg": "image/svg+xml",
   "LICENSE.md": "text/markdown; charset=utf-8",
 };
 const files = await Promise.all(
