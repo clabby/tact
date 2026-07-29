@@ -7,7 +7,16 @@ import {
   type FileDiffMetadata,
 } from "@pierre/diffs";
 import { FileTree, type GitStatus, type GitStatusEntry } from "@pierre/trees";
+import { pendingCommentCount } from "./comment-state";
 import "./styles.css";
+
+const COMMENT_ICON_SPRITE = `
+  <svg aria-hidden="true" style="display:none" xmlns="http://www.w3.org/2000/svg">
+    <symbol id="tact-comment" viewBox="0 0 16 16">
+      <path fill="#4b8cff" d="M3.25 2.25h9.5c.97 0 1.75.78 1.75 1.75v6c0 .97-.78 1.75-1.75 1.75H7.1l-3.53 2.06a.55.55 0 0 1-.82-.47V11.7A1.75 1.75 0 0 1 1.5 10V4c0-.97.78-1.75 1.75-1.75Z"/>
+    </symbol>
+  </svg>`;
+const TREE_ICONS = { set: "minimal", spriteSheet: COMMENT_ICON_SPRITE } as const;
 
 type ReviewPage = {
   title: string;
@@ -171,11 +180,17 @@ class ReviewApp {
       flattenEmptyDirectories: true,
       initialExpansion: "open",
       density: "compact",
-      icons: "minimal",
-      gitStatus: this.files.map((file) => ({
-        path: file.name,
-        status: treeStatus(file.type),
-      })) satisfies GitStatusEntry[],
+      icons: TREE_ICONS,
+      gitStatus: this.treeGitStatus(),
+      renderRowDecoration: ({ item }) => {
+        if (item.kind !== "file") return null;
+        const count = pendingCommentCount(this.comments, item.path);
+        if (count === 0) return null;
+        return {
+          icon: { name: "tact-comment", width: 14, height: 14, viewBox: "0 0 16 16" },
+          title: `${count} pending ${count === 1 ? "comment" : "comments"}`,
+        };
+      },
       onSelectionChange: (paths) => {
         const path = paths.at(-1);
         const id = path ? this.pathToItem.get(path) : undefined;
@@ -183,6 +198,13 @@ class ReviewApp {
       },
     });
     this.tree.render({ containerWrapper: container });
+  }
+
+  private treeGitStatus(): GitStatusEntry[] {
+    return this.files.map((file) => ({
+      path: file.name,
+      status: treeStatus(file.type),
+    }));
   }
 
   private bindEvents() {
@@ -253,6 +275,7 @@ class ReviewApp {
     };
     this.comments.push(comment);
     this.refreshItem(item.id);
+    this.refreshTreeDecorations();
     this.renderCommentList();
     this.closeCommentComposer();
   }
@@ -262,7 +285,13 @@ class ReviewApp {
     if (index < 0) return;
     const [comment] = this.comments.splice(index, 1);
     this.refreshItem(comment.itemId);
+    this.refreshTreeDecorations();
     this.renderCommentList();
+  }
+
+  private refreshTreeDecorations() {
+    // Updating the icon surface asks virtualized rows to evaluate their decorations again.
+    this.tree?.setIcons({ ...TREE_ICONS });
   }
 
   private refreshItem(itemId: string) {
