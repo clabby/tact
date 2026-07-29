@@ -89,11 +89,13 @@ tact run "inspect the workspace"
 
 ## Review changes
 
-Enter `/review` while no agent work is active to review workspace changes. Tact opens uncommitted
-changes by default; the browser can switch to the full branch from trunk. The root agent generates
+Enter `/review` while no agent work is active to review workspace changes. Tact opens the full
+branch from trunk by default; the browser can narrow the range, including to uncommitted changes. The root agent generates
 the overview as a visible transcript turn, then Tact waits while you review the overview and diff in
 your browser. Approve or request changes there, with optional overall and inline comments. Tact
 converts the result to Markdown and inserts it into the composer so you can edit or send it.
+Reloading or closing the browser does not cancel the review. Reopen the live URL shown by Tact, or
+cancel explicitly from the browser or Tact.
 
 The first review from an official release asks before downloading the matching, checksummed browser
 assets. This is a one-time download for that Tact version, stored under `~/.tact/review` by default.
@@ -115,7 +117,8 @@ To work on the interface in a browser with sample review data, run:
 just dev
 ```
 
-`TACT_REVIEW_ASSETS=/absolute/path/to/web/review/dist` remains available as a manual override.
+`TACT_REVIEW_ASSETS=/absolute/path/to/web/review/dist` remains available as a manual override. The
+development server watches browser sources, rebuilds them, and reloads connected pages.
 
 ## Configuration
 

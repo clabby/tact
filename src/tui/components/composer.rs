@@ -73,6 +73,7 @@ pub(crate) enum ComposerEvent {
     },
     ReviewWaiting {
         waiting: bool,
+        status: Option<String>,
         now: Instant,
     },
     ActiveSubagents {
@@ -104,6 +105,7 @@ pub(crate) struct Composer {
     activity_wave: Option<WavedText>,
     activity_status: Option<String>,
     review_wave: Option<WavedText>,
+    review_status: Option<String>,
     active_subagents: usize,
     subagent_wave: Option<WavedText>,
     turn_timers: VecDeque<TurnTimer>,
@@ -199,6 +201,7 @@ impl Composer {
             activity_wave: None,
             activity_status: None,
             review_wave: None,
+            review_status: None,
             active_subagents: 0,
             subagent_wave: None,
             turn_timers: VecDeque::new(),
@@ -283,15 +286,22 @@ impl Composer {
                 self.activity_status = status;
                 ComposerUpdate::changed()
             }
-            ComposerEvent::ReviewWaiting { waiting, now } => {
-                if self.review_wave.is_some() == waiting {
+            ComposerEvent::ReviewWaiting {
+                waiting,
+                status,
+                now,
+            } => {
+                let status =
+                    waiting.then(|| status.unwrap_or_else(|| "Waiting for review…".to_owned()));
+                if self.review_status == status {
                     return ComposerUpdate::unchanged();
                 }
-                self.review_wave = waiting.then(|| {
-                    let mut wave = WavedText::new("Waiting for review…", Color::Green);
+                self.review_wave = status.as_ref().map(|status| {
+                    let mut wave = WavedText::new(status, Color::Green);
                     wave.set_active(true, now);
                     wave
                 });
+                self.review_status = status;
                 ComposerUpdate::changed()
             }
             ComposerEvent::ActiveSubagents { count, now } => {
@@ -855,9 +865,9 @@ impl Composer {
         let content_end = content_start + u16::try_from(content_width).unwrap_or(u16::MAX);
         let usage_prefix = format!(" {}%/272k ", context_percent(self.context_tokens));
         let review_segment = self
-            .review_wave
+            .review_status
             .as_ref()
-            .map(|_| "Waiting for review… ")
+            .map(|status| format!("{status} "))
             .unwrap_or_default();
         let status_segment = self.activity_status.clone().unwrap_or_default();
         let subagent_segment = if self.active_subagents > 0 {
@@ -1251,6 +1261,7 @@ mod tests {
         let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
         composer.update(ComposerEvent::ReviewWaiting {
             waiting: true,
+            status: None,
             now: Instant::now(),
         });
 

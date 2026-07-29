@@ -2,7 +2,6 @@
 
 use crate::{
     app::config::ReasoningEffort,
-    review::OverviewGenerationError,
     tui::{components::QueueId, pane::PaneId, prompt::Submission, transcript::TurnId},
 };
 use nanocodex::{
@@ -21,12 +20,12 @@ pub(crate) enum WorkerCommand {
         id: TurnId,
         prompt: Submission,
     },
-    ReviewOverview {
+    Auxiliary {
         pane: PaneId,
         id: TurnId,
         prompt: Submission,
         shutdown: CancellationToken,
-        completion: oneshot::Sender<Result<String, OverviewGenerationError>>,
+        completion: oneshot::Sender<Result<String, AuxiliaryError>>,
     },
     Steer {
         pane: PaneId,
@@ -49,6 +48,12 @@ pub(crate) enum WorkerCommand {
     CancelAll(PaneId),
     OpenFork(PaneId),
     ClosePane(PaneId),
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) enum AuxiliaryError {
+    Cancelled,
+    Failed(String),
 }
 
 pub(crate) enum WorkerEvent {
@@ -114,7 +119,7 @@ struct CompletedTurn {
 
 enum TurnPurpose {
     Conversation,
-    ReviewOverview(oneshot::Sender<Result<String, OverviewGenerationError>>),
+    Auxiliary(oneshot::Sender<Result<String, AuxiliaryError>>),
 }
 
 struct TurnRequest {
@@ -182,7 +187,7 @@ async fn run(
                         purpose: TurnPurpose::Conversation,
                         shutdown: None,
                     },
-                    WorkerCommand::ReviewOverview {
+                    WorkerCommand::Auxiliary {
                         pane,
                         id,
                         prompt,
@@ -192,7 +197,7 @@ async fn run(
                         pane,
                         id,
                         prompt,
-                        purpose: TurnPurpose::ReviewOverview(completion),
+                        purpose: TurnPurpose::Auxiliary(completion),
                         shutdown: Some(shutdown),
                     },
                     WorkerCommand::Steer {
@@ -339,6 +344,14 @@ async fn start_turn(
     turns: &mut JoinSet<(TurnKey, TurnPurpose, bool, TurnResult)>,
     updates: &mpsc::UnboundedSender<WorkerEvent>,
 ) {
+    if request
+        .shutdown
+        .as_ref()
+        .is_some_and(CancellationToken::is_cancelled)
+    {
+        reject_cancelled_turn(request);
+        return;
+    }
     let TurnRequest {
         pane,
         id,
@@ -397,8 +410,14 @@ fn reject_turn(request: TurnRequest, error: String, updates: &mpsc::UnboundedSen
         error: Some(error.clone()),
         snapshot: None,
     }));
-    if let TurnPurpose::ReviewOverview(completion) = request.purpose {
-        drop(completion.send(Err(OverviewGenerationError::Failed(error))));
+    if let TurnPurpose::Auxiliary(completion) = request.purpose {
+        drop(completion.send(Err(AuxiliaryError::Failed(error))));
+    }
+}
+
+fn reject_cancelled_turn(request: TurnRequest) {
+    if let TurnPurpose::Auxiliary(completion) = request.purpose {
+        drop(completion.send(Err(AuxiliaryError::Cancelled)));
     }
 }
 
@@ -525,14 +544,14 @@ fn finish_turn(
         Err(NanocodexError::TurnCancelled)
             if shutting_down || was_cancelled || cancelled_by_scope =>
         {
-            (None, None, Err(OverviewGenerationError::Cancelled))
+            (None, None, Err(AuxiliaryError::Cancelled))
         }
         Err(error) => {
             let error = error.to_string();
             (
                 Some(error.clone()),
                 None,
-                Err(OverviewGenerationError::Failed(error)),
+                Err(AuxiliaryError::Failed(error)),
             )
         }
     };
@@ -542,7 +561,7 @@ fn finish_turn(
         error,
         snapshot,
     }));
-    if let TurnPurpose::ReviewOverview(completion) = purpose {
+    if let TurnPurpose::Auxiliary(completion) = purpose {
         drop(completion.send(overview));
     }
 }
@@ -993,7 +1012,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn review_overview_runs_on_the_root_worker_and_has_targeted_cancellation() {
+    async fn auxiliary_job_runs_on_the_root_worker_and_has_targeted_cancellation() {
         let called = Arc::new(Notify::new());
         let calls = Arc::new(AtomicUsize::new(0));
         let (agent, mut events) = pending_agent(Arc::clone(&called), calls);
@@ -1004,7 +1023,7 @@ mod tests {
         let (completion, result) = oneshot::channel();
 
         commands
-            .send(WorkerCommand::ReviewOverview {
+            .send(WorkerCommand::Auxiliary {
                 pane: PaneId::Main,
                 id: TurnId::new(7),
                 prompt: "generate a visible overview".to_owned().into(),
@@ -1037,6 +1056,54 @@ mod tests {
                 ..
             })) if id == TurnId::new(7)
         ));
+
+        worker_shutdown.cancel();
+        timeout(Duration::from_secs(5), async {
+            while !matches!(updates.recv().await, Some(WorkerEvent::Stopped { .. })) {}
+        })
+        .await
+        .expect("the worker should stop");
+        timeout(Duration::from_secs(5), drain)
+            .await
+            .expect("the event stream should drain")
+            .expect("the drain task should not panic");
+    }
+
+    #[tokio::test]
+    async fn cancelled_auxiliary_job_never_calls_the_model_or_emits_turn_events() {
+        let called = Arc::new(Notify::new());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (agent, mut events) = pending_agent(Arc::clone(&called), Arc::clone(&calls));
+        let worker_shutdown = CancellationToken::new();
+        let job_shutdown = CancellationToken::new();
+        job_shutdown.cancel();
+        let (commands, mut updates) = spawn(agent, worker_shutdown.clone());
+        let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
+        let (completion, result) = oneshot::channel();
+
+        commands
+            .send(WorkerCommand::Auxiliary {
+                pane: PaneId::Main,
+                id: TurnId::new(7),
+                prompt: "do not run".to_owned().into(),
+                shutdown: job_shutdown,
+                completion,
+            })
+            .unwrap();
+
+        assert_eq!(
+            timeout(Duration::from_secs(5), result)
+                .await
+                .expect("the completion should resolve")
+                .expect("the worker should send a completion"),
+            Err(super::AuxiliaryError::Cancelled),
+        );
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+        assert!(
+            timeout(Duration::from_millis(50), updates.recv())
+                .await
+                .is_err()
+        );
 
         worker_shutdown.cancel();
         timeout(Duration::from_secs(5), async {

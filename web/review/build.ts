@@ -30,12 +30,20 @@ await Bun.write(
   Bun.file(join(import.meta.dir, "..", "..", "LICENSE.md")),
 );
 
+const contentTypes: Record<string, string> = {
+  "index.html": "text/html; charset=utf-8",
+  "app.css": "text/css; charset=utf-8",
+  "app.js": "text/javascript; charset=utf-8",
+  "LICENSE.md": "text/markdown; charset=utf-8",
+  "THIRD_PARTY_NOTICES.md": "text/markdown; charset=utf-8",
+};
 const files = await Promise.all(
-  ["index.html", "app.css", "app.js", "LICENSE.md", "THIRD_PARTY_NOTICES.md"].map(async (name) => {
-    const file = Bun.file(join(outputDirectory, name));
+  Object.keys(contentTypes).map(async (path) => {
+    const file = Bun.file(join(outputDirectory, path));
     const bytes = await file.bytes();
     return {
-      name,
+      path,
+      content_type: contentTypes[path],
       bytes: bytes.byteLength,
       sha256: new Bun.CryptoHasher("sha256").update(bytes).digest("hex"),
     };
@@ -43,5 +51,11 @@ const files = await Promise.all(
 );
 await Bun.write(
   join(outputDirectory, "manifest.json"),
-  `${JSON.stringify({ version: 1, files }, null, 2)}\n`,
+  `${JSON.stringify({
+    schema_version: 2,
+    review_api: { min: 1, max: 1 },
+    tact: { version: process.env.TACT_VERSION ?? "development" },
+    entrypoint: "index.html",
+    files,
+  }, null, 2)}\n`,
 );

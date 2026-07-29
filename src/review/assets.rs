@@ -1,35 +1,30 @@
+use crate::app::update::{
+    UpdateError, can_download_release_artifacts, download_verified_release_artifact,
+};
 use flate2::read::GzDecoder;
-use futures_util::StreamExt;
-use reqwest::Client;
-use serde::Deserialize;
+use fs2::FileExt;
+use semver::Version;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
+    collections::{BTreeMap, BTreeSet},
     env, fs,
-    io::{self, Cursor},
+    fs::{File, OpenOptions},
+    io::{self, Read, Write},
     path::{Component, Path, PathBuf},
-    time::Duration,
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
 };
-use tar::Archive;
 use tempfile::tempdir_in;
 
 const REVIEW_ASSETS_ENV: &str = "TACT_REVIEW_ASSETS";
-const MAX_ARCHIVE_BYTES: usize = 32 * 1024 * 1024;
-const MAX_SIDECAR_BYTES: usize = 64 * 1024;
-const CONTENT_FILES: [&str; 5] = [
-    "index.html",
-    "app.js",
-    "app.css",
-    "LICENSE.md",
-    "THIRD_PARTY_NOTICES.md",
-];
-const REQUIRED_FILES: [&str; 6] = [
-    "index.html",
-    "app.js",
-    "app.css",
-    "LICENSE.md",
-    "THIRD_PARTY_NOTICES.md",
-    "manifest.json",
-];
+const MANIFEST_NAME: &str = "manifest.json";
+const BUNDLE_SCHEMA_VERSION: u32 = 2;
+const REVIEW_API_VERSION: u32 = 1;
+const MAX_ARCHIVE_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_EXPANDED_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
 
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum AssetAvailability {
@@ -41,28 +36,40 @@ pub(crate) enum AssetAvailability {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ReviewAssets {
     path: PathBuf,
+    manifest: Arc<ValidatedManifest>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ResolvedReviewAsset {
+    pub(crate) path: PathBuf,
+    pub(crate) content_type: String,
 }
 
 impl ReviewAssets {
     pub(crate) fn availability() -> Result<AssetAvailability, AssetError> {
         if let Some(path) = env::var_os(REVIEW_ASSETS_ENV).map(PathBuf::from) {
-            validate_directory(&path)?;
-            return Ok(AssetAvailability::Ready(Self { path }));
+            return Self::from_directory(path, InstallKind::DevelopmentOverride)
+                .map(AssetAvailability::Ready);
         }
 
         let path = install_path(&tact_home()?);
-        if path.is_dir() {
-            validate_directory(&path)?;
-            return Ok(AssetAvailability::Ready(Self { path }));
+        if path.exists() {
+            match Self::from_directory(path, InstallKind::Managed) {
+                Ok(assets) => return Ok(AssetAvailability::Ready(assets)),
+                Err(_) if can_download_release_artifacts() => {
+                    return Ok(AssetAvailability::DownloadRequired);
+                }
+                Err(error) => return Err(error),
+            }
         }
-        if official_build() {
+        if can_download_release_artifacts() {
             return Ok(AssetAvailability::DownloadRequired);
         }
         Ok(AssetAvailability::DevelopmentInstallRequired { path })
     }
 
     pub(crate) async fn download() -> Result<Self, AssetError> {
-        if !official_build() {
+        if !can_download_release_artifacts() {
             return Err(AssetError::DevelopmentDownload);
         }
 
@@ -72,46 +79,131 @@ impl ReviewAssets {
             path: review_root.clone(),
             source,
         })?;
-        let archive_name = format!("tact-review-v{}.tar.gz", env!("CARGO_PKG_VERSION"));
-        let base = format!(
-            "https://github.com/clabby/tact/releases/download/v{}",
-            env!("CARGO_PKG_VERSION")
-        );
-        let client = Client::builder()
-            .connect_timeout(Duration::from_secs(5))
-            .timeout(Duration::from_secs(30))
-            .user_agent(concat!("tact/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .map_err(AssetError::Client)?;
-        let archive = download(
-            &client,
-            &format!("{base}/{archive_name}"),
-            MAX_ARCHIVE_BYTES,
-        )
-        .await?;
-        let checksum = download(
-            &client,
-            &format!("{base}/{archive_name}.sha256"),
-            MAX_SIDECAR_BYTES,
-        )
-        .await?;
-        verify_checksum(&archive, &checksum, &archive_name)?;
-
-        let temporary = tempdir_in(&review_root).map_err(AssetError::TemporaryDirectory)?;
-        extract(&archive, temporary.path())?;
-        let extracted = temporary.path().join("review");
-        validate_directory(&extracted)?;
+        let _lock = acquire_install_lock(&review_root).await?;
         let destination = install_path(&tact_home);
+
+        if destination.exists() {
+            match Self::from_directory(destination.clone(), InstallKind::Managed) {
+                Ok(assets) => return Ok(assets),
+                Err(_) => quarantine(&destination)?,
+            }
+        }
+
+        let version =
+            Version::parse(env!("CARGO_PKG_VERSION")).map_err(AssetError::PackageVersion)?;
+        let archive_name = format!("tact-review-v{version}.tar.gz");
+        let archive =
+            download_verified_release_artifact(&version, &archive_name, MAX_ARCHIVE_BYTES).await?;
+        let temporary = tempdir_in(&review_root).map_err(AssetError::TemporaryDirectory)?;
+        extract(archive.path(), temporary.path())?;
+        let extracted = temporary.path().join("review");
+        let assets = Self::from_directory(extracted.clone(), InstallKind::Managed)?;
         fs::rename(&extracted, &destination).map_err(|source| AssetError::Install {
             path: destination.clone(),
             source,
         })?;
-        Ok(Self { path: destination })
+        sync_directory(&review_root)?;
+
+        Ok(Self {
+            path: destination,
+            manifest: assets.manifest,
+        })
     }
 
-    pub(super) fn path(&self) -> &Path {
-        &self.path
+    fn from_directory(path: PathBuf, kind: InstallKind) -> Result<Self, AssetError> {
+        let manifest = validate_directory(&path, kind)?;
+        Ok(Self {
+            path,
+            manifest: Arc::new(manifest),
+        })
     }
+
+    pub(crate) fn resolve(&self, request_path: &str) -> Option<ResolvedReviewAsset> {
+        let request_path = request_path.strip_prefix('/').unwrap_or(request_path);
+        if !safe_relative_path(Path::new(request_path)) {
+            return None;
+        }
+        let file = self.manifest.files.get(request_path)?;
+        Some(ResolvedReviewAsset {
+            path: self.path.join(request_path),
+            content_type: file.content_type.clone(),
+        })
+    }
+
+    pub(crate) fn entrypoint(&self) -> &str {
+        &self.manifest.entrypoint
+    }
+
+    #[cfg(test)]
+    pub(super) fn for_test(path: PathBuf) -> Self {
+        let files = [
+            ("index.html", "text/html; charset=utf-8"),
+            ("app.js", "text/javascript; charset=utf-8"),
+            ("app.css", "text/css; charset=utf-8"),
+        ]
+        .into_iter()
+        .map(|(path, content_type)| {
+            (
+                path.to_owned(),
+                ValidatedFile {
+                    content_type: content_type.to_owned(),
+                    bytes: 0,
+                    sha256: [0; 32],
+                },
+            )
+        })
+        .collect();
+        Self {
+            path,
+            manifest: Arc::new(ValidatedManifest {
+                entrypoint: "index.html".to_owned(),
+                files,
+            }),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum InstallKind {
+    DevelopmentOverride,
+    Managed,
+}
+
+impl InstallKind {
+    fn allows_symlinks(self) -> bool {
+        matches!(self, Self::DevelopmentOverride)
+    }
+}
+
+struct InstallLock(File);
+
+impl Drop for InstallLock {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.0);
+    }
+}
+
+async fn acquire_install_lock(review_root: &Path) -> Result<InstallLock, AssetError> {
+    let path = review_root.join(format!("v{}.lock", env!("CARGO_PKG_VERSION")));
+    tokio::task::spawn_blocking(move || {
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .map_err(|source| AssetError::Lock {
+                path: path.clone(),
+                source,
+            })?;
+        file.lock_exclusive().map_err(|source| AssetError::Lock {
+            path: path.clone(),
+            source,
+        })?;
+        Ok(InstallLock(file))
+    })
+    .await
+    .map_err(AssetError::LockTask)?
 }
 
 fn tact_home() -> Result<PathBuf, AssetError> {
@@ -132,266 +224,698 @@ fn install_path(tact_home: &Path) -> PathBuf {
         .join(format!("v{}", env!("CARGO_PKG_VERSION")))
 }
 
-fn official_build() -> bool {
-    env!("TACT_RELEASE_BUILD") == "true"
+fn quarantine(path: &Path) -> Result<(), AssetError> {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let name = format!(
+        "{}.corrupt.{}.{}",
+        path.file_name().unwrap_or_default().to_string_lossy(),
+        std::process::id(),
+        timestamp
+    );
+    let quarantine = path.with_file_name(name);
+    fs::rename(path, &quarantine).map_err(|source| AssetError::Quarantine {
+        path: path.to_owned(),
+        quarantine,
+        source,
+    })
 }
 
-fn validate_directory(path: &Path) -> Result<(), AssetError> {
-    for name in REQUIRED_FILES {
-        let file = path.join(name);
-        if !file.is_file() {
-            return Err(AssetError::MissingFile(file));
-        }
-    }
+fn sync_directory(path: &Path) -> Result<(), AssetError> {
+    File::open(path)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|source| AssetError::SyncDirectory {
+            path: path.to_owned(),
+            source,
+        })
+}
 
-    let manifest_path = path.join("manifest.json");
-    let manifest = fs::read(&manifest_path).map_err(|source| AssetError::ReadManifest {
-        path: manifest_path.clone(),
-        source,
-    })?;
+fn validate_directory(path: &Path, kind: InstallKind) -> Result<ValidatedManifest, AssetError> {
+    if !kind.allows_symlinks() {
+        reject_symlink(path)?;
+    }
+    let manifest_path = path.join(MANIFEST_NAME);
+    reject_symlink(&manifest_path)?;
+    let manifest_bytes = read_limited(&manifest_path, MAX_MANIFEST_BYTES)?;
     let manifest: AssetManifest =
-        serde_json::from_slice(&manifest).map_err(|source| AssetError::Manifest {
+        serde_json::from_slice(&manifest_bytes).map_err(|source| AssetError::Manifest {
             path: manifest_path,
             source,
         })?;
-    if manifest.version != 1 {
-        return Err(AssetError::ManifestVersion(manifest.version));
+    let manifest = validate_manifest(manifest, kind)?;
+
+    let actual_files = collect_files(path, path)?;
+    let expected_files = manifest
+        .files
+        .keys()
+        .cloned()
+        .chain([MANIFEST_NAME.to_owned()])
+        .collect::<BTreeSet<_>>();
+    if actual_files != expected_files {
+        return Err(AssetError::DirectoryContents {
+            expected: expected_files,
+            actual: actual_files,
+        });
     }
-    for expected in CONTENT_FILES {
-        let Some(file) = manifest.files.iter().find(|file| file.name == expected) else {
-            return Err(AssetError::MissingManifestEntry(expected.to_owned()));
-        };
-        let contents = fs::read(path.join(expected)).map_err(|source| AssetError::ReadAsset {
-            path: path.join(expected),
+
+    let mut total_bytes = 0_u64;
+    for (name, expected) in &manifest.files {
+        let asset_path = path.join(name);
+        reject_symlink(&asset_path)?;
+        let metadata = fs::metadata(&asset_path).map_err(|source| AssetError::ReadAsset {
+            path: asset_path.clone(),
             source,
         })?;
-        if contents.len() != file.bytes || hex_digest(&contents) != file.sha256 {
-            return Err(AssetError::AssetChecksum(expected.to_owned()));
+        if !metadata.is_file() || metadata.len() != expected.bytes {
+            return Err(AssetError::AssetSize(name.clone()));
         }
+        if expected.bytes > MAX_FILE_BYTES {
+            return Err(AssetError::ExpandedFileTooLarge {
+                path: PathBuf::from(name),
+                limit: MAX_FILE_BYTES,
+            });
+        }
+        total_bytes = total_bytes.saturating_add(expected.bytes);
+        if total_bytes > MAX_EXPANDED_BYTES {
+            return Err(AssetError::ExpandedArchiveTooLarge(MAX_EXPANDED_BYTES));
+        }
+        if hash_path(&asset_path)? != expected.sha256 {
+            return Err(AssetError::AssetChecksum(name.clone()));
+        }
+    }
+    Ok(manifest)
+}
+
+fn validate_manifest(
+    manifest: AssetManifest,
+    kind: InstallKind,
+) -> Result<ValidatedManifest, AssetError> {
+    if manifest.schema_version != BUNDLE_SCHEMA_VERSION {
+        return Err(AssetError::ManifestVersion(manifest.schema_version));
+    }
+    if manifest.review_api.min > REVIEW_API_VERSION || manifest.review_api.max < REVIEW_API_VERSION
+    {
+        return Err(AssetError::ReviewApi {
+            min: manifest.review_api.min,
+            max: manifest.review_api.max,
+        });
+    }
+    let current_version = env!("CARGO_PKG_VERSION");
+    let compatible_tact = manifest.tact.version == current_version
+        || (kind.allows_symlinks() && manifest.tact.version == "development");
+    if !compatible_tact {
+        return Err(AssetError::TactVersion {
+            expected: current_version,
+            actual: manifest.tact.version,
+        });
+    }
+    if !safe_relative_path(Path::new(&manifest.entrypoint)) {
+        return Err(AssetError::UnsafeManifestPath(manifest.entrypoint));
+    }
+
+    let mut files = BTreeMap::new();
+    for file in manifest.files {
+        if !safe_relative_path(Path::new(&file.path)) || file.path == MANIFEST_NAME {
+            return Err(AssetError::UnsafeManifestPath(file.path));
+        }
+        if file.bytes > MAX_FILE_BYTES {
+            return Err(AssetError::ExpandedFileTooLarge {
+                path: PathBuf::from(file.path),
+                limit: MAX_FILE_BYTES,
+            });
+        }
+        let Some(sha256) = parse_sha256(&file.sha256) else {
+            return Err(AssetError::ManifestChecksum(file.path));
+        };
+        if !valid_content_type(&file.content_type) {
+            return Err(AssetError::ContentType(file.path));
+        }
+        let path = file.path.clone();
+        let file = ValidatedFile {
+            content_type: file.content_type,
+            bytes: file.bytes,
+            sha256,
+        };
+        if files.insert(path.clone(), file).is_some() {
+            return Err(AssetError::DuplicateManifestPath(path));
+        }
+    }
+    if !files.contains_key(&manifest.entrypoint) {
+        return Err(AssetError::MissingEntrypoint(manifest.entrypoint));
+    }
+    Ok(ValidatedManifest {
+        entrypoint: manifest.entrypoint,
+        files,
+    })
+}
+
+fn valid_content_type(value: &str) -> bool {
+    !value.is_empty() && value.is_ascii() && value.bytes().all(|byte| (b' '..=b'~').contains(&byte))
+}
+
+fn collect_files(root: &Path, directory: &Path) -> Result<BTreeSet<String>, AssetError> {
+    let mut files = BTreeSet::new();
+    let entries = fs::read_dir(directory).map_err(|source| AssetError::ReadDirectory {
+        path: directory.to_owned(),
+        source,
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|source| AssetError::ReadDirectory {
+            path: directory.to_owned(),
+            source,
+        })?;
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path).map_err(|source| AssetError::ReadAsset {
+            path: path.clone(),
+            source,
+        })?;
+        if metadata.file_type().is_symlink() {
+            return Err(AssetError::ManagedSymlink(path));
+        }
+        let followed = fs::metadata(&path).map_err(|source| AssetError::ReadAsset {
+            path: path.clone(),
+            source,
+        })?;
+        if followed.is_dir() {
+            files.extend(collect_files(root, &path)?);
+            continue;
+        }
+        if !followed.is_file() {
+            return Err(AssetError::InvalidAssetType(path));
+        }
+        let relative = path
+            .strip_prefix(root)
+            .expect("directory walk remains beneath root");
+        let relative = relative
+            .to_str()
+            .ok_or_else(|| AssetError::NonUtf8Path(relative.to_owned()))?;
+        files.insert(relative.replace(std::path::MAIN_SEPARATOR, "/"));
+    }
+    Ok(files)
+}
+
+fn reject_symlink(path: &Path) -> Result<(), AssetError> {
+    let metadata = fs::symlink_metadata(path).map_err(|source| AssetError::ReadAsset {
+        path: path.to_owned(),
+        source,
+    })?;
+    if metadata.file_type().is_symlink() {
+        return Err(AssetError::ManagedSymlink(path.to_owned()));
     }
     Ok(())
 }
 
-async fn download(client: &Client, url: &str, limit: usize) -> Result<Vec<u8>, AssetError> {
-    let response = client
-        .get(url)
-        .send()
-        .await
-        .map_err(AssetError::Download)?
-        .error_for_status()
-        .map_err(AssetError::Download)?;
-    if response
-        .content_length()
-        .is_some_and(|length| length > limit as u64)
-    {
-        return Err(AssetError::DownloadTooLarge(limit));
-    }
+fn read_limited(path: &Path, limit: u64) -> Result<Vec<u8>, AssetError> {
+    let file = File::open(path).map_err(|source| AssetError::ReadManifest {
+        path: path.to_owned(),
+        source,
+    })?;
     let mut bytes = Vec::new();
-    let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(AssetError::Download)?;
-        if bytes.len().saturating_add(chunk.len()) > limit {
-            return Err(AssetError::DownloadTooLarge(limit));
-        }
-        bytes.extend_from_slice(&chunk);
+    file.take(limit + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|source| AssetError::ReadManifest {
+            path: path.to_owned(),
+            source,
+        })?;
+    if bytes.len() as u64 > limit {
+        return Err(AssetError::ManifestTooLarge(limit));
     }
     Ok(bytes)
 }
 
-fn verify_checksum(archive: &[u8], sidecar: &[u8], name: &str) -> Result<(), AssetError> {
-    let sidecar = std::str::from_utf8(sidecar).map_err(AssetError::ChecksumEncoding)?;
-    let mut fields = sidecar.split_whitespace();
-    let expected = fields.next().ok_or(AssetError::ChecksumFile)?;
-    let listed_name = fields.next().ok_or(AssetError::ChecksumFile)?;
-    if fields.next().is_some() || listed_name.trim_start_matches('*') != name {
-        return Err(AssetError::ChecksumFile);
+fn hash_path(path: &Path) -> Result<[u8; 32], AssetError> {
+    let mut file = File::open(path).map_err(|source| AssetError::ReadAsset {
+        path: path.to_owned(),
+        source,
+    })?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|source| AssetError::ReadAsset {
+                path: path.to_owned(),
+                source,
+            })?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
     }
-    if expected != hex_digest(archive) {
-        return Err(AssetError::ArchiveChecksum);
-    }
-    Ok(())
+    Ok(hasher.finalize().into())
 }
 
-fn extract(bytes: &[u8], destination: &Path) -> Result<(), AssetError> {
-    let mut archive = Archive::new(GzDecoder::new(Cursor::new(bytes)));
-    let mut seen = Vec::new();
+fn extract(archive_path: &Path, destination: &Path) -> Result<(), AssetError> {
+    let input = File::open(archive_path).map_err(AssetError::Archive)?;
+    let mut archive = tar::Archive::new(GzDecoder::new(input));
+    let mut seen = BTreeSet::new();
+    let mut expanded_bytes = 0_u64;
     for entry in archive.entries().map_err(AssetError::Archive)? {
         let mut entry = entry.map_err(AssetError::Archive)?;
         let path = entry.path().map_err(AssetError::Archive)?.into_owned();
+        if !seen.insert(path.clone()) {
+            return Err(AssetError::DuplicateArchivePath(path));
+        }
         if path == Path::new("review") && entry.header().entry_type().is_dir() {
             continue;
         }
-        let mut components = path.components();
-        if components.next() != Some(Component::Normal("review".as_ref())) {
+        if !safe_archive_path(&path) {
             return Err(AssetError::UnsafeArchivePath(path));
         }
-        let Some(Component::Normal(name)) = components.next() else {
-            return Err(AssetError::UnsafeArchivePath(path));
+        if entry.header().entry_type().is_dir() {
+            fs::create_dir_all(destination.join(&path)).map_err(AssetError::Archive)?;
+            continue;
+        }
+        if !entry.header().entry_type().is_file() {
+            return Err(AssetError::InvalidArchiveEntry(path));
+        }
+        let size = entry.header().size().map_err(AssetError::Archive)?;
+        let limit = if path == Path::new("review").join(MANIFEST_NAME) {
+            MAX_MANIFEST_BYTES
+        } else {
+            MAX_FILE_BYTES
         };
-        if components.next().is_some()
-            || !REQUIRED_FILES.iter().any(|expected| name == *expected)
-            || !entry.header().entry_type().is_file()
-        {
-            return Err(AssetError::UnsafeArchivePath(path));
+        if size > limit {
+            return Err(AssetError::ExpandedFileTooLarge { path, limit });
         }
-        if seen.contains(&path) {
-            return Err(AssetError::DuplicateArchivePath(path));
+        expanded_bytes = expanded_bytes.saturating_add(size);
+        if expanded_bytes > MAX_EXPANDED_BYTES {
+            return Err(AssetError::ExpandedArchiveTooLarge(MAX_EXPANDED_BYTES));
         }
-        seen.push(path.clone());
-        entry.unpack_in(destination).map_err(AssetError::Archive)?;
+
+        let output_path = destination.join(&path);
+        if let Some(parent) = output_path.parent() {
+            fs::create_dir_all(parent).map_err(AssetError::Archive)?;
+        }
+        let mut output = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&output_path)
+            .map_err(AssetError::Archive)?;
+        let written = io::copy(&mut entry, &mut output).map_err(AssetError::Archive)?;
+        if written != size {
+            return Err(AssetError::ArchiveSize {
+                path,
+                size,
+                written,
+            });
+        }
+        output.flush().map_err(AssetError::Archive)?;
     }
     Ok(())
 }
 
-fn hex_digest(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+fn safe_archive_path(path: &Path) -> bool {
+    let mut components = path.components();
+    components.next() == Some(Component::Normal("review".as_ref()))
+        && components.clone().next().is_some()
+        && components.all(|component| matches!(component, Component::Normal(_)))
 }
 
-#[derive(Deserialize)]
+fn safe_relative_path(path: &Path) -> bool {
+    !path.as_os_str().is_empty()
+        && path
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+}
+
+fn parse_sha256(value: &str) -> Option<[u8; 32]> {
+    if value.len() != 64 {
+        return None;
+    }
+    let mut digest = [0_u8; 32];
+    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+        let pair = std::str::from_utf8(pair).ok()?;
+        digest[index] = u8::from_str_radix(pair, 16).ok()?;
+    }
+    Some(digest)
+}
+
+#[derive(Deserialize, Serialize)]
 struct AssetManifest {
-    version: u32,
+    schema_version: u32,
+    review_api: ApiCompatibility,
+    tact: TactCompatibility,
+    entrypoint: String,
     files: Vec<AssetFile>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
+struct ApiCompatibility {
+    min: u32,
+    max: u32,
+}
+
+#[derive(Deserialize, Serialize)]
+struct TactCompatibility {
+    version: String,
+}
+
+#[derive(Deserialize, Serialize)]
 struct AssetFile {
-    name: String,
-    bytes: usize,
+    path: String,
+    content_type: String,
+    bytes: u64,
     sha256: String,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct ValidatedManifest {
+    entrypoint: String,
+    files: BTreeMap<String, ValidatedFile>,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct ValidatedFile {
+    content_type: String,
+    bytes: u64,
+    sha256: [u8; 32],
 }
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum AssetError {
     #[error("could not determine the Tact directory; set TACT_HOME")]
     HomeUnavailable,
-    #[error("development builds do not download review assets")]
+    #[error(
+        "this development build cannot download release review assets; set TACT_REVIEW_ASSETS to an explicit development bundle"
+    )]
     DevelopmentDownload,
-    #[error("review asset file is missing: {0}")]
-    MissingFile(PathBuf),
-    #[error("review asset manifest is missing `{0}`")]
-    MissingManifestEntry(String),
-    #[error("unsupported review asset manifest version {0}")]
-    ManifestVersion(u32),
-    #[error("review asset `{0}` does not match its manifest checksum")]
-    AssetChecksum(String),
-    #[error("failed to read review manifest {path}: {source}")]
-    ReadManifest { path: PathBuf, source: io::Error },
+    #[error("the built-in package version is invalid: {0}")]
+    PackageVersion(semver::Error),
+    #[error("authenticated release artifact download failed: {0}")]
+    ReleaseArtifact(#[from] UpdateError),
     #[error("failed to parse review manifest {path}: {source}")]
     Manifest {
         path: PathBuf,
         source: serde_json::Error,
     },
+    #[error("unsupported review asset manifest version {0}")]
+    ManifestVersion(u32),
+    #[error(
+        "review assets require API versions {min} through {max}, but this binary uses API version {REVIEW_API_VERSION}"
+    )]
+    ReviewApi { min: u32, max: u32 },
+    #[error("review assets target Tact `{actual}`, but this binary is Tact `{expected}`")]
+    TactVersion {
+        expected: &'static str,
+        actual: String,
+    },
+    #[error("review manifest contains unsafe asset path `{0}`")]
+    UnsafeManifestPath(String),
+    #[error("review manifest contains duplicate asset path `{0}`")]
+    DuplicateManifestPath(String),
+    #[error("review manifest entry `{0}` has an invalid SHA-256 digest")]
+    ManifestChecksum(String),
+    #[error("review manifest entry `{0}` has an invalid content type")]
+    ContentType(String),
+    #[error("review manifest entrypoint `{0}` is not a listed asset")]
+    MissingEntrypoint(String),
+    #[error("review asset `{0}` has an unexpected byte size")]
+    AssetSize(String),
+    #[error("review asset `{0}` does not match its manifest checksum")]
+    AssetChecksum(String),
+    #[error("review asset manifest exceeds the {0}-byte limit")]
+    ManifestTooLarge(u64),
+    #[error("review asset file `{path}` exceeds the {limit}-byte expanded limit")]
+    ExpandedFileTooLarge { path: PathBuf, limit: u64 },
+    #[error("review assets exceed the {0}-byte total expanded limit")]
+    ExpandedArchiveTooLarge(u64),
+    #[error(
+        "review asset directory has unexpected contents (expected {expected:?}, actual {actual:?})"
+    )]
+    DirectoryContents {
+        expected: BTreeSet<String>,
+        actual: BTreeSet<String>,
+    },
+    #[error("managed review assets cannot contain symlink `{0}`")]
+    ManagedSymlink(PathBuf),
+    #[error("review asset `{0}` is not a regular file or directory")]
+    InvalidAssetType(PathBuf),
+    #[error("review asset path is not UTF-8: `{0}`")]
+    NonUtf8Path(PathBuf),
+    #[error("failed to read review manifest {path}: {source}")]
+    ReadManifest { path: PathBuf, source: io::Error },
     #[error("failed to read review asset {path}: {source}")]
     ReadAsset { path: PathBuf, source: io::Error },
+    #[error("failed to enumerate review asset directory {path}: {source}")]
+    ReadDirectory { path: PathBuf, source: io::Error },
     #[error("failed to create review asset directory {path}: {source}")]
     CreateDirectory { path: PathBuf, source: io::Error },
     #[error("failed to create temporary review directory: {0}")]
     TemporaryDirectory(io::Error),
-    #[error("failed to create review HTTP client: {0}")]
-    Client(reqwest::Error),
-    #[error("failed to download review assets: {0}")]
-    Download(reqwest::Error),
-    #[error("review asset download exceeds the {0}-byte limit")]
-    DownloadTooLarge(usize),
-    #[error("review checksum is not valid UTF-8: {0}")]
-    ChecksumEncoding(std::str::Utf8Error),
-    #[error("review checksum file is malformed")]
-    ChecksumFile,
-    #[error("review archive does not match its checksum")]
-    ArchiveChecksum,
+    #[error("failed to acquire review asset lock {path}: {source}")]
+    Lock { path: PathBuf, source: io::Error },
+    #[error("review asset lock task failed: {0}")]
+    LockTask(tokio::task::JoinError),
+    #[error("failed to quarantine corrupt review assets from {path} to {quarantine}: {source}")]
+    Quarantine {
+        path: PathBuf,
+        quarantine: PathBuf,
+        source: io::Error,
+    },
     #[error("failed to read review archive: {0}")]
     Archive(io::Error),
-    #[error("review archive contains unsafe path {0}")]
+    #[error("review archive contains unsafe path `{0}`")]
     UnsafeArchivePath(PathBuf),
-    #[error("review archive contains duplicate path {0}")]
+    #[error("review archive contains duplicate path `{0}`")]
     DuplicateArchivePath(PathBuf),
+    #[error("review archive contains unsupported entry `{0}`")]
+    InvalidArchiveEntry(PathBuf),
+    #[error("review archive entry `{path}` declared {size} bytes but contained {written}")]
+    ArchiveSize {
+        path: PathBuf,
+        size: u64,
+        written: u64,
+    },
     #[error("failed to install review assets at {path}: {source}")]
     Install { path: PathBuf, source: io::Error },
+    #[error("failed to sync review asset directory {path}: {source}")]
+    SyncDirectory { path: PathBuf, source: io::Error },
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        AssetError, CONTENT_FILES, extract, hex_digest, validate_directory, verify_checksum,
+        ApiCompatibility, AssetError, AssetFile, AssetManifest, InstallKind, ReviewAssets,
+        TactCompatibility, extract, parse_sha256, validate_directory,
     };
     use flate2::{Compression, write::GzEncoder};
-    use std::{fs, path::Path};
-    use tar::Builder;
+    use sha2::{Digest, Sha256};
+    use std::{
+        fs,
+        io::{self, Read, Write},
+        path::Path,
+    };
+    use tar::{Builder, EntryType, Header};
 
     fn write_valid_assets(directory: &Path) {
-        let files = CONTENT_FILES.map(|name| {
-            let contents = format!("contents of {name}");
-            fs::write(directory.join(name), &contents).unwrap();
-            serde_json::json!({
-                "name": name,
-                "bytes": contents.len(),
-                "sha256": hex_digest(contents.as_bytes()),
+        let assets = [
+            ("index.html", "text/html; charset=utf-8"),
+            ("chunks/app.js", "text/javascript; charset=utf-8"),
+            ("app.css", "text/css; charset=utf-8"),
+        ];
+        let files = assets
+            .into_iter()
+            .map(|(path, content_type)| {
+                let contents = format!("contents of {path}");
+                let output = directory.join(path);
+                fs::create_dir_all(output.parent().unwrap()).unwrap();
+                fs::write(&output, &contents).unwrap();
+                AssetFile {
+                    path: path.to_owned(),
+                    content_type: content_type.to_owned(),
+                    bytes: contents.len() as u64,
+                    sha256: format!("{:x}", Sha256::digest(contents.as_bytes())),
+                }
             })
-        });
+            .collect();
+        let manifest = AssetManifest {
+            schema_version: 2,
+            review_api: ApiCompatibility { min: 1, max: 1 },
+            tact: TactCompatibility {
+                version: env!("CARGO_PKG_VERSION").to_owned(),
+            },
+            entrypoint: "index.html".to_owned(),
+            files,
+        };
         fs::write(
             directory.join("manifest.json"),
-            serde_json::to_vec(&serde_json::json!({ "version": 1, "files": files })).unwrap(),
+            serde_json::to_vec(&manifest).unwrap(),
         )
         .unwrap();
     }
 
+    fn archive(entries: &[(&str, EntryType, &[u8])]) -> Vec<u8> {
+        let encoder = GzEncoder::new(Vec::new(), Compression::default());
+        let mut builder = Builder::new(encoder);
+        for (path, entry_type, contents) in entries {
+            let mut header = Header::new_gnu();
+            header.set_entry_type(*entry_type);
+            header.set_size(contents.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder.append_data(&mut header, path, *contents).unwrap();
+        }
+        builder.into_inner().unwrap().finish().unwrap()
+    }
+
+    fn archive_with_raw_path(path: &str, contents: &[u8]) -> Vec<u8> {
+        let mut header = Header::new_gnu();
+        header.set_entry_type(EntryType::Regular);
+        header.set_size(contents.len() as u64);
+        header.set_mode(0o644);
+        let path_bytes = path.as_bytes();
+        assert!(path_bytes.len() <= 100);
+        header.as_mut_bytes()[..100].fill(0);
+        header.as_mut_bytes()[..path_bytes.len()].copy_from_slice(path_bytes);
+        header.set_cksum();
+
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(header.as_bytes()).unwrap();
+        encoder.write_all(contents).unwrap();
+        let padding = (512 - contents.len() % 512) % 512;
+        encoder.write_all(&vec![0; padding + 1024]).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    fn extract_bytes(bytes: &[u8]) -> Result<tempfile::TempDir, AssetError> {
+        let archive = tempfile::NamedTempFile::new().unwrap();
+        fs::write(archive.path(), bytes).unwrap();
+        let output = tempfile::tempdir().unwrap();
+        extract(archive.path(), output.path())?;
+        Ok(output)
+    }
+
     #[test]
-    fn validates_every_distributed_asset_against_the_manifest() {
+    fn validates_exact_manifest_and_resolves_only_listed_assets() {
         let directory = tempfile::tempdir().unwrap();
         write_valid_assets(directory.path());
+        let assets = ReviewAssets::from_directory(
+            directory.path().to_owned(),
+            InstallKind::DevelopmentOverride,
+        )
+        .unwrap();
 
-        validate_directory(directory.path()).unwrap();
+        let resolved = assets.resolve("/chunks/app.js").unwrap();
+        assert_eq!(resolved.path, directory.path().join("chunks/app.js"));
+        assert_eq!(resolved.content_type, "text/javascript; charset=utf-8");
+        assert!(assets.resolve("../manifest.json").is_none());
+        assert!(assets.resolve("manifest.json").is_none());
 
-        fs::write(directory.path().join("app.js"), "changed").unwrap();
+        fs::write(directory.path().join("unlisted.js"), "surprise").unwrap();
         assert!(matches!(
-            validate_directory(directory.path()),
-            Err(AssetError::AssetChecksum(name)) if name == "app.js"
+            validate_directory(directory.path(), InstallKind::DevelopmentOverride),
+            Err(AssetError::DirectoryContents { .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_traversal_and_incompatible_manifest_entries() {
+        let directory = tempfile::tempdir().unwrap();
+        write_valid_assets(directory.path());
+        let manifest_path = directory.path().join("manifest.json");
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        manifest["files"][1]["path"] = "../app.js".into();
+        fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        assert!(matches!(
+            validate_directory(directory.path(), InstallKind::DevelopmentOverride),
+            Err(AssetError::UnsafeManifestPath(_))
+        ));
+
+        write_valid_assets(directory.path());
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        let duplicate = manifest["files"][0].clone();
+        manifest["files"].as_array_mut().unwrap().push(duplicate);
+        fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        assert!(matches!(
+            validate_directory(directory.path(), InstallKind::DevelopmentOverride),
+            Err(AssetError::DuplicateManifestPath(_))
+        ));
+
+        write_valid_assets(directory.path());
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        manifest["review_api"]["min"] = 2.into();
+        fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        assert!(matches!(
+            validate_directory(directory.path(), InstallKind::DevelopmentOverride),
+            Err(AssetError::ReviewApi { .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_archive_traversal_duplicates_and_symlinks() {
+        let traversal = archive_with_raw_path("review/../escape", b"bad");
+        assert!(matches!(
+            extract_bytes(&traversal),
+            Err(AssetError::UnsafeArchivePath(_))
+        ));
+
+        let duplicate = archive(&[
+            ("review/app.js", EntryType::Regular, b"first"),
+            ("review/app.js", EntryType::Regular, b"second"),
+        ]);
+        assert!(matches!(
+            extract_bytes(&duplicate),
+            Err(AssetError::DuplicateArchivePath(_))
+        ));
+
+        let symlink = archive(&[("review/app.js", EntryType::Symlink, b"")]);
+        assert!(matches!(
+            extract_bytes(&symlink),
+            Err(AssetError::InvalidArchiveEntry(_))
+        ));
+    }
+
+    #[test]
+    fn enforces_expanded_file_and_total_limits_before_writing() {
+        let encoder = GzEncoder::new(Vec::new(), Compression::default());
+        let mut builder = Builder::new(encoder);
+        let mut header = Header::new_gnu();
+        header.set_entry_type(EntryType::Regular);
+        header.set_size(super::MAX_FILE_BYTES + 1);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder
+            .append_data(
+                &mut header,
+                "review/huge.js",
+                io::repeat(0).take(super::MAX_FILE_BYTES + 1),
+            )
+            .unwrap();
+        let bytes = builder.into_inner().unwrap().finish().unwrap();
+        assert!(matches!(
+            extract_bytes(&bytes),
+            Err(AssetError::ExpandedFileTooLarge { .. })
         ));
     }
 
     #[cfg(unix)]
     #[test]
-    fn validates_assets_through_a_directory_symlink() {
+    fn allows_override_symlink_but_rejects_managed_symlink() {
         use std::os::unix::fs::symlink;
 
         let assets = tempfile::tempdir().unwrap();
         write_valid_assets(assets.path());
+        let root = tempfile::tempdir().unwrap();
+        let link = root.path().join("assets");
+        symlink(assets.path(), &link).unwrap();
 
-        let install_root = tempfile::tempdir().unwrap();
-        let installed = install_root.path().join("v-test");
-        symlink(assets.path(), &installed).unwrap();
-
-        validate_directory(&installed).unwrap();
-    }
-
-    #[test]
-    fn extracts_the_directory_entry_created_by_release_packaging() {
-        let source = tempfile::tempdir().unwrap();
-        write_valid_assets(source.path());
-        let encoder = GzEncoder::new(Vec::new(), Compression::default());
-        let mut archive = Builder::new(encoder);
-        archive.append_dir("review", source.path()).unwrap();
-        for name in super::REQUIRED_FILES {
-            archive
-                .append_path_with_name(source.path().join(name), Path::new("review").join(name))
-                .unwrap();
-        }
-        let encoder = archive.into_inner().unwrap();
-        let bytes = encoder.finish().unwrap();
-
-        let destination = tempfile::tempdir().unwrap();
-        extract(&bytes, destination.path()).unwrap();
-        validate_directory(&destination.path().join("review")).unwrap();
-    }
-
-    #[test]
-    fn checksum_sidecar_must_name_the_downloaded_archive() {
-        let archive = b"archive";
-        let checksum = format!("{}  other.tar.gz\n", hex_digest(archive));
-
+        validate_directory(&link, InstallKind::DevelopmentOverride).unwrap();
         assert!(matches!(
-            verify_checksum(archive, checksum.as_bytes(), "review.tar.gz"),
-            Err(AssetError::ChecksumFile)
+            validate_directory(&link, InstallKind::Managed),
+            Err(AssetError::ManagedSymlink(_))
         ));
+    }
+
+    #[test]
+    fn sha256_parser_requires_exact_hex() {
+        assert!(parse_sha256(&"ab".repeat(32)).is_some());
+        assert!(parse_sha256(&"ab".repeat(31)).is_none());
+        assert!(parse_sha256(&"zz".repeat(32)).is_none());
     }
 }

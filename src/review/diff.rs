@@ -44,6 +44,7 @@ pub(super) struct ReviewContext {
     repository: String,
     trunk: Trunk,
     range_points: Vec<RangePoint>,
+    version: WorkspaceVersion,
 }
 
 #[derive(Clone, Serialize)]
@@ -63,6 +64,12 @@ pub(super) struct FileContext {
     pub(super) new_contents: String,
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum PatchSide {
+    Additions,
+    Deletions,
+}
+
 struct ChangedFile {
     kind: u8,
     old_path: String,
@@ -72,6 +79,26 @@ struct ChangedFile {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct WorkspaceVersion([u8; 32]);
 
+#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(transparent)]
+pub(super) struct SnapshotId(String);
+
+#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(transparent)]
+pub(super) struct PatchId(String);
+
+impl std::fmt::Display for SnapshotId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::fmt::Display for PatchId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
 #[cfg(test)]
 impl WorkspaceVersion {
     pub(super) fn test(value: u8) -> Self {
@@ -79,10 +106,25 @@ impl WorkspaceVersion {
     }
 }
 
+#[cfg(test)]
+impl SnapshotId {
+    pub(super) fn test(value: u8) -> Self {
+        Self(format!("snapshot-{value}"))
+    }
+}
+
+#[cfg(test)]
+impl PatchId {
+    pub(super) fn test(value: u8) -> Self {
+        Self(format!("patch-{value}"))
+    }
+}
+
 impl ReviewContext {
     pub(super) async fn load(workspace: &Path) -> Result<Self, DiffError> {
         let root = repository_root(workspace).await?;
         let trunk = resolve_trunk(&root).await?;
+        let version = workspace_version_at(&root, &trunk).await?;
         let range_points = load_range_points(&root, &trunk).await?;
         let repository = root
             .file_name()
@@ -94,6 +136,7 @@ impl ReviewContext {
             repository,
             trunk,
             range_points,
+            version,
         })
     }
 
@@ -179,8 +222,12 @@ impl ReviewContext {
         })
     }
 
-    pub(super) fn version(&self, snapshot: &DiffSnapshot) -> WorkspaceVersion {
-        workspace_version(&self.trunk.merge_base, &snapshot.base, &snapshot.patch)
+    pub(super) fn version(&self) -> WorkspaceVersion {
+        self.version.clone()
+    }
+
+    pub(super) fn snapshot_id(&self) -> SnapshotId {
+        snapshot_id(&self.version)
     }
 
     async fn collect_working_tree(
@@ -214,6 +261,80 @@ impl ReviewContext {
             target_count: self.range_points.len(),
         })
     }
+}
+
+impl DiffSnapshot {
+    pub(super) fn contains_anchor(
+        &self,
+        path: &str,
+        side: PatchSide,
+        start_line: u32,
+        end_line: u32,
+    ) -> bool {
+        if start_line == 0 || end_line < start_line {
+            return false;
+        }
+
+        let mut old_path = None;
+        let mut new_path = None;
+        for line in self.patch.lines() {
+            if line.starts_with("diff --git ") {
+                old_path = None;
+                new_path = None;
+                continue;
+            }
+            if let Some(value) = line.strip_prefix("--- ") {
+                old_path = patch_path(value);
+                continue;
+            }
+            if let Some(value) = line.strip_prefix("+++ ") {
+                new_path = patch_path(value);
+                continue;
+            }
+            let Some((old_start, old_count, new_start, new_count)) = parse_hunk_header(line) else {
+                continue;
+            };
+            let (candidate_path, first, count) = match side {
+                PatchSide::Additions => (new_path, new_start, new_count),
+                PatchSide::Deletions => (old_path, old_start, old_count),
+            };
+            if candidate_path != Some(path) || count == 0 {
+                continue;
+            }
+            let Some(last) = first.checked_add(count - 1) else {
+                continue;
+            };
+            if start_line >= first && end_line <= last {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+fn patch_path(value: &str) -> Option<&str> {
+    let value = value.split('\t').next().unwrap_or(value);
+    if value == "/dev/null" {
+        return None;
+    }
+    value
+        .strip_prefix("a/")
+        .or_else(|| value.strip_prefix("b/"))
+        .or(Some(value))
+}
+
+fn parse_hunk_header(line: &str) -> Option<(u32, u32, u32, u32)> {
+    let header = line.strip_prefix("@@ -")?;
+    let (old, remainder) = header.split_once(" +")?;
+    let (new, _) = remainder.split_once(" @@")?;
+    let (old_start, old_count) = parse_hunk_range(old)?;
+    let (new_start, new_count) = parse_hunk_range(new)?;
+    Some((old_start, old_count, new_start, new_count))
+}
+
+fn parse_hunk_range(value: &str) -> Option<(u32, u32)> {
+    let (start, count) = value.split_once(',').unwrap_or((value, "1"));
+    Some((start.parse().ok()?, count.parse().ok()?))
 }
 
 async fn collect_file_contexts(
@@ -373,10 +494,14 @@ pub(super) async fn load(workspace: &Path) -> Result<ReviewContext, DiffError> {
 pub(super) async fn current_version(workspace: &Path) -> Result<WorkspaceVersion, DiffError> {
     let root = repository_root(workspace).await?;
     let trunk = resolve_trunk(&root).await?;
-    let output = git_output(&root, ["rev-parse", "HEAD"]).await?;
+    workspace_version_at(&root, &trunk).await
+}
+
+async fn workspace_version_at(root: &Path, trunk: &Trunk) -> Result<WorkspaceVersion, DiffError> {
+    let output = git_output(root, ["rev-parse", "HEAD"]).await?;
     ensure_success(output.status, &output.stderr)?;
     let head = String::from_utf8(output.stdout)?.trim().to_owned();
-    let patch = working_tree_patch(&root, &head).await?;
+    let patch = working_tree_patch(root, &head).await?;
     Ok(workspace_version(&trunk.merge_base, &head, &patch))
 }
 
@@ -387,6 +512,43 @@ fn workspace_version(trunk: &str, head: &str, patch: &str) -> WorkspaceVersion {
         digest.update(value.as_bytes());
     }
     WorkspaceVersion(digest.finalize().into())
+}
+
+fn snapshot_id(version: &WorkspaceVersion) -> SnapshotId {
+    let mut digest = Sha256::new();
+    digest.update(b"tact-review-snapshot-v1");
+    digest.update(version.0);
+    SnapshotId(hex_digest(digest.finalize().into()))
+}
+
+pub(super) fn patch_id(snapshot: &SnapshotId, range: ReviewRange, patch: &str) -> PatchId {
+    let mut digest = Sha256::new();
+    digest.update(b"tact-review-patch-v1");
+    digest.update(snapshot.0.as_bytes());
+    digest.update(range.from.to_le_bytes());
+    digest.update(range.to.to_le_bytes());
+    digest.update(patch.len().to_le_bytes());
+    digest.update(patch.as_bytes());
+    PatchId(hex_digest(digest.finalize().into()))
+}
+
+fn hex_digest(bytes: [u8; 32]) -> String {
+    use std::fmt::Write as _;
+
+    let mut value = String::with_capacity(64);
+    for byte in bytes {
+        write!(&mut value, "{byte:02x}").expect("writing to a string cannot fail");
+    }
+    value
+}
+
+impl Serialize for WorkspaceVersion {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&hex_digest(self.0))
+    }
 }
 
 async fn repository_root(workspace: &Path) -> Result<std::path::PathBuf, DiffError> {
@@ -821,12 +983,29 @@ mod tests {
         let repository = repository();
         fs::write(repository.path().join("tracked.txt"), "first edit\n").unwrap();
         let context = load(repository.path()).await.unwrap();
-        let snapshot = context.collect(context.uncommitted_range()).await.unwrap();
-        let initial = context.version(&snapshot);
+        let _snapshot = context.collect(context.uncommitted_range()).await.unwrap();
+        let initial = context.version();
 
         fs::write(repository.path().join("tracked.txt"), "second edit\n").unwrap();
 
         assert_ne!(current_version(repository.path()).await.unwrap(), initial);
+    }
+
+    #[tokio::test]
+    async fn clean_feature_branch_snapshot_matches_the_current_workspace_version() {
+        let repository = repository();
+        git(repository.path(), ["checkout", "--quiet", "-b", "feature"]);
+        fs::write(repository.path().join("tracked.txt"), "feature\n").unwrap();
+        git(repository.path(), ["add", "tracked.txt"]);
+        git(repository.path(), ["commit", "--quiet", "-m", "feature"]);
+
+        let context = load(repository.path()).await.unwrap();
+        let _snapshot = context.collect(context.full_range()).await.unwrap();
+
+        assert_eq!(
+            context.version(),
+            current_version(repository.path()).await.unwrap()
+        );
     }
 
     fn repository() -> TempDir {

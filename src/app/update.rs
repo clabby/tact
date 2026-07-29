@@ -236,6 +236,7 @@ impl Release {
     }
 }
 
+#[derive(Clone, Copy)]
 struct ReleaseAssets<'a> {
     archive: &'a GithubAsset,
     checksum: &'a GithubAsset,
@@ -295,6 +296,34 @@ pub(crate) fn is_official_release_build() -> bool {
     matches!(env!("TACT_RELEASE_BUILD"), "true")
 }
 
+pub(crate) fn can_download_release_artifacts() -> bool {
+    is_official_release_build() || crates_io_install_root().is_some()
+}
+
+pub(crate) async fn download_verified_release_artifact(
+    version: &Version,
+    archive_name: &str,
+    max_archive_bytes: u64,
+) -> Result<NamedTempFile, UpdateError> {
+    let base = format!("https://github.com/clabby/tact/releases/download/v{version}");
+    let assets = OwnedReleaseAssets {
+        archive: GithubAsset {
+            name: archive_name.to_owned(),
+            browser_download_url: format!("{base}/{archive_name}"),
+        },
+        checksum: GithubAsset {
+            name: format!("{archive_name}.sha256"),
+            browser_download_url: format!("{base}/{archive_name}.sha256"),
+        },
+        signature: GithubAsset {
+            name: format!("{archive_name}.sig"),
+            browser_download_url: format!("{base}/{archive_name}.sig"),
+        },
+    };
+    let client = http_client()?;
+    download_verified_artifact(&client, version, assets.as_borrowed(), max_archive_bytes).await
+}
+
 pub(crate) async fn check_for_update(config_path: &Path) -> Result<Option<Version>, UpdateError> {
     if !is_official_release_build() {
         return Ok(None);
@@ -333,25 +362,57 @@ pub(crate) async fn install_latest() -> Result<UpdateStatus, UpdateError> {
     }
 
     let assets = release.assets_for(target)?;
-    let public_key = fetch_signing_key(&client, &release.version).await?;
+    let archive =
+        download_verified_artifact(&client, &release.version, assets, MAX_ARCHIVE_BYTES).await?;
+    let extracted = extract_binary(&archive, &assets.archive.name, target, &release.version)?;
+    self_replace::self_replace(&extracted.path).map_err(UpdateError::Replace)?;
+    Ok(UpdateStatus::Updated {
+        from: current,
+        to: release.version,
+    })
+}
+
+struct OwnedReleaseAssets {
+    archive: GithubAsset,
+    checksum: GithubAsset,
+    signature: GithubAsset,
+}
+
+impl OwnedReleaseAssets {
+    fn as_borrowed(&self) -> ReleaseAssets<'_> {
+        ReleaseAssets {
+            archive: &self.archive,
+            checksum: &self.checksum,
+            signature: &self.signature,
+        }
+    }
+}
+
+async fn download_verified_artifact(
+    client: &Client,
+    version: &Version,
+    assets: ReleaseAssets<'_>,
+    max_archive_bytes: u64,
+) -> Result<NamedTempFile, UpdateError> {
+    let public_key = fetch_signing_key(client, version).await?;
     let archive = NamedTempFile::new().map_err(UpdateError::TemporaryStorage)?;
     download_to_file(
-        &client,
+        client,
         &assets.archive.browser_download_url,
         &assets.archive.name,
-        MAX_ARCHIVE_BYTES,
+        max_archive_bytes,
         &archive,
     )
     .await?;
     let checksum = fetch_bytes(
-        &client,
+        client,
         &assets.checksum.browser_download_url,
         &assets.checksum.name,
         MAX_SIDECAR_BYTES,
     )
     .await?;
     let signature = fetch_bytes(
-        &client,
+        client,
         &assets.signature.browser_download_url,
         &assets.signature.name,
         MAX_SIDECAR_BYTES,
@@ -371,12 +432,7 @@ pub(crate) async fn install_latest() -> Result<UpdateStatus, UpdateError> {
         &assets.signature.name,
         &public_key,
     )?;
-    let extracted = extract_binary(&archive, &assets.archive.name, target, &release.version)?;
-    self_replace::self_replace(&extracted.path).map_err(UpdateError::Replace)?;
-    Ok(UpdateStatus::Updated {
-        from: current,
-        to: release.version,
-    })
+    Ok(archive)
 }
 
 fn crates_io_install_root() -> Option<PathBuf> {

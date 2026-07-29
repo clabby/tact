@@ -131,6 +131,7 @@ pub(crate) enum RootEvent {
     Subagent(AgentUpdate),
     ReplaceDraft(String),
     ReviewStarted,
+    ReviewReady(String),
     ReviewOverviewStarted,
     ReviewCancelled,
     ReviewFinished(String),
@@ -250,6 +251,7 @@ pub(crate) struct RootNode {
     in_flight_turns: usize,
     in_flight_shells: usize,
     review_active: bool,
+    review_url: Option<String>,
     fork_available: bool,
     interactive: bool,
     theme_mode: ThemeMode,
@@ -278,6 +280,7 @@ impl RootNode {
             in_flight_turns: 0,
             in_flight_shells: 0,
             review_active: false,
+            review_url: None,
             fork_available: true,
             interactive: true,
             theme_mode: ThemeMode::Auto,
@@ -774,6 +777,24 @@ impl RootNode {
         if is_control_key(&event, 'f') {
             self.key_confirmation = None;
             return self.open_fork();
+        }
+        if is_plain_key(&event, 'o')
+            && let Some(url) = &self.review_url
+        {
+            self.key_confirmation = None;
+            return ComponentUpdate {
+                effects: vec![RootEffect::OpenLink(url.clone())],
+                render: RenderRequest::None,
+            };
+        }
+        if is_plain_key(&event, 'c')
+            && let Some(url) = &self.review_url
+        {
+            self.key_confirmation = None;
+            return ComponentUpdate {
+                effects: vec![RootEffect::Copy(url.clone())],
+                render: RenderRequest::None,
+            };
         }
         if is_escape(&event) {
             return self.update_key_confirmation(ConfirmationAction::CancelReview, Instant::now());
@@ -1692,9 +1713,22 @@ impl Component for RootNode {
             }
             RootEvent::ReviewStarted => {
                 self.review_active = true;
+                self.review_url = None;
                 self.update_composer(
                     ComposerEvent::ReviewWaiting {
                         waiting: true,
+                        status: None,
+                        now: Instant::now(),
+                    },
+                    RenderRequest::Immediate,
+                )
+            }
+            RootEvent::ReviewReady(url) => {
+                self.review_url = Some(url.clone());
+                self.update_composer(
+                    ComposerEvent::ReviewWaiting {
+                        waiting: true,
+                        status: Some(format!("Review ready · O reopen · C copy · {url}")),
                         now: Instant::now(),
                     },
                     RenderRequest::Immediate,
@@ -1706,9 +1740,11 @@ impl Component for RootNode {
             }
             RootEvent::ReviewFinished(markdown) => {
                 self.review_active = false;
+                self.review_url = None;
                 let waiting = self.update_composer(
                     ComposerEvent::ReviewWaiting {
                         waiting: false,
+                        status: None,
                         now: Instant::now(),
                     },
                     RenderRequest::Immediate,
@@ -1738,6 +1774,7 @@ impl Component for RootNode {
             }
             RootEvent::ReviewCancelled => {
                 self.review_active = false;
+                self.review_url = None;
                 self.notification = Some(Notification::plain(
                     "Review cancelled.".to_owned(),
                     Color::Yellow,
@@ -1745,6 +1782,7 @@ impl Component for RootNode {
                 self.update_composer(
                     ComposerEvent::ReviewWaiting {
                         waiting: false,
+                        status: None,
                         now: Instant::now(),
                     },
                     RenderRequest::Immediate,
@@ -1752,10 +1790,12 @@ impl Component for RootNode {
             }
             RootEvent::ReviewFailed(message) => {
                 self.review_active = false;
+                self.review_url = None;
                 self.notification = Some(Notification::plain(message, Color::Red));
                 self.update_composer(
                     ComposerEvent::ReviewWaiting {
                         waiting: false,
+                        status: None,
                         now: Instant::now(),
                     },
                     RenderRequest::Immediate,
@@ -2066,6 +2106,15 @@ fn is_plain_enter(event: &Event) -> bool {
     };
     matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
         && key.code == KeyCode::Enter
+        && key.modifiers.is_empty()
+}
+
+fn is_plain_key(event: &Event, character: char) -> bool {
+    let Event::Key(key) = event else {
+        return false;
+    };
+    matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
+        && key.code == KeyCode::Char(character)
         && key.modifiers.is_empty()
 }
 
@@ -3892,6 +3941,32 @@ mod tests {
         assert!(quit.effects.is_empty());
         assert!(pasted.effects.is_empty());
         assert_eq!(root.composer().draft(), "keep this draft");
+    }
+
+    #[test]
+    fn review_ready_exposes_a_reopen_action_without_unlocking_input() {
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        root.update(RootEvent::ReviewStarted);
+        root.update(RootEvent::ReviewReady(
+            "http://127.0.0.1:4321/review".to_owned(),
+        ));
+
+        let rendered = render_root_text(&mut root, 100, 20);
+        let update = root.update(key(KeyCode::Char('o'), KeyModifiers::NONE));
+        let copy = root.update(key(KeyCode::Char('c'), KeyModifiers::NONE));
+
+        assert!(rendered.contains("Review ready"));
+        assert_eq!(
+            update.effects,
+            [RootEffect::OpenLink(
+                "http://127.0.0.1:4321/review".to_owned()
+            )]
+        );
+        assert_eq!(
+            copy.effects,
+            [RootEffect::Copy("http://127.0.0.1:4321/review".to_owned())]
+        );
+        assert!(root.review_active);
     }
 
     #[test]

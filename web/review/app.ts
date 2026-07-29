@@ -7,10 +7,25 @@ import {
   type FileDiffMetadata,
 } from "@pierre/diffs";
 import { FileTree, type GitStatus, type GitStatusEntry } from "@pierre/trees";
+import { ApiClient, ApiError, errorMessage } from "./api-client";
 import { pendingCommentCount } from "./comment-state";
 import { commentSelectionCallbacks } from "./comment-selection";
-import { addExpandableContext, type FileContext } from "./diff-context";
 import { renderMarkdown } from "./markdown";
+import {
+  beginTerminal,
+  failTerminal,
+  feedbackDescription,
+  finishTerminal,
+  type CommentDraft,
+  type CommentMetadata,
+  ReviewStore,
+} from "./review-store";
+import type {
+  ReviewComment,
+  ReviewDecision,
+  ReviewPage,
+  ReviewSession,
+} from "./protocol";
 import {
   activeSyntaxTheme,
   appearance,
@@ -55,55 +70,6 @@ const TREE_SEEN_STYLES = `
   [data-icon-name="tact-seen"] { color: var(--accent); }
 `;
 
-type ReviewBootstrap = {
-  title: string;
-  repository: string;
-  trunk: string;
-  range_targets: ReviewTarget[];
-  default_range: ReviewRange;
-};
-
-type ReviewPage = {
-  title: string;
-  selected_range: ReviewRange;
-  patch: string;
-  file_contexts?: FileContext[];
-  repository: string;
-  scope: string;
-  base: string;
-};
-
-type OverviewResponse = { selected_range: ReviewRange; overview_html: string };
-type RefreshResponse = { bootstrap: ReviewBootstrap; page: ReviewPage };
-
-type ReviewComment = {
-  id: number;
-  path: string;
-  side: "additions" | "deletions";
-  start_line: number;
-  end_line: number;
-  body: string;
-};
-
-type ReviewDecision = {
-  decision: "approve" | "request_changes";
-  summary: string;
-  comments: Omit<ReviewComment, "id">[];
-};
-
-type CommentMetadata = ReviewComment & { itemId: string };
-
-type CommentDraft = {
-  itemId: string;
-  path: string;
-  side: ReviewComment["side"];
-  startLine: number;
-  endLine: number;
-  body: string;
-  editingId?: number;
-  tab: "comment" | "preview";
-};
-
 type AnnotationMetadata =
   | { kind: "comment"; comment: CommentMetadata }
   | { kind: "composer"; draft: CommentDraft };
@@ -114,17 +80,26 @@ if (!root) throw new Error("review root is missing");
 void start();
 
 async function start() {
+  const api = new ApiClient();
   try {
-    const response = await fetch("./api/review");
-    if (!response.ok) throw new Error(`review request failed: ${response.status}`);
-    const bootstrap = (await response.json()) as ReviewBootstrap;
-    const app = new ReviewApp(root, bootstrap);
+    const session = await api.review();
+    const app = new ReviewApp(root, api, session);
     app.render();
-    await app.selectRange(bootstrap.default_range);
+    app.installInitialPage();
     app.startWorkspacePolling();
   } catch (error) {
-    root.innerHTML = `<div class="fatal"><p>Could not load this review.</p><small>${escapeHtml(String(error))}</small></div>`;
+    renderBootstrapError(root, error);
   }
+}
+
+function renderBootstrapError(container: HTMLElement, error: unknown) {
+  container.innerHTML = `
+    <div class="fatal" role="alert">
+      <p>Could not load this review.</p>
+      <small>${escapeHtml(errorMessage(error))}</small>
+      <button class="button primary" data-bootstrap-retry>Retry</button>
+    </div>`;
+  container.querySelector("[data-bootstrap-retry]")?.addEventListener("click", () => void start());
 }
 
 class ReviewApp {
@@ -132,14 +107,10 @@ class ReviewApp {
   private files: FileDiffMetadata[] = [];
   private items: CodeViewDiffItem<AnnotationMetadata>[] = [];
   private readonly pathToItem = new Map<string, string>();
-  private readonly comments: CommentMetadata[] = [];
   private readonly overviews = new Map<string, string>();
-  private readonly seenFilesByRange = new Map<string, Set<string>>();
-  private draft?: CommentDraft;
   private pendingRange?: ReviewRange;
   private previewRange?: ReviewRange;
   private nextCommentId = 1;
-  private submitted = false;
   private loadingRange?: ReviewRange;
   private loadingOverview?: ReviewRange;
   private rangeRequest = 0;
@@ -147,15 +118,29 @@ class ReviewApp {
   private statusTimer?: number;
   private checkingStatus = false;
   private refreshing = false;
+  private snapshotStale = false;
   private viewer?: CodeView<AnnotationMetadata>;
   private tree?: FileTree;
   private settings = loadReviewSettings(window.localStorage, document.cookie);
   private readonly colorScheme = window.matchMedia("(prefers-color-scheme: dark)");
+  private readonly store: ReviewStore;
 
   constructor(
     private readonly root: HTMLElement,
-    private bootstrap: ReviewBootstrap,
-  ) {}
+    private readonly api: ApiClient,
+    private bootstrap: ReviewSession,
+  ) {
+    this.store = new ReviewStore(bootstrap);
+  }
+
+  private get feedback() { return this.store.feedback(); }
+  private get comments() { return this.feedback.comments; }
+  private get draft() { return this.feedback.draft; }
+  private set draft(value: CommentDraft | undefined) { this.feedback.draft = value; }
+
+  installInitialPage() {
+    this.installPage(this.bootstrap.page);
+  }
 
   render() {
     document.title = `${this.bootstrap.title} · Tact`;
@@ -215,27 +200,36 @@ class ReviewApp {
           <iframe class="overview" title="Agent overview" sandbox="" hidden></iframe>
         </section>
         <section class="panel changes-panel active" id="changes-panel" role="tabpanel" aria-labelledby="changes-tab" data-panel="changes">
+          <div class="mobile-navigation" role="tablist" aria-label="Changes navigation">
+            <button class="active" role="tab" aria-selected="true" data-mobile-panel="diff">Diff</button>
+            <button role="tab" aria-selected="false" tabindex="-1" data-mobile-panel="files">Files</button>
+            <button role="tab" aria-selected="false" tabindex="-1" data-mobile-panel="comments">Comments <span id="mobile-comment-count">0</span></button>
+          </div>
           <aside class="sidebar">
-            <div class="sidebar-label">Changed files</div>
-            <div id="file-tree" class="file-tree"></div>
-            <div class="comment-index">
+            <div class="files-navigation" data-mobile-content="files">
+              <div class="sidebar-label">Changed files</div>
+              <div id="file-tree" class="file-tree"></div>
+            </div>
+            <div class="comment-index" data-mobile-content="comments">
               <div class="sidebar-label">Comments <span id="comment-count">0</span></div>
               <div id="comment-list" class="comment-list">
                 <p class="empty-comments">Select a line in the diff to comment.</p>
               </div>
             </div>
           </aside>
-          <main id="diff-view" class="diff-view"></main>
+          <main id="diff-view" class="diff-view" data-mobile-content="diff"></main>
         </section>
         <footer class="review-bar">
-          <textarea id="review-summary" rows="1" placeholder="Leave an overall comment (optional)"></textarea>
+          <label class="sr-only" for="review-summary">Overall review comment</label>
+          <textarea id="review-summary" rows="1" placeholder="Leave an overall comment (optional)" aria-describedby="terminal-status"></textarea>
           <div class="review-actions">
             <button class="button quiet" id="cancel-review">Cancel</button>
             <button class="button secondary" data-decision="request_changes">Request changes</button>
             <button class="button primary" data-decision="approve">Approve</button>
           </div>
         </footer>
-        <div class="scope-state" id="scope-state" hidden></div>
+        <div class="terminal-status" id="terminal-status" role="status" aria-live="polite"></div>
+        <div class="scope-state" id="scope-state" role="status" aria-live="polite" hidden></div>
         <dialog class="range-dialog" id="range-dialog" aria-labelledby="range-title" aria-describedby="range-description">
             <header>
               <div>
@@ -248,11 +242,11 @@ class ReviewApp {
             <div class="range-builder">
               <div class="range-endpoints" aria-label="Selected range endpoints" aria-live="polite">
                 <div class="range-endpoint">
-                  <small>From</small><strong id="range-from-label"></strong><span id="range-from-title"></span>
+                  <small>Base (excluded)</small><strong id="range-from-label"></strong><span id="range-from-title"></span>
                 </div>
                 <span class="range-direction">${icon("arrow-right")}</span>
                 <div class="range-endpoint">
-                  <small>To</small><strong id="range-to-label"></strong><span id="range-to-title"></span>
+                  <small>Through (included)</small><strong id="range-to-label"></strong><span id="range-to-title"></span>
                 </div>
               </div>
               <div class="commit-timeline" id="commit-timeline" aria-label="Branch timeline">
@@ -276,6 +270,11 @@ class ReviewApp {
     this.bindEvents();
     this.syncSettingsControls();
     this.applySettings(false);
+    const summary = this.root.querySelector<HTMLTextAreaElement>("#review-summary");
+    if (summary) {
+      summary.value = this.feedback.summary;
+      summary.addEventListener("input", () => { this.feedback.summary = summary.value; });
+    }
   }
 
   startWorkspacePolling() {
@@ -287,7 +286,7 @@ class ReviewApp {
     void this.checkWorkspaceStatus();
   }
 
-  async selectRange(range: ReviewRange) {
+  async selectRange(range: ReviewRange, discardCurrentFeedback = false) {
     if (this.loadingRange) return;
     if (rangesEqual(this.page?.selected_range, range)) {
       const state = this.root.querySelector<HTMLElement>("#scope-state");
@@ -297,24 +296,16 @@ class ReviewApp {
     const request = ++this.rangeRequest;
     this.setRangeLoading(range);
     try {
-      const response = await fetch("./api/range", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ range }),
-      });
-      const payload = await response.json() as ReviewPage | { error?: string };
+      const payload = await this.api.loadRange(this.bootstrap.generation, range);
       if (request !== this.rangeRequest) return;
-      if (!response.ok) {
-        const message = "error" in payload && payload.error
-          ? payload.error
-          : `Could not load this range (${response.status}).`;
-        this.showRangeError(message);
+      if (payload.generation !== this.bootstrap.generation || !rangesEqual(payload.selected_range, range)) {
+        this.showRangeError("Tact returned a page for a different review generation or range.", range);
         return;
       }
-      this.clearPendingComments();
+      if (discardCurrentFeedback) this.store.discardFeedback();
       this.installPage(payload as ReviewPage);
     } catch (error) {
-      if (request === this.rangeRequest) this.showRangeError(String(error));
+      if (request === this.rangeRequest) this.showRangeError(errorMessage(error), range);
     } finally {
       if (request === this.rangeRequest) this.setRangeReady();
     }
@@ -322,12 +313,15 @@ class ReviewApp {
 
   private installPage(page: ReviewPage) {
     this.page = page;
+    this.store.activate(page);
     const seenFiles = this.seenFiles();
-    const cacheKey = `tact-review-${rangeKey(page.selected_range)}`;
+    const cacheKey = `tact-review-${page.patch_id}`;
     const patchFiles = parsePatchFiles(page.patch, cacheKey, true).flatMap(
       (patch) => patch.files,
     );
-    this.files = addExpandableContext(patchFiles, page.file_contexts ?? []);
+    // Git's patch owns changed-line identity. Pierre may expand context already present in
+    // that immutable patch, but browser-side re-diffing must never replace its hunks.
+    this.files = patchFiles;
     this.pathToItem.clear();
     this.items = this.files.map((file, index) => {
       const id = `${rangeKey(page.selected_range)}:${index}:${file.name}`;
@@ -349,6 +343,8 @@ class ReviewApp {
     this.renderDiff();
     this.renderTree();
     this.renderCommentList();
+    const summary = this.root.querySelector<HTMLTextAreaElement>("#review-summary");
+    if (summary) summary.value = this.feedback.summary;
     this.syncSelectedRange(page.selected_range);
     this.selectTab("changes");
   }
@@ -378,12 +374,12 @@ class ReviewApp {
           <span class="row-control-space"></span>
         </button>
         <span class="endpoint-handles">
-          <button data-boundary-handle="from" aria-label="Drag From boundary; use arrow keys to move">↕ From</button>
-          <button data-boundary-handle="to" aria-label="Drag To boundary; use arrow keys to move">↕ To</button>
+          <button data-boundary-handle="from" aria-label="Drag Base excluded boundary; use arrow keys to move">↕ Base</button>
+          <button data-boundary-handle="to" aria-label="Drag Through included boundary; use arrow keys to move">↕ Through</button>
         </span>
         <span class="boundary-actions">
-          <button data-move-boundary="from">Move From</button>
-          <button data-move-boundary="to">Move To</button>
+          <button data-move-boundary="from">Move Base</button>
+          <button data-move-boundary="to">Move Through</button>
         </span>
       </div>`).join("");
   }
@@ -432,24 +428,19 @@ class ReviewApp {
     }
 
     try {
-      const response = await fetch("./api/overview", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ range }),
-      });
-      const payload = await response.json() as OverviewResponse | { error?: string };
+      const payload = await this.api.overview(page);
       if (request !== this.overviewRequest) return;
-      if (!response.ok || !("overview_html" in payload) || !rangesEqual(payload.selected_range, range)) {
-        const message = "error" in payload && payload.error
-          ? payload.error
-          : `Could not prepare the overview (${response.status}).`;
-        this.showOverviewError(message);
+      if (payload.generation !== page.generation
+        || payload.snapshot_id !== page.snapshot_id
+        || payload.patch_id !== page.patch_id
+        || !rangesEqual(payload.selected_range, range)) {
+        this.showOverviewError("Tact returned an overview for a different snapshot.");
         return;
       }
       this.overviews.set(key, payload.overview_html);
       if (rangesEqual(this.page?.selected_range, range)) this.renderOverviewState();
     } catch (error) {
-      if (request === this.overviewRequest) this.showOverviewError(String(error));
+      if (request === this.overviewRequest) this.showOverviewError(errorMessage(error));
     } finally {
       if (request === this.overviewRequest) {
         this.loadingOverview = undefined;
@@ -463,6 +454,8 @@ class ReviewApp {
     const state = this.root.querySelector<HTMLElement>("#overview-state");
     if (!state) return;
     state.hidden = false;
+    state.setAttribute("role", "alert");
+    state.setAttribute("aria-live", "assertive");
     state.innerHTML = `
       <div class="overview-error">!</div>
       <strong>Could not prepare the overview</strong>
@@ -485,6 +478,17 @@ class ReviewApp {
     if (!container) return;
     this.viewer?.cleanUp();
     container.replaceChildren();
+    if (this.files.length === 0) {
+      container.innerHTML = `
+        <div class="empty-range">
+          <strong>No changes in this range</strong>
+          <span>Choose another range or refresh after changing the workspace.</span>
+          <div><button class="button" data-empty-range-change>Change range</button><button class="button" data-empty-range-refresh>Refresh</button></div>
+        </div>`;
+      container.querySelector("[data-empty-range-change]")?.addEventListener("click", () => this.openRangeDialog());
+      container.querySelector("[data-empty-range-refresh]")?.addEventListener("click", () => void this.refreshReview());
+      return;
+    }
     this.viewer = new CodeView<AnnotationMetadata>(this.viewerOptions());
     this.viewer.setup(container);
     this.viewer.setItems(this.items);
@@ -558,14 +562,7 @@ class ReviewApp {
   }
 
   private seenFiles() {
-    if (!this.page) return new Set<string>();
-    const key = rangeKey(this.page.selected_range);
-    let files = this.seenFilesByRange.get(key);
-    if (!files) {
-      files = new Set<string>();
-      this.seenFilesByRange.set(key, files);
-    }
-    return files;
+    return this.feedback.seenPaths;
   }
 
   private seenButton(item: CodeViewDiffItem<AnnotationMetadata>) {
@@ -601,14 +598,17 @@ class ReviewApp {
     for (const [index, tab] of tabs.entries()) {
       tab.addEventListener("click", () => this.selectTab(tab.dataset.tab ?? "changes"));
       tab.addEventListener("keydown", (event) => {
-        if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+        if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
         event.preventDefault();
-        const offset = event.key === "ArrowRight" ? 1 : -1;
-        const target = tabs[(index + offset + tabs.length) % tabs.length];
+        const targetIndex = event.key === "Home" ? 0
+          : event.key === "End" ? tabs.length - 1
+          : (index + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
+        const target = tabs[targetIndex];
         target.focus();
         this.selectTab(target.dataset.tab ?? "changes");
       });
     }
+    this.bindMobileNavigation();
     this.root.querySelector("#range-button")?.addEventListener("click", () => this.openRangeDialog());
     this.bindRangeEvents();
     this.root.querySelector("#refresh-notice")?.addEventListener("click", () => void this.refreshReview());
@@ -633,10 +633,33 @@ class ReviewApp {
       if (this.settings.syntaxTheme !== "system") return;
       if (this.draft?.tab === "preview") void this.renderDraftPreview();
     });
-    window.addEventListener("pagehide", () => {
-      if (this.statusTimer !== undefined) window.clearInterval(this.statusTimer);
-      if (!this.submitted) navigator.sendBeacon("./api/cancel");
-    });
+  }
+
+  private bindMobileNavigation() {
+    const tabs = [...this.root.querySelectorAll<HTMLButtonElement>("[data-mobile-panel]")];
+    const select = (name: string) => {
+      for (const tab of tabs) {
+        const active = tab.dataset.mobilePanel === name;
+        tab.classList.toggle("active", active);
+        tab.setAttribute("aria-selected", String(active));
+        tab.tabIndex = active ? 0 : -1;
+      }
+      this.root.querySelector("#changes-panel")?.setAttribute("data-mobile-active", name);
+      if (name === "diff") this.viewer?.render(true);
+    };
+    for (const [index, tab] of tabs.entries()) {
+      tab.addEventListener("click", () => select(tab.dataset.mobilePanel ?? "diff"));
+      tab.addEventListener("keydown", (event) => {
+        if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+        event.preventDefault();
+        const targetIndex = event.key === "Home" ? 0
+          : event.key === "End" ? tabs.length - 1
+          : (index + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
+        tabs[targetIndex].focus();
+        select(tabs[targetIndex].dataset.mobilePanel ?? "diff");
+      });
+    }
+    select("diff");
   }
 
   private bindRangeEvents() {
@@ -672,13 +695,19 @@ class ReviewApp {
   }
 
   private async checkWorkspaceStatus() {
-    if (document.hidden || this.checkingStatus || this.refreshing || this.submitted) return;
+    if (document.hidden || this.checkingStatus || this.refreshing || this.store.state.terminal.kind === "finished") return;
     this.checkingStatus = true;
     try {
-      const response = await fetch("./api/status", { cache: "no-store" });
-      if (!response.ok) return;
-      const status = await response.json() as { changed: boolean };
+      const status = await this.api.status();
+      if (status.generation !== this.bootstrap.generation) {
+        this.snapshotStale = true;
+        this.setRefreshNotice(true, "This browser page belongs to an older review generation.");
+        this.setReviewControlsDisabled(false);
+        return;
+      }
+      this.snapshotStale = status.changed;
       this.setRefreshNotice(status.changed);
+      this.setReviewControlsDisabled(false);
     } catch {
       // Polling is advisory; transient failures should not interrupt the review.
     } finally {
@@ -700,12 +729,7 @@ class ReviewApp {
 
   private async refreshReview() {
     if (this.refreshing || this.loadingRange || this.loadingOverview) return;
-    const pendingFeedback = [
-      this.comments.length > 0
-        ? `${this.comments.length} pending ${this.comments.length === 1 ? "comment" : "comments"}`
-        : "",
-      this.draft ? "the open comment draft" : "",
-    ].filter(Boolean).join(" and ");
+    const pendingFeedback = feedbackDescription(this.feedback);
     if (pendingFeedback && !window.confirm(
       `Refreshing will discard ${pendingFeedback}. Continue?`,
     )) return;
@@ -719,26 +743,20 @@ class ReviewApp {
       if (action) action.textContent = "Refreshing…";
     }
     try {
-      const response = await fetch("./api/refresh", { method: "POST" });
-      const payload = await response.json() as RefreshResponse | { error?: string };
-      if (!response.ok || !("bootstrap" in payload)) {
-        const message = "error" in payload && payload.error ? payload.error : "Refresh failed";
-        this.setRefreshNotice(true, message);
-        return;
-      }
-      this.bootstrap = payload.bootstrap;
-      this.clearPendingComments();
+      const payload = await this.api.refresh(this.bootstrap.generation);
+      this.bootstrap = payload;
+      this.store.replaceSession(payload);
       this.overviews.clear();
-      this.seenFilesByRange.clear();
       const timeline = this.root.querySelector<HTMLElement>("#commit-timeline");
       if (timeline) {
         timeline.innerHTML = this.rangeTimelineMarkup();
         this.bindRangeEvents();
       }
       this.installPage(payload.page);
+      this.snapshotStale = false;
       this.setRefreshNotice(false);
     } catch (error) {
-      this.setRefreshNotice(true, String(error));
+      this.setRefreshNotice(true, errorMessage(error));
     } finally {
       this.refreshing = false;
       if (notice) {
@@ -949,9 +967,8 @@ class ReviewApp {
     const apply = this.root.querySelector<HTMLButtonElement>("#apply-range");
     const currentRange = this.page?.selected_range ?? this.bootstrap.default_range;
     const changesRange = this.pendingRange !== undefined && !rangesEqual(this.pendingRange, currentRange);
-    const commentCount = this.comments.length;
-    const hasDraft = this.draft !== undefined;
-    const hasPendingFeedback = commentCount > 0 || hasDraft;
+    const pendingFeedback = feedbackDescription(this.feedback);
+    const hasPendingFeedback = pendingFeedback.length > 0;
     if (apply) {
       apply.disabled = !changesRange;
       apply.textContent = changesRange && hasPendingFeedback ? "Discard feedback and apply" : "Apply range";
@@ -961,18 +978,15 @@ class ReviewApp {
       warning.hidden = true;
       return;
     }
-    const comments = commentCount === 0
-      ? ""
-      : `${commentCount} pending ${commentCount === 1 ? "comment" : "comments"}`;
-    const draft = hasDraft ? "an open comment draft" : "";
-    warning.textContent = `Switching ranges will discard ${[comments, draft].filter(Boolean).join(" and ")}.`;
+    warning.textContent = `Switching ranges will discard ${pendingFeedback}.`;
     warning.hidden = false;
   }
 
   private async applyRange() {
     const range = this.pendingRange;
+    const discardFeedback = feedbackDescription(this.feedback).length > 0;
     this.closeRangeDialog();
-    if (range) await this.selectRange(range);
+    if (range) await this.selectRange(range, discardFeedback);
   }
 
   private openCommentComposer(selection: CodeViewLineSelection | null) {
@@ -982,6 +996,11 @@ class ReviewApp {
     if (side !== endSide) return;
     const item = this.items.find((candidate) => candidate.id === selection.id);
     if (!item) return;
+    if (this.draft) {
+      this.showInlineError("Save or discard the open comment draft before starting another comment.");
+      this.focusDraft();
+      return;
+    }
 
     const previousItemId = this.draft?.itemId;
     this.draft = {
@@ -999,6 +1018,15 @@ class ReviewApp {
   }
 
   private editComment(comment: CommentMetadata) {
+    if (this.draft) {
+      if (this.draft.editingId === comment.id) {
+        this.focusDraft();
+        return;
+      }
+      this.showInlineError("Save or discard the open comment draft before editing another comment.");
+      this.focusDraft();
+      return;
+    }
     const previousItemId = this.draft?.itemId;
     this.draft = {
       itemId: comment.itemId,
@@ -1033,6 +1061,7 @@ class ReviewApp {
     this.draft = undefined;
     this.viewer?.clearSelectedLines();
     if (itemId) this.refreshItem(itemId);
+    this.clearInlineError();
   }
 
   private saveComment() {
@@ -1064,6 +1093,7 @@ class ReviewApp {
     this.refreshItem(itemId);
     this.refreshTreeDecorations();
     this.renderCommentList();
+    this.clearInlineError();
   }
 
   private removeComment(id: number) {
@@ -1074,12 +1104,6 @@ class ReviewApp {
     this.refreshItem(comment.itemId);
     this.refreshTreeDecorations();
     this.renderCommentList();
-  }
-
-  private clearPendingComments() {
-    this.comments.splice(0);
-    this.draft = undefined;
-    this.viewer?.clearSelectedLines();
   }
 
   private refreshTreeDecorations() {
@@ -1173,6 +1197,13 @@ class ReviewApp {
     }
     for (const button of element.querySelectorAll<HTMLButtonElement>("[data-editor-tab]")) {
       button.addEventListener("click", () => this.selectEditorTab(element, draft, button.dataset.editorTab as CommentDraft["tab"]));
+      button.addEventListener("keydown", (event) => {
+        if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+        event.preventDefault();
+        const tab = event.key === "ArrowLeft" || event.key === "Home" ? "comment" : "preview";
+        this.selectEditorTab(element, draft, tab);
+        element.querySelector<HTMLButtonElement>(`[data-editor-tab=${tab}]`)?.focus();
+      });
     }
     element.querySelector("[data-comment-action=cancel]")?.addEventListener("click", () => this.closeCommentComposer());
     element.querySelector("[data-comment-action=save]")?.addEventListener("click", () => this.saveComment());
@@ -1242,9 +1273,11 @@ class ReviewApp {
 
   private renderCommentList() {
     const count = this.root.querySelector<HTMLElement>("#comment-count");
+    const mobileCount = this.root.querySelector<HTMLElement>("#mobile-comment-count");
     const list = this.root.querySelector<HTMLElement>("#comment-list");
     if (!count || !list) return;
     count.textContent = String(this.comments.length);
+    if (mobileCount) mobileCount.textContent = String(this.comments.length);
     list.replaceChildren();
     if (this.comments.length === 0) {
       const empty = document.createElement("p");
@@ -1301,14 +1334,18 @@ class ReviewApp {
     if (state?.classList.contains("loading")) state.hidden = true;
   }
 
-  private showRangeError(message: string) {
+  private showRangeError(message: string, range: ReviewRange) {
     const state = this.root.querySelector<HTMLElement>("#scope-state");
     if (!state) return;
     state.className = "scope-state error";
+    state.setAttribute("role", "alert");
     state.innerHTML = `
       <div class="scope-error-icon">!</div>
       <strong>Could not load the selected range</strong>
-      <span>${escapeHtml(message)}</span>`;
+      <span>${escapeHtml(message)}</span>
+      <div class="scope-error-actions"><button class="button primary" data-range-retry>Retry</button>${this.page ? '<button class="button" data-range-keep>Keep current range</button>' : ""}</div>`;
+    state.querySelector("[data-range-retry]")?.addEventListener("click", () => void this.selectRange(range));
+    state.querySelector("[data-range-keep]")?.addEventListener("click", () => { state.hidden = true; });
     state.hidden = false;
   }
 
@@ -1322,17 +1359,39 @@ class ReviewApp {
   }
 
   private setReviewControlsDisabled(disabled: boolean) {
+    const terminalBusy = this.store.state.terminal.kind === "busy";
     for (const button of this.root.querySelectorAll<HTMLButtonElement>("[data-decision]")) {
-      button.disabled = disabled || !this.page;
+      button.disabled = disabled || !this.page || terminalBusy || this.snapshotStale;
+      button.title = this.snapshotStale ? "Refresh before submitting this stale snapshot." : "";
     }
+    const cancel = this.root.querySelector<HTMLButtonElement>("#cancel-review");
+    if (cancel) cancel.disabled = terminalBusy;
   }
 
   private async submit(decision: ReviewDecision["decision"]) {
     if (!this.page || this.loadingRange) return;
-    const summary = this.root.querySelector<HTMLTextAreaElement>("#review-summary")?.value.trim() ?? "";
+    if (this.draft) {
+      this.showInlineError("Save or discard the open comment draft before submitting the review.");
+      this.focusDraft();
+      return;
+    }
+    if (this.snapshotStale) {
+      this.showInlineError("The workspace changed. Refresh before submitting this review.");
+      return;
+    }
+    const previous = this.store.state;
+    this.store.state = beginTerminal(previous, "submit");
+    if (this.store.state === previous) return;
+    this.setReviewControlsDisabled(false);
+    this.showTerminalBusy(decision === "approve" ? "Submitting approval…" : "Submitting requested changes…");
+    const page = this.page;
     const payload: ReviewDecision = {
+      generation: page.generation,
+      snapshot_id: page.snapshot_id,
+      patch_id: page.patch_id,
+      range: page.selected_range,
       decision,
-      summary,
+      summary: this.feedback.summary.trim(),
       comments: this.comments.map(({ path, side, start_line, end_line, body }) => ({
         path,
         side,
@@ -1341,31 +1400,69 @@ class ReviewApp {
         body,
       })),
     };
-    const response = await fetch("./api/decision", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-    if (!response.ok) {
-      window.alert(`Could not submit review (${response.status}).`);
+    try {
+      await this.api.submit(payload);
+    } catch (error) {
+      const code = error instanceof ApiError ? error.code : "unknown";
+      if (["stale_snapshot", "workspace_changed"].includes(code)) this.snapshotStale = true;
+      this.store.state = failTerminal(this.store.state, "submit", code, errorMessage(error));
+      this.showInlineError(errorMessage(error), () => void this.submit(decision));
+      this.setReviewControlsDisabled(false);
       return;
     }
-    this.submitted = true;
+    this.store.state = finishTerminal(this.store.state, "submit");
     const finished = this.root.querySelector<HTMLElement>("#finished");
     if (finished) finished.hidden = false;
   }
 
   private async cancel() {
-    const response = await fetch("./api/cancel", { method: "POST", keepalive: true });
-    if (!response.ok) {
-      window.alert(`Could not cancel review (${response.status}).`);
+    if (this.draft) {
+      this.showInlineError("Save or discard the open comment draft before cancelling the review.");
+      this.focusDraft();
       return;
     }
-    this.submitted = true;
+    const previous = this.store.state;
+    this.store.state = beginTerminal(previous, "cancel");
+    if (this.store.state === previous) return;
+    this.setReviewControlsDisabled(false);
+    this.showTerminalBusy("Cancelling review…");
+    try {
+      await this.api.cancel(this.bootstrap.generation);
+    } catch (error) {
+      const code = error instanceof ApiError ? error.code : "unknown";
+      this.store.state = failTerminal(this.store.state, "cancel", code, errorMessage(error));
+      this.showInlineError(errorMessage(error), () => void this.cancel());
+      this.setReviewControlsDisabled(false);
+      return;
+    }
+    this.store.state = finishTerminal(this.store.state, "cancel");
     const finished = this.root.querySelector<HTMLElement>("#finished");
     if (!finished) return;
     finished.innerHTML = "<div><span>✓</span><h2>Review cancelled</h2><p>You can return to Tact.</p></div>";
     finished.hidden = false;
+  }
+
+  private showTerminalBusy(message: string) {
+    const status = this.root.querySelector<HTMLElement>("#terminal-status");
+    if (!status) return;
+    status.className = "terminal-status busy";
+    status.textContent = message;
+  }
+
+  private showInlineError(message: string, retry?: () => void) {
+    const status = this.root.querySelector<HTMLElement>("#terminal-status");
+    if (!status) return;
+    status.className = "terminal-status error";
+    status.setAttribute("role", "alert");
+    status.innerHTML = `${escapeHtml(message)}${retry ? ` <button class="text-button" data-terminal-retry>Retry</button>` : ""}`;
+    if (retry) status.querySelector("[data-terminal-retry]")?.addEventListener("click", retry);
+  }
+
+  private clearInlineError() {
+    const status = this.root.querySelector<HTMLElement>("#terminal-status");
+    if (!status || !status.classList.contains("error")) return;
+    status.className = "terminal-status";
+    status.textContent = "";
   }
 }
 

@@ -50,6 +50,10 @@ pub(crate) enum AppEvent {
         markdown: String,
     },
     ReviewStarted(PaneId),
+    ReviewReady {
+        pane: PaneId,
+        url: String,
+    },
     ReviewOverviewStarted(PaneId),
     ReviewCancelled(PaneId),
     ReviewFailed {
@@ -189,6 +193,9 @@ impl AppNode {
                 self.update_root(pane, RootEvent::ReviewFinished(markdown))
             }
             AppEvent::ReviewStarted(pane) => self.update_root(pane, RootEvent::ReviewStarted),
+            AppEvent::ReviewReady { pane, url } => {
+                self.update_root(pane, RootEvent::ReviewReady(url))
+            }
             AppEvent::ReviewOverviewStarted(pane) => {
                 self.update_root(pane, RootEvent::ReviewOverviewStarted)
             }

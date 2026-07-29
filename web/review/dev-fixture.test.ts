@@ -23,12 +23,12 @@ test("review bootstrap exposes every selectable commit-range endpoint", () => {
   ]);
 });
 
-test("standalone review fixtures demonstrate expandable file context", () => {
+test("standalone review fixtures retain Git anchors when file contents are present", () => {
   for (const fixture of Object.values(reviewFixtures)) {
     const files = parsePatchFiles(fixture.patch, "dev-fixture", true).flatMap(
       (patch) => patch.files,
     );
-    const expandable = addExpandableContext(files, fixture.file_contexts);
-    expect(expandable.some((file) => !file.isPartial)).toBe(true);
+    const authoritative = addExpandableContext(files, fixture.file_contexts);
+    expect(authoritative).toBe(files);
   }
 });

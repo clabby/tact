@@ -70,7 +70,10 @@ const releaseContexts = [
   },
 ];
 
-export const reviewBootstrap = {
+const reviewBootstrapBase = {
+  protocol_version: 1,
+  generation: 1,
+  workspace_version: "dev-workspace-1",
   title: "Review feature/review-workflow",
   repository: "tact",
   trunk: "main",
@@ -101,8 +104,11 @@ const overview = `
 
 export const reviewFixtures = {
   "2:3": {
-    title: reviewBootstrap.title,
-    repository: reviewBootstrap.repository,
+    generation: 1,
+    snapshot_id: "dev-snapshot-1",
+    patch_id: "dev-patch-uncommitted",
+    title: reviewBootstrapBase.title,
+    repository: reviewBootstrapBase.repository,
     selected_range: { from: 2, to: 3 },
     scope: "Uncommitted changes",
     base: "HEAD",
@@ -110,8 +116,11 @@ export const reviewFixtures = {
     file_contexts: fileContexts,
   },
   "0:3": {
-    title: reviewBootstrap.title,
-    repository: reviewBootstrap.repository,
+    generation: 1,
+    snapshot_id: "dev-snapshot-1",
+    patch_id: "dev-patch-full",
+    title: reviewBootstrapBase.title,
+    repository: reviewBootstrapBase.repository,
     selected_range: { from: 0, to: 3 },
     scope: "Full branch",
     base: "9d3b745",
@@ -119,14 +128,22 @@ export const reviewFixtures = {
     file_contexts: releaseContexts,
   },
   "1:2": {
-    title: reviewBootstrap.title,
-    repository: reviewBootstrap.repository,
+    generation: 1,
+    snapshot_id: "dev-snapshot-1",
+    patch_id: "dev-patch-interval",
+    title: reviewBootstrapBase.title,
+    repository: reviewBootstrapBase.repository,
     selected_range: { from: 1, to: 2 },
     scope: "a4c981e → d2e640b",
     base: "a4c981e",
     patch,
     file_contexts: fileContexts,
   },
+};
+
+export const reviewBootstrap = {
+  ...reviewBootstrapBase,
+  page: reviewFixtures["0:3"],
 };
 
 export const overviewFixtures = {

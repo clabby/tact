@@ -8,6 +8,7 @@ mod editor;
 mod format;
 mod pane;
 mod prompt;
+mod review_controller;
 mod scheduler;
 pub(crate) mod session;
 mod shell;
@@ -33,6 +34,9 @@ use crate::{
         editor::EditorOutcome,
         pane::PaneId,
         prompt::Submission,
+        review_controller::{
+            ReviewCompletion, ReviewController, ReviewIdentity, ReviewPhase, ReviewTask,
+        },
         scheduler::{RenderScheduler, STREAM_FRAME_INTERVAL},
         session::SessionSummary,
         shell::ShellExecution,
@@ -42,7 +46,7 @@ use crate::{
             LocalEvent, SessionEnded, SessionOutcome, SessionStarted, ShellId, TranscriptError,
             TranscriptJournal, TurnId,
         },
-        worker::{WorkerCommand, WorkerEvent},
+        worker::{AuxiliaryError, WorkerCommand, WorkerEvent},
     },
 };
 use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
@@ -73,17 +77,15 @@ type NewSessionTask = JoinHandle<(
     Result<ConfiguredAgent>,
 )>;
 type SessionListTask = JoinHandle<(PaneId, Result<Vec<SessionSummary>>)>;
-type ReviewTask = JoinHandle<(
-    PaneId,
-    std::result::Result<Option<String>, crate::review::ReviewError>,
-)>;
-struct ReviewOverviewRequest {
-    pane: PaneId,
+struct AuxiliaryJobRequest {
+    review: ReviewIdentity,
     prompt: String,
     shutdown: CancellationToken,
-    completion: tokio::sync::oneshot::Sender<
-        std::result::Result<String, crate::review::OverviewGenerationError>,
-    >,
+    completion: tokio::sync::oneshot::Sender<std::result::Result<String, AuxiliaryError>>,
+}
+struct ReviewReady {
+    identity: ReviewIdentity,
+    url: String,
 }
 type ResumeSessionTask = JoinHandle<(
     PaneId,
@@ -94,12 +96,6 @@ type ResumeSessionTask = JoinHandle<(
 )>;
 type UpdateCheckTask =
     JoinHandle<std::result::Result<Option<semver::Version>, crate::app::update::UpdateError>>;
-
-fn stop_review_task(review_task: &mut Option<ReviewTask>) {
-    if let Some(task) = review_task.take() {
-        task.abort();
-    }
-}
 
 fn update_checks_enabled() -> bool {
     crate::app::update::is_official_release_build()
@@ -378,8 +374,9 @@ pub(crate) async fn run(
     let mut fast_mode_task = None::<FastModeUpdateTask>;
     let mut new_session_task = None::<NewSessionTask>;
     let mut session_list_task = None::<SessionListTask>;
-    let mut review_task = None::<ReviewTask>;
-    let (review_overview_sender, mut review_overviews) = mpsc::unbounded_channel();
+    let mut review_controller = ReviewController::new();
+    let (auxiliary_sender, mut auxiliary_jobs) = mpsc::unbounded_channel();
+    let (review_ready_sender, mut review_ready_updates) = mpsc::unbounded_channel();
     let mut resume_session_task = None::<ResumeSessionTask>;
     let mut scheduler = RenderScheduler::new(STREAM_FRAME_INTERVAL, Instant::now());
     let mut stopping = false;
@@ -407,8 +404,9 @@ pub(crate) async fn run(
                     fast_mode_task: &mut fast_mode_task,
                     new_session_task: &mut new_session_task,
                     session_list_task: &mut session_list_task,
-                    review_task: &mut review_task,
-                    review_overview_sender: &review_overview_sender,
+                    review_controller: &mut review_controller,
+                    auxiliary_sender: &auxiliary_sender,
+                    review_ready_sender: &review_ready_sender,
                     resume_session_task: &mut resume_session_task,
                     terminal: &mut terminal,
                     scheduler: &mut scheduler,
@@ -426,7 +424,7 @@ pub(crate) async fn run(
         }
         if stopping {
             shell_tasks.abort_all();
-            stop_review_task(&mut review_task);
+            review_controller.cancel();
         }
         if stopping && !subagents_stopping {
             for runtime in panes.values() {
@@ -560,21 +558,61 @@ pub(crate) async fn run(
                     );
                 }
             }
-            Some(request) = review_overviews.recv(), if !stopping => {
-                let ReviewOverviewRequest {
-                    pane,
+            Some(ready) = review_ready_updates.recv(), if !stopping => {
+                if review_controller.identity() != Some(ready.identity) {
+                    continue;
+                }
+                review_controller.set_url(ready.identity, ready.url.clone());
+                review_controller.set_phase(ready.identity, ReviewPhase::Waiting);
+                let url = review_controller
+                    .url(ready.identity.pane)
+                    .expect("the active review just stored its URL")
+                    .to_owned();
+                schedule(
+                    app.update(AppEvent::ReviewReady {
+                        pane: ready.identity.pane,
+                        url: url.clone(),
+                    }),
+                    &mut scheduler,
+                );
+                if let Err(error) = crate::app::browser::open(&url) {
+                    schedule(
+                        app.update(AppEvent::NotifyError {
+                            pane: ready.identity.pane,
+                            error: format!(
+                                "Could not open the browser. Press O to retry or open {} manually: {error}",
+                                url,
+                            ),
+                        }),
+                        &mut scheduler,
+                    );
+                }
+            }
+            Some(request) = auxiliary_jobs.recv(), if !stopping => {
+                let AuxiliaryJobRequest {
+                    review,
                     prompt,
                     shutdown,
                     completion,
                 } = request;
-                let Some(runtime) = panes.get_mut(&pane) else {
-                    drop(completion.send(Err(
-                        crate::review::OverviewGenerationError::Failed(
-                            "review pane is no longer available".to_owned(),
-                        ),
-                    )));
+                if !review_controller.accepts(review, &shutdown) {
+                    drop(completion.send(Err(AuxiliaryError::Cancelled)));
+                    continue;
+                }
+                let pane = review.pane;
+                let Some(runtime) = panes
+                    .get_mut(&pane)
+                    .filter(|runtime| runtime.generation == review.pane_generation)
+                else {
+                    drop(completion.send(Err(AuxiliaryError::Failed(
+                        "auxiliary job pane is no longer available".to_owned(),
+                    ))));
                     continue;
                 };
+                if shutdown.is_cancelled() {
+                    drop(completion.send(Err(AuxiliaryError::Cancelled)));
+                    continue;
+                }
                 let id = TurnId::new(runtime.next_turn);
                 runtime.next_turn = runtime.next_turn.saturating_add(1);
                 let record = runtime.journal_mut()?.append_local(LocalEvent::UserSubmitted {
@@ -582,9 +620,10 @@ pub(crate) async fn run(
                     text: prompt.clone(),
                 })?;
                 schedule(app.update(AppEvent::Transcript { pane, record }), &mut scheduler);
+                review_controller.set_phase(review, ReviewPhase::GeneratingOverview);
                 schedule(app.update(AppEvent::ReviewOverviewStarted(pane)), &mut scheduler);
                 commands
-                    .send(WorkerCommand::ReviewOverview {
+                    .send(WorkerCommand::Auxiliary {
                         pane,
                         id,
                         prompt: prompt.into(),
@@ -990,14 +1029,23 @@ pub(crate) async fn run(
                 scheduler.request_immediate(Instant::now());
             }
             result = async {
-                review_task
-                    .as_mut()
+                review_controller
+                    .task_mut()
                     .expect("review branch is disabled without a task")
                     .await
-            }, if review_task.is_some() && !stopping => {
-                review_task = None;
-                let (pane, review) = result.map_err(RuntimeError::SessionTask)?;
-                match review {
+            }, if review_controller.is_active() && !stopping => {
+                let completion = result.map_err(RuntimeError::SessionTask)?;
+                if !review_controller.complete(completion.identity) {
+                    continue;
+                }
+                let pane = completion.identity.pane;
+                if !panes
+                    .get(&pane)
+                    .is_some_and(|runtime| runtime.generation == completion.identity.pane_generation)
+                {
+                    continue;
+                }
+                match completion.result {
                     Ok(Some(markdown)) => schedule(
                         app.update(AppEvent::ReviewFinished { pane, markdown }),
                         &mut scheduler,
@@ -1277,8 +1325,9 @@ struct EffectContext<'a> {
     fast_mode_task: &'a mut Option<FastModeUpdateTask>,
     new_session_task: &'a mut Option<NewSessionTask>,
     session_list_task: &'a mut Option<SessionListTask>,
-    review_task: &'a mut Option<ReviewTask>,
-    review_overview_sender: &'a mpsc::UnboundedSender<ReviewOverviewRequest>,
+    review_controller: &'a mut ReviewController,
+    auxiliary_sender: &'a mpsc::UnboundedSender<AuxiliaryJobRequest>,
+    review_ready_sender: &'a mpsc::UnboundedSender<ReviewReady>,
     resume_session_task: &'a mut Option<ResumeSessionTask>,
     terminal: &'a mut TerminalSession,
     scheduler: &'a mut RenderScheduler,
@@ -1548,7 +1597,7 @@ fn apply_pane_effect(
             }));
         }
         components::RootEffect::Review { download_assets } => {
-            if context.review_task.is_some() {
+            if context.review_controller.is_active() {
                 schedule(
                     context.app.update(AppEvent::NotifyError {
                         pane,
@@ -1561,12 +1610,7 @@ fn apply_pane_effect(
 
             match crate::review::ReviewAssets::availability() {
                 Ok(crate::review::AssetAvailability::Ready(assets)) => {
-                    *context.review_task = Some(spawn_review(
-                        pane,
-                        context.review_overview_sender.clone(),
-                        context.workspace.to_path_buf(),
-                        Some(assets),
-                    ));
+                    start_review(context, pane, Some(assets));
                 }
                 Ok(crate::review::AssetAvailability::DownloadRequired) if !download_assets => {
                     schedule(
@@ -1578,12 +1622,7 @@ fn apply_pane_effect(
                     return Ok(());
                 }
                 Ok(crate::review::AssetAvailability::DownloadRequired) => {
-                    *context.review_task = Some(spawn_review(
-                        pane,
-                        context.review_overview_sender.clone(),
-                        context.workspace.to_path_buf(),
-                        None,
-                    ));
+                    start_review(context, pane, None);
                 }
                 Ok(crate::review::AssetAvailability::DevelopmentInstallRequired { path }) => {
                     schedule(
@@ -1728,7 +1767,7 @@ fn apply_pane_effect(
                 .map_err(|_| RuntimeError::AgentWorkerStopped)?;
         }
         components::RootEffect::CancelReview => {
-            stop_review_task(context.review_task);
+            context.review_controller.cancel();
             schedule(
                 context.app.update(AppEvent::ReviewCancelled(pane)),
                 context.scheduler,
@@ -1743,9 +1782,38 @@ fn apply_pane_effect(
     Ok(())
 }
 
-fn spawn_review(
+fn start_review(
+    context: &mut EffectContext<'_>,
     pane: PaneId,
-    overview_requests: mpsc::UnboundedSender<ReviewOverviewRequest>,
+    assets: Option<crate::review::ReviewAssets>,
+) {
+    let pane_generation = context
+        .panes
+        .get(&pane)
+        .expect("review pane must exist")
+        .generation;
+    let auxiliary_jobs = context.auxiliary_sender.clone();
+    let ready_updates = context.review_ready_sender.clone();
+    let workspace = context.workspace.to_path_buf();
+    context
+        .review_controller
+        .start(pane, pane_generation, move |identity, cancellation| {
+            spawn_review(
+                identity,
+                cancellation,
+                auxiliary_jobs,
+                ready_updates,
+                workspace,
+                assets,
+            )
+        });
+}
+
+fn spawn_review(
+    identity: ReviewIdentity,
+    cancellation: CancellationToken,
+    auxiliary_jobs: mpsc::UnboundedSender<AuxiliaryJobRequest>,
+    ready_updates: mpsc::UnboundedSender<ReviewReady>,
     workspace: PathBuf,
     assets: Option<crate::review::ReviewAssets>,
 ) -> ReviewTask {
@@ -1757,15 +1825,16 @@ fn spawn_review(
             };
             let overview_generator: crate::review::OverviewGenerator =
                 Arc::new(move |prompt, shutdown| {
-                    let overview_requests = overview_requests.clone();
+                    let auxiliary_jobs = auxiliary_jobs.clone();
+                    let cancellation = cancellation.clone();
                     Box::pin(async move {
-                        if shutdown.is_cancelled() {
+                        if cancellation.is_cancelled() || shutdown.is_cancelled() {
                             return Err(crate::review::OverviewGenerationError::Cancelled);
                         }
                         let (completion, result) = tokio::sync::oneshot::channel();
-                        overview_requests
-                            .send(ReviewOverviewRequest {
-                                pane,
+                        auxiliary_jobs
+                            .send(AuxiliaryJobRequest {
+                                review: identity,
                                 prompt,
                                 shutdown,
                                 completion,
@@ -1775,17 +1844,31 @@ fn spawn_review(
                                     "review overview worker stopped".to_owned(),
                                 )
                             })?;
-                        result.await.map_err(|_| {
+                        match result.await.map_err(|_| {
                             crate::review::OverviewGenerationError::Failed(
                                 "review overview worker stopped".to_owned(),
                             )
-                        })?
+                        })? {
+                            Ok(overview) => Ok(overview),
+                            Err(AuxiliaryError::Cancelled) => {
+                                Err(crate::review::OverviewGenerationError::Cancelled)
+                            }
+                            Err(AuxiliaryError::Failed(error)) => {
+                                Err(crate::review::OverviewGenerationError::Failed(error))
+                            }
+                        }
                     })
                 });
-            crate::review::run(overview_generator, &workspace, assets).await
+            let handle =
+                crate::review::ReviewService::start(overview_generator, &workspace, assets).await?;
+            drop(ready_updates.send(ReviewReady {
+                identity,
+                url: handle.url(),
+            }));
+            handle.wait().await
         }
         .await;
-        (pane, result)
+        ReviewCompletion { identity, result }
     })
 }
 
@@ -1862,9 +1945,9 @@ fn request_render(request: RenderRequest, scheduler: &mut RenderScheduler) {
 #[cfg(test)]
 mod tests {
     use super::{
-        PaneGeneration, PaneSession, PaneSettings, PendingSubmission, ReviewTask,
-        close_pane_journal, is_image_paste, local_link_path, open_pane, send_submission,
-        stop_review_task, subagent_pane, update_checks_enabled, validate_interactive,
+        PaneGeneration, PaneSession, PaneSettings, PendingSubmission, close_pane_journal,
+        is_image_paste, local_link_path, open_pane, send_submission, subagent_pane,
+        update_checks_enabled, validate_interactive,
     };
     use crate::{
         app::{
@@ -1903,19 +1986,6 @@ mod tests {
             KeyCode::Char('v'),
             KeyModifiers::NONE,
         ))));
-    }
-
-    #[tokio::test]
-    async fn stopping_aborts_the_review_task() {
-        let task: ReviewTask = tokio::spawn(std::future::pending());
-        let abort = task.abort_handle();
-        let mut review_task = Some(task);
-
-        stop_review_task(&mut review_task);
-        tokio::task::yield_now().await;
-
-        assert!(review_task.is_none());
-        assert!(abort.is_finished());
     }
 
     #[test]

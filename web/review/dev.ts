@@ -1,3 +1,4 @@
+import { watch } from "node:fs";
 import { mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { overviewFixtures, reviewBootstrap, reviewFixtures } from "./dev-fixture";
@@ -7,22 +8,27 @@ const outputDirectory = join(import.meta.dir, ".dev");
 await rm(outputDirectory, { recursive: true, force: true });
 await mkdir(outputDirectory, { recursive: true });
 
-const build = await Bun.build({
-  entrypoints: [join(import.meta.dir, "app.ts")],
-  outdir: outputDirectory,
-  target: "browser",
-  sourcemap: "inline",
-  naming: "[name].[ext]",
-});
-if (!build.success) {
-  for (const message of build.logs) console.error(message);
-  process.exit(1);
+async function buildAssets() {
+  const build = await Bun.build({
+    entrypoints: [join(import.meta.dir, "app.ts")],
+    outdir: outputDirectory,
+    target: "browser",
+    sourcemap: "inline",
+    naming: "[name].[ext]",
+  });
+  if (!build.success) {
+    for (const message of build.logs) console.error(message);
+    return false;
+  }
+  const html = await Bun.file(join(import.meta.dir, "index.html")).text();
+  await Bun.write(join(outputDirectory, "index.html"), html.replace(
+    "</body>",
+    '<script>const socket=new WebSocket(`ws://${location.host}/__reload`);socket.onmessage=()=>location.reload()</script></body>',
+  ));
+  return true;
 }
 
-await Bun.write(
-  join(outputDirectory, "index.html"),
-  Bun.file(join(import.meta.dir, "index.html")),
-);
+if (!await buildAssets()) process.exit(1);
 
 let workspaceChanged = true;
 
@@ -34,17 +40,14 @@ const server = Bun.serve({
       return Response.json(reviewBootstrap);
     }
     if (request.method === "GET" && url.pathname === "/api/status") {
-      return Response.json({ changed: workspaceChanged });
+      return Response.json({ generation: 1, workspace_version: "dev-workspace-1", changed: workspaceChanged });
     }
     if (request.method === "POST" && url.pathname === "/api/refresh") {
       workspaceChanged = false;
-      return Response.json({
-        bootstrap: reviewBootstrap,
-        page: reviewFixtures[rangeKey(reviewBootstrap.default_range)],
-      });
+      return Response.json(reviewBootstrap);
     }
     if (request.method === "POST" && url.pathname === "/api/range") {
-      const body = await request.json() as { range?: ReviewRange };
+      const body = await request.json() as { generation?: number; range?: ReviewRange };
       const key = body.range ? rangeKey(body.range) : "";
       const fixture = reviewFixtures[key as keyof typeof reviewFixtures];
       if (!fixture) return Response.json({ error: "Unknown review range" }, { status: 422 });
@@ -52,12 +55,12 @@ const server = Bun.serve({
       return Response.json(fixture);
     }
     if (request.method === "POST" && url.pathname === "/api/overview") {
-      const body = await request.json() as { range?: ReviewRange };
+      const body = await request.json() as { generation?: number; range?: ReviewRange; snapshot_id?: string; patch_id?: string };
       const key = body.range ? rangeKey(body.range) : "";
       const overview = overviewFixtures[key as keyof typeof overviewFixtures];
       if (!overview) return Response.json({ error: "Unknown review range" }, { status: 422 });
       await Bun.sleep(900);
-      return Response.json({ selected_range: body.range, overview_html: overview });
+      return Response.json({ generation: body.generation, snapshot_id: body.snapshot_id, patch_id: body.patch_id, selected_range: body.range, overview_html: overview });
     }
     if (request.method === "POST" && url.pathname === "/api/decision") {
       console.log("\nReview result:\n", JSON.stringify(await request.json(), null, 2));
@@ -68,12 +71,29 @@ const server = Bun.serve({
       return new Response(null, { status: 204 });
     }
 
+    if (url.pathname === "/__reload" && server.upgrade(request)) return;
+
     const name = url.pathname === "/" ? "index.html" : url.pathname.slice(1);
     if (!["index.html", "app.js", "app.css"].includes(name)) {
       return new Response("Not found", { status: 404 });
     }
     return new Response(Bun.file(join(outputDirectory, name)));
   },
+  websocket: {
+    open(socket) { socket.subscribe("reload"); },
+    message() {},
+  },
 });
 
 console.log(`Tact review UI: http://localhost:${server.port}`);
+
+let rebuildTimer: ReturnType<typeof setTimeout> | undefined;
+watch(import.meta.dir, { recursive: true }, (_event, filename) => {
+  if (!filename || filename.startsWith(".dev/") || filename.startsWith("dist/")) return;
+  clearTimeout(rebuildTimer);
+  rebuildTimer = setTimeout(async () => {
+    if (!await buildAssets()) return;
+    server.publish("reload", "reload");
+    console.log("Review UI rebuilt");
+  }, 80);
+});

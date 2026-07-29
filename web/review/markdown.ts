@@ -1,9 +1,9 @@
-import pierreDark from "@pierre/theme/pierre-dark";
-import pierreDarkSoft from "@pierre/theme/pierre-dark-soft";
-import pierreLight from "@pierre/theme/pierre-light";
-import pierreLightSoft from "@pierre/theme/pierre-light-soft";
+import {
+  getSharedHighlighter,
+  type DiffsThemeNames,
+  type SupportedLanguages,
+} from "@pierre/diffs";
 import { Marked, Renderer } from "marked";
-import { codeToHtml, type BundledLanguage, type BundledTheme } from "shiki";
 import type { SyntaxTheme } from "./review-settings";
 
 const renderer = new Renderer();
@@ -16,12 +16,9 @@ renderer.link = function ({ href, title, tokens }) {
 };
 
 const markdown = new Marked({ breaks: true, gfm: true, renderer });
-const themes = {
-  "pierre-light": pierreLight,
-  "pierre-light-soft": pierreLightSoft,
-  "pierre-dark": pierreDark,
-  "pierre-dark-soft": pierreDarkSoft,
-} as const;
+const themes: DiffsThemeNames[] = [
+  "pierre-light", "pierre-light-soft", "pierre-dark", "pierre-dark-soft",
+];
 
 export async function renderMarkdown(
   container: HTMLElement,
@@ -40,9 +37,13 @@ export async function renderMarkdown(
     if (!pre) return;
     const language = code.className.match(/(?:^|\s)language-([^\s]+)/)?.[1] ?? "text";
     try {
-      const highlighted = await codeToHtml(code.textContent ?? "", {
-        lang: language as BundledLanguage,
-        theme: themes[themeName] as unknown as BundledTheme,
+      const highlighter = await getSharedHighlighter({
+        themes,
+        langs: [language as SupportedLanguages],
+      });
+      const highlighted = highlighter.codeToHtml(code.textContent ?? "", {
+        lang: language,
+        theme: themeName,
       });
       const highlightedTemplate = document.createElement("template");
       highlightedTemplate.innerHTML = highlighted;

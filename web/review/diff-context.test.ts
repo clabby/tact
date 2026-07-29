@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { parsePatchFiles } from "@pierre/diffs";
 import { addExpandableContext } from "./diff-context";
 
-test("full file contents make collapsed diff context expandable", () => {
+test("full file contents never replace Git's authoritative hunks", () => {
   const oldLines = Array.from({ length: 40 }, (_, index) => `line ${index + 1}`);
   const newLines = [...oldLines];
   newLines[19] = "changed line";
@@ -33,10 +33,9 @@ index 1111111..2222222 100644
   );
 
   expect(partial.isPartial).toBe(true);
-  expect(expandable!.isPartial).toBe(false);
-  expect(expandable!.deletionLines).toHaveLength(40);
-  expect(expandable!.additionLines).toHaveLength(40);
-  expect(expandable!.hunks[0]!.collapsedBefore).toBeGreaterThan(0);
+  expect(expandable).toBe(partial);
+  expect(expandable!.isPartial).toBe(true);
+  expect(expandable!.hunks).toEqual(partial.hunks);
 });
 
 test("files without context retain their patch representation", () => {

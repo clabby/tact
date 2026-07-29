@@ -37,60 +37,76 @@ pub(crate) enum OverviewGenerationError {
     Failed(String),
 }
 
-pub(crate) async fn run(
-    overview_generator: OverviewGenerator,
-    workspace: &Path,
-    assets: ReviewAssets,
-) -> Result<Option<String>, ReviewError> {
-    let preparation_shutdown = CancellationToken::new();
-    let _cancel_preparation_on_drop = CancelOnDrop(preparation_shutdown.clone());
-    let workspace = workspace.to_path_buf();
-    let prepared = prepare_review(workspace.clone(), preparation_shutdown).await?;
-    let repository = prepared.bootstrap.repository.clone();
-    let status_workspace = workspace.clone();
-    let status_loader: StatusLoader = Arc::new(move |shutdown| {
-        let workspace = status_workspace.clone();
-        Box::pin(async move {
-            tokio::select! {
-                result = diff::current_version(&workspace) => result.map_err(|error| ScopeLoadError::Failed(error.to_string())),
-                () = shutdown.cancelled() => Err(ScopeLoadError::Cancelled),
-            }
-        })
-    });
-    let refresh_loader: RefreshLoader = Arc::new(move |shutdown| {
-        let workspace = workspace.clone();
-        Box::pin(async move {
-            prepare_review(workspace, shutdown)
-                .await
-                .map_err(scope_load_error)
-        })
-    });
-    let overview_loader: OverviewLoader = Arc::new(move |_range, label, patch, shutdown| {
-        let overview_generator = overview_generator.clone();
-        Box::pin(async move {
-            generate_overview(overview_generator, &label, &patch, shutdown)
-                .await
-                .map_err(|error| match error {
-                    ReviewError::Cancelled => ScopeLoadError::Cancelled,
-                    error => ScopeLoadError::Failed(error.to_string()),
-                })
-        })
-    });
-    let token = review_token(&repository, SystemTime::now());
-    let server = ReviewServer::start(
-        prepared,
-        status_loader,
-        refresh_loader,
-        overview_loader,
-        token,
-        assets.path().to_owned(),
-    )
-    .await?;
-    let url = server.url();
-    crate::app::browser::open(&url).map_err(|source| ReviewError::OpenBrowser { url, source })?;
-    match server.wait().await? {
-        ReviewOutcome::Decision(decision) => Ok(Some(decision.to_markdown())),
-        ReviewOutcome::Cancelled => Ok(None),
+pub(crate) struct ReviewService;
+
+pub(crate) struct ReviewHandle {
+    server: ReviewServer,
+}
+
+impl ReviewService {
+    pub(crate) async fn start(
+        overview_generator: OverviewGenerator,
+        workspace: &Path,
+        assets: ReviewAssets,
+    ) -> Result<ReviewHandle, ReviewError> {
+        let preparation_shutdown = CancellationToken::new();
+        let _cancel_preparation_on_drop = CancelOnDrop(preparation_shutdown.clone());
+        let workspace = workspace.to_path_buf();
+        let prepared = prepare_review(workspace.clone(), preparation_shutdown).await?;
+        let repository = prepared.bootstrap.repository.clone();
+        let status_workspace = workspace.clone();
+        let status_loader: StatusLoader = Arc::new(move |shutdown| {
+            let workspace = status_workspace.clone();
+            Box::pin(async move {
+                tokio::select! {
+                    result = diff::current_version(&workspace) => result.map_err(|error| ScopeLoadError::Failed(error.to_string())),
+                    () = shutdown.cancelled() => Err(ScopeLoadError::Cancelled),
+                }
+            })
+        });
+        let refresh_loader: RefreshLoader = Arc::new(move |shutdown| {
+            let workspace = workspace.clone();
+            Box::pin(async move {
+                prepare_review(workspace, shutdown)
+                    .await
+                    .map_err(scope_load_error)
+            })
+        });
+        let overview_loader: OverviewLoader = Arc::new(move |_range, label, patch, shutdown| {
+            let overview_generator = overview_generator.clone();
+            Box::pin(async move {
+                generate_overview(overview_generator, &label, &patch, shutdown)
+                    .await
+                    .map_err(|error| match error {
+                        ReviewError::Cancelled => ScopeLoadError::Cancelled,
+                        error => ScopeLoadError::Failed(error.to_string()),
+                    })
+            })
+        });
+        let token = review_token(&repository, SystemTime::now());
+        let server = ReviewServer::start(
+            prepared,
+            status_loader,
+            refresh_loader,
+            overview_loader,
+            token,
+            assets,
+        )
+        .await?;
+        Ok(ReviewHandle { server })
+    }
+}
+
+impl ReviewHandle {
+    pub(crate) fn url(&self) -> String {
+        self.server.url()
+    }
+
+    pub(crate) async fn wait(self) -> Result<Option<String>, ReviewError> {
+        match self.server.wait().await? {
+            ReviewOutcome::Decision(decision) => Ok(Some(decision.to_markdown())),
+            ReviewOutcome::Cancelled => Ok(None),
+        }
     }
 }
 
@@ -105,14 +121,16 @@ async fn prepare_review(
         };
         let title = format!("Review {}", context.repository());
         let default_range = context.default_range();
+        let snapshot_id = context.snapshot_id();
         let initial_page = prepare_page(
             context.clone(),
             title.clone(),
             default_range,
+            snapshot_id.clone(),
             shutdown.clone(),
         )
         .await?;
-        let version = context.version(&initial_page.diff);
+        let version = context.version();
         let current = tokio::select! {
             result = diff::current_version(&workspace) => result?,
             () = shutdown.cancelled() => return Err(ReviewError::Cancelled),
@@ -121,6 +139,10 @@ async fn prepare_review(
             continue;
         }
         let bootstrap = ReviewBootstrap {
+            protocol_version: server::PROTOCOL_VERSION,
+            generation: 0,
+            workspace_version: version.clone(),
+            snapshot_id: snapshot_id.clone(),
             title: title.clone(),
             repository: context.repository().to_owned(),
             trunk: context.trunk_name().to_owned(),
@@ -130,8 +152,9 @@ async fn prepare_review(
         let range_loader: RangeLoader = Arc::new(move |range, shutdown| {
             let context = context.clone();
             let title = title.clone();
+            let snapshot_id = snapshot_id.clone();
             Box::pin(async move {
-                prepare_page(context, title, range, shutdown)
+                prepare_page(context, title, range, snapshot_id, shutdown)
                     .await
                     .map_err(scope_load_error)
             })
@@ -165,13 +188,18 @@ async fn prepare_page(
     context: diff::ReviewContext,
     title: String,
     range: ReviewRange,
+    snapshot_id: diff::SnapshotId,
     shutdown: CancellationToken,
 ) -> Result<ReviewPage, ReviewError> {
     let snapshot = tokio::select! {
         result = context.collect(range) => result?,
         () = shutdown.cancelled() => return Err(ReviewError::Cancelled),
     };
+    let patch_id = diff::patch_id(&snapshot_id, range, &snapshot.patch);
     Ok(ReviewPage {
+        generation: 0,
+        snapshot_id,
+        patch_id,
         title,
         selected_range: range,
         diff: snapshot,
@@ -236,7 +264,14 @@ impl ReviewDecision {
             server::Decision::Approve => "Approved",
             server::Decision::RequestChanges => "Changes requested",
         };
-        let mut markdown = format!("## Review: {heading}\n");
+        let mut markdown = format!(
+            "## Review: {heading}\n\n**Scope:** {scope}\n**Range:** {from} → {to}\n**Snapshot:** `{snapshot}`\n**Patch:** `{patch}`\n",
+            scope = self.scope,
+            from = self.range.from,
+            to = self.range.to,
+            snapshot = self.snapshot_id,
+            patch = self.patch_id,
+        );
         if !self.summary.trim().is_empty() {
             markdown.push('\n');
             markdown.push_str(self.summary.trim());
@@ -275,8 +310,6 @@ pub(crate) enum ReviewError {
     Diff(#[from] diff::DiffError),
     #[error("failed to start the review server: {0}")]
     StartServer(#[from] std::io::Error),
-    #[error("failed to open the review page in a browser: {source}. Open {url} manually")]
-    OpenBrowser { url: String, source: std::io::Error },
     #[error(transparent)]
     Server(#[from] server::ServerError),
     #[error("failed to create the review overview snapshot: {0}")]
@@ -307,6 +340,7 @@ impl ReviewError {
 mod tests {
     use super::server::{CommentSide, Decision, ReviewComment, ReviewDecision};
     use super::{OverviewGenerator, generate_overview};
+    use crate::review::diff::{PatchId, ReviewRange, SnapshotId};
     use std::sync::{Arc, Mutex};
     use tokio_util::sync::CancellationToken;
 
@@ -366,6 +400,11 @@ mod tests {
     #[test]
     fn review_decision_renders_as_composer_markdown() {
         let review = ReviewDecision {
+            generation: 3,
+            snapshot_id: SnapshotId::test(1),
+            patch_id: PatchId::test(2),
+            range: ReviewRange { from: 0, to: 2 },
+            scope: "Full branch".to_owned(),
             decision: Decision::RequestChanges,
             summary: "Please address this before merging.".to_owned(),
             comments: vec![ReviewComment {
@@ -379,7 +418,7 @@ mod tests {
 
         assert_eq!(
             review.to_markdown(),
-            "## Review: Changes requested\n\nPlease address this before merging.\n\n### Comments\n\n- `src/main.rs:12-14` (new)\n  Handle the error.\n  This can fail.\n"
+            "## Review: Changes requested\n\n**Scope:** Full branch\n**Range:** 0 → 2\n**Snapshot:** `snapshot-1`\n**Patch:** `patch-2`\n\nPlease address this before merging.\n\n### Comments\n\n- `src/main.rs:12-14` (new)\n  Handle the error.\n  This can fail.\n"
         );
     }
 }
