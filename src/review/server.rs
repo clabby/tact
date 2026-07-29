@@ -541,7 +541,7 @@ fn secure(response: &mut Response<Body>) {
     headers.insert(
         header::CONTENT_SECURITY_POLICY,
         HeaderValue::from_static(
-            "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-src 'self'",
+            "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-src 'self'",
         ),
     );
 }
@@ -615,6 +615,16 @@ mod tests {
         let response = reqwest::get(server.url()).await.unwrap();
 
         assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert!(
+            response
+                .headers()
+                .get(reqwest::header::CONTENT_SECURITY_POLICY)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .contains("'wasm-unsafe-eval'"),
+            "Shiki requires WebAssembly compilation for syntax highlighting"
+        );
         assert_eq!(response.text().await.unwrap(), "review page");
     }
 
