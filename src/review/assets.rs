@@ -5,7 +5,6 @@ use flate2::read::GzDecoder;
 use fs2::FileExt;
 use semver::Version;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     env, fs,
@@ -153,8 +152,6 @@ impl ReviewAssets {
                 path.to_owned(),
                 ValidatedFile {
                     content_type: content_type.to_owned(),
-                    bytes: 0,
-                    sha256: [0; 32],
                 },
             )
         })
@@ -263,7 +260,9 @@ fn validate_directory(path: &Path, kind: InstallKind) -> Result<ValidatedManifes
         reject_symlink(path)?;
     }
     let manifest_path = path.join(MANIFEST_NAME);
-    reject_symlink(&manifest_path)?;
+    if !kind.allows_symlinks() {
+        reject_symlink(&manifest_path)?;
+    }
     let manifest_bytes = read_limited(&manifest_path, MAX_MANIFEST_BYTES)?;
     let manifest: AssetManifest =
         serde_json::from_slice(&manifest_bytes).map_err(|source| AssetError::Manifest {
@@ -272,43 +271,28 @@ fn validate_directory(path: &Path, kind: InstallKind) -> Result<ValidatedManifes
         })?;
     let manifest = validate_manifest(manifest, kind)?;
 
-    let actual_files = collect_files(path, path)?;
-    let expected_files = manifest
-        .files
-        .keys()
-        .cloned()
-        .chain([MANIFEST_NAME.to_owned()])
-        .collect::<BTreeSet<_>>();
-    if actual_files != expected_files {
-        return Err(AssetError::DirectoryContents {
-            expected: expected_files,
-            actual: actual_files,
-        });
-    }
-
     let mut total_bytes = 0_u64;
-    for (name, expected) in &manifest.files {
+    for name in manifest.files.keys() {
         let asset_path = path.join(name);
-        reject_symlink(&asset_path)?;
+        if !kind.allows_symlinks() {
+            reject_path_symlinks(path, Path::new(name))?;
+        }
         let metadata = fs::metadata(&asset_path).map_err(|source| AssetError::ReadAsset {
             path: asset_path.clone(),
             source,
         })?;
-        if !metadata.is_file() || metadata.len() != expected.bytes {
-            return Err(AssetError::AssetSize(name.clone()));
+        if !metadata.is_file() {
+            return Err(AssetError::InvalidAssetType(asset_path));
         }
-        if expected.bytes > MAX_FILE_BYTES {
+        if metadata.len() > MAX_FILE_BYTES {
             return Err(AssetError::ExpandedFileTooLarge {
                 path: PathBuf::from(name),
                 limit: MAX_FILE_BYTES,
             });
         }
-        total_bytes = total_bytes.saturating_add(expected.bytes);
+        total_bytes = total_bytes.saturating_add(metadata.len());
         if total_bytes > MAX_EXPANDED_BYTES {
             return Err(AssetError::ExpandedArchiveTooLarge(MAX_EXPANDED_BYTES));
-        }
-        if hash_path(&asset_path)? != expected.sha256 {
-            return Err(AssetError::AssetChecksum(name.clone()));
         }
     }
     Ok(manifest)
@@ -346,23 +330,12 @@ fn validate_manifest(
         if !safe_relative_path(Path::new(&file.path)) || file.path == MANIFEST_NAME {
             return Err(AssetError::UnsafeManifestPath(file.path));
         }
-        if file.bytes > MAX_FILE_BYTES {
-            return Err(AssetError::ExpandedFileTooLarge {
-                path: PathBuf::from(file.path),
-                limit: MAX_FILE_BYTES,
-            });
-        }
-        let Some(sha256) = parse_sha256(&file.sha256) else {
-            return Err(AssetError::ManifestChecksum(file.path));
-        };
         if !valid_content_type(&file.content_type) {
             return Err(AssetError::ContentType(file.path));
         }
         let path = file.path.clone();
         let file = ValidatedFile {
             content_type: file.content_type,
-            bytes: file.bytes,
-            sha256,
         };
         if files.insert(path.clone(), file).is_some() {
             return Err(AssetError::DuplicateManifestPath(path));
@@ -381,47 +354,6 @@ fn valid_content_type(value: &str) -> bool {
     !value.is_empty() && value.is_ascii() && value.bytes().all(|byte| (b' '..=b'~').contains(&byte))
 }
 
-fn collect_files(root: &Path, directory: &Path) -> Result<BTreeSet<String>, AssetError> {
-    let mut files = BTreeSet::new();
-    let entries = fs::read_dir(directory).map_err(|source| AssetError::ReadDirectory {
-        path: directory.to_owned(),
-        source,
-    })?;
-    for entry in entries {
-        let entry = entry.map_err(|source| AssetError::ReadDirectory {
-            path: directory.to_owned(),
-            source,
-        })?;
-        let path = entry.path();
-        let metadata = fs::symlink_metadata(&path).map_err(|source| AssetError::ReadAsset {
-            path: path.clone(),
-            source,
-        })?;
-        if metadata.file_type().is_symlink() {
-            return Err(AssetError::ManagedSymlink(path));
-        }
-        let followed = fs::metadata(&path).map_err(|source| AssetError::ReadAsset {
-            path: path.clone(),
-            source,
-        })?;
-        if followed.is_dir() {
-            files.extend(collect_files(root, &path)?);
-            continue;
-        }
-        if !followed.is_file() {
-            return Err(AssetError::InvalidAssetType(path));
-        }
-        let relative = path
-            .strip_prefix(root)
-            .expect("directory walk remains beneath root");
-        let relative = relative
-            .to_str()
-            .ok_or_else(|| AssetError::NonUtf8Path(relative.to_owned()))?;
-        files.insert(relative.replace(std::path::MAIN_SEPARATOR, "/"));
-    }
-    Ok(files)
-}
-
 fn reject_symlink(path: &Path) -> Result<(), AssetError> {
     let metadata = fs::symlink_metadata(path).map_err(|source| AssetError::ReadAsset {
         path: path.to_owned(),
@@ -429,6 +361,15 @@ fn reject_symlink(path: &Path) -> Result<(), AssetError> {
     })?;
     if metadata.file_type().is_symlink() {
         return Err(AssetError::ManagedSymlink(path.to_owned()));
+    }
+    Ok(())
+}
+
+fn reject_path_symlinks(root: &Path, relative: &Path) -> Result<(), AssetError> {
+    let mut path = root.to_owned();
+    for component in relative.components() {
+        path.push(component);
+        reject_symlink(&path)?;
     }
     Ok(())
 }
@@ -449,28 +390,6 @@ fn read_limited(path: &Path, limit: u64) -> Result<Vec<u8>, AssetError> {
         return Err(AssetError::ManifestTooLarge(limit));
     }
     Ok(bytes)
-}
-
-fn hash_path(path: &Path) -> Result<[u8; 32], AssetError> {
-    let mut file = File::open(path).map_err(|source| AssetError::ReadAsset {
-        path: path.to_owned(),
-        source,
-    })?;
-    let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
-    loop {
-        let read = file
-            .read(&mut buffer)
-            .map_err(|source| AssetError::ReadAsset {
-                path: path.to_owned(),
-                source,
-            })?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    Ok(hasher.finalize().into())
 }
 
 fn extract(archive_path: &Path, destination: &Path) -> Result<(), AssetError> {
@@ -547,18 +466,6 @@ fn safe_relative_path(path: &Path) -> bool {
             .all(|component| matches!(component, Component::Normal(_)))
 }
 
-fn parse_sha256(value: &str) -> Option<[u8; 32]> {
-    if value.len() != 64 {
-        return None;
-    }
-    let mut digest = [0_u8; 32];
-    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
-        let pair = std::str::from_utf8(pair).ok()?;
-        digest[index] = u8::from_str_radix(pair, 16).ok()?;
-    }
-    Some(digest)
-}
-
 #[derive(Deserialize, Serialize)]
 struct AssetManifest {
     schema_version: u32,
@@ -583,8 +490,6 @@ struct TactCompatibility {
 struct AssetFile {
     path: String,
     content_type: String,
-    bytes: u64,
-    sha256: String,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -596,8 +501,6 @@ struct ValidatedManifest {
 #[derive(Debug, Eq, PartialEq)]
 struct ValidatedFile {
     content_type: String,
-    bytes: u64,
-    sha256: [u8; 32],
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -632,41 +535,24 @@ pub(crate) enum AssetError {
     UnsafeManifestPath(String),
     #[error("review manifest contains duplicate asset path `{0}`")]
     DuplicateManifestPath(String),
-    #[error("review manifest entry `{0}` has an invalid SHA-256 digest")]
-    ManifestChecksum(String),
     #[error("review manifest entry `{0}` has an invalid content type")]
     ContentType(String),
     #[error("review manifest entrypoint `{0}` is not a listed asset")]
     MissingEntrypoint(String),
-    #[error("review asset `{0}` has an unexpected byte size")]
-    AssetSize(String),
-    #[error("review asset `{0}` does not match its manifest checksum")]
-    AssetChecksum(String),
     #[error("review asset manifest exceeds the {0}-byte limit")]
     ManifestTooLarge(u64),
     #[error("review asset file `{path}` exceeds the {limit}-byte expanded limit")]
     ExpandedFileTooLarge { path: PathBuf, limit: u64 },
     #[error("review assets exceed the {0}-byte total expanded limit")]
     ExpandedArchiveTooLarge(u64),
-    #[error(
-        "review asset directory has unexpected contents (expected {expected:?}, actual {actual:?})"
-    )]
-    DirectoryContents {
-        expected: BTreeSet<String>,
-        actual: BTreeSet<String>,
-    },
     #[error("managed review assets cannot contain symlink `{0}`")]
     ManagedSymlink(PathBuf),
     #[error("review asset `{0}` is not a regular file or directory")]
     InvalidAssetType(PathBuf),
-    #[error("review asset path is not UTF-8: `{0}`")]
-    NonUtf8Path(PathBuf),
     #[error("failed to read review manifest {path}: {source}")]
     ReadManifest { path: PathBuf, source: io::Error },
     #[error("failed to read review asset {path}: {source}")]
     ReadAsset { path: PathBuf, source: io::Error },
-    #[error("failed to enumerate review asset directory {path}: {source}")]
-    ReadDirectory { path: PathBuf, source: io::Error },
     #[error("failed to create review asset directory {path}: {source}")]
     CreateDirectory { path: PathBuf, source: io::Error },
     #[error("failed to create temporary review directory: {0}")]
@@ -705,10 +591,9 @@ pub(crate) enum AssetError {
 mod tests {
     use super::{
         ApiCompatibility, AssetError, AssetFile, AssetManifest, InstallKind, ReviewAssets,
-        TactCompatibility, extract, parse_sha256, validate_directory,
+        TactCompatibility, extract, validate_directory,
     };
     use flate2::{Compression, write::GzEncoder};
-    use sha2::{Digest, Sha256};
     use std::{
         ffi::OsString,
         fs,
@@ -766,8 +651,6 @@ mod tests {
                 AssetFile {
                     path: path.to_owned(),
                     content_type: content_type.to_owned(),
-                    bytes: contents.len() as u64,
-                    sha256: format!("{:x}", Sha256::digest(contents.as_bytes())),
                 }
             })
             .collect();
@@ -829,7 +712,7 @@ mod tests {
     }
 
     #[test]
-    fn validates_exact_manifest_and_resolves_only_listed_assets() {
+    fn serves_only_safe_manifest_assets() {
         let directory = tempfile::tempdir().unwrap();
         write_valid_assets(directory.path());
         let assets = ReviewAssets::from_directory(
@@ -845,10 +728,8 @@ mod tests {
         assert!(assets.resolve("manifest.json").is_none());
 
         fs::write(directory.path().join("unlisted.js"), "surprise").unwrap();
-        assert!(matches!(
-            validate_directory(directory.path(), InstallKind::DevelopmentOverride),
-            Err(AssetError::DirectoryContents { .. })
-        ));
+        validate_directory(directory.path(), InstallKind::DevelopmentOverride).unwrap();
+        assert!(assets.resolve("unlisted.js").is_none());
     }
 
     #[cfg(unix)]
@@ -976,10 +857,23 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
     #[test]
-    fn sha256_parser_requires_exact_hex() {
-        assert!(parse_sha256(&"ab".repeat(32)).is_some());
-        assert!(parse_sha256(&"ab".repeat(31)).is_none());
-        assert!(parse_sha256(&"zz".repeat(32)).is_none());
+    fn managed_install_rejects_symlinked_asset_ancestors() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        write_valid_assets(directory.path());
+        let chunks = directory.path().join("chunks");
+        let external = tempfile::tempdir().unwrap();
+        fs::rename(chunks.join("app.js"), external.path().join("app.js")).unwrap();
+        fs::remove_dir(&chunks).unwrap();
+        symlink(external.path(), &chunks).unwrap();
+
+        validate_directory(directory.path(), InstallKind::DevelopmentOverride).unwrap();
+        assert!(matches!(
+            validate_directory(directory.path(), InstallKind::Managed),
+            Err(AssetError::ManagedSymlink(path)) if path == chunks
+        ));
     }
 }
