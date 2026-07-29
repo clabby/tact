@@ -6,10 +6,15 @@ import {
   type DiffLineAnnotation,
   type FileDiffMetadata,
 } from "@pierre/diffs";
-import { FileTree, type GitStatus, type GitStatusEntry } from "@pierre/trees";
+import {
+  FileTree,
+  type GitStatus,
+  type GitStatusEntry,
+} from "@pierre/trees";
 import { ApiClient, ApiError, errorMessage } from "./api-client";
 import { pendingCommentCount } from "./comment-state";
 import { commentSelectionCallbacks } from "./comment-selection";
+import { changeStats, fileTreeChangeStats } from "./file-tree-stats";
 import { renderMarkdown } from "./markdown";
 import {
   beginTerminal,
@@ -54,25 +59,19 @@ import {
 } from "./range-selection";
 import "./styles.css";
 
-const TREE_ICON_SPRITE = `
-  <svg aria-hidden="true" style="display:none" xmlns="http://www.w3.org/2000/svg">
-    <symbol id="tact-comment" viewBox="0 0 16 16">
-      <path fill="#4b8cff" d="M3.25 2.25h9.5c.97 0 1.75.78 1.75 1.75v6c0 .97-.78 1.75-1.75 1.75H7.1l-3.53 2.06a.55.55 0 0 1-.82-.47V11.7A1.75 1.75 0 0 1 1.5 10V4c0-.97.78-1.75 1.75-1.75Z"/>
-    </symbol>
-    <symbol id="tact-comment-seen" viewBox="0 0 16 16">
-      <path fill="#4b8cff" d="M3.25 2.25h9.5c.97 0 1.75.78 1.75 1.75v6c0 .97-.78 1.75-1.75 1.75H7.1l-3.53 2.06a.55.55 0 0 1-.82-.47V11.7A1.75 1.75 0 0 1 1.5 10V4c0-.97.78-1.75 1.75-1.75Z"/>
-    </symbol>
-    <symbol id="tact-seen" viewBox="0 0 16 16">
-      <path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.7" d="m3 8.5 3 3 7-7"/>
-    </symbol>
-  </svg>`;
-const TREE_ICONS = { set: "minimal", spriteSheet: TREE_ICON_SPRITE } as const;
-const TREE_SEEN_STYLES = `
-  [data-type="item"]:has([data-icon-name="tact-seen"], [data-icon-name="tact-comment-seen"]) [data-item-section="content"] {
+const TREE_ICONS = { set: "minimal" } as const;
+const TREE_STYLES = `
+  [data-item-section="decoration"] {
+    margin-inline-start: auto;
+    text-align: right;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+  }
+  [data-type="item"]:has([data-item-section="decoration"] [title*="Seen"]) [data-item-section="content"] {
     opacity: .56;
     text-decoration: line-through;
   }
-  [data-icon-name="tact-seen"] { color: var(--accent); }
 `;
 
 type AnnotationMetadata =
@@ -528,6 +527,7 @@ export class ReviewApp {
   private renderTree() {
     const container = this.root.querySelector<HTMLElement>("#file-tree");
     if (!container) return;
+    const statsByPath = fileTreeChangeStats(this.files);
     this.tree?.cleanUp();
     container.replaceChildren();
     this.tree = new FileTree({
@@ -536,23 +536,34 @@ export class ReviewApp {
       initialExpansion: "open",
       density: "compact",
       icons: TREE_ICONS,
-      unsafeCSS: TREE_SEEN_STYLES,
+      unsafeCSS: TREE_STYLES,
       gitStatus: this.treeGitStatus(),
       renderRowDecoration: ({ item }) => {
-        if (item.kind !== "file") return null;
-        const count = pendingCommentCount(this.comments, item.path);
-        const seen = this.seenFiles().has(item.path);
-        if (count === 0 && !seen) return null;
+        const stats = statsByPath.get(item.path);
+        if (!stats) return null;
+
+        const count = item.kind === "file"
+          ? pendingCommentCount(this.comments, item.path)
+          : 0;
+        const seen = item.kind === "file" && this.seenFiles().has(item.path);
+        const title = [`+${stats.additions}/-${stats.deletions}`];
+        const parts: Array<{ text: string; color?: string }> = [
+          { text: `+${stats.additions}`, color: "var(--trees-status-added)" },
+          { text: "/", color: "var(--trees-fg-muted)" },
+          { text: `-${stats.deletions}`, color: "var(--trees-status-deleted)" },
+        ];
+        if (count > 0) {
+          title.push(`${count} pending ${count === 1 ? "comment" : "comments"}`);
+          parts.push({ text: `  ●${count}`, color: "#4b8cff" });
+        }
+        if (seen) {
+          title.push("Seen");
+          parts.push({ text: "  ✓", color: "var(--trees-accent)" });
+        }
         return {
-          icon: {
-            name: count > 0 ? (seen ? "tact-comment-seen" : "tact-comment") : "tact-seen",
-            width: 14,
-            height: 14,
-            viewBox: "0 0 16 16",
-          },
-          title: count > 0
-            ? `${count} pending ${count === 1 ? "comment" : "comments"}`
-            : "Seen",
+          text: `+${stats.additions}/-${stats.deletions}`,
+          parts,
+          title: title.join(" · "),
         };
       },
       onSelectionChange: (paths) => {
@@ -1486,19 +1497,6 @@ export class ReviewApp {
     status.className = "terminal-status";
     status.textContent = "";
   }
-}
-
-function changeStats(files: FileDiffMetadata[]) {
-  return files.reduce(
-    (total, file) => {
-      for (const hunk of file.hunks) {
-        total.additions += hunk.additionLines;
-        total.deletions += hunk.deletionLines;
-      }
-      return total;
-    },
-    { additions: 0, deletions: 0 },
-  );
 }
 
 function treeStatus(type: FileDiffMetadata["type"]): GitStatus {

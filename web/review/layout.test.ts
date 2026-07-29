@@ -19,7 +19,7 @@ test("new changes appear before the range selector", async () => {
 test("seen files are crossed out in the file tree", async () => {
   const app = await Bun.file(new URL("app.ts", import.meta.url)).text();
 
-  expect(app).toContain('data-icon-name="tact-seen"');
+  expect(app).toContain('[title*="Seen"]');
   expect(app).toMatch(/text-decoration:\s*line-through/);
 });
 
