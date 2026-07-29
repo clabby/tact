@@ -583,6 +583,9 @@ impl RootNode {
         if is_confirmation_key_repeat(&event) {
             return ComponentUpdate::none();
         }
+        if self.review_active && is_control_c(&event) {
+            return self.update_key_confirmation(ConfirmationAction::Exit, Instant::now());
+        }
         if self.review_active {
             return self.update_review_input(event);
         }
@@ -3901,6 +3904,18 @@ mod tests {
 
         assert!(first.effects.is_empty());
         assert_eq!(second.effects, [RootEffect::CancelReview]);
+    }
+
+    #[test]
+    fn control_c_twice_exits_during_an_active_review() {
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        root.update(RootEvent::ReviewStarted);
+
+        let first = root.update(key(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        let second = root.update(key(KeyCode::Char('c'), KeyModifiers::CONTROL));
+
+        assert!(first.effects.is_empty());
+        assert_eq!(second.effects, [RootEffect::Shutdown]);
     }
 
     #[test]
