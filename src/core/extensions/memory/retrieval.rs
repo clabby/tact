@@ -5,7 +5,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 const BM25_K1: f64 = 1.2;
 const BM25_B: f64 = 0.75;
-const PREVIEW_MAX_BYTES: usize = 96;
+const PREVIEW_MAX_BYTES: usize = 64;
 
 pub(super) fn rank(query: &str, memories: &[StoredMemory], limit: usize) -> Vec<MemoryCandidate> {
     if limit == 0 || memories.is_empty() {
@@ -322,10 +322,19 @@ mod tests {
     }
 
     #[test]
-    fn preview_respects_utf8_byte_limit() {
-        let value = "é".repeat(60);
-        let preview = preview(&value);
-        assert_eq!(preview.len(), 96);
+    fn preview_returns_short_content_and_truncates_at_a_utf8_boundary() {
+        let short = "Use early returns.";
+        assert_eq!(preview(short), short);
+
+        let exact = "a".repeat(64);
+        assert_eq!(preview(&exact), exact);
+
+        let long = "a".repeat(65);
+        assert_eq!(preview(&long), "a".repeat(64));
+
+        let crossing = format!("{}é-tail", "a".repeat(63));
+        let preview = preview(&crossing);
+        assert_eq!(preview, "a".repeat(63));
         assert!(preview.is_char_boundary(preview.len()));
     }
 }
