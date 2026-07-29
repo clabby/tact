@@ -1,5 +1,13 @@
 # Working Agreements
 
+## Common Dev Commands
+
+- `cargo check --all-features`: Check compilation.
+- `just check-fmt`: Check formatting.
+- `just fmt`: Fix formatting.
+- `just clippy`: Run clippy.
+- `just test`: Run tests
+
 ## Code
 
 - Optimize for the reader. Code should be obvious on the first pass and easy to scan later.
