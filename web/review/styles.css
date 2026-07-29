@@ -146,6 +146,8 @@ button:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2p
 .tab:hover { color: var(--text); }
 .tab.active { color: var(--text); border-color: var(--accent-solid); font-weight: 600; }
 .tab span { margin-left: 4px; color: var(--muted); }
+.overview-tab-spinner { display: none; width: 12px; height: 12px; margin-left: 7px; border: 1.5px solid color-mix(in srgb, var(--muted) 35%, transparent); border-top-color: var(--accent-solid); border-radius: 50%; vertical-align: -2px; }
+.tab.loading .overview-tab-spinner { display: inline-block; animation: spin .8s linear infinite; }
 
 .panel { display: none; min-height: 0; }
 .panel.active { display: block; }
@@ -378,6 +380,6 @@ button:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2p
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .scope-spinner, .overview-spinner span { animation: none; }
+  .scope-spinner, .overview-spinner span, .overview-tab-spinner { animation: none; }
   .range-dialog { animation: none; }
 }

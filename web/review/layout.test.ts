@@ -16,6 +16,18 @@ test("new changes appear before the range selector", async () => {
   );
 });
 
+test("the overview tab shows when its agent is working", async () => {
+  const app = await Bun.file(new URL("app.ts", import.meta.url)).text();
+  const styles = await Bun.file(new URL("styles.css", import.meta.url)).text();
+
+  expect(app).toContain('class="overview-tab-spinner" aria-hidden="true"');
+  expect(app).toContain('tab.classList.toggle("loading", loading)');
+  expect(app).toContain('tab.setAttribute("aria-busy", "true")');
+  expect(app).toContain("this.setOverviewLoading(true)");
+  expect(app).toContain("this.setOverviewLoading(false)");
+  expect(styles).toMatch(/\.tab\.loading\s+\.overview-tab-spinner\s*{[^}]*animation:\s*spin/s);
+});
+
 test("seen files are crossed out in the file tree", async () => {
   const app = await Bun.file(new URL("app.ts", import.meta.url)).text();
 

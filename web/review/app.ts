@@ -215,7 +215,7 @@ export class ReviewApp {
         </header>
         <nav class="tabs" role="tablist" aria-label="Review sections">
           <button class="tab active" id="changes-tab" role="tab" aria-selected="true" aria-controls="changes-panel" data-tab="changes">Changes <span id="file-count">0</span></button>
-          <button class="tab" id="overview-tab" role="tab" aria-selected="false" aria-controls="overview-panel" tabindex="-1" data-tab="overview">Overview</button>
+          <button class="tab" id="overview-tab" role="tab" aria-selected="false" aria-controls="overview-panel" tabindex="-1" data-tab="overview">Overview<span class="overview-tab-spinner" aria-hidden="true"></span></button>
         </nav>
         <section class="panel overview-panel" id="overview-panel" role="tabpanel" aria-labelledby="overview-tab" data-panel="overview" hidden>
           <div class="overview-state" id="overview-state"></div>
@@ -432,6 +432,17 @@ export class ReviewApp {
     state.querySelector("[data-generate-overview]")?.addEventListener("click", () => void this.loadOverview());
   }
 
+  private setOverviewLoading(loading: boolean) {
+    const tab = this.root.querySelector<HTMLElement>("#overview-tab");
+    if (!tab) return;
+    tab.classList.toggle("loading", loading);
+    if (loading) {
+      tab.setAttribute("aria-busy", "true");
+      return;
+    }
+    tab.removeAttribute("aria-busy");
+  }
+
   private async loadOverview() {
     const page = this.page;
     if (!page || rangesEqual(this.loadingOverview, page.selected_range)) return;
@@ -444,6 +455,7 @@ export class ReviewApp {
     const range = page.selected_range;
     const request = ++this.overviewRequest;
     this.loadingOverview = range;
+    this.setOverviewLoading(true);
     this.syncSelectedRange(range);
     const state = this.root.querySelector<HTMLElement>("#overview-state");
     if (state) {
@@ -452,7 +464,7 @@ export class ReviewApp {
       state.innerHTML = `
         <div class="overview-spinner"><span></span><i></i></div>
         <strong>Preparing the overview</strong>
-        <span>Tact’s root agent is reading the exact patch shown in Changes.</span>`;
+        <span>Tact’s root agent is inspecting the selected range and surrounding code.</span>`;
     }
 
     try {
@@ -470,6 +482,7 @@ export class ReviewApp {
     } finally {
       if (request === this.overviewRequest) {
         this.loadingOverview = undefined;
+        this.setOverviewLoading(false);
         state?.removeAttribute("aria-busy");
         this.syncSelectedRange(this.page?.selected_range ?? this.bootstrap.default_range);
       }
