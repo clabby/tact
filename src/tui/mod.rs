@@ -65,8 +65,11 @@ use tokio_util::sync::CancellationToken;
 
 type EditorTask =
     JoinHandle<std::result::Result<EditorCompletion, crate::app::error::ExternalEditorError>>;
+
 type EffortUpdateTask = JoinHandle<Result<EffortUpdate>>;
+
 type FastModeUpdateTask = JoinHandle<Result<FastModeUpdate>>;
+
 type NewSessionTask = JoinHandle<(
     PaneId,
     ReasoningEffort,
@@ -74,17 +77,9 @@ type NewSessionTask = JoinHandle<(
     bool,
     Result<ConfiguredAgent>,
 )>;
+
 type SessionListTask = JoinHandle<(PaneId, Result<Vec<SessionSummary>>)>;
-struct AuxiliaryJobRequest {
-    review: ReviewIdentity,
-    prompt: String,
-    shutdown: CancellationToken,
-    completion: tokio::sync::oneshot::Sender<std::result::Result<String, AuxiliaryError>>,
-}
-struct ReviewReady {
-    identity: ReviewIdentity,
-    url: String,
-}
+
 type ResumeSessionTask = JoinHandle<(
     PaneId,
     ReasoningEffort,
@@ -92,8 +87,21 @@ type ResumeSessionTask = JoinHandle<(
     bool,
     Result<RestoredSession>,
 )>;
+
 type UpdateCheckTask =
     JoinHandle<std::result::Result<Option<semver::Version>, crate::app::update::UpdateError>>;
+
+struct AuxiliaryJobRequest {
+    review: ReviewIdentity,
+    prompt: String,
+    shutdown: CancellationToken,
+    completion: tokio::sync::oneshot::Sender<std::result::Result<String, AuxiliaryError>>,
+}
+
+struct ReviewReady {
+    identity: ReviewIdentity,
+    url: String,
+}
 
 fn update_checks_enabled() -> bool {
     crate::app::update::is_official_release_build()
