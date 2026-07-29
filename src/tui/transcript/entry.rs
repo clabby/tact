@@ -47,7 +47,6 @@ pub(crate) enum EntryKind {
     Interrupted { count: usize },
     ContextCompacted { duration_ns: u64 },
     TurnCompleted { duration_ns: u64 },
-    ReviewWaiting,
     ContextCompactionFailed { message: String },
     Error { message: String },
 }

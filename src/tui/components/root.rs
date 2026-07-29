@@ -53,6 +53,7 @@ const BREADCRUMB_DURATION: Duration = Duration::from_secs(10);
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum ConfirmationAction {
     Interrupt,
+    CancelReview,
     Exit,
 }
 
@@ -60,6 +61,7 @@ impl ConfirmationAction {
     const fn title_key(self) -> &'static str {
         match self {
             Self::Interrupt => "Esc",
+            Self::CancelReview => "Esc",
             Self::Exit => "Ctrl+C",
         }
     }
@@ -67,6 +69,7 @@ impl ConfirmationAction {
     const fn action_label(self) -> &'static str {
         match self {
             Self::Interrupt => "Interrupt",
+            Self::CancelReview => "Cancel review",
             Self::Exit => "Quit",
         }
     }
@@ -74,6 +77,7 @@ impl ConfirmationAction {
     const fn effect(self) -> RootEffect {
         match self {
             Self::Interrupt => RootEffect::CancelTurns,
+            Self::CancelReview => RootEffect::CancelReview,
             Self::Exit => RootEffect::Shutdown,
         }
     }
@@ -200,6 +204,7 @@ pub(crate) enum RootEffect {
     SetTheme(ThemeMode),
     Fork,
     CancelTurns,
+    CancelReview,
     Shutdown,
 }
 
@@ -525,6 +530,7 @@ impl RootNode {
             composer_area,
             theme,
             focused
+                && !self.review_active
                 && !self.transcript.component().expandables_focused()
                 && !self.queue.component().focused(),
         );
@@ -576,6 +582,9 @@ impl RootNode {
         }
         if is_confirmation_key_repeat(&event) {
             return ComponentUpdate::none();
+        }
+        if self.review_active {
+            return self.update_review_input(event);
         }
         if is_control_c(&event) {
             if self.overlay.is_none()
@@ -755,10 +764,26 @@ impl RootNode {
         if self.transcript.component().expandables_focused() {
             return ComponentUpdate::none();
         }
-        if self.review_active && is_plain_enter(&event) {
+        self.update_composer(ComposerEvent::Terminal(event), RenderRequest::Immediate)
+    }
+
+    fn update_review_input(&mut self, event: Event) -> ComponentUpdate<RootEffect> {
+        if is_control_key(&event, 'f') {
+            self.key_confirmation = None;
+            return self.open_fork();
+        }
+        if is_escape(&event) {
+            return self.update_key_confirmation(ConfirmationAction::CancelReview, Instant::now());
+        }
+        if is_key_release(&event) {
             return ComponentUpdate::none();
         }
-        self.update_composer(ComposerEvent::Terminal(event), RenderRequest::Immediate)
+        let confirmation_cleared = self.key_confirmation.take().is_some();
+        ComponentUpdate::render(if confirmation_cleared {
+            RenderRequest::Immediate
+        } else {
+            RenderRequest::None
+        })
     }
 
     fn update_selection_mouse(&mut self, event: &mut Event) -> Option<ComponentUpdate<RootEffect>> {
@@ -1605,7 +1630,8 @@ impl Component for RootNode {
         match event {
             RootEvent::Terminal(event) => self.update_terminal(event),
             RootEvent::PasteImage(data_url) => {
-                if self.overlay.is_some() || self.queue.component().focused() {
+                if self.review_active || self.overlay.is_some() || self.queue.component().focused()
+                {
                     ComponentUpdate::none()
                 } else {
                     self.update_composer(
@@ -1621,8 +1647,6 @@ impl Component for RootNode {
             ),
             RootEvent::Transcript(record) => {
                 let steer_applied = record.kind() == "run.steered";
-                let review_started = self.review_active && record.kind() == "run.started";
-                let review_completed = self.review_active && record.kind() == "run.completed";
                 let turn_timer = turn_timer_event(&record);
                 let observation = self.context_diagnostics.observe(&record);
                 if let Some(Overlay::ContextDiagnostics(panel)) = &mut self.overlay {
@@ -1631,12 +1655,6 @@ impl Component for RootNode {
                         .replace(self.context_diagnostics.clone());
                 }
                 let mut update = self.update_transcript(TranscriptEvent::Record(record));
-                if review_started || review_completed {
-                    let waiting =
-                        self.update_transcript(TranscriptEvent::ReviewWaiting(review_completed));
-                    update.effects.extend(waiting.effects);
-                    update.render = update.render.max(waiting.render);
-                }
                 if let Some(event) = turn_timer {
                     let timer = self.update_composer(event, RenderRequest::Streaming);
                     update.effects.extend(timer.effects);
@@ -1671,19 +1689,27 @@ impl Component for RootNode {
             }
             RootEvent::ReviewStarted => {
                 self.review_active = true;
-                self.notification = Some(Notification::plain(
-                    "Preparing review overview…".to_owned(),
-                    Color::Green,
-                ));
-                ComponentUpdate::render(RenderRequest::Immediate)
+                self.update_composer(
+                    ComposerEvent::ReviewWaiting {
+                        waiting: true,
+                        now: Instant::now(),
+                    },
+                    RenderRequest::Immediate,
+                )
             }
             RootEvent::ReviewOverviewStarted => {
                 self.in_flight_turns = self.in_flight_turns.saturating_add(1);
-                self.update_transcript(TranscriptEvent::ReviewWaiting(false))
+                ComponentUpdate::none()
             }
             RootEvent::ReviewFinished(markdown) => {
                 self.review_active = false;
-                let waiting = self.update_transcript(TranscriptEvent::ReviewWaiting(false));
+                let waiting = self.update_composer(
+                    ComposerEvent::ReviewWaiting {
+                        waiting: false,
+                        now: Instant::now(),
+                    },
+                    RenderRequest::Immediate,
+                );
                 let cursor = self.composer.component().cursor();
                 let draft = self.composer.component().draft();
                 let before = if draft[..cursor].is_empty() {
@@ -1713,20 +1739,24 @@ impl Component for RootNode {
                     "Review cancelled.".to_owned(),
                     Color::Yellow,
                 ));
-                let waiting = self.update_transcript(TranscriptEvent::ReviewWaiting(false));
-                ComponentUpdate {
-                    effects: waiting.effects,
-                    render: waiting.render.max(RenderRequest::Immediate),
-                }
+                self.update_composer(
+                    ComposerEvent::ReviewWaiting {
+                        waiting: false,
+                        now: Instant::now(),
+                    },
+                    RenderRequest::Immediate,
+                )
             }
             RootEvent::ReviewFailed(message) => {
                 self.review_active = false;
                 self.notification = Some(Notification::plain(message, Color::Red));
-                let waiting = self.update_transcript(TranscriptEvent::ReviewWaiting(false));
-                ComponentUpdate {
-                    effects: waiting.effects,
-                    render: waiting.render.max(RenderRequest::Immediate),
-                }
+                self.update_composer(
+                    ComposerEvent::ReviewWaiting {
+                        waiting: false,
+                        now: Instant::now(),
+                    },
+                    RenderRequest::Immediate,
+                )
             }
             RootEvent::RestoreQueued { index, text } => self.restore_queued(index, text),
             RootEvent::WorkerTurnFinished => self.turn_finished(),
@@ -3817,7 +3847,7 @@ mod tests {
     }
 
     #[test]
-    fn completed_overview_waits_for_the_browser_in_the_transcript() {
+    fn review_waiting_is_shown_in_the_composer_instead_of_the_transcript() {
         let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
         root.update(RootEvent::ReviewStarted);
         root.update(RootEvent::ReviewOverviewStarted);
@@ -3832,21 +3862,65 @@ mod tests {
             json!({}),
         )));
 
-        assert!(render_root_text(&mut root, 80, 20).contains("Waiting for browser review"));
+        let rendered = render_root_text(&mut root, 100, 20);
+        assert!(rendered.contains("Waiting for review"));
+        assert!(!rendered.contains("Waiting for browser review"));
+        assert!(!rendered.contains("Preparing review overview"));
 
         root.update(RootEvent::ReviewCancelled);
-        assert!(!render_root_text(&mut root, 80, 20).contains("Waiting for browser review"));
+        assert!(!render_root_text(&mut root, 100, 20).contains("Waiting for review"));
     }
 
     #[test]
-    fn review_keeps_the_root_agent_exclusive_without_clearing_the_draft() {
+    fn review_suspends_composer_input_without_clearing_the_draft() {
         let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
         root.update(RootEvent::ReplaceDraft("keep this draft".to_owned()));
         root.update(RootEvent::ReviewStarted);
 
-        let update = root.update(key(KeyCode::Enter, KeyModifiers::NONE));
+        let typed = root.update(key(KeyCode::Char('x'), KeyModifiers::NONE));
+        let submitted = root.update(key(KeyCode::Enter, KeyModifiers::NONE));
+        let quit = root.update(key(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        let pasted = root.update(RootEvent::PasteImage(
+            "data:image/png;base64,abc".to_owned(),
+        ));
 
-        assert!(update.effects.is_empty());
+        assert!(typed.effects.is_empty());
+        assert!(submitted.effects.is_empty());
+        assert!(quit.effects.is_empty());
+        assert!(pasted.effects.is_empty());
         assert_eq!(root.composer().draft(), "keep this draft");
+    }
+
+    #[test]
+    fn escape_twice_cancels_an_active_review() {
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        root.update(RootEvent::ReviewStarted);
+
+        let first = root.update(key(KeyCode::Esc, KeyModifiers::NONE));
+        let second = root.update(key(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert!(first.effects.is_empty());
+        assert_eq!(second.effects, [RootEffect::CancelReview]);
+    }
+
+    #[test]
+    fn control_f_can_fork_during_an_active_review() {
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        root.update(RootEvent::ReviewStarted);
+
+        let update = root.update(key(KeyCode::Char('f'), KeyModifiers::CONTROL));
+
+        assert_eq!(update.effects, [RootEffect::Fork]);
+    }
+
+    #[test]
+    fn fork_does_not_inherit_the_active_review() {
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        root.update(RootEvent::ReviewStarted);
+
+        let mut fork = root.fork(Path::new("/work"), ReasoningEffort::Medium);
+
+        assert!(!fork.review_active);
+        assert!(!render_root_text(&mut fork, 100, 20).contains("Waiting for review"));
     }
 }

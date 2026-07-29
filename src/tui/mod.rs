@@ -1727,6 +1727,13 @@ fn apply_pane_effect(
                 .send(WorkerCommand::CancelAll(pane))
                 .map_err(|_| RuntimeError::AgentWorkerStopped)?;
         }
+        components::RootEffect::CancelReview => {
+            stop_review_task(context.review_task);
+            schedule(
+                context.app.update(AppEvent::ReviewCancelled(pane)),
+                context.scheduler,
+            );
+        }
         components::RootEffect::Fork
         | components::RootEffect::SetTheme(_)
         | components::RootEffect::Shutdown => {
