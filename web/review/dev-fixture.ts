@@ -39,37 +39,6 @@ index 82a06c1..90c03be 100644
        - run: cargo test
 `;
 
-const reviewModule = `pub async fn run(workspace: &Path) -> Result<String, ReviewError> {
-    let snapshot = diff::collect(workspace).await?;
-    let overview = generate_overview(&snapshot).await?;
-    let server = ReviewServer::start(snapshot, overview).await?;
-
-    browser::open(&server.url())?;
-    let decision = server.wait().await?;
-
-    Ok(decision.to_markdown())
-}
-
-// The browser reviews an immutable snapshot.
-// Live workspace changes do not alter the displayed diff.
-`;
-const actionPrefix = Array.from({ length: 17 }, (_, index) => `// Existing action ${index + 1}`);
-const oldActions = [...actionPrefix, "    Action::NewSession,", "    Action::ResumeSession,", "    Action::ChangeEffort,"].join("\n") + "\n";
-const newActions = [...actionPrefix, "    Action::Review,", "    Action::NewSession,", "    Action::ResumeSession,", "    Action::ChangeEffort,"].join("\n") + "\n";
-const fileContexts = [
-  { old_path: "src/review/mod.rs", new_path: "src/review/mod.rs", old_contents: "", new_contents: reviewModule },
-  { old_path: "src/tui/components/actions.rs", new_path: "src/tui/components/actions.rs", old_contents: oldActions, new_contents: newActions },
-];
-const releaseContexts = [
-  ...fileContexts,
-  {
-    old_path: ".github/workflows/release.yml",
-    new_path: ".github/workflows/release.yml",
-    old_contents: "jobs:\n  release:\n    steps:\n      - run: cargo build --release\n      - run: cargo test\n",
-    new_contents: "jobs:\n  release:\n    steps:\n      - run: cargo build --release\n      - run: cd web/review && bun install --frozen-lockfile\n      - run: cd web/review && bun run build\n      - run: cargo test\n",
-  },
-];
-
 const reviewBootstrapBase = {
   protocol_version: 1,
   generation: 1,
@@ -113,7 +82,6 @@ export const reviewFixtures = {
     scope: "Uncommitted changes",
     base: "HEAD",
     patch,
-    file_contexts: fileContexts,
   },
   "0:3": {
     generation: 1,
@@ -125,7 +93,6 @@ export const reviewFixtures = {
     scope: "Full branch",
     base: "9d3b745",
     patch: branchPatch,
-    file_contexts: releaseContexts,
   },
   "1:2": {
     generation: 1,
@@ -137,7 +104,6 @@ export const reviewFixtures = {
     scope: "a4c981e → d2e640b",
     base: "a4c981e",
     patch,
-    file_contexts: fileContexts,
   },
 };
 

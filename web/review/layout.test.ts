@@ -37,3 +37,14 @@ test("the comment editor keeps its actions after the comment body", async () => 
     editor.indexOf('class="editor-footer"'),
   );
 });
+
+test("the changed-file wrapper owns the tree's available height", async () => {
+  const styles = await Bun.file(new URL("styles.css", import.meta.url)).text();
+  const navigation = styles.match(/\.files-navigation\s*{([^}]*)}/)?.[1];
+
+  expect(navigation).toBeDefined();
+  expect(navigation).toMatch(/display:\s*grid/);
+  expect(navigation).toMatch(/grid-template-rows:\s*45px\s+minmax\(0,\s*1fr\)/);
+  expect(navigation).toMatch(/min-height:\s*0/);
+  expect(navigation).toMatch(/height:\s*100%/);
+});

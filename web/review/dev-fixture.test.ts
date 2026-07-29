@@ -1,6 +1,5 @@
 import { expect, test } from "bun:test";
 import { parsePatchFiles } from "@pierre/diffs";
-import { addExpandableContext } from "./diff-context";
 import { reviewBootstrap, reviewFixtures } from "./dev-fixture";
 import { rangeKey } from "./range-selection";
 
@@ -21,14 +20,4 @@ test("review bootstrap exposes every selectable commit-range endpoint", () => {
     "commit",
     "working_tree",
   ]);
-});
-
-test("standalone review fixtures retain Git anchors when file contents are present", () => {
-  for (const fixture of Object.values(reviewFixtures)) {
-    const files = parsePatchFiles(fixture.patch, "dev-fixture", true).flatMap(
-      (patch) => patch.files,
-    );
-    const authoritative = addExpandableContext(files, fixture.file_contexts);
-    expect(authoritative).toBe(files);
-  }
 });

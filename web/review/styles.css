@@ -164,11 +164,13 @@ button:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2p
 .overview-spinner span { inset: 0; border: 1px solid var(--line); border-top: 2px solid var(--accent-solid); animation: spin 1s linear infinite; }
 .overview-spinner i { width: 25px; height: 25px; background: color-mix(in srgb, var(--accent-solid) 12%, transparent); }
 .overview-error { display: grid; place-items: center; width: 42px; height: 42px; border-radius: 13px; background: color-mix(in srgb, var(--danger) 12%, transparent); color: var(--danger); font-weight: 750; }
-.changes-panel.active { display: grid; grid-template-columns: 272px minmax(0, 1fr); }
+.changes-panel.active { display: grid; grid-template-columns: 272px minmax(0, 1fr); width: 100%; height: 100%; min-height: 0; }
 
-.sidebar { display: grid; grid-template-rows: 37px minmax(140px, 1fr) auto; min-width: 0; border-right: 1px solid var(--line); background: var(--surface); }
+.sidebar { display: grid; grid-template-rows: minmax(140px, 1fr) auto; width: 100%; height: 100%; min-width: 0; min-height: 0; overflow: hidden; border-right: 1px solid var(--line); background: var(--surface); }
 .sidebar-label { display: flex; align-items: center; justify-content: space-between; padding: 0 14px; color: var(--muted); font-size: 11px; font-weight: 650; letter-spacing: .06em; text-transform: uppercase; }
 .sidebar-label span { display: grid; place-items: center; min-width: 19px; height: 19px; padding: 0 5px; border-radius: 10px; background: var(--bg); color: var(--muted); }
+.files-navigation { display: grid; grid-template-rows: 45px minmax(0, 1fr); height: 100%; min-height: 0; overflow: hidden; }
+.files-navigation > .sidebar-label { padding-top: 8px; }
 .file-tree { min-height: 0; overflow: hidden; }
 .file-tree > * { height: 100%; }
 .comment-index { max-height: 38vh; overflow: hidden; border-top: 1px solid var(--line); }
@@ -348,7 +350,7 @@ button:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2p
   .mobile-navigation button.active { background: var(--bg); color: var(--text); font-weight: 650; }
   .sidebar { display: none; grid-row: 2; width: auto; min-width: 0; border-right: 0; }
   .changes-panel[data-mobile-active="files"] .sidebar,
-  .changes-panel[data-mobile-active="comments"] .sidebar { display: block; }
+  .changes-panel[data-mobile-active="comments"] .sidebar { display: grid; }
   .changes-panel[data-mobile-active="files"] .comment-index,
   .changes-panel[data-mobile-active="comments"] .files-navigation { display: none; }
   .changes-panel[data-mobile-active="comments"] .comment-index { border-top: 0; }

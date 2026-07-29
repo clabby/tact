@@ -324,13 +324,7 @@ impl ReviewSession {
     }
 
     fn insert_page(&mut self, page: ReviewPage) {
-        let bytes = page.diff.patch.len()
-            + page
-                .diff
-                .file_contexts
-                .iter()
-                .map(|context| context.old_contents.len() + context.new_contents.len())
-                .sum::<usize>();
+        let bytes = page.diff.patch.len() + page.diff.overview_patch.len();
         self.range_pages.insert(page.selected_range, page, bytes);
     }
 }
@@ -699,7 +693,7 @@ async fn load_overview(
     let overview_html = match (state.overview_loader)(
         request.range,
         page.diff.scope.clone(),
-        page.diff.patch.clone(),
+        page.diff.overview_patch.clone(),
         shutdown,
     )
     .await
@@ -1718,7 +1712,7 @@ mod tests {
             selected_range: range,
             diff: DiffSnapshot {
                 patch: "patch".to_owned(),
-                file_contexts: Vec::new(),
+                overview_patch: "patch".to_owned(),
                 repository: "repo".to_owned(),
                 scope: "Selected range".to_owned(),
                 base: "HEAD".to_owned(),

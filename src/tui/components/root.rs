@@ -1728,7 +1728,7 @@ impl Component for RootNode {
                 self.update_composer(
                     ComposerEvent::ReviewWaiting {
                         waiting: true,
-                        status: Some(format!("Review ready · O reopen · C copy · {url}")),
+                        status: Some("Review ready · O reopen · C copy".to_owned()),
                         now: Instant::now(),
                     },
                     RenderRequest::Immediate,
@@ -3956,6 +3956,9 @@ mod tests {
         let copy = root.update(key(KeyCode::Char('c'), KeyModifiers::NONE));
 
         assert!(rendered.contains("Review ready"));
+        assert!(rendered.contains("O reopen"));
+        assert!(rendered.contains("C copy"));
+        assert!(!rendered.contains("http://127.0.0.1:4321/review"));
         assert_eq!(
             update.effects,
             [RootEffect::OpenLink(

@@ -1,4 +1,3 @@
-import type { FileContext } from "./diff-context";
 import type { ReviewRange, ReviewTarget } from "./range-selection";
 
 export const REVIEW_PROTOCOL_VERSION = 1;
@@ -19,7 +18,6 @@ export type ReviewPage = {
   patch_id: string;
   title: string;
   patch: string;
-  file_contexts?: FileContext[];
   repository: string;
   scope: string;
   base: string;
