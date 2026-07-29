@@ -1189,7 +1189,7 @@ impl RootNode {
         }
     }
 
-    fn load_sessions(&mut self) -> ComponentUpdate<RootEffect> {
+    pub(super) fn load_sessions(&mut self) -> ComponentUpdate<RootEffect> {
         self.overlay = None;
         self.interactive = false;
         let _ = self
