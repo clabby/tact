@@ -74,7 +74,7 @@ const TREE_STYLES = `
   [data-item-section="decoration"] {
     position: absolute;
     z-index: 2;
-    inset-block: 0;
+    inset-block: var(--trees-focus-ring-width);
     inset-inline-end: calc(var(--trees-item-padding-x) + var(--trees-git-lane-width));
     align-items: center;
     padding-inline-start: 8px;

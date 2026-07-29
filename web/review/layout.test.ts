@@ -66,6 +66,7 @@ test("change totals layer above long file names", async () => {
 
   expect(treeStyles).toMatch(/\[data-item-section="decoration"\][^{]*{[^}]*position:\s*absolute/s);
   expect(treeStyles).toMatch(/\[data-item-section="decoration"\][^{]*{[^}]*z-index:\s*2/s);
+  expect(treeStyles).toMatch(/inset-block:\s*var\(--trees-focus-ring-width\)/);
   expect(treeStyles).toMatch(/background-color:\s*var\(--tact-tree-row-bg\)/);
   expect(treeStyles).not.toContain("linear-gradient");
 });
