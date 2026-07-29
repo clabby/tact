@@ -187,7 +187,8 @@ test("the file change totals and comment indicator preserve their spacing", asyn
   expect(app).toContain('{ text: "\\u00a0\\u00a0" }');
   expect(app).toContain('text: `\\u00a0${count}`, color: "var(--tact-comment-indicator)"');
   expect(app).not.toContain("🗨︎");
-  expect(treeStyles).toContain("data:image/svg+xml");
+  expect(treeStyles).toContain("${commentIconMask}");
+  expect(treeStyles).toContain("${seenIconMask}");
   expect(treeStyles).toMatch(/span\[style\*="--tact-comment-indicator"\]::before/);
   expect(treeStyles).toContain("--tact-seen-icon");
   expect(treeStyles).toMatch(/\[title\*="Seen"\]::after\s*{[^}]*margin-inline-start:\s*8px/s);

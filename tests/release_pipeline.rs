@@ -101,6 +101,7 @@ fn release_packages_and_signs_the_review_bundle() {
         package,
         "cp dist/index.html dist/app.js dist/app.css dist/worker.js \\",
     );
+    assert_contains(package, "dist/FONT-AWESOME-LICENSE.txt dist/LICENSE.md");
     assert_contains(package, "tar -czf \"$archive\" review");
     assert_contains(package, "shasum -a 256 \"$archive\"");
 

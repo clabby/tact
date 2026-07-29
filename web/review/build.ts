@@ -27,6 +27,16 @@ await Bun.write(
   Bun.file(join(import.meta.dir, "..", "..", "LICENSE.md")),
 );
 await Bun.write(
+  join(outputDirectory, "FONT-AWESOME-LICENSE.txt"),
+  Bun.file(join(
+    import.meta.dir,
+    "node_modules",
+    "@fortawesome",
+    "free-solid-svg-icons",
+    "LICENSE.txt",
+  )),
+);
+await Bun.write(
   join(outputDirectory, "favicon.svg"),
   Bun.file(join(import.meta.dir, "..", "..", "assets", "favicon.svg")),
 );
@@ -35,6 +45,7 @@ const contentTypes: Record<string, string> = {
   "index.html": "text/html; charset=utf-8",
   "app.css": "text/css; charset=utf-8",
   "favicon.svg": "image/svg+xml",
+  "FONT-AWESOME-LICENSE.txt": "text/plain; charset=utf-8",
   "LICENSE.md": "text/markdown; charset=utf-8",
 };
 for (const asset of reviewScriptAssets) {

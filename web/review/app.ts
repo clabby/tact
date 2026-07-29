@@ -15,6 +15,13 @@ import { ApiClient, ApiError, errorMessage } from "./api-client";
 import { annotationPath, pendingCommentCount } from "./comment-state";
 import { commentSelectionCallbacks } from "./comment-selection";
 import { changeStats, fileTreeChangeStats } from "./file-tree-stats";
+import {
+  commentIconMask,
+  icon,
+  seenIconMask,
+  treeIcons,
+  type FormattingIconName,
+} from "./icons";
 import { renderMarkdown } from "./markdown";
 import {
   beginTerminal,
@@ -76,7 +83,6 @@ import {
 } from "./range-selection";
 import "./styles.css";
 
-const TREE_ICONS = { set: "minimal" } as const;
 const TREE_STYLES = `
   [data-type="item"] {
     --tact-tree-row-bg: var(--trees-bg);
@@ -91,8 +97,8 @@ const TREE_STYLES = `
   [data-item-section="decoration"] {
     position: absolute;
     z-index: 2;
-    --tact-comment-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z'/%3E%3C/svg%3E");
-    --tact-seen-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='9'/%3E%3Cpath d='m8 12 2.5 2.5L16 9'/%3E%3C/svg%3E");
+    --tact-comment-icon: url("${commentIconMask}");
+    --tact-seen-icon: url("${seenIconMask}");
     --tact-comment-indicator: #4b8cff;
     inset-block: var(--trees-focus-ring-width);
     inset-inline-end: calc(var(--trees-item-padding-x) + var(--trees-git-lane-width));
@@ -796,7 +802,7 @@ export class ReviewApp {
       flattenEmptyDirectories: true,
       initialExpansion: "open",
       density: "compact",
-      icons: TREE_ICONS,
+      icons: treeIcons,
       unsafeCSS: TREE_STYLES,
       gitStatus: this.treeGitStatus(),
       renderRowDecoration: ({ item }) => {
@@ -1414,7 +1420,7 @@ export class ReviewApp {
   }
 
   private refreshTreeDecorations() {
-    this.tree?.setIcons({ ...TREE_ICONS });
+    this.tree?.setIcons(treeIcons);
   }
 
   private refreshItem(itemId: string) {
@@ -2110,30 +2116,8 @@ function applyFormatting(textarea: HTMLTextAreaElement, format: string) {
   textarea.focus();
 }
 
-function formatButton(format: string, label: string) {
+function formatButton(format: FormattingIconName, label: string) {
   return `<button class="format-button" data-format="${format}" aria-label="${label}" title="${label}">${icon(format)}</button>`;
-}
-
-function icon(name: string) {
-  const paths: Record<string, string> = {
-    "git-branch": '<circle cx="6" cy="5" r="2"/><circle cx="18" cy="6" r="2"/><circle cx="6" cy="19" r="2"/><path d="M6 7v10M8 11h4a6 6 0 0 0 6-3"/>',
-    "chevron-down": '<path d="m7 10 5 5 5-5"/>',
-    close: '<path d="m7 7 10 10M17 7 7 17"/>',
-    "arrow-right": '<path d="M5 12h14m-5-5 5 5-5 5"/>',
-    sparkles: '<path d="m12 3 1.2 3.3L16.5 7.5l-3.3 1.2L12 12l-1.2-3.3-3.3-1.2 3.3-1.2ZM18 14l.8 2.2L21 17l-2.2.8L18 20l-.8-2.2L15 17l2.2-.8ZM6 13l.7 1.8 1.8.7-1.8.7L6 18l-.7-1.8-1.8-.7 1.8-.7Z"/>',
-    settings: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 8.92 4a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09A1.65 1.65 0 0 0 15 4.6a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82 1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09A1.65 1.65 0 0 0 19.4 15Z"/>',
-    bold: '<path d="M7 5h5a3 3 0 0 1 0 6H7Zm0 6h5.5a3.5 3.5 0 0 1 0 7H7Z"/>',
-    italic: '<path d="M10 5h7M7 19h7M14 5 10 19"/>',
-    code: '<path d="m8 9-4 3 4 3m8-6 4 3-4 3m-3-8-2 10"/>',
-    "code-block": '<path d="M4 5h16v14H4zM8 10l-2 2 2 2m4-4 2 2-2 2"/>',
-    link: '<path d="M10 13a5 5 0 0 0 7.5.5l2-2a5 5 0 0 0-7-7l-1.15 1.15M14 11a5 5 0 0 0-7.5-.5l-2 2a5 5 0 0 0 7 7l1.15-1.15"/>',
-    list: '<path d="M9 6h11M9 12h11M9 18h11M4 6h.01M4 12h.01M4 18h.01"/>',
-    quote: '<path d="M7 17H4a2 2 0 0 1-2-2v-3a5 5 0 0 1 5-5v2a3 3 0 0 0-3 3h3Zm10 0h-3a2 2 0 0 1-2-2v-3a5 5 0 0 1 5-5v2a3 3 0 0 0-3 3h3Z"/>',
-    check: '<path d="m5 12 4 4L19 6"/>',
-    edit: '<path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4Z"/>',
-    trash: '<path d="M4 7h16M9 11v6m6-6v6M6 7l1 14h10l1-14M9 7V4h6v3"/>',
-  };
-  return `<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${paths[name] ?? ""}</svg>`;
 }
 
 function formatRange(start: number, end: number) {
