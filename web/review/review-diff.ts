@@ -16,9 +16,10 @@ export function parseReviewPatch(
   const fullFiles = parsePatchFiles(patch, cacheKey, true).flatMap(
     (parsed) => parsed.files,
   );
-  const displayPatches = trimPatchContext(patch, DEFAULT_CONTEXT_LINES)
+  const displayPatches = patch
     .split(GIT_DIFF_FILE_BREAK_REGEX)
-    .filter((filePatch) => filePatch.startsWith("diff --git"));
+    .filter((filePatch) => filePatch.startsWith("diff --git"))
+    .map((filePatch) => trimPatchContext(filePatch, DEFAULT_CONTEXT_LINES));
 
   if (displayPatches.length !== fullFiles.length) {
     throw new Error("The review patch contains mismatched file data.");
