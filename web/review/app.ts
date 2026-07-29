@@ -745,22 +745,22 @@ export class ReviewApp {
           ? pendingCommentCount(this.comments, item.path)
           : 0;
         const seen = item.kind === "file" && this.seenFiles().has(item.path);
-        const title = [`+${stats.additions}/-${stats.deletions}`];
+        const title = [`+${stats.additions} / -${stats.deletions}`];
         const parts: Array<{ text: string; color?: string }> = [
           { text: `+${stats.additions}`, color: "var(--trees-status-added)" },
-          { text: "/", color: "var(--trees-fg-muted)" },
+          { text: "\u00a0/\u00a0", color: "var(--trees-fg-muted)" },
           { text: `-${stats.deletions}`, color: "var(--trees-status-deleted)" },
         ];
         if (count > 0) {
           title.push(`${count} pending ${count === 1 ? "comment" : "comments"}`);
-          parts.push({ text: `  ●${count}`, color: "#4b8cff" });
+          parts.push({ text: `\u00a0\u00a0●${count}`, color: "#4b8cff" });
         }
         if (seen) {
           title.push("Seen");
           parts.push({ text: "  ✓", color: "var(--trees-accent)" });
         }
         return {
-          text: `+${stats.additions}/-${stats.deletions}`,
+          text: `+${stats.additions} / -${stats.deletions}`,
           parts,
           title: title.join(" · "),
         };

@@ -139,6 +139,20 @@ test("change totals layer above long file names", async () => {
   expect(treeStyles).not.toContain("linear-gradient");
 });
 
+test("the file change totals and comment indicator preserve their spacing", async () => {
+  const app = await Bun.file(new URL("app.ts", import.meta.url)).text();
+
+  expect(app).toContain('text: "\\u00a0/\\u00a0"');
+  expect(app).toContain('text: `\\u00a0\\u00a0●${count}`');
+});
+
+test("the range warning has stable vertical spacing", async () => {
+  const styles = await Bun.file(new URL("styles.css", import.meta.url)).text();
+  const warning = styles.match(/\.range-warning\s*{([^}]*)}/)?.[1];
+
+  expect(warning).toMatch(/margin:\s*14px\s+18px/);
+});
+
 test("dark surfaces are neutral while green remains an accent", async () => {
   const styles = await Bun.file(new URL("styles.css", import.meta.url)).text();
 
