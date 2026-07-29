@@ -75,6 +75,16 @@ test("the comment editor keeps its actions after the comment body", async () => 
   );
 });
 
+test("the comment input uses a neutral focus indicator", async () => {
+  const styles = await Bun.file(new URL("styles.css", import.meta.url)).text();
+  const focus = styles.match(/\.comment-input:focus\s*{([^}]*)}/)?.[1];
+  const focusVisible = styles.match(/\.comment-input:focus-visible\s*{([^}]*)}/)?.[1];
+
+  expect(focus).toMatch(/box-shadow:\s*0\s+0\s+0\s+1px\s+var\(--line-strong\)\s+inset/);
+  expect(focus).not.toContain("var(--blue)");
+  expect(focusVisible).toMatch(/outline:\s*0/);
+});
+
 test("new inline drafts can become agent questions", async () => {
   const app = await Bun.file(new URL("app.ts", import.meta.url)).text();
   const editor = app.slice(

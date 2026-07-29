@@ -228,7 +228,8 @@ button:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2p
 .editor-tabs button:hover { color: var(--text); }
 .editor-tabs button.active { border-color: var(--blue); color: var(--text); font-weight: 600; }
 .comment-input { display: block; width: 100%; min-height: 142px; resize: vertical; padding: 14px 15px; border: 0; border-bottom: 1px solid var(--line); outline: 0; background: var(--bg); color: var(--text); font: 13px/1.55 ui-sans-serif, system-ui, sans-serif; }
-.comment-input:focus { box-shadow: 0 0 0 2px color-mix(in srgb, var(--blue) 26%, transparent) inset; }
+.comment-input:focus { box-shadow: 0 0 0 1px var(--line-strong) inset; }
+.comment-input:focus-visible { outline: 0; }
 .comment-input[hidden], .markdown-preview[hidden] { display: none; }
 .markdown-preview { min-height: 142px; padding: 14px 15px; border-bottom: 1px solid var(--line); background: var(--bg); }
 .comment-markdown p, .markdown-preview p, .thread-markdown p { margin: 0 0 .8em; }
