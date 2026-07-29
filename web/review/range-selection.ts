@@ -1,5 +1,4 @@
 export type ReviewRange = { from: number; to: number };
-export type RangeEndpoint = "from" | "to";
 
 export type ReviewTarget = {
   index: number;
@@ -30,21 +29,15 @@ export function targetLabel(target: ReviewTarget) {
   return target.kind === "working_tree" ? "Working tree" : target.short_id;
 }
 
-export function canSelectTarget(
-  range: ReviewRange,
-  endpoint: RangeEndpoint,
-  targetIndex: number,
-) {
-  return endpoint === "from" ? targetIndex < range.to : targetIndex > range.from;
-}
+export function resizeRange(range: ReviewRange, targetIndex: number): ReviewRange {
+  if (targetIndex === range.from || targetIndex === range.to) return range;
+  if (targetIndex < range.from) return { from: targetIndex, to: range.to };
+  if (targetIndex > range.to) return { from: range.from, to: targetIndex };
 
-export function selectTarget(
-  range: ReviewRange,
-  endpoint: RangeEndpoint,
-  targetIndex: number,
-): ReviewRange {
-  if (!canSelectTarget(range, endpoint, targetIndex)) return range;
-  return endpoint === "from"
-    ? { from: targetIndex, to: range.to }
-    : { from: range.from, to: targetIndex };
+  const distanceFromStart = targetIndex - range.from;
+  const distanceFromEnd = range.to - targetIndex;
+  if (distanceFromStart <= distanceFromEnd) {
+    return { from: targetIndex, to: range.to };
+  }
+  return { from: range.from, to: targetIndex };
 }

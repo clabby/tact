@@ -1,10 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import {
-  canSelectTarget,
   rangeKey,
   rangeLabel,
+  resizeRange,
   rangesEqual,
-  selectTarget,
   type ReviewTarget,
 } from "./range-selection";
 
@@ -22,14 +21,26 @@ describe("commit range selection", () => {
     expect(rangeLabel(targets, { from: 1, to: 2 })).toBe("b111111 → c222222");
   });
 
-  test("each endpoint can move without crossing the other", () => {
-    const range = { from: 1, to: 3 };
-    expect(canSelectTarget(range, "from", 2)).toBe(true);
-    expect(canSelectTarget(range, "from", 3)).toBe(false);
-    expect(canSelectTarget(range, "to", 2)).toBe(true);
-    expect(canSelectTarget(range, "to", 1)).toBe(false);
-    expect(selectTarget(range, "from", 2)).toEqual({ from: 2, to: 3 });
-    expect(selectTarget(range, "to", 1)).toBe(range);
+  test("clicking outside the range widens its nearest boundary", () => {
+    const range = { from: 2, to: 5 };
+
+    expect(resizeRange(range, 0)).toEqual({ from: 0, to: 5 });
+    expect(resizeRange(range, 7)).toEqual({ from: 2, to: 7 });
+  });
+
+  test("clicking inside the range shrinks its nearest boundary", () => {
+    const range = { from: 2, to: 6 };
+
+    expect(resizeRange(range, 3)).toEqual({ from: 3, to: 6 });
+    expect(resizeRange(range, 5)).toEqual({ from: 2, to: 5 });
+    expect(resizeRange(range, 4)).toEqual({ from: 4, to: 6 });
+  });
+
+  test("clicking a boundary never crosses or collapses the range", () => {
+    const range = { from: 2, to: 3 };
+
+    expect(resizeRange(range, 2)).toBe(range);
+    expect(resizeRange(range, 3)).toBe(range);
   });
 
   test("range identity is stable across decoded objects", () => {

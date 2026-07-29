@@ -21,13 +21,11 @@ import {
 } from "./review-settings";
 import { overviewDocument } from "./overview";
 import {
-  canSelectTarget,
   rangeKey,
   rangeLabel,
+  resizeRange,
   rangesEqual,
-  selectTarget,
   targetLabel,
-  type RangeEndpoint,
   type ReviewRange,
   type ReviewTarget,
 } from "./range-selection";
@@ -119,7 +117,6 @@ class ReviewApp {
   private readonly overviews = new Map<string, string>();
   private draft?: CommentDraft;
   private pendingRange?: ReviewRange;
-  private rangeEndpoint: RangeEndpoint = "from";
   private nextCommentId = 1;
   private submitted = false;
   private loadingRange?: ReviewRange;
@@ -217,19 +214,19 @@ class ReviewApp {
               <div>
                 <span class="dialog-eyebrow">Review scope</span>
                 <h2 id="range-title">Choose a change range</h2>
-                <p id="range-description">Select the snapshot you want to inspect. Pending comments stay attached to the current range.</p>
+                <p id="range-description">Choose any point on the timeline to widen or shrink the nearest edge. Pending comments stay attached to the current range.</p>
               </div>
               <button class="icon-button" data-range-close aria-label="Close range selector">${icon("close")}</button>
             </header>
             <div class="range-builder">
-              <div class="range-endpoints" aria-label="Selected range endpoints">
-                <button class="range-endpoint active" data-range-endpoint="from" aria-pressed="true">
+              <div class="range-endpoints" aria-label="Selected range endpoints" aria-live="polite">
+                <div class="range-endpoint">
                   <small>From</small><strong id="range-from-label"></strong><span id="range-from-title"></span>
-                </button>
+                </div>
                 <span class="range-direction">${icon("arrow-right")}</span>
-                <button class="range-endpoint" data-range-endpoint="to" aria-pressed="false">
+                <div class="range-endpoint">
                   <small>To</small><strong id="range-to-label"></strong><span id="range-to-title"></span>
-                </button>
+                </div>
               </div>
               <div class="commit-timeline" id="commit-timeline" aria-label="Branch timeline">
                 ${this.rangeTimelineMarkup()}
@@ -324,7 +321,7 @@ class ReviewApp {
 
   private rangeTimelineMarkup() {
     return this.bootstrap.range_targets.map((target) => `
-      <button class="commit-target" data-range-target="${target.index}">
+      <button class="commit-target" data-range-target="${target.index}" aria-label="Resize range at ${escapeHtml(targetLabel(target))}: ${escapeHtml(target.title)}">
         <span class="commit-rail"><i></i><b></b></span>
         <span class="commit-id">${escapeHtml(targetLabel(target))}</span>
         <span class="commit-copy">
@@ -499,18 +496,11 @@ class ReviewApp {
       });
     }
     this.root.querySelector("#range-button")?.addEventListener("click", () => this.openRangeDialog());
-    for (const button of this.root.querySelectorAll<HTMLButtonElement>("[data-range-endpoint]")) {
-      button.addEventListener("click", () => {
-        this.rangeEndpoint = button.dataset.rangeEndpoint as RangeEndpoint;
-        this.syncRangeSelector();
-      });
-    }
     for (const button of this.root.querySelectorAll<HTMLButtonElement>("[data-range-target]")) {
       button.addEventListener("click", () => {
         if (!this.pendingRange) return;
         const index = Number(button.dataset.rangeTarget);
-        this.pendingRange = selectTarget(this.pendingRange, this.rangeEndpoint, index);
-        if (this.rangeEndpoint === "from") this.rangeEndpoint = "to";
+        this.pendingRange = resizeRange(this.pendingRange, index);
         this.syncRangeSelector();
       });
     }
@@ -618,14 +608,13 @@ class ReviewApp {
   private openRangeDialog() {
     if (this.loadingRange || this.loadingOverview) return;
     this.pendingRange = { ...(this.page?.selected_range ?? this.bootstrap.default_range) };
-    this.rangeEndpoint = "from";
     this.syncRangeSelector();
     this.root.querySelector<HTMLDialogElement>("#range-dialog")?.showModal();
     this.root.querySelector("#range-button")?.setAttribute("aria-expanded", "true");
-    this.root.querySelector<HTMLButtonElement>("[data-range-endpoint=from]")?.focus();
     queueMicrotask(() => {
-      this.root.querySelector<HTMLElement>("[data-range-target].from")
-        ?.scrollIntoView({ block: "center" });
+      const from = this.root.querySelector<HTMLButtonElement>("[data-range-target].from");
+      from?.scrollIntoView({ block: "center" });
+      from?.focus();
     });
   }
 
@@ -640,26 +629,21 @@ class ReviewApp {
   private syncRangeSelector() {
     const range = this.pendingRange;
     if (!range) return;
-    for (const endpoint of this.root.querySelectorAll<HTMLButtonElement>("[data-range-endpoint]")) {
-      const active = endpoint.dataset.rangeEndpoint === this.rangeEndpoint;
-      endpoint.classList.toggle("active", active);
-      endpoint.setAttribute("aria-pressed", String(active));
-    }
     const from = this.bootstrap.range_targets[range.from];
     const to = this.bootstrap.range_targets[range.to];
     this.setRangeEndpointText("from", from);
     this.setRangeEndpointText("to", to);
     for (const target of this.root.querySelectorAll<HTMLButtonElement>("[data-range-target]")) {
       const index = Number(target.dataset.rangeTarget);
-      target.disabled = !canSelectTarget(range, this.rangeEndpoint, index);
       target.classList.toggle("from", index === range.from);
       target.classList.toggle("to", index === range.to);
       target.classList.toggle("included", index > range.from && index < range.to);
+      target.setAttribute("aria-pressed", String(index === range.from || index === range.to));
     }
     this.syncRangeWarning();
   }
 
-  private setRangeEndpointText(endpoint: RangeEndpoint, target: ReviewTarget) {
+  private setRangeEndpointText(endpoint: "from" | "to", target: ReviewTarget) {
     const label = this.root.querySelector<HTMLElement>(`#range-${endpoint}-label`);
     const title = this.root.querySelector<HTMLElement>(`#range-${endpoint}-title`);
     if (label) label.textContent = targetLabel(target);

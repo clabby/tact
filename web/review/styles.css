@@ -249,9 +249,7 @@ button:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2p
 .range-dialog header .icon-button { flex: none; margin: -5px -6px 0 0; }
 .range-builder { padding: 18px; background: color-mix(in srgb, var(--bg) 45%, var(--surface)); }
 .range-endpoints { display: grid; grid-template-columns: minmax(0, 1fr) 34px minmax(0, 1fr); align-items: center; gap: 7px; margin-bottom: 14px; }
-.range-endpoint { min-width: 0; padding: 11px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); cursor: pointer; text-align: left; }
-.range-endpoint:hover { border-color: var(--line-strong); }
-.range-endpoint.active { border-color: color-mix(in srgb, var(--accent-solid) 72%, var(--line)); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent-solid) 10%, transparent); }
+.range-endpoint { min-width: 0; padding: 11px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); text-align: left; }
 .range-endpoint small, .range-endpoint strong, .range-endpoint span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .range-endpoint small { color: var(--accent); font-size: 9px; font-weight: 750; letter-spacing: .08em; text-transform: uppercase; }
 .range-endpoint strong { margin-top: 3px; font: 650 12px ui-monospace, SFMono-Regular, monospace; }
