@@ -8,6 +8,7 @@ import {
 } from "@pierre/diffs";
 import { FileTree, type GitStatus, type GitStatusEntry } from "@pierre/trees";
 import { pendingCommentCount } from "./comment-state";
+import { commentSelectionCallbacks } from "./comment-selection";
 import { renderMarkdown } from "./markdown";
 import {
   activeSyntaxTheme,
@@ -302,7 +303,7 @@ class ReviewApp {
       enableLineSelection: true,
       stickyHeaders: true,
       lineHoverHighlight: "both" as const,
-      onSelectedLinesChange: (selection: CodeViewLineSelection | null) => this.openCommentComposer(selection),
+      ...commentSelectionCallbacks((selection) => this.openCommentComposer(selection)),
       renderAnnotation: (annotation: DiffLineAnnotation<AnnotationMetadata>) => this.annotationElement(annotation),
     };
   }
