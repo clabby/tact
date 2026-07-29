@@ -25,6 +25,7 @@ trim = true
 conventional_commits = true
 filter_unconventional = true
 commit_preprocessors = [
+  { pattern = '(?m) \(#\d+\)$', replace = "" },
   { pattern = "#(\\d+)", replace = "[#$1](https://github.com/clabby/tact/issues/$1)" },
 ]
 commit_parsers = [
