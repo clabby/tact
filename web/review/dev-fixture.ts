@@ -81,6 +81,7 @@ export const reviewFixtures = {
     scope: "Uncommitted changes",
     base: "HEAD",
     patch,
+    full_context: false,
   },
   "0:3": {
     generation: 1,
@@ -90,6 +91,7 @@ export const reviewFixtures = {
     scope: "Full branch",
     base: "9d3b745",
     patch: branchPatch,
+    full_context: false,
   },
   "1:2": {
     generation: 1,
@@ -99,6 +101,7 @@ export const reviewFixtures = {
     scope: "a4c981e → d2e640b",
     base: "a4c981e",
     patch,
+    full_context: false,
   },
 };
 

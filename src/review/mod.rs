@@ -171,6 +171,7 @@ impl ReviewBackend {
         Ok(ReviewPage {
             generation: 0,
             selected_range: range,
+            full_context: true,
             diff,
         })
     }

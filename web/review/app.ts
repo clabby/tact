@@ -5,6 +5,7 @@ import {
   type DiffLineAnnotation,
   type FileDiffMetadata,
 } from "@pierre/diffs";
+import { WorkerPoolManager } from "@pierre/diffs/worker";
 import {
   FileTree,
   type GitStatus,
@@ -14,6 +15,13 @@ import { ApiClient, ApiError, errorMessage } from "./api-client";
 import { annotationPath, pendingCommentCount } from "./comment-state";
 import { commentSelectionCallbacks } from "./comment-selection";
 import { changeStats, fileTreeChangeStats } from "./file-tree-stats";
+import {
+  commentIconMask,
+  icon,
+  seenIconMask,
+  treeIcons,
+  type FormattingIconName,
+} from "./icons";
 import { renderMarkdown } from "./markdown";
 import {
   beginTerminal,
@@ -75,7 +83,6 @@ import {
 } from "./range-selection";
 import "./styles.css";
 
-const TREE_ICONS = { set: "minimal" } as const;
 const TREE_STYLES = `
   [data-type="item"] {
     --tact-tree-row-bg: var(--trees-bg);
@@ -90,8 +97,8 @@ const TREE_STYLES = `
   [data-item-section="decoration"] {
     position: absolute;
     z-index: 2;
-    --tact-comment-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z'/%3E%3C/svg%3E");
-    --tact-seen-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='9'/%3E%3Cpath d='m8 12 2.5 2.5L16 9'/%3E%3C/svg%3E");
+    --tact-comment-icon: url("${commentIconMask}");
+    --tact-seen-icon: url("${seenIconMask}");
     --tact-comment-indicator: #4b8cff;
     inset-block: var(--trees-focus-ring-width);
     inset-inline-end: calc(var(--trees-item-padding-x) + var(--trees-git-lane-width));
@@ -152,13 +159,16 @@ void start();
 
 async function start() {
   const api = new ApiClient();
+  let app: ReviewApp | undefined;
   try {
     const session = await api.review();
-    const app = new ReviewApp(root, api, session);
+    app = new ReviewApp(root, api, session);
     app.render();
     app.installInitialPage();
     app.startWorkspacePolling();
+    window.addEventListener("beforeunload", () => app.cleanUp(), { once: true });
   } catch (error) {
+    app?.cleanUp();
     renderBootstrapError(root, error);
   }
 }
@@ -196,6 +206,8 @@ export class ReviewApp {
   private snapshotStale = false;
   private generationStale = false;
   private viewer?: CodeView<AnnotationMetadata>;
+  private readonly workerPool: WorkerPoolManager;
+  private itemVersion = 0;
   private tree?: FileTree;
   private settings = loadReviewSettings(window.localStorage, document.cookie);
   private readonly colorScheme = window.matchMedia("(prefers-color-scheme: dark)");
@@ -207,6 +219,15 @@ export class ReviewApp {
     private bootstrap: ReviewSession,
   ) {
     this.state = createReviewState(bootstrap);
+    this.workerPool = new WorkerPoolManager(
+      {
+        workerFactory: () => new Worker(
+          new URL("./worker.js", import.meta.url),
+          { type: "module" },
+        ),
+      },
+      { theme: diffTheme(this.settings) },
+    );
   }
 
   private get feedback() { return currentFeedback(this.state); }
@@ -390,6 +411,14 @@ export class ReviewApp {
     void this.checkWorkspaceStatus();
   }
 
+  cleanUp() {
+    if (this.statusTimer !== undefined) window.clearInterval(this.statusTimer);
+    if (this.questionPollTimer !== undefined) window.clearTimeout(this.questionPollTimer);
+    this.viewer?.cleanUp();
+    this.tree?.cleanUp();
+    this.workerPool.terminate();
+  }
+
   async selectRange(
     range: ReviewRange,
     discardCurrentFeedback = false,
@@ -430,13 +459,14 @@ export class ReviewApp {
     this.state = activatePage(this.state, page);
     const seenFiles = this.seenFiles();
     const cacheKey = `tact-review-${page.generation}-${rangeKey(page.selected_range)}`;
-    const patchFiles = parseReviewPatch(page.patch, cacheKey);
+    const patchFiles = parseReviewPatch(page.patch, cacheKey, page.full_context === true);
     // Git's patch owns changed-line identity. Pierre may expand context already present in
     // that immutable patch, but browser-side re-diffing must never replace its hunks.
     this.files = patchFiles;
     this.pathToItem.clear();
-    this.items = this.files.map((file, index) => {
-      const id = `${rangeKey(page.selected_range)}:${index}:${file.name}`;
+    const version = ++this.itemVersion;
+    this.items = this.files.map((file) => {
+      const id = file.name;
       this.pathToItem.set(file.name, id);
       return {
         id,
@@ -444,7 +474,7 @@ export class ReviewApp {
         fileDiff: file,
         annotations: [],
         collapsed: seenFiles.has(file.name),
-        version: 1,
+        version,
       };
     });
     this.attachQuestionItems();
@@ -454,7 +484,7 @@ export class ReviewApp {
     if (description) description.textContent = page.scope;
     this.renderStats();
     this.renderOverviewState();
-    this.renderDiff();
+    this.renderDiff(true);
     this.renderTree();
     this.renderCommentList();
     const summary = this.root.querySelector<HTMLTextAreaElement>("#review-summary");
@@ -708,12 +738,13 @@ export class ReviewApp {
     frame.hidden = false;
   }
 
-  private renderDiff() {
+  private renderDiff(resetScroll = false) {
     const container = this.root.querySelector<HTMLElement>("#diff-view");
     if (!container) return;
-    this.viewer?.cleanUp();
-    container.replaceChildren();
     if (this.files.length === 0) {
+      this.viewer?.cleanUp();
+      this.viewer = undefined;
+      container.replaceChildren();
       container.innerHTML = `
         <div class="empty-range">
           <strong>No changes in this range</strong>
@@ -724,9 +755,18 @@ export class ReviewApp {
       container.querySelector("[data-empty-range-refresh]")?.addEventListener("click", () => void this.refreshReview());
       return;
     }
-    this.viewer = new CodeView<AnnotationMetadata>(this.viewerOptions());
-    this.viewer.setup(container);
+
+    if (!this.viewer) {
+      container.replaceChildren();
+      this.viewer = new CodeView<AnnotationMetadata>(this.viewerOptions(), this.workerPool);
+      this.viewer.setup(container);
+    } else {
+      this.viewer.setOptions(this.viewerOptions());
+    }
     this.viewer.setItems(this.items);
+    if (resetScroll) {
+      this.viewer.scrollTo({ type: "position", position: 0, behavior: "instant" });
+    }
   }
 
   private viewerOptions() {
@@ -740,6 +780,7 @@ export class ReviewApp {
       expansionLineCount: 20,
       enableLineSelection: true,
       stickyHeaders: true,
+      pointerEventsOnScroll: false,
       lineHoverHighlight: "both" as const,
       renderHeaderMetadata: (_file, context) => {
         if (context.item.type !== "diff") return null;
@@ -761,7 +802,7 @@ export class ReviewApp {
       flattenEmptyDirectories: true,
       initialExpansion: "open",
       density: "compact",
-      icons: TREE_ICONS,
+      icons: treeIcons,
       unsafeCSS: TREE_STYLES,
       gitStatus: this.treeGitStatus(),
       renderRowDecoration: ({ item }) => {
@@ -845,7 +886,7 @@ export class ReviewApp {
     else files.delete(path);
 
     item.collapsed = seen;
-    item.version = (item.version ?? 0) + 1;
+    item.version = ++this.itemVersion;
     this.viewer?.updateItem(item);
     this.refreshTreeDecorations();
   }
@@ -1088,6 +1129,9 @@ export class ReviewApp {
     document.documentElement.dataset.appearance = appearance(this.settings);
     this.syncTreeAppearance();
     if (rebuildDiff && this.page) {
+      void this.workerPool
+        .setRenderOptions({ theme: diffTheme(this.settings) })
+        .catch((error) => console.warn("Could not update the diff worker theme.", error));
       this.renderOverview();
       this.renderDiff();
     }
@@ -1376,14 +1420,14 @@ export class ReviewApp {
   }
 
   private refreshTreeDecorations() {
-    this.tree?.setIcons({ ...TREE_ICONS });
+    this.tree?.setIcons(treeIcons);
   }
 
   private refreshItem(itemId: string) {
     const item = this.items.find((candidate) => candidate.id === itemId);
     if (!item) return;
     item.annotations = this.annotationsForItem(itemId);
-    item.version = (item.version ?? 0) + 1;
+    item.version = ++this.itemVersion;
     this.viewer?.updateItem(item);
   }
 
@@ -2072,30 +2116,8 @@ function applyFormatting(textarea: HTMLTextAreaElement, format: string) {
   textarea.focus();
 }
 
-function formatButton(format: string, label: string) {
+function formatButton(format: FormattingIconName, label: string) {
   return `<button class="format-button" data-format="${format}" aria-label="${label}" title="${label}">${icon(format)}</button>`;
-}
-
-function icon(name: string) {
-  const paths: Record<string, string> = {
-    "git-branch": '<circle cx="6" cy="5" r="2"/><circle cx="18" cy="6" r="2"/><circle cx="6" cy="19" r="2"/><path d="M6 7v10M8 11h4a6 6 0 0 0 6-3"/>',
-    "chevron-down": '<path d="m7 10 5 5 5-5"/>',
-    close: '<path d="m7 7 10 10M17 7 7 17"/>',
-    "arrow-right": '<path d="M5 12h14m-5-5 5 5-5 5"/>',
-    sparkles: '<path d="m12 3 1.2 3.3L16.5 7.5l-3.3 1.2L12 12l-1.2-3.3-3.3-1.2 3.3-1.2ZM18 14l.8 2.2L21 17l-2.2.8L18 20l-.8-2.2L15 17l2.2-.8ZM6 13l.7 1.8 1.8.7-1.8.7L6 18l-.7-1.8-1.8-.7 1.8-.7Z"/>',
-    settings: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-1.42 1.42-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1.02 1.56V20h-2v-.48A1.7 1.7 0 0 0 12.4 18a1.7 1.7 0 0 0-1.88.34l-.06.06-1.42-1.42.06-.06A1.7 1.7 0 0 0 9.44 15a1.7 1.7 0 0 0-1.56-1.02H7.4v-2h.48A1.7 1.7 0 0 0 9.44 11a1.7 1.7 0 0 0-.34-1.88l-.06-.06 1.42-1.42.06.06A1.7 1.7 0 0 0 12.4 8a1.7 1.7 0 0 0 1.02-1.56V6h2v.44A1.7 1.7 0 0 0 16.44 8a1.7 1.7 0 0 0 1.88-.34l.06-.06 1.42 1.42-.06.06A1.7 1.7 0 0 0 19.4 11a1.7 1.7 0 0 0 1.56 1.02h.48v2h-.48A1.7 1.7 0 0 0 19.4 15Z" transform="translate(-2.4 -1) scale(1.2)"/>',
-    bold: '<path d="M7 5h5a3 3 0 0 1 0 6H7Zm0 6h5.5a3.5 3.5 0 0 1 0 7H7Z"/>',
-    italic: '<path d="M10 5h7M7 19h7M14 5 10 19"/>',
-    code: '<path d="m8 9-4 3 4 3m8-6 4 3-4 3m-3-8-2 10"/>',
-    "code-block": '<path d="M4 5h16v14H4zM8 10l-2 2 2 2m4-4 2 2-2 2"/>',
-    link: '<path d="M10 13a5 5 0 0 0 7.5.5l2-2a5 5 0 0 0-7-7l-1.15 1.15M14 11a5 5 0 0 0-7.5-.5l-2 2a5 5 0 0 0 7 7l1.15-1.15"/>',
-    list: '<path d="M9 6h11M9 12h11M9 18h11M4 6h.01M4 12h.01M4 18h.01"/>',
-    quote: '<path d="M7 17H4a2 2 0 0 1-2-2v-3a5 5 0 0 1 5-5v2a3 3 0 0 0-3 3h3Zm10 0h-3a2 2 0 0 1-2-2v-3a5 5 0 0 1 5-5v2a3 3 0 0 0-3 3h3Z"/>',
-    check: '<path d="m5 12 4 4L19 6"/>',
-    edit: '<path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4Z"/>',
-    trash: '<path d="M4 7h16M9 11v6m6-6v6M6 7l1 14h10l1-14M9 7V4h6v3"/>',
-  };
-  return `<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${paths[name] ?? ""}</svg>`;
 }
 
 function formatRange(start: number, end: number) {
