@@ -1341,8 +1341,10 @@ fn render_selection(
 
 #[cfg(test)]
 mod tests {
-    use super::super::selection::{Selection, Surface, TextRange};
-    use super::{Composer, ComposerEffect, ComposerEvent, context_percent};
+    use super::{
+        super::selection::{Selection, Surface, TextRange},
+        Composer, ComposerEffect, ComposerEvent, context_percent,
+    };
     use crate::{
         app::config::{ReasoningEffort, ReasoningMode},
         tui::theme::Theme,

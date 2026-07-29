@@ -1,5 +1,5 @@
 build *args='':
-    cargo build $@
+    cargo build {{args}}
 
 # Build an optimized binary; pass --official to mark it as an official release build.
 release *args='':
@@ -21,15 +21,15 @@ check-fmt:
     just fmt --check
 
 fmt *args='':
-    cargo +nightly fmt --all $@
+    cargo +nightly fmt --all -- {{args}}
 
 clippy *args='':
-    cargo +stable clippy --all-targets $@ -- -D warnings
+    cargo +stable clippy --all-targets {{args}} -- -D warnings
 
 lint: check-fmt clippy
 
 test *args='':
-    cargo nextest run $@
+    cargo nextest run {{args}}
 
 test-docs:
     rustdoc --test README.md --edition 2024
@@ -38,7 +38,7 @@ check-docs:
     cargo doc --no-deps
 
 bench *args='':
-    cargo bench $@
+    cargo bench {{args}}
 
 # Install the pinned, development-only Harbor environment.
 harbor-bootstrap:

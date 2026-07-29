@@ -129,8 +129,7 @@ jobs:
 
           archive="tact-review-${GITHUB_REF_NAME}.tar.gz"
           mkdir review
-          cp dist/index.html dist/app.js dist/app.css dist/worker.js \
-            dist/FONT-AWESOME-LICENSE.txt dist/LICENSE.md dist/manifest.json review/
+          cp -R dist/. review/
           tar -czf "$archive" review
           shasum -a 256 "$archive" > "${archive}.sha256"
       - name: Upload packaged review assets
