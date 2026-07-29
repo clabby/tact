@@ -22,16 +22,17 @@ use std::{
 use tokio_util::sync::CancellationToken;
 
 const MAX_OVERVIEW_BYTES: usize = 1024 * 1024;
+const MAX_QUESTION_ANSWER_BYTES: usize = 256 * 1024;
 const MAX_PREPARATION_ATTEMPTS: usize = 3;
 
-pub(crate) type OverviewGenerator = Arc<
-    dyn Fn(String, CancellationToken) -> BoxFuture<'static, Result<String, OverviewGenerationError>>
+pub(crate) type ReviewAgent = Arc<
+    dyn Fn(String, CancellationToken) -> BoxFuture<'static, Result<String, ReviewAgentError>>
         + Send
         + Sync,
 >;
 
 #[derive(Debug)]
-pub(crate) enum OverviewGenerationError {
+pub(crate) enum ReviewAgentError {
     Cancelled,
     Failed(String),
 }
@@ -40,7 +41,7 @@ pub(crate) struct ReviewService;
 
 struct ReviewBackend {
     workspace: PathBuf,
-    overview_generator: OverviewGenerator,
+    review_agent: ReviewAgent,
     #[cfg(test)]
     current_version_error: Option<String>,
 }
@@ -51,7 +52,7 @@ pub(crate) struct ReviewHandle {
 
 impl ReviewService {
     pub(crate) async fn start(
-        overview_generator: OverviewGenerator,
+        review_agent: ReviewAgent,
         workspace: &Path,
         assets: ReviewAssets,
     ) -> Result<ReviewHandle, ReviewError> {
@@ -59,7 +60,7 @@ impl ReviewService {
         let _cancel_preparation_on_drop = CancelOnDrop(preparation_shutdown.clone());
         let backend = Arc::new(ReviewBackend {
             workspace: workspace.to_path_buf(),
-            overview_generator,
+            review_agent,
             #[cfg(test)]
             current_version_error: None,
         });
@@ -181,34 +182,68 @@ impl ReviewBackend {
         context: &diff::OverviewContext,
         shutdown: CancellationToken,
     ) -> Result<String, ScopeLoadError> {
-        generate_overview(self.overview_generator.clone(), label, context, shutdown)
+        generate_overview(self.review_agent.clone(), label, context, shutdown)
             .await
             .map_err(scope_load_error)
+    }
+
+    async fn answer_question(
+        &self,
+        label: &str,
+        context: &diff::OverviewContext,
+        question: &server::QuestionRequest,
+        shutdown: CancellationToken,
+    ) -> Result<String, ScopeLoadError> {
+        let repository = repository_scope(context);
+        let side = match question.side {
+            server::CommentSide::Additions => "new",
+            server::CommentSide::Deletions => "old",
+        };
+        let lines = if question.start_line == question.end_line {
+            question.start_line.to_string()
+        } else {
+            format!("{}-{}", question.start_line, question.end_line)
+        };
+        let messages = serde_json::to_string(&question.messages)
+            .map_err(|error| ScopeLoadError::Failed(error.to_string()))?;
+        let prompt = format!(
+            "Delegate this task to a sub-agent so the host agent does not absorb the investigation context. Ask the sub-agent to answer the reviewer's latest question about `{path}:{lines}` on the {side} side of `{label}`. {repository} It must inspect the repository, diff, history, selected lines, and surrounding code needed for an accurate answer without modifying the workspace. The complete conversation is JSON: {messages}. Return the sub-agent's answer as concise Markdown with direct `path:line` citations where useful. Return only the answer to the reviewer, with no preamble about delegation.",
+            path = question.path,
+        );
+        let answer = match (self.review_agent)(prompt, shutdown).await {
+            Ok(answer) => answer,
+            Err(ReviewAgentError::Cancelled) => return Err(ScopeLoadError::Cancelled),
+            Err(ReviewAgentError::Failed(error)) => return Err(ScopeLoadError::Failed(error)),
+        };
+        let answer = answer.trim();
+        if answer.is_empty() {
+            return Err(ScopeLoadError::Failed(
+                "the agent returned an empty answer".to_owned(),
+            ));
+        }
+        if answer.len() > MAX_QUESTION_ANSWER_BYTES {
+            return Err(ScopeLoadError::Failed(
+                "the agent returned an answer larger than 256 KiB".to_owned(),
+            ));
+        }
+        Ok(answer.to_owned())
     }
 }
 
 async fn generate_overview(
-    overview_generator: OverviewGenerator,
+    review_agent: ReviewAgent,
     label: &str,
     context: &diff::OverviewContext,
     shutdown: CancellationToken,
 ) -> Result<String, ReviewError> {
-    let repository = context.repository.to_string_lossy();
-    let range = match &context.range {
-        diff::OverviewRange::Commits { base, head } => format!(
-            "Inspect the Git commit range `{base}..{head}` in the repository at `{repository}`."
-        ),
-        diff::OverviewRange::WorkingTree { base } => format!(
-            "Inspect the changes from Git commit `{base}` through the working tree, including untracked files, in the repository at `{repository}`."
-        ),
-    };
+    let repository = repository_scope(context);
     let prompt = format!(
-        "Create a self-contained HTML overview of the features in `{label}` for a human reviewer. {range} Use repository tools to examine the diff, history, actual source files, and surrounding code needed to understand the change. Do not modify the workspace. Scale the depth and presentation to the change: a small change can be restrained and compact, while a large or architectural change warrants a substantial walkthrough. Explain the purpose, user-visible behavior, architecture and data flow, important files, and areas that deserve reviewer attention. Give the overview a visual identity appropriate to this particular change instead of making it look like rendered Markdown. You may include a `<style>` element, classes, responsive layouts, and inline SVG. Use diagrams or other visualizations when they materially improve understanding, but do not force them into every overview. The iframe document exposes `data-theme=\"light\"`, `data-theme=\"dark\"`, or `data-theme=\"system\"` on its root; define an intentional palette for both light and dark appearances, including a `prefers-color-scheme` fallback for system mode. Return only the HTML fragment, not a full code review or a Markdown fence. Keep it accessible and responsive. Do not include scripts, event handlers, external resources, or raster images.",
+        "Delegate this task to a sub-agent so the host agent does not absorb the investigation context. Ask the sub-agent to create a self-contained HTML overview of the features in `{label}` for a human reviewer. {repository} It must use repository tools to examine the diff, history, actual source files, and surrounding code needed to understand the change without modifying the workspace. Scale the depth and presentation to the change: a small change can be restrained and compact, while a large or architectural change warrants a substantial walkthrough. Explain the purpose, user-visible behavior, architecture and data flow, important files, and areas that deserve reviewer attention. Whenever directing the reviewer's attention to code, cite direct `path:line` or `path:start-end` locations. Give the overview a visual identity appropriate to this particular change instead of making it look like rendered Markdown. It may include a `<style>` element, classes, responsive layouts, and inline SVG. Use diagrams or other visualizations when they materially improve understanding, but do not force them into every overview. The iframe document exposes `data-theme=\"light\"`, `data-theme=\"dark\"`, or `data-theme=\"system\"` on its root; define an intentional palette for both light and dark appearances, including a `prefers-color-scheme` fallback for system mode. Return the sub-agent's result as only the HTML fragment, not a full code review or a Markdown fence. Keep it accessible and responsive. Do not include scripts, event handlers, external resources, or raster images.",
     );
-    let result = match overview_generator(prompt, shutdown).await {
+    let result = match review_agent(prompt, shutdown).await {
         Ok(result) => result,
-        Err(OverviewGenerationError::Cancelled) => return Err(ReviewError::Cancelled),
-        Err(OverviewGenerationError::Failed(error)) => return Err(ReviewError::Overview(error)),
+        Err(ReviewAgentError::Cancelled) => return Err(ReviewError::Cancelled),
+        Err(ReviewAgentError::Failed(error)) => return Err(ReviewError::Overview(error)),
     };
     let overview = strip_html_fence(result.trim());
     if overview.is_empty() {
@@ -218,6 +253,18 @@ async fn generate_overview(
         return Err(ReviewError::OverviewTooLarge);
     }
     Ok(overview.to_owned())
+}
+
+fn repository_scope(context: &diff::OverviewContext) -> String {
+    let repository = context.repository.to_string_lossy();
+    match &context.range {
+        diff::OverviewRange::Commits { base, head } => format!(
+            "Inspect the Git commit range `{base}..{head}` in the repository at `{repository}`."
+        ),
+        diff::OverviewRange::WorkingTree { base } => format!(
+            "Inspect the changes from Git commit `{base}` through the working tree, including untracked files, in the repository at `{repository}`."
+        ),
+    }
 }
 
 fn strip_html_fence(value: &str) -> &str {
@@ -321,7 +368,7 @@ impl ReviewError {
 #[cfg(test)]
 mod tests {
     use super::server::{CommentSide, Decision, ReviewComment, ReviewDecision};
-    use super::{OverviewGenerator, ReviewBackend, ReviewError, generate_overview};
+    use super::{ReviewAgent, ReviewBackend, ReviewError, generate_overview};
     use crate::review::diff::{OverviewContext, OverviewRange, ReviewRange};
     use std::{
         fs,
@@ -373,7 +420,7 @@ mod tests {
         }
         let backend = ReviewBackend {
             workspace: repository.path().to_owned(),
-            overview_generator: Arc::new(|_, _| Box::pin(async { Ok(String::new()) })),
+            review_agent: Arc::new(|_, _| Box::pin(async { Ok(String::new()) })),
             current_version_error: Some("git metadata became unavailable".to_owned()),
         };
 
@@ -387,9 +434,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn overview_generator_receives_repository_context_and_returns_html() {
+    async fn review_agent_receives_repository_context_and_returns_html() {
         let observed_prompt = Arc::new(Mutex::new(String::new()));
-        let generator: OverviewGenerator = Arc::new({
+        let generator: ReviewAgent = Arc::new({
             let observed_prompt = Arc::clone(&observed_prompt);
             move |prompt, _shutdown| {
                 let observed_prompt = Arc::clone(&observed_prompt);
@@ -417,10 +464,12 @@ mod tests {
 
         assert_eq!(overview, "<section>Overview</section>");
         let prompt = observed_prompt.lock().unwrap();
+        assert!(prompt.contains("Delegate this task to a sub-agent"));
         assert!(prompt.contains("self-contained HTML overview"));
         assert!(prompt.contains("/workspace/repo"));
         assert!(prompt.contains("0123456789abcdef..fedcba9876543210"));
         assert!(prompt.contains("actual source files"));
+        assert!(prompt.contains("`path:line` or `path:start-end`"));
         assert!(prompt.contains("Scale the depth and presentation"));
         assert!(prompt.contains("inline SVG"));
         assert!(prompt.contains("visual identity appropriate to this particular change"));

@@ -625,7 +625,7 @@ pub(crate) async fn run(
                     text: prompt.clone(),
                 })?;
                 schedule(app.update(AppEvent::Transcript { pane, record }), &mut scheduler);
-                schedule(app.update(AppEvent::ReviewOverviewStarted(pane)), &mut scheduler);
+                schedule(app.update(AppEvent::ReviewAgentStarted(pane)), &mut scheduler);
                 commands
                     .send(WorkerCommand::Auxiliary {
                         pane,
@@ -1827,44 +1827,43 @@ fn spawn_review(
                 Some(assets) => assets,
                 None => crate::review::ReviewAssets::download().await?,
             };
-            let overview_generator: crate::review::OverviewGenerator =
-                Arc::new(move |prompt, shutdown| {
-                    let auxiliary_jobs = auxiliary_jobs.clone();
-                    let cancellation = cancellation.clone();
-                    Box::pin(async move {
-                        if cancellation.is_cancelled() || shutdown.is_cancelled() {
-                            return Err(crate::review::OverviewGenerationError::Cancelled);
-                        }
-                        let (completion, result) = tokio::sync::oneshot::channel();
-                        auxiliary_jobs
-                            .send(AuxiliaryJobRequest {
-                                review: identity,
-                                prompt,
-                                shutdown,
-                                completion,
-                            })
-                            .map_err(|_| {
-                                crate::review::OverviewGenerationError::Failed(
-                                    "review overview worker stopped".to_owned(),
-                                )
-                            })?;
-                        match result.await.map_err(|_| {
-                            crate::review::OverviewGenerationError::Failed(
-                                "review overview worker stopped".to_owned(),
+            let review_agent: crate::review::ReviewAgent = Arc::new(move |prompt, shutdown| {
+                let auxiliary_jobs = auxiliary_jobs.clone();
+                let cancellation = cancellation.clone();
+                Box::pin(async move {
+                    if cancellation.is_cancelled() || shutdown.is_cancelled() {
+                        return Err(crate::review::ReviewAgentError::Cancelled);
+                    }
+                    let (completion, result) = tokio::sync::oneshot::channel();
+                    auxiliary_jobs
+                        .send(AuxiliaryJobRequest {
+                            review: identity,
+                            prompt,
+                            shutdown,
+                            completion,
+                        })
+                        .map_err(|_| {
+                            crate::review::ReviewAgentError::Failed(
+                                "review agent worker stopped".to_owned(),
                             )
-                        })? {
-                            Ok(overview) => Ok(overview),
-                            Err(AuxiliaryError::Cancelled) => {
-                                Err(crate::review::OverviewGenerationError::Cancelled)
-                            }
-                            Err(AuxiliaryError::Failed(error)) => {
-                                Err(crate::review::OverviewGenerationError::Failed(error))
-                            }
+                        })?;
+                    match result.await.map_err(|_| {
+                        crate::review::ReviewAgentError::Failed(
+                            "review agent worker stopped".to_owned(),
+                        )
+                    })? {
+                        Ok(response) => Ok(response),
+                        Err(AuxiliaryError::Cancelled) => {
+                            Err(crate::review::ReviewAgentError::Cancelled)
                         }
-                    })
-                });
+                        Err(AuxiliaryError::Failed(error)) => {
+                            Err(crate::review::ReviewAgentError::Failed(error))
+                        }
+                    }
+                })
+            });
             let handle =
-                crate::review::ReviewService::start(overview_generator, &workspace, assets).await?;
+                crate::review::ReviewService::start(review_agent, &workspace, assets).await?;
             drop(ready_updates.send(ReviewReady {
                 identity,
                 url: handle.url(),

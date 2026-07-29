@@ -1,6 +1,8 @@
 import {
   REVIEW_PROTOCOL_VERSION,
   type OverviewResponse,
+  type QuestionRequest,
+  type QuestionResponse,
   type ReviewDecision,
   type ReviewErrorCode,
   type ReviewPage,
@@ -24,6 +26,8 @@ export class ApiError extends Error {
   get retryable() {
     return this.code === "network_error"
       || this.code === "overview_failed"
+      || this.code === "question_failed"
+      || this.code === "agent_busy"
       || this.code === "operation_cancelled"
       || (this.status !== undefined && this.status >= 500);
   }
@@ -60,6 +64,10 @@ export class ApiClient {
       generation: page.generation,
       range: page.selected_range,
     }, signal);
+  }
+
+  question(request: QuestionRequest, signal?: AbortSignal): Promise<QuestionResponse> {
+    return this.post("question", request, signal);
   }
 
   async submit(decision: ReviewDecision): Promise<void> {
@@ -120,7 +128,8 @@ async function responseError(response: Response): Promise<ApiError> {
 function isErrorCode(value: string | undefined): value is ReviewErrorCode {
   return [
     "stale_snapshot", "invalid_range", "workspace_changed", "overview_failed",
-    "operation_cancelled", "session_cancelled", "invalid_comment_anchor",
+    "question_failed", "invalid_thread", "agent_busy", "operation_cancelled",
+    "session_cancelled", "invalid_comment_anchor",
   ].includes(value ?? "");
 }
 

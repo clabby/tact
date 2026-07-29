@@ -1,6 +1,6 @@
 import type { ReviewRange, ReviewTarget } from "./range-selection";
 
-export const REVIEW_PROTOCOL_VERSION = 1;
+export const REVIEW_PROTOCOL_VERSION = 2;
 
 export type ReviewComment = {
   id: number;
@@ -42,6 +42,27 @@ export type OverviewResponse = {
   overview_html: string;
 };
 
+export type ThreadMessage = {
+  role: "reviewer" | "agent";
+  body: string;
+};
+
+export type QuestionRequest = {
+  generation: number;
+  range: ReviewRange;
+  path: string;
+  side: ReviewComment["side"];
+  start_line: number;
+  end_line: number;
+  messages: ThreadMessage[];
+};
+
+export type QuestionResponse = {
+  generation: number;
+  selected_range: ReviewRange;
+  answer: string;
+};
+
 export type ReviewDecision = {
   generation: number;
   range: ReviewRange;
@@ -55,6 +76,9 @@ export type ReviewErrorCode =
   | "invalid_range"
   | "workspace_changed"
   | "overview_failed"
+  | "question_failed"
+  | "invalid_thread"
+  | "agent_busy"
   | "operation_cancelled"
   | "session_cancelled"
   | "invalid_comment_anchor"

@@ -23,7 +23,9 @@ const MAX_COMMENTS: usize = 256;
 const MAX_COMMENT_BYTES: usize = 64 * 1024;
 const MAX_SUMMARY_BYTES: usize = 64 * 1024;
 const MAX_PATH_BYTES: usize = 4096;
-pub(super) const PROTOCOL_VERSION: u32 = 1;
+const MAX_THREAD_MESSAGES: usize = 64;
+const MAX_THREAD_BYTES: usize = 256 * 1024;
+pub(super) const PROTOCOL_VERSION: u32 = 2;
 const MAX_CACHED_PAGES: usize = 8;
 const MAX_CACHED_PAGE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_CACHED_OVERVIEWS: usize = 8;
@@ -79,6 +81,39 @@ struct OverviewResponse {
     overview_html: String,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct QuestionRequest {
+    pub(super) generation: u64,
+    pub(super) range: super::diff::ReviewRange,
+    pub(super) path: String,
+    pub(super) side: CommentSide,
+    pub(super) start_line: u32,
+    pub(super) end_line: u32,
+    pub(super) messages: Vec<ThreadMessage>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ThreadMessage {
+    pub(super) role: ThreadRole,
+    pub(super) body: String,
+}
+
+#[derive(Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum ThreadRole {
+    Reviewer,
+    Agent,
+}
+
+#[derive(Serialize)]
+struct QuestionResponse {
+    generation: u64,
+    selected_range: super::diff::ReviewRange,
+    answer: String,
+}
+
 #[derive(Serialize)]
 struct ReviewStatus {
     generation: u64,
@@ -109,6 +144,9 @@ enum ErrorCode {
     InvalidRange,
     WorkspaceChanged,
     OverviewFailed,
+    QuestionFailed,
+    InvalidThread,
+    AgentBusy,
     OperationCancelled,
     SessionCancelled,
     InvalidCommentAnchor,
@@ -162,6 +200,7 @@ struct ServerState {
     session: Mutex<ReviewSession>,
     backend: Arc<super::ReviewBackend>,
     overview_operations: OverviewOperations,
+    agent_operation: Mutex<()>,
     refresh_generation: Mutex<()>,
     session_shutdown: CancellationToken,
     outcome: Mutex<Option<oneshot::Sender<ReviewOutcome>>>,
@@ -301,6 +340,7 @@ impl ReviewServer {
             session: Mutex::new(ReviewSession::new(review, session_shutdown.clone())),
             backend,
             overview_operations: Mutex::new(HashMap::new()),
+            agent_operation: Mutex::new(()),
             refresh_generation: Mutex::new(()),
             session_shutdown: session_shutdown.clone(),
             outcome: Mutex::new(Some(outcome_tx)),
@@ -372,6 +412,7 @@ fn router(state: Arc<ServerState>) -> Router {
         .route("/api/refresh", post(refresh_review))
         .route("/api/range", post(load_range))
         .route("/api/overview", post(load_overview))
+        .route("/api/question", post(ask_question))
         .route("/api/decision", post(submit))
         .route("/api/cancel", post(cancel))
         .route("/{*asset_path}", get(static_asset))
@@ -638,6 +679,9 @@ async fn load_overview(
             session.generation_shutdown.clone(),
         )
     };
+    let Ok(_agent_operation) = state.agent_operation.try_lock() else {
+        return agent_busy();
+    };
     let current = match state.backend.current_version(shutdown.clone()).await {
         Ok(version) => version,
         Err(ScopeLoadError::Cancelled) => {
@@ -713,6 +757,128 @@ async fn load_overview(
             generation: request.generation,
             selected_range: request.range,
             overview_html,
+        },
+    )
+}
+
+async fn ask_question(
+    State(state): State<Arc<ServerState>>,
+    Json(request): Json<QuestionRequest>,
+) -> Response<Body> {
+    if invalid_question(&request) {
+        return error_response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            ErrorCode::InvalidThread,
+            "the question thread is invalid",
+            false,
+            true,
+        );
+    }
+    let (page, version, shutdown) = {
+        let session = state.session.lock().await;
+        let Some(page) = matching_page(&session, request.generation, &request.range) else {
+            return stale_snapshot("the question's review snapshot is stale");
+        };
+        if !valid_anchor(
+            &page.diff,
+            &request.path,
+            request.side,
+            request.start_line,
+            request.end_line,
+        ) {
+            return error_response(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                ErrorCode::InvalidThread,
+                "the question is not anchored to the reviewed patch",
+                false,
+                true,
+            );
+        }
+        (
+            page.clone(),
+            session.version.clone(),
+            session.generation_shutdown.clone(),
+        )
+    };
+    let Ok(_agent_operation) = state.agent_operation.try_lock() else {
+        return agent_busy();
+    };
+    let current = match state.backend.current_version(shutdown.clone()).await {
+        Ok(version) => version,
+        Err(ScopeLoadError::Cancelled) => {
+            return stale_snapshot("the review changed before the question was answered");
+        }
+        Err(ScopeLoadError::Failed(error)) => {
+            return error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                ErrorCode::WorkspaceChanged,
+                error,
+                true,
+                false,
+            );
+        }
+    };
+    if current != version {
+        return stale_snapshot("the workspace changed before the question was answered");
+    }
+    let answer = match state
+        .backend
+        .answer_question(
+            &page.diff.scope,
+            &page.diff.overview,
+            &request,
+            shutdown.clone(),
+        )
+        .await
+    {
+        Ok(answer) => answer,
+        Err(ScopeLoadError::Cancelled) => {
+            return error_response(
+                StatusCode::CONFLICT,
+                ErrorCode::OperationCancelled,
+                "question answering was cancelled",
+                true,
+                true,
+            );
+        }
+        Err(ScopeLoadError::Failed(error)) => {
+            return error_response(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                ErrorCode::QuestionFailed,
+                error,
+                true,
+                true,
+            );
+        }
+    };
+    let current = match state.backend.current_version(shutdown).await {
+        Ok(version) => version,
+        Err(ScopeLoadError::Cancelled) => {
+            return stale_snapshot("the workspace changed while the question was answered");
+        }
+        Err(ScopeLoadError::Failed(error)) => {
+            return error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                ErrorCode::WorkspaceChanged,
+                error,
+                true,
+                false,
+            );
+        }
+    };
+    if current != version {
+        return stale_snapshot("the workspace changed while the question was answered");
+    }
+    let session = state.session.lock().await;
+    if matching_page(&session, request.generation, &request.range).is_none() {
+        return stale_snapshot("the review changed while the question was answered");
+    }
+    secure_json(
+        StatusCode::OK,
+        QuestionResponse {
+            generation: request.generation,
+            selected_range: request.range,
+            answer,
         },
     )
 }
@@ -831,12 +997,28 @@ fn matching_page<'a>(
     session.page(range)
 }
 
-fn valid_comment_anchor(snapshot: &super::diff::DiffSnapshot, comment: &ReviewComment) -> bool {
-    let side = match comment.side {
+fn valid_anchor(
+    snapshot: &super::diff::DiffSnapshot,
+    path: &str,
+    side: CommentSide,
+    start_line: u32,
+    end_line: u32,
+) -> bool {
+    let side = match side {
         CommentSide::Additions => super::diff::PatchSide::Additions,
         CommentSide::Deletions => super::diff::PatchSide::Deletions,
     };
-    snapshot.contains_anchor(&comment.path, side, comment.start_line, comment.end_line)
+    snapshot.contains_anchor(path, side, start_line, end_line)
+}
+
+fn valid_comment_anchor(snapshot: &super::diff::DiffSnapshot, comment: &ReviewComment) -> bool {
+    valid_anchor(
+        snapshot,
+        &comment.path,
+        comment.side,
+        comment.start_line,
+        comment.end_line,
+    )
 }
 
 fn invalid_comment(comment: &ReviewComment) -> bool {
@@ -852,6 +1034,42 @@ fn invalid_decision(decision: &ReviewDecision) -> bool {
     decision.summary.len() > MAX_SUMMARY_BYTES
         || decision.comments.len() > MAX_COMMENTS
         || decision.comments.iter().any(invalid_comment)
+}
+
+fn invalid_question(question: &QuestionRequest) -> bool {
+    if question.path.trim().is_empty()
+        || question.path.len() > MAX_PATH_BYTES
+        || question.start_line == 0
+        || question.end_line < question.start_line
+        || question.messages.is_empty()
+        || question.messages.len() > MAX_THREAD_MESSAGES
+    {
+        return true;
+    }
+    let mut bytes = 0_usize;
+    for (index, message) in question.messages.iter().enumerate() {
+        let expected = if index.is_multiple_of(2) {
+            ThreadRole::Reviewer
+        } else {
+            ThreadRole::Agent
+        };
+        if message.role != expected || message.body.trim().is_empty() {
+            return true;
+        }
+        bytes = bytes.saturating_add(message.body.len());
+    }
+    question.messages.last().map(|message| message.role) != Some(ThreadRole::Reviewer)
+        || bytes > MAX_THREAD_BYTES
+}
+
+fn agent_busy() -> Response<Body> {
+    error_response(
+        StatusCode::CONFLICT,
+        ErrorCode::AgentBusy,
+        "another review agent operation is already running",
+        true,
+        true,
+    )
 }
 
 fn stale_snapshot(message: impl Into<String>) -> Response<Body> {
@@ -937,7 +1155,7 @@ pub(crate) enum ServerError {
 mod tests {
     use super::{Decision, PROTOCOL_VERSION, ReviewOutcome, ReviewServer};
     use crate::review::diff::ReviewRange;
-    use crate::review::{OverviewGenerationError, OverviewGenerator, ReviewBackend};
+    use crate::review::{ReviewAgent, ReviewAgentError, ReviewBackend};
     use std::{
         fs,
         path::Path,
@@ -1202,7 +1420,7 @@ mod tests {
             std::fs::write(assets.path().join(name), "").unwrap();
         }
         let loads = Arc::new(AtomicUsize::new(0));
-        let generator: OverviewGenerator = Arc::new({
+        let generator: ReviewAgent = Arc::new({
             let loads = Arc::clone(&loads);
             move |_prompt, _shutdown| {
                 loads.fetch_add(1, Ordering::SeqCst);
@@ -1235,7 +1453,7 @@ mod tests {
             std::fs::write(assets.path().join(name), "").unwrap();
         }
         let prompts = Arc::new(Mutex::new(Vec::new()));
-        let generator: OverviewGenerator = Arc::new({
+        let generator: ReviewAgent = Arc::new({
             let prompts = Arc::clone(&prompts);
             move |prompt, _shutdown| {
                 prompts.lock().unwrap().push(prompt);
@@ -1274,13 +1492,156 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn question_agent_receives_the_anchor_range_and_complete_thread() {
+        let assets = tempfile::tempdir().unwrap();
+        for name in ["index.html", "app.js", "app.css"] {
+            std::fs::write(assets.path().join(name), "").unwrap();
+        }
+        let prompt = Arc::new(Mutex::new(String::new()));
+        let generator: ReviewAgent = Arc::new({
+            let prompt = Arc::clone(&prompt);
+            move |value, _shutdown| {
+                *prompt.lock().unwrap() = value;
+                Box::pin(async move { Ok("The value comes from `tracked.txt:1`.".to_owned()) })
+            }
+        });
+        let server = start_server_with_generator(&assets, generator).await;
+        let trunk = git_stdout(&server.state.backend.workspace, ["rev-parse", "main"]);
+
+        let response = reqwest::Client::new()
+            .post(server.endpoint_url("api/question"))
+            .json(&question_request())
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let response = response.json::<serde_json::Value>().await.unwrap();
+        assert_eq!(response["answer"], "The value comes from `tracked.txt:1`.");
+        let prompt = prompt.lock().unwrap();
+        assert!(prompt.contains("Delegate this task to a sub-agent"));
+        assert!(prompt.contains("`tracked.txt:1`"));
+        assert!(prompt.contains("new side"));
+        assert!(prompt.contains(&trunk));
+        assert!(prompt.contains(r#""body":"Why was this changed?""#));
+        assert!(prompt.contains(r#""body":"It supports the feature.""#));
+        assert!(prompt.contains(r#""body":"Where is that used?""#));
+    }
+
+    #[tokio::test]
+    async fn question_rejects_an_anchor_outside_the_reviewed_patch() {
+        let assets = tempfile::tempdir().unwrap();
+        for name in ["index.html", "app.js", "app.css"] {
+            std::fs::write(assets.path().join(name), "").unwrap();
+        }
+        let loads = Arc::new(AtomicUsize::new(0));
+        let generator: ReviewAgent = Arc::new({
+            let loads = Arc::clone(&loads);
+            move |_prompt, _shutdown| {
+                loads.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async move { Ok("answer".to_owned()) })
+            }
+        });
+        let server = start_server_with_generator(&assets, generator).await;
+        let mut request = question_request();
+        request["path"] = "not-in-the-review.rs".into();
+
+        let response = reqwest::Client::new()
+            .post(server.endpoint_url("api/question"))
+            .json(&request)
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), reqwest::StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(loads.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn overview_and_question_agent_operations_are_mutually_exclusive() {
+        let assets = tempfile::tempdir().unwrap();
+        for name in ["index.html", "app.js", "app.css"] {
+            std::fs::write(assets.path().join(name), "").unwrap();
+        }
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let generator: ReviewAgent = Arc::new({
+            let started = Arc::clone(&started);
+            let release = Arc::clone(&release);
+            move |prompt, _shutdown| {
+                let started = Arc::clone(&started);
+                let release = Arc::clone(&release);
+                Box::pin(async move {
+                    started.notify_one();
+                    release.notified().await;
+                    if prompt.contains("self-contained HTML") {
+                        Ok("<p>Overview</p>".to_owned())
+                    } else {
+                        Ok("Answer".to_owned())
+                    }
+                })
+            }
+        });
+        let server = start_server_with_generator(&assets, generator).await;
+        let client = reqwest::Client::new();
+        let overview = tokio::spawn({
+            let url = server.endpoint_url("api/overview");
+            async move { request_overview(url, uncommitted_range()).await }
+        });
+        started.notified().await;
+
+        let busy = client
+            .post(server.endpoint_url("api/question"))
+            .json(&question_request())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(busy.status(), reqwest::StatusCode::CONFLICT);
+        assert_eq!(
+            busy.json::<serde_json::Value>().await.unwrap()["code"],
+            "agent_busy"
+        );
+        release.notify_one();
+        assert_eq!(overview.await.unwrap(), reqwest::StatusCode::OK);
+
+        let range = working_tree_range();
+        let loaded = client
+            .post(server.endpoint_url("api/range"))
+            .json(&range_request(range))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(loaded.status(), reqwest::StatusCode::OK);
+        let question = tokio::spawn({
+            let url = server.endpoint_url("api/question");
+            async move {
+                reqwest::Client::new()
+                    .post(url)
+                    .json(&question_request())
+                    .send()
+                    .await
+                    .unwrap()
+                    .status()
+            }
+        });
+        started.notified().await;
+
+        assert_eq!(
+            request_overview(server.endpoint_url("api/overview"), range).await,
+            reqwest::StatusCode::CONFLICT
+        );
+        release.notify_one();
+        assert_eq!(question.await.unwrap(), reqwest::StatusCode::OK);
+    }
+
+    #[tokio::test]
     async fn overview_rejects_a_changed_workspace_before_starting_the_agent() {
         let assets = tempfile::tempdir().unwrap();
         for name in ["index.html", "app.js", "app.css"] {
             std::fs::write(assets.path().join(name), "").unwrap();
         }
         let loads = Arc::new(AtomicUsize::new(0));
-        let generator: OverviewGenerator = Arc::new({
+        let generator: ReviewAgent = Arc::new({
             let loads = Arc::clone(&loads);
             move |_prompt, _shutdown| {
                 loads.fetch_add(1, Ordering::SeqCst);
@@ -1313,7 +1674,7 @@ mod tests {
         }
         let started = Arc::new(Notify::new());
         let release = Arc::new(Notify::new());
-        let generator: OverviewGenerator = Arc::new({
+        let generator: ReviewAgent = Arc::new({
             let started = Arc::clone(&started);
             let release = Arc::clone(&release);
             move |_prompt, _shutdown| {
@@ -1361,7 +1722,7 @@ mod tests {
         let loads = Arc::new(AtomicUsize::new(0));
         let started = Arc::new(Notify::new());
         let release = Arc::new(Notify::new());
-        let generator: OverviewGenerator = Arc::new({
+        let generator: ReviewAgent = Arc::new({
             let loads = Arc::clone(&loads);
             let started = Arc::clone(&started);
             let release = Arc::clone(&release);
@@ -1397,7 +1758,7 @@ mod tests {
             std::fs::write(assets.path().join(name), "").unwrap();
         }
         let loads = Arc::new(AtomicUsize::new(0));
-        let generator: OverviewGenerator = Arc::new({
+        let generator: ReviewAgent = Arc::new({
             let loads = Arc::clone(&loads);
             move |_prompt, _shutdown| {
                 loads.fetch_add(1, Ordering::SeqCst);
@@ -1419,9 +1780,8 @@ mod tests {
         for name in ["index.html", "app.js", "app.css"] {
             std::fs::write(assets.path().join(name), "").unwrap();
         }
-        let generator: OverviewGenerator = Arc::new(|_prompt, _shutdown| {
-            Box::pin(async { Err(OverviewGenerationError::Cancelled) })
-        });
+        let generator: ReviewAgent =
+            Arc::new(|_prompt, _shutdown| Box::pin(async { Err(ReviewAgentError::Cancelled) }));
         let server = start_server_with_generator(&assets, generator).await;
 
         let response = reqwest::Client::new()
@@ -1454,14 +1814,14 @@ mod tests {
             std::fs::write(assets.path().join(name), "").unwrap();
         }
         let started = Arc::new(Notify::new());
-        let generator: OverviewGenerator = Arc::new({
+        let generator: ReviewAgent = Arc::new({
             let started = Arc::clone(&started);
             move |_prompt, shutdown| {
                 let started = Arc::clone(&started);
                 Box::pin(async move {
                     started.notify_one();
                     shutdown.cancelled().await;
-                    Err(OverviewGenerationError::Cancelled)
+                    Err(ReviewAgentError::Cancelled)
                 })
             }
         });
@@ -1660,16 +2020,16 @@ mod tests {
     }
 
     async fn start_server(assets: &tempfile::TempDir) -> ReviewServer {
-        start_server_with_generator(assets, overview_generator()).await
+        start_server_with_generator(assets, review_agent()).await
     }
 
     async fn start_server_with_generator(
         assets: &tempfile::TempDir,
-        overview_generator: OverviewGenerator,
+        review_agent: ReviewAgent,
     ) -> ReviewServer {
         let backend = Arc::new(ReviewBackend {
             workspace: repository().keep(),
-            overview_generator,
+            review_agent,
             current_version_error: None,
         });
         let review = backend.prepare(CancellationToken::new()).await.unwrap();
@@ -1683,7 +2043,7 @@ mod tests {
         .unwrap()
     }
 
-    fn overview_generator() -> OverviewGenerator {
+    fn review_agent() -> ReviewAgent {
         Arc::new(|_prompt, _shutdown| Box::pin(async { Ok("<p>Overview</p>".to_owned()) }))
     }
 
@@ -1705,6 +2065,22 @@ mod tests {
         serde_json::json!({
             "generation": 0,
             "range": range,
+        })
+    }
+
+    fn question_request() -> serde_json::Value {
+        serde_json::json!({
+            "generation": 0,
+            "range": uncommitted_range(),
+            "path": "tracked.txt",
+            "side": "additions",
+            "start_line": 1,
+            "end_line": 1,
+            "messages": [
+                { "role": "reviewer", "body": "Why was this changed?" },
+                { "role": "agent", "body": "It supports the feature." },
+                { "role": "reviewer", "body": "Where is that used?" }
+            ]
         })
     }
 

@@ -20,7 +20,7 @@ use tempfile::tempdir_in;
 const REVIEW_ASSETS_ENV: &str = "TACT_REVIEW_ASSETS";
 const MANIFEST_NAME: &str = "manifest.json";
 const BUNDLE_SCHEMA_VERSION: u32 = 2;
-const REVIEW_API_VERSION: u32 = 1;
+const REVIEW_API_VERSION: u32 = 2;
 const MAX_ARCHIVE_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_EXPANDED_BYTES: u64 = 32 * 1024 * 1024;
@@ -725,7 +725,7 @@ mod tests {
             .collect();
         let manifest = AssetManifest {
             schema_version: 2,
-            review_api: ApiCompatibility { min: 1, max: 1 },
+            review_api: ApiCompatibility { min: 2, max: 2 },
             tact: TactCompatibility {
                 version: env!("CARGO_PKG_VERSION").to_owned(),
             },
@@ -853,7 +853,7 @@ mod tests {
         write_valid_assets(directory.path());
         let mut manifest: serde_json::Value =
             serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
-        manifest["review_api"]["min"] = 2.into();
+        manifest["review_api"]["min"] = 3.into();
         fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
         assert!(matches!(
             validate_directory(directory.path(), InstallKind::DevelopmentOverride),
