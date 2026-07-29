@@ -789,6 +789,14 @@ export class ReviewApp {
       },
     });
     this.tree.render({ containerWrapper: container });
+    this.syncTreeAppearance();
+  }
+
+  private syncTreeAppearance() {
+    const container = this.tree?.getFileTreeContainer();
+    if (!container) return;
+    const selected = appearance(this.settings);
+    container.style.colorScheme = selected === "system" ? "light dark" : selected;
   }
 
   private treeGitStatus(): GitStatusEntry[] {
@@ -1066,6 +1074,7 @@ export class ReviewApp {
 
   private applySettings(rebuildDiff: boolean) {
     document.documentElement.dataset.appearance = appearance(this.settings);
+    this.syncTreeAppearance();
     if (rebuildDiff && this.page) {
       this.renderOverview();
       this.renderDiff();

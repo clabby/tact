@@ -191,6 +191,22 @@ test("the file change totals and comment indicator preserve their spacing", asyn
   expect(treeStyles).toMatch(/span\[style\*="--tact-comment-indicator"\]::before/);
 });
 
+test("the file tree follows explicit appearance settings", async () => {
+  const app = await Bun.file(new URL("app.ts", import.meta.url)).text();
+  const sync = app.slice(
+    app.indexOf("private syncTreeAppearance"),
+    app.indexOf("private treeGitStatus"),
+  );
+  const settings = app.slice(
+    app.indexOf("private applySettings"),
+    app.indexOf("private selectTab"),
+  );
+
+  expect(sync).toContain("getFileTreeContainer()");
+  expect(sync).toContain('selected === "system" ? "light dark" : selected');
+  expect(settings).toContain("this.syncTreeAppearance()");
+});
+
 test("the range warning has stable vertical spacing", async () => {
   const styles = await Bun.file(new URL("styles.css", import.meta.url)).text();
   const warning = styles.match(/\.range-warning\s*{([^}]*)}/)?.[1];
