@@ -9,6 +9,7 @@ import {
 import { FileTree, type GitStatus, type GitStatusEntry } from "@pierre/trees";
 import { pendingCommentCount } from "./comment-state";
 import { commentSelectionCallbacks } from "./comment-selection";
+import { addExpandableContext, type FileContext } from "./diff-context";
 import { renderMarkdown } from "./markdown";
 import {
   activeSyntaxTheme,
@@ -53,6 +54,7 @@ type ReviewPage = {
   title: string;
   selected_range: ReviewRange;
   patch: string;
+  file_contexts?: FileContext[];
   repository: string;
   scope: string;
   base: string;
@@ -306,9 +308,11 @@ class ReviewApp {
 
   private installPage(page: ReviewPage) {
     this.page = page;
-    this.files = parsePatchFiles(page.patch, `tact-review-${rangeKey(page.selected_range)}`, true).flatMap(
+    const cacheKey = `tact-review-${rangeKey(page.selected_range)}`;
+    const patchFiles = parsePatchFiles(page.patch, cacheKey, true).flatMap(
       (patch) => patch.files,
     );
+    this.files = addExpandableContext(patchFiles, page.file_contexts ?? []);
     this.pathToItem.clear();
     this.items = this.files.map((file, index) => {
       const id = `${rangeKey(page.selected_range)}:${index}:${file.name}`;
@@ -471,6 +475,8 @@ class ReviewApp {
       disableLineNumbers: !this.settings.lineNumbers,
       theme: diffTheme(this.settings),
       themeType: appearance(this.settings),
+      hunkSeparators: "line-info" as const,
+      expansionLineCount: 20,
       enableLineSelection: true,
       stickyHeaders: true,
       lineHoverHighlight: "both" as const,

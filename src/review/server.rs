@@ -1082,6 +1082,7 @@ mod tests {
             selected_range: range,
             diff: DiffSnapshot {
                 patch: "patch".to_owned(),
+                file_contexts: Vec::new(),
                 repository: "repo".to_owned(),
                 scope: "Selected range".to_owned(),
                 base: "HEAD".to_owned(),

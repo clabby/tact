@@ -7,6 +7,8 @@ use std::{
 use tokio::{io::AsyncReadExt, process::Command};
 
 const MAX_DIFF_BYTES: usize = 32 * 1024 * 1024;
+const MAX_CONTEXT_FILE_BYTES: usize = 2 * 1024 * 1024;
+const MAX_CONTEXT_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub(crate) struct ReviewRange {
@@ -47,9 +49,24 @@ pub(super) struct ReviewContext {
 #[derive(Clone, Serialize)]
 pub(super) struct DiffSnapshot {
     pub(super) patch: String,
+    pub(super) file_contexts: Vec<FileContext>,
     pub(super) repository: String,
     pub(super) scope: String,
     pub(super) base: String,
+}
+
+#[derive(Clone, Serialize)]
+pub(super) struct FileContext {
+    pub(super) old_path: String,
+    pub(super) new_path: String,
+    pub(super) old_contents: String,
+    pub(super) new_contents: String,
+}
+
+struct ChangedFile {
+    kind: u8,
+    old_path: String,
+    new_path: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -126,33 +143,32 @@ impl ReviewContext {
             .revision
             .as_deref()
             .expect("a valid range cannot start at the working tree");
-        let head = self.range_points[range.to].revision.as_deref();
-        let output = match head {
-            Some(head) => {
-                git_output_limited(
-                    &self.root,
-                    [
-                        "diff",
-                        "--binary",
-                        "--find-renames",
-                        "--find-copies",
-                        "--no-ext-diff",
-                        base,
-                        head,
-                        "--",
-                    ],
-                    MAX_DIFF_BYTES,
-                    0,
-                )
-                .await?
-            }
-            None => return self.collect_working_tree(base, range).await,
+        let Some(head) = self.range_points[range.to].revision.as_deref() else {
+            return self.collect_working_tree(base, range).await;
         };
+        let output = git_output_limited(
+            &self.root,
+            [
+                "diff",
+                "--binary",
+                "--find-renames",
+                "--find-copies",
+                "--no-ext-diff",
+                base,
+                head,
+                "--",
+            ],
+            MAX_DIFF_BYTES,
+            0,
+        )
+        .await?;
         ensure_success(output.status, &output.stderr)?;
         let patch = String::from_utf8(output.stdout)?;
+        let file_contexts = collect_file_contexts(&self.root, base, Some(head)).await?;
 
         Ok(DiffSnapshot {
             patch,
+            file_contexts,
             repository: self.repository.clone(),
             scope: self.range_label(range)?,
             base: base.to_owned(),
@@ -168,13 +184,20 @@ impl ReviewContext {
         base: &str,
         range: ReviewRange,
     ) -> Result<DiffSnapshot, DiffError> {
-        let patch = working_tree_patch(&self.root, base).await?;
-        Ok(DiffSnapshot {
-            patch,
-            repository: self.repository.clone(),
-            scope: self.range_label(range)?,
-            base: base.to_owned(),
-        })
+        for _ in 0..3 {
+            let patch = working_tree_patch(&self.root, base).await?;
+            let file_contexts = collect_file_contexts(&self.root, base, None).await?;
+            if working_tree_patch(&self.root, base).await? == patch {
+                return Ok(DiffSnapshot {
+                    patch,
+                    file_contexts,
+                    repository: self.repository.clone(),
+                    scope: self.range_label(range)?,
+                    base: base.to_owned(),
+                });
+            }
+        }
+        Err(DiffError::WorkspaceChangedDuringSnapshot)
     }
 
     fn validate_range(&self, range: ReviewRange) -> Result<(), DiffError> {
@@ -187,6 +210,149 @@ impl ReviewContext {
             target_count: self.range_points.len(),
         })
     }
+}
+
+async fn collect_file_contexts(
+    root: &Path,
+    base: &str,
+    head: Option<&str>,
+) -> Result<Vec<FileContext>, DiffError> {
+    let mut changed = changed_files(root, base, head).await?;
+    if head.is_none() {
+        changed.extend(untracked_files(root).await?);
+    }
+
+    let mut contexts = Vec::with_capacity(changed.len());
+    let mut total_bytes = 0usize;
+    for file in changed {
+        let old_contents = if file.kind == b'A' {
+            Some(String::new())
+        } else {
+            revision_file(root, base, &file.old_path).await?
+        };
+        let new_contents = if file.kind == b'D' {
+            Some(String::new())
+        } else if let Some(head) = head {
+            revision_file(root, head, &file.new_path).await?
+        } else {
+            working_tree_file(root, &file.new_path).await
+        };
+        let (Some(old_contents), Some(new_contents)) = (old_contents, new_contents) else {
+            continue;
+        };
+        let context_bytes = old_contents.len().saturating_add(new_contents.len());
+        if total_bytes.saturating_add(context_bytes) > MAX_CONTEXT_BYTES {
+            continue;
+        }
+        total_bytes += context_bytes;
+        contexts.push(FileContext {
+            old_path: file.old_path,
+            new_path: file.new_path,
+            old_contents,
+            new_contents,
+        });
+    }
+    Ok(contexts)
+}
+
+async fn changed_files(
+    root: &Path,
+    base: &str,
+    head: Option<&str>,
+) -> Result<Vec<ChangedFile>, DiffError> {
+    let mut command = Command::new("git");
+    command.args([
+        "diff",
+        "--name-status",
+        "-z",
+        "--find-renames",
+        "--find-copies",
+        base,
+    ]);
+    if let Some(head) = head {
+        command.arg(head);
+    }
+    let output = command
+        .arg("--")
+        .current_dir(root)
+        .kill_on_drop(true)
+        .output()
+        .await
+        .map_err(DiffError::StartGit)?;
+    ensure_success(output.status, &output.stderr)?;
+    parse_changed_files(&output.stdout)
+}
+
+fn parse_changed_files(output: &[u8]) -> Result<Vec<ChangedFile>, DiffError> {
+    let mut fields = output
+        .split(|byte| *byte == 0)
+        .filter(|field| !field.is_empty());
+    let mut files = Vec::new();
+    while let Some(status) = fields.next() {
+        let kind = status.first().copied().unwrap_or_default();
+        let old_path = fields.next().ok_or(DiffError::InvalidNameStatus)?;
+        let new_path = if matches!(kind, b'R' | b'C') {
+            fields.next().ok_or(DiffError::InvalidNameStatus)?
+        } else {
+            old_path
+        };
+        files.push(ChangedFile {
+            kind,
+            old_path: std::str::from_utf8(old_path)?.to_owned(),
+            new_path: std::str::from_utf8(new_path)?.to_owned(),
+        });
+    }
+    Ok(files)
+}
+
+async fn untracked_files(root: &Path) -> Result<Vec<ChangedFile>, DiffError> {
+    let output = git_output(root, ["ls-files", "--others", "--exclude-standard", "-z"]).await?;
+    ensure_success(output.status, &output.stderr)?;
+    output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(|path| {
+            let path = std::str::from_utf8(path)?.to_owned();
+            Ok(ChangedFile {
+                kind: b'A',
+                old_path: path.clone(),
+                new_path: path,
+            })
+        })
+        .collect()
+}
+
+async fn revision_file(
+    root: &Path,
+    revision: &str,
+    path: &str,
+) -> Result<Option<String>, DiffError> {
+    let object = format!("{revision}:{path}");
+    let output = match git_output_limited(root, ["show", &object], MAX_CONTEXT_FILE_BYTES, 0).await
+    {
+        Ok(output) => output,
+        Err(DiffError::TooLarge { .. }) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if !output.status.success() {
+        return Ok(None);
+    }
+    Ok(String::from_utf8(output.stdout).ok())
+}
+
+async fn working_tree_file(root: &Path, path: &str) -> Option<String> {
+    let path = root.join(path);
+    let metadata = tokio::fs::symlink_metadata(&path).await.ok()?;
+    if metadata.file_type().is_symlink() {
+        let target = tokio::fs::read_link(path).await.ok()?;
+        return target.to_str().map(ToOwned::to_owned);
+    }
+    if !metadata.is_file() || metadata.len() > MAX_CONTEXT_FILE_BYTES as u64 {
+        return None;
+    }
+    let bytes = tokio::fs::read(path).await.ok()?;
+    String::from_utf8(bytes).ok()
 }
 
 fn target_label(target: &ReviewTarget) -> &str {
@@ -500,6 +666,10 @@ pub(crate) enum DiffError {
     },
     #[error("git returned invalid commit metadata for the review range")]
     InvalidCommitMetadata,
+    #[error("git returned invalid changed-file metadata")]
+    InvalidNameStatus,
+    #[error("workspace kept changing while the review snapshot was collected")]
+    WorkspaceChangedDuringSnapshot,
     #[error("review diff is {actual} bytes, exceeding the {maximum}-byte limit")]
     TooLarge { actual: usize, maximum: usize },
     #[error("git output was not valid UTF-8: {0}")]
@@ -527,6 +697,16 @@ mod tests {
         assert!(snapshot.patch.contains("new.txt"));
         assert!(snapshot.patch.contains("+changed"));
         assert!(snapshot.patch.contains("+new"));
+        assert!(snapshot.file_contexts.iter().any(|context| {
+            context.new_path == "tracked.txt"
+                && context.old_contents == "initial\n"
+                && context.new_contents == "changed\n"
+        }));
+        assert!(snapshot.file_contexts.iter().any(|context| {
+            context.new_path == "new.txt"
+                && context.old_contents.is_empty()
+                && context.new_contents == "new\n"
+        }));
     }
 
     #[tokio::test]
@@ -542,6 +722,35 @@ mod tests {
 
         assert!(snapshot.patch.contains("+feature"));
         assert_ne!(snapshot.base, "HEAD");
+        assert!(snapshot.file_contexts.iter().any(|context| {
+            context.new_path == "tracked.txt"
+                && context.old_contents == "initial\n"
+                && context.new_contents == "feature\n"
+        }));
+    }
+
+    #[tokio::test]
+    async fn file_context_tracks_renames_and_skips_non_utf8_content() {
+        let repository = repository();
+        git(repository.path(), ["mv", "tracked.txt", "renamed.txt"]);
+
+        let context = load(repository.path()).await.unwrap();
+        let snapshot = context.collect(context.default_range()).await.unwrap();
+        assert!(snapshot.file_contexts.iter().any(|context| {
+            context.old_path == "tracked.txt"
+                && context.new_path == "renamed.txt"
+                && context.old_contents == "initial\n"
+                && context.new_contents == "initial\n"
+        }));
+
+        fs::write(repository.path().join("renamed.txt"), [0xff, 0x00]).unwrap();
+        let snapshot = context.collect(context.default_range()).await.unwrap();
+        assert!(
+            snapshot
+                .file_contexts
+                .iter()
+                .all(|context| context.new_path != "renamed.txt")
+        );
     }
 
     #[tokio::test]
