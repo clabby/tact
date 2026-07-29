@@ -90,6 +90,8 @@ const TREE_STYLES = `
   [data-item-section="decoration"] {
     position: absolute;
     z-index: 2;
+    --tact-comment-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z'/%3E%3C/svg%3E");
+    --tact-comment-indicator: #4b8cff;
     inset-block: var(--trees-focus-ring-width);
     inset-inline-end: calc(var(--trees-item-padding-x) + var(--trees-git-lane-width));
     align-items: center;
@@ -100,6 +102,18 @@ const TREE_STYLES = `
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     font-size: 11px;
     font-variant-numeric: tabular-nums;
+  }
+  [data-item-section="decoration"] span[style*="--tact-comment-indicator"] {
+    display: inline-flex;
+    align-items: center;
+  }
+  [data-item-section="decoration"] span[style*="--tact-comment-indicator"]::before {
+    width: 12px;
+    height: 12px;
+    content: "";
+    background-color: currentColor;
+    -webkit-mask: var(--tact-comment-icon) center / contain no-repeat;
+    mask: var(--tact-comment-icon) center / contain no-repeat;
   }
   [data-type="item"]:has([data-item-section="decoration"] [title*="Seen"]) [data-item-section="content"] {
     opacity: .56;
@@ -753,7 +767,10 @@ export class ReviewApp {
         ];
         if (count > 0) {
           title.push(`${count} pending ${count === 1 ? "comment" : "comments"}`);
-          parts.push({ text: `\u00a0\u00a0●${count}`, color: "#4b8cff" });
+          parts.push(
+            { text: "\u00a0\u00a0" },
+            { text: `\u00a0${count}`, color: "var(--tact-comment-indicator)" },
+          );
         }
         if (seen) {
           title.push("Seen");

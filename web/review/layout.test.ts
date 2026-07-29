@@ -141,9 +141,17 @@ test("change totals layer above long file names", async () => {
 
 test("the file change totals and comment indicator preserve their spacing", async () => {
   const app = await Bun.file(new URL("app.ts", import.meta.url)).text();
+  const treeStyles = app.slice(
+    app.indexOf("const TREE_STYLES"),
+    app.indexOf("type AnnotationMetadata"),
+  );
 
   expect(app).toContain('text: "\\u00a0/\\u00a0"');
-  expect(app).toContain('text: `\\u00a0\\u00a0●${count}`');
+  expect(app).toContain('{ text: "\\u00a0\\u00a0" }');
+  expect(app).toContain('text: `\\u00a0${count}`, color: "var(--tact-comment-indicator)"');
+  expect(app).not.toContain("🗨︎");
+  expect(treeStyles).toContain("data:image/svg+xml");
+  expect(treeStyles).toMatch(/span\[style\*="--tact-comment-indicator"\]::before/);
 });
 
 test("the range warning has stable vertical spacing", async () => {
