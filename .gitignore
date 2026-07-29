@@ -1,5 +1,9 @@
 /target
 /.tact
+/dist
+/web/review/dist
+/web/review/.dev
+/web/review/node_modules
 /evals/.venv
 __pycache__/
 *.pyc
