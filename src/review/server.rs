@@ -6,7 +6,6 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
-use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, VecDeque},
@@ -36,9 +35,6 @@ type OverviewOperations = Mutex<HashMap<OverviewOperationKey, Arc<Mutex<()>>>>;
 #[derive(Clone, Serialize)]
 pub(super) struct ReviewPage {
     pub(super) generation: u64,
-    pub(super) snapshot_id: super::diff::SnapshotId,
-    pub(super) patch_id: super::diff::PatchId,
-    pub(super) title: String,
     pub(super) selected_range: super::diff::ReviewRange,
     #[serde(flatten)]
     pub(super) diff: super::diff::DiffSnapshot,
@@ -48,8 +44,6 @@ pub(super) struct ReviewPage {
 pub(super) struct ReviewBootstrap {
     pub(super) protocol_version: u32,
     pub(super) generation: u64,
-    pub(super) workspace_version: super::diff::WorkspaceVersion,
-    pub(super) snapshot_id: super::diff::SnapshotId,
     pub(super) title: String,
     pub(super) repository: String,
     pub(super) trunk: String,
@@ -61,7 +55,7 @@ pub(super) struct ReviewBootstrap {
 pub(super) struct PreparedReview {
     pub(super) bootstrap: ReviewBootstrap,
     pub(super) initial_page: ReviewPage,
-    pub(super) range_loader: RangeLoader,
+    pub(super) context: super::diff::ReviewContext,
     pub(super) version: super::diff::WorkspaceVersion,
 }
 
@@ -74,15 +68,6 @@ struct RangeRequest {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct SnapshotRequest {
-    generation: u64,
-    snapshot_id: super::diff::SnapshotId,
-    patch_id: super::diff::PatchId,
-    range: super::diff::ReviewRange,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct GenerationRequest {
     generation: u64,
 }
@@ -90,8 +75,6 @@ struct GenerationRequest {
 #[derive(Serialize)]
 struct OverviewResponse {
     generation: u64,
-    snapshot_id: super::diff::SnapshotId,
-    patch_id: super::diff::PatchId,
     selected_range: super::diff::ReviewRange,
     overview_html: String,
 }
@@ -99,7 +82,6 @@ struct OverviewResponse {
 #[derive(Serialize)]
 struct ReviewStatus {
     generation: u64,
-    workspace_version: super::diff::WorkspaceVersion,
     changed: bool,
 }
 
@@ -132,40 +114,6 @@ enum ErrorCode {
     InvalidCommentAnchor,
 }
 
-pub(super) type RangeLoader = Arc<
-    dyn Fn(
-            super::diff::ReviewRange,
-            CancellationToken,
-        ) -> BoxFuture<'static, Result<ReviewPage, ScopeLoadError>>
-        + Send
-        + Sync,
->;
-
-pub(super) type OverviewLoader = Arc<
-    dyn Fn(
-            super::diff::ReviewRange,
-            String,
-            String,
-            CancellationToken,
-        ) -> BoxFuture<'static, Result<String, ScopeLoadError>>
-        + Send
-        + Sync,
->;
-
-pub(super) type StatusLoader = Arc<
-    dyn Fn(
-            CancellationToken,
-        ) -> BoxFuture<'static, Result<super::diff::WorkspaceVersion, ScopeLoadError>>
-        + Send
-        + Sync,
->;
-
-pub(super) type RefreshLoader = Arc<
-    dyn Fn(CancellationToken) -> BoxFuture<'static, Result<PreparedReview, ScopeLoadError>>
-        + Send
-        + Sync,
->;
-
 pub(super) enum ScopeLoadError {
     Cancelled,
     Failed(String),
@@ -175,8 +123,6 @@ pub(super) enum ScopeLoadError {
 #[serde(deny_unknown_fields)]
 pub(super) struct ReviewDecision {
     pub(super) generation: u64,
-    pub(super) snapshot_id: super::diff::SnapshotId,
-    pub(super) patch_id: super::diff::PatchId,
     pub(super) range: super::diff::ReviewRange,
     #[serde(skip_deserializing, default)]
     pub(super) scope: String,
@@ -214,9 +160,7 @@ pub(super) enum CommentSide {
 struct ServerState {
     assets: super::ReviewAssets,
     session: Mutex<ReviewSession>,
-    status_loader: StatusLoader,
-    refresh_loader: RefreshLoader,
-    overview_loader: OverviewLoader,
+    backend: Arc<super::ReviewBackend>,
     overview_operations: OverviewOperations,
     refresh_generation: Mutex<()>,
     session_shutdown: CancellationToken,
@@ -227,11 +171,10 @@ struct ReviewSession {
     generation: u64,
     bootstrap: ReviewBootstrap,
     default_page: ReviewPage,
-    range_loader: RangeLoader,
+    context: super::diff::ReviewContext,
     range_pages: BoundedCache<super::diff::ReviewRange, ReviewPage>,
     overviews: BoundedCache<super::diff::ReviewRange, String>,
     version: super::diff::WorkspaceVersion,
-    snapshot_id: super::diff::SnapshotId,
     generation_shutdown: CancellationToken,
     session_shutdown: CancellationToken,
 }
@@ -288,16 +231,14 @@ where
 
 impl ReviewSession {
     fn new(review: PreparedReview, session_shutdown: CancellationToken) -> Self {
-        let snapshot_id = review.initial_page.snapshot_id.clone();
         Self {
             generation: 0,
             bootstrap: review.bootstrap,
             default_page: review.initial_page,
-            range_loader: review.range_loader,
+            context: review.context,
             range_pages: BoundedCache::new(MAX_CACHED_PAGES, MAX_CACHED_PAGE_BYTES),
             overviews: BoundedCache::new(MAX_CACHED_OVERVIEWS, MAX_CACHED_OVERVIEW_BYTES),
             version: review.version,
-            snapshot_id,
             generation_shutdown: session_shutdown.child_token(),
             session_shutdown,
         }
@@ -347,9 +288,7 @@ pub(super) struct ReviewServer {
 impl ReviewServer {
     pub(super) async fn start(
         review: PreparedReview,
-        status_loader: StatusLoader,
-        refresh_loader: RefreshLoader,
-        overview_loader: OverviewLoader,
+        backend: Arc<super::ReviewBackend>,
         token: String,
         assets: super::ReviewAssets,
     ) -> Result<Self, std::io::Error> {
@@ -360,9 +299,7 @@ impl ReviewServer {
         let state = Arc::new(ServerState {
             assets,
             session: Mutex::new(ReviewSession::new(review, session_shutdown.clone())),
-            status_loader,
-            refresh_loader,
-            overview_loader,
+            backend,
             overview_operations: Mutex::new(HashMap::new()),
             refresh_generation: Mutex::new(()),
             session_shutdown: session_shutdown.clone(),
@@ -477,7 +414,7 @@ async fn review_status(State(state): State<Arc<ServerState>>) -> Response<Body> 
             session.generation_shutdown.clone(),
         )
     };
-    let current = match (state.status_loader)(shutdown).await {
+    let current = match state.backend.current_version(shutdown).await {
         Ok(version) => version,
         Err(ScopeLoadError::Cancelled) => {
             return error_response(
@@ -506,7 +443,6 @@ async fn review_status(State(state): State<Arc<ServerState>>) -> Response<Body> 
         StatusCode::OK,
         ReviewStatus {
             generation,
-            workspace_version: current.clone(),
             changed: current != version,
         },
     )
@@ -524,7 +460,12 @@ async fn refresh_review(
         }
         session.generation_shutdown.clone()
     };
-    let review = match (state.refresh_loader)(shutdown).await {
+    let review = match state
+        .backend
+        .prepare(shutdown)
+        .await
+        .map_err(super::scope_load_error)
+    {
         Ok(review) => review,
         Err(ScopeLoadError::Cancelled) => {
             return error_response(
@@ -568,7 +509,7 @@ async fn load_range(
     State(state): State<Arc<ServerState>>,
     Json(request): Json<RangeRequest>,
 ) -> Response<Body> {
-    let (loader, generation, version, shutdown) = {
+    let (context, generation, version, shutdown) = {
         let session = state.session.lock().await;
         if request.generation != session.generation {
             return stale_snapshot("the review generation is stale");
@@ -577,14 +518,14 @@ async fn load_range(
             return secure_json(StatusCode::OK, page);
         }
         (
-            Arc::clone(&session.range_loader),
+            session.context.clone(),
             session.generation,
             session.version.clone(),
             session.generation_shutdown.clone(),
         )
     };
 
-    let current = match (state.status_loader)(shutdown.clone()).await {
+    let current = match state.backend.current_version(shutdown.clone()).await {
         Ok(version) => version,
         Err(ScopeLoadError::Cancelled) => {
             return error_response(
@@ -610,7 +551,12 @@ async fn load_range(
     }
 
     let validation_shutdown = shutdown.clone();
-    let page = match loader(request.range, shutdown).await {
+    let page = match state
+        .backend
+        .prepare_page(context, request.range, shutdown)
+        .await
+        .map_err(super::scope_load_error)
+    {
         Ok(page) => page,
         Err(ScopeLoadError::Cancelled) => {
             return error_response(
@@ -631,7 +577,7 @@ async fn load_range(
             );
         }
     };
-    let current = match (state.status_loader)(validation_shutdown).await {
+    let current = match state.backend.current_version(validation_shutdown).await {
         Ok(version) => version,
         Err(ScopeLoadError::Cancelled) => {
             return stale_snapshot("the review changed while this range was loading");
@@ -659,7 +605,7 @@ async fn load_range(
 
 async fn load_overview(
     State(state): State<Arc<ServerState>>,
-    Json(request): Json<SnapshotRequest>,
+    Json(request): Json<RangeRequest>,
 ) -> Response<Body> {
     let overview_key = (request.generation, request.range);
     let operation = {
@@ -673,7 +619,7 @@ async fn load_overview(
     let _operation = operation.lock().await;
     let (page, shutdown) = {
         let session = state.session.lock().await;
-        let Some(page) = matching_page(&session, &request) else {
+        let Some(page) = matching_page(&session, request.generation, &request.range) else {
             return stale_snapshot("the requested review snapshot is stale");
         };
         if let Some(overview_html) = session.overviews.get(&request.range).cloned() {
@@ -681,8 +627,6 @@ async fn load_overview(
                 StatusCode::OK,
                 OverviewResponse {
                     generation: request.generation,
-                    snapshot_id: request.snapshot_id,
-                    patch_id: request.patch_id,
                     selected_range: request.range,
                     overview_html,
                 },
@@ -690,13 +634,10 @@ async fn load_overview(
         }
         (page.clone(), session.generation_shutdown.clone())
     };
-    let overview_html = match (state.overview_loader)(
-        request.range,
-        page.diff.scope.clone(),
-        page.diff.overview_patch.clone(),
-        shutdown,
-    )
-    .await
+    let overview_html = match state
+        .backend
+        .overview(&page.diff.scope, &page.diff.overview_patch, shutdown)
+        .await
     {
         Ok(overview) => overview,
         Err(ScopeLoadError::Cancelled) => {
@@ -719,7 +660,7 @@ async fn load_overview(
         }
     };
     let mut session = state.session.lock().await;
-    if matching_page(&session, &request).is_none() {
+    if matching_page(&session, request.generation, &request.range).is_none() {
         return stale_snapshot("the review changed while its overview was loading");
     }
     session
@@ -730,8 +671,6 @@ async fn load_overview(
         StatusCode::OK,
         OverviewResponse {
             generation: request.generation,
-            snapshot_id: request.snapshot_id,
-            patch_id: request.patch_id,
             selected_range: request.range,
             overview_html,
         },
@@ -752,9 +691,16 @@ async fn submit(
         );
     }
 
-    let session = state.session.lock().await;
-    let Some(page) = matching_decision_page(&session, &decision) else {
-        return stale_snapshot("the submitted review snapshot is stale");
+    let (page, version, shutdown) = {
+        let session = state.session.lock().await;
+        let Some(page) = matching_page(&session, decision.generation, &decision.range) else {
+            return stale_snapshot("the submitted review snapshot is stale");
+        };
+        (
+            page.clone(),
+            session.version.clone(),
+            session.generation_shutdown.clone(),
+        )
     };
     if decision
         .comments
@@ -769,7 +715,7 @@ async fn submit(
             true,
         );
     }
-    let current = match (state.status_loader)(session.generation_shutdown.clone()).await {
+    let current = match state.backend.current_version(shutdown).await {
         Ok(version) => version,
         Err(ScopeLoadError::Cancelled) => {
             return error_response(
@@ -790,8 +736,12 @@ async fn submit(
             );
         }
     };
-    if current != session.version {
+    if current != version {
         return stale_snapshot("the workspace changed after this snapshot was captured");
+    }
+    let session = state.session.lock().await;
+    if matching_page(&session, decision.generation, &decision.range).is_none() {
+        return stale_snapshot("the review changed while submission was validated");
     }
     decision.scope = page.diff.scope.clone();
 
@@ -830,30 +780,13 @@ async fn cancel(
 
 fn matching_page<'a>(
     session: &'a ReviewSession,
-    request: &SnapshotRequest,
+    generation: u64,
+    range: &super::diff::ReviewRange,
 ) -> Option<&'a ReviewPage> {
-    if request.generation != session.generation || request.snapshot_id != session.snapshot_id {
+    if generation != session.generation {
         return None;
     }
-    let page = session.page(&request.range)?;
-    if page.patch_id != request.patch_id {
-        return None;
-    }
-    Some(page)
-}
-
-fn matching_decision_page<'a>(
-    session: &'a ReviewSession,
-    decision: &ReviewDecision,
-) -> Option<&'a ReviewPage> {
-    if decision.generation != session.generation || decision.snapshot_id != session.snapshot_id {
-        return None;
-    }
-    let page = session.page(&decision.range)?;
-    if page.patch_id != decision.patch_id {
-        return None;
-    }
-    Some(page)
+    session.page(range)
 }
 
 fn valid_comment_anchor(snapshot: &super::diff::DiffSnapshot, comment: &ReviewComment) -> bool {
@@ -960,22 +893,22 @@ pub(crate) enum ServerError {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        Decision, OverviewLoader, PROTOCOL_VERSION, PreparedReview, RangeLoader, RefreshLoader,
-        ReviewBootstrap, ReviewOutcome, ReviewPage, ReviewServer, ScopeLoadError, StatusLoader,
-    };
-    use crate::review::diff::{
-        DiffSnapshot, PatchId, ReviewRange, ReviewTarget, ReviewTargetKind, SnapshotId,
-        WorkspaceVersion,
-    };
+    use super::{Decision, PROTOCOL_VERSION, ReviewOutcome, ReviewServer};
+    use crate::review::diff::ReviewRange;
+    use crate::review::{OverviewGenerationError, OverviewGenerator, ReviewBackend};
     use std::{
+        fs,
+        path::Path,
+        process::Command,
         sync::{
             Arc,
-            atomic::{AtomicU8, AtomicUsize, Ordering},
+            atomic::{AtomicUsize, Ordering},
         },
         time::Duration,
     };
+    use tempfile::TempDir;
     use tokio::sync::Notify;
+    use tokio_util::sync::CancellationToken;
 
     #[tokio::test]
     async fn server_returns_the_submitted_decision() {
@@ -989,8 +922,6 @@ mod tests {
             .post(server.endpoint_url("api/decision"))
             .json(&serde_json::json!({
                 "generation": 0,
-                "snapshot_id": "snapshot-1",
-                "patch_id": "patch-1",
                 "range": uncommitted_range(),
                 "decision": "approve",
                 "summary": "Looks good",
@@ -1047,34 +978,7 @@ mod tests {
         for name in ["index.html", "app.js", "app.css"] {
             std::fs::write(assets.path().join(name), "").unwrap();
         }
-        let version = Arc::new(AtomicU8::new(1));
-        let status_loader: StatusLoader = Arc::new({
-            let version = Arc::clone(&version);
-            move |_shutdown| {
-                let value = version.load(Ordering::SeqCst);
-                Box::pin(async move { Ok(WorkspaceVersion::test(value)) })
-            }
-        });
-        let refresh_loader: RefreshLoader = Arc::new({
-            let version = Arc::clone(&version);
-            move |_shutdown| {
-                let value = version.load(Ordering::SeqCst);
-                let mut review = prepared_review(loader());
-                review.version = WorkspaceVersion::test(value);
-                review.initial_page.diff.patch = "refreshed patch".to_owned();
-                Box::pin(async move { Ok(review) })
-            }
-        });
-        let server = ReviewServer::start(
-            prepared_review(loader()),
-            status_loader,
-            refresh_loader,
-            overview_loader(),
-            "test-token".to_owned(),
-            crate::review::ReviewAssets::for_test(assets.path().to_owned()),
-        )
-        .await
-        .unwrap();
+        let server = start_server(&assets).await;
         let client = reqwest::Client::new();
 
         let initial = client
@@ -1087,7 +991,11 @@ mod tests {
             .unwrap();
         assert_eq!(initial["changed"], false);
 
-        version.store(2, Ordering::SeqCst);
+        fs::write(
+            server.state.backend.workspace.join("working.txt"),
+            "changed again\n",
+        )
+        .unwrap();
         let changed = client
             .get(server.endpoint_url("api/status"))
             .send()
@@ -1107,7 +1015,12 @@ mod tests {
             .json::<serde_json::Value>()
             .await
             .unwrap();
-        assert_eq!(refreshed["page"]["patch"], "refreshed patch");
+        assert!(
+            refreshed["page"]["patch"]
+                .as_str()
+                .unwrap()
+                .contains("changed again")
+        );
         let current = client
             .get(server.endpoint_url("api/status"))
             .send()
@@ -1125,15 +1038,7 @@ mod tests {
         for name in ["index.html", "app.js", "app.css"] {
             std::fs::write(assets.path().join(name), "").unwrap();
         }
-        let loads = Arc::new(AtomicUsize::new(0));
-        let loader: RangeLoader = Arc::new({
-            let loads = Arc::clone(&loads);
-            move |scope, _shutdown| {
-                loads.fetch_add(1, Ordering::SeqCst);
-                Box::pin(async move { Ok(page(scope)) })
-            }
-        });
-        let server = start_server_with_loader(&assets, loader).await;
+        let server = start_server(&assets).await;
 
         let response = reqwest::Client::new()
             .post(server.endpoint_url("api/range"))
@@ -1143,7 +1048,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), reqwest::StatusCode::OK);
-        assert_eq!(loads.load(Ordering::SeqCst), 0);
+        server.cancel().await;
     }
 
     #[tokio::test]
@@ -1155,15 +1060,13 @@ mod tests {
         let server = start_server(&assets).await;
         let client = reqwest::Client::new();
 
-        for to in 2..=10 {
-            let response = client
-                .post(server.endpoint_url("api/range"))
-                .json(&range_request(ReviewRange { from: 0, to }))
-                .send()
-                .await
-                .unwrap();
-            assert_eq!(response.status(), reqwest::StatusCode::OK);
-        }
+        let response = client
+            .post(server.endpoint_url("api/range"))
+            .json(&range_request(full_range()))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
 
         let response = client
             .get(server.endpoint_url("api/review"))
@@ -1180,35 +1083,16 @@ mod tests {
         for name in ["index.html", "app.js", "app.css"] {
             std::fs::write(assets.path().join(name), "").unwrap();
         }
-        let version = Arc::new(AtomicU8::new(1));
-        let status_loader: StatusLoader = Arc::new({
-            let version = Arc::clone(&version);
-            move |_shutdown| {
-                let value = version.load(Ordering::SeqCst);
-                Box::pin(async move { Ok(WorkspaceVersion::test(value)) })
-            }
-        });
-        let review = prepared_review(loader());
-        let refreshed = review.clone();
-        let refresh_loader: RefreshLoader = Arc::new(move |_shutdown| {
-            let refreshed = refreshed.clone();
-            Box::pin(async move { Ok(refreshed) })
-        });
-        let server = ReviewServer::start(
-            review,
-            status_loader,
-            refresh_loader,
-            overview_loader(),
-            "test-token".to_owned(),
-            crate::review::ReviewAssets::for_test(assets.path().to_owned()),
+        let server = start_server(&assets).await;
+        fs::write(
+            server.state.backend.workspace.join("working.txt"),
+            "changed again\n",
         )
-        .await
         .unwrap();
-        version.store(2, Ordering::SeqCst);
 
         let response = reqwest::Client::new()
             .post(server.endpoint_url("api/range"))
-            .json(&range_request(ReviewRange { from: 0, to: 2 }))
+            .json(&range_request(working_tree_range()))
             .send()
             .await
             .unwrap();
@@ -1276,14 +1160,14 @@ mod tests {
             std::fs::write(assets.path().join(name), "").unwrap();
         }
         let loads = Arc::new(AtomicUsize::new(0));
-        let overview_loader: OverviewLoader = Arc::new({
+        let generator: OverviewGenerator = Arc::new({
             let loads = Arc::clone(&loads);
-            move |_range, _label, patch, _shutdown| {
+            move |_prompt, _shutdown| {
                 loads.fetch_add(1, Ordering::SeqCst);
-                Box::pin(async move { Ok(format!("<p>{patch}</p>")) })
+                Box::pin(async move { Ok("<p>Overview</p>".to_owned()) })
             }
         });
-        let server = start_server_with_loaders(&assets, loader(), overview_loader).await;
+        let server = start_server_with_generator(&assets, generator).await;
 
         assert_eq!(loads.load(Ordering::SeqCst), 0);
         for _ in 0..2 {
@@ -1296,7 +1180,7 @@ mod tests {
             assert_eq!(response.status(), reqwest::StatusCode::OK);
             assert_eq!(
                 response.json::<serde_json::Value>().await.unwrap()["overview_html"],
-                "<p>patch</p>"
+                "<p>Overview</p>"
             );
         }
         assert_eq!(loads.load(Ordering::SeqCst), 1);
@@ -1311,11 +1195,11 @@ mod tests {
         let loads = Arc::new(AtomicUsize::new(0));
         let started = Arc::new(Notify::new());
         let release = Arc::new(Notify::new());
-        let overview_loader: OverviewLoader = Arc::new({
+        let generator: OverviewGenerator = Arc::new({
             let loads = Arc::clone(&loads);
             let started = Arc::clone(&started);
             let release = Arc::clone(&release);
-            move |_range, _label, _patch, _shutdown| {
+            move |_prompt, _shutdown| {
                 let started = Arc::clone(&started);
                 let release = Arc::clone(&release);
                 loads.fetch_add(1, Ordering::SeqCst);
@@ -1326,7 +1210,7 @@ mod tests {
                 })
             }
         });
-        let server = start_server_with_loaders(&assets, loader(), overview_loader).await;
+        let server = start_server_with_generator(&assets, generator).await;
         let url = server.endpoint_url("api/overview");
         let first = tokio::spawn(request_overview(url.clone(), uncommitted_range()));
         started.notified().await;
@@ -1347,16 +1231,16 @@ mod tests {
             std::fs::write(assets.path().join(name), "").unwrap();
         }
         let loads = Arc::new(AtomicUsize::new(0));
-        let overview_loader: OverviewLoader = Arc::new({
+        let generator: OverviewGenerator = Arc::new({
             let loads = Arc::clone(&loads);
-            move |_range, _label, _patch, _shutdown| {
+            move |_prompt, _shutdown| {
                 loads.fetch_add(1, Ordering::SeqCst);
                 Box::pin(async { Ok("<p>Overview</p>".to_owned()) })
             }
         });
-        let server = start_server_with_loaders(&assets, loader(), overview_loader).await;
+        let server = start_server_with_generator(&assets, generator).await;
 
-        let status = request_overview(server.endpoint_url("api/overview"), full_range()).await;
+        let status = request_overview(server.endpoint_url("api/overview"), working_tree_range()).await;
 
         assert_eq!(status, reqwest::StatusCode::CONFLICT);
         assert_eq!(loads.load(Ordering::SeqCst), 0);
@@ -1368,10 +1252,10 @@ mod tests {
         for name in ["index.html", "app.js", "app.css"] {
             std::fs::write(assets.path().join(name), "").unwrap();
         }
-        let overview_loader: OverviewLoader = Arc::new(|_range, _label, _patch, _shutdown| {
-            Box::pin(async { Err(ScopeLoadError::Cancelled) })
+        let generator: OverviewGenerator = Arc::new(|_prompt, _shutdown| {
+            Box::pin(async { Err(OverviewGenerationError::Cancelled) })
         });
-        let server = start_server_with_loaders(&assets, loader(), overview_loader).await;
+        let server = start_server_with_generator(&assets, generator).await;
 
         let response = reqwest::Client::new()
             .post(server.endpoint_url("api/overview"))
@@ -1397,70 +1281,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancelling_stops_an_active_scope_load() {
-        let assets = tempfile::tempdir().unwrap();
-        for name in ["index.html", "app.js", "app.css"] {
-            std::fs::write(assets.path().join(name), "").unwrap();
-        }
-        let started = Arc::new(Notify::new());
-        let loader: RangeLoader = Arc::new({
-            let started = Arc::clone(&started);
-            move |_scope, shutdown| {
-                let started = Arc::clone(&started);
-                Box::pin(async move {
-                    started.notify_one();
-                    shutdown.cancelled().await;
-                    Err(ScopeLoadError::Cancelled)
-                })
-            }
-        });
-        let server = start_server_with_loader(&assets, loader).await;
-        let scope_request = tokio::spawn({
-            let url = server.endpoint_url("api/range");
-            async move {
-                reqwest::Client::new()
-                    .post(url)
-                    .json(&range_request(full_range()))
-                    .send()
-                    .await
-            }
-        });
-        started.notified().await;
-
-        reqwest::Client::new()
-            .post(server.endpoint_url("api/cancel"))
-            .json(&serde_json::json!({ "generation": 0 }))
-            .send()
-            .await
-            .unwrap();
-
-        let outcome = tokio::time::timeout(Duration::from_secs(1), server.wait())
-            .await
-            .expect("server should stop without waiting for the scope load")
-            .unwrap();
-        assert!(matches!(outcome, ReviewOutcome::Cancelled));
-        scope_request.await.unwrap().unwrap();
-    }
-
-    #[tokio::test]
     async fn cancelling_stops_an_active_overview_load() {
         let assets = tempfile::tempdir().unwrap();
         for name in ["index.html", "app.js", "app.css"] {
             std::fs::write(assets.path().join(name), "").unwrap();
         }
         let started = Arc::new(Notify::new());
-        let overview_loader: OverviewLoader = Arc::new({
+        let generator: OverviewGenerator = Arc::new({
             let started = Arc::clone(&started);
-            move |_range, _label, _patch, shutdown| {
+            move |_prompt, shutdown| {
                 let started = Arc::clone(&started);
                 Box::pin(async move {
                     started.notify_one();
                     shutdown.cancelled().await;
-                    Err(ScopeLoadError::Cancelled)
+                    Err(OverviewGenerationError::Cancelled)
                 })
             }
         });
-        let server = start_server_with_loaders(&assets, loader(), overview_loader).await;
+        let server = start_server_with_generator(&assets, generator).await;
         let overview_request = tokio::spawn({
             let url = server.endpoint_url("api/overview");
             async move { request_overview(url, uncommitted_range()).await }
@@ -1502,7 +1340,13 @@ mod tests {
 
         assert_eq!(response["protocol_version"], PROTOCOL_VERSION);
         assert_eq!(response["generation"], 0);
-        assert_eq!(response["page"]["snapshot_id"], "snapshot-1");
+        assert_eq!(
+            response["page"]["selected_range"],
+            serde_json::json!({ "from": 0, "to": 2 })
+        );
+        assert!(response.get("workspace_version").is_none());
+        assert!(response.get("snapshot_id").is_none());
+        assert!(response["page"].get("patch_id").is_none());
         assert!(response.get("bootstrap").is_none());
         server.cancel().await;
     }
@@ -1515,9 +1359,16 @@ mod tests {
         }
         let server = start_server(&assets).await;
         let client = reqwest::Client::new();
+        let refreshed = client
+            .post(server.endpoint_url("api/refresh"))
+            .json(&serde_json::json!({ "generation": 0 }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(refreshed.status(), reqwest::StatusCode::OK);
         let stale = client
             .post(server.endpoint_url("api/decision"))
-            .json(&decision_request("wrong-patch", Vec::new()))
+            .json(&decision_request(0, Vec::new()))
             .send()
             .await
             .unwrap();
@@ -1529,7 +1380,7 @@ mod tests {
 
         let accepted = client
             .post(server.endpoint_url("api/decision"))
-            .json(&decision_request("patch-1", Vec::new()))
+            .json(&decision_request(1, Vec::new()))
             .send()
             .await
             .unwrap();
@@ -1556,7 +1407,7 @@ mod tests {
         });
         let response = reqwest::Client::new()
             .post(server.endpoint_url("api/decision"))
-            .json(&decision_request("patch-1", vec![comment]))
+            .json(&decision_request(0, vec![comment]))
             .send()
             .await
             .unwrap();
@@ -1573,34 +1424,21 @@ mod tests {
     }
 
     async fn start_server(assets: &tempfile::TempDir) -> ReviewServer {
-        start_server_with_loader(assets, loader()).await
+        start_server_with_generator(assets, overview_generator()).await
     }
 
-    async fn start_server_with_loader(
+    async fn start_server_with_generator(
         assets: &tempfile::TempDir,
-        loader: RangeLoader,
+        overview_generator: OverviewGenerator,
     ) -> ReviewServer {
-        start_server_with_loaders(assets, loader, overview_loader()).await
-    }
-
-    async fn start_server_with_loaders(
-        assets: &tempfile::TempDir,
-        loader: RangeLoader,
-        overview_loader: OverviewLoader,
-    ) -> ReviewServer {
-        let review = prepared_review(loader);
-        let status_loader: StatusLoader =
-            Arc::new(|_shutdown| Box::pin(async { Ok(WorkspaceVersion::test(1)) }));
-        let refreshed = review.clone();
-        let refresh_loader: RefreshLoader = Arc::new(move |_shutdown| {
-            let refreshed = refreshed.clone();
-            Box::pin(async move { Ok(refreshed) })
+        let backend = Arc::new(ReviewBackend {
+            workspace: repository().keep(),
+            overview_generator,
         });
+        let review = backend.prepare(CancellationToken::new()).await.unwrap();
         ReviewServer::start(
             review,
-            status_loader,
-            refresh_loader,
-            overview_loader,
+            backend,
             "test-token".to_owned(),
             crate::review::ReviewAssets::for_test(assets.path().to_owned()),
         )
@@ -1608,33 +1446,8 @@ mod tests {
         .unwrap()
     }
 
-    fn prepared_review(loader: RangeLoader) -> PreparedReview {
-        PreparedReview {
-            bootstrap: ReviewBootstrap {
-                protocol_version: 1,
-                generation: 0,
-                workspace_version: WorkspaceVersion::test(1),
-                snapshot_id: SnapshotId::test(1),
-                title: "Review repo".to_owned(),
-                repository: "repo".to_owned(),
-                trunk: "main".to_owned(),
-                range_targets: targets(),
-                default_range: uncommitted_range(),
-            },
-            initial_page: page(uncommitted_range()),
-            range_loader: loader,
-            version: WorkspaceVersion::test(1),
-        }
-    }
-
-    fn loader() -> RangeLoader {
-        Arc::new(|range, _shutdown| Box::pin(async move { Ok(page(range)) }))
-    }
-
-    fn overview_loader() -> OverviewLoader {
-        Arc::new(|_range, _label, _patch, _shutdown| {
-            Box::pin(async { Ok("<p>Overview</p>".to_owned()) })
-        })
+    fn overview_generator() -> OverviewGenerator {
+        Arc::new(|_prompt, _shutdown| Box::pin(async { Ok("<p>Overview</p>".to_owned()) }))
     }
 
     async fn request_overview(url: String, range: ReviewRange) -> reqwest::StatusCode {
@@ -1654,17 +1467,13 @@ mod tests {
     fn snapshot_request(range: ReviewRange) -> serde_json::Value {
         serde_json::json!({
             "generation": 0,
-            "snapshot_id": "snapshot-1",
-            "patch_id": format!("patch-{}", range.from),
             "range": range,
         })
     }
 
-    fn decision_request(patch_id: &str, comments: Vec<serde_json::Value>) -> serde_json::Value {
+    fn decision_request(generation: u64, comments: Vec<serde_json::Value>) -> serde_json::Value {
         serde_json::json!({
-            "generation": 0,
-            "snapshot_id": "snapshot-1",
-            "patch_id": patch_id,
+            "generation": generation,
             "range": uncommitted_range(),
             "decision": "approve",
             "summary": "",
@@ -1673,6 +1482,10 @@ mod tests {
     }
 
     fn uncommitted_range() -> ReviewRange {
+        full_range()
+    }
+
+    fn working_tree_range() -> ReviewRange {
         ReviewRange { from: 1, to: 2 }
     }
 
@@ -1680,43 +1493,35 @@ mod tests {
         ReviewRange { from: 0, to: 2 }
     }
 
-    fn targets() -> Vec<ReviewTarget> {
-        vec![
-            ReviewTarget {
-                index: 0,
-                kind: ReviewTargetKind::Trunk,
-                short_id: "base".to_owned(),
-                title: "main · Base".to_owned(),
-            },
-            ReviewTarget {
-                index: 1,
-                kind: ReviewTargetKind::Commit,
-                short_id: "head".to_owned(),
-                title: "Current commit".to_owned(),
-            },
-            ReviewTarget {
-                index: 2,
-                kind: ReviewTargetKind::WorkingTree,
-                short_id: "WT".to_owned(),
-                title: "Uncommitted changes".to_owned(),
-            },
-        ]
+    fn repository() -> TempDir {
+        let directory = TempDir::new().unwrap();
+        git(
+            directory.path(),
+            ["init", "--quiet", "--initial-branch=main"],
+        );
+        git(
+            directory.path(),
+            ["config", "user.email", "test@example.com"],
+        );
+        git(directory.path(), ["config", "user.name", "Test User"]);
+        git(directory.path(), ["config", "commit.gpgSign", "false"]);
+        fs::write(directory.path().join("tracked.txt"), "initial\n").unwrap();
+        git(directory.path(), ["add", "tracked.txt"]);
+        git(directory.path(), ["commit", "--quiet", "-m", "initial"]);
+        git(directory.path(), ["checkout", "--quiet", "-b", "feature"]);
+        fs::write(directory.path().join("tracked.txt"), "feature\n").unwrap();
+        git(directory.path(), ["add", "tracked.txt"]);
+        git(directory.path(), ["commit", "--quiet", "-m", "feature"]);
+        fs::write(directory.path().join("working.txt"), "working\n").unwrap();
+        directory
     }
 
-    fn page(range: ReviewRange) -> ReviewPage {
-        ReviewPage {
-            generation: 0,
-            snapshot_id: SnapshotId::test(1),
-            patch_id: PatchId::test(range.from as u8),
-            title: "Review".to_owned(),
-            selected_range: range,
-            diff: DiffSnapshot {
-                patch: "patch".to_owned(),
-                overview_patch: "patch".to_owned(),
-                repository: "repo".to_owned(),
-                scope: "Selected range".to_owned(),
-                base: "HEAD".to_owned(),
-            },
-        }
+    fn git<const N: usize>(root: &Path, arguments: [&str; N]) {
+        let status = Command::new("git")
+            .args(arguments)
+            .current_dir(root)
+            .status()
+            .unwrap();
+        assert!(status.success());
     }
 }

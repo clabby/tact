@@ -115,27 +115,3 @@ export function finishTerminal(
 function emptyFeedback(): FeedbackState {
   return { summary: "", comments: [], seenPaths: new Set() };
 }
-
-export class ReviewStore {
-  state: ReviewState;
-
-  constructor(session: ReviewSession) {
-    this.state = createReviewState(session);
-  }
-
-  feedback() {
-    return currentFeedback(this.state);
-  }
-
-  activate(page: ReviewPage) {
-    this.state = activatePage(this.state, page);
-  }
-
-  replaceSession(session: ReviewSession) {
-    this.state = installSession(this.state, session);
-  }
-
-  discardFeedback() {
-    this.state = discardCurrentFeedback(this.state);
-  }
-}

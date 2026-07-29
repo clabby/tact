@@ -65,47 +65,6 @@ pub(super) enum PatchSide {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct WorkspaceVersion([u8; 32]);
 
-#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
-#[serde(transparent)]
-pub(super) struct SnapshotId(String);
-
-#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
-#[serde(transparent)]
-pub(super) struct PatchId(String);
-
-impl std::fmt::Display for SnapshotId {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(&self.0)
-    }
-}
-
-impl std::fmt::Display for PatchId {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(&self.0)
-    }
-}
-
-#[cfg(test)]
-impl WorkspaceVersion {
-    pub(super) fn test(value: u8) -> Self {
-        Self([value; 32])
-    }
-}
-
-#[cfg(test)]
-impl SnapshotId {
-    pub(super) fn test(value: u8) -> Self {
-        Self(format!("snapshot-{value}"))
-    }
-}
-
-#[cfg(test)]
-impl PatchId {
-    pub(super) fn test(value: u8) -> Self {
-        Self(format!("patch-{value}"))
-    }
-}
-
 impl ReviewContext {
     pub(super) async fn load(workspace: &Path) -> Result<Self, DiffError> {
         let root = repository_root(workspace).await?;
@@ -193,10 +152,6 @@ impl ReviewContext {
 
     pub(super) fn version(&self) -> WorkspaceVersion {
         self.version.clone()
-    }
-
-    pub(super) fn snapshot_id(&self) -> SnapshotId {
-        snapshot_id(&self.version)
     }
 
     async fn collect_working_tree(
@@ -394,43 +349,6 @@ fn workspace_version(trunk: &str, head: &str, patch: &str) -> WorkspaceVersion {
         digest.update(value.as_bytes());
     }
     WorkspaceVersion(digest.finalize().into())
-}
-
-fn snapshot_id(version: &WorkspaceVersion) -> SnapshotId {
-    let mut digest = Sha256::new();
-    digest.update(b"tact-review-snapshot-v1");
-    digest.update(version.0);
-    SnapshotId(hex_digest(digest.finalize().into()))
-}
-
-pub(super) fn patch_id(snapshot: &SnapshotId, range: ReviewRange, patch: &str) -> PatchId {
-    let mut digest = Sha256::new();
-    digest.update(b"tact-review-patch-v1");
-    digest.update(snapshot.0.as_bytes());
-    digest.update(range.from.to_le_bytes());
-    digest.update(range.to.to_le_bytes());
-    digest.update(patch.len().to_le_bytes());
-    digest.update(patch.as_bytes());
-    PatchId(hex_digest(digest.finalize().into()))
-}
-
-fn hex_digest(bytes: [u8; 32]) -> String {
-    use std::fmt::Write as _;
-
-    let mut value = String::with_capacity(64);
-    for byte in bytes {
-        write!(&mut value, "{byte:02x}").expect("writing to a string cannot fail");
-    }
-    value
-}
-
-impl Serialize for WorkspaceVersion {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_str(&hex_digest(self.0))
-    }
 }
 
 async fn repository_root(workspace: &Path) -> Result<std::path::PathBuf, DiffError> {

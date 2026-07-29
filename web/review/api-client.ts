@@ -32,8 +32,8 @@ export class ApiError extends Error {
 export class ApiClient {
   constructor(private readonly base = "./api") {}
 
-  async review(): Promise<ReviewSession> {
-    const session = await this.request<ReviewSession>("review");
+  async review(signal?: AbortSignal): Promise<ReviewSession> {
+    const session = await this.request<ReviewSession>("review", { signal });
     if (session.protocol_version !== REVIEW_PROTOCOL_VERSION) {
       throw new ApiError(
         "invalid_response",
@@ -43,25 +43,23 @@ export class ApiClient {
     return session;
   }
 
-  status(): Promise<ReviewStatus> {
-    return this.request("status", { cache: "no-store" });
+  status(signal?: AbortSignal): Promise<ReviewStatus> {
+    return this.request("status", { cache: "no-store", signal });
   }
 
-  loadRange(generation: number, range: ReviewRange): Promise<ReviewPage> {
-    return this.post("range", { generation, range });
+  loadRange(generation: number, range: ReviewRange, signal?: AbortSignal): Promise<ReviewPage> {
+    return this.post("range", { generation, range }, signal);
   }
 
-  refresh(generation: number): Promise<ReviewSession> {
-    return this.post("refresh", { generation });
+  refresh(generation: number, signal?: AbortSignal): Promise<ReviewSession> {
+    return this.post("refresh", { generation }, signal);
   }
 
-  overview(page: ReviewPage): Promise<OverviewResponse> {
+  overview(page: ReviewPage, signal?: AbortSignal): Promise<OverviewResponse> {
     return this.post("overview", {
       generation: page.generation,
       range: page.selected_range,
-      snapshot_id: page.snapshot_id,
-      patch_id: page.patch_id,
-    });
+    }, signal);
   }
 
   async submit(decision: ReviewDecision): Promise<void> {
@@ -72,8 +70,8 @@ export class ApiClient {
     await this.request("cancel", this.postOptions({ generation }), false);
   }
 
-  private post<T>(path: string, body: unknown): Promise<T> {
-    return this.request(path, this.postOptions(body));
+  private post<T>(path: string, body: unknown, signal?: AbortSignal): Promise<T> {
+    return this.request(path, { ...this.postOptions(body), signal });
   }
 
   private postOptions(body: unknown): RequestInit {
@@ -129,4 +127,3 @@ function isErrorCode(value: string | undefined): value is ReviewErrorCode {
 export function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
 }
-

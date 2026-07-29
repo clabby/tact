@@ -1,12 +1,12 @@
 :root {
   color-scheme: light dark;
-  --bg: light-dark(#f7f8f5, #111311);
-  --surface: light-dark(#ffffff, #181b18);
-  --surface-raised: light-dark(#ffffff, #202420);
-  --line: light-dark(#e2e5df, #2d322e);
-  --line-strong: light-dark(#d2d6cf, #3a403b);
-  --text: light-dark(#202320, #ecf0ec);
-  --muted: light-dark(#70766f, #929a93);
+  --bg: light-dark(#f7f8f5, #0f1115);
+  --surface: light-dark(#ffffff, #171a20);
+  --surface-raised: light-dark(#ffffff, #20242c);
+  --line: light-dark(#e2e5df, #2c313b);
+  --line-strong: light-dark(#d2d6cf, #3b424e);
+  --text: light-dark(#202320, #edf0f5);
+  --muted: light-dark(#70766f, #969daa);
   --accent: light-dark(#315f36, #9bc59e);
   --accent-solid: light-dark(#315f36, #7eae82);
   --accent-on: #fff;

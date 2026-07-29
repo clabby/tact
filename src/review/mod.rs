@@ -10,8 +10,8 @@ pub(crate) use diff::ReviewRange;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use futures_util::future::BoxFuture;
 use server::{
-    OverviewLoader, PreparedReview, RangeLoader, RefreshLoader, ReviewBootstrap, ReviewDecision,
-    ReviewOutcome, ReviewPage, ReviewServer, ScopeLoadError, StatusLoader,
+    PreparedReview, ReviewBootstrap, ReviewDecision, ReviewOutcome, ReviewPage, ReviewServer,
+    ScopeLoadError,
 };
 use sha2::{Digest, Sha256};
 use std::{
@@ -39,6 +39,11 @@ pub(crate) enum OverviewGenerationError {
 
 pub(crate) struct ReviewService;
 
+struct ReviewBackend {
+    workspace: PathBuf,
+    overview_generator: OverviewGenerator,
+}
+
 pub(crate) struct ReviewHandle {
     server: ReviewServer,
 }
@@ -51,48 +56,14 @@ impl ReviewService {
     ) -> Result<ReviewHandle, ReviewError> {
         let preparation_shutdown = CancellationToken::new();
         let _cancel_preparation_on_drop = CancelOnDrop(preparation_shutdown.clone());
-        let workspace = workspace.to_path_buf();
-        let prepared = prepare_review(workspace.clone(), preparation_shutdown).await?;
+        let backend = Arc::new(ReviewBackend {
+            workspace: workspace.to_path_buf(),
+            overview_generator,
+        });
+        let prepared = backend.prepare(preparation_shutdown).await?;
         let repository = prepared.bootstrap.repository.clone();
-        let status_workspace = workspace.clone();
-        let status_loader: StatusLoader = Arc::new(move |shutdown| {
-            let workspace = status_workspace.clone();
-            Box::pin(async move {
-                tokio::select! {
-                    result = diff::current_version(&workspace) => result.map_err(|error| ScopeLoadError::Failed(error.to_string())),
-                    () = shutdown.cancelled() => Err(ScopeLoadError::Cancelled),
-                }
-            })
-        });
-        let refresh_loader: RefreshLoader = Arc::new(move |shutdown| {
-            let workspace = workspace.clone();
-            Box::pin(async move {
-                prepare_review(workspace, shutdown)
-                    .await
-                    .map_err(scope_load_error)
-            })
-        });
-        let overview_loader: OverviewLoader = Arc::new(move |_range, label, patch, shutdown| {
-            let overview_generator = overview_generator.clone();
-            Box::pin(async move {
-                generate_overview(overview_generator, &label, &patch, shutdown)
-                    .await
-                    .map_err(|error| match error {
-                        ReviewError::Cancelled => ScopeLoadError::Cancelled,
-                        error => ScopeLoadError::Failed(error.to_string()),
-                    })
-            })
-        });
         let token = review_token(&repository, SystemTime::now());
-        let server = ReviewServer::start(
-            prepared,
-            status_loader,
-            refresh_loader,
-            overview_loader,
-            token,
-            assets,
-        )
-        .await?;
+        let server = ReviewServer::start(prepared, backend, token, assets).await?;
         Ok(ReviewHandle { server })
     }
 }
@@ -110,65 +81,6 @@ impl ReviewHandle {
     }
 }
 
-async fn prepare_review(
-    workspace: PathBuf,
-    shutdown: CancellationToken,
-) -> Result<PreparedReview, ReviewError> {
-    for _ in 0..MAX_PREPARATION_ATTEMPTS {
-        let context = tokio::select! {
-            result = diff::load(&workspace) => result?,
-            () = shutdown.cancelled() => return Err(ReviewError::Cancelled),
-        };
-        let title = format!("Review {}", context.repository());
-        let default_range = context.default_range();
-        let snapshot_id = context.snapshot_id();
-        let initial_page = prepare_page(
-            context.clone(),
-            title.clone(),
-            default_range,
-            snapshot_id.clone(),
-            shutdown.clone(),
-        )
-        .await?;
-        let version = context.version();
-        let current = tokio::select! {
-            result = diff::current_version(&workspace) => result?,
-            () = shutdown.cancelled() => return Err(ReviewError::Cancelled),
-        };
-        if current != version {
-            continue;
-        }
-        let bootstrap = ReviewBootstrap {
-            protocol_version: server::PROTOCOL_VERSION,
-            generation: 0,
-            workspace_version: version.clone(),
-            snapshot_id: snapshot_id.clone(),
-            title: title.clone(),
-            repository: context.repository().to_owned(),
-            trunk: context.trunk_name().to_owned(),
-            range_targets: context.range_targets(),
-            default_range,
-        };
-        let range_loader: RangeLoader = Arc::new(move |range, shutdown| {
-            let context = context.clone();
-            let title = title.clone();
-            let snapshot_id = snapshot_id.clone();
-            Box::pin(async move {
-                prepare_page(context, title, range, snapshot_id, shutdown)
-                    .await
-                    .map_err(scope_load_error)
-            })
-        });
-        return Ok(PreparedReview {
-            bootstrap,
-            initial_page,
-            range_loader,
-            version,
-        });
-    }
-    Err(ReviewError::WorkspaceChanged)
-}
-
 fn scope_load_error(error: ReviewError) -> ScopeLoadError {
     match error {
         ReviewError::Cancelled => ScopeLoadError::Cancelled,
@@ -184,26 +96,87 @@ impl Drop for CancelOnDrop {
     }
 }
 
-async fn prepare_page(
-    context: diff::ReviewContext,
-    title: String,
-    range: ReviewRange,
-    snapshot_id: diff::SnapshotId,
-    shutdown: CancellationToken,
-) -> Result<ReviewPage, ReviewError> {
-    let snapshot = tokio::select! {
-        result = context.collect(range) => result?,
-        () = shutdown.cancelled() => return Err(ReviewError::Cancelled),
-    };
-    let patch_id = diff::patch_id(&snapshot_id, range, &snapshot.patch);
-    Ok(ReviewPage {
-        generation: 0,
-        snapshot_id,
-        patch_id,
-        title,
-        selected_range: range,
-        diff: snapshot,
-    })
+impl ReviewBackend {
+    async fn prepare(&self, shutdown: CancellationToken) -> Result<PreparedReview, ReviewError> {
+        for _ in 0..MAX_PREPARATION_ATTEMPTS {
+            let context = tokio::select! {
+                result = diff::load(&self.workspace) => result?,
+                () = shutdown.cancelled() => return Err(ReviewError::Cancelled),
+            };
+            let default_range = context.default_range();
+            let initial_page = self
+                .prepare_page(context.clone(), default_range, shutdown.clone())
+                .await?;
+            let version = context.version();
+            if self
+                .current_version(shutdown.clone())
+                .await
+                .map_err(|error| match error {
+                    ScopeLoadError::Cancelled => ReviewError::Cancelled,
+                    ScopeLoadError::Failed(error) => ReviewError::Overview(error),
+                })?
+                != version
+            {
+                continue;
+            }
+            let bootstrap = ReviewBootstrap {
+                protocol_version: server::PROTOCOL_VERSION,
+                generation: 0,
+                title: format!("Review {}", context.repository()),
+                repository: context.repository().to_owned(),
+                trunk: context.trunk_name().to_owned(),
+                range_targets: context.range_targets(),
+                default_range,
+            };
+            return Ok(PreparedReview {
+                bootstrap,
+                initial_page,
+                context,
+                version,
+            });
+        }
+        Err(ReviewError::WorkspaceChanged)
+    }
+
+    async fn current_version(
+        &self,
+        shutdown: CancellationToken,
+    ) -> Result<diff::WorkspaceVersion, ScopeLoadError> {
+        tokio::select! {
+            result = diff::current_version(&self.workspace) => {
+                result.map_err(|error| ScopeLoadError::Failed(error.to_string()))
+            }
+            () = shutdown.cancelled() => Err(ScopeLoadError::Cancelled),
+        }
+    }
+
+    async fn prepare_page(
+        &self,
+        context: diff::ReviewContext,
+        range: ReviewRange,
+        shutdown: CancellationToken,
+    ) -> Result<ReviewPage, ReviewError> {
+        let diff = tokio::select! {
+            result = context.collect(range) => result?,
+            () = shutdown.cancelled() => return Err(ReviewError::Cancelled),
+        };
+        Ok(ReviewPage {
+            generation: 0,
+            selected_range: range,
+            diff,
+        })
+    }
+
+    async fn overview(
+        &self,
+        label: &str,
+        patch: &str,
+        shutdown: CancellationToken,
+    ) -> Result<String, ScopeLoadError> {
+        generate_overview(self.overview_generator.clone(), label, patch, shutdown)
+            .await
+            .map_err(scope_load_error)
+    }
 }
 
 async fn generate_overview(
@@ -218,7 +191,7 @@ async fn generate_overview(
         .map_err(ReviewError::OverviewSnapshot)?;
     let path = snapshot.path().to_string_lossy();
     let prompt = format!(
-        "Create an HTML overview that explains and visualizes the features in `{label}` for a human reviewer. The exact, immutable Git patch is at `{path}`. Read it without modifying the workspace. Scale the depth of the overview to the size and complexity of the change: a large change warrants a substantial walkthrough, while a small change should remain focused. Explain the purpose, user-visible behavior, architecture and data flow, important files, and areas that deserve reviewer attention. Use clear diagrams when they materially help explain architecture, state, or interactions; inline semantic HTML and inline SVG are available. Return only the HTML fragment, not a full code review. The reviewer owns all visual styling so the fragment works in both light and dark mode: do not include styles, classes, fixed colors, raster images, scripts, external resources, or markdown fences.",
+        "Create a self-contained HTML overview of the features in `{label}` for a human reviewer. The exact, immutable Git patch is at `{path}`. Read it without modifying the workspace. Scale the depth and presentation to the change: a small change can be restrained and compact, while a large or architectural change warrants a substantial walkthrough. Explain the purpose, user-visible behavior, architecture and data flow, important files, and areas that deserve reviewer attention. Give the overview a visual identity appropriate to this particular change instead of making it look like rendered Markdown. You may include a `<style>` element, classes, responsive layouts, and inline SVG. Use diagrams or other visualizations when they materially improve understanding, but do not force them into every overview. The iframe document exposes `data-theme=\"light\"`, `data-theme=\"dark\"`, or `data-theme=\"system\"` on its root; define an intentional palette for both light and dark appearances, including a `prefers-color-scheme` fallback for system mode. Return only the HTML fragment, not a full code review or a Markdown fence. Keep it accessible and responsive. Do not include scripts, event handlers, external resources, or raster images.",
         label = label,
     );
     let result = match overview_generator(prompt, shutdown).await {
@@ -265,12 +238,10 @@ impl ReviewDecision {
             server::Decision::RequestChanges => "Changes requested",
         };
         let mut markdown = format!(
-            "## Review: {heading}\n\n**Scope:** {scope}\n**Range:** {from} → {to}\n**Snapshot:** `{snapshot}`\n**Patch:** `{patch}`\n",
+            "## Review: {heading}\n\n**Scope:** {scope}\n**Range:** {from} → {to}\n",
             scope = self.scope,
             from = self.range.from,
             to = self.range.to,
-            snapshot = self.snapshot_id,
-            patch = self.patch_id,
         );
         if !self.summary.trim().is_empty() {
             markdown.push('\n');
@@ -340,7 +311,7 @@ impl ReviewError {
 mod tests {
     use super::server::{CommentSide, Decision, ReviewComment, ReviewDecision};
     use super::{OverviewGenerator, generate_overview};
-    use crate::review::diff::{PatchId, ReviewRange, SnapshotId};
+    use crate::review::diff::ReviewRange;
     use std::sync::{Arc, Mutex};
     use tokio_util::sync::CancellationToken;
 
@@ -391,18 +362,18 @@ mod tests {
             "diff --git a/file b/file\n"
         );
         let prompt = observed_prompt.lock().unwrap();
-        assert!(prompt.contains("explains and visualizes the features"));
-        assert!(prompt.contains("Scale the depth"));
+        assert!(prompt.contains("self-contained HTML overview"));
+        assert!(prompt.contains("Scale the depth and presentation"));
         assert!(prompt.contains("inline SVG"));
-        assert!(prompt.contains("both light and dark mode"));
+        assert!(prompt.contains("visual identity appropriate to this particular change"));
+        assert!(prompt.contains("both light and dark appearances"));
+        assert!(prompt.contains("do not force them into every overview"));
     }
 
     #[test]
     fn review_decision_renders_as_composer_markdown() {
         let review = ReviewDecision {
             generation: 3,
-            snapshot_id: SnapshotId::test(1),
-            patch_id: PatchId::test(2),
             range: ReviewRange { from: 0, to: 2 },
             scope: "Full branch".to_owned(),
             decision: Decision::RequestChanges,
@@ -418,7 +389,7 @@ mod tests {
 
         assert_eq!(
             review.to_markdown(),
-            "## Review: Changes requested\n\n**Scope:** Full branch\n**Range:** 0 → 2\n**Snapshot:** `snapshot-1`\n**Patch:** `patch-2`\n\nPlease address this before merging.\n\n### Comments\n\n- `src/main.rs:12-14` (new)\n  Handle the error.\n  This can fail.\n"
+            "## Review: Changes requested\n\n**Scope:** Full branch\n**Range:** 0 → 2\n\nPlease address this before merging.\n\n### Comments\n\n- `src/main.rs:12-14` (new)\n  Handle the error.\n  This can fail.\n"
         );
     }
 }

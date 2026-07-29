@@ -42,7 +42,6 @@ index 82a06c1..90c03be 100644
 const reviewBootstrapBase = {
   protocol_version: 1,
   generation: 1,
-  workspace_version: "dev-workspace-1",
   title: "Review feature/review-workflow",
   repository: "tact",
   trunk: "main",
@@ -74,8 +73,6 @@ const overview = `
 export const reviewFixtures = {
   "2:3": {
     generation: 1,
-    snapshot_id: "dev-snapshot-1",
-    patch_id: "dev-patch-uncommitted",
     title: reviewBootstrapBase.title,
     repository: reviewBootstrapBase.repository,
     selected_range: { from: 2, to: 3 },
@@ -85,8 +82,6 @@ export const reviewFixtures = {
   },
   "0:3": {
     generation: 1,
-    snapshot_id: "dev-snapshot-1",
-    patch_id: "dev-patch-full",
     title: reviewBootstrapBase.title,
     repository: reviewBootstrapBase.repository,
     selected_range: { from: 0, to: 3 },
@@ -96,8 +91,6 @@ export const reviewFixtures = {
   },
   "1:2": {
     generation: 1,
-    snapshot_id: "dev-snapshot-1",
-    patch_id: "dev-patch-interval",
     title: reviewBootstrapBase.title,
     repository: reviewBootstrapBase.repository,
     selected_range: { from: 1, to: 2 },

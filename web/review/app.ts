@@ -13,13 +13,18 @@ import { commentSelectionCallbacks } from "./comment-selection";
 import { renderMarkdown } from "./markdown";
 import {
   beginTerminal,
+  activatePage,
+  createReviewState,
+  currentFeedback,
+  discardCurrentFeedback as clearCurrentFeedback,
   failTerminal,
   feedbackDescription,
   finishTerminal,
+  installSession,
   type CommentDraft,
   type CommentMetadata,
-  ReviewStore,
-} from "./review-store";
+  type ReviewState,
+} from "./review-state";
 import type {
   ReviewComment,
   ReviewDecision,
@@ -102,7 +107,7 @@ function renderBootstrapError(container: HTMLElement, error: unknown) {
   container.querySelector("[data-bootstrap-retry]")?.addEventListener("click", () => void start());
 }
 
-class ReviewApp {
+export class ReviewApp {
   private page?: ReviewPage;
   private files: FileDiffMetadata[] = [];
   private items: CodeViewDiffItem<AnnotationMetadata>[] = [];
@@ -124,17 +129,17 @@ class ReviewApp {
   private tree?: FileTree;
   private settings = loadReviewSettings(window.localStorage, document.cookie);
   private readonly colorScheme = window.matchMedia("(prefers-color-scheme: dark)");
-  private readonly store: ReviewStore;
+  private state: ReviewState;
 
   constructor(
     private readonly root: HTMLElement,
     private readonly api: ApiClient,
     private bootstrap: ReviewSession,
   ) {
-    this.store = new ReviewStore(bootstrap);
+    this.state = createReviewState(bootstrap);
   }
 
-  private get feedback() { return this.store.feedback(); }
+  private get feedback() { return currentFeedback(this.state); }
   private get comments() { return this.feedback.comments; }
   private get draft() { return this.feedback.draft; }
   private set draft(value: CommentDraft | undefined) { this.feedback.draft = value; }
@@ -307,7 +312,7 @@ class ReviewApp {
         );
         return;
       }
-      if (discardCurrentFeedback) this.store.discardFeedback();
+      if (discardCurrentFeedback) this.state = clearCurrentFeedback(this.state);
       this.installPage(payload as ReviewPage);
     } catch (error) {
       if (request === this.rangeRequest) {
@@ -320,9 +325,9 @@ class ReviewApp {
 
   private installPage(page: ReviewPage) {
     this.page = page;
-    this.store.activate(page);
+    this.state = activatePage(this.state, page);
     const seenFiles = this.seenFiles();
-    const cacheKey = `tact-review-${page.patch_id}`;
+    const cacheKey = `tact-review-${page.generation}-${rangeKey(page.selected_range)}`;
     const patchFiles = parsePatchFiles(page.patch, cacheKey, true).flatMap(
       (patch) => patch.files,
     );
@@ -438,10 +443,8 @@ class ReviewApp {
       const payload = await this.api.overview(page);
       if (request !== this.overviewRequest) return;
       if (payload.generation !== page.generation
-        || payload.snapshot_id !== page.snapshot_id
-        || payload.patch_id !== page.patch_id
         || !rangesEqual(payload.selected_range, range)) {
-        this.showOverviewError("Tact returned an overview for a different snapshot.");
+        this.showOverviewError("Tact returned an overview for a different review range.");
         return;
       }
       this.overviews.set(key, payload.overview_html);
@@ -702,10 +705,12 @@ class ReviewApp {
   }
 
   private async checkWorkspaceStatus() {
-    if (document.hidden || this.checkingStatus || this.refreshing || this.store.state.terminal.kind === "finished") return;
+    if (document.hidden || this.checkingStatus || this.refreshing || this.state.terminal.kind === "finished") return;
+    const requestedGeneration = this.bootstrap.generation;
     this.checkingStatus = true;
     try {
       const status = await this.api.status();
+      if (requestedGeneration !== this.bootstrap.generation) return;
       if (status.generation !== this.bootstrap.generation) {
         this.generationStale = true;
         this.snapshotStale = true;
@@ -756,7 +761,7 @@ class ReviewApp {
         ? await this.api.review()
         : await this.api.refresh(this.bootstrap.generation);
       this.bootstrap = payload;
-      this.store.replaceSession(payload);
+      this.state = installSession(this.state, payload);
       this.overviews.clear();
       const timeline = this.root.querySelector<HTMLElement>("#commit-timeline");
       if (timeline) {
@@ -1378,7 +1383,7 @@ class ReviewApp {
   }
 
   private setReviewControlsDisabled(disabled: boolean) {
-    const terminalBusy = this.store.state.terminal.kind === "busy";
+    const terminalBusy = this.state.terminal.kind === "busy";
     for (const button of this.root.querySelectorAll<HTMLButtonElement>("[data-decision]")) {
       button.disabled = disabled || !this.page || terminalBusy || this.snapshotStale;
       button.title = this.snapshotStale ? "Refresh before submitting this stale snapshot." : "";
@@ -1398,16 +1403,14 @@ class ReviewApp {
       this.showInlineError("The workspace changed. Refresh before submitting this review.");
       return;
     }
-    const previous = this.store.state;
-    this.store.state = beginTerminal(previous, "submit");
-    if (this.store.state === previous) return;
+    const previous = this.state;
+    this.state = beginTerminal(previous, "submit");
+    if (this.state === previous) return;
     this.setReviewControlsDisabled(false);
     this.showTerminalBusy(decision === "approve" ? "Submitting approval…" : "Submitting requested changes…");
     const page = this.page;
     const payload: ReviewDecision = {
       generation: page.generation,
-      snapshot_id: page.snapshot_id,
-      patch_id: page.patch_id,
       range: page.selected_range,
       decision,
       summary: this.feedback.summary.trim(),
@@ -1424,12 +1427,12 @@ class ReviewApp {
     } catch (error) {
       const code = error instanceof ApiError ? error.code : "unknown";
       if (["stale_snapshot", "workspace_changed"].includes(code)) this.snapshotStale = true;
-      this.store.state = failTerminal(this.store.state, "submit", code, errorMessage(error));
+      this.state = failTerminal(this.state, "submit", code, errorMessage(error));
       this.showInlineError(errorMessage(error), () => void this.submit(decision));
       this.setReviewControlsDisabled(false);
       return;
     }
-    this.store.state = finishTerminal(this.store.state, "submit");
+    this.state = finishTerminal(this.state, "submit");
     const finished = this.root.querySelector<HTMLElement>("#finished");
     if (finished) finished.hidden = false;
   }
@@ -1440,21 +1443,21 @@ class ReviewApp {
       this.focusDraft();
       return;
     }
-    const previous = this.store.state;
-    this.store.state = beginTerminal(previous, "cancel");
-    if (this.store.state === previous) return;
+    const previous = this.state;
+    this.state = beginTerminal(previous, "cancel");
+    if (this.state === previous) return;
     this.setReviewControlsDisabled(false);
     this.showTerminalBusy("Cancelling review…");
     try {
       await this.api.cancel(this.bootstrap.generation);
     } catch (error) {
       const code = error instanceof ApiError ? error.code : "unknown";
-      this.store.state = failTerminal(this.store.state, "cancel", code, errorMessage(error));
+      this.state = failTerminal(this.state, "cancel", code, errorMessage(error));
       this.showInlineError(errorMessage(error), () => void this.cancel());
       this.setReviewControlsDisabled(false);
       return;
     }
-    this.store.state = finishTerminal(this.store.state, "cancel");
+    this.state = finishTerminal(this.state, "cancel");
     const finished = this.root.querySelector<HTMLElement>("#finished");
     if (!finished) return;
     finished.innerHTML = "<div><span>✓</span><h2>Review cancelled</h2><p>You can return to Tact.</p></div>";

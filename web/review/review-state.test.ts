@@ -8,13 +8,12 @@ import {
   discardCurrentFeedback,
   feedbackOwner,
   finishTerminal,
-} from "./review-store";
+} from "./review-state";
 
-const firstPage = page(3, { from: 0, to: 2 }, "patch-a");
+const firstPage = page(3, { from: 0, to: 2 });
 const session: ReviewSession = {
   protocol_version: 1,
   generation: 3,
-  workspace_version: "workspace-a",
   title: "Review",
   repository: "tact",
   trunk: "main",
@@ -23,13 +22,13 @@ const session: ReviewSession = {
   page: firstPage,
 };
 
-describe("ReviewStore transitions", () => {
+describe("review state transitions", () => {
   test("feedback is isolated by generation and range", () => {
     let state = createReviewState(session);
     currentFeedback(state).summary = "first summary";
     currentFeedback(state).seenPaths.add("src/main.rs");
 
-    state = activatePage(state, page(3, { from: 1, to: 2 }, "patch-b"));
+    state = activatePage(state, page(3, { from: 1, to: 2 }));
     expect(currentFeedback(state).summary).toBe("");
     expect(currentFeedback(state).seenPaths.size).toBe(0);
 
@@ -62,13 +61,10 @@ describe("ReviewStore transitions", () => {
   });
 });
 
-function page(generation: number, selected_range: { from: number; to: number }, patch_id: string): ReviewPage {
+function page(generation: number, selected_range: { from: number; to: number }): ReviewPage {
   return {
     generation,
     selected_range,
-    snapshot_id: "snapshot-a",
-    patch_id,
-    title: "Review",
     patch: "",
     repository: "tact",
     scope: "Full branch",

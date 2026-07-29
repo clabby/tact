@@ -48,3 +48,13 @@ test("the changed-file wrapper owns the tree's available height", async () => {
   expect(navigation).toMatch(/min-height:\s*0/);
   expect(navigation).toMatch(/height:\s*100%/);
 });
+
+test("dark surfaces are neutral while green remains an accent", async () => {
+  const styles = await Bun.file(new URL("styles.css", import.meta.url)).text();
+
+  expect(styles).toContain("--bg: light-dark(#f7f8f5, #0f1115)");
+  expect(styles).toContain("--surface: light-dark(#ffffff, #171a20)");
+  expect(styles).toContain("--accent: light-dark(#315f36, #9bc59e)");
+  expect(styles).not.toContain("#111311");
+  expect(styles).not.toContain("#181b18");
+});

@@ -14,9 +14,6 @@ export type ReviewComment = {
 export type ReviewPage = {
   generation: number;
   selected_range: ReviewRange;
-  snapshot_id: string;
-  patch_id: string;
-  title: string;
   patch: string;
   repository: string;
   scope: string;
@@ -26,8 +23,6 @@ export type ReviewPage = {
 export type ReviewSession = {
   protocol_version: number;
   generation: number;
-  workspace_version: string;
-  snapshot_id: string;
   title: string;
   repository: string;
   trunk: string;
@@ -38,22 +33,17 @@ export type ReviewSession = {
 
 export type ReviewStatus = {
   generation: number;
-  workspace_version: string;
   changed: boolean;
 };
 
 export type OverviewResponse = {
   generation: number;
   selected_range: ReviewRange;
-  snapshot_id: string;
-  patch_id: string;
   overview_html: string;
 };
 
 export type ReviewDecision = {
   generation: number;
-  snapshot_id: string;
-  patch_id: string;
   range: ReviewRange;
   decision: "approve" | "request_changes";
   summary: string;

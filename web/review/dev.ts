@@ -40,7 +40,7 @@ const server = Bun.serve({
       return Response.json(reviewBootstrap);
     }
     if (request.method === "GET" && url.pathname === "/api/status") {
-      return Response.json({ generation: 1, workspace_version: "dev-workspace-1", changed: workspaceChanged });
+      return Response.json({ generation: 1, changed: workspaceChanged });
     }
     if (request.method === "POST" && url.pathname === "/api/refresh") {
       workspaceChanged = false;
@@ -55,12 +55,12 @@ const server = Bun.serve({
       return Response.json(fixture);
     }
     if (request.method === "POST" && url.pathname === "/api/overview") {
-      const body = await request.json() as { generation?: number; range?: ReviewRange; snapshot_id?: string; patch_id?: string };
+      const body = await request.json() as { generation?: number; range?: ReviewRange };
       const key = body.range ? rangeKey(body.range) : "";
       const overview = overviewFixtures[key as keyof typeof overviewFixtures];
       if (!overview) return Response.json({ error: "Unknown review range" }, { status: 422 });
       await Bun.sleep(900);
-      return Response.json({ generation: body.generation, snapshot_id: body.snapshot_id, patch_id: body.patch_id, selected_range: body.range, overview_html: overview });
+      return Response.json({ generation: body.generation, selected_range: body.range, overview_html: overview });
     }
     if (request.method === "POST" && url.pathname === "/api/decision") {
       console.log("\nReview result:\n", JSON.stringify(await request.json(), null, 2));
