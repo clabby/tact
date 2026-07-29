@@ -1,6 +1,6 @@
 import type { ReviewRange, ReviewTarget } from "./range-selection";
 
-export const REVIEW_PROTOCOL_VERSION = 3;
+export const REVIEW_PROTOCOL_VERSION = 4;
 
 export type ReviewComment = {
   id: number;
@@ -29,6 +29,7 @@ export type ReviewSession = {
   range_targets: ReviewTarget[];
   default_range: ReviewRange;
   page: ReviewPage;
+  overview: StoredOverview | null;
   questions: StoredQuestionThread[];
 };
 
@@ -41,6 +42,12 @@ export type OverviewResponse = {
   generation: number;
   selected_range: ReviewRange;
   overview_html: string;
+};
+
+export type StoredOverview = {
+  selected_range: ReviewRange;
+  status: "generating" | "ready";
+  overview_html?: string;
 };
 
 export type ThreadMessage = {

@@ -3,7 +3,12 @@ import { mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { overviewFixtures, reviewBootstrap, reviewFixtures } from "./dev-fixture";
 import { rangeKey, type ReviewRange } from "./range-selection";
-import type { QuestionRequest, StoredQuestionThread } from "./protocol";
+import type {
+  QuestionRequest,
+  ReviewPage,
+  StoredOverview,
+  StoredQuestionThread,
+} from "./protocol";
 
 const outputDirectory = join(import.meta.dir, ".dev");
 await rm(outputDirectory, { recursive: true, force: true });
@@ -34,20 +39,29 @@ if (!await buildAssets()) process.exit(1);
 let workspaceChanged = true;
 const questionCancellations = new Map<string, () => void>();
 const devQuestions: StoredQuestionThread[] = [];
+let devPage: ReviewPage = reviewBootstrap.page;
+let devOverview: StoredOverview | null = null;
 
 const server = Bun.serve({
   port: Number(process.env.PORT ?? 4173),
   async fetch(request) {
     const url = new URL(request.url);
     if (request.method === "GET" && url.pathname === "/api/review") {
-      return Response.json({ ...reviewBootstrap, questions: devQuestions });
+      return Response.json({
+        ...reviewBootstrap,
+        page: devPage,
+        overview: devOverview,
+        questions: devQuestions,
+      });
     }
     if (request.method === "GET" && url.pathname === "/api/status") {
       return Response.json({ generation: 1, changed: workspaceChanged });
     }
     if (request.method === "POST" && url.pathname === "/api/refresh") {
       workspaceChanged = false;
-      return Response.json(reviewBootstrap);
+      devPage = reviewBootstrap.page;
+      devOverview = null;
+      return Response.json({ ...reviewBootstrap, page: devPage, overview: devOverview });
     }
     if (request.method === "POST" && url.pathname === "/api/range") {
       const body = await request.json() as { generation?: number; range?: ReviewRange };
@@ -55,6 +69,7 @@ const server = Bun.serve({
       const fixture = reviewFixtures[key as keyof typeof reviewFixtures];
       if (!fixture) return Response.json({ error: "Unknown review range" }, { status: 422 });
       await Bun.sleep(350);
+      devPage = fixture;
       return Response.json(fixture);
     }
     if (request.method === "POST" && url.pathname === "/api/overview") {
@@ -62,7 +77,13 @@ const server = Bun.serve({
       const key = body.range ? rangeKey(body.range) : "";
       const overview = overviewFixtures[key as keyof typeof overviewFixtures];
       if (!overview) return Response.json({ error: "Unknown review range" }, { status: 422 });
+      devOverview = { selected_range: body.range!, status: "generating" };
       await Bun.sleep(900);
+      devOverview = {
+        selected_range: body.range!,
+        status: "ready",
+        overview_html: overview,
+      };
       return Response.json({ generation: body.generation, selected_range: body.range, overview_html: overview });
     }
     if (request.method === "POST" && url.pathname === "/api/question") {

@@ -14,7 +14,7 @@ import {
 
 const firstPage = page(3, { from: 0, to: 2 });
 const session: ReviewSession = {
-  protocol_version: 3,
+  protocol_version: 4,
   generation: 3,
   title: "Review",
   repository: "tact",
@@ -22,6 +22,7 @@ const session: ReviewSession = {
   range_targets: [],
   default_range: firstPage.selected_range,
   page: firstPage,
+  overview: null,
   questions: [],
 };
 

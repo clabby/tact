@@ -50,6 +50,7 @@ import type {
   ReviewDecision,
   ReviewPage,
   ReviewSession,
+  StoredOverview,
 } from "./protocol";
 import {
   activeSyntaxTheme,
@@ -186,7 +187,23 @@ export class ReviewApp {
   private set draft(value: CommentDraft | undefined) { this.feedback.draft = value; }
 
   installInitialPage() {
+    this.restoreStoredOverview(this.bootstrap.overview);
     this.installPage(this.bootstrap.page);
+    this.restoreAgentOperation();
+  }
+
+  private restoreStoredOverview(overview: StoredOverview | null) {
+    if (overview?.status !== "ready" || !overview.overview_html?.trim()) return;
+    this.overviews.set(rangeKey(overview.selected_range), overview.overview_html);
+  }
+
+  private restoreAgentOperation() {
+    const overview = this.bootstrap.overview;
+    if (overview?.status === "generating"
+      && rangesEqual(overview.selected_range, this.page?.selected_range)) {
+      void this.loadOverview(true);
+      return;
+    }
     void this.restoreActiveQuestion();
   }
 
@@ -250,7 +267,7 @@ export class ReviewApp {
         </header>
         <nav class="tabs" role="tablist" aria-label="Review sections">
           <button class="tab active" id="changes-tab" role="tab" aria-selected="true" aria-controls="changes-panel" data-tab="changes">Changes <span id="file-count">0</span></button>
-          <button class="tab" id="overview-tab" role="tab" aria-selected="false" aria-controls="overview-panel" tabindex="-1" data-tab="overview">Overview<span class="overview-tab-spinner" aria-hidden="true"></span></button>
+          <button class="tab" id="overview-tab" role="tab" aria-selected="false" aria-controls="overview-panel" tabindex="-1" data-tab="overview">Overview<span class="overview-tab-activity" aria-hidden="true"><i></i><i></i><i></i></span></button>
         </nav>
         <section class="panel overview-panel" id="overview-panel" role="tabpanel" aria-labelledby="overview-tab" data-panel="overview" hidden>
           <div class="overview-state" id="overview-state"></div>
@@ -588,9 +605,11 @@ export class ReviewApp {
     tab.removeAttribute("aria-busy");
   }
 
-  private async loadOverview() {
+  private async loadOverview(restoring = false) {
     const page = this.page;
-    if (!page || this.agentOperation || rangesEqual(this.loadingOverview, page.selected_range)) return;
+    if (!page
+      || (this.agentOperation && !restoring)
+      || rangesEqual(this.loadingOverview, page.selected_range)) return;
     const key = rangeKey(page.selected_range);
     if (this.overviews.has(key)) {
       this.renderOverviewState();
@@ -608,7 +627,7 @@ export class ReviewApp {
       state.hidden = false;
       state.setAttribute("aria-busy", "true");
       state.innerHTML = `
-        <div class="overview-spinner"><span></span><i></i></div>
+        <div class="overview-spinner" aria-hidden="true"><span>${icon("sparkles")}</span></div>
         <strong>Preparing the overview</strong>
         <span>Tact’s root agent is inspecting the selected range and surrounding code.</span>`;
     }
@@ -955,13 +974,14 @@ export class ReviewApp {
       this.bootstrap = payload;
       this.state = installSession(this.state, payload);
       this.overviews.clear();
+      this.restoreStoredOverview(payload.overview);
       const timeline = this.root.querySelector<HTMLElement>("#commit-timeline");
       if (timeline) {
         timeline.innerHTML = this.rangeTimelineMarkup();
         this.bindRangeEvents();
       }
       this.installPage(payload.page);
-      await this.restoreActiveQuestion();
+      this.restoreAgentOperation();
       this.snapshotStale = false;
       this.generationStale = false;
       this.setRefreshNotice(false);
@@ -1633,7 +1653,7 @@ export class ReviewApp {
       turn.className = "agent-thread-turn asking";
       turn.setAttribute("role", "status");
       turn.setAttribute("aria-live", "polite");
-      turn.innerHTML = `<span class="thread-spinner" aria-hidden="true"></span><span>${thread.turn.stopping ? "Stopping…" : "Tact is answering…"}</span><button class="button quiet" data-thread-stop ${thread.turn.stopping ? "disabled" : ""}>${thread.turn.stopping ? "Stopping…" : "Stop"}</button>`;
+      turn.innerHTML = `<span class="thread-spinner" aria-hidden="true">${icon("sparkles")}</span><span>${thread.turn.stopping ? "Stopping…" : "Tact is answering…"}</span><button class="button quiet" data-thread-stop ${thread.turn.stopping ? "disabled" : ""}>${thread.turn.stopping ? "Stopping…" : "Stop"}</button>`;
       turn.querySelector("[data-thread-stop]")?.addEventListener("click", () => void this.stopQuestion(thread));
       return element;
     }

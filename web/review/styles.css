@@ -146,8 +146,11 @@ button:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2p
 .tab:hover { color: var(--text); }
 .tab.active { color: var(--text); border-color: var(--accent-solid); font-weight: 600; }
 .tab span { margin-left: 4px; color: var(--muted); }
-.overview-tab-spinner { display: none; width: 12px; height: 12px; margin-left: 7px; border: 1.5px solid color-mix(in srgb, var(--muted) 35%, transparent); border-top-color: var(--accent-solid); border-radius: 50%; vertical-align: -2px; }
-.tab.loading .overview-tab-spinner { display: inline-block; animation: spin .8s linear infinite; }
+.overview-tab-activity { display: none; align-items: center; gap: 2px; margin-left: 7px; vertical-align: 1px; }
+.overview-tab-activity i { width: 4px; height: 4px; border-radius: 1px; background: var(--accent-solid); transform: rotate(45deg); animation: tact-shimmer .9s ease-in-out infinite; }
+.overview-tab-activity i:nth-child(2) { animation-delay: .14s; }
+.overview-tab-activity i:nth-child(3) { animation-delay: .28s; }
+.tab.loading .overview-tab-activity { display: inline-flex; }
 
 .panel { display: none; min-height: 0; }
 .panel.active { display: block; }
@@ -161,10 +164,10 @@ button:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2p
 .overview-state .button { margin-top: 18px; }
 .overview-orbit { display: grid; place-items: center; width: 50px; height: 50px; border: 1px solid var(--line); border-radius: 15px; background: linear-gradient(145deg, color-mix(in srgb, var(--accent-solid) 13%, var(--surface)), var(--surface)); color: var(--accent); box-shadow: 0 16px 36px color-mix(in srgb, #000 8%, transparent); }
 .overview-orbit svg { width: 24px; height: 24px; }
-.overview-spinner { position: relative; display: grid; place-items: center; width: 52px; height: 52px; }
-.overview-spinner span, .overview-spinner i { position: absolute; border-radius: 50%; }
-.overview-spinner span { inset: 0; border: 1px solid var(--line); border-top: 2px solid var(--accent-solid); animation: spin 1s linear infinite; }
-.overview-spinner i { width: 25px; height: 25px; background: color-mix(in srgb, var(--accent-solid) 12%, transparent); }
+.overview-spinner { position: relative; display: grid; place-items: center; width: 58px; height: 58px; }
+.overview-spinner::before { position: absolute; inset: 0; border: 2px solid color-mix(in srgb, var(--accent-solid) 18%, var(--line)); border-top-color: var(--accent-solid); border-right-color: color-mix(in srgb, var(--accent-solid) 62%, var(--line)); border-radius: 50%; content: ""; animation: tact-spin .9s cubic-bezier(.55, .15, .45, .85) infinite; box-shadow: 0 0 18px color-mix(in srgb, var(--accent-solid) 12%, transparent); }
+.overview-spinner span { display: grid; place-items: center; width: 38px; height: 38px; border: 1px solid color-mix(in srgb, var(--accent-solid) 24%, var(--line)); border-radius: 50%; background: linear-gradient(145deg, color-mix(in srgb, var(--accent-solid) 14%, var(--surface)), var(--surface)); color: var(--accent); }
+.overview-spinner svg { width: 20px; height: 20px; }
 .overview-error { display: grid; place-items: center; width: 42px; height: 42px; border-radius: 13px; background: color-mix(in srgb, var(--danger) 12%, transparent); color: var(--danger); font-weight: 750; }
 .changes-panel.active { display: grid; grid-template-columns: 352px minmax(0, 1fr); width: 100%; height: 100%; min-height: 0; }
 
@@ -257,7 +260,8 @@ button:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2p
 .agent-thread-turn.cancelled { grid-template-columns: minmax(0, 1fr) auto; align-items: center; color: var(--muted); font-size: 12px; }
 .agent-thread-validation, .agent-thread-limit { color: var(--danger); font-size: 11px; }
 .agent-thread-limit { padding: 2px 0; }
-.thread-spinner { display: inline-block; flex: none; width: 15px; height: 15px; border: 2px solid color-mix(in srgb, #9b6cff 25%, var(--line)); border-top-color: #9b6cff; border-radius: 50%; animation: spin .8s linear infinite; }
+.thread-spinner { display: inline-block; flex: none; width: 17px; height: 17px; color: #9b6cff; animation: tact-thread-spin 1.05s cubic-bezier(.55, .15, .45, .85) infinite; transform-origin: center; will-change: transform; }
+.thread-spinner svg { display: block; width: 17px; height: 17px; }
 .editor-footer { display: flex; align-items: center; gap: 12px; min-height: 54px; padding: 8px 10px 8px 13px; }
 .editor-shortcut { display: flex; align-items: center; gap: 4px; color: var(--muted); font-size: 10px; }
 .editor-shortcut kbd { min-width: 20px; padding: 2px 5px; border: 1px solid var(--line-strong); border-bottom-width: 2px; border-radius: 5px; background: var(--surface); color: var(--text); font: 10px ui-monospace, SFMono-Regular, monospace; text-align: center; }
@@ -297,6 +301,9 @@ button:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2p
 .scope-spinner { width: 24px; height: 24px; border: 2px solid var(--line-strong); border-top-color: var(--accent-solid); border-radius: 50%; animation: spin .8s linear infinite; }
 .scope-error-icon { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 50%; background: color-mix(in srgb, var(--danger) 14%, transparent); color: var(--danger); font-weight: 700; }
 @keyframes spin { to { transform: rotate(360deg); } }
+@keyframes tact-spin { to { transform: rotate(360deg); } }
+@keyframes tact-thread-spin { to { transform: rotate(360deg); } }
+@keyframes tact-shimmer { 0%, 100% { opacity: .3; transform: translateY(1px) rotate(45deg) scale(.72); } 50% { opacity: 1; transform: translateY(-1px) rotate(45deg) scale(1.12); } }
 
 .range-dialog::backdrop { background: color-mix(in srgb, var(--bg) 70%, transparent); backdrop-filter: blur(12px); }
 .range-dialog { width: min(680px, calc(100% - 48px)); max-width: none; max-height: calc(100dvh - 32px); padding: 0; overflow: hidden; border: 1px solid var(--line-strong); border-radius: 18px; outline: 0; background: var(--surface-raised); color: var(--text); box-shadow: 0 28px 90px color-mix(in srgb, #000 28%, transparent), 0 1px 0 color-mix(in srgb, #fff 25%, transparent) inset; animation: range-dialog-in .16s ease-out; }
@@ -404,6 +411,6 @@ button:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2p
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .scope-spinner, .overview-spinner span, .overview-tab-spinner, .thread-spinner { animation: none; }
+  .scope-spinner, .overview-tab-activity i { animation: none; }
   .range-dialog { animation: none; }
 }

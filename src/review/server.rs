@@ -27,14 +27,28 @@ const MAX_OPERATION_ID_BYTES: usize = 128;
 const MAX_THREAD_MESSAGES: usize = 64;
 const MAX_THREAD_BYTES: usize = 256 * 1024;
 const MAX_QUESTION_THREADS: usize = 256;
-pub(super) const PROTOCOL_VERSION: u32 = 3;
+pub(super) const PROTOCOL_VERSION: u32 = 4;
 const MAX_CACHED_PAGES: usize = 8;
 const MAX_CACHED_PAGE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_CACHED_OVERVIEWS: usize = 8;
 const MAX_CACHED_OVERVIEW_BYTES: usize = 8 * 1024 * 1024;
 
 type OverviewOperationKey = (u64, super::diff::ReviewRange);
-type OverviewOperations = Mutex<HashMap<OverviewOperationKey, Arc<Mutex<()>>>>;
+type OverviewOperations = Mutex<HashMap<OverviewOperationKey, Arc<OverviewOperation>>>;
+
+struct OverviewOperation {
+    gate: Arc<Mutex<()>>,
+    result: Mutex<Option<OverviewRunResult>>,
+}
+
+impl OverviewOperation {
+    fn new() -> Self {
+        Self {
+            gate: Arc::new(Mutex::new(())),
+            result: Mutex::new(None),
+        }
+    }
+}
 
 #[derive(Clone, Serialize)]
 pub(super) struct ReviewPage {
@@ -81,6 +95,21 @@ struct OverviewResponse {
     generation: u64,
     selected_range: super::diff::ReviewRange,
     overview_html: String,
+}
+
+#[derive(Clone, Serialize)]
+struct StoredOverview {
+    selected_range: super::diff::ReviewRange,
+    status: OverviewStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    overview_html: Option<String>,
+}
+
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum OverviewStatus {
+    Generating,
+    Ready,
 }
 
 #[derive(Deserialize)]
@@ -168,6 +197,7 @@ struct RefreshResponse {
     #[serde(flatten)]
     bootstrap: ReviewBootstrap,
     page: ReviewPage,
+    overview: Option<StoredOverview>,
     questions: Vec<StoredQuestion>,
 }
 
@@ -287,6 +317,7 @@ struct ReviewSession {
     context: super::diff::ReviewContext,
     range_pages: BoundedCache<super::diff::ReviewRange, ReviewPage>,
     overviews: BoundedCache<super::diff::ReviewRange, String>,
+    active_overview: Option<OverviewOperationKey>,
     questions: Vec<StoredQuestion>,
     version: super::diff::WorkspaceVersion,
     generation_shutdown: CancellationToken,
@@ -354,6 +385,7 @@ impl ReviewSession {
             context: review.context,
             range_pages: BoundedCache::new(MAX_CACHED_PAGES, MAX_CACHED_PAGE_BYTES),
             overviews: BoundedCache::new(MAX_CACHED_OVERVIEWS, MAX_CACHED_OVERVIEW_BYTES),
+            active_overview: None,
             questions: Vec::new(),
             version: review.version,
             generation_shutdown: session_shutdown.child_token(),
@@ -385,6 +417,24 @@ impl ReviewSession {
     fn insert_page(&mut self, page: ReviewPage) {
         let bytes = page.diff.patch.len();
         self.range_pages.insert(page.selected_range, page, bytes);
+    }
+
+    fn selected_overview(&self) -> Option<StoredOverview> {
+        let range = self.selected_page.selected_range;
+        if self.active_overview == Some((self.generation, range)) {
+            return Some(StoredOverview {
+                selected_range: range,
+                status: OverviewStatus::Generating,
+                overview_html: None,
+            });
+        }
+        self.overviews
+            .get(&range)
+            .map(|overview_html| StoredOverview {
+                selected_range: range,
+                status: OverviewStatus::Ready,
+                overview_html: Some(overview_html.clone()),
+            })
     }
 }
 
@@ -520,6 +570,7 @@ async fn review(State(state): State<Arc<ServerState>>) -> impl IntoResponse {
         RefreshResponse {
             bootstrap: session.bootstrap.clone(),
             page: session.selected_page.clone(),
+            overview: session.selected_overview(),
             questions: session.questions.clone(),
         },
     )
@@ -621,6 +672,7 @@ async fn refresh_review(
         RefreshResponse {
             bootstrap: session.bootstrap.clone(),
             page,
+            overview: session.selected_overview(),
             questions: session.questions.clone(),
         },
     )
@@ -736,10 +788,14 @@ async fn load_overview(
         Arc::clone(
             operations
                 .entry(overview_key)
-                .or_insert_with(|| Arc::new(Mutex::new(()))),
+                .or_insert_with(|| Arc::new(OverviewOperation::new())),
         )
     };
-    let _operation = operation.lock().await;
+    let operation_gate = Arc::clone(&operation.gate).lock_owned().await;
+    if let Some(result) = operation.result.lock().await.clone() {
+        state.overview_operations.lock().await.remove(&overview_key);
+        return overview_response(overview_key, result);
+    }
     let (page, version, shutdown) = {
         let session = state.session.lock().await;
         let Some(page) = matching_page(&session, request.generation, &request.range) else {
@@ -761,26 +817,69 @@ async fn load_overview(
             session.generation_shutdown.clone(),
         )
     };
-    let Ok(_agent_operation) = state.agent_operation.try_lock() else {
+    let Ok(agent_operation) = Arc::clone(&state.agent_operation).try_lock_owned() else {
         return agent_busy();
     };
+    {
+        let mut session = state.session.lock().await;
+        if matching_page(&session, request.generation, &request.range).is_none() {
+            return stale_snapshot("the requested review snapshot is stale");
+        }
+        session.active_overview = Some(overview_key);
+    }
+
+    let (completion, response) = oneshot::channel();
+    let task_state = Arc::clone(&state);
+    tokio::spawn(async move {
+        let _operation_gate = operation_gate;
+        let _agent_operation = agent_operation;
+        let result = run_overview(&task_state, &page, version, shutdown).await;
+        let result = store_overview_result(&task_state, overview_key, result).await;
+        *operation.result.lock().await = Some(result.clone());
+        let initiating_browser_is_connected = completion
+            .send(overview_response(overview_key, result))
+            .is_ok();
+        let reloaded_browser_is_waiting = Arc::strong_count(&operation) > 2;
+        if initiating_browser_is_connected || !reloaded_browser_is_waiting {
+            task_state
+                .overview_operations
+                .lock()
+                .await
+                .remove(&overview_key);
+        }
+    });
+
+    response
+        .await
+        .unwrap_or_else(|_| internal_error("the overview operation stopped unexpectedly"))
+}
+
+#[derive(Clone)]
+enum OverviewRunResult {
+    Ready(String),
+    Cancelled,
+    Stale(&'static str),
+    Workspace(String),
+    Failed(String),
+}
+
+async fn run_overview(
+    state: &ServerState,
+    page: &ReviewPage,
+    version: super::diff::WorkspaceVersion,
+    shutdown: CancellationToken,
+) -> OverviewRunResult {
     let current = match state.backend.current_version(shutdown.clone()).await {
         Ok(version) => version,
         Err(ScopeLoadError::Cancelled) => {
-            return stale_snapshot("the review changed before its overview was generated");
-        }
-        Err(ScopeLoadError::Failed(error)) => {
-            return error_response(
-                StatusCode::SERVICE_UNAVAILABLE,
-                ErrorCode::WorkspaceChanged,
-                error,
-                true,
-                false,
+            return OverviewRunResult::Stale(
+                "the review changed before its overview was generated",
             );
         }
+        Err(ScopeLoadError::Failed(error)) => return OverviewRunResult::Workspace(error),
     };
     if current != version {
-        return stale_snapshot("the workspace changed before its overview was generated");
+        return OverviewRunResult::Stale("the workspace changed before its overview was generated");
     }
     let overview_html = match state
         .backend
@@ -788,59 +887,80 @@ async fn load_overview(
         .await
     {
         Ok(overview) => overview,
-        Err(ScopeLoadError::Cancelled) => {
-            return error_response(
-                StatusCode::CONFLICT,
-                ErrorCode::OperationCancelled,
-                "overview generation was cancelled",
-                true,
-                true,
-            );
-        }
-        Err(ScopeLoadError::Failed(error)) => {
-            return error_response(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                ErrorCode::OverviewFailed,
-                error,
-                true,
-                true,
-            );
-        }
+        Err(ScopeLoadError::Cancelled) => return OverviewRunResult::Cancelled,
+        Err(ScopeLoadError::Failed(error)) => return OverviewRunResult::Failed(error),
     };
     let current = match state.backend.current_version(shutdown).await {
         Ok(version) => version,
         Err(ScopeLoadError::Cancelled) => {
-            return stale_snapshot("the workspace changed while its overview was generated");
-        }
-        Err(ScopeLoadError::Failed(error)) => {
-            return error_response(
-                StatusCode::SERVICE_UNAVAILABLE,
-                ErrorCode::WorkspaceChanged,
-                error,
-                true,
-                false,
+            return OverviewRunResult::Stale(
+                "the workspace changed while its overview was generated",
             );
         }
+        Err(ScopeLoadError::Failed(error)) => return OverviewRunResult::Workspace(error),
     };
     if current != version {
-        return stale_snapshot("the workspace changed while its overview was generated");
+        return OverviewRunResult::Stale("the workspace changed while its overview was generated");
     }
+    OverviewRunResult::Ready(overview_html)
+}
+
+async fn store_overview_result(
+    state: &ServerState,
+    overview_key: OverviewOperationKey,
+    result: OverviewRunResult,
+) -> OverviewRunResult {
     let mut session = state.session.lock().await;
-    if matching_page(&session, request.generation, &request.range).is_none() {
-        return stale_snapshot("the review changed while its overview was loading");
+    if session.active_overview == Some(overview_key) {
+        session.active_overview = None;
     }
-    session
-        .overviews
-        .insert(request.range, overview_html.clone(), overview_html.len());
-    state.overview_operations.lock().await.remove(&overview_key);
-    secure_json(
-        StatusCode::OK,
-        OverviewResponse {
-            generation: request.generation,
-            selected_range: request.range,
-            overview_html,
-        },
-    )
+    if matching_page(&session, overview_key.0, &overview_key.1).is_none() {
+        return OverviewRunResult::Stale("the review changed while its overview was loading");
+    }
+    if let OverviewRunResult::Ready(overview_html) = &result {
+        session
+            .overviews
+            .insert(overview_key.1, overview_html.clone(), overview_html.len());
+    }
+    result
+}
+
+fn overview_response(
+    overview_key: OverviewOperationKey,
+    result: OverviewRunResult,
+) -> Response<Body> {
+    match result {
+        OverviewRunResult::Ready(overview_html) => secure_json(
+            StatusCode::OK,
+            OverviewResponse {
+                generation: overview_key.0,
+                selected_range: overview_key.1,
+                overview_html,
+            },
+        ),
+        OverviewRunResult::Cancelled => error_response(
+            StatusCode::CONFLICT,
+            ErrorCode::OperationCancelled,
+            "overview generation was cancelled",
+            true,
+            true,
+        ),
+        OverviewRunResult::Stale(message) => stale_snapshot(message),
+        OverviewRunResult::Workspace(error) => error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            ErrorCode::WorkspaceChanged,
+            error,
+            true,
+            false,
+        ),
+        OverviewRunResult::Failed(error) => error_response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            ErrorCode::OverviewFailed,
+            error,
+            true,
+            true,
+        ),
+    }
 }
 
 async fn ask_question(
@@ -2076,6 +2196,136 @@ mod tests {
                 .unwrap()["body"],
             "Persistent answer"
         );
+    }
+
+    #[tokio::test]
+    async fn overview_survives_a_browser_reload_and_remains_visible() {
+        let assets = tempfile::tempdir().unwrap();
+        for name in ["index.html", "app.js", "app.css"] {
+            std::fs::write(assets.path().join(name), "").unwrap();
+        }
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let generator: ReviewAgent = Arc::new({
+            let started = Arc::clone(&started);
+            let release = Arc::clone(&release);
+            let cancelled = Arc::clone(&cancelled);
+            move |_prompt, shutdown| {
+                let started = Arc::clone(&started);
+                let release = Arc::clone(&release);
+                let cancelled = Arc::clone(&cancelled);
+                Box::pin(async move {
+                    started.notify_one();
+                    tokio::select! {
+                        () = release.notified() => Ok("<p>Persistent overview</p>".to_owned()),
+                        () = shutdown.cancelled() => {
+                            cancelled.store(true, Ordering::SeqCst);
+                            Err(ReviewAgentError::Cancelled)
+                        }
+                    }
+                })
+            }
+        });
+        let server = start_server_with_generator(&assets, generator).await;
+        let client = reqwest::Client::new();
+        let range = working_tree_range();
+        let loaded = client
+            .post(server.endpoint_url("api/range"))
+            .json(&range_request(range))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(loaded.status(), reqwest::StatusCode::OK);
+
+        let request = tokio::spawn({
+            let url = server.endpoint_url("api/overview");
+            async move { request_overview(url, range).await }
+        });
+        started.notified().await;
+
+        let generating = reqwest::get(server.endpoint_url("api/review"))
+            .await
+            .unwrap()
+            .json::<serde_json::Value>()
+            .await
+            .unwrap();
+        assert_eq!(
+            generating["page"]["selected_range"],
+            serde_json::json!({ "from": 1, "to": 2 })
+        );
+        assert_eq!(generating["overview"]["status"], "generating");
+        request.abort();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!cancelled.load(Ordering::SeqCst));
+
+        release.notify_one();
+        let completed = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let review = reqwest::get(server.endpoint_url("api/review"))
+                    .await
+                    .unwrap()
+                    .json::<serde_json::Value>()
+                    .await
+                    .unwrap();
+                if review["overview"]["status"] == "ready" {
+                    break review;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("the detached overview should finish");
+        assert_eq!(
+            completed["overview"]["overview_html"],
+            "<p>Persistent overview</p>"
+        );
+    }
+
+    #[tokio::test]
+    async fn reloaded_browser_observes_the_same_overview_failure() {
+        let assets = tempfile::tempdir().unwrap();
+        for name in ["index.html", "app.js", "app.css"] {
+            std::fs::write(assets.path().join(name), "").unwrap();
+        }
+        let loads = Arc::new(AtomicUsize::new(0));
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let generator: ReviewAgent = Arc::new({
+            let loads = Arc::clone(&loads);
+            let started = Arc::clone(&started);
+            let release = Arc::clone(&release);
+            move |_prompt, _shutdown| {
+                let loads = Arc::clone(&loads);
+                let started = Arc::clone(&started);
+                let release = Arc::clone(&release);
+                Box::pin(async move {
+                    loads.fetch_add(1, Ordering::SeqCst);
+                    started.notify_one();
+                    release.notified().await;
+                    Err(ReviewAgentError::Failed("overview failed".to_owned()))
+                })
+            }
+        });
+        let server = start_server_with_generator(&assets, generator).await;
+        let first = tokio::spawn({
+            let url = server.endpoint_url("api/overview");
+            async move { request_overview(url, uncommitted_range()).await }
+        });
+        started.notified().await;
+        let reloaded = tokio::spawn({
+            let url = server.endpoint_url("api/overview");
+            async move { request_overview(url, uncommitted_range()).await }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        first.abort();
+        release.notify_one();
+
+        assert_eq!(
+            reloaded.await.unwrap(),
+            reqwest::StatusCode::UNPROCESSABLE_ENTITY
+        );
+        assert_eq!(loads.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

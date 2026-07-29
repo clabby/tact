@@ -20,12 +20,14 @@ test("the overview tab shows when its agent is working", async () => {
   const app = await Bun.file(new URL("app.ts", import.meta.url)).text();
   const styles = await Bun.file(new URL("styles.css", import.meta.url)).text();
 
-  expect(app).toContain('class="overview-tab-spinner" aria-hidden="true"');
+  expect(app).toContain('class="overview-tab-activity" aria-hidden="true"');
   expect(app).toContain('tab.classList.toggle("loading", loading)');
   expect(app).toContain('tab.setAttribute("aria-busy", "true")');
   expect(app).toContain("this.setOverviewLoading(true)");
   expect(app).toContain("this.setOverviewLoading(false)");
-  expect(styles).toMatch(/\.tab\.loading\s+\.overview-tab-spinner\s*{[^}]*animation:\s*spin/s);
+  expect(styles).toMatch(/\.tab\.loading\s+\.overview-tab-activity\s*{/s);
+  expect(styles).toMatch(/\.overview-tab-activity\s+i\s*{[^}]*animation:\s*tact-shimmer/s);
+  expect(styles).toMatch(/\.overview-spinner::before\s*{[^}]*animation:\s*tact-spin/s);
 });
 
 test("the inline answer spinner can visibly rotate", async () => {
@@ -34,7 +36,11 @@ test("the inline answer spinner can visibly rotate", async () => {
 
   expect(spinner).toBeDefined();
   expect(spinner).toMatch(/display:\s*inline-block/);
-  expect(spinner).toMatch(/animation:\s*spin/);
+  expect(spinner).toMatch(/animation:\s*tact-thread-spin/);
+  const reducedMotion = styles.match(
+    /@media\s*\(prefers-reduced-motion:\s*reduce\)\s*{([\s\S]*)}\s*$/,
+  )?.[1];
+  expect(reducedMotion).not.toContain(".thread-spinner");
 });
 
 test("seen files are crossed out in the file tree", async () => {
@@ -82,7 +88,7 @@ test("overview generation and question threads share one agent-operation gate", 
     app.indexOf("private pendingCommentElement"),
   );
 
-  expect(overview).toContain("if (!page || this.agentOperation");
+  expect(overview).toContain("(this.agentOperation && !restoring)");
   expect(overview).toContain('this.agentOperation = { kind: "overview", request }');
   expect(question).toContain("if (!draft || draft.editingId !== undefined || !page || this.agentOperation) return");
   expect(question).toContain('kind: "question"');
