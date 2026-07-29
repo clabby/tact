@@ -6,6 +6,22 @@ use std::{
 };
 use tokio::{io::AsyncReadExt, process::Command};
 
+#[cfg(test)]
+type PatchHook = std::sync::Arc<dyn Fn(&Path, bool, PatchHookPhase) + Send + Sync>;
+
+#[cfg(test)]
+static PATCH_HOOK: std::sync::RwLock<Option<PatchHook>> = std::sync::RwLock::new(None);
+
+#[cfg(test)]
+static PATCH_HOOK_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+enum PatchHookPhase {
+    Before,
+    After,
+}
+
 const MAX_DIFF_BYTES: usize = 32 * 1024 * 1024;
 const FULL_CONTEXT: &str = "--unified=2147483647";
 
@@ -162,15 +178,19 @@ impl ReviewContext {
         for _ in 0..3 {
             let overview_patch = working_tree_patch(&self.root, base, false).await?;
             let patch = working_tree_patch(&self.root, base, true).await?;
-            if working_tree_patch(&self.root, base, false).await? == overview_patch {
-                return Ok(DiffSnapshot {
-                    patch,
-                    overview_patch,
-                    repository: self.repository.clone(),
-                    scope: self.range_label(range)?,
-                    base: base.to_owned(),
-                });
+            if working_tree_patch(&self.root, base, false).await? != overview_patch {
+                continue;
             }
+            if working_tree_patch(&self.root, base, true).await? != patch {
+                continue;
+            }
+            return Ok(DiffSnapshot {
+                patch,
+                overview_patch,
+                repository: self.repository.clone(),
+                scope: self.range_label(range)?,
+                base: base.to_owned(),
+            });
         }
         Err(DiffError::WorkspaceChangedDuringSnapshot)
     }
@@ -354,7 +374,11 @@ fn workspace_version(trunk: &str, head: &str, patch: &str) -> WorkspaceVersion {
 async fn repository_root(workspace: &Path) -> Result<std::path::PathBuf, DiffError> {
     let output = git_output(workspace, ["rev-parse", "--show-toplevel"]).await?;
     if !output.status.success() {
-        return Err(DiffError::NotRepository(workspace.to_owned()));
+        let error = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        if error.contains("not a git repository") {
+            return Err(DiffError::NotRepository(workspace.to_owned()));
+        }
+        return Err(DiffError::GitFailed(error));
     }
 
     let root = String::from_utf8(output.stdout)?;
@@ -362,21 +386,74 @@ async fn repository_root(workspace: &Path) -> Result<std::path::PathBuf, DiffErr
 }
 
 async fn resolve_trunk(root: &Path) -> Result<Trunk, DiffError> {
-    for candidate in [
-        "refs/remotes/origin/HEAD",
-        "refs/remotes/upstream/HEAD",
-        "main",
-        "master",
-    ] {
-        if revision_exists(root, candidate).await? {
+    let current_branch = current_branch(root).await?;
+    let mut candidates = Vec::new();
+    if let Some(upstream) = current_upstream(root, current_branch.as_deref()).await? {
+        candidates.push(upstream);
+    }
+    candidates.extend(
+        [
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/upstream/HEAD",
+            "main",
+            "master",
+            "trunk",
+            "develop",
+        ]
+        .map(str::to_owned),
+    );
+    if let Some(current_branch) = current_branch {
+        candidates.push(current_branch);
+    }
+
+    for candidate in candidates {
+        if revision_exists(root, &candidate).await? {
             return Ok(Trunk {
-                name: candidate.to_owned(),
-                merge_base: merge_base(root, candidate).await?,
+                merge_base: merge_base(root, &candidate).await?,
+                name: candidate,
             });
         }
     }
 
     Err(DiffError::BaseNotFound)
+}
+
+async fn current_branch(root: &Path) -> Result<Option<String>, DiffError> {
+    let output = git_output(root, ["symbolic-ref", "--quiet", "--short", "HEAD"]).await?;
+    if output.status.code() == Some(1) {
+        return Ok(None);
+    }
+    ensure_success(output.status, &output.stderr)?;
+    let branch = String::from_utf8(output.stdout)?.trim().to_owned();
+    Ok((!branch.is_empty()).then_some(branch))
+}
+
+async fn current_upstream(
+    root: &Path,
+    current_branch: Option<&str>,
+) -> Result<Option<String>, DiffError> {
+    let Some(current_branch) = current_branch else {
+        return Ok(None);
+    };
+    let reference = format!("refs/heads/{current_branch}");
+    let output = git_output(
+        root,
+        [
+            "for-each-ref",
+            "--format=%(upstream:short)",
+            reference.as_str(),
+        ],
+    )
+    .await?;
+    ensure_success(output.status, &output.stderr)?;
+    let upstream = String::from_utf8(output.stdout)?.trim().to_owned();
+    if upstream.is_empty()
+        || upstream == current_branch
+        || upstream.ends_with(&format!("/{current_branch}"))
+    {
+        return Ok(None);
+    }
+    Ok(Some(upstream))
 }
 
 #[derive(Clone)]
@@ -460,7 +537,14 @@ async fn commit_metadata(root: &Path, revision: &str) -> Result<CommitMetadata, 
 
 async fn revision_exists(root: &Path, revision: &str) -> Result<bool, DiffError> {
     let output = git_output(root, ["rev-parse", "--verify", "--quiet", revision]).await?;
-    Ok(output.status.success())
+    if output.status.success() {
+        return Ok(true);
+    }
+    if output.status.code() == Some(1) {
+        return Ok(false);
+    }
+    ensure_success(output.status, &output.stderr)?;
+    Ok(false)
 }
 
 async fn merge_base(root: &Path, revision: &str) -> Result<String, DiffError> {
@@ -532,6 +616,9 @@ async fn working_tree_patch(
     base: &str,
     full_context: bool,
 ) -> Result<String, DiffError> {
+    #[cfg(test)]
+    run_patch_hook(root, full_context, PatchHookPhase::Before);
+
     let mut arguments = vec![
         "diff",
         "--binary",
@@ -547,7 +634,19 @@ async fn working_tree_patch(
     ensure_success(output.status, &output.stderr)?;
     let mut patch = String::from_utf8(output.stdout)?;
     append_untracked_files(root, &mut patch, full_context).await?;
+
+    #[cfg(test)]
+    run_patch_hook(root, full_context, PatchHookPhase::After);
+
     Ok(patch)
+}
+
+#[cfg(test)]
+fn run_patch_hook(root: &Path, full_context: bool, phase: PatchHookPhase) {
+    let hook = PATCH_HOOK.read().unwrap().clone();
+    if let Some(hook) = hook {
+        hook(root, full_context, phase);
+    }
 }
 
 async fn git_output<const N: usize>(
@@ -648,7 +747,7 @@ pub(crate) enum DiffError {
     GitFailed(String),
     #[error("review workspace is not in a Git repository: {0}")]
     NotRepository(std::path::PathBuf),
-    #[error("could not determine the branch base; pass `base` explicitly")]
+    #[error("could not determine the branch base; configure an upstream for the current branch")]
     BaseNotFound,
     #[error("could not find a merge base between HEAD and `{0}`")]
     InvalidBase(String),
@@ -672,8 +771,19 @@ pub(crate) enum DiffError {
 
 #[cfg(test)]
 mod tests {
-    use super::{DiffSnapshot, PatchSide, ReviewRange, ReviewTargetKind, current_version, load};
-    use std::{fs, path::Path, process::Command};
+    use super::{
+        DiffSnapshot, PatchHook, PatchHookPhase, PatchSide, ReviewRange, ReviewTargetKind,
+        current_version, load, repository_root,
+    };
+    use std::{
+        fs,
+        path::Path,
+        process::Command,
+        sync::{
+            Arc, MutexGuard,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
     use tempfile::TempDir;
 
     #[tokio::test]
@@ -831,6 +941,127 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn working_tree_snapshot_rejects_changes_between_patch_formats() {
+        let repository = repository();
+        let path = repository.path().join("tracked.txt");
+        fs::write(&path, "state-a\n").unwrap();
+        let context = load(repository.path()).await.unwrap();
+        let full_context_calls = Arc::new(AtomicUsize::new(0));
+        let observed_full_context_calls = Arc::clone(&full_context_calls);
+        let _hook = install_patch_hook({
+            let root = fs::canonicalize(repository.path()).unwrap();
+            let path = path.clone();
+            move |candidate, full_context, phase| {
+                if candidate != root || !matches!(phase, PatchHookPhase::Before) {
+                    return;
+                }
+                let first_full_context_capture = full_context
+                    && full_context_calls
+                        .fetch_add(1, Ordering::SeqCst)
+                        .is_multiple_of(2);
+                let contents = if first_full_context_capture {
+                    "state-b-with-a-different-size\n"
+                } else {
+                    "state-a\n"
+                };
+                fs::write(&path, contents).unwrap();
+            }
+        });
+
+        match context.collect(context.uncommitted_range()).await {
+            Err(super::DiffError::WorkspaceChangedDuringSnapshot) => {}
+            Err(error) => panic!("unexpected snapshot error: {error}"),
+            Ok(snapshot) => panic!(
+                "snapshot mixed states after {} full captures: overview_b={}, patch_b={}",
+                observed_full_context_calls.load(Ordering::SeqCst),
+                snapshot
+                    .overview_patch
+                    .contains("state-b-with-a-different-size"),
+                snapshot.patch.contains("state-b-with-a-different-size")
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn develop_branch_can_define_trunk_without_a_remote_head() {
+        let repository = repository_with_initial_branch("develop");
+        git(repository.path(), ["checkout", "--quiet", "-b", "feature"]);
+        fs::write(repository.path().join("tracked.txt"), "feature\n").unwrap();
+        git(repository.path(), ["add", "tracked.txt"]);
+        git(repository.path(), ["commit", "--quiet", "-m", "feature"]);
+
+        let context = load(repository.path()).await.unwrap();
+
+        assert_eq!(context.trunk_name(), "develop");
+        assert!(
+            context
+                .collect(context.full_range())
+                .await
+                .unwrap()
+                .patch
+                .contains("+feature")
+        );
+    }
+
+    #[tokio::test]
+    async fn current_branch_upstream_can_define_an_arbitrary_trunk() {
+        let repository = repository_with_initial_branch("stable");
+        git(repository.path(), ["checkout", "--quiet", "-b", "feature"]);
+        git(repository.path(), ["config", "branch.feature.remote", "."]);
+        git(
+            repository.path(),
+            ["config", "branch.feature.merge", "refs/heads/stable"],
+        );
+
+        let context = load(repository.path()).await.unwrap();
+
+        assert_eq!(context.trunk_name(), "stable");
+    }
+
+    #[tokio::test]
+    async fn same_branch_remote_upstream_is_not_treated_as_trunk() {
+        let repository = repository();
+        git(repository.path(), ["checkout", "--quiet", "-b", "feature"]);
+        git(
+            repository.path(),
+            ["update-ref", "refs/remotes/origin/feature", "HEAD"],
+        );
+        git(
+            repository.path(),
+            ["config", "branch.feature.remote", "origin"],
+        );
+        git(
+            repository.path(),
+            ["config", "branch.feature.merge", "refs/heads/feature"],
+        );
+
+        let context = load(repository.path()).await.unwrap();
+
+        assert_eq!(context.trunk_name(), "main");
+    }
+
+    #[tokio::test]
+    async fn repository_discovery_preserves_non_repository_git_failures() {
+        let repository = repository();
+        fs::write(repository.path().join(".git/config"), "[invalid\n").unwrap();
+
+        assert!(matches!(
+            repository_root(repository.path()).await,
+            Err(super::DiffError::GitFailed(error)) if error.contains("config")
+        ));
+    }
+
+    #[tokio::test]
+    async fn repository_discovery_identifies_a_directory_outside_git() {
+        let directory = TempDir::new().unwrap();
+
+        assert!(matches!(
+            repository_root(directory.path()).await,
+            Err(super::DiffError::NotRepository(path)) if path == directory.path()
+        ));
+    }
+
     #[test]
     fn comment_anchors_decode_git_quoted_paths() {
         let snapshot = DiffSnapshot {
@@ -853,10 +1084,14 @@ mod tests {
     }
 
     fn repository() -> TempDir {
+        repository_with_initial_branch("main")
+    }
+
+    fn repository_with_initial_branch(branch: &str) -> TempDir {
         let directory = TempDir::new().unwrap();
-        git(
+        git_dynamic(
             directory.path(),
-            ["init", "--quiet", "--initial-branch=main"],
+            &["init", "--quiet", &format!("--initial-branch={branch}")],
         );
         git(
             directory.path(),
@@ -870,7 +1105,29 @@ mod tests {
         directory
     }
 
+    struct PatchHookGuard {
+        _serial: MutexGuard<'static, ()>,
+    }
+
+    impl Drop for PatchHookGuard {
+        fn drop(&mut self) {
+            *super::PATCH_HOOK.write().unwrap() = None;
+        }
+    }
+
+    fn install_patch_hook(
+        hook: impl Fn(&Path, bool, PatchHookPhase) + Send + Sync + 'static,
+    ) -> PatchHookGuard {
+        let serial = super::PATCH_HOOK_SERIAL.lock().unwrap();
+        *super::PATCH_HOOK.write().unwrap() = Some(Arc::new(hook) as PatchHook);
+        PatchHookGuard { _serial: serial }
+    }
+
     fn git<const N: usize>(root: &Path, arguments: [&str; N]) {
+        git_dynamic(root, &arguments);
+    }
+
+    fn git_dynamic(root: &Path, arguments: &[&str]) {
         let status = Command::new("git")
             .args(arguments)
             .current_dir(root)

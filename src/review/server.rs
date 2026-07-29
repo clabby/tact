@@ -1506,6 +1506,7 @@ mod tests {
         let backend = Arc::new(ReviewBackend {
             workspace: repository().keep(),
             overview_generator,
+            current_version_error: None,
         });
         let review = backend.prepare(CancellationToken::new()).await.unwrap();
         ReviewServer::start(

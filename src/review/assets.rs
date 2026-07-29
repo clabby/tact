@@ -5,6 +5,7 @@ use flate2::read::GzDecoder;
 use fs2::FileExt;
 use semver::Version;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     env, fs,
@@ -152,6 +153,8 @@ impl ReviewAssets {
                 path.to_owned(),
                 ValidatedFile {
                     content_type: content_type.to_owned(),
+                    bytes: 0,
+                    sha256: Sha256::digest([]).into(),
                 },
             )
         })
@@ -272,7 +275,7 @@ fn validate_directory(path: &Path, kind: InstallKind) -> Result<ValidatedManifes
     let manifest = validate_manifest(manifest, kind)?;
 
     let mut total_bytes = 0_u64;
-    for name in manifest.files.keys() {
+    for (name, expected) in &manifest.files {
         let asset_path = path.join(name);
         if !kind.allows_symlinks() {
             reject_path_symlinks(path, Path::new(name))?;
@@ -289,6 +292,17 @@ fn validate_directory(path: &Path, kind: InstallKind) -> Result<ValidatedManifes
                 path: PathBuf::from(name),
                 limit: MAX_FILE_BYTES,
             });
+        }
+        if metadata.len() != expected.bytes {
+            return Err(AssetError::AssetSize {
+                path: PathBuf::from(name),
+                expected: expected.bytes,
+                actual: metadata.len(),
+            });
+        }
+        let actual_digest = hash_file(&asset_path)?;
+        if actual_digest != expected.sha256 {
+            return Err(AssetError::AssetDigest(PathBuf::from(name)));
         }
         total_bytes = total_bytes.saturating_add(metadata.len());
         if total_bytes > MAX_EXPANDED_BYTES {
@@ -336,6 +350,8 @@ fn validate_manifest(
         let path = file.path.clone();
         let file = ValidatedFile {
             content_type: file.content_type,
+            bytes: file.bytes,
+            sha256: parse_sha256(&path, &file.sha256)?,
         };
         if files.insert(path.clone(), file).is_some() {
             return Err(AssetError::DuplicateManifestPath(path));
@@ -348,6 +364,42 @@ fn validate_manifest(
         entrypoint: manifest.entrypoint,
         files,
     })
+}
+
+fn parse_sha256(path: &str, value: &str) -> Result<[u8; 32], AssetError> {
+    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(AssetError::AssetChecksum(PathBuf::from(path)));
+    }
+    let mut checksum = [0_u8; 32];
+    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+        let pair = std::str::from_utf8(pair)
+            .map_err(|_| AssetError::AssetChecksum(PathBuf::from(path)))?;
+        checksum[index] = u8::from_str_radix(pair, 16)
+            .map_err(|_| AssetError::AssetChecksum(PathBuf::from(path)))?;
+    }
+    Ok(checksum)
+}
+
+fn hash_file(path: &Path) -> Result<[u8; 32], AssetError> {
+    let mut file = File::open(path).map_err(|source| AssetError::ReadAsset {
+        path: path.to_owned(),
+        source,
+    })?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|source| AssetError::ReadAsset {
+                path: path.to_owned(),
+                source,
+            })?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hasher.finalize().into())
 }
 
 fn valid_content_type(value: &str) -> bool {
@@ -490,6 +542,8 @@ struct TactCompatibility {
 struct AssetFile {
     path: String,
     content_type: String,
+    bytes: u64,
+    sha256: String,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -501,6 +555,8 @@ struct ValidatedManifest {
 #[derive(Debug, Eq, PartialEq)]
 struct ValidatedFile {
     content_type: String,
+    bytes: u64,
+    sha256: [u8; 32],
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -537,6 +593,16 @@ pub(crate) enum AssetError {
     DuplicateManifestPath(String),
     #[error("review manifest entry `{0}` has an invalid content type")]
     ContentType(String),
+    #[error("review manifest entry `{0}` has an invalid SHA-256 checksum")]
+    AssetChecksum(PathBuf),
+    #[error("review asset `{path}` is {actual} bytes, but its manifest declares {expected}")]
+    AssetSize {
+        path: PathBuf,
+        expected: u64,
+        actual: u64,
+    },
+    #[error("review asset `{0}` does not match its manifest checksum")]
+    AssetDigest(PathBuf),
     #[error("review manifest entrypoint `{0}` is not a listed asset")]
     MissingEntrypoint(String),
     #[error("review asset manifest exceeds the {0}-byte limit")]
@@ -594,6 +660,7 @@ mod tests {
         TactCompatibility, extract, validate_directory,
     };
     use flate2::{Compression, write::GzEncoder};
+    use sha2::{Digest, Sha256};
     use std::{
         ffi::OsString,
         fs,
@@ -651,6 +718,8 @@ mod tests {
                 AssetFile {
                     path: path.to_owned(),
                     content_type: content_type.to_owned(),
+                    bytes: contents.len() as u64,
+                    sha256: format!("{:x}", Sha256::digest(contents.as_bytes())),
                 }
             })
             .collect();
@@ -790,6 +859,15 @@ mod tests {
             validate_directory(directory.path(), InstallKind::DevelopmentOverride),
             Err(AssetError::ReviewApi { .. })
         ));
+    }
+
+    #[test]
+    fn rejects_asset_contents_that_do_not_match_the_manifest() {
+        let directory = tempfile::tempdir().unwrap();
+        write_valid_assets(directory.path());
+        fs::write(directory.path().join("chunks/app.js"), "corrupted").unwrap();
+
+        assert!(validate_directory(directory.path(), InstallKind::Managed).is_err());
     }
 
     #[test]

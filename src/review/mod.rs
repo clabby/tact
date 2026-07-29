@@ -42,6 +42,8 @@ pub(crate) struct ReviewService;
 struct ReviewBackend {
     workspace: PathBuf,
     overview_generator: OverviewGenerator,
+    #[cfg(test)]
+    current_version_error: Option<String>,
 }
 
 pub(crate) struct ReviewHandle {
@@ -59,6 +61,8 @@ impl ReviewService {
         let backend = Arc::new(ReviewBackend {
             workspace: workspace.to_path_buf(),
             overview_generator,
+            #[cfg(test)]
+            current_version_error: None,
         });
         let prepared = backend.prepare(preparation_shutdown).await?;
         let repository = prepared.bootstrap.repository.clone();
@@ -113,7 +117,7 @@ impl ReviewBackend {
                 .await
                 .map_err(|error| match error {
                     ScopeLoadError::Cancelled => ReviewError::Cancelled,
-                    ScopeLoadError::Failed(error) => ReviewError::Overview(error),
+                    ScopeLoadError::Failed(error) => ReviewError::WorkspaceValidation(error),
                 })?
                 != version
             {
@@ -142,6 +146,11 @@ impl ReviewBackend {
         &self,
         shutdown: CancellationToken,
     ) -> Result<diff::WorkspaceVersion, ScopeLoadError> {
+        #[cfg(test)]
+        if let Some(error) = &self.current_version_error {
+            return Err(ScopeLoadError::Failed(error.clone()));
+        }
+
         tokio::select! {
             result = diff::current_version(&self.workspace) => {
                 result.map_err(|error| ScopeLoadError::Failed(error.to_string()))
@@ -287,6 +296,8 @@ pub(crate) enum ReviewError {
     OverviewSnapshot(std::io::Error),
     #[error("failed to generate the review overview: {0}")]
     Overview(String),
+    #[error("failed to validate the review workspace: {0}")]
+    WorkspaceValidation(String),
     #[error("review overview generation was cancelled")]
     Cancelled,
     #[error("the agent returned an empty review overview")]
@@ -310,9 +321,13 @@ impl ReviewError {
 #[cfg(test)]
 mod tests {
     use super::server::{CommentSide, Decision, ReviewComment, ReviewDecision};
-    use super::{OverviewGenerator, generate_overview};
+    use super::{OverviewGenerator, ReviewBackend, ReviewError, generate_overview};
     use crate::review::diff::ReviewRange;
-    use std::sync::{Arc, Mutex};
+    use std::{
+        fs,
+        process::Command,
+        sync::{Arc, Mutex},
+    };
     use tokio_util::sync::CancellationToken;
 
     #[test]
@@ -322,6 +337,53 @@ mod tests {
         ));
 
         assert_eq!(error.user_message(), "The folder must be a git repository.");
+    }
+
+    #[tokio::test]
+    async fn snapshot_validation_failure_is_not_reported_as_an_overview_failure() {
+        let repository = tempfile::tempdir().unwrap();
+        for arguments in [
+            vec!["init", "--quiet", "--initial-branch=main"],
+            vec!["config", "user.email", "test@example.com"],
+            vec!["config", "user.name", "Test User"],
+            vec!["config", "commit.gpgSign", "false"],
+        ] {
+            assert!(
+                Command::new("git")
+                    .args(arguments)
+                    .current_dir(repository.path())
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        fs::write(repository.path().join("tracked.txt"), "initial\n").unwrap();
+        for arguments in [
+            vec!["add", "tracked.txt"],
+            vec!["commit", "--quiet", "-m", "initial"],
+        ] {
+            assert!(
+                Command::new("git")
+                    .args(arguments)
+                    .current_dir(repository.path())
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        let backend = ReviewBackend {
+            workspace: repository.path().to_owned(),
+            overview_generator: Arc::new(|_, _| Box::pin(async { Ok(String::new()) })),
+            current_version_error: Some("git metadata became unavailable".to_owned()),
+        };
+
+        let error = match backend.prepare(CancellationToken::new()).await {
+            Ok(_) => panic!("snapshot validation should fail"),
+            Err(error) => error,
+        };
+
+        assert!(!matches!(error, ReviewError::Overview(_)));
+        assert!(error.to_string().contains("workspace"));
     }
 
     #[tokio::test]
