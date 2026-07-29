@@ -131,7 +131,7 @@ async fn generate_overview(
         .map_err(ReviewError::OverviewSnapshot)?;
     let path = snapshot.path().to_string_lossy();
     let prompt = format!(
-        "Prepare a concise HTML overview for a human reviewing `{label}`. The exact, immutable Git patch is at `{path}`. Read it without modifying the workspace. Return only a self-contained HTML fragment with the change's purpose, architecture/data flow, most important files, and concrete review risks. Do not include scripts, external resources, markdown fences, or a full code review.",
+        "Prepare a concise HTML overview for a human reviewing `{label}`. The exact, immutable Git patch is at `{path}`. Read it without modifying the workspace. Return only a semantic HTML fragment with the change's purpose, architecture/data flow, most important files, and concrete review risks. The reviewer owns all visual styling so the fragment works in both light and dark mode: do not include styles, classes, images, scripts, external resources, markdown fences, or a full code review.",
         label = scope.label(),
     );
     let result = match overview_generator(prompt, shutdown).await {

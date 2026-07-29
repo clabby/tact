@@ -18,6 +18,7 @@ import {
   type ReviewSettings,
   type SyntaxTheme,
 } from "./review-settings";
+import { overviewDocument } from "./overview";
 import "./styles.css";
 
 const COMMENT_ICON_SPRITE = `
@@ -278,7 +279,7 @@ class ReviewApp {
   private renderOverview() {
     const frame = this.root.querySelector<HTMLIFrameElement>(".overview");
     if (!frame || !this.page) return;
-    frame.srcdoc = `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:"><style>${overviewStyles()}</style></head><body>${this.page.overview_html}</body></html>`;
+    frame.srcdoc = overviewDocument(this.page.overview_html, appearance(this.settings));
   }
 
   private renderDiff() {
@@ -416,7 +417,10 @@ class ReviewApp {
 
   private applySettings(rebuildDiff: boolean) {
     document.documentElement.dataset.appearance = appearance(this.settings);
-    if (rebuildDiff && this.page) this.renderDiff();
+    if (rebuildDiff && this.page) {
+      this.renderOverview();
+      this.renderDiff();
+    }
     if (this.draft?.tab === "preview") void this.renderDraftPreview();
   }
 
@@ -889,20 +893,4 @@ function escapeHtml(value: string) {
   return value.replace(/[&<>'"]/g, (character) => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;",
   })[character] ?? character);
-}
-
-function overviewStyles() {
-  return `
-    :root { color-scheme: light dark; font: 15px/1.65 Inter, ui-sans-serif, system-ui, sans-serif; color: light-dark(#242624, #e8eae8); }
-    body { max-width: 780px; margin: 0 auto; padding: 56px 42px 120px; }
-    h1, h2, h3 { line-height: 1.2; letter-spacing: -.025em; margin: 2em 0 .6em; }
-    h1:first-child, h2:first-child { margin-top: 0; }
-    p, ul, ol, pre { margin: 0 0 1.2em; }
-    code { font: 13px ui-monospace, SFMono-Regular, monospace; background: light-dark(#f0f1ef, #282b29); padding: 2px 5px; border-radius: 5px; }
-    pre { padding: 18px; overflow: auto; border: 1px solid light-dark(#e1e3df, #353936); border-radius: 10px; }
-    pre code { padding: 0; background: none; }
-    a { color: inherit; }
-    strong { font-weight: 650; }
-    blockquote { margin: 1.5em 0; padding-left: 18px; border-left: 2px solid #8ca388; color: light-dark(#5d625d, #abb0ab); }
-  `;
 }
