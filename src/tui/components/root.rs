@@ -1728,7 +1728,7 @@ impl Component for RootNode {
                 self.update_composer(
                     ComposerEvent::ReviewWaiting {
                         waiting: true,
-                        status: Some("Review ready · O reopen · C copy".to_owned()),
+                        status: Some("Review ready · O reopen · C copy link".to_owned()),
                         now: Instant::now(),
                     },
                     RenderRequest::Immediate,
@@ -3957,7 +3957,7 @@ mod tests {
 
         assert!(rendered.contains("Review ready"));
         assert!(rendered.contains("O reopen"));
-        assert!(rendered.contains("C copy"));
+        assert!(rendered.contains("C copy link"));
         assert!(!rendered.contains("http://127.0.0.1:4321/review"));
         assert_eq!(
             update.effects,

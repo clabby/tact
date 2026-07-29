@@ -16,6 +16,16 @@ test("new changes appear before the range selector", async () => {
   );
 });
 
+test("the refresh banner keeps stable spacing around its separator", async () => {
+  const styles = await Bun.file(new URL("styles.css", import.meta.url)).text();
+  const banner = styles.match(/\.refresh-notice\s*{([^}]*)}/)?.[1];
+  const action = styles.match(/\.refresh-notice\s+strong\s*{([^}]*)}/)?.[1];
+
+  expect(banner).toMatch(/gap:\s*8px/);
+  expect(banner).toMatch(/white-space:\s*nowrap/);
+  expect(action).toMatch(/padding-left:\s*8px/);
+});
+
 test("the overview tab shows when its agent is working", async () => {
   const app = await Bun.file(new URL("app.ts", import.meta.url)).text();
   const styles = await Bun.file(new URL("styles.css", import.meta.url)).text();

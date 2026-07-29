@@ -10,7 +10,13 @@ repository = "https://github.com/clabby/tact"
 homepage = "https://github.com/clabby/tact"
 documentation = "https://docs.rs/tact"
 readme = "README.md"
-exclude = ["dist/**", "evals/**", "web/review/.dev/**", "web/review/dist/**", "web/review/node_modules/**"]
+exclude = [
+    "dist/**",
+    "docker/**",
+    "evals/**",
+    "tests/release_pipeline.rs",
+    "web/**",
+]
 keywords = ["ai", "coding-agent", "llm", "terminal", "tui"]
 categories = ["command-line-interface", "development-tools"]
 publish = ["crates-io"]

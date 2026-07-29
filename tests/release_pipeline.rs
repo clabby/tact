@@ -33,6 +33,20 @@ fn number_after(document: &str, marker: &str) -> u32 {
 }
 
 #[test]
+fn crate_package_omits_repository_only_assets() {
+    let manifest: toml::Value = toml::from_str(CARGO_MANIFEST).unwrap();
+    let excluded = manifest["package"]["exclude"].as_array().unwrap();
+    let excluded = excluded
+        .iter()
+        .map(|entry| entry.as_str().unwrap())
+        .collect::<Vec<_>>();
+
+    for path in ["docker/**", "tests/release_pipeline.rs", "web/**"] {
+        assert!(excluded.contains(&path), "crate package should exclude {path}");
+    }
+}
+
+#[test]
 fn ci_builds_and_typechecks_review_assets_with_locked_dependencies() {
     let workflow = workflow(CI_WORKFLOW);
     let steps = workflow["jobs"]["review-web"]["steps"]
