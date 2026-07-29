@@ -1034,7 +1034,7 @@ impl Composer {
         let directory_width = directory.width().min(content_width);
         let directory_start =
             content_end.saturating_sub(u16::try_from(directory_width).unwrap_or(u16::MAX));
-        let development_width = if is_development_build()
+        let development_width = if crate::app::installation::current().is_development()
             && DEVELOPMENT_BADGE.width()
                 <= usize::from(directory_start.saturating_sub(content_start))
         {
@@ -1154,10 +1154,6 @@ fn context_percent(tokens: u64) -> u64 {
         / MODEL_WINDOW_TOKENS
 }
 
-fn is_development_build() -> bool {
-    !matches!(env!("TACT_RELEASE_BUILD"), "true")
-}
-
 fn draw_symbol(buffer: &mut Buffer, x: u16, y: u16, symbol: &str, style: Style) {
     buffer[(x, y)].set_symbol(symbol).set_style(style);
 }
@@ -1199,7 +1195,7 @@ fn render_draft_line(
 
 #[cfg(test)]
 mod tests {
-    use super::{Composer, ComposerEffect, ComposerEvent, context_percent, is_development_build};
+    use super::{Composer, ComposerEffect, ComposerEvent, context_percent};
     use crate::{
         app::config::{ReasoningEffort, ReasoningMode},
         tui::theme::Theme,
@@ -1238,7 +1234,7 @@ mod tests {
     fn empty_composer_matches_the_pi_chrome() {
         let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
         let terminal = render(&mut composer, 60, 5);
-        let footer = if is_development_build() {
+        let footer = if crate::app::installation::current().is_development() {
             "╰─ / actions · @ files ───────────────────── ◉ dev  /work ─╯"
         } else {
             "╰─ / actions · @ files ──────────────────────────── /work ─╯"
@@ -1396,14 +1392,14 @@ mod tests {
     }
 
     #[test]
-    fn development_badge_matches_the_release_build_marker() {
+    fn development_badge_matches_the_installation_kind() {
         let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
         let terminal = render(&mut composer, 60, 5);
         let row = &terminal.backend().buffer().content[4 * 60..5 * 60];
         let rendered = row.iter().map(|cell| cell.symbol()).collect::<String>();
         let badge_start = row.iter().position(|cell| cell.symbol() == "◉");
 
-        if !is_development_build() {
+        if !crate::app::installation::current().is_development() {
             assert!(badge_start.is_none());
             assert!(!rendered.contains("dev"));
             return;

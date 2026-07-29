@@ -1,5 +1,6 @@
 //! Release discovery and verified replacement of the running executable.
 
+use crate::app::installation::{InstallationKind, current as installation};
 use flate2::read::GzDecoder;
 use minisign_verify::{PublicKey, Signature};
 use reqwest::Client;
@@ -7,11 +8,9 @@ use semver::Version;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeMap,
     env, fs,
     io::{self, Cursor, Read, Seek, SeekFrom, Write},
     path::{Component, Path, PathBuf},
-    process::Command,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tempfile::{NamedTempFile, TempDir, tempdir};
@@ -287,19 +286,6 @@ struct UpdateCache {
     version: Version,
 }
 
-#[derive(Deserialize)]
-struct CargoInstallMetadata {
-    v1: BTreeMap<String, Vec<String>>,
-}
-
-pub(crate) fn is_official_release_build() -> bool {
-    matches!(env!("TACT_RELEASE_BUILD"), "true")
-}
-
-pub(crate) fn can_download_release_artifacts() -> bool {
-    is_official_release_build() || crates_io_install_root().is_some()
-}
-
 pub(crate) async fn download_verified_release_artifact(
     version: &Version,
     archive_name: &str,
@@ -325,32 +311,46 @@ pub(crate) async fn download_verified_release_artifact(
 }
 
 pub(crate) async fn check_for_update(config_path: &Path) -> Result<Option<Version>, UpdateError> {
-    if !is_official_release_build() {
+    let installation = installation();
+    if installation.is_development() {
         return Ok(None);
     }
-    let target = SupportedTarget::current()?;
+    let build_target = env!("TACT_BUILD_TARGET");
+    let artifact_target = update_artifact_target(installation, build_target)?;
     let current = current_version()?;
     let now = unix_timestamp(SystemTime::now());
-    if let Some(cache) = read_fresh_cache(config_path, target, now) {
+    if let Some(cache) = read_fresh_cache(config_path, build_target, now) {
         return Ok((cache.version > current).then_some(cache.version));
     }
 
     let client = http_client()?;
     let release = latest_release(&client).await?;
     if release.version <= current {
-        write_cache(config_path, target, &release.version, now);
+        write_cache(config_path, build_target, &release.version, now);
         return Ok(None);
     }
-    release.assets_for(target)?;
-    fetch_signing_key(&client, &release.version).await?;
-    write_cache(config_path, target, &release.version, now);
+    if let Some(target) = artifact_target {
+        release.assets_for(target)?;
+        fetch_signing_key(&client, &release.version).await?;
+    }
+    write_cache(config_path, build_target, &release.version, now);
     Ok(Some(release.version))
 }
 
+fn update_artifact_target(
+    installation: &InstallationKind,
+    target: &str,
+) -> Result<Option<SupportedTarget>, UpdateError> {
+    match installation {
+        InstallationKind::ReleaseArchive => SupportedTarget::from_triple(target).map(Some),
+        InstallationKind::CratesIo { .. } | InstallationKind::Development => Ok(None),
+    }
+}
+
 pub(crate) async fn install_latest() -> Result<UpdateStatus, UpdateError> {
-    if let Some(root) = crates_io_install_root() {
+    if let InstallationKind::CratesIo { root } = installation() {
         return Ok(UpdateStatus::UseCargo {
-            command: cargo_update_command(&root, default_cargo_install_root().as_deref()),
+            command: cargo_update_command(root, default_cargo_install_root().as_deref()),
         });
     }
     let target = SupportedTarget::current()?;
@@ -433,90 +433,6 @@ async fn download_verified_artifact(
         &public_key,
     )?;
     Ok(archive)
-}
-
-fn crates_io_install_root() -> Option<PathBuf> {
-    let executable = env::current_exe().ok()?;
-    let root = candidate_cargo_install_root(&executable)?;
-    match cargo_metadata_tact_ownership(&root) {
-        Some(true) => return Some(root),
-        Some(false) => return None,
-        None => {}
-    }
-    let output = Command::new("cargo")
-        .args(["install", "--list", "--root"])
-        .arg(&root)
-        .args(["--color", "never"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let installed = std::str::from_utf8(&output.stdout).ok()?;
-    cargo_list_owns_tact(installed).then_some(root)
-}
-
-#[cfg(test)]
-fn cargo_metadata_owns_tact(root: &Path) -> bool {
-    cargo_metadata_tact_ownership(root) == Some(true)
-}
-
-fn cargo_metadata_tact_ownership(root: &Path) -> Option<bool> {
-    let contents = fs::read_to_string(root.join(".crates.toml")).ok()?;
-    let metadata: CargoInstallMetadata = toml::from_str(&contents).ok()?;
-    Some(metadata.v1.iter().any(|(package, binaries)| {
-        crates_io_tact_package(package) && binaries.iter().any(|binary| binary == "tact")
-    }))
-}
-
-fn crates_io_tact_package(package: &str) -> bool {
-    let Some(package) = package.strip_prefix("tact ") else {
-        return false;
-    };
-    let Some((version, source)) = package.split_once(" (") else {
-        return false;
-    };
-    Version::parse(version).is_ok()
-        && source == "registry+https://github.com/rust-lang/crates.io-index)"
-}
-
-fn candidate_cargo_install_root(executable: &Path) -> Option<PathBuf> {
-    let filename = executable.file_name()?.to_str()?;
-    if !matches!(filename, "tact" | "tact.exe") {
-        return None;
-    }
-    let bin = executable.parent()?;
-    (bin.file_name()? == "bin").then(|| bin.parent().map(Path::to_path_buf))?
-}
-
-fn cargo_list_owns_tact(output: &str) -> bool {
-    let mut lines = output.lines().peekable();
-    while let Some(header) = lines.next() {
-        if header.starts_with(char::is_whitespace) {
-            continue;
-        }
-        let Some(header) = header.strip_suffix(':') else {
-            continue;
-        };
-        let mut fields = header.split_whitespace();
-        let is_registry_tact = fields.next() == Some("tact")
-            && fields
-                .next()
-                .and_then(|version| version.strip_prefix('v'))
-                .is_some_and(|version| Version::parse(version).is_ok())
-            && fields.next().is_none();
-        let mut owns_binary = false;
-        while lines
-            .peek()
-            .is_some_and(|line| line.starts_with(char::is_whitespace))
-        {
-            owns_binary |= lines.next().is_some_and(|line| line.trim() == "tact");
-        }
-        if is_registry_tact && owns_binary {
-            return true;
-        }
-    }
-    false
 }
 
 fn default_cargo_install_root() -> Option<PathBuf> {
@@ -954,26 +870,26 @@ fn cache_path(config_path: &Path) -> PathBuf {
         .join(CACHE_FILE)
 }
 
-fn read_fresh_cache(config_path: &Path, target: SupportedTarget, now: u64) -> Option<UpdateCache> {
+fn read_fresh_cache(config_path: &Path, target: &str, now: u64) -> Option<UpdateCache> {
     let cache: UpdateCache =
         serde_json::from_slice(&fs::read(cache_path(config_path)).ok()?).ok()?;
     cache_is_fresh(&cache, target, now).then_some(cache)
 }
 
-fn cache_is_fresh(cache: &UpdateCache, target: SupportedTarget, now: u64) -> bool {
-    cache.target == target.triple()
+fn cache_is_fresh(cache: &UpdateCache, target: &str, now: u64) -> bool {
+    cache.target == target
         && now.saturating_sub(cache.checked_at) <= CACHE_TTL.as_secs()
         && cache.checked_at <= now
 }
 
-fn write_cache(config_path: &Path, target: SupportedTarget, version: &Version, now: u64) {
+fn write_cache(config_path: &Path, target: &str, version: &Version, now: u64) {
     let path = cache_path(config_path);
     let Some(parent) = path.parent() else {
         return;
     };
     let cache = UpdateCache {
         checked_at: now,
-        target: target.triple().to_owned(),
+        target: target.to_owned(),
         version: version.clone(),
     };
     let Ok(encoded) = serde_json::to_vec(&cache) else {
@@ -994,10 +910,10 @@ fn write_cache(config_path: &Path, target: SupportedTarget, version: &Version, n
 mod tests {
     use super::{
         GithubAsset, GithubReleaseResponse, Release, SupportedTarget, UpdateCache, UpdateError,
-        cache_is_fresh, candidate_cargo_install_root, cargo_list_owns_tact,
-        cargo_metadata_owns_tact, cargo_update_command, crate_manifest, extract_binary,
-        parse_hex_checksum, verify_archive_checksum,
+        cache_is_fresh, cargo_update_command, crate_manifest, extract_binary, parse_hex_checksum,
+        update_artifact_target, verify_archive_checksum,
     };
+    use crate::app::installation::InstallationKind;
     use flate2::{Compression, write::GzEncoder};
     use semver::Version;
     use sha2::Digest;
@@ -1063,6 +979,25 @@ mod tests {
             SupportedTarget::from_triple("x86_64-pc-windows-msvc"),
             Err(UpdateError::UnsupportedTarget { .. })
         ));
+    }
+
+    #[test]
+    fn cargo_update_checks_do_not_require_a_release_archive_target() {
+        let installation = InstallationKind::CratesIo {
+            root: "/opt/tact".into(),
+        };
+
+        assert_eq!(
+            update_artifact_target(&installation, "x86_64-unknown-linux-musl").unwrap(),
+            None,
+        );
+        assert!(
+            update_artifact_target(
+                &InstallationKind::ReleaseArchive,
+                "x86_64-unknown-linux-musl",
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -1174,15 +1109,19 @@ mod tests {
         };
         assert!(cache_is_fresh(
             &cache,
-            SupportedTarget::LinuxX86_64,
+            SupportedTarget::LinuxX86_64.triple(),
             1_000 + 60 * 60
         ));
         assert!(!cache_is_fresh(
             &cache,
-            SupportedTarget::LinuxX86_64,
+            SupportedTarget::LinuxX86_64.triple(),
             1_001 + 60 * 60
         ));
-        assert!(!cache_is_fresh(&cache, SupportedTarget::MacosX86_64, 1_001));
+        assert!(!cache_is_fresh(
+            &cache,
+            SupportedTarget::MacosX86_64.triple(),
+            1_001,
+        ));
     }
 
     #[test]
@@ -1190,69 +1129,6 @@ mod tests {
         assert!(parse_hex_checksum(&"a".repeat(64)).is_some());
         assert!(parse_hex_checksum(&"a".repeat(63)).is_none());
         assert!(parse_hex_checksum(&"z".repeat(64)).is_none());
-    }
-
-    #[test]
-    fn cargo_list_only_matches_registry_tact_owning_the_tact_binary() {
-        assert!(cargo_list_owns_tact(
-            "bat v0.26.1:\n    bat\ntact v1.2.3:\n    tact\n"
-        ));
-        assert!(!cargo_list_owns_tact(
-            "tact v1.2.3 (/work/tact):\n    tact\n"
-        ));
-        assert!(!cargo_list_owns_tact(
-            "tact v1.2.3 (git+https://example.com/tact):\n    tact\n"
-        ));
-        assert!(!cargo_list_owns_tact("tact v1.2.3:\n    helper\n"));
-    }
-
-    #[test]
-    fn cargo_metadata_detects_crates_io_install_without_running_cargo() {
-        let root = tempfile::tempdir().unwrap();
-        std::fs::write(
-            root.path().join(".crates.toml"),
-            r#"[v1]
-"tact 1.2.3 (registry+https://github.com/rust-lang/crates.io-index)" = ["tact"]
-"helper 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)" = ["helper"]
-"#,
-        )
-        .unwrap();
-
-        assert!(cargo_metadata_owns_tact(root.path()));
-    }
-
-    #[test]
-    fn cargo_metadata_rejects_non_crates_io_installations() {
-        for source in [
-            "path+file:///work/tact",
-            "git+https://example.com/tact",
-            "registry+https://example.com/index",
-        ] {
-            let root = tempfile::tempdir().unwrap();
-            std::fs::write(
-                root.path().join(".crates.toml"),
-                format!("[v1]\n\"tact 1.2.3 ({source})\" = [\"tact\"]\n"),
-            )
-            .unwrap();
-
-            assert!(!cargo_metadata_owns_tact(root.path()));
-        }
-    }
-
-    #[test]
-    fn cargo_install_root_requires_the_expected_bin_layout() {
-        assert_eq!(
-            candidate_cargo_install_root(std::path::Path::new("/opt/tools/bin/tact")),
-            Some(std::path::PathBuf::from("/opt/tools"))
-        );
-        assert_eq!(
-            candidate_cargo_install_root(std::path::Path::new("/work/target/debug/tact")),
-            None
-        );
-        assert_eq!(
-            candidate_cargo_install_root(std::path::Path::new("/opt/tools/bin/other")),
-            None
-        );
     }
 
     #[test]

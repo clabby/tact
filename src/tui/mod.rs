@@ -103,12 +103,8 @@ struct ReviewReady {
     url: String,
 }
 
-fn update_checks_enabled() -> bool {
-    crate::app::update::is_official_release_build()
-}
-
 fn spawn_update_check(config_path: &Path) -> Option<UpdateCheckTask> {
-    if !update_checks_enabled() {
+    if crate::app::installation::current().is_development() {
         return None;
     }
     let config_path = config_path.to_path_buf();
@@ -1944,7 +1940,7 @@ mod tests {
     use super::{
         PaneGeneration, PaneSession, PaneSettings, PendingSubmission, close_pane_journal,
         is_image_paste, local_link_path, open_pane, send_submission, subagent_pane,
-        update_checks_enabled, validate_interactive,
+        validate_interactive,
     };
     use crate::{
         app::{
@@ -1961,11 +1957,6 @@ mod tests {
     };
     use std::{collections::HashMap, fs, path::Path, sync::Arc};
     use tempfile::tempdir;
-
-    #[test]
-    fn development_builds_do_not_enable_update_checks() {
-        assert!(!update_checks_enabled());
-    }
 
     #[test]
     fn control_or_super_v_requests_an_image_paste() {
