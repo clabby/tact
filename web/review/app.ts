@@ -1914,7 +1914,7 @@ export class ReviewApp {
       button.title = this.snapshotStale ? "Refresh before submitting this stale snapshot." : "";
     }
     const cancel = this.root.querySelector<HTMLButtonElement>("#cancel-review");
-    if (cancel) cancel.disabled = disabled || agentBusy || terminalBusy;
+    if (cancel) cancel.disabled = terminalBusy;
   }
 
   private async submit(decision: ReviewDecision["decision"]) {
@@ -1963,7 +1963,6 @@ export class ReviewApp {
   }
 
   private async cancel() {
-    if (this.agentOperation) return;
     if (this.draft) {
       this.showInlineError("Save or discard the open comment draft before cancelling the review.");
       this.focusDraft();

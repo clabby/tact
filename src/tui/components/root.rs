@@ -132,7 +132,6 @@ pub(crate) enum RootEvent {
     ReplaceDraft(String),
     ReviewStarted,
     ReviewReady(String),
-    ReviewAgentStarted,
     ReviewCancelled,
     ReviewFinished(String),
     ReviewFailed(String),
@@ -1733,10 +1732,6 @@ impl Component for RootNode {
                     },
                     RenderRequest::Immediate,
                 )
-            }
-            RootEvent::ReviewAgentStarted => {
-                self.in_flight_turns = self.in_flight_turns.saturating_add(1);
-                ComponentUpdate::none()
             }
             RootEvent::ReviewFinished(markdown) => {
                 self.review_active = false;
@@ -3902,7 +3897,6 @@ mod tests {
     fn review_waiting_is_shown_in_the_composer_instead_of_the_transcript() {
         let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
         root.update(RootEvent::ReviewStarted);
-        root.update(RootEvent::ReviewAgentStarted);
         root.update(RootEvent::Transcript(agent_record(
             1,
             AgentEventKind::RunStarted,

@@ -114,7 +114,7 @@ type TurnResult = Result<CompletedTurn, NanocodexError>;
 
 struct CompletedTurn {
     final_message: String,
-    snapshot: Box<SessionSnapshot>,
+    snapshot: Option<Box<SessionSnapshot>>,
 }
 
 enum TurnPurpose {
@@ -322,6 +322,7 @@ async fn run(
     commands.close();
     while commands.try_recv().is_ok() {}
 
+    drop(cancel_turns(&controls, None).await);
     let (main_shutdown, fork_shutdown) = tokio::join!(
         shutdown_agent(main.take()),
         shutdown_agent(fork.take().map(|(_, agent)| agent)),
@@ -359,9 +360,58 @@ async fn start_turn(
         purpose,
         shutdown,
     } = request;
-    let turn = match agent.prompt(prompt.agent_prompt()).await {
+    let auxiliary = matches!(purpose, TurnPurpose::Auxiliary(_));
+    let (isolated_agent, event_drain) = if auxiliary {
+        let spawn = agent.spawn();
+        let spawned = if let Some(scope) = shutdown.clone() {
+            tokio::select! {
+                result = spawn => result,
+                () = scope.cancelled() => {
+                    reject_cancelled_turn(TurnRequest {
+                        pane,
+                        id,
+                        prompt,
+                        purpose,
+                        shutdown,
+                    });
+                    return;
+                }
+            }
+        } else {
+            spawn.await
+        };
+        let (agent, mut events) = match spawned {
+            Ok(spawned) => spawned,
+            Err(error) => {
+                reject_turn(
+                    TurnRequest {
+                        pane,
+                        id,
+                        prompt,
+                        purpose,
+                        shutdown,
+                    },
+                    error.to_string(),
+                    updates,
+                );
+                return;
+            }
+        };
+        let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
+        (Some(agent), Some(drain))
+    } else {
+        (None, None)
+    };
+    let turn_agent = isolated_agent.as_ref().unwrap_or(agent);
+    let turn = match turn_agent.prompt(prompt.agent_prompt()).await {
         Ok(turn) => turn,
         Err(error) => {
+            if let Some(agent) = isolated_agent {
+                drop(agent.shutdown().await);
+            }
+            if let Some(drain) = event_drain {
+                drop(drain.await);
+            }
             reject_turn(
                 TurnRequest {
                     pane,
@@ -396,22 +446,32 @@ async fn start_turn(
         };
         let result = result.map(|result| CompletedTurn {
             final_message: result.final_message().to_owned(),
-            snapshot: Box::new(result.snapshot()),
+            snapshot: (!auxiliary).then(|| Box::new(result.snapshot())),
         });
+        if let Some(agent) = isolated_agent {
+            drop(agent.shutdown().await);
+        }
+        if let Some(drain) = event_drain {
+            drop(drain.await);
+        }
         (key, purpose, cancelled_by_scope, result)
     });
-    drop(updates.send(WorkerEvent::TurnAccepted { pane, id }));
+    if !auxiliary {
+        drop(updates.send(WorkerEvent::TurnAccepted { pane, id }));
+    }
 }
 
 fn reject_turn(request: TurnRequest, error: String, updates: &mpsc::UnboundedSender<WorkerEvent>) {
-    drop(updates.send(WorkerEvent::TurnFinished {
-        pane: request.pane,
-        id: request.id,
-        error: Some(error.clone()),
-        snapshot: None,
-    }));
-    if let TurnPurpose::Auxiliary(completion) = request.purpose {
-        drop(completion.send(Err(AuxiliaryError::Failed(error))));
+    match request.purpose {
+        TurnPurpose::Conversation => drop(updates.send(WorkerEvent::TurnFinished {
+            pane: request.pane,
+            id: request.id,
+            error: Some(error),
+            snapshot: None,
+        })),
+        TurnPurpose::Auxiliary(completion) => {
+            drop(completion.send(Err(AuxiliaryError::Failed(error))));
+        }
     }
 }
 
@@ -467,7 +527,7 @@ async fn steer_turn(
             turns.spawn(async move {
                 let result = turn.await.map(|result| CompletedTurn {
                     final_message: result.final_message().to_owned(),
-                    snapshot: Box::new(result.snapshot()),
+                    snapshot: Some(Box::new(result.snapshot())),
                 });
                 (key, TurnPurpose::Conversation, false, result)
             });
@@ -539,30 +599,36 @@ fn finish_turn(
     };
     controls.remove(&key);
     let was_cancelled = cancelled.remove(&key);
-    let (error, snapshot, overview) = match result {
-        Ok(completed) => (None, Some(completed.snapshot), Ok(completed.final_message)),
-        Err(NanocodexError::TurnCancelled)
-            if shutting_down || was_cancelled || cancelled_by_scope =>
-        {
-            (None, None, Err(AuxiliaryError::Cancelled))
+    match purpose {
+        TurnPurpose::Conversation => {
+            let (error, snapshot) = match result {
+                Ok(completed) => (None, completed.snapshot),
+                Err(NanocodexError::TurnCancelled)
+                    if shutting_down || was_cancelled || cancelled_by_scope =>
+                {
+                    (None, None)
+                }
+                Err(error) => (Some(error.to_string()), None),
+            };
+            drop(updates.send(WorkerEvent::TurnFinished {
+                pane: key.pane,
+                id: key.id,
+                error,
+                snapshot,
+            }));
         }
-        Err(error) => {
-            let error = error.to_string();
-            (
-                Some(error.clone()),
-                None,
-                Err(AuxiliaryError::Failed(error)),
-            )
+        TurnPurpose::Auxiliary(completion) => {
+            let result = match result {
+                Ok(completed) => Ok(completed.final_message),
+                Err(NanocodexError::TurnCancelled)
+                    if shutting_down || was_cancelled || cancelled_by_scope =>
+                {
+                    Err(AuxiliaryError::Cancelled)
+                }
+                Err(error) => Err(AuxiliaryError::Failed(error.to_string())),
+            };
+            drop(completion.send(result));
         }
-    };
-    drop(updates.send(WorkerEvent::TurnFinished {
-        pane: key.pane,
-        id: key.id,
-        error,
-        snapshot,
-    }));
-    if let TurnPurpose::Auxiliary(completion) = purpose {
-        drop(completion.send(overview));
     }
 }
 
@@ -1012,14 +1078,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn auxiliary_job_runs_on_the_root_worker_and_has_targeted_cancellation() {
+    async fn auxiliary_job_is_isolated_and_has_targeted_cancellation() {
         let called = Arc::new(Notify::new());
         let calls = Arc::new(AtomicUsize::new(0));
         let (agent, mut events) = pending_agent(Arc::clone(&called), calls);
         let worker_shutdown = CancellationToken::new();
         let overview_shutdown = CancellationToken::new();
         let (commands, mut updates) = spawn(agent, worker_shutdown.clone());
-        let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
         let (completion, result) = oneshot::channel();
 
         commands
@@ -1033,11 +1098,17 @@ mod tests {
             .unwrap();
         timeout(Duration::from_secs(5), called.notified())
             .await
-            .expect("the root model request should start");
-        assert!(matches!(
-            updates.recv().await,
-            Some(WorkerEvent::TurnAccepted { id, .. }) if id == TurnId::new(7)
-        ));
+            .expect("the isolated model request should start");
+        assert!(
+            timeout(Duration::from_millis(50), events.recv())
+                .await
+                .is_err()
+        );
+        assert!(
+            timeout(Duration::from_millis(50), updates.recv())
+                .await
+                .is_err()
+        );
 
         overview_shutdown.cancel();
         assert!(
@@ -1047,15 +1118,11 @@ mod tests {
                 .expect("the worker should return a result")
                 .is_err()
         );
-        assert!(matches!(
-            timeout(Duration::from_secs(5), updates.recv()).await,
-            Ok(Some(WorkerEvent::TurnFinished {
-                id,
-                error: None,
-                snapshot: None,
-                ..
-            })) if id == TurnId::new(7)
-        ));
+        assert!(
+            timeout(Duration::from_millis(50), updates.recv())
+                .await
+                .is_err()
+        );
 
         worker_shutdown.cancel();
         timeout(Duration::from_secs(5), async {
@@ -1063,10 +1130,10 @@ mod tests {
         })
         .await
         .expect("the worker should stop");
-        timeout(Duration::from_secs(5), drain)
-            .await
-            .expect("the event stream should drain")
-            .expect("the drain task should not panic");
+        assert!(matches!(
+            timeout(Duration::from_secs(5), events.recv()).await,
+            Ok(None)
+        ));
     }
 
     #[tokio::test]

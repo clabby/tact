@@ -116,6 +116,33 @@ test("overview generation and question threads share one agent-operation gate", 
   expect(app).toContain('querySelectorAll<HTMLTextAreaElement>("[data-thread-input]")');
 });
 
+test("the review can be cancelled while the agent is working", async () => {
+  const app = await Bun.file(new URL("app.ts", import.meta.url)).text();
+  const controls = app.slice(
+    app.indexOf("private setReviewControlsDisabled"),
+    app.indexOf("private async submit"),
+  );
+  const cancel = app.slice(
+    app.indexOf("private async cancel()"),
+    app.indexOf("private showTerminalBusy"),
+  );
+
+  expect(controls).toContain("cancel.disabled = terminalBusy");
+  expect(cancel).not.toContain("if (this.agentOperation) return");
+});
+
+test("the mobile layout reserves room for its stacked review actions", async () => {
+  const styles = await Bun.file(new URL("styles.css", import.meta.url)).text();
+  const mobile = styles.slice(
+    styles.indexOf("@media (max-width: 760px)"),
+    styles.indexOf("@media (max-width: 600px)"),
+  );
+
+  expect(styles).toContain("--review-footer-height: 68px");
+  expect(styles).toContain("var(--review-footer-height)");
+  expect(mobile).toContain("--review-footer-height: 132px");
+});
+
 test("the changed-file wrapper owns the tree's available height", async () => {
   const styles = await Bun.file(new URL("styles.css", import.meta.url)).text();
   const navigation = styles.match(/\.files-navigation\s*{([^}]*)}/)?.[1];

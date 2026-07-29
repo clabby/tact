@@ -294,12 +294,7 @@ impl ReviewDecision {
             server::Decision::Approve => "Approved",
             server::Decision::RequestChanges => "Changes requested",
         };
-        let mut markdown = format!(
-            "## Review: {heading}\n\n**Scope:** {scope}\n**Range:** {from} → {to}\n",
-            scope = self.scope,
-            from = self.range.from,
-            to = self.range.to,
-        );
+        let mut markdown = format!("## Review: {heading}\n\n**Scope:** {}\n", self.scope);
         if !self.summary.trim().is_empty() {
             markdown.push('\n');
             markdown.push_str(self.summary.trim());
@@ -497,7 +492,7 @@ mod tests {
 
         assert_eq!(
             review.to_markdown(),
-            "## Review: Changes requested\n\n**Scope:** Full branch\n**Range:** 0 → 2\n\nPlease address this before merging.\n\n### Comments\n\n- `src/main.rs:12-14` (new)\n  Handle the error.\n  This can fail.\n"
+            "## Review: Changes requested\n\n**Scope:** Full branch\n\nPlease address this before merging.\n\n### Comments\n\n- `src/main.rs:12-14` (new)\n  Handle the error.\n  This can fail.\n"
         );
     }
 }

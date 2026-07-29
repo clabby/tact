@@ -50,7 +50,7 @@ fn crate_package_omits_repository_only_assets() {
 }
 
 #[test]
-fn ci_builds_and_typechecks_review_assets_with_locked_dependencies() {
+fn ci_tests_builds_and_typechecks_review_assets_with_locked_dependencies() {
     let workflow = workflow(CI_WORKFLOW);
     let steps = workflow["jobs"]["review-web"]["steps"]
         .as_sequence()
@@ -58,6 +58,7 @@ fn ci_builds_and_typechecks_review_assets_with_locked_dependencies() {
 
     for command in [
         "bun install --frozen-lockfile",
+        "bun test",
         "bun run build",
         "bun run typecheck",
     ] {

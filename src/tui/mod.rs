@@ -620,12 +620,6 @@ pub(crate) async fn run(
                 }
                 let id = TurnId::new(runtime.next_turn);
                 runtime.next_turn = runtime.next_turn.saturating_add(1);
-                let record = runtime.journal_mut()?.append_local(LocalEvent::UserSubmitted {
-                    id,
-                    text: prompt.clone(),
-                })?;
-                schedule(app.update(AppEvent::Transcript { pane, record }), &mut scheduler);
-                schedule(app.update(AppEvent::ReviewAgentStarted(pane)), &mut scheduler);
                 commands
                     .send(WorkerCommand::Auxiliary {
                         pane,
