@@ -24,12 +24,24 @@ await Bun.write(
   Bun.file(join(import.meta.dir, "index.html")),
 );
 
+let workspaceChanged = true;
+
 const server = Bun.serve({
   port: Number(process.env.PORT ?? 4173),
   async fetch(request) {
     const url = new URL(request.url);
     if (request.method === "GET" && url.pathname === "/api/review") {
       return Response.json(reviewBootstrap);
+    }
+    if (request.method === "GET" && url.pathname === "/api/status") {
+      return Response.json({ changed: workspaceChanged });
+    }
+    if (request.method === "POST" && url.pathname === "/api/refresh") {
+      workspaceChanged = false;
+      return Response.json({
+        bootstrap: reviewBootstrap,
+        page: reviewFixtures[rangeKey(reviewBootstrap.default_range)],
+      });
     }
     if (request.method === "POST" && url.pathname === "/api/range") {
       const body = await request.json() as { range?: ReviewRange };

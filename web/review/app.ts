@@ -59,6 +59,7 @@ type ReviewPage = {
 };
 
 type OverviewResponse = { selected_range: ReviewRange; overview_html: string };
+type RefreshResponse = { bootstrap: ReviewBootstrap; page: ReviewPage };
 
 type ReviewComment = {
   id: number;
@@ -105,6 +106,7 @@ async function start() {
     const app = new ReviewApp(root, bootstrap);
     app.render();
     await app.selectRange(bootstrap.default_range);
+    app.startWorkspacePolling();
   } catch (error) {
     root.innerHTML = `<div class="fatal"><p>Could not load this review.</p><small>${escapeHtml(String(error))}</small></div>`;
   }
@@ -126,6 +128,9 @@ class ReviewApp {
   private loadingOverview?: ReviewRange;
   private rangeRequest = 0;
   private overviewRequest = 0;
+  private statusTimer?: number;
+  private checkingStatus = false;
+  private refreshing = false;
   private viewer?: CodeView<AnnotationMetadata>;
   private tree?: FileTree;
   private settings = loadReviewSettings(window.localStorage, document.cookie);
@@ -133,7 +138,7 @@ class ReviewApp {
 
   constructor(
     private readonly root: HTMLElement,
-    private readonly bootstrap: ReviewBootstrap,
+    private bootstrap: ReviewBootstrap,
   ) {}
 
   render() {
@@ -155,6 +160,9 @@ class ReviewApp {
               <span class="range-chevron">${icon("chevron-down")}</span>
             </button>
             <div class="change-stats" id="change-stats" aria-label="Change statistics"></div>
+            <button class="refresh-notice" id="refresh-notice" hidden>
+              <i aria-hidden="true"></i><span>New changes available</span><strong>Refresh</strong>
+            </button>
             <button class="icon-button settings-button" id="settings-button" aria-label="Review settings" aria-expanded="false">
               ${icon("settings")}
             </button>
@@ -252,6 +260,15 @@ class ReviewApp {
     this.bindEvents();
     this.syncSettingsControls();
     this.applySettings(false);
+  }
+
+  startWorkspacePolling() {
+    this.statusTimer = window.setInterval(() => void this.checkWorkspaceStatus(), 5_000);
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) void this.checkWorkspaceStatus();
+    });
+    window.addEventListener("focus", () => void this.checkWorkspaceStatus());
+    void this.checkWorkspaceStatus();
   }
 
   async selectRange(range: ReviewRange) {
@@ -509,6 +526,36 @@ class ReviewApp {
       });
     }
     this.root.querySelector("#range-button")?.addEventListener("click", () => this.openRangeDialog());
+    this.bindRangeEvents();
+    this.root.querySelector("#refresh-notice")?.addEventListener("click", () => void this.refreshReview());
+    for (const button of this.root.querySelectorAll<HTMLButtonElement>("[data-range-close]")) {
+      button.addEventListener("click", () => this.closeRangeDialog());
+    }
+    this.root.querySelector("#apply-range")?.addEventListener("click", () => void this.applyRange());
+    const rangeDialog = this.root.querySelector<HTMLDialogElement>("#range-dialog");
+    rangeDialog?.addEventListener("cancel", (event) => {
+      event.preventDefault();
+      this.closeRangeDialog();
+    });
+    rangeDialog?.addEventListener("click", (event) => {
+      if (event.target === rangeDialog) this.closeRangeDialog();
+    });
+    this.root.querySelector("#cancel-review")?.addEventListener("click", () => void this.cancel());
+    for (const button of this.root.querySelectorAll<HTMLButtonElement>("[data-decision]")) {
+      button.addEventListener("click", () => void this.submit(button.dataset.decision as ReviewDecision["decision"]));
+    }
+    this.bindSettings();
+    this.colorScheme.addEventListener("change", () => {
+      if (this.settings.syntaxTheme !== "system") return;
+      if (this.draft?.tab === "preview") void this.renderDraftPreview();
+    });
+    window.addEventListener("pagehide", () => {
+      if (this.statusTimer !== undefined) window.clearInterval(this.statusTimer);
+      if (!this.submitted) navigator.sendBeacon("./api/cancel");
+    });
+  }
+
+  private bindRangeEvents() {
     for (const button of this.root.querySelectorAll<HTMLButtonElement>("[data-range-expand]")) {
       button.addEventListener("click", () => {
         if (!this.pendingRange) return;
@@ -538,30 +585,82 @@ class ReviewApp {
       handle.addEventListener("keydown", (event) => this.moveBoundaryWithKeyboard(event, boundary));
       handle.addEventListener("pointerdown", (event) => this.startBoundaryDrag(event, boundary));
     }
-    for (const button of this.root.querySelectorAll<HTMLButtonElement>("[data-range-close]")) {
-      button.addEventListener("click", () => this.closeRangeDialog());
+  }
+
+  private async checkWorkspaceStatus() {
+    if (document.hidden || this.checkingStatus || this.refreshing || this.submitted) return;
+    this.checkingStatus = true;
+    try {
+      const response = await fetch("./api/status", { cache: "no-store" });
+      if (!response.ok) return;
+      const status = await response.json() as { changed: boolean };
+      this.setRefreshNotice(status.changed);
+    } catch {
+      // Polling is advisory; transient failures should not interrupt the review.
+    } finally {
+      this.checkingStatus = false;
     }
-    this.root.querySelector("#apply-range")?.addEventListener("click", () => void this.applyRange());
-    const rangeDialog = this.root.querySelector<HTMLDialogElement>("#range-dialog");
-    rangeDialog?.addEventListener("cancel", (event) => {
-      event.preventDefault();
-      this.closeRangeDialog();
-    });
-    rangeDialog?.addEventListener("click", (event) => {
-      if (event.target === rangeDialog) this.closeRangeDialog();
-    });
-    this.root.querySelector("#cancel-review")?.addEventListener("click", () => void this.cancel());
-    for (const button of this.root.querySelectorAll<HTMLButtonElement>("[data-decision]")) {
-      button.addEventListener("click", () => void this.submit(button.dataset.decision as ReviewDecision["decision"]));
+  }
+
+  private setRefreshNotice(visible: boolean, error?: string) {
+    const notice = this.root.querySelector<HTMLButtonElement>("#refresh-notice");
+    if (!notice) return;
+    notice.hidden = !visible;
+    notice.classList.toggle("error", error !== undefined);
+    notice.title = error ?? "";
+    const label = notice.querySelector("span");
+    const action = notice.querySelector("strong");
+    if (label) label.textContent = error ? "Could not refresh" : "New changes available";
+    if (action) action.textContent = error ? "Retry" : "Refresh";
+  }
+
+  private async refreshReview() {
+    if (this.refreshing || this.loadingRange || this.loadingOverview) return;
+    const pendingFeedback = [
+      this.comments.length > 0
+        ? `${this.comments.length} pending ${this.comments.length === 1 ? "comment" : "comments"}`
+        : "",
+      this.draft ? "the open comment draft" : "",
+    ].filter(Boolean).join(" and ");
+    if (pendingFeedback && !window.confirm(
+      `Refreshing will discard ${pendingFeedback}. Continue?`,
+    )) return;
+
+    const notice = this.root.querySelector<HTMLButtonElement>("#refresh-notice");
+    this.refreshing = true;
+    if (notice) {
+      notice.disabled = true;
+      notice.classList.add("loading");
+      const action = notice.querySelector("strong");
+      if (action) action.textContent = "Refreshing…";
     }
-    this.bindSettings();
-    this.colorScheme.addEventListener("change", () => {
-      if (this.settings.syntaxTheme !== "system") return;
-      if (this.draft?.tab === "preview") void this.renderDraftPreview();
-    });
-    window.addEventListener("pagehide", () => {
-      if (!this.submitted) navigator.sendBeacon("./api/cancel");
-    });
+    try {
+      const response = await fetch("./api/refresh", { method: "POST" });
+      const payload = await response.json() as RefreshResponse | { error?: string };
+      if (!response.ok || !("bootstrap" in payload)) {
+        const message = "error" in payload && payload.error ? payload.error : "Refresh failed";
+        this.setRefreshNotice(true, message);
+        return;
+      }
+      this.bootstrap = payload.bootstrap;
+      this.clearPendingComments();
+      this.overviews.clear();
+      const timeline = this.root.querySelector<HTMLElement>("#commit-timeline");
+      if (timeline) {
+        timeline.innerHTML = this.rangeTimelineMarkup();
+        this.bindRangeEvents();
+      }
+      this.installPage(payload.page);
+      this.setRefreshNotice(false);
+    } catch (error) {
+      this.setRefreshNotice(true, String(error));
+    } finally {
+      this.refreshing = false;
+      if (notice) {
+        notice.disabled = false;
+        notice.classList.remove("loading");
+      }
+    }
   }
 
   private bindSettings() {
@@ -1119,6 +1218,8 @@ class ReviewApp {
     const button = this.root.querySelector<HTMLButtonElement>("#range-button");
     if (label) label.textContent = rangeLabel(this.bootstrap.range_targets, range);
     if (button) button.disabled = this.loadingRange !== undefined || this.loadingOverview !== undefined;
+    const refresh = this.root.querySelector<HTMLButtonElement>("#refresh-notice");
+    if (refresh) refresh.disabled = this.loadingRange !== undefined || this.loadingOverview !== undefined || this.refreshing;
   }
 
   private setReviewControlsDisabled(disabled: boolean) {

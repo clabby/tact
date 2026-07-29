@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
     path::{Path, PathBuf},
     process::{Output, Stdio},
@@ -49,6 +50,16 @@ pub(super) struct DiffSnapshot {
     pub(super) repository: String,
     pub(super) scope: String,
     pub(super) base: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct WorkspaceVersion([u8; 32]);
+
+#[cfg(test)]
+impl WorkspaceVersion {
+    pub(super) fn test(value: u8) -> Self {
+        Self([value; 32])
+    }
 }
 
 impl ReviewContext {
@@ -135,30 +146,29 @@ impl ReviewContext {
                 )
                 .await?
             }
-            None => {
-                git_output_limited(
-                    &self.root,
-                    [
-                        "diff",
-                        "--binary",
-                        "--find-renames",
-                        "--find-copies",
-                        "--no-ext-diff",
-                        base,
-                        "--",
-                    ],
-                    MAX_DIFF_BYTES,
-                    0,
-                )
-                .await?
-            }
+            None => return self.collect_working_tree(base, range).await,
         };
         ensure_success(output.status, &output.stderr)?;
-        let mut patch = String::from_utf8(output.stdout)?;
+        let patch = String::from_utf8(output.stdout)?;
 
-        if head.is_none() {
-            append_untracked_files(&self.root, &mut patch).await?;
-        }
+        Ok(DiffSnapshot {
+            patch,
+            repository: self.repository.clone(),
+            scope: self.range_label(range)?,
+            base: base.to_owned(),
+        })
+    }
+
+    pub(super) fn version(&self, snapshot: &DiffSnapshot) -> WorkspaceVersion {
+        workspace_version(&self.trunk.merge_base, &snapshot.base, &snapshot.patch)
+    }
+
+    async fn collect_working_tree(
+        &self,
+        base: &str,
+        range: ReviewRange,
+    ) -> Result<DiffSnapshot, DiffError> {
+        let patch = working_tree_patch(&self.root, base).await?;
         Ok(DiffSnapshot {
             patch,
             repository: self.repository.clone(),
@@ -188,6 +198,25 @@ fn target_label(target: &ReviewTarget) -> &str {
 
 pub(super) async fn load(workspace: &Path) -> Result<ReviewContext, DiffError> {
     ReviewContext::load(workspace).await
+}
+
+pub(super) async fn current_version(workspace: &Path) -> Result<WorkspaceVersion, DiffError> {
+    let root = repository_root(workspace).await?;
+    let trunk = resolve_trunk(&root).await?;
+    let output = git_output(&root, ["rev-parse", "HEAD"]).await?;
+    ensure_success(output.status, &output.stderr)?;
+    let head = String::from_utf8(output.stdout)?.trim().to_owned();
+    let patch = working_tree_patch(&root, &head).await?;
+    Ok(workspace_version(&trunk.merge_base, &head, &patch))
+}
+
+fn workspace_version(trunk: &str, head: &str, patch: &str) -> WorkspaceVersion {
+    let mut digest = Sha256::new();
+    for value in [trunk, head, patch] {
+        digest.update(value.len().to_le_bytes());
+        digest.update(value.as_bytes());
+    }
+    WorkspaceVersion(digest.finalize().into())
 }
 
 async fn repository_root(workspace: &Path) -> Result<std::path::PathBuf, DiffError> {
@@ -343,6 +372,28 @@ async fn append_untracked_files(root: &Path, patch: &mut String) -> Result<(), D
     Ok(())
 }
 
+async fn working_tree_patch(root: &Path, base: &str) -> Result<String, DiffError> {
+    let output = git_output_limited(
+        root,
+        [
+            "diff",
+            "--binary",
+            "--find-renames",
+            "--find-copies",
+            "--no-ext-diff",
+            base,
+            "--",
+        ],
+        MAX_DIFF_BYTES,
+        0,
+    )
+    .await?;
+    ensure_success(output.status, &output.stderr)?;
+    let mut patch = String::from_utf8(output.stdout)?;
+    append_untracked_files(root, &mut patch).await?;
+    Ok(patch)
+}
+
 async fn git_output<const N: usize>(
     root: &Path,
     arguments: [&str; N],
@@ -459,7 +510,7 @@ pub(crate) enum DiffError {
 
 #[cfg(test)]
 mod tests {
-    use super::{ReviewRange, ReviewTargetKind, load};
+    use super::{ReviewRange, ReviewTargetKind, current_version, load};
     use std::{fs, path::Path, process::Command};
     use tempfile::TempDir;
 
@@ -549,6 +600,19 @@ mod tests {
                 Err(super::DiffError::InvalidRange { .. })
             ));
         }
+    }
+
+    #[tokio::test]
+    async fn workspace_version_detects_further_edits_to_an_already_modified_file() {
+        let repository = repository();
+        fs::write(repository.path().join("tracked.txt"), "first edit\n").unwrap();
+        let context = load(repository.path()).await.unwrap();
+        let snapshot = context.collect(context.default_range()).await.unwrap();
+        let initial = context.version(&snapshot);
+
+        fs::write(repository.path().join("tracked.txt"), "second edit\n").unwrap();
+
+        assert_ne!(current_version(repository.path()).await.unwrap(), initial);
     }
 
     fn repository() -> TempDir {

@@ -95,6 +95,14 @@ button:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2p
 .change-stats .add { color: var(--accent); }
 .change-stats .del { color: var(--danger); }
 
+.refresh-notice { display: flex; align-items: center; gap: 7px; height: 34px; padding: 0 9px; border: 1px solid color-mix(in srgb, var(--blue) 30%, var(--line)); border-radius: 9px; background: color-mix(in srgb, var(--blue) 7%, var(--surface)); color: var(--blue); cursor: pointer; font-size: 11px; }
+.refresh-notice[hidden] { display: none; }
+.refresh-notice:hover:not(:disabled) { border-color: color-mix(in srgb, var(--blue) 55%, var(--line)); background: color-mix(in srgb, var(--blue) 11%, var(--surface)); }
+.refresh-notice i { width: 7px; height: 7px; flex: none; border-radius: 50%; background: currentColor; box-shadow: 0 0 0 4px color-mix(in srgb, currentColor 12%, transparent); }
+.refresh-notice strong { padding-left: 2px; border-left: 1px solid color-mix(in srgb, currentColor 22%, transparent); font-size: 10px; }
+.refresh-notice.loading i { background: transparent; border: 1.5px solid color-mix(in srgb, currentColor 25%, transparent); border-top-color: currentColor; box-shadow: none; animation: spin .8s linear infinite; }
+.refresh-notice.error { border-color: color-mix(in srgb, var(--danger) 32%, var(--line)); background: color-mix(in srgb, var(--danger) 7%, var(--surface)); color: var(--danger); }
+
 .icon-button, .small-icon-button, .format-button {
   display: grid;
   place-items: center;
@@ -307,6 +315,7 @@ button:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2p
 @media (max-width: 900px) {
   .change-stats span { display: none; }
   .identity p { max-width: 180px; }
+  .refresh-notice span { display: none; }
 }
 
 @media (max-width: 760px) {

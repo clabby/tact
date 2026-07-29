@@ -10,19 +10,20 @@ pub(crate) use diff::ReviewRange;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use futures_util::future::BoxFuture;
 use server::{
-    OverviewLoader, RangeLoader, ReviewBootstrap, ReviewDecision, ReviewOutcome, ReviewPage,
-    ReviewServer, ScopeLoadError,
+    OverviewLoader, PreparedReview, RangeLoader, RefreshLoader, ReviewBootstrap, ReviewDecision,
+    ReviewOutcome, ReviewPage, ReviewServer, ScopeLoadError, StatusLoader,
 };
 use sha2::{Digest, Sha256};
 use std::{
     io::Write,
-    path::Path,
+    path::{Path, PathBuf},
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio_util::sync::CancellationToken;
 
 const MAX_OVERVIEW_BYTES: usize = 1024 * 1024;
+const MAX_PREPARATION_ATTEMPTS: usize = 3;
 
 pub(crate) type OverviewGenerator = Arc<
     dyn Fn(String, CancellationToken) -> BoxFuture<'static, Result<String, OverviewGenerationError>>
@@ -41,36 +42,27 @@ pub(crate) async fn run(
     workspace: &Path,
     assets: ReviewAssets,
 ) -> Result<Option<String>, ReviewError> {
-    let context = diff::load(workspace).await?;
-    let title = format!("Review {}", context.repository());
     let preparation_shutdown = CancellationToken::new();
     let _cancel_preparation_on_drop = CancelOnDrop(preparation_shutdown.clone());
-    let default_range = context.default_range();
-    let initial_page = prepare_page(
-        context.clone(),
-        title.clone(),
-        default_range,
-        preparation_shutdown,
-    )
-    .await?;
-    let bootstrap = ReviewBootstrap {
-        title: title.clone(),
-        repository: context.repository().to_owned(),
-        trunk: context.trunk_name().to_owned(),
-        range_targets: context.range_targets(),
-        default_range,
-    };
-    let loader_context = context.clone();
-    let range_loader: RangeLoader = Arc::new(move |range, shutdown| {
-        let context = loader_context.clone();
-        let title = title.clone();
+    let workspace = workspace.to_path_buf();
+    let prepared = prepare_review(workspace.clone(), preparation_shutdown).await?;
+    let repository = prepared.bootstrap.repository.clone();
+    let status_workspace = workspace.clone();
+    let status_loader: StatusLoader = Arc::new(move |shutdown| {
+        let workspace = status_workspace.clone();
         Box::pin(async move {
-            prepare_page(context, title, range, shutdown)
+            tokio::select! {
+                result = diff::current_version(&workspace) => result.map_err(|error| ScopeLoadError::Failed(error.to_string())),
+                () = shutdown.cancelled() => Err(ScopeLoadError::Cancelled),
+            }
+        })
+    });
+    let refresh_loader: RefreshLoader = Arc::new(move |shutdown| {
+        let workspace = workspace.clone();
+        Box::pin(async move {
+            prepare_review(workspace, shutdown)
                 .await
-                .map_err(|error| match error {
-                    ReviewError::Cancelled => ScopeLoadError::Cancelled,
-                    error => ScopeLoadError::Failed(error.to_string()),
-                })
+                .map_err(scope_load_error)
         })
     });
     let overview_loader: OverviewLoader = Arc::new(move |_range, label, patch, shutdown| {
@@ -84,11 +76,11 @@ pub(crate) async fn run(
                 })
         })
     });
-    let token = review_token(context.repository(), SystemTime::now());
+    let token = review_token(&repository, SystemTime::now());
     let server = ReviewServer::start(
-        bootstrap,
-        initial_page,
-        range_loader,
+        prepared,
+        status_loader,
+        refresh_loader,
         overview_loader,
         token,
         assets.path().to_owned(),
@@ -99,6 +91,65 @@ pub(crate) async fn run(
     match server.wait().await? {
         ReviewOutcome::Decision(decision) => Ok(Some(decision.to_markdown())),
         ReviewOutcome::Cancelled => Ok(None),
+    }
+}
+
+async fn prepare_review(
+    workspace: PathBuf,
+    shutdown: CancellationToken,
+) -> Result<PreparedReview, ReviewError> {
+    for _ in 0..MAX_PREPARATION_ATTEMPTS {
+        let context = tokio::select! {
+            result = diff::load(&workspace) => result?,
+            () = shutdown.cancelled() => return Err(ReviewError::Cancelled),
+        };
+        let title = format!("Review {}", context.repository());
+        let default_range = context.default_range();
+        let initial_page = prepare_page(
+            context.clone(),
+            title.clone(),
+            default_range,
+            shutdown.clone(),
+        )
+        .await?;
+        let version = context.version(&initial_page.diff);
+        let current = tokio::select! {
+            result = diff::current_version(&workspace) => result?,
+            () = shutdown.cancelled() => return Err(ReviewError::Cancelled),
+        };
+        if current != version {
+            continue;
+        }
+        let bootstrap = ReviewBootstrap {
+            title: title.clone(),
+            repository: context.repository().to_owned(),
+            trunk: context.trunk_name().to_owned(),
+            range_targets: context.range_targets(),
+            default_range,
+        };
+        let range_loader: RangeLoader = Arc::new(move |range, shutdown| {
+            let context = context.clone();
+            let title = title.clone();
+            Box::pin(async move {
+                prepare_page(context, title, range, shutdown)
+                    .await
+                    .map_err(scope_load_error)
+            })
+        });
+        return Ok(PreparedReview {
+            bootstrap,
+            initial_page,
+            range_loader,
+            version,
+        });
+    }
+    Err(ReviewError::WorkspaceChanged)
+}
+
+fn scope_load_error(error: ReviewError) -> ScopeLoadError {
+    match error {
+        ReviewError::Cancelled => ScopeLoadError::Cancelled,
+        error => ScopeLoadError::Failed(error.to_string()),
     }
 }
 
@@ -238,6 +289,8 @@ pub(crate) enum ReviewError {
     EmptyOverview,
     #[error("the agent returned a review overview larger than 1 MiB")]
     OverviewTooLarge,
+    #[error("the workspace kept changing while the review was being prepared; try again")]
+    WorkspaceChanged,
 }
 
 impl ReviewError {

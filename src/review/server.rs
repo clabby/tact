@@ -38,6 +38,14 @@ pub(super) struct ReviewBootstrap {
     pub(super) default_range: super::diff::ReviewRange,
 }
 
+#[derive(Clone)]
+pub(super) struct PreparedReview {
+    pub(super) bootstrap: ReviewBootstrap,
+    pub(super) initial_page: ReviewPage,
+    pub(super) range_loader: RangeLoader,
+    pub(super) version: super::diff::WorkspaceVersion,
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RangeRequest {
@@ -48,6 +56,17 @@ struct RangeRequest {
 struct OverviewResponse {
     selected_range: super::diff::ReviewRange,
     overview_html: String,
+}
+
+#[derive(Serialize)]
+struct ReviewStatus {
+    changed: bool,
+}
+
+#[derive(Serialize)]
+struct RefreshResponse {
+    bootstrap: ReviewBootstrap,
+    page: ReviewPage,
 }
 
 #[derive(Serialize)]
@@ -71,6 +90,20 @@ pub(super) type OverviewLoader = Arc<
             String,
             CancellationToken,
         ) -> BoxFuture<'static, Result<String, ScopeLoadError>>
+        + Send
+        + Sync,
+>;
+
+pub(super) type StatusLoader = Arc<
+    dyn Fn(
+            CancellationToken,
+        ) -> BoxFuture<'static, Result<super::diff::WorkspaceVersion, ScopeLoadError>>
+        + Send
+        + Sync,
+>;
+
+pub(super) type RefreshLoader = Arc<
+    dyn Fn(CancellationToken) -> BoxFuture<'static, Result<PreparedReview, ScopeLoadError>>
         + Send
         + Sync,
 >;
@@ -116,14 +149,42 @@ pub(super) enum CommentSide {
 
 struct ServerState {
     assets: PathBuf,
-    bootstrap: ReviewBootstrap,
-    range_loader: RangeLoader,
+    session: Mutex<ReviewSession>,
+    status_loader: StatusLoader,
+    refresh_loader: RefreshLoader,
     overview_loader: OverviewLoader,
-    range_pages: Mutex<HashMap<super::diff::ReviewRange, ReviewPage>>,
-    overviews: Mutex<HashMap<super::diff::ReviewRange, String>>,
     overview_generation: Mutex<()>,
+    refresh_generation: Mutex<()>,
     scope_shutdown: CancellationToken,
     outcome: Mutex<Option<oneshot::Sender<ReviewOutcome>>>,
+}
+
+struct ReviewSession {
+    generation: u64,
+    bootstrap: ReviewBootstrap,
+    range_loader: RangeLoader,
+    range_pages: HashMap<super::diff::ReviewRange, ReviewPage>,
+    overviews: HashMap<super::diff::ReviewRange, String>,
+    version: super::diff::WorkspaceVersion,
+}
+
+impl ReviewSession {
+    fn new(review: PreparedReview) -> Self {
+        Self {
+            generation: 0,
+            bootstrap: review.bootstrap,
+            range_loader: review.range_loader,
+            range_pages: HashMap::from([(review.initial_page.selected_range, review.initial_page)]),
+            overviews: HashMap::new(),
+            version: review.version,
+        }
+    }
+
+    fn replace(&mut self, review: PreparedReview) {
+        let generation = self.generation.wrapping_add(1);
+        *self = Self::new(review);
+        self.generation = generation;
+    }
 }
 
 pub(super) enum ReviewOutcome {
@@ -142,9 +203,9 @@ pub(super) struct ReviewServer {
 
 impl ReviewServer {
     pub(super) async fn start(
-        bootstrap: ReviewBootstrap,
-        initial_page: ReviewPage,
-        range_loader: RangeLoader,
+        review: PreparedReview,
+        status_loader: StatusLoader,
+        refresh_loader: RefreshLoader,
         overview_loader: OverviewLoader,
         token: String,
         assets: PathBuf,
@@ -155,12 +216,12 @@ impl ReviewServer {
         let scope_shutdown = CancellationToken::new();
         let state = Arc::new(ServerState {
             assets,
-            bootstrap,
-            range_loader,
+            session: Mutex::new(ReviewSession::new(review)),
+            status_loader,
+            refresh_loader,
             overview_loader,
-            range_pages: Mutex::new(HashMap::from([(initial_page.selected_range, initial_page)])),
-            overviews: Mutex::new(HashMap::new()),
             overview_generation: Mutex::new(()),
+            refresh_generation: Mutex::new(()),
             scope_shutdown: scope_shutdown.clone(),
             outcome: Mutex::new(Some(outcome_tx)),
         });
@@ -215,6 +276,8 @@ fn router(state: Arc<ServerState>) -> Router {
         .route("/app.js", get(javascript))
         .route("/app.css", get(stylesheet))
         .route("/api/review", get(review))
+        .route("/api/status", get(review_status))
+        .route("/api/refresh", post(refresh_review))
         .route("/api/range", post(load_range))
         .route("/api/overview", post(load_overview))
         .route("/api/decision", post(submit))
@@ -236,20 +299,54 @@ async fn stylesheet(State(state): State<Arc<ServerState>>) -> impl IntoResponse 
 }
 
 async fn review(State(state): State<Arc<ServerState>>) -> impl IntoResponse {
-    let mut response = Json(&state.bootstrap).into_response();
+    let bootstrap = state.session.lock().await.bootstrap.clone();
+    let mut response = Json(bootstrap).into_response();
     secure(&mut response);
     response
+}
+
+async fn review_status(State(state): State<Arc<ServerState>>) -> Response<Body> {
+    let current = match (state.status_loader)(state.scope_shutdown.clone()).await {
+        Ok(version) => version,
+        Err(ScopeLoadError::Cancelled) => return StatusCode::GONE.into_response(),
+        Err(ScopeLoadError::Failed(error)) => {
+            return secure_json(StatusCode::SERVICE_UNAVAILABLE, ScopeError { error });
+        }
+    };
+    let changed = current != state.session.lock().await.version;
+    secure_json(StatusCode::OK, ReviewStatus { changed })
+}
+
+async fn refresh_review(State(state): State<Arc<ServerState>>) -> Response<Body> {
+    let _refresh = state.refresh_generation.lock().await;
+    let review = match (state.refresh_loader)(state.scope_shutdown.clone()).await {
+        Ok(review) => review,
+        Err(ScopeLoadError::Cancelled) => return StatusCode::GONE.into_response(),
+        Err(ScopeLoadError::Failed(error)) => {
+            return secure_json(StatusCode::UNPROCESSABLE_ENTITY, ScopeError { error });
+        }
+    };
+    let response = RefreshResponse {
+        bootstrap: review.bootstrap.clone(),
+        page: review.initial_page.clone(),
+    };
+    state.session.lock().await.replace(review);
+    secure_json(StatusCode::OK, response)
 }
 
 async fn load_range(
     State(state): State<Arc<ServerState>>,
     Json(request): Json<RangeRequest>,
 ) -> Response<Body> {
-    if let Some(page) = state.range_pages.lock().await.get(&request.range).cloned() {
-        return secure_json(StatusCode::OK, page);
-    }
+    let (loader, generation) = {
+        let session = state.session.lock().await;
+        if let Some(page) = session.range_pages.get(&request.range).cloned() {
+            return secure_json(StatusCode::OK, page);
+        }
+        (Arc::clone(&session.range_loader), session.generation)
+    };
 
-    let page = match (state.range_loader)(request.range, state.scope_shutdown.clone()).await {
+    let page = match loader(request.range, state.scope_shutdown.clone()).await {
         Ok(page) => page,
         Err(ScopeLoadError::Cancelled) => {
             if let Some(sender) = state.outcome.lock().await.take() {
@@ -266,11 +363,16 @@ async fn load_range(
             return secure_json(StatusCode::UNPROCESSABLE_ENTITY, ScopeError { error });
         }
     };
-    state
-        .range_pages
-        .lock()
-        .await
-        .insert(request.range, page.clone());
+    let mut session = state.session.lock().await;
+    if session.generation != generation {
+        return secure_json(
+            StatusCode::CONFLICT,
+            ScopeError {
+                error: "the review changed while this range was loading".to_owned(),
+            },
+        );
+    }
+    session.range_pages.insert(request.range, page.clone());
     secure_json(StatusCode::OK, page)
 }
 
@@ -278,7 +380,14 @@ async fn load_overview(
     State(state): State<Arc<ServerState>>,
     Json(request): Json<RangeRequest>,
 ) -> Response<Body> {
-    if let Some(overview_html) = state.overviews.lock().await.get(&request.range).cloned() {
+    if let Some(overview_html) = state
+        .session
+        .lock()
+        .await
+        .overviews
+        .get(&request.range)
+        .cloned()
+    {
         return secure_json(
             StatusCode::OK,
             OverviewResponse {
@@ -288,7 +397,14 @@ async fn load_overview(
         );
     }
     let _generation = state.overview_generation.lock().await;
-    if let Some(overview_html) = state.overviews.lock().await.get(&request.range).cloned() {
+    if let Some(overview_html) = state
+        .session
+        .lock()
+        .await
+        .overviews
+        .get(&request.range)
+        .cloned()
+    {
         return secure_json(
             StatusCode::OK,
             OverviewResponse {
@@ -298,16 +414,21 @@ async fn load_overview(
         );
     }
 
-    let (label, patch) = match state.range_pages.lock().await.get(&request.range) {
-        Some(page) => (page.diff.scope.clone(), page.diff.patch.clone()),
-        None => {
+    let (label, patch, session_generation) = {
+        let session = state.session.lock().await;
+        let Some(page) = session.range_pages.get(&request.range) else {
             return secure_json(
                 StatusCode::CONFLICT,
                 ScopeError {
                     error: "load this change range before requesting its overview".to_owned(),
                 },
             );
-        }
+        };
+        (
+            page.diff.scope.clone(),
+            page.diff.patch.clone(),
+            session.generation,
+        )
     };
     let overview_html =
         match (state.overview_loader)(request.range, label, patch, state.scope_shutdown.clone())
@@ -329,10 +450,17 @@ async fn load_overview(
                 return secure_json(StatusCode::UNPROCESSABLE_ENTITY, ScopeError { error });
             }
         };
-    state
+    let mut session = state.session.lock().await;
+    if session.generation != session_generation {
+        return secure_json(
+            StatusCode::CONFLICT,
+            ScopeError {
+                error: "the review changed while its overview was loading".to_owned(),
+            },
+        );
+    }
+    session
         .overviews
-        .lock()
-        .await
         .insert(request.range, overview_html.clone());
     secure_json(
         StatusCode::OK,
@@ -431,14 +559,16 @@ pub(crate) enum ServerError {
 #[cfg(test)]
 mod tests {
     use super::{
-        Decision, OverviewLoader, RangeLoader, ReviewBootstrap, ReviewOutcome, ReviewPage,
-        ReviewServer, ScopeLoadError,
+        Decision, OverviewLoader, PreparedReview, RangeLoader, RefreshLoader, ReviewBootstrap,
+        ReviewOutcome, ReviewPage, ReviewServer, ScopeLoadError, StatusLoader,
     };
-    use crate::review::diff::{DiffSnapshot, ReviewRange, ReviewTarget, ReviewTargetKind};
+    use crate::review::diff::{
+        DiffSnapshot, ReviewRange, ReviewTarget, ReviewTargetKind, WorkspaceVersion,
+    };
     use std::{
         sync::{
             Arc,
-            atomic::{AtomicUsize, Ordering},
+            atomic::{AtomicU8, AtomicUsize, Ordering},
         },
         time::Duration,
     };
@@ -486,6 +616,83 @@ mod tests {
 
         assert_eq!(response.status(), reqwest::StatusCode::OK);
         assert_eq!(response.text().await.unwrap(), "review page");
+    }
+
+    #[tokio::test]
+    async fn status_detects_changes_and_refresh_replaces_the_review_snapshot() {
+        let assets = tempfile::tempdir().unwrap();
+        for name in ["index.html", "app.js", "app.css"] {
+            std::fs::write(assets.path().join(name), "").unwrap();
+        }
+        let version = Arc::new(AtomicU8::new(1));
+        let status_loader: StatusLoader = Arc::new({
+            let version = Arc::clone(&version);
+            move |_shutdown| {
+                let value = version.load(Ordering::SeqCst);
+                Box::pin(async move { Ok(WorkspaceVersion::test(value)) })
+            }
+        });
+        let refresh_loader: RefreshLoader = Arc::new({
+            let version = Arc::clone(&version);
+            move |_shutdown| {
+                let value = version.load(Ordering::SeqCst);
+                let mut review = prepared_review(loader());
+                review.version = WorkspaceVersion::test(value);
+                review.initial_page.diff.patch = "refreshed patch".to_owned();
+                Box::pin(async move { Ok(review) })
+            }
+        });
+        let server = ReviewServer::start(
+            prepared_review(loader()),
+            status_loader,
+            refresh_loader,
+            overview_loader(),
+            "test-token".to_owned(),
+            assets.path().to_owned(),
+        )
+        .await
+        .unwrap();
+        let client = reqwest::Client::new();
+
+        let initial = client
+            .get(server.endpoint_url("api/status"))
+            .send()
+            .await
+            .unwrap()
+            .json::<serde_json::Value>()
+            .await
+            .unwrap();
+        assert_eq!(initial["changed"], false);
+
+        version.store(2, Ordering::SeqCst);
+        let changed = client
+            .get(server.endpoint_url("api/status"))
+            .send()
+            .await
+            .unwrap()
+            .json::<serde_json::Value>()
+            .await
+            .unwrap();
+        assert_eq!(changed["changed"], true);
+
+        let refreshed = client
+            .post(server.endpoint_url("api/refresh"))
+            .send()
+            .await
+            .unwrap()
+            .json::<serde_json::Value>()
+            .await
+            .unwrap();
+        assert_eq!(refreshed["page"]["patch"], "refreshed patch");
+        let current = client
+            .get(server.endpoint_url("api/status"))
+            .send()
+            .await
+            .unwrap()
+            .json::<serde_json::Value>()
+            .await
+            .unwrap();
+        assert_eq!(current["changed"], false);
     }
 
     #[tokio::test]
@@ -783,22 +990,39 @@ mod tests {
         loader: RangeLoader,
         overview_loader: OverviewLoader,
     ) -> ReviewServer {
+        let review = prepared_review(loader);
+        let status_loader: StatusLoader =
+            Arc::new(|_shutdown| Box::pin(async { Ok(WorkspaceVersion::test(1)) }));
+        let refreshed = review.clone();
+        let refresh_loader: RefreshLoader = Arc::new(move |_shutdown| {
+            let refreshed = refreshed.clone();
+            Box::pin(async move { Ok(refreshed) })
+        });
         ReviewServer::start(
-            ReviewBootstrap {
-                title: "Review repo".to_owned(),
-                repository: "repo".to_owned(),
-                trunk: "main".to_owned(),
-                range_targets: targets(),
-                default_range: uncommitted_range(),
-            },
-            page(uncommitted_range()),
-            loader,
+            review,
+            status_loader,
+            refresh_loader,
             overview_loader,
             "test-token".to_owned(),
             assets.path().to_owned(),
         )
         .await
         .unwrap()
+    }
+
+    fn prepared_review(loader: RangeLoader) -> PreparedReview {
+        PreparedReview {
+            bootstrap: ReviewBootstrap {
+                title: "Review repo".to_owned(),
+                repository: "repo".to_owned(),
+                trunk: "main".to_owned(),
+                range_targets: targets(),
+                default_range: uncommitted_range(),
+            },
+            initial_page: page(uncommitted_range()),
+            range_loader: loader,
+            version: WorkspaceVersion::test(1),
+        }
     }
 
     fn loader() -> RangeLoader {
