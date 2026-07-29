@@ -91,6 +91,7 @@ const TREE_STYLES = `
     position: absolute;
     z-index: 2;
     --tact-comment-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z'/%3E%3C/svg%3E");
+    --tact-seen-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='9'/%3E%3Cpath d='m8 12 2.5 2.5L16 9'/%3E%3C/svg%3E");
     --tact-comment-indicator: #4b8cff;
     inset-block: var(--trees-focus-ring-width);
     inset-inline-end: calc(var(--trees-item-padding-x) + var(--trees-git-lane-width));
@@ -114,6 +115,20 @@ const TREE_STYLES = `
     background-color: currentColor;
     -webkit-mask: var(--tact-comment-icon) center / contain no-repeat;
     mask: var(--tact-comment-icon) center / contain no-repeat;
+  }
+  [data-item-section="decoration"] [title*="Seen"] {
+    display: inline-flex;
+    align-items: center;
+  }
+  [data-item-section="decoration"] [title*="Seen"]::after {
+    width: 13px;
+    height: 13px;
+    flex: none;
+    margin-inline-start: 8px;
+    content: "";
+    background-color: var(--trees-accent);
+    -webkit-mask: var(--tact-seen-icon) center / contain no-repeat;
+    mask: var(--tact-seen-icon) center / contain no-repeat;
   }
   [data-type="item"]:has([data-item-section="decoration"] [title*="Seen"]) [data-item-section="content"] {
     opacity: .56;
@@ -774,7 +789,6 @@ export class ReviewApp {
         }
         if (seen) {
           title.push("Seen");
-          parts.push({ text: "  ✓", color: "var(--trees-accent)" });
         }
         return {
           text: `+${stats.additions} / -${stats.deletions}`,

@@ -189,6 +189,9 @@ test("the file change totals and comment indicator preserve their spacing", asyn
   expect(app).not.toContain("🗨︎");
   expect(treeStyles).toContain("data:image/svg+xml");
   expect(treeStyles).toMatch(/span\[style\*="--tact-comment-indicator"\]::before/);
+  expect(treeStyles).toContain("--tact-seen-icon");
+  expect(treeStyles).toMatch(/\[title\*="Seen"\]::after\s*{[^}]*margin-inline-start:\s*8px/s);
+  expect(app).not.toContain('{ text: "  ✓"');
 });
 
 test("the file tree follows explicit appearance settings", async () => {
