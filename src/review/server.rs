@@ -123,6 +123,7 @@ pub(super) struct ReviewServer {
 impl ReviewServer {
     pub(super) async fn start(
         bootstrap: ReviewBootstrap,
+        initial_page: ReviewPage,
         scope_loader: ScopeLoader,
         token: String,
         assets: PathBuf,
@@ -135,7 +136,7 @@ impl ReviewServer {
             assets,
             bootstrap,
             scope_loader,
-            scope_pages: Mutex::new(HashMap::new()),
+            scope_pages: Mutex::new(HashMap::from([(initial_page.selected_scope, initial_page)])),
             scope_shutdown: scope_shutdown.clone(),
             outcome: Mutex::new(Some(outcome_tx)),
         });
@@ -158,7 +159,12 @@ impl ReviewServer {
     }
 
     pub(super) fn url(&self) -> String {
-        format!("http://{}/{}/", self.address, self.token)
+        format!("http://{}/{}/index.html", self.address, self.token)
+    }
+
+    #[cfg(test)]
+    fn endpoint_url(&self, endpoint: &str) -> String {
+        format!("http://{}/{}/{}", self.address, self.token, endpoint)
     }
 
     pub(super) async fn wait(mut self) -> Result<ReviewOutcome, ServerError> {
@@ -181,6 +187,7 @@ impl Drop for ReviewServer {
 fn router(state: Arc<ServerState>) -> Router {
     Router::new()
         .route("/", get(index))
+        .route("/index.html", get(index))
         .route("/app.js", get(javascript))
         .route("/app.css", get(stylesheet))
         .route("/api/review", get(review))
@@ -334,7 +341,13 @@ mod tests {
         ScopeLoader,
     };
     use crate::review::diff::{DiffSnapshot, ReviewScope};
-    use std::{sync::Arc, time::Duration};
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::Duration,
+    };
     use tokio::sync::Notify;
 
     #[tokio::test]
@@ -346,7 +359,7 @@ mod tests {
         let server = start_server(&assets).await;
         let client = reqwest::Client::new();
         let response = client
-            .post(format!("{}api/decision", server.url()))
+            .post(server.endpoint_url("api/decision"))
             .json(&serde_json::json!({
                 "decision": "approve",
                 "summary": "Looks good",
@@ -368,6 +381,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn generated_review_url_serves_the_index() {
+        let assets = tempfile::tempdir().unwrap();
+        std::fs::write(assets.path().join("index.html"), "review page").unwrap();
+        std::fs::write(assets.path().join("app.js"), "").unwrap();
+        std::fs::write(assets.path().join("app.css"), "").unwrap();
+        let server = start_server(&assets).await;
+
+        let response = reqwest::get(server.url()).await.unwrap();
+
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert_eq!(response.text().await.unwrap(), "review page");
+    }
+
+    #[tokio::test]
+    async fn default_scope_is_ready_before_the_browser_requests_it() {
+        let assets = tempfile::tempdir().unwrap();
+        for name in ["index.html", "app.js", "app.css"] {
+            std::fs::write(assets.path().join(name), "").unwrap();
+        }
+        let loads = Arc::new(AtomicUsize::new(0));
+        let loader: ScopeLoader = Arc::new({
+            let loads = Arc::clone(&loads);
+            move |scope, _shutdown| {
+                loads.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async move { Ok(page(scope)) })
+            }
+        });
+        let server = start_server_with_loader(&assets, loader).await;
+
+        let response = reqwest::Client::new()
+            .post(server.endpoint_url("api/scope"))
+            .json(&serde_json::json!({ "scope": "uncommitted" }))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert_eq!(loads.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
     async fn server_can_cancel_an_abandoned_review() {
         let assets = tempfile::tempdir().unwrap();
         for name in ["index.html", "app.js", "app.css"] {
@@ -375,7 +429,7 @@ mod tests {
         }
         let server = start_server(&assets).await;
         let response = reqwest::Client::new()
-            .post(format!("{}api/cancel", server.url()))
+            .post(server.endpoint_url("api/cancel"))
             .send()
             .await
             .unwrap();
@@ -394,7 +448,7 @@ mod tests {
         }
         let server = start_server(&assets).await;
         let response = reqwest::Client::new()
-            .post(format!("{}api/scope", server.url()))
+            .post(server.endpoint_url("api/scope"))
             .json(&serde_json::json!({ "scope": "full_branch" }))
             .send()
             .await
@@ -407,7 +461,7 @@ mod tests {
         );
 
         reqwest::Client::new()
-            .post(format!("{}api/cancel", server.url()))
+            .post(server.endpoint_url("api/cancel"))
             .send()
             .await
             .unwrap();
@@ -428,8 +482,8 @@ mod tests {
         let server = start_server_with_loader(&assets, loader).await;
 
         let response = reqwest::Client::new()
-            .post(format!("{}api/scope", server.url()))
-            .json(&serde_json::json!({ "scope": "uncommitted" }))
+            .post(server.endpoint_url("api/scope"))
+            .json(&serde_json::json!({ "scope": "full_branch" }))
             .send()
             .await
             .unwrap();
@@ -461,11 +515,11 @@ mod tests {
         });
         let server = start_server_with_loader(&assets, loader).await;
         let scope_request = tokio::spawn({
-            let url = format!("{}api/scope", server.url());
+            let url = server.endpoint_url("api/scope");
             async move {
                 reqwest::Client::new()
                     .post(url)
-                    .json(&serde_json::json!({ "scope": "uncommitted" }))
+                    .json(&serde_json::json!({ "scope": "full_branch" }))
                     .send()
                     .await
             }
@@ -473,7 +527,7 @@ mod tests {
         started.notified().await;
 
         reqwest::Client::new()
-            .post(format!("{}api/cancel", server.url()))
+            .post(server.endpoint_url("api/cancel"))
             .send()
             .await
             .unwrap();
@@ -501,6 +555,7 @@ mod tests {
                 trunk: "main".to_owned(),
                 default_scope: ReviewScope::Uncommitted,
             },
+            page(ReviewScope::Uncommitted),
             loader,
             "test-token".to_owned(),
             assets.path().to_owned(),

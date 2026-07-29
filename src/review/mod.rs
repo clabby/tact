@@ -43,6 +43,16 @@ pub(crate) async fn run(
 ) -> Result<Option<String>, ReviewError> {
     let context = diff::load(workspace).await?;
     let title = format!("Review {}", context.repository());
+    let preparation_shutdown = CancellationToken::new();
+    let _cancel_preparation_on_drop = CancelOnDrop(preparation_shutdown.clone());
+    let initial_page = prepare_page(
+        overview_generator.clone(),
+        context.clone(),
+        title.clone(),
+        ReviewScope::Uncommitted,
+        preparation_shutdown,
+    )
+    .await?;
     let bootstrap = ReviewBootstrap {
         title: title.clone(),
         repository: context.repository().to_owned(),
@@ -64,13 +74,27 @@ pub(crate) async fn run(
         })
     });
     let token = review_token(context.repository(), SystemTime::now());
-    let server =
-        ReviewServer::start(bootstrap, scope_loader, token, assets.path().to_owned()).await?;
+    let server = ReviewServer::start(
+        bootstrap,
+        initial_page,
+        scope_loader,
+        token,
+        assets.path().to_owned(),
+    )
+    .await?;
     let url = server.url();
     crate::app::browser::open(&url).map_err(|source| ReviewError::OpenBrowser { url, source })?;
     match server.wait().await? {
         ReviewOutcome::Decision(decision) => Ok(Some(decision.to_markdown())),
         ReviewOutcome::Cancelled => Ok(None),
+    }
+}
+
+struct CancelOnDrop(CancellationToken);
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.cancel();
     }
 }
 
