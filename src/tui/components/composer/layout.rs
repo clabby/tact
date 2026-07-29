@@ -1,5 +1,6 @@
 //! Grapheme-aware soft and hard wrapping for the composer.
 
+use std::ops::Range;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -165,4 +166,35 @@ pub(super) fn byte_at_column(text: &str, line: &VisualLine, target: usize) -> us
         column = next;
     }
     line.end
+}
+
+pub(super) fn grapheme_at_column(text: &str, line: &VisualLine, target: usize) -> Range<usize> {
+    let mut column = 0;
+    for (offset, grapheme) in text[line.start..line.end].grapheme_indices(true) {
+        let start = line.start + offset;
+        let next = column + grapheme.width();
+        if next > target {
+            return start..start + grapheme.len();
+        }
+        column = next;
+    }
+    line.end..line.end
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{VisualLayout, grapheme_at_column};
+
+    #[test]
+    fn hit_testing_returns_whole_graphemes() {
+        let text = "a界e\u{301}";
+        let layout = VisualLayout::new(text, 0, 10);
+        let line = &layout.lines[0];
+
+        assert_eq!(grapheme_at_column(text, line, 0), 0..1);
+        assert_eq!(grapheme_at_column(text, line, 1), 1..4);
+        assert_eq!(grapheme_at_column(text, line, 2), 1..4);
+        assert_eq!(grapheme_at_column(text, line, 3), 4..7);
+        assert_eq!(grapheme_at_column(text, line, 4), 7..7);
+    }
 }

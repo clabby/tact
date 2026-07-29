@@ -7,7 +7,10 @@ mod markdown;
 mod message;
 mod tool;
 
-use super::node::{Component, ComponentUpdate, RenderRequest};
+use super::{
+    node::{Component, ComponentUpdate, RenderRequest},
+    selection::{TextRange, TextSpan},
+};
 use crate::{
     app::config::ReasoningEffort,
     core::extensions::subagents::{AgentMessageUpdate, MessageSender},
@@ -24,13 +27,15 @@ use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, 
 use empty::EmptyLogo;
 use ratatui::{
     Frame,
-    layout::Rect,
+    buffer::Buffer,
+    layout::{Position, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Clear, Widget},
 };
 use std::{
     collections::{HashMap, hash_map::Entry},
+    ops::Range,
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -73,7 +78,9 @@ pub(crate) struct Transcript {
     selected_expandable: Option<EntryId>,
     expandable_hits: Vec<ExpandableHitRegion>,
     link_hits: Vec<LinkHitRegion>,
+    selection_rows: Vec<(u16, Anchor)>,
     transcript_y: u16,
+    transcript_x: u16,
     pending_expandable_anchor: Option<PendingExpandableAnchor>,
     empty_logo: EmptyLogo,
     effort: ReasoningEffort,
@@ -87,6 +94,8 @@ struct CachedEntry {
     tool_summary_lines: usize,
     lines: Vec<Line<'static>>,
     links: Vec<Vec<markdown::LinkSpan>>,
+    selections: Vec<Vec<markdown::SourceSpan>>,
+    envelopes: Vec<markdown::SourceEnvelope>,
 }
 
 #[derive(Default)]
@@ -194,7 +203,9 @@ impl Transcript {
             selected_expandable: None,
             expandable_hits: Vec::new(),
             link_hits: Vec::new(),
+            selection_rows: Vec::new(),
             transcript_y: 0,
+            transcript_x: 0,
             pending_expandable_anchor: None,
             empty_logo: EmptyLogo::new(Instant::now()),
             effort,
@@ -449,6 +460,110 @@ impl Transcript {
             .iter()
             .find(|hit| hit.row == mouse.row && (hit.start..hit.end).contains(&mouse.column))
             .map(|hit| Arc::clone(&hit.destination))
+    }
+
+    pub(super) fn selection_span(&self, position: Position) -> Option<TextSpan> {
+        self.selection_span_with_fallback(position, false)
+    }
+
+    pub(super) fn selection_span_nearest(&self, position: Position) -> Option<TextSpan> {
+        self.selection_span_with_fallback(position, true)
+    }
+
+    fn selection_span_with_fallback(
+        &self,
+        position: Position,
+        across_entries: bool,
+    ) -> Option<TextSpan> {
+        let exact = self
+            .selection_rows
+            .iter()
+            .find(|(row, _)| *row == position.y)
+            .map(|(_, anchor)| *anchor);
+        let exact = match exact {
+            Some(exact) => exact,
+            None if across_entries => self
+                .selection_rows
+                .iter()
+                .min_by_key(|(row, _)| row.abs_diff(position.y))
+                .map(|(_, anchor)| *anchor)?,
+            None => return None,
+        };
+        let anchor = if self.cache.selections(exact).is_empty() {
+            if !across_entries {
+                selection_source(self.model.entry(exact.entry)?)?;
+            }
+            self.selection_rows
+                .iter()
+                .filter(|(_, anchor)| {
+                    (across_entries || anchor.entry == exact.entry)
+                        && !self.cache.selections(*anchor).is_empty()
+                })
+                .min_by_key(|(row, _)| row.abs_diff(position.y))
+                .map(|(_, anchor)| *anchor)?
+        } else {
+            exact
+        };
+        let spans = self.cache.selections(anchor);
+        let column = position.x.saturating_sub(self.transcript_x);
+        let source = spans
+            .iter()
+            .find(|span| span.columns.contains(&column))
+            .or_else(|| {
+                spans.iter().min_by_key(|span| {
+                    if column < span.columns.start {
+                        span.columns.start - column
+                    } else {
+                        column.saturating_sub(span.columns.end.saturating_sub(1))
+                    }
+                })
+            })?;
+        Some(TextSpan::new(
+            anchor.entry.index(),
+            source.source.start,
+            source.source.end,
+        ))
+    }
+
+    pub(super) fn selection_text(&self, range: TextRange) -> Option<String> {
+        let (start, end) = range.bounds();
+        let mut fragments = Vec::new();
+        for entry in self.model.entries() {
+            let block = entry.id.index();
+            if block < start.block || block > end.block {
+                continue;
+            }
+            let Some(source) = selection_source(entry) else {
+                continue;
+            };
+            let Some(selected) = range.source_range(block, source.len()) else {
+                continue;
+            };
+            let selected = self.cache.expand_selection(entry.id, selected);
+            if let Some(fragment) = source.get(selected)
+                && !fragment.is_empty()
+            {
+                fragments.push(fragment);
+            }
+        }
+        (!fragments.is_empty()).then(|| fragments.join("\n\n"))
+    }
+
+    pub(super) fn render_selection(&self, buffer: &mut Buffer, range: TextRange) {
+        let selected = Style::reset().fg(Color::Black).bg(Color::Yellow);
+        for (row, anchor) in &self.selection_rows {
+            for span in self.cache.selections(*anchor) {
+                if !range.includes(anchor.entry.index(), &span.source) {
+                    continue;
+                }
+                for column in span.columns.clone() {
+                    let column = self.transcript_x.saturating_add(column);
+                    if let Some(cell) = buffer.cell_mut(Position::new(column, *row)) {
+                        cell.set_style(selected);
+                    }
+                }
+            }
+        }
     }
 
     pub(super) const fn expandables_focused(&self) -> bool {
@@ -986,6 +1101,32 @@ impl LayoutCache {
             .and_then(|cached| cached.links.get(anchor.line))
             .map_or(&[], Vec::as_slice)
     }
+
+    fn selections(&self, anchor: Anchor) -> &[markdown::SourceSpan] {
+        self.entries
+            .get(&anchor.entry)
+            .and_then(|cached| cached.selections.get(anchor.line))
+            .map_or(&[], Vec::as_slice)
+    }
+
+    fn expand_selection(&self, entry: EntryId, mut selected: Range<usize>) -> Range<usize> {
+        let Some(cached) = self.entries.get(&entry) else {
+            return selected;
+        };
+        loop {
+            let previous = selected.clone();
+            for envelope in &cached.envelopes {
+                if selected.start <= envelope.content.start && selected.end >= envelope.content.end
+                {
+                    selected.start = selected.start.min(envelope.source.start);
+                    selected.end = selected.end.max(envelope.source.end);
+                }
+            }
+            if selected == previous {
+                return selected;
+            }
+        }
+    }
 }
 
 impl CachedEntry {
@@ -1011,6 +1152,8 @@ impl CachedEntry {
             tool_summary_lines,
             lines: layout.lines,
             links: layout.links,
+            selections: layout.selections,
+            envelopes: layout.envelopes,
         }
     }
 
@@ -1028,6 +1171,10 @@ impl CachedEntry {
         let summary_len = summary.len();
         self.lines.splice(0..self.tool_summary_lines, summary);
         self.links.splice(
+            0..self.tool_summary_lines,
+            std::iter::repeat_with(Vec::new).take(summary_len),
+        );
+        self.selections.splice(
             0..self.tool_summary_lines,
             std::iter::repeat_with(Vec::new).take(summary_len),
         );
@@ -1063,8 +1210,10 @@ impl Component for Transcript {
     fn render(&mut self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
         self.viewport_height = area.height;
         self.transcript_y = area.y;
+        self.transcript_x = area.x;
         self.expandable_hits.clear();
         self.link_hits.clear();
+        self.selection_rows.clear();
         Clear.render(area, frame.buffer_mut());
         if self.is_empty() {
             self.empty_logo.render(frame, area, theme, self.effort);
@@ -1086,6 +1235,7 @@ impl Component for Transcript {
                     start: area.x.saturating_add(link.start),
                     end: area.x.saturating_add(link.end).min(area.right()),
                 }));
+            self.selection_rows.push((y, anchor));
             if anchor.line == 0
                 && let Some(entry) = self.model.entry(anchor.entry)
             {
@@ -1157,7 +1307,7 @@ fn render_entry(
     expanded: bool,
 ) -> markdown::Layout {
     let mut layout = match &entry.kind {
-        EntryKind::User { text, .. } => layout_without_links(render_user(text, width, theme)),
+        EntryKind::User { text, .. } => render_user(text, width, theme),
         EntryKind::Assistant { text, .. } => markdown::render(text, width, theme),
         EntryKind::Reasoning { text } => {
             let mut layout = markdown::render(text, width.saturating_sub(2), theme);
@@ -1256,28 +1406,63 @@ fn render_entry(
     };
     layout.lines.push(Line::default());
     layout.links.push(Vec::new());
+    layout.selections.push(Vec::new());
     layout
+}
+
+fn selection_source(entry: &TranscriptEntry) -> Option<&str> {
+    match &entry.kind {
+        EntryKind::User { text }
+        | EntryKind::Assistant { text, .. }
+        | EntryKind::Reasoning { text } => Some(text),
+        _ => None,
+    }
 }
 
 fn layout_without_links(lines: Vec<Line<'static>>) -> markdown::Layout {
     let links = vec![Vec::new(); lines.len()];
-    markdown::Layout { lines, links }
+    let selections = vec![Vec::new(); lines.len()];
+    markdown::Layout {
+        lines,
+        links,
+        selections,
+        envelopes: Vec::new(),
+    }
 }
 
-fn render_user(text: &str, width: u16, theme: &Theme) -> Vec<Line<'static>> {
+fn render_user(text: &str, width: u16, theme: &Theme) -> markdown::Layout {
     let color = theme.thinking_medium();
     let content_width = width.saturating_sub(2).max(1);
     let mut lines = Vec::new();
+    let mut selections = Vec::new();
+    let mut source_offset = 0;
     for logical in text.split('\n') {
-        for line in markdown::wrap_plain(logical, content_width, Style::default().fg(color)) {
+        let wrapped = markdown::wrap_plain(logical, content_width, Style::default().fg(color));
+        let wrapped_selections = markdown::plain_selection_spans(logical, &wrapped);
+        for (line, mut line_selections) in wrapped.into_iter().zip(wrapped_selections) {
+            for selection in &mut line_selections {
+                selection.columns.start = selection.columns.start.saturating_add(2);
+                selection.columns.end = selection.columns.end.saturating_add(2);
+                selection.source.start = selection.source.start.saturating_add(source_offset);
+                selection.source.end = selection.source.end.saturating_add(source_offset);
+            }
             lines.push(Line::from(
                 std::iter::once(Span::styled("┃ ", Style::default().fg(color)))
                     .chain(line.spans)
                     .collect::<Vec<_>>(),
             ));
+            selections.push(line_selections);
         }
+        source_offset = source_offset
+            .saturating_add(logical.len())
+            .saturating_add(1);
     }
-    lines
+    markdown::Layout {
+        links: vec![Vec::new(); lines.len()],
+        lines,
+        selections,
+        envelopes: Vec::new(),
+    }
 }
 
 fn line_width(text: &str) -> usize {
@@ -1302,7 +1487,7 @@ mod tests {
         Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     };
     use nanocodex::agent::events::{AgentEvent, AgentEventKind};
-    use ratatui::{Terminal, backend::TestBackend, style::Color};
+    use ratatui::{Terminal, backend::TestBackend, layout::Position, style::Color};
     use serde_json::{json, value::to_raw_value};
     use std::{sync::Arc, time::Duration};
 
@@ -1433,6 +1618,34 @@ mod tests {
         assert_eq!(backend.buffer()[(2, 1)].symbol(), "h");
         assert_eq!(backend.buffer()[(0, 2)].symbol(), "┃");
         assert_eq!(backend.buffer()[(0, 0)].symbol(), " ");
+        assert!(transcript.selection_span(Position::new(0, 0)).is_none());
+        assert!(
+            transcript
+                .selection_span_nearest(Position::new(0, 0))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn active_selection_can_cross_an_unselectable_tool() {
+        let mut transcript = Transcript::new();
+        transcript.update(TranscriptEvent::Record(user(1, "before")));
+        shell(&mut transcript, 2, "output");
+        transcript.update(TranscriptEvent::Record(user(4, "after")));
+
+        let backend = render(&mut transcript, 40, 12);
+        let tool_row = (0..backend.buffer().area.height)
+            .find(|&row| {
+                (0..backend.buffer().area.width)
+                    .map(|column| backend.buffer()[(column, row)].symbol())
+                    .collect::<String>()
+                    .contains("cargo test")
+            })
+            .expect("tool summary should be visible");
+        let position = Position::new(0, tool_row);
+
+        assert!(transcript.selection_span(position).is_none());
+        assert!(transcript.selection_span_nearest(position).is_some());
     }
 
     #[test]
