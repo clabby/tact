@@ -377,7 +377,9 @@ class ReviewApp {
     state.innerHTML = `
       <div class="overview-orbit">${icon("sparkles")}</div>
       <strong>Overview available on request</strong>
-      <span>Open this tab when you want Tact’s root agent to map the change.</span>`;
+      <span>Ask Tact’s root agent to explain and visualize the change when you need it.</span>
+      <button type="button" class="button primary" data-generate-overview>Generate overview</button>`;
+    state.querySelector("[data-generate-overview]")?.addEventListener("click", () => void this.loadOverview());
   }
 
   private async loadOverview() {
@@ -396,6 +398,7 @@ class ReviewApp {
     const state = this.root.querySelector<HTMLElement>("#overview-state");
     if (state) {
       state.hidden = false;
+      state.setAttribute("aria-busy", "true");
       state.innerHTML = `
         <div class="overview-spinner"><span></span><i></i></div>
         <strong>Preparing the overview</strong>
@@ -424,6 +427,7 @@ class ReviewApp {
     } finally {
       if (request === this.overviewRequest) {
         this.loadingOverview = undefined;
+        state?.removeAttribute("aria-busy");
         this.syncSelectedRange(this.page?.selected_range ?? this.bootstrap.default_range);
       }
     }
@@ -735,7 +739,6 @@ class ReviewApp {
       panel.hidden = !selected;
     }
     if (name === "changes") this.viewer?.render(true);
-    if (name === "overview") void this.loadOverview();
   }
 
   private openRangeDialog() {

@@ -190,7 +190,7 @@ async fn generate_overview(
         .map_err(ReviewError::OverviewSnapshot)?;
     let path = snapshot.path().to_string_lossy();
     let prompt = format!(
-        "Prepare a concise HTML overview for a human reviewing `{label}`. The exact, immutable Git patch is at `{path}`. Read it without modifying the workspace. Return only a semantic HTML fragment with the change's purpose, architecture/data flow, most important files, and concrete review risks. The reviewer owns all visual styling so the fragment works in both light and dark mode: do not include styles, classes, images, scripts, external resources, markdown fences, or a full code review.",
+        "Create an HTML overview that explains and visualizes the features in `{label}` for a human reviewer. The exact, immutable Git patch is at `{path}`. Read it without modifying the workspace. Scale the depth of the overview to the size and complexity of the change: a large change warrants a substantial walkthrough, while a small change should remain focused. Explain the purpose, user-visible behavior, architecture and data flow, important files, and areas that deserve reviewer attention. Use clear diagrams when they materially help explain architecture, state, or interactions; inline semantic HTML and inline SVG are available. Return only the HTML fragment, not a full code review. The reviewer owns all visual styling so the fragment works in both light and dark mode: do not include styles, classes, fixed colors, raster images, scripts, external resources, or markdown fences.",
         label = label,
     );
     let result = match overview_generator(prompt, shutdown).await {
@@ -322,10 +322,13 @@ mod tests {
     #[tokio::test]
     async fn overview_generator_reads_the_immutable_patch_and_returns_html() {
         let observed_patch = Arc::new(Mutex::new(String::new()));
+        let observed_prompt = Arc::new(Mutex::new(String::new()));
         let generator: OverviewGenerator = Arc::new({
             let observed_patch = Arc::clone(&observed_patch);
+            let observed_prompt = Arc::clone(&observed_prompt);
             move |prompt, _shutdown| {
                 let observed_patch = Arc::clone(&observed_patch);
+                let observed_prompt = Arc::clone(&observed_prompt);
                 Box::pin(async move {
                     let path = prompt
                         .split("at `")
@@ -333,6 +336,7 @@ mod tests {
                         .and_then(|value| value.split('`').next())
                         .expect("prompt should contain the snapshot path");
                     *observed_patch.lock().unwrap() = std::fs::read_to_string(path).unwrap();
+                    *observed_prompt.lock().unwrap() = prompt;
                     Ok("```html\n<section>Overview</section>\n```".to_owned())
                 })
             }
@@ -352,6 +356,11 @@ mod tests {
             *observed_patch.lock().unwrap(),
             "diff --git a/file b/file\n"
         );
+        let prompt = observed_prompt.lock().unwrap();
+        assert!(prompt.contains("explains and visualizes the features"));
+        assert!(prompt.contains("Scale the depth"));
+        assert!(prompt.contains("inline SVG"));
+        assert!(prompt.contains("both light and dark mode"));
     }
 
     #[test]
