@@ -257,7 +257,7 @@ button:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2p
 .agent-thread-turn.cancelled { grid-template-columns: minmax(0, 1fr) auto; align-items: center; color: var(--muted); font-size: 12px; }
 .agent-thread-validation, .agent-thread-limit { color: var(--danger); font-size: 11px; }
 .agent-thread-limit { padding: 2px 0; }
-.thread-spinner { width: 15px; height: 15px; border: 2px solid color-mix(in srgb, #9b6cff 25%, var(--line)); border-top-color: #9b6cff; border-radius: 50%; animation: spin .8s linear infinite; }
+.thread-spinner { display: inline-block; flex: none; width: 15px; height: 15px; border: 2px solid color-mix(in srgb, #9b6cff 25%, var(--line)); border-top-color: #9b6cff; border-radius: 50%; animation: spin .8s linear infinite; }
 .editor-footer { display: flex; align-items: center; gap: 12px; min-height: 54px; padding: 8px 10px 8px 13px; }
 .editor-shortcut { display: flex; align-items: center; gap: 4px; color: var(--muted); font-size: 10px; }
 .editor-shortcut kbd { min-width: 20px; padding: 2px 5px; border: 1px solid var(--line-strong); border-bottom-width: 2px; border-radius: 5px; background: var(--surface); color: var(--text); font: 10px ui-monospace, SFMono-Regular, monospace; text-align: center; }

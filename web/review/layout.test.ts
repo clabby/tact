@@ -28,6 +28,15 @@ test("the overview tab shows when its agent is working", async () => {
   expect(styles).toMatch(/\.tab\.loading\s+\.overview-tab-spinner\s*{[^}]*animation:\s*spin/s);
 });
 
+test("the inline answer spinner can visibly rotate", async () => {
+  const styles = await Bun.file(new URL("styles.css", import.meta.url)).text();
+  const spinner = styles.match(/\.thread-spinner\s*{([^}]*)}/)?.[1];
+
+  expect(spinner).toBeDefined();
+  expect(spinner).toMatch(/display:\s*inline-block/);
+  expect(spinner).toMatch(/animation:\s*spin/);
+});
+
 test("seen files are crossed out in the file tree", async () => {
   const app = await Bun.file(new URL("app.ts", import.meta.url)).text();
 
