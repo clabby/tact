@@ -15,6 +15,7 @@ export type ReviewPage = {
   generation: number;
   selected_range: ReviewRange;
   patch: string;
+  full_context?: boolean;
   repository: string;
   scope: string;
   base: string;

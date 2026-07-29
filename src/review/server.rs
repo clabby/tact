@@ -54,6 +54,7 @@ impl OverviewOperation {
 pub(super) struct ReviewPage {
     pub(super) generation: u64,
     pub(super) selected_range: super::diff::ReviewRange,
+    pub(super) full_context: bool,
     #[serde(flatten)]
     pub(super) diff: super::diff::DiffSnapshot,
 }
@@ -2580,6 +2581,7 @@ mod tests {
             response["page"]["selected_range"],
             serde_json::json!({ "from": 0, "to": 2 })
         );
+        assert_eq!(response["page"]["full_context"], true);
         assert!(response.get("workspace_version").is_none());
         assert!(response.get("snapshot_id").is_none());
         assert!(response["page"].get("patch_id").is_none());

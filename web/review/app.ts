@@ -5,6 +5,7 @@ import {
   type DiffLineAnnotation,
   type FileDiffMetadata,
 } from "@pierre/diffs";
+import { WorkerPoolManager } from "@pierre/diffs/worker";
 import {
   FileTree,
   type GitStatus,
@@ -152,13 +153,16 @@ void start();
 
 async function start() {
   const api = new ApiClient();
+  let app: ReviewApp | undefined;
   try {
     const session = await api.review();
-    const app = new ReviewApp(root, api, session);
+    app = new ReviewApp(root, api, session);
     app.render();
     app.installInitialPage();
     app.startWorkspacePolling();
+    window.addEventListener("beforeunload", () => app.cleanUp(), { once: true });
   } catch (error) {
+    app?.cleanUp();
     renderBootstrapError(root, error);
   }
 }
@@ -196,6 +200,8 @@ export class ReviewApp {
   private snapshotStale = false;
   private generationStale = false;
   private viewer?: CodeView<AnnotationMetadata>;
+  private readonly workerPool: WorkerPoolManager;
+  private itemVersion = 0;
   private tree?: FileTree;
   private settings = loadReviewSettings(window.localStorage, document.cookie);
   private readonly colorScheme = window.matchMedia("(prefers-color-scheme: dark)");
@@ -207,6 +213,15 @@ export class ReviewApp {
     private bootstrap: ReviewSession,
   ) {
     this.state = createReviewState(bootstrap);
+    this.workerPool = new WorkerPoolManager(
+      {
+        workerFactory: () => new Worker(
+          new URL("./worker.js", import.meta.url),
+          { type: "module" },
+        ),
+      },
+      { theme: diffTheme(this.settings) },
+    );
   }
 
   private get feedback() { return currentFeedback(this.state); }
@@ -390,6 +405,14 @@ export class ReviewApp {
     void this.checkWorkspaceStatus();
   }
 
+  cleanUp() {
+    if (this.statusTimer !== undefined) window.clearInterval(this.statusTimer);
+    if (this.questionPollTimer !== undefined) window.clearTimeout(this.questionPollTimer);
+    this.viewer?.cleanUp();
+    this.tree?.cleanUp();
+    this.workerPool.terminate();
+  }
+
   async selectRange(
     range: ReviewRange,
     discardCurrentFeedback = false,
@@ -430,13 +453,14 @@ export class ReviewApp {
     this.state = activatePage(this.state, page);
     const seenFiles = this.seenFiles();
     const cacheKey = `tact-review-${page.generation}-${rangeKey(page.selected_range)}`;
-    const patchFiles = parseReviewPatch(page.patch, cacheKey);
+    const patchFiles = parseReviewPatch(page.patch, cacheKey, page.full_context === true);
     // Git's patch owns changed-line identity. Pierre may expand context already present in
     // that immutable patch, but browser-side re-diffing must never replace its hunks.
     this.files = patchFiles;
     this.pathToItem.clear();
-    this.items = this.files.map((file, index) => {
-      const id = `${rangeKey(page.selected_range)}:${index}:${file.name}`;
+    const version = ++this.itemVersion;
+    this.items = this.files.map((file) => {
+      const id = file.name;
       this.pathToItem.set(file.name, id);
       return {
         id,
@@ -444,7 +468,7 @@ export class ReviewApp {
         fileDiff: file,
         annotations: [],
         collapsed: seenFiles.has(file.name),
-        version: 1,
+        version,
       };
     });
     this.attachQuestionItems();
@@ -454,7 +478,7 @@ export class ReviewApp {
     if (description) description.textContent = page.scope;
     this.renderStats();
     this.renderOverviewState();
-    this.renderDiff();
+    this.renderDiff(true);
     this.renderTree();
     this.renderCommentList();
     const summary = this.root.querySelector<HTMLTextAreaElement>("#review-summary");
@@ -708,12 +732,13 @@ export class ReviewApp {
     frame.hidden = false;
   }
 
-  private renderDiff() {
+  private renderDiff(resetScroll = false) {
     const container = this.root.querySelector<HTMLElement>("#diff-view");
     if (!container) return;
-    this.viewer?.cleanUp();
-    container.replaceChildren();
     if (this.files.length === 0) {
+      this.viewer?.cleanUp();
+      this.viewer = undefined;
+      container.replaceChildren();
       container.innerHTML = `
         <div class="empty-range">
           <strong>No changes in this range</strong>
@@ -724,9 +749,18 @@ export class ReviewApp {
       container.querySelector("[data-empty-range-refresh]")?.addEventListener("click", () => void this.refreshReview());
       return;
     }
-    this.viewer = new CodeView<AnnotationMetadata>(this.viewerOptions());
-    this.viewer.setup(container);
+
+    if (!this.viewer) {
+      container.replaceChildren();
+      this.viewer = new CodeView<AnnotationMetadata>(this.viewerOptions(), this.workerPool);
+      this.viewer.setup(container);
+    } else {
+      this.viewer.setOptions(this.viewerOptions());
+    }
     this.viewer.setItems(this.items);
+    if (resetScroll) {
+      this.viewer.scrollTo({ type: "position", position: 0, behavior: "instant" });
+    }
   }
 
   private viewerOptions() {
@@ -740,6 +774,7 @@ export class ReviewApp {
       expansionLineCount: 20,
       enableLineSelection: true,
       stickyHeaders: true,
+      pointerEventsOnScroll: false,
       lineHoverHighlight: "both" as const,
       renderHeaderMetadata: (_file, context) => {
         if (context.item.type !== "diff") return null;
@@ -845,7 +880,7 @@ export class ReviewApp {
     else files.delete(path);
 
     item.collapsed = seen;
-    item.version = (item.version ?? 0) + 1;
+    item.version = ++this.itemVersion;
     this.viewer?.updateItem(item);
     this.refreshTreeDecorations();
   }
@@ -1088,6 +1123,9 @@ export class ReviewApp {
     document.documentElement.dataset.appearance = appearance(this.settings);
     this.syncTreeAppearance();
     if (rebuildDiff && this.page) {
+      void this.workerPool
+        .setRenderOptions({ theme: diffTheme(this.settings) })
+        .catch((error) => console.warn("Could not update the diff worker theme.", error));
       this.renderOverview();
       this.renderDiff();
     }
@@ -1383,7 +1421,7 @@ export class ReviewApp {
     const item = this.items.find((candidate) => candidate.id === itemId);
     if (!item) return;
     item.annotations = this.annotationsForItem(itemId);
-    item.version = (item.version ?? 0) + 1;
+    item.version = ++this.itemVersion;
     this.viewer?.updateItem(item);
   }
 
@@ -2083,7 +2121,7 @@ function icon(name: string) {
     close: '<path d="m7 7 10 10M17 7 7 17"/>',
     "arrow-right": '<path d="M5 12h14m-5-5 5 5-5 5"/>',
     sparkles: '<path d="m12 3 1.2 3.3L16.5 7.5l-3.3 1.2L12 12l-1.2-3.3-3.3-1.2 3.3-1.2ZM18 14l.8 2.2L21 17l-2.2.8L18 20l-.8-2.2L15 17l2.2-.8ZM6 13l.7 1.8 1.8.7-1.8.7L6 18l-.7-1.8-1.8-.7 1.8-.7Z"/>',
-    settings: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-1.42 1.42-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1.02 1.56V20h-2v-.48A1.7 1.7 0 0 0 12.4 18a1.7 1.7 0 0 0-1.88.34l-.06.06-1.42-1.42.06-.06A1.7 1.7 0 0 0 9.44 15a1.7 1.7 0 0 0-1.56-1.02H7.4v-2h.48A1.7 1.7 0 0 0 9.44 11a1.7 1.7 0 0 0-.34-1.88l-.06-.06 1.42-1.42.06.06A1.7 1.7 0 0 0 12.4 8a1.7 1.7 0 0 0 1.02-1.56V6h2v.44A1.7 1.7 0 0 0 16.44 8a1.7 1.7 0 0 0 1.88-.34l.06-.06 1.42 1.42-.06.06A1.7 1.7 0 0 0 19.4 11a1.7 1.7 0 0 0 1.56 1.02h.48v2h-.48A1.7 1.7 0 0 0 19.4 15Z" transform="translate(-2.4 -1) scale(1.2)"/>',
+    settings: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 8.92 4a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09A1.65 1.65 0 0 0 15 4.6a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82 1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09A1.65 1.65 0 0 0 19.4 15Z"/>',
     bold: '<path d="M7 5h5a3 3 0 0 1 0 6H7Zm0 6h5.5a3.5 3.5 0 0 1 0 7H7Z"/>',
     italic: '<path d="M10 5h7M7 19h7M14 5 10 19"/>',
     code: '<path d="m8 9-4 3 4 3m8-6 4 3-4 3m-3-8-2 10"/>',

@@ -1,6 +1,7 @@
 import { watch } from "node:fs";
 import { mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
+import { reviewEntrypoints, reviewScriptAssets } from "./build-config";
 import { overviewFixtures, reviewBootstrap, reviewFixtures } from "./dev-fixture";
 import { rangeKey, type ReviewRange } from "./range-selection";
 import type {
@@ -16,7 +17,7 @@ await mkdir(outputDirectory, { recursive: true });
 
 async function buildAssets() {
   const build = await Bun.build({
-    entrypoints: [join(import.meta.dir, "app.ts")],
+    entrypoints: reviewEntrypoints,
     outdir: outputDirectory,
     target: "browser",
     sourcemap: "inline",
@@ -147,7 +148,7 @@ const server = Bun.serve({
     if (url.pathname === "/__reload" && server.upgrade(request)) return;
 
     const name = url.pathname === "/" ? "index.html" : url.pathname.slice(1);
-    if (!["index.html", "app.js", "app.css"].includes(name)) {
+    if (!["index.html", "app.css", ...reviewScriptAssets].includes(name)) {
       return new Response("Not found", { status: 404 });
     }
     return new Response(Bun.file(join(outputDirectory, name)));

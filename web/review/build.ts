@@ -1,12 +1,13 @@
 import { mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
+import { reviewEntrypoints, reviewScriptAssets } from "./build-config";
 
 const outputDirectory = join(import.meta.dir, "dist");
 await rm(outputDirectory, { recursive: true, force: true });
 await mkdir(outputDirectory, { recursive: true });
 
 const result = await Bun.build({
-  entrypoints: [join(import.meta.dir, "app.ts")],
+  entrypoints: reviewEntrypoints,
   outdir: outputDirectory,
   target: "browser",
   minify: true,
@@ -33,10 +34,12 @@ await Bun.write(
 const contentTypes: Record<string, string> = {
   "index.html": "text/html; charset=utf-8",
   "app.css": "text/css; charset=utf-8",
-  "app.js": "text/javascript; charset=utf-8",
   "favicon.svg": "image/svg+xml",
   "LICENSE.md": "text/markdown; charset=utf-8",
 };
+for (const asset of reviewScriptAssets) {
+  contentTypes[asset] = "text/javascript; charset=utf-8";
+}
 const files = await Promise.all(
   Object.keys(contentTypes).map(async (path) => {
     const file = Bun.file(join(outputDirectory, path));
