@@ -2,10 +2,15 @@
 
 use crate::{
     app::config::ReasoningEffort,
+    core::MEMORY_REVIEW_CHECKPOINT,
     tui::{components::QueueId, pane::PaneId, prompt::Submission, transcript::TurnId},
 };
 use nanocodex::{
-    AgentEvents, Nanocodex, NanocodexError, TurnControl, agent::session::SessionSnapshot,
+    AgentEvents, Nanocodex, NanocodexError, TurnControl,
+    agent::{
+        input::{Prompt, PromptInput, UserInput},
+        session::SessionSnapshot,
+    },
 };
 use std::collections::{HashMap, HashSet};
 use tokio::{
@@ -36,6 +41,7 @@ pub(crate) enum WorkerCommand {
     ReplaceAgent {
         pane: PaneId,
         agent: Nanocodex,
+        memory_review: MemoryReviewState,
     },
     SetThinking {
         pane: PaneId,
@@ -130,6 +136,74 @@ struct TurnRequest {
     shutdown: Option<CancellationToken>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MemoryReviewState {
+    Disabled,
+    BeforeFirstTurn,
+    FollowUp,
+}
+
+impl MemoryReviewState {
+    pub(crate) const fn fresh(enabled: bool) -> Self {
+        if enabled {
+            Self::BeforeFirstTurn
+        } else {
+            Self::Disabled
+        }
+    }
+
+    pub(crate) const fn restored(enabled: bool) -> Self {
+        if enabled {
+            Self::FollowUp
+        } else {
+            Self::Disabled
+        }
+    }
+
+    const fn forked(self) -> Self {
+        match self {
+            Self::Disabled => Self::Disabled,
+            Self::BeforeFirstTurn | Self::FollowUp => Self::FollowUp,
+        }
+    }
+
+    fn submission_prompt(self, submission: &Submission) -> Prompt {
+        match self {
+            Self::Disabled | Self::BeforeFirstTurn => submission.agent_prompt(),
+            Self::FollowUp => prompt_with_memory_review(submission),
+        }
+    }
+
+    fn steer_prompt(self, submission: &Submission) -> Prompt {
+        match self {
+            Self::Disabled => submission.agent_prompt(),
+            Self::BeforeFirstTurn | Self::FollowUp => prompt_with_memory_review(submission),
+        }
+    }
+
+    fn turn_accepted(&mut self) {
+        if *self == Self::BeforeFirstTurn {
+            *self = Self::FollowUp;
+        }
+    }
+}
+
+fn prompt_with_memory_review(submission: &Submission) -> Prompt {
+    let mut prompt = submission.agent_prompt();
+    match &mut prompt.instruction {
+        PromptInput::Text(text) => {
+            if !text.is_empty() {
+                text.push_str("\n\n");
+            }
+            text.push_str(MEMORY_REVIEW_CHECKPOINT);
+        }
+        PromptInput::Content(content) => content.push(UserInput::Text {
+            text: format!("\n\n{MEMORY_REVIEW_CHECKPOINT}"),
+        }),
+    }
+    prompt
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct TurnKey {
     pane: PaneId,
@@ -145,6 +219,7 @@ struct SteerRequest {
 
 pub(crate) fn spawn(
     agent: Nanocodex,
+    memory_review: MemoryReviewState,
     shutdown: CancellationToken,
 ) -> (
     mpsc::UnboundedSender<WorkerCommand>,
@@ -152,12 +227,13 @@ pub(crate) fn spawn(
 ) {
     let (commands, command_rx) = mpsc::unbounded_channel();
     let (updates, update_rx) = mpsc::unbounded_channel();
-    tokio::spawn(run(agent, command_rx, updates, shutdown));
+    tokio::spawn(run(agent, memory_review, command_rx, updates, shutdown));
     (commands, update_rx)
 }
 
 async fn run(
     agent: Nanocodex,
+    memory_review: MemoryReviewState,
     mut commands: mpsc::UnboundedReceiver<WorkerCommand>,
     updates: mpsc::UnboundedSender<WorkerEvent>,
     shutdown: CancellationToken,
@@ -165,6 +241,7 @@ async fn run(
     let mut main = Some(agent);
     let mut fork = None::<(PaneId, Nanocodex)>;
     let mut controls = HashMap::<TurnKey, TurnControl>::new();
+    let mut memory_reviews = HashMap::from([(PaneId::Main, memory_review)]);
     let mut cancelled = HashSet::<TurnKey>::new();
     let mut turns = JoinSet::<(TurnKey, TurnPurpose, bool, TurnResult)>::new();
 
@@ -220,14 +297,39 @@ async fn run(
                             fallback_id,
                             prompt,
                         };
-                        steer_turn(agent, &mut controls, &mut turns, &updates, request).await;
+                        let memory_review = *memory_reviews
+                            .get(&pane)
+                            .expect("an available pane must have memory-review state");
+                        let started_turn = steer_turn(
+                            agent,
+                            memory_review,
+                            &mut controls,
+                            &mut turns,
+                            &updates,
+                            request,
+                        )
+                        .await;
+                        if started_turn {
+                            memory_reviews
+                                .get_mut(&pane)
+                                .expect("an available pane must have memory-review state")
+                                .turn_accepted();
+                        }
                         continue;
                     }
-                    WorkerCommand::ReplaceAgent { pane, agent } => {
+                    WorkerCommand::ReplaceAgent {
+                        pane,
+                        agent,
+                        memory_review,
+                    } => {
                         debug_assert!(!controls.keys().any(|key| key.pane == pane));
                         let retired = match pane {
-                            PaneId::Main => main.replace(agent),
+                            PaneId::Main => {
+                                memory_reviews.insert(pane, memory_review);
+                                main.replace(agent)
+                            }
                             PaneId::Fork(_) if fork.as_ref().is_some_and(|(id, _)| *id == pane) => {
+                                memory_reviews.insert(pane, memory_review);
                                 fork.replace((pane, agent)).map(|(_, agent)| agent)
                             }
                             PaneId::Fork(_) => {
@@ -288,6 +390,11 @@ async fn run(
                         };
                         match agent.fork().await {
                             Ok((agent, events)) => {
+                                let memory_review = *memory_reviews
+                                    .get(&PaneId::Main)
+                                    .expect("the primary pane must have memory-review state");
+                                let memory_review = memory_review.forked();
+                                memory_reviews.insert(pane, memory_review);
                                 fork = Some((pane, agent));
                                 drop(updates.send(WorkerEvent::ForkOpened { pane, events }));
                             }
@@ -306,6 +413,7 @@ async fn run(
                             }
                             PaneId::Fork(_) => None,
                         };
+                        memory_reviews.remove(&pane);
                         close_pane(pane, agent, &controls, &mut cancelled, &updates).await;
                         continue;
                     }
@@ -314,7 +422,25 @@ async fn run(
                     reject_turn(request, "session pane is no longer available".to_owned(), &updates);
                     continue;
                 };
-                start_turn(agent, request, &mut controls, &mut turns, &updates).await;
+                let pane = request.pane;
+                let memory_review = *memory_reviews
+                    .get(&pane)
+                    .expect("an available pane must have memory-review state");
+                let started_conversation = start_turn(
+                    agent,
+                    request,
+                    memory_review,
+                    &mut controls,
+                    &mut turns,
+                    &updates,
+                )
+                .await;
+                if started_conversation {
+                    memory_reviews
+                        .get_mut(&pane)
+                        .expect("an available pane must have memory-review state")
+                        .turn_accepted();
+                }
             }
         }
     }
@@ -341,17 +467,18 @@ async fn run(
 async fn start_turn(
     agent: &Nanocodex,
     request: TurnRequest,
+    memory_review: MemoryReviewState,
     controls: &mut HashMap<TurnKey, TurnControl>,
     turns: &mut JoinSet<(TurnKey, TurnPurpose, bool, TurnResult)>,
     updates: &mpsc::UnboundedSender<WorkerEvent>,
-) {
+) -> bool {
     if request
         .shutdown
         .as_ref()
         .is_some_and(CancellationToken::is_cancelled)
     {
         reject_cancelled_turn(request);
-        return;
+        return false;
     }
     let TurnRequest {
         pane,
@@ -374,7 +501,7 @@ async fn start_turn(
                         purpose,
                         shutdown,
                     });
-                    return;
+                    return false;
                 }
             }
         } else {
@@ -394,7 +521,7 @@ async fn start_turn(
                     error.to_string(),
                     updates,
                 );
-                return;
+                return false;
             }
         };
         let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
@@ -403,7 +530,12 @@ async fn start_turn(
         (None, None)
     };
     let turn_agent = isolated_agent.as_ref().unwrap_or(agent);
-    let turn = match turn_agent.prompt(prompt.agent_prompt()).await {
+    let agent_prompt = if auxiliary {
+        prompt.agent_prompt()
+    } else {
+        memory_review.submission_prompt(&prompt)
+    };
+    let turn = match turn_agent.prompt(agent_prompt).await {
         Ok(turn) => turn,
         Err(error) => {
             if let Some(agent) = isolated_agent {
@@ -423,7 +555,7 @@ async fn start_turn(
                 error.to_string(),
                 updates,
             );
-            return;
+            return false;
         }
     };
     let key = TurnKey { pane, id };
@@ -459,6 +591,7 @@ async fn start_turn(
     if !auxiliary {
         drop(updates.send(WorkerEvent::TurnAccepted { pane, id }));
     }
+    !auxiliary
 }
 
 fn reject_turn(request: TurnRequest, error: String, updates: &mpsc::UnboundedSender<WorkerEvent>) {
@@ -483,11 +616,12 @@ fn reject_cancelled_turn(request: TurnRequest) {
 
 async fn steer_turn(
     agent: &Nanocodex,
+    memory_review: MemoryReviewState,
     controls: &mut HashMap<TurnKey, TurnControl>,
     turns: &mut JoinSet<(TurnKey, TurnPurpose, bool, TurnResult)>,
     updates: &mpsc::UnboundedSender<WorkerEvent>,
     request: SteerRequest,
-) {
+) -> bool {
     let SteerRequest {
         pane,
         queue_id,
@@ -500,10 +634,10 @@ async fn steer_turn(
         .collect::<Vec<_>>();
     active.sort_unstable_by_key(|(key, _)| key.id);
     for (_, control) in active {
-        match control.steer(prompt.agent_prompt()).await {
+        match control.steer(memory_review.steer_prompt(&prompt)).await {
             Ok(()) => {
                 drop(updates.send(WorkerEvent::SteerAdmitted { pane, queue_id }));
-                return;
+                return false;
             }
             Err(NanocodexError::TurnNotSteerable) => {}
             Err(error) => {
@@ -512,12 +646,12 @@ async fn steer_turn(
                     queue_id,
                     error: error.to_string(),
                 }));
-                return;
+                return false;
             }
         }
     }
 
-    match agent.prompt(prompt.agent_prompt()).await {
+    match agent.prompt(memory_review.steer_prompt(&prompt)).await {
         Ok(turn) => {
             let control = turn.control();
             let key = TurnKey {
@@ -542,6 +676,7 @@ async fn steer_turn(
                 id: fallback_id,
                 prompt,
             }));
+            true
         }
         Err(error) => {
             drop(updates.send(WorkerEvent::SteerFailed {
@@ -549,6 +684,7 @@ async fn steer_turn(
                 queue_id,
                 error: error.to_string(),
             }));
+            false
         }
     }
 }
@@ -684,13 +820,15 @@ async fn shutdown_agent(agent: Option<Nanocodex>) -> Result<(), NanocodexError> 
 
 #[cfg(test)]
 mod tests {
-    use super::{WorkerCommand, WorkerEvent, spawn};
+    use super::{MemoryReviewState, WorkerCommand, WorkerEvent, spawn};
     use crate::{
         app::config::ReasoningEffort,
-        tui::{components::QueueId, pane::PaneId, transcript::TurnId},
+        core::MEMORY_REVIEW_CHECKPOINT,
+        tui::{components::QueueId, pane::PaneId, prompt::Submission, transcript::TurnId},
     };
     use nanocodex::{
         AgentEvents, Nanocodex, OpenAi,
+        agent::input::{Prompt, PromptInput, UserInput},
         oai::{
             ResponseError,
             tower::{ResponsesAttempt, ResponsesServiceResponse},
@@ -746,13 +884,76 @@ mod tests {
         Nanocodex::builder(openai).build().unwrap()
     }
 
+    fn prompt_text(prompt: Prompt) -> String {
+        match prompt.instruction {
+            PromptInput::Text(text) => text,
+            PromptInput::Content(content) => content
+                .into_iter()
+                .filter_map(|item| match item {
+                    UserInput::Text { text } => Some(text),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+        }
+    }
+
+    #[test]
+    fn review_state_decorates_followups_and_steers_without_changing_display_text() {
+        let initial = Submission::text("initial request".to_owned());
+        let follow_up = Submission::text("actually, preserve ordering".to_owned());
+        let steer = Submission::text("change direction".to_owned());
+        let mut review = MemoryReviewState::fresh(true);
+
+        assert!(
+            !prompt_text(review.submission_prompt(&initial)).contains(MEMORY_REVIEW_CHECKPOINT)
+        );
+        review.turn_accepted();
+        assert_eq!(
+            prompt_text(review.submission_prompt(&follow_up))
+                .matches(MEMORY_REVIEW_CHECKPOINT)
+                .count(),
+            1
+        );
+        assert_eq!(
+            prompt_text(MemoryReviewState::fresh(true).steer_prompt(&steer))
+                .matches(MEMORY_REVIEW_CHECKPOINT)
+                .count(),
+            1
+        );
+        assert_eq!(follow_up.display_text(), "actually, preserve ordering");
+        assert_eq!(steer.display_text(), "change direction");
+
+        let disabled = MemoryReviewState::fresh(false);
+        assert!(!prompt_text(disabled.steer_prompt(&steer)).contains(MEMORY_REVIEW_CHECKPOINT));
+    }
+
+    #[test]
+    fn restored_and_forked_sessions_start_with_followup_review() {
+        let prompt = Submission::text("continue".to_owned());
+
+        assert!(
+            prompt_text(MemoryReviewState::restored(true).submission_prompt(&prompt))
+                .contains(MEMORY_REVIEW_CHECKPOINT)
+        );
+        assert!(
+            prompt_text(
+                MemoryReviewState::fresh(true)
+                    .forked()
+                    .submission_prompt(&prompt)
+            )
+            .contains(MEMORY_REVIEW_CHECKPOINT)
+        );
+    }
+
     #[tokio::test]
     async fn thinking_can_change_while_a_turn_is_active() {
         let called = Arc::new(Notify::new());
         let calls = Arc::new(AtomicUsize::new(0));
         let (agent, mut events) = pending_agent(Arc::clone(&called), calls);
         let shutdown = CancellationToken::new();
-        let (commands, mut updates) = spawn(agent, shutdown.clone());
+        let (commands, mut updates) =
+            spawn(agent, MemoryReviewState::fresh(false), shutdown.clone());
         let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
 
         commands
@@ -803,7 +1004,8 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let (agent, mut events) = pending_agent(Arc::clone(&called), calls);
         let shutdown = CancellationToken::new();
-        let (commands, mut updates) = spawn(agent, shutdown.clone());
+        let (commands, mut updates) =
+            spawn(agent, MemoryReviewState::fresh(false), shutdown.clone());
         let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
 
         commands
@@ -854,7 +1056,8 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let (agent, mut events) = pending_agent(Arc::clone(&called), calls);
         let shutdown = CancellationToken::new();
-        let (commands, mut updates) = spawn(agent, shutdown.clone());
+        let (commands, mut updates) =
+            spawn(agent, MemoryReviewState::fresh(false), shutdown.clone());
         let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
 
         commands
@@ -911,7 +1114,8 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let (agent, mut events) = pending_agent(Arc::clone(&called), calls);
         let shutdown = CancellationToken::new();
-        let (commands, mut updates) = spawn(agent, shutdown.clone());
+        let (commands, mut updates) =
+            spawn(agent, MemoryReviewState::fresh(false), shutdown.clone());
         let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
 
         commands
@@ -961,7 +1165,8 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let (agent, mut events) = pending_agent(Arc::clone(&called), calls);
         let shutdown = CancellationToken::new();
-        let (commands, mut updates) = spawn(agent, shutdown.clone());
+        let (commands, mut updates) =
+            spawn(agent, MemoryReviewState::fresh(false), shutdown.clone());
         let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
 
         commands
@@ -1010,7 +1215,8 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let (agent, mut events) = pending_agent(Arc::clone(&called), calls);
         let shutdown = CancellationToken::new();
-        let (commands, mut updates) = spawn(agent, shutdown.clone());
+        let (commands, mut updates) =
+            spawn(agent, MemoryReviewState::fresh(false), shutdown.clone());
         let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
 
         commands
@@ -1084,7 +1290,11 @@ mod tests {
         let (agent, mut events) = pending_agent(Arc::clone(&called), calls);
         let worker_shutdown = CancellationToken::new();
         let overview_shutdown = CancellationToken::new();
-        let (commands, mut updates) = spawn(agent, worker_shutdown.clone());
+        let (commands, mut updates) = spawn(
+            agent,
+            MemoryReviewState::fresh(false),
+            worker_shutdown.clone(),
+        );
         let (completion, result) = oneshot::channel();
 
         commands
@@ -1144,7 +1354,11 @@ mod tests {
         let worker_shutdown = CancellationToken::new();
         let job_shutdown = CancellationToken::new();
         job_shutdown.cancel();
-        let (commands, mut updates) = spawn(agent, worker_shutdown.clone());
+        let (commands, mut updates) = spawn(
+            agent,
+            MemoryReviewState::fresh(false),
+            worker_shutdown.clone(),
+        );
         let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
         let (completion, result) = oneshot::channel();
 
@@ -1190,7 +1404,8 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let (agent, mut events) = pending_agent(Arc::clone(&called), calls);
         let shutdown = CancellationToken::new();
-        let (commands, mut updates) = spawn(agent, shutdown.clone());
+        let (commands, mut updates) =
+            spawn(agent, MemoryReviewState::fresh(false), shutdown.clone());
         let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
 
         commands
@@ -1257,12 +1472,17 @@ mod tests {
         let second_drain =
             tokio::spawn(async move { while second_events.recv().await.is_some() {} });
         let shutdown = CancellationToken::new();
-        let (commands, mut updates) = spawn(first_agent, shutdown.clone());
+        let (commands, mut updates) = spawn(
+            first_agent,
+            MemoryReviewState::fresh(false),
+            shutdown.clone(),
+        );
 
         commands
             .send(WorkerCommand::ReplaceAgent {
                 pane: PaneId::Main,
                 agent: second_agent,
+                memory_review: MemoryReviewState::fresh(false),
             })
             .unwrap();
         commands

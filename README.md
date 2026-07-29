@@ -241,7 +241,9 @@ enabled = true
 
 Memory is global to the selected Tact configuration, not scoped to a workspace. Tact stores it in
 `memory/v1.sqlite3` beside the selected `config.toml`, and agents access it only through explicit
-memory tool calls; the corpus is never inserted into prompts automatically. See the
+memory tool calls. The corpus is never inserted into prompts automatically. For later user
+messages and in-flight steers, Tact adds a fixed, content-free checkpoint asking the agent to
+review the conversation and update memory when it finds a durable conclusion. See the
 [global memory design](docs/memory.md) for the tool contract, limits, privacy model, and evaluation
 criteria.
 

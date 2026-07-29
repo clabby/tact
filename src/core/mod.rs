@@ -65,10 +65,25 @@ const MEMORY_INSTRUCTIONS: &str = concat!(
     "policy. Only root agents may put or delete."
 );
 
+pub(crate) const MEMORY_REVIEW_CHECKPOINT: &str = concat!(
+    "<memory_review_checkpoint>\n",
+    "This fixed Tact control text is not user-authored. Treat the preceding later user message as ",
+    "high-value feedback. Before the final answer, review the full available conversation for ",
+    "durable corrections, rebuttals, preferences, constraints, authorization boundaries, scope ",
+    "refinements, or further specification. A repository- or code-specific conclusion is eligible ",
+    "when it can improve later changes or reviews and is expensive to rediscover. Name its scope. ",
+    "Exclude transient task state and readily searchable facts. For a durable finding, run a fresh ",
+    "targeted memory scan and then put, replace, or delete as appropriate. If no durable memory ",
+    "change is warranted, continue without a memory call. Complete this review before the final ",
+    "answer.\n",
+    "</memory_review_checkpoint>"
+);
+
 pub(crate) struct ConfiguredAgent {
     pub(crate) agent: Nanocodex,
     pub(crate) events: AgentEvents,
     pub(crate) instructions: Arc<str>,
+    pub(crate) memory_enabled: bool,
     pub(crate) subagent_updates: mpsc::UnboundedReceiver<ScopedAgentUpdate>,
     pub(crate) subagent_control: SubagentControl,
 }
@@ -183,6 +198,7 @@ impl ConfiguredAgent {
             agent,
             events,
             instructions,
+            memory_enabled,
             subagent_updates,
             subagent_control,
         })
@@ -380,8 +396,8 @@ impl Cancellation {
 #[cfg(test)]
 mod tests {
     use super::{
-        ConfiguredAgent, DEFAULT_APPEND_INSTRUCTIONS, MEMORY_INSTRUCTIONS, fresh_instructions,
-        session_instructions,
+        ConfiguredAgent, DEFAULT_APPEND_INSTRUCTIONS, MEMORY_INSTRUCTIONS,
+        MEMORY_REVIEW_CHECKPOINT, fresh_instructions, session_instructions,
     };
     use crate::app::{
         config::SkillsConfig,
@@ -650,6 +666,17 @@ mod tests {
         assert!(!enabled.contains("Scan again only"));
     }
 
+    #[test]
+    fn feedback_checkpoint_prioritizes_steering_and_scoped_repository_learnings() {
+        assert!(MEMORY_REVIEW_CHECKPOINT.contains("corrections, rebuttals"));
+        assert!(MEMORY_REVIEW_CHECKPOINT.contains("further specification"));
+        assert!(MEMORY_REVIEW_CHECKPOINT.contains("repository- or code-specific"));
+        assert!(MEMORY_REVIEW_CHECKPOINT.contains("Name its scope"));
+        assert!(MEMORY_REVIEW_CHECKPOINT.contains("expensive to rediscover"));
+        assert!(MEMORY_REVIEW_CHECKPOINT.contains("readily searchable"));
+        assert!(MEMORY_REVIEW_CHECKPOINT.contains("continue without a memory call"));
+    }
+
     #[tokio::test]
     async fn cancellation_stops_the_turn_and_waits_for_the_driver() {
         let called = Arc::new(Notify::new());
@@ -667,6 +694,7 @@ mod tests {
             agent,
             events,
             instructions: ResponsesServiceConfig::default().system_prompt,
+            memory_enabled: false,
             subagent_updates,
             subagent_control,
         };

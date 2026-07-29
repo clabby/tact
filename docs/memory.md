@@ -44,14 +44,29 @@ may state that the tool exists, but the first stored-memory token appears only a
 
 | Operation | Callers | Contract |
 | --- | --- | --- |
-| `scan` | Root and child agents | Search active records and return at most five compact candidate cards. A card contains identity, version, score, and a short match preview, not an unbounded corpus slice. |
-| `read` | Root and child agents | Fetch the complete content and metadata of at most three records by stable ID. Missing IDs are omitted from the result. |
+| `scan` | Root and child agents | Search active records and return at most five compact candidate cards. A card contains identity, version, score, and a deterministic preview. Content at 64 bytes or fewer is returned in full. Longer content is a UTF-8-safe prefix of at most 64 bytes. |
+| `read` | Root and child agents | Fetch complete content and metadata by stable ID. The ID list has no separate record cap. Missing IDs are omitted from the result. |
 | `put` | Root agent only | Add one atomic conclusion or replace a known record. A replacement supplies the stable ID and expected version. The tool rejects stale versions rather than overwriting concurrent work. The agent should scan before putting to avoid duplicates. |
 | `delete` | Root agent only | Delete a known record using its stable ID and expected version. The tool rejects stale versions. |
 
-Not calling the tool is the `NOOP` path. There is no automatic search, read-after-scan, write at turn
-completion, or background model pass. In particular, a scan returns candidates for the agent to
-judge; it does not silently treat every returned candidate as relevant.
+When memory is enabled, Tact appends a fixed, model-only memory-review checkpoint to every accepted
+user message after the first turn, including restored and forked-session continuations. It also
+appends the checkpoint to every accepted in-flight steer and to a steer promoted into a new turn.
+The checkpoint identifies itself as Tact control text and contains no user text, candidate memory,
+path, or session identifier. It tells the root agent to review the full available conversation and
+store any warranted durable conclusion before its final answer. A review that finds no durable
+change makes no memory call. The original user submission remains unchanged for display and
+transcript journaling.
+
+The model-visible checkpoint becomes part of Nanocodex's conversation state and completed session
+checkpoint, so a resumed model can see the same control text. It is not written as a separate user
+transcript event and never copies the triggering message into the control text.
+
+The checkpoint is a structural prompt trigger, not an independent memory manager. There is no
+automatic search, read-after-scan, write at turn completion, persisted candidate queue, or
+background model pass. A scan returns candidates for the agent to judge. It does not silently treat
+every returned candidate as relevant. Outside a requested review, not calling the tool remains the
+ordinary no-op path.
 
 Child agents may scan and read because shared conclusions can prevent repeated work. They may not
 put, replace, or delete. Root-only mutation gives the session's coordinating agent one place to
@@ -64,6 +79,9 @@ A record is one self-contained conclusion that can be used without reconstructin
 that produced it. Good records include a durable user correction, a stable preference, or an
 expensive-to-rediscover operational fact. Each record should include qualifications that affect its
 truth: the relevant repository or service, the observed version, and a date when freshness matters.
+Repository- and code-specific conclusions are first-class candidates when they can materially help
+later changes or review and would be expensive to rediscover. They must name their stable logical
+scope because the store has no implicit workspace boundary.
 
 Do not store transcripts, reasoning traces, task plans, raw tool output, credentials, transient
 state, generic knowledge, or facts that a cheap repository search will recover. Do not bundle a
@@ -103,8 +121,11 @@ rarer terms rank higher through BM25. A scan abstains only when the query has no
 when no active record shares a term with it.
 
 This recall-oriented behavior is bounded at candidate retrieval. `scan` returns no more than five
-compact candidate cards. `read` has no separate record cap, but complete content enters context
-only for IDs the agent explicitly selects.
+compact candidate cards. A preview returns the complete record when it is at most 64 bytes. Longer
+records return a UTF-8-safe prefix of at most 64 bytes. The preview is deliberately not a semantic
+summary. `read` has no separate ID cap and returns complete records for the IDs the agent selects.
+For a short record, scan and read can therefore contain the same text. Read remains a deliberate-use
+operation that updates separate telemetry and clears probation.
 
 ## Telemetry and probation
 
@@ -135,7 +156,6 @@ All limits apply to the single global corpus, not separately to each workspace:
 | Total content | 256 KiB | At most 262,144 bytes of record content across stored rows. |
 | Main database file | 4 MiB | Maximum size of `v1.sqlite3` itself, including tables, indexes, metadata, and free pages. SQLite sidecar files are not covered by this number. |
 | Scan results | 5 | Maximum candidate cards returned by one scan. |
-| Read records | 3 | Maximum complete records returned by one read. |
 
 The store prunes expired unread probation records before rejecting a capacity-increasing mutation.
 It must not silently evict a graduated active conclusion merely to make a new put succeed. If the
@@ -223,8 +243,8 @@ global coding-agent setting.
 - [LongMemEval-V2](https://arxiv.org/abs/2605.12493) evaluates static and dynamic state, workflows,
   environment gotchas, and premise awareness while framing memory as compact evidence gathering.
   It motivates testing durable operational conclusions and downstream task utility. Its reported
-  coding-agent method also has high latency, supporting an explicit bounded baseline rather than
-  automatic history processing.
+  coding-agent method also has high latency, supporting a fixed in-turn review checkpoint rather
+  than a separate background history-processing pass.
 - [MemGPT](https://arxiv.org/abs/2310.08560) treats external memory as a tier accessed under a
   limited context window. Tact adopts explicit movement into active context, not automatic corpus
   injection.
@@ -252,13 +272,14 @@ documentation defines the behavior Tact relies on or deliberately avoids.
 ## Tact constants requiring calibration
 
 The product invariants are opt-in operation, no automatic corpus injection, one global corpus,
-explicit tool access, root-only mutation, bounded storage, and honest deletion language. The
-following are initial Tact choices rather than conclusions established by the cited research:
+explicit tool access, a content-free in-turn feedback checkpoint, root-only mutation, bounded
+storage, and honest deletion language. The following are initial Tact choices rather than
+conclusions established by the cited research:
 
-- seven days of unread probation;
-- 1 KiB per record, 512 rows, 256 KiB of content, and a 4 MiB main database;
-- five scan candidates;
-- the tokenizer and no-overlap abstention rule, and
+- seven days of unread probation.
+- 1 KiB per record, 512 rows, 256 KiB of content, and a 4 MiB main database.
+- five scan candidates and a 64-byte preview.
+- the tokenizer and no-overlap abstention rule.
 - BM25 `k1 = 1.2` and `b = 0.75` for this corpus, despite being established baseline values.
 
 Evaluation may tune these values while the experiment remains disabled by default. Tuning must be
@@ -269,18 +290,17 @@ limits or add embeddings, graphs, or reflection.
 
 Evaluate memory with paired runs using the same model, effort, task, and starting state, with memory
 enabled for one run and disabled for the other. Counterbalance run order. The scenario set must
-cover durable corrections, preferences, expensive workspace gotchas, stale replacements,
-contradictions, cross-workspace name collisions, irrelevant queries, secret-shaped content, and
-adversarial repository text.
+cover durable corrections, rebuttals, direction-changing steers, later scope refinements,
+preferences, expensive workspace gotchas, stale replacements, contradictions, cross-workspace name
+collisions, irrelevant queries, secret-shaped content, and adversarial repository text.
 
 Measure at least:
 
-- task completion and correctness after the relevant fact crosses a session boundary;
-- scan precision and recall at five, read precision at three, ranking quality, and correct
-  abstention;
-- duplicate puts, correct replacement, contradiction rate, forbidden writes, probation survival,
-  and the share of turns taking the zero-call path;
-- scan and read counts separately, including candidates repeatedly scanned but never read; and
+- task completion and correctness after the relevant fact crosses a session boundary.
+- scan precision and recall at five, read precision, ranking quality, and correct abstention.
+- duplicate puts, correct replacement, contradiction rate, forbidden writes, and probation
+  survival.
+- scan and read counts separately, including candidates repeatedly scanned but never read.
 - p50/p95 tool latency, memory tokens added to context, main/sidecar disk use, and failure behavior
   at every bound.
 

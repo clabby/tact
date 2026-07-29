@@ -441,6 +441,7 @@ pub(crate) async fn run(
         agent,
         events,
         instructions,
+        memory_enabled,
         subagent_updates,
         subagent_control,
     } = configured;
@@ -466,7 +467,12 @@ pub(crate) async fn run(
             &writer_sender,
         )?,
     );
-    let (commands, mut worker_updates) = worker::spawn(agent, shutdown.clone());
+    let memory_review = if resuming {
+        worker::MemoryReviewState::restored(memory_enabled)
+    } else {
+        worker::MemoryReviewState::fresh(memory_enabled)
+    };
+    let (commands, mut worker_updates) = worker::spawn(agent, memory_review, shutdown.clone());
     let workspace = config.agent().workspace().to_path_buf();
     let (agent_event_sender, mut agent_events) = mpsc::unbounded_channel();
     agent_events::forward(PaneId::Main, 0, events, agent_event_sender.clone());
@@ -1083,6 +1089,7 @@ pub(crate) async fn run(
                             agent,
                             events,
                             instructions,
+                            memory_enabled,
                             subagent_updates,
                             subagent_control,
                         } = configured;
@@ -1126,7 +1133,11 @@ pub(crate) async fn run(
                             subagent_sender.clone(),
                         );
                         commands
-                            .send(WorkerCommand::ReplaceAgent { pane, agent })
+                            .send(WorkerCommand::ReplaceAgent {
+                                pane,
+                                agent,
+                                memory_review: worker::MemoryReviewState::fresh(memory_enabled),
+                            })
                             .map_err(|_| RuntimeError::AgentWorkerStopped)?;
                         schedule(
                             app.update(AppEvent::NewSessionReady {
@@ -1228,6 +1239,7 @@ pub(crate) async fn run(
                             agent,
                             events,
                             instructions,
+                            memory_enabled,
                             subagent_updates,
                             subagent_control,
                         } = configured;
@@ -1271,7 +1283,11 @@ pub(crate) async fn run(
                             subagent_sender.clone(),
                         );
                         commands
-                            .send(WorkerCommand::ReplaceAgent { pane, agent })
+                            .send(WorkerCommand::ReplaceAgent {
+                                pane,
+                                agent,
+                                memory_review: worker::MemoryReviewState::restored(memory_enabled),
+                            })
                             .map_err(|_| RuntimeError::AgentWorkerStopped)?;
                         schedule(
                             app.update(AppEvent::SessionRestored {

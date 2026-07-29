@@ -169,7 +169,7 @@ impl Tool for MemoryTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::function(
             "memory",
-            "Explicitly searches, reads, stores, replaces, or deletes bounded global memories. Scan returns candidates without counting them as used; read marks selected memories as deliberately used. Put and delete are root-agent-only.",
+            "Explicitly searches, reads, stores, replaces, or deletes bounded global memories. Scan returns bounded candidate previews without counting them as used; read returns full selected memories and marks them as deliberately used. Put and delete are root-agent-only.",
             memory_input_schema(),
         )
         .with_output_schema(memory_output_schema())
@@ -268,7 +268,7 @@ fn memory_output_schema() -> Value {
                             "type": "object",
                             "properties": {
                                 "key": memory_key_schema(),
-                                "preview": { "type": "string" },
+                                "preview": { "type": "string", "maxLength": 64 },
                                 "score": { "type": "number" }
                             },
                             "required": ["key", "preview", "score"],
@@ -379,6 +379,7 @@ mod tests {
         );
         let definition = tool.definition();
         let schema = definition.parameters().unwrap().as_value();
+        let output_schema = definition.output_schema().unwrap().as_value();
 
         assert_eq!(definition.name(), "memory");
         assert_eq!(schema["oneOf"].as_array().unwrap().len(), 4);
@@ -389,6 +390,14 @@ mod tests {
                 .iter()
                 .all(|operation| { operation["additionalProperties"] == json!(false) })
         );
+        let scan_output = output_schema["oneOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|operation| operation["properties"]["operation"]["const"] == json!("scan"))
+            .expect("scan output should be exposed");
+        let candidate = &scan_output["properties"]["candidates"]["items"];
+        assert_eq!(candidate["properties"]["preview"]["maxLength"], json!(64));
     }
 
     #[test]
