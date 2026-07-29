@@ -89,16 +89,19 @@ tact run "inspect the workspace"
 
 ## Review changes
 
-Enter `/review` while no agent work is active to review workspace changes. Tact opens the full
-branch from trunk by default; the browser can narrow the range, including to uncommitted changes. The root agent generates
-the overview as a visible transcript turn, then Tact waits while you review the overview and diff in
-your browser. Approve or request changes there, with optional overall and inline comments. Tact
-converts the result to Markdown and inserts it into the composer so you can edit or send it.
+Enter `/review` while no agent work is active to open a browser-based human review tool for
+workspace changes. Tact shows the full branch from trunk by default; you can narrow the range,
+inspect the diff, leave overall or inline feedback, and approve or request changes. Tact converts
+your review to Markdown and inserts it into the composer so you can edit it before passing it to the
+agent. The browser can also generate an agent-authored visual overview of the selected range on
+demand.
+
 Reloading or closing the browser does not cancel the review. Reopen the live URL shown by Tact, or
 cancel explicitly from the browser or Tact.
 
-The first review from an official release asks before downloading the matching, checksummed browser
-assets. This is a one-time download for that Tact version, stored under `~/.tact/review` by default.
+The review tool requires a separate browser bundle. The first `/review` from each official Tact
+version asks for confirmation, then lazily downloads and verifies the matching release artifact.
+The bundle is downloaded once per Tact version and stored under `~/.tact/review` by default.
 
 ### Developing the review interface
 
