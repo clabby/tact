@@ -1,0 +1,22 @@
+{
+  "name": "tact-review",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "bun run build.ts",
+    "dev": "bun run dev.ts",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit --skipLibCheck --module Preserve --moduleResolution bundler --target ES2022 --types bun --lib ES2022,DOM,DOM.Iterable app.ts build.ts dev.ts"
+  },
+  "dependencies": {
+    "@pierre/diffs": "1.2.12",
+    "@pierre/theme": "1.1.0",
+    "@pierre/trees": "1.0.0-beta.6",
+    "marked": "18.0.7",
+    "shiki": "4.3.1"
+  },
+  "devDependencies": {
+    "@types/bun": "1.3.14",
+    "typescript": "5.9.3"
+  }
+}

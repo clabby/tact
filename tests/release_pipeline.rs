@@ -1,14 +1,119 @@
 const RELEASE_WORKFLOW: &str = include_str!("../.github/workflows/release.yaml");
+const CI_WORKFLOW: &str = include_str!("../.github/workflows/ci.yaml");
 const RELEASE_TEMPLATE: &str = include_str!("../.github/RELEASE_TEMPLATE.md");
 const CHANGELOG_CONFIG: &str = include_str!("../cliff.toml");
 const RELEASE_INSTRUCTIONS: &str = include_str!("../RELEASES.md");
 const CARGO_MANIFEST: &str = include_str!("../Cargo.toml");
+const REVIEW_BUILD: &str = include_str!("../web/review/build.ts");
+const REVIEW_ASSETS: &str = include_str!("../src/review/assets.rs");
 
 fn assert_contains(document: &str, expected: &str) {
     assert!(
         document.contains(expected),
         "expected document to contain `{expected}`"
     );
+}
+
+fn workflow(document: &str) -> serde_yaml::Value {
+    serde_yaml::from_str(document).expect("workflow should be valid YAML")
+}
+
+fn number_after(document: &str, marker: &str) -> u32 {
+    let value = document
+        .split_once(marker)
+        .unwrap_or_else(|| panic!("expected document to contain `{marker}`"))
+        .1;
+    let digits: String = value
+        .chars()
+        .take_while(|character| character.is_ascii_digit())
+        .collect();
+    digits
+        .parse()
+        .unwrap_or_else(|_| panic!("expected `{marker}` to be followed by a number"))
+}
+
+#[test]
+fn crate_package_omits_repository_only_assets() {
+    let manifest: toml::Value = toml::from_str(CARGO_MANIFEST).unwrap();
+    let excluded = manifest["package"]["exclude"].as_array().unwrap();
+    let excluded = excluded
+        .iter()
+        .map(|entry| entry.as_str().unwrap())
+        .collect::<Vec<_>>();
+
+    for path in ["docker/**", "tests/release_pipeline.rs", "web/**"] {
+        assert!(
+            excluded.contains(&path),
+            "crate package should exclude {path}"
+        );
+    }
+}
+
+#[test]
+fn ci_tests_builds_and_typechecks_review_assets_with_locked_dependencies() {
+    let workflow = workflow(CI_WORKFLOW);
+    let steps = workflow["jobs"]["review-web"]["steps"]
+        .as_sequence()
+        .expect("review-web should contain steps");
+
+    for command in [
+        "bun install --frozen-lockfile",
+        "bun test",
+        "bun run build",
+        "bun run typecheck",
+    ] {
+        assert!(
+            steps.iter().any(|step| step["run"]
+                .as_str()
+                .is_some_and(|run| run.starts_with(command))),
+            "review-web should run `{command}`"
+        );
+    }
+}
+
+#[test]
+fn review_bundle_api_matches_the_rust_asset_validator() {
+    let rust_api = number_after(REVIEW_ASSETS, "const REVIEW_API_VERSION: u32 = ");
+    let bundle_min = number_after(REVIEW_BUILD, "review_api: { min: ");
+    let bundle_max = number_after(REVIEW_BUILD, "max: ");
+
+    assert!(
+        (bundle_min..=bundle_max).contains(&rust_api),
+        "review bundle API {bundle_min}..={bundle_max} excludes Rust API {rust_api}"
+    );
+}
+
+#[test]
+fn release_packages_and_signs_the_review_bundle() {
+    let workflow = workflow(RELEASE_WORKFLOW);
+    let review_steps = workflow["jobs"]["review_assets"]["steps"]
+        .as_sequence()
+        .expect("review_assets should contain steps");
+    let package = review_steps
+        .iter()
+        .find(|step| step["name"] == "Package review assets")
+        .expect("review assets should be packaged")["run"]
+        .as_str()
+        .expect("review packaging should be a shell command");
+
+    assert_contains(package, "archive=\"tact-review-${GITHUB_REF_NAME}.tar.gz\"");
+    assert_contains(
+        package,
+        "cp dist/index.html dist/app.js dist/app.css dist/LICENSE.md dist/manifest.json review/",
+    );
+    assert_contains(package, "tar -czf \"$archive\" review");
+    assert_contains(package, "shasum -a 256 \"$archive\"");
+
+    let sign_needs = workflow["jobs"]["sign"]["needs"]
+        .as_sequence()
+        .expect("sign should depend on all asset builds");
+    assert!(sign_needs.iter().any(|need| need == "review_assets"));
+
+    assert_contains(RELEASE_WORKFLOW, "for archive in dist/*.tar.gz");
+    assert_contains(RELEASE_WORKFLOW, "test -s \"${archive}.sig\"");
+    assert_contains(RELEASE_WORKFLOW, "dist/*.tar.gz");
+    assert_contains(RELEASE_WORKFLOW, "dist/*.sha256");
+    assert_contains(RELEASE_WORKFLOW, "dist/*.sig");
 }
 
 #[test]

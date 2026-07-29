@@ -1088,8 +1088,11 @@ impl Component for Transcript {
                 }));
             if anchor.line == 0
                 && let Some(entry) = self.model.entry(anchor.entry)
-                && is_expandable(entry)
             {
+                if !is_expandable(entry) {
+                    y = y.saturating_add(1);
+                    continue;
+                }
                 self.expandable_hits.push(ExpandableHitRegion {
                     entry: anchor.entry,
                     row: y,

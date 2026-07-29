@@ -71,6 +71,11 @@ pub(crate) enum ComposerEvent {
         status: Option<String>,
         now: Instant,
     },
+    ReviewWaiting {
+        waiting: bool,
+        status: Option<String>,
+        now: Instant,
+    },
     ActiveSubagents {
         count: usize,
         now: Instant,
@@ -99,6 +104,8 @@ pub(crate) struct Composer {
     fast_mode: bool,
     activity_wave: Option<WavedText>,
     activity_status: Option<String>,
+    review_wave: Option<WavedText>,
+    review_status: Option<String>,
     active_subagents: usize,
     subagent_wave: Option<WavedText>,
     turn_timers: VecDeque<TurnTimer>,
@@ -193,6 +200,8 @@ impl Composer {
             fast_mode: false,
             activity_wave: None,
             activity_status: None,
+            review_wave: None,
+            review_status: None,
             active_subagents: 0,
             subagent_wave: None,
             turn_timers: VecDeque::new(),
@@ -277,6 +286,24 @@ impl Composer {
                 self.activity_status = status;
                 ComposerUpdate::changed()
             }
+            ComposerEvent::ReviewWaiting {
+                waiting,
+                status,
+                now,
+            } => {
+                let status =
+                    waiting.then(|| status.unwrap_or_else(|| "Waiting for review…".to_owned()));
+                if self.review_status == status {
+                    return ComposerUpdate::unchanged();
+                }
+                self.review_wave = status.as_ref().map(|status| {
+                    let mut wave = WavedText::new(status, Color::Green);
+                    wave.set_active(true, now);
+                    wave
+                });
+                self.review_status = status;
+                ComposerUpdate::changed()
+            }
             ComposerEvent::ActiveSubagents { count, now } => {
                 if self.active_subagents == count {
                     return ComposerUpdate::unchanged();
@@ -311,6 +338,10 @@ impl Composer {
                     .activity_wave
                     .as_mut()
                     .is_some_and(|wave| wave.advance(now));
+                let review_changed = self
+                    .review_wave
+                    .as_mut()
+                    .is_some_and(|wave| wave.advance(now));
                 let subagent_changed = self
                     .subagent_wave
                     .as_mut()
@@ -319,7 +350,9 @@ impl Composer {
                 for timer in &mut self.turn_timers {
                     timer_changed |= timer.advance(now);
                 }
-                ComposerUpdate::from_change(activity_changed || subagent_changed || timer_changed)
+                ComposerUpdate::from_change(
+                    activity_changed || review_changed || subagent_changed || timer_changed,
+                )
             }
         }
     }
@@ -341,6 +374,11 @@ impl Composer {
             .as_ref()
             .and_then(WavedText::animation_deadline)
             .into_iter()
+            .chain(
+                self.review_wave
+                    .as_ref()
+                    .and_then(WavedText::animation_deadline),
+            )
             .chain(
                 self.subagent_wave
                     .as_ref()
@@ -826,15 +864,21 @@ impl Composer {
         let content_width = usize::from(area.width - 4);
         let content_end = content_start + u16::try_from(content_width).unwrap_or(u16::MAX);
         let usage_prefix = format!(" {}%/272k ", context_percent(self.context_tokens));
+        let review_segment = self
+            .review_status
+            .as_ref()
+            .map(|status| format!("{status} "))
+            .unwrap_or_default();
         let status_segment = self.activity_status.clone().unwrap_or_default();
         let subagent_segment = if self.active_subagents > 0 {
             format!(" {} subagents", self.active_subagents)
         } else {
             String::new()
         };
+        let usage_before_activity = format!("{usage_prefix}{review_segment}");
         let usage_before_subagents = self.activity_wave.as_ref().map_or_else(
-            || usage_prefix.clone(),
-            |_| format!("{usage_prefix}{status_segment} "),
+            || usage_before_activity.clone(),
+            |_| format!("{usage_before_activity}{status_segment} "),
         );
         let usage = if subagent_segment.is_empty() {
             usage_before_subagents.clone()
@@ -866,8 +910,20 @@ impl Composer {
             usage_space,
             Style::default().fg(theme.muted()),
         );
-        if let Some(wave) = &self.activity_wave {
+        if let Some(wave) = &self.review_wave {
             let mut x = content_start + u16::try_from(usage_prefix.width()).unwrap_or(u16::MAX);
+            for span in wave.spans() {
+                if x >= right_start {
+                    break;
+                }
+                let width = u16::try_from(span.width()).unwrap_or(u16::MAX);
+                buffer.set_span(x, top, &span, right_start.saturating_sub(x));
+                x = x.saturating_add(width);
+            }
+        }
+        if let Some(wave) = &self.activity_wave {
+            let mut x =
+                content_start + u16::try_from(usage_before_activity.width()).unwrap_or(u16::MAX);
             for span in wave.spans() {
                 if x >= right_start {
                     break;
@@ -1030,7 +1086,9 @@ impl Composer {
     }
 
     fn border_style(&self, theme: &Theme) -> Style {
-        Style::default().fg(if self.draft.starts_with('!') {
+        Style::default().fg(if self.review_wave.is_some() {
+            Color::Green
+        } else if self.draft.starts_with('!') {
             Color::Yellow
         } else {
             theme.border()
@@ -1196,6 +1254,21 @@ mod tests {
                 footer,
             ]
         );
+    }
+
+    #[test]
+    fn review_waiting_uses_green_chrome_next_to_context() {
+        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        composer.update(ComposerEvent::ReviewWaiting {
+            waiting: true,
+            status: None,
+            now: Instant::now(),
+        });
+
+        let terminal = render(&mut composer, 80, 5);
+
+        assert!(rows(&terminal)[0].contains("0%/272k Waiting for review"));
+        assert_eq!(terminal.backend().buffer()[(0, 0)].fg, Color::Green);
     }
 
     #[test]

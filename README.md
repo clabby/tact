@@ -87,6 +87,44 @@ For scripts and integrations, `tact run` submits one prompt and streams Nanocode
 tact run "inspect the workspace"
 ```
 
+## Review changes
+
+Enter `/review` while no agent work is active to open a browser-based human review tool for
+workspace changes. Tact shows the full branch from trunk by default; you can narrow the range,
+inspect the diff, leave overall or inline feedback, and approve or request changes. Tact converts
+your review to Markdown and inserts it into the composer so you can edit it before passing it to the
+agent. Inline selections can also open a private question thread with the agent; those conversations
+help you understand the code but are not included in the rendered review feedback. The browser can
+also generate an agent-authored visual overview of the selected range on demand.
+
+Reloading or closing the browser does not cancel the review. Agent question threads remain available,
+and an answer already in progress continues in the background. Reopen the live URL shown by Tact,
+or cancel explicitly from the browser or Tact.
+
+The review tool requires a separate browser bundle. The first `/review` from each official Tact
+version asks for confirmation, then lazily downloads and verifies the matching release artifact.
+The bundle is downloaded once per Tact version and stored under `~/.tact/review` by default.
+
+### Developing the review interface
+
+Development builds do not download browser assets. Install Bun, then build and link the assets into
+the development Tact directory:
+
+```sh
+cd web/review
+bun install --frozen-lockfile
+just install-dev
+```
+
+To work on the interface in a browser with sample review data, run:
+
+```sh
+just dev
+```
+
+`TACT_REVIEW_ASSETS=/absolute/path/to/web/review/dist` remains available as a manual override. The
+development server watches browser sources, rebuilds them, and reloads connected pages.
+
 ## Configuration
 
 The configuration file is optional. Tact reads `$TACT_HOME/config.toml`, or

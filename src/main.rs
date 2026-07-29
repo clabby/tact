@@ -5,6 +5,7 @@
 
 mod app;
 mod core;
+mod review;
 mod tui;
 
 use app::Cli;

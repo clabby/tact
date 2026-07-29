@@ -1,0 +1,2109 @@
+import {
+  CodeView,
+  type CodeViewDiffItem,
+  type CodeViewLineSelection,
+  type DiffLineAnnotation,
+  type FileDiffMetadata,
+} from "@pierre/diffs";
+import {
+  FileTree,
+  type GitStatus,
+  type GitStatusEntry,
+} from "@pierre/trees";
+import { ApiClient, ApiError, errorMessage } from "./api-client";
+import { annotationPath, pendingCommentCount } from "./comment-state";
+import { commentSelectionCallbacks } from "./comment-selection";
+import { changeStats, fileTreeChangeStats } from "./file-tree-stats";
+import { renderMarkdown } from "./markdown";
+import {
+  beginTerminal,
+  activatePage,
+  allQuestions,
+  createReviewState,
+  currentFeedback,
+  currentQuestions,
+  discardCurrentFeedback as clearCurrentFeedback,
+  failTerminal,
+  feedbackDescription,
+  finishTerminal,
+  installSession,
+  synchronizeQuestions,
+  type CommentDraft,
+  type CommentMetadata,
+  type ReviewState,
+} from "./review-state";
+import {
+  beginFollowUp,
+  beginStopping,
+  cancelQuestion,
+  createQuestionThread,
+  failQuestion,
+  finishQuestion,
+  questionValidationError,
+  retryQuestion,
+  stopFailed,
+  type QuestionThread,
+} from "./question-state";
+import type {
+  ReviewComment,
+  ReviewDecision,
+  ReviewPage,
+  ReviewSession,
+  StoredOverview,
+} from "./protocol";
+import {
+  activeSyntaxTheme,
+  appearance,
+  diffTheme,
+  loadReviewSettings,
+  saveReviewSettings,
+  type ReviewSettings,
+  type SyntaxTheme,
+} from "./review-settings";
+import { overviewDocument } from "./overview";
+import { parseReviewPatch } from "./review-diff";
+import {
+  expandRange,
+  moveRangeBoundary,
+  rangeKey,
+  rangeLabel,
+  rangesEqual,
+  targetLabel,
+  type RangeBoundary,
+  type ReviewRange,
+  type ReviewTarget,
+} from "./range-selection";
+import "./styles.css";
+
+const TREE_ICONS = { set: "minimal" } as const;
+const TREE_STYLES = `
+  [data-type="item"] {
+    --tact-tree-row-bg: var(--trees-bg);
+    position: relative;
+  }
+  [data-type="item"]:hover {
+    --tact-tree-row-bg: var(--trees-bg-muted);
+  }
+  [data-type="item"][aria-selected="true"] {
+    --tact-tree-row-bg: var(--trees-selected-bg);
+  }
+  [data-item-section="decoration"] {
+    position: absolute;
+    z-index: 2;
+    --tact-comment-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z'/%3E%3C/svg%3E");
+    --tact-seen-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='9'/%3E%3Cpath d='m8 12 2.5 2.5L16 9'/%3E%3C/svg%3E");
+    --tact-comment-indicator: #4b8cff;
+    inset-block: var(--trees-focus-ring-width);
+    inset-inline-end: calc(var(--trees-item-padding-x) + var(--trees-git-lane-width));
+    align-items: center;
+    padding-inline-start: 8px;
+    pointer-events: none;
+    background-color: var(--tact-tree-row-bg);
+    text-align: right;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+  }
+  [data-item-section="decoration"] span[style*="--tact-comment-indicator"] {
+    display: inline-flex;
+    align-items: center;
+  }
+  [data-item-section="decoration"] span[style*="--tact-comment-indicator"]::before {
+    width: 12px;
+    height: 12px;
+    content: "";
+    background-color: currentColor;
+    -webkit-mask: var(--tact-comment-icon) center / contain no-repeat;
+    mask: var(--tact-comment-icon) center / contain no-repeat;
+  }
+  [data-item-section="decoration"] [title*="Seen"] {
+    display: inline-flex;
+    align-items: center;
+  }
+  [data-item-section="decoration"] [title*="Seen"]::after {
+    width: 13px;
+    height: 13px;
+    flex: none;
+    margin-inline-start: 8px;
+    content: "";
+    background-color: var(--trees-accent);
+    -webkit-mask: var(--tact-seen-icon) center / contain no-repeat;
+    mask: var(--tact-seen-icon) center / contain no-repeat;
+  }
+  [data-type="item"]:has([data-item-section="decoration"] [title*="Seen"]) [data-item-section="content"] {
+    opacity: .56;
+    text-decoration: line-through;
+  }
+`;
+
+type AnnotationMetadata =
+  | { kind: "comment"; comment: CommentMetadata }
+  | { kind: "question"; thread: QuestionThread }
+  | { kind: "composer"; draft: CommentDraft };
+
+type AgentOperation =
+  | { kind: "overview"; request: number }
+  | { kind: "question"; threadId: string; request: number; operationId: string };
+
+const root = document.querySelector<HTMLElement>("#app");
+if (!root) throw new Error("review root is missing");
+
+void start();
+
+async function start() {
+  const api = new ApiClient();
+  try {
+    const session = await api.review();
+    const app = new ReviewApp(root, api, session);
+    app.render();
+    app.installInitialPage();
+    app.startWorkspacePolling();
+  } catch (error) {
+    renderBootstrapError(root, error);
+  }
+}
+
+function renderBootstrapError(container: HTMLElement, error: unknown) {
+  container.innerHTML = `
+    <div class="fatal" role="alert">
+      <p>Could not load this review.</p>
+      <small>${escapeHtml(errorMessage(error))}</small>
+      <button class="button primary" data-bootstrap-retry>Retry</button>
+    </div>`;
+  container.querySelector("[data-bootstrap-retry]")?.addEventListener("click", () => void start());
+}
+
+export class ReviewApp {
+  private page?: ReviewPage;
+  private files: FileDiffMetadata[] = [];
+  private items: CodeViewDiffItem<AnnotationMetadata>[] = [];
+  private readonly pathToItem = new Map<string, string>();
+  private readonly overviews = new Map<string, string>();
+  private pendingRange?: ReviewRange;
+  private previewRange?: ReviewRange;
+  private nextCommentId = 1;
+  private loadingRange?: ReviewRange;
+  private loadingOverview?: ReviewRange;
+  private rangeRequest = 0;
+  private overviewRequest = 0;
+  private questionRequest = 0;
+  private questionPollTimer?: number;
+  private pollingQuestions = false;
+  private agentOperation?: AgentOperation;
+  private statusTimer?: number;
+  private checkingStatus = false;
+  private refreshing = false;
+  private snapshotStale = false;
+  private generationStale = false;
+  private viewer?: CodeView<AnnotationMetadata>;
+  private tree?: FileTree;
+  private settings = loadReviewSettings(window.localStorage, document.cookie);
+  private readonly colorScheme = window.matchMedia("(prefers-color-scheme: dark)");
+  private state: ReviewState;
+
+  constructor(
+    private readonly root: HTMLElement,
+    private readonly api: ApiClient,
+    private bootstrap: ReviewSession,
+  ) {
+    this.state = createReviewState(bootstrap);
+  }
+
+  private get feedback() { return currentFeedback(this.state); }
+  private get comments() { return this.feedback.comments; }
+  private get questions() { return currentQuestions(this.state); }
+  private get draft() { return this.feedback.draft; }
+  private set draft(value: CommentDraft | undefined) { this.feedback.draft = value; }
+
+  installInitialPage() {
+    this.restoreStoredOverview(this.bootstrap.overview);
+    this.installPage(this.bootstrap.page);
+    this.restoreAgentOperation();
+  }
+
+  private restoreStoredOverview(overview: StoredOverview | null) {
+    if (overview?.status !== "ready" || !overview.overview_html?.trim()) return;
+    this.overviews.set(rangeKey(overview.selected_range), overview.overview_html);
+  }
+
+  private restoreAgentOperation() {
+    const overview = this.bootstrap.overview;
+    if (overview?.status === "generating"
+      && rangesEqual(overview.selected_range, this.page?.selected_range)) {
+      void this.loadOverview(true);
+      return;
+    }
+    void this.restoreActiveQuestion();
+  }
+
+  private async restoreActiveQuestion() {
+    const active = allQuestions(this.state).find((thread) => thread.turn.kind === "asking");
+    if (!active) return;
+    this.resumeQuestionOperation();
+    if (!rangesEqual(active.range, this.page?.selected_range)) {
+      await this.selectRange(active.range, false, true);
+    }
+  }
+
+  render() {
+    document.title = `${this.bootstrap.title} · Tact`;
+    this.root.innerHTML = `
+      <div class="review-shell">
+        <header class="topbar">
+          <div class="identity">
+            <span class="mark" aria-hidden="true">T</span>
+            <div>
+              <h1>${escapeHtml(this.bootstrap.title)}</h1>
+              <p>${escapeHtml(this.bootstrap.repository)} <span>·</span> <span id="scope-description">Loading changes…</span></p>
+            </div>
+          </div>
+          <div class="topbar-actions">
+            <button class="refresh-notice" id="refresh-notice" hidden>
+              <i aria-hidden="true"></i><span>New changes available</span><strong>Refresh</strong>
+            </button>
+            <button class="range-button" id="range-button" aria-haspopup="dialog" aria-controls="range-dialog" aria-expanded="false">
+              <span class="range-button-icon">${icon("git-branch")}</span>
+              <span><small>Change range</small><strong id="range-label">Full branch</strong></span>
+              <span class="range-chevron">${icon("chevron-down")}</span>
+            </button>
+            <div class="change-stats" id="change-stats" aria-label="Change statistics"></div>
+            <button class="icon-button settings-button" id="settings-button" aria-label="Review settings" aria-expanded="false">
+              ${icon("settings")}
+            </button>
+            <div class="settings-popover" id="settings-popover" hidden>
+              <div class="settings-heading">Review settings</div>
+              <label>
+                <span>Syntax theme</span>
+                <select data-setting="syntaxTheme">
+                  <option value="system">System</option>
+                  <option value="pierre-light">Pierre Light</option>
+                  <option value="pierre-light-soft">Pierre Light Soft</option>
+                  <option value="pierre-dark">Pierre Dark</option>
+                  <option value="pierre-dark-soft">Pierre Dark Soft</option>
+                </select>
+              </label>
+              <label>
+                <span>Diff layout</span>
+                <select data-setting="diffStyle">
+                  <option value="unified">Unified</option>
+                  <option value="split">Split</option>
+                </select>
+              </label>
+              <label class="toggle-setting"><span>Wrap long lines</span><input type="checkbox" data-setting="wrapLines"></label>
+              <label class="toggle-setting"><span>Line numbers</span><input type="checkbox" data-setting="lineNumbers"></label>
+            </div>
+          </div>
+        </header>
+        <nav class="tabs" role="tablist" aria-label="Review sections">
+          <button class="tab active" id="changes-tab" role="tab" aria-selected="true" aria-controls="changes-panel" data-tab="changes">Changes <span id="file-count">0</span></button>
+          <button class="tab" id="overview-tab" role="tab" aria-selected="false" aria-controls="overview-panel" tabindex="-1" data-tab="overview">Overview<span class="overview-tab-activity" aria-hidden="true"><i></i><i></i><i></i></span></button>
+        </nav>
+        <section class="panel overview-panel" id="overview-panel" role="tabpanel" aria-labelledby="overview-tab" data-panel="overview" hidden>
+          <div class="overview-state" id="overview-state"></div>
+          <iframe class="overview" title="Agent overview" sandbox="" hidden></iframe>
+        </section>
+        <section class="panel changes-panel active" id="changes-panel" role="tabpanel" aria-labelledby="changes-tab" data-panel="changes">
+          <div class="mobile-navigation" role="tablist" aria-label="Changes navigation">
+            <button class="active" role="tab" aria-selected="true" data-mobile-panel="diff">Diff</button>
+            <button role="tab" aria-selected="false" tabindex="-1" data-mobile-panel="files">Files</button>
+            <button role="tab" aria-selected="false" tabindex="-1" data-mobile-panel="comments">Comments <span id="mobile-comment-count">0</span></button>
+          </div>
+          <aside class="sidebar">
+            <div class="files-navigation" data-mobile-content="files">
+              <div class="sidebar-label">Changed files</div>
+              <div id="file-tree" class="file-tree"></div>
+            </div>
+            <div class="comment-index" data-mobile-content="comments">
+              <div class="sidebar-label">Comments <span id="comment-count">0</span></div>
+              <div id="comment-list" class="comment-list">
+                <p class="empty-comments">Select a line in the diff to comment.</p>
+              </div>
+            </div>
+          </aside>
+          <main id="diff-view" class="diff-view" data-mobile-content="diff"></main>
+        </section>
+        <footer class="review-bar">
+          <label class="sr-only" for="review-summary">Overall review comment</label>
+          <textarea id="review-summary" rows="1" placeholder="Leave an overall comment (optional)" aria-describedby="terminal-status"></textarea>
+          <div class="review-actions">
+            <button class="button quiet" id="cancel-review">Cancel</button>
+            <button class="button secondary" data-decision="request_changes">Request changes</button>
+            <button class="button primary" data-decision="approve">Approve</button>
+          </div>
+        </footer>
+        <div class="terminal-status" id="terminal-status" role="status" aria-live="polite"></div>
+        <div class="sr-only" id="agent-announcement" aria-live="polite"></div>
+        <div class="scope-state" id="scope-state" role="status" aria-live="polite" hidden></div>
+        <dialog class="range-dialog" id="range-dialog" aria-labelledby="range-title" aria-describedby="range-description">
+            <header>
+              <div>
+                <span class="dialog-eyebrow">Review scope</span>
+                <h2 id="range-title">Choose a change range</h2>
+                <p id="range-description">Click outside the range to widen it. Drag a handle or use an interior action to shrink it.</p>
+              </div>
+              <button class="icon-button" data-range-close aria-label="Close range selector">${icon("close")}</button>
+            </header>
+            <div class="range-builder">
+              <div class="range-endpoints" aria-label="Selected range endpoints" aria-live="polite">
+                <div class="range-endpoint">
+                  <small>Base (excluded)</small><strong id="range-from-label"></strong><span id="range-from-title"></span>
+                </div>
+                <span class="range-direction">${icon("arrow-right")}</span>
+                <div class="range-endpoint">
+                  <small>Through (included)</small><strong id="range-to-label"></strong><span id="range-to-title"></span>
+                </div>
+              </div>
+              <div class="commit-timeline" id="commit-timeline" aria-label="Branch timeline">
+                ${this.rangeTimelineMarkup()}
+              </div>
+            </div>
+            <div class="range-warning" id="range-warning" hidden></div>
+            <footer>
+              <span><kbd>Esc</kbd> to cancel</span>
+              <div>
+                <button class="button quiet" data-range-close>Cancel</button>
+                <button class="button primary" id="apply-range">Apply range</button>
+              </div>
+            </footer>
+        </dialog>
+        <div id="finished" class="finished" hidden>
+          <div><span>✓</span><h2>Review submitted</h2><p>You can return to Tact.</p></div>
+        </div>
+      </div>`;
+
+    this.bindEvents();
+    this.syncSettingsControls();
+    this.applySettings(false);
+    const summary = this.root.querySelector<HTMLTextAreaElement>("#review-summary");
+    if (summary) {
+      summary.value = this.feedback.summary;
+      summary.addEventListener("input", () => { this.feedback.summary = summary.value; });
+    }
+  }
+
+  startWorkspacePolling() {
+    this.statusTimer = window.setInterval(() => void this.checkWorkspaceStatus(), 5_000);
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) void this.checkWorkspaceStatus();
+    });
+    window.addEventListener("focus", () => void this.checkWorkspaceStatus());
+    void this.checkWorkspaceStatus();
+  }
+
+  async selectRange(
+    range: ReviewRange,
+    discardCurrentFeedback = false,
+    restoringActiveQuestion = false,
+  ) {
+    if (this.loadingRange || (this.agentOperation && !restoringActiveQuestion)) return;
+    if (rangesEqual(this.page?.selected_range, range)) {
+      const state = this.root.querySelector<HTMLElement>("#scope-state");
+      if (state?.classList.contains("error")) state.hidden = true;
+      return;
+    }
+    const request = ++this.rangeRequest;
+    this.setRangeLoading(range);
+    try {
+      const payload = await this.api.loadRange(this.bootstrap.generation, range);
+      if (request !== this.rangeRequest) return;
+      if (payload.generation !== this.bootstrap.generation || !rangesEqual(payload.selected_range, range)) {
+        this.showRangeError(
+          "Tact returned a page for a different review generation or range.",
+          range,
+          discardCurrentFeedback,
+        );
+        return;
+      }
+      if (discardCurrentFeedback) this.state = clearCurrentFeedback(this.state);
+      this.installPage(payload as ReviewPage);
+    } catch (error) {
+      if (request === this.rangeRequest) {
+        this.showRangeError(errorMessage(error), range, discardCurrentFeedback);
+      }
+    } finally {
+      if (request === this.rangeRequest) this.setRangeReady();
+    }
+  }
+
+  private installPage(page: ReviewPage) {
+    this.page = page;
+    this.state = activatePage(this.state, page);
+    const seenFiles = this.seenFiles();
+    const cacheKey = `tact-review-${page.generation}-${rangeKey(page.selected_range)}`;
+    const patchFiles = parseReviewPatch(page.patch, cacheKey);
+    // Git's patch owns changed-line identity. Pierre may expand context already present in
+    // that immutable patch, but browser-side re-diffing must never replace its hunks.
+    this.files = patchFiles;
+    this.pathToItem.clear();
+    this.items = this.files.map((file, index) => {
+      const id = `${rangeKey(page.selected_range)}:${index}:${file.name}`;
+      this.pathToItem.set(file.name, id);
+      return {
+        id,
+        type: "diff",
+        fileDiff: file,
+        annotations: [],
+        collapsed: seenFiles.has(file.name),
+        version: 1,
+      };
+    });
+    this.attachQuestionItems();
+    for (const item of this.items) item.annotations = this.annotationsForItem(item.id);
+
+    const description = this.root.querySelector<HTMLElement>("#scope-description");
+    if (description) description.textContent = page.scope;
+    this.renderStats();
+    this.renderOverviewState();
+    this.renderDiff();
+    this.renderTree();
+    this.renderCommentList();
+    const summary = this.root.querySelector<HTMLTextAreaElement>("#review-summary");
+    if (summary) summary.value = this.feedback.summary;
+    this.syncSelectedRange(page.selected_range);
+    this.selectTab("changes");
+  }
+
+  private attachQuestionItems() {
+    for (const thread of this.questions) {
+      const item = this.items.find(
+        (candidate) => annotationPath(candidate.fileDiff, thread.side) === thread.path,
+      );
+      thread.itemId = item?.id ?? "";
+    }
+  }
+
+  private resumeQuestionOperation() {
+    const thread = allQuestions(this.state).find(
+      (candidate) => candidate.turn.kind === "asking",
+    );
+    if (!thread || thread.turn.kind !== "asking") return;
+    this.agentOperation = {
+      kind: "question",
+      threadId: thread.id,
+      request: thread.turn.request,
+      operationId: thread.turn.operationId,
+    };
+    if (thread.itemId) this.refreshItem(thread.itemId);
+    this.syncAgentControls();
+    this.scheduleQuestionPoll();
+  }
+
+  private scheduleQuestionPoll() {
+    if (this.questionPollTimer !== undefined) window.clearTimeout(this.questionPollTimer);
+    this.questionPollTimer = window.setTimeout(() => {
+      this.questionPollTimer = undefined;
+      void this.pollQuestions();
+    }, 400);
+  }
+
+  private async pollQuestions() {
+    const operation = this.agentOperation;
+    if (this.pollingQuestions || operation?.kind !== "question") return;
+    this.pollingQuestions = true;
+    try {
+      const payload = await this.api.questions(this.bootstrap.generation);
+      if (payload.generation !== this.bootstrap.generation) {
+        this.agentOperation = undefined;
+        this.generationStale = true;
+        this.snapshotStale = true;
+        this.setRefreshNotice(true, "This browser page belongs to an older review generation.");
+        this.syncAgentControls();
+        return;
+      }
+      const stored = payload.questions.find(
+        (thread) => thread.thread_id === operation.threadId,
+      );
+      if (!stored) {
+        const thread = allQuestions(this.state).find(
+          (candidate) => candidate.id === operation.threadId,
+        );
+        if (thread) {
+          failQuestion(thread, operation.request, "Tact did not retain this question. Ask again to retry.");
+          if (thread.itemId) this.refreshItem(thread.itemId);
+        }
+        this.agentOperation = undefined;
+        this.syncAgentControls();
+        return;
+      }
+      if (stored?.status === "asking"
+        && stored.operation_id === operation.operationId) return;
+
+      this.state = synchronizeQuestions(this.state, payload.questions);
+      this.attachQuestionItems();
+      for (const item of this.items) this.refreshItem(item.id);
+      const synchronized = allQuestions(this.state).find(
+        (thread) => thread.id === operation.threadId,
+      );
+      if (synchronized?.turn.kind === "asking") {
+        this.agentOperation = {
+          kind: "question",
+          threadId: synchronized.id,
+          request: synchronized.turn.request,
+          operationId: synchronized.turn.operationId,
+        };
+        this.syncAgentControls();
+        return;
+      }
+      this.agentOperation = undefined;
+      this.syncAgentControls();
+      if (stored?.status === "idle") this.announceAgent("Tact answered the question.");
+      else if (stored?.status === "cancelled") this.announceAgent("Question cancelled.");
+      else if (stored?.status === "error") {
+        this.announceAgent(`Tact could not answer the question: ${stored.error ?? "Unknown error"}`);
+      }
+    } catch (error) {
+      if (error instanceof ApiError && error.code === "stale_snapshot") {
+        this.agentOperation = undefined;
+        this.generationStale = true;
+        this.snapshotStale = true;
+        this.setRefreshNotice(true, "This browser page belongs to an older review generation.");
+        this.syncAgentControls();
+      }
+      // Other polling failures are transient; the stored operation remains authoritative.
+    } finally {
+      this.pollingQuestions = false;
+      if (this.agentOperation?.kind === "question") this.scheduleQuestionPoll();
+    }
+  }
+
+  private renderStats() {
+    const stats = changeStats(this.files);
+    const container = this.root.querySelector<HTMLElement>("#change-stats");
+    const count = this.root.querySelector<HTMLElement>("#file-count");
+    if (count) count.textContent = String(this.files.length);
+    if (!container) return;
+    container.innerHTML = `
+      <span>${this.files.length} ${this.files.length === 1 ? "file" : "files"}</span>
+      <strong class="add">+${stats.additions}</strong>
+      <strong class="del">−${stats.deletions}</strong>`;
+  }
+
+  private rangeTimelineMarkup() {
+    return this.bootstrap.range_targets.map((target) => `
+      <div class="commit-target" data-range-target="${target.index}">
+        <button class="commit-target-main" data-range-expand aria-label="Expand range through ${escapeHtml(targetLabel(target))}: ${escapeHtml(target.title)}">
+          <span class="commit-rail"><i></i><b></b></span>
+          <span class="commit-id">${escapeHtml(targetLabel(target))}</span>
+          <span class="commit-copy">
+            <strong>${escapeHtml(target.title)}</strong>
+            <small>${target.kind === "trunk" ? "Trunk base" : target.kind === "working_tree" ? "Working tree" : "Commit"}</small>
+          </span>
+          <span class="row-control-space"></span>
+        </button>
+        <span class="endpoint-handles">
+          <button data-boundary-handle="from" aria-label="Drag Base excluded boundary; use arrow keys to move">↕ Base</button>
+          <button data-boundary-handle="to" aria-label="Drag Through included boundary; use arrow keys to move">↕ Through</button>
+        </span>
+        <span class="boundary-actions">
+          <button data-move-boundary="from">Move Base</button>
+          <button data-move-boundary="to">Move Through</button>
+        </span>
+      </div>`).join("");
+  }
+
+  private renderOverviewState() {
+    const state = this.root.querySelector<HTMLElement>("#overview-state");
+    const frame = this.root.querySelector<HTMLIFrameElement>(".overview");
+    if (!state || !frame || !this.page) return;
+    if (this.overviews.has(rangeKey(this.page.selected_range))) {
+      state.hidden = true;
+      this.renderOverview();
+      return;
+    }
+    frame.hidden = true;
+    frame.removeAttribute("srcdoc");
+    state.hidden = false;
+    state.innerHTML = `
+      <div class="overview-orbit">${icon("sparkles")}</div>
+      <strong>Overview available on request</strong>
+      <span>Ask Tact’s root agent to explain and visualize the change when you need it.</span>
+      <button type="button" class="button primary" data-agent-action data-generate-overview ${this.agentOperation ? "disabled" : ""}>Generate overview</button>`;
+    state.querySelector("[data-generate-overview]")?.addEventListener("click", () => void this.loadOverview());
+  }
+
+  private setOverviewLoading(loading: boolean) {
+    const tab = this.root.querySelector<HTMLElement>("#overview-tab");
+    if (!tab) return;
+    tab.classList.toggle("loading", loading);
+    if (loading) {
+      tab.setAttribute("aria-busy", "true");
+      return;
+    }
+    tab.removeAttribute("aria-busy");
+  }
+
+  private async loadOverview(restoring = false) {
+    const page = this.page;
+    if (!page
+      || (this.agentOperation && !restoring)
+      || rangesEqual(this.loadingOverview, page.selected_range)) return;
+    const key = rangeKey(page.selected_range);
+    if (this.overviews.has(key)) {
+      this.renderOverviewState();
+      return;
+    }
+
+    const range = page.selected_range;
+    const request = ++this.overviewRequest;
+    this.agentOperation = { kind: "overview", request };
+    this.loadingOverview = range;
+    this.setOverviewLoading(true);
+    this.syncAgentControls();
+    const state = this.root.querySelector<HTMLElement>("#overview-state");
+    if (state) {
+      state.hidden = false;
+      state.setAttribute("aria-busy", "true");
+      state.innerHTML = `
+        <div class="overview-spinner" aria-hidden="true"><span>${icon("sparkles")}</span></div>
+        <strong>Preparing the overview</strong>
+        <span>Tact’s root agent is inspecting the selected range and surrounding code.</span>`;
+    }
+
+    try {
+      const payload = await this.api.overview(page);
+      if (request !== this.overviewRequest) return;
+      if (payload.generation !== page.generation
+        || !rangesEqual(payload.selected_range, range)) {
+        this.showOverviewError("Tact returned an overview for a different review range.");
+        return;
+      }
+      this.overviews.set(key, payload.overview_html);
+      if (rangesEqual(this.page?.selected_range, range)) this.renderOverviewState();
+    } catch (error) {
+      if (request === this.overviewRequest) this.showOverviewError(errorMessage(error));
+    } finally {
+      if (request === this.overviewRequest) {
+        this.loadingOverview = undefined;
+        if (this.agentOperation?.kind === "overview"
+          && this.agentOperation.request === request) {
+          this.agentOperation = undefined;
+        }
+        this.setOverviewLoading(false);
+        state?.removeAttribute("aria-busy");
+        this.syncAgentControls();
+      }
+    }
+  }
+
+  private showOverviewError(message: string) {
+    const state = this.root.querySelector<HTMLElement>("#overview-state");
+    if (!state) return;
+    state.hidden = false;
+    state.setAttribute("role", "alert");
+    state.setAttribute("aria-live", "assertive");
+    state.innerHTML = `
+      <div class="overview-error">!</div>
+      <strong>Could not prepare the overview</strong>
+      <span>${escapeHtml(message)}</span>
+      <button class="button" data-agent-action data-retry-overview ${this.agentOperation ? "disabled" : ""}>Try again</button>`;
+    state.querySelector("[data-retry-overview]")?.addEventListener("click", () => void this.loadOverview());
+  }
+
+  private renderOverview() {
+    const frame = this.root.querySelector<HTMLIFrameElement>(".overview");
+    if (!frame || !this.page) return;
+    const html = this.overviews.get(rangeKey(this.page.selected_range));
+    if (!html) return;
+    frame.srcdoc = overviewDocument(html, appearance(this.settings));
+    frame.hidden = false;
+  }
+
+  private renderDiff() {
+    const container = this.root.querySelector<HTMLElement>("#diff-view");
+    if (!container) return;
+    this.viewer?.cleanUp();
+    container.replaceChildren();
+    if (this.files.length === 0) {
+      container.innerHTML = `
+        <div class="empty-range">
+          <strong>No changes in this range</strong>
+          <span>Choose another range or refresh after changing the workspace.</span>
+          <div><button class="button" data-empty-range-change>Change range</button><button class="button" data-empty-range-refresh>Refresh</button></div>
+        </div>`;
+      container.querySelector("[data-empty-range-change]")?.addEventListener("click", () => this.openRangeDialog());
+      container.querySelector("[data-empty-range-refresh]")?.addEventListener("click", () => void this.refreshReview());
+      return;
+    }
+    this.viewer = new CodeView<AnnotationMetadata>(this.viewerOptions());
+    this.viewer.setup(container);
+    this.viewer.setItems(this.items);
+  }
+
+  private viewerOptions() {
+    return {
+      diffStyle: this.settings.diffStyle,
+      overflow: this.settings.wrapLines ? "wrap" as const : "scroll" as const,
+      disableLineNumbers: !this.settings.lineNumbers,
+      theme: diffTheme(this.settings),
+      themeType: appearance(this.settings),
+      hunkSeparators: "line-info" as const,
+      expansionLineCount: 20,
+      enableLineSelection: true,
+      stickyHeaders: true,
+      lineHoverHighlight: "both" as const,
+      renderHeaderMetadata: (_file, context) => {
+        if (context.item.type !== "diff") return null;
+        return this.seenButton(context.item);
+      },
+      ...commentSelectionCallbacks((selection) => this.openCommentComposer(selection)),
+      renderAnnotation: (annotation: DiffLineAnnotation<AnnotationMetadata>) => this.annotationElement(annotation),
+    };
+  }
+
+  private renderTree() {
+    const container = this.root.querySelector<HTMLElement>("#file-tree");
+    if (!container) return;
+    const statsByPath = fileTreeChangeStats(this.files);
+    this.tree?.cleanUp();
+    container.replaceChildren();
+    this.tree = new FileTree({
+      paths: this.files.map((file) => file.name),
+      flattenEmptyDirectories: true,
+      initialExpansion: "open",
+      density: "compact",
+      icons: TREE_ICONS,
+      unsafeCSS: TREE_STYLES,
+      gitStatus: this.treeGitStatus(),
+      renderRowDecoration: ({ item }) => {
+        const stats = statsByPath.get(item.path);
+        if (!stats) return null;
+
+        const count = item.kind === "file"
+          ? pendingCommentCount(this.comments, item.path)
+          : 0;
+        const seen = item.kind === "file" && this.seenFiles().has(item.path);
+        const title = [`+${stats.additions} / -${stats.deletions}`];
+        const parts: Array<{ text: string; color?: string }> = [
+          { text: `+${stats.additions}`, color: "var(--trees-status-added)" },
+          { text: "\u00a0/\u00a0", color: "var(--trees-fg-muted)" },
+          { text: `-${stats.deletions}`, color: "var(--trees-status-deleted)" },
+        ];
+        if (count > 0) {
+          title.push(`${count} pending ${count === 1 ? "comment" : "comments"}`);
+          parts.push(
+            { text: "\u00a0\u00a0" },
+            { text: `\u00a0${count}`, color: "var(--tact-comment-indicator)" },
+          );
+        }
+        if (seen) {
+          title.push("Seen");
+        }
+        return {
+          text: `+${stats.additions} / -${stats.deletions}`,
+          parts,
+          title: title.join(" · "),
+        };
+      },
+      onSelectionChange: (paths) => {
+        const path = paths.at(-1);
+        const id = path ? this.pathToItem.get(path) : undefined;
+        if (id) this.viewer?.scrollTo({ type: "item", id, align: "start", behavior: "smooth-auto" });
+      },
+    });
+    this.tree.render({ containerWrapper: container });
+    this.syncTreeAppearance();
+  }
+
+  private syncTreeAppearance() {
+    const container = this.tree?.getFileTreeContainer();
+    if (!container) return;
+    const selected = appearance(this.settings);
+    container.style.colorScheme = selected === "system" ? "light dark" : selected;
+  }
+
+  private treeGitStatus(): GitStatusEntry[] {
+    return this.files.map((file) => ({
+      path: file.name,
+      status: treeStatus(file.type),
+    }));
+  }
+
+  private seenFiles() {
+    return this.feedback.seenPaths;
+  }
+
+  private seenButton(item: CodeViewDiffItem<AnnotationMetadata>) {
+    const seen = this.seenFiles().has(item.fileDiff.name);
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `mark-seen-button${seen ? " seen" : ""}`;
+    button.innerHTML = `${icon("check")}<span>${seen ? "Seen" : "Mark as Seen"}</span>`;
+    button.setAttribute("aria-pressed", String(seen));
+    button.title = seen ? "Mark as unseen and expand file" : "Mark as seen and collapse file";
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      this.toggleSeen(item);
+    });
+    return button;
+  }
+
+  private toggleSeen(item: CodeViewDiffItem<AnnotationMetadata>) {
+    const files = this.seenFiles();
+    const path = item.fileDiff.name;
+    const seen = !files.has(path);
+    if (seen) files.add(path);
+    else files.delete(path);
+
+    item.collapsed = seen;
+    item.version = (item.version ?? 0) + 1;
+    this.viewer?.updateItem(item);
+    this.refreshTreeDecorations();
+  }
+
+  private bindEvents() {
+    const tabs = [...this.root.querySelectorAll<HTMLButtonElement>("[data-tab]")];
+    for (const [index, tab] of tabs.entries()) {
+      tab.addEventListener("click", () => this.selectTab(tab.dataset.tab ?? "changes"));
+      tab.addEventListener("keydown", (event) => {
+        if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+        event.preventDefault();
+        const targetIndex = event.key === "Home" ? 0
+          : event.key === "End" ? tabs.length - 1
+          : (index + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
+        const target = tabs[targetIndex];
+        target.focus();
+        this.selectTab(target.dataset.tab ?? "changes");
+      });
+    }
+    this.bindMobileNavigation();
+    this.root.querySelector("#range-button")?.addEventListener("click", () => this.openRangeDialog());
+    this.bindRangeEvents();
+    this.root.querySelector("#refresh-notice")?.addEventListener("click", () => void this.refreshReview());
+    for (const button of this.root.querySelectorAll<HTMLButtonElement>("[data-range-close]")) {
+      button.addEventListener("click", () => this.closeRangeDialog());
+    }
+    this.root.querySelector("#apply-range")?.addEventListener("click", () => void this.applyRange());
+    const rangeDialog = this.root.querySelector<HTMLDialogElement>("#range-dialog");
+    rangeDialog?.addEventListener("cancel", (event) => {
+      event.preventDefault();
+      this.closeRangeDialog();
+    });
+    rangeDialog?.addEventListener("click", (event) => {
+      if (event.target === rangeDialog) this.closeRangeDialog();
+    });
+    this.root.querySelector("#cancel-review")?.addEventListener("click", () => void this.cancel());
+    for (const button of this.root.querySelectorAll<HTMLButtonElement>("[data-decision]")) {
+      button.addEventListener("click", () => void this.submit(button.dataset.decision as ReviewDecision["decision"]));
+    }
+    this.bindSettings();
+    this.colorScheme.addEventListener("change", () => {
+      if (this.settings.syntaxTheme !== "system") return;
+      if (this.draft?.tab === "preview") void this.renderDraftPreview();
+    });
+  }
+
+  private bindMobileNavigation() {
+    const tabs = [...this.root.querySelectorAll<HTMLButtonElement>("[data-mobile-panel]")];
+    const select = (name: string) => {
+      for (const tab of tabs) {
+        const active = tab.dataset.mobilePanel === name;
+        tab.classList.toggle("active", active);
+        tab.setAttribute("aria-selected", String(active));
+        tab.tabIndex = active ? 0 : -1;
+      }
+      this.root.querySelector("#changes-panel")?.setAttribute("data-mobile-active", name);
+      if (name === "diff") this.viewer?.render(true);
+    };
+    for (const [index, tab] of tabs.entries()) {
+      tab.addEventListener("click", () => select(tab.dataset.mobilePanel ?? "diff"));
+      tab.addEventListener("keydown", (event) => {
+        if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+        event.preventDefault();
+        const targetIndex = event.key === "Home" ? 0
+          : event.key === "End" ? tabs.length - 1
+          : (index + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
+        tabs[targetIndex].focus();
+        select(tabs[targetIndex].dataset.mobilePanel ?? "diff");
+      });
+    }
+    select("diff");
+  }
+
+  private bindRangeEvents() {
+    for (const button of this.root.querySelectorAll<HTMLButtonElement>("[data-range-expand]")) {
+      button.addEventListener("click", () => {
+        if (!this.pendingRange) return;
+        const index = this.rangeTargetIndex(button);
+        const expanded = expandRange(this.pendingRange, index);
+        if (expanded === this.pendingRange) {
+          this.closeBoundaryActions();
+          button.closest("[data-range-target]")?.classList.add("actions-open");
+          return;
+        }
+        this.closeBoundaryActions();
+        this.pendingRange = expanded;
+        this.syncRangeSelector();
+      });
+    }
+    for (const button of this.root.querySelectorAll<HTMLButtonElement>("[data-move-boundary]")) {
+      const boundary = button.dataset.moveBoundary as RangeBoundary;
+      const preview = () => this.previewBoundaryMove(boundary, this.rangeTargetIndex(button));
+      button.addEventListener("pointerenter", preview);
+      button.addEventListener("focus", preview);
+      button.addEventListener("pointerleave", () => this.clearRangePreview());
+      button.addEventListener("blur", () => this.clearRangePreview());
+      button.addEventListener("click", () => this.commitBoundaryMove(boundary, this.rangeTargetIndex(button)));
+    }
+    for (const handle of this.root.querySelectorAll<HTMLButtonElement>("[data-boundary-handle]")) {
+      const boundary = handle.dataset.boundaryHandle as RangeBoundary;
+      handle.addEventListener("keydown", (event) => this.moveBoundaryWithKeyboard(event, boundary));
+      handle.addEventListener("pointerdown", (event) => this.startBoundaryDrag(event, boundary));
+    }
+  }
+
+  private async checkWorkspaceStatus() {
+    if (document.hidden || this.checkingStatus || this.refreshing || this.state.terminal.kind === "finished") return;
+    const requestedGeneration = this.bootstrap.generation;
+    this.checkingStatus = true;
+    try {
+      const status = await this.api.status();
+      if (requestedGeneration !== this.bootstrap.generation) return;
+      if (status.generation !== this.bootstrap.generation) {
+        this.generationStale = true;
+        this.snapshotStale = true;
+        this.setRefreshNotice(true, "This browser page belongs to an older review generation.");
+        this.setReviewControlsDisabled(false);
+        return;
+      }
+      this.generationStale = false;
+      this.snapshotStale = status.changed;
+      this.setRefreshNotice(status.changed);
+      this.setReviewControlsDisabled(false);
+    } catch {
+      // Polling is advisory; transient failures should not interrupt the review.
+    } finally {
+      this.checkingStatus = false;
+    }
+  }
+
+  private setRefreshNotice(visible: boolean, error?: string) {
+    const notice = this.root.querySelector<HTMLButtonElement>("#refresh-notice");
+    if (!notice) return;
+    notice.hidden = !visible;
+    notice.classList.toggle("error", error !== undefined);
+    notice.title = error ?? "";
+    const label = notice.querySelector("span");
+    const action = notice.querySelector("strong");
+    if (label) label.textContent = error ? "Could not refresh" : "New changes available";
+    if (action) action.textContent = error ? "Retry" : "Refresh";
+  }
+
+  private async refreshReview() {
+    if (this.refreshing || this.loadingRange || this.agentOperation) return;
+    const pendingFeedback = feedbackDescription(this.feedback);
+    if (pendingFeedback && !window.confirm(
+      `Refreshing will discard ${pendingFeedback}. Continue?`,
+    )) return;
+
+    const notice = this.root.querySelector<HTMLButtonElement>("#refresh-notice");
+    this.refreshing = true;
+    this.syncAgentControls();
+    if (notice) {
+      notice.disabled = true;
+      notice.classList.add("loading");
+      const action = notice.querySelector("strong");
+      if (action) action.textContent = "Refreshing…";
+    }
+    try {
+      const payload = this.generationStale
+        ? await this.api.review()
+        : await this.api.refresh(this.bootstrap.generation);
+      this.bootstrap = payload;
+      this.state = installSession(this.state, payload);
+      this.overviews.clear();
+      this.restoreStoredOverview(payload.overview);
+      const timeline = this.root.querySelector<HTMLElement>("#commit-timeline");
+      if (timeline) {
+        timeline.innerHTML = this.rangeTimelineMarkup();
+        this.bindRangeEvents();
+      }
+      this.installPage(payload.page);
+      this.restoreAgentOperation();
+      this.snapshotStale = false;
+      this.generationStale = false;
+      this.setRefreshNotice(false);
+    } catch (error) {
+      this.setRefreshNotice(true, errorMessage(error));
+    } finally {
+      this.refreshing = false;
+      if (notice) {
+        notice.disabled = false;
+        notice.classList.remove("loading");
+      }
+      this.syncAgentControls();
+    }
+  }
+
+  private bindSettings() {
+    const button = this.root.querySelector<HTMLButtonElement>("#settings-button");
+    const popover = this.root.querySelector<HTMLElement>("#settings-popover");
+    button?.addEventListener("click", (event) => {
+      event.stopPropagation();
+      if (!popover) return;
+      popover.hidden = !popover.hidden;
+      button.setAttribute("aria-expanded", String(!popover.hidden));
+    });
+    popover?.addEventListener("click", (event) => event.stopPropagation());
+    document.addEventListener("click", () => {
+      if (!popover || popover.hidden) return;
+      popover.hidden = true;
+      button?.setAttribute("aria-expanded", "false");
+    });
+    for (const control of this.root.querySelectorAll<HTMLInputElement | HTMLSelectElement>("[data-setting]")) {
+      control.addEventListener("change", () => {
+        this.readSettingsControls();
+        saveReviewSettings(window.localStorage, this.settings, (cookie) => {
+          document.cookie = cookie;
+        });
+        this.applySettings(true);
+      });
+    }
+  }
+
+  private syncSettingsControls() {
+    const theme = this.root.querySelector<HTMLSelectElement>("[data-setting=syntaxTheme]");
+    const layout = this.root.querySelector<HTMLSelectElement>("[data-setting=diffStyle]");
+    const wrap = this.root.querySelector<HTMLInputElement>("[data-setting=wrapLines]");
+    const lineNumbers = this.root.querySelector<HTMLInputElement>("[data-setting=lineNumbers]");
+    if (theme) theme.value = this.settings.syntaxTheme;
+    if (layout) layout.value = this.settings.diffStyle;
+    if (wrap) wrap.checked = this.settings.wrapLines;
+    if (lineNumbers) lineNumbers.checked = this.settings.lineNumbers;
+  }
+
+  private readSettingsControls() {
+    const theme = this.root.querySelector<HTMLSelectElement>("[data-setting=syntaxTheme]");
+    const layout = this.root.querySelector<HTMLSelectElement>("[data-setting=diffStyle]");
+    const wrap = this.root.querySelector<HTMLInputElement>("[data-setting=wrapLines]");
+    const lineNumbers = this.root.querySelector<HTMLInputElement>("[data-setting=lineNumbers]");
+    this.settings = {
+      syntaxTheme: (theme?.value ?? "system") as SyntaxTheme,
+      diffStyle: layout?.value === "split" ? "split" : "unified",
+      wrapLines: wrap?.checked ?? false,
+      lineNumbers: lineNumbers?.checked ?? true,
+    };
+  }
+
+  private applySettings(rebuildDiff: boolean) {
+    document.documentElement.dataset.appearance = appearance(this.settings);
+    this.syncTreeAppearance();
+    if (rebuildDiff && this.page) {
+      this.renderOverview();
+      this.renderDiff();
+    }
+    if (this.draft?.tab === "preview") void this.renderDraftPreview();
+  }
+
+  private selectTab(name: string) {
+    for (const tab of this.root.querySelectorAll<HTMLElement>("[data-tab]")) {
+      const selected = tab.dataset.tab === name;
+      tab.classList.toggle("active", selected);
+      tab.setAttribute("aria-selected", String(selected));
+      tab.tabIndex = selected ? 0 : -1;
+    }
+    for (const panel of this.root.querySelectorAll<HTMLElement>("[data-panel]")) {
+      const selected = panel.dataset.panel === name;
+      panel.classList.toggle("active", selected);
+      panel.hidden = !selected;
+    }
+    if (name === "changes") this.viewer?.render(true);
+  }
+
+  private openRangeDialog() {
+    if (this.loadingRange || this.agentOperation) return;
+    this.closeBoundaryActions();
+    this.pendingRange = { ...(this.page?.selected_range ?? this.bootstrap.default_range) };
+    this.previewRange = undefined;
+    this.syncRangeSelector();
+    this.root.querySelector<HTMLDialogElement>("#range-dialog")?.showModal();
+    this.root.querySelector("#range-button")?.setAttribute("aria-expanded", "true");
+    queueMicrotask(() => {
+      const from = this.root.querySelector<HTMLButtonElement>(".commit-target.pending-from [data-boundary-handle=from]");
+      from?.scrollIntoView({ block: "center" });
+      from?.focus();
+    });
+  }
+
+  private closeRangeDialog() {
+    const dialog = this.root.querySelector<HTMLDialogElement>("#range-dialog");
+    if (dialog?.open) dialog.close();
+    this.root.querySelector("#range-button")?.setAttribute("aria-expanded", "false");
+    this.closeBoundaryActions();
+    this.pendingRange = undefined;
+    this.previewRange = undefined;
+    this.root.querySelector<HTMLButtonElement>("#range-button")?.focus();
+  }
+
+  private syncRangeSelector() {
+    const range = this.previewRange ?? this.pendingRange;
+    if (!range) return;
+    const from = this.bootstrap.range_targets[range.from];
+    const to = this.bootstrap.range_targets[range.to];
+    this.setRangeEndpointText("from", from);
+    this.setRangeEndpointText("to", to);
+    const pending = this.pendingRange ?? range;
+    const timeline = this.root.querySelector<HTMLElement>("#commit-timeline");
+    timeline?.classList.toggle("previewing", this.previewRange !== undefined);
+    for (const target of this.root.querySelectorAll<HTMLElement>("[data-range-target]")) {
+      const index = Number(target.dataset.rangeTarget);
+      target.classList.toggle("from", index === range.from);
+      target.classList.toggle("to", index === range.to);
+      target.classList.toggle("included", index > range.from && index < range.to);
+      target.classList.toggle("pending-from", index === pending.from);
+      target.classList.toggle("pending-to", index === pending.to);
+      target.classList.toggle("interior", index > pending.from && index < pending.to);
+      target.classList.toggle("outside", index < pending.from || index > pending.to);
+    }
+    this.syncRangeWarning();
+  }
+
+  private rangeTargetIndex(element: Element) {
+    return Number(element.closest<HTMLElement>("[data-range-target]")?.dataset.rangeTarget);
+  }
+
+  private previewBoundaryMove(boundary: RangeBoundary, index: number) {
+    if (!this.pendingRange) return;
+    this.previewRange = moveRangeBoundary(this.pendingRange, boundary, index);
+    this.syncRangeSelector();
+  }
+
+  private clearRangePreview() {
+    if (!this.previewRange) return;
+    this.previewRange = undefined;
+    this.syncRangeSelector();
+  }
+
+  private commitBoundaryMove(boundary: RangeBoundary, index: number) {
+    if (!this.pendingRange) return;
+    this.closeBoundaryActions();
+    this.pendingRange = moveRangeBoundary(this.pendingRange, boundary, index);
+    this.previewRange = undefined;
+    this.syncRangeSelector();
+  }
+
+  private closeBoundaryActions() {
+    for (const target of this.root.querySelectorAll(".commit-target.actions-open")) {
+      target.classList.remove("actions-open");
+    }
+  }
+
+  private moveBoundaryWithKeyboard(event: KeyboardEvent, boundary: RangeBoundary) {
+    if (!this.pendingRange) return;
+    const current = this.pendingRange[boundary];
+    let target = current;
+    if (event.key === "ArrowUp" || event.key === "ArrowLeft") target--;
+    else if (event.key === "ArrowDown" || event.key === "ArrowRight") target++;
+    else if (event.key === "Home") target = boundary === "from" ? 0 : this.pendingRange.from + 1;
+    else if (event.key === "End") target = boundary === "from" ? this.pendingRange.to - 1 : this.bootstrap.range_targets.length - 1;
+    else return;
+    event.preventDefault();
+    this.commitBoundaryMove(boundary, target);
+    this.root.querySelector<HTMLButtonElement>(`.commit-target.pending-${boundary} [data-boundary-handle=${boundary}]`)?.focus();
+  }
+
+  private startBoundaryDrag(event: PointerEvent, boundary: RangeBoundary) {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    document.body.classList.add("range-dragging");
+    const move = (pointer: PointerEvent) => {
+      pointer.preventDefault();
+      const target = document.elementFromPoint(pointer.clientX, pointer.clientY);
+      if (target?.closest("[data-range-target]")) {
+        this.commitBoundaryMove(boundary, this.rangeTargetIndex(target));
+      }
+    };
+    const finish = () => {
+      document.body.classList.remove("range-dragging");
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", finish);
+      window.removeEventListener("pointercancel", finish);
+      this.root.querySelector<HTMLButtonElement>(`.commit-target.pending-${boundary} [data-boundary-handle=${boundary}]`)?.focus();
+    };
+    window.addEventListener("pointermove", move, { passive: false });
+    window.addEventListener("pointerup", finish);
+    window.addEventListener("pointercancel", finish);
+  }
+
+  private setRangeEndpointText(endpoint: "from" | "to", target: ReviewTarget) {
+    const label = this.root.querySelector<HTMLElement>(`#range-${endpoint}-label`);
+    const title = this.root.querySelector<HTMLElement>(`#range-${endpoint}-title`);
+    if (label) label.textContent = targetLabel(target);
+    if (title) title.textContent = target.title;
+  }
+
+  private syncRangeWarning() {
+    const warning = this.root.querySelector<HTMLElement>("#range-warning");
+    const apply = this.root.querySelector<HTMLButtonElement>("#apply-range");
+    const currentRange = this.page?.selected_range ?? this.bootstrap.default_range;
+    const changesRange = this.pendingRange !== undefined && !rangesEqual(this.pendingRange, currentRange);
+    const pendingFeedback = feedbackDescription(this.feedback);
+    const hasPendingFeedback = pendingFeedback.length > 0;
+    if (apply) {
+      apply.disabled = !changesRange;
+      apply.textContent = changesRange && hasPendingFeedback ? "Discard feedback and apply" : "Apply range";
+    }
+    if (!warning) return;
+    if (!changesRange || !hasPendingFeedback) {
+      warning.hidden = true;
+      return;
+    }
+    warning.textContent = `Switching ranges will discard ${pendingFeedback}.`;
+    warning.hidden = false;
+  }
+
+  private async applyRange() {
+    const range = this.pendingRange;
+    const discardFeedback = feedbackDescription(this.feedback).length > 0;
+    this.closeRangeDialog();
+    if (range) await this.selectRange(range, discardFeedback);
+  }
+
+  private openCommentComposer(selection: CodeViewLineSelection | null) {
+    if (!selection || this.loadingRange) return;
+    const side = selection.range.side ?? "additions";
+    const endSide = selection.range.endSide ?? side;
+    if (side !== endSide) return;
+    const item = this.items.find((candidate) => candidate.id === selection.id);
+    if (!item) return;
+    if (this.draft) {
+      this.showInlineError("Save or discard the open comment draft before starting another comment.");
+      this.focusDraft();
+      return;
+    }
+
+    const previousItemId = this.draft?.itemId;
+    this.draft = {
+      itemId: item.id,
+      path: annotationPath(item.fileDiff, side),
+      side,
+      startLine: Math.min(selection.range.start, selection.range.end),
+      endLine: Math.max(selection.range.start, selection.range.end),
+      body: "",
+      tab: "comment",
+    };
+    if (previousItemId && previousItemId !== item.id) this.refreshItem(previousItemId);
+    this.refreshItem(item.id);
+    queueMicrotask(() => this.focusDraft());
+  }
+
+  private editComment(comment: CommentMetadata) {
+    if (this.draft) {
+      if (this.draft.editingId === comment.id) {
+        this.focusDraft();
+        return;
+      }
+      this.showInlineError("Save or discard the open comment draft before editing another comment.");
+      this.focusDraft();
+      return;
+    }
+    const previousItemId = this.draft?.itemId;
+    this.draft = {
+      itemId: comment.itemId,
+      path: comment.path,
+      side: comment.side,
+      startLine: comment.start_line,
+      endLine: comment.end_line,
+      body: comment.body,
+      editingId: comment.id,
+      tab: "comment",
+    };
+    if (previousItemId && previousItemId !== comment.itemId) this.refreshItem(previousItemId);
+    this.refreshItem(comment.itemId);
+    this.selectTab("changes");
+    this.viewer?.scrollTo({
+      type: "range",
+      id: comment.itemId,
+      range: {
+        start: comment.start_line,
+        end: comment.end_line,
+        side: comment.side,
+        endSide: comment.side,
+      },
+      align: "center",
+      behavior: "smooth-auto",
+    });
+    queueMicrotask(() => this.focusDraft());
+  }
+
+  private closeCommentComposer() {
+    const itemId = this.draft?.itemId;
+    this.draft = undefined;
+    this.viewer?.clearSelectedLines();
+    if (itemId) this.refreshItem(itemId);
+    this.clearInlineError();
+  }
+
+  private saveComment() {
+    const draft = this.draft;
+    if (!draft) return;
+    const body = draft.body.trim();
+    if (!body) {
+      this.focusDraft();
+      return;
+    }
+
+    if (draft.editingId !== undefined) {
+      const comment = this.comments.find((candidate) => candidate.id === draft.editingId);
+      if (comment) comment.body = body;
+    } else {
+      this.comments.push({
+        id: this.nextCommentId++,
+        itemId: draft.itemId,
+        path: draft.path,
+        side: draft.side,
+        start_line: draft.startLine,
+        end_line: draft.endLine,
+        body,
+      });
+    }
+    const itemId = draft.itemId;
+    this.draft = undefined;
+    this.viewer?.clearSelectedLines();
+    this.refreshItem(itemId);
+    this.refreshTreeDecorations();
+    this.renderCommentList();
+    this.clearInlineError();
+  }
+
+  private removeComment(id: number) {
+    const index = this.comments.findIndex((comment) => comment.id === id);
+    if (index < 0) return;
+    const [comment] = this.comments.splice(index, 1);
+    if (this.draft?.editingId === id) this.draft = undefined;
+    this.refreshItem(comment.itemId);
+    this.refreshTreeDecorations();
+    this.renderCommentList();
+  }
+
+  private refreshTreeDecorations() {
+    this.tree?.setIcons({ ...TREE_ICONS });
+  }
+
+  private refreshItem(itemId: string) {
+    const item = this.items.find((candidate) => candidate.id === itemId);
+    if (!item) return;
+    item.annotations = this.annotationsForItem(itemId);
+    item.version = (item.version ?? 0) + 1;
+    this.viewer?.updateItem(item);
+  }
+
+  private annotationsForItem(itemId: string): DiffLineAnnotation<AnnotationMetadata>[] {
+    const annotations: DiffLineAnnotation<AnnotationMetadata>[] = this.comments
+      .filter((comment) => comment.itemId === itemId && comment.id !== this.draft?.editingId)
+      .map((comment) => ({
+        side: comment.side,
+        lineNumber: comment.end_line,
+        metadata: { kind: "comment", comment },
+      }));
+    annotations.push(...this.questions
+      .filter((thread) => thread.itemId === itemId)
+      .map((thread) => ({
+        side: thread.side,
+        lineNumber: thread.endLine,
+        metadata: { kind: "question" as const, thread },
+      })));
+    if (this.draft?.itemId === itemId) {
+      annotations.push({
+        side: this.draft.side,
+        lineNumber: this.draft.endLine,
+        metadata: { kind: "composer", draft: this.draft },
+      });
+    }
+    return annotations;
+  }
+
+  private annotationElement(annotation: DiffLineAnnotation<AnnotationMetadata>) {
+    if (annotation.metadata.kind === "composer") {
+      return this.commentComposerElement(annotation.metadata.draft);
+    }
+    if (annotation.metadata.kind === "question") {
+      return this.questionThreadElement(annotation.metadata.thread);
+    }
+    return this.pendingCommentElement(annotation.metadata.comment);
+  }
+
+  private commentComposerElement(draft: CommentDraft) {
+    const element = document.createElement("section");
+    element.className = "inline-comment-editor";
+    const range = formatRange(draft.startLine, draft.endLine);
+    const editorId = `comment-editor-${draft.itemId.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
+    element.innerHTML = `
+      <header class="editor-heading">
+        <div>
+          <strong>${draft.editingId === undefined ? "Add a comment" : "Edit comment"} on ${draft.startLine === draft.endLine ? "line" : "lines"} ${escapeHtml(range)}</strong>
+          <span title="${escapeHtml(draft.path)}">${escapeHtml(draft.path)}</span>
+        </div>
+      </header>
+      <div class="editor-topbar" role="tablist" aria-label="Comment editor">
+        <div class="editor-tabs">
+          <button id="${editorId}-comment" role="tab" aria-controls="${editorId}-input" aria-selected="${draft.tab === "comment"}" tabindex="${draft.tab === "comment" ? "0" : "-1"}" class="${draft.tab === "comment" ? "active" : ""}" data-editor-tab="comment">Comment</button>
+          <button id="${editorId}-preview-tab" role="tab" aria-controls="${editorId}-preview" aria-selected="${draft.tab === "preview"}" tabindex="${draft.tab === "preview" ? "0" : "-1"}" class="${draft.tab === "preview" ? "active" : ""}" data-editor-tab="preview">Preview</button>
+        </div>
+        <div class="formatting-tools" aria-label="Markdown formatting">
+          ${formatButton("bold", "Bold")}
+          ${formatButton("italic", "Italic")}
+          ${formatButton("code", "Inline code")}
+          ${formatButton("code-block", "Code block")}
+          ${formatButton("link", "Link")}
+          ${formatButton("list", "Bulleted list")}
+          ${formatButton("quote", "Quote")}
+        </div>
+      </div>
+      <textarea id="${editorId}-input" role="tabpanel" aria-labelledby="${editorId}-comment" class="comment-input" rows="6" placeholder="Leave a comment" ${draft.tab === "preview" ? "hidden" : ""}></textarea>
+      <div id="${editorId}-preview" role="tabpanel" aria-labelledby="${editorId}-preview-tab" class="markdown-preview" ${draft.tab === "comment" ? "hidden" : ""}></div>
+      <div class="editor-footer">
+        <span class="editor-shortcut"><kbd>⌘</kbd><kbd>Enter</kbd> to save</span>
+        <div class="composer-actions">
+          <button class="button quiet" data-comment-action="cancel">Cancel</button>
+          ${draft.editingId === undefined ? `<button class="button" data-agent-action data-comment-action="ask" ${draft.body.trim() && !this.agentOperation ? "" : "disabled"}>Ask <span aria-hidden="true">✨</span></button>` : ""}
+          <button class="button primary" data-comment-action="save" ${draft.body.trim() ? "" : "disabled"}>${draft.editingId === undefined ? "Add comment" : "Save changes"}</button>
+        </div>
+      </div>`;
+
+    const textarea = element.querySelector<HTMLTextAreaElement>(".comment-input");
+    const saveButton = element.querySelector<HTMLButtonElement>("[data-comment-action=save]");
+    const askButton = element.querySelector<HTMLButtonElement>("[data-comment-action=ask]");
+    if (textarea) {
+      textarea.value = draft.body;
+      textarea.addEventListener("input", () => {
+        if (this.draft === draft) draft.body = textarea.value;
+        if (saveButton) saveButton.disabled = textarea.value.trim().length === 0;
+        if (askButton) askButton.disabled = textarea.value.trim().length === 0 || this.agentOperation !== undefined;
+      });
+      textarea.addEventListener("keydown", (event) => {
+        if ((event.metaKey || event.ctrlKey) && event.key === "Enter") this.saveComment();
+        if (event.key === "Escape") this.closeCommentComposer();
+      });
+    }
+    for (const button of element.querySelectorAll<HTMLButtonElement>("[data-format]")) {
+      button.addEventListener("click", () => {
+        if (textarea) applyFormatting(textarea, button.dataset.format ?? "");
+        draft.body = textarea?.value ?? draft.body;
+      });
+    }
+    for (const button of element.querySelectorAll<HTMLButtonElement>("[data-editor-tab]")) {
+      button.addEventListener("click", () => this.selectEditorTab(element, draft, button.dataset.editorTab as CommentDraft["tab"]));
+      button.addEventListener("keydown", (event) => {
+        if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+        event.preventDefault();
+        const tab = event.key === "ArrowLeft" || event.key === "Home" ? "comment" : "preview";
+        this.selectEditorTab(element, draft, tab);
+        element.querySelector<HTMLButtonElement>(`[data-editor-tab=${tab}]`)?.focus();
+      });
+    }
+    element.querySelector("[data-comment-action=cancel]")?.addEventListener("click", () => this.closeCommentComposer());
+    element.querySelector("[data-comment-action=ask]")?.addEventListener("click", () => this.askDraftQuestion());
+    element.querySelector("[data-comment-action=save]")?.addEventListener("click", () => this.saveComment());
+    if (draft.tab === "preview") void this.renderPreviewElement(element, draft.body);
+    return element;
+  }
+
+  private askDraftQuestion() {
+    const draft = this.draft;
+    const page = this.page;
+    if (!draft || draft.editingId !== undefined || !page || this.agentOperation) return;
+    if (!draft.body.trim()) {
+      this.focusDraft();
+      return;
+    }
+    const validationError = questionValidationError([], draft.body);
+    if (validationError) {
+      this.showInlineError(validationError);
+      this.focusDraft();
+      return;
+    }
+
+    const request = ++this.questionRequest;
+    const threadId = crypto.randomUUID();
+    const operationId = crypto.randomUUID();
+    const thread = createQuestionThread(threadId, {
+      itemId: draft.itemId,
+      range: page.selected_range,
+      path: draft.path,
+      side: draft.side,
+      startLine: draft.startLine,
+      endLine: draft.endLine,
+    }, draft.body, request, operationId);
+    this.questions.push(thread);
+    this.draft = undefined;
+    this.viewer?.clearSelectedLines();
+    this.startQuestion(thread, request, operationId, page);
+  }
+
+  private askFollowUp(thread: QuestionThread) {
+    const page = this.page;
+    if (!page || this.agentOperation) return;
+    const validationError = questionValidationError(thread.messages, thread.draft);
+    if (validationError) {
+      thread.validationError = validationError;
+      this.refreshItem(thread.itemId);
+      queueMicrotask(() => this.focusThreadDraft(thread));
+      return;
+    }
+    const request = ++this.questionRequest;
+    const operationId = crypto.randomUUID();
+    if (!beginFollowUp(thread, request, operationId)) return;
+    this.startQuestion(thread, request, operationId, page);
+  }
+
+  private retryThreadQuestion(thread: QuestionThread) {
+    const page = this.page;
+    if (!page || this.agentOperation) return;
+    const request = ++this.questionRequest;
+    const operationId = crypto.randomUUID();
+    if (!retryQuestion(thread, request, operationId)) return;
+    this.startQuestion(thread, request, operationId, page);
+  }
+
+  private startQuestion(
+    thread: QuestionThread,
+    request: number,
+    operationId: string,
+    page: ReviewPage,
+  ) {
+    this.agentOperation = {
+      kind: "question",
+      threadId: thread.id,
+      request,
+      operationId,
+    };
+    this.announceAgent(`Tact is answering a question about ${thread.path}, ${formatRange(thread.startLine, thread.endLine)}.`);
+    this.refreshItem(thread.itemId);
+    this.syncAgentControls();
+    void this.sendQuestion(thread, request, operationId, page);
+  }
+
+  private async sendQuestion(
+    thread: QuestionThread,
+    request: number,
+    operationId: string,
+    page: ReviewPage,
+  ) {
+    let reconcileWithServer = false;
+    try {
+      const payload = await this.api.question({
+        thread_id: thread.id,
+        operation_id: operationId,
+        generation: page.generation,
+        range: page.selected_range,
+        path: thread.path,
+        side: thread.side,
+        start_line: thread.startLine,
+        end_line: thread.endLine,
+        messages: thread.messages.map((message) => ({ ...message })),
+      });
+      if (payload.generation !== page.generation
+        || !rangesEqual(payload.selected_range, page.selected_range)
+        || !payload.answer.trim()) {
+        throw new ApiError(
+          "invalid_response",
+          "Tact returned an invalid answer for this review range.",
+        );
+      }
+      finishQuestion(thread, request, payload.answer);
+      this.announceAgent(`Tact answered the question about ${thread.path}, ${formatRange(thread.startLine, thread.endLine)}.`);
+    } catch (error) {
+      if (error instanceof ApiError && error.code === "network_error") {
+        reconcileWithServer = true;
+        this.announceAgent("Reconnecting to the question…");
+        this.scheduleQuestionPoll();
+        return;
+      }
+      const cancelled = error instanceof ApiError && error.code === "operation_cancelled";
+      if (cancelled) cancelQuestion(thread, request);
+      else failQuestion(thread, request, errorMessage(error));
+      this.announceAgent(
+        cancelled
+          ? "Question cancelled."
+          : `Tact could not answer the question: ${errorMessage(error)}`,
+      );
+      if (error instanceof ApiError
+        && ["stale_snapshot", "workspace_changed"].includes(error.code)) {
+        this.snapshotStale = true;
+        this.setRefreshNotice(true);
+      }
+    } finally {
+      if (reconcileWithServer) return;
+      const operation = this.agentOperation;
+      if (operation?.kind === "question"
+        && operation.threadId === thread.id
+        && operation.request === request) {
+        this.agentOperation = undefined;
+      }
+      this.refreshItem(thread.itemId);
+      this.syncAgentControls();
+    }
+  }
+
+  private async stopQuestion(thread: QuestionThread) {
+    const operation = this.agentOperation;
+    const page = this.page;
+    if (!page || operation?.kind !== "question" || operation.threadId !== thread.id) return;
+    if (!beginStopping(thread, operation.request)) return;
+    this.announceAgent("Stopping the question…");
+    this.refreshItem(thread.itemId);
+    try {
+      await this.api.cancelQuestion({
+        operation_id: operation.operationId,
+        generation: page.generation,
+        range: page.selected_range,
+      });
+    } catch (error) {
+      stopFailed(thread, operation.request);
+      this.refreshItem(thread.itemId);
+      this.showInlineError(`Could not stop the question: ${errorMessage(error)}`);
+      this.announceAgent(`Could not stop the question: ${errorMessage(error)}`);
+    }
+  }
+
+  private questionThreadElement(thread: QuestionThread) {
+    const element = document.createElement("article");
+    element.className = "agent-thread";
+    element.dataset.threadId = String(thread.id);
+    const inputId = `thread-${thread.id}-input`;
+    const headingId = `thread-${thread.id}-heading`;
+    const contextId = `thread-${thread.id}-context`;
+    const linesId = `thread-${thread.id}-lines`;
+    const lineLabel = thread.startLine === thread.endLine ? "Line" : "Lines";
+    element.setAttribute("aria-labelledby", `${headingId} ${contextId} ${linesId}`);
+    if (thread.turn.kind === "asking") element.setAttribute("aria-busy", "true");
+    element.innerHTML = `
+      <header class="agent-thread-heading">
+        <div><strong id="${headingId}">Ask Tact <span aria-hidden="true">✨</span></strong><span id="${linesId}">${lineLabel} ${escapeHtml(formatRange(thread.startLine, thread.endLine))}</span></div>
+        <small id="${contextId}" title="${escapeHtml(thread.path)}">${escapeHtml(thread.path)}</small>
+      </header>
+      <div class="agent-thread-messages"></div>
+      <div class="agent-thread-turn"></div>`;
+
+    const messages = element.querySelector<HTMLElement>(".agent-thread-messages");
+    for (const message of thread.messages) {
+      const entry = document.createElement("section");
+      entry.className = `agent-thread-message ${message.role}`;
+      entry.innerHTML = `<strong>${message.role === "reviewer" ? "You" : "Tact"}</strong><div class="thread-markdown"></div>`;
+      const body = entry.querySelector<HTMLElement>(".thread-markdown");
+      if (body) void this.renderMarkdown(body, message.body);
+      messages?.append(entry);
+    }
+
+    const turn = element.querySelector<HTMLElement>(".agent-thread-turn");
+    if (!turn) return element;
+    if (thread.turn.kind === "asking") {
+      turn.className = "agent-thread-turn asking";
+      turn.setAttribute("role", "status");
+      turn.setAttribute("aria-live", "polite");
+      turn.innerHTML = `<span class="thread-spinner" aria-hidden="true">${icon("sparkles")}</span><span>${thread.turn.stopping ? "Stopping…" : "Tact is answering…"}</span><button class="button quiet" data-thread-stop ${thread.turn.stopping ? "disabled" : ""}>${thread.turn.stopping ? "Stopping…" : "Stop"}</button>`;
+      turn.querySelector("[data-thread-stop]")?.addEventListener("click", () => void this.stopQuestion(thread));
+      return element;
+    }
+    if (thread.turn.kind === "error") {
+      turn.className = "agent-thread-turn error";
+      turn.setAttribute("role", "alert");
+      turn.innerHTML = `<span>${escapeHtml(thread.turn.message)}</span><button class="button" data-agent-action data-thread-retry ${this.agentOperation ? "disabled" : ""}>Try again</button>`;
+      turn.querySelector("[data-thread-retry]")?.addEventListener("click", () => this.retryThreadQuestion(thread));
+      return element;
+    }
+    if (thread.turn.kind === "cancelled") {
+      turn.className = "agent-thread-turn cancelled";
+      turn.setAttribute("role", "status");
+      turn.innerHTML = `<span>Question cancelled.</span><button class="button" data-agent-action data-thread-retry ${this.agentOperation ? "disabled" : ""}>Ask again</button>`;
+      turn.querySelector("[data-thread-retry]")?.addEventListener("click", () => this.retryThreadQuestion(thread));
+      return element;
+    }
+
+    const capacityError = questionValidationError(thread.messages, "x");
+    if (capacityError) {
+      turn.innerHTML = `<span class="agent-thread-limit" role="status">${escapeHtml(capacityError)}</span>`;
+      return element;
+    }
+    turn.innerHTML = `
+      <label for="${inputId}">Ask a follow-up</label>
+      <textarea id="${inputId}" data-thread-input aria-describedby="${contextId} ${linesId} thread-${thread.id}-validation" rows="3" placeholder="Ask about this code" ${this.agentOperation ? "disabled" : ""}></textarea>
+      <span id="thread-${thread.id}-validation" class="agent-thread-validation" role="alert" ${thread.validationError ? "" : "hidden"}>${escapeHtml(thread.validationError ?? "")}</span>
+      <div><button class="button" data-agent-action data-thread-ask disabled>Ask <span aria-hidden="true">✨</span></button></div>`;
+    const textarea = turn.querySelector<HTMLTextAreaElement>("textarea");
+    const ask = turn.querySelector<HTMLButtonElement>("[data-thread-ask]");
+    if (textarea) {
+      textarea.value = thread.draft;
+      textarea.addEventListener("input", () => {
+        thread.draft = textarea.value;
+        thread.validationError = undefined;
+        const validation = turn.querySelector<HTMLElement>(".agent-thread-validation");
+        if (validation) {
+          validation.hidden = true;
+          validation.textContent = "";
+        }
+        if (ask) ask.disabled = !textarea.value.trim() || this.agentOperation !== undefined;
+      });
+      textarea.addEventListener("keydown", (event) => {
+        if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+          this.askFollowUp(thread);
+        }
+      });
+    }
+    ask?.addEventListener("click", () => this.askFollowUp(thread));
+    return element;
+  }
+
+  private focusThreadDraft(thread: QuestionThread) {
+    const textarea = this.root.querySelector<HTMLTextAreaElement>(
+      `[data-thread-id="${thread.id}"] [data-thread-input]`,
+    );
+    textarea?.focus();
+    textarea?.setSelectionRange(textarea.value.length, textarea.value.length);
+  }
+
+  private announceAgent(message: string) {
+    const announcement = this.root.querySelector<HTMLElement>("#agent-announcement");
+    if (!announcement) return;
+    announcement.textContent = "";
+    queueMicrotask(() => { announcement.textContent = message; });
+  }
+
+  private pendingCommentElement(comment: CommentMetadata) {
+    const element = document.createElement("article");
+    element.className = "diff-comment";
+    element.innerHTML = `
+      <header>
+        <span>Lines ${formatRange(comment.start_line, comment.end_line)}</span>
+        <div>
+          <button class="small-icon-button" data-comment-edit aria-label="Edit comment">${icon("edit")}</button>
+          <button class="small-icon-button danger" data-comment-delete aria-label="Delete comment">${icon("trash")}</button>
+        </div>
+      </header>
+      <div class="comment-markdown"></div>`;
+    element.querySelector("[data-comment-edit]")?.addEventListener("click", () => this.editComment(comment));
+    element.querySelector("[data-comment-delete]")?.addEventListener("click", () => this.removeComment(comment.id));
+    const markdown = element.querySelector<HTMLElement>(".comment-markdown");
+    if (markdown) void this.renderMarkdown(markdown, comment.body);
+    return element;
+  }
+
+  private selectEditorTab(element: HTMLElement, draft: CommentDraft, tab: CommentDraft["tab"]) {
+    if (this.draft !== draft) return;
+    draft.tab = tab;
+    for (const button of element.querySelectorAll<HTMLButtonElement>("[data-editor-tab]")) {
+      const active = button.dataset.editorTab === tab;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-selected", String(active));
+      button.tabIndex = active ? 0 : -1;
+    }
+    const textarea = element.querySelector<HTMLTextAreaElement>(".comment-input");
+    const preview = element.querySelector<HTMLElement>(".markdown-preview");
+    if (textarea) textarea.hidden = tab !== "comment";
+    if (preview) preview.hidden = tab !== "preview";
+    if (tab === "comment") {
+      textarea?.focus();
+      return;
+    }
+    if (preview) void this.renderPreviewElement(element, draft.body);
+  }
+
+  private async renderPreviewElement(element: HTMLElement, body: string) {
+    const preview = element.querySelector<HTMLElement>(".markdown-preview");
+    if (preview) await this.renderMarkdown(preview, body);
+  }
+
+  private async renderDraftPreview() {
+    const editor = this.root.querySelector<HTMLElement>(".inline-comment-editor");
+    if (editor && this.draft) await this.renderPreviewElement(editor, this.draft.body);
+  }
+
+  private async renderMarkdown(container: HTMLElement, body: string) {
+    const theme = activeSyntaxTheme(this.settings, this.colorScheme.matches);
+    await renderMarkdown(container, body, theme);
+  }
+
+  private focusDraft() {
+    const textarea = this.root.querySelector<HTMLTextAreaElement>(".inline-comment-editor .comment-input");
+    textarea?.focus();
+    textarea?.setSelectionRange(textarea.value.length, textarea.value.length);
+  }
+
+  private renderCommentList() {
+    const count = this.root.querySelector<HTMLElement>("#comment-count");
+    const mobileCount = this.root.querySelector<HTMLElement>("#mobile-comment-count");
+    const list = this.root.querySelector<HTMLElement>("#comment-list");
+    if (!count || !list) return;
+    count.textContent = String(this.comments.length);
+    if (mobileCount) mobileCount.textContent = String(this.comments.length);
+    list.replaceChildren();
+    if (this.comments.length === 0) {
+      const empty = document.createElement("p");
+      empty.className = "empty-comments";
+      empty.textContent = "Select a line in the diff to comment.";
+      list.append(empty);
+      return;
+    }
+    for (const comment of this.comments) {
+      const item = document.createElement("div");
+      item.className = "comment-link";
+      item.innerHTML = `
+        <button class="comment-jump">
+          <strong>${escapeHtml(comment.path)}</strong>
+          <span>${formatRange(comment.start_line, comment.end_line)} · ${comment.side === "additions" ? "new" : "old"}</span>
+          <p>${escapeHtml(comment.body)}</p>
+        </button>
+        <div class="comment-link-actions">
+          <button aria-label="Edit comment" data-edit>${icon("edit")}</button>
+          <button aria-label="Delete comment" data-delete>${icon("trash")}</button>
+        </div>`;
+      item.querySelector(".comment-jump")?.addEventListener("click", () => {
+        this.selectTab("changes");
+        this.viewer?.scrollTo({
+          type: "range",
+          id: comment.itemId,
+          range: { start: comment.start_line, end: comment.end_line, side: comment.side, endSide: comment.side },
+          align: "center",
+          behavior: "smooth-auto",
+        });
+      });
+      item.querySelector("[data-edit]")?.addEventListener("click", () => this.editComment(comment));
+      item.querySelector("[data-delete]")?.addEventListener("click", () => this.removeComment(comment.id));
+      list.append(item);
+    }
+  }
+
+  private setRangeLoading(range: ReviewRange) {
+    this.loadingRange = range;
+    const state = this.root.querySelector<HTMLElement>("#scope-state");
+    if (state) {
+      state.className = "scope-state loading";
+      state.innerHTML = `<div class="scope-spinner"></div><strong>Loading ${escapeHtml(rangeLabel(this.bootstrap.range_targets, range))}</strong><span>Capturing an immutable diff for this review.</span>`;
+      state.hidden = false;
+    }
+    this.syncAgentControls();
+  }
+
+  private setRangeReady() {
+    this.loadingRange = undefined;
+    this.syncAgentControls();
+    const state = this.root.querySelector<HTMLElement>("#scope-state");
+    if (state?.classList.contains("loading")) state.hidden = true;
+  }
+
+  private showRangeError(
+    message: string,
+    range: ReviewRange,
+    discardCurrentFeedback = false,
+  ) {
+    const state = this.root.querySelector<HTMLElement>("#scope-state");
+    if (!state) return;
+    state.className = "scope-state error";
+    state.setAttribute("role", "alert");
+    state.innerHTML = `
+      <div class="scope-error-icon">!</div>
+      <strong>Could not load the selected range</strong>
+      <span>${escapeHtml(message)}</span>
+      <div class="scope-error-actions"><button class="button primary" data-range-retry>Retry</button>${this.page ? '<button class="button" data-range-keep>Keep current range</button>' : ""}</div>`;
+    state.querySelector("[data-range-retry]")?.addEventListener(
+      "click",
+      () => void this.selectRange(range, discardCurrentFeedback),
+    );
+    state.querySelector("[data-range-keep]")?.addEventListener("click", () => { state.hidden = true; });
+    state.hidden = false;
+  }
+
+  private syncSelectedRange(range: ReviewRange) {
+    const label = this.root.querySelector<HTMLElement>("#range-label");
+    const button = this.root.querySelector<HTMLButtonElement>("#range-button");
+    if (label) label.textContent = rangeLabel(this.bootstrap.range_targets, range);
+    if (button) button.disabled = this.loadingRange !== undefined || this.agentOperation !== undefined;
+    const refresh = this.root.querySelector<HTMLButtonElement>("#refresh-notice");
+    if (refresh) refresh.disabled = this.loadingRange !== undefined || this.agentOperation !== undefined || this.refreshing;
+  }
+
+  private syncAgentControls() {
+    const busy = this.agentOperation !== undefined || this.loadingRange !== undefined || this.refreshing;
+    for (const textarea of this.root.querySelectorAll<HTMLTextAreaElement>("[data-thread-input]")) {
+      textarea.disabled = busy;
+    }
+    for (const button of this.root.querySelectorAll<HTMLButtonElement>("[data-agent-action]")) {
+      const needsQuestion = button.matches("[data-comment-action=ask], [data-thread-ask]");
+      const editor = button.closest<HTMLElement>(".inline-comment-editor, .agent-thread-turn");
+      const input = editor?.querySelector<HTMLTextAreaElement>("textarea");
+      button.disabled = busy || (needsQuestion && !input?.value.trim());
+    }
+    this.syncSelectedRange(this.page?.selected_range ?? this.bootstrap.default_range);
+    this.setReviewControlsDisabled(busy);
+  }
+
+  private setReviewControlsDisabled(disabled: boolean) {
+    const terminalBusy = this.state.terminal.kind === "busy";
+    const agentBusy = this.agentOperation !== undefined;
+    for (const button of this.root.querySelectorAll<HTMLButtonElement>("[data-decision]")) {
+      button.disabled = disabled || agentBusy || !this.page || terminalBusy || this.snapshotStale;
+      button.title = this.snapshotStale ? "Refresh before submitting this stale snapshot." : "";
+    }
+    const cancel = this.root.querySelector<HTMLButtonElement>("#cancel-review");
+    if (cancel) cancel.disabled = terminalBusy;
+  }
+
+  private async submit(decision: ReviewDecision["decision"]) {
+    if (!this.page || this.loadingRange || this.agentOperation) return;
+    if (this.draft) {
+      this.showInlineError("Save or discard the open comment draft before submitting the review.");
+      this.focusDraft();
+      return;
+    }
+    if (this.snapshotStale) {
+      this.showInlineError("The workspace changed. Refresh before submitting this review.");
+      return;
+    }
+    const previous = this.state;
+    this.state = beginTerminal(previous, "submit");
+    if (this.state === previous) return;
+    this.setReviewControlsDisabled(false);
+    this.showTerminalBusy(decision === "approve" ? "Submitting approval…" : "Submitting requested changes…");
+    const page = this.page;
+    const payload: ReviewDecision = {
+      generation: page.generation,
+      range: page.selected_range,
+      decision,
+      summary: this.feedback.summary.trim(),
+      comments: this.comments.map(({ path, side, start_line, end_line, body }) => ({
+        path,
+        side,
+        start_line,
+        end_line,
+        body,
+      })),
+    };
+    try {
+      await this.api.submit(payload);
+    } catch (error) {
+      const code = error instanceof ApiError ? error.code : "unknown";
+      if (["stale_snapshot", "workspace_changed"].includes(code)) this.snapshotStale = true;
+      this.state = failTerminal(this.state, "submit", code, errorMessage(error));
+      this.showInlineError(errorMessage(error), () => void this.submit(decision));
+      this.setReviewControlsDisabled(false);
+      return;
+    }
+    this.state = finishTerminal(this.state, "submit");
+    const finished = this.root.querySelector<HTMLElement>("#finished");
+    if (finished) finished.hidden = false;
+  }
+
+  private async cancel() {
+    if (this.draft) {
+      this.showInlineError("Save or discard the open comment draft before cancelling the review.");
+      this.focusDraft();
+      return;
+    }
+    const previous = this.state;
+    this.state = beginTerminal(previous, "cancel");
+    if (this.state === previous) return;
+    this.setReviewControlsDisabled(false);
+    this.showTerminalBusy("Cancelling review…");
+    try {
+      await this.api.cancel(this.bootstrap.generation);
+    } catch (error) {
+      const code = error instanceof ApiError ? error.code : "unknown";
+      this.state = failTerminal(this.state, "cancel", code, errorMessage(error));
+      this.showInlineError(errorMessage(error), () => void this.cancel());
+      this.setReviewControlsDisabled(false);
+      return;
+    }
+    this.state = finishTerminal(this.state, "cancel");
+    const finished = this.root.querySelector<HTMLElement>("#finished");
+    if (!finished) return;
+    finished.innerHTML = "<div><span>✓</span><h2>Review cancelled</h2><p>You can return to Tact.</p></div>";
+    finished.hidden = false;
+  }
+
+  private showTerminalBusy(message: string) {
+    const status = this.root.querySelector<HTMLElement>("#terminal-status");
+    if (!status) return;
+    status.className = "terminal-status busy";
+    status.textContent = message;
+  }
+
+  private showInlineError(message: string, retry?: () => void) {
+    const status = this.root.querySelector<HTMLElement>("#terminal-status");
+    if (!status) return;
+    status.className = "terminal-status error";
+    status.setAttribute("role", "alert");
+    status.innerHTML = `${escapeHtml(message)}${retry ? ` <button class="text-button" data-terminal-retry>Retry</button>` : ""}`;
+    if (retry) status.querySelector("[data-terminal-retry]")?.addEventListener("click", retry);
+  }
+
+  private clearInlineError() {
+    const status = this.root.querySelector<HTMLElement>("#terminal-status");
+    if (!status || !status.classList.contains("error")) return;
+    status.className = "terminal-status";
+    status.textContent = "";
+  }
+}
+
+function treeStatus(type: FileDiffMetadata["type"]): GitStatus {
+  switch (type) {
+    case "new": return "added";
+    case "deleted": return "deleted";
+    case "rename-pure":
+    case "rename-changed": return "renamed";
+    case "change": return "modified";
+  }
+}
+
+function applyFormatting(textarea: HTMLTextAreaElement, format: string) {
+  const start = textarea.selectionStart;
+  const end = textarea.selectionEnd;
+  const selection = textarea.value.slice(start, end);
+  const replacements: Record<string, [string, string, string]> = {
+    bold: ["**", "**", "bold text"],
+    italic: ["_", "_", "italic text"],
+    code: ["`", "`", "code"],
+    "code-block": ["```\n", "\n```", "code"],
+    link: ["[", "](https://)", "link text"],
+    quote: ["> ", "", "quote"],
+  };
+  if (format === "list") {
+    const value = selection || "list item";
+    const replacement = value.split("\n").map((line) => `- ${line}`).join("\n");
+    textarea.setRangeText(replacement, start, end, "select");
+    textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    textarea.focus();
+    return;
+  }
+  const [before, after, placeholder] = replacements[format] ?? ["", "", ""];
+  const value = selection || placeholder;
+  textarea.setRangeText(`${before}${value}${after}`, start, end, "end");
+  if (!selection) textarea.setSelectionRange(start + before.length, start + before.length + value.length);
+  textarea.dispatchEvent(new Event("input", { bubbles: true }));
+  textarea.focus();
+}
+
+function formatButton(format: string, label: string) {
+  return `<button class="format-button" data-format="${format}" aria-label="${label}" title="${label}">${icon(format)}</button>`;
+}
+
+function icon(name: string) {
+  const paths: Record<string, string> = {
+    "git-branch": '<circle cx="6" cy="5" r="2"/><circle cx="18" cy="6" r="2"/><circle cx="6" cy="19" r="2"/><path d="M6 7v10M8 11h4a6 6 0 0 0 6-3"/>',
+    "chevron-down": '<path d="m7 10 5 5 5-5"/>',
+    close: '<path d="m7 7 10 10M17 7 7 17"/>',
+    "arrow-right": '<path d="M5 12h14m-5-5 5 5-5 5"/>',
+    sparkles: '<path d="m12 3 1.2 3.3L16.5 7.5l-3.3 1.2L12 12l-1.2-3.3-3.3-1.2 3.3-1.2ZM18 14l.8 2.2L21 17l-2.2.8L18 20l-.8-2.2L15 17l2.2-.8ZM6 13l.7 1.8 1.8.7-1.8.7L6 18l-.7-1.8-1.8-.7 1.8-.7Z"/>',
+    settings: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-1.42 1.42-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1.02 1.56V20h-2v-.48A1.7 1.7 0 0 0 12.4 18a1.7 1.7 0 0 0-1.88.34l-.06.06-1.42-1.42.06-.06A1.7 1.7 0 0 0 9.44 15a1.7 1.7 0 0 0-1.56-1.02H7.4v-2h.48A1.7 1.7 0 0 0 9.44 11a1.7 1.7 0 0 0-.34-1.88l-.06-.06 1.42-1.42.06.06A1.7 1.7 0 0 0 12.4 8a1.7 1.7 0 0 0 1.02-1.56V6h2v.44A1.7 1.7 0 0 0 16.44 8a1.7 1.7 0 0 0 1.88-.34l.06-.06 1.42 1.42-.06.06A1.7 1.7 0 0 0 19.4 11a1.7 1.7 0 0 0 1.56 1.02h.48v2h-.48A1.7 1.7 0 0 0 19.4 15Z" transform="translate(-2.4 -1) scale(1.2)"/>',
+    bold: '<path d="M7 5h5a3 3 0 0 1 0 6H7Zm0 6h5.5a3.5 3.5 0 0 1 0 7H7Z"/>',
+    italic: '<path d="M10 5h7M7 19h7M14 5 10 19"/>',
+    code: '<path d="m8 9-4 3 4 3m8-6 4 3-4 3m-3-8-2 10"/>',
+    "code-block": '<path d="M4 5h16v14H4zM8 10l-2 2 2 2m4-4 2 2-2 2"/>',
+    link: '<path d="M10 13a5 5 0 0 0 7.5.5l2-2a5 5 0 0 0-7-7l-1.15 1.15M14 11a5 5 0 0 0-7.5-.5l-2 2a5 5 0 0 0 7 7l1.15-1.15"/>',
+    list: '<path d="M9 6h11M9 12h11M9 18h11M4 6h.01M4 12h.01M4 18h.01"/>',
+    quote: '<path d="M7 17H4a2 2 0 0 1-2-2v-3a5 5 0 0 1 5-5v2a3 3 0 0 0-3 3h3Zm10 0h-3a2 2 0 0 1-2-2v-3a5 5 0 0 1 5-5v2a3 3 0 0 0-3 3h3Z"/>',
+    check: '<path d="m5 12 4 4L19 6"/>',
+    edit: '<path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4Z"/>',
+    trash: '<path d="M4 7h16M9 11v6m6-6v6M6 7l1 14h10l1-14M9 7V4h6v3"/>',
+  };
+  return `<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${paths[name] ?? ""}</svg>`;
+}
+
+function formatRange(start: number, end: number) {
+  return start === end ? String(start) : `${Math.min(start, end)}–${Math.max(start, end)}`;
+}
+
+function escapeHtml(value: string) {
+  return value.replace(/[&<>'"]/g, (character) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;",
+  })[character] ?? character);
+}

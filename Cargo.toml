@@ -10,7 +10,13 @@ repository = "https://github.com/clabby/tact"
 homepage = "https://github.com/clabby/tact"
 documentation = "https://docs.rs/tact"
 readme = "README.md"
-exclude = ["dist/**", "evals/**"]
+exclude = [
+    "dist/**",
+    "docker/**",
+    "evals/**",
+    "tests/release_pipeline.rs",
+    "web/**",
+]
 keywords = ["ai", "coding-agent", "llm", "terminal", "tui"]
 categories = ["command-line-interface", "development-tools"]
 publish = ["crates-io"]
@@ -22,12 +28,14 @@ pkg-fmt = "tgz"
 
 [dependencies]
 arboard = "3.6.1"
+axum = "0.8.4"
 base64 = "0.22.1"
 chrono = { version = "0.4.45", default-features = false, features = ["std"] }
 clap = { version = "4.6.4", features = ["derive", "env"] }
 crossterm = { version = "0.29.0", features = ["event-stream", "osc52"] }
 dark-light = "2.0.0"
 flate2 = "1.1.9"
+fs2 = "0.4.3"
 futures-util = "0.3.33"
 jsonschema = { version = "0.48.5", default-features = false }
 miette = { version = "7.6.0", features = ["fancy"] }
@@ -37,7 +45,7 @@ pulldown-cmark = { version = "0.13.4", default-features = false }
 png = "0.18.1"
 ratatui = "0.30.2"
 rayon = "1.12.0"
-reqwest = { version = "0.13.4", default-features = false, features = ["rustls"] }
+reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "stream"] }
 self-replace = "1.5.0"
 semver = { version = "1.0.28", features = ["serde"] }
 serde = { version = "1.0.229", features = ["derive", "rc"] }

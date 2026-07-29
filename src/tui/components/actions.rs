@@ -16,7 +16,7 @@ use ratatui::{
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-const ACTIONS: [Action; 11] = [
+const ACTIONS: [Action; 12] = [
     Action::Effort,
     Action::FastMode,
     Action::Theme,
@@ -28,6 +28,7 @@ const ACTIONS: [Action; 11] = [
     Action::EditConfig,
     Action::Subagents,
     Action::DebugContext,
+    Action::Review,
 ];
 const KEY_BINDINGS: [&str; 3] = ["↑↓ move", "enter/tab open", "esc close"];
 const SEARCH_LABEL: &str = "Search: ";
@@ -45,6 +46,7 @@ pub(super) struct ActionAvailability {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Action {
+    Review,
     Subagents,
     Effort,
     FastMode,
@@ -246,6 +248,7 @@ impl ActionsMenu {
 
     const fn is_enabled(&self, action: Action) -> bool {
         match action {
+            Action::Review => self.availability.new_session,
             Action::Subagents => true,
             Action::Effort => true,
             Action::FastMode => true,
@@ -269,6 +272,9 @@ impl ActionsMenu {
                 "Resume session · finish active work first"
             }
             Action::Fork if !self.availability.fork => "Fork session · one fork at a time",
+            Action::Review if !self.availability.new_session => {
+                "Review changes · finish active work first"
+            }
             Action::FastMode if self.availability.fast_mode => "Disable fast mode",
             _ => action.label(),
         }
@@ -278,6 +284,7 @@ impl ActionsMenu {
 impl Action {
     const fn label(self) -> &'static str {
         match self {
+            Self::Review => "Review changes",
             Self::Subagents => "Subagents",
             Self::Effort => "Change effort",
             Self::FastMode => "Enable fast mode",
@@ -294,6 +301,7 @@ impl Action {
 
     const fn alias(self) -> Option<&'static str> {
         match self {
+            Self::Review => Some("review"),
             Self::Subagents => Some("agents"),
             Self::Effort => Some("thinking"),
             Self::FastMode => Some("priority"),
@@ -331,7 +339,7 @@ impl Component for ActionsMenu {
             return;
         }
 
-        let layout = Floating::new("Actions", 58, 15, &KEY_BINDINGS).render(frame, area, theme);
+        let layout = Floating::new("Actions", 58, 16, &KEY_BINDINGS).render(frame, area, theme);
         if layout.body.is_empty() {
             return;
         }
@@ -393,7 +401,7 @@ mod tests {
     }
 
     fn render(menu: &mut ActionsMenu) -> Terminal<TestBackend> {
-        let mut terminal = Terminal::new(TestBackend::new(60, 17)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(60, 18)).unwrap();
         terminal
             .draw(|frame| menu.render(frame, frame.area(), &Theme::default()))
             .unwrap();
@@ -466,10 +474,14 @@ mod tests {
         );
         assert_eq!(
             row_segment(&terminal, 14, 1, 58),
-            "│          ↑↓ move · enter/tab open · esc close          │"
+            "│  Review changes (alias: review)                        │"
         );
         assert_eq!(
             row_segment(&terminal, 15, 1, 58),
+            "│          ↑↓ move · enter/tab open · esc close          │"
+        );
+        assert_eq!(
+            row_segment(&terminal, 16, 1, 58),
             "╰────────────────────────────────────────────────────────╯"
         );
         assert_eq!(
@@ -534,6 +546,19 @@ mod tests {
         assert_eq!(
             enabled.update(key(KeyCode::Enter)).effects,
             [ActionsEffect::Trigger(Action::Effort)]
+        );
+    }
+
+    #[test]
+    fn review_action_is_searchable() {
+        let mut menu = ActionsMenu::new(available());
+        for character in "review".chars() {
+            menu.update(key(KeyCode::Char(character)));
+        }
+
+        assert_eq!(
+            menu.update(key(KeyCode::Enter)).effects,
+            [ActionsEffect::Trigger(Action::Review)]
         );
     }
 
