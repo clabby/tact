@@ -34,9 +34,7 @@ use crate::{
         editor::EditorOutcome,
         pane::PaneId,
         prompt::Submission,
-        review_controller::{
-            ReviewCompletion, ReviewController, ReviewIdentity, ReviewPhase, ReviewTask,
-        },
+        review_controller::{ReviewCompletion, ReviewController, ReviewIdentity, ReviewTask},
         scheduler::{RenderScheduler, STREAM_FRAME_INTERVAL},
         session::SessionSummary,
         shell::ShellExecution,
@@ -563,7 +561,6 @@ pub(crate) async fn run(
                     continue;
                 }
                 review_controller.set_url(ready.identity, ready.url.clone());
-                review_controller.set_phase(ready.identity, ReviewPhase::Waiting);
                 let url = review_controller
                     .url(ready.identity.pane)
                     .expect("the active review just stored its URL")
@@ -620,7 +617,6 @@ pub(crate) async fn run(
                     text: prompt.clone(),
                 })?;
                 schedule(app.update(AppEvent::Transcript { pane, record }), &mut scheduler);
-                review_controller.set_phase(review, ReviewPhase::GeneratingOverview);
                 schedule(app.update(AppEvent::ReviewOverviewStarted(pane)), &mut scheduler);
                 commands
                     .send(WorkerCommand::Auxiliary {

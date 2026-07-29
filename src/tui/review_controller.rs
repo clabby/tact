@@ -17,16 +17,8 @@ pub(crate) struct ReviewCompletion {
     pub(crate) result: ReviewResult,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ReviewPhase {
-    Starting,
-    Waiting,
-    GeneratingOverview,
-}
-
 struct ActiveReview {
     identity: ReviewIdentity,
-    phase: ReviewPhase,
     url: Option<String>,
     cancellation: CancellationToken,
     task: ReviewTask,
@@ -70,7 +62,6 @@ impl ReviewController {
         let task = spawn(identity, cancellation.clone());
         self.active = Some(ActiveReview {
             identity,
-            phase: ReviewPhase::Starting,
             url: None,
             cancellation,
             task,
@@ -88,18 +79,6 @@ impl ReviewController {
                 .active
                 .as_ref()
                 .is_some_and(|review| review.identity == identity)
-    }
-
-    pub(crate) fn set_phase(&mut self, identity: ReviewIdentity, phase: ReviewPhase) -> bool {
-        let Some(review) = self
-            .active
-            .as_mut()
-            .filter(|review| review.identity == identity)
-        else {
-            return false;
-        };
-        review.phase = phase;
-        true
     }
 
     pub(crate) fn set_url(&mut self, identity: ReviewIdentity, url: String) -> bool {
@@ -146,7 +125,7 @@ impl ReviewController {
 
 #[cfg(test)]
 mod tests {
-    use super::{ReviewCompletion, ReviewController, ReviewIdentity, ReviewPhase};
+    use super::{ReviewCompletion, ReviewController, ReviewIdentity};
     use crate::tui::pane::PaneId;
 
     fn pending_review(
@@ -168,7 +147,6 @@ mod tests {
         let identity = controller
             .start(PaneId::Main, 4, pending_review)
             .expect("the first review should start");
-        assert!(controller.set_phase(identity, ReviewPhase::Waiting));
         assert!(controller.set_url(identity, "http://127.0.0.1/review".to_owned()));
         assert_eq!(
             controller.url(PaneId::Main),
