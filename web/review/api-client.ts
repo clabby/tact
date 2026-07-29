@@ -2,6 +2,7 @@ import {
   REVIEW_PROTOCOL_VERSION,
   type OverviewResponse,
   type QuestionCancelRequest,
+  type QuestionListResponse,
   type QuestionRequest,
   type QuestionResponse,
   type ReviewDecision,
@@ -69,6 +70,10 @@ export class ApiClient {
 
   question(request: QuestionRequest, signal?: AbortSignal): Promise<QuestionResponse> {
     return this.post("question", request, signal);
+  }
+
+  questions(generation: number, signal?: AbortSignal): Promise<QuestionListResponse> {
+    return this.post("questions", { generation }, signal);
   }
 
   async cancelQuestion(request: QuestionCancelRequest): Promise<void> {

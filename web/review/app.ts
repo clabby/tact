@@ -19,6 +19,7 @@ import { renderMarkdown } from "./markdown";
 import {
   beginTerminal,
   activatePage,
+  allQuestions,
   createReviewState,
   currentFeedback,
   currentQuestions,
@@ -27,6 +28,7 @@ import {
   feedbackDescription,
   finishTerminal,
   installSession,
+  synchronizeQuestions,
   type CommentDraft,
   type CommentMetadata,
   type ReviewState,
@@ -111,7 +113,7 @@ type AnnotationMetadata =
 
 type AgentOperation =
   | { kind: "overview"; request: number }
-  | { kind: "question"; threadId: number; request: number; operationId: string };
+  | { kind: "question"; threadId: string; request: number; operationId: string };
 
 const root = document.querySelector<HTMLElement>("#app");
 if (!root) throw new Error("review root is missing");
@@ -150,12 +152,13 @@ export class ReviewApp {
   private pendingRange?: ReviewRange;
   private previewRange?: ReviewRange;
   private nextCommentId = 1;
-  private nextThreadId = 1;
   private loadingRange?: ReviewRange;
   private loadingOverview?: ReviewRange;
   private rangeRequest = 0;
   private overviewRequest = 0;
   private questionRequest = 0;
+  private questionPollTimer?: number;
+  private pollingQuestions = false;
   private agentOperation?: AgentOperation;
   private statusTimer?: number;
   private checkingStatus = false;
@@ -184,6 +187,16 @@ export class ReviewApp {
 
   installInitialPage() {
     this.installPage(this.bootstrap.page);
+    void this.restoreActiveQuestion();
+  }
+
+  private async restoreActiveQuestion() {
+    const active = allQuestions(this.state).find((thread) => thread.turn.kind === "asking");
+    if (!active) return;
+    this.resumeQuestionOperation();
+    if (!rangesEqual(active.range, this.page?.selected_range)) {
+      await this.selectRange(active.range, false, true);
+    }
   }
 
   render() {
@@ -331,8 +344,12 @@ export class ReviewApp {
     void this.checkWorkspaceStatus();
   }
 
-  async selectRange(range: ReviewRange, discardCurrentFeedback = false) {
-    if (this.loadingRange || this.agentOperation) return;
+  async selectRange(
+    range: ReviewRange,
+    discardCurrentFeedback = false,
+    restoringActiveQuestion = false,
+  ) {
+    if (this.loadingRange || (this.agentOperation && !restoringActiveQuestion)) return;
     if (rangesEqual(this.page?.selected_range, range)) {
       const state = this.root.querySelector<HTMLElement>("#scope-state");
       if (state?.classList.contains("error")) state.hidden = true;
@@ -381,11 +398,13 @@ export class ReviewApp {
         id,
         type: "diff",
         fileDiff: file,
-        annotations: this.annotationsForItem(id),
+        annotations: [],
         collapsed: seenFiles.has(file.name),
         version: 1,
       };
     });
+    this.attachQuestionItems();
+    for (const item of this.items) item.annotations = this.annotationsForItem(item.id);
 
     const description = this.root.querySelector<HTMLElement>("#scope-description");
     if (description) description.textContent = page.scope;
@@ -398,6 +417,109 @@ export class ReviewApp {
     if (summary) summary.value = this.feedback.summary;
     this.syncSelectedRange(page.selected_range);
     this.selectTab("changes");
+  }
+
+  private attachQuestionItems() {
+    for (const thread of this.questions) {
+      const item = this.items.find(
+        (candidate) => annotationPath(candidate.fileDiff, thread.side) === thread.path,
+      );
+      thread.itemId = item?.id ?? "";
+    }
+  }
+
+  private resumeQuestionOperation() {
+    const thread = allQuestions(this.state).find(
+      (candidate) => candidate.turn.kind === "asking",
+    );
+    if (!thread || thread.turn.kind !== "asking") return;
+    this.agentOperation = {
+      kind: "question",
+      threadId: thread.id,
+      request: thread.turn.request,
+      operationId: thread.turn.operationId,
+    };
+    if (thread.itemId) this.refreshItem(thread.itemId);
+    this.syncAgentControls();
+    this.scheduleQuestionPoll();
+  }
+
+  private scheduleQuestionPoll() {
+    if (this.questionPollTimer !== undefined) window.clearTimeout(this.questionPollTimer);
+    this.questionPollTimer = window.setTimeout(() => {
+      this.questionPollTimer = undefined;
+      void this.pollQuestions();
+    }, 400);
+  }
+
+  private async pollQuestions() {
+    const operation = this.agentOperation;
+    if (this.pollingQuestions || operation?.kind !== "question") return;
+    this.pollingQuestions = true;
+    try {
+      const payload = await this.api.questions(this.bootstrap.generation);
+      if (payload.generation !== this.bootstrap.generation) {
+        this.agentOperation = undefined;
+        this.generationStale = true;
+        this.snapshotStale = true;
+        this.setRefreshNotice(true, "This browser page belongs to an older review generation.");
+        this.syncAgentControls();
+        return;
+      }
+      const stored = payload.questions.find(
+        (thread) => thread.thread_id === operation.threadId,
+      );
+      if (!stored) {
+        const thread = allQuestions(this.state).find(
+          (candidate) => candidate.id === operation.threadId,
+        );
+        if (thread) {
+          failQuestion(thread, operation.request, "Tact did not retain this question. Ask again to retry.");
+          if (thread.itemId) this.refreshItem(thread.itemId);
+        }
+        this.agentOperation = undefined;
+        this.syncAgentControls();
+        return;
+      }
+      if (stored?.status === "asking"
+        && stored.operation_id === operation.operationId) return;
+
+      this.state = synchronizeQuestions(this.state, payload.questions);
+      this.attachQuestionItems();
+      for (const item of this.items) this.refreshItem(item.id);
+      const synchronized = allQuestions(this.state).find(
+        (thread) => thread.id === operation.threadId,
+      );
+      if (synchronized?.turn.kind === "asking") {
+        this.agentOperation = {
+          kind: "question",
+          threadId: synchronized.id,
+          request: synchronized.turn.request,
+          operationId: synchronized.turn.operationId,
+        };
+        this.syncAgentControls();
+        return;
+      }
+      this.agentOperation = undefined;
+      this.syncAgentControls();
+      if (stored?.status === "idle") this.announceAgent("Tact answered the question.");
+      else if (stored?.status === "cancelled") this.announceAgent("Question cancelled.");
+      else if (stored?.status === "error") {
+        this.announceAgent(`Tact could not answer the question: ${stored.error ?? "Unknown error"}`);
+      }
+    } catch (error) {
+      if (error instanceof ApiError && error.code === "stale_snapshot") {
+        this.agentOperation = undefined;
+        this.generationStale = true;
+        this.snapshotStale = true;
+        this.setRefreshNotice(true, "This browser page belongs to an older review generation.");
+        this.syncAgentControls();
+      }
+      // Other polling failures are transient; the stored operation remains authoritative.
+    } finally {
+      this.pollingQuestions = false;
+      if (this.agentOperation?.kind === "question") this.scheduleQuestionPoll();
+    }
   }
 
   private renderStats() {
@@ -839,6 +961,7 @@ export class ReviewApp {
         this.bindRangeEvents();
       }
       this.installPage(payload.page);
+      await this.restoreActiveQuestion();
       this.snapshotStale = false;
       this.generationStale = false;
       this.setRefreshNotice(false);
@@ -1333,17 +1456,20 @@ export class ReviewApp {
     }
 
     const request = ++this.questionRequest;
-    const thread = createQuestionThread(this.nextThreadId++, {
+    const threadId = crypto.randomUUID();
+    const operationId = crypto.randomUUID();
+    const thread = createQuestionThread(threadId, {
       itemId: draft.itemId,
+      range: page.selected_range,
       path: draft.path,
       side: draft.side,
       startLine: draft.startLine,
       endLine: draft.endLine,
-    }, draft.body, request);
+    }, draft.body, request, operationId);
     this.questions.push(thread);
     this.draft = undefined;
     this.viewer?.clearSelectedLines();
-    this.startQuestion(thread, request, page);
+    this.startQuestion(thread, request, operationId, page);
   }
 
   private askFollowUp(thread: QuestionThread) {
@@ -1357,20 +1483,26 @@ export class ReviewApp {
       return;
     }
     const request = ++this.questionRequest;
-    if (!beginFollowUp(thread, request)) return;
-    this.startQuestion(thread, request, page);
+    const operationId = crypto.randomUUID();
+    if (!beginFollowUp(thread, request, operationId)) return;
+    this.startQuestion(thread, request, operationId, page);
   }
 
   private retryThreadQuestion(thread: QuestionThread) {
     const page = this.page;
     if (!page || this.agentOperation) return;
     const request = ++this.questionRequest;
-    if (!retryQuestion(thread, request)) return;
-    this.startQuestion(thread, request, page);
+    const operationId = crypto.randomUUID();
+    if (!retryQuestion(thread, request, operationId)) return;
+    this.startQuestion(thread, request, operationId, page);
   }
 
-  private startQuestion(thread: QuestionThread, request: number, page: ReviewPage) {
-    const operationId = crypto.randomUUID();
+  private startQuestion(
+    thread: QuestionThread,
+    request: number,
+    operationId: string,
+    page: ReviewPage,
+  ) {
     this.agentOperation = {
       kind: "question",
       threadId: thread.id,
@@ -1389,8 +1521,10 @@ export class ReviewApp {
     operationId: string,
     page: ReviewPage,
   ) {
+    let reconcileWithServer = false;
     try {
       const payload = await this.api.question({
+        thread_id: thread.id,
         operation_id: operationId,
         generation: page.generation,
         range: page.selected_range,
@@ -1411,6 +1545,12 @@ export class ReviewApp {
       finishQuestion(thread, request, payload.answer);
       this.announceAgent(`Tact answered the question about ${thread.path}, ${formatRange(thread.startLine, thread.endLine)}.`);
     } catch (error) {
+      if (error instanceof ApiError && error.code === "network_error") {
+        reconcileWithServer = true;
+        this.announceAgent("Reconnecting to the question…");
+        this.scheduleQuestionPoll();
+        return;
+      }
       const cancelled = error instanceof ApiError && error.code === "operation_cancelled";
       if (cancelled) cancelQuestion(thread, request);
       else failQuestion(thread, request, errorMessage(error));
@@ -1425,6 +1565,7 @@ export class ReviewApp {
         this.setRefreshNotice(true);
       }
     } finally {
+      if (reconcileWithServer) return;
       const operation = this.agentOperation;
       if (operation?.kind === "question"
         && operation.threadId === thread.id

@@ -40,7 +40,7 @@ index 82a06c1..90c03be 100644
 `;
 
 const reviewBootstrapBase = {
-  protocol_version: 2,
+  protocol_version: 3,
   generation: 1,
   title: "Review feature/review-workflow",
   repository: "tact",
@@ -52,6 +52,7 @@ const reviewBootstrapBase = {
     { index: 3, kind: "working_tree" as const, short_id: "WT", title: "Uncommitted changes" },
   ],
   default_range: { from: 0, to: 3 },
+  questions: [],
 };
 
 const overview = `

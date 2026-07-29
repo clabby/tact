@@ -14,7 +14,7 @@ import {
 
 const firstPage = page(3, { from: 0, to: 2 });
 const session: ReviewSession = {
-  protocol_version: 2,
+  protocol_version: 3,
   generation: 3,
   title: "Review",
   repository: "tact",
@@ -22,6 +22,7 @@ const session: ReviewSession = {
   range_targets: [],
   default_range: firstPage.selected_range,
   page: firstPage,
+  questions: [],
 };
 
 describe("review state transitions", () => {
@@ -29,13 +30,14 @@ describe("review state transitions", () => {
     let state = createReviewState(session);
     currentFeedback(state).summary = "first summary";
     currentFeedback(state).seenPaths.add("src/main.rs");
-    currentQuestions(state).push(createQuestionThread(1, {
+    currentQuestions(state).push(createQuestionThread("thread-1", {
       itemId: "item",
+      range: { from: 0, to: 2 },
       path: "src/main.rs",
       side: "additions",
       startLine: 1,
       endLine: 1,
-    }, "Why?", 1));
+    }, "Why?", 1, "operation-1"));
 
     state = activatePage(state, page(3, { from: 1, to: 2 }));
     expect(currentFeedback(state).summary).toBe("");
@@ -58,9 +60,10 @@ describe("review state transitions", () => {
       itemId: "item", path: "README.md", side: "additions", startLine: 1,
       endLine: 1, body: "draft", tab: "comment",
     };
-    currentQuestions(state).push(createQuestionThread(1, {
-      itemId: "item", path: "README.md", side: "additions", startLine: 1, endLine: 1,
-    }, "Why?", 1));
+    currentQuestions(state).push(createQuestionThread("thread-1", {
+      itemId: "item", range: { from: 0, to: 2 }, path: "README.md",
+      side: "additions", startLine: 1, endLine: 1,
+    }, "Why?", 1, "operation-1"));
 
     state = discardCurrentFeedback(state);
     expect(currentFeedback(state)).toEqual({ summary: "", comments: [], seenPaths: new Set() });
@@ -73,6 +76,32 @@ describe("review state transitions", () => {
     expect(beginTerminal(busy, "cancel")).toBe(busy);
     const finished = finishTerminal(busy, "submit");
     expect(beginTerminal(finished, "submit")).toBe(finished);
+  });
+
+  test("restores an in-progress question from the review session", () => {
+    const state = createReviewState({
+      ...session,
+      questions: [{
+        thread_id: "thread-1",
+        operation_id: "operation-1",
+        generation: 3,
+        range: { from: 0, to: 2 },
+        path: "src/main.rs",
+        side: "additions",
+        start_line: 4,
+        end_line: 8,
+        messages: [{ role: "reviewer", body: "Why?" }],
+        status: "asking",
+      }],
+    });
+
+    expect(currentQuestions(state)).toHaveLength(1);
+    expect(currentQuestions(state)[0].turn).toEqual({
+      kind: "asking",
+      request: 0,
+      operationId: "operation-1",
+      stopping: false,
+    });
   });
 });
 

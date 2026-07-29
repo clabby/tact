@@ -1,6 +1,6 @@
 import type { ReviewRange, ReviewTarget } from "./range-selection";
 
-export const REVIEW_PROTOCOL_VERSION = 2;
+export const REVIEW_PROTOCOL_VERSION = 3;
 
 export type ReviewComment = {
   id: number;
@@ -29,6 +29,7 @@ export type ReviewSession = {
   range_targets: ReviewTarget[];
   default_range: ReviewRange;
   page: ReviewPage;
+  questions: StoredQuestionThread[];
 };
 
 export type ReviewStatus = {
@@ -48,6 +49,7 @@ export type ThreadMessage = {
 };
 
 export type QuestionRequest = {
+  thread_id: string;
   operation_id: string;
   generation: number;
   range: ReviewRange;
@@ -56,6 +58,25 @@ export type QuestionRequest = {
   start_line: number;
   end_line: number;
   messages: ThreadMessage[];
+};
+
+export type StoredQuestionThread = {
+  thread_id: string;
+  operation_id: string;
+  generation: number;
+  range: ReviewRange;
+  path: string;
+  side: ReviewComment["side"];
+  start_line: number;
+  end_line: number;
+  messages: ThreadMessage[];
+  status: "asking" | "idle" | "error" | "cancelled";
+  error?: string;
+};
+
+export type QuestionListResponse = {
+  generation: number;
+  questions: StoredQuestionThread[];
 };
 
 export type QuestionCancelRequest = Pick<

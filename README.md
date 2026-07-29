@@ -97,8 +97,9 @@ agent. Inline selections can also open a private question thread with the agent;
 help you understand the code but are not included in the rendered review feedback. The browser can
 also generate an agent-authored visual overview of the selected range on demand.
 
-Reloading or closing the browser does not cancel the review. Reopen the live URL shown by Tact, or
-cancel explicitly from the browser or Tact.
+Reloading or closing the browser does not cancel the review. Agent question threads remain available,
+and an answer already in progress continues in the background. Reopen the live URL shown by Tact,
+or cancel explicitly from the browser or Tact.
 
 The review tool requires a separate browser bundle. The first `/review` from each official Tact
 version asks for confirmation, then lazily downloads and verifies the matching release artifact.

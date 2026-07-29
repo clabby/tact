@@ -3,7 +3,7 @@ import { mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { overviewFixtures, reviewBootstrap, reviewFixtures } from "./dev-fixture";
 import { rangeKey, type ReviewRange } from "./range-selection";
-import type { QuestionRequest } from "./protocol";
+import type { QuestionRequest, StoredQuestionThread } from "./protocol";
 
 const outputDirectory = join(import.meta.dir, ".dev");
 await rm(outputDirectory, { recursive: true, force: true });
@@ -33,13 +33,14 @@ if (!await buildAssets()) process.exit(1);
 
 let workspaceChanged = true;
 const questionCancellations = new Map<string, () => void>();
+const devQuestions: StoredQuestionThread[] = [];
 
 const server = Bun.serve({
   port: Number(process.env.PORT ?? 4173),
   async fetch(request) {
     const url = new URL(request.url);
     if (request.method === "GET" && url.pathname === "/api/review") {
-      return Response.json(reviewBootstrap);
+      return Response.json({ ...reviewBootstrap, questions: devQuestions });
     }
     if (request.method === "GET" && url.pathname === "/api/status") {
       return Response.json({ generation: 1, changed: workspaceChanged });
@@ -66,6 +67,22 @@ const server = Bun.serve({
     }
     if (request.method === "POST" && url.pathname === "/api/question") {
       const body = await request.json() as QuestionRequest;
+      const existing = devQuestions.find((thread) => thread.thread_id === body.thread_id);
+      const nextThread: StoredQuestionThread = {
+        thread_id: body.thread_id,
+        operation_id: body.operation_id,
+        generation: body.generation,
+        range: body.range,
+        path: body.path,
+        side: body.side,
+        start_line: body.start_line,
+        end_line: body.end_line,
+        messages: body.messages.map((message) => ({ ...message })),
+        status: "asking",
+      };
+      const thread = existing ?? nextThread;
+      Object.assign(thread, nextThread);
+      if (!existing) devQuestions.push(thread);
       const cancelled = await Promise.race([
         Bun.sleep(900).then(() => false),
         new Promise<boolean>((resolve) => {
@@ -74,16 +91,23 @@ const server = Bun.serve({
       ]);
       questionCancellations.delete(body.operation_id);
       if (cancelled) {
+        thread.status = "cancelled";
         return Response.json({
           code: "operation_cancelled",
           error: "question answering was cancelled",
         }, { status: 409 });
       }
+      const answer = `This thread is anchored to \`${body.path}:${body.start_line}${body.end_line === body.start_line ? "" : `-${body.end_line}`}\`. In a real review, Tact asks a sub-agent to inspect the surrounding code and answer with that context.`;
+      thread.messages.push({ role: "agent", body: answer });
+      thread.status = "idle";
       return Response.json({
         generation: body.generation,
         selected_range: body.range,
-        answer: `This thread is anchored to \`${body.path}:${body.start_line}${body.end_line === body.start_line ? "" : `-${body.end_line}`}\`. In a real review, Tact asks a sub-agent to inspect the surrounding code and answer with that context.`,
+        answer,
       });
+    }
+    if (request.method === "POST" && url.pathname === "/api/questions") {
+      return Response.json({ generation: reviewBootstrap.generation, questions: devQuestions });
     }
     if (request.method === "POST" && url.pathname === "/api/question/cancel") {
       const body = await request.json() as { operation_id: string };

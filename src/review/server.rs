@@ -26,7 +26,8 @@ const MAX_PATH_BYTES: usize = 4096;
 const MAX_OPERATION_ID_BYTES: usize = 128;
 const MAX_THREAD_MESSAGES: usize = 64;
 const MAX_THREAD_BYTES: usize = 256 * 1024;
-pub(super) const PROTOCOL_VERSION: u32 = 2;
+const MAX_QUESTION_THREADS: usize = 256;
+pub(super) const PROTOCOL_VERSION: u32 = 3;
 const MAX_CACHED_PAGES: usize = 8;
 const MAX_CACHED_PAGE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_CACHED_OVERVIEWS: usize = 8;
@@ -85,6 +86,7 @@ struct OverviewResponse {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct QuestionRequest {
+    pub(super) thread_id: String,
     pub(super) operation_id: String,
     pub(super) generation: u64,
     pub(super) range: super::diff::ReviewRange,
@@ -103,14 +105,14 @@ struct QuestionCancelRequest {
     range: super::diff::ReviewRange,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ThreadMessage {
     pub(super) role: ThreadRole,
     pub(super) body: String,
 }
 
-#[derive(Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum ThreadRole {
     Reviewer,
@@ -124,6 +126,37 @@ struct QuestionResponse {
     answer: String,
 }
 
+#[derive(Clone, Serialize)]
+struct StoredQuestion {
+    thread_id: String,
+    operation_id: String,
+    generation: u64,
+    range: super::diff::ReviewRange,
+    path: String,
+    side: CommentSide,
+    start_line: u32,
+    end_line: u32,
+    messages: Vec<ThreadMessage>,
+    status: QuestionStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum QuestionStatus {
+    Asking,
+    Idle,
+    Error,
+    Cancelled,
+}
+
+#[derive(Serialize)]
+struct QuestionListResponse {
+    generation: u64,
+    questions: Vec<StoredQuestion>,
+}
+
 #[derive(Serialize)]
 struct ReviewStatus {
     generation: u64,
@@ -135,6 +168,7 @@ struct RefreshResponse {
     #[serde(flatten)]
     bootstrap: ReviewBootstrap,
     page: ReviewPage,
+    questions: Vec<StoredQuestion>,
 }
 
 #[derive(Serialize)]
@@ -198,7 +232,7 @@ pub(super) struct ReviewComment {
     pub(super) body: String,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum CommentSide {
     Additions,
@@ -210,7 +244,7 @@ struct ServerState {
     session: Mutex<ReviewSession>,
     backend: Arc<super::ReviewBackend>,
     overview_operations: OverviewOperations,
-    agent_operation: Mutex<()>,
+    agent_operation: Arc<Mutex<()>>,
     active_question: StdMutex<Option<ActiveQuestion>>,
     refresh_generation: Mutex<()>,
     session_shutdown: CancellationToken,
@@ -224,13 +258,13 @@ struct ActiveQuestion {
     cancellation: CancellationToken,
 }
 
-struct ActiveQuestionRegistration<'a> {
-    state: &'a ServerState,
-    operation_id: &'a str,
+struct ActiveQuestionRegistration {
+    state: Arc<ServerState>,
+    operation_id: String,
     cancellation: CancellationToken,
 }
 
-impl Drop for ActiveQuestionRegistration<'_> {
+impl Drop for ActiveQuestionRegistration {
     fn drop(&mut self) {
         self.cancellation.cancel();
         let Ok(mut active) = self.state.active_question.lock() else {
@@ -249,9 +283,11 @@ struct ReviewSession {
     generation: u64,
     bootstrap: ReviewBootstrap,
     default_page: ReviewPage,
+    selected_page: ReviewPage,
     context: super::diff::ReviewContext,
     range_pages: BoundedCache<super::diff::ReviewRange, ReviewPage>,
     overviews: BoundedCache<super::diff::ReviewRange, String>,
+    questions: Vec<StoredQuestion>,
     version: super::diff::WorkspaceVersion,
     generation_shutdown: CancellationToken,
     session_shutdown: CancellationToken,
@@ -309,13 +345,16 @@ where
 
 impl ReviewSession {
     fn new(review: PreparedReview, session_shutdown: CancellationToken) -> Self {
+        let selected_page = review.initial_page.clone();
         Self {
             generation: 0,
             bootstrap: review.bootstrap,
             default_page: review.initial_page,
+            selected_page,
             context: review.context,
             range_pages: BoundedCache::new(MAX_CACHED_PAGES, MAX_CACHED_PAGE_BYTES),
             overviews: BoundedCache::new(MAX_CACHED_OVERVIEWS, MAX_CACHED_OVERVIEW_BYTES),
+            questions: Vec::new(),
             version: review.version,
             generation_shutdown: session_shutdown.child_token(),
             session_shutdown,
@@ -330,6 +369,7 @@ impl ReviewSession {
         self.generation = generation;
         self.bootstrap.generation = generation;
         self.default_page.generation = generation;
+        self.selected_page.generation = generation;
         for (page, _) in self.range_pages.values.values_mut() {
             page.generation = generation;
         }
@@ -379,7 +419,7 @@ impl ReviewServer {
             session: Mutex::new(ReviewSession::new(review, session_shutdown.clone())),
             backend,
             overview_operations: Mutex::new(HashMap::new()),
-            agent_operation: Mutex::new(()),
+            agent_operation: Arc::new(Mutex::new(())),
             active_question: StdMutex::new(None),
             refresh_generation: Mutex::new(()),
             session_shutdown: session_shutdown.clone(),
@@ -453,6 +493,7 @@ fn router(state: Arc<ServerState>) -> Router {
         .route("/api/range", post(load_range))
         .route("/api/overview", post(load_overview))
         .route("/api/question", post(ask_question))
+        .route("/api/questions", post(list_questions))
         .route("/api/question/cancel", post(cancel_question))
         .route("/api/decision", post(submit))
         .route("/api/cancel", post(cancel))
@@ -474,15 +515,12 @@ async fn static_asset(
 
 async fn review(State(state): State<Arc<ServerState>>) -> impl IntoResponse {
     let session = state.session.lock().await;
-    let page = session
-        .page(&session.bootstrap.default_range)
-        .expect("the default review page must remain cached")
-        .clone();
     secure_json(
         StatusCode::OK,
         RefreshResponse {
             bootstrap: session.bootstrap.clone(),
-            page,
+            page: session.selected_page.clone(),
+            questions: session.questions.clone(),
         },
     )
 }
@@ -583,6 +621,7 @@ async fn refresh_review(
         RefreshResponse {
             bootstrap: session.bootstrap.clone(),
             page,
+            questions: session.questions.clone(),
         },
     )
 }
@@ -592,11 +631,12 @@ async fn load_range(
     Json(request): Json<RangeRequest>,
 ) -> Response<Body> {
     let (context, generation, version, shutdown) = {
-        let session = state.session.lock().await;
+        let mut session = state.session.lock().await;
         if request.generation != session.generation {
             return stale_snapshot("the review generation is stale");
         }
         if let Some(page) = session.page(&request.range).cloned() {
+            session.selected_page = page.clone();
             return secure_json(StatusCode::OK, page);
         }
         (
@@ -682,6 +722,7 @@ async fn load_range(
         return stale_snapshot("the review changed while this range was loading");
     }
     session.insert_page(page.clone());
+    session.selected_page = page.clone();
     secure_json(StatusCode::OK, page)
 }
 
@@ -807,13 +848,7 @@ async fn ask_question(
     Json(request): Json<QuestionRequest>,
 ) -> Response<Body> {
     if invalid_question(&request) {
-        return error_response(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            ErrorCode::InvalidThread,
-            "the question thread is invalid",
-            false,
-            true,
-        );
+        return invalid_thread("the question thread is invalid");
     }
     let (page, version, shutdown) = {
         let session = state.session.lock().await;
@@ -827,13 +862,7 @@ async fn ask_question(
             request.start_line,
             request.end_line,
         ) {
-            return error_response(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                ErrorCode::InvalidThread,
-                "the question is not anchored to the reviewed patch",
-                false,
-                true,
-            );
+            return invalid_thread("the question is not anchored to the reviewed patch");
         }
         (
             page.clone(),
@@ -841,9 +870,16 @@ async fn ask_question(
             session.generation_shutdown.clone(),
         )
     };
-    let Ok(_agent_operation) = state.agent_operation.try_lock() else {
+    let Ok(agent_operation) = Arc::clone(&state.agent_operation).try_lock_owned() else {
         return agent_busy();
     };
+    {
+        let mut session = state.session.lock().await;
+        if !begin_stored_question(&mut session, &request) {
+            return invalid_thread("the question does not continue its stored thread");
+        }
+    }
+
     let operation_shutdown = shutdown.child_token();
     {
         let Ok(mut active) = state.active_question.lock() else {
@@ -856,93 +892,164 @@ async fn ask_question(
             cancellation: operation_shutdown.clone(),
         });
     }
-    let _registration = ActiveQuestionRegistration {
-        state: &state,
-        operation_id: &request.operation_id,
-        cancellation: operation_shutdown.clone(),
-    };
-    let current = match state
-        .backend
-        .current_version(operation_shutdown.clone())
+    let (completion, response) = oneshot::channel();
+    let task_state = Arc::clone(&state);
+    tokio::spawn(async move {
+        let _agent_operation = agent_operation;
+        let completion_shutdown = operation_shutdown.clone();
+        let _registration = ActiveQuestionRegistration {
+            state: Arc::clone(&task_state),
+            operation_id: request.operation_id.clone(),
+            cancellation: operation_shutdown.clone(),
+        };
+        let mut result =
+            run_question(&task_state, &request, &page, version, operation_shutdown).await;
+        if completion_shutdown.is_cancelled() {
+            result = QuestionRunResult::Cancelled;
+        }
+        store_question_result(&task_state, &request, &result).await;
+        let _ = completion.send(question_response(&request, result));
+    });
+
+    response
         .await
-    {
+        .unwrap_or_else(|_| internal_error("the question operation stopped unexpectedly"))
+}
+
+async fn list_questions(
+    State(state): State<Arc<ServerState>>,
+    Json(request): Json<GenerationRequest>,
+) -> Response<Body> {
+    let session = state.session.lock().await;
+    if session.generation != request.generation {
+        return stale_snapshot("the question list belongs to an older review generation");
+    }
+    secure_json(
+        StatusCode::OK,
+        QuestionListResponse {
+            generation: session.generation,
+            questions: session.questions.clone(),
+        },
+    )
+}
+
+enum QuestionRunResult {
+    Answer(String),
+    Cancelled,
+    Stale(&'static str),
+    Workspace(String),
+    Failed(String),
+}
+
+async fn run_question(
+    state: &ServerState,
+    request: &QuestionRequest,
+    page: &ReviewPage,
+    version: super::diff::WorkspaceVersion,
+    shutdown: CancellationToken,
+) -> QuestionRunResult {
+    let current = match state.backend.current_version(shutdown.clone()).await {
         Ok(version) => version,
-        Err(ScopeLoadError::Cancelled) => {
-            return operation_cancelled("question answering was cancelled");
-        }
-        Err(ScopeLoadError::Failed(error)) => {
-            return error_response(
-                StatusCode::SERVICE_UNAVAILABLE,
-                ErrorCode::WorkspaceChanged,
-                error,
-                true,
-                false,
-            );
-        }
+        Err(ScopeLoadError::Cancelled) => return QuestionRunResult::Cancelled,
+        Err(ScopeLoadError::Failed(error)) => return QuestionRunResult::Workspace(error),
     };
     if current != version {
-        return stale_snapshot("the workspace changed before the question was answered");
+        return QuestionRunResult::Stale("the workspace changed before the question was answered");
     }
     let answer = match state
         .backend
         .answer_question(
             &page.diff.scope,
             &page.diff.overview,
-            &request,
-            operation_shutdown.clone(),
+            request,
+            shutdown.clone(),
         )
         .await
     {
         Ok(answer) => answer,
-        Err(ScopeLoadError::Cancelled) => {
-            return error_response(
-                StatusCode::CONFLICT,
-                ErrorCode::OperationCancelled,
-                "question answering was cancelled",
-                true,
-                true,
-            );
-        }
-        Err(ScopeLoadError::Failed(error)) => {
-            return error_response(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                ErrorCode::QuestionFailed,
-                error,
-                true,
-                true,
-            );
-        }
+        Err(ScopeLoadError::Cancelled) => return QuestionRunResult::Cancelled,
+        Err(ScopeLoadError::Failed(error)) => return QuestionRunResult::Failed(error),
     };
-    let current = match state.backend.current_version(operation_shutdown).await {
+    let current = match state.backend.current_version(shutdown).await {
         Ok(version) => version,
-        Err(ScopeLoadError::Cancelled) => {
-            return operation_cancelled("question answering was cancelled");
-        }
-        Err(ScopeLoadError::Failed(error)) => {
-            return error_response(
-                StatusCode::SERVICE_UNAVAILABLE,
-                ErrorCode::WorkspaceChanged,
-                error,
-                true,
-                false,
-            );
-        }
+        Err(ScopeLoadError::Cancelled) => return QuestionRunResult::Cancelled,
+        Err(ScopeLoadError::Failed(error)) => return QuestionRunResult::Workspace(error),
     };
     if current != version {
-        return stale_snapshot("the workspace changed while the question was answered");
+        return QuestionRunResult::Stale("the workspace changed while the question was answered");
     }
     let session = state.session.lock().await;
     if matching_page(&session, request.generation, &request.range).is_none() {
-        return stale_snapshot("the review changed while the question was answered");
+        return QuestionRunResult::Stale("the review changed while the question was answered");
     }
-    secure_json(
-        StatusCode::OK,
-        QuestionResponse {
-            generation: request.generation,
-            selected_range: request.range,
-            answer,
-        },
-    )
+    QuestionRunResult::Answer(answer)
+}
+
+async fn store_question_result(
+    state: &ServerState,
+    request: &QuestionRequest,
+    result: &QuestionRunResult,
+) {
+    let mut session = state.session.lock().await;
+    let Some(thread) = session.questions.iter_mut().find(|thread| {
+        thread.thread_id == request.thread_id
+            && thread.operation_id == request.operation_id
+            && thread.generation == request.generation
+            && thread.range == request.range
+    }) else {
+        return;
+    };
+    match result {
+        QuestionRunResult::Answer(answer) => {
+            thread.messages.push(ThreadMessage {
+                role: ThreadRole::Agent,
+                body: answer.clone(),
+            });
+            thread.status = QuestionStatus::Idle;
+            thread.error = None;
+        }
+        QuestionRunResult::Cancelled => {
+            thread.status = QuestionStatus::Cancelled;
+            thread.error = None;
+        }
+        QuestionRunResult::Stale(message) => {
+            thread.status = QuestionStatus::Error;
+            thread.error = Some((*message).to_owned());
+        }
+        QuestionRunResult::Workspace(error) | QuestionRunResult::Failed(error) => {
+            thread.status = QuestionStatus::Error;
+            thread.error = Some(error.clone());
+        }
+    }
+}
+
+fn question_response(request: &QuestionRequest, result: QuestionRunResult) -> Response<Body> {
+    match result {
+        QuestionRunResult::Answer(answer) => secure_json(
+            StatusCode::OK,
+            QuestionResponse {
+                generation: request.generation,
+                selected_range: request.range,
+                answer,
+            },
+        ),
+        QuestionRunResult::Cancelled => operation_cancelled("question answering was cancelled"),
+        QuestionRunResult::Stale(message) => stale_snapshot(message),
+        QuestionRunResult::Workspace(error) => error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            ErrorCode::WorkspaceChanged,
+            error,
+            true,
+            false,
+        ),
+        QuestionRunResult::Failed(error) => error_response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            ErrorCode::QuestionFailed,
+            error,
+            true,
+            true,
+        ),
+    }
 }
 
 async fn cancel_question(
@@ -1125,7 +1232,8 @@ fn invalid_decision(decision: &ReviewDecision) -> bool {
 }
 
 fn invalid_question(question: &QuestionRequest) -> bool {
-    if invalid_operation_id(&question.operation_id)
+    if invalid_operation_id(&question.thread_id)
+        || invalid_operation_id(&question.operation_id)
         || question.path.trim().is_empty()
         || question.path.len() > MAX_PATH_BYTES
         || question.start_line == 0
@@ -1151,6 +1259,60 @@ fn invalid_question(question: &QuestionRequest) -> bool {
         || bytes > MAX_THREAD_BYTES
 }
 
+fn begin_stored_question(session: &mut ReviewSession, request: &QuestionRequest) -> bool {
+    if matching_page(session, request.generation, &request.range).is_none() {
+        return false;
+    }
+    if let Some(thread) = session
+        .questions
+        .iter_mut()
+        .find(|thread| thread.thread_id == request.thread_id)
+    {
+        let same_anchor = thread.generation == request.generation
+            && thread.range == request.range
+            && thread.path == request.path
+            && thread.side == request.side
+            && thread.start_line == request.start_line
+            && thread.end_line == request.end_line;
+        if !same_anchor || thread.status == QuestionStatus::Asking {
+            return false;
+        }
+        let retries_last_question = matches!(
+            thread.status,
+            QuestionStatus::Error | QuestionStatus::Cancelled
+        ) && request.messages == thread.messages;
+        let adds_follow_up = thread.status == QuestionStatus::Idle
+            && request.messages.len() == thread.messages.len() + 1
+            && request.messages.starts_with(&thread.messages)
+            && request.messages.last().map(|message| message.role) == Some(ThreadRole::Reviewer);
+        if !retries_last_question && !adds_follow_up {
+            return false;
+        }
+        thread.operation_id.clone_from(&request.operation_id);
+        thread.messages.clone_from(&request.messages);
+        thread.status = QuestionStatus::Asking;
+        thread.error = None;
+        return true;
+    }
+    if session.questions.len() >= MAX_QUESTION_THREADS {
+        return false;
+    }
+    session.questions.push(StoredQuestion {
+        thread_id: request.thread_id.clone(),
+        operation_id: request.operation_id.clone(),
+        generation: request.generation,
+        range: request.range,
+        path: request.path.clone(),
+        side: request.side,
+        start_line: request.start_line,
+        end_line: request.end_line,
+        messages: request.messages.clone(),
+        status: QuestionStatus::Asking,
+        error: None,
+    });
+    true
+}
+
 fn invalid_operation_id(operation_id: &str) -> bool {
     operation_id.trim().is_empty()
         || operation_id.len() > MAX_OPERATION_ID_BYTES
@@ -1163,6 +1325,16 @@ fn agent_busy() -> Response<Body> {
         ErrorCode::AgentBusy,
         "another review agent operation is already running",
         true,
+        true,
+    )
+}
+
+fn invalid_thread(message: impl Into<String>) -> Response<Body> {
+    error_response(
+        StatusCode::UNPROCESSABLE_ENTITY,
+        ErrorCode::InvalidThread,
+        message,
+        false,
         true,
     )
 }
@@ -1277,7 +1449,7 @@ mod tests {
         process::Command,
         sync::{
             Arc, Mutex,
-            atomic::{AtomicUsize, Ordering},
+            atomic::{AtomicBool, AtomicUsize, Ordering},
         },
         time::Duration,
     };
@@ -1505,7 +1677,7 @@ mod tests {
         let server = start_server(&assets).await;
         let response = reqwest::Client::new()
             .post(server.endpoint_url("api/range"))
-            .json(&range_request(full_range()))
+            .json(&range_request(working_tree_range()))
             .send()
             .await
             .unwrap();
@@ -1513,7 +1685,17 @@ mod tests {
         assert_eq!(response.status(), reqwest::StatusCode::OK);
         assert_eq!(
             response.json::<serde_json::Value>().await.unwrap()["selected_range"],
-            serde_json::json!({ "from": 0, "to": 2 })
+            serde_json::json!({ "from": 1, "to": 2 })
+        );
+        let reloaded = reqwest::get(server.endpoint_url("api/review"))
+            .await
+            .unwrap()
+            .json::<serde_json::Value>()
+            .await
+            .unwrap();
+        assert_eq!(
+            reloaded["page"]["selected_range"],
+            serde_json::json!({ "from": 1, "to": 2 })
         );
 
         reqwest::Client::new()
@@ -1808,6 +1990,91 @@ mod tests {
         assert_eq!(
             request_overview(server.endpoint_url("api/overview"), uncommitted_range()).await,
             reqwest::StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn question_survives_a_browser_reload_and_remains_visible() {
+        let assets = tempfile::tempdir().unwrap();
+        for name in ["index.html", "app.js", "app.css"] {
+            std::fs::write(assets.path().join(name), "").unwrap();
+        }
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let generator: ReviewAgent = Arc::new({
+            let started = Arc::clone(&started);
+            let release = Arc::clone(&release);
+            let cancelled = Arc::clone(&cancelled);
+            move |_prompt, shutdown| {
+                let started = Arc::clone(&started);
+                let release = Arc::clone(&release);
+                let cancelled = Arc::clone(&cancelled);
+                Box::pin(async move {
+                    started.notify_one();
+                    tokio::select! {
+                        () = release.notified() => Ok("Persistent answer".to_owned()),
+                        () = shutdown.cancelled() => {
+                            cancelled.store(true, Ordering::SeqCst);
+                            Err(ReviewAgentError::Cancelled)
+                        }
+                    }
+                })
+            }
+        });
+        let server = start_server_with_generator(&assets, generator).await;
+        let request = tokio::spawn({
+            let url = server.endpoint_url("api/question");
+            async move {
+                reqwest::Client::new()
+                    .post(url)
+                    .json(&question_request())
+                    .send()
+                    .await
+            }
+        });
+        started.notified().await;
+
+        let reloaded = reqwest::get(server.endpoint_url("api/review"))
+            .await
+            .unwrap()
+            .json::<serde_json::Value>()
+            .await
+            .unwrap();
+        assert_eq!(reloaded["questions"][0]["status"], "asking");
+        request.abort();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!cancelled.load(Ordering::SeqCst));
+        assert_eq!(
+            request_overview(server.endpoint_url("api/overview"), uncommitted_range()).await,
+            reqwest::StatusCode::CONFLICT
+        );
+
+        release.notify_one();
+        let completed = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let review = reqwest::get(server.endpoint_url("api/review"))
+                    .await
+                    .unwrap()
+                    .json::<serde_json::Value>()
+                    .await
+                    .unwrap();
+                if review["questions"][0]["status"] == "idle" {
+                    break review;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("the detached question should finish");
+        assert_eq!(completed["questions"][0]["status"], "idle");
+        assert_eq!(
+            completed["questions"][0]["messages"]
+                .as_array()
+                .unwrap()
+                .last()
+                .unwrap()["body"],
+            "Persistent answer"
         );
     }
 
@@ -2247,6 +2514,7 @@ mod tests {
 
     fn question_request() -> serde_json::Value {
         serde_json::json!({
+            "thread_id": "thread-1",
             "operation_id": "question-1",
             "generation": 0,
             "range": uncommitted_range(),
