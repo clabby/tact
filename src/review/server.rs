@@ -1561,8 +1561,7 @@ pub(crate) enum ServerError {
 #[cfg(test)]
 mod tests {
     use super::{Decision, PROTOCOL_VERSION, ReviewOutcome, ReviewServer};
-    use crate::review::diff::ReviewRange;
-    use crate::review::{ReviewAgent, ReviewAgentError, ReviewBackend};
+    use crate::review::{ReviewAgent, ReviewAgentError, ReviewBackend, diff::ReviewRange};
     use std::{
         fs,
         path::Path,

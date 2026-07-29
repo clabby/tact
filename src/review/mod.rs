@@ -5,9 +5,8 @@ mod diff;
 mod server;
 
 pub(crate) use assets::{AssetAvailability, ReviewAssets};
-pub(crate) use diff::ReviewRange;
-
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+pub(crate) use diff::ReviewRange;
 use futures_util::future::BoxFuture;
 use server::{
     PreparedReview, ReviewBootstrap, ReviewDecision, ReviewOutcome, ReviewPage, ReviewServer,
@@ -367,8 +366,10 @@ impl ReviewError {
 
 #[cfg(test)]
 mod tests {
-    use super::server::{CommentSide, Decision, ReviewComment, ReviewDecision};
-    use super::{ReviewAgent, ReviewBackend, ReviewError, generate_overview};
+    use super::{
+        ReviewAgent, ReviewBackend, ReviewError, generate_overview,
+        server::{CommentSide, Decision, ReviewComment, ReviewDecision},
+    };
     use crate::review::diff::{OverviewContext, OverviewRange, ReviewRange};
     use std::{
         fs,

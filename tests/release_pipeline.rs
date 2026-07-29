@@ -42,7 +42,10 @@ fn crate_package_omits_repository_only_assets() {
         .collect::<Vec<_>>();
 
     for path in ["docker/**", "tests/release_pipeline.rs", "web/**"] {
-        assert!(excluded.contains(&path), "crate package should exclude {path}");
+        assert!(
+            excluded.contains(&path),
+            "crate package should exclude {path}"
+        );
     }
 }
 
