@@ -4,7 +4,13 @@ use super::{
 };
 use crate::tui::theme::Theme;
 use crossterm::event::{Event, KeyCode, KeyEventKind};
-use ratatui::{Frame, layout::Rect, style::Style, text::Line, widgets::Paragraph};
+use ratatui::{
+    Frame,
+    layout::Rect,
+    style::Style,
+    text::Line,
+    widgets::{Paragraph, Wrap},
+};
 
 const KEY_BINDINGS: [&str; 2] = ["enter/y download", "esc/n cancel"];
 
@@ -55,6 +61,37 @@ impl Component for ReviewDownloadConfirmation {
                 Style::default().fg(theme.muted()),
             ),
         ];
-        frame.render_widget(Paragraph::new(lines), layout.body);
+        frame.render_widget(
+            Paragraph::new(lines).wrap(Wrap { trim: false }),
+            layout.body,
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Component, ReviewDownloadConfirmation};
+    use crate::tui::theme::Theme;
+    use ratatui::{Terminal, backend::TestBackend};
+
+    #[test]
+    fn download_message_fits_inside_the_popup() {
+        let mut terminal = Terminal::new(TestBackend::new(64, 9)).unwrap();
+        terminal
+            .draw(|frame| {
+                ReviewDownloadConfirmation.render(frame, frame.area(), &Theme::default());
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let text = (0..buffer.area.height)
+            .map(|y| (1..63).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(text.contains("Download the matching, checksummed bundle from this Tact release?"));
+        for y in 1..8 {
+            assert_eq!(buffer[(63, y)].symbol(), "│");
+        }
     }
 }
