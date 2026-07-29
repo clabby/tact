@@ -80,7 +80,7 @@ export const reviewBootstrap = {
     { index: 2, kind: "commit" as const, short_id: "d2e640b", title: "Integrate review action" },
     { index: 3, kind: "working_tree" as const, short_id: "WT", title: "Uncommitted changes" },
   ],
-  default_range: { from: 2, to: 3 },
+  default_range: { from: 0, to: 3 },
 };
 
 const overview = `

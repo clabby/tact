@@ -113,6 +113,10 @@ impl ReviewContext {
     }
 
     pub(super) fn default_range(&self) -> ReviewRange {
+        self.full_range()
+    }
+
+    fn uncommitted_range(&self) -> ReviewRange {
         let to = self.range_points.len() - 1;
         ReviewRange { from: to - 1, to }
     }
@@ -126,7 +130,7 @@ impl ReviewContext {
 
     pub(super) fn range_label(&self, range: ReviewRange) -> Result<String, DiffError> {
         self.validate_range(range)?;
-        if range == self.default_range() {
+        if range == self.uncommitted_range() {
             return Ok("Uncommitted changes".to_owned());
         }
         if range == self.full_range() {
@@ -691,7 +695,7 @@ mod tests {
         fs::write(repository.path().join("new.txt"), "new\n").unwrap();
 
         let context = load(repository.path()).await.unwrap();
-        let snapshot = context.collect(context.default_range()).await.unwrap();
+        let snapshot = context.collect(context.uncommitted_range()).await.unwrap();
 
         assert!(snapshot.patch.contains("tracked.txt"));
         assert!(snapshot.patch.contains("new.txt"));
@@ -735,7 +739,7 @@ mod tests {
         git(repository.path(), ["mv", "tracked.txt", "renamed.txt"]);
 
         let context = load(repository.path()).await.unwrap();
-        let snapshot = context.collect(context.default_range()).await.unwrap();
+        let snapshot = context.collect(context.uncommitted_range()).await.unwrap();
         assert!(snapshot.file_contexts.iter().any(|context| {
             context.old_path == "tracked.txt"
                 && context.new_path == "renamed.txt"
@@ -744,7 +748,7 @@ mod tests {
         }));
 
         fs::write(repository.path().join("renamed.txt"), [0xff, 0x00]).unwrap();
-        let snapshot = context.collect(context.default_range()).await.unwrap();
+        let snapshot = context.collect(context.uncommitted_range()).await.unwrap();
         assert!(
             snapshot
                 .file_contexts
@@ -773,6 +777,7 @@ mod tests {
 
         let context = load(repository.path()).await.unwrap();
         let targets = context.range_targets();
+        assert_eq!(context.default_range(), context.full_range());
         assert_eq!(targets.len(), 4);
         assert!(matches!(targets[0].kind, ReviewTargetKind::Trunk));
         assert_eq!(targets[1].title, "first change");
@@ -816,7 +821,7 @@ mod tests {
         let repository = repository();
         fs::write(repository.path().join("tracked.txt"), "first edit\n").unwrap();
         let context = load(repository.path()).await.unwrap();
-        let snapshot = context.collect(context.default_range()).await.unwrap();
+        let snapshot = context.collect(context.uncommitted_range()).await.unwrap();
         let initial = context.version(&snapshot);
 
         fs::write(repository.path().join("tracked.txt"), "second edit\n").unwrap();

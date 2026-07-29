@@ -152,13 +152,13 @@ class ReviewApp {
             <span class="mark" aria-hidden="true">T</span>
             <div>
               <h1>${escapeHtml(this.bootstrap.title)}</h1>
-              <p>${escapeHtml(this.bootstrap.repository)} <span>·</span> <span id="scope-description">Loading uncommitted changes…</span></p>
+              <p>${escapeHtml(this.bootstrap.repository)} <span>·</span> <span id="scope-description">Loading changes…</span></p>
             </div>
           </div>
           <div class="topbar-actions">
             <button class="range-button" id="range-button" aria-haspopup="dialog" aria-controls="range-dialog" aria-expanded="false">
               <span class="range-button-icon">${icon("git-branch")}</span>
-              <span><small>Change range</small><strong id="range-label">Uncommitted changes</strong></span>
+              <span><small>Change range</small><strong id="range-label">Full branch</strong></span>
               <span class="range-chevron">${icon("chevron-down")}</span>
             </button>
             <div class="change-stats" id="change-stats" aria-label="Change statistics"></div>

@@ -9,7 +9,7 @@ test("standalone review fixtures contain valid patches", () => {
     expect(() => parsePatchFiles(fixture.patch, "dev-fixture", true)).not.toThrow();
   }
   expect(reviewFixtures[rangeKey(reviewBootstrap.default_range) as keyof typeof reviewFixtures].selected_range)
-    .toEqual({ from: 2, to: 3 });
+    .toEqual({ from: 0, to: 3 });
   expect(reviewFixtures["2:3"]).not.toHaveProperty("overview_html");
 });
 
