@@ -257,11 +257,14 @@ button:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2p
 .range-direction { display: grid; place-items: center; color: var(--muted); }
 .range-direction svg { width: 17px; height: 17px; }
 .commit-timeline { max-height: 330px; overflow: auto; padding: 5px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
-.commit-target { position: relative; display: grid; grid-template-columns: 24px 68px minmax(0, 1fr) auto; align-items: center; gap: 8px; width: 100%; min-height: 52px; padding: 5px 9px 5px 5px; border: 0; border-radius: 8px; background: transparent; color: var(--text); cursor: pointer; text-align: left; }
-.commit-target:hover:not(:disabled) { background: var(--bg); }
-.commit-target:disabled { opacity: .38; }
-.commit-target.from, .commit-target.to { background: color-mix(in srgb, var(--accent-solid) 9%, transparent); }
-.commit-target.included { background: color-mix(in srgb, var(--accent-solid) 4%, transparent); }
+.commit-target { position: relative; min-height: 52px; border-radius: 8px; }
+.commit-target-main { display: grid; grid-template-columns: 24px 68px minmax(0, 1fr) 116px; align-items: center; gap: 8px; width: 100%; min-height: 52px; padding: 5px 9px 5px 5px; border: 0; border-radius: 8px; background: transparent; color: var(--text); text-align: left; }
+.commit-target.outside .commit-target-main { cursor: pointer; }
+.commit-target.outside .commit-target-main:hover { background: var(--bg); }
+.commit-target:not(.outside) .commit-target-main { cursor: default; }
+.commit-target.from .commit-target-main, .commit-target.to .commit-target-main { background: color-mix(in srgb, var(--accent-solid) 9%, transparent); }
+.commit-target.included .commit-target-main { background: color-mix(in srgb, var(--accent-solid) 4%, transparent); }
+.commit-timeline.previewing .commit-target-main { transition: background .1s ease; }
 .commit-rail { position: relative; align-self: stretch; display: grid; place-items: center; }
 .commit-rail i { position: absolute; top: -6px; bottom: -6px; width: 1px; background: var(--line-strong); }
 .commit-target:first-child .commit-rail i { top: 50%; }
@@ -275,9 +278,15 @@ button:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2p
 .commit-copy strong, .commit-copy small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .commit-copy strong { font-size: 12px; font-weight: 620; }
 .commit-copy small { margin-top: 2px; color: var(--muted); font-size: 9px; letter-spacing: .05em; text-transform: uppercase; }
-.endpoint-badges { display: flex; gap: 4px; }
-.endpoint-badges em { display: none; padding: 2px 6px; border-radius: 9px; background: color-mix(in srgb, var(--accent-solid) 13%, transparent); color: var(--accent); font-size: 9px; font-style: normal; font-weight: 700; }
-.commit-target.from [data-from-badge], .commit-target.to [data-to-badge] { display: block; }
+.endpoint-handles, .boundary-actions { position: absolute; top: 50%; right: 9px; z-index: 2; display: none; align-items: center; gap: 4px; transform: translateY(-50%); }
+.endpoint-handles button, .boundary-actions button { height: 26px; padding: 0 8px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface-raised); color: var(--muted); cursor: pointer; font-size: 9px; font-weight: 700; white-space: nowrap; }
+.endpoint-handles button:hover, .endpoint-handles button:focus-visible, .boundary-actions button:hover, .boundary-actions button:focus-visible { border-color: var(--accent-solid); color: var(--accent); }
+.endpoint-handles button { display: none; touch-action: none; cursor: ns-resize; background: color-mix(in srgb, var(--accent-solid) 11%, var(--surface-raised)); color: var(--accent); }
+.commit-target.pending-from [data-boundary-handle="from"], .commit-target.pending-to [data-boundary-handle="to"] { display: block; }
+.commit-target.pending-from .endpoint-handles, .commit-target.pending-to .endpoint-handles { display: flex; }
+.commit-target.interior:hover .boundary-actions, .commit-target.interior:focus-within .boundary-actions, .commit-target.interior.actions-open .boundary-actions { display: flex; }
+.commit-target.interior:hover .commit-copy, .commit-target.interior:focus-within .commit-copy, .commit-target.interior.actions-open .commit-copy { opacity: .62; }
+.range-dragging, .range-dragging * { cursor: ns-resize !important; user-select: none !important; }
 .range-warning { margin: 0 18px 14px; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--danger) 22%, var(--line)); border-radius: 9px; background: color-mix(in srgb, var(--danger) 7%, var(--surface)); color: color-mix(in srgb, var(--danger) 78%, var(--text)); font-size: 11px; }
 .range-warning[hidden] { display: none; }
 .range-dialog > footer { display: flex; align-items: center; justify-content: space-between; padding: 12px 18px; border-top: 1px solid var(--line); }
@@ -315,7 +324,7 @@ button:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2p
   .range-dialog > header { padding: 19px 18px 15px; }
   .range-builder { padding: 12px; }
   .commit-timeline { max-height: max(160px, calc(100dvh - 330px)); }
-  .commit-target { grid-template-columns: 20px 58px minmax(0, 1fr) auto; gap: 6px; }
+  .commit-target-main { grid-template-columns: 20px 58px minmax(0, 1fr) 110px; gap: 6px; }
   .range-dialog footer > span { display: none; }
 }
 

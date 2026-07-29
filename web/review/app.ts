@@ -21,11 +21,13 @@ import {
 } from "./review-settings";
 import { overviewDocument } from "./overview";
 import {
+  expandRange,
+  moveRangeBoundary,
   rangeKey,
   rangeLabel,
-  resizeRange,
   rangesEqual,
   targetLabel,
+  type RangeBoundary,
   type ReviewRange,
   type ReviewTarget,
 } from "./range-selection";
@@ -117,6 +119,7 @@ class ReviewApp {
   private readonly overviews = new Map<string, string>();
   private draft?: CommentDraft;
   private pendingRange?: ReviewRange;
+  private previewRange?: ReviewRange;
   private nextCommentId = 1;
   private submitted = false;
   private loadingRange?: ReviewRange;
@@ -214,7 +217,7 @@ class ReviewApp {
               <div>
                 <span class="dialog-eyebrow">Review scope</span>
                 <h2 id="range-title">Choose a change range</h2>
-                <p id="range-description">Choose any point on the timeline to widen or shrink the nearest edge. Pending comments stay attached to the current range.</p>
+                <p id="range-description">Click outside the range to widen it. Drag a handle or use an interior action to shrink it.</p>
               </div>
               <button class="icon-button" data-range-close aria-label="Close range selector">${icon("close")}</button>
             </header>
@@ -321,15 +324,25 @@ class ReviewApp {
 
   private rangeTimelineMarkup() {
     return this.bootstrap.range_targets.map((target) => `
-      <button class="commit-target" data-range-target="${target.index}" aria-label="Resize range at ${escapeHtml(targetLabel(target))}: ${escapeHtml(target.title)}">
-        <span class="commit-rail"><i></i><b></b></span>
-        <span class="commit-id">${escapeHtml(targetLabel(target))}</span>
-        <span class="commit-copy">
-          <strong>${escapeHtml(target.title)}</strong>
-          <small>${target.kind === "trunk" ? "Trunk base" : target.kind === "working_tree" ? "Working tree" : "Commit"}</small>
+      <div class="commit-target" data-range-target="${target.index}">
+        <button class="commit-target-main" data-range-expand aria-label="Expand range through ${escapeHtml(targetLabel(target))}: ${escapeHtml(target.title)}">
+          <span class="commit-rail"><i></i><b></b></span>
+          <span class="commit-id">${escapeHtml(targetLabel(target))}</span>
+          <span class="commit-copy">
+            <strong>${escapeHtml(target.title)}</strong>
+            <small>${target.kind === "trunk" ? "Trunk base" : target.kind === "working_tree" ? "Working tree" : "Commit"}</small>
+          </span>
+          <span class="row-control-space"></span>
+        </button>
+        <span class="endpoint-handles">
+          <button data-boundary-handle="from" aria-label="Drag From boundary; use arrow keys to move">↕ From</button>
+          <button data-boundary-handle="to" aria-label="Drag To boundary; use arrow keys to move">↕ To</button>
         </span>
-        <span class="endpoint-badges"><em data-from-badge>From</em><em data-to-badge>To</em></span>
-      </button>`).join("");
+        <span class="boundary-actions">
+          <button data-move-boundary="from">Move From</button>
+          <button data-move-boundary="to">Move To</button>
+        </span>
+      </div>`).join("");
   }
 
   private renderOverviewState() {
@@ -496,13 +509,34 @@ class ReviewApp {
       });
     }
     this.root.querySelector("#range-button")?.addEventListener("click", () => this.openRangeDialog());
-    for (const button of this.root.querySelectorAll<HTMLButtonElement>("[data-range-target]")) {
+    for (const button of this.root.querySelectorAll<HTMLButtonElement>("[data-range-expand]")) {
       button.addEventListener("click", () => {
         if (!this.pendingRange) return;
-        const index = Number(button.dataset.rangeTarget);
-        this.pendingRange = resizeRange(this.pendingRange, index);
+        const index = this.rangeTargetIndex(button);
+        const expanded = expandRange(this.pendingRange, index);
+        if (expanded === this.pendingRange) {
+          this.closeBoundaryActions();
+          button.closest("[data-range-target]")?.classList.add("actions-open");
+          return;
+        }
+        this.closeBoundaryActions();
+        this.pendingRange = expanded;
         this.syncRangeSelector();
       });
+    }
+    for (const button of this.root.querySelectorAll<HTMLButtonElement>("[data-move-boundary]")) {
+      const boundary = button.dataset.moveBoundary as RangeBoundary;
+      const preview = () => this.previewBoundaryMove(boundary, this.rangeTargetIndex(button));
+      button.addEventListener("pointerenter", preview);
+      button.addEventListener("focus", preview);
+      button.addEventListener("pointerleave", () => this.clearRangePreview());
+      button.addEventListener("blur", () => this.clearRangePreview());
+      button.addEventListener("click", () => this.commitBoundaryMove(boundary, this.rangeTargetIndex(button)));
+    }
+    for (const handle of this.root.querySelectorAll<HTMLButtonElement>("[data-boundary-handle]")) {
+      const boundary = handle.dataset.boundaryHandle as RangeBoundary;
+      handle.addEventListener("keydown", (event) => this.moveBoundaryWithKeyboard(event, boundary));
+      handle.addEventListener("pointerdown", (event) => this.startBoundaryDrag(event, boundary));
     }
     for (const button of this.root.querySelectorAll<HTMLButtonElement>("[data-range-close]")) {
       button.addEventListener("click", () => this.closeRangeDialog());
@@ -607,12 +641,14 @@ class ReviewApp {
 
   private openRangeDialog() {
     if (this.loadingRange || this.loadingOverview) return;
+    this.closeBoundaryActions();
     this.pendingRange = { ...(this.page?.selected_range ?? this.bootstrap.default_range) };
+    this.previewRange = undefined;
     this.syncRangeSelector();
     this.root.querySelector<HTMLDialogElement>("#range-dialog")?.showModal();
     this.root.querySelector("#range-button")?.setAttribute("aria-expanded", "true");
     queueMicrotask(() => {
-      const from = this.root.querySelector<HTMLButtonElement>("[data-range-target].from");
+      const from = this.root.querySelector<HTMLButtonElement>(".commit-target.pending-from [data-boundary-handle=from]");
       from?.scrollIntoView({ block: "center" });
       from?.focus();
     });
@@ -622,25 +658,100 @@ class ReviewApp {
     const dialog = this.root.querySelector<HTMLDialogElement>("#range-dialog");
     if (dialog?.open) dialog.close();
     this.root.querySelector("#range-button")?.setAttribute("aria-expanded", "false");
+    this.closeBoundaryActions();
     this.pendingRange = undefined;
+    this.previewRange = undefined;
     this.root.querySelector<HTMLButtonElement>("#range-button")?.focus();
   }
 
   private syncRangeSelector() {
-    const range = this.pendingRange;
+    const range = this.previewRange ?? this.pendingRange;
     if (!range) return;
     const from = this.bootstrap.range_targets[range.from];
     const to = this.bootstrap.range_targets[range.to];
     this.setRangeEndpointText("from", from);
     this.setRangeEndpointText("to", to);
-    for (const target of this.root.querySelectorAll<HTMLButtonElement>("[data-range-target]")) {
+    const pending = this.pendingRange ?? range;
+    const timeline = this.root.querySelector<HTMLElement>("#commit-timeline");
+    timeline?.classList.toggle("previewing", this.previewRange !== undefined);
+    for (const target of this.root.querySelectorAll<HTMLElement>("[data-range-target]")) {
       const index = Number(target.dataset.rangeTarget);
       target.classList.toggle("from", index === range.from);
       target.classList.toggle("to", index === range.to);
       target.classList.toggle("included", index > range.from && index < range.to);
-      target.setAttribute("aria-pressed", String(index === range.from || index === range.to));
+      target.classList.toggle("pending-from", index === pending.from);
+      target.classList.toggle("pending-to", index === pending.to);
+      target.classList.toggle("interior", index > pending.from && index < pending.to);
+      target.classList.toggle("outside", index < pending.from || index > pending.to);
     }
     this.syncRangeWarning();
+  }
+
+  private rangeTargetIndex(element: Element) {
+    return Number(element.closest<HTMLElement>("[data-range-target]")?.dataset.rangeTarget);
+  }
+
+  private previewBoundaryMove(boundary: RangeBoundary, index: number) {
+    if (!this.pendingRange) return;
+    this.previewRange = moveRangeBoundary(this.pendingRange, boundary, index);
+    this.syncRangeSelector();
+  }
+
+  private clearRangePreview() {
+    if (!this.previewRange) return;
+    this.previewRange = undefined;
+    this.syncRangeSelector();
+  }
+
+  private commitBoundaryMove(boundary: RangeBoundary, index: number) {
+    if (!this.pendingRange) return;
+    this.closeBoundaryActions();
+    this.pendingRange = moveRangeBoundary(this.pendingRange, boundary, index);
+    this.previewRange = undefined;
+    this.syncRangeSelector();
+  }
+
+  private closeBoundaryActions() {
+    for (const target of this.root.querySelectorAll(".commit-target.actions-open")) {
+      target.classList.remove("actions-open");
+    }
+  }
+
+  private moveBoundaryWithKeyboard(event: KeyboardEvent, boundary: RangeBoundary) {
+    if (!this.pendingRange) return;
+    const current = this.pendingRange[boundary];
+    let target = current;
+    if (event.key === "ArrowUp" || event.key === "ArrowLeft") target--;
+    else if (event.key === "ArrowDown" || event.key === "ArrowRight") target++;
+    else if (event.key === "Home") target = boundary === "from" ? 0 : this.pendingRange.from + 1;
+    else if (event.key === "End") target = boundary === "from" ? this.pendingRange.to - 1 : this.bootstrap.range_targets.length - 1;
+    else return;
+    event.preventDefault();
+    this.commitBoundaryMove(boundary, target);
+    this.root.querySelector<HTMLButtonElement>(`.commit-target.pending-${boundary} [data-boundary-handle=${boundary}]`)?.focus();
+  }
+
+  private startBoundaryDrag(event: PointerEvent, boundary: RangeBoundary) {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    document.body.classList.add("range-dragging");
+    const move = (pointer: PointerEvent) => {
+      pointer.preventDefault();
+      const target = document.elementFromPoint(pointer.clientX, pointer.clientY);
+      if (target?.closest("[data-range-target]")) {
+        this.commitBoundaryMove(boundary, this.rangeTargetIndex(target));
+      }
+    };
+    const finish = () => {
+      document.body.classList.remove("range-dragging");
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", finish);
+      window.removeEventListener("pointercancel", finish);
+      this.root.querySelector<HTMLButtonElement>(`.commit-target.pending-${boundary} [data-boundary-handle=${boundary}]`)?.focus();
+    };
+    window.addEventListener("pointermove", move, { passive: false });
+    window.addEventListener("pointerup", finish);
+    window.addEventListener("pointercancel", finish);
   }
 
   private setRangeEndpointText(endpoint: "from" | "to", target: ReviewTarget) {

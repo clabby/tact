@@ -1,8 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import {
+  expandRange,
+  moveRangeBoundary,
   rangeKey,
   rangeLabel,
-  resizeRange,
   rangesEqual,
   type ReviewTarget,
 } from "./range-selection";
@@ -21,26 +22,27 @@ describe("commit range selection", () => {
     expect(rangeLabel(targets, { from: 1, to: 2 })).toBe("b111111 → c222222");
   });
 
-  test("clicking outside the range widens its nearest boundary", () => {
+  test("clicking outside the range widens the unambiguous boundary", () => {
     const range = { from: 2, to: 5 };
 
-    expect(resizeRange(range, 0)).toEqual({ from: 0, to: 5 });
-    expect(resizeRange(range, 7)).toEqual({ from: 2, to: 7 });
+    expect(expandRange(range, 0)).toEqual({ from: 0, to: 5 });
+    expect(expandRange(range, 7)).toEqual({ from: 2, to: 7 });
   });
 
-  test("clicking inside the range shrinks its nearest boundary", () => {
+  test("clicking inside the range does not guess which boundary to move", () => {
     const range = { from: 2, to: 6 };
 
-    expect(resizeRange(range, 3)).toEqual({ from: 3, to: 6 });
-    expect(resizeRange(range, 5)).toEqual({ from: 2, to: 5 });
-    expect(resizeRange(range, 4)).toEqual({ from: 4, to: 6 });
+    expect(expandRange(range, 3)).toBe(range);
+    expect(expandRange(range, 5)).toBe(range);
   });
 
-  test("clicking a boundary never crosses or collapses the range", () => {
-    const range = { from: 2, to: 3 };
+  test("explicit boundary moves can shrink without crossing", () => {
+    const range = { from: 2, to: 6 };
 
-    expect(resizeRange(range, 2)).toBe(range);
-    expect(resizeRange(range, 3)).toBe(range);
+    expect(moveRangeBoundary(range, "from", 4)).toEqual({ from: 4, to: 6 });
+    expect(moveRangeBoundary(range, "to", 3)).toEqual({ from: 2, to: 3 });
+    expect(moveRangeBoundary(range, "from", 6)).toBe(range);
+    expect(moveRangeBoundary(range, "to", 2)).toBe(range);
   });
 
   test("range identity is stable across decoded objects", () => {
