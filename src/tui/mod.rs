@@ -73,6 +73,14 @@ type NewSessionTask = JoinHandle<(
     Result<ConfiguredAgent>,
 )>;
 type SessionListTask = JoinHandle<(PaneId, Result<Vec<SessionSummary>>)>;
+type ReviewRangeTask = JoinHandle<(
+    PaneId,
+    std::result::Result<Vec<crate::review::ReviewRange>, crate::review::ReviewError>,
+)>;
+type ReviewTask = JoinHandle<(
+    PaneId,
+    std::result::Result<Option<String>, crate::review::ReviewError>,
+)>;
 type ResumeSessionTask = JoinHandle<(
     PaneId,
     ReasoningEffort,
@@ -322,6 +330,7 @@ pub(crate) async fn run(
             &writer_sender,
         )?,
     );
+    let mut review_agent = agent.clone();
     let (commands, mut worker_updates) = worker::spawn(agent, shutdown.clone());
     let workspace = config.agent().workspace().to_path_buf();
     let (agent_event_sender, mut agent_events) = mpsc::unbounded_channel();
@@ -360,6 +369,8 @@ pub(crate) async fn run(
     let mut fast_mode_task = None::<FastModeUpdateTask>;
     let mut new_session_task = None::<NewSessionTask>;
     let mut session_list_task = None::<SessionListTask>;
+    let mut review_range_task = None::<ReviewRangeTask>;
+    let mut review_task = None::<ReviewTask>;
     let mut resume_session_task = None::<ResumeSessionTask>;
     let mut scheduler = RenderScheduler::new(STREAM_FRAME_INTERVAL, Instant::now());
     let mut stopping = false;
@@ -387,6 +398,9 @@ pub(crate) async fn run(
                     fast_mode_task: &mut fast_mode_task,
                     new_session_task: &mut new_session_task,
                     session_list_task: &mut session_list_task,
+                    review_range_task: &mut review_range_task,
+                    review_task: &mut review_task,
+                    review_agent: &mut review_agent,
                     resume_session_task: &mut resume_session_task,
                     terminal: &mut terminal,
                     scheduler: &mut scheduler,
@@ -404,6 +418,12 @@ pub(crate) async fn run(
         }
         if stopping {
             shell_tasks.abort_all();
+            if let Some(task) = review_range_task.take() {
+                task.abort();
+            }
+            if let Some(task) = review_task.take() {
+                task.abort();
+            }
         }
         if stopping && !subagents_stopping {
             for runtime in panes.values() {
@@ -886,6 +906,9 @@ pub(crate) async fn run(
                             subagent_updates,
                             subagent_sender.clone(),
                         );
+                        if pane == PaneId::Main {
+                            review_agent = agent.clone();
+                        }
                         commands
                             .send(WorkerCommand::ReplaceAgent { pane, agent })
                             .map_err(|_| RuntimeError::AgentWorkerStopped)?;
@@ -927,6 +950,56 @@ pub(crate) async fn run(
                         app.update(AppEvent::SessionLoadFailed {
                             pane,
                             error: format!("Could not load sessions: {error}"),
+                        }),
+                        &mut scheduler,
+                    ),
+                }
+                scheduler.request_immediate(Instant::now());
+            }
+            result = async {
+                review_range_task
+                    .as_mut()
+                    .expect("review-range branch is disabled without a task")
+                    .await
+            }, if review_range_task.is_some() && !stopping => {
+                review_range_task = None;
+                let (pane, ranges) = result.map_err(RuntimeError::SessionTask)?;
+                match ranges {
+                    Ok(ranges) => schedule(
+                        app.update(AppEvent::ReviewRangesLoaded { pane, ranges }),
+                        &mut scheduler,
+                    ),
+                    Err(error) => schedule(
+                        app.update(AppEvent::NotifyError {
+                            pane,
+                            error: format!("Could not load review ranges: {error}"),
+                        }),
+                        &mut scheduler,
+                    ),
+                }
+                scheduler.request_immediate(Instant::now());
+            }
+            result = async {
+                review_task
+                    .as_mut()
+                    .expect("review branch is disabled without a task")
+                    .await
+            }, if review_task.is_some() && !stopping => {
+                review_task = None;
+                let (pane, review) = result.map_err(RuntimeError::SessionTask)?;
+                match review {
+                    Ok(Some(markdown)) => schedule(
+                        app.update(AppEvent::ReviewFinished { pane, markdown }),
+                        &mut scheduler,
+                    ),
+                    Ok(None) => schedule(
+                        app.update(AppEvent::ReviewCancelled(pane)),
+                        &mut scheduler,
+                    ),
+                    Err(error) => schedule(
+                        app.update(AppEvent::ReviewFailed {
+                            pane,
+                            error: format!("Review failed: {error}"),
                         }),
                         &mut scheduler,
                     ),
@@ -995,6 +1068,9 @@ pub(crate) async fn run(
                             subagent_updates,
                             subagent_sender.clone(),
                         );
+                        if pane == PaneId::Main {
+                            review_agent = agent.clone();
+                        }
                         commands
                             .send(WorkerCommand::ReplaceAgent { pane, agent })
                             .map_err(|_| RuntimeError::AgentWorkerStopped)?;
@@ -1194,6 +1270,9 @@ struct EffectContext<'a> {
     fast_mode_task: &'a mut Option<FastModeUpdateTask>,
     new_session_task: &'a mut Option<NewSessionTask>,
     session_list_task: &'a mut Option<SessionListTask>,
+    review_range_task: &'a mut Option<ReviewRangeTask>,
+    review_task: &'a mut Option<ReviewTask>,
+    review_agent: &'a mut nanocodex::Nanocodex,
     resume_session_task: &'a mut Option<ResumeSessionTask>,
     terminal: &'a mut TerminalSession,
     scheduler: &'a mut RenderScheduler,
@@ -1462,6 +1541,94 @@ fn apply_pane_effect(
                 (pane, sessions.map_err(Into::into))
             }));
         }
+        components::RootEffect::LoadReviewRanges => {
+            if context.review_range_task.is_some() || context.review_task.is_some() {
+                schedule(
+                    context.app.update(AppEvent::NotifyError {
+                        pane,
+                        error: "A review is already being prepared.".to_owned(),
+                    }),
+                    context.scheduler,
+                );
+                return Ok(());
+            }
+            let workspace = context.workspace.to_path_buf();
+            *context.review_range_task = Some(tokio::spawn(async move {
+                (pane, crate::review::load_ranges(&workspace).await)
+            }));
+        }
+        components::RootEffect::Review {
+            range,
+            download_assets,
+        } => {
+            if context.review_task.is_some() {
+                schedule(
+                    context.app.update(AppEvent::NotifyError {
+                        pane,
+                        error: "A review is already open.".to_owned(),
+                    }),
+                    context.scheduler,
+                );
+                return Ok(());
+            }
+
+            match crate::review::ReviewAssets::availability() {
+                Ok(crate::review::AssetAvailability::Ready(assets)) => {
+                    *context.review_task = Some(spawn_review(
+                        pane,
+                        context.review_agent.clone(),
+                        context.workspace.to_path_buf(),
+                        range,
+                        Some(assets),
+                    ));
+                }
+                Ok(crate::review::AssetAvailability::DownloadRequired) if !download_assets => {
+                    schedule(
+                        context
+                            .app
+                            .update(AppEvent::ConfirmReviewDownload { pane, range }),
+                        context.scheduler,
+                    );
+                    return Ok(());
+                }
+                Ok(crate::review::AssetAvailability::DownloadRequired) => {
+                    *context.review_task = Some(spawn_review(
+                        pane,
+                        context.review_agent.clone(),
+                        context.workspace.to_path_buf(),
+                        range,
+                        None,
+                    ));
+                }
+                Ok(crate::review::AssetAvailability::DevelopmentInstallRequired { path }) => {
+                    schedule(
+                        context.app.update(AppEvent::NotifyError {
+                            pane,
+                            error: format!(
+                                "Review assets are not installed. Run `cd web/review && bun install --frozen-lockfile && bun run build`, then set TACT_REVIEW_ASSETS to the absolute `web/review/dist` path, or copy that directory to {}.",
+                                path.display()
+                            ),
+                        }),
+                        context.scheduler,
+                    );
+                    return Ok(());
+                }
+                Err(error) => {
+                    schedule(
+                        context.app.update(AppEvent::NotifyError {
+                            pane,
+                            error: format!("Could not load review assets: {error}"),
+                        }),
+                        context.scheduler,
+                    );
+                    return Ok(());
+                }
+            }
+            schedule(
+                context.app.update(AppEvent::ReviewStarted(pane)),
+                context.scheduler,
+            );
+        }
         components::RootEffect::ResumeSession(session_id) => {
             *context.input = None;
             let effort = context.config.agent().thinking();
@@ -1582,6 +1749,26 @@ fn apply_pane_effect(
         }
     }
     Ok(())
+}
+
+fn spawn_review(
+    pane: PaneId,
+    agent: nanocodex::Nanocodex,
+    workspace: PathBuf,
+    range: crate::review::ReviewRange,
+    assets: Option<crate::review::ReviewAssets>,
+) -> ReviewTask {
+    tokio::spawn(async move {
+        let result = async {
+            let assets = match assets {
+                Some(assets) => assets,
+                None => crate::review::ReviewAssets::download().await?,
+            };
+            crate::review::run(agent, &workspace, range, assets).await
+        }
+        .await;
+        (pane, result)
+    })
 }
 
 fn is_web_link(destination: &str) -> bool {

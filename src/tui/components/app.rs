@@ -45,6 +45,16 @@ pub(crate) enum AppEvent {
         pane: PaneId,
         draft: String,
     },
+    ReviewFinished {
+        pane: PaneId,
+        markdown: String,
+    },
+    ReviewStarted(PaneId),
+    ReviewCancelled(PaneId),
+    ReviewFailed {
+        pane: PaneId,
+        error: String,
+    },
     QueueEditorFinished {
         pane: PaneId,
         index: usize,
@@ -103,6 +113,14 @@ pub(crate) enum AppEvent {
     NotifySuccess {
         pane: PaneId,
         message: String,
+    },
+    ReviewRangesLoaded {
+        pane: PaneId,
+        ranges: Vec<crate::review::ReviewRange>,
+    },
+    ConfirmReviewDownload {
+        pane: PaneId,
+        range: crate::review::ReviewRange,
     },
     UpdateAvailable(Version),
     ConfigReloaded {
@@ -170,6 +188,14 @@ impl AppNode {
             }
             AppEvent::EditorDraft { pane, draft } => {
                 self.update_root(pane, RootEvent::ReplaceDraft(draft))
+            }
+            AppEvent::ReviewFinished { pane, markdown } => {
+                self.update_root(pane, RootEvent::ReviewFinished(markdown))
+            }
+            AppEvent::ReviewStarted(pane) => self.update_root(pane, RootEvent::ReviewStarted),
+            AppEvent::ReviewCancelled(pane) => self.update_root(pane, RootEvent::ReviewCancelled),
+            AppEvent::ReviewFailed { pane, error } => {
+                self.update_root(pane, RootEvent::ReviewFailed(error))
             }
             AppEvent::QueueEditorFinished { pane, index, text } => {
                 self.update_root(pane, RootEvent::RestoreQueued { index, text })
@@ -251,6 +277,12 @@ impl AppNode {
             }
             AppEvent::NotifySuccess { pane, message } => {
                 self.update_root(pane, RootEvent::NotifySuccess(message))
+            }
+            AppEvent::ReviewRangesLoaded { pane, ranges } => {
+                self.update_root(pane, RootEvent::ReviewRangesLoaded(ranges))
+            }
+            AppEvent::ConfirmReviewDownload { pane, range } => {
+                self.update_root(pane, RootEvent::ConfirmReviewDownload(range))
             }
             AppEvent::UpdateAvailable(version) => {
                 let pane = if self.main.is_some() {

@@ -12,6 +12,10 @@ use super::{
     keybindings::{KeybindingsEffect, KeybindingsEvent, KeybindingsHelp},
     node::{Component, ComponentUpdate, Node, RenderRequest},
     queue::{MessageQueue, QueueEffect, QueueEvent, QueueId},
+    review_confirmation::{
+        ReviewConfirmationEffect, ReviewConfirmationEvent, ReviewDownloadConfirmation,
+    },
+    review_range_picker::{ReviewRangeEffect, ReviewRangeEvent, ReviewRangePicker},
     selection::{Selection, Surface},
     session_picker::{SessionPicker, SessionPickerEffect, SessionPickerEvent},
     subagents::{SubagentEffect, SubagentOverlay, SubagentTree},
@@ -21,6 +25,7 @@ use super::{
 use crate::{
     app::config::{ReasoningEffort, ReasoningMode},
     core::extensions::subagents::{AgentUpdate, MessageSender},
+    review::ReviewRange,
     tui::{
         context::ContextDiagnostics,
         prompt::Submission,
@@ -123,6 +128,10 @@ pub(crate) enum RootEvent {
     AgentStreamClosed,
     Subagent(AgentUpdate),
     ReplaceDraft(String),
+    ReviewStarted,
+    ReviewCancelled,
+    ReviewFinished(String),
+    ReviewFailed(String),
     RestoreQueued {
         index: usize,
         text: String,
@@ -143,6 +152,8 @@ pub(crate) enum RootEvent {
     },
     NotifyError(String),
     NotifySuccess(String),
+    ReviewRangesLoaded(Vec<ReviewRange>),
+    ConfirmReviewDownload(ReviewRange),
     UpdateAvailable(Version),
     SteerAdmitted(QueueId),
     SteerPromoted(QueueId),
@@ -179,6 +190,11 @@ pub(crate) enum RootEffect {
     },
     PersistSteer(String),
     Copy(String),
+    LoadReviewRanges,
+    Review {
+        range: ReviewRange,
+        download_assets: bool,
+    },
     SetEffort {
         effort: ReasoningEffort,
         reasoning_mode: ReasoningMode,
@@ -199,6 +215,8 @@ enum Overlay {
     FileFinder(FileMention),
     Keybindings(Node<KeybindingsHelp>),
     Sessions(Node<SessionPicker>),
+    ReviewDownload(Node<ReviewDownloadConfirmation>),
+    ReviewRange(Node<ReviewRangePicker>),
     Subagents(SubagentOverlay),
 }
 
@@ -231,6 +249,7 @@ pub(crate) struct RootNode {
     queue_area: Rect,
     in_flight_turns: usize,
     in_flight_shells: usize,
+    review_active: bool,
     fork_available: bool,
     interactive: bool,
     theme_mode: ThemeMode,
@@ -258,6 +277,7 @@ impl RootNode {
             queue_area: Rect::default(),
             in_flight_turns: 0,
             in_flight_shells: 0,
+            review_active: false,
             fork_available: true,
             interactive: true,
             theme_mode: ThemeMode::Auto,
@@ -529,6 +549,10 @@ impl RootNode {
                 Overlay::FileFinder(mention) => mention.finder.render(frame, area, theme),
                 Overlay::Keybindings(help) => help.render(frame, area, theme),
                 Overlay::Sessions(picker) => picker.render(frame, area, theme),
+                Overlay::ReviewDownload(confirmation) => {
+                    confirmation.render(frame, area, theme);
+                }
+                Overlay::ReviewRange(picker) => picker.render(frame, area, theme),
                 Overlay::Subagents(SubagentOverlay::Tree) => {
                     self.subagents.render_tree(frame, area, theme);
                 }
@@ -716,6 +740,7 @@ impl RootNode {
         if self.composer.component().draft().is_empty() && is_actions_trigger(&event) {
             let new_session_enabled = self.in_flight_turns == 0
                 && self.in_flight_shells == 0
+                && !self.review_active
                 && self.queue.component().is_empty();
             self.overlay = Some(Overlay::Actions(Node::new(ActionsMenu::new(
                 ActionAvailability {
@@ -826,6 +851,8 @@ impl RootNode {
             Some(Overlay::FileFinder(_)) => self.update_file_finder(event),
             Some(Overlay::Keybindings(_)) => self.update_keybindings(event),
             Some(Overlay::Sessions(_)) => self.update_session_picker(event),
+            Some(Overlay::ReviewDownload(_)) => self.update_review_confirmation(event),
+            Some(Overlay::ReviewRange(_)) => self.update_review_range(event),
             Some(Overlay::Subagents(SubagentOverlay::Tree)) => {
                 let effect = self.subagents.update_tree(event);
                 self.apply_subagent_effect(effect)
@@ -993,6 +1020,13 @@ impl RootNode {
                     ContextDiagnosticsPanel::new(self.context_diagnostics.clone()),
                 )));
             }
+            Some(ActionsEffect::Trigger(Action::Review)) => {
+                self.overlay = None;
+                return ComponentUpdate {
+                    effects: vec![RootEffect::LoadReviewRanges],
+                    render: RenderRequest::Immediate,
+                };
+            }
             None => {}
         }
         ComponentUpdate {
@@ -1020,6 +1054,54 @@ impl RootNode {
         ComponentUpdate {
             effects: Vec::new(),
             render: update.render,
+        }
+    }
+
+    fn update_review_confirmation(&mut self, event: Event) -> ComponentUpdate<RootEffect> {
+        let Some(Overlay::ReviewDownload(confirmation)) = &mut self.overlay else {
+            return ComponentUpdate::none();
+        };
+        let update = confirmation.update(ReviewConfirmationEvent::Terminal(event));
+        let Some(effect) = update.effects.into_iter().next() else {
+            return ComponentUpdate {
+                effects: Vec::new(),
+                render: update.render,
+            };
+        };
+        self.overlay = None;
+        match effect {
+            ReviewConfirmationEffect::Confirm(range) => ComponentUpdate {
+                effects: vec![RootEffect::Review {
+                    range,
+                    download_assets: true,
+                }],
+                render: RenderRequest::Immediate,
+            },
+            ReviewConfirmationEffect::Dismiss => ComponentUpdate::render(RenderRequest::Immediate),
+        }
+    }
+
+    fn update_review_range(&mut self, event: Event) -> ComponentUpdate<RootEffect> {
+        let Some(Overlay::ReviewRange(picker)) = &mut self.overlay else {
+            return ComponentUpdate::none();
+        };
+        let update = picker.update(ReviewRangeEvent::Terminal(event));
+        let Some(effect) = update.effects.into_iter().next() else {
+            return ComponentUpdate {
+                effects: Vec::new(),
+                render: update.render,
+            };
+        };
+        self.overlay = None;
+        match effect {
+            ReviewRangeEffect::Selected(range) => ComponentUpdate {
+                effects: vec![RootEffect::Review {
+                    range,
+                    download_assets: false,
+                }],
+                render: RenderRequest::Immediate,
+            },
+            ReviewRangeEffect::Dismiss => ComponentUpdate::render(RenderRequest::Immediate),
         }
     }
 
@@ -1606,6 +1688,49 @@ impl Component for RootNode {
             RootEvent::ReplaceDraft(draft) => {
                 self.update_composer(ComposerEvent::ReplaceDraft(draft), RenderRequest::Immediate)
             }
+            RootEvent::ReviewStarted => {
+                self.review_active = true;
+                self.notification = Some(Notification::plain(
+                    "Preparing review overview…".to_owned(),
+                    Color::Green,
+                ));
+                ComponentUpdate::render(RenderRequest::Immediate)
+            }
+            RootEvent::ReviewFinished(markdown) => {
+                self.review_active = false;
+                let cursor = self.composer.component().cursor();
+                let draft = self.composer.component().draft();
+                let before = if draft[..cursor].is_empty() {
+                    ""
+                } else {
+                    "\n\n"
+                };
+                let after = if draft[cursor..].is_empty() {
+                    ""
+                } else {
+                    "\n\n"
+                };
+                self.update_composer(
+                    ComposerEvent::ReplaceRange {
+                        range: cursor..cursor,
+                        text: format!("{before}{markdown}{after}"),
+                    },
+                    RenderRequest::Immediate,
+                )
+            }
+            RootEvent::ReviewCancelled => {
+                self.review_active = false;
+                self.notification = Some(Notification::plain(
+                    "Review cancelled.".to_owned(),
+                    Color::Yellow,
+                ));
+                ComponentUpdate::render(RenderRequest::Immediate)
+            }
+            RootEvent::ReviewFailed(message) => {
+                self.review_active = false;
+                self.notification = Some(Notification::plain(message, Color::Red));
+                ComponentUpdate::render(RenderRequest::Immediate)
+            }
             RootEvent::RestoreQueued { index, text } => self.restore_queued(index, text),
             RootEvent::WorkerTurnFinished => self.turn_finished(),
             RootEvent::ShellFinished => {
@@ -1641,6 +1766,18 @@ impl Component for RootNode {
             }
             RootEvent::NotifySuccess(message) => {
                 self.notification = Some(Notification::plain(message, Color::Green));
+                ComponentUpdate::render(RenderRequest::Immediate)
+            }
+            RootEvent::ReviewRangesLoaded(ranges) => {
+                self.overlay = Some(Overlay::ReviewRange(Node::new(ReviewRangePicker::new(
+                    ranges,
+                ))));
+                ComponentUpdate::render(RenderRequest::Immediate)
+            }
+            RootEvent::ConfirmReviewDownload(range) => {
+                self.overlay = Some(Overlay::ReviewDownload(Node::new(
+                    ReviewDownloadConfirmation::new(range),
+                )));
                 ComponentUpdate::render(RenderRequest::Immediate)
             }
             RootEvent::UpdateAvailable(version) => {
@@ -3648,5 +3785,22 @@ mod tests {
 
         assert!(update.effects.is_empty());
         assert!(matches!(&root.overlay, Some(Overlay::Effort(_))));
+    }
+
+    #[test]
+    fn review_feedback_is_inserted_without_replacing_the_draft() {
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        root.update(super::RootEvent::ReplaceDraft("existing draft".to_owned()));
+        root.update(super::RootEvent::ReviewStarted);
+
+        root.update(super::RootEvent::ReviewFinished(
+            "## Review: Approved".to_owned(),
+        ));
+
+        assert_eq!(
+            root.composer().draft(),
+            "existing draft\n\n## Review: Approved"
+        );
+        assert!(!root.review_active);
     }
 }

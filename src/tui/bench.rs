@@ -25,6 +25,24 @@ mod core {
     }
 }
 
+mod review {
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub(crate) struct ReviewRange {
+        label: String,
+        detail: String,
+    }
+
+    impl ReviewRange {
+        pub(crate) fn label(&self) -> &str {
+            &self.label
+        }
+
+        pub(crate) fn detail(&self) -> &str {
+            &self.detail
+        }
+    }
+}
+
 #[path = "components/mod.rs"]
 mod components;
 mod context;
