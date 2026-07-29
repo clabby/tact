@@ -4,8 +4,6 @@ mod retrieval;
 mod secrets;
 mod tool;
 
-pub(crate) use tool::MemoryTool;
-
 use retrieval::rank;
 use rusqlite::{
     Connection, ErrorCode, OptionalExtension, Transaction, TransactionBehavior, params,
@@ -20,6 +18,7 @@ use std::{
     time::Duration,
 };
 use thiserror::Error;
+pub(crate) use tool::MemoryTool;
 
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const DATABASE_PAGE_SIZE_BYTES: usize = 4 * 1024;
@@ -65,7 +64,6 @@ pub(crate) struct MemoryLimits {
     pub(crate) total_content_bytes: usize,
     pub(crate) database_bytes: usize,
     pub(crate) scan_results: usize,
-    pub(crate) read_records: usize,
     pub(crate) query_bytes: usize,
     pub(crate) probation_duration_ms: i64,
 }
@@ -77,7 +75,6 @@ impl MemoryLimits {
         total_content_bytes: 256 * 1_024,
         database_bytes: 4 * 1_024 * 1_024,
         scan_results: 5,
-        read_records: 3,
         query_bytes: 512,
         probation_duration_ms: PROBATION_DURATION_MS,
     };
@@ -150,12 +147,6 @@ impl MemoryStore {
 
     pub(crate) fn read(&self, ids: &[i64], now_ms: i64) -> Result<Vec<MemoryRecord>, MemoryError> {
         let ids = distinct_ids(ids);
-        if ids.len() > self.limits.read_records {
-            return Err(MemoryError::TooManyIds {
-                maximum: self.limits.read_records,
-            });
-        }
-
         let mut connection = self.open()?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -443,8 +434,6 @@ pub(crate) enum MemoryError {
     ContentTooLarge { maximum_bytes: usize },
     #[error("memory query exceeds the {maximum_bytes}-byte limit")]
     QueryTooLarge { maximum_bytes: usize },
-    #[error("memory read exceeds the {maximum}-record limit")]
-    TooManyIds { maximum: usize },
     #[error("memory record capacity of {maximum} was reached")]
     RecordCapacity { maximum: usize },
     #[error("memory content capacity of {maximum_bytes} bytes was reached")]

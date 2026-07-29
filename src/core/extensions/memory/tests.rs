@@ -16,7 +16,6 @@ fn tiny_limits() -> MemoryLimits {
         total_content_bytes: 64,
         database_bytes: 4 * 1_024 * 1_024,
         scan_results: 2,
-        read_records: 3,
         query_bytes: 16,
         probation_duration_ms: 10,
     }
@@ -238,22 +237,6 @@ fn read_deduplicates_ids_and_updates_use_telemetry_once() {
     );
     let listed = store.list(5).unwrap();
     assert!(listed.iter().all(|record| record.use_count == 1));
-}
-
-#[test]
-fn read_limit_counts_distinct_ids() {
-    let directory = tempfile::tempdir().unwrap();
-    let limits = MemoryLimits {
-        read_records: 2,
-        ..tiny_limits()
-    };
-    let store = MemoryStore::with_limits(directory.path().join("memory.sqlite3"), limits);
-
-    assert!(store.read(&[1, 1, 2], 0).is_ok());
-    assert!(matches!(
-        store.read(&[1, 2, 3], 0),
-        Err(MemoryError::TooManyIds { maximum: 2 })
-    ));
 }
 
 #[test]
