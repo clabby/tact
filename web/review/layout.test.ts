@@ -66,7 +66,8 @@ test("change totals layer above long file names", async () => {
 
   expect(treeStyles).toMatch(/\[data-item-section="decoration"\][^{]*{[^}]*position:\s*absolute/s);
   expect(treeStyles).toMatch(/\[data-item-section="decoration"\][^{]*{[^}]*z-index:\s*2/s);
-  expect(treeStyles).toMatch(/background:\s*linear-gradient\(/);
+  expect(treeStyles).toMatch(/background-color:\s*var\(--tact-tree-row-bg\)/);
+  expect(treeStyles).not.toContain("linear-gradient");
 });
 
 test("dark surfaces are neutral while green remains an accent", async () => {

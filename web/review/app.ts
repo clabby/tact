@@ -77,9 +77,9 @@ const TREE_STYLES = `
     inset-block: 0;
     inset-inline-end: calc(var(--trees-item-padding-x) + var(--trees-git-lane-width));
     align-items: center;
-    padding-inline-start: 20px;
+    padding-inline-start: 8px;
     pointer-events: none;
-    background: linear-gradient(to right, transparent, var(--tact-tree-row-bg) 20px);
+    background-color: var(--tact-tree-row-bg);
     text-align: right;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     font-size: 11px;
