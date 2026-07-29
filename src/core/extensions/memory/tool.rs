@@ -222,8 +222,7 @@ fn memory_input_schema() -> Value {
                     "ids": {
                         "type": "array",
                         "items": { "type": "integer", "minimum": 1 },
-                        "minItems": 1,
-                        "maxItems": 3
+                        "minItems": 1
                     }
                 },
                 "required": ["operation", "ids"],
@@ -284,7 +283,7 @@ fn memory_output_schema() -> Value {
                 "type": "object",
                 "properties": {
                     "operation": { "type": "string", "const": "read" },
-                    "memories": { "type": "array", "maxItems": 3, "items": record.clone() }
+                    "memories": { "type": "array", "items": record.clone() }
                 },
                 "required": ["operation", "memories"],
                 "additionalProperties": false

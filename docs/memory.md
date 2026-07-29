@@ -102,13 +102,9 @@ query retrieve memories that match coherent subsets of its terms. Records matchi
 rarer terms rank higher through BM25. A scan abstains only when the query has no searchable terms or
 when no active record shares a term with it.
 
-This recall-oriented behavior is bounded by the separate scan and read limits. A partial match can
-surface as a compact candidate, but the agent must still select it explicitly before its complete
-content enters context.
-
-The scan and read limits are deliberately separate. `scan` returns no more than five candidate
-cards; `read` accepts no more than three IDs. This forces a second deliberate selection before full
-record content consumes context.
+This recall-oriented behavior is bounded at candidate retrieval. `scan` returns no more than five
+compact candidate cards. `read` has no separate record cap, but complete content enters context
+only for IDs the agent explicitly selects.
 
 ## Telemetry and probation
 
@@ -261,7 +257,7 @@ following are initial Tact choices rather than conclusions established by the ci
 
 - seven days of unread probation;
 - 1 KiB per record, 512 rows, 256 KiB of content, and a 4 MiB main database;
-- five scan candidates and three complete reads;
+- five scan candidates;
 - the tokenizer and no-overlap abstention rule, and
 - BM25 `k1 = 1.2` and `b = 0.75` for this corpus, despite being established baseline values.
 
