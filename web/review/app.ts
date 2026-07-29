@@ -1,6 +1,5 @@
 import {
   CodeView,
-  parsePatchFiles,
   type CodeViewDiffItem,
   type CodeViewLineSelection,
   type DiffLineAnnotation,
@@ -62,6 +61,7 @@ import {
   type SyntaxTheme,
 } from "./review-settings";
 import { overviewDocument } from "./overview";
+import { parseReviewPatch } from "./review-diff";
 import {
   expandRange,
   moveRangeBoundary,
@@ -430,9 +430,7 @@ export class ReviewApp {
     this.state = activatePage(this.state, page);
     const seenFiles = this.seenFiles();
     const cacheKey = `tact-review-${page.generation}-${rangeKey(page.selected_range)}`;
-    const patchFiles = parsePatchFiles(page.patch, cacheKey, true).flatMap(
-      (patch) => patch.files,
-    );
+    const patchFiles = parseReviewPatch(page.patch, cacheKey);
     // Git's patch owns changed-line identity. Pierre may expand context already present in
     // that immutable patch, but browser-side re-diffing must never replace its hunks.
     this.files = patchFiles;

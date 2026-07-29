@@ -1,0 +1,42 @@
+import {
+  GIT_DIFF_FILE_BREAK_REGEX,
+  parsePatchFiles,
+  processFile,
+  trimPatchContext,
+  type FileContents,
+  type FileDiffMetadata,
+} from "@pierre/diffs";
+
+const DEFAULT_CONTEXT_LINES = 3;
+
+export function parseReviewPatch(
+  patch: string,
+  cacheKey: string,
+): FileDiffMetadata[] {
+  const fullFiles = parsePatchFiles(patch, cacheKey, true).flatMap(
+    (parsed) => parsed.files,
+  );
+  const displayPatches = trimPatchContext(patch, DEFAULT_CONTEXT_LINES)
+    .split(GIT_DIFF_FILE_BREAK_REGEX)
+    .filter((filePatch) => filePatch.startsWith("diff --git"));
+
+  if (displayPatches.length !== fullFiles.length) {
+    throw new Error("The review patch contains mismatched file data.");
+  }
+
+  return displayPatches.map((filePatch, index) => {
+    const fullFile = fullFiles[index];
+    const file = processFile(filePatch, {
+      cacheKey: `${cacheKey}-${index}`,
+      oldFile: fileContents(fullFile.prevName ?? fullFile.name, fullFile.deletionLines),
+      newFile: fileContents(fullFile.name, fullFile.additionLines),
+      throwOnError: true,
+    });
+    if (!file) throw new Error(`The review patch for ${fullFile.name} is invalid.`);
+    return file;
+  });
+}
+
+function fileContents(name: string, lines: readonly string[]): FileContents {
+  return { name, contents: lines.join("") };
+}
