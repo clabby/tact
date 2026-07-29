@@ -4,6 +4,8 @@ const RELEASE_TEMPLATE: &str = include_str!("../.github/RELEASE_TEMPLATE.md");
 const CHANGELOG_CONFIG: &str = include_str!("../cliff.toml");
 const RELEASE_INSTRUCTIONS: &str = include_str!("../RELEASES.md");
 const CARGO_MANIFEST: &str = include_str!("../Cargo.toml");
+const REVIEW_BUILD: &str = include_str!("../web/review/build.ts");
+const REVIEW_ASSETS: &str = include_str!("../src/review/assets.rs");
 
 fn assert_contains(document: &str, expected: &str) {
     assert!(
@@ -14,6 +16,20 @@ fn assert_contains(document: &str, expected: &str) {
 
 fn workflow(document: &str) -> serde_yaml::Value {
     serde_yaml::from_str(document).expect("workflow should be valid YAML")
+}
+
+fn number_after(document: &str, marker: &str) -> u32 {
+    let value = document
+        .split_once(marker)
+        .unwrap_or_else(|| panic!("expected document to contain `{marker}`"))
+        .1;
+    let digits: String = value
+        .chars()
+        .take_while(|character| character.is_ascii_digit())
+        .collect();
+    digits
+        .parse()
+        .unwrap_or_else(|_| panic!("expected `{marker}` to be followed by a number"))
 }
 
 #[test]
@@ -35,6 +51,18 @@ fn ci_builds_and_typechecks_review_assets_with_locked_dependencies() {
             "review-web should run `{command}`"
         );
     }
+}
+
+#[test]
+fn review_bundle_api_matches_the_rust_asset_validator() {
+    let rust_api = number_after(REVIEW_ASSETS, "const REVIEW_API_VERSION: u32 = ");
+    let bundle_min = number_after(REVIEW_BUILD, "review_api: { min: ");
+    let bundle_max = number_after(REVIEW_BUILD, "max: ");
+
+    assert!(
+        (bundle_min..=bundle_max).contains(&rust_api),
+        "review bundle API {bundle_min}..={bundle_max} excludes Rust API {rust_api}"
+    );
 }
 
 #[test]

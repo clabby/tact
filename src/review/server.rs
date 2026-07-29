@@ -748,6 +748,8 @@ async fn submit(
     let Some(sender) = state.outcome.lock().await.take() else {
         return stale_snapshot("review already submitted");
     };
+    drop(session);
+
     if sender.send(ReviewOutcome::Decision(decision)).is_err() {
         return error_response(
             StatusCode::GONE,
@@ -1240,7 +1242,8 @@ mod tests {
         });
         let server = start_server_with_generator(&assets, generator).await;
 
-        let status = request_overview(server.endpoint_url("api/overview"), working_tree_range()).await;
+        let status =
+            request_overview(server.endpoint_url("api/overview"), working_tree_range()).await;
 
         assert_eq!(status, reqwest::StatusCode::CONFLICT);
         assert_eq!(loads.load(Ordering::SeqCst), 0);
@@ -1385,6 +1388,75 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(accepted.status(), reqwest::StatusCode::NO_CONTENT);
+        assert!(matches!(
+            server.wait().await.unwrap(),
+            ReviewOutcome::Decision(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn accepted_submission_cannot_race_with_refresh() {
+        let assets = tempfile::tempdir().unwrap();
+        for name in ["index.html", "app.js", "app.css"] {
+            std::fs::write(assets.path().join(name), "").unwrap();
+        }
+        let server = start_server(&assets).await;
+        let outcome = server.state.outcome.lock().await;
+        let client = reqwest::Client::new();
+        let submit = tokio::spawn({
+            let client = client.clone();
+            let url = server.endpoint_url("api/decision");
+            async move {
+                client
+                    .post(url)
+                    .json(&decision_request(0, Vec::new()))
+                    .send()
+                    .await
+                    .unwrap()
+            }
+        });
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while server.state.session.try_lock().is_ok() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("submission did not reach final session validation");
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        assert!(
+            server.state.session.try_lock().is_err(),
+            "submission must retain the validated session until it consumes the outcome"
+        );
+
+        let refresh = tokio::spawn({
+            let url = server.endpoint_url("api/refresh");
+            async move {
+                reqwest::Client::new()
+                    .post(url)
+                    .json(&serde_json::json!({ "generation": 0 }))
+                    .send()
+                    .await
+                    .unwrap()
+            }
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), async {
+                while !refresh.is_finished() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .is_err(),
+            "refresh must wait for the accepted submission"
+        );
+
+        drop(outcome);
+        assert_eq!(
+            submit.await.unwrap().status(),
+            reqwest::StatusCode::NO_CONTENT
+        );
+        let _ = refresh.await.unwrap();
         assert!(matches!(
             server.wait().await.unwrap(),
             ReviewOutcome::Decision(_)

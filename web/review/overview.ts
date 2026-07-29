@@ -6,10 +6,10 @@ export function overviewDocument(html: string, appearance: OverviewAppearance) {
   <head>
     <meta charset="utf-8">
     <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
+    <style>${overviewStyles(appearance)}</style>
   </head>
   <body>
     ${html}
-    <style>${overviewStyles(appearance)}</style>
   </body>
 </html>`;
 }

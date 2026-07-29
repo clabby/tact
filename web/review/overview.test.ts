@@ -22,4 +22,15 @@ describe("agent overview document", () => {
     expect(document).not.toContain("!important");
     expect(document).toContain("default-src 'none'; style-src 'unsafe-inline'");
   });
+
+  test("agent styles take precedence over the host fallback", () => {
+    const document = overviewDocument(
+      "<style>body { background: rebeccapurple; }</style>",
+      "dark",
+    );
+
+    expect(document.indexOf("--overview-bg")).toBeLessThan(
+      document.indexOf("rebeccapurple"),
+    );
+  });
 });
