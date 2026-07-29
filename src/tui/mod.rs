@@ -1633,7 +1633,7 @@ fn apply_pane_effect(
                         context.app.update(AppEvent::NotifyError {
                             pane,
                             error: format!(
-                                "Review assets are not installed. Run `cd web/review && bun install --frozen-lockfile && just install-dev`, or set TACT_REVIEW_ASSETS to the absolute `web/review/dist` path. The development install path is {}.",
+                                "You are running a development build of Tact, which cannot download review assets automatically. Run `cd web/review && bun install --frozen-lockfile && just install-dev`, or set TACT_REVIEW_ASSETS to the absolute `web/review/dist` path. The development install path is {}.",
                                 path.display()
                             ),
                         }),
