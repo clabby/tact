@@ -265,7 +265,7 @@ impl ReviewSession {
     }
 
     fn insert_page(&mut self, page: ReviewPage) {
-        let bytes = page.diff.patch.len() + page.diff.overview_patch.len();
+        let bytes = page.diff.patch.len();
         self.range_pages.insert(page.selected_range, page, bytes);
     }
 }
@@ -617,7 +617,7 @@ async fn load_overview(
         )
     };
     let _operation = operation.lock().await;
-    let (page, shutdown) = {
+    let (page, version, shutdown) = {
         let session = state.session.lock().await;
         let Some(page) = matching_page(&session, request.generation, &request.range) else {
             return stale_snapshot("the requested review snapshot is stale");
@@ -632,11 +632,33 @@ async fn load_overview(
                 },
             );
         }
-        (page.clone(), session.generation_shutdown.clone())
+        (
+            page.clone(),
+            session.version.clone(),
+            session.generation_shutdown.clone(),
+        )
     };
+    let current = match state.backend.current_version(shutdown.clone()).await {
+        Ok(version) => version,
+        Err(ScopeLoadError::Cancelled) => {
+            return stale_snapshot("the review changed before its overview was generated");
+        }
+        Err(ScopeLoadError::Failed(error)) => {
+            return error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                ErrorCode::WorkspaceChanged,
+                error,
+                true,
+                false,
+            );
+        }
+    };
+    if current != version {
+        return stale_snapshot("the workspace changed before its overview was generated");
+    }
     let overview_html = match state
         .backend
-        .overview(&page.diff.scope, &page.diff.overview_patch, shutdown)
+        .overview(&page.diff.scope, &page.diff.overview, shutdown.clone())
         .await
     {
         Ok(overview) => overview,
@@ -659,6 +681,24 @@ async fn load_overview(
             );
         }
     };
+    let current = match state.backend.current_version(shutdown).await {
+        Ok(version) => version,
+        Err(ScopeLoadError::Cancelled) => {
+            return stale_snapshot("the workspace changed while its overview was generated");
+        }
+        Err(ScopeLoadError::Failed(error)) => {
+            return error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                ErrorCode::WorkspaceChanged,
+                error,
+                true,
+                false,
+            );
+        }
+    };
+    if current != version {
+        return stale_snapshot("the workspace changed while its overview was generated");
+    }
     let mut session = state.session.lock().await;
     if matching_page(&session, request.generation, &request.range).is_none() {
         return stale_snapshot("the review changed while its overview was loading");
@@ -903,7 +943,7 @@ mod tests {
         path::Path,
         process::Command,
         sync::{
-            Arc,
+            Arc, Mutex,
             atomic::{AtomicUsize, Ordering},
         },
         time::Duration,
@@ -1186,6 +1226,130 @@ mod tests {
             );
         }
         assert_eq!(loads.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn overview_agent_receives_repository_ranges() {
+        let assets = tempfile::tempdir().unwrap();
+        for name in ["index.html", "app.js", "app.css"] {
+            std::fs::write(assets.path().join(name), "").unwrap();
+        }
+        let prompts = Arc::new(Mutex::new(Vec::new()));
+        let generator: OverviewGenerator = Arc::new({
+            let prompts = Arc::clone(&prompts);
+            move |prompt, _shutdown| {
+                prompts.lock().unwrap().push(prompt);
+                Box::pin(async move { Ok("<p>Overview</p>".to_owned()) })
+            }
+        });
+        let server = start_server_with_generator(&assets, generator).await;
+        let workspace = &server.state.backend.workspace;
+        let trunk = git_stdout(workspace, ["rev-parse", "main"]);
+        let head = git_stdout(workspace, ["rev-parse", "HEAD"]);
+        let client = reqwest::Client::new();
+
+        for range in [ReviewRange { from: 0, to: 1 }, working_tree_range()] {
+            let response = client
+                .post(server.endpoint_url("api/range"))
+                .json(&range_request(range))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            assert_eq!(
+                request_overview(server.endpoint_url("api/overview"), range).await,
+                reqwest::StatusCode::OK
+            );
+        }
+
+        let prompts = prompts.lock().unwrap();
+        assert_eq!(prompts.len(), 2);
+        assert!(prompts[0].contains(&workspace.to_string_lossy().into_owned()));
+        assert!(prompts[0].contains(&format!("{trunk}..{head}")));
+        assert!(prompts[0].contains("surrounding"));
+        assert!(prompts[1].contains(&head));
+        assert!(prompts[1].contains("working tree"));
+        assert!(!prompts[0].contains("immutable Git patch"));
+        assert!(!prompts[1].contains("immutable Git patch"));
+    }
+
+    #[tokio::test]
+    async fn overview_rejects_a_changed_workspace_before_starting_the_agent() {
+        let assets = tempfile::tempdir().unwrap();
+        for name in ["index.html", "app.js", "app.css"] {
+            std::fs::write(assets.path().join(name), "").unwrap();
+        }
+        let loads = Arc::new(AtomicUsize::new(0));
+        let generator: OverviewGenerator = Arc::new({
+            let loads = Arc::clone(&loads);
+            move |_prompt, _shutdown| {
+                loads.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async move { Ok("<p>Overview</p>".to_owned()) })
+            }
+        });
+        let server = start_server_with_generator(&assets, generator).await;
+        fs::write(
+            server.state.backend.workspace.join("working.txt"),
+            "changed after snapshot\n",
+        )
+        .unwrap();
+
+        let response = reqwest::Client::new()
+            .post(server.endpoint_url("api/overview"))
+            .json(&snapshot_request(uncommitted_range()))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), reqwest::StatusCode::CONFLICT);
+        assert_eq!(loads.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn overview_rejects_workspace_changes_during_generation() {
+        let assets = tempfile::tempdir().unwrap();
+        for name in ["index.html", "app.js", "app.css"] {
+            std::fs::write(assets.path().join(name), "").unwrap();
+        }
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let generator: OverviewGenerator = Arc::new({
+            let started = Arc::clone(&started);
+            let release = Arc::clone(&release);
+            move |_prompt, _shutdown| {
+                let started = Arc::clone(&started);
+                let release = Arc::clone(&release);
+                Box::pin(async move {
+                    started.notify_one();
+                    release.notified().await;
+                    Ok("<p>Stale overview</p>".to_owned())
+                })
+            }
+        });
+        let server = start_server_with_generator(&assets, generator).await;
+        let request = tokio::spawn({
+            let url = server.endpoint_url("api/overview");
+            async move {
+                reqwest::Client::new()
+                    .post(url)
+                    .json(&snapshot_request(uncommitted_range()))
+                    .send()
+                    .await
+                    .unwrap()
+            }
+        });
+        started.notified().await;
+        fs::write(
+            server.state.backend.workspace.join("working.txt"),
+            "changed during generation\n",
+        )
+        .unwrap();
+        release.notify_one();
+
+        assert_eq!(
+            request.await.unwrap().status(),
+            reqwest::StatusCode::CONFLICT
+        );
     }
 
     #[tokio::test]
@@ -1596,5 +1760,15 @@ mod tests {
             .status()
             .unwrap();
         assert!(status.success());
+    }
+
+    fn git_stdout<const N: usize>(root: &Path, arguments: [&str; N]) -> String {
+        let output = Command::new("git")
+            .args(arguments)
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
     }
 }

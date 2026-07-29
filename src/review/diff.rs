@@ -66,10 +66,22 @@ pub(super) struct ReviewContext {
 pub(super) struct DiffSnapshot {
     pub(super) patch: String,
     #[serde(skip)]
-    pub(super) overview_patch: String,
+    pub(super) overview: OverviewContext,
     pub(super) repository: String,
     pub(super) scope: String,
     pub(super) base: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct OverviewContext {
+    pub(super) repository: PathBuf,
+    pub(super) range: OverviewRange,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) enum OverviewRange {
+    Commits { base: String, head: String },
+    WorkingTree { base: String },
 }
 
 #[derive(Clone, Copy)]
@@ -154,12 +166,17 @@ impl ReviewContext {
         let Some(head) = self.range_points[range.to].revision.as_deref() else {
             return self.collect_working_tree(base, range).await;
         };
-        let overview_patch = committed_patch(&self.root, base, head, false).await?;
         let patch = committed_patch(&self.root, base, head, true).await?;
 
         Ok(DiffSnapshot {
             patch,
-            overview_patch,
+            overview: OverviewContext {
+                repository: self.root.clone(),
+                range: OverviewRange::Commits {
+                    base: base.to_owned(),
+                    head: head.to_owned(),
+                },
+            },
             repository: self.repository.clone(),
             scope: self.range_label(range)?,
             base: base.to_owned(),
@@ -176,17 +193,18 @@ impl ReviewContext {
         range: ReviewRange,
     ) -> Result<DiffSnapshot, DiffError> {
         for _ in 0..3 {
-            let overview_patch = working_tree_patch(&self.root, base, false).await?;
             let patch = working_tree_patch(&self.root, base, true).await?;
-            if working_tree_patch(&self.root, base, false).await? != overview_patch {
-                continue;
-            }
             if working_tree_patch(&self.root, base, true).await? != patch {
                 continue;
             }
             return Ok(DiffSnapshot {
                 patch,
-                overview_patch,
+                overview: OverviewContext {
+                    repository: self.root.clone(),
+                    range: OverviewRange::WorkingTree {
+                        base: base.to_owned(),
+                    },
+                },
                 repository: self.repository.clone(),
                 scope: self.range_label(range)?,
                 base: base.to_owned(),
@@ -883,6 +901,16 @@ mod tests {
             .collect(ReviewRange { from: 1, to: 2 })
             .await
             .unwrap();
+        assert_eq!(
+            committed.overview,
+            super::OverviewContext {
+                repository: context.root.clone(),
+                range: super::OverviewRange::Commits {
+                    base: context.range_points[1].revision.clone().unwrap(),
+                    head: context.range_points[2].revision.clone().unwrap(),
+                },
+            }
+        );
         assert!(!committed.patch.contains("first.txt"));
         assert!(committed.patch.contains("second.txt"));
         assert!(!committed.patch.contains("working.txt"));
@@ -891,6 +919,15 @@ mod tests {
             .collect(ReviewRange { from: 2, to: 3 })
             .await
             .unwrap();
+        assert_eq!(
+            through_working_tree.overview,
+            super::OverviewContext {
+                repository: context.root.clone(),
+                range: super::OverviewRange::WorkingTree {
+                    base: context.range_points[2].revision.clone().unwrap(),
+                },
+            }
+        );
         assert!(through_working_tree.patch.contains("working.txt"));
         assert!(!through_working_tree.patch.contains("second.txt"));
     }
@@ -942,7 +979,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn working_tree_snapshot_rejects_changes_between_patch_formats() {
+    async fn working_tree_snapshot_rejects_changes_between_captures() {
         let repository = repository();
         let path = repository.path().join("tracked.txt");
         fs::write(&path, "state-a\n").unwrap();
@@ -973,11 +1010,8 @@ mod tests {
             Err(super::DiffError::WorkspaceChangedDuringSnapshot) => {}
             Err(error) => panic!("unexpected snapshot error: {error}"),
             Ok(snapshot) => panic!(
-                "snapshot mixed states after {} full captures: overview_b={}, patch_b={}",
+                "snapshot mixed states after {} full captures: patch_b={}",
                 observed_full_context_calls.load(Ordering::SeqCst),
-                snapshot
-                    .overview_patch
-                    .contains("state-b-with-a-different-size"),
                 snapshot.patch.contains("state-b-with-a-different-size")
             ),
         }
@@ -1074,7 +1108,12 @@ mod tests {
                 "+new\n",
             )
             .to_owned(),
-            overview_patch: "-old\n+new\n".to_owned(),
+            overview: super::OverviewContext {
+                repository: "/repo".into(),
+                range: super::OverviewRange::WorkingTree {
+                    base: "HEAD".to_owned(),
+                },
+            },
             repository: "repo".to_owned(),
             scope: "Uncommitted changes".to_owned(),
             base: "HEAD".to_owned(),

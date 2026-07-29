@@ -15,7 +15,6 @@ use server::{
 };
 use sha2::{Digest, Sha256};
 use std::{
-    io::Write,
     path::{Path, PathBuf},
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
@@ -179,10 +178,10 @@ impl ReviewBackend {
     async fn overview(
         &self,
         label: &str,
-        patch: &str,
+        context: &diff::OverviewContext,
         shutdown: CancellationToken,
     ) -> Result<String, ScopeLoadError> {
-        generate_overview(self.overview_generator.clone(), label, patch, shutdown)
+        generate_overview(self.overview_generator.clone(), label, context, shutdown)
             .await
             .map_err(scope_load_error)
     }
@@ -191,17 +190,20 @@ impl ReviewBackend {
 async fn generate_overview(
     overview_generator: OverviewGenerator,
     label: &str,
-    patch: &str,
+    context: &diff::OverviewContext,
     shutdown: CancellationToken,
 ) -> Result<String, ReviewError> {
-    let mut snapshot = tempfile::NamedTempFile::new().map_err(ReviewError::OverviewSnapshot)?;
-    snapshot
-        .write_all(patch.as_bytes())
-        .map_err(ReviewError::OverviewSnapshot)?;
-    let path = snapshot.path().to_string_lossy();
+    let repository = context.repository.to_string_lossy();
+    let range = match &context.range {
+        diff::OverviewRange::Commits { base, head } => format!(
+            "Inspect the Git commit range `{base}..{head}` in the repository at `{repository}`."
+        ),
+        diff::OverviewRange::WorkingTree { base } => format!(
+            "Inspect the changes from Git commit `{base}` through the working tree, including untracked files, in the repository at `{repository}`."
+        ),
+    };
     let prompt = format!(
-        "Create a self-contained HTML overview of the features in `{label}` for a human reviewer. The exact, immutable Git patch is at `{path}`. Read it without modifying the workspace. Scale the depth and presentation to the change: a small change can be restrained and compact, while a large or architectural change warrants a substantial walkthrough. Explain the purpose, user-visible behavior, architecture and data flow, important files, and areas that deserve reviewer attention. Give the overview a visual identity appropriate to this particular change instead of making it look like rendered Markdown. You may include a `<style>` element, classes, responsive layouts, and inline SVG. Use diagrams or other visualizations when they materially improve understanding, but do not force them into every overview. The iframe document exposes `data-theme=\"light\"`, `data-theme=\"dark\"`, or `data-theme=\"system\"` on its root; define an intentional palette for both light and dark appearances, including a `prefers-color-scheme` fallback for system mode. Return only the HTML fragment, not a full code review or a Markdown fence. Keep it accessible and responsive. Do not include scripts, event handlers, external resources, or raster images.",
-        label = label,
+        "Create a self-contained HTML overview of the features in `{label}` for a human reviewer. {range} Use repository tools to examine the diff, history, actual source files, and surrounding code needed to understand the change. Do not modify the workspace. Scale the depth and presentation to the change: a small change can be restrained and compact, while a large or architectural change warrants a substantial walkthrough. Explain the purpose, user-visible behavior, architecture and data flow, important files, and areas that deserve reviewer attention. Give the overview a visual identity appropriate to this particular change instead of making it look like rendered Markdown. You may include a `<style>` element, classes, responsive layouts, and inline SVG. Use diagrams or other visualizations when they materially improve understanding, but do not force them into every overview. The iframe document exposes `data-theme=\"light\"`, `data-theme=\"dark\"`, or `data-theme=\"system\"` on its root; define an intentional palette for both light and dark appearances, including a `prefers-color-scheme` fallback for system mode. Return only the HTML fragment, not a full code review or a Markdown fence. Keep it accessible and responsive. Do not include scripts, event handlers, external resources, or raster images.",
     );
     let result = match overview_generator(prompt, shutdown).await {
         Ok(result) => result,
@@ -292,8 +294,6 @@ pub(crate) enum ReviewError {
     StartServer(#[from] std::io::Error),
     #[error(transparent)]
     Server(#[from] server::ServerError),
-    #[error("failed to create the review overview snapshot: {0}")]
-    OverviewSnapshot(std::io::Error),
     #[error("failed to generate the review overview: {0}")]
     Overview(String),
     #[error("failed to validate the review workspace: {0}")]
@@ -322,7 +322,7 @@ impl ReviewError {
 mod tests {
     use super::server::{CommentSide, Decision, ReviewComment, ReviewDecision};
     use super::{OverviewGenerator, ReviewBackend, ReviewError, generate_overview};
-    use crate::review::diff::ReviewRange;
+    use crate::review::diff::{OverviewContext, OverviewRange, ReviewRange};
     use std::{
         fs,
         process::Command,
@@ -387,22 +387,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn overview_generator_reads_the_immutable_patch_and_returns_html() {
-        let observed_patch = Arc::new(Mutex::new(String::new()));
+    async fn overview_generator_receives_repository_context_and_returns_html() {
         let observed_prompt = Arc::new(Mutex::new(String::new()));
         let generator: OverviewGenerator = Arc::new({
-            let observed_patch = Arc::clone(&observed_patch);
             let observed_prompt = Arc::clone(&observed_prompt);
             move |prompt, _shutdown| {
-                let observed_patch = Arc::clone(&observed_patch);
                 let observed_prompt = Arc::clone(&observed_prompt);
                 Box::pin(async move {
-                    let path = prompt
-                        .split("at `")
-                        .nth(1)
-                        .and_then(|value| value.split('`').next())
-                        .expect("prompt should contain the snapshot path");
-                    *observed_patch.lock().unwrap() = std::fs::read_to_string(path).unwrap();
                     *observed_prompt.lock().unwrap() = prompt;
                     Ok("```html\n<section>Overview</section>\n```".to_owned())
                 })
@@ -411,20 +402,25 @@ mod tests {
 
         let overview = generate_overview(
             generator,
-            "Uncommitted changes",
-            "diff --git a/file b/file\n",
+            "Full branch",
+            &OverviewContext {
+                repository: "/workspace/repo".into(),
+                range: OverviewRange::Commits {
+                    base: "0123456789abcdef".to_owned(),
+                    head: "fedcba9876543210".to_owned(),
+                },
+            },
             CancellationToken::new(),
         )
         .await
         .unwrap();
 
         assert_eq!(overview, "<section>Overview</section>");
-        assert_eq!(
-            *observed_patch.lock().unwrap(),
-            "diff --git a/file b/file\n"
-        );
         let prompt = observed_prompt.lock().unwrap();
         assert!(prompt.contains("self-contained HTML overview"));
+        assert!(prompt.contains("/workspace/repo"));
+        assert!(prompt.contains("0123456789abcdef..fedcba9876543210"));
+        assert!(prompt.contains("actual source files"));
         assert!(prompt.contains("Scale the depth and presentation"));
         assert!(prompt.contains("inline SVG"));
         assert!(prompt.contains("visual identity appropriate to this particular change"));
