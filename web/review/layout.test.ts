@@ -54,7 +54,19 @@ test("the desktop file tree has room for paths and change totals", async () => {
   const changesPanel = styles.match(/\.changes-panel\.active\s*{([^}]*)}/)?.[1];
 
   expect(changesPanel).toBeDefined();
-  expect(changesPanel).toMatch(/grid-template-columns:\s*320px\s+minmax\(0,\s*1fr\)/);
+  expect(changesPanel).toMatch(/grid-template-columns:\s*352px\s+minmax\(0,\s*1fr\)/);
+});
+
+test("change totals layer above long file names", async () => {
+  const app = await Bun.file(new URL("app.ts", import.meta.url)).text();
+  const treeStyles = app.slice(
+    app.indexOf("const TREE_STYLES"),
+    app.indexOf("type AnnotationMetadata"),
+  );
+
+  expect(treeStyles).toMatch(/\[data-item-section="decoration"\][^{]*{[^}]*position:\s*absolute/s);
+  expect(treeStyles).toMatch(/\[data-item-section="decoration"\][^{]*{[^}]*z-index:\s*2/s);
+  expect(treeStyles).toMatch(/background:\s*linear-gradient\(/);
 });
 
 test("dark surfaces are neutral while green remains an accent", async () => {

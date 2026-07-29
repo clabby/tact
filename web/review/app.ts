@@ -61,8 +61,25 @@ import "./styles.css";
 
 const TREE_ICONS = { set: "minimal" } as const;
 const TREE_STYLES = `
+  [data-type="item"] {
+    --tact-tree-row-bg: var(--trees-bg);
+    position: relative;
+  }
+  [data-type="item"]:hover {
+    --tact-tree-row-bg: var(--trees-bg-muted);
+  }
+  [data-type="item"][aria-selected="true"] {
+    --tact-tree-row-bg: var(--trees-selected-bg);
+  }
   [data-item-section="decoration"] {
-    margin-inline-start: auto;
+    position: absolute;
+    z-index: 2;
+    inset-block: 0;
+    inset-inline-end: calc(var(--trees-item-padding-x) + var(--trees-git-lane-width));
+    align-items: center;
+    padding-inline-start: 20px;
+    pointer-events: none;
+    background: linear-gradient(to right, transparent, var(--tact-tree-row-bg) 20px);
     text-align: right;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     font-size: 11px;
