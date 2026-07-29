@@ -226,6 +226,7 @@ struct ServerState {
 struct ReviewSession {
     generation: u64,
     bootstrap: ReviewBootstrap,
+    default_page: ReviewPage,
     range_loader: RangeLoader,
     range_pages: BoundedCache<super::diff::ReviewRange, ReviewPage>,
     overviews: BoundedCache<super::diff::ReviewRange, String>,
@@ -288,25 +289,12 @@ where
 impl ReviewSession {
     fn new(review: PreparedReview, session_shutdown: CancellationToken) -> Self {
         let snapshot_id = review.initial_page.snapshot_id.clone();
-        let mut range_pages = BoundedCache::new(MAX_CACHED_PAGES, MAX_CACHED_PAGE_BYTES);
-        let page_bytes = review.initial_page.diff.patch.len()
-            + review
-                .initial_page
-                .diff
-                .file_contexts
-                .iter()
-                .map(|context| context.old_contents.len() + context.new_contents.len())
-                .sum::<usize>();
-        range_pages.insert(
-            review.initial_page.selected_range,
-            review.initial_page,
-            page_bytes,
-        );
         Self {
             generation: 0,
             bootstrap: review.bootstrap,
+            default_page: review.initial_page,
             range_loader: review.range_loader,
-            range_pages,
+            range_pages: BoundedCache::new(MAX_CACHED_PAGES, MAX_CACHED_PAGE_BYTES),
             overviews: BoundedCache::new(MAX_CACHED_OVERVIEWS, MAX_CACHED_OVERVIEW_BYTES),
             version: review.version,
             snapshot_id,
@@ -322,12 +310,16 @@ impl ReviewSession {
         *self = Self::new(review, session_shutdown);
         self.generation = generation;
         self.bootstrap.generation = generation;
+        self.default_page.generation = generation;
         for (page, _) in self.range_pages.values.values_mut() {
             page.generation = generation;
         }
     }
 
     fn page(&self, range: &super::diff::ReviewRange) -> Option<&ReviewPage> {
+        if range == &self.bootstrap.default_range {
+            return Some(&self.default_page);
+        }
         self.range_pages.get(range)
     }
 
@@ -582,7 +574,7 @@ async fn load_range(
     State(state): State<Arc<ServerState>>,
     Json(request): Json<RangeRequest>,
 ) -> Response<Body> {
-    let (loader, generation, shutdown) = {
+    let (loader, generation, version, shutdown) = {
         let session = state.session.lock().await;
         if request.generation != session.generation {
             return stale_snapshot("the review generation is stale");
@@ -593,10 +585,37 @@ async fn load_range(
         (
             Arc::clone(&session.range_loader),
             session.generation,
+            session.version.clone(),
             session.generation_shutdown.clone(),
         )
     };
 
+    let current = match (state.status_loader)(shutdown.clone()).await {
+        Ok(version) => version,
+        Err(ScopeLoadError::Cancelled) => {
+            return error_response(
+                StatusCode::CONFLICT,
+                ErrorCode::OperationCancelled,
+                "range validation was cancelled",
+                true,
+                true,
+            );
+        }
+        Err(ScopeLoadError::Failed(error)) => {
+            return error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                ErrorCode::WorkspaceChanged,
+                error,
+                true,
+                false,
+            );
+        }
+    };
+    if current != version {
+        return stale_snapshot("the workspace changed before this range was loaded");
+    }
+
+    let validation_shutdown = shutdown.clone();
     let page = match loader(request.range, shutdown).await {
         Ok(page) => page,
         Err(ScopeLoadError::Cancelled) => {
@@ -618,6 +637,24 @@ async fn load_range(
             );
         }
     };
+    let current = match (state.status_loader)(validation_shutdown).await {
+        Ok(version) => version,
+        Err(ScopeLoadError::Cancelled) => {
+            return stale_snapshot("the review changed while this range was loading");
+        }
+        Err(ScopeLoadError::Failed(error)) => {
+            return error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                ErrorCode::WorkspaceChanged,
+                error,
+                true,
+                false,
+            );
+        }
+    };
+    if current != version {
+        return stale_snapshot("the workspace changed while this range was loading");
+    }
     let mut session = state.session.lock().await;
     if session.generation != generation {
         return stale_snapshot("the review changed while this range was loading");
@@ -1113,6 +1150,77 @@ mod tests {
 
         assert_eq!(response.status(), reqwest::StatusCode::OK);
         assert_eq!(loads.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn default_page_remains_available_after_range_cache_eviction() {
+        let assets = tempfile::tempdir().unwrap();
+        for name in ["index.html", "app.js", "app.css"] {
+            std::fs::write(assets.path().join(name), "").unwrap();
+        }
+        let server = start_server(&assets).await;
+        let client = reqwest::Client::new();
+
+        for to in 2..=10 {
+            let response = client
+                .post(server.endpoint_url("api/range"))
+                .json(&range_request(ReviewRange { from: 0, to }))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+        }
+
+        let response = client
+            .get(server.endpoint_url("api/review"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        server.cancel().await;
+    }
+
+    #[tokio::test]
+    async fn range_load_rejects_a_changed_working_tree_snapshot() {
+        let assets = tempfile::tempdir().unwrap();
+        for name in ["index.html", "app.js", "app.css"] {
+            std::fs::write(assets.path().join(name), "").unwrap();
+        }
+        let version = Arc::new(AtomicU8::new(1));
+        let status_loader: StatusLoader = Arc::new({
+            let version = Arc::clone(&version);
+            move |_shutdown| {
+                let value = version.load(Ordering::SeqCst);
+                Box::pin(async move { Ok(WorkspaceVersion::test(value)) })
+            }
+        });
+        let review = prepared_review(loader());
+        let refreshed = review.clone();
+        let refresh_loader: RefreshLoader = Arc::new(move |_shutdown| {
+            let refreshed = refreshed.clone();
+            Box::pin(async move { Ok(refreshed) })
+        });
+        let server = ReviewServer::start(
+            review,
+            status_loader,
+            refresh_loader,
+            overview_loader(),
+            "test-token".to_owned(),
+            crate::review::ReviewAssets::for_test(assets.path().to_owned()),
+        )
+        .await
+        .unwrap();
+        version.store(2, Ordering::SeqCst);
+
+        let response = reqwest::Client::new()
+            .post(server.endpoint_url("api/range"))
+            .json(&range_request(ReviewRange { from: 0, to: 2 }))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), reqwest::StatusCode::CONFLICT);
+        server.cancel().await;
     }
 
     #[tokio::test]

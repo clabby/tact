@@ -295,8 +295,8 @@ impl DiffSnapshot {
                 continue;
             };
             let (candidate_path, first, count) = match side {
-                PatchSide::Additions => (new_path, new_start, new_count),
-                PatchSide::Deletions => (old_path, old_start, old_count),
+                PatchSide::Additions => (new_path.as_deref(), new_start, new_count),
+                PatchSide::Deletions => (old_path.as_deref(), old_start, old_count),
             };
             if candidate_path != Some(path) || count == 0 {
                 continue;
@@ -312,15 +312,71 @@ impl DiffSnapshot {
     }
 }
 
-fn patch_path(value: &str) -> Option<&str> {
+fn patch_path(value: &str) -> Option<String> {
     let value = value.split('\t').next().unwrap_or(value);
     if value == "/dev/null" {
         return None;
     }
-    value
-        .strip_prefix("a/")
-        .or_else(|| value.strip_prefix("b/"))
-        .or(Some(value))
+    let value = decode_git_path(value)?;
+    Some(
+        value
+            .strip_prefix("a/")
+            .or_else(|| value.strip_prefix("b/"))
+            .unwrap_or(&value)
+            .to_owned(),
+    )
+}
+
+fn decode_git_path(value: &str) -> Option<String> {
+    let Some(quoted) = value
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+    else {
+        return Some(value.to_owned());
+    };
+    let bytes = quoted.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'\\' {
+            decoded.push(bytes[index]);
+            index += 1;
+            continue;
+        }
+        index += 1;
+        let escaped = *bytes.get(index)?;
+        if escaped.is_ascii_digit() && escaped < b'8' {
+            let mut value = 0_u8;
+            let mut digits = 0;
+            while digits < 3 {
+                let Some(digit) = bytes.get(index).copied() else {
+                    break;
+                };
+                if !(b'0'..=b'7').contains(&digit) {
+                    break;
+                }
+                value = value.checked_mul(8)?.checked_add(digit - b'0')?;
+                index += 1;
+                digits += 1;
+            }
+            decoded.push(value);
+            continue;
+        }
+        decoded.push(match escaped {
+            b'a' => 0x07,
+            b'b' => 0x08,
+            b'f' => 0x0c,
+            b'n' => b'\n',
+            b'r' => b'\r',
+            b't' => b'\t',
+            b'v' => 0x0b,
+            b'\\' => b'\\',
+            b'"' => b'"',
+            _ => return None,
+        });
+        index += 1;
+    }
+    String::from_utf8(decoded).ok()
 }
 
 fn parse_hunk_header(line: &str) -> Option<(u32, u32, u32, u32)> {
@@ -846,7 +902,7 @@ pub(crate) enum DiffError {
 
 #[cfg(test)]
 mod tests {
-    use super::{ReviewRange, ReviewTargetKind, current_version, load};
+    use super::{DiffSnapshot, PatchSide, ReviewRange, ReviewTargetKind, current_version, load};
     use std::{fs, path::Path, process::Command};
     use tempfile::TempDir;
 
@@ -1006,6 +1062,27 @@ mod tests {
             context.version(),
             current_version(repository.path()).await.unwrap()
         );
+    }
+
+    #[test]
+    fn comment_anchors_decode_git_quoted_paths() {
+        let snapshot = DiffSnapshot {
+            patch: concat!(
+                "diff --git \"a/caf\\303\\251.rs\" \"b/caf\\303\\251.rs\"\n",
+                "--- \"a/caf\\303\\251.rs\"\n",
+                "+++ \"b/caf\\303\\251.rs\"\n",
+                "@@ -1 +1 @@\n",
+                "-old\n",
+                "+new\n",
+            )
+            .to_owned(),
+            file_contexts: Vec::new(),
+            repository: "repo".to_owned(),
+            scope: "Uncommitted changes".to_owned(),
+            base: "HEAD".to_owned(),
+        };
+
+        assert!(snapshot.contains_anchor("café.rs", PatchSide::Additions, 1, 1));
     }
 
     fn repository() -> TempDir {

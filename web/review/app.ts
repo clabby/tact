@@ -119,6 +119,7 @@ class ReviewApp {
   private checkingStatus = false;
   private refreshing = false;
   private snapshotStale = false;
+  private generationStale = false;
   private viewer?: CodeView<AnnotationMetadata>;
   private tree?: FileTree;
   private settings = loadReviewSettings(window.localStorage, document.cookie);
@@ -299,13 +300,19 @@ class ReviewApp {
       const payload = await this.api.loadRange(this.bootstrap.generation, range);
       if (request !== this.rangeRequest) return;
       if (payload.generation !== this.bootstrap.generation || !rangesEqual(payload.selected_range, range)) {
-        this.showRangeError("Tact returned a page for a different review generation or range.", range);
+        this.showRangeError(
+          "Tact returned a page for a different review generation or range.",
+          range,
+          discardCurrentFeedback,
+        );
         return;
       }
       if (discardCurrentFeedback) this.store.discardFeedback();
       this.installPage(payload as ReviewPage);
     } catch (error) {
-      if (request === this.rangeRequest) this.showRangeError(errorMessage(error), range);
+      if (request === this.rangeRequest) {
+        this.showRangeError(errorMessage(error), range, discardCurrentFeedback);
+      }
     } finally {
       if (request === this.rangeRequest) this.setRangeReady();
     }
@@ -700,11 +707,13 @@ class ReviewApp {
     try {
       const status = await this.api.status();
       if (status.generation !== this.bootstrap.generation) {
+        this.generationStale = true;
         this.snapshotStale = true;
         this.setRefreshNotice(true, "This browser page belongs to an older review generation.");
         this.setReviewControlsDisabled(false);
         return;
       }
+      this.generationStale = false;
       this.snapshotStale = status.changed;
       this.setRefreshNotice(status.changed);
       this.setReviewControlsDisabled(false);
@@ -743,7 +752,9 @@ class ReviewApp {
       if (action) action.textContent = "Refreshing…";
     }
     try {
-      const payload = await this.api.refresh(this.bootstrap.generation);
+      const payload = this.generationStale
+        ? await this.api.review()
+        : await this.api.refresh(this.bootstrap.generation);
       this.bootstrap = payload;
       this.store.replaceSession(payload);
       this.overviews.clear();
@@ -754,6 +765,7 @@ class ReviewApp {
       }
       this.installPage(payload.page);
       this.snapshotStale = false;
+      this.generationStale = false;
       this.setRefreshNotice(false);
     } catch (error) {
       this.setRefreshNotice(true, errorMessage(error));
@@ -1334,7 +1346,11 @@ class ReviewApp {
     if (state?.classList.contains("loading")) state.hidden = true;
   }
 
-  private showRangeError(message: string, range: ReviewRange) {
+  private showRangeError(
+    message: string,
+    range: ReviewRange,
+    discardCurrentFeedback = false,
+  ) {
     const state = this.root.querySelector<HTMLElement>("#scope-state");
     if (!state) return;
     state.className = "scope-state error";
@@ -1344,7 +1360,10 @@ class ReviewApp {
       <strong>Could not load the selected range</strong>
       <span>${escapeHtml(message)}</span>
       <div class="scope-error-actions"><button class="button primary" data-range-retry>Retry</button>${this.page ? '<button class="button" data-range-keep>Keep current range</button>' : ""}</div>`;
-    state.querySelector("[data-range-retry]")?.addEventListener("click", () => void this.selectRange(range));
+    state.querySelector("[data-range-retry]")?.addEventListener(
+      "click",
+      () => void this.selectRange(range, discardCurrentFeedback),
+    );
     state.querySelector("[data-range-keep]")?.addEventListener("click", () => { state.hidden = true; });
     state.hidden = false;
   }

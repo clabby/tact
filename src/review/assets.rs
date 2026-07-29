@@ -54,9 +54,15 @@ impl ReviewAssets {
 
         let path = install_path(&tact_home()?);
         if path.exists() {
-            match Self::from_directory(path, InstallKind::Managed) {
+            let can_download = can_download_release_artifacts();
+            let kind = if can_download {
+                InstallKind::Managed
+            } else {
+                InstallKind::DevelopmentOverride
+            };
+            match Self::from_directory(path, kind) {
                 Ok(assets) => return Ok(AssetAvailability::Ready(assets)),
-                Err(_) if can_download_release_artifacts() => {
+                Err(_) if can_download => {
                     return Ok(AssetAvailability::DownloadRequired);
                 }
                 Err(error) => return Err(error),
@@ -704,11 +710,45 @@ mod tests {
     use flate2::{Compression, write::GzEncoder};
     use sha2::{Digest, Sha256};
     use std::{
+        ffi::OsString,
         fs,
         io::{self, Read, Write},
         path::Path,
+        sync::Mutex,
     };
     use tar::{Builder, EntryType, Header};
+
+    static ENVIRONMENT: Mutex<()> = Mutex::new(());
+
+    struct EnvironmentGuard {
+        name: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl EnvironmentGuard {
+        fn set(name: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let previous = std::env::var_os(name);
+            unsafe { std::env::set_var(name, value) };
+            Self { name, previous }
+        }
+
+        fn remove(name: &'static str) -> Self {
+            let previous = std::env::var_os(name);
+            unsafe { std::env::remove_var(name) };
+            Self { name, previous }
+        }
+    }
+
+    impl Drop for EnvironmentGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.previous {
+                    Some(value) => std::env::set_var(self.name, value),
+                    None => std::env::remove_var(self.name),
+                }
+            }
+        }
+    }
 
     fn write_valid_assets(directory: &Path) {
         let assets = [
@@ -808,6 +848,30 @@ mod tests {
         assert!(matches!(
             validate_directory(directory.path(), InstallKind::DevelopmentOverride),
             Err(AssetError::DirectoryContents { .. })
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn availability_accepts_the_documented_development_symlink_install() {
+        let _environment = ENVIRONMENT.lock().unwrap();
+        let tact_home = tempfile::tempdir().unwrap();
+        let bundle = tempfile::tempdir().unwrap();
+        write_valid_assets(bundle.path());
+        let manifest_path = bundle.path().join("manifest.json");
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        manifest["tact"]["version"] = "development".into();
+        fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let destination = super::install_path(tact_home.path());
+        fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(bundle.path(), &destination).unwrap();
+        let _home = EnvironmentGuard::set("TACT_HOME", tact_home.path());
+        let _override = EnvironmentGuard::remove(super::REVIEW_ASSETS_ENV);
+
+        assert!(matches!(
+            ReviewAssets::availability(),
+            Ok(super::AssetAvailability::Ready(_))
         ));
     }
 
