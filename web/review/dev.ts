@@ -1,6 +1,6 @@
 import { mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
-import { reviewFixture } from "./dev-fixture";
+import { reviewBootstrap, reviewFixtures } from "./dev-fixture";
 
 const outputDirectory = join(import.meta.dir, ".dev");
 await rm(outputDirectory, { recursive: true, force: true });
@@ -28,7 +28,14 @@ const server = Bun.serve({
   async fetch(request) {
     const url = new URL(request.url);
     if (request.method === "GET" && url.pathname === "/api/review") {
-      return Response.json(reviewFixture);
+      return Response.json(reviewBootstrap);
+    }
+    if (request.method === "POST" && url.pathname === "/api/scope") {
+      const body = await request.json() as { scope?: keyof typeof reviewFixtures };
+      const fixture = body.scope ? reviewFixtures[body.scope] : undefined;
+      if (!fixture) return Response.json({ error: "Unknown review scope" }, { status: 422 });
+      await Bun.sleep(350);
+      return Response.json(fixture);
     }
     if (request.method === "POST" && url.pathname === "/api/decision") {
       console.log("\nReview result:\n", JSON.stringify(await request.json(), null, 2));

@@ -73,10 +73,6 @@ type NewSessionTask = JoinHandle<(
     Result<ConfiguredAgent>,
 )>;
 type SessionListTask = JoinHandle<(PaneId, Result<Vec<SessionSummary>>)>;
-type ReviewRangeTask = JoinHandle<(
-    PaneId,
-    std::result::Result<Vec<crate::review::ReviewRange>, crate::review::ReviewError>,
-)>;
 type ReviewTask = JoinHandle<(
     PaneId,
     std::result::Result<Option<String>, crate::review::ReviewError>,
@@ -93,12 +89,8 @@ type UpdateCheckTask =
 
 fn stop_review_tasks(
     review_agent: &mut Option<nanocodex::Nanocodex>,
-    range_task: &mut Option<ReviewRangeTask>,
     review_task: &mut Option<ReviewTask>,
 ) {
-    if let Some(task) = range_task.take() {
-        task.abort();
-    }
     if let Some(task) = review_task.take() {
         task.abort();
     }
@@ -383,7 +375,6 @@ pub(crate) async fn run(
     let mut fast_mode_task = None::<FastModeUpdateTask>;
     let mut new_session_task = None::<NewSessionTask>;
     let mut session_list_task = None::<SessionListTask>;
-    let mut review_range_task = None::<ReviewRangeTask>;
     let mut review_task = None::<ReviewTask>;
     let mut resume_session_task = None::<ResumeSessionTask>;
     let mut scheduler = RenderScheduler::new(STREAM_FRAME_INTERVAL, Instant::now());
@@ -412,7 +403,6 @@ pub(crate) async fn run(
                     fast_mode_task: &mut fast_mode_task,
                     new_session_task: &mut new_session_task,
                     session_list_task: &mut session_list_task,
-                    review_range_task: &mut review_range_task,
                     review_task: &mut review_task,
                     review_agent: &mut review_agent,
                     resume_session_task: &mut resume_session_task,
@@ -432,7 +422,7 @@ pub(crate) async fn run(
         }
         if stopping {
             shell_tasks.abort_all();
-            stop_review_tasks(&mut review_agent, &mut review_range_task, &mut review_task);
+            stop_review_tasks(&mut review_agent, &mut review_task);
         }
         if stopping && !subagents_stopping {
             for runtime in panes.values() {
@@ -966,29 +956,6 @@ pub(crate) async fn run(
                 scheduler.request_immediate(Instant::now());
             }
             result = async {
-                review_range_task
-                    .as_mut()
-                    .expect("review-range branch is disabled without a task")
-                    .await
-            }, if review_range_task.is_some() && !stopping => {
-                review_range_task = None;
-                let (pane, ranges) = result.map_err(RuntimeError::SessionTask)?;
-                match ranges {
-                    Ok(ranges) => schedule(
-                        app.update(AppEvent::ReviewRangesLoaded { pane, ranges }),
-                        &mut scheduler,
-                    ),
-                    Err(error) => schedule(
-                        app.update(AppEvent::NotifyError {
-                            pane,
-                            error: format!("Could not load review ranges: {error}"),
-                        }),
-                        &mut scheduler,
-                    ),
-                }
-                scheduler.request_immediate(Instant::now());
-            }
-            result = async {
                 review_task
                     .as_mut()
                     .expect("review branch is disabled without a task")
@@ -1279,7 +1246,6 @@ struct EffectContext<'a> {
     fast_mode_task: &'a mut Option<FastModeUpdateTask>,
     new_session_task: &'a mut Option<NewSessionTask>,
     session_list_task: &'a mut Option<SessionListTask>,
-    review_range_task: &'a mut Option<ReviewRangeTask>,
     review_task: &'a mut Option<ReviewTask>,
     review_agent: &'a mut Option<nanocodex::Nanocodex>,
     resume_session_task: &'a mut Option<ResumeSessionTask>,
@@ -1550,26 +1516,7 @@ fn apply_pane_effect(
                 (pane, sessions.map_err(Into::into))
             }));
         }
-        components::RootEffect::LoadReviewRanges => {
-            if context.review_range_task.is_some() || context.review_task.is_some() {
-                schedule(
-                    context.app.update(AppEvent::NotifyError {
-                        pane,
-                        error: "A review is already being prepared.".to_owned(),
-                    }),
-                    context.scheduler,
-                );
-                return Ok(());
-            }
-            let workspace = context.workspace.to_path_buf();
-            *context.review_range_task = Some(tokio::spawn(async move {
-                (pane, crate::review::load_ranges(&workspace).await)
-            }));
-        }
-        components::RootEffect::Review {
-            range,
-            download_assets,
-        } => {
+        components::RootEffect::Review { download_assets } => {
             if context.review_task.is_some() {
                 schedule(
                     context.app.update(AppEvent::NotifyError {
@@ -1591,7 +1538,6 @@ fn apply_pane_effect(
                             .expect("review agent is available while the UI is running")
                             .clone(),
                         context.workspace.to_path_buf(),
-                        range,
                         Some(assets),
                     ));
                 }
@@ -1599,7 +1545,7 @@ fn apply_pane_effect(
                     schedule(
                         context
                             .app
-                            .update(AppEvent::ConfirmReviewDownload { pane, range }),
+                            .update(AppEvent::ConfirmReviewDownload { pane }),
                         context.scheduler,
                     );
                     return Ok(());
@@ -1613,7 +1559,6 @@ fn apply_pane_effect(
                             .expect("review agent is available while the UI is running")
                             .clone(),
                         context.workspace.to_path_buf(),
-                        range,
                         None,
                     ));
                 }
@@ -1772,7 +1717,6 @@ fn spawn_review(
     pane: PaneId,
     agent: nanocodex::Nanocodex,
     workspace: PathBuf,
-    range: crate::review::ReviewRange,
     assets: Option<crate::review::ReviewAssets>,
 ) -> ReviewTask {
     tokio::spawn(async move {
@@ -1781,7 +1725,7 @@ fn spawn_review(
                 Some(assets) => assets,
                 None => crate::review::ReviewAssets::download().await?,
             };
-            crate::review::run(agent, &workspace, range, assets).await
+            crate::review::run(agent, &workspace, assets).await
         }
         .await;
         (pane, result)
@@ -1911,7 +1855,6 @@ mod tests {
         let openai = OpenAi::new("test-key").unwrap();
         let (agent, mut events) = Nanocodex::builder(openai).build().unwrap();
         let mut review_agent = Some(agent.clone());
-        let mut range_task = None;
         let mut review_task = None;
 
         agent.shutdown().await.unwrap();
@@ -1922,7 +1865,7 @@ mod tests {
                 .is_err()
         );
 
-        stop_review_tasks(&mut review_agent, &mut range_task, &mut review_task);
+        stop_review_tasks(&mut review_agent, &mut review_task);
 
         assert!(matches!(
             timeout(Duration::from_secs(1), events.recv()).await,

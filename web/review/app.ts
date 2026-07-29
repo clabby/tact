@@ -8,6 +8,16 @@ import {
 } from "@pierre/diffs";
 import { FileTree, type GitStatus, type GitStatusEntry } from "@pierre/trees";
 import { pendingCommentCount } from "./comment-state";
+import { renderMarkdown } from "./markdown";
+import {
+  activeSyntaxTheme,
+  appearance,
+  diffTheme,
+  loadReviewSettings,
+  saveReviewSettings,
+  type ReviewSettings,
+  type SyntaxTheme,
+} from "./review-settings";
 import "./styles.css";
 
 const COMMENT_ICON_SPRITE = `
@@ -18,13 +28,23 @@ const COMMENT_ICON_SPRITE = `
   </svg>`;
 const TREE_ICONS = { set: "minimal", spriteSheet: COMMENT_ICON_SPRITE } as const;
 
+type ReviewScope = "uncommitted" | "full_branch";
+
+type ReviewBootstrap = {
+  title: string;
+  repository: string;
+  trunk: string;
+  default_scope: ReviewScope;
+};
+
 type ReviewPage = {
   title: string;
   overview_html: string;
+  selected_scope: ReviewScope;
   patch: string;
   repository: string;
   scope: string;
-  base?: string;
+  base: string;
 };
 
 type ReviewComment = {
@@ -44,6 +64,21 @@ type ReviewDecision = {
 
 type CommentMetadata = ReviewComment & { itemId: string };
 
+type CommentDraft = {
+  itemId: string;
+  path: string;
+  side: ReviewComment["side"];
+  startLine: number;
+  endLine: number;
+  body: string;
+  editingId?: number;
+  tab: "comment" | "preview";
+};
+
+type AnnotationMetadata =
+  | { kind: "comment"; comment: CommentMetadata }
+  | { kind: "composer"; draft: CommentDraft };
+
 const root = document.querySelector<HTMLElement>("#app");
 if (!root) throw new Error("review root is missing");
 
@@ -53,60 +88,84 @@ async function start() {
   try {
     const response = await fetch("./api/review");
     if (!response.ok) throw new Error(`review request failed: ${response.status}`);
-    const review = (await response.json()) as ReviewPage;
-    new ReviewApp(root, review).render();
+    const bootstrap = (await response.json()) as ReviewBootstrap;
+    const app = new ReviewApp(root, bootstrap);
+    app.render();
+    await app.selectScope(bootstrap.default_scope);
   } catch (error) {
     root.innerHTML = `<div class="fatal"><p>Could not load this review.</p><small>${escapeHtml(String(error))}</small></div>`;
   }
 }
 
 class ReviewApp {
-  private readonly files: FileDiffMetadata[];
-  private readonly items: CodeViewDiffItem<CommentMetadata>[];
+  private page?: ReviewPage;
+  private files: FileDiffMetadata[] = [];
+  private items: CodeViewDiffItem<AnnotationMetadata>[] = [];
   private readonly pathToItem = new Map<string, string>();
   private readonly comments: CommentMetadata[] = [];
-  private selection: CodeViewLineSelection | null = null;
+  private draft?: CommentDraft;
   private nextCommentId = 1;
   private submitted = false;
-  private viewer?: CodeView<CommentMetadata>;
+  private loadingScope?: ReviewScope;
+  private scopeRequest = 0;
+  private viewer?: CodeView<AnnotationMetadata>;
   private tree?: FileTree;
+  private settings = loadReviewSettings(window.localStorage, document.cookie);
+  private readonly colorScheme = window.matchMedia("(prefers-color-scheme: dark)");
 
   constructor(
     private readonly root: HTMLElement,
-    private readonly review: ReviewPage,
-  ) {
-    this.files = parsePatchFiles(review.patch, "tact-review", true).flatMap(
-      (patch) => patch.files,
-    );
-    this.items = this.files.map((file, index) => {
-      const id = `${index}:${file.name}`;
-      this.pathToItem.set(file.name, id);
-      return { id, type: "diff", fileDiff: file, annotations: [], version: 1 };
-    });
-  }
+    private readonly bootstrap: ReviewBootstrap,
+  ) {}
 
   render() {
-    document.title = `${this.review.title} · Tact`;
-    const stats = changeStats(this.files);
+    document.title = `${this.bootstrap.title} · Tact`;
     this.root.innerHTML = `
       <div class="review-shell">
         <header class="topbar">
           <div class="identity">
             <span class="mark" aria-hidden="true">T</span>
             <div>
-              <h1>${escapeHtml(this.review.title)}</h1>
-              <p>${escapeHtml(this.review.repository)} <span>·</span> ${escapeHtml(this.review.scope)}</p>
+              <h1>${escapeHtml(this.bootstrap.title)}</h1>
+              <p>${escapeHtml(this.bootstrap.repository)} <span>·</span> <span id="scope-description">Loading uncommitted changes…</span></p>
             </div>
           </div>
-          <div class="change-stats" aria-label="Change statistics">
-            <span>${this.files.length} ${this.files.length === 1 ? "file" : "files"}</span>
-            <strong class="add">+${stats.additions}</strong>
-            <strong class="del">−${stats.deletions}</strong>
+          <div class="topbar-actions">
+            <div class="scope-switch" aria-label="Review scope">
+              <button data-scope="uncommitted">Uncommitted</button>
+              <button data-scope="full_branch" title="Everything since ${escapeHtml(this.bootstrap.trunk)}">Full branch</button>
+            </div>
+            <div class="change-stats" id="change-stats" aria-label="Change statistics"></div>
+            <button class="icon-button settings-button" id="settings-button" aria-label="Review settings" aria-expanded="false">
+              ${icon("settings")}
+            </button>
+            <div class="settings-popover" id="settings-popover" hidden>
+              <div class="settings-heading">Review settings</div>
+              <label>
+                <span>Syntax theme</span>
+                <select data-setting="syntaxTheme">
+                  <option value="system">System</option>
+                  <option value="pierre-light">Pierre Light</option>
+                  <option value="pierre-light-soft">Pierre Light Soft</option>
+                  <option value="pierre-dark">Pierre Dark</option>
+                  <option value="pierre-dark-soft">Pierre Dark Soft</option>
+                </select>
+              </label>
+              <label>
+                <span>Diff layout</span>
+                <select data-setting="diffStyle">
+                  <option value="unified">Unified</option>
+                  <option value="split">Split</option>
+                </select>
+              </label>
+              <label class="toggle-setting"><span>Wrap long lines</span><input type="checkbox" data-setting="wrapLines"></label>
+              <label class="toggle-setting"><span>Line numbers</span><input type="checkbox" data-setting="lineNumbers"></label>
+            </div>
           </div>
         </header>
         <nav class="tabs" aria-label="Review sections">
           <button class="tab active" data-tab="overview">Overview</button>
-          <button class="tab" data-tab="changes">Changes <span>${this.files.length}</span></button>
+          <button class="tab" data-tab="changes">Changes <span id="file-count">0</span></button>
         </nav>
         <section class="panel overview-panel active" data-panel="overview">
           <iframe class="overview" title="Agent overview" sandbox=""></iframe>
@@ -132,49 +191,126 @@ class ReviewApp {
             <button class="button primary" data-decision="approve">Approve</button>
           </div>
         </footer>
-        <div id="comment-composer" class="comment-composer" hidden>
-          <div class="comment-anchor" id="comment-anchor"></div>
-          <textarea id="comment-body" rows="4" placeholder="Leave a comment"></textarea>
-          <div class="composer-actions">
-            <button class="text-button" id="cancel-comment">Cancel</button>
-            <button class="button primary" id="save-comment">Add comment</button>
-          </div>
-        </div>
+        <div class="scope-state" id="scope-state" hidden></div>
         <div id="finished" class="finished" hidden>
           <div><span>✓</span><h2>Review submitted</h2><p>You can return to Tact.</p></div>
         </div>
       </div>`;
 
+    this.bindEvents();
+    this.syncSettingsControls();
+    this.applySettings(false);
+  }
+
+  async selectScope(scope: ReviewScope) {
+    if (this.loadingScope) return;
+    if (this.page?.selected_scope === scope) {
+      const state = this.root.querySelector<HTMLElement>("#scope-state");
+      if (state?.classList.contains("error")) state.hidden = true;
+      return;
+    }
+    if (this.comments.length > 0 || this.draft?.body.trim()) {
+      const confirmed = window.confirm("Changing the review scope will discard pending comments. Continue?");
+      if (!confirmed) return;
+    }
+
+    const request = ++this.scopeRequest;
+    this.setScopeLoading(scope);
+    try {
+      const response = await fetch("./api/scope", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ scope }),
+      });
+      const payload = await response.json() as ReviewPage | { error?: string };
+      if (request !== this.scopeRequest) return;
+      if (!response.ok) {
+        const message = "error" in payload && payload.error
+          ? payload.error
+          : `Could not load this scope (${response.status}).`;
+        this.showScopeError(scope, message);
+        return;
+      }
+      this.clearPendingComments();
+      this.installPage(payload as ReviewPage);
+    } catch (error) {
+      if (request === this.scopeRequest) this.showScopeError(scope, String(error));
+    } finally {
+      if (request === this.scopeRequest) this.setScopeReady();
+    }
+  }
+
+  private installPage(page: ReviewPage) {
+    this.page = page;
+    this.files = parsePatchFiles(page.patch, `tact-review-${page.selected_scope}`, true).flatMap(
+      (patch) => patch.files,
+    );
+    this.pathToItem.clear();
+    this.items = this.files.map((file, index) => {
+      const id = `${page.selected_scope}:${index}:${file.name}`;
+      this.pathToItem.set(file.name, id);
+      return { id, type: "diff", fileDiff: file, annotations: [], version: 1 };
+    });
+
+    const description = this.root.querySelector<HTMLElement>("#scope-description");
+    if (description) description.textContent = page.scope;
+    this.renderStats();
     this.renderOverview();
     this.renderDiff();
     this.renderTree();
-    this.bindEvents();
+    this.renderCommentList();
+    this.syncScopeButtons(page.selected_scope);
+    this.selectTab("overview");
+  }
+
+  private renderStats() {
+    const stats = changeStats(this.files);
+    const container = this.root.querySelector<HTMLElement>("#change-stats");
+    const count = this.root.querySelector<HTMLElement>("#file-count");
+    if (count) count.textContent = String(this.files.length);
+    if (!container) return;
+    container.innerHTML = `
+      <span>${this.files.length} ${this.files.length === 1 ? "file" : "files"}</span>
+      <strong class="add">+${stats.additions}</strong>
+      <strong class="del">−${stats.deletions}</strong>`;
   }
 
   private renderOverview() {
     const frame = this.root.querySelector<HTMLIFrameElement>(".overview");
-    if (!frame) return;
-    frame.srcdoc = `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:"><style>${overviewStyles()}</style></head><body>${this.review.overview_html}</body></html>`;
+    if (!frame || !this.page) return;
+    frame.srcdoc = `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:"><style>${overviewStyles()}</style></head><body>${this.page.overview_html}</body></html>`;
   }
 
   private renderDiff() {
     const container = this.root.querySelector<HTMLElement>("#diff-view");
     if (!container) return;
-    this.viewer = new CodeView<CommentMetadata>({
-      diffStyle: "unified",
-      enableLineSelection: true,
-      stickyHeaders: true,
-      lineHoverHighlight: "both",
-      onSelectedLinesChange: (selection) => this.openCommentComposer(selection),
-      renderAnnotation: (annotation) => this.annotationElement(annotation),
-    });
+    this.viewer?.cleanUp();
+    container.replaceChildren();
+    this.viewer = new CodeView<AnnotationMetadata>(this.viewerOptions());
     this.viewer.setup(container);
     this.viewer.setItems(this.items);
+  }
+
+  private viewerOptions() {
+    return {
+      diffStyle: this.settings.diffStyle,
+      overflow: this.settings.wrapLines ? "wrap" as const : "scroll" as const,
+      disableLineNumbers: !this.settings.lineNumbers,
+      theme: diffTheme(this.settings),
+      themeType: appearance(this.settings),
+      enableLineSelection: true,
+      stickyHeaders: true,
+      lineHoverHighlight: "both" as const,
+      onSelectedLinesChange: (selection: CodeViewLineSelection | null) => this.openCommentComposer(selection),
+      renderAnnotation: (annotation: DiffLineAnnotation<AnnotationMetadata>) => this.annotationElement(annotation),
+    };
   }
 
   private renderTree() {
     const container = this.root.querySelector<HTMLElement>("#file-tree");
     if (!container) return;
+    this.tree?.cleanUp();
+    container.replaceChildren();
     this.tree = new FileTree({
       paths: this.files.map((file) => file.name),
       flattenEmptyDirectories: true,
@@ -211,15 +347,77 @@ class ReviewApp {
     for (const tab of this.root.querySelectorAll<HTMLButtonElement>("[data-tab]")) {
       tab.addEventListener("click", () => this.selectTab(tab.dataset.tab ?? "overview"));
     }
-    this.root.querySelector("#cancel-comment")?.addEventListener("click", () => this.closeCommentComposer());
-    this.root.querySelector("#save-comment")?.addEventListener("click", () => this.saveComment());
+    for (const button of this.root.querySelectorAll<HTMLButtonElement>("[data-scope]")) {
+      button.addEventListener("click", () => void this.selectScope(button.dataset.scope as ReviewScope));
+    }
     this.root.querySelector("#cancel-review")?.addEventListener("click", () => void this.cancel());
     for (const button of this.root.querySelectorAll<HTMLButtonElement>("[data-decision]")) {
       button.addEventListener("click", () => void this.submit(button.dataset.decision as ReviewDecision["decision"]));
     }
+    this.bindSettings();
+    this.colorScheme.addEventListener("change", () => {
+      if (this.settings.syntaxTheme !== "system") return;
+      if (this.draft?.tab === "preview") void this.renderDraftPreview();
+    });
     window.addEventListener("pagehide", () => {
       if (!this.submitted) navigator.sendBeacon("./api/cancel");
     });
+  }
+
+  private bindSettings() {
+    const button = this.root.querySelector<HTMLButtonElement>("#settings-button");
+    const popover = this.root.querySelector<HTMLElement>("#settings-popover");
+    button?.addEventListener("click", (event) => {
+      event.stopPropagation();
+      if (!popover) return;
+      popover.hidden = !popover.hidden;
+      button.setAttribute("aria-expanded", String(!popover.hidden));
+    });
+    popover?.addEventListener("click", (event) => event.stopPropagation());
+    document.addEventListener("click", () => {
+      if (!popover || popover.hidden) return;
+      popover.hidden = true;
+      button?.setAttribute("aria-expanded", "false");
+    });
+    for (const control of this.root.querySelectorAll<HTMLInputElement | HTMLSelectElement>("[data-setting]")) {
+      control.addEventListener("change", () => {
+        this.readSettingsControls();
+        saveReviewSettings(window.localStorage, this.settings, (cookie) => {
+          document.cookie = cookie;
+        });
+        this.applySettings(true);
+      });
+    }
+  }
+
+  private syncSettingsControls() {
+    const theme = this.root.querySelector<HTMLSelectElement>("[data-setting=syntaxTheme]");
+    const layout = this.root.querySelector<HTMLSelectElement>("[data-setting=diffStyle]");
+    const wrap = this.root.querySelector<HTMLInputElement>("[data-setting=wrapLines]");
+    const lineNumbers = this.root.querySelector<HTMLInputElement>("[data-setting=lineNumbers]");
+    if (theme) theme.value = this.settings.syntaxTheme;
+    if (layout) layout.value = this.settings.diffStyle;
+    if (wrap) wrap.checked = this.settings.wrapLines;
+    if (lineNumbers) lineNumbers.checked = this.settings.lineNumbers;
+  }
+
+  private readSettingsControls() {
+    const theme = this.root.querySelector<HTMLSelectElement>("[data-setting=syntaxTheme]");
+    const layout = this.root.querySelector<HTMLSelectElement>("[data-setting=diffStyle]");
+    const wrap = this.root.querySelector<HTMLInputElement>("[data-setting=wrapLines]");
+    const lineNumbers = this.root.querySelector<HTMLInputElement>("[data-setting=lineNumbers]");
+    this.settings = {
+      syntaxTheme: (theme?.value ?? "system") as SyntaxTheme,
+      diffStyle: layout?.value === "split" ? "split" : "unified",
+      wrapLines: wrap?.checked ?? false,
+      lineNumbers: lineNumbers?.checked ?? true,
+    };
+  }
+
+  private applySettings(rebuildDiff: boolean) {
+    document.documentElement.dataset.appearance = appearance(this.settings);
+    if (rebuildDiff && this.page) this.renderDiff();
+    if (this.draft?.tab === "preview") void this.renderDraftPreview();
   }
 
   private selectTab(name: string) {
@@ -233,90 +431,253 @@ class ReviewApp {
   }
 
   private openCommentComposer(selection: CodeViewLineSelection | null) {
-    if (!selection) return;
+    if (!selection || this.loadingScope) return;
     const side = selection.range.side ?? "additions";
     const endSide = selection.range.endSide ?? side;
     if (side !== endSide) return;
-    this.selection = selection;
     const item = this.items.find((candidate) => candidate.id === selection.id);
     if (!item) return;
-    const composer = this.root.querySelector<HTMLElement>("#comment-composer");
-    const anchor = this.root.querySelector<HTMLElement>("#comment-anchor");
-    if (!composer || !anchor) return;
-    anchor.textContent = `${item.fileDiff.name}:${formatRange(selection.range.start, selection.range.end)}`;
-    composer.hidden = false;
-    this.root.querySelector<HTMLTextAreaElement>("#comment-body")?.focus();
+
+    const previousItemId = this.draft?.itemId;
+    this.draft = {
+      itemId: item.id,
+      path: item.fileDiff.name,
+      side,
+      startLine: Math.min(selection.range.start, selection.range.end),
+      endLine: Math.max(selection.range.start, selection.range.end),
+      body: "",
+      tab: "comment",
+    };
+    if (previousItemId && previousItemId !== item.id) this.refreshItem(previousItemId);
+    this.refreshItem(item.id);
+    queueMicrotask(() => this.focusDraft());
+  }
+
+  private editComment(comment: CommentMetadata) {
+    const previousItemId = this.draft?.itemId;
+    this.draft = {
+      itemId: comment.itemId,
+      path: comment.path,
+      side: comment.side,
+      startLine: comment.start_line,
+      endLine: comment.end_line,
+      body: comment.body,
+      editingId: comment.id,
+      tab: "comment",
+    };
+    if (previousItemId && previousItemId !== comment.itemId) this.refreshItem(previousItemId);
+    this.refreshItem(comment.itemId);
+    this.selectTab("changes");
+    this.viewer?.scrollTo({
+      type: "range",
+      id: comment.itemId,
+      range: {
+        start: comment.start_line,
+        end: comment.end_line,
+        side: comment.side,
+        endSide: comment.side,
+      },
+      align: "center",
+      behavior: "smooth-auto",
+    });
+    queueMicrotask(() => this.focusDraft());
   }
 
   private closeCommentComposer() {
-    this.selection = null;
+    const itemId = this.draft?.itemId;
+    this.draft = undefined;
     this.viewer?.clearSelectedLines();
-    const composer = this.root.querySelector<HTMLElement>("#comment-composer");
-    if (composer) composer.hidden = true;
-    const body = this.root.querySelector<HTMLTextAreaElement>("#comment-body");
-    if (body) body.value = "";
+    if (itemId) this.refreshItem(itemId);
   }
 
   private saveComment() {
-    if (!this.selection) return;
-    const body = this.root.querySelector<HTMLTextAreaElement>("#comment-body")?.value.trim();
-    if (!body) return;
-    const item = this.items.find((candidate) => candidate.id === this.selection?.id);
-    if (!item) return;
-    const range = this.selection.range;
-    const comment: CommentMetadata = {
-      id: this.nextCommentId++,
-      itemId: item.id,
-      path: item.fileDiff.name,
-      side: range.side ?? "additions",
-      start_line: Math.min(range.start, range.end),
-      end_line: Math.max(range.start, range.end),
-      body,
-    };
-    this.comments.push(comment);
-    this.refreshItem(item.id);
+    const draft = this.draft;
+    if (!draft) return;
+    const body = draft.body.trim();
+    if (!body) {
+      this.focusDraft();
+      return;
+    }
+
+    if (draft.editingId !== undefined) {
+      const comment = this.comments.find((candidate) => candidate.id === draft.editingId);
+      if (comment) comment.body = body;
+    } else {
+      this.comments.push({
+        id: this.nextCommentId++,
+        itemId: draft.itemId,
+        path: draft.path,
+        side: draft.side,
+        start_line: draft.startLine,
+        end_line: draft.endLine,
+        body,
+      });
+    }
+    const itemId = draft.itemId;
+    this.draft = undefined;
+    this.viewer?.clearSelectedLines();
+    this.refreshItem(itemId);
     this.refreshTreeDecorations();
     this.renderCommentList();
-    this.closeCommentComposer();
   }
 
   private removeComment(id: number) {
     const index = this.comments.findIndex((comment) => comment.id === id);
     if (index < 0) return;
     const [comment] = this.comments.splice(index, 1);
+    if (this.draft?.editingId === id) this.draft = undefined;
     this.refreshItem(comment.itemId);
     this.refreshTreeDecorations();
     this.renderCommentList();
   }
 
+  private clearPendingComments() {
+    this.comments.splice(0);
+    this.draft = undefined;
+    this.viewer?.clearSelectedLines();
+  }
+
   private refreshTreeDecorations() {
-    // Updating the icon surface asks virtualized rows to evaluate their decorations again.
     this.tree?.setIcons({ ...TREE_ICONS });
   }
 
   private refreshItem(itemId: string) {
     const item = this.items.find((candidate) => candidate.id === itemId);
     if (!item) return;
-    item.annotations = this.comments
-      .filter((comment) => comment.itemId === itemId)
+    const annotations: DiffLineAnnotation<AnnotationMetadata>[] = this.comments
+      .filter((comment) => comment.itemId === itemId && comment.id !== this.draft?.editingId)
       .map((comment) => ({
         side: comment.side,
-        lineNumber: comment.start_line,
-        metadata: comment,
+        lineNumber: comment.end_line,
+        metadata: { kind: "comment", comment },
       }));
+    if (this.draft?.itemId === itemId) {
+      annotations.push({
+        side: this.draft.side,
+        lineNumber: this.draft.endLine,
+        metadata: { kind: "composer", draft: this.draft },
+      });
+    }
+    item.annotations = annotations;
     item.version = (item.version ?? 0) + 1;
     this.viewer?.updateItem(item);
   }
 
-  private annotationElement(annotation: DiffLineAnnotation<CommentMetadata>) {
-    const element = document.createElement("div");
-    element.className = "diff-comment";
-    const range = document.createElement("span");
-    range.textContent = `Lines ${formatRange(annotation.metadata.start_line, annotation.metadata.end_line)}`;
-    const body = document.createElement("p");
-    body.textContent = annotation.metadata.body;
-    element.append(range, body);
+  private annotationElement(annotation: DiffLineAnnotation<AnnotationMetadata>) {
+    if (annotation.metadata.kind === "composer") {
+      return this.commentComposerElement(annotation.metadata.draft);
+    }
+    return this.pendingCommentElement(annotation.metadata.comment);
+  }
+
+  private commentComposerElement(draft: CommentDraft) {
+    const element = document.createElement("section");
+    element.className = "inline-comment-editor";
+    element.innerHTML = `
+      <div class="editor-topbar">
+        <div class="formatting-tools" aria-label="Markdown formatting">
+          ${formatButton("bold", "Bold")}
+          ${formatButton("italic", "Italic")}
+          ${formatButton("code", "Inline code")}
+          ${formatButton("code-block", "Code block")}
+          ${formatButton("link", "Link")}
+          ${formatButton("list", "Bulleted list")}
+          ${formatButton("quote", "Quote")}
+        </div>
+        <div class="editor-tabs" role="tablist">
+          <button class="${draft.tab === "comment" ? "active" : ""}" data-editor-tab="comment">Comment</button>
+          <button class="${draft.tab === "preview" ? "active" : ""}" data-editor-tab="preview">Preview</button>
+        </div>
+      </div>
+      <div class="editor-context">${escapeHtml(draft.path)}:${formatRange(draft.startLine, draft.endLine)}</div>
+      <textarea class="comment-input" rows="5" placeholder="Leave a comment" ${draft.tab === "preview" ? "hidden" : ""}></textarea>
+      <div class="markdown-preview" ${draft.tab === "comment" ? "hidden" : ""}></div>
+      <div class="composer-actions">
+        <button class="text-button" data-comment-action="cancel">Cancel</button>
+        <button class="button primary" data-comment-action="save">${draft.editingId === undefined ? "Add comment" : "Save changes"}</button>
+      </div>`;
+
+    const textarea = element.querySelector<HTMLTextAreaElement>(".comment-input");
+    if (textarea) {
+      textarea.value = draft.body;
+      textarea.addEventListener("input", () => {
+        if (this.draft === draft) draft.body = textarea.value;
+      });
+      textarea.addEventListener("keydown", (event) => {
+        if ((event.metaKey || event.ctrlKey) && event.key === "Enter") this.saveComment();
+        if (event.key === "Escape") this.closeCommentComposer();
+      });
+    }
+    for (const button of element.querySelectorAll<HTMLButtonElement>("[data-format]")) {
+      button.addEventListener("click", () => {
+        if (textarea) applyFormatting(textarea, button.dataset.format ?? "");
+        draft.body = textarea?.value ?? draft.body;
+      });
+    }
+    for (const button of element.querySelectorAll<HTMLButtonElement>("[data-editor-tab]")) {
+      button.addEventListener("click", () => this.selectEditorTab(element, draft, button.dataset.editorTab as CommentDraft["tab"]));
+    }
+    element.querySelector("[data-comment-action=cancel]")?.addEventListener("click", () => this.closeCommentComposer());
+    element.querySelector("[data-comment-action=save]")?.addEventListener("click", () => this.saveComment());
+    if (draft.tab === "preview") void this.renderPreviewElement(element, draft.body);
     return element;
+  }
+
+  private pendingCommentElement(comment: CommentMetadata) {
+    const element = document.createElement("article");
+    element.className = "diff-comment";
+    element.innerHTML = `
+      <header>
+        <span>Lines ${formatRange(comment.start_line, comment.end_line)}</span>
+        <div>
+          <button class="small-icon-button" data-comment-edit aria-label="Edit comment">${icon("edit")}</button>
+          <button class="small-icon-button danger" data-comment-delete aria-label="Delete comment">${icon("trash")}</button>
+        </div>
+      </header>
+      <div class="comment-markdown"></div>`;
+    element.querySelector("[data-comment-edit]")?.addEventListener("click", () => this.editComment(comment));
+    element.querySelector("[data-comment-delete]")?.addEventListener("click", () => this.removeComment(comment.id));
+    const markdown = element.querySelector<HTMLElement>(".comment-markdown");
+    if (markdown) void this.renderMarkdown(markdown, comment.body);
+    return element;
+  }
+
+  private selectEditorTab(element: HTMLElement, draft: CommentDraft, tab: CommentDraft["tab"]) {
+    if (this.draft !== draft) return;
+    draft.tab = tab;
+    for (const button of element.querySelectorAll<HTMLButtonElement>("[data-editor-tab]")) {
+      button.classList.toggle("active", button.dataset.editorTab === tab);
+    }
+    const textarea = element.querySelector<HTMLTextAreaElement>(".comment-input");
+    const preview = element.querySelector<HTMLElement>(".markdown-preview");
+    if (textarea) textarea.hidden = tab !== "comment";
+    if (preview) preview.hidden = tab !== "preview";
+    if (tab === "comment") {
+      textarea?.focus();
+      return;
+    }
+    if (preview) void this.renderPreviewElement(element, draft.body);
+  }
+
+  private async renderPreviewElement(element: HTMLElement, body: string) {
+    const preview = element.querySelector<HTMLElement>(".markdown-preview");
+    if (preview) await this.renderMarkdown(preview, body);
+  }
+
+  private async renderDraftPreview() {
+    const editor = this.root.querySelector<HTMLElement>(".inline-comment-editor");
+    if (editor && this.draft) await this.renderPreviewElement(editor, this.draft.body);
+  }
+
+  private async renderMarkdown(container: HTMLElement, body: string) {
+    const theme = activeSyntaxTheme(this.settings, this.colorScheme.matches);
+    await renderMarkdown(container, body, theme);
+  }
+
+  private focusDraft() {
+    const textarea = this.root.querySelector<HTMLTextAreaElement>(".inline-comment-editor .comment-input");
+    textarea?.focus();
+    textarea?.setSelectionRange(textarea.value.length, textarea.value.length);
   }
 
   private renderCommentList() {
@@ -333,14 +694,20 @@ class ReviewApp {
       return;
     }
     for (const comment of this.comments) {
-      const button = document.createElement("button");
-      button.className = "comment-link";
-      button.innerHTML = `<strong>${escapeHtml(comment.path)}</strong><span>${formatRange(comment.start_line, comment.end_line)} · ${comment.side === "additions" ? "new" : "old"}</span><p>${escapeHtml(comment.body)}</p><i aria-label="Remove comment">×</i>`;
-      button.addEventListener("click", (event) => {
-        if ((event.target as HTMLElement).tagName === "I") {
-          this.removeComment(comment.id);
-          return;
-        }
+      const item = document.createElement("div");
+      item.className = "comment-link";
+      item.innerHTML = `
+        <button class="comment-jump">
+          <strong>${escapeHtml(comment.path)}</strong>
+          <span>${formatRange(comment.start_line, comment.end_line)} · ${comment.side === "additions" ? "new" : "old"}</span>
+          <p>${escapeHtml(comment.body)}</p>
+        </button>
+        <div class="comment-link-actions">
+          <button aria-label="Edit comment" data-edit>${icon("edit")}</button>
+          <button aria-label="Delete comment" data-delete>${icon("trash")}</button>
+        </div>`;
+      item.querySelector(".comment-jump")?.addEventListener("click", () => {
+        this.selectTab("changes");
         this.viewer?.scrollTo({
           type: "range",
           id: comment.itemId,
@@ -349,11 +716,60 @@ class ReviewApp {
           behavior: "smooth-auto",
         });
       });
-      list.append(button);
+      item.querySelector("[data-edit]")?.addEventListener("click", () => this.editComment(comment));
+      item.querySelector("[data-delete]")?.addEventListener("click", () => this.removeComment(comment.id));
+      list.append(item);
+    }
+  }
+
+  private setScopeLoading(scope: ReviewScope) {
+    this.loadingScope = scope;
+    this.syncScopeButtons(scope);
+    const state = this.root.querySelector<HTMLElement>("#scope-state");
+    if (state) {
+      state.className = "scope-state loading";
+      state.innerHTML = `<div class="scope-spinner"></div><strong>Preparing ${scope === "uncommitted" ? "uncommitted changes" : "the full branch"}</strong><span>Generating a fresh overview…</span>`;
+      state.hidden = false;
+    }
+    this.setReviewControlsDisabled(true);
+  }
+
+  private setScopeReady() {
+    this.loadingScope = undefined;
+    this.syncScopeButtons(this.page?.selected_scope ?? this.bootstrap.default_scope);
+    this.setReviewControlsDisabled(false);
+    const state = this.root.querySelector<HTMLElement>("#scope-state");
+    if (state?.classList.contains("loading")) state.hidden = true;
+  }
+
+  private showScopeError(scope: ReviewScope, message: string) {
+    const state = this.root.querySelector<HTMLElement>("#scope-state");
+    if (!state) return;
+    state.className = "scope-state error";
+    state.innerHTML = `
+      <div class="scope-error-icon">!</div>
+      <strong>${scope === "uncommitted" ? "No uncommitted review available" : "Could not load the full branch"}</strong>
+      <span>${escapeHtml(message)}</span>
+      ${scope === "uncommitted" ? '<button class="button primary" data-load-full>Review full branch</button>' : ""}`;
+    state.hidden = false;
+    state.querySelector("[data-load-full]")?.addEventListener("click", () => void this.selectScope("full_branch"));
+  }
+
+  private syncScopeButtons(scope: ReviewScope) {
+    for (const button of this.root.querySelectorAll<HTMLButtonElement>("[data-scope]")) {
+      button.classList.toggle("active", button.dataset.scope === scope);
+      button.disabled = this.loadingScope !== undefined;
+    }
+  }
+
+  private setReviewControlsDisabled(disabled: boolean) {
+    for (const button of this.root.querySelectorAll<HTMLButtonElement>("[data-decision]")) {
+      button.disabled = disabled || !this.page;
     }
   }
 
   private async submit(decision: ReviewDecision["decision"]) {
+    if (!this.page || this.loadingScope) return;
     const summary = this.root.querySelector<HTMLTextAreaElement>("#review-summary")?.value.trim() ?? "";
     const payload: ReviewDecision = {
       decision,
@@ -415,6 +831,54 @@ function treeStatus(type: FileDiffMetadata["type"]): GitStatus {
     case "rename-changed": return "renamed";
     case "change": return "modified";
   }
+}
+
+function applyFormatting(textarea: HTMLTextAreaElement, format: string) {
+  const start = textarea.selectionStart;
+  const end = textarea.selectionEnd;
+  const selection = textarea.value.slice(start, end);
+  const replacements: Record<string, [string, string, string]> = {
+    bold: ["**", "**", "bold text"],
+    italic: ["_", "_", "italic text"],
+    code: ["`", "`", "code"],
+    "code-block": ["```\n", "\n```", "code"],
+    link: ["[", "](https://)", "link text"],
+    quote: ["> ", "", "quote"],
+  };
+  if (format === "list") {
+    const value = selection || "list item";
+    const replacement = value.split("\n").map((line) => `- ${line}`).join("\n");
+    textarea.setRangeText(replacement, start, end, "select");
+    textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    textarea.focus();
+    return;
+  }
+  const [before, after, placeholder] = replacements[format] ?? ["", "", ""];
+  const value = selection || placeholder;
+  textarea.setRangeText(`${before}${value}${after}`, start, end, "end");
+  if (!selection) textarea.setSelectionRange(start + before.length, start + before.length + value.length);
+  textarea.dispatchEvent(new Event("input", { bubbles: true }));
+  textarea.focus();
+}
+
+function formatButton(format: string, label: string) {
+  return `<button class="format-button" data-format="${format}" aria-label="${label}" title="${label}">${icon(format)}</button>`;
+}
+
+function icon(name: string) {
+  const paths: Record<string, string> = {
+    settings: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-1.42 1.42-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1.02 1.56V20h-2v-.48A1.7 1.7 0 0 0 12.4 18a1.7 1.7 0 0 0-1.88.34l-.06.06-1.42-1.42.06-.06A1.7 1.7 0 0 0 9.44 15a1.7 1.7 0 0 0-1.56-1.02H7.4v-2h.48A1.7 1.7 0 0 0 9.44 11a1.7 1.7 0 0 0-.34-1.88l-.06-.06 1.42-1.42.06.06A1.7 1.7 0 0 0 12.4 8a1.7 1.7 0 0 0 1.02-1.56V6h2v.44A1.7 1.7 0 0 0 16.44 8a1.7 1.7 0 0 0 1.88-.34l.06-.06 1.42 1.42-.06.06A1.7 1.7 0 0 0 19.4 11a1.7 1.7 0 0 0 1.56 1.02h.48v2h-.48A1.7 1.7 0 0 0 19.4 15Z" transform="translate(-2.4 -1) scale(1.2)"/>',
+    bold: '<path d="M7 5h5a3 3 0 0 1 0 6H7Zm0 6h5.5a3.5 3.5 0 0 1 0 7H7Z"/>',
+    italic: '<path d="M10 5h7M7 19h7M14 5 10 19"/>',
+    code: '<path d="m8 9-4 3 4 3m8-6 4 3-4 3m-3-8-2 10"/>',
+    "code-block": '<path d="M4 5h16v14H4zM8 10l-2 2 2 2m4-4 2 2-2 2"/>',
+    link: '<path d="M10 13a5 5 0 0 0 7.5.5l2-2a5 5 0 0 0-7-7l-1.15 1.15M14 11a5 5 0 0 0-7.5-.5l-2 2a5 5 0 0 0 7 7l1.15-1.15"/>',
+    list: '<path d="M9 6h11M9 12h11M9 18h11M4 6h.01M4 12h.01M4 18h.01"/>',
+    quote: '<path d="M7 17H4a2 2 0 0 1-2-2v-3a5 5 0 0 1 5-5v2a3 3 0 0 0-3 3h3Zm10 0h-3a2 2 0 0 1-2-2v-3a5 5 0 0 1 5-5v2a3 3 0 0 0-3 3h3Z"/>',
+    edit: '<path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4Z"/>',
+    trash: '<path d="M4 7h16M9 11v6m6-6v6M6 7l1 14h10l1-14M9 7V4h6v3"/>',
+  };
+  return `<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${paths[name] ?? ""}</svg>`;
 }
 
 function formatRange(start: number, end: number) {

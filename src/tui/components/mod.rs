@@ -11,7 +11,6 @@ mod keybindings;
 mod node;
 mod queue;
 mod review_confirmation;
-mod review_range_picker;
 mod root;
 mod selection;
 mod session_picker;

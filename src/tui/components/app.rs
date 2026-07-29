@@ -114,13 +114,8 @@ pub(crate) enum AppEvent {
         pane: PaneId,
         message: String,
     },
-    ReviewRangesLoaded {
-        pane: PaneId,
-        ranges: Vec<crate::review::ReviewRange>,
-    },
     ConfirmReviewDownload {
         pane: PaneId,
-        range: crate::review::ReviewRange,
     },
     UpdateAvailable(Version),
     ConfigReloaded {
@@ -278,11 +273,8 @@ impl AppNode {
             AppEvent::NotifySuccess { pane, message } => {
                 self.update_root(pane, RootEvent::NotifySuccess(message))
             }
-            AppEvent::ReviewRangesLoaded { pane, ranges } => {
-                self.update_root(pane, RootEvent::ReviewRangesLoaded(ranges))
-            }
-            AppEvent::ConfirmReviewDownload { pane, range } => {
-                self.update_root(pane, RootEvent::ConfirmReviewDownload(range))
+            AppEvent::ConfirmReviewDownload { pane } => {
+                self.update_root(pane, RootEvent::ConfirmReviewDownload)
             }
             AppEvent::UpdateAvailable(version) => {
                 let pane = if self.main.is_some() {

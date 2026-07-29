@@ -6,8 +6,9 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
+use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
-use std::{net::SocketAddr, path::PathBuf, sync::Arc};
+use std::{collections::HashMap, net::SocketAddr, path::PathBuf, sync::Arc};
 use tokio::{
     net::TcpListener,
     sync::{Mutex, oneshot},
@@ -24,9 +25,38 @@ const MAX_PATH_BYTES: usize = 4096;
 pub(super) struct ReviewPage {
     pub(super) title: String,
     pub(super) overview_html: String,
+    pub(super) selected_scope: super::diff::ReviewScope,
     #[serde(flatten)]
     pub(super) diff: super::diff::DiffSnapshot,
 }
+
+#[derive(Clone, Serialize)]
+pub(super) struct ReviewBootstrap {
+    pub(super) title: String,
+    pub(super) repository: String,
+    pub(super) trunk: String,
+    pub(super) default_scope: super::diff::ReviewScope,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScopeRequest {
+    scope: super::diff::ReviewScope,
+}
+
+#[derive(Serialize)]
+struct ScopeError {
+    error: String,
+}
+
+pub(super) type ScopeLoader = Arc<
+    dyn Fn(
+            super::diff::ReviewScope,
+            CancellationToken,
+        ) -> BoxFuture<'static, Result<ReviewPage, String>>
+        + Send
+        + Sync,
+>;
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -64,7 +94,10 @@ pub(super) enum CommentSide {
 
 struct ServerState {
     assets: PathBuf,
-    page: ReviewPage,
+    bootstrap: ReviewBootstrap,
+    scope_loader: ScopeLoader,
+    scope_pages: Mutex<HashMap<super::diff::ReviewScope, ReviewPage>>,
+    scope_shutdown: CancellationToken,
     outcome: Mutex<Option<oneshot::Sender<ReviewOutcome>>>,
 }
 
@@ -77,22 +110,28 @@ pub(super) struct ReviewServer {
     address: SocketAddr,
     token: String,
     outcome: oneshot::Receiver<ReviewOutcome>,
+    scope_shutdown: CancellationToken,
     shutdown: CancellationToken,
     task: tokio::task::JoinHandle<Result<(), std::io::Error>>,
 }
 
 impl ReviewServer {
     pub(super) async fn start(
-        page: ReviewPage,
+        bootstrap: ReviewBootstrap,
+        scope_loader: ScopeLoader,
         token: String,
         assets: PathBuf,
     ) -> Result<Self, std::io::Error> {
         let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
         let address = listener.local_addr()?;
         let (outcome_tx, outcome) = oneshot::channel();
+        let scope_shutdown = CancellationToken::new();
         let state = Arc::new(ServerState {
             assets,
-            page,
+            bootstrap,
+            scope_loader,
+            scope_pages: Mutex::new(HashMap::new()),
+            scope_shutdown: scope_shutdown.clone(),
             outcome: Mutex::new(Some(outcome_tx)),
         });
         let app = Router::new().nest(&format!("/{token}"), router(state));
@@ -107,6 +146,7 @@ impl ReviewServer {
             address,
             token,
             outcome,
+            scope_shutdown,
             shutdown,
             task,
         })
@@ -118,6 +158,7 @@ impl ReviewServer {
 
     pub(super) async fn wait(mut self) -> Result<ReviewOutcome, ServerError> {
         let outcome = (&mut self.outcome).await?;
+        self.scope_shutdown.cancel();
         self.shutdown.cancel();
         (&mut self.task).await??;
         Ok(outcome)
@@ -126,6 +167,7 @@ impl ReviewServer {
 
 impl Drop for ReviewServer {
     fn drop(&mut self) {
+        self.scope_shutdown.cancel();
         self.shutdown.cancel();
         self.task.abort();
     }
@@ -137,6 +179,7 @@ fn router(state: Arc<ServerState>) -> Router {
         .route("/app.js", get(javascript))
         .route("/app.css", get(stylesheet))
         .route("/api/review", get(review))
+        .route("/api/scope", post(load_scope))
         .route("/api/decision", post(submit))
         .route("/api/cancel", post(cancel))
         .layer(DefaultBodyLimit::max(MAX_DECISION_BYTES))
@@ -156,9 +199,31 @@ async fn stylesheet(State(state): State<Arc<ServerState>>) -> impl IntoResponse 
 }
 
 async fn review(State(state): State<Arc<ServerState>>) -> impl IntoResponse {
-    let mut response = Json(&state.page).into_response();
+    let mut response = Json(&state.bootstrap).into_response();
     secure(&mut response);
     response
+}
+
+async fn load_scope(
+    State(state): State<Arc<ServerState>>,
+    Json(request): Json<ScopeRequest>,
+) -> Response<Body> {
+    if let Some(page) = state.scope_pages.lock().await.get(&request.scope).cloned() {
+        return secure_json(StatusCode::OK, page);
+    }
+
+    let page = match (state.scope_loader)(request.scope, state.scope_shutdown.clone()).await {
+        Ok(page) => page,
+        Err(error) => {
+            return secure_json(StatusCode::UNPROCESSABLE_ENTITY, ScopeError { error });
+        }
+    };
+    state
+        .scope_pages
+        .lock()
+        .await
+        .insert(request.scope, page.clone());
+    secure_json(StatusCode::OK, page)
 }
 
 async fn submit(
@@ -201,6 +266,12 @@ fn invalid_decision(decision: &ReviewDecision) -> bool {
         || decision.comments.iter().any(invalid_comment)
 }
 
+fn secure_json(status: StatusCode, value: impl Serialize) -> Response<Body> {
+    let mut response = (status, Json(value)).into_response();
+    secure(&mut response);
+    response
+}
+
 async fn asset(root: &std::path::Path, name: &str, content_type: &'static str) -> Response<Body> {
     let contents = match tokio::fs::read(root.join(name)).await {
         Ok(contents) => contents,
@@ -225,7 +296,7 @@ fn secure(response: &mut Response<Body>) {
     headers.insert(
         header::CONTENT_SECURITY_POLICY,
         HeaderValue::from_static(
-            "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-src 'self'",
+            "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-src 'self'",
         ),
     );
 }
@@ -242,8 +313,10 @@ pub(crate) enum ServerError {
 
 #[cfg(test)]
 mod tests {
-    use super::{Decision, ReviewOutcome, ReviewPage, ReviewServer};
-    use crate::review::diff::DiffSnapshot;
+    use super::{Decision, ReviewBootstrap, ReviewOutcome, ReviewPage, ReviewServer, ScopeLoader};
+    use crate::review::diff::{DiffSnapshot, ReviewScope};
+    use std::{sync::Arc, time::Duration};
+    use tokio::sync::Notify;
 
     #[tokio::test]
     async fn server_returns_the_submitted_decision() {
@@ -251,9 +324,7 @@ mod tests {
         std::fs::write(assets.path().join("index.html"), "review").unwrap();
         std::fs::write(assets.path().join("app.js"), "").unwrap();
         std::fs::write(assets.path().join("app.css"), "").unwrap();
-        let server = ReviewServer::start(page(), "test-token".to_owned(), assets.path().to_owned())
-            .await
-            .unwrap();
+        let server = start_server(&assets).await;
         let client = reqwest::Client::new();
         let response = client
             .post(format!("{}api/decision", server.url()))
@@ -283,9 +354,7 @@ mod tests {
         for name in ["index.html", "app.js", "app.css"] {
             std::fs::write(assets.path().join(name), "").unwrap();
         }
-        let server = ReviewServer::start(page(), "test-token".to_owned(), assets.path().to_owned())
-            .await
-            .unwrap();
+        let server = start_server(&assets).await;
         let response = reqwest::Client::new()
             .post(format!("{}api/cancel", server.url()))
             .send()
@@ -298,15 +367,119 @@ mod tests {
         ));
     }
 
-    fn page() -> ReviewPage {
+    #[tokio::test]
+    async fn server_loads_the_selected_scope() {
+        let assets = tempfile::tempdir().unwrap();
+        for name in ["index.html", "app.js", "app.css"] {
+            std::fs::write(assets.path().join(name), "").unwrap();
+        }
+        let server = start_server(&assets).await;
+        let response = reqwest::Client::new()
+            .post(format!("{}api/scope", server.url()))
+            .json(&serde_json::json!({ "scope": "full_branch" }))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            response.json::<serde_json::Value>().await.unwrap()["selected_scope"],
+            "full_branch"
+        );
+
+        reqwest::Client::new()
+            .post(format!("{}api/cancel", server.url()))
+            .send()
+            .await
+            .unwrap();
+        assert!(matches!(
+            server.wait().await.unwrap(),
+            ReviewOutcome::Cancelled
+        ));
+    }
+
+    #[tokio::test]
+    async fn cancelling_stops_an_active_scope_load() {
+        let assets = tempfile::tempdir().unwrap();
+        for name in ["index.html", "app.js", "app.css"] {
+            std::fs::write(assets.path().join(name), "").unwrap();
+        }
+        let started = Arc::new(Notify::new());
+        let loader: ScopeLoader = Arc::new({
+            let started = Arc::clone(&started);
+            move |_scope, shutdown| {
+                let started = Arc::clone(&started);
+                Box::pin(async move {
+                    started.notify_one();
+                    shutdown.cancelled().await;
+                    Err("scope load cancelled".to_owned())
+                })
+            }
+        });
+        let server = start_server_with_loader(&assets, loader).await;
+        let scope_request = tokio::spawn({
+            let url = format!("{}api/scope", server.url());
+            async move {
+                reqwest::Client::new()
+                    .post(url)
+                    .json(&serde_json::json!({ "scope": "uncommitted" }))
+                    .send()
+                    .await
+            }
+        });
+        started.notified().await;
+
+        reqwest::Client::new()
+            .post(format!("{}api/cancel", server.url()))
+            .send()
+            .await
+            .unwrap();
+
+        let outcome = tokio::time::timeout(Duration::from_secs(1), server.wait())
+            .await
+            .expect("server should stop without waiting for the scope load")
+            .unwrap();
+        assert!(matches!(outcome, ReviewOutcome::Cancelled));
+        scope_request.await.unwrap().unwrap();
+    }
+
+    async fn start_server(assets: &tempfile::TempDir) -> ReviewServer {
+        start_server_with_loader(assets, loader()).await
+    }
+
+    async fn start_server_with_loader(
+        assets: &tempfile::TempDir,
+        loader: ScopeLoader,
+    ) -> ReviewServer {
+        ReviewServer::start(
+            ReviewBootstrap {
+                title: "Review repo".to_owned(),
+                repository: "repo".to_owned(),
+                trunk: "main".to_owned(),
+                default_scope: ReviewScope::Uncommitted,
+            },
+            loader,
+            "test-token".to_owned(),
+            assets.path().to_owned(),
+        )
+        .await
+        .unwrap()
+    }
+
+    fn loader() -> ScopeLoader {
+        Arc::new(|scope, _shutdown| Box::pin(async move { Ok(page(scope)) }))
+    }
+
+    fn page(scope: ReviewScope) -> ReviewPage {
         ReviewPage {
             title: "Review".to_owned(),
             overview_html: "<p>Overview</p>".to_owned(),
+            selected_scope: scope,
             diff: DiffSnapshot {
                 patch: "patch".to_owned(),
                 repository: "repo".to_owned(),
-                scope: "Branch changes".to_owned(),
-                base: "abc123".to_owned(),
+                scope: scope.label().to_owned(),
+                base: "HEAD".to_owned(),
             },
         }
     }

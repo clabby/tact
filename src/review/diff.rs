@@ -1,31 +1,33 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
-    path::Path,
+    path::{Path, PathBuf},
     process::{Output, Stdio},
 };
 use tokio::{io::AsyncReadExt, process::Command};
 
 const MAX_DIFF_BYTES: usize = 32 * 1024 * 1024;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct ReviewRange {
-    label: String,
-    detail: String,
-    base: String,
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ReviewScope {
+    Uncommitted,
+    FullBranch,
 }
 
-impl ReviewRange {
-    pub(crate) fn label(&self) -> &str {
-        &self.label
+impl ReviewScope {
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Uncommitted => "Uncommitted changes",
+            Self::FullBranch => "Full branch",
+        }
     }
+}
 
-    pub(crate) fn detail(&self) -> &str {
-        &self.detail
-    }
-
-    pub(super) fn base(&self) -> &str {
-        &self.base
-    }
+#[derive(Clone)]
+pub(super) struct ReviewContext {
+    root: PathBuf,
+    repository: String,
+    trunk: Trunk,
 }
 
 #[derive(Clone, Serialize)]
@@ -36,78 +38,68 @@ pub(super) struct DiffSnapshot {
     pub(super) base: String,
 }
 
-pub(crate) async fn ranges(workspace: &Path) -> Result<Vec<ReviewRange>, DiffError> {
-    let root = repository_root(workspace).await?;
-    let trunk = resolve_trunk(&root).await?;
-    let commits = branch_commits(&root, &trunk.merge_base).await?;
-    let uncommitted = has_uncommitted_changes(&root).await?;
-    if commits.is_empty() && !uncommitted {
-        return Err(DiffError::NoChanges);
+impl ReviewContext {
+    pub(super) async fn load(workspace: &Path) -> Result<Self, DiffError> {
+        let root = repository_root(workspace).await?;
+        let trunk = resolve_trunk(&root).await?;
+        let repository = root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("repository")
+            .to_owned();
+        Ok(Self {
+            root,
+            repository,
+            trunk,
+        })
     }
 
-    let mut ranges = Vec::new();
-    if uncommitted {
-        ranges.push(ReviewRange {
-            label: "Uncommitted changes".to_owned(),
-            detail: "Working tree and index only".to_owned(),
-            base: "HEAD".to_owned(),
-        });
+    pub(super) fn repository(&self) -> &str {
+        &self.repository
     }
-    for commit in commits.iter().take(commits.len().saturating_sub(1)) {
-        ranges.push(ReviewRange {
-            label: format!("{}  {}", commit.short, commit.subject),
-            detail: "This commit through the working tree".to_owned(),
-            base: format!("{}^", commit.id),
-        });
+
+    pub(super) fn trunk_name(&self) -> &str {
+        &self.trunk.name
     }
-    if !commits.is_empty() {
-        ranges.push(ReviewRange {
-            label: format!("Trunk · {}", trunk.name),
-            detail: "All branch changes through the working tree".to_owned(),
-            base: trunk.merge_base,
-        });
+
+    pub(super) async fn collect(&self, scope: ReviewScope) -> Result<DiffSnapshot, DiffError> {
+        let base = match scope {
+            ReviewScope::Uncommitted => "HEAD",
+            ReviewScope::FullBranch => &self.trunk.merge_base,
+        };
+        let output = git_output_limited(
+            &self.root,
+            [
+                "diff",
+                "--binary",
+                "--find-renames",
+                "--find-copies",
+                "--no-ext-diff",
+                base,
+                "--",
+            ],
+            MAX_DIFF_BYTES,
+            0,
+        )
+        .await?;
+        ensure_success(output.status, &output.stderr)?;
+        let mut patch = String::from_utf8(output.stdout)?;
+
+        append_untracked_files(&self.root, &mut patch).await?;
+        if patch.is_empty() {
+            return Err(DiffError::NoChanges);
+        }
+        Ok(DiffSnapshot {
+            patch,
+            repository: self.repository.clone(),
+            scope: scope.label().to_owned(),
+            base: base.to_owned(),
+        })
     }
-    Ok(ranges)
 }
 
-pub(super) async fn collect(
-    workspace: &Path,
-    range: &ReviewRange,
-) -> Result<DiffSnapshot, DiffError> {
-    let root = repository_root(workspace).await?;
-    let output = git_output_limited(
-        &root,
-        [
-            "diff",
-            "--binary",
-            "--find-renames",
-            "--find-copies",
-            "--no-ext-diff",
-            range.base(),
-            "--",
-        ],
-        MAX_DIFF_BYTES,
-        0,
-    )
-    .await?;
-    ensure_success(output.status, &output.stderr)?;
-    let mut patch = String::from_utf8(output.stdout)?;
-
-    append_untracked_files(&root, &mut patch).await?;
-    if patch.is_empty() {
-        return Err(DiffError::NoChanges);
-    }
-    let repository = root
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("repository")
-        .to_owned();
-    Ok(DiffSnapshot {
-        patch,
-        repository,
-        scope: range.label.clone(),
-        base: range.base.clone(),
-    })
+pub(super) async fn load(workspace: &Path) -> Result<ReviewContext, DiffError> {
+    ReviewContext::load(workspace).await
 }
 
 async fn repository_root(workspace: &Path) -> Result<std::path::PathBuf, DiffError> {
@@ -138,52 +130,10 @@ async fn resolve_trunk(root: &Path) -> Result<Trunk, DiffError> {
     Err(DiffError::BaseNotFound)
 }
 
-async fn branch_commits(root: &Path, merge_base: &str) -> Result<Vec<Commit>, DiffError> {
-    let range = format!("{merge_base}..HEAD");
-    let output = git_output(
-        root,
-        [
-            "log",
-            "--first-parent",
-            "--format=%H%x1f%h%x1f%s%x00",
-            &range,
-        ],
-    )
-    .await?;
-    ensure_success(output.status, &output.stderr)?;
-    let output = String::from_utf8(output.stdout)?;
-    output
-        .split('\0')
-        .filter(|record| !record.trim().is_empty())
-        .map(|record| {
-            let mut fields = record.trim().splitn(3, '\x1f');
-            let id = fields.next().ok_or(DiffError::InvalidLog)?;
-            let short = fields.next().ok_or(DiffError::InvalidLog)?;
-            let subject = fields.next().ok_or(DiffError::InvalidLog)?;
-            Ok(Commit {
-                id: id.to_owned(),
-                short: short.to_owned(),
-                subject: subject.to_owned(),
-            })
-        })
-        .collect()
-}
-
-async fn has_uncommitted_changes(root: &Path) -> Result<bool, DiffError> {
-    let output = git_output(root, ["status", "--porcelain", "--untracked-files=normal"]).await?;
-    ensure_success(output.status, &output.stderr)?;
-    Ok(!output.stdout.is_empty())
-}
-
+#[derive(Clone)]
 struct Trunk {
     name: String,
     merge_base: String,
-}
-
-struct Commit {
-    id: String,
-    short: String,
-    subject: String,
 }
 
 async fn revision_exists(root: &Path, revision: &str) -> Result<bool, DiffError> {
@@ -330,8 +280,6 @@ pub(crate) enum DiffError {
     BaseNotFound,
     #[error("could not find a merge base between HEAD and `{0}`")]
     InvalidBase(String),
-    #[error("git returned malformed commit history")]
-    InvalidLog,
     #[error("the selected review scope contains no changes")]
     NoChanges,
     #[error("review diff is {actual} bytes, exceeding the {maximum}-byte limit")]
@@ -344,7 +292,7 @@ pub(crate) enum DiffError {
 
 #[cfg(test)]
 mod tests {
-    use super::{collect, ranges};
+    use super::{ReviewScope, load};
     use std::{fs, path::Path, process::Command};
     use tempfile::TempDir;
 
@@ -354,8 +302,8 @@ mod tests {
         fs::write(repository.path().join("tracked.txt"), "changed\n").unwrap();
         fs::write(repository.path().join("new.txt"), "new\n").unwrap();
 
-        let ranges = ranges(repository.path()).await.unwrap();
-        let snapshot = collect(repository.path(), &ranges[0]).await.unwrap();
+        let context = load(repository.path()).await.unwrap();
+        let snapshot = context.collect(ReviewScope::Uncommitted).await.unwrap();
 
         assert!(snapshot.patch.contains("tracked.txt"));
         assert!(snapshot.patch.contains("new.txt"));
@@ -371,9 +319,8 @@ mod tests {
         git(repository.path(), ["add", "tracked.txt"]);
         git(repository.path(), ["commit", "--quiet", "-m", "feature"]);
 
-        let ranges = ranges(repository.path()).await.unwrap();
-        let range = ranges.last().unwrap();
-        let snapshot = collect(repository.path(), range).await.unwrap();
+        let context = load(repository.path()).await.unwrap();
+        let snapshot = context.collect(ReviewScope::FullBranch).await.unwrap();
 
         assert!(snapshot.patch.contains("+feature"));
         assert_ne!(snapshot.base, "HEAD");

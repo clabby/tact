@@ -2,7 +2,7 @@ use super::{
     floating::Floating,
     node::{Component, ComponentUpdate, RenderRequest},
 };
-use crate::{review::ReviewRange, tui::theme::Theme};
+use crate::tui::theme::Theme;
 use crossterm::event::{Event, KeyCode, KeyEventKind};
 use ratatui::{Frame, layout::Rect, style::Style, text::Line, widgets::Paragraph};
 
@@ -14,19 +14,11 @@ pub(super) enum ReviewConfirmationEvent {
 
 #[derive(Debug, Eq, PartialEq)]
 pub(super) enum ReviewConfirmationEffect {
-    Confirm(ReviewRange),
+    Confirm,
     Dismiss,
 }
 
-pub(super) struct ReviewDownloadConfirmation {
-    range: ReviewRange,
-}
-
-impl ReviewDownloadConfirmation {
-    pub(super) const fn new(range: ReviewRange) -> Self {
-        Self { range }
-    }
-}
+pub(super) struct ReviewDownloadConfirmation;
 
 impl Component for ReviewDownloadConfirmation {
     type Event = ReviewConfirmationEvent;
@@ -41,7 +33,7 @@ impl Component for ReviewDownloadConfirmation {
         }
         match key.code {
             KeyCode::Enter | KeyCode::Char('y' | 'Y') => ComponentUpdate {
-                effects: vec![ReviewConfirmationEffect::Confirm(self.range.clone())],
+                effects: vec![ReviewConfirmationEffect::Confirm],
                 render: RenderRequest::Immediate,
             },
             KeyCode::Esc | KeyCode::Char('n' | 'N') => ComponentUpdate {

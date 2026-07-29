@@ -15,7 +15,6 @@ use super::{
     review_confirmation::{
         ReviewConfirmationEffect, ReviewConfirmationEvent, ReviewDownloadConfirmation,
     },
-    review_range_picker::{ReviewRangeEffect, ReviewRangeEvent, ReviewRangePicker},
     selection::{Selection, Surface},
     session_picker::{SessionPicker, SessionPickerEffect, SessionPickerEvent},
     subagents::{SubagentEffect, SubagentOverlay, SubagentTree},
@@ -25,7 +24,6 @@ use super::{
 use crate::{
     app::config::{ReasoningEffort, ReasoningMode},
     core::extensions::subagents::{AgentUpdate, MessageSender},
-    review::ReviewRange,
     tui::{
         context::ContextDiagnostics,
         prompt::Submission,
@@ -152,8 +150,7 @@ pub(crate) enum RootEvent {
     },
     NotifyError(String),
     NotifySuccess(String),
-    ReviewRangesLoaded(Vec<ReviewRange>),
-    ConfirmReviewDownload(ReviewRange),
+    ConfirmReviewDownload,
     UpdateAvailable(Version),
     SteerAdmitted(QueueId),
     SteerPromoted(QueueId),
@@ -190,9 +187,7 @@ pub(crate) enum RootEffect {
     },
     PersistSteer(String),
     Copy(String),
-    LoadReviewRanges,
     Review {
-        range: ReviewRange,
         download_assets: bool,
     },
     SetEffort {
@@ -216,7 +211,6 @@ enum Overlay {
     Keybindings(Node<KeybindingsHelp>),
     Sessions(Node<SessionPicker>),
     ReviewDownload(Node<ReviewDownloadConfirmation>),
-    ReviewRange(Node<ReviewRangePicker>),
     Subagents(SubagentOverlay),
 }
 
@@ -552,7 +546,6 @@ impl RootNode {
                 Overlay::ReviewDownload(confirmation) => {
                     confirmation.render(frame, area, theme);
                 }
-                Overlay::ReviewRange(picker) => picker.render(frame, area, theme),
                 Overlay::Subagents(SubagentOverlay::Tree) => {
                     self.subagents.render_tree(frame, area, theme);
                 }
@@ -852,7 +845,6 @@ impl RootNode {
             Some(Overlay::Keybindings(_)) => self.update_keybindings(event),
             Some(Overlay::Sessions(_)) => self.update_session_picker(event),
             Some(Overlay::ReviewDownload(_)) => self.update_review_confirmation(event),
-            Some(Overlay::ReviewRange(_)) => self.update_review_range(event),
             Some(Overlay::Subagents(SubagentOverlay::Tree)) => {
                 let effect = self.subagents.update_tree(event);
                 self.apply_subagent_effect(effect)
@@ -1023,7 +1015,9 @@ impl RootNode {
             Some(ActionsEffect::Trigger(Action::Review)) => {
                 self.overlay = None;
                 return ComponentUpdate {
-                    effects: vec![RootEffect::LoadReviewRanges],
+                    effects: vec![RootEffect::Review {
+                        download_assets: false,
+                    }],
                     render: RenderRequest::Immediate,
                 };
             }
@@ -1070,38 +1064,13 @@ impl RootNode {
         };
         self.overlay = None;
         match effect {
-            ReviewConfirmationEffect::Confirm(range) => ComponentUpdate {
+            ReviewConfirmationEffect::Confirm => ComponentUpdate {
                 effects: vec![RootEffect::Review {
-                    range,
                     download_assets: true,
                 }],
                 render: RenderRequest::Immediate,
             },
             ReviewConfirmationEffect::Dismiss => ComponentUpdate::render(RenderRequest::Immediate),
-        }
-    }
-
-    fn update_review_range(&mut self, event: Event) -> ComponentUpdate<RootEffect> {
-        let Some(Overlay::ReviewRange(picker)) = &mut self.overlay else {
-            return ComponentUpdate::none();
-        };
-        let update = picker.update(ReviewRangeEvent::Terminal(event));
-        let Some(effect) = update.effects.into_iter().next() else {
-            return ComponentUpdate {
-                effects: Vec::new(),
-                render: update.render,
-            };
-        };
-        self.overlay = None;
-        match effect {
-            ReviewRangeEffect::Selected(range) => ComponentUpdate {
-                effects: vec![RootEffect::Review {
-                    range,
-                    download_assets: false,
-                }],
-                render: RenderRequest::Immediate,
-            },
-            ReviewRangeEffect::Dismiss => ComponentUpdate::render(RenderRequest::Immediate),
         }
     }
 
@@ -1768,15 +1737,9 @@ impl Component for RootNode {
                 self.notification = Some(Notification::plain(message, Color::Green));
                 ComponentUpdate::render(RenderRequest::Immediate)
             }
-            RootEvent::ReviewRangesLoaded(ranges) => {
-                self.overlay = Some(Overlay::ReviewRange(Node::new(ReviewRangePicker::new(
-                    ranges,
-                ))));
-                ComponentUpdate::render(RenderRequest::Immediate)
-            }
-            RootEvent::ConfirmReviewDownload(range) => {
+            RootEvent::ConfirmReviewDownload => {
                 self.overlay = Some(Overlay::ReviewDownload(Node::new(
-                    ReviewDownloadConfirmation::new(range),
+                    ReviewDownloadConfirmation,
                 )));
                 ComponentUpdate::render(RenderRequest::Immediate)
             }
