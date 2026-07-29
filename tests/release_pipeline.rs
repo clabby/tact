@@ -115,15 +115,22 @@ fn release_packages_and_signs_the_review_bundle() {
 
 #[test]
 fn release_instructions_tag_the_pushed_main_revision() {
-    assert_contains(RELEASE_INSTRUCTIONS, "release_revision=main@origin");
+    let fetch = RELEASE_INSTRUCTIONS
+        .find("jj git fetch")
+        .expect("release instructions should refresh remote bookmarks");
+    let pin = RELEASE_INSTRUCTIONS
+        .find("release_revision=$(jj log -r main@origin")
+        .expect("release instructions should pin the main commit");
+    assert!(fetch < pin, "main must be fetched before it is pinned");
+    assert_contains(
+        RELEASE_INSTRUCTIONS,
+        "jj file show -r \"$release_revision\" Cargo.toml",
+    );
     assert_contains(
         RELEASE_INSTRUCTIONS,
         "jj tag set \"v${version}\" -r \"$release_revision\"",
     );
-    assert_contains(
-        RELEASE_INSTRUCTIONS,
-        "jj log -r \"$release_revision\" --no-graph -T 'commit_id'",
-    );
+    assert_contains(RELEASE_INSTRUCTIONS, "release_commit=\"$release_revision\"");
 }
 
 #[test]

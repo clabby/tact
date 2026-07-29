@@ -31,9 +31,12 @@ Commit and push that version bump, then wait for the `main` CI run to pass. Crea
 from the release commit and publish it to GitHub:
 
 ```sh
-release_revision=main@origin
-version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "tact") | .version')
-release_commit=$(jj log -r "$release_revision" --no-graph -T 'commit_id')
+set -eu
+jj git fetch
+release_revision=$(jj log -r main@origin --no-graph -T 'commit_id')
+version=$(jj file show -r "$release_revision" Cargo.toml | awk -F'"' '$1 == "version = " { print $2; exit }')
+test -n "$version"
+release_commit="$release_revision"
 jj tag set "v${version}" -r "$release_revision"
 gh api repos/clabby/tact/git/refs \
   --method POST \
