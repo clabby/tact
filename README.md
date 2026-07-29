@@ -93,8 +93,9 @@ Enter `/review` while no agent work is active to open a browser-based human revi
 workspace changes. Tact shows the full branch from trunk by default; you can narrow the range,
 inspect the diff, leave overall or inline feedback, and approve or request changes. Tact converts
 your review to Markdown and inserts it into the composer so you can edit it before passing it to the
-agent. The browser can also generate an agent-authored visual overview of the selected range on
-demand.
+agent. Inline selections can also open a private question thread with the agent; those conversations
+help you understand the code but are not included in the rendered review feedback. The browser can
+also generate an agent-authored visual overview of the selected range on demand.
 
 Reloading or closing the browser does not cancel the review. Reopen the live URL shown by Tact, or
 cancel explicitly from the browser or Tact.

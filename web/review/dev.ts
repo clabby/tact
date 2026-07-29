@@ -3,6 +3,7 @@ import { mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { overviewFixtures, reviewBootstrap, reviewFixtures } from "./dev-fixture";
 import { rangeKey, type ReviewRange } from "./range-selection";
+import type { QuestionRequest } from "./protocol";
 
 const outputDirectory = join(import.meta.dir, ".dev");
 await rm(outputDirectory, { recursive: true, force: true });
@@ -31,6 +32,7 @@ async function buildAssets() {
 if (!await buildAssets()) process.exit(1);
 
 let workspaceChanged = true;
+const questionCancellations = new Map<string, () => void>();
 
 const server = Bun.serve({
   port: Number(process.env.PORT ?? 4173),
@@ -61,6 +63,32 @@ const server = Bun.serve({
       if (!overview) return Response.json({ error: "Unknown review range" }, { status: 422 });
       await Bun.sleep(900);
       return Response.json({ generation: body.generation, selected_range: body.range, overview_html: overview });
+    }
+    if (request.method === "POST" && url.pathname === "/api/question") {
+      const body = await request.json() as QuestionRequest;
+      const cancelled = await Promise.race([
+        Bun.sleep(900).then(() => false),
+        new Promise<boolean>((resolve) => {
+          questionCancellations.set(body.operation_id, () => resolve(true));
+        }),
+      ]);
+      questionCancellations.delete(body.operation_id);
+      if (cancelled) {
+        return Response.json({
+          code: "operation_cancelled",
+          error: "question answering was cancelled",
+        }, { status: 409 });
+      }
+      return Response.json({
+        generation: body.generation,
+        selected_range: body.range,
+        answer: `This thread is anchored to \`${body.path}:${body.start_line}${body.end_line === body.start_line ? "" : `-${body.end_line}`}\`. In a real review, Tact asks a sub-agent to inspect the surrounding code and answer with that context.`,
+      });
+    }
+    if (request.method === "POST" && url.pathname === "/api/question/cancel") {
+      const body = await request.json() as { operation_id: string };
+      questionCancellations.get(body.operation_id)?.();
+      return new Response(null, { status: 204 });
     }
     if (request.method === "POST" && url.pathname === "/api/decision") {
       console.log("\nReview result:\n", JSON.stringify(await request.json(), null, 2));

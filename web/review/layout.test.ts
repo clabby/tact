@@ -50,6 +50,37 @@ test("the comment editor keeps its actions after the comment body", async () => 
   );
 });
 
+test("new inline drafts can become agent questions", async () => {
+  const app = await Bun.file(new URL("app.ts", import.meta.url)).text();
+  const editor = app.slice(
+    app.indexOf("private commentComposerElement"),
+    app.indexOf("private askDraftQuestion"),
+  );
+
+  expect(editor).toContain('data-comment-action="ask"');
+  expect(editor).toContain('Ask <span aria-hidden="true">✨</span>');
+  expect(editor).toContain('draft.editingId === undefined');
+});
+
+test("overview generation and question threads share one agent-operation gate", async () => {
+  const app = await Bun.file(new URL("app.ts", import.meta.url)).text();
+  const overview = app.slice(
+    app.indexOf("private async loadOverview"),
+    app.indexOf("private showOverviewError"),
+  );
+  const question = app.slice(
+    app.indexOf("private askDraftQuestion"),
+    app.indexOf("private pendingCommentElement"),
+  );
+
+  expect(overview).toContain("if (!page || this.agentOperation");
+  expect(overview).toContain('this.agentOperation = { kind: "overview", request }');
+  expect(question).toContain("if (!draft || draft.editingId !== undefined || !page || this.agentOperation) return");
+  expect(question).toContain('kind: "question"');
+  expect(question).toContain("operationId");
+  expect(app).toContain('querySelectorAll<HTMLTextAreaElement>("[data-thread-input]")');
+});
+
 test("the changed-file wrapper owns the tree's available height", async () => {
   const styles = await Bun.file(new URL("styles.css", import.meta.url)).text();
   const navigation = styles.match(/\.files-navigation\s*{([^}]*)}/)?.[1];

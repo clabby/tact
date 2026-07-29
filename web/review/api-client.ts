@@ -1,6 +1,7 @@
 import {
   REVIEW_PROTOCOL_VERSION,
   type OverviewResponse,
+  type QuestionCancelRequest,
   type QuestionRequest,
   type QuestionResponse,
   type ReviewDecision,
@@ -68,6 +69,10 @@ export class ApiClient {
 
   question(request: QuestionRequest, signal?: AbortSignal): Promise<QuestionResponse> {
     return this.post("question", request, signal);
+  }
+
+  async cancelQuestion(request: QuestionCancelRequest): Promise<void> {
+    await this.request("question/cancel", this.postOptions(request), false);
   }
 
   async submit(decision: ReviewDecision): Promise<void> {

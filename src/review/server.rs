@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, VecDeque},
     net::SocketAddr,
-    sync::Arc,
+    sync::{Arc, Mutex as StdMutex},
 };
 use tokio::{
     net::TcpListener,
@@ -23,6 +23,7 @@ const MAX_COMMENTS: usize = 256;
 const MAX_COMMENT_BYTES: usize = 64 * 1024;
 const MAX_SUMMARY_BYTES: usize = 64 * 1024;
 const MAX_PATH_BYTES: usize = 4096;
+const MAX_OPERATION_ID_BYTES: usize = 128;
 const MAX_THREAD_MESSAGES: usize = 64;
 const MAX_THREAD_BYTES: usize = 256 * 1024;
 pub(super) const PROTOCOL_VERSION: u32 = 2;
@@ -84,6 +85,7 @@ struct OverviewResponse {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct QuestionRequest {
+    pub(super) operation_id: String,
     pub(super) generation: u64,
     pub(super) range: super::diff::ReviewRange,
     pub(super) path: String,
@@ -91,6 +93,14 @@ pub(super) struct QuestionRequest {
     pub(super) start_line: u32,
     pub(super) end_line: u32,
     pub(super) messages: Vec<ThreadMessage>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct QuestionCancelRequest {
+    operation_id: String,
+    generation: u64,
+    range: super::diff::ReviewRange,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -201,9 +211,38 @@ struct ServerState {
     backend: Arc<super::ReviewBackend>,
     overview_operations: OverviewOperations,
     agent_operation: Mutex<()>,
+    active_question: StdMutex<Option<ActiveQuestion>>,
     refresh_generation: Mutex<()>,
     session_shutdown: CancellationToken,
     outcome: Mutex<Option<oneshot::Sender<ReviewOutcome>>>,
+}
+
+struct ActiveQuestion {
+    operation_id: String,
+    generation: u64,
+    range: super::diff::ReviewRange,
+    cancellation: CancellationToken,
+}
+
+struct ActiveQuestionRegistration<'a> {
+    state: &'a ServerState,
+    operation_id: &'a str,
+    cancellation: CancellationToken,
+}
+
+impl Drop for ActiveQuestionRegistration<'_> {
+    fn drop(&mut self) {
+        self.cancellation.cancel();
+        let Ok(mut active) = self.state.active_question.lock() else {
+            return;
+        };
+        if active
+            .as_ref()
+            .is_some_and(|question| question.operation_id == self.operation_id)
+        {
+            *active = None;
+        }
+    }
 }
 
 struct ReviewSession {
@@ -341,6 +380,7 @@ impl ReviewServer {
             backend,
             overview_operations: Mutex::new(HashMap::new()),
             agent_operation: Mutex::new(()),
+            active_question: StdMutex::new(None),
             refresh_generation: Mutex::new(()),
             session_shutdown: session_shutdown.clone(),
             outcome: Mutex::new(Some(outcome_tx)),
@@ -413,6 +453,7 @@ fn router(state: Arc<ServerState>) -> Router {
         .route("/api/range", post(load_range))
         .route("/api/overview", post(load_overview))
         .route("/api/question", post(ask_question))
+        .route("/api/question/cancel", post(cancel_question))
         .route("/api/decision", post(submit))
         .route("/api/cancel", post(cancel))
         .route("/{*asset_path}", get(static_asset))
@@ -803,10 +844,31 @@ async fn ask_question(
     let Ok(_agent_operation) = state.agent_operation.try_lock() else {
         return agent_busy();
     };
-    let current = match state.backend.current_version(shutdown.clone()).await {
+    let operation_shutdown = shutdown.child_token();
+    {
+        let Ok(mut active) = state.active_question.lock() else {
+            return internal_error("the active question state is unavailable");
+        };
+        *active = Some(ActiveQuestion {
+            operation_id: request.operation_id.clone(),
+            generation: request.generation,
+            range: request.range,
+            cancellation: operation_shutdown.clone(),
+        });
+    }
+    let _registration = ActiveQuestionRegistration {
+        state: &state,
+        operation_id: &request.operation_id,
+        cancellation: operation_shutdown.clone(),
+    };
+    let current = match state
+        .backend
+        .current_version(operation_shutdown.clone())
+        .await
+    {
         Ok(version) => version,
         Err(ScopeLoadError::Cancelled) => {
-            return stale_snapshot("the review changed before the question was answered");
+            return operation_cancelled("question answering was cancelled");
         }
         Err(ScopeLoadError::Failed(error)) => {
             return error_response(
@@ -827,7 +889,7 @@ async fn ask_question(
             &page.diff.scope,
             &page.diff.overview,
             &request,
-            shutdown.clone(),
+            operation_shutdown.clone(),
         )
         .await
     {
@@ -851,10 +913,10 @@ async fn ask_question(
             );
         }
     };
-    let current = match state.backend.current_version(shutdown).await {
+    let current = match state.backend.current_version(operation_shutdown).await {
         Ok(version) => version,
         Err(ScopeLoadError::Cancelled) => {
-            return stale_snapshot("the workspace changed while the question was answered");
+            return operation_cancelled("question answering was cancelled");
         }
         Err(ScopeLoadError::Failed(error)) => {
             return error_response(
@@ -881,6 +943,32 @@ async fn ask_question(
             answer,
         },
     )
+}
+
+async fn cancel_question(
+    State(state): State<Arc<ServerState>>,
+    Json(request): Json<QuestionCancelRequest>,
+) -> impl IntoResponse {
+    if invalid_operation_id(&request.operation_id) {
+        return error_response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            ErrorCode::InvalidThread,
+            "the question operation identifier is invalid",
+            false,
+            true,
+        );
+    }
+    let Ok(active) = state.active_question.lock() else {
+        return internal_error("the active question state is unavailable");
+    };
+    if let Some(question) = active.as_ref()
+        && question.operation_id == request.operation_id
+        && question.generation == request.generation
+        && question.range == request.range
+    {
+        question.cancellation.cancel();
+    }
+    StatusCode::NO_CONTENT.into_response()
 }
 
 async fn submit(
@@ -1037,7 +1125,8 @@ fn invalid_decision(decision: &ReviewDecision) -> bool {
 }
 
 fn invalid_question(question: &QuestionRequest) -> bool {
-    if question.path.trim().is_empty()
+    if invalid_operation_id(&question.operation_id)
+        || question.path.trim().is_empty()
         || question.path.len() > MAX_PATH_BYTES
         || question.start_line == 0
         || question.end_line < question.start_line
@@ -1062,11 +1151,37 @@ fn invalid_question(question: &QuestionRequest) -> bool {
         || bytes > MAX_THREAD_BYTES
 }
 
+fn invalid_operation_id(operation_id: &str) -> bool {
+    operation_id.trim().is_empty()
+        || operation_id.len() > MAX_OPERATION_ID_BYTES
+        || !operation_id.is_ascii()
+}
+
 fn agent_busy() -> Response<Body> {
     error_response(
         StatusCode::CONFLICT,
         ErrorCode::AgentBusy,
         "another review agent operation is already running",
+        true,
+        true,
+    )
+}
+
+fn operation_cancelled(message: impl Into<String>) -> Response<Body> {
+    error_response(
+        StatusCode::CONFLICT,
+        ErrorCode::OperationCancelled,
+        message,
+        true,
+        true,
+    )
+}
+
+fn internal_error(message: impl Into<String>) -> Response<Body> {
+    error_response(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        ErrorCode::QuestionFailed,
+        message,
         true,
         true,
     )
@@ -1635,6 +1750,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cancelling_a_question_releases_the_agent_operation() {
+        let assets = tempfile::tempdir().unwrap();
+        for name in ["index.html", "app.js", "app.css"] {
+            std::fs::write(assets.path().join(name), "").unwrap();
+        }
+        let started = Arc::new(Notify::new());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let generator: ReviewAgent = Arc::new({
+            let started = Arc::clone(&started);
+            let calls = Arc::clone(&calls);
+            move |_prompt, shutdown| {
+                let started = Arc::clone(&started);
+                let call = calls.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async move {
+                    if call == 0 {
+                        started.notify_one();
+                        shutdown.cancelled().await;
+                        return Err(ReviewAgentError::Cancelled);
+                    }
+                    Ok("<p>Overview</p>".to_owned())
+                })
+            }
+        });
+        let server = start_server_with_generator(&assets, generator).await;
+        let question = tokio::spawn({
+            let url = server.endpoint_url("api/question");
+            async move {
+                reqwest::Client::new()
+                    .post(url)
+                    .json(&question_request())
+                    .send()
+                    .await
+                    .unwrap()
+            }
+        });
+        started.notified().await;
+
+        let cancelled = reqwest::Client::new()
+            .post(server.endpoint_url("api/question/cancel"))
+            .json(&serde_json::json!({
+                "operation_id": "question-1",
+                "generation": 0,
+                "range": uncommitted_range(),
+            }))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(cancelled.status(), reqwest::StatusCode::NO_CONTENT);
+        let response = question.await.unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::CONFLICT);
+        assert_eq!(
+            response.json::<serde_json::Value>().await.unwrap()["code"],
+            "operation_cancelled"
+        );
+        assert_eq!(
+            request_overview(server.endpoint_url("api/overview"), uncommitted_range()).await,
+            reqwest::StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
     async fn overview_rejects_a_changed_workspace_before_starting_the_agent() {
         let assets = tempfile::tempdir().unwrap();
         for name in ["index.html", "app.js", "app.css"] {
@@ -2070,6 +2247,7 @@ mod tests {
 
     fn question_request() -> serde_json::Value {
         serde_json::json!({
+            "operation_id": "question-1",
             "generation": 0,
             "range": uncommitted_range(),
             "path": "tracked.txt",

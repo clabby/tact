@@ -1,4 +1,5 @@
 import type { ReviewComment, ReviewPage, ReviewSession } from "./protocol";
+import type { QuestionThread } from "./question-state";
 import { rangeKey, type ReviewRange } from "./range-selection";
 
 export type CommentDraft = {
@@ -31,6 +32,7 @@ export type ReviewState = {
   session: ReviewSession;
   page: ReviewPage;
   feedbackByOwner: Map<string, FeedbackState>;
+  questionsByOwner: Map<string, QuestionThread[]>;
   terminal: TerminalState;
 };
 
@@ -43,16 +45,22 @@ export function createReviewState(session: ReviewSession): ReviewState {
     session,
     page: session.page,
     feedbackByOwner: new Map(),
+    questionsByOwner: new Map(),
     terminal: { kind: "idle" },
   }, session.page);
 }
 
 export function activatePage(state: ReviewState, page: ReviewPage): ReviewState {
   const key = feedbackOwner(page.generation, page.selected_range);
-  if (state.feedbackByOwner.has(key)) return { ...state, page };
+  const hasFeedback = state.feedbackByOwner.has(key);
+  const hasQuestions = state.questionsByOwner.has(key);
+  if (hasFeedback && hasQuestions) return { ...state, page };
+
   const feedbackByOwner = new Map(state.feedbackByOwner);
-  feedbackByOwner.set(key, emptyFeedback());
-  return { ...state, page, feedbackByOwner };
+  const questionsByOwner = new Map(state.questionsByOwner);
+  if (!hasFeedback) feedbackByOwner.set(key, emptyFeedback());
+  if (!hasQuestions) questionsByOwner.set(key, []);
+  return { ...state, page, feedbackByOwner, questionsByOwner };
 }
 
 export function installSession(_state: ReviewState, session: ReviewSession): ReviewState {
@@ -64,6 +72,13 @@ export function currentFeedback(state: ReviewState): FeedbackState {
   const feedback = state.feedbackByOwner.get(key);
   if (!feedback) throw new Error(`missing feedback owner ${key}`);
   return feedback;
+}
+
+export function currentQuestions(state: ReviewState): QuestionThread[] {
+  const key = feedbackOwner(state.page.generation, state.page.selected_range);
+  const questions = state.questionsByOwner.get(key);
+  if (!questions) throw new Error(`missing question owner ${key}`);
+  return questions;
 }
 
 export function feedbackDescription(feedback: FeedbackState) {

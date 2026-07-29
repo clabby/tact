@@ -48,6 +48,7 @@ export type ThreadMessage = {
 };
 
 export type QuestionRequest = {
+  operation_id: string;
   generation: number;
   range: ReviewRange;
   path: string;
@@ -56,6 +57,11 @@ export type QuestionRequest = {
   end_line: number;
   messages: ThreadMessage[];
 };
+
+export type QuestionCancelRequest = Pick<
+  QuestionRequest,
+  "operation_id" | "generation" | "range"
+>;
 
 export type QuestionResponse = {
   generation: number;
