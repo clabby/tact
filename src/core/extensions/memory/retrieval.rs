@@ -5,7 +5,6 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 const BM25_K1: f64 = 1.2;
 const BM25_B: f64 = 0.75;
-const MIN_WEIGHTED_COVERAGE: f64 = 0.5;
 const PREVIEW_MAX_BYTES: usize = 96;
 
 pub(super) fn rank(query: &str, memories: &[StoredMemory], limit: usize) -> Vec<MemoryCandidate> {
@@ -28,27 +27,19 @@ pub(super) fn rank(query: &str, memories: &[StoredMemory], limit: usize) -> Vec<
         .sum::<f64>()
         / documents.len() as f64;
     let inverse_document_frequencies = inverse_document_frequencies(&query_terms, &documents);
-    let total_query_weight = inverse_document_frequencies.values().sum::<f64>();
 
     let mut candidates = documents
         .into_iter()
         .filter_map(|document| {
-            let matched_weight = query_terms
-                .iter()
-                .filter(|term| document.term_frequencies.contains_key(*term))
-                .map(|term| inverse_document_frequencies[term])
-                .sum::<f64>();
-            if matched_weight == 0.0 || matched_weight / total_query_weight < MIN_WEIGHTED_COVERAGE
-            {
-                return None;
-            }
-
             let score = bm25_score(
                 &document,
                 &query_terms,
                 &inverse_document_frequencies,
                 average_document_length,
             );
+            if score == 0.0 {
+                return None;
+            }
             Some(MemoryCandidate {
                 key: document.memory.key(),
                 preview: preview(&document.memory.content),
@@ -244,7 +235,7 @@ mod tests {
     }
 
     #[test]
-    fn requires_weighted_query_coverage() {
+    fn ranks_complete_matches_above_partial_matches() {
         let memories = [
             memory(1, "common"),
             memory(2, "common rare"),
@@ -253,8 +244,67 @@ mod tests {
 
         let candidates = rank("common rare", &memories, 5);
 
-        assert_eq!(candidates.len(), 1);
-        assert_eq!(candidates[0].key.id, 2);
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| candidate.key.id)
+                .collect::<Vec<_>>(),
+            [2, 1, 3]
+        );
+    }
+
+    #[test]
+    fn broad_preference_query_returns_coherent_subset_matches() {
+        let memories = [
+            memory(
+                1,
+                "The user prefers invariant-first code review and implementation.",
+            ),
+            memory(
+                2,
+                "The user expects task scope to be followed. Read-only requests authorize no edits.",
+            ),
+            memory(3, "An unrelated repository fact."),
+        ];
+
+        let candidates = rank(
+            "user preferences code review actionable defects read only repository",
+            &memories,
+            2,
+        );
+        let mut ids = candidates
+            .iter()
+            .map(|candidate| candidate.key.id)
+            .collect::<Vec<_>>();
+        ids.sort_unstable();
+
+        assert_eq!(ids, [1, 2]);
+    }
+
+    #[test]
+    fn broad_repository_query_returns_partial_topic_match() {
+        let memories = [
+            memory(
+                1,
+                "For Commonware storage reviews, checkpoints are trusted and paired with their database.",
+            ),
+            memory(2, "For Commonware networking reviews, peers are untrusted."),
+            memory(
+                3,
+                "Durability requires an explicit synchronization boundary.",
+            ),
+        ];
+
+        let candidates = rank(
+            "Commonware runtime storage buffer durability review",
+            &memories,
+            5,
+        );
+
+        assert!(
+            candidates.iter().any(|candidate| candidate.key.id == 1),
+            "the storage-specific memory should survive unrelated query terms"
+        );
     }
 
     #[test]

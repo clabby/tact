@@ -97,20 +97,14 @@ the score itself; this reference does not imply that Tact uses FTS5. The probabi
 described by Robertson and Zaragoza in
 [The Probabilistic Relevance Framework: BM25 and Beyond](https://www.nowpublishers.com/article/Details/INR-019).
 
-BM25 rank alone is not permission to return a weak partial match. Tact also computes IDF coverage:
+Terms absent from a record contribute no score rather than vetoing that record. This lets a verbose
+query retrieve memories that match coherent subsets of its terms. Records matching more terms or
+rarer terms rank higher through BM25. A scan abstains only when the query has no searchable terms or
+when no active record shares a term with it.
 
-```text
-coverage(document, query) =
-    sum(IDF(t) for distinct query terms t present in document)
-    / sum(IDF(t) for distinct query terms t)
-```
-
-Terms absent from the corpus remain in the denominator, so matching one generic word does not hide
-the absence of a specific query term. A scan abstains when there are no searchable query terms or
-when its best candidate does not meet the minimum IDF-coverage threshold. Coverage is a gate, not a
-recency or popularity boost. The v1 minimum is `0.5`: at least half of the query's total IDF weight
-must be present in a candidate. This is a Tact calibration constant and must be validated on the
-retrieval evaluation set rather than justified after observing production results.
+This recall-oriented behavior is bounded by the separate scan and read limits. A partial match can
+surface as a compact candidate, but the agent must still select it explicitly before its complete
+content enters context.
 
 The scan and read limits are deliberately separate. `scan` returns no more than five candidate
 cards; `read` accepts no more than three IDs. This forces a second deliberate selection before full
@@ -268,7 +262,7 @@ following are initial Tact choices rather than conclusions established by the ci
 - seven days of unread probation;
 - 1 KiB per record, 512 rows, 256 KiB of content, and a 4 MiB main database;
 - five scan candidates and three complete reads;
-- the tokenizer and the `0.5` IDF-coverage abstention threshold; and
+- the tokenizer and no-overlap abstention rule, and
 - BM25 `k1 = 1.2` and `b = 0.75` for this corpus, despite being established baseline values.
 
 Evaluation may tune these values while the experiment remains disabled by default. Tuning must be
