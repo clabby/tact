@@ -181,7 +181,7 @@ button:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2p
 .comment-link-actions button:last-child:hover { color: var(--danger); }
 .comment-link-actions svg { width: 13px; height: 13px; }
 
-.diff-view { min-width: 0; min-height: 0; overflow: hidden; background: var(--surface); }
+.diff-view { min-width: 0; min-height: 0; overflow: auto; background: var(--surface); }
 
 .diff-comment, .inline-comment-editor { margin: 10px 14px; white-space: normal; }
 .diff-comment { border: 1px solid var(--line-strong); border-radius: 9px; background: var(--surface-raised); }
