@@ -91,6 +91,20 @@ type ResumeSessionTask = JoinHandle<(
 type UpdateCheckTask =
     JoinHandle<std::result::Result<Option<semver::Version>, crate::app::update::UpdateError>>;
 
+fn stop_review_tasks(
+    review_agent: &mut Option<nanocodex::Nanocodex>,
+    range_task: &mut Option<ReviewRangeTask>,
+    review_task: &mut Option<ReviewTask>,
+) {
+    if let Some(task) = range_task.take() {
+        task.abort();
+    }
+    if let Some(task) = review_task.take() {
+        task.abort();
+    }
+    review_agent.take();
+}
+
 fn update_checks_enabled() -> bool {
     crate::app::update::is_official_release_build()
 }
@@ -330,7 +344,7 @@ pub(crate) async fn run(
             &writer_sender,
         )?,
     );
-    let mut review_agent = agent.clone();
+    let mut review_agent = Some(agent.clone());
     let (commands, mut worker_updates) = worker::spawn(agent, shutdown.clone());
     let workspace = config.agent().workspace().to_path_buf();
     let (agent_event_sender, mut agent_events) = mpsc::unbounded_channel();
@@ -418,12 +432,7 @@ pub(crate) async fn run(
         }
         if stopping {
             shell_tasks.abort_all();
-            if let Some(task) = review_range_task.take() {
-                task.abort();
-            }
-            if let Some(task) = review_task.take() {
-                task.abort();
-            }
+            stop_review_tasks(&mut review_agent, &mut review_range_task, &mut review_task);
         }
         if stopping && !subagents_stopping {
             for runtime in panes.values() {
@@ -907,7 +916,7 @@ pub(crate) async fn run(
                             subagent_sender.clone(),
                         );
                         if pane == PaneId::Main {
-                            review_agent = agent.clone();
+                            review_agent = Some(agent.clone());
                         }
                         commands
                             .send(WorkerCommand::ReplaceAgent { pane, agent })
@@ -1069,7 +1078,7 @@ pub(crate) async fn run(
                             subagent_sender.clone(),
                         );
                         if pane == PaneId::Main {
-                            review_agent = agent.clone();
+                            review_agent = Some(agent.clone());
                         }
                         commands
                             .send(WorkerCommand::ReplaceAgent { pane, agent })
@@ -1272,7 +1281,7 @@ struct EffectContext<'a> {
     session_list_task: &'a mut Option<SessionListTask>,
     review_range_task: &'a mut Option<ReviewRangeTask>,
     review_task: &'a mut Option<ReviewTask>,
-    review_agent: &'a mut nanocodex::Nanocodex,
+    review_agent: &'a mut Option<nanocodex::Nanocodex>,
     resume_session_task: &'a mut Option<ResumeSessionTask>,
     terminal: &'a mut TerminalSession,
     scheduler: &'a mut RenderScheduler,
@@ -1576,7 +1585,11 @@ fn apply_pane_effect(
                 Ok(crate::review::AssetAvailability::Ready(assets)) => {
                     *context.review_task = Some(spawn_review(
                         pane,
-                        context.review_agent.clone(),
+                        context
+                            .review_agent
+                            .as_ref()
+                            .expect("review agent is available while the UI is running")
+                            .clone(),
                         context.workspace.to_path_buf(),
                         range,
                         Some(assets),
@@ -1594,7 +1607,11 @@ fn apply_pane_effect(
                 Ok(crate::review::AssetAvailability::DownloadRequired) => {
                     *context.review_task = Some(spawn_review(
                         pane,
-                        context.review_agent.clone(),
+                        context
+                            .review_agent
+                            .as_ref()
+                            .expect("review agent is available while the UI is running")
+                            .clone(),
                         context.workspace.to_path_buf(),
                         range,
                         None,
@@ -1845,8 +1862,8 @@ fn request_render(request: RenderRequest, scheduler: &mut RenderScheduler) {
 mod tests {
     use super::{
         PaneGeneration, PaneSession, PaneSettings, PendingSubmission, close_pane_journal,
-        is_image_paste, local_link_path, open_pane, send_submission, subagent_pane,
-        update_checks_enabled, validate_interactive,
+        is_image_paste, local_link_path, open_pane, send_submission, stop_review_tasks,
+        subagent_pane, update_checks_enabled, validate_interactive,
     };
     use crate::{
         app::{
@@ -1861,8 +1878,10 @@ mod tests {
             worker::WorkerCommand,
         },
     };
-    use std::{collections::HashMap, fs, path::Path, sync::Arc};
+    use nanocodex::{Nanocodex, OpenAi};
+    use std::{collections::HashMap, fs, path::Path, sync::Arc, time::Duration};
     use tempfile::tempdir;
+    use tokio::time::timeout;
 
     #[test]
     fn development_builds_do_not_enable_update_checks() {
@@ -1885,6 +1904,30 @@ mod tests {
             KeyCode::Char('v'),
             KeyModifiers::NONE,
         ))));
+    }
+
+    #[tokio::test]
+    async fn stopping_review_tasks_releases_the_agent_event_stream() {
+        let openai = OpenAi::new("test-key").unwrap();
+        let (agent, mut events) = Nanocodex::builder(openai).build().unwrap();
+        let mut review_agent = Some(agent.clone());
+        let mut range_task = None;
+        let mut review_task = None;
+
+        agent.shutdown().await.unwrap();
+        drop(agent);
+        assert!(
+            timeout(Duration::from_millis(10), events.recv())
+                .await
+                .is_err()
+        );
+
+        stop_review_tasks(&mut review_agent, &mut range_task, &mut review_task);
+
+        assert!(matches!(
+            timeout(Duration::from_secs(1), events.recv()).await,
+            Ok(None)
+        ));
     }
 
     #[test]
