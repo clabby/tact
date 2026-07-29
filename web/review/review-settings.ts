@@ -18,7 +18,7 @@ export type ReviewSettings = {
 export const DEFAULT_REVIEW_SETTINGS: ReviewSettings = {
   syntaxTheme: "system",
   diffStyle: "unified",
-  wrapLines: false,
+  wrapLines: true,
   lineNumbers: true,
 };
 

@@ -21,6 +21,10 @@ class MemoryStorage {
 }
 
 describe("review settings", () => {
+  test("wraps diff lines by default", () => {
+    expect(loadReviewSettings(new MemoryStorage()).wrapLines).toBe(true);
+  });
+
   test("invalid persisted values fall back field by field", () => {
     const storage = new MemoryStorage();
     storage.setItem(REVIEW_SETTINGS_KEY, JSON.stringify({
