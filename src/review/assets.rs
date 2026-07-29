@@ -1,5 +1,6 @@
-use crate::app::update::{
-    UpdateError, can_download_release_artifacts, download_verified_release_artifact,
+use crate::app::{
+    installation::current as installation,
+    update::{UpdateError, download_verified_release_artifact},
 };
 use flate2::read::GzDecoder;
 use fs2::FileExt;
@@ -54,7 +55,7 @@ impl ReviewAssets {
 
         let path = install_path(&tact_home()?);
         if path.exists() {
-            let can_download = can_download_release_artifacts();
+            let can_download = !installation().is_development();
             let kind = if can_download {
                 InstallKind::Managed
             } else {
@@ -68,14 +69,14 @@ impl ReviewAssets {
                 Err(error) => return Err(error),
             }
         }
-        if can_download_release_artifacts() {
+        if !installation().is_development() {
             return Ok(AssetAvailability::DownloadRequired);
         }
         Ok(AssetAvailability::DevelopmentInstallRequired { path })
     }
 
     pub(crate) async fn download() -> Result<Self, AssetError> {
-        if !can_download_release_artifacts() {
+        if installation().is_development() {
             return Err(AssetError::DevelopmentDownload);
         }
 

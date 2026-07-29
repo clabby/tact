@@ -6,11 +6,13 @@
 pub(crate) mod config;
 #[path = "../app/error.rs"]
 pub(crate) mod error;
+#[path = "../app/installation.rs"]
+pub(crate) mod installation;
 #[path = "../core/extensions/subagents/model.rs"]
 mod subagent_model;
 
 mod app {
-    pub(crate) use crate::{config, error};
+    pub(crate) use crate::{config, error, installation};
 }
 
 mod core {

@@ -2316,14 +2316,30 @@ mod tests {
             let url = server.endpoint_url("api/overview");
             async move { request_overview(url, uncommitted_range()).await }
         });
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let operations = server.state.overview_operations.lock().await;
+                let reloaded_browser_is_waiting = operations
+                    .get(&(0, uncommitted_range()))
+                    .is_some_and(|operation| Arc::strong_count(operation) > 2);
+                drop(operations);
+
+                if reloaded_browser_is_waiting {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the reloaded browser should join the in-flight operation");
         first.abort();
         release.notify_one();
 
-        assert_eq!(
-            reloaded.await.unwrap(),
-            reqwest::StatusCode::UNPROCESSABLE_ENTITY
-        );
+        let reloaded_status = tokio::time::timeout(Duration::from_secs(2), reloaded)
+            .await
+            .expect("the reloaded browser should observe the completed operation")
+            .unwrap();
+        assert_eq!(reloaded_status, reqwest::StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(loads.load(Ordering::SeqCst), 1);
     }
 
