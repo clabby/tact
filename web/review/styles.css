@@ -240,31 +240,46 @@ button:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2p
 @keyframes spin { to { transform: rotate(360deg); } }
 
 .range-dialog::backdrop { background: color-mix(in srgb, var(--bg) 70%, transparent); backdrop-filter: blur(12px); }
-.range-dialog { width: min(620px, calc(100% - 48px)); max-width: none; padding: 0; overflow: hidden; border: 1px solid var(--line-strong); border-radius: 18px; outline: 0; background: var(--surface-raised); color: var(--text); box-shadow: 0 28px 90px color-mix(in srgb, #000 28%, transparent), 0 1px 0 color-mix(in srgb, #fff 25%, transparent) inset; animation: range-dialog-in .16s ease-out; }
+.range-dialog { width: min(680px, calc(100% - 48px)); max-width: none; max-height: calc(100dvh - 32px); padding: 0; overflow: hidden; border: 1px solid var(--line-strong); border-radius: 18px; outline: 0; background: var(--surface-raised); color: var(--text); box-shadow: 0 28px 90px color-mix(in srgb, #000 28%, transparent), 0 1px 0 color-mix(in srgb, #fff 25%, transparent) inset; animation: range-dialog-in .16s ease-out; }
 @keyframes range-dialog-in { from { opacity: 0; transform: translateY(8px) scale(.985); } }
 .range-dialog > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; padding: 25px 25px 19px; border-bottom: 1px solid var(--line); }
 .dialog-eyebrow { color: var(--accent); font-size: 10px; font-weight: 700; letter-spacing: .09em; text-transform: uppercase; }
 .range-dialog h2 { margin: 4px 0 0; font-size: 20px; letter-spacing: -.025em; }
 .range-dialog header p { max-width: 470px; margin: 7px 0 0; color: var(--muted); font-size: 12px; }
 .range-dialog header .icon-button { flex: none; margin: -5px -6px 0 0; }
-.range-options { display: grid; gap: 10px; padding: 18px; background: color-mix(in srgb, var(--bg) 45%, var(--surface)); }
-.range-option { display: grid; grid-template-columns: 19px minmax(0, 1fr); gap: 13px; width: 100%; padding: 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); color: var(--text); cursor: pointer; text-align: left; transition: border-color .15s ease, box-shadow .15s ease, transform .15s ease; }
-.range-option:hover { border-color: var(--line-strong); transform: translateY(-1px); box-shadow: 0 8px 22px color-mix(in srgb, #000 7%, transparent); }
-.range-option.selected { border-color: color-mix(in srgb, var(--accent-solid) 68%, var(--line)); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent-solid) 10%, transparent); }
-.range-radio { display: grid; place-items: center; width: 18px; height: 18px; margin-top: 1px; border: 1.5px solid var(--line-strong); border-radius: 50%; }
-.range-option.selected .range-radio { border-color: var(--accent-solid); }
-.range-option.selected .range-radio span { width: 8px; height: 8px; border-radius: 50%; background: var(--accent-solid); }
-.range-copy { min-width: 0; }
-.range-copy > span { display: block; }
-.range-option-heading { display: flex !important; align-items: center; gap: 8px; }
-.range-option-heading strong { font-size: 13px; font-weight: 680; }
-.range-option-heading em { padding: 2px 6px; border-radius: 10px; background: color-mix(in srgb, var(--accent-solid) 12%, transparent); color: var(--accent); font-size: 9px; font-style: normal; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
-.range-option-heading + span { margin-top: 3px; color: var(--muted); font-size: 12px; }
-.range-path { display: flex !important; align-items: center; gap: 8px; margin-top: 13px; }
-.range-path code { max-width: 180px; overflow: hidden; padding: 3px 7px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); font: 10px ui-monospace, SFMono-Regular, monospace; text-overflow: ellipsis; white-space: nowrap; }
-.range-line { display: flex !important; align-items: center; min-width: 44px; flex: 1; color: var(--muted); }
-.range-line i { height: 1px; flex: 1; background: var(--line-strong); }
-.range-line svg { width: 12px; height: 12px; margin-left: -1px; }
+.range-builder { padding: 18px; background: color-mix(in srgb, var(--bg) 45%, var(--surface)); }
+.range-endpoints { display: grid; grid-template-columns: minmax(0, 1fr) 34px minmax(0, 1fr); align-items: center; gap: 7px; margin-bottom: 14px; }
+.range-endpoint { min-width: 0; padding: 11px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); cursor: pointer; text-align: left; }
+.range-endpoint:hover { border-color: var(--line-strong); }
+.range-endpoint.active { border-color: color-mix(in srgb, var(--accent-solid) 72%, var(--line)); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent-solid) 10%, transparent); }
+.range-endpoint small, .range-endpoint strong, .range-endpoint span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.range-endpoint small { color: var(--accent); font-size: 9px; font-weight: 750; letter-spacing: .08em; text-transform: uppercase; }
+.range-endpoint strong { margin-top: 3px; font: 650 12px ui-monospace, SFMono-Regular, monospace; }
+.range-endpoint span { margin-top: 2px; color: var(--muted); font-size: 10px; }
+.range-direction { display: grid; place-items: center; color: var(--muted); }
+.range-direction svg { width: 17px; height: 17px; }
+.commit-timeline { max-height: 330px; overflow: auto; padding: 5px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
+.commit-target { position: relative; display: grid; grid-template-columns: 24px 68px minmax(0, 1fr) auto; align-items: center; gap: 8px; width: 100%; min-height: 52px; padding: 5px 9px 5px 5px; border: 0; border-radius: 8px; background: transparent; color: var(--text); cursor: pointer; text-align: left; }
+.commit-target:hover:not(:disabled) { background: var(--bg); }
+.commit-target:disabled { opacity: .38; }
+.commit-target.from, .commit-target.to { background: color-mix(in srgb, var(--accent-solid) 9%, transparent); }
+.commit-target.included { background: color-mix(in srgb, var(--accent-solid) 4%, transparent); }
+.commit-rail { position: relative; align-self: stretch; display: grid; place-items: center; }
+.commit-rail i { position: absolute; top: -6px; bottom: -6px; width: 1px; background: var(--line-strong); }
+.commit-target:first-child .commit-rail i { top: 50%; }
+.commit-target:last-child .commit-rail i { bottom: 50%; }
+.commit-target.included .commit-rail i, .commit-target.from .commit-rail i, .commit-target.to .commit-rail i { width: 2px; background: var(--accent-solid); }
+.commit-rail b { position: relative; width: 9px; height: 9px; border: 2px solid var(--line-strong); border-radius: 50%; background: var(--surface); }
+.commit-target.from .commit-rail b, .commit-target.to .commit-rail b { width: 12px; height: 12px; border: 3px solid var(--accent-solid); }
+.commit-target.included .commit-rail b { border-color: var(--accent-solid); }
+.commit-id { overflow: hidden; color: var(--muted); font: 10px ui-monospace, SFMono-Regular, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.commit-copy { min-width: 0; }
+.commit-copy strong, .commit-copy small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.commit-copy strong { font-size: 12px; font-weight: 620; }
+.commit-copy small { margin-top: 2px; color: var(--muted); font-size: 9px; letter-spacing: .05em; text-transform: uppercase; }
+.endpoint-badges { display: flex; gap: 4px; }
+.endpoint-badges em { display: none; padding: 2px 6px; border-radius: 9px; background: color-mix(in srgb, var(--accent-solid) 13%, transparent); color: var(--accent); font-size: 9px; font-style: normal; font-weight: 700; }
+.commit-target.from [data-from-badge], .commit-target.to [data-to-badge] { display: block; }
 .range-warning { margin: 0 18px 14px; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--danger) 22%, var(--line)); border-radius: 9px; background: color-mix(in srgb, var(--danger) 7%, var(--surface)); color: color-mix(in srgb, var(--danger) 78%, var(--text)); font-size: 11px; }
 .range-warning[hidden] { display: none; }
 .range-dialog > footer { display: flex; align-items: center; justify-content: space-between; padding: 12px 18px; border-top: 1px solid var(--line); }
@@ -295,6 +310,20 @@ button:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2p
   .review-bar { align-items: stretch; }
   .review-actions { flex-direction: column; }
   .review-actions .button { height: 31px; }
+}
+
+@media (max-width: 600px) {
+  .range-dialog { width: calc(100% - 16px); max-height: calc(100dvh - 16px); border-radius: 14px; }
+  .range-dialog > header { padding: 19px 18px 15px; }
+  .range-builder { padding: 12px; }
+  .commit-timeline { max-height: max(160px, calc(100dvh - 330px)); }
+  .commit-target { grid-template-columns: 20px 58px minmax(0, 1fr) auto; gap: 6px; }
+  .range-dialog footer > span { display: none; }
+}
+
+@media (max-width: 380px) {
+  .range-endpoints { grid-template-columns: 1fr; }
+  .range-direction { transform: rotate(90deg); }
 }
 
 @media (prefers-reduced-motion: reduce) {

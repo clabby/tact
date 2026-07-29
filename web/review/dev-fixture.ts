@@ -43,7 +43,13 @@ export const reviewBootstrap = {
   title: "Review feature/review-workflow",
   repository: "tact",
   trunk: "main",
-  default_scope: "uncommitted" as const,
+  range_targets: [
+    { index: 0, kind: "trunk" as const, short_id: "9d3b745", title: "main · Review foundation" },
+    { index: 1, kind: "commit" as const, short_id: "a4c981e", title: "Add native review service" },
+    { index: 2, kind: "commit" as const, short_id: "d2e640b", title: "Integrate review action" },
+    { index: 3, kind: "working_tree" as const, short_id: "WT", title: "Uncommitted changes" },
+  ],
+  default_range: { from: 2, to: 3 },
 };
 
 const overview = `
@@ -63,27 +69,36 @@ const overview = `
   </ul>`;
 
 export const reviewFixtures = {
-  uncommitted: {
+  "2:3": {
     title: reviewBootstrap.title,
     repository: reviewBootstrap.repository,
-    selected_scope: "uncommitted" as const,
+    selected_range: { from: 2, to: 3 },
     scope: "Uncommitted changes",
     base: "HEAD",
     patch,
   },
-  full_branch: {
+  "0:3": {
     title: reviewBootstrap.title,
     repository: reviewBootstrap.repository,
-    selected_scope: "full_branch" as const,
+    selected_range: { from: 0, to: 3 },
     scope: "Full branch",
     base: "9d3b745",
     patch: branchPatch,
   },
+  "1:2": {
+    title: reviewBootstrap.title,
+    repository: reviewBootstrap.repository,
+    selected_range: { from: 1, to: 2 },
+    scope: "a4c981e → d2e640b",
+    base: "a4c981e",
+    patch,
+  },
 };
 
 export const overviewFixtures = {
-  uncommitted: overview,
-  full_branch: `${overview}<h2>Branch-only release work</h2><p>The full branch also packages the browser bundle in the release workflow.</p>`,
+  "2:3": overview,
+  "0:3": `${overview}<h2>Branch-only release work</h2><p>The full branch also packages the browser bundle in the release workflow.</p>`,
+  "1:2": `${overview}<h2>Selected commits</h2><p>This overview covers only the selected commit interval.</p>`,
 };
 
-export const reviewFixture = reviewFixtures.uncommitted;
+export const reviewFixture = reviewFixtures["2:3"];

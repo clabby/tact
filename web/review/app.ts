@@ -20,7 +20,17 @@ import {
   type SyntaxTheme,
 } from "./review-settings";
 import { overviewDocument } from "./overview";
-import { rangeOption, rangeOptions, type ReviewScope } from "./range-selection";
+import {
+  canSelectTarget,
+  rangeKey,
+  rangeLabel,
+  rangesEqual,
+  selectTarget,
+  targetLabel,
+  type RangeEndpoint,
+  type ReviewRange,
+  type ReviewTarget,
+} from "./range-selection";
 import "./styles.css";
 
 const COMMENT_ICON_SPRITE = `
@@ -35,19 +45,20 @@ type ReviewBootstrap = {
   title: string;
   repository: string;
   trunk: string;
-  default_scope: ReviewScope;
+  range_targets: ReviewTarget[];
+  default_range: ReviewRange;
 };
 
 type ReviewPage = {
   title: string;
-  selected_scope: ReviewScope;
+  selected_range: ReviewRange;
   patch: string;
   repository: string;
   scope: string;
   base: string;
 };
 
-type OverviewResponse = { selected_scope: ReviewScope; overview_html: string };
+type OverviewResponse = { selected_range: ReviewRange; overview_html: string };
 
 type ReviewComment = {
   id: number;
@@ -93,7 +104,7 @@ async function start() {
     const bootstrap = (await response.json()) as ReviewBootstrap;
     const app = new ReviewApp(root, bootstrap);
     app.render();
-    await app.selectScope(bootstrap.default_scope);
+    await app.selectRange(bootstrap.default_range);
   } catch (error) {
     root.innerHTML = `<div class="fatal"><p>Could not load this review.</p><small>${escapeHtml(String(error))}</small></div>`;
   }
@@ -105,14 +116,15 @@ class ReviewApp {
   private items: CodeViewDiffItem<AnnotationMetadata>[] = [];
   private readonly pathToItem = new Map<string, string>();
   private readonly comments: CommentMetadata[] = [];
-  private readonly overviews = new Map<ReviewScope, string>();
+  private readonly overviews = new Map<string, string>();
   private draft?: CommentDraft;
-  private pendingScope?: ReviewScope;
+  private pendingRange?: ReviewRange;
+  private rangeEndpoint: RangeEndpoint = "from";
   private nextCommentId = 1;
   private submitted = false;
-  private loadingScope?: ReviewScope;
-  private loadingOverview?: ReviewScope;
-  private scopeRequest = 0;
+  private loadingRange?: ReviewRange;
+  private loadingOverview?: ReviewRange;
+  private rangeRequest = 0;
   private overviewRequest = 0;
   private viewer?: CodeView<AnnotationMetadata>;
   private tree?: FileTree;
@@ -209,8 +221,19 @@ class ReviewApp {
               </div>
               <button class="icon-button" data-range-close aria-label="Close range selector">${icon("close")}</button>
             </header>
-            <div class="range-options">
-              ${this.rangeOptionMarkup()}
+            <div class="range-builder">
+              <div class="range-endpoints" aria-label="Selected range endpoints">
+                <button class="range-endpoint active" data-range-endpoint="from" aria-pressed="true">
+                  <small>From</small><strong id="range-from-label"></strong><span id="range-from-title"></span>
+                </button>
+                <span class="range-direction">${icon("arrow-right")}</span>
+                <button class="range-endpoint" data-range-endpoint="to" aria-pressed="false">
+                  <small>To</small><strong id="range-to-label"></strong><span id="range-to-title"></span>
+                </button>
+              </div>
+              <div class="commit-timeline" id="commit-timeline" aria-label="Branch timeline">
+                ${this.rangeTimelineMarkup()}
+              </div>
             </div>
             <div class="range-warning" id="range-warning" hidden></div>
             <footer>
@@ -231,47 +254,47 @@ class ReviewApp {
     this.applySettings(false);
   }
 
-  async selectScope(scope: ReviewScope) {
-    if (this.loadingScope) return;
-    if (this.page?.selected_scope === scope) {
+  async selectRange(range: ReviewRange) {
+    if (this.loadingRange) return;
+    if (rangesEqual(this.page?.selected_range, range)) {
       const state = this.root.querySelector<HTMLElement>("#scope-state");
       if (state?.classList.contains("error")) state.hidden = true;
       return;
     }
-    const request = ++this.scopeRequest;
-    this.setScopeLoading(scope);
+    const request = ++this.rangeRequest;
+    this.setRangeLoading(range);
     try {
-      const response = await fetch("./api/scope", {
+      const response = await fetch("./api/range", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ scope }),
+        body: JSON.stringify({ range }),
       });
       const payload = await response.json() as ReviewPage | { error?: string };
-      if (request !== this.scopeRequest) return;
+      if (request !== this.rangeRequest) return;
       if (!response.ok) {
         const message = "error" in payload && payload.error
           ? payload.error
-          : `Could not load this scope (${response.status}).`;
-        this.showScopeError(scope, message);
+          : `Could not load this range (${response.status}).`;
+        this.showRangeError(message);
         return;
       }
       this.clearPendingComments();
       this.installPage(payload as ReviewPage);
     } catch (error) {
-      if (request === this.scopeRequest) this.showScopeError(scope, String(error));
+      if (request === this.rangeRequest) this.showRangeError(String(error));
     } finally {
-      if (request === this.scopeRequest) this.setScopeReady();
+      if (request === this.rangeRequest) this.setRangeReady();
     }
   }
 
   private installPage(page: ReviewPage) {
     this.page = page;
-    this.files = parsePatchFiles(page.patch, `tact-review-${page.selected_scope}`, true).flatMap(
+    this.files = parsePatchFiles(page.patch, `tact-review-${rangeKey(page.selected_range)}`, true).flatMap(
       (patch) => patch.files,
     );
     this.pathToItem.clear();
     this.items = this.files.map((file, index) => {
-      const id = `${page.selected_scope}:${index}:${file.name}`;
+      const id = `${rangeKey(page.selected_range)}:${index}:${file.name}`;
       this.pathToItem.set(file.name, id);
       return { id, type: "diff", fileDiff: file, annotations: [], version: 1 };
     });
@@ -283,7 +306,7 @@ class ReviewApp {
     this.renderDiff();
     this.renderTree();
     this.renderCommentList();
-    this.syncSelectedRange(page.selected_scope);
+    this.syncSelectedRange(page.selected_range);
     this.selectTab("changes");
   }
 
@@ -299,22 +322,16 @@ class ReviewApp {
       <strong class="del">−${stats.deletions}</strong>`;
   }
 
-  private rangeOptionMarkup() {
-    return rangeOptions(this.bootstrap.trunk).map((option) => `
-      <button class="range-option" data-range-option="${option.scope}">
-        <span class="range-radio"><span></span></span>
-        <span class="range-copy">
-          <span class="range-option-heading">
-            <strong>${escapeHtml(option.label)}</strong>
-            ${option.recommended ? "<em>Recommended</em>" : ""}
-          </span>
-          <span>${escapeHtml(option.description)}</span>
-          <span class="range-path">
-            <code>${escapeHtml(option.from)}</code>
-            <span class="range-line"><i></i>${icon("arrow-right")}</span>
-            <code>${escapeHtml(option.to)}</code>
-          </span>
+  private rangeTimelineMarkup() {
+    return this.bootstrap.range_targets.map((target) => `
+      <button class="commit-target" data-range-target="${target.index}">
+        <span class="commit-rail"><i></i><b></b></span>
+        <span class="commit-id">${escapeHtml(targetLabel(target))}</span>
+        <span class="commit-copy">
+          <strong>${escapeHtml(target.title)}</strong>
+          <small>${target.kind === "trunk" ? "Trunk base" : target.kind === "working_tree" ? "Working tree" : "Commit"}</small>
         </span>
+        <span class="endpoint-badges"><em data-from-badge>From</em><em data-to-badge>To</em></span>
       </button>`).join("");
   }
 
@@ -322,7 +339,7 @@ class ReviewApp {
     const state = this.root.querySelector<HTMLElement>("#overview-state");
     const frame = this.root.querySelector<HTMLIFrameElement>(".overview");
     if (!state || !frame || !this.page) return;
-    if (this.overviews.has(this.page.selected_scope)) {
+    if (this.overviews.has(rangeKey(this.page.selected_range))) {
       state.hidden = true;
       this.renderOverview();
       return;
@@ -338,16 +355,17 @@ class ReviewApp {
 
   private async loadOverview() {
     const page = this.page;
-    if (!page || this.loadingOverview === page.selected_scope) return;
-    if (this.overviews.has(page.selected_scope)) {
+    if (!page || rangesEqual(this.loadingOverview, page.selected_range)) return;
+    const key = rangeKey(page.selected_range);
+    if (this.overviews.has(key)) {
       this.renderOverviewState();
       return;
     }
 
-    const scope = page.selected_scope;
+    const range = page.selected_range;
     const request = ++this.overviewRequest;
-    this.loadingOverview = scope;
-    this.syncSelectedRange(scope);
+    this.loadingOverview = range;
+    this.syncSelectedRange(range);
     const state = this.root.querySelector<HTMLElement>("#overview-state");
     if (state) {
       state.hidden = false;
@@ -361,25 +379,25 @@ class ReviewApp {
       const response = await fetch("./api/overview", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ scope }),
+        body: JSON.stringify({ range }),
       });
       const payload = await response.json() as OverviewResponse | { error?: string };
       if (request !== this.overviewRequest) return;
-      if (!response.ok || !("overview_html" in payload) || payload.selected_scope !== scope) {
+      if (!response.ok || !("overview_html" in payload) || !rangesEqual(payload.selected_range, range)) {
         const message = "error" in payload && payload.error
           ? payload.error
           : `Could not prepare the overview (${response.status}).`;
         this.showOverviewError(message);
         return;
       }
-      this.overviews.set(scope, payload.overview_html);
-      if (this.page?.selected_scope === scope) this.renderOverviewState();
+      this.overviews.set(key, payload.overview_html);
+      if (rangesEqual(this.page?.selected_range, range)) this.renderOverviewState();
     } catch (error) {
       if (request === this.overviewRequest) this.showOverviewError(String(error));
     } finally {
       if (request === this.overviewRequest) {
         this.loadingOverview = undefined;
-        this.syncSelectedRange(this.page?.selected_scope ?? this.bootstrap.default_scope);
+        this.syncSelectedRange(this.page?.selected_range ?? this.bootstrap.default_range);
       }
     }
   }
@@ -399,7 +417,7 @@ class ReviewApp {
   private renderOverview() {
     const frame = this.root.querySelector<HTMLIFrameElement>(".overview");
     if (!frame || !this.page) return;
-    const html = this.overviews.get(this.page.selected_scope);
+    const html = this.overviews.get(rangeKey(this.page.selected_range));
     if (!html) return;
     frame.srcdoc = overviewDocument(html, appearance(this.settings));
     frame.hidden = false;
@@ -481,10 +499,19 @@ class ReviewApp {
       });
     }
     this.root.querySelector("#range-button")?.addEventListener("click", () => this.openRangeDialog());
-    for (const button of this.root.querySelectorAll<HTMLButtonElement>("[data-range-option]")) {
+    for (const button of this.root.querySelectorAll<HTMLButtonElement>("[data-range-endpoint]")) {
       button.addEventListener("click", () => {
-        this.pendingScope = button.dataset.rangeOption as ReviewScope;
-        this.syncRangeOptions();
+        this.rangeEndpoint = button.dataset.rangeEndpoint as RangeEndpoint;
+        this.syncRangeSelector();
+      });
+    }
+    for (const button of this.root.querySelectorAll<HTMLButtonElement>("[data-range-target]")) {
+      button.addEventListener("click", () => {
+        if (!this.pendingRange) return;
+        const index = Number(button.dataset.rangeTarget);
+        this.pendingRange = selectTarget(this.pendingRange, this.rangeEndpoint, index);
+        if (this.rangeEndpoint === "from") this.rangeEndpoint = "to";
+        this.syncRangeSelector();
       });
     }
     for (const button of this.root.querySelectorAll<HTMLButtonElement>("[data-range-close]")) {
@@ -589,36 +616,61 @@ class ReviewApp {
   }
 
   private openRangeDialog() {
-    if (this.loadingScope || this.loadingOverview) return;
-    this.pendingScope = this.page?.selected_scope ?? this.bootstrap.default_scope;
-    this.syncRangeOptions();
+    if (this.loadingRange || this.loadingOverview) return;
+    this.pendingRange = { ...(this.page?.selected_range ?? this.bootstrap.default_range) };
+    this.rangeEndpoint = "from";
+    this.syncRangeSelector();
     this.root.querySelector<HTMLDialogElement>("#range-dialog")?.showModal();
     this.root.querySelector("#range-button")?.setAttribute("aria-expanded", "true");
-    this.root.querySelector<HTMLButtonElement>(`[data-range-option="${this.pendingScope}"]`)?.focus();
+    this.root.querySelector<HTMLButtonElement>("[data-range-endpoint=from]")?.focus();
+    queueMicrotask(() => {
+      this.root.querySelector<HTMLElement>("[data-range-target].from")
+        ?.scrollIntoView({ block: "center" });
+    });
   }
 
   private closeRangeDialog() {
     const dialog = this.root.querySelector<HTMLDialogElement>("#range-dialog");
     if (dialog?.open) dialog.close();
     this.root.querySelector("#range-button")?.setAttribute("aria-expanded", "false");
-    this.pendingScope = undefined;
+    this.pendingRange = undefined;
     this.root.querySelector<HTMLButtonElement>("#range-button")?.focus();
   }
 
-  private syncRangeOptions() {
-    for (const option of this.root.querySelectorAll<HTMLButtonElement>("[data-range-option]")) {
-      const selected = option.dataset.rangeOption === this.pendingScope;
-      option.classList.toggle("selected", selected);
-      option.setAttribute("aria-pressed", String(selected));
+  private syncRangeSelector() {
+    const range = this.pendingRange;
+    if (!range) return;
+    for (const endpoint of this.root.querySelectorAll<HTMLButtonElement>("[data-range-endpoint]")) {
+      const active = endpoint.dataset.rangeEndpoint === this.rangeEndpoint;
+      endpoint.classList.toggle("active", active);
+      endpoint.setAttribute("aria-pressed", String(active));
+    }
+    const from = this.bootstrap.range_targets[range.from];
+    const to = this.bootstrap.range_targets[range.to];
+    this.setRangeEndpointText("from", from);
+    this.setRangeEndpointText("to", to);
+    for (const target of this.root.querySelectorAll<HTMLButtonElement>("[data-range-target]")) {
+      const index = Number(target.dataset.rangeTarget);
+      target.disabled = !canSelectTarget(range, this.rangeEndpoint, index);
+      target.classList.toggle("from", index === range.from);
+      target.classList.toggle("to", index === range.to);
+      target.classList.toggle("included", index > range.from && index < range.to);
     }
     this.syncRangeWarning();
+  }
+
+  private setRangeEndpointText(endpoint: RangeEndpoint, target: ReviewTarget) {
+    const label = this.root.querySelector<HTMLElement>(`#range-${endpoint}-label`);
+    const title = this.root.querySelector<HTMLElement>(`#range-${endpoint}-title`);
+    if (label) label.textContent = targetLabel(target);
+    if (title) title.textContent = target.title;
   }
 
   private syncRangeWarning() {
     const warning = this.root.querySelector<HTMLElement>("#range-warning");
     const apply = this.root.querySelector<HTMLButtonElement>("#apply-range");
-    const currentScope = this.page?.selected_scope ?? this.bootstrap.default_scope;
-    const changesRange = this.pendingScope !== undefined && this.pendingScope !== currentScope;
+    const currentRange = this.page?.selected_range ?? this.bootstrap.default_range;
+    const changesRange = this.pendingRange !== undefined && !rangesEqual(this.pendingRange, currentRange);
     const commentCount = this.comments.length;
     const hasDraft = this.draft !== undefined;
     const hasPendingFeedback = commentCount > 0 || hasDraft;
@@ -640,13 +692,13 @@ class ReviewApp {
   }
 
   private async applyRange() {
-    const scope = this.pendingScope;
+    const range = this.pendingRange;
     this.closeRangeDialog();
-    if (scope) await this.selectScope(scope);
+    if (range) await this.selectRange(range);
   }
 
   private openCommentComposer(selection: CodeViewLineSelection | null) {
-    if (!selection || this.loadingScope) return;
+    if (!selection || this.loadingRange) return;
     const side = selection.range.side ?? "additions";
     const endSide = selection.range.endSide ?? side;
     if (side !== endSide) return;
@@ -937,45 +989,41 @@ class ReviewApp {
     }
   }
 
-  private setScopeLoading(scope: ReviewScope) {
-    this.loadingScope = scope;
-    this.syncSelectedRange(scope);
+  private setRangeLoading(range: ReviewRange) {
+    this.loadingRange = range;
     const state = this.root.querySelector<HTMLElement>("#scope-state");
     if (state) {
       state.className = "scope-state loading";
-      state.innerHTML = `<div class="scope-spinner"></div><strong>Loading ${scope === "uncommitted" ? "uncommitted changes" : "the full branch"}</strong><span>Capturing an immutable diff for this review.</span>`;
+      state.innerHTML = `<div class="scope-spinner"></div><strong>Loading ${escapeHtml(rangeLabel(this.bootstrap.range_targets, range))}</strong><span>Capturing an immutable diff for this review.</span>`;
       state.hidden = false;
     }
     this.setReviewControlsDisabled(true);
   }
 
-  private setScopeReady() {
-    this.loadingScope = undefined;
-    this.syncSelectedRange(this.page?.selected_scope ?? this.bootstrap.default_scope);
+  private setRangeReady() {
+    this.loadingRange = undefined;
+    this.syncSelectedRange(this.page?.selected_range ?? this.bootstrap.default_range);
     this.setReviewControlsDisabled(false);
     const state = this.root.querySelector<HTMLElement>("#scope-state");
     if (state?.classList.contains("loading")) state.hidden = true;
   }
 
-  private showScopeError(scope: ReviewScope, message: string) {
+  private showRangeError(message: string) {
     const state = this.root.querySelector<HTMLElement>("#scope-state");
     if (!state) return;
     state.className = "scope-state error";
     state.innerHTML = `
       <div class="scope-error-icon">!</div>
-      <strong>${scope === "uncommitted" ? "No uncommitted review available" : "Could not load the full branch"}</strong>
-      <span>${escapeHtml(message)}</span>
-      ${scope === "uncommitted" ? '<button class="button primary" data-load-full>Review full branch</button>' : ""}`;
+      <strong>Could not load the selected range</strong>
+      <span>${escapeHtml(message)}</span>`;
     state.hidden = false;
-    state.querySelector("[data-load-full]")?.addEventListener("click", () => void this.selectScope("full_branch"));
   }
 
-  private syncSelectedRange(scope: ReviewScope) {
-    const option = rangeOption(scope, this.bootstrap.trunk);
+  private syncSelectedRange(range: ReviewRange) {
     const label = this.root.querySelector<HTMLElement>("#range-label");
     const button = this.root.querySelector<HTMLButtonElement>("#range-button");
-    if (label) label.textContent = option.label;
-    if (button) button.disabled = this.loadingScope !== undefined || this.loadingOverview !== undefined;
+    if (label) label.textContent = rangeLabel(this.bootstrap.range_targets, range);
+    if (button) button.disabled = this.loadingRange !== undefined || this.loadingOverview !== undefined;
   }
 
   private setReviewControlsDisabled(disabled: boolean) {
@@ -985,7 +1033,7 @@ class ReviewApp {
   }
 
   private async submit(decision: ReviewDecision["decision"]) {
-    if (!this.page || this.loadingScope) return;
+    if (!this.page || this.loadingRange) return;
     const summary = this.root.querySelector<HTMLTextAreaElement>("#review-summary")?.value.trim() ?? "";
     const payload: ReviewDecision = {
       decision,

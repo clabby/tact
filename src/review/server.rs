@@ -24,7 +24,7 @@ const MAX_PATH_BYTES: usize = 4096;
 #[derive(Clone, Serialize)]
 pub(super) struct ReviewPage {
     pub(super) title: String,
-    pub(super) selected_scope: super::diff::ReviewScope,
+    pub(super) selected_range: super::diff::ReviewRange,
     #[serde(flatten)]
     pub(super) diff: super::diff::DiffSnapshot,
 }
@@ -34,18 +34,19 @@ pub(super) struct ReviewBootstrap {
     pub(super) title: String,
     pub(super) repository: String,
     pub(super) trunk: String,
-    pub(super) default_scope: super::diff::ReviewScope,
+    pub(super) range_targets: Vec<super::diff::ReviewTarget>,
+    pub(super) default_range: super::diff::ReviewRange,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ScopeRequest {
-    scope: super::diff::ReviewScope,
+struct RangeRequest {
+    range: super::diff::ReviewRange,
 }
 
 #[derive(Serialize)]
 struct OverviewResponse {
-    selected_scope: super::diff::ReviewScope,
+    selected_range: super::diff::ReviewRange,
     overview_html: String,
 }
 
@@ -54,9 +55,9 @@ struct ScopeError {
     error: String,
 }
 
-pub(super) type ScopeLoader = Arc<
+pub(super) type RangeLoader = Arc<
     dyn Fn(
-            super::diff::ReviewScope,
+            super::diff::ReviewRange,
             CancellationToken,
         ) -> BoxFuture<'static, Result<ReviewPage, ScopeLoadError>>
         + Send
@@ -65,7 +66,8 @@ pub(super) type ScopeLoader = Arc<
 
 pub(super) type OverviewLoader = Arc<
     dyn Fn(
-            super::diff::ReviewScope,
+            super::diff::ReviewRange,
+            String,
             String,
             CancellationToken,
         ) -> BoxFuture<'static, Result<String, ScopeLoadError>>
@@ -115,10 +117,10 @@ pub(super) enum CommentSide {
 struct ServerState {
     assets: PathBuf,
     bootstrap: ReviewBootstrap,
-    scope_loader: ScopeLoader,
+    range_loader: RangeLoader,
     overview_loader: OverviewLoader,
-    scope_pages: Mutex<HashMap<super::diff::ReviewScope, ReviewPage>>,
-    overviews: Mutex<HashMap<super::diff::ReviewScope, String>>,
+    range_pages: Mutex<HashMap<super::diff::ReviewRange, ReviewPage>>,
+    overviews: Mutex<HashMap<super::diff::ReviewRange, String>>,
     overview_generation: Mutex<()>,
     scope_shutdown: CancellationToken,
     outcome: Mutex<Option<oneshot::Sender<ReviewOutcome>>>,
@@ -142,7 +144,7 @@ impl ReviewServer {
     pub(super) async fn start(
         bootstrap: ReviewBootstrap,
         initial_page: ReviewPage,
-        scope_loader: ScopeLoader,
+        range_loader: RangeLoader,
         overview_loader: OverviewLoader,
         token: String,
         assets: PathBuf,
@@ -154,9 +156,9 @@ impl ReviewServer {
         let state = Arc::new(ServerState {
             assets,
             bootstrap,
-            scope_loader,
+            range_loader,
             overview_loader,
-            scope_pages: Mutex::new(HashMap::from([(initial_page.selected_scope, initial_page)])),
+            range_pages: Mutex::new(HashMap::from([(initial_page.selected_range, initial_page)])),
             overviews: Mutex::new(HashMap::new()),
             overview_generation: Mutex::new(()),
             scope_shutdown: scope_shutdown.clone(),
@@ -213,7 +215,7 @@ fn router(state: Arc<ServerState>) -> Router {
         .route("/app.js", get(javascript))
         .route("/app.css", get(stylesheet))
         .route("/api/review", get(review))
-        .route("/api/scope", post(load_scope))
+        .route("/api/range", post(load_range))
         .route("/api/overview", post(load_overview))
         .route("/api/decision", post(submit))
         .route("/api/cancel", post(cancel))
@@ -239,15 +241,15 @@ async fn review(State(state): State<Arc<ServerState>>) -> impl IntoResponse {
     response
 }
 
-async fn load_scope(
+async fn load_range(
     State(state): State<Arc<ServerState>>,
-    Json(request): Json<ScopeRequest>,
+    Json(request): Json<RangeRequest>,
 ) -> Response<Body> {
-    if let Some(page) = state.scope_pages.lock().await.get(&request.scope).cloned() {
+    if let Some(page) = state.range_pages.lock().await.get(&request.range).cloned() {
         return secure_json(StatusCode::OK, page);
     }
 
-    let page = match (state.scope_loader)(request.scope, state.scope_shutdown.clone()).await {
+    let page = match (state.range_loader)(request.range, state.scope_shutdown.clone()).await {
         Ok(page) => page,
         Err(ScopeLoadError::Cancelled) => {
             if let Some(sender) = state.outcome.lock().await.take() {
@@ -265,39 +267,39 @@ async fn load_scope(
         }
     };
     state
-        .scope_pages
+        .range_pages
         .lock()
         .await
-        .insert(request.scope, page.clone());
+        .insert(request.range, page.clone());
     secure_json(StatusCode::OK, page)
 }
 
 async fn load_overview(
     State(state): State<Arc<ServerState>>,
-    Json(request): Json<ScopeRequest>,
+    Json(request): Json<RangeRequest>,
 ) -> Response<Body> {
-    if let Some(overview_html) = state.overviews.lock().await.get(&request.scope).cloned() {
+    if let Some(overview_html) = state.overviews.lock().await.get(&request.range).cloned() {
         return secure_json(
             StatusCode::OK,
             OverviewResponse {
-                selected_scope: request.scope,
+                selected_range: request.range,
                 overview_html,
             },
         );
     }
     let _generation = state.overview_generation.lock().await;
-    if let Some(overview_html) = state.overviews.lock().await.get(&request.scope).cloned() {
+    if let Some(overview_html) = state.overviews.lock().await.get(&request.range).cloned() {
         return secure_json(
             StatusCode::OK,
             OverviewResponse {
-                selected_scope: request.scope,
+                selected_range: request.range,
                 overview_html,
             },
         );
     }
 
-    let patch = match state.scope_pages.lock().await.get(&request.scope) {
-        Some(page) => page.diff.patch.clone(),
+    let (label, patch) = match state.range_pages.lock().await.get(&request.range) {
+        Some(page) => (page.diff.scope.clone(), page.diff.patch.clone()),
         None => {
             return secure_json(
                 StatusCode::CONFLICT,
@@ -308,7 +310,9 @@ async fn load_overview(
         }
     };
     let overview_html =
-        match (state.overview_loader)(request.scope, patch, state.scope_shutdown.clone()).await {
+        match (state.overview_loader)(request.range, label, patch, state.scope_shutdown.clone())
+            .await
+        {
             Ok(overview) => overview,
             Err(ScopeLoadError::Cancelled) => {
                 if let Some(sender) = state.outcome.lock().await.take() {
@@ -329,11 +333,11 @@ async fn load_overview(
         .overviews
         .lock()
         .await
-        .insert(request.scope, overview_html.clone());
+        .insert(request.range, overview_html.clone());
     secure_json(
         StatusCode::OK,
         OverviewResponse {
-            selected_scope: request.scope,
+            selected_range: request.range,
             overview_html,
         },
     )
@@ -427,10 +431,10 @@ pub(crate) enum ServerError {
 #[cfg(test)]
 mod tests {
     use super::{
-        Decision, OverviewLoader, ReviewBootstrap, ReviewOutcome, ReviewPage, ReviewServer,
-        ScopeLoadError, ScopeLoader,
+        Decision, OverviewLoader, RangeLoader, ReviewBootstrap, ReviewOutcome, ReviewPage,
+        ReviewServer, ScopeLoadError,
     };
-    use crate::review::diff::{DiffSnapshot, ReviewScope};
+    use crate::review::diff::{DiffSnapshot, ReviewRange, ReviewTarget, ReviewTargetKind};
     use std::{
         sync::{
             Arc,
@@ -491,7 +495,7 @@ mod tests {
             std::fs::write(assets.path().join(name), "").unwrap();
         }
         let loads = Arc::new(AtomicUsize::new(0));
-        let loader: ScopeLoader = Arc::new({
+        let loader: RangeLoader = Arc::new({
             let loads = Arc::clone(&loads);
             move |scope, _shutdown| {
                 loads.fetch_add(1, Ordering::SeqCst);
@@ -501,8 +505,8 @@ mod tests {
         let server = start_server_with_loader(&assets, loader).await;
 
         let response = reqwest::Client::new()
-            .post(server.endpoint_url("api/scope"))
-            .json(&serde_json::json!({ "scope": "uncommitted" }))
+            .post(server.endpoint_url("api/range"))
+            .json(&serde_json::json!({ "range": uncommitted_range() }))
             .send()
             .await
             .unwrap();
@@ -538,16 +542,16 @@ mod tests {
         }
         let server = start_server(&assets).await;
         let response = reqwest::Client::new()
-            .post(server.endpoint_url("api/scope"))
-            .json(&serde_json::json!({ "scope": "full_branch" }))
+            .post(server.endpoint_url("api/range"))
+            .json(&serde_json::json!({ "range": full_range() }))
             .send()
             .await
             .unwrap();
 
         assert_eq!(response.status(), reqwest::StatusCode::OK);
         assert_eq!(
-            response.json::<serde_json::Value>().await.unwrap()["selected_scope"],
-            "full_branch"
+            response.json::<serde_json::Value>().await.unwrap()["selected_range"],
+            serde_json::json!({ "from": 0, "to": 2 })
         );
 
         reqwest::Client::new()
@@ -570,7 +574,7 @@ mod tests {
         let loads = Arc::new(AtomicUsize::new(0));
         let overview_loader: OverviewLoader = Arc::new({
             let loads = Arc::clone(&loads);
-            move |_scope, patch, _shutdown| {
+            move |_range, _label, patch, _shutdown| {
                 loads.fetch_add(1, Ordering::SeqCst);
                 Box::pin(async move { Ok(format!("<p>{patch}</p>")) })
             }
@@ -581,7 +585,7 @@ mod tests {
         for _ in 0..2 {
             let response = reqwest::Client::new()
                 .post(server.endpoint_url("api/overview"))
-                .json(&serde_json::json!({ "scope": "uncommitted" }))
+                .json(&serde_json::json!({ "range": uncommitted_range() }))
                 .send()
                 .await
                 .unwrap();
@@ -607,7 +611,7 @@ mod tests {
             let loads = Arc::clone(&loads);
             let started = Arc::clone(&started);
             let release = Arc::clone(&release);
-            move |_scope, _patch, _shutdown| {
+            move |_range, _label, _patch, _shutdown| {
                 let started = Arc::clone(&started);
                 let release = Arc::clone(&release);
                 loads.fetch_add(1, Ordering::SeqCst);
@@ -620,9 +624,9 @@ mod tests {
         });
         let server = start_server_with_loaders(&assets, loader(), overview_loader).await;
         let url = server.endpoint_url("api/overview");
-        let first = tokio::spawn(request_overview(url.clone(), ReviewScope::Uncommitted));
+        let first = tokio::spawn(request_overview(url.clone(), uncommitted_range()));
         started.notified().await;
-        let second = tokio::spawn(request_overview(url, ReviewScope::Uncommitted));
+        let second = tokio::spawn(request_overview(url, uncommitted_range()));
         tokio::task::yield_now().await;
 
         release.notify_waiters();
@@ -641,15 +645,14 @@ mod tests {
         let loads = Arc::new(AtomicUsize::new(0));
         let overview_loader: OverviewLoader = Arc::new({
             let loads = Arc::clone(&loads);
-            move |_scope, _patch, _shutdown| {
+            move |_range, _label, _patch, _shutdown| {
                 loads.fetch_add(1, Ordering::SeqCst);
                 Box::pin(async { Ok("<p>Overview</p>".to_owned()) })
             }
         });
         let server = start_server_with_loaders(&assets, loader(), overview_loader).await;
 
-        let status =
-            request_overview(server.endpoint_url("api/overview"), ReviewScope::FullBranch).await;
+        let status = request_overview(server.endpoint_url("api/overview"), full_range()).await;
 
         assert_eq!(status, reqwest::StatusCode::CONFLICT);
         assert_eq!(loads.load(Ordering::SeqCst), 0);
@@ -661,14 +664,14 @@ mod tests {
         for name in ["index.html", "app.js", "app.css"] {
             std::fs::write(assets.path().join(name), "").unwrap();
         }
-        let overview_loader: OverviewLoader = Arc::new(|_scope, _patch, _shutdown| {
+        let overview_loader: OverviewLoader = Arc::new(|_range, _label, _patch, _shutdown| {
             Box::pin(async { Err(ScopeLoadError::Cancelled) })
         });
         let server = start_server_with_loaders(&assets, loader(), overview_loader).await;
 
         let response = reqwest::Client::new()
             .post(server.endpoint_url("api/overview"))
-            .json(&serde_json::json!({ "scope": "uncommitted" }))
+            .json(&serde_json::json!({ "range": uncommitted_range() }))
             .send()
             .await
             .unwrap();
@@ -687,7 +690,7 @@ mod tests {
             std::fs::write(assets.path().join(name), "").unwrap();
         }
         let started = Arc::new(Notify::new());
-        let loader: ScopeLoader = Arc::new({
+        let loader: RangeLoader = Arc::new({
             let started = Arc::clone(&started);
             move |_scope, shutdown| {
                 let started = Arc::clone(&started);
@@ -700,11 +703,11 @@ mod tests {
         });
         let server = start_server_with_loader(&assets, loader).await;
         let scope_request = tokio::spawn({
-            let url = server.endpoint_url("api/scope");
+            let url = server.endpoint_url("api/range");
             async move {
                 reqwest::Client::new()
                     .post(url)
-                    .json(&serde_json::json!({ "scope": "full_branch" }))
+                    .json(&serde_json::json!({ "range": full_range() }))
                     .send()
                     .await
             }
@@ -734,7 +737,7 @@ mod tests {
         let started = Arc::new(Notify::new());
         let overview_loader: OverviewLoader = Arc::new({
             let started = Arc::clone(&started);
-            move |_scope, _patch, shutdown| {
+            move |_range, _label, _patch, shutdown| {
                 let started = Arc::clone(&started);
                 Box::pin(async move {
                     started.notify_one();
@@ -746,7 +749,7 @@ mod tests {
         let server = start_server_with_loaders(&assets, loader(), overview_loader).await;
         let overview_request = tokio::spawn({
             let url = server.endpoint_url("api/overview");
-            async move { request_overview(url, ReviewScope::Uncommitted).await }
+            async move { request_overview(url, uncommitted_range()).await }
         });
         started.notified().await;
 
@@ -770,14 +773,14 @@ mod tests {
 
     async fn start_server_with_loader(
         assets: &tempfile::TempDir,
-        loader: ScopeLoader,
+        loader: RangeLoader,
     ) -> ReviewServer {
         start_server_with_loaders(assets, loader, overview_loader()).await
     }
 
     async fn start_server_with_loaders(
         assets: &tempfile::TempDir,
-        loader: ScopeLoader,
+        loader: RangeLoader,
         overview_loader: OverviewLoader,
     ) -> ReviewServer {
         ReviewServer::start(
@@ -785,9 +788,10 @@ mod tests {
                 title: "Review repo".to_owned(),
                 repository: "repo".to_owned(),
                 trunk: "main".to_owned(),
-                default_scope: ReviewScope::Uncommitted,
+                range_targets: targets(),
+                default_range: uncommitted_range(),
             },
-            page(ReviewScope::Uncommitted),
+            page(uncommitted_range()),
             loader,
             overview_loader,
             "test-token".to_owned(),
@@ -797,32 +801,65 @@ mod tests {
         .unwrap()
     }
 
-    fn loader() -> ScopeLoader {
-        Arc::new(|scope, _shutdown| Box::pin(async move { Ok(page(scope)) }))
+    fn loader() -> RangeLoader {
+        Arc::new(|range, _shutdown| Box::pin(async move { Ok(page(range)) }))
     }
 
     fn overview_loader() -> OverviewLoader {
-        Arc::new(|_scope, _patch, _shutdown| Box::pin(async { Ok("<p>Overview</p>".to_owned()) }))
+        Arc::new(|_range, _label, _patch, _shutdown| {
+            Box::pin(async { Ok("<p>Overview</p>".to_owned()) })
+        })
     }
 
-    async fn request_overview(url: String, scope: ReviewScope) -> reqwest::StatusCode {
+    async fn request_overview(url: String, range: ReviewRange) -> reqwest::StatusCode {
         reqwest::Client::new()
             .post(url)
-            .json(&serde_json::json!({ "scope": scope }))
+            .json(&serde_json::json!({ "range": range }))
             .send()
             .await
             .unwrap()
             .status()
     }
 
-    fn page(scope: ReviewScope) -> ReviewPage {
+    fn uncommitted_range() -> ReviewRange {
+        ReviewRange { from: 1, to: 2 }
+    }
+
+    fn full_range() -> ReviewRange {
+        ReviewRange { from: 0, to: 2 }
+    }
+
+    fn targets() -> Vec<ReviewTarget> {
+        vec![
+            ReviewTarget {
+                index: 0,
+                kind: ReviewTargetKind::Trunk,
+                short_id: "base".to_owned(),
+                title: "main · Base".to_owned(),
+            },
+            ReviewTarget {
+                index: 1,
+                kind: ReviewTargetKind::Commit,
+                short_id: "head".to_owned(),
+                title: "Current commit".to_owned(),
+            },
+            ReviewTarget {
+                index: 2,
+                kind: ReviewTargetKind::WorkingTree,
+                short_id: "WT".to_owned(),
+                title: "Uncommitted changes".to_owned(),
+            },
+        ]
+    }
+
+    fn page(range: ReviewRange) -> ReviewPage {
         ReviewPage {
             title: "Review".to_owned(),
-            selected_scope: scope,
+            selected_range: range,
             diff: DiffSnapshot {
                 patch: "patch".to_owned(),
                 repository: "repo".to_owned(),
-                scope: scope.label().to_owned(),
+                scope: "Selected range".to_owned(),
                 base: "HEAD".to_owned(),
             },
         }

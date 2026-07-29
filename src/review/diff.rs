@@ -8,19 +8,31 @@ use tokio::{io::AsyncReadExt, process::Command};
 const MAX_DIFF_BYTES: usize = 32 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum ReviewScope {
-    Uncommitted,
-    FullBranch,
+pub(crate) struct ReviewRange {
+    pub(crate) from: usize,
+    pub(crate) to: usize,
 }
 
-impl ReviewScope {
-    pub(crate) const fn label(self) -> &'static str {
-        match self {
-            Self::Uncommitted => "Uncommitted changes",
-            Self::FullBranch => "Full branch",
-        }
-    }
+#[derive(Clone, Debug, Serialize)]
+pub(super) struct ReviewTarget {
+    pub(super) index: usize,
+    pub(super) kind: ReviewTargetKind,
+    pub(super) short_id: String,
+    pub(super) title: String,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum ReviewTargetKind {
+    Trunk,
+    Commit,
+    WorkingTree,
+}
+
+#[derive(Clone)]
+struct RangePoint {
+    target: ReviewTarget,
+    revision: Option<String>,
 }
 
 #[derive(Clone)]
@@ -28,6 +40,7 @@ pub(super) struct ReviewContext {
     root: PathBuf,
     repository: String,
     trunk: Trunk,
+    range_points: Vec<RangePoint>,
 }
 
 #[derive(Clone, Serialize)]
@@ -42,6 +55,7 @@ impl ReviewContext {
     pub(super) async fn load(workspace: &Path) -> Result<Self, DiffError> {
         let root = repository_root(workspace).await?;
         let trunk = resolve_trunk(&root).await?;
+        let range_points = load_range_points(&root, &trunk).await?;
         let repository = root
             .file_name()
             .and_then(|name| name.to_str())
@@ -51,6 +65,7 @@ impl ReviewContext {
             root,
             repository,
             trunk,
+            range_points,
         })
     }
 
@@ -62,39 +77,112 @@ impl ReviewContext {
         &self.trunk.name
     }
 
-    pub(super) async fn collect(&self, scope: ReviewScope) -> Result<DiffSnapshot, DiffError> {
-        let base = match scope {
-            ReviewScope::Uncommitted => "HEAD",
-            ReviewScope::FullBranch => &self.trunk.merge_base,
+    pub(super) fn range_targets(&self) -> Vec<ReviewTarget> {
+        self.range_points
+            .iter()
+            .map(|point| point.target.clone())
+            .collect()
+    }
+
+    pub(super) fn default_range(&self) -> ReviewRange {
+        let to = self.range_points.len() - 1;
+        ReviewRange { from: to - 1, to }
+    }
+
+    pub(super) fn full_range(&self) -> ReviewRange {
+        ReviewRange {
+            from: 0,
+            to: self.range_points.len() - 1,
+        }
+    }
+
+    pub(super) fn range_label(&self, range: ReviewRange) -> Result<String, DiffError> {
+        self.validate_range(range)?;
+        if range == self.default_range() {
+            return Ok("Uncommitted changes".to_owned());
+        }
+        if range == self.full_range() {
+            return Ok("Full branch".to_owned());
+        }
+        let from = &self.range_points[range.from].target;
+        let to = &self.range_points[range.to].target;
+        Ok(format!("{} → {}", target_label(from), target_label(to)))
+    }
+
+    pub(super) async fn collect(&self, range: ReviewRange) -> Result<DiffSnapshot, DiffError> {
+        self.validate_range(range)?;
+        let base = self.range_points[range.from]
+            .revision
+            .as_deref()
+            .expect("a valid range cannot start at the working tree");
+        let head = self.range_points[range.to].revision.as_deref();
+        let output = match head {
+            Some(head) => {
+                git_output_limited(
+                    &self.root,
+                    [
+                        "diff",
+                        "--binary",
+                        "--find-renames",
+                        "--find-copies",
+                        "--no-ext-diff",
+                        base,
+                        head,
+                        "--",
+                    ],
+                    MAX_DIFF_BYTES,
+                    0,
+                )
+                .await?
+            }
+            None => {
+                git_output_limited(
+                    &self.root,
+                    [
+                        "diff",
+                        "--binary",
+                        "--find-renames",
+                        "--find-copies",
+                        "--no-ext-diff",
+                        base,
+                        "--",
+                    ],
+                    MAX_DIFF_BYTES,
+                    0,
+                )
+                .await?
+            }
         };
-        let output = git_output_limited(
-            &self.root,
-            [
-                "diff",
-                "--binary",
-                "--find-renames",
-                "--find-copies",
-                "--no-ext-diff",
-                base,
-                "--",
-            ],
-            MAX_DIFF_BYTES,
-            0,
-        )
-        .await?;
         ensure_success(output.status, &output.stderr)?;
         let mut patch = String::from_utf8(output.stdout)?;
 
-        append_untracked_files(&self.root, &mut patch).await?;
-        if patch.is_empty() {
-            return Err(DiffError::NoChanges);
+        if head.is_none() {
+            append_untracked_files(&self.root, &mut patch).await?;
         }
         Ok(DiffSnapshot {
             patch,
             repository: self.repository.clone(),
-            scope: scope.label().to_owned(),
+            scope: self.range_label(range)?,
             base: base.to_owned(),
         })
+    }
+
+    fn validate_range(&self, range: ReviewRange) -> Result<(), DiffError> {
+        if range.from < range.to && range.to < self.range_points.len() {
+            return Ok(());
+        }
+        Err(DiffError::InvalidRange {
+            from: range.from,
+            to: range.to,
+            target_count: self.range_points.len(),
+        })
+    }
+}
+
+fn target_label(target: &ReviewTarget) -> &str {
+    match target.kind {
+        ReviewTargetKind::WorkingTree => "Working tree",
+        ReviewTargetKind::Trunk | ReviewTargetKind::Commit => &target.short_id,
     }
 }
 
@@ -134,6 +222,79 @@ async fn resolve_trunk(root: &Path) -> Result<Trunk, DiffError> {
 struct Trunk {
     name: String,
     merge_base: String,
+}
+
+async fn load_range_points(root: &Path, trunk: &Trunk) -> Result<Vec<RangePoint>, DiffError> {
+    let trunk_commit = commit_metadata(root, &trunk.merge_base).await?;
+    let mut points = vec![RangePoint {
+        target: ReviewTarget {
+            index: 0,
+            kind: ReviewTargetKind::Trunk,
+            short_id: trunk_commit.short_id,
+            title: format!("{} · {}", trunk.name, trunk_commit.title),
+        },
+        revision: Some(trunk.merge_base.clone()),
+    }];
+    let range = format!("{}..HEAD", trunk.merge_base);
+    let output = git_output(
+        root,
+        [
+            "log",
+            "--first-parent",
+            "--reverse",
+            "--format=%H%x00%h%x00%s",
+            &range,
+        ],
+    )
+    .await?;
+    ensure_success(output.status, &output.stderr)?;
+    let commits = String::from_utf8(output.stdout)?;
+    for line in commits.lines().filter(|line| !line.is_empty()) {
+        let mut fields = line.splitn(3, '\0');
+        let revision = fields.next().unwrap_or_default();
+        let short_id = fields.next().unwrap_or_default();
+        let title = fields.next().unwrap_or_default();
+        if revision.is_empty() || short_id.is_empty() {
+            return Err(DiffError::InvalidCommitMetadata);
+        }
+        points.push(RangePoint {
+            target: ReviewTarget {
+                index: points.len(),
+                kind: ReviewTargetKind::Commit,
+                short_id: short_id.to_owned(),
+                title: title.to_owned(),
+            },
+            revision: Some(revision.to_owned()),
+        });
+    }
+    points.push(RangePoint {
+        target: ReviewTarget {
+            index: points.len(),
+            kind: ReviewTargetKind::WorkingTree,
+            short_id: "WT".to_owned(),
+            title: "Uncommitted changes".to_owned(),
+        },
+        revision: None,
+    });
+    Ok(points)
+}
+
+struct CommitMetadata {
+    short_id: String,
+    title: String,
+}
+
+async fn commit_metadata(root: &Path, revision: &str) -> Result<CommitMetadata, DiffError> {
+    let output = git_output(root, ["show", "--no-patch", "--format=%h%x00%s", revision]).await?;
+    ensure_success(output.status, &output.stderr)?;
+    let value = String::from_utf8(output.stdout)?;
+    let Some((short_id, title)) = value.trim().split_once('\0') else {
+        return Err(DiffError::InvalidCommitMetadata);
+    };
+    Ok(CommitMetadata {
+        short_id: short_id.to_owned(),
+        title: title.to_owned(),
+    })
 }
 
 async fn revision_exists(root: &Path, revision: &str) -> Result<bool, DiffError> {
@@ -280,8 +441,14 @@ pub(crate) enum DiffError {
     BaseNotFound,
     #[error("could not find a merge base between HEAD and `{0}`")]
     InvalidBase(String),
-    #[error("the selected review scope contains no changes")]
-    NoChanges,
+    #[error("the selected review range {from}..{to} is invalid for {target_count} targets")]
+    InvalidRange {
+        from: usize,
+        to: usize,
+        target_count: usize,
+    },
+    #[error("git returned invalid commit metadata for the review range")]
+    InvalidCommitMetadata,
     #[error("review diff is {actual} bytes, exceeding the {maximum}-byte limit")]
     TooLarge { actual: usize, maximum: usize },
     #[error("git output was not valid UTF-8: {0}")]
@@ -292,7 +459,7 @@ pub(crate) enum DiffError {
 
 #[cfg(test)]
 mod tests {
-    use super::{ReviewScope, load};
+    use super::{ReviewRange, ReviewTargetKind, load};
     use std::{fs, path::Path, process::Command};
     use tempfile::TempDir;
 
@@ -303,7 +470,7 @@ mod tests {
         fs::write(repository.path().join("new.txt"), "new\n").unwrap();
 
         let context = load(repository.path()).await.unwrap();
-        let snapshot = context.collect(ReviewScope::Uncommitted).await.unwrap();
+        let snapshot = context.collect(context.default_range()).await.unwrap();
 
         assert!(snapshot.patch.contains("tracked.txt"));
         assert!(snapshot.patch.contains("new.txt"));
@@ -320,10 +487,68 @@ mod tests {
         git(repository.path(), ["commit", "--quiet", "-m", "feature"]);
 
         let context = load(repository.path()).await.unwrap();
-        let snapshot = context.collect(ReviewScope::FullBranch).await.unwrap();
+        let snapshot = context.collect(context.full_range()).await.unwrap();
 
         assert!(snapshot.patch.contains("+feature"));
         assert_ne!(snapshot.base, "HEAD");
+    }
+
+    #[tokio::test]
+    async fn any_interval_between_trunk_commits_and_working_tree_can_be_selected() {
+        let repository = repository();
+        git(repository.path(), ["checkout", "--quiet", "-b", "feature"]);
+        fs::write(repository.path().join("first.txt"), "first\n").unwrap();
+        git(repository.path(), ["add", "first.txt"]);
+        git(
+            repository.path(),
+            ["commit", "--quiet", "-m", "first change"],
+        );
+        fs::write(repository.path().join("second.txt"), "second\n").unwrap();
+        git(repository.path(), ["add", "second.txt"]);
+        git(
+            repository.path(),
+            ["commit", "--quiet", "-m", "second change"],
+        );
+        fs::write(repository.path().join("working.txt"), "working\n").unwrap();
+
+        let context = load(repository.path()).await.unwrap();
+        let targets = context.range_targets();
+        assert_eq!(targets.len(), 4);
+        assert!(matches!(targets[0].kind, ReviewTargetKind::Trunk));
+        assert_eq!(targets[1].title, "first change");
+        assert_eq!(targets[2].title, "second change");
+        assert!(matches!(targets[3].kind, ReviewTargetKind::WorkingTree));
+
+        let committed = context
+            .collect(ReviewRange { from: 1, to: 2 })
+            .await
+            .unwrap();
+        assert!(!committed.patch.contains("first.txt"));
+        assert!(committed.patch.contains("second.txt"));
+        assert!(!committed.patch.contains("working.txt"));
+
+        let through_working_tree = context
+            .collect(ReviewRange { from: 2, to: 3 })
+            .await
+            .unwrap();
+        assert!(through_working_tree.patch.contains("working.txt"));
+        assert!(!through_working_tree.patch.contains("second.txt"));
+    }
+
+    #[tokio::test]
+    async fn reversed_or_empty_ranges_are_rejected() {
+        let repository = repository();
+        let context = load(repository.path()).await.unwrap();
+
+        for range in [
+            ReviewRange { from: 0, to: 0 },
+            ReviewRange { from: 1, to: 0 },
+        ] {
+            assert!(matches!(
+                context.collect(range).await,
+                Err(super::DiffError::InvalidRange { .. })
+            ));
+        }
     }
 
     fn repository() -> TempDir {

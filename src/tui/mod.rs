@@ -1009,7 +1009,7 @@ pub(crate) async fn run(
                     Err(error) => schedule(
                         app.update(AppEvent::ReviewFailed {
                             pane,
-                            error: format!("Review failed: {error}"),
+                            error: error.user_message(),
                         }),
                         &mut scheduler,
                     ),

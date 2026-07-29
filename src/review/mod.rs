@@ -5,13 +5,13 @@ mod diff;
 mod server;
 
 pub(crate) use assets::{AssetAvailability, ReviewAssets};
-pub(crate) use diff::ReviewScope;
+pub(crate) use diff::ReviewRange;
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use futures_util::future::BoxFuture;
 use server::{
-    OverviewLoader, ReviewBootstrap, ReviewDecision, ReviewOutcome, ReviewPage, ReviewServer,
-    ScopeLoadError, ScopeLoader,
+    OverviewLoader, RangeLoader, ReviewBootstrap, ReviewDecision, ReviewOutcome, ReviewPage,
+    ReviewServer, ScopeLoadError,
 };
 use sha2::{Digest, Sha256};
 use std::{
@@ -45,10 +45,11 @@ pub(crate) async fn run(
     let title = format!("Review {}", context.repository());
     let preparation_shutdown = CancellationToken::new();
     let _cancel_preparation_on_drop = CancelOnDrop(preparation_shutdown.clone());
+    let default_range = context.default_range();
     let initial_page = prepare_page(
         context.clone(),
         title.clone(),
-        ReviewScope::Uncommitted,
+        default_range,
         preparation_shutdown,
     )
     .await?;
@@ -56,14 +57,15 @@ pub(crate) async fn run(
         title: title.clone(),
         repository: context.repository().to_owned(),
         trunk: context.trunk_name().to_owned(),
-        default_scope: ReviewScope::Uncommitted,
+        range_targets: context.range_targets(),
+        default_range,
     };
     let loader_context = context.clone();
-    let scope_loader: ScopeLoader = Arc::new(move |scope, shutdown| {
+    let range_loader: RangeLoader = Arc::new(move |range, shutdown| {
         let context = loader_context.clone();
         let title = title.clone();
         Box::pin(async move {
-            prepare_page(context, title, scope, shutdown)
+            prepare_page(context, title, range, shutdown)
                 .await
                 .map_err(|error| match error {
                     ReviewError::Cancelled => ScopeLoadError::Cancelled,
@@ -71,10 +73,10 @@ pub(crate) async fn run(
                 })
         })
     });
-    let overview_loader: OverviewLoader = Arc::new(move |scope, patch, shutdown| {
+    let overview_loader: OverviewLoader = Arc::new(move |_range, label, patch, shutdown| {
         let overview_generator = overview_generator.clone();
         Box::pin(async move {
-            generate_overview(overview_generator, scope, &patch, shutdown)
+            generate_overview(overview_generator, &label, &patch, shutdown)
                 .await
                 .map_err(|error| match error {
                     ReviewError::Cancelled => ScopeLoadError::Cancelled,
@@ -86,7 +88,7 @@ pub(crate) async fn run(
     let server = ReviewServer::start(
         bootstrap,
         initial_page,
-        scope_loader,
+        range_loader,
         overview_loader,
         token,
         assets.path().to_owned(),
@@ -111,23 +113,23 @@ impl Drop for CancelOnDrop {
 async fn prepare_page(
     context: diff::ReviewContext,
     title: String,
-    scope: ReviewScope,
+    range: ReviewRange,
     shutdown: CancellationToken,
 ) -> Result<ReviewPage, ReviewError> {
     let snapshot = tokio::select! {
-        result = context.collect(scope) => result?,
+        result = context.collect(range) => result?,
         () = shutdown.cancelled() => return Err(ReviewError::Cancelled),
     };
     Ok(ReviewPage {
         title,
-        selected_scope: scope,
+        selected_range: range,
         diff: snapshot,
     })
 }
 
 async fn generate_overview(
     overview_generator: OverviewGenerator,
-    scope: ReviewScope,
+    label: &str,
     patch: &str,
     shutdown: CancellationToken,
 ) -> Result<String, ReviewError> {
@@ -138,7 +140,7 @@ async fn generate_overview(
     let path = snapshot.path().to_string_lossy();
     let prompt = format!(
         "Prepare a concise HTML overview for a human reviewing `{label}`. The exact, immutable Git patch is at `{path}`. Read it without modifying the workspace. Return only a semantic HTML fragment with the change's purpose, architecture/data flow, most important files, and concrete review risks. The reviewer owns all visual styling so the fragment works in both light and dark mode: do not include styles, classes, images, scripts, external resources, markdown fences, or a full code review.",
-        label = scope.label(),
+        label = label,
     );
     let result = match overview_generator(prompt, shutdown).await {
         Ok(result) => result,
@@ -238,12 +240,31 @@ pub(crate) enum ReviewError {
     OverviewTooLarge,
 }
 
+impl ReviewError {
+    pub(crate) fn user_message(&self) -> String {
+        if matches!(self, Self::Diff(diff::DiffError::NotRepository(_))) {
+            return "The folder must be a git repository.".to_owned();
+        }
+
+        format!("Review failed: {self}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::server::{CommentSide, Decision, ReviewComment, ReviewDecision};
-    use super::{OverviewGenerator, ReviewScope, generate_overview};
+    use super::{OverviewGenerator, generate_overview};
     use std::sync::{Arc, Mutex};
     use tokio_util::sync::CancellationToken;
+
+    #[test]
+    fn non_repository_error_has_a_direct_action_message() {
+        let error = super::ReviewError::Diff(super::diff::DiffError::NotRepository(
+            "/tmp/not-a-repository".into(),
+        ));
+
+        assert_eq!(error.user_message(), "The folder must be a git repository.");
+    }
 
     #[tokio::test]
     async fn overview_generator_reads_the_immutable_patch_and_returns_html() {
@@ -266,7 +287,7 @@ mod tests {
 
         let overview = generate_overview(
             generator,
-            ReviewScope::Uncommitted,
+            "Uncommitted changes",
             "diff --git a/file b/file\n",
             CancellationToken::new(),
         )

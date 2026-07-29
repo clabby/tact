@@ -1,6 +1,7 @@
 import { mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { overviewFixtures, reviewBootstrap, reviewFixtures } from "./dev-fixture";
+import { rangeKey, type ReviewRange } from "./range-selection";
 
 const outputDirectory = join(import.meta.dir, ".dev");
 await rm(outputDirectory, { recursive: true, force: true });
@@ -30,19 +31,21 @@ const server = Bun.serve({
     if (request.method === "GET" && url.pathname === "/api/review") {
       return Response.json(reviewBootstrap);
     }
-    if (request.method === "POST" && url.pathname === "/api/scope") {
-      const body = await request.json() as { scope?: keyof typeof reviewFixtures };
-      const fixture = body.scope ? reviewFixtures[body.scope] : undefined;
-      if (!fixture) return Response.json({ error: "Unknown review scope" }, { status: 422 });
+    if (request.method === "POST" && url.pathname === "/api/range") {
+      const body = await request.json() as { range?: ReviewRange };
+      const key = body.range ? rangeKey(body.range) : "";
+      const fixture = reviewFixtures[key as keyof typeof reviewFixtures];
+      if (!fixture) return Response.json({ error: "Unknown review range" }, { status: 422 });
       await Bun.sleep(350);
       return Response.json(fixture);
     }
     if (request.method === "POST" && url.pathname === "/api/overview") {
-      const body = await request.json() as { scope?: keyof typeof overviewFixtures };
-      const overview = body.scope ? overviewFixtures[body.scope] : undefined;
-      if (!overview) return Response.json({ error: "Unknown review scope" }, { status: 422 });
+      const body = await request.json() as { range?: ReviewRange };
+      const key = body.range ? rangeKey(body.range) : "";
+      const overview = overviewFixtures[key as keyof typeof overviewFixtures];
+      if (!overview) return Response.json({ error: "Unknown review range" }, { status: 422 });
       await Bun.sleep(900);
-      return Response.json({ selected_scope: body.scope, overview_html: overview });
+      return Response.json({ selected_range: body.range, overview_html: overview });
     }
     if (request.method === "POST" && url.pathname === "/api/decision") {
       console.log("\nReview result:\n", JSON.stringify(await request.json(), null, 2));

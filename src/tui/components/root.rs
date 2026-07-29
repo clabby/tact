@@ -3796,6 +3796,27 @@ mod tests {
     }
 
     #[test]
+    fn review_failure_uses_the_red_notification() {
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        root.update(RootEvent::ReviewStarted);
+
+        root.update(RootEvent::ReviewFailed(
+            "The folder must be a git repository.".to_owned(),
+        ));
+
+        let notification = root.notification.as_ref().unwrap();
+        let message = notification
+            .message
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert_eq!(message, "The folder must be a git repository.");
+        assert_eq!(notification.color, Color::Red);
+        assert!(!root.review_active);
+    }
+
+    #[test]
     fn completed_overview_waits_for_the_browser_in_the_transcript() {
         let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
         root.update(RootEvent::ReviewStarted);
