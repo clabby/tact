@@ -1,10 +1,6 @@
-//! Shared mouse selection over rendered component surfaces.
+//! Semantic selection shared by transcript and composer surfaces.
 
-use ratatui::{
-    buffer::Buffer,
-    layout::{Position, Rect},
-    style::{Color, Style},
-};
+use std::ops::Range;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Surface {
@@ -13,292 +9,170 @@ pub(super) enum Surface {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct Point {
-    surface: Surface,
-    position: Position,
+pub(super) struct TextSpan {
+    pub(super) block: usize,
+    pub(super) start: usize,
+    pub(super) end: usize,
+}
+
+impl TextSpan {
+    pub(super) const fn new(block: usize, start: usize, end: usize) -> Self {
+        Self { block, start, end }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct Range {
-    anchor: Point,
-    head: Point,
+struct Point {
+    surface: Surface,
+    span: TextSpan,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct TextRange {
+    anchor: TextSpan,
+    head: TextSpan,
+}
+
+impl TextRange {
+    pub(super) fn bounds(self) -> (TextSpan, TextSpan) {
+        if (self.anchor.block, self.anchor.start) <= (self.head.block, self.head.start) {
+            (self.anchor, self.head)
+        } else {
+            (self.head, self.anchor)
+        }
+    }
+
+    pub(super) fn source_range(self, block: usize, source_len: usize) -> Option<Range<usize>> {
+        let (start, end) = self.bounds();
+        if block < start.block || block > end.block {
+            return None;
+        }
+        let range_start = if block == start.block { start.start } else { 0 };
+        let range_end = if block == end.block {
+            end.end
+        } else {
+            source_len
+        };
+        (range_start < range_end).then_some(range_start..range_end)
+    }
+
+    pub(super) fn includes(self, block: usize, source: &Range<usize>) -> bool {
+        self.source_range(block, usize::MAX)
+            .is_some_and(|selected| selected.start < source.end && source.start < selected.end)
+    }
 }
 
 #[derive(Default)]
 pub(super) struct Selection {
+    surface: Option<Surface>,
     pending: Option<Point>,
-    range: Option<Range>,
-    snapshot: Option<Snapshot>,
-}
-
-struct Snapshot {
-    area: Rect,
-    rows: Vec<Vec<String>>,
+    range: Option<TextRange>,
 }
 
 impl Selection {
-    pub(super) fn begin(&mut self, surface: Surface, position: Position) {
-        let point = Point { surface, position };
-        self.pending = Some(point);
+    pub(super) fn begin(&mut self, surface: Surface, span: TextSpan) {
+        self.surface = Some(surface);
+        self.pending = Some(Point { surface, span });
         self.range = None;
-        self.snapshot = None;
     }
 
-    pub(super) fn drag(&mut self, position: Position, area: Rect) -> bool {
-        let Some(anchor) = self
-            .pending
-            .or_else(|| self.range.map(|range| range.anchor))
-        else {
+    pub(super) fn drag(&mut self, span: TextSpan) -> bool {
+        let Some(anchor) = self.pending.or_else(|| {
+            self.range.map(|range| Point {
+                surface: self.surface.expect("a range has a surface"),
+                span: range.anchor,
+            })
+        }) else {
             return false;
         };
-        let head = Point {
-            surface: anchor.surface,
-            position: clamp(position, area),
+        let range = TextRange {
+            anchor: anchor.span,
+            head: span,
         };
-        self.range = Some(Range { anchor, head });
-        true
+        let changed = self.range != Some(range);
+        self.range = Some(range);
+        changed
     }
 
-    pub(super) fn finish(&mut self, position: Position, area: Rect) -> bool {
-        let Some(anchor) = self
-            .pending
-            .or_else(|| self.range.map(|range| range.anchor))
-        else {
+    pub(super) fn finish(&mut self, span: TextSpan) -> bool {
+        let Some(anchor) = self.pending.or_else(|| {
+            self.range.map(|range| Point {
+                surface: self.surface.expect("a range has a surface"),
+                span: range.anchor,
+            })
+        }) else {
             return false;
         };
-        let head = Point {
-            surface: anchor.surface,
-            position: clamp(position, area),
-        };
-        if self.range.is_none() && head == anchor {
-            self.cancel_pending();
+        if self.range.is_none() && span == anchor.span {
+            self.pending = None;
             return false;
         }
-        self.range = Some(Range { anchor, head });
+        self.range = Some(TextRange {
+            anchor: anchor.span,
+            head: span,
+        });
         self.pending = None;
         true
-    }
-
-    fn cancel_pending(&mut self) {
-        self.pending = None;
-        if self.range.is_none() {
-            self.snapshot = None;
-        }
     }
 
     pub(super) fn clear(&mut self) -> bool {
         let changed = self.pending.take().is_some() || self.range.take().is_some();
-        self.snapshot = None;
+        self.surface = None;
         changed
     }
 
-    pub(super) fn is_pending(&self) -> bool {
+    pub(super) const fn is_pending(&self) -> bool {
         self.pending.is_some()
     }
 
-    pub(super) fn is_active(&self) -> bool {
+    pub(super) const fn is_active(&self) -> bool {
         self.range.is_some()
     }
 
-    pub(super) fn surface(&self) -> Option<Surface> {
-        self.pending
-            .map(|point| point.surface)
-            .or_else(|| self.range.map(|range| range.anchor.surface))
+    pub(super) const fn surface(&self) -> Option<Surface> {
+        self.surface
     }
 
-    pub(super) fn capture_and_render(&mut self, buffer: &mut Buffer, area: Rect) {
-        if self.pending.is_none() && self.range.is_none() {
-            return;
-        }
-
-        self.snapshot = Some(Snapshot::capture(buffer, area));
-        let Some(range) = self.range else {
-            return;
-        };
-        for position in positions(range, area) {
-            if let Some(cell) = buffer.cell_mut(position) {
-                cell.set_style(Style::reset().fg(Color::Black).bg(Color::Yellow));
-            }
-        }
-    }
-
-    pub(super) fn take_text(&mut self) -> Option<String> {
-        let range = self.range.take()?;
-        self.pending = None;
-        let snapshot = self.snapshot.take()?;
-        let text = snapshot.text(range);
-        (!text.is_empty()).then_some(text)
-    }
-}
-
-impl Snapshot {
-    fn capture(buffer: &Buffer, area: Rect) -> Self {
-        let rows = (area.y..area.bottom())
-            .map(|y| capture_row(buffer, area, y))
-            .collect();
-        Self { area, rows }
-    }
-
-    fn text(&self, range: Range) -> String {
-        let mut lines = Vec::new();
-        for row in selected_rows(range, self.area) {
-            let y = usize::from(row.y.saturating_sub(self.area.y));
-            let start = usize::from(row.start.saturating_sub(self.area.x));
-            let end = usize::from(row.end.saturating_sub(self.area.x));
-            let Some(cells) = self.rows.get(y).and_then(|line| line.get(start..=end)) else {
-                continue;
-            };
-            let line = cells.concat();
-            lines.push(line.trim_end().to_owned());
-        }
-        lines.join("\n")
-    }
-}
-
-fn capture_row(buffer: &Buffer, area: Rect, y: u16) -> Vec<String> {
-    let mut continuation_cells = 0;
-    (area.x..area.right())
-        .map(|x| {
-            if continuation_cells > 0 {
-                continuation_cells -= 1;
-                return String::new();
-            }
-            let symbol = buffer[(x, y)].symbol();
-            continuation_cells = unicode_width::UnicodeWidthStr::width(symbol).saturating_sub(1);
-            symbol.to_owned()
+    pub(super) fn range(&self) -> Option<TextRange> {
+        self.range.or_else(|| {
+            self.pending.map(|point| TextRange {
+                anchor: point.span,
+                head: point.span,
+            })
         })
-        .collect()
-}
-
-#[derive(Clone, Copy)]
-struct SelectedRow {
-    y: u16,
-    start: u16,
-    end: u16,
-}
-
-fn positions(range: Range, area: Rect) -> impl Iterator<Item = Position> {
-    selected_rows(range, area)
-        .flat_map(|row| (row.start..=row.end).map(move |x| Position::new(x, row.y)))
-}
-
-fn selected_rows(range: Range, area: Rect) -> impl Iterator<Item = SelectedRow> {
-    let (start, end) = ordered(range.anchor.position, range.head.position);
-    (start.y..=end.y).map(move |y| SelectedRow {
-        y,
-        start: if y == start.y { start.x } else { area.x },
-        end: if y == end.y {
-            end.x
-        } else {
-            area.right().saturating_sub(1)
-        },
-    })
-}
-
-fn ordered(left: Position, right: Position) -> (Position, Position) {
-    if (left.y, left.x) <= (right.y, right.x) {
-        (left, right)
-    } else {
-        (right, left)
     }
-}
 
-fn clamp(position: Position, area: Rect) -> Position {
-    Position::new(
-        position.x.clamp(area.x, area.right().saturating_sub(1)),
-        position.y.clamp(area.y, area.bottom().saturating_sub(1)),
-    )
+    pub(super) fn take_range(&mut self) -> Option<TextRange> {
+        self.pending = None;
+        self.surface = None;
+        self.range.take()
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Selection, Surface};
-    use ratatui::{
-        buffer::Buffer,
-        layout::{Position, Rect},
-        style::{Color, Modifier, Style},
-    };
+    use super::{Selection, Surface, TextSpan};
 
     #[test]
-    fn selection_extracts_forward_and_reverse_visual_ranges() {
-        for (anchor, head) in [
-            (Position::new(1, 0), Position::new(2, 1)),
-            (Position::new(2, 1), Position::new(1, 0)),
-        ] {
-            let area = Rect::new(0, 0, 5, 2);
-            let mut buffer = Buffer::empty(area);
-            buffer.set_string(0, 0, "alpha", Style::default());
-            buffer.set_string(0, 1, "beta ", Style::default());
-            let mut selection = Selection::default();
-            selection.begin(Surface::Transcript, anchor);
-            selection.drag(head, area);
-            selection.capture_and_render(&mut buffer, area);
+    fn semantic_ranges_are_ordered_and_span_whole_intermediate_blocks() {
+        let mut selection = Selection::default();
+        selection.begin(Surface::Transcript, TextSpan::new(3, 4, 5));
+        selection.drag(TextSpan::new(1, 2, 3));
+        let range = selection.range().unwrap();
 
-            assert_eq!(selection.take_text().as_deref(), Some("lpha\nbet"));
-        }
+        assert_eq!(range.source_range(1, 10), Some(2..10));
+        assert_eq!(range.source_range(2, 10), Some(0..10));
+        assert_eq!(range.source_range(3, 10), Some(0..5));
+        assert_eq!(range.source_range(4, 10), None);
     }
 
     #[test]
-    fn pending_click_does_not_create_copyable_text() {
+    fn pending_click_does_not_create_a_range() {
         let mut selection = Selection::default();
-        selection.begin(Surface::Composer, Position::new(1, 1));
+        let span = TextSpan::new(0, 1, 2);
+        selection.begin(Surface::Composer, span);
 
-        assert!(selection.is_pending());
-        assert!(!selection.finish(Position::new(1, 1), Rect::new(0, 0, 3, 3)));
-        assert!(selection.take_text().is_none());
-    }
-
-    #[test]
-    fn displaced_release_finishes_without_a_drag_event() {
-        let area = Rect::new(0, 0, 7, 1);
-        let mut buffer = Buffer::empty(area);
-        buffer.set_string(0, 0, "copy me", Style::default());
-        let mut selection = Selection::default();
-        selection.begin(Surface::Composer, Position::new(0, 0));
-        selection.capture_and_render(&mut buffer, area);
-
-        assert!(selection.finish(Position::new(6, 0), area));
-        assert_eq!(selection.take_text().as_deref(), Some("copy me"));
-    }
-
-    #[test]
-    fn wide_graphemes_do_not_add_continuation_spaces() {
-        let area = Rect::new(0, 0, 4, 1);
-        let mut buffer = Buffer::empty(area);
-        buffer.set_string(0, 0, "a界b", Style::default());
-        let mut selection = Selection::default();
-        selection.begin(Surface::Composer, Position::new(0, 0));
-        selection.drag(Position::new(3, 0), area);
-        selection.capture_and_render(&mut buffer, area);
-
-        assert_eq!(selection.take_text().as_deref(), Some("a界b"));
-    }
-
-    #[test]
-    fn selection_is_always_black_on_yellow() {
-        let area = Rect::new(0, 0, 4, 1);
-        let mut buffer = Buffer::empty(area);
-        buffer.set_string(
-            0,
-            0,
-            "text",
-            Style::default()
-                .fg(Color::Red)
-                .bg(Color::Blue)
-                .add_modifier(Modifier::BOLD),
-        );
-        let mut selection = Selection::default();
-        selection.begin(Surface::Transcript, Position::new(1, 0));
-        selection.drag(Position::new(2, 0), area);
-
-        selection.capture_and_render(&mut buffer, area);
-
-        for x in 1..=2 {
-            assert_eq!(buffer[(x, 0)].fg, Color::Black);
-            assert_eq!(buffer[(x, 0)].bg, Color::Yellow);
-            assert!(buffer[(x, 0)].modifier.is_empty());
-        }
-        assert_eq!(buffer[(0, 0)].fg, Color::Red);
-        assert_eq!(buffer[(0, 0)].bg, Color::Blue);
+        assert!(!selection.finish(span));
+        assert!(selection.take_range().is_none());
     }
 }

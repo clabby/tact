@@ -5,6 +5,7 @@ mod layout;
 
 use super::{
     node::{Component, ComponentUpdate, RenderRequest},
+    selection::{TextRange, TextSpan},
     waved_text::WavedText,
 };
 use crate::{
@@ -18,7 +19,7 @@ use crate::{
 };
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use history::PromptHistory;
-use layout::{VisualLayout, byte_at_column};
+use layout::{VisualLayout, byte_at_column, grapheme_at_column};
 use nanocodex::oai::MODEL;
 use ratatui::{
     Frame,
@@ -413,11 +414,22 @@ impl Composer {
         theme: &Theme,
         focused: bool,
     ) {
+        self.render_focused_with_selection(frame, area, theme, focused, None);
+    }
+
+    pub(super) fn render_focused_with_selection(
+        &mut self,
+        frame: &mut Frame<'_>,
+        area: Rect,
+        theme: &Theme,
+        focused: bool,
+        selection: Option<TextRange>,
+    ) {
         if area.is_empty() {
             return;
         }
         if area.width < 2 || area.height < 3 {
-            self.render_narrow(frame, area, theme, focused);
+            self.render_narrow(frame, area, theme, focused, selection);
             return;
         }
 
@@ -428,7 +440,11 @@ impl Composer {
             (layout.cursor_row, layout.cursor_column, layout.lines.len())
         };
         let visible_rows = usize::from(area.height - 2);
-        self.keep_cursor_visible(cursor_row, visible_rows, line_count);
+        if selection.is_none() {
+            self.keep_cursor_visible(cursor_row, visible_rows, line_count);
+        } else {
+            self.clamp_scroll(visible_rows, line_count);
+        }
 
         let buffer = frame.buffer_mut();
         buffer.set_style(area, Style::default().fg(theme.text()));
@@ -456,15 +472,66 @@ impl Composer {
                 content_width,
                 theme,
             );
+            if let Some(selection) = selection {
+                render_selection(
+                    buffer,
+                    Position::new(area.x + 1, y),
+                    &self.draft,
+                    line.start..line.end,
+                    selection,
+                    content_width,
+                );
+            }
         }
 
         let cursor_row = cursor_row.saturating_sub(self.scroll);
         let cursor_x = area.x + 1 + u16::try_from(cursor_column).unwrap_or(u16::MAX);
         let cursor_y = area.y + 1 + u16::try_from(cursor_row).unwrap_or(u16::MAX);
         let max_cursor_x = area.right().saturating_sub(2);
-        if focused {
+        if focused && selection.is_none() {
             frame.set_cursor_position(Position::new(cursor_x.min(max_cursor_x), cursor_y));
         }
+    }
+
+    pub(super) fn selection_span(&mut self, position: Position, area: Rect) -> Option<TextSpan> {
+        if area.is_empty() {
+            return None;
+        }
+
+        let width = usize::from(area.width).max(1);
+        self.last_width = width;
+        let position = Position::new(
+            position.x.clamp(area.x, area.right().saturating_sub(1)),
+            position.y.clamp(area.y, area.bottom().saturating_sub(1)),
+        );
+        let row = self.scroll + usize::from(position.y - area.y);
+        let column = usize::from(position.x - area.x);
+        let line = self.visual_layout(width).lines.get(row)?.clone();
+        let range = grapheme_at_column(&self.draft, &line, column);
+        Some(TextSpan::new(0, range.start, range.end))
+    }
+
+    pub(super) fn selection_text(&self, selection: TextRange) -> Option<String> {
+        let range = selection.source_range(0, self.draft.len())?;
+        self.draft.get(range).map(ToOwned::to_owned)
+    }
+
+    pub(super) fn scroll_selection(&mut self, rows: isize, area: Rect) -> bool {
+        if area.is_empty() {
+            return false;
+        }
+
+        let width = usize::from(area.width).max(1);
+        self.last_width = width;
+        let line_count = self.visual_layout(width).lines.len();
+        let visible_rows = usize::from(area.height);
+        let maximum = line_count.saturating_sub(visible_rows);
+        let scroll = self.scroll.saturating_add_signed(rows).min(maximum);
+        if scroll == self.scroll {
+            return false;
+        }
+        self.scroll = scroll;
+        true
     }
 
     pub(crate) fn draft(&self) -> &str {
@@ -800,6 +867,10 @@ impl Composer {
             self.scroll = cursor_row + 1 - visible;
         }
 
+        self.clamp_scroll(visible, line_count);
+    }
+
+    fn clamp_scroll(&mut self, visible: usize, line_count: usize) {
         self.scroll = self.scroll.min(line_count.saturating_sub(visible));
     }
 
@@ -822,7 +893,27 @@ impl Composer {
         &cached.value
     }
 
-    fn render_narrow(&mut self, frame: &mut Frame<'_>, area: Rect, theme: &Theme, focused: bool) {
+    fn render_narrow(
+        &mut self,
+        frame: &mut Frame<'_>,
+        area: Rect,
+        theme: &Theme,
+        focused: bool,
+        selection: Option<TextRange>,
+    ) {
+        let width = usize::from(area.width).max(1);
+        let (cursor_row, cursor_column, line_count) = {
+            let layout = self.visual_layout(width);
+            (layout.cursor_row, layout.cursor_column, layout.lines.len())
+        };
+        if selection.is_none() {
+            self.scroll = 0;
+        } else {
+            self.clamp_scroll(1, line_count);
+        }
+        let scroll = self.scroll;
+        let line = self.visual_layout(width).lines[scroll].clone();
+
         let buffer = frame.buffer_mut();
         buffer.set_style(area, Style::default().fg(theme.text()));
         render_draft_line(
@@ -830,12 +921,30 @@ impl Composer {
             Position::new(area.x, area.y),
             &self.draft,
             &self.images,
-            0..self.draft.len(),
-            usize::from(area.width),
+            line.start..line.end,
+            width,
             theme,
         );
-        if focused {
-            frame.set_cursor_position(Position::new(area.x, area.y));
+        if let Some(selection) = selection {
+            render_selection(
+                buffer,
+                Position::new(area.x, area.y),
+                &self.draft,
+                line.start..line.end,
+                selection,
+                width,
+            );
+        }
+        if focused && selection.is_none() {
+            let cursor_column = if cursor_row == scroll {
+                u16::try_from(cursor_column).unwrap_or(u16::MAX)
+            } else {
+                0
+            };
+            let cursor_x = area
+                .x
+                .saturating_add(cursor_column.min(area.width.saturating_sub(1)));
+            frame.set_cursor_position(Position::new(cursor_x, area.y));
         }
     }
 
@@ -1193,8 +1302,46 @@ fn render_draft_line(
     }
 }
 
+fn render_selection(
+    buffer: &mut Buffer,
+    position: Position,
+    draft: &str,
+    line: Range<usize>,
+    selection: TextRange,
+    width: usize,
+) {
+    let Some(selected) = selection.source_range(0, draft.len()) else {
+        return;
+    };
+    let start = selected.start.max(line.start);
+    let end = selected.end.min(line.end);
+    if start >= end {
+        return;
+    }
+    let Some(prefix) = draft.get(line.start..start) else {
+        return;
+    };
+    let Some(text) = draft.get(start..end) else {
+        return;
+    };
+    let offset = prefix.width();
+    let selected_width = text.width().min(width.saturating_sub(offset));
+    if selected_width == 0 {
+        return;
+    }
+    let x = position
+        .x
+        .saturating_add(u16::try_from(offset).unwrap_or(u16::MAX));
+    let width = u16::try_from(selected_width).unwrap_or(u16::MAX);
+    buffer.set_style(
+        Rect::new(x, position.y, width, 1),
+        Style::reset().fg(Color::Black).bg(Color::Yellow),
+    );
+}
+
 #[cfg(test)]
 mod tests {
+    use super::super::selection::{Selection, Surface, TextRange};
     use super::{Composer, ComposerEffect, ComposerEvent, context_percent};
     use crate::{
         app::config::{ReasoningEffort, ReasoningMode},
@@ -1202,7 +1349,12 @@ mod tests {
     };
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use nanocodex::agent::input::{PromptInput, UserInput};
-    use ratatui::{Terminal, backend::TestBackend, layout::Position, style::Color};
+    use ratatui::{
+        Terminal,
+        backend::TestBackend,
+        layout::{Position, Rect},
+        style::Color,
+    };
     use std::{
         path::Path,
         time::{Duration, Instant},
@@ -1217,6 +1369,28 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|frame| composer.render(frame, frame.area(), &Theme::default()))
+            .unwrap();
+        terminal
+    }
+
+    fn render_with_selection(
+        composer: &mut Composer,
+        width: u16,
+        height: u16,
+        selection: TextRange,
+    ) -> Terminal<TestBackend> {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                composer.render_focused_with_selection(
+                    frame,
+                    frame.area(),
+                    &Theme::default(),
+                    true,
+                    Some(selection),
+                );
+            })
             .unwrap();
         terminal
     }
@@ -1712,6 +1886,79 @@ mod tests {
         assert!(rows[1].contains("alpha"));
         assert!(rows[2].contains("betaab"));
         assert!(rows[3].contains("cdefgh"));
+    }
+
+    #[test]
+    fn semantic_selection_preserves_source_across_soft_and_hard_wraps() {
+        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        composer.replace_draft("abcdef\ngh".to_owned());
+        let area = Rect::new(10, 5, 3, 3);
+        let anchor = composer.selection_span(Position::new(11, 5), area).unwrap();
+        let head = composer.selection_span(Position::new(11, 7), area).unwrap();
+        let mut selection = Selection::default();
+        selection.begin(Surface::Composer, anchor);
+        selection.drag(head);
+
+        assert_eq!(
+            composer
+                .selection_text(selection.range().unwrap())
+                .as_deref(),
+            Some("bcdef\ngh")
+        );
+    }
+
+    #[test]
+    fn selection_scrolling_keeps_the_semantic_range_visible_without_cursor_follow() {
+        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        composer.replace_draft("line 1\nline 2\nline 3\nline 4".to_owned());
+        render(&mut composer, 12, 4);
+        assert_eq!(composer.scroll, 2);
+
+        let content = Rect::new(1, 1, 10, 2);
+        assert!(composer.scroll_selection(-1, content));
+        let anchor = composer
+            .selection_span(Position::new(1, 1), content)
+            .unwrap();
+        let head = composer
+            .selection_span(Position::new(6, 2), content)
+            .unwrap();
+        let mut selection = Selection::default();
+        selection.begin(Surface::Composer, anchor);
+        selection.drag(head);
+        let range = selection.range().unwrap();
+
+        let terminal = render_with_selection(&mut composer, 12, 4, range);
+
+        assert_eq!(composer.scroll, 1);
+        assert_eq!(
+            composer.selection_text(range).as_deref(),
+            Some("line 2\nline 3")
+        );
+        assert_eq!(terminal.backend().buffer()[(1, 1)].bg, Color::Yellow);
+        assert_eq!(terminal.backend().buffer()[(6, 2)].bg, Color::Yellow);
+        assert_eq!(terminal.backend().cursor_position(), Position::new(0, 0));
+    }
+
+    #[test]
+    fn narrow_selection_matches_the_visible_draft_text() {
+        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        composer.replace_draft("first\nsecond\nthird".to_owned());
+        render(&mut composer, 12, 4);
+
+        let terminal = render(&mut composer, 2, 2);
+        let visible = terminal.backend().buffer()[(0, 0)].symbol().to_owned();
+        let area = Rect::new(0, 0, 2, 1);
+        let span = composer.selection_span(Position::new(0, 0), area).unwrap();
+        let mut selection = Selection::default();
+        selection.begin(Surface::Composer, span);
+        selection.drag(span);
+
+        assert_eq!(
+            composer
+                .selection_text(selection.range().unwrap())
+                .as_deref(),
+            Some(visible.as_str())
+        );
     }
 
     #[test]

@@ -15,11 +15,11 @@ use super::{
     review_confirmation::{
         ReviewConfirmationEffect, ReviewConfirmationEvent, ReviewDownloadConfirmation,
     },
-    selection::{Selection, Surface},
+    selection::{Selection, Surface, TextSpan},
     session_picker::{SessionPicker, SessionPickerEffect, SessionPickerEvent},
     subagents::{SubagentEffect, SubagentOverlay, SubagentTree},
     theme_selector::{ThemeSelector, ThemeSelectorEffect, ThemeSelectorEvent},
-    transcript::{Transcript, TranscriptEvent},
+    transcript::{ScrollCommand, Transcript, TranscriptEvent},
 };
 use crate::{
     app::config::{ReasoningEffort, ReasoningMode},
@@ -48,6 +48,7 @@ use std::{
 };
 
 const KEY_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(2);
+const SELECTION_SCROLL_INTERVAL: Duration = Duration::from_millis(60);
 const BREADCRUMB_DURATION: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -91,6 +92,12 @@ struct KeyConfirmation {
 struct Notification {
     message: Line<'static>,
     color: Color,
+    deadline: Instant,
+}
+
+struct SelectionAutoScroll {
+    direction: isize,
+    position: Position,
     deadline: Instant,
 }
 
@@ -243,6 +250,7 @@ pub(crate) struct RootNode {
     notification: Option<Notification>,
     discarded_draft: Option<ComposerDraft>,
     selection: Selection,
+    selection_auto_scroll: Option<SelectionAutoScroll>,
     transcript_area: Rect,
     composer_area: Rect,
     composer_content_area: Rect,
@@ -272,6 +280,7 @@ impl RootNode {
             notification: None,
             discarded_draft: None,
             selection: Selection::default(),
+            selection_auto_scroll: None,
             transcript_area: Rect::default(),
             composer_area: Rect::default(),
             composer_content_area: Rect::default(),
@@ -475,6 +484,9 @@ impl RootNode {
                 .as_ref()
                 .map(|confirmation| confirmation.deadline),
             self.notification.as_ref().map(|notice| notice.deadline),
+            self.selection_auto_scroll
+                .as_ref()
+                .map(|scroll| scroll.deadline),
             self.subagents.animation_deadline(),
         ]
         .into_iter()
@@ -523,11 +535,17 @@ impl RootNode {
                 composer_area.height - 2,
             )
         } else {
-            composer_area
+            Rect {
+                height: composer_area.height.min(1),
+                ..composer_area
+            }
         };
         self.transcript.render(frame, transcript_area, theme);
         self.queue.render(frame, queue_area, theme);
-        self.composer.component_mut().render_focused(
+        let composer_selection = (self.selection.surface() == Some(Surface::Composer))
+            .then(|| self.selection.range())
+            .flatten();
+        self.composer.component_mut().render_focused_with_selection(
             frame,
             composer_area,
             theme,
@@ -535,10 +553,14 @@ impl RootNode {
                 && !self.review_active
                 && !self.transcript.component().expandables_focused()
                 && !self.queue.component().focused(),
+            composer_selection,
         );
-        if let Some(selection_area) = self.selection_area() {
-            self.selection
-                .capture_and_render(frame.buffer_mut(), selection_area);
+        if self.selection.surface() == Some(Surface::Transcript)
+            && let Some(range) = self.selection.range()
+        {
+            self.transcript
+                .component()
+                .render_selection(frame.buffer_mut(), range);
         }
         self.transcript
             .component()
@@ -580,6 +602,7 @@ impl RootNode {
     fn update_terminal(&mut self, event: Event) -> ComponentUpdate<RootEffect> {
         if matches!(event, Event::Resize(_, _)) {
             self.selection.clear();
+            self.selection_auto_scroll = None;
             return ComponentUpdate::render(RenderRequest::Immediate);
         }
         if is_confirmation_key_repeat(&event) {
@@ -657,6 +680,7 @@ impl RootNode {
         }
         if is_escape(&event) {
             if self.selection.clear() {
+                self.selection_auto_scroll = None;
                 self.key_confirmation = None;
                 return ComponentUpdate::render(RenderRequest::Immediate);
             }
@@ -816,30 +840,63 @@ impl RootNode {
         let position = Position::new(mouse.column, mouse.row);
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
-                let (surface, area) = self.surface_at(position)?;
-                self.selection.begin(surface, clamp_to(position, area));
+                let (surface, span) = self.selection_span_at(position)?;
+                self.selection.begin(surface, span);
+                self.selection_auto_scroll = None;
                 Some(ComponentUpdate::render(RenderRequest::Immediate))
             }
             MouseEventKind::Drag(MouseButton::Left) => {
-                let area = self.selection_area()?;
-                self.selection.drag(position, area);
+                let surface = self.selection.surface()?;
+                let span = self.selection_span_on(surface, position)?;
+                self.selection.drag(span);
+                self.begin_selection_auto_scroll(surface, position);
                 Some(ComponentUpdate::render(RenderRequest::Immediate))
+            }
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                if self.selection.is_active() || self.selection.is_pending() =>
+            {
+                let rows = if mouse.kind == MouseEventKind::ScrollUp {
+                    -3
+                } else {
+                    3
+                };
+                let render = match self.selection.surface()? {
+                    Surface::Transcript => {
+                        self.transcript
+                            .update(TranscriptEvent::Scroll(ScrollCommand::Rows(rows)));
+                        RenderRequest::Immediate
+                    }
+                    Surface::Composer => {
+                        let changed = self
+                            .composer
+                            .component_mut()
+                            .scroll_selection(rows as isize, self.composer_content_area);
+                        if changed {
+                            RenderRequest::Immediate
+                        } else {
+                            RenderRequest::None
+                        }
+                    }
+                };
+                Some(ComponentUpdate::render(render))
             }
             MouseEventKind::Up(MouseButton::Left)
                 if self.selection.is_active() || self.selection.is_pending() =>
             {
-                let area = self.selection_area()?;
-                if !self.selection.finish(position, area) {
+                let surface = self.selection.surface()?;
+                self.selection_auto_scroll = None;
+                let span = self.selection_span_on(surface, position)?;
+                if !self.selection.finish(span) {
                     mouse.kind = MouseEventKind::Down(MouseButton::Left);
                     return None;
                 }
+                let range = self.selection.take_range()?;
+                let text = match surface {
+                    Surface::Transcript => self.transcript.component().selection_text(range),
+                    Surface::Composer => self.composer.component().selection_text(range),
+                };
                 Some(ComponentUpdate {
-                    effects: self
-                        .selection
-                        .take_text()
-                        .map(RootEffect::Copy)
-                        .into_iter()
-                        .collect(),
+                    effects: text.map(RootEffect::Copy).into_iter().collect(),
                     render: RenderRequest::Immediate,
                 })
             }
@@ -847,19 +904,73 @@ impl RootNode {
         }
     }
 
-    fn surface_at(&self, position: Position) -> Option<(Surface, Rect)> {
+    fn selection_span_at(&mut self, position: Position) -> Option<(Surface, TextSpan)> {
         if self.composer_content_area.contains(position) {
-            return Some((Surface::Composer, self.composer_content_area));
+            let span = self
+                .composer
+                .component_mut()
+                .selection_span(position, self.composer_content_area)?;
+            return Some((Surface::Composer, span));
         }
-        self.transcript_area
-            .contains(position)
-            .then_some((Surface::Transcript, self.transcript_area))
+        if !self.transcript_area.contains(position) {
+            return None;
+        }
+        let span = self.transcript.component().selection_span(position)?;
+        Some((Surface::Transcript, span))
     }
 
-    fn selection_area(&self) -> Option<Rect> {
-        match self.selection.surface()? {
-            Surface::Transcript => Some(self.transcript_area),
-            Surface::Composer => Some(self.composer_content_area),
+    fn selection_span_on(&mut self, surface: Surface, position: Position) -> Option<TextSpan> {
+        match surface {
+            Surface::Transcript => {
+                let position = clamp_to(position, self.transcript_area);
+                self.transcript.component().selection_span_nearest(position)
+            }
+            Surface::Composer => {
+                let position = clamp_to(position, self.composer_content_area);
+                self.composer
+                    .component_mut()
+                    .selection_span(position, self.composer_content_area)
+            }
+        }
+    }
+
+    fn begin_selection_auto_scroll(&mut self, surface: Surface, position: Position) {
+        let area = match surface {
+            Surface::Transcript => self.transcript_area,
+            Surface::Composer => self.composer_content_area,
+        };
+        let direction = if position.y <= area.y {
+            -1
+        } else if position.y >= area.bottom().saturating_sub(1) {
+            1
+        } else {
+            self.selection_auto_scroll = None;
+            return;
+        };
+        if let Some(scroll) = &mut self.selection_auto_scroll
+            && scroll.direction == direction
+        {
+            scroll.position = position;
+            return;
+        }
+        self.selection_auto_scroll = Some(SelectionAutoScroll {
+            direction,
+            position,
+            deadline: Instant::now() + SELECTION_SCROLL_INTERVAL,
+        });
+    }
+
+    fn scroll_selected_surface(&mut self, surface: Surface, rows: isize) -> bool {
+        match surface {
+            Surface::Transcript => {
+                self.transcript
+                    .update(TranscriptEvent::Scroll(ScrollCommand::Rows(rows as i32)));
+                true
+            }
+            Surface::Composer => self
+                .composer
+                .component_mut()
+                .scroll_selection(rows, self.composer_content_area),
         }
     }
 
@@ -1577,6 +1688,7 @@ impl RootNode {
         } else {
             RenderRequest::None
         };
+        let selection = self.update_selection_auto_scroll(now);
         let notification = if self
             .notification
             .as_ref()
@@ -1595,9 +1707,33 @@ impl RootNode {
                 .max(composer.render)
                 .max(queue.render)
                 .max(subagents)
+                .max(selection)
                 .max(confirmation)
                 .max(notification),
         }
+    }
+
+    fn update_selection_auto_scroll(&mut self, now: Instant) -> RenderRequest {
+        let Some(mut scroll) = self.selection_auto_scroll.take() else {
+            return RenderRequest::None;
+        };
+        if now < scroll.deadline {
+            self.selection_auto_scroll = Some(scroll);
+            return RenderRequest::None;
+        }
+        let Some(surface) = self.selection.surface() else {
+            return RenderRequest::None;
+        };
+        let Some(span) = self.selection_span_on(surface, scroll.position) else {
+            return RenderRequest::None;
+        };
+        self.selection.drag(span);
+        if !self.scroll_selected_surface(surface, scroll.direction) {
+            return RenderRequest::None;
+        }
+        scroll.deadline = now + SELECTION_SCROLL_INTERVAL;
+        self.selection_auto_scroll = Some(scroll);
+        RenderRequest::Immediate
     }
 
     fn apply_subagent_update(&mut self, update: AgentUpdate) -> ComponentUpdate<RootEffect> {
@@ -3079,11 +3215,11 @@ mod tests {
         root.update(key(KeyCode::Tab, KeyModifiers::NONE));
         assert!(root.queue.component().focused());
 
-        root.update(mouse(MouseEventKind::Down(MouseButton::Left), 10, 9));
-        let update = root.update(mouse(MouseEventKind::Up(MouseButton::Left), 10, 9));
+        let down = root.update(mouse(MouseEventKind::Down(MouseButton::Left), 10, 9));
+        let up = root.update(mouse(MouseEventKind::Up(MouseButton::Left), 10, 9));
 
         assert!(!root.queue.component().focused());
-        assert_eq!(update.render, super::RenderRequest::Immediate);
+        assert_eq!(down.render.max(up.render), super::RenderRequest::Immediate);
     }
 
     #[test]
@@ -3445,6 +3581,303 @@ mod tests {
 
         assert_eq!(update.effects, [RootEffect::Copy("hello".to_owned())]);
         assert!(!root.selection.is_active());
+    }
+
+    #[test]
+    fn transcript_selection_copies_code_source_without_rendered_borders() {
+        let mut terminal = Terminal::new(TestBackend::new(40, 14)).unwrap();
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        root.update(super::RootEvent::Transcript(agent_record(
+            1,
+            AgentEventKind::AssistantMessage,
+            json!({
+                "model_call_index": 1,
+                "item_id": "answer",
+                "phase": "final_answer",
+                "text": "```rust\n    let answer = 42;\n```",
+            }),
+        )));
+        terminal
+            .draw(|frame| root.render(frame, frame.area(), &Theme::default()))
+            .unwrap();
+        let row = (0..terminal.backend().buffer().area.height)
+            .find(|&row| {
+                (0..terminal.backend().buffer().area.width)
+                    .map(|column| terminal.backend().buffer()[(column, row)].symbol())
+                    .collect::<String>()
+                    .contains("    let answer = 42;")
+            })
+            .expect("code should be visible");
+
+        root.update(mouse(MouseEventKind::Down(MouseButton::Left), 0, row));
+        root.update(mouse(MouseEventKind::Drag(MouseButton::Left), 39, row));
+        terminal
+            .draw(|frame| root.render(frame, frame.area(), &Theme::default()))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        assert_ne!(buffer[(0, row)].bg, Color::Yellow);
+        assert_eq!(buffer[(2, row)].bg, Color::Yellow);
+        assert_ne!(buffer[(39, row)].bg, Color::Yellow);
+
+        let update = root.update(mouse(MouseEventKind::Up(MouseButton::Left), 39, row));
+        assert_eq!(
+            update.effects,
+            [RootEffect::Copy("    let answer = 42;".to_owned())]
+        );
+    }
+
+    #[test]
+    fn transcript_selection_copies_original_markdown_syntax() {
+        let mut terminal = Terminal::new(TestBackend::new(64, 12)).unwrap();
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        root.update(super::RootEvent::Transcript(agent_record(
+            1,
+            AgentEventKind::AssistantMessage,
+            json!({
+                "model_call_index": 1,
+                "item_id": "answer",
+                "phase": "final_answer",
+                "text": "**bold** and [site](https://example.com)",
+            }),
+        )));
+        terminal
+            .draw(|frame| root.render(frame, frame.area(), &Theme::default()))
+            .unwrap();
+        let row = (0..terminal.backend().buffer().area.height)
+            .find(|&row| {
+                (0..terminal.backend().buffer().area.width)
+                    .map(|column| terminal.backend().buffer()[(column, row)].symbol())
+                    .collect::<String>()
+                    .contains("bold and site")
+            })
+            .expect("message should be visible");
+        let start = text_column(terminal.backend().buffer(), row, "bold");
+        let end = text_column(terminal.backend().buffer(), row, "site") + 3;
+
+        root.update(mouse(MouseEventKind::Down(MouseButton::Left), start, row));
+        root.update(mouse(MouseEventKind::Drag(MouseButton::Left), end, row));
+        terminal
+            .draw(|frame| root.render(frame, frame.area(), &Theme::default()))
+            .unwrap();
+        let destination = text_column(terminal.backend().buffer(), row, "https://example.com");
+        assert_ne!(
+            terminal.backend().buffer()[(destination, row)].bg,
+            Color::Yellow
+        );
+
+        let update = root.update(mouse(MouseEventKind::Up(MouseButton::Left), end, row));
+        assert_eq!(
+            update.effects,
+            [RootEffect::Copy(
+                "**bold** and [site](https://example.com)".to_owned()
+            )]
+        );
+    }
+
+    #[test]
+    fn partial_transcript_selection_does_not_copy_unmatched_markdown_delimiters() {
+        let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        root.update(super::RootEvent::Transcript(agent_record(
+            1,
+            AgentEventKind::AssistantMessage,
+            json!({
+                "model_call_index": 1,
+                "item_id": "answer",
+                "phase": "final_answer",
+                "text": "**bold**",
+            }),
+        )));
+        terminal
+            .draw(|frame| root.render(frame, frame.area(), &Theme::default()))
+            .unwrap();
+        let row = (0..root.transcript_area.height)
+            .find(|&row| {
+                (0..40)
+                    .map(|column| terminal.backend().buffer()[(column, row)].symbol())
+                    .collect::<String>()
+                    .contains("bold")
+            })
+            .unwrap();
+        let start = text_column(terminal.backend().buffer(), row, "bold");
+
+        root.update(mouse(MouseEventKind::Down(MouseButton::Left), start, row));
+        root.update(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            start + 1,
+            row,
+        ));
+        let update = root.update(mouse(MouseEventKind::Up(MouseButton::Left), start + 1, row));
+
+        assert_eq!(update.effects, [RootEffect::Copy("bo".to_owned())]);
+    }
+
+    #[test]
+    fn transcript_selection_survives_scrolling_beyond_the_viewport() {
+        let mut terminal = Terminal::new(TestBackend::new(32, 12)).unwrap();
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        for sequence in 1..=10 {
+            let record = TranscriptRecord::from_local(
+                sequence,
+                sequence,
+                LocalEvent::UserSubmitted {
+                    id: TurnId::new(sequence),
+                    text: format!("prompt {sequence}"),
+                },
+            )
+            .unwrap();
+            root.update(super::RootEvent::Transcript(Arc::new(record)));
+        }
+        root.update(key(KeyCode::Home, KeyModifiers::CONTROL));
+        terminal
+            .draw(|frame| root.render(frame, frame.area(), &Theme::default()))
+            .unwrap();
+        let start_row = (0..root.transcript_area.height)
+            .find(|&row| {
+                (0..32)
+                    .map(|column| terminal.backend().buffer()[(column, row)].symbol())
+                    .collect::<String>()
+                    .contains("prompt 1")
+            })
+            .expect("first prompt should be visible");
+
+        root.update(mouse(MouseEventKind::Down(MouseButton::Left), 0, start_row));
+        root.update(mouse(MouseEventKind::ScrollDown, 4, start_row));
+        terminal
+            .draw(|frame| root.render(frame, frame.area(), &Theme::default()))
+            .unwrap();
+        let end_row = (0..root.transcript_area.height)
+            .rev()
+            .find(|&row| terminal.backend().buffer()[(0, row)].symbol() == "┃")
+            .expect("a later prompt should be visible");
+        let end_column = (0..32)
+            .rev()
+            .find(|&column| terminal.backend().buffer()[(column, end_row)].symbol() != " ")
+            .expect("prompt should contain text");
+        root.update(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            end_column,
+            end_row,
+        ));
+        let update = root.update(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            end_column,
+            end_row,
+        ));
+
+        assert_eq!(
+            update.effects,
+            [RootEffect::Copy(
+                "prompt 1\n\nprompt 2\n\nprompt 3\n\nprompt 4\n\nprompt 5".to_owned()
+            )]
+        );
+    }
+
+    #[test]
+    fn dragging_at_the_viewport_edge_keeps_extending_the_selection() {
+        let mut terminal = Terminal::new(TestBackend::new(32, 12)).unwrap();
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        for sequence in 1..=12 {
+            let record = TranscriptRecord::from_local(
+                sequence,
+                sequence,
+                LocalEvent::UserSubmitted {
+                    id: TurnId::new(sequence),
+                    text: format!("prompt {sequence}"),
+                },
+            )
+            .unwrap();
+            root.update(super::RootEvent::Transcript(Arc::new(record)));
+        }
+        root.update(key(KeyCode::Home, KeyModifiers::CONTROL));
+        terminal
+            .draw(|frame| root.render(frame, frame.area(), &Theme::default()))
+            .unwrap();
+        let start_row = (0..root.transcript_area.height)
+            .find(|&row| {
+                (0..32)
+                    .map(|column| terminal.backend().buffer()[(column, row)].symbol())
+                    .collect::<String>()
+                    .contains("prompt 1")
+            })
+            .unwrap();
+        let edge = root.transcript_area.bottom().saturating_sub(1);
+        root.update(mouse(MouseEventKind::Down(MouseButton::Left), 2, start_row));
+        root.update(mouse(MouseEventKind::Drag(MouseButton::Left), 31, edge));
+
+        for _ in 0..4 {
+            terminal
+                .draw(|frame| root.render(frame, frame.area(), &Theme::default()))
+                .unwrap();
+            let deadline = root
+                .selection_auto_scroll
+                .as_ref()
+                .expect("edge drag should keep scrolling")
+                .deadline;
+            root.update(super::RootEvent::AnimationFrame(deadline));
+        }
+        terminal
+            .draw(|frame| root.render(frame, frame.area(), &Theme::default()))
+            .unwrap();
+        let update = root.update(mouse(MouseEventKind::Up(MouseButton::Left), 31, edge));
+        let [RootEffect::Copy(text)] = update.effects.as_slice() else {
+            panic!("edge drag should copy the semantic selection");
+        };
+
+        assert!(text.starts_with("prompt 1\n\n"));
+        assert!(text.contains("prompt 6"));
+        assert!(!text.contains('┃'));
+        assert!(root.selection_auto_scroll.is_none());
+    }
+
+    #[test]
+    fn composer_selection_scrolls_without_losing_offscreen_text() {
+        let mut terminal = Terminal::new(TestBackend::new(32, 12)).unwrap();
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        root.update(super::RootEvent::ReplaceDraft(
+            (1..=10)
+                .map(|line| format!("line {line}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ));
+        terminal
+            .draw(|frame| root.render(frame, frame.area(), &Theme::default()))
+            .unwrap();
+        let start_row = root.composer_content_area.bottom().saturating_sub(1);
+        let start_column = text_column(terminal.backend().buffer(), start_row, "line 10");
+
+        root.update(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            start_column + 6,
+            start_row,
+        ));
+        root.update(mouse(MouseEventKind::ScrollUp, start_column, start_row));
+        terminal
+            .draw(|frame| root.render(frame, frame.area(), &Theme::default()))
+            .unwrap();
+        let end_row = root.composer_content_area.y;
+        let end_column = text_column(terminal.backend().buffer(), end_row, "line 2");
+        root.update(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            end_column,
+            end_row,
+        ));
+        let update = root.update(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            end_column,
+            end_row,
+        ));
+
+        assert_eq!(
+            update.effects,
+            [RootEffect::Copy(
+                (2..=10)
+                    .map(|line| format!("line {line}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            )]
+        );
     }
 
     #[test]

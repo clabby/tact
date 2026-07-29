@@ -4,7 +4,7 @@ use ratatui::{
     style::{Modifier, Style},
     text::{Line, Span},
 };
-use std::sync::Arc;
+use std::{ops::Range, sync::Arc};
 use syntect::easy::HighlightLines;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
@@ -12,6 +12,20 @@ use unicode_width::UnicodeWidthStr;
 pub(super) struct Layout {
     pub(super) lines: Vec<Line<'static>>,
     pub(super) links: Vec<Vec<LinkSpan>>,
+    pub(super) selections: Vec<Vec<SourceSpan>>,
+    pub(super) envelopes: Vec<SourceEnvelope>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct SourceSpan {
+    pub(super) columns: Range<u16>,
+    pub(super) source: Range<usize>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct SourceEnvelope {
+    pub(super) content: Range<usize>,
+    pub(super) source: Range<usize>,
 }
 
 #[derive(Clone)]
@@ -26,6 +40,8 @@ pub(super) fn render(markdown: &str, width: u16, theme: &Theme) -> Layout {
         return Layout {
             lines: Vec::new(),
             links: Vec::new(),
+            selections: Vec::new(),
+            envelopes: Vec::new(),
         };
     }
     let options = Options::ENABLE_TABLES
@@ -50,7 +66,17 @@ pub(super) fn render(markdown: &str, width: u16, theme: &Theme) -> Layout {
             event => renderer.event(event),
         }
     }
-    renderer.finish()
+    let (mut layout, selection_exclusions) = renderer.finish();
+    let (selections, envelopes) =
+        markdown_selection_spans(markdown, &layout.lines, options, &selection_exclusions);
+    layout.selections = selections;
+    layout.envelopes = envelopes;
+    layout
+}
+
+pub(super) fn plain_selection_spans(source: &str, lines: &[Line<'static>]) -> Vec<Vec<SourceSpan>> {
+    let graphemes = source_graphemes(source, source, 0..source.len());
+    align_source_graphemes(&graphemes, lines, &[])
 }
 
 pub(super) fn wrap_plain(text: &str, width: u16, style: Style) -> Vec<Line<'static>> {
@@ -89,6 +115,7 @@ struct Renderer<'a> {
     quote_depth: usize,
     links: Vec<LinkState>,
     rendered_links: Vec<(usize, LinkSpan)>,
+    selection_exclusions: Vec<Vec<Range<u16>>>,
     image: Option<ImageState>,
 }
 
@@ -123,6 +150,7 @@ impl<'a> Renderer<'a> {
             quote_depth: 0,
             links: Vec::new(),
             rendered_links: Vec::new(),
+            selection_exclusions: Vec::new(),
             image: None,
         }
     }
@@ -414,11 +442,13 @@ impl<'a> Renderer<'a> {
         );
         let syntax_theme = super::highlight::theme(self.theme);
         let mut highlighter = HighlightLines::new(syntax, &syntax_theme);
+        let header = self.lines.len();
         self.lines.push(code_block_header(
             language.as_deref(),
             self.width,
             self.theme,
         ));
+        self.exclude_from_selection(header, 0..self.width);
         let content_width = self.width.saturating_sub(4).max(1);
         for source_line in code.trim_end_matches('\n').split('\n') {
             let highlighted =
@@ -441,9 +471,19 @@ impl<'a> Renderer<'a> {
                 body.extend(spans);
                 body.push(Span::raw(" ".repeat(padding)));
                 body.push(Span::styled(" │", border));
+                let line = self.lines.len();
                 self.lines.push(Line::from(body));
+                self.exclude_from_selection(line, 0..2);
+                if index > 0 {
+                    self.exclude_from_selection(line, 2..4);
+                }
+                let content_end = 2_u16
+                    .saturating_add(u16::try_from(used).unwrap_or(u16::MAX))
+                    .min(self.width);
+                self.exclude_from_selection(line, content_end..self.width);
             }
         }
+        let footer = self.lines.len();
         self.lines.push(Line::from(Span::styled(
             format!(
                 "╰{}╯",
@@ -451,6 +491,7 @@ impl<'a> Renderer<'a> {
             ),
             border,
         )));
+        self.exclude_from_selection(footer, 0..self.width);
         self.blank();
     }
 
@@ -470,7 +511,9 @@ impl<'a> Renderer<'a> {
             for spans in super::highlight::wrap(highlighted, content_width) {
                 let mut line = vec![Span::styled("┃ ", gutter)];
                 line.extend(spans);
+                let line_index = self.lines.len();
                 self.lines.push(Line::from(line));
+                self.exclude_from_selection(line_index, 0..2);
             }
         }
     }
@@ -588,7 +631,14 @@ impl<'a> Renderer<'a> {
         self.lines.push(Line::default());
     }
 
-    fn finish(mut self) -> Layout {
+    fn exclude_from_selection(&mut self, line: usize, columns: Range<u16>) {
+        if self.selection_exclusions.len() <= line {
+            self.selection_exclusions.resize_with(line + 1, Vec::new);
+        }
+        self.selection_exclusions[line].push(columns);
+    }
+
+    fn finish(mut self) -> (Layout, Vec<Vec<Range<u16>>>) {
         self.flush();
         while self.lines.last().is_some_and(|line| line.width() == 0) {
             self.lines.pop();
@@ -599,11 +649,252 @@ impl<'a> Renderer<'a> {
                 line_links.push(link);
             }
         }
-        Layout {
-            lines: self.lines,
-            links,
+        (
+            Layout {
+                lines: self.lines,
+                links,
+                selections: Vec::new(),
+                envelopes: Vec::new(),
+            },
+            self.selection_exclusions,
+        )
+    }
+}
+
+#[derive(Clone)]
+struct SourceGrapheme {
+    text: String,
+    source: Range<usize>,
+}
+
+fn markdown_selection_spans(
+    markdown: &str,
+    lines: &[Line<'static>],
+    options: Options,
+    exclusions: &[Vec<Range<u16>>],
+) -> (Vec<Vec<SourceSpan>>, Vec<SourceEnvelope>) {
+    let mut graphemes = Vec::<SourceGrapheme>::new();
+    let mut envelopes = Vec::<(TagEnd, Range<usize>, usize, bool)>::new();
+    let mut source_envelopes = Vec::new();
+    for (event, range) in Parser::new_ext(markdown, options).into_offset_iter() {
+        match event {
+            Event::Start(tag) => {
+                let preserve_delimiters = !matches!(tag, Tag::CodeBlock(_));
+                envelopes.push((tag.to_end(), range, graphemes.len(), preserve_delimiters));
+            }
+            Event::End(end) => {
+                let Some(index) = envelopes.iter().rposition(|(tag, ..)| *tag == end) else {
+                    continue;
+                };
+                let (_, range, first, preserve_delimiters) = envelopes.remove(index);
+                if !preserve_delimiters || first == graphemes.len() {
+                    continue;
+                }
+                source_envelopes.push(SourceEnvelope {
+                    content: graphemes[first].source.start
+                        ..graphemes
+                            .last()
+                            .expect("the envelope has content")
+                            .source
+                            .end,
+                    source: range,
+                });
+            }
+            Event::Text(text) | Event::Code(text) | Event::Html(text) | Event::InlineHtml(text) => {
+                graphemes.extend(source_graphemes(markdown, &sanitize(&text), range));
+            }
+            Event::InlineMath(math) => {
+                graphemes.extend(source_graphemes(
+                    markdown,
+                    &format!("${}$", sanitize(&math)),
+                    range,
+                ));
+            }
+            Event::DisplayMath(math) => {
+                graphemes.extend(source_graphemes(
+                    markdown,
+                    &format!("$${}$$", sanitize(&math)),
+                    range,
+                ));
+            }
+            Event::FootnoteReference(reference) => {
+                graphemes.extend(source_graphemes(
+                    markdown,
+                    &format!("[{}]", sanitize(&reference)),
+                    range,
+                ));
+            }
+            Event::SoftBreak => graphemes.push(SourceGrapheme {
+                text: " ".to_owned(),
+                source: range,
+            }),
+            Event::HardBreak => graphemes.push(SourceGrapheme {
+                text: "\n".to_owned(),
+                source: range,
+            }),
+            Event::TaskListMarker(checked) => {
+                graphemes.extend(source_graphemes(
+                    markdown,
+                    if checked { "✓ " } else { "□ " },
+                    range,
+                ));
+            }
+            Event::Rule => {}
         }
     }
+    (
+        align_source_graphemes(&graphemes, lines, exclusions),
+        source_envelopes,
+    )
+}
+
+fn source_graphemes(raw: &str, rendered: &str, source: Range<usize>) -> Vec<SourceGrapheme> {
+    let raw_fragment = raw.get(source.clone()).unwrap_or_default();
+    if raw_fragment == rendered {
+        return rendered
+            .grapheme_indices(true)
+            .map(|(offset, text)| SourceGrapheme {
+                text: text.to_owned(),
+                source: source.start + offset..source.start + offset + text.len(),
+            })
+            .collect();
+    }
+    rendered
+        .graphemes(true)
+        .map(|text| SourceGrapheme {
+            text: text.to_owned(),
+            source: source.clone(),
+        })
+        .collect()
+}
+
+struct RenderedGrapheme {
+    line: usize,
+    column: u16,
+    text: String,
+    width: u16,
+}
+
+fn align_source_graphemes(
+    source: &[SourceGrapheme],
+    lines: &[Line<'static>],
+    exclusions: &[Vec<Range<u16>>],
+) -> Vec<Vec<SourceSpan>> {
+    let rendered = rendered_graphemes(lines, exclusions);
+    let mut matches = vec![None; source.len()];
+    let mut next_rendered = 0;
+    for (source_index, grapheme) in source.iter().enumerate() {
+        if grapheme.text.chars().all(char::is_whitespace) {
+            continue;
+        }
+        let Some(offset) = rendered[next_rendered..]
+            .iter()
+            .position(|candidate| candidate.text == grapheme.text)
+        else {
+            continue;
+        };
+        let rendered_index = next_rendered + offset;
+        matches[source_index] = Some(rendered_index);
+        next_rendered = rendered_index + 1;
+    }
+
+    let mut line_start = 0;
+    while line_start < source.len() {
+        let line_end = source[line_start..]
+            .iter()
+            .position(|grapheme| grapheme.text == "\n")
+            .map_or(source.len(), |offset| line_start + offset);
+        let first_content = (line_start..line_end).find(|index| {
+            !source[*index].text.chars().all(char::is_whitespace) && matches[*index].is_some()
+        });
+        if let Some(first_content) = first_content {
+            let leading = first_content.saturating_sub(line_start);
+            let first_rendered =
+                matches[first_content].expect("matched content has a rendered cell");
+            if leading <= first_rendered {
+                let candidates = first_rendered - leading..first_rendered;
+                let same_line = candidates
+                    .clone()
+                    .all(|index| rendered[index].line == rendered[first_rendered].line);
+                let whitespace = candidates
+                    .clone()
+                    .all(|index| rendered[index].text.chars().all(char::is_whitespace));
+                if same_line && whitespace {
+                    for (source_index, rendered_index) in
+                        (line_start..first_content).zip(candidates)
+                    {
+                        matches[source_index] = Some(rendered_index);
+                    }
+                }
+            }
+        }
+        line_start = line_end.saturating_add(1);
+    }
+
+    for source_index in 1..source.len().saturating_sub(1) {
+        if !source[source_index].text.chars().all(char::is_whitespace) {
+            continue;
+        }
+        let Some(previous) = matches[..source_index].iter().rposition(Option::is_some) else {
+            continue;
+        };
+        let Some(next_offset) = matches[source_index + 1..].iter().position(Option::is_some) else {
+            continue;
+        };
+        let next = source_index + 1 + next_offset;
+        let (Some(previous_rendered), Some(next_rendered)) = (matches[previous], matches[next])
+        else {
+            continue;
+        };
+        if next_rendered == previous_rendered + 2
+            && rendered[previous_rendered + 1]
+                .text
+                .chars()
+                .all(char::is_whitespace)
+        {
+            matches[source_index] = Some(previous_rendered + 1);
+        }
+    }
+
+    let mut selections = vec![Vec::new(); lines.len()];
+    for (grapheme, rendered_index) in source.iter().zip(matches) {
+        let Some(rendered) = rendered_index.and_then(|index| rendered.get(index)) else {
+            continue;
+        };
+        selections[rendered.line].push(SourceSpan {
+            columns: rendered.column..rendered.column.saturating_add(rendered.width),
+            source: grapheme.source.clone(),
+        });
+    }
+    selections
+}
+
+fn rendered_graphemes(
+    lines: &[Line<'static>],
+    exclusions: &[Vec<Range<u16>>],
+) -> Vec<RenderedGrapheme> {
+    let mut rendered = Vec::new();
+    for (line_index, line) in lines.iter().enumerate() {
+        let mut column = 0_u16;
+        for span in &line.spans {
+            for text in span.content.graphemes(true) {
+                let width = u16::try_from(UnicodeWidthStr::width(text)).unwrap_or(u16::MAX);
+                let excluded = exclusions
+                    .get(line_index)
+                    .is_some_and(|ranges| ranges.iter().any(|range| range.contains(&column)));
+                if width > 0 && !excluded {
+                    rendered.push(RenderedGrapheme {
+                        line: line_index,
+                        column,
+                        text: text.to_owned(),
+                        width,
+                    });
+                }
+                column = column.saturating_add(width);
+            }
+        }
+    }
+    rendered
 }
 
 fn is_diff_language(language: &str) -> bool {
@@ -1056,6 +1347,31 @@ mod tests {
             .expect("Rust keywords should be syntax-highlighted separately");
         assert_ne!(keyword.style.fg, Some(Theme::default().code_text()));
         assert!(lines[1].spans.iter().all(|span| span.style.bg.is_none()));
+    }
+
+    #[test]
+    fn code_selection_excludes_language_labels_and_borders() {
+        let markdown = "```rust\nrust\n│ value\n```";
+        let layout = render(markdown, 32, &Theme::default());
+        let code_start = markdown.find("\nrust\n").unwrap() + 1;
+        let pipe = markdown.find('│').unwrap();
+
+        assert!(layout.selections[0].is_empty());
+        assert!(
+            layout.selections[1].iter().any(|span| {
+                span.columns == (2..3) && span.source == (code_start..code_start + 1)
+            })
+        );
+        assert!(
+            layout.selections[2]
+                .iter()
+                .any(|span| span.columns == (2..3) && span.source == (pipe..pipe + '│'.len_utf8()))
+        );
+        assert!(
+            layout.selections[2]
+                .iter()
+                .all(|span| !span.columns.contains(&0))
+        );
     }
 
     #[test]

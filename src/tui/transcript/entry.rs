@@ -11,6 +11,10 @@ impl EntryId {
     pub(super) const fn from_index(index: usize) -> Self {
         Self(index)
     }
+
+    pub(crate) const fn index(self) -> usize {
+        self.0
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
