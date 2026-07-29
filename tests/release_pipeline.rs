@@ -1,4 +1,5 @@
 const RELEASE_WORKFLOW: &str = include_str!("../.github/workflows/release.yaml");
+const CI_WORKFLOW: &str = include_str!("../.github/workflows/ci.yaml");
 const RELEASE_TEMPLATE: &str = include_str!("../.github/RELEASE_TEMPLATE.md");
 const CHANGELOG_CONFIG: &str = include_str!("../cliff.toml");
 const RELEASE_INSTRUCTIONS: &str = include_str!("../RELEASES.md");
@@ -9,6 +10,64 @@ fn assert_contains(document: &str, expected: &str) {
         document.contains(expected),
         "expected document to contain `{expected}`"
     );
+}
+
+fn workflow(document: &str) -> serde_yaml::Value {
+    serde_yaml::from_str(document).expect("workflow should be valid YAML")
+}
+
+#[test]
+fn ci_builds_and_typechecks_review_assets_with_locked_dependencies() {
+    let workflow = workflow(CI_WORKFLOW);
+    let steps = workflow["jobs"]["review-web"]["steps"]
+        .as_sequence()
+        .expect("review-web should contain steps");
+
+    for command in [
+        "bun install --frozen-lockfile",
+        "bun run build",
+        "bun run typecheck",
+    ] {
+        assert!(
+            steps.iter().any(|step| step["run"]
+                .as_str()
+                .is_some_and(|run| run.starts_with(command))),
+            "review-web should run `{command}`"
+        );
+    }
+}
+
+#[test]
+fn release_packages_and_signs_the_review_bundle() {
+    let workflow = workflow(RELEASE_WORKFLOW);
+    let review_steps = workflow["jobs"]["review_assets"]["steps"]
+        .as_sequence()
+        .expect("review_assets should contain steps");
+    let package = review_steps
+        .iter()
+        .find(|step| step["name"] == "Package review assets")
+        .expect("review assets should be packaged")["run"]
+        .as_str()
+        .expect("review packaging should be a shell command");
+
+    assert_contains(package, "archive=\"tact-review-${GITHUB_REF_NAME}.tar.gz\"");
+    assert_contains(
+        package,
+        "cp dist/index.html dist/app.js dist/app.css dist/LICENSE.md dist/THIRD_PARTY_NOTICES.md dist/manifest.json review/",
+    );
+    assert_contains(package, "tar -czf \"$archive\" review");
+    assert_contains(package, "shasum -a 256 \"$archive\"");
+
+    let sign_needs = workflow["jobs"]["sign"]["needs"]
+        .as_sequence()
+        .expect("sign should depend on all asset builds");
+    assert!(sign_needs.iter().any(|need| need == "review_assets"));
+
+    assert_contains(RELEASE_WORKFLOW, "for archive in dist/*.tar.gz");
+    assert_contains(RELEASE_WORKFLOW, "test -s \"${archive}.sig\"");
+    assert_contains(RELEASE_WORKFLOW, "dist/*.tar.gz");
+    assert_contains(RELEASE_WORKFLOW, "dist/*.sha256");
+    assert_contains(RELEASE_WORKFLOW, "dist/*.sig");
 }
 
 #[test]
