@@ -1437,7 +1437,11 @@ fn render_user(text: &str, width: u16, theme: &Theme) -> markdown::Layout {
     let mut selections = Vec::new();
     let mut source_offset = 0;
     for logical in text.split('\n') {
-        let wrapped = markdown::wrap_plain(logical, content_width, Style::default().fg(color));
+        let wrapped = markdown::wrap_plain_preserving_whitespace(
+            logical,
+            content_width,
+            Style::default().fg(color),
+        );
         let wrapped_selections = markdown::plain_selection_spans(logical, &wrapped);
         for (line, mut line_selections) in wrapped.into_iter().zip(wrapped_selections) {
             for selection in &mut line_selections {
@@ -1624,6 +1628,28 @@ mod tests {
                 .selection_span_nearest(Position::new(0, 0))
                 .is_some()
         );
+    }
+
+    #[test]
+    fn user_messages_preserve_internal_code_indentation() {
+        let mut transcript = Transcript::new();
+        transcript.update(TranscriptEvent::Record(user(
+            1,
+            "before\n    fn main() {\n        work();\n    }\nafter",
+        )));
+
+        let backend = render(&mut transcript, 30, 8);
+        let rows = (0..backend.buffer().area.height)
+            .map(|row| {
+                (0..backend.buffer().area.width)
+                    .map(|column| backend.buffer()[(column, row)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+
+        assert!(rows.iter().any(|row| row.starts_with("┃     fn main() {")));
+        assert!(rows.iter().any(|row| row.starts_with("┃         work();")));
+        assert!(rows.iter().any(|row| row.starts_with("┃     }")));
     }
 
     #[test]
