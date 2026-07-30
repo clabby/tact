@@ -426,10 +426,9 @@ async fn resolve_trunk(root: &Path) -> Result<Trunk, DiffError> {
 
     for candidate in candidates {
         if revision_exists(root, &candidate).await? {
-            return Ok(Trunk {
-                merge_base: merge_base(root, &candidate).await?,
-                name: candidate,
-            });
+            let merge_base = merge_base(root, &candidate).await?;
+            let name = symbolic_ref(root, &candidate).await?.unwrap_or(candidate);
+            return Ok(Trunk { merge_base, name });
         }
     }
 
@@ -437,13 +436,17 @@ async fn resolve_trunk(root: &Path) -> Result<Trunk, DiffError> {
 }
 
 async fn current_branch(root: &Path) -> Result<Option<String>, DiffError> {
-    let output = git_output(root, ["symbolic-ref", "--quiet", "--short", "HEAD"]).await?;
+    symbolic_ref(root, "HEAD").await
+}
+
+async fn symbolic_ref(root: &Path, reference: &str) -> Result<Option<String>, DiffError> {
+    let output = git_output(root, ["symbolic-ref", "--quiet", "--short", reference]).await?;
     if output.status.code() == Some(1) {
         return Ok(None);
     }
     ensure_success(output.status, &output.stderr)?;
-    let branch = String::from_utf8(output.stdout)?.trim().to_owned();
-    Ok((!branch.is_empty()).then_some(branch))
+    let target = String::from_utf8(output.stdout)?.trim().to_owned();
+    Ok((!target.is_empty()).then_some(target))
 }
 
 async fn current_upstream(
@@ -1036,6 +1039,28 @@ mod tests {
                 .patch
                 .contains("+feature")
         );
+    }
+
+    #[tokio::test]
+    async fn remote_default_branch_is_named_without_the_head_alias() {
+        let repository = repository();
+        git(
+            repository.path(),
+            ["update-ref", "refs/remotes/origin/main", "HEAD"],
+        );
+        git(
+            repository.path(),
+            [
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/main",
+            ],
+        );
+        git(repository.path(), ["checkout", "--quiet", "-b", "feature"]);
+
+        let context = load(repository.path()).await.unwrap();
+
+        assert_eq!(context.trunk_name(), "origin/main");
     }
 
     #[tokio::test]
