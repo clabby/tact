@@ -80,11 +80,33 @@ pub(super) fn plain_selection_spans(source: &str, lines: &[Line<'static>]) -> Ve
 }
 
 pub(super) fn wrap_plain(text: &str, width: u16, style: Style) -> Vec<Line<'static>> {
+    wrap_plain_with_whitespace(text, width, style, false)
+}
+
+pub(super) fn wrap_plain_preserving_whitespace(
+    text: &str,
+    width: u16,
+    style: Style,
+) -> Vec<Line<'static>> {
+    wrap_plain_with_whitespace(text, width, style, true)
+}
+
+fn wrap_plain_with_whitespace(
+    text: &str,
+    width: u16,
+    style: Style,
+    preserve_whitespace: bool,
+) -> Vec<Line<'static>> {
     let logical = sanitize(text);
     let mut lines = Vec::new();
     for line in logical.split('\n') {
         let spans = vec![Span::styled(line.to_owned(), style)];
-        lines.extend(wrap_spans(&spans, width, true));
+        lines.extend(wrap_spans_with_whitespace(
+            &spans,
+            width,
+            true,
+            preserve_whitespace,
+        ));
     }
     if lines.is_empty() {
         lines.push(Line::default());
@@ -919,6 +941,15 @@ pub(super) fn wrap_spans(
     width: u16,
     prefer_words: bool,
 ) -> Vec<Line<'static>> {
+    wrap_spans_with_whitespace(spans, width, prefer_words, false)
+}
+
+fn wrap_spans_with_whitespace(
+    spans: &[Span<'static>],
+    width: u16,
+    prefer_words: bool,
+    preserve_whitespace: bool,
+) -> Vec<Line<'static>> {
     if width == 0 {
         return Vec::new();
     }
@@ -937,7 +968,7 @@ pub(super) fn wrap_spans(
                 .collect::<Vec<_>>()
         })
         .collect::<Vec<_>>();
-    wrap_graphemes(&graphemes, width, prefer_words)
+    wrap_graphemes(&graphemes, width, prefer_words, preserve_whitespace)
         .into_iter()
         .map(|(line, _)| line)
         .collect()
@@ -968,13 +999,14 @@ fn wrap_tagged_spans(
                 .collect::<Vec<_>>()
         })
         .collect::<Vec<_>>();
-    wrap_graphemes(&graphemes, width, prefer_words)
+    wrap_graphemes(&graphemes, width, prefer_words, false)
 }
 
 fn wrap_graphemes(
     graphemes: &[StyledGrapheme],
     width: u16,
     prefer_words: bool,
+    preserve_whitespace: bool,
 ) -> Vec<(Line<'static>, Vec<LinkSpan>)> {
     if graphemes.is_empty() {
         return vec![(Line::default(), Vec::new())];
@@ -987,6 +1019,7 @@ fn wrap_graphemes(
                 &graphemes[start..index],
                 width,
                 prefer_words,
+                preserve_whitespace,
             ));
             start = index + 1;
         }
@@ -996,7 +1029,12 @@ fn wrap_graphemes(
             .last()
             .is_some_and(|grapheme| grapheme.text == "\n")
     {
-        lines.extend(wrap_visual_line(&graphemes[start..], width, prefer_words));
+        lines.extend(wrap_visual_line(
+            &graphemes[start..],
+            width,
+            prefer_words,
+            preserve_whitespace,
+        ));
     }
     lines
 }
@@ -1005,6 +1043,7 @@ fn wrap_visual_line(
     graphemes: &[StyledGrapheme],
     width: u16,
     prefer_words: bool,
+    preserve_whitespace: bool,
 ) -> Vec<(Line<'static>, Vec<LinkSpan>)> {
     if graphemes.is_empty() {
         return vec![(Line::default(), Vec::new())];
@@ -1013,8 +1052,10 @@ fn wrap_visual_line(
     let mut lines = Vec::new();
     let mut start = 0_usize;
     while start < graphemes.len() {
-        while start < graphemes.len() && graphemes[start].whitespace {
-            start += 1;
+        if !preserve_whitespace {
+            while start < graphemes.len() && graphemes[start].whitespace {
+                start += 1;
+            }
         }
         if start == graphemes.len() {
             break;
@@ -1022,12 +1063,16 @@ fn wrap_visual_line(
         let mut end = start;
         let mut used = 0_u16;
         let mut word_break = None;
+        let first_content = graphemes[start..]
+            .iter()
+            .position(|grapheme| !grapheme.whitespace)
+            .map_or(start, |offset| start.saturating_add(offset));
         while end < graphemes.len() {
             let next = used.saturating_add(graphemes[end].width);
             if next > width && end > start {
                 break;
             }
-            if graphemes[end].whitespace {
+            if graphemes[end].whitespace && (!preserve_whitespace || end > first_content) {
                 word_break = Some(end);
             }
             used = next;
@@ -1041,7 +1086,10 @@ fn wrap_visual_line(
         } else {
             end
         };
-        lines.push(graphemes_to_line(&graphemes[start..split]));
+        lines.push(graphemes_to_line(
+            &graphemes[start..split],
+            preserve_whitespace,
+        ));
         start = split.max(start + 1);
     }
     lines
@@ -1055,14 +1103,21 @@ struct StyledGrapheme {
     whitespace: bool,
 }
 
-fn graphemes_to_line(graphemes: &[StyledGrapheme]) -> (Line<'static>, Vec<LinkSpan>) {
+fn graphemes_to_line(
+    graphemes: &[StyledGrapheme],
+    preserve_whitespace: bool,
+) -> (Line<'static>, Vec<LinkSpan>) {
     let mut spans = Vec::<Span<'static>>::new();
     let mut links = Vec::<LinkSpan>::new();
     let mut column = 0_u16;
-    let rendered_len = graphemes
-        .iter()
-        .rposition(|grapheme| !grapheme.whitespace)
-        .map_or(0, |index| index.saturating_add(1));
+    let rendered_len = if preserve_whitespace {
+        graphemes.len()
+    } else {
+        graphemes
+            .iter()
+            .rposition(|grapheme| !grapheme.whitespace)
+            .map_or(0, |index| index.saturating_add(1))
+    };
     for grapheme in &graphemes[..rendered_len] {
         if let Some(last) = spans.last_mut()
             && last.style == grapheme.style
