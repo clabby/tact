@@ -405,21 +405,13 @@ async fn repository_root(workspace: &Path) -> Result<std::path::PathBuf, DiffErr
 
 async fn resolve_trunk(root: &Path) -> Result<Trunk, DiffError> {
     let current_branch = current_branch(root).await?;
-    let mut candidates = Vec::new();
+    let mut candidates = ["refs/remotes/origin/HEAD", "refs/remotes/upstream/HEAD"]
+        .map(str::to_owned)
+        .to_vec();
     if let Some(upstream) = current_upstream(root, current_branch.as_deref()).await? {
         candidates.push(upstream);
     }
-    candidates.extend(
-        [
-            "refs/remotes/origin/HEAD",
-            "refs/remotes/upstream/HEAD",
-            "main",
-            "master",
-            "trunk",
-            "develop",
-        ]
-        .map(str::to_owned),
-    );
+    candidates.extend(["main", "master", "trunk", "develop"].map(str::to_owned));
     if let Some(current_branch) = current_branch {
         candidates.push(current_branch);
     }
@@ -1064,6 +1056,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn remote_default_branch_precedes_a_differently_named_feature_upstream() {
+        let repository = repository();
+        git(repository.path(), ["remote", "add", "origin", "."]);
+        git(
+            repository.path(),
+            ["update-ref", "refs/remotes/origin/main", "HEAD"],
+        );
+        git(
+            repository.path(),
+            [
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/main",
+            ],
+        );
+        git(repository.path(), ["checkout", "--quiet", "-b", "topic"]);
+        fs::write(repository.path().join("pushed.txt"), "pushed\n").unwrap();
+        git(repository.path(), ["add", "pushed.txt"]);
+        git(repository.path(), ["commit", "--quiet", "-m", "pushed"]);
+        git(
+            repository.path(),
+            ["update-ref", "refs/remotes/origin/topic", "HEAD"],
+        );
+        git(
+            repository.path(),
+            [
+                "checkout",
+                "--quiet",
+                "--track",
+                "-b",
+                "pr/1234",
+                "origin/topic",
+            ],
+        );
+        fs::write(repository.path().join("local.txt"), "local\n").unwrap();
+        git(repository.path(), ["add", "local.txt"]);
+        git(repository.path(), ["commit", "--quiet", "-m", "local"]);
+
+        let context = load(repository.path()).await.unwrap();
+        let snapshot = context.collect(context.full_range()).await.unwrap();
+
+        assert_eq!(context.trunk_name(), "origin/main");
+        assert!(snapshot.patch.contains("+pushed"));
+        assert!(snapshot.patch.contains("+local"));
+    }
+
+    #[tokio::test]
     async fn current_branch_upstream_can_define_an_arbitrary_trunk() {
         let repository = repository_with_initial_branch("stable");
         git(repository.path(), ["checkout", "--quiet", "-b", "feature"]);
@@ -1082,6 +1121,7 @@ mod tests {
     async fn same_branch_remote_upstream_is_not_treated_as_trunk() {
         let repository = repository();
         git(repository.path(), ["checkout", "--quiet", "-b", "feature"]);
+        git(repository.path(), ["remote", "add", "origin", "."]);
         git(
             repository.path(),
             ["update-ref", "refs/remotes/origin/feature", "HEAD"],
