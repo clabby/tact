@@ -226,6 +226,9 @@ enabled = true
 roots = ["skills", "/path/to/shared-skills"]
 ```
 
+Type `$` at a token boundary in the composer to search the active session's skills. Enter or Tab
+inserts the selected `$skill-name` into the prompt.
+
 When enabled, tact also searches `$CODEX_HOME/skills` (or `~/.codex/skills`) and
 `~/.agents/skills`. A new session discovers the current set of skills. Restored sessions keep the
 skill catalog they started with so their instructions remain stable.

@@ -186,6 +186,7 @@ struct PaneSession<'a> {
     id: &'a str,
     parent_id: Option<&'a str>,
     previously_persisted: bool,
+    skills_catalog_present: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -206,19 +207,21 @@ impl PaneSettings {
 }
 
 impl<'a> PaneSession<'a> {
-    const fn new(id: &'a str, parent_id: Option<&'a str>) -> Self {
+    const fn new(id: &'a str, parent_id: Option<&'a str>, skills_catalog_present: bool) -> Self {
         Self {
             id,
             parent_id,
             previously_persisted: false,
+            skills_catalog_present,
         }
     }
 
-    const fn persisted(id: &'a str) -> Self {
+    const fn persisted(id: &'a str, skills_catalog_present: bool) -> Self {
         Self {
             id,
             parent_id: None,
             previously_persisted: true,
+            skills_catalog_present,
         }
     }
 }
@@ -226,6 +229,7 @@ impl<'a> PaneSession<'a> {
 struct PaneRuntime {
     session_id: String,
     instructions: Arc<str>,
+    skills_catalog_present: bool,
     previously_persisted: bool,
     journal: Option<TranscriptJournal>,
     writer_path: PathBuf,
@@ -441,6 +445,7 @@ pub(crate) async fn run(
         agent,
         events,
         instructions,
+        skills,
         memory_enabled,
         subagent_updates,
         subagent_control,
@@ -456,9 +461,9 @@ pub(crate) async fn run(
                 generation: 0,
             },
             if resuming {
-                PaneSession::persisted(&main_session_id)
+                PaneSession::persisted(&main_session_id, !skills.is_empty())
             } else {
-                PaneSession::new(&main_session_id, None)
+                PaneSession::new(&main_session_id, None, !skills.is_empty())
             },
             &config,
             PaneSettings::new(initial_effort, reasoning_mode, initial_fast_mode),
@@ -498,6 +503,7 @@ pub(crate) async fn run(
             projection,
         );
     }
+    root.set_skills(skills);
     let mut theme = config.theme().clone();
     if let Some(scheme) = theme::detect_system_scheme() {
         theme.set_system_scheme(scheme);
@@ -807,6 +813,7 @@ pub(crate) async fn run(
                                 &runtime.session_id,
                                 &snapshot,
                                 &runtime.instructions,
+                                runtime.skills_catalog_present,
                             )?;
                         }
                         let record = runtime.journal_mut()?.append_local(LocalEvent::WorkerTurnFinished {
@@ -887,6 +894,10 @@ pub(crate) async fn run(
                                 .expect("main pane must exist")
                                 .instructions,
                         );
+                        let skills_catalog_present = panes
+                            .get(&PaneId::Main)
+                            .expect("main pane must exist")
+                            .skills_catalog_present;
                         panes.insert(
                             pane,
                             open_pane(
@@ -894,7 +905,11 @@ pub(crate) async fn run(
                                     pane,
                                     generation: 0,
                                 },
-                                PaneSession::new(&session_id, parent_session_id.as_deref()),
+                                PaneSession::new(
+                                    &session_id,
+                                    parent_session_id.as_deref(),
+                                    skills_catalog_present,
+                                ),
                                 &config,
                                 PaneSettings::new(effort, reasoning_mode, fast_mode),
                                 instructions,
@@ -1089,6 +1104,7 @@ pub(crate) async fn run(
                             agent,
                             events,
                             instructions,
+                            skills,
                             memory_enabled,
                             subagent_updates,
                             subagent_control,
@@ -1112,7 +1128,7 @@ pub(crate) async fn run(
                             pane,
                             open_pane(
                                 PaneGeneration { pane, generation },
-                                PaneSession::new(&session_id, None),
+                                PaneSession::new(&session_id, None, !skills.is_empty()),
                                 &config,
                                 PaneSettings::new(effort, reasoning_mode, fast_mode),
                                 instructions,
@@ -1145,6 +1161,7 @@ pub(crate) async fn run(
                                 effort,
                                 reasoning_mode,
                                 fast_mode,
+                                skills,
                             }),
                             &mut scheduler,
                         );
@@ -1239,6 +1256,7 @@ pub(crate) async fn run(
                             agent,
                             events,
                             instructions,
+                            skills,
                             memory_enabled,
                             subagent_updates,
                             subagent_control,
@@ -1262,7 +1280,7 @@ pub(crate) async fn run(
                             pane,
                             open_pane(
                                 PaneGeneration { pane, generation },
-                                PaneSession::persisted(&session_id),
+                                PaneSession::persisted(&session_id, !skills.is_empty()),
                                 &config,
                                 PaneSettings::new(effort, reasoning_mode, fast_mode),
                                 instructions,
@@ -1297,6 +1315,7 @@ pub(crate) async fn run(
                                 reasoning_mode,
                                 preferred_reasoning_mode,
                                 fast_mode,
+                                skills,
                             }),
                             &mut scheduler,
                         );
@@ -1381,6 +1400,7 @@ fn open_pane(
         id: session_id,
         parent_id: parent_session_id,
         previously_persisted,
+        skills_catalog_present,
     } = session;
     if pane == PaneId::Main && generation == 0 {
         session::remove_obsolete_checkpoints(config.path())?;
@@ -1417,6 +1437,7 @@ fn open_pane(
     Ok(PaneRuntime {
         session_id: session_id.to_owned(),
         instructions,
+        skills_catalog_present,
         previously_persisted,
         journal: Some(journal),
         writer_path,
@@ -2356,7 +2377,7 @@ mod tests {
                 pane: PaneId::Main,
                 generation: 0,
             },
-            PaneSession::new("main-session", None),
+            PaneSession::new("main-session", None, false),
             &config,
             PaneSettings::new(ReasoningEffort::Low, ReasoningMode::Standard, false),
             Arc::from("instructions"),
@@ -2389,7 +2410,7 @@ mod tests {
                 pane: PaneId::Main,
                 generation: 0,
             },
-            PaneSession::new("main-session", None),
+            PaneSession::new("main-session", None, false),
             &config,
             PaneSettings::new(ReasoningEffort::Low, ReasoningMode::Standard, false),
             Arc::from("instructions"),
@@ -2402,7 +2423,7 @@ mod tests {
                 pane: PaneId::Fork(1),
                 generation: 0,
             },
-            PaneSession::new("fork-session", Some("main-session")),
+            PaneSession::new("fork-session", Some("main-session"), false),
             &config,
             PaneSettings::new(ReasoningEffort::Low, ReasoningMode::Standard, false),
             Arc::from("instructions"),
@@ -2487,7 +2508,7 @@ mod tests {
                 pane: PaneId::Main,
                 generation: 0,
             },
-            PaneSession::new("old-session", None),
+            PaneSession::new("old-session", None, false),
             &config,
             PaneSettings::new(ReasoningEffort::Medium, ReasoningMode::Standard, false),
             Arc::from("instructions"),
@@ -2510,7 +2531,7 @@ mod tests {
                 pane: PaneId::Main,
                 generation: 1,
             },
-            PaneSession::new("new-session", None),
+            PaneSession::new("new-session", None, false),
             &config,
             PaneSettings::new(ReasoningEffort::Medium, ReasoningMode::Standard, false),
             Arc::from("instructions"),

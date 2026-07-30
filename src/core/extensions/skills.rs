@@ -96,6 +96,29 @@ struct SkillMetadata {
     path: PathBuf,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct Skill {
+    name: String,
+    description: String,
+}
+
+impl Skill {
+    pub(crate) fn new(name: impl Into<String>, description: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            description: description.into(),
+        }
+    }
+
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub(crate) fn description(&self) -> &str {
+        &self.description
+    }
+}
+
 #[derive(Deserialize)]
 struct Frontmatter {
     name: Option<String>,
@@ -164,6 +187,49 @@ impl SkillCatalog {
     /// Instructions safe to add to model context; skill bodies are never included here.
     pub(crate) fn rendered_instructions(&self) -> Option<&str> {
         self.rendered.as_deref()
+    }
+
+    pub(crate) fn available_in(instructions: &str) -> Vec<Skill> {
+        let start_marker = format!("{CATALOG_START_MARKER}\n");
+        let end_marker = format!("\n{CATALOG_END_MARKER}");
+        let Some((_, catalog)) = instructions.rsplit_once(&start_marker) else {
+            return Vec::new();
+        };
+        let Some((catalog, _)) = catalog.split_once(&end_marker) else {
+            return Vec::new();
+        };
+
+        let mut skills = Vec::new();
+        let mut lines = catalog.lines();
+        while let Some(line) = lines.next() {
+            let Some(name) = line.strip_prefix("- name: ") else {
+                continue;
+            };
+            let Some(description) = lines
+                .next()
+                .and_then(|line| line.strip_prefix("  description: "))
+            else {
+                continue;
+            };
+            let Some(path) = lines.next().and_then(|line| line.strip_prefix("  path: ")) else {
+                continue;
+            };
+            let (Ok(name), Ok(description), Ok(path)) = (
+                serde_json::from_str::<String>(name),
+                serde_json::from_str::<String>(description),
+                serde_json::from_str::<String>(path),
+            ) else {
+                continue;
+            };
+            if valid_skill_name(&name)
+                && !description.trim().is_empty()
+                && description.chars().count() <= MAX_DESCRIPTION_CHARS
+                && !path.trim().is_empty()
+            {
+                skills.push(Skill::new(name, description));
+            }
+        }
+        skills
     }
 
     #[cfg(test)]
@@ -567,7 +633,9 @@ fn parse_metadata(path: &Path) -> Result<SkillMetadata, SkillDiagnostic> {
 }
 
 fn valid_skill_name(name: &str) -> bool {
-    !name.starts_with('-')
+    !name.is_empty()
+        && name.len() <= MAX_NAME_CHARS
+        && !name.starts_with('-')
         && !name.ends_with('-')
         && !name.contains("--")
         && name
@@ -701,6 +769,55 @@ mod tests {
     }
 
     #[test]
+    fn recovers_available_skills_from_rendered_session_instructions() {
+        let directory = tempdir().unwrap();
+        write_skill(
+            directory.path(),
+            "autofix",
+            "---\nname: autofix\ndescription: Review and repair a pull request.\n---\n",
+        );
+        write_skill(
+            directory.path(),
+            "open-docs",
+            "---\nname: open-docs\ndescription: Open relevant documentation.\n---\n",
+        );
+        let config = SkillsConfig::from_roots(true, vec![directory.path().to_path_buf()]);
+        let catalog = SkillCatalog::load(&config);
+        let instructions = format!(
+            "System instructions.\n\n{}\n\nSession appendix.",
+            catalog.rendered_instructions().unwrap()
+        );
+
+        let skills = SkillCatalog::available_in(&instructions);
+
+        assert_eq!(
+            skills,
+            [
+                super::Skill::new("autofix", "Review and repair a pull request."),
+                super::Skill::new("open-docs", "Open relevant documentation."),
+            ]
+        );
+        assert!(SkillCatalog::available_in("ordinary instructions").is_empty());
+    }
+
+    #[test]
+    fn recovered_skills_enforce_discovery_metadata_invariants() {
+        let overlong_name = "a".repeat(super::MAX_NAME_CHARS + 1);
+        assert!(!super::valid_skill_name(""));
+        assert!(!super::valid_skill_name(&overlong_name));
+
+        let instructions = format!(
+            "{CATALOG_START_MARKER}\n\
+- name: \"blank-description\"\n\
+  description: \"   \"\n\
+  path: \"/blank/SKILL.md\"\n\
+{CATALOG_END_MARKER}"
+        );
+
+        assert!(SkillCatalog::available_in(&instructions).is_empty());
+    }
+
+    #[test]
     fn malformed_and_duplicate_skills_produce_deterministic_diagnostics() {
         let directory = tempdir().unwrap();
         let first_root = directory.path().join("a-root");
@@ -801,12 +918,21 @@ mod tests {
 
         let catalog = SkillCatalog::load(&config);
         let rendered = catalog.rendered_instructions().unwrap();
+        let omitted = catalog
+            .diagnostics()
+            .iter()
+            .find_map(|diagnostic| match diagnostic {
+                SkillDiagnostic::MetadataBudget { omitted } => Some(*omitted),
+                _ => None,
+            })
+            .unwrap();
 
         assert!(rendered.len() <= MAX_RENDERED_BYTES);
-        assert!(catalog.diagnostics().iter().any(|diagnostic| matches!(
-            diagnostic,
-            SkillDiagnostic::MetadataBudget { omitted } if *omitted > 0
-        )));
+        assert!(omitted > 0);
+        assert_eq!(
+            SkillCatalog::available_in(rendered).len(),
+            catalog.len() - omitted
+        );
     }
 
     #[test]

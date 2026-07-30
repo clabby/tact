@@ -18,6 +18,7 @@ use super::{
     },
     selection::{Selection, Surface, TextSpan},
     session_picker::{SessionPicker, SessionPickerEffect, SessionPickerEvent},
+    skill_picker::{SkillPicker, SkillPickerEffect, SkillPickerEvent},
     subagents::{SubagentEffect, SubagentOverlay, SubagentTree},
     theme_selector::{ThemeSelector, ThemeSelectorEffect, ThemeSelectorEvent},
     transcript::{ScrollCommand, Transcript, TranscriptEvent},
@@ -25,6 +26,7 @@ use super::{
 use crate::{
     app::config::{ReasoningEffort, ReasoningMode},
     core::extensions::{
+        Skill,
         memory::{MemoryKey, MemoryRecord},
         subagents::{AgentUpdate, MessageSender},
     },
@@ -172,6 +174,7 @@ pub(crate) enum RootEvent {
         reasoning_mode: ReasoningMode,
         preferred_reasoning_mode: ReasoningMode,
         fast_mode: bool,
+        skills: Arc<[Skill]>,
     },
     NotifyError(String),
     NotifySuccess(String),
@@ -236,6 +239,7 @@ enum Overlay {
     Effort(Node<EffortSelector>),
     Theme(Node<ThemeSelector>),
     FileFinder(FileMention),
+    Skills(SkillMention),
     Keybindings(Node<KeybindingsHelp>),
     Memory(Node<MemoryBrowser>),
     Sessions(Node<SessionPicker>),
@@ -245,6 +249,11 @@ enum Overlay {
 
 struct FileMention {
     finder: Node<FileFinder>,
+    start: usize,
+}
+
+struct SkillMention {
+    picker: Node<SkillPicker>,
     start: usize,
 }
 
@@ -276,6 +285,7 @@ pub(crate) struct RootNode {
     review_active: bool,
     review_url: Option<String>,
     fork_available: bool,
+    skills: Arc<[Skill]>,
     memory_enabled: bool,
     interactive: bool,
     theme_mode: ThemeMode,
@@ -307,6 +317,7 @@ impl RootNode {
             review_active: false,
             review_url: None,
             fork_available: true,
+            skills: Arc::from([]),
             memory_enabled: false,
             interactive: true,
             theme_mode: ThemeMode::Auto,
@@ -332,6 +343,7 @@ impl RootNode {
         root.set_max_subagents(self.subagents.max_subagents());
         root.thread = ThreadState::Started;
         root.fork_available = false;
+        root.set_skills(Arc::clone(&self.skills));
         root.memory_enabled = self.memory_enabled;
         root.theme_mode = self.theme_mode;
         root.context_diagnostics = self.context_diagnostics.clone();
@@ -348,6 +360,13 @@ impl RootNode {
 
     pub(crate) fn set_fork_available(&mut self, available: bool) {
         self.fork_available = available;
+    }
+
+    pub(crate) fn set_skills(&mut self, skills: Arc<[Skill]>) {
+        self.skills = skills;
+        if self.skills.is_empty() && matches!(&self.overlay, Some(Overlay::Skills(_))) {
+            self.overlay = None;
+        }
     }
 
     pub(crate) fn set_memory_enabled(&mut self, enabled: bool) {
@@ -600,6 +619,7 @@ impl RootNode {
                 Overlay::Effort(selector) => selector.render(frame, area, theme),
                 Overlay::Theme(selector) => selector.render(frame, area, theme),
                 Overlay::FileFinder(mention) => mention.finder.render(frame, area, theme),
+                Overlay::Skills(mention) => mention.picker.render(frame, area, theme),
                 Overlay::Keybindings(help) => help.render(frame, area, theme),
                 Overlay::Memory(browser) => browser.render(frame, area, theme),
                 Overlay::Sessions(picker) => picker.render(frame, area, theme),
@@ -786,6 +806,20 @@ impl RootNode {
             && is_plain_enter(&event)
         {
             return self.update_queue(event);
+        }
+        if !self.skills.is_empty()
+            && !self.composer.component().draft().starts_with('!')
+            && is_skill_picker_trigger(&event)
+            && self.composer.component().cursor_is_at_token_boundary()
+        {
+            let start = self.composer.component().cursor();
+            let update =
+                self.update_composer(ComposerEvent::Terminal(event), RenderRequest::Immediate);
+            self.overlay = Some(Overlay::Skills(SkillMention {
+                picker: Node::new(SkillPicker::new(Arc::clone(&self.skills))),
+                start,
+            }));
+            return update;
         }
         if is_file_finder_trigger(&event) && self.composer.component().cursor_is_at_token_boundary()
         {
@@ -1035,6 +1069,7 @@ impl RootNode {
                 self.update_theme_selector(ThemeSelectorEvent::Terminal(event))
             }
             Some(Overlay::FileFinder(_)) => self.update_file_finder(event),
+            Some(Overlay::Skills(_)) => self.update_skill_picker(event),
             Some(Overlay::Keybindings(_)) => self.update_keybindings(event),
             Some(Overlay::Memory(_)) => self.update_memory(MemoryBrowserEvent::Terminal(event)),
             Some(Overlay::Sessions(_)) => self.update_session_picker(event),
@@ -1094,12 +1129,12 @@ impl RootNode {
             return ComponentUpdate::none();
         }
 
-        if is_file_mention_edit(&event) {
-            let keep_open = file_mention_edit_continues_query(&event);
+        if is_mention_edit(&event) {
+            let keep_open = mention_edit_continues_query(&event, is_file_query_character);
             let update =
                 self.update_composer(ComposerEvent::Terminal(event), RenderRequest::Immediate);
             let query = if keep_open {
-                self.file_mention_query(start)
+                self.mention_query(start, '@')
             } else {
                 None
             };
@@ -1113,12 +1148,15 @@ impl RootNode {
             return update;
         }
 
-        if !is_file_finder_navigation(&event) {
+        if !is_picker_navigation(&event) {
             self.overlay = None;
             if is_escape(&event) {
                 return ComponentUpdate::render(RenderRequest::Immediate);
             }
-            return self.update_composer(ComposerEvent::Terminal(event), RenderRequest::Immediate);
+            let mut update =
+                self.update_composer(ComposerEvent::Terminal(event), RenderRequest::Immediate);
+            update.render = update.render.max(RenderRequest::Immediate);
+            return update;
         }
 
         let Some(Overlay::FileFinder(mention)) = &mut self.overlay else {
@@ -1145,12 +1183,76 @@ impl RootNode {
         }
     }
 
-    fn file_mention_query(&self, start: usize) -> Option<String> {
+    fn update_skill_picker(&mut self, event: Event) -> ComponentUpdate<RootEffect> {
+        let Some(Overlay::Skills(mention)) = &self.overlay else {
+            return ComponentUpdate::none();
+        };
+        let start = mention.start;
+
+        if is_key_release(&event) {
+            return ComponentUpdate::none();
+        }
+
+        if is_mention_edit(&event) {
+            let keep_open = mention_edit_continues_query(&event, is_skill_query_character);
+            let update =
+                self.update_composer(ComposerEvent::Terminal(event), RenderRequest::Immediate);
+            let query = if keep_open {
+                self.mention_query(start, '$')
+            } else {
+                None
+            };
+            let Some(query) = query else {
+                self.overlay = None;
+                return update;
+            };
+            if let Some(Overlay::Skills(mention)) = &mut self.overlay {
+                let _ = mention.picker.update(SkillPickerEvent::Query(query));
+            }
+            return update;
+        }
+
+        if !is_picker_navigation(&event) {
+            self.overlay = None;
+            if is_escape(&event) {
+                return ComponentUpdate::render(RenderRequest::Immediate);
+            }
+            let mut update =
+                self.update_composer(ComposerEvent::Terminal(event), RenderRequest::Immediate);
+            update.render = update.render.max(RenderRequest::Immediate);
+            return update;
+        }
+
+        let Some(Overlay::Skills(mention)) = &mut self.overlay else {
+            unreachable!("skill picker was checked above");
+        };
+        let update = mention.picker.update(SkillPickerEvent::Terminal(event));
+        let Some(effect) = update.effects.into_iter().next() else {
+            return ComponentUpdate {
+                effects: Vec::new(),
+                render: update.render,
+            };
+        };
+
+        self.overlay = None;
+        match effect {
+            SkillPickerEffect::Dismiss => ComponentUpdate::render(RenderRequest::Immediate),
+            SkillPickerEffect::Insert(name) => self.update_composer(
+                ComposerEvent::ReplaceRange {
+                    range: start..self.composer.component().cursor(),
+                    text: format!("${name} "),
+                },
+                RenderRequest::Immediate,
+            ),
+        }
+    }
+
+    fn mention_query(&self, start: usize, prefix: char) -> Option<String> {
         let composer = self.composer.component();
         composer
             .draft()
             .get(start..composer.cursor())?
-            .strip_prefix('@')
+            .strip_prefix(prefix)
             .map(str::to_owned)
     }
 
@@ -2037,6 +2139,7 @@ impl Component for RootNode {
                 reasoning_mode,
                 preferred_reasoning_mode,
                 fast_mode,
+                skills,
             } => {
                 let workspace = self.workspace.clone();
                 self.install_session_projection(
@@ -2047,6 +2150,7 @@ impl Component for RootNode {
                     fast_mode,
                     *projection,
                 );
+                self.set_skills(skills);
                 ComponentUpdate::render(RenderRequest::Immediate)
             }
             RootEvent::NotifyError(message) => {
@@ -2226,7 +2330,18 @@ fn is_file_finder_trigger(event: &Event) -> bool {
             .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
 }
 
-fn is_file_finder_navigation(event: &Event) -> bool {
+fn is_skill_picker_trigger(event: &Event) -> bool {
+    let Event::Key(key) = event else {
+        return false;
+    };
+    matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
+        && key.code == KeyCode::Char('$')
+        && !key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+}
+
+fn is_picker_navigation(event: &Event) -> bool {
     let Event::Key(key) = event else {
         return false;
     };
@@ -2237,7 +2352,7 @@ fn is_file_finder_navigation(event: &Event) -> bool {
         )
 }
 
-fn is_file_mention_edit(event: &Event) -> bool {
+fn is_mention_edit(event: &Event) -> bool {
     match event {
         Event::Key(key) => {
             matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
@@ -2252,19 +2367,23 @@ fn is_file_mention_edit(event: &Event) -> bool {
     }
 }
 
-fn file_mention_edit_continues_query(event: &Event) -> bool {
+fn mention_edit_continues_query(event: &Event, valid: fn(char) -> bool) -> bool {
     match event {
         Event::Key(key) if key.code == KeyCode::Backspace => true,
         Event::Key(key) => {
-            matches!(key.code, KeyCode::Char(character) if is_file_query_character(character))
+            matches!(key.code, KeyCode::Char(character) if valid(character))
         }
-        Event::Paste(text) => text.chars().all(is_file_query_character),
+        Event::Paste(text) => text.chars().all(valid),
         _ => false,
     }
 }
 
 fn is_file_query_character(character: char) -> bool {
     character.is_alphanumeric() || matches!(character, '_' | '-' | '.' | '/')
+}
+
+fn is_skill_query_character(character: char) -> bool {
+    character.is_ascii_alphanumeric() || character == '-'
 }
 
 fn is_focus_toggle(event: &Event) -> bool {
@@ -2346,6 +2465,7 @@ mod tests {
     use crate::{
         app::config::{ReasoningEffort, ReasoningMode},
         core::extensions::{
+            Skill,
             memory::{MemoryKey, MemoryRecord},
             subagents::{AgentDescriptor, AgentId, AgentMessageUpdate, AgentStatus, AgentUpdate},
         },
@@ -2922,6 +3042,136 @@ mod tests {
 
         assert!(root.overlay.is_none());
         assert_eq!(root.composer().draft(), "a/");
+    }
+
+    #[test]
+    fn dollar_at_a_token_boundary_opens_skills_and_remains_in_the_draft() {
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        root.set_skills(
+            vec![Skill::new(
+                "autofix",
+                "Review and repair a pull request until clean.",
+            )]
+            .into(),
+        );
+        for character in "use ".chars() {
+            root.update(key(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+
+        let update = root.update(key(KeyCode::Char('$'), KeyModifiers::NONE));
+
+        assert!(matches!(&root.overlay, Some(Overlay::Skills(_))));
+        assert_eq!(root.composer().draft(), "use $");
+        assert_eq!(update.render, RenderRequest::Immediate);
+        let rendered = render_root_text(&mut root, 90, 20);
+        assert!(rendered.contains("$autofix"));
+        assert!(rendered.contains("Review and repair a pull request until clean."));
+    }
+
+    #[test]
+    fn dollar_is_literal_without_available_skills_or_inside_a_token() {
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        root.update(key(KeyCode::Char('$'), KeyModifiers::NONE));
+        assert!(root.overlay.is_none());
+        assert_eq!(root.composer().draft(), "$");
+
+        root.composer.component_mut().replace_draft(String::new());
+        root.set_skills(vec![Skill::new("autofix", "Repair a pull request.")].into());
+        for character in "price$5".chars() {
+            root.update(key(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+
+        assert!(root.overlay.is_none());
+        assert_eq!(root.composer().draft(), "price$5");
+    }
+
+    #[test]
+    fn dollar_is_literal_in_shell_mode() {
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        root.set_skills(vec![Skill::new("autofix", "Repair a pull request.")].into());
+
+        for character in "!echo $PATH".chars() {
+            root.update(key(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+
+        assert!(root.overlay.is_none());
+        assert_eq!(root.composer().draft(), "!echo $PATH");
+
+        let submitted = root.update(key(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            submitted.effects,
+            [RootEffect::RunShell("echo $PATH".to_owned())]
+        );
+    }
+
+    fn assert_skill_selection(key_code: KeyCode) {
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        root.set_skills(
+            vec![
+                Skill::new("autofix", "Repair a pull request."),
+                Skill::new("open-docs", "Open documentation."),
+            ]
+            .into(),
+        );
+        for character in "use later".chars() {
+            root.update(key(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+        for _ in 0.."later".len() {
+            root.update(key(KeyCode::Left, KeyModifiers::NONE));
+        }
+        for character in "$auto".chars() {
+            root.update(key(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+
+        root.update(key(key_code, KeyModifiers::NONE));
+
+        assert!(root.overlay.is_none());
+        assert_eq!(root.composer().draft(), "use $autofix later");
+    }
+
+    #[test]
+    fn enter_selects_a_filtered_skill_at_the_composer_cursor() {
+        assert_skill_selection(KeyCode::Enter);
+    }
+
+    #[test]
+    fn tab_selects_a_filtered_skill_at_the_composer_cursor() {
+        assert_skill_selection(KeyCode::Tab);
+    }
+
+    #[test]
+    fn escape_preserves_a_literal_skill_query() {
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        root.set_skills(vec![Skill::new("autofix", "Repair a pull request.")].into());
+        for character in "$auto".chars() {
+            root.update(key(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+
+        root.update(key(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert!(root.overlay.is_none());
+        assert_eq!(root.composer().draft(), "$auto");
+    }
+
+    #[test]
+    fn mouse_dismisses_mention_popovers_with_an_immediate_redraw() {
+        let workspace = tempfile::tempdir().unwrap();
+        let mut root = RootNode::new(workspace.path(), ReasoningEffort::Medium);
+        root.update(key(KeyCode::Char('@'), KeyModifiers::NONE));
+
+        let file_update = root.update(mouse(MouseEventKind::Moved, 0, 0));
+
+        assert!(root.overlay.is_none());
+        assert_eq!(file_update.render, RenderRequest::Immediate);
+
+        root.set_skills(vec![Skill::new("autofix", "Repair a pull request.")].into());
+        root.update(key(KeyCode::Char(' '), KeyModifiers::NONE));
+        root.update(key(KeyCode::Char('$'), KeyModifiers::NONE));
+
+        let skill_update = root.update(mouse(MouseEventKind::Moved, 0, 0));
+
+        assert!(root.overlay.is_none());
+        assert_eq!(skill_update.render, RenderRequest::Immediate);
     }
 
     #[test]

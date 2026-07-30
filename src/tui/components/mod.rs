@@ -15,6 +15,7 @@ mod review_confirmation;
 mod root;
 mod selection;
 mod session_picker;
+mod skill_picker;
 mod subagent_tree_layout;
 mod subagents;
 mod theme_selector;

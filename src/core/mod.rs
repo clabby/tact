@@ -10,7 +10,7 @@ use crate::{
         error::{Result, RuntimeError},
     },
     core::extensions::{
-        SkillCatalog, mcp_provider,
+        Skill, SkillCatalog, mcp_provider,
         memory::MemoryStore,
         subagents::{self, ScopedAgentUpdate, SubagentControl},
     },
@@ -83,9 +83,15 @@ pub(crate) struct ConfiguredAgent {
     pub(crate) agent: Nanocodex,
     pub(crate) events: AgentEvents,
     pub(crate) instructions: Arc<str>,
+    pub(crate) skills: Arc<[Skill]>,
     pub(crate) memory_enabled: bool,
     pub(crate) subagent_updates: mpsc::UnboundedReceiver<ScopedAgentUpdate>,
     pub(crate) subagent_control: SubagentControl,
+}
+
+struct SessionInstructions {
+    text: Arc<str>,
+    skills: Arc<[Skill]>,
 }
 
 enum Cancellation {
@@ -170,12 +176,16 @@ impl ConfiguredAgent {
         if let Some(codex_home) = config.codex_home() {
             builder = builder.codex_home(codex_home);
         }
-        let (snapshot, restored_instructions) = resume
-            .map(ResumeState::into_parts)
-            .map_or((None, None), |(snapshot, instructions)| {
-                (Some(snapshot), Some(instructions))
-            });
-        let instructions = session_instructions(
+        let (snapshot, restored_instructions) = resume.map(ResumeState::into_parts).map_or(
+            (None, None),
+            |(snapshot, instructions, catalog_present)| {
+                (Some(snapshot), Some((instructions, catalog_present)))
+            },
+        );
+        let SessionInstructions {
+            text: instructions,
+            skills,
+        } = session_instructions(
             agent_config.instructions(),
             agent_config.append_instructions(),
             config.skills(),
@@ -198,6 +208,7 @@ impl ConfiguredAgent {
             agent,
             events,
             instructions,
+            skills,
             memory_enabled,
             subagent_updates,
             subagent_control,
@@ -324,19 +335,39 @@ fn session_instructions(
     custom: Option<&str>,
     appended: Option<&str>,
     skills: &SkillsConfig,
-    restored: Option<String>,
+    restored: Option<(String, Option<bool>)>,
     memory_enabled: bool,
-) -> Arc<str> {
+) -> SessionInstructions {
     restored.map_or_else(
         || {
-            let mut instructions = fresh_instructions(custom, appended, skills);
+            let catalog = SkillCatalog::load(skills);
+            let session_skills = catalog
+                .rendered_instructions()
+                .map(SkillCatalog::available_in)
+                .unwrap_or_default()
+                .into();
+            let mut instructions = fresh_instructions_with_catalog(custom, appended, &catalog);
             if memory_enabled {
                 instructions.push_str("\n\n");
                 instructions.push_str(MEMORY_INSTRUCTIONS);
             }
-            Arc::from(instructions)
+            SessionInstructions {
+                text: Arc::from(instructions),
+                skills: session_skills,
+            }
         },
-        |instructions| Arc::from(reconcile_memory_instructions(instructions, memory_enabled)),
+        |(instructions, catalog_present)| {
+            let instructions = reconcile_memory_instructions(instructions, memory_enabled);
+            let skills = if catalog_present.unwrap_or(true) {
+                SkillCatalog::available_in(&instructions).into()
+            } else {
+                Arc::from([])
+            };
+            SessionInstructions {
+                text: Arc::from(instructions),
+                skills,
+            }
+        },
     )
 }
 
@@ -361,12 +392,21 @@ fn reconcile_memory_instructions(mut instructions: String, memory_enabled: bool)
     instructions
 }
 
+#[cfg(test)]
 fn fresh_instructions(
     custom: Option<&str>,
     appended: Option<&str>,
     skills: &SkillsConfig,
 ) -> String {
     let catalog = SkillCatalog::load(skills);
+    fresh_instructions_with_catalog(custom, appended, &catalog)
+}
+
+fn fresh_instructions_with_catalog(
+    custom: Option<&str>,
+    appended: Option<&str>,
+    catalog: &SkillCatalog,
+) -> String {
     let mut instructions = custom
         .map(str::to_owned)
         .unwrap_or_else(|| ResponsesServiceConfig::default().system_prompt.to_string());
@@ -399,9 +439,12 @@ mod tests {
         ConfiguredAgent, DEFAULT_APPEND_INSTRUCTIONS, MEMORY_INSTRUCTIONS,
         MEMORY_REVIEW_CHECKPOINT, fresh_instructions, session_instructions,
     };
-    use crate::app::{
-        config::SkillsConfig,
-        error::{Error, RuntimeError},
+    use crate::{
+        app::{
+            config::SkillsConfig,
+            error::{Error, RuntimeError},
+        },
+        core::extensions::Skill,
     };
     use nanocodex::{
         Nanocodex, OpenAi,
@@ -515,6 +558,12 @@ mod tests {
             instructions.contains(&fs::canonicalize(skill_path).unwrap().display().to_string())
         );
         assert!(!instructions.contains("BODY-SENTINEL"));
+
+        let session = session_instructions(None, None, &enabled, None, false);
+        assert_eq!(
+            session.skills.as_ref(),
+            [Skill::new("review", "Review code carefully.")]
+        );
     }
 
     #[test]
@@ -560,7 +609,14 @@ mod tests {
 
     #[test]
     fn restored_catalog_is_reused_after_skills_are_disabled_or_changed() {
-        let stored = "Original instructions.\n\n<!-- tact:skills-catalog:start -->\nold catalog\n<!-- tact:skills-catalog:end -->";
+        let stored = concat!(
+            "Original instructions.\n\n",
+            "<!-- tact:skills-catalog:start -->\n",
+            "- name: \"old-skill\"\n",
+            "  description: \"The original catalog entry.\"\n",
+            "  path: \"/old/SKILL.md\"\n",
+            "<!-- tact:skills-catalog:end -->"
+        );
         let disabled = SkillsConfig::from_roots(false, Vec::new());
 
         let directory = tempdir().unwrap();
@@ -578,16 +634,55 @@ mod tests {
                 Some("Changed instructions."),
                 Some("Changed appendix."),
                 &disabled,
-                Some(stored.to_owned()),
+                Some((stored.to_owned(), Some(true))),
                 false,
             )
+            .text
             .as_ref(),
             stored
         );
-        assert_eq!(
-            session_instructions(None, None, &enabled, Some(stored.to_owned()), false).as_ref(),
-            stored
+        let restored = session_instructions(
+            None,
+            None,
+            &enabled,
+            Some((stored.to_owned(), Some(true))),
+            false,
         );
+        assert_eq!(restored.text.as_ref(), stored);
+        assert_eq!(
+            restored.skills.as_ref(),
+            [Skill::new("old-skill", "The original catalog entry.")]
+        );
+        let legacy =
+            session_instructions(None, None, &enabled, Some((stored.to_owned(), None)), false);
+        assert_eq!(legacy.skills, restored.skills);
+    }
+
+    #[test]
+    fn fresh_custom_catalog_markers_do_not_enable_skill_completion() {
+        let custom = concat!(
+            "Custom instructions.\n\n",
+            "<!-- tact:skills-catalog:start -->\n",
+            "- name: \"not-discovered\"\n",
+            "  description: \"Only marker-shaped custom text.\"\n",
+            "  path: \"/not/discovered/SKILL.md\"\n",
+            "<!-- tact:skills-catalog:end -->"
+        );
+        let disabled = SkillsConfig::from_roots(false, Vec::new());
+
+        let instructions = session_instructions(Some(custom), None, &disabled, None, false);
+
+        assert!(instructions.text.contains("not-discovered"));
+        assert!(instructions.skills.is_empty());
+
+        let restored = session_instructions(
+            None,
+            None,
+            &disabled,
+            Some((instructions.text.to_string(), Some(false))),
+            false,
+        );
+        assert!(restored.skills.is_empty());
     }
 
     #[test]
@@ -603,8 +698,15 @@ mod tests {
         let enabled = SkillsConfig::from_roots(true, vec![directory.path().to_path_buf()]);
 
         assert_eq!(
-            session_instructions(None, None, &enabled, Some("Old default.".to_owned()), false,)
-                .as_ref(),
+            session_instructions(
+                None,
+                None,
+                &enabled,
+                Some(("Old default.".to_owned(), Some(false))),
+                false,
+            )
+            .text
+            .as_ref(),
             "Old default."
         );
         assert_eq!(
@@ -612,9 +714,10 @@ mod tests {
                 Some("Current custom."),
                 Some("Current appendix."),
                 &enabled,
-                Some("Old custom.".to_owned()),
+                Some(("Old custom.".to_owned(), Some(false))),
                 false,
             )
+            .text
             .as_ref(),
             "Old custom."
         );
@@ -626,31 +729,48 @@ mod tests {
         let disabled = session_instructions(None, None, &skills, None, false);
         let enabled = session_instructions(None, None, &skills, None, true);
 
-        assert!(!disabled.contains(MEMORY_INSTRUCTIONS));
-        assert!(enabled.ends_with(MEMORY_INSTRUCTIONS));
+        assert!(!disabled.text.contains(MEMORY_INSTRUCTIONS));
+        assert!(enabled.text.ends_with(MEMORY_INSTRUCTIONS));
         assert!(
-            enabled.contains(
+            enabled.text.contains(
                 "At the beginning of every substantial task, use code mode to scan memory"
             )
         );
-        assert!(enabled.contains("do not run it in parallel"));
-        assert!(enabled.contains("code review, implementation, debugging"));
-        assert!(enabled.contains("Repeat retrieval before each meaningful phase"));
-        assert!(enabled.contains("before the root agent's final answer"));
-        assert!(!enabled.contains("Most turns should not call it"));
-        assert!(!enabled.contains("memory record:"));
+        assert!(enabled.text.contains("do not run it in parallel"));
+        assert!(
+            enabled
+                .text
+                .contains("code review, implementation, debugging")
+        );
+        assert!(
+            enabled
+                .text
+                .contains("Repeat retrieval before each meaningful phase")
+        );
+        assert!(
+            enabled
+                .text
+                .contains("before the root agent's final answer")
+        );
+        assert!(!enabled.text.contains("Most turns should not call it"));
+        assert!(!enabled.text.contains("memory record:"));
 
-        let restored_enabled =
-            session_instructions(None, None, &skills, Some("Stored.".to_owned()), true);
-        assert!(restored_enabled.ends_with(MEMORY_INSTRUCTIONS));
+        let restored_enabled = session_instructions(
+            None,
+            None,
+            &skills,
+            Some(("Stored.".to_owned(), Some(false))),
+            true,
+        );
+        assert!(restored_enabled.text.ends_with(MEMORY_INSTRUCTIONS));
         let restored_disabled = session_instructions(
             None,
             None,
             &skills,
-            Some(format!("Stored.\n\n{MEMORY_INSTRUCTIONS}")),
+            Some((format!("Stored.\n\n{MEMORY_INSTRUCTIONS}"), Some(false))),
             false,
         );
-        assert_eq!(restored_disabled.as_ref(), "Stored.");
+        assert_eq!(restored_disabled.text.as_ref(), "Stored.");
     }
 
     #[test]
@@ -658,12 +778,20 @@ mod tests {
         let skills = SkillsConfig::from_roots(false, Vec::new());
         let enabled = session_instructions(None, None, &skills, None, true);
 
-        assert!(enabled.contains("Use separate, narrow scans"));
-        assert!(enabled.contains("before each meaningful phase"));
-        assert!(enabled.contains("before any consequential or externally visible action"));
-        assert!(enabled.contains("After every user correction"));
-        assert!(enabled.contains("review the full available transcript"));
-        assert!(!enabled.contains("Scan again only"));
+        assert!(enabled.text.contains("Use separate, narrow scans"));
+        assert!(enabled.text.contains("before each meaningful phase"));
+        assert!(
+            enabled
+                .text
+                .contains("before any consequential or externally visible action")
+        );
+        assert!(enabled.text.contains("After every user correction"));
+        assert!(
+            enabled
+                .text
+                .contains("review the full available transcript")
+        );
+        assert!(!enabled.text.contains("Scan again only"));
     }
 
     #[test]
@@ -694,6 +822,7 @@ mod tests {
             agent,
             events,
             instructions: ResponsesServiceConfig::default().system_prompt,
+            skills: Arc::from([]),
             memory_enabled: false,
             subagent_updates,
             subagent_control,

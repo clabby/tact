@@ -7,7 +7,7 @@ use super::{
 };
 use crate::{
     app::config::{ReasoningEffort, ReasoningMode},
-    core::extensions::{memory::MemoryRecord, subagents::AgentUpdate},
+    core::extensions::{Skill, memory::MemoryRecord, subagents::AgentUpdate},
     tui::{
         pane::PaneId,
         session::SessionSummary,
@@ -89,6 +89,7 @@ pub(crate) enum AppEvent {
         effort: ReasoningEffort,
         reasoning_mode: ReasoningMode,
         fast_mode: bool,
+        skills: Arc<[Skill]>,
     },
     NewSessionFailed {
         pane: PaneId,
@@ -126,6 +127,7 @@ pub(crate) enum AppEvent {
         reasoning_mode: ReasoningMode,
         preferred_reasoning_mode: ReasoningMode,
         fast_mode: bool,
+        skills: Arc<[Skill]>,
     },
     NotifyError {
         pane: PaneId,
@@ -260,6 +262,7 @@ impl AppNode {
                 effort,
                 reasoning_mode,
                 fast_mode,
+                skills,
             } => {
                 let workspace = self.workspace.clone();
                 let Some(root) = self.pane_mut(pane) else {
@@ -272,6 +275,7 @@ impl AppNode {
                     reasoning_mode,
                 );
                 root.component_mut().set_fast_mode(fast_mode);
+                root.component_mut().set_skills(skills);
                 ComponentUpdate::render(RenderRequest::Immediate)
             }
             AppEvent::NewSessionFailed { pane, error } => {
@@ -304,6 +308,7 @@ impl AppNode {
                 reasoning_mode,
                 preferred_reasoning_mode,
                 fast_mode,
+                skills,
             } => self.update_root(
                 pane,
                 RootEvent::SessionRestored {
@@ -312,6 +317,7 @@ impl AppNode {
                     reasoning_mode,
                     preferred_reasoning_mode,
                     fast_mode,
+                    skills,
                 },
             ),
             AppEvent::NotifyError { pane, error } => {
