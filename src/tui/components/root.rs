@@ -1090,6 +1090,10 @@ impl RootNode {
         };
         let start = mention.start;
 
+        if is_key_release(&event) {
+            return ComponentUpdate::none();
+        }
+
         if is_file_mention_edit(&event) {
             let keep_open = file_mention_edit_continues_query(&event);
             let update =
@@ -2933,6 +2937,23 @@ mod tests {
         assert!(matches!(&root.overlay, Some(Overlay::FileFinder(_))));
         assert_eq!(root.composer().draft(), "inspect @");
         assert_eq!(update.render, super::RenderRequest::Immediate);
+    }
+
+    #[test]
+    fn releasing_at_keeps_the_file_finder_open() {
+        let workspace = tempfile::tempdir().unwrap();
+        let mut root = RootNode::new(workspace.path(), ReasoningEffort::Medium);
+        root.update(key(KeyCode::Char('@'), KeyModifiers::NONE));
+
+        let update = root.update(key_with_kind(
+            KeyCode::Char('@'),
+            KeyModifiers::NONE,
+            KeyEventKind::Release,
+        ));
+
+        assert!(matches!(&root.overlay, Some(Overlay::FileFinder(_))));
+        assert!(update.effects.is_empty());
+        assert_eq!(update.render, super::RenderRequest::None);
     }
 
     #[test]
