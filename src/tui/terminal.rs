@@ -15,11 +15,7 @@ use crossterm::{
 };
 use ratatui::{
     Frame, Terminal,
-    backend::{Backend, CrosstermBackend},
-};
-#[cfg(test)]
-use ratatui::{
-    backend::{ClearType, WindowSize},
+    backend::{Backend, ClearType, CrosstermBackend, WindowSize},
     buffer::Cell,
     layout::{Position, Size},
 };
@@ -32,13 +28,103 @@ use std::{
     },
 };
 
-type TuiTerminal = Terminal<CrosstermBackend<Stdout>>;
+type TuiTerminal = Terminal<StableCursorBackend<CrosstermBackend<Stdout>>>;
+
+/// Avoids restarting the terminal's cursor blink cycle on every rendered frame.
+struct StableCursorBackend<B> {
+    inner: B,
+    cursor_visible: bool,
+}
+
+impl<B> StableCursorBackend<B> {
+    const fn hidden(inner: B) -> Self {
+        Self {
+            inner,
+            cursor_visible: false,
+        }
+    }
+
+    const fn assume_cursor_hidden(&mut self) {
+        self.cursor_visible = false;
+    }
+}
+
+impl<B: Write> Write for StableCursorBackend<B> {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        self.inner.write(buffer)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+impl<B: Backend> Backend for StableCursorBackend<B> {
+    type Error = B::Error;
+
+    fn draw<'a, I>(&mut self, content: I) -> Result<(), Self::Error>
+    where
+        I: Iterator<Item = (u16, u16, &'a Cell)>,
+    {
+        self.inner.draw(content)
+    }
+
+    fn append_lines(&mut self, count: u16) -> Result<(), Self::Error> {
+        self.inner.append_lines(count)
+    }
+
+    fn hide_cursor(&mut self) -> Result<(), Self::Error> {
+        if self.cursor_visible {
+            self.inner.hide_cursor()?;
+            self.cursor_visible = false;
+        }
+        Ok(())
+    }
+
+    fn show_cursor(&mut self) -> Result<(), Self::Error> {
+        if !self.cursor_visible {
+            self.inner.show_cursor()?;
+            self.cursor_visible = true;
+        }
+        Ok(())
+    }
+
+    fn get_cursor_position(&mut self) -> Result<Position, Self::Error> {
+        self.inner.get_cursor_position()
+    }
+
+    fn set_cursor_position<P: Into<Position>>(&mut self, position: P) -> Result<(), Self::Error> {
+        self.inner.set_cursor_position(position)
+    }
+
+    fn clear(&mut self) -> Result<(), Self::Error> {
+        self.inner.clear()
+    }
+
+    fn clear_region(&mut self, clear_type: ClearType) -> Result<(), Self::Error> {
+        self.inner.clear_region(clear_type)
+    }
+
+    fn size(&self) -> Result<Size, Self::Error> {
+        self.inner.size()
+    }
+
+    fn window_size(&mut self) -> Result<WindowSize, Self::Error> {
+        self.inner.window_size()
+    }
+
+    fn flush(&mut self) -> Result<(), Self::Error> {
+        self.inner.flush()
+    }
+}
 
 #[cfg(test)]
 pub(crate) struct MeasuredBackend<B> {
     inner: B,
     changed_cells: u64,
     cursor_reads: u64,
+    cursor_hides: u64,
+    cursor_shows: u64,
 }
 
 pub(crate) struct TerminalSession {
@@ -73,10 +159,12 @@ impl<B: Backend> Backend for MeasuredBackend<B> {
     }
 
     fn hide_cursor(&mut self) -> Result<(), Self::Error> {
+        self.cursor_hides = self.cursor_hides.saturating_add(1);
         self.inner.hide_cursor()
     }
 
     fn show_cursor(&mut self) -> Result<(), Self::Error> {
+        self.cursor_shows = self.cursor_shows.saturating_add(1);
         self.inner.show_cursor()
     }
 
@@ -124,7 +212,7 @@ impl TerminalSession {
         let mut output = stdout();
         activate_commands(&mut output)?;
         TERMINAL_ACTIVE.store(true, Ordering::Release);
-        let terminal = Terminal::new(CrosstermBackend::new(output))?;
+        let terminal = Terminal::new(StableCursorBackend::hidden(CrosstermBackend::new(output)))?;
         restore.armed = false;
 
         Ok(Self {
@@ -163,6 +251,7 @@ impl TerminalSession {
         let mut restore = RestoreOnDrop { armed: true };
         enable_raw_mode()?;
         activate_commands(self.terminal.backend_mut())?;
+        self.terminal.backend_mut().assume_cursor_hidden();
         TERMINAL_ACTIVE.store(true, Ordering::Release);
         reset_after_resume(&mut self.terminal)?;
         restore.armed = false;
@@ -259,8 +348,8 @@ fn install_panic_hook() {
 #[cfg(test)]
 mod tests {
     use super::{
-        MeasuredBackend, begin_synchronized_update, copy_to_clipboard, end_synchronized_update,
-        reset_after_resume, restore_commands,
+        MeasuredBackend, StableCursorBackend, begin_synchronized_update, copy_to_clipboard,
+        end_synchronized_update, reset_after_resume, restore_commands,
     };
     use crate::{
         app::config::ReasoningEffort,
@@ -269,7 +358,7 @@ mod tests {
             theme::Theme,
         },
     };
-    use ratatui::{Terminal, backend::TestBackend};
+    use ratatui::{Terminal, backend::TestBackend, layout::Position};
     use std::path::Path;
 
     #[test]
@@ -310,6 +399,8 @@ mod tests {
             inner: TestBackend::new(40, 5),
             changed_cells: 0,
             cursor_reads: 0,
+            cursor_hides: 0,
+            cursor_shows: 0,
         };
         let mut terminal = Terminal::new(backend).unwrap();
         let root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
@@ -329,11 +420,38 @@ mod tests {
             inner: TestBackend::new(40, 5),
             changed_cells: 0,
             cursor_reads: 0,
+            cursor_hides: 0,
+            cursor_shows: 0,
         };
         let mut terminal = Terminal::new(backend).unwrap();
 
         reset_after_resume(&mut terminal).unwrap();
 
         assert_eq!(terminal.backend().cursor_reads, 0);
+    }
+
+    #[test]
+    fn unchanged_cursor_visibility_does_not_reach_the_terminal() {
+        let measured = MeasuredBackend {
+            inner: TestBackend::new(10, 2),
+            changed_cells: 0,
+            cursor_reads: 0,
+            cursor_hides: 0,
+            cursor_shows: 0,
+        };
+        let backend = StableCursorBackend::hidden(measured);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| frame.set_cursor_position(Position::new(0, 0)))
+            .unwrap();
+        terminal
+            .draw(|frame| frame.set_cursor_position(Position::new(1, 0)))
+            .unwrap();
+        terminal.draw(|_| {}).unwrap();
+        terminal.draw(|_| {}).unwrap();
+
+        assert_eq!(terminal.backend().inner.cursor_shows, 1);
+        assert_eq!(terminal.backend().inner.cursor_hides, 1);
     }
 }
