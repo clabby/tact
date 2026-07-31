@@ -117,7 +117,7 @@ enum Subject {
 impl Presentation {
     pub(super) fn new(title: impl Into<String>, subject: impl Into<String>) -> Self {
         Self {
-            title: title.into(),
+            title: capitalize_title(&title.into()),
             subject: Subject::Plain(subject.into()),
             outcome: None,
             details: Vec::new(),
@@ -127,7 +127,7 @@ impl Presentation {
 
     pub(super) fn styled_subject(title: impl Into<String>, subject: Vec<Span<'static>>) -> Self {
         Self {
-            title: title.into(),
+            title: capitalize_title(&title.into()),
             subject: Subject::Styled(subject),
             outcome: None,
             details: Vec::new(),
@@ -149,6 +149,20 @@ impl Presentation {
         self.footer = Some(footer.into());
         self
     }
+}
+
+fn capitalize_title(title: &str) -> String {
+    let mut capitalize_next = true;
+    let mut capitalized = String::with_capacity(title.len());
+    for character in title.chars() {
+        if capitalize_next && character.is_alphanumeric() {
+            capitalized.extend(character.to_uppercase());
+            capitalize_next = false;
+        } else {
+            capitalized.push(character);
+        }
+    }
+    capitalized
 }
 
 fn summary_lines(
@@ -620,7 +634,12 @@ mod tests {
             (
                 "mcp__files__read",
                 json!({"path": "/tmp/file"}),
-                "files · read  /tmp/file",
+                "Files · read  /tmp/file",
+            ),
+            (
+                "spawn_agent",
+                json!({"role": "reviewer"}),
+                "Spawn agent  1 arguments",
             ),
         ];
 
