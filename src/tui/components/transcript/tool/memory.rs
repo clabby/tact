@@ -465,6 +465,7 @@ mod tests {
             result,
             metadata: None,
             substeps: Vec::new(),
+            child_count: 0,
         }
     }
 

@@ -106,6 +106,7 @@ mod tests {
             })),
             metadata: None,
             substeps: Vec::new(),
+            child_count: 0,
         };
 
         let collapsed = present(&tool, 80, &Theme::default(), false);
