@@ -126,6 +126,9 @@ enabled = false
 [memory]
 enabled = false
 
+[subagents]
+enabled = true
+
 [theme]
 mode = "auto" # auto, light, or dark
 ```
@@ -135,8 +138,9 @@ resolved from the configuration file's directory; relative command-line paths ar
 current directory. Command-line options take precedence over environment variables, which take
 precedence over the file.
 
-New sessions append concise built-in guidance for delegating and orchestrating sub-agents after the
-standard or replacement instructions. Configured `append_instructions` follow that guidance.
+When subagents are enabled, new sessions append concise built-in guidance for delegation and
+orchestration after the standard or replacement instructions. Configured `append_instructions`
+follow that guidance.
 
 Tact loads global instructions from `AGENTS.override.md` or `AGENTS.md` in `CODEX_HOME`, which
 defaults to `~/.codex`, followed by project instructions from the Git repository root through the
@@ -152,6 +156,20 @@ The `/subagents` panel shows the current concurrency limit. Use `-` and `+` ther
 Use **Reload config** in the Actions menu after editing the file. Theme changes apply immediately.
 Most agent settings apply when a session starts or is restored, while effort and fast mode can also
 be changed during a session. Workspace changes require restarting tact.
+
+### Subagents
+
+Subagents are enabled by default. Disable their tools and built-in delegation instructions with:
+
+```toml
+[subagents]
+enabled = false
+```
+
+This setting applies when a session starts or is restored. Reloading the configuration does not
+change the tool surface of an already-running session. `agent.max_subagents` controls concurrency
+when the feature is enabled; setting it does not enable or disable subagents. See the
+[subagent design](docs/subagents.md) for the tool, lifecycle, messaging, and authority contracts.
 
 ### Themes
 
