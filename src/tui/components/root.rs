@@ -469,6 +469,7 @@ impl RootNode {
             }
             let _ = transcript.update(TranscriptEvent::Record(record));
         }
+        let _ = transcript.update(TranscriptEvent::AgentStreamClosed);
         RestoredSessionProjection {
             transcript,
             context_diagnostics,
@@ -2460,7 +2461,7 @@ fn is_plain_key(event: &Event, character: char) -> bool {
 mod tests {
     use super::{
         Component, ComposerChromeTarget, ConfirmationAction, Overlay, RenderRequest, RootEffect,
-        RootEvent, RootNode, SubagentOverlay, ThreadState,
+        RootEvent, RootNode, SubagentOverlay, ThreadState, TranscriptEvent,
     };
     use crate::{
         app::config::{ReasoningEffort, ReasoningMode},
@@ -2664,6 +2665,53 @@ mod tests {
         assert_eq!(root.context_diagnostics.usage.unwrap().total, 1_050);
         root.update(key(KeyCode::Esc, KeyModifiers::NONE));
         assert!(root.overlay.is_none());
+    }
+
+    #[test]
+    fn restored_session_does_not_keep_historical_activity() {
+        let mut projection = RootNode::project_session(
+            ReasoningEffort::Medium,
+            vec![
+                agent_record(1, AgentEventKind::RunStarted, json!({})),
+                agent_record(2, AgentEventKind::RunStarted, json!({})),
+                agent_record(
+                    3,
+                    AgentEventKind::ToolCall,
+                    json!({
+                        "call_id": "orphaned-shell",
+                        "tool": "exec_command",
+                        "arguments": {"cmd": "sleep 100"},
+                    }),
+                ),
+            ],
+        );
+
+        let restored = projection
+            .transcript
+            .update(TranscriptEvent::AgentStreamClosed);
+        assert!(restored.effects.is_empty());
+
+        let started = projection
+            .transcript
+            .update(TranscriptEvent::Record(agent_record(
+                4,
+                AgentEventKind::RunStarted,
+                json!({}),
+            )));
+        assert_eq!(started.effects.len(), 1);
+        assert!(started.effects[0].active);
+        assert_eq!(started.effects[0].status.as_deref(), Some("Thinking…"));
+
+        let completed = projection
+            .transcript
+            .update(TranscriptEvent::Record(agent_record(
+                5,
+                AgentEventKind::RunCompleted,
+                json!({"duration_ns": 1_000_000}),
+            )));
+        assert_eq!(completed.effects.len(), 1);
+        assert!(!completed.effects[0].active);
+        assert!(completed.effects[0].status.is_none());
     }
 
     #[test]
