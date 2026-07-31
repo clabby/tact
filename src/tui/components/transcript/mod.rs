@@ -1711,6 +1711,29 @@ mod tests {
     }
 
     #[test]
+    fn user_soft_wrap_omits_the_separator_space_but_preserves_explicit_indentation() {
+        let mut transcript = Transcript::new();
+        transcript.update(TranscriptEvent::Record(user(1, "alpha bravo\n bravo")));
+
+        let backend = render(&mut transcript, 12, 5);
+        let rows = (0..backend.buffer().area.height)
+            .map(|row| {
+                (0..backend.buffer().area.width)
+                    .map(|column| backend.buffer()[(column, row)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+
+        assert!(rows.iter().any(|row| row.starts_with("┃ bravo")));
+        assert_eq!(
+            rows.iter()
+                .filter(|row| row.starts_with("┃  bravo"))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
     fn active_selection_can_cross_an_unselectable_tool() {
         let mut transcript = Transcript::new();
         transcript.update(TranscriptEvent::Record(user(1, "before")));

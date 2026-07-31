@@ -1052,6 +1052,9 @@ fn wrap_visual_line(
     let mut lines = Vec::new();
     let mut start = 0_usize;
     while start < graphemes.len() {
+        if preserve_whitespace && start > 0 && graphemes[start].text == " " {
+            start += 1;
+        }
         if !preserve_whitespace {
             while start < graphemes.len() && graphemes[start].whitespace {
                 start += 1;
