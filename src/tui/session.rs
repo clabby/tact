@@ -555,6 +555,11 @@ fn transcript_loader() -> &'static rayon::ThreadPool {
     })
 }
 
+#[allow(dead_code, reason = "used by session benchmarks")]
+pub(crate) fn initialize_transcript_loader() {
+    _ = transcript_loader();
+}
+
 pub(crate) fn format_age(started_at_unix_ms: u64) -> String {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -999,9 +1004,10 @@ fn create_private_directory(path: &Path) -> Result<(), SessionError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        encode_filename, format_age, list, list_async, load_checkpoint, load_transcript,
-        load_transcript_async, obsolete_checkpoint_path, save_checkpoint, transcript_fingerprint,
-        transcript_paths, transcript_projection_path, write_transcript_projection,
+        encode_filename, format_age, initialize_transcript_loader, list, list_async,
+        load_checkpoint, load_transcript, load_transcript_async, obsolete_checkpoint_path,
+        save_checkpoint, transcript_fingerprint, transcript_loader, transcript_paths,
+        transcript_projection_path, write_transcript_projection,
     };
     use crate::{
         app::config::{ReasoningEffort, ReasoningMode},
@@ -1038,6 +1044,13 @@ mod tests {
             }]
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn initializes_transcript_loader_before_parallel_work() {
+        initialize_transcript_loader();
+
+        assert!(transcript_loader().current_num_threads() > 0);
     }
 
     async fn write_minimal_session(config: &Path, session_id: &str) {
