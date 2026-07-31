@@ -42,6 +42,7 @@ use std::{
 
 const EXPANDABLE_FOCUS_HINTS: [&str; 2] =
     ["↑↓ item · Enter toggle · Esc back", "↑↓ item · Enter · Esc"];
+const NESTED_TOOL_INDENT: u16 = 4;
 
 pub(crate) enum TranscriptEvent {
     Record(Arc<TranscriptRecord>),
@@ -1140,7 +1141,7 @@ impl CachedEntry {
         let layout = render_entry(entry, live_duration_ns, width, theme, expanded);
         let tool_summary_lines = match (&entry.kind, live_duration_ns) {
             (EntryKind::Tool(tool), Some(duration_ns)) => {
-                tool::render_live_summary(tool, duration_ns, width, theme, expanded).len()
+                render_live_tool_summary(entry, tool, duration_ns, width, theme, expanded).len()
             }
             _ => 0,
         };
@@ -1167,7 +1168,7 @@ impl CachedEntry {
             return;
         };
         let summary =
-            tool::render_live_summary(tool, duration_ns, self.width, theme, self.expanded);
+            render_live_tool_summary(entry, tool, duration_ns, self.width, theme, self.expanded);
         let summary_len = summary.len();
         self.lines.splice(0..self.tool_summary_lines, summary);
         self.links.splice(
@@ -1253,14 +1254,20 @@ impl Component for Transcript {
                         if tool.state == crate::tui::transcript::ToolState::Running
                 ) && let Some(spinner) = self.tool_spinner
                 {
-                    frame.buffer_mut().set_string(
-                        area.x.saturating_add(4),
-                        y,
-                        spinner.symbol(),
-                        Style::default()
-                            .fg(theme.accent())
-                            .add_modifier(Modifier::BOLD),
-                    );
+                    let spinner_x = area
+                        .x
+                        .saturating_add(4)
+                        .saturating_add(nested_tool_indent(entry, area.width));
+                    if spinner_x < area.right() {
+                        frame.buffer_mut().set_string(
+                            spinner_x,
+                            y,
+                            spinner.symbol(),
+                            Style::default()
+                                .fg(theme.accent())
+                                .add_modifier(Modifier::BOLD),
+                        );
+                    }
                 }
                 if self.expandables_focused && self.selected_expandable == Some(anchor.entry) {
                     frame.buffer_mut().set_string(
@@ -1323,13 +1330,16 @@ fn render_entry(
             layout
         }
         EntryKind::Tool(tool) => {
-            let lines = if let Some(duration_ns) = live_duration_ns {
-                tool::render_live(tool, duration_ns, width, theme, expanded)
+            let indent = nested_tool_indent(entry, width);
+            let tool_width = width.saturating_sub(indent);
+            let mut lines = if let Some(duration_ns) = live_duration_ns {
+                tool::render_live(tool, duration_ns, tool_width, theme, expanded)
             } else if expanded {
-                tool::render_expanded(tool, width, theme)
+                tool::render_expanded(tool, tool_width, theme)
             } else {
-                tool::render(tool, width, theme)
+                tool::render(tool, tool_width, theme)
             };
+            indent_nested_tool(indent, &mut lines, theme);
             layout_without_links(lines)
         }
         EntryKind::DirectedMessage(thread) => {
@@ -1404,10 +1414,58 @@ fn render_entry(
             Style::default().fg(theme.thinking_xhigh()),
         )),
     };
-    layout.lines.push(Line::default());
-    layout.links.push(Vec::new());
-    layout.selections.push(Vec::new());
+    if entry.trailing_spacer {
+        layout.lines.push(Line::default());
+        layout.links.push(Vec::new());
+        layout.selections.push(Vec::new());
+    }
     layout
+}
+
+fn render_live_tool_summary(
+    entry: &TranscriptEntry,
+    tool: &crate::tui::transcript::ToolEntry,
+    duration_ns: u64,
+    width: u16,
+    theme: &Theme,
+    expanded: bool,
+) -> Vec<Line<'static>> {
+    let indent = nested_tool_indent(entry, width);
+    let tool_width = width.saturating_sub(indent);
+    let mut lines = tool::render_live_summary(tool, duration_ns, tool_width, theme, expanded);
+    indent_nested_tool(indent, &mut lines, theme);
+    lines
+}
+
+const fn nested_tool_indent(entry: &TranscriptEntry, width: u16) -> u16 {
+    if entry.parent.is_some() {
+        let available = width.saturating_sub(1);
+        if available < NESTED_TOOL_INDENT {
+            available
+        } else {
+            NESTED_TOOL_INDENT
+        }
+    } else {
+        0
+    }
+}
+
+fn indent_nested_tool(indent: u16, lines: &mut [Line<'static>], theme: &Theme) {
+    let markers = match indent {
+        0 => return,
+        1 => ("├", "│"),
+        2 => ("├─", "│ "),
+        3 => (" ├─", " │ "),
+        _ => ("  ├─", "  │ "),
+    };
+    if lines.is_empty() {
+        return;
+    }
+    for (index, line) in lines.iter_mut().enumerate() {
+        let marker = if index == 0 { markers.0 } else { markers.1 };
+        line.spans
+            .insert(0, Span::styled(marker, Style::default().fg(theme.border())));
+    }
 }
 
 fn selection_source(entry: &TranscriptEntry) -> Option<&str> {
@@ -2343,6 +2401,164 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
         assert!(completed.contains("2.5s"));
+    }
+
+    #[test]
+    fn single_code_workflow_child_renders_as_a_standalone_expandable_tool() {
+        let mut transcript = Transcript::new();
+        transcript.update(TranscriptEvent::Record(agent_with_payload(
+            1,
+            AgentEventKind::ToolCall,
+            json!({
+                "call_id": "workflow",
+                "tool": "exec",
+                "arguments": "await tools.exec_command({cmd: 'cargo test'})",
+            }),
+        )));
+        transcript.update(TranscriptEvent::Record(agent_with_payload(
+            2,
+            AgentEventKind::ToolCall,
+            json!({
+                "call_id": "workflow/code-1",
+                "tool": "exec_command",
+                "arguments": {"cmd": "cargo test"},
+            }),
+        )));
+
+        let backend = render(&mut transcript, 80, 5);
+        let rows = backend
+            .buffer()
+            .content()
+            .chunks(80)
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+            .collect::<Vec<_>>();
+        let running = rows.join("");
+        assert!(!running.contains("Batch"));
+        assert!(running.contains("Shell"));
+        let child_row = rows.iter().position(|row| row.contains("Shell")).unwrap();
+        assert!(rows[child_row + 1].trim().is_empty());
+
+        transcript.update(TranscriptEvent::Record(agent_with_payload(
+            3,
+            AgentEventKind::ToolResult,
+            json!({
+                "call_id": "workflow/code-1",
+                "tool": "exec_command",
+                "status": "completed",
+                "duration_ns": 10_u64,
+                "result": {"output": "ok", "exit_code": 0},
+                "metadata": null,
+            }),
+        )));
+        let completed = render(&mut transcript, 80, 5)
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(completed.contains("▶ ✓ Shell"));
+        assert!(!completed.contains("├─"));
+        assert_eq!(transcript.model.entries().len(), 2);
+
+        transcript.focus_expandables();
+        transcript.update(TranscriptEvent::Expandable(ExpandableCommand::Toggle));
+        let expanded = render(&mut transcript, 80, 8)
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(expanded.contains("ok"));
+    }
+
+    #[test]
+    fn code_workflow_promotes_a_standalone_tool_when_the_second_child_arrives() {
+        let mut transcript = Transcript::new();
+        transcript.update(TranscriptEvent::Record(agent_with_payload(
+            1,
+            AgentEventKind::ToolCall,
+            json!({
+                "call_id": "workflow",
+                "tool": "exec",
+                "arguments": "await tools.exec_command({cmd: 'cargo test'})",
+            }),
+        )));
+        transcript.update(TranscriptEvent::Record(agent_with_payload(
+            2,
+            AgentEventKind::ToolCall,
+            json!({
+                "call_id": "workflow/code-1",
+                "tool": "exec_command",
+                "arguments": {"cmd": "cargo test"},
+            }),
+        )));
+
+        let single = render(&mut transcript, 80, 5)
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(single.contains("Shell"));
+        assert!(!single.contains("Batch"));
+        assert!(!single.contains("├─"));
+
+        transcript.update(TranscriptEvent::Record(agent_with_payload(
+            3,
+            AgentEventKind::ToolCall,
+            json!({
+                "call_id": "workflow/code-2",
+                "tool": "memory",
+                "arguments": {"operation": "scan", "query": "test"},
+            }),
+        )));
+
+        let backend = render(&mut transcript, 80, 8);
+        let rows = backend
+            .buffer()
+            .content()
+            .chunks(80)
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+            .collect::<Vec<_>>();
+        let batch = rows.join("");
+        assert!(batch.contains("Batch"));
+        assert_eq!(batch.matches("├─").count(), 2);
+        let batch_row = rows.iter().position(|row| row.contains("Batch")).unwrap();
+        assert!(rows[batch_row + 1].contains("├─"));
+        assert!(rows[batch_row + 2].contains("├─"));
+        assert!(rows[batch_row + 3].trim().is_empty());
+    }
+
+    #[test]
+    fn code_workflow_children_remain_visible_at_narrow_widths() {
+        let mut transcript = Transcript::new();
+        transcript.update(TranscriptEvent::Record(agent_with_payload(
+            1,
+            AgentEventKind::ToolCall,
+            json!({
+                "call_id": "workflow",
+                "tool": "exec",
+                "arguments": "await tools.exec_command({cmd: 'pwd'})",
+            }),
+        )));
+        transcript.update(TranscriptEvent::Record(agent_with_payload(
+            2,
+            AgentEventKind::ToolCall,
+            json!({
+                "call_id": "workflow/code-1",
+                "tool": "exec_command",
+                "arguments": {"cmd": "pwd"},
+            }),
+        )));
+        let child = transcript.model.entries()[1].clone();
+
+        for width in 1..=8 {
+            let lines = transcript.cache.layout(&child, width, &Theme::default());
+            assert!(!lines.is_empty());
+            assert!(lines[0].width() > 0);
+            assert!(lines.iter().all(|line| line.width() <= usize::from(width)));
+        }
     }
 
     #[test]

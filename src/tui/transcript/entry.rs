@@ -37,6 +37,8 @@ pub(crate) struct TranscriptEntry {
     pub(crate) revision: u64,
     pub(crate) kind: EntryKind,
     pub(crate) hidden: bool,
+    pub(crate) parent: Option<EntryId>,
+    pub(crate) trailing_spacer: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -102,6 +104,7 @@ pub(crate) struct ToolEntry {
     pub(crate) result: Option<Value>,
     pub(crate) metadata: Option<Value>,
     pub(crate) substeps: Vec<String>,
+    pub(crate) child_count: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

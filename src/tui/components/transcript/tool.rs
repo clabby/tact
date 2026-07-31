@@ -439,6 +439,7 @@ mod tests {
             result: None,
             metadata: None,
             substeps: Vec::new(),
+            child_count: 0,
         }
     }
 
@@ -467,6 +468,20 @@ mod tests {
             .find(|span| span.content == "✓ ")
             .expect("successful tool should render a checkmark");
         assert_eq!(checkmark.style.fg, Some(Color::Green));
+    }
+
+    #[test]
+    fn code_workflow_uses_the_compact_workflow_label() {
+        let mut workflow = tool(
+            "exec",
+            json!("await tools.exec_command({cmd: \"cargo test\"})"),
+        );
+        workflow.child_count = 2;
+
+        let lines = render(&workflow, 80, &Theme::default());
+
+        assert_eq!(lines[0].to_string(), "  ▶ ✓ Batch  2 tools · 1.2s");
+        assert!(lines.iter().all(|line| line.width() <= 80));
     }
 
     #[test]

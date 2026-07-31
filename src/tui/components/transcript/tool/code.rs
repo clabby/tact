@@ -18,12 +18,18 @@ pub(super) fn present(tool: &ToolEntry, width: u16, theme: &Theme, expanded: boo
         .as_ref()
         .and_then(Value::as_array)
         .map_or(0, Vec::len);
-    let subject = if emitted == 1 {
+    let child_count = tool.child_count;
+    let subject = if child_count == 1 {
+        "1 tool".to_owned()
+    } else if child_count > 1 {
+        format!("{child_count} tools")
+    } else if emitted == 1 {
         "1 emitted item".to_owned()
     } else {
         format!("{emitted} emitted items")
     };
-    let presentation = Presentation::new("Code", subject);
+    let title = if child_count == 0 { "Code" } else { "Batch" };
+    let presentation = Presentation::new(title, subject);
     if !expanded {
         return presentation;
     }

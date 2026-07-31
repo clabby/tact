@@ -49,6 +49,8 @@ pub(crate) struct TranscriptModel {
     reasoning: HashMap<u32, EntryId>,
     tools: HashMap<String, EntryId>,
     shell_sessions: HashMap<i64, EntryId>,
+    shell_followups: HashMap<String, EntryId>,
+    code_children: HashMap<EntryId, Vec<EntryId>>,
     local_shells: HashMap<ShellId, EntryId>,
     message_threads: HashMap<ThreadId, EntryId>,
     message_order: VecDeque<ThreadId>,
@@ -326,6 +328,7 @@ impl TranscriptModel {
             result: None,
             metadata: None,
             substeps: Vec::new(),
+            child_count: 0,
         }));
         self.local_shells.insert(payload.id, id);
         self.running_tools.insert(id);
@@ -528,37 +531,42 @@ impl TranscriptModel {
             tool,
             arguments,
         } = record.decode_payload::<ToolCallPayload>()?;
+        let parent = self.code_parent(&call_id);
         if tool == "write_stdin"
             && let Some(session_id) = arguments.get("session_id").and_then(Value::as_i64)
             && let Some(id) = self.shell_sessions.get(&session_id).copied()
         {
-            let substep = arguments
-                .get("chars")
-                .and_then(Value::as_str)
-                .filter(|chars| !chars.is_empty())
-                .map_or_else(
-                    || "polled process".to_owned(),
-                    |chars| format!("sent {chars:?}"),
-                );
-            self.update(id, |kind| {
-                if let EntryKind::Tool(tool) = kind {
-                    tool.state = ToolState::Running;
-                    tool.substeps.push(substep);
-                }
-            });
-            self.tools.insert(call_id, id);
-            self.running_tools.insert(id);
-            self.transient = Some(TransientStatus::Tool("Shell".to_owned()));
-            return Ok(true);
+            if parent.is_some() {
+                self.shell_followups.insert(call_id.clone(), id);
+            } else {
+                let substep = arguments
+                    .get("chars")
+                    .and_then(Value::as_str)
+                    .filter(|chars| !chars.is_empty())
+                    .map_or_else(
+                        || "polled process".to_owned(),
+                        |chars| format!("sent {chars:?}"),
+                    );
+                self.update(id, |kind| {
+                    if let EntryKind::Tool(tool) = kind {
+                        tool.state = ToolState::Running;
+                        tool.substeps.push(substep);
+                    }
+                });
+                self.tools.insert(call_id, id);
+                self.running_tools.insert(id);
+                self.transient = Some(TransientStatus::Tool("Shell".to_owned()));
+                return Ok(true);
+            }
         }
-        let hidden = tool == "wait";
+        let displayed_parent = parent.and_then(|parent| self.next_code_child_parent(parent));
+        let hidden = tool == "wait" && parent.is_none();
         let transient = if hidden {
             TransientStatus::WaitingForBackgroundWork
         } else {
-            self.hide_exec_parent(&call_id);
             TransientStatus::Tool(humanize_tool(&tool))
         };
-        let id = self.push_with_visibility(
+        let id = self.push_with_parent(
             EntryKind::Tool(ToolEntry {
                 name: tool,
                 arguments,
@@ -568,9 +576,14 @@ impl TranscriptModel {
                 result: None,
                 metadata: None,
                 substeps: Vec::new(),
+                child_count: 0,
             }),
             hidden,
+            displayed_parent,
         );
+        if let Some(parent) = parent {
+            self.register_code_child(parent, id);
+        }
         self.tools.insert(call_id, id);
         self.running_tools.insert(id);
         self.transient = Some(transient);
@@ -579,9 +592,16 @@ impl TranscriptModel {
 
     fn tool_result(&mut self, record: &TranscriptRecord) -> Result<bool, serde_json::Error> {
         let payload = record.decode_payload::<ToolResultPayload>()?;
+        let resumed_shell = self.shell_followups.remove(&payload.call_id);
         let shell_followup = payload.tool == "write_stdin";
         let result = normalize_result(payload.result);
+        let resumed_result = resumed_shell.map(|_| result.clone());
         let state = tool_result_state(&payload.tool, &payload.status, &result);
+        let entry_state = if resumed_shell.is_some() && state == ToolState::Running {
+            ToolState::Succeeded
+        } else {
+            state
+        };
         let shell_session = (payload.tool == "exec_command")
             .then(|| tool_session_id(&result))
             .flatten();
@@ -590,22 +610,33 @@ impl TranscriptModel {
             .get(&payload.call_id)
             .copied()
             .unwrap_or_else(|| {
-                let id = self.push(EntryKind::Tool(ToolEntry {
-                    name: payload.tool.clone(),
-                    arguments: Value::Null,
-                    started_at_unix_ms: record.recorded_at_unix_ms(),
-                    state: ToolState::Running,
-                    duration_ns: None,
-                    result: None,
-                    metadata: None,
-                    substeps: Vec::new(),
-                }));
+                let parent = self.code_parent(&payload.call_id);
+                let displayed_parent =
+                    parent.and_then(|parent| self.next_code_child_parent(parent));
+                let id = self.push_with_parent(
+                    EntryKind::Tool(ToolEntry {
+                        name: payload.tool.clone(),
+                        arguments: Value::Null,
+                        started_at_unix_ms: record.recorded_at_unix_ms(),
+                        state: ToolState::Running,
+                        duration_ns: None,
+                        result: None,
+                        metadata: None,
+                        substeps: Vec::new(),
+                        child_count: 0,
+                    }),
+                    false,
+                    displayed_parent,
+                );
+                if let Some(parent) = parent {
+                    self.register_code_child(parent, id);
+                }
                 self.tools.insert(payload.call_id.clone(), id);
                 id
             });
         self.update(id, |kind| {
             if let EntryKind::Tool(tool) = kind {
-                tool.state = state;
+                tool.state = entry_state;
                 tool.duration_ns = Some(if shell_followup {
                     elapsed_nanoseconds(tool.started_at_unix_ms, record.recorded_at_unix_ms())
                         .max(payload.duration_ns)
@@ -618,18 +649,32 @@ impl TranscriptModel {
                     result
                 });
                 tool.metadata = payload.metadata;
-                if tool.name == "wait" && state == ToolState::Succeeded {
-                    // Successful wait wrappers do not add historical noise.
-                }
             }
         });
+        if let Some(shell) = resumed_shell {
+            let resumed_result = resumed_result.expect("resumed shell result was retained");
+            self.update(shell, |kind| {
+                if let EntryKind::Tool(tool) = kind {
+                    tool.state = state;
+                    tool.duration_ns = Some(
+                        elapsed_nanoseconds(tool.started_at_unix_ms, record.recorded_at_unix_ms())
+                            .max(payload.duration_ns),
+                    );
+                    tool.result = Some(merge_shell_result(tool.result.take(), resumed_result));
+                }
+            });
+            if state != ToolState::Running {
+                self.shell_sessions.retain(|_, entry| *entry != shell);
+                self.running_tools.remove(&shell);
+            }
+        }
         if payload.tool == "wait"
             && state == ToolState::Failed
             && let Some(index) = self.index_of(id)
         {
             self.entries[index].hidden = false;
         }
-        if state == ToolState::Running {
+        if entry_state == ToolState::Running {
             if let Some(session_id) = shell_session {
                 self.shell_sessions.insert(session_id, id);
             }
@@ -794,26 +839,6 @@ impl TranscriptModel {
         self.push(EntryKind::ContextCompactionFailed { message });
     }
 
-    fn hide_exec_parent(&mut self, call_id: &str) {
-        let parent = call_id
-            .match_indices('/')
-            .rev()
-            .find_map(|(separator, _)| self.tools.get(&call_id[..separator]).copied());
-        let Some(parent) = parent else {
-            return;
-        };
-        let Some(index) = self.index_of(parent) else {
-            return;
-        };
-        let EntryKind::Tool(tool) = &self.entries[index].kind else {
-            return;
-        };
-        if tool.name == "exec" {
-            self.entries[index].hidden = true;
-            self.entries[index].revision = self.entries[index].revision.saturating_add(1);
-        }
-    }
-
     fn projection_error(
         &mut self,
         record: &TranscriptRecord,
@@ -844,6 +869,18 @@ impl TranscriptModel {
     }
 
     fn push_with_visibility(&mut self, kind: EntryKind, hidden: bool) -> EntryId {
+        self.push_with_parent(kind, hidden, None)
+    }
+
+    fn push_with_parent(
+        &mut self,
+        kind: EntryKind,
+        hidden: bool,
+        parent: Option<EntryId>,
+    ) -> EntryId {
+        if let Some(parent) = parent {
+            self.join_workflow(parent);
+        }
         let id = EntryId::from_index(self.next_entry_id);
         self.next_entry_id = self.next_entry_id.saturating_add(1);
         self.entry_indices.insert(id, self.entries.len());
@@ -852,8 +889,70 @@ impl TranscriptModel {
             revision: 1,
             kind,
             hidden,
+            parent,
+            trailing_spacer: true,
         });
         id
+    }
+
+    fn join_workflow(&mut self, parent: EntryId) {
+        let Some(previous) = self.entries.iter_mut().rev().find(|entry| !entry.hidden) else {
+            return;
+        };
+        if previous.id != parent && previous.parent != Some(parent) {
+            return;
+        }
+        previous.trailing_spacer = false;
+        previous.revision = previous.revision.saturating_add(1);
+    }
+
+    fn code_parent(&self, call_id: &str) -> Option<EntryId> {
+        let (parent_call_id, child) = call_id.rsplit_once("/code-")?;
+        child.parse::<u64>().ok()?;
+        let parent = self.tools.get(parent_call_id).copied()?;
+        let entry = self.entry(parent)?;
+        matches!(&entry.kind, EntryKind::Tool(tool) if tool.name == "exec").then_some(parent)
+    }
+
+    fn next_code_child_parent(&self, parent: EntryId) -> Option<EntryId> {
+        self.code_children
+            .get(&parent)
+            .is_some_and(|children| !children.is_empty())
+            .then_some(parent)
+    }
+
+    fn register_code_child(&mut self, parent: EntryId, child: EntryId) {
+        self.update(parent, |kind| {
+            if let EntryKind::Tool(tool) = kind {
+                tool.child_count = tool.child_count.saturating_add(1);
+            }
+        });
+        let children = self.code_children.entry(parent).or_default();
+        children.push(child);
+        let child_count = children.len();
+        let children = children.clone();
+
+        if child_count == 1 {
+            let index = self.index_of(parent).expect("code parent is retained");
+            self.entries[index].hidden = true;
+            self.entries[index].revision = self.entries[index].revision.saturating_add(1);
+            return;
+        }
+        if child_count > 2 {
+            return;
+        }
+
+        let parent_index = self.index_of(parent).expect("code parent is retained");
+        self.entries[parent_index].hidden = false;
+        self.entries[parent_index].trailing_spacer = false;
+        self.entries[parent_index].revision = self.entries[parent_index].revision.saturating_add(1);
+        for (index, child) in children.iter().enumerate() {
+            let child_index = self.index_of(*child).expect("code child is retained");
+            self.entries[child_index].parent = Some(parent);
+            self.entries[child_index].trailing_spacer = index + 1 == children.len();
+            self.entries[child_index].revision =
+                self.entries[child_index].revision.saturating_add(1);
+        }
     }
 
     fn trim_message_history(&mut self) -> Option<EntryId> {
@@ -1804,6 +1903,118 @@ mod tests {
     }
 
     #[test]
+    fn code_mode_shell_followups_remain_visible_workflow_children() {
+        let mut model = TranscriptModel::default();
+        model.apply(&agent_at(
+            1_000,
+            AgentEventKind::ToolCall,
+            json!({
+                "call_id": "workflow",
+                "tool": "exec",
+                "arguments": "await tools.exec_command({cmd: 'cargo test'})",
+            }),
+        ));
+        model.apply(&agent_at(
+            2_000,
+            AgentEventKind::ToolCall,
+            json!({
+                "call_id": "workflow/code-1",
+                "tool": "exec_command",
+                "arguments": {"cmd": "cargo test"},
+            }),
+        ));
+        model.apply(&agent_at(
+            3_000,
+            AgentEventKind::ToolResult,
+            json!({
+                "call_id": "workflow/code-1",
+                "tool": "exec_command",
+                "status": "completed",
+                "duration_ns": 1_u64,
+                "result": {"output": "running", "session_id": 7},
+                "metadata": null,
+            }),
+        ));
+
+        model.apply(&agent_at(
+            4_000,
+            AgentEventKind::ToolCall,
+            json!({
+                "call_id": "workflow/code-2",
+                "tool": "write_stdin",
+                "arguments": {"session_id": 7},
+            }),
+        ));
+
+        assert_eq!(model.entries().len(), 3);
+        assert_eq!(model.entries()[2].parent, Some(model.entries()[0].id));
+        assert!(matches!(
+            &model.entries()[2].kind,
+            EntryKind::Tool(tool)
+                if tool.name == "write_stdin" && tool.state == ToolState::Running
+        ));
+
+        model.apply(&agent_at(
+            5_000,
+            AgentEventKind::ToolResult,
+            json!({
+                "call_id": "workflow/code-2",
+                "tool": "write_stdin",
+                "status": "completed",
+                "duration_ns": 2_u64,
+                "result": {"output": " still", "session_id": 7},
+                "metadata": null,
+            }),
+        ));
+
+        assert!(matches!(
+            &model.entries()[1].kind,
+            EntryKind::Tool(tool) if tool.state == ToolState::Running
+        ));
+        assert!(matches!(
+            &model.entries()[2].kind,
+            EntryKind::Tool(tool) if tool.state == ToolState::Succeeded
+        ));
+
+        model.apply(&agent_at(
+            6_000,
+            AgentEventKind::ToolCall,
+            json!({
+                "call_id": "workflow/code-3",
+                "tool": "write_stdin",
+                "arguments": {"session_id": 7},
+            }),
+        ));
+        model.apply(&agent_at(
+            7_000,
+            AgentEventKind::ToolResult,
+            json!({
+                "call_id": "workflow/code-3",
+                "tool": "write_stdin",
+                "status": "completed",
+                "duration_ns": 2_u64,
+                "result": {"output": " done", "exit_code": 0},
+                "metadata": null,
+            }),
+        ));
+
+        for entry in &model.entries()[1..] {
+            assert!(matches!(
+                &entry.kind,
+                EntryKind::Tool(tool) if tool.state == ToolState::Succeeded
+            ));
+        }
+        assert!(model.shell_sessions.is_empty());
+        let EntryKind::Tool(shell) = &model.entries()[1].kind else {
+            panic!("original shell should remain a tool entry");
+        };
+        assert_eq!(
+            shell.result.as_ref().unwrap()["output"],
+            "running still done"
+        );
+    }
+
+    #[test]
     fn killed_shell_result_resolves_as_failed() {
         let mut model = TranscriptModel::default();
         model.apply(&agent(
@@ -1856,5 +2067,172 @@ mod tests {
                     && tool.result.as_ref().and_then(|result| result["error"].as_str())
                         == Some("tool call ended without a terminal result")
         ));
+    }
+
+    #[test]
+    fn code_mode_tools_promote_into_nested_chronological_entries() {
+        let mut model = TranscriptModel::default();
+        model.apply(&agent(
+            AgentEventKind::ToolCall,
+            json!({
+                "call_id": "workflow",
+                "tool": "exec",
+                "arguments": "await tools.exec_command({cmd: 'cargo test'})",
+            }),
+        ));
+        let parent_revision = model.entries()[0].revision;
+
+        model.apply(&agent(
+            AgentEventKind::ToolCall,
+            json!({
+                "call_id": "workflow/code-1",
+                "tool": "exec_command",
+                "arguments": {"cmd": "cargo test"},
+            }),
+        ));
+
+        assert_eq!(model.entries().len(), 2);
+        assert!(model.entries()[0].hidden);
+        let EntryKind::Tool(workflow) = &model.entries()[0].kind else {
+            panic!("code workflow should remain a tool entry");
+        };
+        assert_eq!(workflow.child_count, 1);
+        assert!(model.entries()[0].revision > parent_revision);
+        assert!(model.entries()[0].trailing_spacer);
+        assert_eq!(model.entries()[1].parent, None);
+        assert!(model.entries()[1].trailing_spacer);
+        assert!(matches!(
+            &model.entries()[1].kind,
+            EntryKind::Tool(tool)
+                if tool.name == "exec_command" && tool.state == ToolState::Running
+        ));
+
+        model.apply(&agent(
+            AgentEventKind::ToolResult,
+            json!({
+                "call_id": "workflow/code-1",
+                "tool": "exec_command",
+                "status": "completed",
+                "duration_ns": 10,
+                "result": {"output": "ok", "exit_code": 0},
+                "metadata": null,
+            }),
+        ));
+
+        assert!(matches!(
+            &model.entries()[1].kind,
+            EntryKind::Tool(tool)
+                if tool.state == ToolState::Succeeded
+                    && tool.result.as_ref().unwrap()["output"] == "ok"
+        ));
+
+        model.apply(&agent(
+            AgentEventKind::ToolCall,
+            json!({
+                "call_id": "workflow/code-2",
+                "tool": "memory",
+                "arguments": {"operation": "scan", "query": "test"},
+            }),
+        ));
+
+        let EntryKind::Tool(workflow) = &model.entries()[0].kind else {
+            panic!("code workflow should remain a tool entry");
+        };
+        assert_eq!(workflow.child_count, 2);
+        assert!(!model.entries()[0].hidden);
+        assert!(!model.entries()[0].trailing_spacer);
+        assert_eq!(model.entries()[1].parent, Some(model.entries()[0].id));
+        assert_eq!(model.entries()[2].parent, Some(model.entries()[0].id));
+        assert!(!model.entries()[1].trailing_spacer);
+        assert!(model.entries()[2].trailing_spacer);
+    }
+
+    #[test]
+    fn resumed_single_code_child_keeps_its_workflow_association_and_timeline_position() {
+        let mut model = TranscriptModel::default();
+        model.apply(&agent(
+            AgentEventKind::ToolCall,
+            json!({"call_id": "workflow", "tool": "exec", "arguments": "text('start')"}),
+        ));
+        let parent = model.entries()[0].id;
+        model.apply(&agent(
+            AgentEventKind::ToolResult,
+            json!({
+                "call_id": "workflow",
+                "tool": "exec",
+                "status": "completed",
+                "duration_ns": 10,
+                "result": [{"text": "Script running"}],
+                "metadata": null,
+            }),
+        ));
+        model.apply(&agent(
+            AgentEventKind::ToolCall,
+            json!({"call_id": "wait-1", "tool": "wait", "arguments": {"cell_id": "1"}}),
+        ));
+        model.apply(&agent(
+            AgentEventKind::ToolCall,
+            json!({
+                "call_id": "workflow/code-2",
+                "tool": "apply_patch",
+                "arguments": "*** Begin Patch\n*** End Patch",
+            }),
+        ));
+
+        assert_eq!(model.entries().len(), 3);
+        assert!(model.entries()[1].hidden);
+        assert_eq!(model.entries()[2].parent, None);
+        assert_eq!(model.code_children[&parent], vec![model.entries()[2].id]);
+        assert!(matches!(
+            &model.entries()[2].kind,
+            EntryKind::Tool(tool) if tool.name == "apply_patch"
+        ));
+    }
+
+    #[test]
+    fn only_canonical_code_child_ids_are_nested() {
+        let mut model = TranscriptModel::default();
+        model.apply(&agent(
+            AgentEventKind::ToolCall,
+            json!({"call_id": "workflow", "tool": "exec", "arguments": "text('start')"}),
+        ));
+        model.apply(&agent(
+            AgentEventKind::ToolCall,
+            json!({
+                "call_id": "workflow/not-code-1",
+                "tool": "memory",
+                "arguments": {"operation": "scan", "query": "test"},
+            }),
+        ));
+
+        assert_eq!(model.entries()[1].parent, None);
+        let EntryKind::Tool(workflow) = &model.entries()[0].kind else {
+            panic!("workflow should remain a tool entry");
+        };
+        assert_eq!(workflow.child_count, 0);
+    }
+
+    #[test]
+    fn code_mode_waits_remain_visible_workflow_children() {
+        let mut model = TranscriptModel::default();
+        model.apply(&agent(
+            AgentEventKind::ToolCall,
+            json!({"call_id": "workflow", "tool": "exec", "arguments": "await tools.wait({})"}),
+        ));
+        model.apply(&agent(
+            AgentEventKind::ToolCall,
+            json!({
+                "call_id": "workflow/code-1",
+                "tool": "wait",
+                "arguments": {"cell_id": "cell-1"},
+            }),
+        ));
+
+        assert!(!model.entries()[1].hidden);
+        assert_eq!(model.entries()[1].parent, None);
+        assert_eq!(
+            model.code_children[&model.entries()[0].id],
+            vec![model.entries()[1].id]
+        );
     }
 }
