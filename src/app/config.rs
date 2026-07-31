@@ -89,6 +89,7 @@ pub(crate) struct Config {
     mcp_servers: BTreeMap<String, McpServerConfig>,
     skills: SkillsConfig,
     memory: MemoryConfig,
+    subagents: SubagentsConfig,
     theme: Theme,
     #[serde(skip)]
     reload: ReloadSource,
@@ -168,6 +169,12 @@ pub(crate) struct MemoryConfig {
     enabled: bool,
 }
 
+/// Effective subagent configuration.
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct SubagentsConfig {
+    enabled: bool,
+}
+
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ConfigOverrides {
     pub(crate) path: Option<PathBuf>,
@@ -206,6 +213,7 @@ struct ConfigFile {
     mcp_servers: BTreeMap<String, McpServerConfigFile>,
     skills: SkillsConfigFile,
     memory: MemoryConfigFile,
+    subagents: SubagentsConfigFile,
     theme: Theme,
 }
 
@@ -220,6 +228,12 @@ struct SkillsConfigFile {
 #[serde(default, deny_unknown_fields)]
 struct MemoryConfigFile {
     enabled: bool,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct SubagentsConfigFile {
+    enabled: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -383,6 +397,9 @@ impl Config {
             memory: MemoryConfig {
                 enabled: file.memory.enabled,
             },
+            subagents: SubagentsConfig {
+                enabled: file.subagents.enabled.unwrap_or(true),
+            },
             theme: file.theme,
             reload,
         })
@@ -445,6 +462,10 @@ impl Config {
 
     pub(crate) const fn memory(&self) -> &MemoryConfig {
         &self.memory
+    }
+
+    pub(crate) const fn subagents(&self) -> &SubagentsConfig {
+        &self.subagents
     }
 
     pub(crate) fn memory_path(&self) -> PathBuf {
@@ -933,6 +954,12 @@ impl MemoryConfig {
     }
 }
 
+impl SubagentsConfig {
+    pub(crate) const fn enabled(&self) -> bool {
+        self.enabled
+    }
+}
+
 impl ReasoningEffort {
     pub(crate) const ALL: [Self; 5] = [Self::Low, Self::Medium, Self::High, Self::Xhigh, Self::Max];
 
@@ -1094,6 +1121,24 @@ mod tests {
     use tempfile::tempdir;
     use zeroize::Zeroize;
 
+    fn load_config(contents: &str) -> crate::app::error::Result<Config> {
+        let directory = tempdir().unwrap();
+        let config_path = directory.path().join("config.toml");
+        fs::write(&config_path, contents).unwrap();
+
+        Config::load_with(
+            ConfigOverrides {
+                path: Some(config_path),
+                ..ConfigOverrides::default()
+            },
+            Environment {
+                codex_home: Some(directory.path().join("codex")),
+                ..Environment::default()
+            },
+            directory.path(),
+        )
+    }
+
     #[test]
     fn missing_default_file_materializes_all_defaults() {
         let directory = tempdir().unwrap();
@@ -1180,6 +1225,33 @@ mod tests {
 
         let rendered: toml::Value = toml::from_str(&config.to_toml().unwrap()).unwrap();
         assert_eq!(rendered["memory"]["enabled"].as_bool(), Some(true));
+    }
+
+    #[test]
+    fn subagents_are_enabled_by_default() {
+        for contents in ["", "[subagents]\n"] {
+            let config = load_config(contents).unwrap();
+
+            assert!(config.subagents().enabled());
+            let rendered: toml::Value = toml::from_str(&config.to_toml().unwrap()).unwrap();
+            assert_eq!(rendered["subagents"]["enabled"].as_bool(), Some(true));
+        }
+    }
+
+    #[test]
+    fn subagents_can_be_disabled_from_the_config_file() {
+        let config = load_config("[subagents]\nenabled = false\n").unwrap();
+
+        assert!(!config.subagents().enabled());
+        let rendered: toml::Value = toml::from_str(&config.to_toml().unwrap()).unwrap();
+        assert_eq!(rendered["subagents"]["enabled"].as_bool(), Some(false));
+    }
+
+    #[test]
+    fn unknown_subagent_fields_are_rejected() {
+        let error = load_config("[subagents]\nenabled = true\nlimit = 4\n").unwrap_err();
+
+        assert!(matches!(error, Error::Config(ConfigError::Parse { .. })));
     }
 
     #[test]

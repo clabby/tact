@@ -31,7 +31,7 @@ use std::{
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-const DEFAULT_APPEND_INSTRUCTIONS: &str = concat!(
+const SUBAGENT_INSTRUCTIONS: &str = concat!(
     "For larger tasks, delegate meaningful, separable work to subagents; handle trivial or tightly ",
     "coupled work directly. Use code mode to build multi-agent pipelines: map independent subtasks ",
     "across agents in parallel, await and reduce their results, then dispatch dependent stages. Do ",
@@ -159,6 +159,7 @@ impl ConfiguredAgent {
         }
         let tools = tools.build().map_err(NanocodexError::from)?;
         let memory_enabled = config.memory().enabled();
+        let subagents_enabled = config.subagents().enabled();
         let memory = memory_enabled.then(|| MemoryStore::new(config.memory_path()));
         let (subagents, subagent_control, subagent_updates) =
             subagents::channel(agent_config.max_subagents());
@@ -173,6 +174,7 @@ impl ConfiguredAgent {
                     agent,
                     Arc::clone(&subagents),
                     memory.clone(),
+                    subagents_enabled,
                 )
             });
         if let Some(codex_home) = config.codex_home() {
@@ -192,6 +194,7 @@ impl ConfiguredAgent {
             agent_config.append_instructions(),
             config.skills(),
             restored_instructions,
+            subagents_enabled,
             memory_enabled,
         );
         builder = builder.instructions(Arc::clone(&instructions));
@@ -338,6 +341,7 @@ fn session_instructions(
     appended: Option<&str>,
     skills: &SkillsConfig,
     restored: Option<(String, Option<bool>)>,
+    subagents_enabled: bool,
     memory_enabled: bool,
 ) -> SessionInstructions {
     restored.map_or_else(
@@ -348,7 +352,8 @@ fn session_instructions(
                 .map(SkillCatalog::available_in)
                 .unwrap_or_default()
                 .into();
-            let mut instructions = fresh_instructions_with_catalog(custom, appended, &catalog);
+            let mut instructions =
+                fresh_instructions_with_catalog(custom, appended, &catalog, subagents_enabled);
             if memory_enabled {
                 instructions.push_str("\n\n");
                 instructions.push_str(MEMORY_INSTRUCTIONS);
@@ -359,6 +364,8 @@ fn session_instructions(
             }
         },
         |(instructions, catalog_present)| {
+            let instructions = reconcile_memory_instructions(instructions, false);
+            let instructions = reconcile_subagent_instructions(instructions, subagents_enabled);
             let instructions = reconcile_memory_instructions(instructions, memory_enabled);
             let skills = if catalog_present.unwrap_or(true) {
                 SkillCatalog::available_in(&instructions).into()
@@ -401,19 +408,22 @@ fn fresh_instructions(
     skills: &SkillsConfig,
 ) -> String {
     let catalog = SkillCatalog::load(skills);
-    fresh_instructions_with_catalog(custom, appended, &catalog)
+    fresh_instructions_with_catalog(custom, appended, &catalog, true)
 }
 
 fn fresh_instructions_with_catalog(
     custom: Option<&str>,
     appended: Option<&str>,
     catalog: &SkillCatalog,
+    subagents_enabled: bool,
 ) -> String {
     let mut instructions = custom
         .map(str::to_owned)
         .unwrap_or_else(|| ResponsesServiceConfig::default().system_prompt.to_string());
-    instructions.push_str("\n\n");
-    instructions.push_str(DEFAULT_APPEND_INSTRUCTIONS);
+    if subagents_enabled {
+        instructions.push_str("\n\n");
+        instructions.push_str(SUBAGENT_INSTRUCTIONS);
+    }
     if let Some(appended) = appended {
         instructions.push_str("\n\n");
         instructions.push_str(appended);
@@ -423,6 +433,23 @@ fn fresh_instructions_with_catalog(
         .map_or(instructions.clone(), |skill_instructions| {
             format!("{instructions}\n\n{skill_instructions}")
         })
+}
+
+fn reconcile_subagent_instructions(mut instructions: String, enabled: bool) -> String {
+    let separator_and_instructions = format!("\n\n{SUBAGENT_INSTRUCTIONS}");
+    if enabled {
+        if instructions.contains(&separator_and_instructions) {
+            return instructions;
+        }
+        instructions.push_str(&separator_and_instructions);
+        return instructions;
+    }
+
+    while let Some(start) = instructions.find(&separator_and_instructions) {
+        let end = start.saturating_add(separator_and_instructions.len());
+        instructions.replace_range(start..end, "");
+    }
+    instructions
 }
 
 impl Cancellation {
@@ -438,8 +465,8 @@ impl Cancellation {
 #[cfg(test)]
 mod tests {
     use super::{
-        ConfiguredAgent, DEFAULT_APPEND_INSTRUCTIONS, MEMORY_INSTRUCTIONS,
-        MEMORY_REVIEW_CHECKPOINT, fresh_instructions, session_instructions,
+        ConfiguredAgent, MEMORY_INSTRUCTIONS, MEMORY_REVIEW_CHECKPOINT, SUBAGENT_INSTRUCTIONS,
+        fresh_instructions, session_instructions,
     };
     use crate::{
         app::{
@@ -510,11 +537,11 @@ mod tests {
 
         assert_eq!(
             fresh_instructions(None, None, &disabled),
-            format!("{default}\n\n{DEFAULT_APPEND_INSTRUCTIONS}")
+            format!("{default}\n\n{SUBAGENT_INSTRUCTIONS}")
         );
         assert_eq!(
             fresh_instructions(Some("Custom instructions."), None, &disabled),
-            format!("Custom instructions.\n\n{DEFAULT_APPEND_INSTRUCTIONS}")
+            format!("Custom instructions.\n\n{SUBAGENT_INSTRUCTIONS}")
         );
     }
 
@@ -526,7 +553,7 @@ mod tests {
         let instructions = fresh_instructions(None, Some("Project instructions."), &disabled);
         assert_eq!(
             instructions,
-            format!("{default}\n\n{DEFAULT_APPEND_INSTRUCTIONS}\n\nProject instructions.")
+            format!("{default}\n\n{SUBAGENT_INSTRUCTIONS}\n\nProject instructions.")
         );
         assert_eq!(
             fresh_instructions(
@@ -534,7 +561,7 @@ mod tests {
                 Some("Project instructions."),
                 &disabled
             ),
-            format!("Replacement.\n\n{DEFAULT_APPEND_INSTRUCTIONS}\n\nProject instructions.")
+            format!("Replacement.\n\n{SUBAGENT_INSTRUCTIONS}\n\nProject instructions.")
         );
     }
 
@@ -561,7 +588,7 @@ mod tests {
         );
         assert!(!instructions.contains("BODY-SENTINEL"));
 
-        let session = session_instructions(None, None, &enabled, None, false);
+        let session = session_instructions(None, None, &enabled, None, true, false);
         assert_eq!(
             session.skills.as_ref(),
             [Skill::new("review", "Review code carefully.")]
@@ -583,7 +610,7 @@ mod tests {
         let instructions = fresh_instructions(Some("Keep this first."), None, &enabled);
 
         assert!(instructions.starts_with(&format!(
-            "Keep this first.\n\n{DEFAULT_APPEND_INSTRUCTIONS}\n\n## Available local skills"
+            "Keep this first.\n\n{SUBAGENT_INSTRUCTIONS}\n\n## Available local skills"
         )));
         assert!(instructions.contains("Run focused tests."));
         assert!(!instructions.contains("SECRET-BODY"));
@@ -638,6 +665,7 @@ mod tests {
                 &disabled,
                 Some((stored.to_owned(), Some(true))),
                 false,
+                false,
             )
             .text
             .as_ref(),
@@ -649,14 +677,21 @@ mod tests {
             &enabled,
             Some((stored.to_owned(), Some(true))),
             false,
+            false,
         );
         assert_eq!(restored.text.as_ref(), stored);
         assert_eq!(
             restored.skills.as_ref(),
             [Skill::new("old-skill", "The original catalog entry.")]
         );
-        let legacy =
-            session_instructions(None, None, &enabled, Some((stored.to_owned(), None)), false);
+        let legacy = session_instructions(
+            None,
+            None,
+            &enabled,
+            Some((stored.to_owned(), None)),
+            false,
+            false,
+        );
         assert_eq!(legacy.skills, restored.skills);
     }
 
@@ -672,7 +707,7 @@ mod tests {
         );
         let disabled = SkillsConfig::from_roots(false, Vec::new());
 
-        let instructions = session_instructions(Some(custom), None, &disabled, None, false);
+        let instructions = session_instructions(Some(custom), None, &disabled, None, true, false);
 
         assert!(instructions.text.contains("not-discovered"));
         assert!(instructions.skills.is_empty());
@@ -682,6 +717,7 @@ mod tests {
             None,
             &disabled,
             Some((instructions.text.to_string(), Some(false))),
+            true,
             false,
         );
         assert!(restored.skills.is_empty());
@@ -706,6 +742,7 @@ mod tests {
                 &enabled,
                 Some(("Old default.".to_owned(), Some(false))),
                 false,
+                false,
             )
             .text
             .as_ref(),
@@ -718,6 +755,7 @@ mod tests {
                 &enabled,
                 Some(("Old custom.".to_owned(), Some(false))),
                 false,
+                false,
             )
             .text
             .as_ref(),
@@ -728,8 +766,8 @@ mod tests {
     #[test]
     fn memory_instructions_are_conditional_and_never_contain_records() {
         let skills = SkillsConfig::from_roots(false, Vec::new());
-        let disabled = session_instructions(None, None, &skills, None, false);
-        let enabled = session_instructions(None, None, &skills, None, true);
+        let disabled = session_instructions(None, None, &skills, None, true, false);
+        let enabled = session_instructions(None, None, &skills, None, true, true);
 
         assert!(!disabled.text.contains(MEMORY_INSTRUCTIONS));
         assert!(enabled.text.ends_with(MEMORY_INSTRUCTIONS));
@@ -762,6 +800,7 @@ mod tests {
             None,
             &skills,
             Some(("Stored.".to_owned(), Some(false))),
+            false,
             true,
         );
         assert!(restored_enabled.text.ends_with(MEMORY_INSTRUCTIONS));
@@ -771,21 +810,66 @@ mod tests {
             &skills,
             Some((format!("Stored.\n\n{MEMORY_INSTRUCTIONS}"), Some(false))),
             false,
+            false,
         );
         assert_eq!(restored_disabled.text.as_ref(), "Stored.");
     }
 
     #[test]
     fn delegation_instructions_prevent_hosts_from_repeating_delegated_work() {
-        assert!(DEFAULT_APPEND_INSTRUCTIONS.contains("wait for delegated work to finish"));
-        assert!(DEFAULT_APPEND_INSTRUCTIONS.contains("Do not repeat delegated work yourself"));
-        assert!(DEFAULT_APPEND_INSTRUCTIONS.contains("Double-check their results"));
+        assert!(SUBAGENT_INSTRUCTIONS.contains("wait for delegated work to finish"));
+        assert!(SUBAGENT_INSTRUCTIONS.contains("Do not repeat delegated work yourself"));
+        assert!(SUBAGENT_INSTRUCTIONS.contains("Double-check their results"));
+    }
+
+    #[test]
+    fn subagent_instructions_follow_the_config_for_fresh_and_restored_sessions() {
+        let skills = SkillsConfig::from_roots(false, Vec::new());
+        let enabled = session_instructions(None, None, &skills, None, true, false);
+        let disabled = session_instructions(None, None, &skills, None, false, false);
+
+        assert!(enabled.text.contains(SUBAGENT_INSTRUCTIONS));
+        assert!(!disabled.text.contains(SUBAGENT_INSTRUCTIONS));
+
+        let restored_disabled = session_instructions(
+            None,
+            None,
+            &skills,
+            Some((enabled.text.to_string(), Some(false))),
+            false,
+            false,
+        );
+        assert!(!restored_disabled.text.contains(SUBAGENT_INSTRUCTIONS));
+
+        let duplicated =
+            format!("Stored.\n\n{SUBAGENT_INSTRUCTIONS}\n\nAppendix.\n\n{SUBAGENT_INSTRUCTIONS}");
+        let restored_duplicates = session_instructions(
+            None,
+            None,
+            &skills,
+            Some((duplicated, Some(false))),
+            false,
+            false,
+        );
+        assert!(!restored_duplicates.text.contains(SUBAGENT_INSTRUCTIONS));
+        assert!(restored_duplicates.text.contains("Appendix."));
+
+        let restored_enabled = session_instructions(
+            None,
+            None,
+            &skills,
+            Some((disabled.text.to_string(), Some(false))),
+            true,
+            true,
+        );
+        assert!(restored_enabled.text.contains(SUBAGENT_INSTRUCTIONS));
+        assert!(restored_enabled.text.ends_with(MEMORY_INSTRUCTIONS));
     }
 
     #[test]
     fn memory_instructions_require_repeated_scans_and_transcript_review() {
         let skills = SkillsConfig::from_roots(false, Vec::new());
-        let enabled = session_instructions(None, None, &skills, None, true);
+        let enabled = session_instructions(None, None, &skills, None, true, true);
 
         assert!(enabled.text.contains("Use separate, narrow scans"));
         assert!(enabled.text.contains("before each meaningful phase"));

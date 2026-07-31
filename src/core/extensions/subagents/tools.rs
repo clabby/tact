@@ -496,33 +496,36 @@ pub(crate) fn install_tools(
     parent: AgentHandle,
     registry: Arc<Registry>,
     memory: Option<MemoryStore>,
+    subagents_enabled: bool,
 ) -> Result<Tools, ToolsBuildError> {
-    let mut tools = tools
-        .into_builder()
-        .tool(SpawnAgent {
-            parent,
-            registry: Arc::downgrade(&registry),
-        })
-        .tool(SubmitResult {
-            registry: Arc::downgrade(&registry),
-        })
-        .tool(SendAgentMessage {
-            registry: Arc::downgrade(&registry),
-        })
-        .tool(ListAgents {
-            registry: Arc::downgrade(&registry),
-        })
-        .tool(WaitAgent {
-            registry: Arc::downgrade(&registry),
-        })
-        .tool(ChangeAgentLifecycle {
-            registry: Arc::downgrade(&registry),
-            operation: LifecycleOperation::Interrupt,
-        })
-        .tool(ChangeAgentLifecycle {
-            registry: Arc::downgrade(&registry),
-            operation: LifecycleOperation::Close,
-        });
+    let mut tools = tools.into_builder();
+    if subagents_enabled {
+        tools = tools
+            .tool(SpawnAgent {
+                parent,
+                registry: Arc::downgrade(&registry),
+            })
+            .tool(SubmitResult {
+                registry: Arc::downgrade(&registry),
+            })
+            .tool(SendAgentMessage {
+                registry: Arc::downgrade(&registry),
+            })
+            .tool(ListAgents {
+                registry: Arc::downgrade(&registry),
+            })
+            .tool(WaitAgent {
+                registry: Arc::downgrade(&registry),
+            })
+            .tool(ChangeAgentLifecycle {
+                registry: Arc::downgrade(&registry),
+                operation: LifecycleOperation::Interrupt,
+            })
+            .tool(ChangeAgentLifecycle {
+                registry: Arc::downgrade(&registry),
+                operation: LifecycleOperation::Close,
+            });
+    }
     if let Some(store) = memory {
         tools = tools.tool(MemoryTool::new(store, RootAgentGuard::new(&registry)));
     }
