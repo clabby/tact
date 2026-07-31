@@ -5,21 +5,19 @@ use flate2::read::GzDecoder;
 use minisign_verify::{PublicKey, Signature};
 use reqwest::Client;
 use semver::Version;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::{
-    env, fs,
+    env,
     io::{self, Cursor, Read, Seek, SeekFrom, Write},
     path::{Component, Path, PathBuf},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 use tempfile::{NamedTempFile, TempDir, tempdir};
 use thiserror::Error;
 
 const GITHUB_LATEST_RELEASE: &str = "https://api.github.com/repos/clabby/tact/releases/latest";
 const CRATES_IO_API: &str = "https://crates.io/api/v1/crates/tact";
-const CACHE_FILE: &str = ".tact-update-check.json";
-const CACHE_TTL: Duration = Duration::from_secs(60 * 60);
 const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_METADATA_BYTES: u64 = 1024 * 1024;
@@ -279,13 +277,6 @@ struct SigningMetadata {
     pubkey: String,
 }
 
-#[derive(Deserialize, Serialize)]
-struct UpdateCache {
-    checked_at: u64,
-    target: String,
-    version: Version,
-}
-
 pub(crate) async fn download_verified_release_artifact(
     version: &Version,
     archive_name: &str,
@@ -310,7 +301,7 @@ pub(crate) async fn download_verified_release_artifact(
     download_verified_artifact(&client, version, assets.as_borrowed(), max_archive_bytes).await
 }
 
-pub(crate) async fn check_for_update(config_path: &Path) -> Result<Option<Version>, UpdateError> {
+pub(crate) async fn check_for_update() -> Result<Option<Version>, UpdateError> {
     let installation = installation();
     if installation.is_development() {
         return Ok(None);
@@ -318,22 +309,16 @@ pub(crate) async fn check_for_update(config_path: &Path) -> Result<Option<Versio
     let build_target = env!("TACT_BUILD_TARGET");
     let artifact_target = update_artifact_target(installation, build_target)?;
     let current = current_version()?;
-    let now = unix_timestamp(SystemTime::now());
-    if let Some(cache) = read_fresh_cache(config_path, build_target, now) {
-        return Ok((cache.version > current).then_some(cache.version));
-    }
 
     let client = http_client()?;
     let release = latest_release(&client).await?;
     if release.version <= current {
-        write_cache(config_path, build_target, &release.version, now);
         return Ok(None);
     }
     if let Some(target) = artifact_target {
         release.assets_for(target)?;
         fetch_signing_key(&client, &release.version).await?;
     }
-    write_cache(config_path, build_target, &release.version, now);
     Ok(Some(release.version))
 }
 
@@ -857,60 +842,11 @@ fn parse_hex_checksum(value: &str) -> Option<[u8; 32]> {
     Some(output)
 }
 
-fn unix_timestamp(time: SystemTime) -> u64 {
-    time.duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
-
-fn cache_path(config_path: &Path) -> PathBuf {
-    config_path
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join(CACHE_FILE)
-}
-
-fn read_fresh_cache(config_path: &Path, target: &str, now: u64) -> Option<UpdateCache> {
-    let cache: UpdateCache =
-        serde_json::from_slice(&fs::read(cache_path(config_path)).ok()?).ok()?;
-    cache_is_fresh(&cache, target, now).then_some(cache)
-}
-
-fn cache_is_fresh(cache: &UpdateCache, target: &str, now: u64) -> bool {
-    cache.target == target
-        && now.saturating_sub(cache.checked_at) <= CACHE_TTL.as_secs()
-        && cache.checked_at <= now
-}
-
-fn write_cache(config_path: &Path, target: &str, version: &Version, now: u64) {
-    let path = cache_path(config_path);
-    let Some(parent) = path.parent() else {
-        return;
-    };
-    let cache = UpdateCache {
-        checked_at: now,
-        target: target.to_owned(),
-        version: version.clone(),
-    };
-    let Ok(encoded) = serde_json::to_vec(&cache) else {
-        return;
-    };
-    if fs::create_dir_all(parent).is_err() {
-        return;
-    }
-    let Ok(mut temporary) = NamedTempFile::new_in(parent) else {
-        return;
-    };
-    if temporary.write_all(&encoded).is_ok() {
-        drop(temporary.persist(path));
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        GithubAsset, GithubReleaseResponse, Release, SupportedTarget, UpdateCache, UpdateError,
-        cache_is_fresh, cargo_update_command, crate_manifest, extract_binary, parse_hex_checksum,
+        GithubAsset, GithubReleaseResponse, Release, SupportedTarget, UpdateError,
+        cargo_update_command, crate_manifest, extract_binary, parse_hex_checksum,
         update_artifact_target, verify_archive_checksum,
     };
     use crate::app::installation::InstallationKind;
@@ -1097,30 +1033,6 @@ mod tests {
                 &Version::new(1, 0, 0)
             ),
             Err(UpdateError::UnexpectedArchivePath { .. })
-        ));
-    }
-
-    #[test]
-    fn cache_is_target_specific_and_valid_for_one_hour() {
-        let cache = UpdateCache {
-            checked_at: 1_000,
-            target: SupportedTarget::LinuxX86_64.triple().to_owned(),
-            version: Version::new(2, 0, 0),
-        };
-        assert!(cache_is_fresh(
-            &cache,
-            SupportedTarget::LinuxX86_64.triple(),
-            1_000 + 60 * 60
-        ));
-        assert!(!cache_is_fresh(
-            &cache,
-            SupportedTarget::LinuxX86_64.triple(),
-            1_001 + 60 * 60
-        ));
-        assert!(!cache_is_fresh(
-            &cache,
-            SupportedTarget::MacosX86_64.triple(),
-            1_001,
         ));
     }
 

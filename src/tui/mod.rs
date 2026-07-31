@@ -115,14 +115,11 @@ struct ReviewReady {
     url: String,
 }
 
-fn spawn_update_check(config_path: &Path) -> Option<UpdateCheckTask> {
+fn spawn_update_check() -> Option<UpdateCheckTask> {
     if crate::app::installation::current().is_development() {
         return None;
     }
-    let config_path = config_path.to_path_buf();
-    Some(tokio::spawn(async move {
-        crate::app::update::check_for_update(&config_path).await
-    }))
+    Some(tokio::spawn(crate::app::update::check_for_update()))
 }
 
 struct RestoredSession {
@@ -509,7 +506,7 @@ pub(crate) async fn run(
         theme.set_system_scheme(scheme);
     }
     let mut app = AppNode::new(theme, workspace.clone(), root);
-    let mut update_check_task = spawn_update_check(config.path());
+    let mut update_check_task = spawn_update_check();
     let (system_theme_sender, mut system_theme_updates) = mpsc::unbounded_channel();
     theme::watch_system_scheme(system_theme_sender, shutdown.clone());
     let mut input = Some(EventStream::new());
