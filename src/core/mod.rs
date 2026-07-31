@@ -34,10 +34,12 @@ use tokio_util::sync::CancellationToken;
 const DEFAULT_APPEND_INSTRUCTIONS: &str = concat!(
     "For larger tasks, delegate meaningful, separable work to subagents; handle trivial or tightly ",
     "coupled work directly. Use code mode to build multi-agent pipelines: map independent subtasks ",
-    "across agents in parallel, await and reduce their results, then dispatch dependent stages. Use ",
-    "schemas that expose the fields downstream stages need, and use loops to iterate until the ",
-    "completion condition is met. Keep concurrent write scopes disjoint. You own final synthesis ",
-    "and verification."
+    "across agents in parallel, await and reduce their results, then dispatch dependent stages. Do ",
+    "not repeat delegated work yourself; wait for delegated work to finish, then use its results for ",
+    "the next step. Double-check their results against the relevant evidence before relying on them. ",
+    "Use schemas that expose the fields downstream stages need, and use loops to iterate until the ",
+    "completion condition is met. Keep concurrent write scopes disjoint. You own final synthesis and ",
+    "verification."
 );
 
 const MEMORY_INSTRUCTIONS: &str = concat!(
@@ -771,6 +773,13 @@ mod tests {
             false,
         );
         assert_eq!(restored_disabled.text.as_ref(), "Stored.");
+    }
+
+    #[test]
+    fn delegation_instructions_prevent_hosts_from_repeating_delegated_work() {
+        assert!(DEFAULT_APPEND_INSTRUCTIONS.contains("wait for delegated work to finish"));
+        assert!(DEFAULT_APPEND_INSTRUCTIONS.contains("Do not repeat delegated work yourself"));
+        assert!(DEFAULT_APPEND_INSTRUCTIONS.contains("Double-check their results"));
     }
 
     #[test]
