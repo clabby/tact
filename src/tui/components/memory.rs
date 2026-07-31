@@ -24,7 +24,7 @@ use unicode_width::UnicodeWidthStr;
 const LIST_KEYS: [&str; 5] = [
     "↑↓ move",
     "enter inspect",
-    "f sort",
+    "ctrl+s sort",
     "ctrl+d remove",
     "ctrl+r refresh · esc close",
 ];
@@ -211,7 +211,7 @@ impl MemoryBrowser {
                 }
                 ComponentUpdate::render(RenderRequest::Immediate)
             }
-            KeyCode::Char('f') if key.modifiers == KeyModifiers::NONE => self.cycle_sort(),
+            KeyCode::Char('s') if key.modifiers == KeyModifiers::CONTROL => self.cycle_sort(),
             KeyCode::Char('r') if key.modifiers == KeyModifiers::CONTROL => self.refresh(),
             KeyCode::Char('d') if key.modifiers == KeyModifiers::CONTROL => {
                 self.confirm_selected(ReturnView::List)
@@ -1094,7 +1094,7 @@ mod tests {
         assert_eq!(ordered_ids(&browser), [3, 1, 2, 4]);
         assert!(render(&mut browser, 80, 16).contains("Sort: Most useful"));
 
-        browser.update(key(KeyCode::Char('f')));
+        browser.update(modified_key(KeyCode::Char('s'), KeyModifiers::CONTROL));
         assert_eq!(browser.sort, SortMode::Newest);
         assert_eq!(ordered_ids(&browser), [2, 3, 1, 4]);
         browser.update(MemoryBrowserEvent::Terminal(Event::Paste(
@@ -1109,15 +1109,15 @@ mod tests {
         assert_eq!(browser.sort, SortMode::Newest);
         assert_eq!(ordered_ids(&browser), [2, 3, 1, 4]);
 
-        browser.update(key(KeyCode::Char('f')));
+        browser.update(modified_key(KeyCode::Char('s'), KeyModifiers::CONTROL));
         assert_eq!(browser.sort, SortMode::Oldest);
         assert_eq!(ordered_ids(&browser), [4, 1, 3, 2]);
 
-        browser.update(key(KeyCode::Char('f')));
+        browser.update(modified_key(KeyCode::Char('s'), KeyModifiers::CONTROL));
         assert_eq!(browser.sort, SortMode::LeastUseful);
         assert_eq!(ordered_ids(&browser), [4, 2, 1, 3]);
 
-        browser.update(key(KeyCode::Char('f')));
+        browser.update(modified_key(KeyCode::Char('s'), KeyModifiers::CONTROL));
         assert_eq!(browser.sort, SortMode::MostUseful);
         assert_eq!(ordered_ids(&browser), [3, 1, 2, 4]);
     }
@@ -1137,13 +1137,13 @@ mod tests {
 
     #[test]
     fn lowercase_shortcut_letters_remain_available_to_the_filter() {
-        let mut browser = loaded(vec![record(1, 1, "durable preference")]);
+        let mut browser = loaded(vec![record(1, 1, "factual preference")]);
 
-        for character in "durable".chars() {
+        for character in "factual".chars() {
             browser.update(key(KeyCode::Char(character)));
         }
 
-        assert_eq!(browser.query, "durable");
+        assert_eq!(browser.query, "factual");
         assert_eq!(browser.matches, [0]);
         assert_eq!(
             browser
