@@ -1,6 +1,8 @@
 # syntax=docker/dockerfile:1.7
 
 # Docker resolves FROM before it can read the tool manifest from the build context.
+FROM ghcr.io/clabby/tact:latest AS tact
+
 FROM debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818 AS toolchain
 
 ARG TARGETARCH
@@ -201,16 +203,6 @@ rm /tmp/cargo-tools
 cp --archive /opt/cargo/bin/. /usr/local/bin/
 EOF
 
-FROM toolchain AS tact-builder
-
-WORKDIR /source
-COPY . .
-RUN --mount=type=cache,target=/opt/cargo/registry,sharing=locked \
-    --mount=type=cache,target=/opt/cargo/git,sharing=locked \
-    --mount=type=cache,target=/source/target,sharing=locked \
-    cargo build --locked --release \
-    && install target/release/tact /tmp/tact
-
 FROM toolchain AS tact-dev
 
 ARG TACT_UID=1000
@@ -224,7 +216,7 @@ ENV HOME=/home/tact \
     BUN_INSTALL_CACHE_DIR=/home/tact/.bun/install/cache \
     PATH=/home/tact/.cargo/bin:/home/tact/.local/bin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
-COPY --from=tact-builder /tmp/tact /usr/local/bin/tact
+COPY --from=tact /tact /usr/local/bin/tact
 COPY --chmod=0755 docker/dev/entrypoint.sh /usr/local/bin/tact-entrypoint
 
 RUN groupadd --gid "$TACT_GID" tact \
