@@ -717,6 +717,8 @@ fn benchmarks(criterion: &mut Criterion) {
     let mixed_fixture = PersistenceFixture::mixed_archive();
     let restored_records = fixture.load_transcript();
     let mixed_records = mixed_projection_records(1_000);
+    // Keep lazy thread creation outside CodSpeed's single measured iteration.
+    session::initialize_transcript_loader();
     let mut sessions = criterion.benchmark_group("session");
     sessions.sample_size(10);
     sessions.measurement_time(Duration::from_secs(5));
