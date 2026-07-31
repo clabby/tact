@@ -138,9 +138,9 @@ resolved from the configuration file's directory; relative command-line paths ar
 current directory. Command-line options take precedence over environment variables, which take
 precedence over the file.
 
-When subagents are enabled, new sessions append concise built-in guidance for delegation and
-orchestration after the standard or replacement instructions. Configured `append_instructions`
-follow that guidance.
+New sessions append concise built-in guidance for orchestrating related tool calls in code mode.
+When subagents are enabled, they also append guidance for delegation and multi-agent pipelines.
+Configured `append_instructions` follow that guidance.
 
 Tact loads global instructions from `AGENTS.override.md` or `AGENTS.md` in `CODEX_HOME`, which
 defaults to `~/.codex`, followed by project instructions from the Git repository root through the
