@@ -7,7 +7,7 @@ use super::{
 };
 use crate::{
     app::config::{ReasoningEffort, ReasoningMode},
-    core::extensions::subagents::AgentUpdate,
+    core::extensions::{Skill, memory::MemoryRecord, subagents::AgentUpdate},
     tui::{
         pane::PaneId,
         session::SessionSummary,
@@ -89,6 +89,7 @@ pub(crate) enum AppEvent {
         effort: ReasoningEffort,
         reasoning_mode: ReasoningMode,
         fast_mode: bool,
+        skills: Arc<[Skill]>,
     },
     NewSessionFailed {
         pane: PaneId,
@@ -102,6 +103,23 @@ pub(crate) enum AppEvent {
         pane: PaneId,
         error: String,
     },
+    MemoriesLoaded {
+        pane: PaneId,
+        records: Vec<MemoryRecord>,
+    },
+    MemoryLoadFailed {
+        pane: PaneId,
+        error: String,
+    },
+    MemoryDeleted {
+        pane: PaneId,
+        id: i64,
+    },
+    MemoryDeleteFailed {
+        pane: PaneId,
+        error: String,
+        conflict: bool,
+    },
     SessionRestored {
         pane: PaneId,
         projection: Box<RestoredSessionProjection>,
@@ -109,6 +127,7 @@ pub(crate) enum AppEvent {
         reasoning_mode: ReasoningMode,
         preferred_reasoning_mode: ReasoningMode,
         fast_mode: bool,
+        skills: Arc<[Skill]>,
     },
     NotifyError {
         pane: PaneId,
@@ -126,6 +145,7 @@ pub(crate) enum AppEvent {
         pane: PaneId,
         theme: Theme,
         preferred_reasoning_mode: ReasoningMode,
+        memory_enabled: bool,
         message: String,
     },
     ConfigReloadFailed {
@@ -242,6 +262,7 @@ impl AppNode {
                 effort,
                 reasoning_mode,
                 fast_mode,
+                skills,
             } => {
                 let workspace = self.workspace.clone();
                 let Some(root) = self.pane_mut(pane) else {
@@ -254,6 +275,7 @@ impl AppNode {
                     reasoning_mode,
                 );
                 root.component_mut().set_fast_mode(fast_mode);
+                root.component_mut().set_skills(skills);
                 ComponentUpdate::render(RenderRequest::Immediate)
             }
             AppEvent::NewSessionFailed { pane, error } => {
@@ -265,6 +287,20 @@ impl AppNode {
             AppEvent::SessionLoadFailed { pane, error } => {
                 self.update_root(pane, RootEvent::SessionLoadFailed(error))
             }
+            AppEvent::MemoriesLoaded { pane, records } => {
+                self.update_root(pane, RootEvent::MemoriesLoaded(records))
+            }
+            AppEvent::MemoryLoadFailed { pane, error } => {
+                self.update_root(pane, RootEvent::MemoryLoadFailed(error))
+            }
+            AppEvent::MemoryDeleted { pane, id } => {
+                self.update_root(pane, RootEvent::MemoryDeleted { id })
+            }
+            AppEvent::MemoryDeleteFailed {
+                pane,
+                error,
+                conflict,
+            } => self.update_root(pane, RootEvent::MemoryDeleteFailed { error, conflict }),
             AppEvent::SessionRestored {
                 pane,
                 projection,
@@ -272,6 +308,7 @@ impl AppNode {
                 reasoning_mode,
                 preferred_reasoning_mode,
                 fast_mode,
+                skills,
             } => self.update_root(
                 pane,
                 RootEvent::SessionRestored {
@@ -280,6 +317,7 @@ impl AppNode {
                     reasoning_mode,
                     preferred_reasoning_mode,
                     fast_mode,
+                    skills,
                 },
             ),
             AppEvent::NotifyError { pane, error } => {
@@ -303,6 +341,7 @@ impl AppNode {
                 pane,
                 theme,
                 preferred_reasoning_mode,
+                memory_enabled,
                 message,
             } => {
                 self.theme.replace_from_config(theme);
@@ -314,6 +353,7 @@ impl AppNode {
                     fork.component_mut().set_theme_mode(mode);
                 }
                 self.set_preferred_reasoning_mode(preferred_reasoning_mode);
+                self.set_memory_enabled(memory_enabled);
                 self.update_root(pane, RootEvent::NotifySuccess(message))
             }
             AppEvent::ConfigReloadFailed { pane, error } => {
@@ -549,6 +589,15 @@ impl AppNode {
         }
     }
 
+    pub(crate) fn set_memory_enabled(&mut self, enabled: bool) {
+        if let Some(main) = &mut self.main {
+            main.component_mut().set_memory_enabled(enabled);
+        }
+        if let Some((_, fork)) = &mut self.fork {
+            fork.component_mut().set_memory_enabled(enabled);
+        }
+    }
+
     fn begin_fork(&mut self) -> PaneId {
         if let Some(main) = &mut self.main {
             main.component_mut().set_fork_available(false);
@@ -645,6 +694,7 @@ mod tests {
     use super::{AppEffect, AppEvent, AppNode, RootEffect, RootEvent, RootNode, SPLIT_HINT};
     use crate::{
         app::config::{ReasoningEffort, ReasoningMode},
+        core::extensions::memory::{MemoryKey, MemoryRecord},
         tui::{
             pane::PaneId,
             theme::{ColorScheme, Theme, ThemeMode},
@@ -669,6 +719,38 @@ mod tests {
             KeyCode::Char(character),
             KeyModifiers::CONTROL,
         )))
+    }
+
+    fn memory_record(id: i64, content: &str) -> MemoryRecord {
+        MemoryRecord {
+            key: MemoryKey { id, version: 1 },
+            content: content.to_owned(),
+            created_at_ms: 0,
+            updated_at_ms: 0,
+            last_scanned_at_ms: None,
+            scan_count: 0,
+            last_used_at_ms: None,
+            use_count: 0,
+            probation_until_ms: None,
+        }
+    }
+
+    fn open_memory(app: &mut AppNode, pane: PaneId) -> super::ComponentUpdate<AppEffect> {
+        app.focus = pane;
+        app.update(AppEvent::Terminal(Event::Key(KeyEvent::new(
+            KeyCode::Char('/'),
+            KeyModifiers::NONE,
+        ))));
+        for character in "memory".chars() {
+            app.update(AppEvent::Terminal(Event::Key(KeyEvent::new(
+                KeyCode::Char(character),
+                KeyModifiers::NONE,
+            ))));
+        }
+        app.update(AppEvent::Terminal(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        ))))
     }
 
     fn rendered(app: &mut AppNode, width: u16, height: u16) -> String {
@@ -980,5 +1062,72 @@ mod tests {
             .collect::<String>();
         assert!(rendered.contains("Could not fork session: no safe checkpoint"));
         assert!(app.root(PaneId::Fork(1)).is_none());
+    }
+
+    #[test]
+    fn memory_operations_and_completions_keep_their_pane_identity() {
+        let mut app = app();
+        app.set_memory_enabled(true);
+        app.update(control('f'));
+        app.update(AppEvent::ForkReady(PaneId::Fork(1)));
+
+        for pane in [PaneId::Main, PaneId::Fork(1)] {
+            let update = open_memory(&mut app, pane);
+            assert!(matches!(
+                update.effects.as_slice(),
+                [AppEffect::Pane {
+                    pane: effect_pane,
+                    effect: super::RootEffect::LoadMemories,
+                }] if *effect_pane == pane
+            ));
+        }
+
+        app.update(AppEvent::MemoriesLoaded {
+            pane: PaneId::Main,
+            records: vec![memory_record(1, "main pane memory")],
+        });
+        app.update(AppEvent::MemoriesLoaded {
+            pane: PaneId::Fork(1),
+            records: vec![memory_record(2, "fork pane memory")],
+        });
+        let output = rendered(&mut app, 120, 24);
+
+        assert_eq!(output.matches("main pane memory").count(), 1);
+        assert_eq!(output.matches("fork pane memory").count(), 1);
+    }
+
+    #[test]
+    fn config_reload_updates_memory_action_availability_for_every_root() {
+        let mut app = app();
+        app.update(control('f'));
+        app.update(AppEvent::ForkReady(PaneId::Fork(1)));
+
+        app.update(AppEvent::ConfigReloaded {
+            pane: PaneId::Main,
+            theme: Theme::default(),
+            preferred_reasoning_mode: ReasoningMode::Standard,
+            memory_enabled: true,
+            message: "enabled memory".to_owned(),
+        });
+        for pane in [PaneId::Main, PaneId::Fork(1)] {
+            assert!(matches!(
+                open_memory(&mut app, pane).effects.as_slice(),
+                [AppEffect::Pane {
+                    pane: effect_pane,
+                    effect: super::RootEffect::LoadMemories,
+                }] if *effect_pane == pane
+            ));
+        }
+
+        app.update(AppEvent::ConfigReloaded {
+            pane: PaneId::Main,
+            theme: Theme::default(),
+            preferred_reasoning_mode: ReasoningMode::Standard,
+            memory_enabled: false,
+            message: "disabled memory".to_owned(),
+        });
+        for pane in [PaneId::Main, PaneId::Fork(1)] {
+            assert!(open_memory(&mut app, pane).effects.is_empty());
+        }
     }
 }

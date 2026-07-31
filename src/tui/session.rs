@@ -84,6 +84,7 @@ struct LoadedSessionSegment {
 struct CheckpointEnvelope<'a> {
     format_version: u32,
     instructions: &'a str,
+    skills_catalog_present: bool,
     snapshot: &'a SessionSnapshot,
 }
 
@@ -94,24 +95,36 @@ struct StoredCheckpoint {
     #[serde(default)]
     instructions: Option<String>,
     #[serde(default)]
+    skills_catalog_present: Option<bool>,
+    #[serde(default)]
     snapshot: Option<SessionSnapshot>,
 }
 
 pub(crate) struct ResumeState {
     snapshot: SessionSnapshot,
     instructions: String,
+    skills_catalog_present: Option<bool>,
 }
 
 impl ResumeState {
-    fn new(snapshot: SessionSnapshot, instructions: String) -> Self {
+    fn new(
+        snapshot: SessionSnapshot,
+        instructions: String,
+        skills_catalog_present: Option<bool>,
+    ) -> Self {
         Self {
             snapshot,
             instructions,
+            skills_catalog_present,
         }
     }
 
-    pub(crate) fn into_parts(self) -> (SessionSnapshot, String) {
-        (self.snapshot, self.instructions)
+    pub(crate) fn into_parts(self) -> (SessionSnapshot, String, Option<bool>) {
+        (
+            self.snapshot,
+            self.instructions,
+            self.skills_catalog_present,
+        )
     }
 }
 
@@ -190,6 +203,7 @@ pub(crate) fn save_checkpoint(
     session_id: &str,
     snapshot: &SessionSnapshot,
     instructions: &str,
+    skills_catalog_present: bool,
 ) -> Result<(), SessionError> {
     let directory = checkpoint_directory(config_path);
     create_private_directory(&directory)?;
@@ -215,6 +229,7 @@ pub(crate) fn save_checkpoint(
     let checkpoint = CheckpointEnvelope {
         format_version: CHECKPOINT_FORMAT_VERSION,
         instructions,
+        skills_catalog_present,
         snapshot,
     };
     serde_json::to_writer(&mut output, &checkpoint).map_err(|source| {
@@ -291,7 +306,11 @@ pub(crate) fn load_checkpoint(
     else {
         return Err(SessionError::InvalidCheckpoint { path });
     };
-    Ok(ResumeState::new(snapshot, instructions))
+    Ok(ResumeState::new(
+        snapshot,
+        instructions,
+        checkpoint.skills_catalog_present,
+    ))
 }
 
 #[allow(
@@ -1073,20 +1092,29 @@ mod tests {
         let obsolete = obsolete_checkpoint_path(&config, "session");
         std::fs::create_dir_all(obsolete.parent().unwrap()).unwrap();
         std::fs::write(&obsolete, b"obsolete checkpoint").unwrap();
-        save_checkpoint(&config, "session", &snapshot("first"), "first instructions").unwrap();
+        save_checkpoint(
+            &config,
+            "session",
+            &snapshot("first"),
+            "first instructions",
+            false,
+        )
+        .unwrap();
         save_checkpoint(
             &config,
             "session",
             &snapshot("second"),
             "second instructions",
+            true,
         )
         .unwrap();
 
         let restored = load_checkpoint(&config, "session").unwrap();
-        let (restored, instructions) = restored.into_parts();
+        let (restored, instructions, skills_catalog_present) = restored.into_parts();
         let restored = serde_json::to_value(restored).unwrap();
         assert_eq!(restored["lineage_id"], Value::String("second".to_owned()));
         assert_eq!(instructions, "second instructions");
+        assert_eq!(skills_catalog_present, Some(true));
         assert!(!obsolete.exists());
         let checkpoints = std::fs::read_dir(directory.path().join("checkpoints/v1"))
             .unwrap()
@@ -1132,7 +1160,14 @@ mod tests {
             .unwrap();
         drop(journal);
         writer.into_task().await.unwrap().unwrap();
-        save_checkpoint(&config, "session/one", &snapshot("lineage"), "instructions").unwrap();
+        save_checkpoint(
+            &config,
+            "session/one",
+            &snapshot("lineage"),
+            "instructions",
+            false,
+        )
+        .unwrap();
 
         let (mut journal, writer) = TranscriptJournal::open(&config, "other-session").unwrap();
         journal
@@ -1154,6 +1189,7 @@ mod tests {
             "other-session",
             &snapshot("other-lineage"),
             "instructions",
+            false,
         )
         .unwrap();
 

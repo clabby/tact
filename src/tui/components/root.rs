@@ -10,6 +10,7 @@ use super::{
     file_finder::{FileFinder, FileFinderEffect, FileFinderEvent},
     floating::Floating,
     keybindings::{KeybindingsEffect, KeybindingsEvent, KeybindingsHelp},
+    memory::{MemoryBrowser, MemoryBrowserEffect, MemoryBrowserEvent},
     node::{Component, ComponentUpdate, Node, RenderRequest},
     queue::{MessageQueue, QueueEffect, QueueEvent, QueueId},
     review_confirmation::{
@@ -17,13 +18,18 @@ use super::{
     },
     selection::{Selection, Surface, TextSpan},
     session_picker::{SessionPicker, SessionPickerEffect, SessionPickerEvent},
+    skill_picker::{SkillPicker, SkillPickerEffect, SkillPickerEvent},
     subagents::{SubagentEffect, SubagentOverlay, SubagentTree},
     theme_selector::{ThemeSelector, ThemeSelectorEffect, ThemeSelectorEvent},
     transcript::{ScrollCommand, Transcript, TranscriptEvent},
 };
 use crate::{
     app::config::{ReasoningEffort, ReasoningMode},
-    core::extensions::subagents::{AgentUpdate, MessageSender},
+    core::extensions::{
+        Skill,
+        memory::{MemoryKey, MemoryRecord},
+        subagents::{AgentUpdate, MessageSender},
+    },
     tui::{
         context::ContextDiagnostics,
         prompt::Submission,
@@ -153,12 +159,22 @@ pub(crate) enum RootEvent {
     NewSessionFailed(String),
     SessionsLoaded(Vec<SessionSummary>),
     SessionLoadFailed(String),
+    MemoriesLoaded(Vec<MemoryRecord>),
+    MemoryLoadFailed(String),
+    MemoryDeleted {
+        id: i64,
+    },
+    MemoryDeleteFailed {
+        error: String,
+        conflict: bool,
+    },
     SessionRestored {
         projection: Box<RestoredSessionProjection>,
         effort: ReasoningEffort,
         reasoning_mode: ReasoningMode,
         preferred_reasoning_mode: ReasoningMode,
         fast_mode: bool,
+        skills: Arc<[Skill]>,
     },
     NotifyError(String),
     NotifySuccess(String),
@@ -192,6 +208,8 @@ pub(crate) enum RootEffect {
     ReloadConfig,
     NewSession,
     LoadSessions,
+    LoadMemories,
+    DeleteMemory(MemoryKey),
     ResumeSession(String),
     Steer {
         id: QueueId,
@@ -221,7 +239,9 @@ enum Overlay {
     Effort(Node<EffortSelector>),
     Theme(Node<ThemeSelector>),
     FileFinder(FileMention),
+    Skills(SkillMention),
     Keybindings(Node<KeybindingsHelp>),
+    Memory(Node<MemoryBrowser>),
     Sessions(Node<SessionPicker>),
     ReviewDownload(Node<ReviewDownloadConfirmation>),
     Subagents(SubagentOverlay),
@@ -229,6 +249,11 @@ enum Overlay {
 
 struct FileMention {
     finder: Node<FileFinder>,
+    start: usize,
+}
+
+struct SkillMention {
+    picker: Node<SkillPicker>,
     start: usize,
 }
 
@@ -260,6 +285,8 @@ pub(crate) struct RootNode {
     review_active: bool,
     review_url: Option<String>,
     fork_available: bool,
+    skills: Arc<[Skill]>,
+    memory_enabled: bool,
     interactive: bool,
     theme_mode: ThemeMode,
     preferred_reasoning_mode: ReasoningMode,
@@ -290,6 +317,8 @@ impl RootNode {
             review_active: false,
             review_url: None,
             fork_available: true,
+            skills: Arc::from([]),
+            memory_enabled: false,
             interactive: true,
             theme_mode: ThemeMode::Auto,
             preferred_reasoning_mode: ReasoningMode::Standard,
@@ -314,6 +343,8 @@ impl RootNode {
         root.set_max_subagents(self.subagents.max_subagents());
         root.thread = ThreadState::Started;
         root.fork_available = false;
+        root.set_skills(Arc::clone(&self.skills));
+        root.memory_enabled = self.memory_enabled;
         root.theme_mode = self.theme_mode;
         root.context_diagnostics = self.context_diagnostics.clone();
         root.interactive = false;
@@ -329,6 +360,20 @@ impl RootNode {
 
     pub(crate) fn set_fork_available(&mut self, available: bool) {
         self.fork_available = available;
+    }
+
+    pub(crate) fn set_skills(&mut self, skills: Arc<[Skill]>) {
+        self.skills = skills;
+        if self.skills.is_empty() && matches!(&self.overlay, Some(Overlay::Skills(_))) {
+            self.overlay = None;
+        }
+    }
+
+    pub(crate) fn set_memory_enabled(&mut self, enabled: bool) {
+        self.memory_enabled = enabled;
+        if !enabled && matches!(&self.overlay, Some(Overlay::Memory(_))) {
+            self.overlay = None;
+        }
     }
 
     pub(crate) fn set_theme_mode(&mut self, mode: ThemeMode) {
@@ -374,12 +419,14 @@ impl RootNode {
         let replaced_draft = current_draft.is_some();
         let discarded_draft = current_draft.or_else(|| self.discarded_draft.take());
         let fork_available = self.fork_available;
+        let memory_enabled = self.memory_enabled;
         let theme_mode = self.theme_mode;
         let max_subagents = self.subagents.max_subagents();
         *self = Self::new(workspace, thinking);
         self.set_reasoning_modes(reasoning_mode, preferred_reasoning_mode);
         self.discarded_draft = discarded_draft;
         self.fork_available = fork_available;
+        self.memory_enabled = memory_enabled;
         self.theme_mode = theme_mode;
         self.set_max_subagents(max_subagents);
         if replaced_draft {
@@ -572,7 +619,9 @@ impl RootNode {
                 Overlay::Effort(selector) => selector.render(frame, area, theme),
                 Overlay::Theme(selector) => selector.render(frame, area, theme),
                 Overlay::FileFinder(mention) => mention.finder.render(frame, area, theme),
+                Overlay::Skills(mention) => mention.picker.render(frame, area, theme),
                 Overlay::Keybindings(help) => help.render(frame, area, theme),
+                Overlay::Memory(browser) => browser.render(frame, area, theme),
                 Overlay::Sessions(picker) => picker.render(frame, area, theme),
                 Overlay::ReviewDownload(confirmation) => {
                     confirmation.render(frame, area, theme);
@@ -758,6 +807,20 @@ impl RootNode {
         {
             return self.update_queue(event);
         }
+        if !self.skills.is_empty()
+            && !self.composer.component().draft().starts_with('!')
+            && is_skill_picker_trigger(&event)
+            && self.composer.component().cursor_is_at_token_boundary()
+        {
+            let start = self.composer.component().cursor();
+            let update =
+                self.update_composer(ComposerEvent::Terminal(event), RenderRequest::Immediate);
+            self.overlay = Some(Overlay::Skills(SkillMention {
+                picker: Node::new(SkillPicker::new(Arc::clone(&self.skills))),
+                start,
+            }));
+            return update;
+        }
         if is_file_finder_trigger(&event) && self.composer.component().cursor_is_at_token_boundary()
         {
             let start = self.composer.component().cursor();
@@ -779,6 +842,7 @@ impl RootNode {
                     new_session: new_session_enabled,
                     fork: self.fork_available,
                     fast_mode: self.composer.component().fast_mode(),
+                    memory: self.memory_enabled,
                 },
             ))));
             return ComponentUpdate::render(RenderRequest::Immediate);
@@ -1005,7 +1069,9 @@ impl RootNode {
                 self.update_theme_selector(ThemeSelectorEvent::Terminal(event))
             }
             Some(Overlay::FileFinder(_)) => self.update_file_finder(event),
+            Some(Overlay::Skills(_)) => self.update_skill_picker(event),
             Some(Overlay::Keybindings(_)) => self.update_keybindings(event),
+            Some(Overlay::Memory(_)) => self.update_memory(MemoryBrowserEvent::Terminal(event)),
             Some(Overlay::Sessions(_)) => self.update_session_picker(event),
             Some(Overlay::ReviewDownload(_)) => self.update_review_confirmation(event),
             Some(Overlay::Subagents(SubagentOverlay::Tree)) => {
@@ -1059,12 +1125,16 @@ impl RootNode {
         };
         let start = mention.start;
 
-        if is_file_mention_edit(&event) {
-            let keep_open = file_mention_edit_continues_query(&event);
+        if is_key_release(&event) {
+            return ComponentUpdate::none();
+        }
+
+        if is_mention_edit(&event) {
+            let keep_open = mention_edit_continues_query(&event, is_file_query_character);
             let update =
                 self.update_composer(ComposerEvent::Terminal(event), RenderRequest::Immediate);
             let query = if keep_open {
-                self.file_mention_query(start)
+                self.mention_query(start, '@')
             } else {
                 None
             };
@@ -1078,12 +1148,15 @@ impl RootNode {
             return update;
         }
 
-        if !is_file_finder_navigation(&event) {
+        if !is_picker_navigation(&event) {
             self.overlay = None;
             if is_escape(&event) {
                 return ComponentUpdate::render(RenderRequest::Immediate);
             }
-            return self.update_composer(ComposerEvent::Terminal(event), RenderRequest::Immediate);
+            let mut update =
+                self.update_composer(ComposerEvent::Terminal(event), RenderRequest::Immediate);
+            update.render = update.render.max(RenderRequest::Immediate);
+            return update;
         }
 
         let Some(Overlay::FileFinder(mention)) = &mut self.overlay else {
@@ -1110,12 +1183,76 @@ impl RootNode {
         }
     }
 
-    fn file_mention_query(&self, start: usize) -> Option<String> {
+    fn update_skill_picker(&mut self, event: Event) -> ComponentUpdate<RootEffect> {
+        let Some(Overlay::Skills(mention)) = &self.overlay else {
+            return ComponentUpdate::none();
+        };
+        let start = mention.start;
+
+        if is_key_release(&event) {
+            return ComponentUpdate::none();
+        }
+
+        if is_mention_edit(&event) {
+            let keep_open = mention_edit_continues_query(&event, is_skill_query_character);
+            let update =
+                self.update_composer(ComposerEvent::Terminal(event), RenderRequest::Immediate);
+            let query = if keep_open {
+                self.mention_query(start, '$')
+            } else {
+                None
+            };
+            let Some(query) = query else {
+                self.overlay = None;
+                return update;
+            };
+            if let Some(Overlay::Skills(mention)) = &mut self.overlay {
+                let _ = mention.picker.update(SkillPickerEvent::Query(query));
+            }
+            return update;
+        }
+
+        if !is_picker_navigation(&event) {
+            self.overlay = None;
+            if is_escape(&event) {
+                return ComponentUpdate::render(RenderRequest::Immediate);
+            }
+            let mut update =
+                self.update_composer(ComposerEvent::Terminal(event), RenderRequest::Immediate);
+            update.render = update.render.max(RenderRequest::Immediate);
+            return update;
+        }
+
+        let Some(Overlay::Skills(mention)) = &mut self.overlay else {
+            unreachable!("skill picker was checked above");
+        };
+        let update = mention.picker.update(SkillPickerEvent::Terminal(event));
+        let Some(effect) = update.effects.into_iter().next() else {
+            return ComponentUpdate {
+                effects: Vec::new(),
+                render: update.render,
+            };
+        };
+
+        self.overlay = None;
+        match effect {
+            SkillPickerEffect::Dismiss => ComponentUpdate::render(RenderRequest::Immediate),
+            SkillPickerEffect::Insert(name) => self.update_composer(
+                ComposerEvent::ReplaceRange {
+                    range: start..self.composer.component().cursor(),
+                    text: format!("${name} "),
+                },
+                RenderRequest::Immediate,
+            ),
+        }
+    }
+
+    fn mention_query(&self, start: usize, prefix: char) -> Option<String> {
         let composer = self.composer.component();
         composer
             .draft()
             .get(start..composer.cursor())?
-            .strip_prefix('@')
+            .strip_prefix(prefix)
             .map(str::to_owned)
     }
 
@@ -1167,6 +1304,19 @@ impl RootNode {
                 self.overlay = None;
                 return ComponentUpdate {
                     effects: vec![RootEffect::OpenConfigEditor],
+                    render: RenderRequest::Immediate,
+                };
+            }
+            Some(ActionsEffect::Trigger(Action::Memory)) => {
+                if !self.memory_enabled {
+                    return ComponentUpdate {
+                        effects: Vec::new(),
+                        render: update.render,
+                    };
+                }
+                self.overlay = Some(Overlay::Memory(Node::new(MemoryBrowser::new())));
+                return ComponentUpdate {
+                    effects: vec![RootEffect::LoadMemories],
                     render: RenderRequest::Immediate,
                 };
             }
@@ -1234,6 +1384,34 @@ impl RootNode {
                 render: RenderRequest::Immediate,
             },
             ReviewConfirmationEffect::Dismiss => ComponentUpdate::render(RenderRequest::Immediate),
+        }
+    }
+
+    fn update_memory(&mut self, event: MemoryBrowserEvent) -> ComponentUpdate<RootEffect> {
+        let Some(Overlay::Memory(browser)) = &mut self.overlay else {
+            return ComponentUpdate::none();
+        };
+        let update = browser.update(event);
+        let Some(effect) = update.effects.into_iter().next() else {
+            return ComponentUpdate {
+                effects: Vec::new(),
+                render: update.render,
+            };
+        };
+
+        match effect {
+            MemoryBrowserEffect::Dismiss => {
+                self.overlay = None;
+                ComponentUpdate::render(RenderRequest::Immediate)
+            }
+            MemoryBrowserEffect::Refresh => ComponentUpdate {
+                effects: vec![RootEffect::LoadMemories],
+                render: update.render,
+            },
+            MemoryBrowserEffect::Delete(key) => ComponentUpdate {
+                effects: vec![RootEffect::DeleteMemory(key)],
+                render: update.render,
+            },
         }
     }
 
@@ -1943,12 +2121,25 @@ impl Component for RootNode {
             RootEvent::NewSessionFailed(message) => self.new_session_failed(message),
             RootEvent::SessionsLoaded(sessions) => self.sessions_loaded(sessions),
             RootEvent::SessionLoadFailed(message) => self.session_load_failed(message),
+            RootEvent::MemoriesLoaded(records) => {
+                self.update_memory(MemoryBrowserEvent::Loaded(records))
+            }
+            RootEvent::MemoryLoadFailed(message) => {
+                self.update_memory(MemoryBrowserEvent::LoadFailed(message))
+            }
+            RootEvent::MemoryDeleted { id } => {
+                self.update_memory(MemoryBrowserEvent::Deleted { id })
+            }
+            RootEvent::MemoryDeleteFailed { error, conflict } => {
+                self.update_memory(MemoryBrowserEvent::DeleteFailed { error, conflict })
+            }
             RootEvent::SessionRestored {
                 projection,
                 effort,
                 reasoning_mode,
                 preferred_reasoning_mode,
                 fast_mode,
+                skills,
             } => {
                 let workspace = self.workspace.clone();
                 self.install_session_projection(
@@ -1959,6 +2150,7 @@ impl Component for RootNode {
                     fast_mode,
                     *projection,
                 );
+                self.set_skills(skills);
                 ComponentUpdate::render(RenderRequest::Immediate)
             }
             RootEvent::NotifyError(message) => {
@@ -2138,7 +2330,18 @@ fn is_file_finder_trigger(event: &Event) -> bool {
             .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
 }
 
-fn is_file_finder_navigation(event: &Event) -> bool {
+fn is_skill_picker_trigger(event: &Event) -> bool {
+    let Event::Key(key) = event else {
+        return false;
+    };
+    matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
+        && key.code == KeyCode::Char('$')
+        && !key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+}
+
+fn is_picker_navigation(event: &Event) -> bool {
     let Event::Key(key) = event else {
         return false;
     };
@@ -2149,7 +2352,7 @@ fn is_file_finder_navigation(event: &Event) -> bool {
         )
 }
 
-fn is_file_mention_edit(event: &Event) -> bool {
+fn is_mention_edit(event: &Event) -> bool {
     match event {
         Event::Key(key) => {
             matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
@@ -2164,19 +2367,23 @@ fn is_file_mention_edit(event: &Event) -> bool {
     }
 }
 
-fn file_mention_edit_continues_query(event: &Event) -> bool {
+fn mention_edit_continues_query(event: &Event, valid: fn(char) -> bool) -> bool {
     match event {
         Event::Key(key) if key.code == KeyCode::Backspace => true,
         Event::Key(key) => {
-            matches!(key.code, KeyCode::Char(character) if is_file_query_character(character))
+            matches!(key.code, KeyCode::Char(character) if valid(character))
         }
-        Event::Paste(text) => text.chars().all(is_file_query_character),
+        Event::Paste(text) => text.chars().all(valid),
         _ => false,
     }
 }
 
 fn is_file_query_character(character: char) -> bool {
     character.is_alphanumeric() || matches!(character, '_' | '-' | '.' | '/')
+}
+
+fn is_skill_query_character(character: char) -> bool {
+    character.is_ascii_alphanumeric() || character == '-'
 }
 
 fn is_focus_toggle(event: &Event) -> bool {
@@ -2252,13 +2459,15 @@ fn is_plain_key(event: &Event, character: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        Component, ComposerChromeTarget, ConfirmationAction, Overlay, RootEffect, RootEvent,
-        RootNode, SubagentOverlay, ThreadState,
+        Component, ComposerChromeTarget, ConfirmationAction, Overlay, RenderRequest, RootEffect,
+        RootEvent, RootNode, SubagentOverlay, ThreadState,
     };
     use crate::{
         app::config::{ReasoningEffort, ReasoningMode},
-        core::extensions::subagents::{
-            AgentDescriptor, AgentId, AgentMessageUpdate, AgentStatus, AgentUpdate,
+        core::extensions::{
+            Skill,
+            memory::{MemoryKey, MemoryRecord},
+            subagents::{AgentDescriptor, AgentId, AgentMessageUpdate, AgentStatus, AgentUpdate},
         },
         tui::{
             theme::{Theme, ThemeMode},
@@ -2290,6 +2499,20 @@ mod tests {
 
     fn key(code: KeyCode, modifiers: KeyModifiers) -> super::RootEvent {
         super::RootEvent::Terminal(Event::Key(KeyEvent::new(code, modifiers)))
+    }
+
+    fn memory_record(id: i64, version: u64, content: &str) -> MemoryRecord {
+        MemoryRecord {
+            key: MemoryKey { id, version },
+            content: content.to_owned(),
+            created_at_ms: 0,
+            updated_at_ms: 0,
+            last_scanned_at_ms: None,
+            scan_count: 0,
+            last_used_at_ms: None,
+            use_count: 0,
+            probation_until_ms: None,
+        }
     }
 
     fn key_with_kind(
@@ -2822,6 +3045,136 @@ mod tests {
     }
 
     #[test]
+    fn dollar_at_a_token_boundary_opens_skills_and_remains_in_the_draft() {
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        root.set_skills(
+            vec![Skill::new(
+                "autofix",
+                "Review and repair a pull request until clean.",
+            )]
+            .into(),
+        );
+        for character in "use ".chars() {
+            root.update(key(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+
+        let update = root.update(key(KeyCode::Char('$'), KeyModifiers::NONE));
+
+        assert!(matches!(&root.overlay, Some(Overlay::Skills(_))));
+        assert_eq!(root.composer().draft(), "use $");
+        assert_eq!(update.render, RenderRequest::Immediate);
+        let rendered = render_root_text(&mut root, 90, 20);
+        assert!(rendered.contains("$autofix"));
+        assert!(rendered.contains("Review and repair a pull request until clean."));
+    }
+
+    #[test]
+    fn dollar_is_literal_without_available_skills_or_inside_a_token() {
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        root.update(key(KeyCode::Char('$'), KeyModifiers::NONE));
+        assert!(root.overlay.is_none());
+        assert_eq!(root.composer().draft(), "$");
+
+        root.composer.component_mut().replace_draft(String::new());
+        root.set_skills(vec![Skill::new("autofix", "Repair a pull request.")].into());
+        for character in "price$5".chars() {
+            root.update(key(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+
+        assert!(root.overlay.is_none());
+        assert_eq!(root.composer().draft(), "price$5");
+    }
+
+    #[test]
+    fn dollar_is_literal_in_shell_mode() {
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        root.set_skills(vec![Skill::new("autofix", "Repair a pull request.")].into());
+
+        for character in "!echo $PATH".chars() {
+            root.update(key(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+
+        assert!(root.overlay.is_none());
+        assert_eq!(root.composer().draft(), "!echo $PATH");
+
+        let submitted = root.update(key(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            submitted.effects,
+            [RootEffect::RunShell("echo $PATH".to_owned())]
+        );
+    }
+
+    fn assert_skill_selection(key_code: KeyCode) {
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        root.set_skills(
+            vec![
+                Skill::new("autofix", "Repair a pull request."),
+                Skill::new("open-docs", "Open documentation."),
+            ]
+            .into(),
+        );
+        for character in "use later".chars() {
+            root.update(key(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+        for _ in 0.."later".len() {
+            root.update(key(KeyCode::Left, KeyModifiers::NONE));
+        }
+        for character in "$auto".chars() {
+            root.update(key(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+
+        root.update(key(key_code, KeyModifiers::NONE));
+
+        assert!(root.overlay.is_none());
+        assert_eq!(root.composer().draft(), "use $autofix later");
+    }
+
+    #[test]
+    fn enter_selects_a_filtered_skill_at_the_composer_cursor() {
+        assert_skill_selection(KeyCode::Enter);
+    }
+
+    #[test]
+    fn tab_selects_a_filtered_skill_at_the_composer_cursor() {
+        assert_skill_selection(KeyCode::Tab);
+    }
+
+    #[test]
+    fn escape_preserves_a_literal_skill_query() {
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        root.set_skills(vec![Skill::new("autofix", "Repair a pull request.")].into());
+        for character in "$auto".chars() {
+            root.update(key(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+
+        root.update(key(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert!(root.overlay.is_none());
+        assert_eq!(root.composer().draft(), "$auto");
+    }
+
+    #[test]
+    fn mouse_dismisses_mention_popovers_with_an_immediate_redraw() {
+        let workspace = tempfile::tempdir().unwrap();
+        let mut root = RootNode::new(workspace.path(), ReasoningEffort::Medium);
+        root.update(key(KeyCode::Char('@'), KeyModifiers::NONE));
+
+        let file_update = root.update(mouse(MouseEventKind::Moved, 0, 0));
+
+        assert!(root.overlay.is_none());
+        assert_eq!(file_update.render, RenderRequest::Immediate);
+
+        root.set_skills(vec![Skill::new("autofix", "Repair a pull request.")].into());
+        root.update(key(KeyCode::Char(' '), KeyModifiers::NONE));
+        root.update(key(KeyCode::Char('$'), KeyModifiers::NONE));
+
+        let skill_update = root.update(mouse(MouseEventKind::Moved, 0, 0));
+
+        assert!(root.overlay.is_none());
+        assert_eq!(skill_update.render, RenderRequest::Immediate);
+    }
+
+    #[test]
     fn at_at_a_token_boundary_opens_the_file_finder_and_remains_in_the_draft() {
         let workspace = tempfile::tempdir().unwrap();
         let mut root = RootNode::new(workspace.path(), ReasoningEffort::Medium);
@@ -2834,6 +3187,23 @@ mod tests {
         assert!(matches!(&root.overlay, Some(Overlay::FileFinder(_))));
         assert_eq!(root.composer().draft(), "inspect @");
         assert_eq!(update.render, super::RenderRequest::Immediate);
+    }
+
+    #[test]
+    fn releasing_at_keeps_the_file_finder_open() {
+        let workspace = tempfile::tempdir().unwrap();
+        let mut root = RootNode::new(workspace.path(), ReasoningEffort::Medium);
+        root.update(key(KeyCode::Char('@'), KeyModifiers::NONE));
+
+        let update = root.update(key_with_kind(
+            KeyCode::Char('@'),
+            KeyModifiers::NONE,
+            KeyEventKind::Release,
+        ));
+
+        assert!(matches!(&root.overlay, Some(Overlay::FileFinder(_))));
+        assert!(update.effects.is_empty());
+        assert_eq!(update.render, super::RenderRequest::None);
     }
 
     #[test]
@@ -4214,6 +4584,96 @@ mod tests {
         assert!(root.overlay.is_none());
         assert_eq!(update.effects, [RootEffect::ReloadConfig]);
         assert_eq!(update.render, super::RenderRequest::Immediate);
+    }
+
+    #[test]
+    fn memory_action_loads_inspects_and_deletes_without_submitting_a_prompt() {
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        root.set_memory_enabled(true);
+        root.update(key(KeyCode::Char('/'), KeyModifiers::NONE));
+        for character in "remember".chars() {
+            root.update(key(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+
+        let opened = root.update(key(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(opened.effects, [RootEffect::LoadMemories]);
+        assert!(matches!(&root.overlay, Some(Overlay::Memory(_))));
+        assert!(root.composer().draft().is_empty());
+
+        root.update(RootEvent::MemoriesLoaded(vec![memory_record(
+            7,
+            3,
+            "remember this",
+        )]));
+        let inspected = root.update(key(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(inspected.effects.is_empty());
+        assert!(render_root_text(&mut root, 80, 28).contains("remember this"));
+
+        root.update(key(KeyCode::Char('d'), KeyModifiers::NONE));
+        let deleted = root.update(key(KeyCode::Delete, KeyModifiers::NONE));
+        assert_eq!(
+            deleted.effects,
+            [RootEffect::DeleteMemory(MemoryKey { id: 7, version: 3 })]
+        );
+        assert!(root.composer().draft().is_empty());
+
+        root.update(RootEvent::MemoryDeleted { id: 7 });
+        assert!(render_root_text(&mut root, 80, 20).contains("Memory is empty"));
+    }
+
+    #[test]
+    fn memory_completions_are_ignored_after_the_browser_closes() {
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        root.set_memory_enabled(true);
+        root.update(key(KeyCode::Char('/'), KeyModifiers::NONE));
+        for character in "memory".chars() {
+            root.update(key(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+        root.update(key(KeyCode::Enter, KeyModifiers::NONE));
+        root.update(key(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(root.overlay.is_none());
+
+        for event in [
+            RootEvent::MemoriesLoaded(vec![memory_record(1, 1, "stale")]),
+            RootEvent::MemoryLoadFailed("stale load".to_owned()),
+            RootEvent::MemoryDeleted { id: 1 },
+            RootEvent::MemoryDeleteFailed {
+                error: "stale delete".to_owned(),
+                conflict: false,
+            },
+        ] {
+            let update = root.update(event);
+            assert!(update.effects.is_empty());
+            assert_eq!(update.render, RenderRequest::None);
+            assert!(root.overlay.is_none());
+        }
+    }
+
+    #[test]
+    fn memory_availability_survives_reset_and_fork_and_disabling_closes_the_browser() {
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        root.set_memory_enabled(true);
+        root.reset_session(
+            Path::new("/work"),
+            ReasoningEffort::Low,
+            ReasoningMode::Standard,
+            ReasoningMode::Standard,
+        );
+        let fork = root.fork(Path::new("/work"), ReasoningEffort::Low);
+        assert!(root.memory_enabled);
+        assert!(fork.memory_enabled);
+
+        root.update(key(KeyCode::Char('/'), KeyModifiers::NONE));
+        for character in "memory".chars() {
+            root.update(key(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+        root.update(key(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(&root.overlay, Some(Overlay::Memory(_))));
+
+        root.set_memory_enabled(false);
+        assert!(!root.memory_enabled);
+        assert!(root.overlay.is_none());
     }
 
     #[test]

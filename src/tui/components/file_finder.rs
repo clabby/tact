@@ -236,7 +236,7 @@ fn is_skipped_directory(path: &Path) -> bool {
         .is_some_and(|name| SKIPPED_DIRECTORIES.contains(&name))
 }
 
-fn fuzzy_score(path: &str, query: &str) -> Option<usize> {
+pub(super) fn fuzzy_score(path: &str, query: &str) -> Option<usize> {
     if query.is_empty() {
         return Some(0);
     }
@@ -269,7 +269,7 @@ fn fuzzy_score(path: &str, query: &str) -> Option<usize> {
     None
 }
 
-fn visible_query_tail(query: &str, width: usize) -> &str {
+pub(super) fn visible_query_tail(query: &str, width: usize) -> &str {
     let mut used = 0;
     for (index, grapheme) in query.grapheme_indices(true).rev() {
         used += grapheme.width();
