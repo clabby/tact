@@ -93,20 +93,20 @@ The configuration file is optional. Tact reads `$TACT_HOME/config.toml`, or
 `~/.tact/config.toml` when `TACT_HOME` is unset. Select another file with `--config PATH` or
 `TACT_CONFIG`.
 
-These commands show which file is selected and the complete effective configuration, including
-defaults:
+Use `config show` to discover every available field and inspect the complete effective
+configuration after file, environment, command-line, and default values have been applied:
 
 ```sh
 tact config path
 tact config show
 ```
 
-A typical configuration looks like this:
+The default effective configuration looks like this (paths depend on your environment):
 
 ```toml
 [auth]
 mode = "auto" # auto, chatgpt, or api-key
-# file = "/path/to/.codex/auth.json"
+file = "/path/to/.codex/auth.json"
 
 [agent]
 workspace = "/path/to/workspace"
@@ -114,14 +114,18 @@ thinking = "medium" # low, medium, high, xhigh, or max
 reasoning_mode = "standard" # standard or pro
 fast_mode = false
 max_subagents = 32
+instructions = ""
+append_instructions = ""
 web_search = true
 image_generation = true
-# instructions = "Replace the standard Nanocodex instructions"
-# append_instructions = "Append after Tact's built-in instructions"
+websocket_url = ""
+api_base_url = ""
+
+[mcp_servers]
 
 [skills]
 enabled = false
-# roots = ["skills", "/path/to/shared-skills"]
+roots = []
 
 [memory]
 enabled = false
@@ -131,6 +135,32 @@ enabled = true
 
 [theme]
 mode = "auto" # auto, light, or dark
+
+[theme.light]
+text = "reset"
+border = "dark-gray"
+muted = "dark-gray"
+accent = "blue"
+code_text = "#262626"
+code_background = "#EEEEEE"
+thinking_low = "dark-gray"
+thinking_medium = "#007878"
+thinking_high = "#9A6700"
+thinking_xhigh = "red"
+thinking_max = "magenta"
+
+[theme.dark]
+text = "reset"
+border = "dark-gray"
+muted = "dark-gray"
+accent = "blue"
+code_text = "#D7D7D7"
+code_background = "#262626"
+thinking_low = "gray"
+thinking_medium = "cyan"
+thinking_high = "yellow"
+thinking_xhigh = "red"
+thinking_max = "magenta"
 ```
 
 The workspace defaults to the directory where tact starts. Relative paths in the configuration are
