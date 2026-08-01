@@ -85,7 +85,6 @@ pub(crate) struct Config {
     codex_home: Option<PathBuf>,
     auth: AuthConfig,
     agent: AgentConfig,
-    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     mcp_servers: BTreeMap<String, McpServerConfig>,
     skills: SkillsConfig,
     memory: MemoryConfig,
@@ -144,11 +143,15 @@ pub(crate) struct AgentConfig {
     reasoning_mode: ReasoningMode,
     fast_mode: bool,
     max_subagents: usize,
+    #[serde(serialize_with = "serialize_optional_string")]
     instructions: Option<String>,
+    #[serde(serialize_with = "serialize_optional_string")]
     append_instructions: Option<String>,
     web_search: bool,
     image_generation: bool,
+    #[serde(serialize_with = "serialize_optional_string")]
     websocket_url: Option<String>,
+    #[serde(serialize_with = "serialize_optional_string")]
     api_base_url: Option<String>,
 }
 
@@ -377,10 +380,12 @@ impl Config {
                     .max_subagents
                     .or(file.agent.max_subagents)
                     .unwrap_or(DEFAULT_MAX_SUBAGENTS),
-                instructions: overrides.instructions.or(file.agent.instructions),
-                append_instructions: overrides
-                    .append_instructions
-                    .or(file.agent.append_instructions),
+                instructions: optional_string(overrides.instructions.or(file.agent.instructions)),
+                append_instructions: optional_string(
+                    overrides
+                        .append_instructions
+                        .or(file.agent.append_instructions),
+                ),
                 web_search: overrides
                     .web_search
                     .or(file.agent.web_search)
@@ -389,8 +394,10 @@ impl Config {
                     .image_generation
                     .or(file.agent.image_generation)
                     .unwrap_or(true),
-                websocket_url: overrides.websocket_url.or(file.agent.websocket_url),
-                api_base_url: overrides.api_base_url.or(file.agent.api_base_url),
+                websocket_url: optional_string(
+                    overrides.websocket_url.or(file.agent.websocket_url),
+                ),
+                api_base_url: optional_string(overrides.api_base_url.or(file.agent.api_base_url)),
             },
             mcp_servers,
             skills,
@@ -841,6 +848,20 @@ where
     map.end()
 }
 
+fn serialize_optional_string<S>(
+    value: &Option<String>,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.serialize_str(value.as_deref().unwrap_or_default())
+}
+
+fn optional_string(value: Option<String>) -> Option<String> {
+    value.filter(|value| !value.is_empty())
+}
+
 impl ConfigReload {
     pub(crate) fn into_parts(self) -> (Config, bool) {
         (self.config, self.workspace_changed)
@@ -1139,6 +1160,14 @@ mod tests {
         )
     }
 
+    fn assert_table_fields(value: &toml::Value, expected: &[&str]) {
+        let table = value.as_table().expect("expected a TOML table");
+        assert_eq!(table.len(), expected.len());
+        for field in expected {
+            assert!(table.contains_key(*field), "missing `{field}`");
+        }
+    }
+
     #[test]
     fn missing_default_file_materializes_all_defaults() {
         let directory = tempdir().unwrap();
@@ -1166,6 +1195,55 @@ mod tests {
         assert_eq!(config.theme.border(), Color::DarkGray);
 
         let rendered: toml::Value = toml::from_str(&config.to_toml().unwrap()).unwrap();
+        assert_table_fields(
+            &rendered,
+            &[
+                "auth",
+                "agent",
+                "mcp_servers",
+                "skills",
+                "memory",
+                "subagents",
+                "theme",
+            ],
+        );
+        assert_table_fields(&rendered["auth"], &["mode", "file"]);
+        assert_table_fields(
+            &rendered["agent"],
+            &[
+                "workspace",
+                "thinking",
+                "reasoning_mode",
+                "fast_mode",
+                "max_subagents",
+                "instructions",
+                "append_instructions",
+                "web_search",
+                "image_generation",
+                "websocket_url",
+                "api_base_url",
+            ],
+        );
+        assert_table_fields(&rendered["mcp_servers"], &[]);
+        assert_table_fields(&rendered["skills"], &["enabled", "roots"]);
+        assert_table_fields(&rendered["memory"], &["enabled"]);
+        assert_table_fields(&rendered["subagents"], &["enabled"]);
+        assert_table_fields(&rendered["theme"], &["mode", "light", "dark"]);
+        let palette_fields = [
+            "text",
+            "border",
+            "muted",
+            "accent",
+            "code_text",
+            "code_background",
+            "thinking_low",
+            "thinking_medium",
+            "thinking_high",
+            "thinking_xhigh",
+            "thinking_max",
+        ];
+        assert_table_fields(&rendered["theme"]["light"], &palette_fields);
+        assert_table_fields(&rendered["theme"]["dark"], &palette_fields);
         assert_eq!(rendered["auth"]["mode"].as_str(), Some("auto"));
         assert_eq!(
             rendered["auth"]["file"].as_str(),
@@ -1178,8 +1256,26 @@ mod tests {
         assert_eq!(rendered["agent"]["thinking"].as_str(), Some("medium"));
         assert_eq!(rendered["agent"]["fast_mode"].as_bool(), Some(false));
         assert_eq!(rendered["agent"]["max_subagents"].as_integer(), Some(32));
+        for field in [
+            "instructions",
+            "append_instructions",
+            "websocket_url",
+            "api_base_url",
+        ] {
+            assert_eq!(rendered["agent"][field].as_str(), Some(""), "{field}");
+        }
+        assert_eq!(
+            rendered["mcp_servers"].as_table().map(|table| table.len()),
+            Some(0)
+        );
         assert_eq!(rendered["theme"]["mode"].as_str(), Some("auto"));
         assert_eq!(rendered["theme"]["dark"]["accent"].as_str(), Some("blue"));
+
+        let reloaded = load_config(&config.to_toml().unwrap()).unwrap();
+        assert!(reloaded.agent.instructions.is_none());
+        assert!(reloaded.agent.append_instructions.is_none());
+        assert!(reloaded.agent.websocket_url.is_none());
+        assert!(reloaded.agent.api_base_url.is_none());
     }
 
     #[test]
