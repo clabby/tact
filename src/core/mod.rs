@@ -42,6 +42,17 @@ const SUBAGENT_INSTRUCTIONS: &str = concat!(
     "verification."
 );
 
+const TOOL_ORCHESTRATION_INSTRUCTIONS: &str = concat!(
+    "Use code mode to orchestrate related tool calls when the next calls can be determined from ",
+    "tool results without additional model judgment or user input. Keep the complete lifecycle in ",
+    "one code-mode program: use `Promise.all` for independent calls, and use loops and conditionals ",
+    "for dependent calls. In particular, when `exec_command` returns a `session_id`, continue calling ",
+    "`write_stdin` in that program until the process exits. If the outer code-mode cell yields, wait ",
+    "on that cell; do not move nested process polling into separate model turns. Return only the ",
+    "results needed for the next reasoning step. Use separate code-mode calls when an intermediate ",
+    "result requires model judgment, user input, or a progress update."
+);
+
 const MEMORY_INSTRUCTIONS: &str = concat!(
     "Global memory is available through the explicit `memory` tool. At the beginning of every ",
     "substantial task, use code mode to scan memory before planning or delegating. Await the scan ",
@@ -365,6 +376,7 @@ fn session_instructions(
         },
         |(instructions, catalog_present)| {
             let instructions = reconcile_memory_instructions(instructions, false);
+            let instructions = reconcile_tool_orchestration_instructions(instructions);
             let instructions = reconcile_subagent_instructions(instructions, subagents_enabled);
             let instructions = reconcile_memory_instructions(instructions, memory_enabled);
             let skills = if catalog_present.unwrap_or(true) {
@@ -420,6 +432,7 @@ fn fresh_instructions_with_catalog(
     let mut instructions = custom
         .map(str::to_owned)
         .unwrap_or_else(|| ResponsesServiceConfig::default().system_prompt.to_string());
+    instructions = reconcile_tool_orchestration_instructions(instructions);
     if subagents_enabled {
         instructions.push_str("\n\n");
         instructions.push_str(SUBAGENT_INSTRUCTIONS);
@@ -433,6 +446,19 @@ fn fresh_instructions_with_catalog(
         .map_or(instructions.clone(), |skill_instructions| {
             format!("{instructions}\n\n{skill_instructions}")
         })
+}
+
+fn reconcile_tool_orchestration_instructions(mut instructions: String) -> String {
+    let separator_and_instructions = format!("\n\n{TOOL_ORCHESTRATION_INSTRUCTIONS}");
+    let occurrences = instructions.matches(&separator_and_instructions).count();
+    if occurrences == 1 {
+        return instructions;
+    }
+    if occurrences > 1 {
+        instructions = instructions.replace(&separator_and_instructions, "");
+    }
+    instructions.push_str(&separator_and_instructions);
+    instructions
 }
 
 fn reconcile_subagent_instructions(mut instructions: String, enabled: bool) -> String {
@@ -466,7 +492,7 @@ impl Cancellation {
 mod tests {
     use super::{
         ConfiguredAgent, MEMORY_INSTRUCTIONS, MEMORY_REVIEW_CHECKPOINT, SUBAGENT_INSTRUCTIONS,
-        fresh_instructions, session_instructions,
+        TOOL_ORCHESTRATION_INSTRUCTIONS, fresh_instructions, session_instructions,
     };
     use crate::{
         app::{
@@ -537,11 +563,13 @@ mod tests {
 
         assert_eq!(
             fresh_instructions(None, None, &disabled),
-            format!("{default}\n\n{SUBAGENT_INSTRUCTIONS}")
+            format!("{default}\n\n{TOOL_ORCHESTRATION_INSTRUCTIONS}\n\n{SUBAGENT_INSTRUCTIONS}")
         );
         assert_eq!(
             fresh_instructions(Some("Custom instructions."), None, &disabled),
-            format!("Custom instructions.\n\n{SUBAGENT_INSTRUCTIONS}")
+            format!(
+                "Custom instructions.\n\n{TOOL_ORCHESTRATION_INSTRUCTIONS}\n\n{SUBAGENT_INSTRUCTIONS}"
+            )
         );
     }
 
@@ -553,7 +581,9 @@ mod tests {
         let instructions = fresh_instructions(None, Some("Project instructions."), &disabled);
         assert_eq!(
             instructions,
-            format!("{default}\n\n{SUBAGENT_INSTRUCTIONS}\n\nProject instructions.")
+            format!(
+                "{default}\n\n{TOOL_ORCHESTRATION_INSTRUCTIONS}\n\n{SUBAGENT_INSTRUCTIONS}\n\nProject instructions."
+            )
         );
         assert_eq!(
             fresh_instructions(
@@ -561,7 +591,9 @@ mod tests {
                 Some("Project instructions."),
                 &disabled
             ),
-            format!("Replacement.\n\n{SUBAGENT_INSTRUCTIONS}\n\nProject instructions.")
+            format!(
+                "Replacement.\n\n{TOOL_ORCHESTRATION_INSTRUCTIONS}\n\n{SUBAGENT_INSTRUCTIONS}\n\nProject instructions."
+            )
         );
     }
 
@@ -610,7 +642,7 @@ mod tests {
         let instructions = fresh_instructions(Some("Keep this first."), None, &enabled);
 
         assert!(instructions.starts_with(&format!(
-            "Keep this first.\n\n{SUBAGENT_INSTRUCTIONS}\n\n## Available local skills"
+            "Keep this first.\n\n{TOOL_ORCHESTRATION_INSTRUCTIONS}\n\n{SUBAGENT_INSTRUCTIONS}\n\n## Available local skills"
         )));
         assert!(instructions.contains("Run focused tests."));
         assert!(!instructions.contains("SECRET-BODY"));
@@ -669,7 +701,7 @@ mod tests {
             )
             .text
             .as_ref(),
-            stored
+            format!("{stored}\n\n{TOOL_ORCHESTRATION_INSTRUCTIONS}")
         );
         let restored = session_instructions(
             None,
@@ -679,7 +711,10 @@ mod tests {
             false,
             false,
         );
-        assert_eq!(restored.text.as_ref(), stored);
+        assert_eq!(
+            restored.text.as_ref(),
+            format!("{stored}\n\n{TOOL_ORCHESTRATION_INSTRUCTIONS}")
+        );
         assert_eq!(
             restored.skills.as_ref(),
             [Skill::new("old-skill", "The original catalog entry.")]
@@ -724,7 +759,7 @@ mod tests {
     }
 
     #[test]
-    fn restored_session_reuses_exact_instructions() {
+    fn restored_session_reuses_stored_instructions_before_builtin_guidance() {
         let directory = tempdir().unwrap();
         let skill = directory.path().join("new");
         fs::create_dir(&skill).unwrap();
@@ -746,7 +781,7 @@ mod tests {
             )
             .text
             .as_ref(),
-            "Old default."
+            format!("Old default.\n\n{TOOL_ORCHESTRATION_INSTRUCTIONS}")
         );
         assert_eq!(
             session_instructions(
@@ -759,7 +794,7 @@ mod tests {
             )
             .text
             .as_ref(),
-            "Old custom."
+            format!("Old custom.\n\n{TOOL_ORCHESTRATION_INSTRUCTIONS}")
         );
     }
 
@@ -812,7 +847,45 @@ mod tests {
             false,
             false,
         );
-        assert_eq!(restored_disabled.text.as_ref(), "Stored.");
+        assert_eq!(
+            restored_disabled.text.as_ref(),
+            format!("Stored.\n\n{TOOL_ORCHESTRATION_INSTRUCTIONS}")
+        );
+    }
+
+    #[test]
+    fn tool_orchestration_instructions_cover_dependent_calls_and_restored_sessions() {
+        let skills = SkillsConfig::from_roots(false, Vec::new());
+        let fresh = session_instructions(None, None, &skills, None, false, false);
+
+        assert!(
+            fresh
+                .text
+                .contains("without additional model judgment or user input")
+        );
+        assert!(fresh.text.contains("continue calling `write_stdin`"));
+        assert!(fresh.text.contains("do not move nested process polling"));
+
+        let duplicated = format!(
+            "Stored.\n\n{TOOL_ORCHESTRATION_INSTRUCTIONS}\n\nAppendix.\n\n{TOOL_ORCHESTRATION_INSTRUCTIONS}"
+        );
+        let restored = session_instructions(
+            None,
+            None,
+            &skills,
+            Some((duplicated, Some(false))),
+            false,
+            false,
+        );
+
+        assert_eq!(
+            restored
+                .text
+                .matches(TOOL_ORCHESTRATION_INSTRUCTIONS)
+                .count(),
+            1
+        );
+        assert!(restored.text.contains("Appendix."));
     }
 
     #[test]
