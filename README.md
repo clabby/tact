@@ -57,7 +57,7 @@ binary. If Cargo owns the installation, tact instead prints `cargo install tact 
 Cargo's records stay accurate. Automatic update notifications are shown only by official release
 builds.
 
-## Sign in
+## Authentication
 
 By default, tact uses the ChatGPT session stored by Codex in `$CODEX_HOME/auth.json` or
 `~/.codex/auth.json`. If that file does not exist, it looks for `OPENAI_API_KEY`.
@@ -187,20 +187,6 @@ Use **Reload config** in the Actions menu after editing the file. Theme changes 
 Most agent settings apply when a session starts or is restored, while effort and fast mode can also
 be changed during a session. Workspace changes require restarting tact.
 
-### Subagents
-
-Subagents are enabled by default. Disable their tools and built-in delegation instructions with:
-
-```toml
-[subagents]
-enabled = false
-```
-
-This setting applies when a session starts or is restored. Reloading the configuration does not
-change the tool surface of an already-running session. `agent.max_subagents` controls concurrency
-when the feature is enabled; setting it does not enable or disable subagents. See the
-[subagent design](docs/subagents.md) for the tool, lifecycle, messaging, and authority contracts.
-
 ### Themes
 
 All theme options can be set directly under `[theme]` to apply to both palettes:
@@ -225,13 +211,130 @@ Put any of the color options under `[theme.light]` or `[theme.dark]` to override
 may be Ratatui names, indexed values such as `239`, or RGB values such as `"#AABBCC"`. Auto mode
 follows the operating-system theme while tact is running.
 
-### Custom endpoints
+### Custom Endpoints
 
 Advanced deployments can set `agent.websocket_url` and `agent.api_base_url`, or use the
 `--websocket-url` and `--api-base-url` options. Leave them unset to use Nanocodex's defaults for the
 selected authentication method.
 
-## MCP servers
+## Features
+
+### Subagents
+
+Subagents are enabled by default. Disable their tools and built-in delegation instructions with:
+
+```toml
+[subagents]
+enabled = false
+```
+
+This setting applies when a session starts or is restored. Reloading the configuration does not
+change the tool surface of an already-running session. `agent.max_subagents` controls concurrency
+when the feature is enabled; setting it does not enable or disable subagents. See the
+[subagent design](docs/subagents.md) for the tool, lifecycle, messaging, and authority contracts.
+
+### Memory
+
+Tact's bounded cross-session memory is disabled by default. Opt in explicitly:
+
+```toml
+[memory]
+enabled = true
+```
+
+Memory is global to the selected Tact configuration, not scoped to a workspace. Tact stores it in
+`memory/v1.sqlite3` beside the selected `config.toml`, and agents access it only through explicit
+memory tool calls. The corpus is never inserted into prompts automatically. For later user
+messages and in-flight steers, Tact adds a fixed, content-free checkpoint asking the agent to
+review the conversation and update memory when it finds a durable conclusion. See the
+[global memory design](docs/memory.md) for the tool contract, limits, privacy model, and evaluation
+criteria.
+
+Config reload applies memory-browser availability immediately. Like other agent tool and prompt
+settings, the agent-facing memory setting applies when a new session starts or is restored; an
+already-running agent retains the tool surface and instructions with which it was created.
+
+### Review
+
+Enter `/review` while no agent work is active to open a browser-based human review tool for
+workspace changes. Tact shows the full branch from trunk by default; you can narrow the range,
+inspect the diff, leave overall or inline feedback, and approve or request changes. Tact converts
+your review to Markdown and inserts it into the composer so you can edit it before passing it to the
+agent. Inline selections can also open a private question thread with the agent; those conversations
+help you understand the code but are not included in the rendered review feedback. The browser can
+also generate an agent-authored visual overview of the selected range on demand.
+
+Reloading or closing the browser does not cancel the review. Agent question threads remain available,
+and an answer already in progress continues in the background. Reopen the live URL shown by Tact,
+or cancel explicitly from the browser or Tact.
+
+The review tool requires a separate browser bundle. The first `/review` from each official Tact
+version asks for confirmation, then lazily downloads and verifies the matching release artifact.
+The bundle is downloaded once per Tact version and stored under `~/.tact/review` by default.
+
+#### Developing the review interface
+
+Development builds do not download browser assets. Install Bun, then build and link the assets into
+the development Tact directory:
+
+```sh
+cd web/review
+bun install --frozen-lockfile
+just install-dev
+```
+
+To work on the interface in a browser with sample review data, run:
+
+```sh
+just dev
+```
+
+`TACT_REVIEW_ASSETS=/absolute/path/to/web/review/dist` remains available as a manual override. The
+development server watches browser sources, rebuilds them, and reloads connected pages.
+
+### Session Forking
+
+Press `Ctrl+F` or choose **Fork session** from the Actions menu to open an independent session next
+to the current one. The fork starts from the stable conversation history available at that point;
+new prompts, model responses, and transcripts then remain independent in each pane.
+
+Tact supports one open fork at a time. Close the fork before creating another. Forked sessions are
+persisted separately and can be resumed like other sessions.
+
+### Resume
+
+Tact checkpoints each completed turn and keeps an append-only transcript. Open **Resume session**
+from the Actions menu to search sessions for the current workspace, or resume a known ID directly:
+
+```sh
+tact --resume SESSION_ID
+```
+
+Tact prints the active session's resume command when it exits. Session files live beside the
+selected configuration in private, versioned `checkpoints` and `transcripts` directories.
+Checkpoints contain the complete model-visible conversation and are not redacted, so treat them as
+private data.
+
+### Skills
+
+Skills are local `SKILL.md` files containing instructions the model can choose to follow. They are
+disabled by default to avoid adding their catalogs to every session's persistent context. Skills
+can also direct tool and shell execution, so enable only directories you trust:
+
+```toml
+[skills]
+enabled = true
+roots = ["skills", "/path/to/shared-skills"]
+```
+
+Type `$` at a token boundary in the composer to search the active session's skills. Enter or Tab
+inserts the selected `$skill-name` into the prompt.
+
+When enabled, tact also searches `$CODEX_HOME/skills` (or `~/.codex/skills`) and
+`~/.agents/skills`. A new session discovers the current set of skills. Restored sessions keep the
+skill catalog they started with so their instructions remain stable.
+
+### MCP Servers
 
 Tact supports local stdio servers and remote Streamable HTTP servers. Add a local server with:
 
@@ -261,95 +364,3 @@ tact mcp add docs --url https://example.com/mcp \
 
 Remote URLs must use HTTP or HTTPS and cannot contain embedded credentials. Each server starts
 independently, so a broken server does not prevent the session or other servers from working.
-
-## Skills
-
-Skills are local `SKILL.md` files containing instructions the model can choose to follow. They are
-disabled by default to avoid adding their catalogs to every session's persistent context. Skills
-can also direct tool and shell execution, so enable only directories you trust:
-
-```toml
-[skills]
-enabled = true
-roots = ["skills", "/path/to/shared-skills"]
-```
-
-Type `$` at a token boundary in the composer to search the active session's skills. Enter or Tab
-inserts the selected `$skill-name` into the prompt.
-
-When enabled, tact also searches `$CODEX_HOME/skills` (or `~/.codex/skills`) and
-`~/.agents/skills`. A new session discovers the current set of skills. Restored sessions keep the
-skill catalog they started with so their instructions remain stable.
-
-## Shared memory
-
-Tact's bounded cross-session memory is disabled by default. Opt in explicitly:
-
-```toml
-[memory]
-enabled = true
-```
-
-Memory is global to the selected Tact configuration, not scoped to a workspace. Tact stores it in
-`memory/v1.sqlite3` beside the selected `config.toml`, and agents access it only through explicit
-memory tool calls. The corpus is never inserted into prompts automatically. For later user
-messages and in-flight steers, Tact adds a fixed, content-free checkpoint asking the agent to
-review the conversation and update memory when it finds a durable conclusion. See the
-[global memory design](docs/memory.md) for the tool contract, limits, privacy model, and evaluation
-criteria.
-
-Config reload applies memory-browser availability immediately. Like other agent tool and prompt
-settings, the agent-facing memory setting applies when a new session starts or is restored; an
-already-running agent retains the tool surface and instructions with which it was created.
-
-## Review changes
-
-Enter `/review` while no agent work is active to open a browser-based human review tool for
-workspace changes. Tact shows the full branch from trunk by default; you can narrow the range,
-inspect the diff, leave overall or inline feedback, and approve or request changes. Tact converts
-your review to Markdown and inserts it into the composer so you can edit it before passing it to the
-agent. Inline selections can also open a private question thread with the agent; those conversations
-help you understand the code but are not included in the rendered review feedback. The browser can
-also generate an agent-authored visual overview of the selected range on demand.
-
-Reloading or closing the browser does not cancel the review. Agent question threads remain available,
-and an answer already in progress continues in the background. Reopen the live URL shown by Tact,
-or cancel explicitly from the browser or Tact.
-
-The review tool requires a separate browser bundle. The first `/review` from each official Tact
-version asks for confirmation, then lazily downloads and verifies the matching release artifact.
-The bundle is downloaded once per Tact version and stored under `~/.tact/review` by default.
-
-### Developing the review interface
-
-Development builds do not download browser assets. Install Bun, then build and link the assets into
-the development Tact directory:
-
-```sh
-cd web/review
-bun install --frozen-lockfile
-just install-dev
-```
-
-To work on the interface in a browser with sample review data, run:
-
-```sh
-just dev
-```
-
-`TACT_REVIEW_ASSETS=/absolute/path/to/web/review/dist` remains available as a manual override. The
-development server watches browser sources, rebuilds them, and reloads connected pages.
-
-## Sessions and local data
-
-Tact checkpoints each completed turn and keeps an append-only transcript. Open **Resume session**
-from the Actions menu to search sessions for the current workspace, or resume a known ID directly:
-
-```sh
-tact --resume SESSION_ID
-```
-
-Tact prints the active session's resume command when it exits. Session files live beside the
-selected configuration in private, versioned `checkpoints` and `transcripts` directories.
-Checkpoints contain the complete model-visible conversation and are not redacted, so treat them as
-private data.
