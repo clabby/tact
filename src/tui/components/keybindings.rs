@@ -16,7 +16,7 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr;
 
 const FOOTER: [&str; 1] = ["esc close"];
-const BINDINGS: [(&str, &str); 19] = [
+const BINDINGS: [(&str, &str); 20] = [
     ("ctrl+s", "change reasoning effort"),
     ("ctrl+f", "fork session · when available"),
     ("ctrl+g", "edit prompt in $EDITOR"),
@@ -31,6 +31,7 @@ const BINDINGS: [(&str, &str); 19] = [
     ("esc esc", "interrupt the active response"),
     ("enter", "submit prompt"),
     ("shift+enter/ctrl+j", "insert newline"),
+    ("alt/option+backspace", "delete previous word"),
     ("↑/↓", "move cursor · prompt history at edge"),
     ("tab", "focus queue · when present"),
     ("/", "open actions · empty prompt only"),
@@ -73,7 +74,7 @@ impl Component for KeybindingsHelp {
 
     fn render(&mut self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
         let layout =
-            Floating::new("Keyboard shortcuts", 72, 22, &FOOTER).render(frame, area, theme);
+            Floating::new("Keyboard shortcuts", 72, 23, &FOOTER).render(frame, area, theme);
         if layout.body.is_empty() {
             return;
         }
@@ -171,6 +172,8 @@ mod tests {
             "clear input · when composer is focused and nonempty",
             "split closes pane · else exit",
             "shift+enter/ctrl+j",
+            "alt/option+backspace",
+            "delete previous word",
             "prompt history at edge",
             "focus queue · when present",
             "open actions · empty prompt only",
