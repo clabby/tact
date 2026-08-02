@@ -930,7 +930,6 @@ impl TranscriptModel {
         let children = self.code_children.entry(parent).or_default();
         children.push(child);
         let child_count = children.len();
-        let children = children.clone();
 
         if child_count == 1 {
             let index = self.index_of(parent).expect("code parent is retained");
@@ -938,21 +937,47 @@ impl TranscriptModel {
             self.entries[index].revision = self.entries[index].revision.saturating_add(1);
             return;
         }
-        if child_count > 2 {
-            return;
+        let previous_child = self.code_children[&parent][child_count - 2];
+        if child_count == 2 {
+            let parent_index = self.index_of(parent).expect("code parent is retained");
+            self.entries[parent_index].hidden = false;
+            self.entries[parent_index].trailing_spacer = false;
+            self.entries[parent_index].revision =
+                self.entries[parent_index].revision.saturating_add(1);
+
+            self.move_entry_after(previous_child, parent);
         }
 
-        let parent_index = self.index_of(parent).expect("code parent is retained");
-        self.entries[parent_index].hidden = false;
-        self.entries[parent_index].trailing_spacer = false;
-        self.entries[parent_index].revision = self.entries[parent_index].revision.saturating_add(1);
-        for (index, child) in children.iter().enumerate() {
-            let child_index = self.index_of(*child).expect("code child is retained");
-            self.entries[child_index].parent = Some(parent);
-            self.entries[child_index].trailing_spacer = index + 1 == children.len();
-            self.entries[child_index].revision =
-                self.entries[child_index].revision.saturating_add(1);
-        }
+        let previous_index = self
+            .index_of(previous_child)
+            .expect("code child is retained");
+        self.entries[previous_index].parent = Some(parent);
+        self.entries[previous_index].trailing_spacer = false;
+        self.entries[previous_index].revision =
+            self.entries[previous_index].revision.saturating_add(1);
+
+        let child_index = self.index_of(child).expect("code child is retained");
+        self.entries[child_index].parent = Some(parent);
+        self.entries[child_index].trailing_spacer = true;
+        self.entries[child_index].revision = self.entries[child_index].revision.saturating_add(1);
+        self.move_entry_after(child, previous_child);
+    }
+
+    fn move_entry_after(&mut self, id: EntryId, previous: EntryId) {
+        let index = self.index_of(id).expect("moved entry is retained");
+        let entry = self.entries.remove(index);
+        let previous_index = self
+            .entries
+            .iter()
+            .position(|entry| entry.id == previous)
+            .expect("preceding entry is retained");
+        self.entries.insert(previous_index + 1, entry);
+        self.entry_indices = self
+            .entries
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| (entry.id, index))
+            .collect();
     }
 
     fn trim_message_history(&mut self) -> Option<EntryId> {
@@ -2145,6 +2170,53 @@ mod tests {
         assert_eq!(model.entries()[2].parent, Some(model.entries()[0].id));
         assert!(!model.entries()[1].trailing_spacer);
         assert!(model.entries()[2].trailing_spacer);
+    }
+
+    #[test]
+    fn late_code_children_remain_with_the_original_batch() {
+        let mut model = TranscriptModel::default();
+        model.apply(&agent(
+            AgentEventKind::ToolCall,
+            json!({"call_id": "workflow", "tool": "exec", "arguments": "text('start')"}),
+        ));
+        for child in 1..=2 {
+            model.apply(&agent(
+                AgentEventKind::ToolCall,
+                json!({
+                    "call_id": format!("workflow/code-{child}"),
+                    "tool": "wait",
+                    "arguments": {"cell_id": "cell"},
+                }),
+            ));
+        }
+        model.apply(&agent(
+            AgentEventKind::AssistantMessage,
+            json!({
+                "model_call_index": 1,
+                "item_id": "message",
+                "phase": "final_answer",
+                "text": "still waiting",
+            }),
+        ));
+        model.apply(&agent(
+            AgentEventKind::ToolCall,
+            json!({
+                "call_id": "workflow/code-3",
+                "tool": "wait",
+                "arguments": {"cell_id": "cell"},
+            }),
+        ));
+
+        let parent = model.entries()[0].id;
+        assert!(
+            model.entries()[1..=3]
+                .iter()
+                .all(|entry| entry.parent == Some(parent))
+        );
+        assert!(matches!(
+            &model.entries()[4].kind,
+            EntryKind::Assistant { text, .. } if text == "still waiting"
+        ));
     }
 
     #[test]
