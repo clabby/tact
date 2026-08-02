@@ -1339,7 +1339,7 @@ fn render_entry(
             } else {
                 tool::render(tool, tool_width, theme)
             };
-            indent_nested_tool(indent, &mut lines, theme);
+            indent_nested_tool(indent, &mut lines, theme, expanded, entry.trailing_spacer);
             layout_without_links(lines)
         }
         EntryKind::DirectedMessage(thread) => {
@@ -1433,7 +1433,7 @@ fn render_live_tool_summary(
     let indent = nested_tool_indent(entry, width);
     let tool_width = width.saturating_sub(indent);
     let mut lines = tool::render_live_summary(tool, duration_ns, tool_width, theme, expanded);
-    indent_nested_tool(indent, &mut lines, theme);
+    indent_nested_tool(indent, &mut lines, theme, expanded, entry.trailing_spacer);
     lines
 }
 
@@ -1450,19 +1450,33 @@ const fn nested_tool_indent(entry: &TranscriptEntry, width: u16) -> u16 {
     }
 }
 
-fn indent_nested_tool(indent: u16, lines: &mut [Line<'static>], theme: &Theme) {
-    let markers = match indent {
+fn indent_nested_tool(
+    indent: u16,
+    lines: &mut [Line<'static>],
+    theme: &Theme,
+    expanded: bool,
+    terminal: bool,
+) {
+    let (terminal_marker, continuing_marker, continuation) = match indent {
         0 => return,
-        1 => ("├", "│"),
-        2 => ("├─", "│ "),
-        3 => (" ├─", " │ "),
-        _ => ("  ├─", "  │ "),
+        1 => ("└", "├", "│"),
+        2 => ("└─", "├─", "│ "),
+        3 => (" └─", " ├─", " │ "),
+        _ => ("  └─", "  ├─", "  │ "),
     };
     if lines.is_empty() {
         return;
     }
     for (index, line) in lines.iter_mut().enumerate() {
-        let marker = if index == 0 { markers.0 } else { markers.1 };
+        let marker = if index == 0 {
+            if expanded || !terminal {
+                continuing_marker
+            } else {
+                terminal_marker
+            }
+        } else {
+            continuation
+        };
         line.spans
             .insert(0, Span::styled(marker, Style::default().fg(theme.border())));
     }
@@ -2546,10 +2560,11 @@ mod tests {
             .collect::<Vec<_>>();
         let batch = rows.join("");
         assert!(batch.contains("Batch"));
-        assert_eq!(batch.matches("├─").count(), 2);
+        assert_eq!(batch.matches("├─").count(), 1);
+        assert_eq!(batch.matches("└─").count(), 1);
         let batch_row = rows.iter().position(|row| row.contains("Batch")).unwrap();
         assert!(rows[batch_row + 1].contains("├─"));
-        assert!(rows[batch_row + 2].contains("├─"));
+        assert!(rows[batch_row + 2].contains("└─"));
         assert!(rows[batch_row + 3].trim().is_empty());
     }
 
