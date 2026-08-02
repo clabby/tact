@@ -650,6 +650,9 @@ impl Composer {
             KeyCode::Down => ComposerUpdate::from_change(self.move_down()),
             KeyCode::Home => ComposerUpdate::from_change(self.move_to_visual_edge(false)),
             KeyCode::End => ComposerUpdate::from_change(self.move_to_visual_edge(true)),
+            KeyCode::Backspace if key.modifiers.contains(KeyModifiers::ALT) => {
+                ComposerUpdate::from_change(self.delete_word_before_cursor())
+            }
             KeyCode::Backspace => ComposerUpdate::from_change(self.backspace()),
             KeyCode::Delete => ComposerUpdate::from_change(self.delete()),
             _ => ComposerUpdate::unchanged(),
@@ -775,6 +778,40 @@ impl Composer {
             return false;
         };
         self.remove_range(previous..self.cursor);
+        true
+    }
+
+    fn delete_word_before_cursor(&mut self) -> bool {
+        let mut start = self.cursor;
+        while let Some((index, character)) = self.draft[..start].char_indices().next_back() {
+            if !character.is_whitespace() {
+                break;
+            }
+            start = index;
+        }
+        while let Some((index, character)) = self.draft[..start].char_indices().next_back() {
+            if character.is_whitespace() {
+                break;
+            }
+            start = index;
+        }
+        let end = self.cursor;
+        if let Some(image_start) = self
+            .images
+            .iter()
+            .filter(|image| image.range.start < end && start < image.range.end)
+            .map(|image| image.range.start)
+            .min()
+        {
+            start = image_start;
+        }
+        if start == end {
+            return false;
+        }
+
+        self.images
+            .retain(|image| image.range.end <= start || image.range.start >= end);
+        self.remove_range(start..end);
         true
     }
 
@@ -1759,6 +1796,32 @@ mod tests {
         composer.update(key(KeyCode::Backspace, KeyModifiers::NONE));
 
         assert!(composer.draft().is_empty());
+        assert!(composer.images.is_empty());
+    }
+
+    #[test]
+    fn option_backspace_deletes_the_previous_word() {
+        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        composer.replace_draft("one two  ".to_owned());
+
+        let update = composer.update(key(KeyCode::Backspace, KeyModifiers::ALT));
+
+        assert!(update.changed);
+        assert_eq!(composer.draft(), "one ");
+        assert_eq!(composer.cursor(), composer.draft().len());
+    }
+
+    #[test]
+    fn option_backspace_removes_an_image_attachment_with_its_token() {
+        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        composer.update(ComposerEvent::Terminal(Event::Paste("inspect ".to_owned())));
+        composer.update(ComposerEvent::PasteImage(
+            "data:image/png;base64,removed".to_owned(),
+        ));
+
+        composer.update(key(KeyCode::Backspace, KeyModifiers::ALT));
+
+        assert_eq!(composer.draft(), "inspect ");
         assert!(composer.images.is_empty());
     }
 
