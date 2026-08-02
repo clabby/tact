@@ -518,7 +518,7 @@ mod tests {
             );
             assert!(keywords.iter().all(|keyword| {
                 keyword.style.add_modifier.contains(Modifier::BOLD)
-                    && keyword.style.fg != Some(Color::Yellow)
+                    && keyword.style.fg == Some(Color::Blue)
             }));
         }
     }

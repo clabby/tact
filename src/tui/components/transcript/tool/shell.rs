@@ -17,7 +17,7 @@ pub(super) fn present(tool: &ToolEntry, width: u16, theme: &Theme, expanded: boo
         .get("cmd")
         .and_then(Value::as_str)
         .unwrap_or("<command unavailable>");
-    let mut presentation = Presentation::styled_subject("Shell", command_spans(command, theme));
+    let mut presentation = Presentation::styled_subject("Shell", command_spans(command));
     if let Some(outcome) = shell_outcome(tool.result.as_ref()) {
         presentation = presentation.outcome(outcome);
     }
@@ -33,7 +33,7 @@ pub(super) fn present(tool: &ToolEntry, width: u16, theme: &Theme, expanded: boo
             Style::default().fg(theme.muted()),
         ));
     }
-    let command = command_spans(command, theme)
+    let command = command_spans(command)
         .into_iter()
         .map(|mut span| {
             span.style = span.style.bg(theme.code_background());
@@ -69,11 +69,11 @@ pub(super) fn present(tool: &ToolEntry, width: u16, theme: &Theme, expanded: boo
     ))
 }
 
-fn command_spans(command: &str, theme: &Theme) -> Vec<Span<'static>> {
+fn command_spans(command: &str) -> Vec<Span<'static>> {
     let command = super::super::markdown::sanitize(command);
     let assets = super::super::highlight::assets();
     let syntax = super::super::highlight::syntax_for_token(&assets.syntaxes, "sh");
-    let syntax_theme = super::super::highlight::theme(theme);
+    let syntax_theme = super::super::highlight::theme();
     let mut highlighter = HighlightLines::new(syntax, &syntax_theme);
     let mut spans = vec![Span::styled("$ ", Style::default().fg(Color::Yellow))];
 
@@ -85,7 +85,6 @@ fn command_spans(command: &str, theme: &Theme) -> Vec<Span<'static>> {
             &mut highlighter,
             line,
             &assets.syntaxes,
-            theme,
         ));
     }
     spans

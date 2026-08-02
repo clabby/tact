@@ -462,7 +462,7 @@ impl<'a> Renderer<'a> {
             || assets.syntaxes.find_syntax_plain_text(),
             |language| super::highlight::syntax_for_token(&assets.syntaxes, language),
         );
-        let syntax_theme = super::highlight::theme(self.theme);
+        let syntax_theme = super::highlight::theme();
         let mut highlighter = HighlightLines::new(syntax, &syntax_theme);
         let header = self.lines.len();
         self.lines.push(code_block_header(
@@ -474,7 +474,7 @@ impl<'a> Renderer<'a> {
         let content_width = self.width.saturating_sub(4).max(1);
         for source_line in code.trim_end_matches('\n').split('\n') {
             let highlighted =
-                super::highlight::line(&mut highlighter, source_line, &assets.syntaxes, self.theme);
+                super::highlight::line(&mut highlighter, source_line, &assets.syntaxes);
             for (index, mut spans) in
                 super::highlight::wrap(highlighted, content_width.saturating_sub(2).max(1))
                     .into_iter()
@@ -524,12 +524,12 @@ impl<'a> Renderer<'a> {
             || assets.syntaxes.find_syntax_plain_text(),
             |language| super::highlight::syntax_for_token(&assets.syntaxes, language),
         );
-        let syntax_theme = super::highlight::theme(self.theme);
+        let syntax_theme = super::highlight::theme();
         let mut highlighter = HighlightLines::new(syntax, &syntax_theme);
         let content_width = self.width.saturating_sub(2).max(1);
         for source_line in code.trim_end_matches('\n').split('\n') {
             let highlighted =
-                super::highlight::line(&mut highlighter, source_line, &assets.syntaxes, self.theme);
+                super::highlight::line(&mut highlighter, source_line, &assets.syntaxes);
             for spans in super::highlight::wrap(highlighted, content_width) {
                 let mut line = vec![Span::styled("┃ ", gutter)];
                 line.extend(spans);
@@ -1403,8 +1403,36 @@ mod tests {
             .iter()
             .find(|span| span.content == "pub")
             .expect("Rust keywords should be syntax-highlighted separately");
-        assert_ne!(keyword.style.fg, Some(Theme::default().code_text()));
+        assert_eq!(keyword.style.fg, Some(Color::Blue));
         assert!(lines[1].spans.iter().all(|span| span.style.bg.is_none()));
+    }
+
+    #[test]
+    fn rust_keywords_types_and_parameters_use_distinct_terminal_colors() {
+        let lines = render(
+            "```rust\npub struct Widget;\npub fn choose(input: &str) { let value = if input.is_empty() { 1 } else { 2 }; }\n```",
+            100,
+            &Theme::default(),
+        )
+        .lines;
+        let spans = lines
+            .iter()
+            .flat_map(|line| &line.spans)
+            .collect::<Vec<_>>();
+        let style = |token| {
+            spans
+                .iter()
+                .find(|span| span.content == token)
+                .unwrap_or_else(|| panic!("{token} should have its own syntax span"))
+                .style
+        };
+
+        for keyword in ["pub", "struct", "fn", "let", "if"] {
+            assert_eq!(style(keyword).fg, Some(Color::Blue));
+        }
+        assert_eq!(style("Widget").fg, Some(Color::Yellow));
+        assert_eq!(style("input").fg, Some(Color::Reset));
+        assert!(style("input").add_modifier.contains(Modifier::ITALIC));
     }
 
     #[test]
@@ -1446,7 +1474,7 @@ mod tests {
             .find(|span| span.content == "const")
             .expect("JavaScript keywords should be syntax-highlighted separately");
 
-        assert_ne!(keyword.style.fg, Some(Theme::default().code_text()));
+        assert_eq!(keyword.style.fg, Some(Color::Blue));
     }
 
     #[test]
@@ -1490,8 +1518,7 @@ mod tests {
 
         assert!(rendered.contains("src/lib.rs"));
         assert!(rendered.contains("-10,2 → +10,3"));
-        assert_ne!(keyword.style.fg, Some(Color::Green));
-        assert_ne!(keyword.style.fg, Some(Color::Red));
+        assert_eq!(keyword.style.fg, Some(Color::Blue));
     }
 
     #[test]
