@@ -1,8 +1,12 @@
 use super::{Presentation, format_bytes};
 use crate::tui::{format::shorten_home, theme::Theme, transcript::ToolEntry};
-use ratatui::style::Style;
+use ratatui::{
+    style::{Color, Style},
+    text::Span,
+};
 use serde_json::Value;
 use std::path::Path;
+use syntect::easy::HighlightLines;
 
 pub(super) fn present(tool: &ToolEntry, width: u16, theme: &Theme, expanded: bool) -> Presentation {
     if tool.name == "write_stdin" {
@@ -13,7 +17,7 @@ pub(super) fn present(tool: &ToolEntry, width: u16, theme: &Theme, expanded: boo
         .get("cmd")
         .and_then(Value::as_str)
         .unwrap_or("<command unavailable>");
-    let mut presentation = Presentation::new("Shell", format!("$ {command}"));
+    let mut presentation = Presentation::styled_subject("Shell", command_spans(command, theme));
     if let Some(outcome) = shell_outcome(tool.result.as_ref()) {
         presentation = presentation.outcome(outcome);
     }
@@ -29,13 +33,14 @@ pub(super) fn present(tool: &ToolEntry, width: u16, theme: &Theme, expanded: boo
             Style::default().fg(theme.muted()),
         ));
     }
-    details.extend(super::super::markdown::wrap_plain(
-        &format!("$ {command}"),
-        width,
-        Style::default()
-            .fg(theme.code_text())
-            .bg(theme.code_background()),
-    ));
+    let command = command_spans(command, theme)
+        .into_iter()
+        .map(|mut span| {
+            span.style = span.style.bg(theme.code_background());
+            span
+        })
+        .collect::<Vec<_>>();
+    details.extend(super::super::markdown::wrap_spans(&command, width, true));
     for substep in &tool.substeps {
         details.extend(super::super::markdown::wrap_plain(
             &format!("↳ {substep}"),
@@ -62,6 +67,28 @@ pub(super) fn present(tool: &ToolEntry, width: u16, theme: &Theme, expanded: boo
         "{line_count} {line_label} · {}",
         format_bytes(output.len())
     ))
+}
+
+fn command_spans(command: &str, theme: &Theme) -> Vec<Span<'static>> {
+    let command = super::super::markdown::sanitize(command);
+    let assets = super::super::highlight::assets();
+    let syntax = super::super::highlight::syntax_for_token(&assets.syntaxes, "sh");
+    let syntax_theme = super::super::highlight::theme(theme);
+    let mut highlighter = HighlightLines::new(syntax, &syntax_theme);
+    let mut spans = vec![Span::styled("$ ", Style::default().fg(Color::Yellow))];
+
+    for (index, line) in command.split('\n').enumerate() {
+        if index > 0 {
+            spans.push(Span::raw("\n"));
+        }
+        spans.extend(super::super::highlight::line(
+            &mut highlighter,
+            line,
+            &assets.syntaxes,
+            theme,
+        ));
+    }
+    spans
 }
 
 fn stdin(tool: &ToolEntry, width: u16, theme: &Theme, expanded: bool) -> Presentation {
