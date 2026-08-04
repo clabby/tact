@@ -4436,7 +4436,7 @@ dependencies = [
 
 [[package]]
 name = "tact"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "arboard",
  "axum",
