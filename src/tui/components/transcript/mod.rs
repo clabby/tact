@@ -1405,6 +1405,7 @@ impl Component for Transcript {
             height: area.height.saturating_sub(prompt_height),
             ..area
         };
+        self.viewport_height = transcript_area.height;
         if prompt_height > 0 {
             plan = self.render_plan(transcript_area.width, transcript_area.height, theme);
             self.render_pinned_prompt(frame, theme);
@@ -2127,6 +2128,55 @@ mod tests {
         assert!(rows[2].contains("prompt five"));
         assert_eq!(backend.buffer()[(29, 0)].symbol(), "…");
         assert_ne!(backend.buffer()[(29, 2)].symbol(), "…");
+    }
+
+    #[test]
+    fn page_navigation_uses_the_unpinned_transcript_height() {
+        let mut transcript = Transcript::new();
+        transcript.set_pin_latest_prompt(true);
+        transcript.update(TranscriptEvent::Record(user(
+            1,
+            "prompt one\nprompt two\nprompt three",
+        )));
+        transcript.update(TranscriptEvent::Record(agent_with_payload(
+            2,
+            AgentEventKind::AssistantMessage,
+            json!({
+                "model_call_index": 1,
+                "item_id": "answer",
+                "phase": "final_answer",
+                "text": (1..=40)
+                    .map(|line| format!("answer {line}"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            }),
+        )));
+        drop(render(&mut transcript, 30, 6));
+        let answer = transcript
+            .model
+            .entries()
+            .iter()
+            .find(|entry| matches!(entry.kind, EntryKind::Assistant { .. }))
+            .unwrap()
+            .id;
+        transcript.scroll = ScrollState::Detached(Anchor {
+            entry: answer,
+            line: 2,
+        });
+        drop(render(&mut transcript, 30, 6));
+        assert_eq!(transcript.pinned_prompt.unwrap().area.height, 3);
+
+        let page_up = transcript.scroll_command(&Event::Key(KeyEvent::new(
+            KeyCode::PageUp,
+            KeyModifiers::NONE,
+        )));
+        let page_down = transcript.scroll_command(&Event::Key(KeyEvent::new(
+            KeyCode::PageDown,
+            KeyModifiers::NONE,
+        )));
+
+        assert!(matches!(page_up, Some(ScrollCommand::Rows(-1))));
+        assert!(matches!(page_down, Some(ScrollCommand::Rows(1))));
     }
 
     #[test]
