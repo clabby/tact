@@ -53,7 +53,7 @@ use crate::{
         worker::{AuxiliaryError, WorkerCommand, WorkerEvent},
     },
 };
-use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
 use futures_util::StreamExt;
 use std::{
     collections::HashMap,
@@ -639,13 +639,24 @@ pub(crate) async fn run(
                         io::ErrorKind::UnexpectedEof,
                         "terminal input closed",
                     )))?;
-                let update = if is_image_paste(&event)
+                let refresh_cursor = matches!(&event, Event::FocusGained)
+                    || matches!(
+                        &event,
+                        Event::Mouse(mouse) if matches!(mouse.kind, MouseEventKind::Down(_))
+                    );
+                if refresh_cursor {
+                    terminal.invalidate_cursor_visibility();
+                }
+                let mut update = if is_image_paste(&event)
                     && let Some(data_url) = clipboard::image_data_url()
                 {
                     app.update(AppEvent::PasteImage(data_url))
                 } else {
                     app.update(AppEvent::Terminal(event))
                 };
+                if refresh_cursor {
+                    update.render = update.render.max(RenderRequest::Immediate);
+                }
                 apply_app_update!(update);
             }
             Some(scheme) = system_theme_updates.recv(), if !stopping => {
