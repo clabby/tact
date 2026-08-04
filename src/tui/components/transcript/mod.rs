@@ -849,6 +849,9 @@ impl Transcript {
             self.selection_rows
                 .push((prompt.area.y.saturating_add(row), anchor));
         }
+        frame
+            .buffer_mut()
+            .set_style(prompt.area, Style::default().bg(theme.code_background()));
 
         let marker_style = Style::default()
             .fg(theme.muted())
@@ -1969,6 +1972,72 @@ mod tests {
         assert!(rows[2].contains("prompt three"));
         assert_eq!(backend.buffer()[(29, 2)].symbol(), "…");
         assert!(rows[3..].iter().any(|row| row.contains("answer")));
+    }
+
+    #[test]
+    fn pinned_prompt_uses_the_code_block_background() {
+        let mut transcript = Transcript::new();
+        transcript.set_pin_latest_prompt(true);
+        transcript.update(TranscriptEvent::Record(user(1, "pinned prompt")));
+        transcript.update(TranscriptEvent::Record(agent_with_payload(
+            2,
+            AgentEventKind::AssistantMessage,
+            json!({
+                "model_call_index": 1,
+                "item_id": "answer",
+                "phase": "final_answer",
+                "text": "response content ".repeat(40),
+            }),
+        )));
+        let answer = transcript
+            .model
+            .entries()
+            .iter()
+            .find(|entry| matches!(entry.kind, EntryKind::Assistant { .. }))
+            .unwrap()
+            .id;
+        transcript.scroll = ScrollState::Detached(Anchor {
+            entry: answer,
+            line: 2,
+        });
+
+        let backend = render(&mut transcript, 30, 6);
+        let area = transcript.pinned_prompt.unwrap().area;
+
+        for row in area.y..area.bottom() {
+            for column in area.x..area.right() {
+                assert_eq!(
+                    backend.buffer()[(column, row)].bg,
+                    Theme::default().code_background()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn active_stream_does_not_pin_while_following() {
+        let mut transcript = Transcript::new();
+        transcript.set_pin_latest_prompt(true);
+        transcript.update(TranscriptEvent::Record(user(1, "streaming prompt")));
+        transcript.update(TranscriptEvent::Record(agent(
+            2,
+            AgentEventKind::RunStarted,
+        )));
+        transcript.update(TranscriptEvent::Record(agent_with_payload(
+            3,
+            AgentEventKind::AssistantMessage,
+            json!({
+                "model_call_index": 1,
+                "item_id": "answer",
+                "phase": "final_answer",
+                "text": "streamed response content ".repeat(40),
+            }),
+        )));
+
+        drop(render(&mut transcript, 30, 6));
+
+        assert!(matches!(transcript.scroll, ScrollState::Follow));
+        assert!(transcript.pinned_prompt.is_none());
     }
 
     #[test]
