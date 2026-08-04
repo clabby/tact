@@ -764,6 +764,9 @@ impl RootNode {
             }
             return self.update_key_confirmation(ConfirmationAction::Interrupt, Instant::now());
         }
+        if self.transcript.component().pinned_prompt_clicked(&event) {
+            return self.update_transcript(TranscriptEvent::JumpToPinnedPrompt);
+        }
         if let Some(update) = self.update_selection_mouse(&mut event) {
             return update;
         }
@@ -2998,6 +3001,61 @@ mod tests {
         let buffer = terminal.backend().buffer();
         assert!((0..7).any(|y| buffer[(0, y)].symbol() == "┃"));
         assert_eq!(buffer[(0, 7)].symbol(), "╭");
+    }
+
+    #[test]
+    fn clicking_a_pinned_prompt_reveals_its_transcript_entry() {
+        let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        root.set_pin_latest_prompt(true);
+        let prompt = TranscriptRecord::from_local(
+            1,
+            1,
+            LocalEvent::UserSubmitted {
+                id: TurnId::new(1),
+                text: "jump to this prompt".to_owned(),
+            },
+        )
+        .unwrap();
+        root.update(super::RootEvent::Transcript(Arc::new(prompt)));
+        root.update(super::RootEvent::Transcript(agent_record(
+            2,
+            AgentEventKind::AssistantMessage,
+            json!({
+                "model_call_index": 1,
+                "item_id": "answer",
+                "phase": "final_answer",
+                "text": (1..=40)
+                    .map(|line| format!("answer {line}"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            }),
+        )));
+        terminal
+            .draw(|frame| root.render(frame, frame.area(), &Theme::default()))
+            .unwrap();
+        root.update(mouse(MouseEventKind::ScrollUp, 5, 1));
+        terminal
+            .draw(|frame| root.render(frame, frame.area(), &Theme::default()))
+            .unwrap();
+        assert_eq!(
+            terminal.backend().buffer()[(5, 0)].bg,
+            Theme::default().code_background()
+        );
+
+        root.update(mouse(MouseEventKind::Down(MouseButton::Left), 5, 0));
+        terminal
+            .draw(|frame| root.render(frame, frame.area(), &Theme::default()))
+            .unwrap();
+
+        let first_row = (0..40)
+            .map(|column| terminal.backend().buffer()[(column, 0)].symbol())
+            .collect::<String>();
+        assert!(first_row.contains("jump to this prompt"));
+        assert_ne!(
+            terminal.backend().buffer()[(5, 0)].bg,
+            Theme::default().code_background()
+        );
     }
 
     #[test]

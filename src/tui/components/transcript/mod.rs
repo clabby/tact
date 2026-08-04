@@ -53,6 +53,7 @@ pub(crate) enum TranscriptEvent {
     },
     AgentStreamClosed,
     Scroll(ScrollCommand),
+    JumpToPinnedPrompt,
     FollowTail,
     BlurExpandables,
     Expandable(ExpandableCommand),
@@ -468,6 +469,17 @@ impl Transcript {
         Some(command)
     }
 
+    pub(super) fn pinned_prompt_clicked(&self, event: &Event) -> bool {
+        let Event::Mouse(mouse) = event else {
+            return false;
+        };
+        if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
+            return false;
+        }
+        self.pinned_prompt
+            .is_some_and(|prompt| prompt.area.contains(Position::new(mouse.column, mouse.row)))
+    }
+
     pub(super) fn expandable_command(&self, event: &Event) -> Option<ExpandableCommand> {
         match event {
             Event::Mouse(mouse) if mouse.kind == MouseEventKind::Down(MouseButton::Left) => self
@@ -623,6 +635,18 @@ impl Transcript {
             return ComponentUpdate::render(RenderRequest::Immediate);
         }
         self.pending_scroll = command;
+        ComponentUpdate::render(RenderRequest::Immediate)
+    }
+
+    fn jump_to_pinned_prompt(&mut self) -> ComponentUpdate<TranscriptEffect> {
+        let Some(prompt) = self.pinned_prompt.take() else {
+            return ComponentUpdate::none();
+        };
+        self.scroll = ScrollState::Detached(Anchor {
+            entry: prompt.entry,
+            line: 0,
+        });
+        self.pending_scroll = ScrollCommand::None;
         ComponentUpdate::render(RenderRequest::Immediate)
     }
 
@@ -1349,6 +1373,7 @@ impl Component for Transcript {
             } => self.update_message(perspective, update),
             TranscriptEvent::AgentStreamClosed => self.agent_stream_closed(),
             TranscriptEvent::Scroll(command) => self.update_scroll(command),
+            TranscriptEvent::JumpToPinnedPrompt => self.jump_to_pinned_prompt(),
             TranscriptEvent::FollowTail => self.follow_tail(),
             TranscriptEvent::BlurExpandables => self.blur_expandables(),
             TranscriptEvent::Expandable(command) => self.update_expandable(command),
@@ -2102,6 +2127,64 @@ mod tests {
         assert!(rows[2].contains("prompt five"));
         assert_eq!(backend.buffer()[(29, 0)].symbol(), "…");
         assert_ne!(backend.buffer()[(29, 2)].symbol(), "…");
+    }
+
+    #[test]
+    fn clicking_a_pinned_prompt_jumps_to_it_in_the_transcript() {
+        let mut transcript = Transcript::new();
+        transcript.set_pin_latest_prompt(true);
+        transcript.update(TranscriptEvent::Record(user(1, "pinned prompt")));
+        transcript.update(TranscriptEvent::Record(agent_with_payload(
+            2,
+            AgentEventKind::AssistantMessage,
+            json!({
+                "model_call_index": 1,
+                "item_id": "answer",
+                "phase": "final_answer",
+                "text": (1..=40)
+                    .map(|line| format!("answer {line}"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            }),
+        )));
+        let prompt = transcript.model.entries()[0].id;
+        let answer = transcript.model.entries()[1].id;
+        transcript.scroll = ScrollState::Detached(Anchor {
+            entry: answer,
+            line: 2,
+        });
+        drop(render(&mut transcript, 30, 6));
+
+        let click = Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 5,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert!(transcript.pinned_prompt_clicked(&click));
+        transcript.update(TranscriptEvent::JumpToPinnedPrompt);
+        let backend = render(&mut transcript, 30, 6);
+
+        assert_eq!(
+            transcript.last_top,
+            Some(Anchor {
+                entry: prompt,
+                line: 0
+            })
+        );
+        assert!(transcript.pinned_prompt.is_none());
+        assert!(
+            backend
+                .buffer()
+                .content()
+                .chunks(30)
+                .next()
+                .unwrap()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>()
+                .contains("pinned prompt")
+        );
     }
 
     #[test]
