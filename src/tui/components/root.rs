@@ -748,9 +748,10 @@ impl RootNode {
             return update;
         }
         if let Some(destination) = self.transcript.component().link_destination(&event) {
+            self.focus_composer();
             return ComponentUpdate {
                 effects: vec![RootEffect::OpenLink(destination.to_string())],
-                render: RenderRequest::None,
+                render: RenderRequest::Immediate,
             };
         }
         if let Event::Mouse(mouse) = &event
@@ -784,18 +785,16 @@ impl RootNode {
             return ComponentUpdate::render(RenderRequest::Immediate);
         }
         if is_left_click_in(&event, self.composer_area) {
-            let queue_was_focused = self.queue.component().focused();
-            self.queue.component_mut().set_focused(false);
-            if self.transcript.component().expandables_focused() {
-                return self.update_transcript(TranscriptEvent::BlurExpandables);
-            }
-            if queue_was_focused {
-                return ComponentUpdate::render(RenderRequest::Immediate);
-            }
+            self.focus_composer();
+            return ComponentUpdate::render(RenderRequest::Immediate);
         }
         if let Some(command) = self.transcript.component().expandable_command(&event) {
             self.queue.component_mut().set_focused(false);
             return self.update_transcript(TranscriptEvent::Expandable(command));
+        }
+        if is_left_click(&event) {
+            self.focus_composer();
+            return ComponentUpdate::render(RenderRequest::Immediate);
         }
         if self.queue.component().focused() {
             return self.update_queue(event);
@@ -1660,6 +1659,14 @@ impl RootNode {
         })
     }
 
+    fn focus_composer(&mut self) {
+        self.queue.component_mut().set_focused(false);
+        let _ = self
+            .transcript
+            .component_mut()
+            .update(TranscriptEvent::BlurExpandables);
+    }
+
     fn update_queue(&mut self, event: Event) -> ComponentUpdate<RootEffect> {
         let update = self.queue.update(QueueEvent::Terminal(event));
         let mut effects = Vec::new();
@@ -2396,11 +2403,20 @@ fn is_focus_toggle(event: &Event) -> bool {
 }
 
 fn is_left_click_in(event: &Event, area: Rect) -> bool {
-    let Event::Mouse(mouse) = event else {
+    if !is_left_click(event) {
         return false;
+    }
+    let Event::Mouse(mouse) = event else {
+        unreachable!("left click helper only accepts mouse events");
     };
-    mouse.kind == MouseEventKind::Down(MouseButton::Left)
-        && area.contains(ratatui::layout::Position::new(mouse.column, mouse.row))
+    area.contains(ratatui::layout::Position::new(mouse.column, mouse.row))
+}
+
+fn is_left_click(event: &Event) -> bool {
+    matches!(
+        event,
+        Event::Mouse(mouse) if mouse.kind == MouseEventKind::Down(MouseButton::Left)
+    )
 }
 
 fn is_control_c(event: &Event) -> bool {
@@ -2987,6 +3003,8 @@ mod tests {
             },
         );
         root.update(super::RootEvent::Transcript(Arc::new(record)));
+        root.queue.component_mut().push("queued".to_owned());
+        root.queue.component_mut().set_focused(true);
         terminal
             .draw(|frame| root.render(frame, frame.area(), &Theme::default()))
             .unwrap();
@@ -3010,6 +3028,7 @@ mod tests {
             up.effects,
             [RootEffect::OpenLink("https://example.com".to_owned())]
         );
+        assert!(!root.queue.component().focused());
     }
 
     #[test]
@@ -3638,6 +3657,45 @@ mod tests {
 
         assert!(!root.queue.component().focused());
         assert_eq!(down.render.max(up.render), super::RenderRequest::Immediate);
+    }
+
+    #[test]
+    fn clicking_the_queue_keeps_focus_on_the_queue() {
+        let backend = TestBackend::new(60, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        root.queue.component_mut().push("queued".to_owned());
+        terminal
+            .draw(|frame| root.render(frame, frame.area(), &Theme::default()))
+            .unwrap();
+
+        let update = root.update(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            root.queue_area.x + 2,
+            root.queue_area.y + 1,
+        ));
+
+        assert!(root.queue.component().focused());
+        assert_eq!(update.render, super::RenderRequest::Immediate);
+    }
+
+    #[test]
+    fn clicking_empty_transcript_space_returns_focus_to_the_composer() {
+        let backend = TestBackend::new(60, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        root.in_flight_turns = 1;
+        root.queue.component_mut().push("queued".to_owned());
+        terminal
+            .draw(|frame| root.render(frame, frame.area(), &Theme::default()))
+            .unwrap();
+        root.update(key(KeyCode::Tab, KeyModifiers::NONE));
+        assert!(root.queue.component().focused());
+
+        let update = root.update(mouse(MouseEventKind::Down(MouseButton::Left), 10, 2));
+
+        assert!(!root.queue.component().focused());
+        assert_eq!(update.render, super::RenderRequest::Immediate);
     }
 
     #[test]

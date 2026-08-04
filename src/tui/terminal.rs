@@ -4,8 +4,9 @@ use crossterm::{
     clipboard::CopyToClipboard,
     cursor::{Hide, Show},
     event::{
-        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+        DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
+        EnableFocusChange, EnableMouseCapture, KeyboardEnhancementFlags,
+        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute, queue,
     terminal::{
@@ -33,19 +34,30 @@ type TuiTerminal = Terminal<StableCursorBackend<CrosstermBackend<Stdout>>>;
 /// Avoids restarting the terminal's cursor blink cycle on every rendered frame.
 struct StableCursorBackend<B> {
     inner: B,
-    cursor_visible: bool,
+    cursor_visibility: CursorVisibility,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CursorVisibility {
+    Hidden,
+    Visible,
+    Unknown,
 }
 
 impl<B> StableCursorBackend<B> {
     const fn hidden(inner: B) -> Self {
         Self {
             inner,
-            cursor_visible: false,
+            cursor_visibility: CursorVisibility::Hidden,
         }
     }
 
     const fn assume_cursor_hidden(&mut self) {
-        self.cursor_visible = false;
+        self.cursor_visibility = CursorVisibility::Hidden;
+    }
+
+    const fn invalidate_cursor_visibility(&mut self) {
+        self.cursor_visibility = CursorVisibility::Unknown;
     }
 }
 
@@ -74,18 +86,20 @@ impl<B: Backend> Backend for StableCursorBackend<B> {
     }
 
     fn hide_cursor(&mut self) -> Result<(), Self::Error> {
-        if self.cursor_visible {
-            self.inner.hide_cursor()?;
-            self.cursor_visible = false;
+        if self.cursor_visibility == CursorVisibility::Hidden {
+            return Ok(());
         }
+        self.inner.hide_cursor()?;
+        self.cursor_visibility = CursorVisibility::Hidden;
         Ok(())
     }
 
     fn show_cursor(&mut self) -> Result<(), Self::Error> {
-        if !self.cursor_visible {
-            self.inner.show_cursor()?;
-            self.cursor_visible = true;
+        if self.cursor_visibility == CursorVisibility::Visible {
+            return Ok(());
         }
+        self.inner.show_cursor()?;
+        self.cursor_visibility = CursorVisibility::Visible;
         Ok(())
     }
 
@@ -228,6 +242,10 @@ impl TerminalSession {
         draw.and(end)
     }
 
+    pub(crate) fn invalidate_cursor_visibility(&mut self) {
+        self.terminal.backend_mut().invalidate_cursor_visibility();
+    }
+
     pub(crate) fn copy_to_clipboard(&mut self, text: &str) -> io::Result<()> {
         copy_to_clipboard(self.terminal.backend_mut(), text)
     }
@@ -293,6 +311,7 @@ fn activate_commands(output: &mut impl Write) -> io::Result<()> {
         output,
         EnterAlternateScreen,
         EnableBracketedPaste,
+        EnableFocusChange,
         EnableMouseCapture,
         Hide
     )?;
@@ -319,6 +338,7 @@ fn restore_commands(output: &mut impl Write) {
         EndSynchronizedUpdate,
         Show,
         PopKeyboardEnhancementFlags,
+        DisableFocusChange,
         DisableMouseCapture,
         DisableBracketedPaste,
         LeaveAlternateScreen
@@ -348,8 +368,8 @@ fn install_panic_hook() {
 #[cfg(test)]
 mod tests {
     use super::{
-        MeasuredBackend, StableCursorBackend, begin_synchronized_update, copy_to_clipboard,
-        end_synchronized_update, reset_after_resume, restore_commands,
+        MeasuredBackend, StableCursorBackend, activate_commands, begin_synchronized_update,
+        copy_to_clipboard, end_synchronized_update, reset_after_resume, restore_commands,
     };
     use crate::{
         app::config::ReasoningEffort,
@@ -372,6 +392,15 @@ mod tests {
     }
 
     #[test]
+    fn activation_requests_terminal_focus_changes() {
+        let mut output = Vec::new();
+
+        activate_commands(&mut output).unwrap();
+
+        assert!(output.windows(8).any(|window| window == b"\x1b[?1004h"));
+    }
+
+    #[test]
     fn restoration_ends_sync_and_restores_input_modes() {
         let mut output = Vec::new();
 
@@ -379,6 +408,7 @@ mod tests {
 
         assert!(output.starts_with(b"\x1b[?2026l\x1b[?25h"));
         assert!(output.windows(5).any(|window| window == b"\x1b[<1u"));
+        assert!(output.windows(8).any(|window| window == b"\x1b[?1004l"));
         assert!(output.windows(8).any(|window| window == b"\x1b[?1000l"));
         assert!(output.windows(8).any(|window| window == b"\x1b[?2004l"));
         assert!(output.ends_with(b"\x1b[?1049l"));
@@ -452,6 +482,37 @@ mod tests {
         terminal.draw(|_| {}).unwrap();
 
         assert_eq!(terminal.backend().inner.cursor_shows, 1);
+        assert_eq!(terminal.backend().inner.cursor_hides, 1);
+    }
+
+    #[test]
+    fn invalidated_cursor_visibility_is_reasserted_once() {
+        let measured = MeasuredBackend {
+            inner: TestBackend::new(10, 2),
+            changed_cells: 0,
+            cursor_reads: 0,
+            cursor_hides: 0,
+            cursor_shows: 0,
+        };
+        let backend = StableCursorBackend::hidden(measured);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| frame.set_cursor_position(Position::new(0, 0)))
+            .unwrap();
+        terminal.backend_mut().invalidate_cursor_visibility();
+        terminal
+            .draw(|frame| frame.set_cursor_position(Position::new(1, 0)))
+            .unwrap();
+        terminal
+            .draw(|frame| frame.set_cursor_position(Position::new(2, 0)))
+            .unwrap();
+
+        terminal.backend_mut().invalidate_cursor_visibility();
+        terminal.draw(|_| {}).unwrap();
+        terminal.draw(|_| {}).unwrap();
+
+        assert_eq!(terminal.backend().inner.cursor_shows, 2);
         assert_eq!(terminal.backend().inner.cursor_hides, 1);
     }
 }
