@@ -1467,13 +1467,16 @@ fn indent_nested_tool(
     if lines.is_empty() {
         return;
     }
+    let line_count = lines.len();
     for (index, line) in lines.iter_mut().enumerate() {
         let marker = if index == 0 {
-            if expanded || !terminal {
+            if expanded || !terminal || line_count > 1 {
                 continuing_marker
             } else {
                 terminal_marker
             }
+        } else if !expanded && terminal && index + 1 == line_count {
+            terminal_marker
         } else {
             continuation
         };
@@ -2566,6 +2569,76 @@ mod tests {
         assert!(rows[batch_row + 1].contains("├─"));
         assert!(rows[batch_row + 2].contains("└─"));
         assert!(rows[batch_row + 3].trim().is_empty());
+    }
+
+    #[test]
+    fn final_multiline_workflow_child_connects_through_its_last_row() {
+        let mut transcript = Transcript::new();
+        transcript.update(TranscriptEvent::Record(agent_with_payload(
+            1,
+            AgentEventKind::ToolCall,
+            json!({
+                "call_id": "workflow",
+                "tool": "exec",
+                "arguments": "await tools.memory({operation: 'scan'}); await tools.exec_command({cmd: 'cargo check'})",
+            }),
+        )));
+        transcript.update(TranscriptEvent::Record(agent_with_payload(
+            2,
+            AgentEventKind::ToolCall,
+            json!({
+                "call_id": "workflow/code-1",
+                "tool": "memory",
+                "arguments": {"operation": "scan", "query": "transcript"},
+            }),
+        )));
+        transcript.update(TranscriptEvent::Record(agent_with_payload(
+            3,
+            AgentEventKind::ToolCall,
+            json!({
+                "call_id": "workflow/code-2",
+                "tool": "exec_command",
+                "arguments": {"cmd": "cargo check --all-features"},
+            }),
+        )));
+        transcript.update(TranscriptEvent::Record(agent_with_payload(
+            4,
+            AgentEventKind::ToolResult,
+            json!({
+                "call_id": "workflow/code-2",
+                "tool": "exec_command",
+                "status": "failed",
+                "duration_ns": 1_200_000_000_u64,
+                "result": {
+                    "output": "error[E0277]: the size for values of type `Self` cannot be known at compilation time",
+                    "exit_code": 101
+                },
+                "metadata": null,
+            }),
+        )));
+
+        let backend = render(&mut transcript, 60, 8);
+        let rows = backend
+            .buffer()
+            .content()
+            .chunks(60)
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+            .collect::<Vec<_>>();
+        let shell_row = rows.iter().position(|row| row.contains("Shell")).unwrap();
+        let spacer = rows[shell_row..]
+            .iter()
+            .position(|row| row.trim().is_empty())
+            .map(|offset| shell_row + offset)
+            .unwrap();
+        let final_shell_row = spacer - 1;
+
+        assert!(rows[shell_row].starts_with("  ├─"));
+        assert!(
+            rows[shell_row + 1..final_shell_row]
+                .iter()
+                .all(|row| row.starts_with("  │ "))
+        );
+        assert!(rows[final_shell_row].starts_with("  └─"));
     }
 
     #[test]
