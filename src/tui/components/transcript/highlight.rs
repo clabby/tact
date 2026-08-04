@@ -1,11 +1,10 @@
 //! Shared, cached syntax highlighting for transcript code.
 
-use crate::tui::theme::Theme;
 use ratatui::{
     style::{Color, Modifier, Style},
     text::Span,
 };
-use std::{str::FromStr, sync::OnceLock};
+use std::{path::Path, str::FromStr, sync::OnceLock};
 use syntect::{
     easy::HighlightLines,
     highlighting::{
@@ -28,43 +27,31 @@ pub(super) fn assets() -> &'static Assets {
     })
 }
 
-pub(super) fn theme(theme: &Theme) -> SyntaxTheme {
+pub(super) fn theme() -> SyntaxTheme {
     SyntaxTheme {
         name: Some("tact".to_owned()),
         settings: ThemeSettings {
-            foreground: Some(syntect_color(theme.code_text())),
-            accent: Some(syntect_color(theme.accent())),
+            foreground: Some(syntect_color(Color::Reset)),
+            accent: Some(syntect_color(Color::Blue)),
             ..ThemeSettings::default()
         },
         scopes: vec![
-            rule("comment", theme.muted(), Some(FontStyle::ITALIC)),
-            rule("string", theme.thinking_medium(), None),
+            rule("comment", Color::DarkGray, Some(FontStyle::ITALIC)),
+            rule("string", Color::Green, None),
             rule(
                 "constant.numeric, constant.language, constant.character",
-                theme.thinking_xhigh(),
+                Color::Magenta,
                 None,
             ),
-            rule("keyword, storage", theme.accent(), Some(FontStyle::BOLD)),
+            rule("keyword, storage", Color::Blue, Some(FontStyle::BOLD)),
+            rule("entity.name.function, support.function", Color::Cyan, None),
             rule(
-                "entity.name.function, support.function",
-                theme.thinking_high(),
+                "entity.name.type, entity.name.class, entity.name.struct, entity.name.enum, entity.name.trait, support.type",
+                Color::Yellow,
                 None,
             ),
-            rule(
-                "entity.name.type, entity.name.class, support.type, storage.type",
-                theme.thinking_max(),
-                None,
-            ),
-            rule(
-                "variable.parameter",
-                theme.thinking_medium(),
-                Some(FontStyle::ITALIC),
-            ),
-            rule(
-                "invalid",
-                theme.thinking_xhigh(),
-                Some(FontStyle::UNDERLINE),
-            ),
+            rule("variable.parameter", Color::Reset, Some(FontStyle::ITALIC)),
+            rule("invalid", Color::Red, Some(FontStyle::UNDERLINE)),
         ],
         ..SyntaxTheme::default()
     }
@@ -79,15 +66,27 @@ pub(super) fn syntax_for_token<'a>(syntaxes: &'a SyntaxSet, token: &str) -> &'a 
         .unwrap_or_else(|| syntaxes.find_syntax_plain_text())
 }
 
+pub(super) fn syntax_for_path<'a>(syntaxes: &'a SyntaxSet, path: &str) -> &'a SyntaxReference {
+    let path = Path::new(path);
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .and_then(|extension| syntaxes.find_syntax_by_extension(extension))
+        .or_else(|| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .and_then(|name| syntaxes.find_syntax_by_extension(name))
+        })
+        .unwrap_or_else(|| syntaxes.find_syntax_plain_text())
+}
+
 pub(super) fn line(
     highlighter: &mut HighlightLines<'_>,
     text: &str,
     syntaxes: &SyntaxSet,
-    theme: &Theme,
 ) -> Vec<Span<'static>> {
     let line = format!("{text}\n");
     let Ok(regions) = highlighter.highlight_line(&line, syntaxes) else {
-        return vec![Span::styled(text.to_owned(), code_style(theme))];
+        return vec![Span::styled(text.to_owned(), code_style())];
     };
     let mut spans = Vec::new();
     for (style, region) in regions {
@@ -108,22 +107,18 @@ pub(super) fn line(
         spans.push(Span::styled(
             region.to_owned(),
             Style::default()
-                .fg(Color::Rgb(
-                    style.foreground.r,
-                    style.foreground.g,
-                    style.foreground.b,
-                ))
+                .fg(terminal_color(style.foreground))
                 .add_modifier(modifier),
         ));
     }
     if spans.is_empty() {
-        spans.push(Span::styled(String::new(), code_style(theme)));
+        spans.push(Span::styled(String::new(), code_style()));
     }
     spans
 }
 
-pub(super) fn code_style(theme: &Theme) -> Style {
-    Style::default().fg(theme.code_text())
+pub(super) fn code_style() -> Style {
+    Style::default().fg(Color::Reset)
 }
 
 pub(super) fn wrap(spans: Vec<Span<'static>>, width: u16) -> Vec<Vec<Span<'static>>> {
@@ -182,61 +177,32 @@ fn rule(scope: &str, color: Color, font_style: Option<FontStyle>) -> ThemeItem {
 }
 
 fn syntect_color(color: Color) -> SyntectColor {
-    let (r, g, b) = terminal_rgb(color);
-    SyntectColor { r, g, b, a: 0xff }
-}
-
-fn terminal_rgb(color: Color) -> (u8, u8, u8) {
-    match color {
+    // Syntect accepts only RGB colors. These values are internal identifiers that are converted
+    // back to named Ratatui colors before rendering, leaving the terminal palette authoritative.
+    let (r, g, b) = match color {
         Color::Reset => (0xd7, 0xd7, 0xd7),
-        Color::Black => (0x00, 0x00, 0x00),
         Color::Red => (0xcd, 0x31, 0x31),
         Color::Green => (0x0d, 0xbc, 0x79),
         Color::Yellow => (0xe5, 0xe5, 0x10),
         Color::Blue => (0x24, 0x72, 0xc8),
         Color::Magenta => (0xbc, 0x3f, 0xbc),
         Color::Cyan => (0x11, 0xa8, 0xcd),
-        Color::Gray => (0xe5, 0xe5, 0xe5),
         Color::DarkGray => (0x66, 0x66, 0x66),
-        Color::LightRed => (0xf1, 0x4c, 0x4c),
-        Color::LightGreen => (0x23, 0xd1, 0x8b),
-        Color::LightYellow => (0xf5, 0xf5, 0x43),
-        Color::LightBlue => (0x3b, 0x8e, 0xd0),
-        Color::LightMagenta => (0xd6, 0x70, 0xd6),
-        Color::LightCyan => (0x29, 0xb8, 0xdb),
-        Color::White => (0xff, 0xff, 0xff),
-        Color::Rgb(r, g, b) => (r, g, b),
-        Color::Indexed(index) => indexed_rgb(index),
-    }
+        _ => unreachable!("syntax themes use named terminal colors"),
+    };
+    SyntectColor { r, g, b, a: 0xff }
 }
 
-fn indexed_rgb(index: u8) -> (u8, u8, u8) {
-    const ANSI: [(u8, u8, u8); 16] = [
-        (0x00, 0x00, 0x00),
-        (0x80, 0x00, 0x00),
-        (0x00, 0x80, 0x00),
-        (0x80, 0x80, 0x00),
-        (0x00, 0x00, 0x80),
-        (0x80, 0x00, 0x80),
-        (0x00, 0x80, 0x80),
-        (0xc0, 0xc0, 0xc0),
-        (0x80, 0x80, 0x80),
-        (0xff, 0x00, 0x00),
-        (0x00, 0xff, 0x00),
-        (0xff, 0xff, 0x00),
-        (0x00, 0x00, 0xff),
-        (0xff, 0x00, 0xff),
-        (0x00, 0xff, 0xff),
-        (0xff, 0xff, 0xff),
-    ];
-    if index < 16 {
-        return ANSI[usize::from(index)];
+fn terminal_color(color: SyntectColor) -> Color {
+    match (color.r, color.g, color.b) {
+        (0xd7, 0xd7, 0xd7) => Color::Reset,
+        (0xcd, 0x31, 0x31) => Color::Red,
+        (0x0d, 0xbc, 0x79) => Color::Green,
+        (0xe5, 0xe5, 0x10) => Color::Yellow,
+        (0x24, 0x72, 0xc8) => Color::Blue,
+        (0xbc, 0x3f, 0xbc) => Color::Magenta,
+        (0x11, 0xa8, 0xcd) => Color::Cyan,
+        (0x66, 0x66, 0x66) => Color::DarkGray,
+        _ => Color::Reset,
     }
-    if index >= 232 {
-        let gray = 8_u8.saturating_add(index.saturating_sub(232).saturating_mul(10));
-        return (gray, gray, gray);
-    }
-    let cube = index - 16;
-    let level = |value: u8| if value == 0 { 0 } else { 55 + value * 40 };
-    (level(cube / 36), level((cube % 36) / 6), level(cube % 6))
 }

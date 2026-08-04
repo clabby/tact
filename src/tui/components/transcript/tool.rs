@@ -440,7 +440,7 @@ mod tests {
         theme::Theme,
         transcript::{ToolEntry, ToolState},
     };
-    use ratatui::style::Color;
+    use ratatui::style::{Color, Modifier};
     use serde_json::json;
 
     fn tool(name: &str, arguments: serde_json::Value) -> ToolEntry {
@@ -482,6 +482,45 @@ mod tests {
             .find(|span| span.content == "✓ ")
             .expect("successful tool should render a checkmark");
         assert_eq!(checkmark.style.fg, Some(Color::Green));
+    }
+
+    #[test]
+    fn shell_commands_use_prompt_and_syntax_colors() {
+        let shell = tool(
+            "exec_command",
+            json!({"cmd": "if test \"$HOME\"; then echo ok; fi"}),
+        );
+        let theme = Theme::default();
+
+        for (lines, expected_commands) in [
+            (render(&shell, 80, &theme), 1),
+            (render_expanded(&shell, 80, &theme), 2),
+        ] {
+            let spans = lines
+                .iter()
+                .flat_map(|line| &line.spans)
+                .collect::<Vec<_>>();
+            let prompts = spans
+                .iter()
+                .filter(|span| span.content == "$ ")
+                .collect::<Vec<_>>();
+            let keywords = spans
+                .iter()
+                .filter(|span| span.content.contains("if"))
+                .collect::<Vec<_>>();
+
+            assert_eq!(prompts.len(), expected_commands);
+            assert_eq!(keywords.len(), expected_commands);
+            assert!(
+                prompts
+                    .iter()
+                    .all(|prompt| prompt.style.fg == Some(Color::Yellow))
+            );
+            assert!(keywords.iter().all(|keyword| {
+                keyword.style.add_modifier.contains(Modifier::BOLD)
+                    && keyword.style.fg == Some(Color::Blue)
+            }));
+        }
     }
 
     #[test]

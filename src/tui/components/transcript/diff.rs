@@ -5,15 +5,7 @@ use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
 };
-use std::{path::Path, str::FromStr, sync::OnceLock};
-use syntect::{
-    easy::HighlightLines,
-    highlighting::{
-        Color as SyntectColor, FontStyle, ScopeSelectors, StyleModifier, Theme as SyntaxTheme,
-        ThemeItem, ThemeSettings,
-    },
-    parsing::SyntaxSet,
-};
+use syntect::{easy::HighlightLines, highlighting::Theme as SyntaxTheme, parsing::SyntaxSet};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -23,7 +15,7 @@ pub(super) fn render(source: &str, width: u16, theme: &Theme) -> Vec<Line<'stati
     }
 
     let files = parse(source);
-    let syntax_theme = syntax_theme(theme);
+    let syntax_theme = super::highlight::theme();
     let mut rendered = Vec::new();
     for file in files {
         if !rendered.is_empty() {
@@ -316,8 +308,8 @@ fn render_file(
     }
 
     rendered.push(component_header(&label, width, theme));
-    let assets = highlighting_assets();
-    let syntax = syntax_for_path(&assets.syntaxes, &file.path);
+    let assets = super::highlight::assets();
+    let syntax = super::highlight::syntax_for_path(&assets.syntaxes, &file.path);
     let code_width = width.saturating_sub(body_overhead).max(1);
     for hunk in &file.hunks {
         rendered.push(hunk_divider(&hunk_label(hunk), width, theme));
@@ -329,9 +321,11 @@ fn render_file(
                 &mut old_highlighter,
                 &mut new_highlighter,
                 &assets.syntaxes,
-                theme,
             );
-            for (index, code) in wrap_spans(spans, code_width).into_iter().enumerate() {
+            for (index, code) in super::highlight::wrap(spans, code_width)
+                .into_iter()
+                .enumerate()
+            {
                 rendered.push(component_body(
                     line,
                     code,
@@ -391,7 +385,7 @@ fn render_narrow_file(
             for text in hard_wrap(&line.text, code_width) {
                 rendered.push(Line::from(vec![
                     Span::styled(&marker(line.kind)[..1], marker_style(line.kind, theme)),
-                    Span::styled(text, code_style(theme)),
+                    Span::styled(text, super::highlight::code_style()),
                 ]));
             }
         }
@@ -480,7 +474,10 @@ fn component_body(
         spans.push(Span::styled("↪ ", Style::default().fg(theme.muted())));
     }
     spans.extend(code);
-    spans.push(Span::styled(" ".repeat(padding), code_style(theme)));
+    spans.push(Span::styled(
+        " ".repeat(padding),
+        super::highlight::code_style(),
+    ));
     spans.push(Span::styled(" │", Style::default().fg(theme.border())));
     Line::from(spans)
 }
@@ -518,258 +515,25 @@ fn marker_style(kind: DiffLineKind, theme: &Theme) -> Style {
     Style::default().fg(color).add_modifier(Modifier::BOLD)
 }
 
-fn code_style(theme: &Theme) -> Style {
-    Style::default().fg(theme.code_text())
-}
-
-struct HighlightingAssets {
-    syntaxes: SyntaxSet,
-}
-
-fn highlighting_assets() -> &'static HighlightingAssets {
-    static ASSETS: OnceLock<HighlightingAssets> = OnceLock::new();
-    ASSETS.get_or_init(|| HighlightingAssets {
-        syntaxes: SyntaxSet::load_defaults_newlines(),
-    })
-}
-
-fn syntax_theme(theme: &Theme) -> SyntaxTheme {
-    SyntaxTheme {
-        name: Some("tact".to_owned()),
-        settings: ThemeSettings {
-            foreground: Some(syntect_color(theme.code_text())),
-            background: Some(syntect_color(theme.code_background())),
-            accent: Some(syntect_color(theme.accent())),
-            ..ThemeSettings::default()
-        },
-        scopes: vec![
-            syntax_rule("comment", theme.muted(), Some(FontStyle::ITALIC)),
-            syntax_rule("string", theme.thinking_medium(), None),
-            syntax_rule(
-                "constant.numeric, constant.language, constant.character",
-                theme.thinking_xhigh(),
-                None,
-            ),
-            syntax_rule("keyword, storage", theme.accent(), Some(FontStyle::BOLD)),
-            syntax_rule(
-                "entity.name.function, support.function",
-                theme.thinking_high(),
-                None,
-            ),
-            syntax_rule(
-                "entity.name.type, entity.name.class, support.type, storage.type",
-                theme.thinking_max(),
-                None,
-            ),
-            syntax_rule(
-                "variable.parameter",
-                theme.thinking_medium(),
-                Some(FontStyle::ITALIC),
-            ),
-            syntax_rule(
-                "invalid",
-                theme.thinking_xhigh(),
-                Some(FontStyle::UNDERLINE),
-            ),
-        ],
-        ..SyntaxTheme::default()
-    }
-}
-
-fn syntax_rule(scope: &str, color: Color, font_style: Option<FontStyle>) -> ThemeItem {
-    ThemeItem {
-        scope: ScopeSelectors::from_str(scope).expect("built-in syntax scopes should be valid"),
-        style: StyleModifier {
-            foreground: Some(syntect_color(color)),
-            background: None,
-            font_style,
-        },
-    }
-}
-
-fn syntect_color(color: Color) -> SyntectColor {
-    let (r, g, b) = terminal_rgb(color);
-    SyntectColor { r, g, b, a: 0xff }
-}
-
-fn terminal_rgb(color: Color) -> (u8, u8, u8) {
-    match color {
-        Color::Reset => (0xd7, 0xd7, 0xd7),
-        Color::Black => (0x00, 0x00, 0x00),
-        Color::Red => (0xcd, 0x31, 0x31),
-        Color::Green => (0x0d, 0xbc, 0x79),
-        Color::Yellow => (0xe5, 0xe5, 0x10),
-        Color::Blue => (0x24, 0x72, 0xc8),
-        Color::Magenta => (0xbc, 0x3f, 0xbc),
-        Color::Cyan => (0x11, 0xa8, 0xcd),
-        Color::Gray => (0xe5, 0xe5, 0xe5),
-        Color::DarkGray => (0x66, 0x66, 0x66),
-        Color::LightRed => (0xf1, 0x4c, 0x4c),
-        Color::LightGreen => (0x23, 0xd1, 0x8b),
-        Color::LightYellow => (0xf5, 0xf5, 0x43),
-        Color::LightBlue => (0x3b, 0x8e, 0xd0),
-        Color::LightMagenta => (0xd6, 0x70, 0xd6),
-        Color::LightCyan => (0x29, 0xb8, 0xdb),
-        Color::White => (0xff, 0xff, 0xff),
-        Color::Rgb(r, g, b) => (r, g, b),
-        Color::Indexed(index) => indexed_rgb(index),
-    }
-}
-
-fn indexed_rgb(index: u8) -> (u8, u8, u8) {
-    const ANSI: [(u8, u8, u8); 16] = [
-        (0x00, 0x00, 0x00),
-        (0x80, 0x00, 0x00),
-        (0x00, 0x80, 0x00),
-        (0x80, 0x80, 0x00),
-        (0x00, 0x00, 0x80),
-        (0x80, 0x00, 0x80),
-        (0x00, 0x80, 0x80),
-        (0xc0, 0xc0, 0xc0),
-        (0x80, 0x80, 0x80),
-        (0xff, 0x00, 0x00),
-        (0x00, 0xff, 0x00),
-        (0xff, 0xff, 0x00),
-        (0x00, 0x00, 0xff),
-        (0xff, 0x00, 0xff),
-        (0x00, 0xff, 0xff),
-        (0xff, 0xff, 0xff),
-    ];
-    if index < 16 {
-        return ANSI[usize::from(index)];
-    }
-    if index >= 232 {
-        let gray = 8_u8.saturating_add(index.saturating_sub(232).saturating_mul(10));
-        return (gray, gray, gray);
-    }
-    let cube = index - 16;
-    let level = |value: u8| if value == 0 { 0 } else { 55 + value * 40 };
-    (level(cube / 36), level((cube % 36) / 6), level(cube % 6))
-}
-
-fn syntax_for_path<'a>(
-    syntaxes: &'a SyntaxSet,
-    path: &str,
-) -> &'a syntect::parsing::SyntaxReference {
-    let path = Path::new(path);
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .and_then(|extension| syntaxes.find_syntax_by_extension(extension))
-        .or_else(|| {
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .and_then(|name| syntaxes.find_syntax_by_extension(name))
-        })
-        .unwrap_or_else(|| syntaxes.find_syntax_plain_text())
-}
-
 fn highlighted_diff_line(
     line: &DiffLine,
     old: &mut HighlightLines<'_>,
     new: &mut HighlightLines<'_>,
     syntaxes: &SyntaxSet,
-    theme: &Theme,
 ) -> Vec<Span<'static>> {
     match line.kind {
         DiffLineKind::Context => {
-            let highlighted = highlight_line(old, &line.text, syntaxes, theme);
-            let _ = highlight_line(new, &line.text, syntaxes, theme);
+            let highlighted = super::highlight::line(old, &line.text, syntaxes);
+            let _ = super::highlight::line(new, &line.text, syntaxes);
             highlighted
         }
-        DiffLineKind::Addition => highlight_line(new, &line.text, syntaxes, theme),
-        DiffLineKind::Deletion => highlight_line(old, &line.text, syntaxes, theme),
+        DiffLineKind::Addition => super::highlight::line(new, &line.text, syntaxes),
+        DiffLineKind::Deletion => super::highlight::line(old, &line.text, syntaxes),
     }
-}
-
-fn highlight_line(
-    highlighter: &mut HighlightLines<'_>,
-    text: &str,
-    syntaxes: &SyntaxSet,
-    theme: &Theme,
-) -> Vec<Span<'static>> {
-    let line = format!("{text}\n");
-    let Ok(regions) = highlighter.highlight_line(&line, syntaxes) else {
-        return vec![Span::styled(text.to_owned(), code_style(theme))];
-    };
-    let mut spans = Vec::new();
-    for (style, region) in regions {
-        let region = region.trim_end_matches('\n');
-        if region.is_empty() {
-            continue;
-        }
-        let mut modifier = Modifier::empty();
-        if style.font_style.contains(FontStyle::BOLD) {
-            modifier.insert(Modifier::BOLD);
-        }
-        if style.font_style.contains(FontStyle::ITALIC) {
-            modifier.insert(Modifier::ITALIC);
-        }
-        if style.font_style.contains(FontStyle::UNDERLINE) {
-            modifier.insert(Modifier::UNDERLINED);
-        }
-        spans.push(Span::styled(
-            region.to_owned(),
-            Style::default()
-                .fg(Color::Rgb(
-                    style.foreground.r,
-                    style.foreground.g,
-                    style.foreground.b,
-                ))
-                .add_modifier(modifier),
-        ));
-    }
-    if spans.is_empty() {
-        spans.push(Span::styled(String::new(), code_style(theme)));
-    }
-    spans
-}
-
-fn wrap_spans(spans: Vec<Span<'static>>, width: u16) -> Vec<Vec<Span<'static>>> {
-    let mut lines = vec![Vec::<Span<'static>>::new()];
-    let mut used = 0_u16;
-    for span in spans {
-        for grapheme in span.content.graphemes(true) {
-            let grapheme_width =
-                u16::try_from(UnicodeWidthStr::width(grapheme)).unwrap_or(u16::MAX);
-            if grapheme_width > width {
-                if used > 0 {
-                    lines.push(Vec::new());
-                }
-                push_grapheme(
-                    lines.last_mut().expect("a line always exists"),
-                    "�",
-                    span.style,
-                );
-                used = 1;
-                continue;
-            }
-            if used.saturating_add(grapheme_width) > width && used > 0 {
-                lines.push(Vec::new());
-                used = 0;
-            }
-            push_grapheme(
-                lines.last_mut().expect("a line always exists"),
-                grapheme,
-                span.style,
-            );
-            used = used.saturating_add(grapheme_width);
-        }
-    }
-    lines
-}
-
-fn push_grapheme(spans: &mut Vec<Span<'static>>, grapheme: &str, style: Style) {
-    if let Some(last) = spans.last_mut()
-        && last.style == style
-    {
-        last.content.to_mut().push_str(grapheme);
-        return;
-    }
-    spans.push(Span::styled(grapheme.to_owned(), style));
 }
 
 fn hard_wrap(text: &str, width: u16) -> Vec<String> {
-    let spans = wrap_spans(vec![Span::raw(text.to_owned())], width);
+    let spans = super::highlight::wrap(vec![Span::raw(text.to_owned())], width);
     spans
         .into_iter()
         .map(|line| line.into_iter().map(|span| span.content).collect())
@@ -889,7 +653,7 @@ mod tests {
     }
 
     #[test]
-    fn syntax_colors_come_from_the_configured_theme() {
+    fn syntax_colors_ignore_configured_hex_colors() {
         let theme = toml::from_str::<Theme>(
             "mode = \"dark\"\naccent = \"#123456\"\ncode_background = \"#010203\"\n",
         )
@@ -905,7 +669,7 @@ mod tests {
             .find(|span| span.content == "pub")
             .expect("Rust keyword should be highlighted");
 
-        assert_eq!(keyword.style.fg, Some(Color::Rgb(0x12, 0x34, 0x56)));
+        assert_eq!(keyword.style.fg, Some(Color::Blue));
         assert_eq!(keyword.style.bg, None);
     }
 
