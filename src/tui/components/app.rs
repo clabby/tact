@@ -146,6 +146,7 @@ pub(crate) enum AppEvent {
         theme: Theme,
         preferred_reasoning_mode: ReasoningMode,
         memory_enabled: bool,
+        pin_latest_prompt: bool,
         message: String,
     },
     ConfigReloadFailed {
@@ -342,6 +343,7 @@ impl AppNode {
                 theme,
                 preferred_reasoning_mode,
                 memory_enabled,
+                pin_latest_prompt,
                 message,
             } => {
                 self.theme.replace_from_config(theme);
@@ -354,6 +356,7 @@ impl AppNode {
                 }
                 self.set_preferred_reasoning_mode(preferred_reasoning_mode);
                 self.set_memory_enabled(memory_enabled);
+                self.set_pin_latest_prompt(pin_latest_prompt);
                 self.update_root(pane, RootEvent::NotifySuccess(message))
             }
             AppEvent::ConfigReloadFailed { pane, error } => {
@@ -595,6 +598,15 @@ impl AppNode {
         }
         if let Some((_, fork)) = &mut self.fork {
             fork.component_mut().set_memory_enabled(enabled);
+        }
+    }
+
+    pub(crate) fn set_pin_latest_prompt(&mut self, enabled: bool) {
+        if let Some(main) = &mut self.main {
+            main.component_mut().set_pin_latest_prompt(enabled);
+        }
+        if let Some((_, fork)) = &mut self.fork {
+            fork.component_mut().set_pin_latest_prompt(enabled);
         }
     }
 
@@ -1107,6 +1119,7 @@ mod tests {
             theme: Theme::default(),
             preferred_reasoning_mode: ReasoningMode::Standard,
             memory_enabled: true,
+            pin_latest_prompt: false,
             message: "enabled memory".to_owned(),
         });
         for pane in [PaneId::Main, PaneId::Fork(1)] {
@@ -1124,10 +1137,31 @@ mod tests {
             theme: Theme::default(),
             preferred_reasoning_mode: ReasoningMode::Standard,
             memory_enabled: false,
+            pin_latest_prompt: false,
             message: "disabled memory".to_owned(),
         });
         for pane in [PaneId::Main, PaneId::Fork(1)] {
             assert!(open_memory(&mut app, pane).effects.is_empty());
+        }
+    }
+
+    #[test]
+    fn config_reload_updates_prompt_pinning_for_every_root() {
+        let mut app = app();
+        app.update(control('f'));
+        app.update(AppEvent::ForkReady(PaneId::Fork(1)));
+
+        app.update(AppEvent::ConfigReloaded {
+            pane: PaneId::Main,
+            theme: Theme::default(),
+            preferred_reasoning_mode: ReasoningMode::Standard,
+            memory_enabled: false,
+            pin_latest_prompt: true,
+            message: "enabled prompt pinning".to_owned(),
+        });
+
+        for pane in [PaneId::Main, PaneId::Fork(1)] {
+            assert!(app.pane(pane).unwrap().component().pin_latest_prompt());
         }
     }
 }

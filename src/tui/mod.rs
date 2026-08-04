@@ -488,6 +488,7 @@ pub(crate) async fn run(
     root.set_reasoning_modes(reasoning_mode, preferred_reasoning_mode);
     root.set_fast_mode(initial_fast_mode);
     root.set_max_subagents(initial_max_subagents);
+    root.set_pin_latest_prompt(config.ui().pin_latest_prompt());
     let mut memory_store = configured_memory_store(&config);
     root.set_memory_enabled(memory_store.is_some());
     if let Some(projection) = restored_projection {
@@ -1756,6 +1757,7 @@ fn apply_pane_effect(
                 let max_subagents = config.agent().max_subagents();
                 let preferred_reasoning_mode = config.agent().reasoning_mode();
                 let memory_enabled = config.memory().enabled();
+                let pin_latest_prompt = config.ui().pin_latest_prompt();
                 *context.memory_store = configured_memory_store(&config);
                 context.app.set_max_subagents(max_subagents);
                 for runtime in context.panes.values() {
@@ -1765,9 +1767,9 @@ fn apply_pane_effect(
                 }
                 *context.config = config;
                 let message = if workspace_changed {
-                    "Reloaded config · theme and memory browser applied · agent/auth/tool settings apply to new sessions · workspace requires restart"
+                    "Reloaded config · theme, UI, and memory browser applied · agent/auth/tool settings apply to new sessions · workspace requires restart"
                 } else {
-                    "Reloaded config · theme and memory browser applied · agent/auth/tool settings apply to new sessions"
+                    "Reloaded config · theme, UI, and memory browser applied · agent/auth/tool settings apply to new sessions"
                 };
                 schedule(
                     context.app.update(AppEvent::ConfigReloaded {
@@ -1775,6 +1777,7 @@ fn apply_pane_effect(
                         theme,
                         preferred_reasoning_mode,
                         memory_enabled,
+                        pin_latest_prompt,
                         message: message.to_owned(),
                     }),
                     context.scheduler,

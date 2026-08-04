@@ -89,6 +89,7 @@ pub(crate) struct Config {
     skills: SkillsConfig,
     memory: MemoryConfig,
     subagents: SubagentsConfig,
+    ui: UiConfig,
     theme: Theme,
     #[serde(skip)]
     reload: ReloadSource,
@@ -178,6 +179,12 @@ pub(crate) struct SubagentsConfig {
     enabled: bool,
 }
 
+/// Effective terminal interface configuration.
+#[derive(Clone, Debug, Default, Serialize)]
+pub(crate) struct UiConfig {
+    pin_latest_prompt: bool,
+}
+
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ConfigOverrides {
     pub(crate) path: Option<PathBuf>,
@@ -217,6 +224,7 @@ struct ConfigFile {
     skills: SkillsConfigFile,
     memory: MemoryConfigFile,
     subagents: SubagentsConfigFile,
+    ui: UiConfigFile,
     theme: Theme,
 }
 
@@ -237,6 +245,12 @@ struct MemoryConfigFile {
 #[serde(default, deny_unknown_fields)]
 struct SubagentsConfigFile {
     enabled: Option<bool>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct UiConfigFile {
+    pin_latest_prompt: bool,
 }
 
 #[derive(Deserialize)]
@@ -407,6 +421,9 @@ impl Config {
             subagents: SubagentsConfig {
                 enabled: file.subagents.enabled.unwrap_or(true),
             },
+            ui: UiConfig {
+                pin_latest_prompt: file.ui.pin_latest_prompt,
+            },
             theme: file.theme,
             reload,
         })
@@ -473,6 +490,10 @@ impl Config {
 
     pub(crate) const fn subagents(&self) -> &SubagentsConfig {
         &self.subagents
+    }
+
+    pub(crate) const fn ui(&self) -> &UiConfig {
+        &self.ui
     }
 
     pub(crate) fn memory_path(&self) -> PathBuf {
@@ -981,6 +1002,12 @@ impl SubagentsConfig {
     }
 }
 
+impl UiConfig {
+    pub(crate) const fn pin_latest_prompt(&self) -> bool {
+        self.pin_latest_prompt
+    }
+}
+
 impl ReasoningEffort {
     pub(crate) const ALL: [Self; 5] = [Self::Low, Self::Medium, Self::High, Self::Xhigh, Self::Max];
 
@@ -1204,6 +1231,7 @@ mod tests {
                 "skills",
                 "memory",
                 "subagents",
+                "ui",
                 "theme",
             ],
         );
@@ -1228,6 +1256,7 @@ mod tests {
         assert_table_fields(&rendered["skills"], &["enabled", "roots"]);
         assert_table_fields(&rendered["memory"], &["enabled"]);
         assert_table_fields(&rendered["subagents"], &["enabled"]);
+        assert_table_fields(&rendered["ui"], &["pin_latest_prompt"]);
         assert_table_fields(&rendered["theme"], &["mode", "light", "dark"]);
         let palette_fields = [
             "text",
@@ -1269,6 +1298,7 @@ mod tests {
             Some(0)
         );
         assert_eq!(rendered["theme"]["mode"].as_str(), Some("auto"));
+        assert_eq!(rendered["ui"]["pin_latest_prompt"].as_bool(), Some(false));
         assert_eq!(rendered["theme"]["dark"]["accent"].as_str(), Some("blue"));
 
         let reloaded = load_config(&config.to_toml().unwrap()).unwrap();
@@ -1296,6 +1326,15 @@ mod tests {
 
         let rendered: toml::Value = toml::from_str(&config.to_toml().unwrap()).unwrap();
         assert_eq!(rendered["memory"]["enabled"].as_bool(), Some(false));
+    }
+
+    #[test]
+    fn latest_prompt_pinning_can_be_enabled_from_the_config_file() {
+        let config = load_config("[ui]\npin_latest_prompt = true\n").unwrap();
+
+        assert!(config.ui().pin_latest_prompt());
+        let rendered: toml::Value = toml::from_str(&config.to_toml().unwrap()).unwrap();
+        assert_eq!(rendered["ui"]["pin_latest_prompt"].as_bool(), Some(true));
     }
 
     #[test]

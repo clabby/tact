@@ -133,6 +133,9 @@ enabled = false
 [subagents]
 enabled = true
 
+[ui]
+pin_latest_prompt = false
+
 [theme]
 mode = "auto" # auto, light, or dark
 
@@ -183,7 +186,7 @@ command-line reference.
 
 The `/subagents` panel shows the current concurrency limit. Use `-` and `+` there to update it.
 
-Use **Reload config** in the Actions menu after editing the file. Theme changes apply immediately.
+Use **Reload config** in the Actions menu after editing the file. Theme and UI changes apply immediately.
 Most agent settings apply when a session starts or is restored, while effort and fast mode can also
 be changed during a session. Workspace changes require restarting tact.
 
@@ -210,6 +213,18 @@ thinking_max = "magenta"
 Put any of the color options under `[theme.light]` or `[theme.dark]` to override that palette. Colors
 may be Ratatui names, indexed values such as `239`, or RGB values such as `"#AABBCC"`. Auto mode
 follows the operating-system theme while tact is running.
+
+### Transcript
+
+Pin the prompt associated with the visible response to the top of the transcript while scrolling:
+
+```toml
+[ui]
+pin_latest_prompt = true
+```
+
+Pinned prompts use at most three rows. Scroll with the pointer over a clipped prompt to reveal the
+rest without moving the transcript.
 
 ### Custom Endpoints
 
