@@ -1763,7 +1763,7 @@ mod tests {
                 (0..backend.buffer().area.width)
                     .map(|column| backend.buffer()[(column, row)].symbol())
                     .collect::<String>()
-                    .contains("cargo test")
+                    .contains("Shell")
             })
             .expect("tool summary should be visible");
         let position = Position::new(0, tool_row);
@@ -2597,8 +2597,8 @@ mod tests {
             AgentEventKind::ToolCall,
             json!({
                 "call_id": "workflow/code-2",
-                "tool": "exec_command",
-                "arguments": {"cmd": "cargo check --all-features"},
+                "tool": "custom_operation",
+                "arguments": {"prompt": "inspect every crate in the workspace"},
             }),
         )));
         transcript.update(TranscriptEvent::Record(agent_with_payload(
@@ -2606,7 +2606,7 @@ mod tests {
             AgentEventKind::ToolResult,
             json!({
                 "call_id": "workflow/code-2",
-                "tool": "exec_command",
+                "tool": "custom_operation",
                 "status": "failed",
                 "duration_ns": 1_200_000_000_u64,
                 "result": {
@@ -2624,21 +2624,24 @@ mod tests {
             .chunks(60)
             .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
             .collect::<Vec<_>>();
-        let shell_row = rows.iter().position(|row| row.contains("Shell")).unwrap();
-        let spacer = rows[shell_row..]
+        let tool_row = rows
+            .iter()
+            .position(|row| row.contains("Custom operation"))
+            .unwrap();
+        let spacer = rows[tool_row..]
             .iter()
             .position(|row| row.trim().is_empty())
-            .map(|offset| shell_row + offset)
+            .map(|offset| tool_row + offset)
             .unwrap();
-        let final_shell_row = spacer - 1;
+        let final_tool_row = spacer - 1;
 
-        assert!(rows[shell_row].starts_with("  ├─"));
+        assert!(rows[tool_row].starts_with("  ├─"));
         assert!(
-            rows[shell_row + 1..final_shell_row]
+            rows[tool_row + 1..final_tool_row]
                 .iter()
                 .all(|row| row.starts_with("  │ "))
         );
-        assert!(rows[final_shell_row].starts_with("  └─"));
+        assert!(rows[final_tool_row].starts_with("  └─"));
     }
 
     #[test]

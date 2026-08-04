@@ -107,12 +107,21 @@ pub(super) struct Presentation {
     outcome: Option<String>,
     details: Vec<Line<'static>>,
     footer: Option<String>,
+    summary_overflow: SummaryOverflow,
 }
 
 enum Subject {
     Plain(String),
     Styled(Vec<Span<'static>>),
 }
+
+enum SummaryOverflow {
+    Wrap,
+    Truncate,
+}
+
+const TRUNCATION_MARKER: &str = " …";
+const TRUNCATION_MARKER_WIDTH: u16 = 2;
 
 impl Presentation {
     pub(super) fn new(title: impl Into<String>, subject: impl Into<String>) -> Self {
@@ -122,6 +131,7 @@ impl Presentation {
             outcome: None,
             details: Vec::new(),
             footer: None,
+            summary_overflow: SummaryOverflow::Wrap,
         }
     }
 
@@ -132,6 +142,7 @@ impl Presentation {
             outcome: None,
             details: Vec::new(),
             footer: None,
+            summary_overflow: SummaryOverflow::Wrap,
         }
     }
 
@@ -147,6 +158,11 @@ impl Presentation {
 
     pub(super) fn footer(mut self, footer: impl Into<String>) -> Self {
         self.footer = Some(footer.into());
+        self
+    }
+
+    pub(super) fn truncate_summary(mut self) -> Self {
+        self.summary_overflow = SummaryOverflow::Truncate;
         self
     }
 }
@@ -189,29 +205,75 @@ fn summary_lines(
             .add_modifier(Modifier::BOLD),
     );
     push_subject(&mut content, &presentation.subject, theme);
+    let mut outcome_spans = Vec::new();
     if let Some(outcome) = &presentation.outcome {
         append_span(
-            &mut content,
+            &mut outcome_spans,
             &format!(" · {outcome}"),
             Style::default().fg(theme.muted()),
         );
     }
+    let mut error_spans = Vec::new();
     if tool.state == ToolState::Failed
         && let Some(error) = first_error_line(tool.result.as_ref())
     {
         append_span(
-            &mut content,
+            &mut error_spans,
             &format!(" · {error}"),
             Style::default().fg(theme.thinking_xhigh()),
         );
     }
+    let mut duration_spans = Vec::new();
     if let Some(duration) = live_duration_ns.or(tool.duration_ns) {
         append_span(
-            &mut content,
+            &mut duration_spans,
             &format!(" · {}", format_duration(duration)),
             Style::default().fg(theme.muted()),
         );
     }
+
+    if matches!(presentation.summary_overflow, SummaryOverflow::Truncate) {
+        let title_span_count = prefix.len() + usize::from(!content.is_empty());
+        let leading = prefix.into_iter().chain(content).collect::<Vec<_>>();
+        let full_summary = leading
+            .iter()
+            .chain(&outcome_spans)
+            .chain(&error_spans)
+            .chain(&duration_spans)
+            .cloned()
+            .collect::<Vec<_>>();
+        if !spans_need_truncation(&full_summary, width) {
+            return vec![Line::from(full_summary)];
+        }
+
+        let suffix = outcome_spans
+            .into_iter()
+            .chain(duration_spans)
+            .collect::<Vec<_>>();
+        let suffix_width = spans_width(&suffix);
+        let minimum_leading_width =
+            spans_width(&leading[..title_span_count]).saturating_add(TRUNCATION_MARKER_WIDTH);
+        if suffix_width >= width || width - suffix_width < minimum_leading_width {
+            return vec![truncate_spans_with_ellipsis(
+                &full_summary,
+                width,
+                Style::default().fg(theme.muted()),
+            )];
+        }
+
+        let leading_width = width - suffix_width;
+        let mut line = truncate_spans_with_ellipsis(
+            &leading,
+            leading_width,
+            Style::default().fg(theme.muted()),
+        );
+        line.spans.extend(suffix);
+        return vec![line];
+    }
+
+    content.extend(outcome_spans);
+    content.extend(error_spans);
+    content.extend(duration_spans);
 
     const PREFIX_WIDTH: u16 = 6;
     if width <= PREFIX_WIDTH {
@@ -229,6 +291,53 @@ fn summary_lines(
         line.spans.splice(0..0, line_prefix);
     }
     lines
+}
+
+fn spans_need_truncation(spans: &[Span<'static>], width: u16) -> bool {
+    spans.iter().any(|span| span.content.contains(['\n', '\r'])) || spans_width(spans) > width
+}
+
+fn spans_width(spans: &[Span<'static>]) -> u16 {
+    spans.iter().fold(0_u16, |total, span| {
+        let width =
+            u16::try_from(UnicodeWidthStr::width(span.content.as_ref())).unwrap_or(u16::MAX);
+        total.saturating_add(width)
+    })
+}
+
+fn truncate_spans_with_ellipsis(
+    spans: &[Span<'static>],
+    width: u16,
+    ellipsis_style: Style,
+) -> Line<'static> {
+    if width == 0 {
+        return Line::default();
+    }
+    let marker = if width < TRUNCATION_MARKER_WIDTH {
+        "…"
+    } else {
+        TRUNCATION_MARKER
+    };
+    let mut rendered = Vec::new();
+    let marker_width =
+        u16::try_from(UnicodeWidthStr::width(marker)).unwrap_or(TRUNCATION_MARKER_WIDTH);
+    let mut remaining = width.saturating_sub(marker_width);
+    for span in spans {
+        let line_end = span.content.find(['\n', '\r']);
+        let content = line_end.map_or(span.content.as_ref(), |end| &span.content[..end]);
+        let shortened = truncate(content, remaining);
+        let fully_rendered = shortened == content;
+        let used = u16::try_from(UnicodeWidthStr::width(shortened.as_str())).unwrap_or(u16::MAX);
+        remaining = remaining.saturating_sub(used);
+        if !shortened.is_empty() {
+            rendered.push(Span::styled(shortened, span.style));
+        }
+        if line_end.is_some() || !fully_rendered {
+            break;
+        }
+    }
+    rendered.push(Span::styled(marker, ellipsis_style));
+    Line::from(rendered)
 }
 
 fn append_span(spans: &mut Vec<Span<'static>>, text: &str, style: Style) {
@@ -435,7 +544,7 @@ fn status_style(state: ToolState, theme: &Theme) -> Style {
 
 #[cfg(test)]
 mod tests {
-    use super::{render, render_expanded};
+    use super::{render, render_expanded, render_live};
     use crate::tui::{
         theme::Theme,
         transcript::{ToolEntry, ToolState},
@@ -538,13 +647,13 @@ mod tests {
     }
 
     #[test]
-    fn collapsed_tool_summary_wraps_instead_of_discarding_overflow() {
-        let shell = tool(
-            "exec_command",
-            json!({"cmd": "cargo test --all-targets --no-fail-fast --workspace"}),
+    fn non_shell_tool_summary_wraps_instead_of_discarding_overflow() {
+        let operation = tool(
+            "custom_operation",
+            json!({"prompt": "inspect every target without failing fast across the workspace"}),
         );
 
-        let lines = render(&shell, 32, &Theme::default());
+        let lines = render(&operation, 32, &Theme::default());
         let rendered = lines
             .iter()
             .map(ToString::to_string)
@@ -560,19 +669,44 @@ mod tests {
                 .skip(1)
                 .all(|line| line.to_string().starts_with("      "))
         );
-        assert!(rendered.contains("cargo test --all-targets --no-fail-fast --workspace"));
+        assert!(
+            rendered.contains("inspect every target without failing fast across the workspace")
+        );
         assert!(rendered.contains("1.2s"));
     }
 
     #[test]
-    fn collapsed_shell_command_preserves_newlines() {
+    fn shell_summaries_truncate_subject_and_preserve_status_suffix() {
+        let mut shell = tool(
+            "exec_command",
+            json!({"cmd": "cargo test --all-targets --no-fail-fast --workspace"}),
+        );
+        shell.result = Some(json!({"output": "", "exit_code": 0}));
+        let stdin = tool(
+            "write_stdin",
+            json!({"chars": "send a long interaction to the running process"}),
+        );
+
+        let shell_line = render(&shell, 36, &Theme::default()).remove(0);
+        let live_shell_line =
+            render_live(&shell, 2_500_000_000, 36, &Theme::default(), false).remove(0);
+        let stdin_line = render(&stdin, 32, &Theme::default()).remove(0);
+
+        assert_eq!(shell_line.width(), 36);
+        assert!(shell_line.to_string().ends_with(" … · exit 0 · 1.2s"));
+        assert!(live_shell_line.to_string().ends_with(" … · exit 0 · 2.5s"));
+        assert_eq!(stdin_line.width(), 32);
+        assert!(stdin_line.to_string().ends_with(" … · 1.2s"));
+    }
+
+    #[test]
+    fn shell_summary_truncates_at_the_first_explicit_newline() {
         let shell = tool("exec_command", json!({"cmd": "printf one\nprintf two"}));
 
         let lines = render(&shell, 80, &Theme::default());
 
-        assert_eq!(lines.len(), 2);
-        assert_eq!(lines[0].to_string(), "  ▶ ✓ Shell  $ printf one");
-        assert_eq!(lines[1].to_string(), "      printf two · 1.2s");
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].to_string(), "  ▶ ✓ Shell  $ printf one … · 1.2s");
     }
 
     #[test]
