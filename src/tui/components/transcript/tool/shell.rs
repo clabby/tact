@@ -17,7 +17,8 @@ pub(super) fn present(tool: &ToolEntry, width: u16, theme: &Theme, expanded: boo
         .get("cmd")
         .and_then(Value::as_str)
         .unwrap_or("<command unavailable>");
-    let mut presentation = Presentation::styled_subject("Shell", command_spans(command));
+    let mut presentation =
+        Presentation::styled_subject("Shell", command_spans(command)).truncate_summary();
     if let Some(outcome) = shell_outcome(tool.result.as_ref()) {
         presentation = presentation.outcome(outcome);
     }
@@ -100,7 +101,7 @@ fn stdin(tool: &ToolEntry, width: u16, theme: &Theme, expanded: bool) -> Present
             || "poll process".to_owned(),
             |chars| format!("send {chars:?}"),
         );
-    let presentation = Presentation::new("Shell input", subject);
+    let presentation = Presentation::new("Shell input", subject).truncate_summary();
     if !expanded {
         return presentation;
     }
