@@ -87,7 +87,6 @@ pub(crate) struct Transcript {
     pending_expandable_anchor: Option<PendingExpandableAnchor>,
     empty_logo: EmptyLogo,
     effort: ReasoningEffort,
-    pin_latest_prompt: bool,
     pinned_prompt: Option<PinnedPrompt>,
 }
 
@@ -223,7 +222,6 @@ impl Transcript {
             pending_expandable_anchor: None,
             empty_logo: EmptyLogo::new(Instant::now()),
             effort,
-            pin_latest_prompt: false,
             pinned_prompt: None,
         }
     }
@@ -231,19 +229,11 @@ impl Transcript {
     pub(crate) fn fork_snapshot(&self) -> Self {
         let mut snapshot = Self::with_effort(self.effort);
         snapshot.model = self.model.fork_snapshot();
-        snapshot.pin_latest_prompt = self.pin_latest_prompt;
         snapshot
     }
 
     pub(crate) const fn set_effort(&mut self, effort: ReasoningEffort) {
         self.effort = effort;
-    }
-
-    pub(crate) fn set_pin_latest_prompt(&mut self, enabled: bool) {
-        self.pin_latest_prompt = enabled;
-        if !enabled {
-            self.pinned_prompt = None;
-        }
     }
 
     pub(super) fn render_chrome(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
@@ -798,7 +788,7 @@ impl Transcript {
     }
 
     fn pinned_prompt_entry(&self, top: Option<Anchor>) -> Option<EntryId> {
-        if !self.pin_latest_prompt || !matches!(self.scroll, ScrollState::Detached(_)) {
+        if !matches!(self.scroll, ScrollState::Detached(_)) {
             return None;
         }
         let top = top?;
@@ -1950,7 +1940,6 @@ mod tests {
     #[test]
     fn detached_transcript_pins_at_most_three_lines_of_the_previous_prompt() {
         let mut transcript = Transcript::new();
-        transcript.set_pin_latest_prompt(true);
         transcript.update(TranscriptEvent::Record(user(
             1,
             "prompt one\nprompt two\nprompt three\nprompt four\nprompt five",
@@ -2003,7 +1992,6 @@ mod tests {
     #[test]
     fn pinned_prompt_uses_the_code_block_background() {
         let mut transcript = Transcript::new();
-        transcript.set_pin_latest_prompt(true);
         transcript.update(TranscriptEvent::Record(user(1, "pinned prompt")));
         transcript.update(TranscriptEvent::Record(agent_with_payload(
             2,
@@ -2043,7 +2031,6 @@ mod tests {
     #[test]
     fn active_stream_does_not_pin_while_following() {
         let mut transcript = Transcript::new();
-        transcript.set_pin_latest_prompt(true);
         transcript.update(TranscriptEvent::Record(user(1, "streaming prompt")));
         transcript.update(TranscriptEvent::Record(agent(
             2,
@@ -2069,7 +2056,6 @@ mod tests {
     #[test]
     fn scrolling_over_a_pinned_prompt_reveals_it_without_moving_the_transcript() {
         let mut transcript = Transcript::new();
-        transcript.set_pin_latest_prompt(true);
         transcript.update(TranscriptEvent::Record(user(
             1,
             "prompt one\nprompt two\nprompt three\nprompt four\nprompt five",
@@ -2133,7 +2119,6 @@ mod tests {
     #[test]
     fn page_navigation_uses_the_unpinned_transcript_height() {
         let mut transcript = Transcript::new();
-        transcript.set_pin_latest_prompt(true);
         transcript.update(TranscriptEvent::Record(user(
             1,
             "prompt one\nprompt two\nprompt three",
@@ -2182,7 +2167,6 @@ mod tests {
     #[test]
     fn clicking_a_pinned_prompt_jumps_to_it_in_the_transcript() {
         let mut transcript = Transcript::new();
-        transcript.set_pin_latest_prompt(true);
         transcript.update(TranscriptEvent::Record(user(1, "pinned prompt")));
         transcript.update(TranscriptEvent::Record(agent_with_payload(
             2,
@@ -2240,7 +2224,6 @@ mod tests {
     #[test]
     fn pinned_prompt_tracks_the_turn_at_the_top_of_the_viewport() {
         let mut transcript = Transcript::new();
-        transcript.set_pin_latest_prompt(true);
         for turn in 1..=2 {
             transcript.update(TranscriptEvent::Record(user(
                 turn * 2 - 1,
@@ -2292,7 +2275,6 @@ mod tests {
     #[test]
     fn prompt_is_not_pinned_above_another_visible_prompt() {
         let mut transcript = Transcript::new();
-        transcript.set_pin_latest_prompt(true);
         transcript.update(TranscriptEvent::Record(user(1, "first prompt")));
         transcript.update(TranscriptEvent::Record(user(2, "second prompt")));
         transcript.update(TranscriptEvent::Record(agent_with_payload(
@@ -2319,23 +2301,6 @@ mod tests {
         });
 
         drop(render(&mut transcript, 30, 2));
-
-        assert!(transcript.pinned_prompt.is_none());
-    }
-
-    #[test]
-    fn prompt_pinning_is_disabled_by_default() {
-        let mut transcript = Transcript::new();
-        transcript.update(TranscriptEvent::Record(user(1, "prompt")));
-        for sequence in 2..=10 {
-            transcript.update(TranscriptEvent::Record(user(
-                sequence,
-                format!("line {sequence}"),
-            )));
-        }
-        drop(render(&mut transcript, 30, 6));
-        transcript.update(TranscriptEvent::Scroll(ScrollCommand::Rows(-2)));
-        drop(render(&mut transcript, 30, 6));
 
         assert!(transcript.pinned_prompt.is_none());
     }

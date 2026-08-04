@@ -133,9 +133,6 @@ enabled = false
 [subagents]
 enabled = true
 
-[ui]
-pin_latest_prompt = false
-
 [theme]
 mode = "auto" # auto, light, or dark
 
@@ -213,18 +210,6 @@ thinking_max = "magenta"
 Put any of the color options under `[theme.light]` or `[theme.dark]` to override that palette. Colors
 may be Ratatui names, indexed values such as `239`, or RGB values such as `"#AABBCC"`. Auto mode
 follows the operating-system theme while tact is running.
-
-### Transcript
-
-Pin the prompt associated with the visible response to the top of the transcript while scrolling:
-
-```toml
-[ui]
-pin_latest_prompt = true
-```
-
-Pinned prompts use at most three rows. Scroll with the pointer over a clipped prompt to reveal the
-rest without moving the transcript.
 
 ### Custom Endpoints
 

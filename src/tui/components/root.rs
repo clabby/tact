@@ -287,7 +287,6 @@ pub(crate) struct RootNode {
     fork_available: bool,
     skills: Arc<[Skill]>,
     memory_enabled: bool,
-    pin_latest_prompt: bool,
     interactive: bool,
     theme_mode: ThemeMode,
     preferred_reasoning_mode: ReasoningMode,
@@ -320,7 +319,6 @@ impl RootNode {
             fork_available: true,
             skills: Arc::from([]),
             memory_enabled: false,
-            pin_latest_prompt: false,
             interactive: true,
             theme_mode: ThemeMode::Auto,
             preferred_reasoning_mode: ReasoningMode::Standard,
@@ -347,7 +345,6 @@ impl RootNode {
         root.fork_available = false;
         root.set_skills(Arc::clone(&self.skills));
         root.memory_enabled = self.memory_enabled;
-        root.set_pin_latest_prompt(self.pin_latest_prompt);
         root.theme_mode = self.theme_mode;
         root.context_diagnostics = self.context_diagnostics.clone();
         root.interactive = false;
@@ -377,18 +374,6 @@ impl RootNode {
         if !enabled && matches!(&self.overlay, Some(Overlay::Memory(_))) {
             self.overlay = None;
         }
-    }
-
-    pub(crate) fn set_pin_latest_prompt(&mut self, enabled: bool) {
-        self.pin_latest_prompt = enabled;
-        self.transcript
-            .component_mut()
-            .set_pin_latest_prompt(enabled);
-    }
-
-    #[cfg(test)]
-    pub(crate) const fn pin_latest_prompt(&self) -> bool {
-        self.pin_latest_prompt
     }
 
     pub(crate) fn set_theme_mode(&mut self, mode: ThemeMode) {
@@ -435,7 +420,6 @@ impl RootNode {
         let discarded_draft = current_draft.or_else(|| self.discarded_draft.take());
         let fork_available = self.fork_available;
         let memory_enabled = self.memory_enabled;
-        let pin_latest_prompt = self.pin_latest_prompt;
         let theme_mode = self.theme_mode;
         let max_subagents = self.subagents.max_subagents();
         *self = Self::new(workspace, thinking);
@@ -443,7 +427,6 @@ impl RootNode {
         self.discarded_draft = discarded_draft;
         self.fork_available = fork_available;
         self.memory_enabled = memory_enabled;
-        self.set_pin_latest_prompt(pin_latest_prompt);
         self.theme_mode = theme_mode;
         self.set_max_subagents(max_subagents);
         if replaced_draft {
@@ -511,9 +494,6 @@ impl RootNode {
         );
         self.set_fast_mode(fast_mode);
         self.transcript = Node::new(projection.transcript);
-        self.transcript
-            .component_mut()
-            .set_pin_latest_prompt(self.pin_latest_prompt);
         self.context_diagnostics = projection.context_diagnostics;
         if let Some(tokens) = projection.context_tokens {
             let _ = self
@@ -3007,7 +2987,6 @@ mod tests {
     fn clicking_a_pinned_prompt_reveals_its_transcript_entry() {
         let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
         let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
-        root.set_pin_latest_prompt(true);
         let prompt = TranscriptRecord::from_local(
             1,
             1,
