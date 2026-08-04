@@ -1,6 +1,6 @@
 [package]
 name = "tact"
-version = "0.3.4"
+version = "0.3.5"
 edition = "2024"
 rust-version = "1.97.0"
 authors = ["Ben Clabby"]
