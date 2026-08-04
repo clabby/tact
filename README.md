@@ -183,7 +183,7 @@ command-line reference.
 
 The `/subagents` panel shows the current concurrency limit. Use `-` and `+` there to update it.
 
-Use **Reload config** in the Actions menu after editing the file. Theme changes apply immediately.
+Use **Reload config** in the Actions menu after editing the file. Theme and UI changes apply immediately.
 Most agent settings apply when a session starts or is restored, while effort and fast mode can also
 be changed during a session. Workspace changes require restarting tact.
 

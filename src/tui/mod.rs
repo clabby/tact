@@ -1765,9 +1765,9 @@ fn apply_pane_effect(
                 }
                 *context.config = config;
                 let message = if workspace_changed {
-                    "Reloaded config · theme and memory browser applied · agent/auth/tool settings apply to new sessions · workspace requires restart"
+                    "Reloaded config · theme, UI, and memory browser applied · agent/auth/tool settings apply to new sessions · workspace requires restart"
                 } else {
-                    "Reloaded config · theme and memory browser applied · agent/auth/tool settings apply to new sessions"
+                    "Reloaded config · theme, UI, and memory browser applied · agent/auth/tool settings apply to new sessions"
                 };
                 schedule(
                     context.app.update(AppEvent::ConfigReloaded {

@@ -43,6 +43,7 @@ use std::{
 const EXPANDABLE_FOCUS_HINTS: [&str; 2] =
     ["↑↓ item · Enter toggle · Esc back", "↑↓ item · Enter · Esc"];
 const NESTED_TOOL_INDENT: u16 = 4;
+const PINNED_PROMPT_MAX_HEIGHT: u16 = 3;
 
 pub(crate) enum TranscriptEvent {
     Record(Arc<TranscriptRecord>),
@@ -52,6 +53,7 @@ pub(crate) enum TranscriptEvent {
     },
     AgentStreamClosed,
     Scroll(ScrollCommand),
+    JumpToPinnedPrompt,
     FollowTail,
     BlurExpandables,
     Expandable(ExpandableCommand),
@@ -85,6 +87,7 @@ pub(crate) struct Transcript {
     pending_expandable_anchor: Option<PendingExpandableAnchor>,
     empty_logo: EmptyLogo,
     effort: ReasoningEffort,
+    pinned_prompt: Option<PinnedPrompt>,
 }
 
 struct CachedEntry {
@@ -119,7 +122,7 @@ enum ScrollState {
     Detached(Anchor),
 }
 
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct Anchor {
     entry: EntryId,
     line: usize,
@@ -148,6 +151,14 @@ enum PendingExpandableAnchor {
 struct RunningToolTimer {
     observed_at: Instant,
     elapsed_at_observation: Duration,
+}
+
+#[derive(Clone, Copy)]
+struct PinnedPrompt {
+    entry: EntryId,
+    area: Rect,
+    offset: usize,
+    max_offset: usize,
 }
 
 impl RunningToolTimer {
@@ -179,6 +190,7 @@ pub(super) enum ScrollCommand {
     #[default]
     None,
     Rows(i32),
+    PinnedPromptRows(i32),
     Home,
     End,
 }
@@ -210,6 +222,7 @@ impl Transcript {
             pending_expandable_anchor: None,
             empty_logo: EmptyLogo::new(Instant::now()),
             effort,
+            pinned_prompt: None,
         }
     }
 
@@ -224,6 +237,11 @@ impl Transcript {
     }
 
     pub(super) fn render_chrome(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
+        let area = self.pinned_prompt.map_or(area, |prompt| Rect {
+            y: prompt.area.bottom(),
+            height: area.bottom().saturating_sub(prompt.area.bottom()),
+            ..area
+        });
         if self.expandables_focused {
             render_top_right_hint(frame, area, &EXPANDABLE_FOCUS_HINTS, theme.accent());
             return;
@@ -417,6 +435,19 @@ impl Transcript {
                 }
             }
             Event::Mouse(mouse) if !mouse.modifiers.contains(KeyModifiers::SHIFT) => {
+                if let Some(prompt) = self.pinned_prompt
+                    && prompt.area.contains(Position::new(mouse.column, mouse.row))
+                {
+                    match mouse.kind {
+                        MouseEventKind::ScrollUp if prompt.offset > 0 => {
+                            return Some(ScrollCommand::PinnedPromptRows(-1));
+                        }
+                        MouseEventKind::ScrollDown if prompt.offset < prompt.max_offset => {
+                            return Some(ScrollCommand::PinnedPromptRows(1));
+                        }
+                        _ => {}
+                    }
+                }
                 match mouse.kind {
                     MouseEventKind::ScrollUp => ScrollCommand::Rows(-3),
                     MouseEventKind::ScrollDown => ScrollCommand::Rows(3),
@@ -426,6 +457,17 @@ impl Transcript {
             _ => return None,
         };
         Some(command)
+    }
+
+    pub(super) fn pinned_prompt_clicked(&self, event: &Event) -> bool {
+        let Event::Mouse(mouse) = event else {
+            return false;
+        };
+        if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
+            return false;
+        }
+        self.pinned_prompt
+            .is_some_and(|prompt| prompt.area.contains(Position::new(mouse.column, mouse.row)))
     }
 
     pub(super) fn expandable_command(&self, event: &Event) -> Option<ExpandableCommand> {
@@ -572,7 +614,29 @@ impl Transcript {
     }
 
     fn update_scroll(&mut self, command: ScrollCommand) -> ComponentUpdate<TranscriptEffect> {
+        if let ScrollCommand::PinnedPromptRows(rows) = command {
+            let Some(prompt) = &mut self.pinned_prompt else {
+                return ComponentUpdate::none();
+            };
+            let offset = i64::try_from(prompt.offset).unwrap_or(i64::MAX);
+            let max_offset = i64::try_from(prompt.max_offset).unwrap_or(i64::MAX);
+            prompt.offset = usize::try_from((offset + i64::from(rows)).clamp(0, max_offset))
+                .unwrap_or(prompt.max_offset);
+            return ComponentUpdate::render(RenderRequest::Immediate);
+        }
         self.pending_scroll = command;
+        ComponentUpdate::render(RenderRequest::Immediate)
+    }
+
+    fn jump_to_pinned_prompt(&mut self) -> ComponentUpdate<TranscriptEffect> {
+        let Some(prompt) = self.pinned_prompt.take() else {
+            return ComponentUpdate::none();
+        };
+        self.scroll = ScrollState::Detached(Anchor {
+            entry: prompt.entry,
+            line: 0,
+        });
+        self.pending_scroll = ScrollCommand::None;
         ComponentUpdate::render(RenderRequest::Immediate)
     }
 
@@ -723,6 +787,107 @@ impl Transcript {
         }
     }
 
+    fn pinned_prompt_entry(&self, top: Option<Anchor>) -> Option<EntryId> {
+        if !matches!(self.scroll, ScrollState::Detached(_)) {
+            return None;
+        }
+        let top = top?;
+        let top_index = self.model.index_of(top.entry)?;
+        if matches!(self.model.entries()[top_index].kind, EntryKind::User { .. }) {
+            return None;
+        }
+        self.model.entries()[..top_index]
+            .iter()
+            .rev()
+            .find(|entry| !entry.hidden && matches!(entry.kind, EntryKind::User { .. }))
+            .map(|entry| entry.id)
+    }
+
+    fn prepare_pinned_prompt(
+        &mut self,
+        entry_id: Option<EntryId>,
+        area: Rect,
+        theme: &Theme,
+    ) -> u16 {
+        let Some(entry_id) = entry_id else {
+            self.pinned_prompt = None;
+            return 0;
+        };
+        let Some(entry) = self.model.entry(entry_id).cloned() else {
+            self.pinned_prompt = None;
+            return 0;
+        };
+        let available_height = area.height.saturating_sub(1).min(PINNED_PROMPT_MAX_HEIGHT);
+        let mut line_count = self.cache.layout(&entry, area.width, theme).len();
+        if entry.trailing_spacer {
+            line_count = line_count.saturating_sub(1);
+        }
+        let height = available_height.min(u16::try_from(line_count).unwrap_or(u16::MAX));
+        if height == 0 {
+            self.pinned_prompt = None;
+            return 0;
+        }
+
+        let max_offset = line_count.saturating_sub(usize::from(height));
+        let offset = self
+            .pinned_prompt
+            .filter(|prompt| prompt.entry == entry_id)
+            .map_or(0, |prompt| prompt.offset.min(max_offset));
+        self.pinned_prompt = Some(PinnedPrompt {
+            entry: entry_id,
+            area: Rect { height, ..area },
+            offset,
+            max_offset,
+        });
+        height
+    }
+
+    fn render_pinned_prompt(&mut self, frame: &mut Frame<'_>, theme: &Theme) {
+        let Some(prompt) = self.pinned_prompt else {
+            return;
+        };
+        for row in 0..prompt.area.height {
+            let line = prompt.offset.saturating_add(usize::from(row));
+            let anchor = Anchor {
+                entry: prompt.entry,
+                line,
+            };
+            if let Some(content) = self.cache.line(anchor) {
+                frame.buffer_mut().set_line(
+                    prompt.area.x,
+                    prompt.area.y.saturating_add(row),
+                    content,
+                    prompt.area.width,
+                );
+            }
+            self.selection_rows
+                .push((prompt.area.y.saturating_add(row), anchor));
+        }
+        frame
+            .buffer_mut()
+            .set_style(prompt.area, Style::default().bg(theme.code_background()));
+
+        let marker_style = Style::default()
+            .fg(theme.muted())
+            .add_modifier(Modifier::BOLD);
+        let marker_x = prompt.area.right().saturating_sub(1);
+        if prompt.offset > 0
+            && let Some(cell) = frame
+                .buffer_mut()
+                .cell_mut(Position::new(marker_x, prompt.area.y))
+        {
+            cell.set_symbol("…").set_style(marker_style);
+        }
+        if prompt.offset < prompt.max_offset
+            && let Some(cell) = frame.buffer_mut().cell_mut(Position::new(
+                marker_x,
+                prompt.area.bottom().saturating_sub(1),
+            ))
+        {
+            cell.set_symbol("…").set_style(marker_style);
+        }
+    }
+
     fn apply_pending_expandable_anchor(&mut self, width: u16, theme: &Theme) {
         let Some(request) = self.pending_expandable_anchor.take() else {
             return;
@@ -740,6 +905,7 @@ impl Transcript {
         let command = std::mem::take(&mut self.pending_scroll);
         match command {
             ScrollCommand::None => {}
+            ScrollCommand::PinnedPromptRows(_) => {}
             ScrollCommand::End => {
                 self.scroll = ScrollState::Follow;
                 self.new_updates = 0;
@@ -1197,6 +1363,7 @@ impl Component for Transcript {
             } => self.update_message(perspective, update),
             TranscriptEvent::AgentStreamClosed => self.agent_stream_closed(),
             TranscriptEvent::Scroll(command) => self.update_scroll(command),
+            TranscriptEvent::JumpToPinnedPrompt => self.jump_to_pinned_prompt(),
             TranscriptEvent::FollowTail => self.follow_tail(),
             TranscriptEvent::BlurExpandables => self.blur_expandables(),
             TranscriptEvent::Expandable(command) => self.update_expandable(command),
@@ -1220,21 +1387,41 @@ impl Component for Transcript {
             self.empty_logo.render(frame, area, theme, self.effort);
             return;
         }
+        let mut plan = self.render_plan(area.width, area.height, theme);
+        let prompt_entry = self.pinned_prompt_entry(plan.anchors.first().copied());
+        let prompt_height = self.prepare_pinned_prompt(prompt_entry, area, theme);
+        let transcript_area = Rect {
+            y: area.y.saturating_add(prompt_height),
+            height: area.height.saturating_sub(prompt_height),
+            ..area
+        };
+        self.viewport_height = transcript_area.height;
+        if prompt_height > 0 {
+            plan = self.render_plan(transcript_area.width, transcript_area.height, theme);
+            self.render_pinned_prompt(frame, theme);
+        }
         let RenderPlan {
             top_padding,
             anchors,
-        } = self.render_plan(area.width, area.height, theme);
-        let mut y = area.y.saturating_add(top_padding);
+        } = plan;
+        let mut y = transcript_area.y.saturating_add(top_padding);
         for anchor in anchors {
             if let Some(line) = self.cache.line(anchor) {
-                frame.buffer_mut().set_line(area.x, y, line, area.width);
+                frame
+                    .buffer_mut()
+                    .set_line(transcript_area.x, y, line, transcript_area.width);
             }
             self.link_hits
-                .extend(self.cache.links(anchor).iter().map(|link| LinkHitRegion {
-                    destination: Arc::clone(&link.destination),
-                    row: y,
-                    start: area.x.saturating_add(link.start),
-                    end: area.x.saturating_add(link.end).min(area.right()),
+                .extend(self.cache.links(anchor).iter().map(|link| {
+                    LinkHitRegion {
+                        destination: Arc::clone(&link.destination),
+                        row: y,
+                        start: area.x.saturating_add(link.start),
+                        end: transcript_area
+                            .x
+                            .saturating_add(link.end)
+                            .min(transcript_area.right()),
+                    }
                 }));
             self.selection_rows.push((y, anchor));
             if anchor.line == 0
@@ -1254,11 +1441,11 @@ impl Component for Transcript {
                         if tool.state == crate::tui::transcript::ToolState::Running
                 ) && let Some(spinner) = self.tool_spinner
                 {
-                    let spinner_x = area
+                    let spinner_x = transcript_area
                         .x
                         .saturating_add(4)
-                        .saturating_add(nested_tool_indent(entry, area.width));
-                    if spinner_x < area.right() {
+                        .saturating_add(nested_tool_indent(entry, transcript_area.width));
+                    if spinner_x < transcript_area.right() {
                         frame.buffer_mut().set_string(
                             spinner_x,
                             y,
@@ -1271,7 +1458,7 @@ impl Component for Transcript {
                 }
                 if self.expandables_focused && self.selected_expandable == Some(anchor.entry) {
                     frame.buffer_mut().set_string(
-                        area.x,
+                        transcript_area.x,
                         y,
                         "›",
                         Style::default()
@@ -1748,6 +1935,374 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn detached_transcript_pins_at_most_three_lines_of_the_previous_prompt() {
+        let mut transcript = Transcript::new();
+        transcript.update(TranscriptEvent::Record(user(
+            1,
+            "prompt one\nprompt two\nprompt three\nprompt four\nprompt five",
+        )));
+        transcript.update(TranscriptEvent::Record(agent_with_payload(
+            2,
+            AgentEventKind::AssistantMessage,
+            json!({
+                "model_call_index": 1,
+                "item_id": "answer",
+                "phase": "final_answer",
+                "text": (1..=40)
+                    .map(|line| format!("answer {line}"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            }),
+        )));
+        drop(render(&mut transcript, 30, 6));
+        let answer = transcript
+            .model
+            .entries()
+            .iter()
+            .find(|entry| matches!(entry.kind, EntryKind::Assistant { .. }))
+            .unwrap()
+            .id;
+        transcript.scroll = ScrollState::Detached(Anchor {
+            entry: answer,
+            line: 2,
+        });
+
+        let backend = render(&mut transcript, 30, 6);
+        let prompt = transcript
+            .pinned_prompt
+            .expect("the previous prompt should be pinned");
+        let rows = backend
+            .buffer()
+            .content()
+            .chunks(30)
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+            .collect::<Vec<_>>();
+
+        assert_eq!(prompt.area.height, 3);
+        assert!(rows[0].contains("prompt one"));
+        assert!(rows[1].contains("prompt two"));
+        assert!(rows[2].contains("prompt three"));
+        assert_eq!(backend.buffer()[(29, 2)].symbol(), "…");
+        assert!(rows[3..].iter().any(|row| row.contains("answer")));
+    }
+
+    #[test]
+    fn pinned_prompt_uses_the_code_block_background() {
+        let mut transcript = Transcript::new();
+        transcript.update(TranscriptEvent::Record(user(1, "pinned prompt")));
+        transcript.update(TranscriptEvent::Record(agent_with_payload(
+            2,
+            AgentEventKind::AssistantMessage,
+            json!({
+                "model_call_index": 1,
+                "item_id": "answer",
+                "phase": "final_answer",
+                "text": "response content ".repeat(40),
+            }),
+        )));
+        let answer = transcript
+            .model
+            .entries()
+            .iter()
+            .find(|entry| matches!(entry.kind, EntryKind::Assistant { .. }))
+            .unwrap()
+            .id;
+        transcript.scroll = ScrollState::Detached(Anchor {
+            entry: answer,
+            line: 2,
+        });
+
+        let backend = render(&mut transcript, 30, 6);
+        let area = transcript.pinned_prompt.unwrap().area;
+
+        for row in area.y..area.bottom() {
+            for column in area.x..area.right() {
+                assert_eq!(
+                    backend.buffer()[(column, row)].bg,
+                    Theme::default().code_background()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn active_stream_does_not_pin_while_following() {
+        let mut transcript = Transcript::new();
+        transcript.update(TranscriptEvent::Record(user(1, "streaming prompt")));
+        transcript.update(TranscriptEvent::Record(agent(
+            2,
+            AgentEventKind::RunStarted,
+        )));
+        transcript.update(TranscriptEvent::Record(agent_with_payload(
+            3,
+            AgentEventKind::AssistantMessage,
+            json!({
+                "model_call_index": 1,
+                "item_id": "answer",
+                "phase": "final_answer",
+                "text": "streamed response content ".repeat(40),
+            }),
+        )));
+
+        drop(render(&mut transcript, 30, 6));
+
+        assert!(matches!(transcript.scroll, ScrollState::Follow));
+        assert!(transcript.pinned_prompt.is_none());
+    }
+
+    #[test]
+    fn scrolling_over_a_pinned_prompt_reveals_it_without_moving_the_transcript() {
+        let mut transcript = Transcript::new();
+        transcript.update(TranscriptEvent::Record(user(
+            1,
+            "prompt one\nprompt two\nprompt three\nprompt four\nprompt five",
+        )));
+        transcript.update(TranscriptEvent::Record(agent_with_payload(
+            2,
+            AgentEventKind::AssistantMessage,
+            json!({
+                "model_call_index": 1,
+                "item_id": "answer",
+                "phase": "final_answer",
+                "text": (1..=40)
+                    .map(|line| format!("answer {line}"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            }),
+        )));
+        drop(render(&mut transcript, 30, 6));
+        let answer = transcript
+            .model
+            .entries()
+            .iter()
+            .find(|entry| matches!(entry.kind, EntryKind::Assistant { .. }))
+            .unwrap()
+            .id;
+        transcript.scroll = ScrollState::Detached(Anchor {
+            entry: answer,
+            line: 2,
+        });
+        drop(render(&mut transcript, 30, 6));
+        let transcript_top = transcript.last_top;
+
+        for _ in 0..2 {
+            scroll(
+                &mut transcript,
+                Event::Mouse(MouseEvent {
+                    kind: MouseEventKind::ScrollDown,
+                    column: 5,
+                    row: 1,
+                    modifiers: KeyModifiers::NONE,
+                }),
+            );
+            drop(render(&mut transcript, 30, 6));
+        }
+        let backend = render(&mut transcript, 30, 6);
+        let rows = backend
+            .buffer()
+            .content()
+            .chunks(30)
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+            .collect::<Vec<_>>();
+
+        assert_eq!(transcript.last_top, transcript_top);
+        assert!(rows[0].contains("prompt three"));
+        assert!(rows[1].contains("prompt four"));
+        assert!(rows[2].contains("prompt five"));
+        assert_eq!(backend.buffer()[(29, 0)].symbol(), "…");
+        assert_ne!(backend.buffer()[(29, 2)].symbol(), "…");
+    }
+
+    #[test]
+    fn page_navigation_uses_the_unpinned_transcript_height() {
+        let mut transcript = Transcript::new();
+        transcript.update(TranscriptEvent::Record(user(
+            1,
+            "prompt one\nprompt two\nprompt three",
+        )));
+        transcript.update(TranscriptEvent::Record(agent_with_payload(
+            2,
+            AgentEventKind::AssistantMessage,
+            json!({
+                "model_call_index": 1,
+                "item_id": "answer",
+                "phase": "final_answer",
+                "text": (1..=40)
+                    .map(|line| format!("answer {line}"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            }),
+        )));
+        drop(render(&mut transcript, 30, 6));
+        let answer = transcript
+            .model
+            .entries()
+            .iter()
+            .find(|entry| matches!(entry.kind, EntryKind::Assistant { .. }))
+            .unwrap()
+            .id;
+        transcript.scroll = ScrollState::Detached(Anchor {
+            entry: answer,
+            line: 2,
+        });
+        drop(render(&mut transcript, 30, 6));
+        assert_eq!(transcript.pinned_prompt.unwrap().area.height, 3);
+
+        let page_up = transcript.scroll_command(&Event::Key(KeyEvent::new(
+            KeyCode::PageUp,
+            KeyModifiers::NONE,
+        )));
+        let page_down = transcript.scroll_command(&Event::Key(KeyEvent::new(
+            KeyCode::PageDown,
+            KeyModifiers::NONE,
+        )));
+
+        assert!(matches!(page_up, Some(ScrollCommand::Rows(-1))));
+        assert!(matches!(page_down, Some(ScrollCommand::Rows(1))));
+    }
+
+    #[test]
+    fn clicking_a_pinned_prompt_jumps_to_it_in_the_transcript() {
+        let mut transcript = Transcript::new();
+        transcript.update(TranscriptEvent::Record(user(1, "pinned prompt")));
+        transcript.update(TranscriptEvent::Record(agent_with_payload(
+            2,
+            AgentEventKind::AssistantMessage,
+            json!({
+                "model_call_index": 1,
+                "item_id": "answer",
+                "phase": "final_answer",
+                "text": (1..=40)
+                    .map(|line| format!("answer {line}"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            }),
+        )));
+        let prompt = transcript.model.entries()[0].id;
+        let answer = transcript.model.entries()[1].id;
+        transcript.scroll = ScrollState::Detached(Anchor {
+            entry: answer,
+            line: 2,
+        });
+        drop(render(&mut transcript, 30, 6));
+
+        let click = Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 5,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert!(transcript.pinned_prompt_clicked(&click));
+        transcript.update(TranscriptEvent::JumpToPinnedPrompt);
+        let backend = render(&mut transcript, 30, 6);
+
+        assert_eq!(
+            transcript.last_top,
+            Some(Anchor {
+                entry: prompt,
+                line: 0
+            })
+        );
+        assert!(transcript.pinned_prompt.is_none());
+        assert!(
+            backend
+                .buffer()
+                .content()
+                .chunks(30)
+                .next()
+                .unwrap()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>()
+                .contains("pinned prompt")
+        );
+    }
+
+    #[test]
+    fn pinned_prompt_tracks_the_turn_at_the_top_of_the_viewport() {
+        let mut transcript = Transcript::new();
+        for turn in 1..=2 {
+            transcript.update(TranscriptEvent::Record(user(
+                turn * 2 - 1,
+                format!("prompt {turn}"),
+            )));
+            transcript.update(TranscriptEvent::Record(agent_with_payload(
+                turn * 2,
+                AgentEventKind::AssistantMessage,
+                json!({
+                    "model_call_index": turn,
+                    "item_id": format!("answer-{turn}"),
+                    "phase": "final_answer",
+                    "text": (1..=40)
+                        .map(|line| format!("turn {turn} answer {line}"))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                }),
+            )));
+        }
+        let users = transcript
+            .model
+            .entries()
+            .iter()
+            .filter(|entry| matches!(entry.kind, EntryKind::User { .. }))
+            .map(|entry| entry.id)
+            .collect::<Vec<_>>();
+        let answers = transcript
+            .model
+            .entries()
+            .iter()
+            .filter(|entry| matches!(entry.kind, EntryKind::Assistant { .. }))
+            .map(|entry| entry.id)
+            .collect::<Vec<_>>();
+
+        for (prompt, answer) in users.into_iter().zip(answers) {
+            transcript.scroll = ScrollState::Detached(Anchor {
+                entry: answer,
+                line: 2,
+            });
+            drop(render(&mut transcript, 30, 6));
+
+            assert_eq!(
+                transcript.pinned_prompt.map(|pinned| pinned.entry),
+                Some(prompt)
+            );
+        }
+    }
+
+    #[test]
+    fn prompt_is_not_pinned_above_another_visible_prompt() {
+        let mut transcript = Transcript::new();
+        transcript.update(TranscriptEvent::Record(user(1, "first prompt")));
+        transcript.update(TranscriptEvent::Record(user(2, "second prompt")));
+        transcript.update(TranscriptEvent::Record(agent_with_payload(
+            3,
+            AgentEventKind::AssistantMessage,
+            json!({
+                "model_call_index": 1,
+                "item_id": "answer",
+                "phase": "final_answer",
+                "text": "a sufficiently long response ".repeat(20),
+            }),
+        )));
+        let second_prompt = transcript
+            .model
+            .entries()
+            .iter()
+            .filter(|entry| matches!(entry.kind, EntryKind::User { .. }))
+            .nth(1)
+            .unwrap()
+            .id;
+        transcript.scroll = ScrollState::Detached(Anchor {
+            entry: second_prompt,
+            line: 0,
+        });
+
+        drop(render(&mut transcript, 30, 2));
+
+        assert!(transcript.pinned_prompt.is_none());
     }
 
     #[test]
