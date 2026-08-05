@@ -88,6 +88,7 @@ pub(crate) struct Transcript {
     empty_logo: EmptyLogo,
     effort: ReasoningEffort,
     pinned_prompt: Option<PinnedPrompt>,
+    updates_banner_area: Option<Rect>,
 }
 
 struct CachedEntry {
@@ -223,6 +224,7 @@ impl Transcript {
             empty_logo: EmptyLogo::new(Instant::now()),
             effort,
             pinned_prompt: None,
+            updates_banner_area: None,
         }
     }
 
@@ -236,14 +238,15 @@ impl Transcript {
         self.effort = effort;
     }
 
-    pub(super) fn render_chrome(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
+    pub(super) fn render_chrome(&mut self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
+        self.updates_banner_area = None;
         let area = self.pinned_prompt.map_or(area, |prompt| Rect {
             y: prompt.area.bottom(),
             height: area.bottom().saturating_sub(prompt.area.bottom()),
             ..area
         });
         if self.expandables_focused {
-            render_top_right_hint(frame, area, &EXPANDABLE_FOCUS_HINTS, theme.accent());
+            let _ = render_top_right_hint(frame, area, &EXPANDABLE_FOCUS_HINTS, theme.accent());
             return;
         }
 
@@ -258,7 +261,8 @@ impl Transcript {
         };
         let label = format!("↓ {} {noun} · Ctrl+End to follow", self.new_updates);
         let compact_label = format!("↓ {} {noun} · Ctrl+End", self.new_updates);
-        render_top_right_hint(frame, area, &[&label, &compact_label], theme.border());
+        self.updates_banner_area =
+            render_top_right_hint(frame, area, &[&label, &compact_label], theme.border());
     }
 
     pub(crate) fn animation_deadline(&self) -> Option<Instant> {
@@ -468,6 +472,17 @@ impl Transcript {
         }
         self.pinned_prompt
             .is_some_and(|prompt| prompt.area.contains(Position::new(mouse.column, mouse.row)))
+    }
+
+    pub(super) fn updates_banner_clicked(&self, event: &Event) -> bool {
+        let Event::Mouse(mouse) = event else {
+            return false;
+        };
+        if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
+            return false;
+        }
+        self.updates_banner_area
+            .is_some_and(|area| area.contains(Position::new(mouse.column, mouse.row)))
     }
 
     pub(super) fn expandable_command(&self, event: &Event) -> Option<ExpandableCommand> {
@@ -1472,14 +1487,16 @@ impl Component for Transcript {
     }
 }
 
-fn render_top_right_hint(frame: &mut Frame<'_>, area: Rect, labels: &[&str], color: Color) {
-    let Some(label) = labels
+fn render_top_right_hint(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    labels: &[&str],
+    color: Color,
+) -> Option<Rect> {
+    let label = labels
         .iter()
         .copied()
-        .find(|label| line_width(label) <= usize::from(area.width))
-    else {
-        return;
-    };
+        .find(|label| line_width(label) <= usize::from(area.width))?;
     let width = u16::try_from(line_width(label)).unwrap_or(u16::MAX);
     let x = area.right().saturating_sub(width);
     frame.buffer_mut().set_line(
@@ -1491,6 +1508,7 @@ fn render_top_right_hint(frame: &mut Frame<'_>, area: Rect, labels: &[&str], col
         )),
         area.right().saturating_sub(x),
     );
+    Some(Rect::new(x, area.y, width, 1))
 }
 
 fn render_entry(

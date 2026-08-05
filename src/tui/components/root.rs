@@ -611,7 +611,7 @@ impl RootNode {
                 .render_selection(frame.buffer_mut(), range);
         }
         self.transcript
-            .component()
+            .component_mut()
             .render_chrome(frame, transcript_area, theme);
         if let Some(overlay) = &mut self.overlay {
             match overlay {
@@ -746,6 +746,9 @@ impl RootNode {
         }
         if self.transcript.component().pinned_prompt_clicked(&event) {
             return self.update_transcript(TranscriptEvent::JumpToPinnedPrompt);
+        }
+        if self.transcript.component().updates_banner_clicked(&event) {
+            return self.update_transcript(TranscriptEvent::FollowTail);
         }
         if let Some(update) = self.update_selection_mouse(&mut event) {
             return update;
@@ -3035,6 +3038,64 @@ mod tests {
             terminal.backend().buffer()[(5, 0)].bg,
             Theme::default().code_background()
         );
+    }
+
+    #[test]
+    fn clicking_the_updates_banner_returns_to_the_transcript_tail() {
+        let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        for sequence in 1..=20 {
+            let record = TranscriptRecord::from_local(
+                sequence,
+                sequence,
+                LocalEvent::UserSubmitted {
+                    id: TurnId::new(sequence),
+                    text: format!("prompt {sequence}"),
+                },
+            )
+            .unwrap();
+            root.update(super::RootEvent::Transcript(Arc::new(record)));
+        }
+        terminal
+            .draw(|frame| root.render(frame, frame.area(), &Theme::default()))
+            .unwrap();
+        root.update(key(KeyCode::PageUp, KeyModifiers::NONE));
+        terminal
+            .draw(|frame| root.render(frame, frame.area(), &Theme::default()))
+            .unwrap();
+        let latest = TranscriptRecord::from_local(
+            21,
+            21,
+            LocalEvent::UserSubmitted {
+                id: TurnId::new(21),
+                text: "latest prompt".to_owned(),
+            },
+        )
+        .unwrap();
+        root.update(super::RootEvent::Transcript(Arc::new(latest)));
+        terminal
+            .draw(|frame| root.render(frame, frame.area(), &Theme::default()))
+            .unwrap();
+        let banner_column = text_column(terminal.backend().buffer(), 0, "1 update");
+
+        root.update(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            banner_column,
+            0,
+        ));
+        terminal
+            .draw(|frame| root.render(frame, frame.area(), &Theme::default()))
+            .unwrap();
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(rendered.contains("latest prompt"));
+        assert!(!rendered.contains("1 update"));
     }
 
     #[test]
