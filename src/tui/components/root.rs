@@ -143,6 +143,9 @@ pub(crate) enum RootEvent {
     AgentStreamClosed,
     Subagent(AgentUpdate),
     ReplaceDraft(String),
+    HandoffFinished(String),
+    HandoffCancelled,
+    HandoffFailed(String),
     ReviewStarted,
     ReviewReady(String),
     ReviewCancelled,
@@ -217,6 +220,7 @@ pub(crate) enum RootEffect {
     },
     PersistSteer(String),
     Copy(String),
+    Handoff,
     Review {
         download_assets: bool,
     },
@@ -230,6 +234,7 @@ pub(crate) enum RootEffect {
     Fork,
     CancelTurns,
     CancelReview,
+    CancelHandoff,
     Shutdown,
 }
 
@@ -245,6 +250,12 @@ enum Overlay {
     Sessions(Node<SessionPicker>),
     ReviewDownload(Node<ReviewDownloadConfirmation>),
     Subagents(SubagentOverlay),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BlockingTask {
+    Handoff,
+    Review,
 }
 
 struct FileMention {
@@ -282,7 +293,7 @@ pub(crate) struct RootNode {
     queue_area: Rect,
     in_flight_turns: usize,
     in_flight_shells: usize,
-    review_active: bool,
+    blocking_task: Option<BlockingTask>,
     review_url: Option<String>,
     fork_available: bool,
     skills: Arc<[Skill]>,
@@ -314,7 +325,7 @@ impl RootNode {
             queue_area: Rect::default(),
             in_flight_turns: 0,
             in_flight_shells: 0,
-            review_active: false,
+            blocking_task: None,
             review_url: None,
             fork_available: true,
             skills: Arc::from([]),
@@ -598,7 +609,7 @@ impl RootNode {
             composer_area,
             theme,
             focused
-                && !self.review_active
+                && self.blocking_task.is_none()
                 && !self.transcript.component().expandables_focused()
                 && !self.queue.component().focused(),
             composer_selection,
@@ -658,11 +669,13 @@ impl RootNode {
         if is_confirmation_key_repeat(&event) {
             return ComponentUpdate::none();
         }
-        if self.review_active && is_control_c(&event) {
+        if self.blocking_task.is_some() && is_control_c(&event) {
             return self.update_key_confirmation(ConfirmationAction::Exit, Instant::now());
         }
-        if self.review_active {
-            return self.update_review_input(event);
+        match self.blocking_task {
+            Some(BlockingTask::Review) => return self.update_review_input(event),
+            Some(BlockingTask::Handoff) => return self.update_handoff_input(event),
+            None => {}
         }
         if is_control_c(&event) {
             if self.overlay.is_none()
@@ -841,7 +854,7 @@ impl RootNode {
         if self.composer.component().draft().is_empty() && is_actions_trigger(&event) {
             let new_session_enabled = self.in_flight_turns == 0
                 && self.in_flight_shells == 0
-                && !self.review_active
+                && self.blocking_task.is_none()
                 && self.queue.component().is_empty();
             self.overlay = Some(Overlay::Actions(Node::new(ActionsMenu::new(
                 ActionAvailability {
@@ -891,6 +904,25 @@ impl RootNode {
         }
         if is_escape(&event) {
             return self.update_key_confirmation(ConfirmationAction::CancelReview, Instant::now());
+        }
+        if is_key_release(&event) {
+            return ComponentUpdate::none();
+        }
+        let confirmation_cleared = self.key_confirmation.take().is_some();
+        ComponentUpdate::render(if confirmation_cleared {
+            RenderRequest::Immediate
+        } else {
+            RenderRequest::None
+        })
+    }
+
+    fn update_handoff_input(&mut self, event: Event) -> ComponentUpdate<RootEffect> {
+        if is_escape(&event) {
+            self.key_confirmation = None;
+            return ComponentUpdate {
+                effects: vec![RootEffect::CancelHandoff],
+                render: RenderRequest::Immediate,
+            };
         }
         if is_key_release(&event) {
             return ComponentUpdate::none();
@@ -1338,6 +1370,22 @@ impl RootNode {
                         download_assets: false,
                     }],
                     render: RenderRequest::Immediate,
+                };
+            }
+            Some(ActionsEffect::Trigger(Action::Handoff)) => {
+                self.overlay = None;
+                self.blocking_task = Some(BlockingTask::Handoff);
+                let waiting = self.update_composer(
+                    ComposerEvent::ReviewWaiting {
+                        waiting: true,
+                        status: Some("Preparing handoff…".to_owned()),
+                        now: Instant::now(),
+                    },
+                    RenderRequest::Immediate,
+                );
+                return ComponentUpdate {
+                    effects: vec![RootEffect::Handoff],
+                    render: waiting.render.max(RenderRequest::Immediate),
                 };
             }
             None => {}
@@ -1981,7 +2029,9 @@ impl Component for RootNode {
         match event {
             RootEvent::Terminal(event) => self.update_terminal(event),
             RootEvent::PasteImage(data_url) => {
-                if self.review_active || self.overlay.is_some() || self.queue.component().focused()
+                if self.blocking_task.is_some()
+                    || self.overlay.is_some()
+                    || self.queue.component().focused()
                 {
                     ComponentUpdate::none()
                 } else {
@@ -2038,8 +2088,53 @@ impl Component for RootNode {
             RootEvent::ReplaceDraft(draft) => {
                 self.update_composer(ComposerEvent::ReplaceDraft(draft), RenderRequest::Immediate)
             }
+            RootEvent::HandoffFinished(prompt) => {
+                self.blocking_task = None;
+                let waiting = self.update_composer(
+                    ComposerEvent::ReviewWaiting {
+                        waiting: false,
+                        status: None,
+                        now: Instant::now(),
+                    },
+                    RenderRequest::Immediate,
+                );
+                let mut draft = self.update_composer(
+                    ComposerEvent::ReplaceDraft(prompt),
+                    RenderRequest::Immediate,
+                );
+                draft.effects.extend(waiting.effects);
+                draft.render = draft.render.max(waiting.render);
+                draft
+            }
+            RootEvent::HandoffCancelled => {
+                self.blocking_task = None;
+                self.notification = Some(Notification::plain(
+                    "Handoff cancelled.".to_owned(),
+                    Color::Yellow,
+                ));
+                self.update_composer(
+                    ComposerEvent::ReviewWaiting {
+                        waiting: false,
+                        status: None,
+                        now: Instant::now(),
+                    },
+                    RenderRequest::Immediate,
+                )
+            }
+            RootEvent::HandoffFailed(message) => {
+                self.blocking_task = None;
+                self.notification = Some(Notification::plain(message, Color::Red));
+                self.update_composer(
+                    ComposerEvent::ReviewWaiting {
+                        waiting: false,
+                        status: None,
+                        now: Instant::now(),
+                    },
+                    RenderRequest::Immediate,
+                )
+            }
             RootEvent::ReviewStarted => {
-                self.review_active = true;
+                self.blocking_task = Some(BlockingTask::Review);
                 self.review_url = None;
                 self.update_composer(
                     ComposerEvent::ReviewWaiting {
@@ -2062,7 +2157,7 @@ impl Component for RootNode {
                 )
             }
             RootEvent::ReviewFinished(markdown) => {
-                self.review_active = false;
+                self.blocking_task = None;
                 self.review_url = None;
                 let waiting = self.update_composer(
                     ComposerEvent::ReviewWaiting {
@@ -2096,7 +2191,7 @@ impl Component for RootNode {
                 update
             }
             RootEvent::ReviewCancelled => {
-                self.review_active = false;
+                self.blocking_task = None;
                 self.review_url = None;
                 self.notification = Some(Notification::plain(
                     "Review cancelled.".to_owned(),
@@ -2112,7 +2207,7 @@ impl Component for RootNode {
                 )
             }
             RootEvent::ReviewFailed(message) => {
-                self.review_active = false;
+                self.blocking_task = None;
                 self.review_url = None;
                 self.notification = Some(Notification::plain(message, Color::Red));
                 self.update_composer(
@@ -4986,7 +5081,7 @@ mod tests {
             root.composer().draft(),
             "existing draft\n\n## Review: Approved"
         );
-        assert!(!root.review_active);
+        assert!(root.blocking_task.is_none());
     }
 
     #[test]
@@ -5007,7 +5102,7 @@ mod tests {
             .collect::<String>();
         assert_eq!(message, "The folder must be a git repository.");
         assert_eq!(notification.color, Color::Red);
-        assert!(!root.review_active);
+        assert!(root.blocking_task.is_none());
     }
 
     #[test]
@@ -5055,6 +5150,49 @@ mod tests {
     }
 
     #[test]
+    fn handoff_blocks_input_until_the_continuation_prompt_is_ready() {
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        root.update(key(KeyCode::Char('/'), KeyModifiers::NONE));
+        for character in "handoff".chars() {
+            root.update(key(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+
+        let started = root.update(key(KeyCode::Enter, KeyModifiers::NONE));
+        let typed = root.update(key(KeyCode::Char('x'), KeyModifiers::NONE));
+        let submitted = root.update(key(KeyCode::Enter, KeyModifiers::NONE));
+        let pasted = root.update(RootEvent::PasteImage(
+            "data:image/png;base64,abc".to_owned(),
+        ));
+
+        assert_eq!(started.effects, [RootEffect::Handoff]);
+        assert!(typed.effects.is_empty());
+        assert!(submitted.effects.is_empty());
+        assert!(pasted.effects.is_empty());
+        assert!(root.composer().draft().is_empty());
+        assert!(render_root_text(&mut root, 100, 20).contains("Preparing handoff"));
+
+        root.update(RootEvent::HandoffFinished(
+            "Continue by implementing the parser.".to_owned(),
+        ));
+
+        assert_eq!(
+            root.composer().draft(),
+            "Continue by implementing the parser."
+        );
+        assert!(root.blocking_task.is_none());
+    }
+
+    #[test]
+    fn escape_cancels_an_active_handoff() {
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        root.blocking_task = Some(super::BlockingTask::Handoff);
+
+        let update = root.update(key(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert_eq!(update.effects, [RootEffect::CancelHandoff]);
+    }
+
+    #[test]
     fn review_ready_exposes_a_reopen_action_without_unlocking_input() {
         let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
         root.update(RootEvent::ReviewStarted);
@@ -5080,7 +5218,7 @@ mod tests {
             copy.effects,
             [RootEffect::Copy("http://127.0.0.1:4321/review".to_owned())]
         );
-        assert!(root.review_active);
+        assert_eq!(root.blocking_task, Some(super::BlockingTask::Review));
     }
 
     #[test]
@@ -5124,7 +5262,7 @@ mod tests {
 
         let mut fork = root.fork(Path::new("/work"), ReasoningEffort::Medium);
 
-        assert!(!fork.review_active);
+        assert!(fork.blocking_task.is_none());
         assert!(!render_root_text(&mut fork, 100, 20).contains("Waiting for review"));
     }
 }
