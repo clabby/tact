@@ -25,11 +25,14 @@ use orchestration::{OrchestrationRecorder, RunOutcome};
 use std::{
     io,
     io::Write,
+    num::NonZeroU32,
     path::{Path, PathBuf},
     sync::Arc,
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+
+const RESPONSE_MAX_ATTEMPTS: NonZeroU32 = NonZeroU32::new(2_000).unwrap();
 
 const SUBAGENT_INSTRUCTIONS: &str = concat!(
     "For larger tasks, delegate meaningful, separable work to subagents; handle trivial or tightly ",
@@ -159,7 +162,7 @@ impl ConfiguredAgent {
         let mcp = mcp_provider(config)?;
         let auth = config.auth().load()?;
 
-        let mut openai = OpenAi::builder(auth);
+        let mut openai = OpenAi::builder(auth).max_attempts(RESPONSE_MAX_ATTEMPTS);
         if let Some(url) = agent_config.websocket_url() {
             openai = openai.websocket_url(url);
         }

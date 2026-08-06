@@ -7,7 +7,7 @@ use crate::{
     core::extensions::subagents::{
         AgentMessageUpdate, MessageDeliveryState, MessageDisposition, MessageSender, ThreadId,
     },
-    tui::format::{format_duration, humanize_tool},
+    tui::format::humanize_tool,
 };
 use nanocodex::{
     agent::events::{
@@ -710,9 +710,8 @@ impl TranscriptModel {
 
     fn retrying(&mut self, record: &TranscriptRecord) -> Result<bool, serde_json::Error> {
         let payload = record.decode_payload::<RetryPayload>()?;
-        let delay = format_duration(payload.delay_ns);
         self.pending_error = Some(payload.error);
-        self.transient = Some(TransientStatus::Retrying(delay));
+        self.transient = Some(TransientStatus::Retrying(payload.delay_ns));
         Ok(true)
     }
 
