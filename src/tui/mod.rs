@@ -6,6 +6,7 @@ mod components;
 mod context;
 mod editor;
 mod format;
+mod handoff_controller;
 mod pane;
 mod prompt;
 mod review_controller;
@@ -27,6 +28,7 @@ use crate::{
     core::{
         ConfiguredAgent,
         extensions::{
+            Skill,
             memory::{MemoryError, MemoryKey, MemoryRecord, MemoryStore},
             subagents::SubagentControl,
         },
@@ -38,6 +40,7 @@ use crate::{
             RestoredSessionProjection, RootNode,
         },
         editor::EditorOutcome,
+        handoff_controller::{HandoffCompletion, HandoffController, PreparedHandoff},
         pane::PaneId,
         prompt::Submission,
         review_controller::{ReviewCompletion, ReviewController, ReviewIdentity, ReviewTask},
@@ -50,7 +53,7 @@ use crate::{
             LocalEvent, SessionEnded, SessionOutcome, SessionStarted, ShellId, TranscriptError,
             TranscriptJournal, TurnId,
         },
-        worker::{AuxiliaryError, WorkerCommand, WorkerEvent},
+        worker::{AuxiliaryContext, AuxiliaryError, WorkerCommand, WorkerEvent},
     },
 };
 use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
@@ -114,6 +117,16 @@ struct ReviewReady {
     identity: ReviewIdentity,
     url: String,
 }
+
+const HANDOFF_PROMPT: &str = concat!(
+    "Prepare a self-contained continuation prompt for a new coding agent that will take over this ",
+    "thread. Summarize the user's objective and requirements, important decisions and constraints, ",
+    "work already completed, the current repository and revision state, relevant files and symbols, ",
+    "validation performed, unresolved blockers, and concrete next steps. Preserve exact technical ",
+    "details that the next agent would otherwise need to rediscover. Do not continue the task, use ",
+    "tools, or address the user. Return only the continuation prompt, ready to be edited and sent ",
+    "to the new agent."
+);
 
 fn spawn_update_check() -> Option<UpdateCheckTask> {
     if crate::app::installation::current().is_development() {
@@ -515,6 +528,7 @@ pub(crate) async fn run(
     let mut fast_mode_task = None::<FastModeUpdateTask>;
     let mut new_session_task = None::<NewSessionTask>;
     let mut session_list_task = None::<SessionListTask>;
+    let mut handoff_controller = HandoffController::new();
     let mut review_controller = ReviewController::new();
     let (auxiliary_sender, mut auxiliary_jobs) = mpsc::unbounded_channel();
     let (review_ready_sender, mut review_ready_updates) = mpsc::unbounded_channel();
@@ -547,6 +561,7 @@ pub(crate) async fn run(
                     fast_mode_task: &mut fast_mode_task,
                     new_session_task: &mut new_session_task,
                     session_list_task: &mut session_list_task,
+                    handoff_controller: &mut handoff_controller,
                     review_controller: &mut review_controller,
                     auxiliary_sender: &auxiliary_sender,
                     review_ready_sender: &review_ready_sender,
@@ -575,6 +590,7 @@ pub(crate) async fn run(
         if stopping {
             shell_tasks.abort_all();
             review_controller.cancel();
+            handoff_controller.cancel();
             memory_tasks.abort_all();
         }
         if stopping && !subagents_stopping {
@@ -781,6 +797,7 @@ pub(crate) async fn run(
                         pane,
                         id,
                         prompt: prompt.into(),
+                        context: AuxiliaryContext::Clean,
                         shutdown,
                         completion,
                     })
@@ -1097,6 +1114,66 @@ pub(crate) async fn run(
                     .map_err(|_| RuntimeError::AgentWorkerStopped)?;
             }
             result = async {
+                handoff_controller
+                    .task_mut()
+                    .expect("handoff branch is disabled without a task")
+                    .await
+            }, if handoff_controller.task_mut().is_some() && !stopping => {
+                let completion = result.map_err(RuntimeError::HandoffTask)?;
+                if !handoff_controller.complete(completion.identity) {
+                    continue;
+                }
+                let pane = completion.identity.pane;
+                if !panes.get(&pane).is_some_and(|runtime| {
+                    runtime.generation == completion.identity.pane_generation
+                }) {
+                    continue;
+                }
+                match completion.result {
+                    Ok(prepared) => {
+                        let PreparedHandoff {
+                            prompt,
+                            effort,
+                            reasoning_mode,
+                            fast_mode,
+                            configured,
+                        } = prepared;
+                        let skills = install_configured_agent(
+                            pane,
+                            configured,
+                            PaneSettings::new(effort, reasoning_mode, fast_mode),
+                            &config,
+                            &mut panes,
+                            &commands,
+                            &agent_event_sender,
+                            &subagent_sender,
+                            &writer_sender,
+                            &mut writers_open,
+                            &mut subagent_shutdowns,
+                        )?;
+                        schedule(
+                            app.update(AppEvent::HandoffReady {
+                                pane,
+                                prompt,
+                                effort,
+                                reasoning_mode,
+                                fast_mode,
+                                skills,
+                            }),
+                            &mut scheduler,
+                        );
+                    }
+                    Err(AuxiliaryError::Cancelled) => schedule(
+                        app.update(AppEvent::HandoffCancelled(pane)),
+                        &mut scheduler,
+                    ),
+                    Err(AuxiliaryError::Failed(error)) => schedule(
+                        app.update(AppEvent::HandoffFailed { pane, error }),
+                        &mut scheduler,
+                    ),
+                }
+            }
+            result = async {
                 new_session_task
                     .as_mut()
                     .expect("new-session branch is disabled without a task")
@@ -1108,61 +1185,20 @@ pub(crate) async fn run(
                     result.map_err(RuntimeError::NewSessionTask)?;
                 match configured {
                     Ok(configured) => {
-                        let ConfiguredAgent {
-                            agent,
-                            events,
-                            instructions,
-                            skills,
-                            memory_enabled,
-                            subagent_updates,
-                            subagent_control,
-                        } = configured;
-                        let session_id = events.request_id().to_owned();
-                        let generation = panes
-                            .get(&pane)
-                            .expect("new-session pane must exist")
-                            .generation
-                            .saturating_add(1);
-                        schedule_subagent_shutdown(
-                            panes.get(&pane).expect("new-session pane must exist"),
+                        let skills = install_configured_agent(
+                            pane,
+                            configured,
+                            PaneSettings::new(effort, reasoning_mode, fast_mode),
+                            &config,
+                            &mut panes,
+                            &commands,
+                            &agent_event_sender,
+                            &subagent_sender,
+                            &writer_sender,
+                            &mut writers_open,
                             &mut subagent_shutdowns,
                         );
-                        close_pane_journal(
-                            panes.get_mut(&pane).expect("new-session pane must exist"),
-                            SessionOutcome::Closed,
-                            None,
-                        )?;
-                        panes.insert(
-                            pane,
-                            open_pane(
-                                PaneGeneration { pane, generation },
-                                PaneSession::new(&session_id, None, !skills.is_empty()),
-                                &config,
-                                PaneSettings::new(effort, reasoning_mode, fast_mode),
-                                instructions,
-                                subagent_control.clone(),
-                                &writer_sender,
-                            )?,
-                        );
-                        writers_open = writers_open.saturating_add(1);
-                        agent_events::forward(
-                            pane,
-                            generation,
-                            events,
-                            agent_event_sender.clone(),
-                        );
-                        subagent_updates::forward(
-                            subagent_control.runtime_id(),
-                            subagent_updates,
-                            subagent_sender.clone(),
-                        );
-                        commands
-                            .send(WorkerCommand::ReplaceAgent {
-                                pane,
-                                agent,
-                                memory_review: worker::MemoryReviewState::fresh(memory_enabled),
-                            })
-                            .map_err(|_| RuntimeError::AgentWorkerStopped)?;
+                        let skills = skills?;
                         schedule(
                             app.update(AppEvent::NewSessionReady {
                                 pane,
@@ -1382,6 +1418,73 @@ pub(crate) fn ensure_interactive() -> Result<()> {
     validate_interactive(io::stdin().is_terminal(), io::stdout().is_terminal())
 }
 
+#[allow(clippy::too_many_arguments)]
+fn install_configured_agent(
+    pane: PaneId,
+    configured: ConfiguredAgent,
+    settings: PaneSettings,
+    config: &Config,
+    panes: &mut HashMap<PaneId, PaneRuntime>,
+    commands: &mpsc::UnboundedSender<WorkerCommand>,
+    agent_event_sender: &mpsc::UnboundedSender<ForwardedAgentEvent>,
+    subagent_sender: &mpsc::UnboundedSender<ForwardedSubagentUpdate>,
+    writer_sender: &mpsc::UnboundedSender<WriterCompletion>,
+    writers_open: &mut usize,
+    subagent_shutdowns: &mut JoinSet<()>,
+) -> Result<Arc<[Skill]>> {
+    let ConfiguredAgent {
+        agent,
+        events,
+        instructions,
+        skills,
+        memory_enabled,
+        subagent_updates,
+        subagent_control,
+    } = configured;
+    let session_id = events.request_id().to_owned();
+    let generation = panes
+        .get(&pane)
+        .expect("replacement pane must exist")
+        .generation
+        .saturating_add(1);
+    schedule_subagent_shutdown(
+        panes.get(&pane).expect("replacement pane must exist"),
+        subagent_shutdowns,
+    );
+    close_pane_journal(
+        panes.get_mut(&pane).expect("replacement pane must exist"),
+        SessionOutcome::Closed,
+        None,
+    )?;
+    panes.insert(
+        pane,
+        open_pane(
+            PaneGeneration { pane, generation },
+            PaneSession::new(&session_id, None, !skills.is_empty()),
+            config,
+            settings,
+            instructions,
+            subagent_control.clone(),
+            writer_sender,
+        )?,
+    );
+    *writers_open = writers_open.saturating_add(1);
+    agent_events::forward(pane, generation, events, agent_event_sender.clone());
+    subagent_updates::forward(
+        subagent_control.runtime_id(),
+        subagent_updates,
+        subagent_sender.clone(),
+    );
+    commands
+        .send(WorkerCommand::ReplaceAgent {
+            pane,
+            agent,
+            memory_review: worker::MemoryReviewState::fresh(memory_enabled),
+        })
+        .map_err(|_| RuntimeError::AgentWorkerStopped)?;
+    Ok(skills)
+}
+
 fn validate_interactive(stdin: bool, stdout: bool) -> Result<()> {
     if stdin && stdout {
         return Ok(());
@@ -1514,6 +1617,7 @@ struct EffectContext<'a> {
     fast_mode_task: &'a mut Option<FastModeUpdateTask>,
     new_session_task: &'a mut Option<NewSessionTask>,
     session_list_task: &'a mut Option<SessionListTask>,
+    handoff_controller: &'a mut HandoffController,
     review_controller: &'a mut ReviewController,
     auxiliary_sender: &'a mpsc::UnboundedSender<AuxiliaryJobRequest>,
     review_ready_sender: &'a mpsc::UnboundedSender<ReviewReady>,
@@ -1825,6 +1929,7 @@ fn apply_pane_effect(
                 (pane, sessions.map_err(Into::into))
             }));
         }
+        components::RootEffect::Handoff => start_handoff(context, pane),
         components::RootEffect::Review { download_assets } => {
             if context.review_controller.is_active() {
                 schedule(
@@ -2002,6 +2107,9 @@ fn apply_pane_effect(
                 context.scheduler,
             );
         }
+        components::RootEffect::CancelHandoff => {
+            context.handoff_controller.cancel();
+        }
         components::RootEffect::Fork
         | components::RootEffect::SetTheme(_)
         | components::RootEffect::Shutdown => {
@@ -2009,6 +2117,103 @@ fn apply_pane_effect(
         }
     }
     Ok(())
+}
+
+fn start_handoff(context: &mut EffectContext<'_>, pane: PaneId) {
+    let Some(runtime) = context.panes.get_mut(&pane) else {
+        schedule(
+            context.app.update(AppEvent::HandoffFailed {
+                pane,
+                error: "Could not prepare handoff: session pane is no longer available".to_owned(),
+            }),
+            context.scheduler,
+        );
+        return;
+    };
+    let pane_generation = runtime.generation;
+    let id = TurnId::new(runtime.next_turn);
+    runtime.next_turn = runtime.next_turn.saturating_add(1);
+    let commands = context.commands.clone();
+    let config = context.config.clone();
+    let started =
+        context
+            .handoff_controller
+            .start(pane, pane_generation, move |identity, cancellation| {
+                let (completion, result) = tokio::sync::oneshot::channel();
+                let sent = commands.send(WorkerCommand::Auxiliary {
+                    pane,
+                    id,
+                    prompt: HANDOFF_PROMPT.to_owned().into(),
+                    context: AuxiliaryContext::CurrentConversation,
+                    shutdown: cancellation.clone(),
+                    completion,
+                });
+                tokio::spawn(async move {
+                    let result = if sent.is_err() {
+                        Err(AuxiliaryError::Failed(
+                            "agent worker stopped before the handoff could start".to_owned(),
+                        ))
+                    } else {
+                        match result.await {
+                            Ok(result) => result,
+                            Err(_) if cancellation.is_cancelled() => Err(AuxiliaryError::Cancelled),
+                            Err(_) => Err(AuxiliaryError::Failed(
+                                "agent worker stopped before the handoff completed".to_owned(),
+                            )),
+                        }
+                    };
+                    let result = prepare_handoff(result, config, cancellation).await;
+                    HandoffCompletion { identity, result }
+                })
+            });
+    if started.is_none() {
+        schedule(
+            context.app.update(AppEvent::HandoffFailed {
+                pane,
+                error: "A handoff is already being prepared.".to_owned(),
+            }),
+            context.scheduler,
+        );
+    }
+}
+
+async fn prepare_handoff(
+    result: std::result::Result<String, AuxiliaryError>,
+    config: Config,
+    cancellation: CancellationToken,
+) -> std::result::Result<PreparedHandoff, AuxiliaryError> {
+    let prompt = result?;
+    if prompt.trim().is_empty() {
+        return Err(AuxiliaryError::Failed(
+            "The handoff agent returned an empty continuation prompt.".to_owned(),
+        ));
+    }
+    if cancellation.is_cancelled() {
+        return Err(AuxiliaryError::Cancelled);
+    }
+
+    let effort = config.agent().thinking();
+    let reasoning_mode = config.agent().reasoning_mode();
+    let fast_mode = config.agent().fast_mode();
+    let task = tokio::task::spawn_blocking(move || {
+        ConfiguredAgent::from_config_with_session(&config, effort, reasoning_mode, None, None)
+    });
+    let configured = tokio::select! {
+        result = task => result
+            .map_err(|error| AuxiliaryError::Failed(format!("handoff session task failed: {error}")))?
+            .map_err(|error| AuxiliaryError::Failed(format!("Could not start handoff session: {error}")))?,
+        () = cancellation.cancelled() => return Err(AuxiliaryError::Cancelled),
+    };
+    if cancellation.is_cancelled() {
+        return Err(AuxiliaryError::Cancelled);
+    }
+    Ok(PreparedHandoff {
+        prompt,
+        effort,
+        reasoning_mode,
+        fast_mode,
+        configured,
+    })
 }
 
 fn start_review(

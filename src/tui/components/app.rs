@@ -59,6 +59,19 @@ pub(crate) enum AppEvent {
         pane: PaneId,
         error: String,
     },
+    HandoffReady {
+        pane: PaneId,
+        prompt: String,
+        effort: ReasoningEffort,
+        reasoning_mode: ReasoningMode,
+        fast_mode: bool,
+        skills: Arc<[Skill]>,
+    },
+    HandoffCancelled(PaneId),
+    HandoffFailed {
+        pane: PaneId,
+        error: String,
+    },
     QueueEditorFinished {
         pane: PaneId,
         index: usize,
@@ -226,6 +239,34 @@ impl AppNode {
             AppEvent::ReviewCancelled(pane) => self.update_root(pane, RootEvent::ReviewCancelled),
             AppEvent::ReviewFailed { pane, error } => {
                 self.update_root(pane, RootEvent::ReviewFailed(error))
+            }
+            AppEvent::HandoffReady {
+                pane,
+                prompt,
+                effort,
+                reasoning_mode,
+                fast_mode,
+                skills,
+            } => {
+                let workspace = self.workspace.clone();
+                {
+                    let Some(root) = self.pane_mut(pane) else {
+                        return ComponentUpdate::none();
+                    };
+                    root.component_mut().reset_session(
+                        &workspace,
+                        effort,
+                        reasoning_mode,
+                        reasoning_mode,
+                    );
+                    root.component_mut().set_fast_mode(fast_mode);
+                    root.component_mut().set_skills(skills);
+                }
+                self.update_root(pane, RootEvent::HandoffFinished(prompt))
+            }
+            AppEvent::HandoffCancelled(pane) => self.update_root(pane, RootEvent::HandoffCancelled),
+            AppEvent::HandoffFailed { pane, error } => {
+                self.update_root(pane, RootEvent::HandoffFailed(error))
             }
             AppEvent::QueueEditorFinished { pane, index, text } => {
                 self.update_root(pane, RootEvent::RestoreQueued { index, text })
@@ -863,6 +904,27 @@ mod tests {
                 .composer()
                 .context_tokens(),
             136_000
+        );
+    }
+
+    #[test]
+    fn handoff_starts_a_fresh_session_with_an_editable_draft() {
+        let mut app = app();
+
+        let update = app.update(AppEvent::HandoffReady {
+            pane: PaneId::Main,
+            prompt: "Continue from the validated parser design.".to_owned(),
+            effort: ReasoningEffort::High,
+            reasoning_mode: ReasoningMode::Standard,
+            fast_mode: false,
+            skills: Arc::from([]),
+        });
+
+        assert!(update.effects.is_empty());
+        let root = app.root(PaneId::Main).expect("the main pane should remain");
+        assert_eq!(
+            root.composer().draft(),
+            "Continue from the validated parser design."
         );
     }
 

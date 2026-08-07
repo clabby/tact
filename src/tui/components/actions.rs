@@ -16,7 +16,7 @@ use ratatui::{
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-const ACTIONS: [Action; 13] = [
+const ACTIONS: [Action; 14] = [
     Action::Effort,
     Action::FastMode,
     Action::Theme,
@@ -29,6 +29,7 @@ const ACTIONS: [Action; 13] = [
     Action::Memory,
     Action::Subagents,
     Action::DebugContext,
+    Action::Handoff,
     Action::Review,
 ];
 const KEY_BINDINGS: [&str; 3] = ["↑↓ move", "enter/tab open", "esc close"];
@@ -48,6 +49,7 @@ pub(super) struct ActionAvailability {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Action {
+    Handoff,
     Review,
     Subagents,
     Effort,
@@ -254,7 +256,7 @@ impl ActionsMenu {
 
     const fn is_enabled(&self, action: Action) -> bool {
         match action {
-            Action::Review => self.availability.new_session,
+            Action::Handoff | Action::Review => self.availability.new_session,
             Action::Subagents => true,
             Action::Effort => true,
             Action::FastMode => true,
@@ -282,6 +284,9 @@ impl ActionsMenu {
             Action::Review if !self.availability.new_session => {
                 "Review changes · finish active work first"
             }
+            Action::Handoff if !self.availability.new_session => {
+                "Prepare handoff · finish active work first"
+            }
             Action::FastMode if self.availability.fast_mode => "Disable fast mode",
             Action::Memory if !self.availability.memory => {
                 "Memory · enable in config: memory.enabled = true"
@@ -294,6 +299,7 @@ impl ActionsMenu {
 impl Action {
     const fn label(self) -> &'static str {
         match self {
+            Self::Handoff => "Prepare handoff",
             Self::Review => "Review changes",
             Self::Subagents => "Subagents",
             Self::Effort => "Change effort",
@@ -312,6 +318,7 @@ impl Action {
 
     const fn alias(self) -> Option<&'static str> {
         match self {
+            Self::Handoff => Some("handoff"),
             Self::Review => Some("review"),
             Self::Subagents => Some("agents"),
             Self::Effort => Some("thinking"),
@@ -351,7 +358,7 @@ impl Component for ActionsMenu {
             return;
         }
 
-        let layout = Floating::new("Actions", 58, 17, &KEY_BINDINGS).render(frame, area, theme);
+        let layout = Floating::new("Actions", 58, 18, &KEY_BINDINGS).render(frame, area, theme);
         if layout.body.is_empty() {
             return;
         }
@@ -414,7 +421,7 @@ mod tests {
     }
 
     fn render(menu: &mut ActionsMenu) -> Terminal<TestBackend> {
-        let mut terminal = Terminal::new(TestBackend::new(60, 19)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(60, 20)).unwrap();
         terminal
             .draw(|frame| menu.render(frame, frame.area(), &Theme::default()))
             .unwrap();
@@ -491,14 +498,18 @@ mod tests {
         );
         assert_eq!(
             row_segment(&terminal, 15, 1, 58),
-            "│  Review changes (alias: review)                        │"
+            "│  Prepare handoff (alias: handoff)                      │"
         );
         assert_eq!(
             row_segment(&terminal, 16, 1, 58),
-            "│          ↑↓ move · enter/tab open · esc close          │"
+            "│  Review changes (alias: review)                        │"
         );
         assert_eq!(
             row_segment(&terminal, 17, 1, 58),
+            "│          ↑↓ move · enter/tab open · esc close          │"
+        );
+        assert_eq!(
+            row_segment(&terminal, 18, 1, 58),
             "╰────────────────────────────────────────────────────────╯"
         );
         assert_eq!(
@@ -551,6 +562,19 @@ mod tests {
         assert_eq!(
             menu.update(key(KeyCode::Tab)).effects,
             [ActionsEffect::Trigger(Action::FastMode)]
+        );
+    }
+
+    #[test]
+    fn handoff_alias_triggers_the_handoff_action() {
+        let mut menu = ActionsMenu::new(available());
+        for character in "handoff".chars() {
+            menu.update(key(KeyCode::Char(character)));
+        }
+
+        assert_eq!(
+            menu.update(key(KeyCode::Enter)).effects,
+            [ActionsEffect::Trigger(Action::Handoff)]
         );
     }
 

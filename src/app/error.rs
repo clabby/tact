@@ -167,6 +167,8 @@ pub(crate) enum RuntimeError {
     FastModeUpdateTask(#[source] tokio::task::JoinError),
     #[error("the new-session task stopped unexpectedly: {0}")]
     NewSessionTask(#[source] tokio::task::JoinError),
+    #[error("the handoff task stopped unexpectedly: {0}")]
+    HandoffTask(#[source] tokio::task::JoinError),
     #[error("the session task stopped unexpectedly: {0}")]
     SessionTask(#[source] tokio::task::JoinError),
     #[error("the Nanocodex worker stopped before accepting a command")]

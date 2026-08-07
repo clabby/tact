@@ -29,6 +29,7 @@ pub(crate) enum WorkerCommand {
         pane: PaneId,
         id: TurnId,
         prompt: Submission,
+        context: AuxiliaryContext,
         shutdown: CancellationToken,
         completion: oneshot::Sender<Result<String, AuxiliaryError>>,
     },
@@ -54,6 +55,12 @@ pub(crate) enum WorkerCommand {
     CancelAll(PaneId),
     OpenFork(PaneId),
     ClosePane(PaneId),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AuxiliaryContext {
+    Clean,
+    CurrentConversation,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -133,6 +140,7 @@ struct TurnRequest {
     id: TurnId,
     prompt: Submission,
     purpose: TurnPurpose,
+    auxiliary_context: Option<AuxiliaryContext>,
     shutdown: Option<CancellationToken>,
 }
 
@@ -262,12 +270,14 @@ async fn run(
                         id,
                         prompt,
                         purpose: TurnPurpose::Conversation,
+                        auxiliary_context: None,
                         shutdown: None,
                     },
                     WorkerCommand::Auxiliary {
                         pane,
                         id,
                         prompt,
+                        context,
                         shutdown,
                         completion,
                     } => TurnRequest {
@@ -275,6 +285,7 @@ async fn run(
                         id,
                         prompt,
                         purpose: TurnPurpose::Auxiliary(completion),
+                        auxiliary_context: Some(context),
                         shutdown: Some(shutdown),
                     },
                     WorkerCommand::Steer {
@@ -485,27 +496,34 @@ async fn start_turn(
         id,
         prompt,
         purpose,
+        auxiliary_context,
         shutdown,
     } = request;
-    let auxiliary = matches!(purpose, TurnPurpose::Auxiliary(_));
-    let (isolated_agent, event_drain) = if auxiliary {
-        let spawn = agent.spawn();
+    let auxiliary = auxiliary_context.is_some();
+    let (isolated_agent, event_drain) = if let Some(context) = auxiliary_context {
+        let create_agent = async {
+            match context {
+                AuxiliaryContext::Clean => agent.spawn().await,
+                AuxiliaryContext::CurrentConversation => agent.fork().await,
+            }
+        };
         let spawned = if let Some(scope) = shutdown.clone() {
             tokio::select! {
-                result = spawn => result,
+                result = create_agent => result,
                 () = scope.cancelled() => {
                     reject_cancelled_turn(TurnRequest {
                         pane,
                         id,
                         prompt,
                         purpose,
+                        auxiliary_context: Some(context),
                         shutdown,
                     });
                     return false;
                 }
             }
         } else {
-            spawn.await
+            create_agent.await
         };
         let (agent, mut events) = match spawned {
             Ok(spawned) => spawned,
@@ -516,6 +534,7 @@ async fn start_turn(
                         id,
                         prompt,
                         purpose,
+                        auxiliary_context: Some(context),
                         shutdown,
                     },
                     error.to_string(),
@@ -550,6 +569,7 @@ async fn start_turn(
                     id,
                     prompt,
                     purpose,
+                    auxiliary_context,
                     shutdown,
                 },
                 error.to_string(),
@@ -1302,6 +1322,7 @@ mod tests {
                 pane: PaneId::Main,
                 id: TurnId::new(7),
                 prompt: "generate a visible overview".to_owned().into(),
+                context: super::AuxiliaryContext::Clean,
                 shutdown: overview_shutdown.clone(),
                 completion,
             })
@@ -1367,6 +1388,7 @@ mod tests {
                 pane: PaneId::Main,
                 id: TurnId::new(7),
                 prompt: "do not run".to_owned().into(),
+                context: super::AuxiliaryContext::Clean,
                 shutdown: job_shutdown,
                 completion,
             })
