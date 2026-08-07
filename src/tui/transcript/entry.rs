@@ -25,7 +25,7 @@ pub(crate) enum TransientStatus {
     WaitingForBackgroundWork,
     Tool(String),
     Compacting,
-    Retrying(String),
+    Retrying(u64),
     Connecting,
     Reconnecting,
     Error(String),
