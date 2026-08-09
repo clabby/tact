@@ -4,6 +4,7 @@ mod diff;
 mod empty;
 mod highlight;
 mod markdown;
+mod mermaid;
 mod message;
 mod tool;
 
@@ -1580,7 +1581,9 @@ fn render_entry(
 ) -> markdown::Layout {
     let mut layout = match &entry.kind {
         EntryKind::User { text, .. } => render_user(text, width, theme),
-        EntryKind::Assistant { text, .. } => markdown::render(text, width, theme),
+        EntryKind::Assistant { text, complete } => {
+            markdown::render_assistant(text, width, theme, *complete)
+        }
         EntryKind::Reasoning { text } => {
             let mut layout = markdown::render(text, width.saturating_sub(2), theme);
             for line in &mut layout.lines {

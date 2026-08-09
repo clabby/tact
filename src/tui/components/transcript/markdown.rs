@@ -36,6 +36,19 @@ pub(super) struct LinkSpan {
 }
 
 pub(super) fn render(markdown: &str, width: u16, theme: &Theme) -> Layout {
+    render_with_mermaid(markdown, width, theme, false)
+}
+
+pub(super) fn render_assistant(
+    markdown: &str,
+    width: u16,
+    theme: &Theme,
+    complete: bool,
+) -> Layout {
+    render_with_mermaid(markdown, width, theme, complete)
+}
+
+fn render_with_mermaid(markdown: &str, width: u16, theme: &Theme, render_mermaid: bool) -> Layout {
     if width == 0 {
         return Layout {
             lines: Vec::new(),
@@ -51,7 +64,13 @@ pub(super) fn render(markdown: &str, width: u16, theme: &Theme) -> Layout {
         | Options::ENABLE_SMART_PUNCTUATION
         | Options::ENABLE_MATH
         | Options::ENABLE_GFM;
-    let mut renderer = Renderer::new(width, theme);
+    let mermaid_sources = (render_mermaid && width >= 6).then(|| {
+        mermaid_source_ranges(markdown, options)
+            .into_iter()
+            .filter(|source| source.len() <= super::mermaid::MAX_SOURCE_BYTES)
+            .collect::<Vec<_>>()
+    });
+    let mut renderer = Renderer::new(width, theme, render_mermaid);
     let mut events = Parser::new_ext(markdown, options).peekable();
     while let Some(event) = events.next() {
         match event {
@@ -66,12 +85,59 @@ pub(super) fn render(markdown: &str, width: u16, theme: &Theme) -> Layout {
             event => renderer.event(event),
         }
     }
-    let (mut layout, selection_exclusions) = renderer.finish();
+    let (mut layout, selection_exclusions, mermaid_lines) = renderer.finish();
     let (selections, envelopes) =
         markdown_selection_spans(markdown, &layout.lines, options, &selection_exclusions);
     layout.selections = selections;
     layout.envelopes = envelopes;
+    if let Some(mermaid_sources) = mermaid_sources {
+        debug_assert_eq!(mermaid_sources.len(), mermaid_lines.len());
+        for (lines, source) in mermaid_lines.into_iter().zip(mermaid_sources) {
+            for line_index in lines {
+                let width = layout.lines[line_index].width();
+                layout.selections[line_index] = vec![SourceSpan {
+                    columns: 0..u16::try_from(width).unwrap_or(u16::MAX),
+                    source: source.clone(),
+                }];
+            }
+        }
+    }
     layout
+}
+
+fn mermaid_source_ranges(markdown: &str, options: Options) -> Vec<Range<usize>> {
+    let mut ranges = Vec::new();
+    let mut current = None::<Range<usize>>;
+    for (event, range) in Parser::new_ext(markdown, options).into_offset_iter() {
+        match event {
+            Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(language)))
+                if is_mermaid_language(&language) =>
+            {
+                current = Some(markdown.len()..0);
+            }
+            Event::Text(_) | Event::Code(_) if current.is_some() => {
+                let current = current.as_mut().expect("checked above");
+                current.start = current.start.min(range.start);
+                current.end = current.end.max(range.end);
+            }
+            Event::End(TagEnd::CodeBlock) => {
+                if let Some(mut range) = current.take()
+                    && range.start < range.end
+                {
+                    while range.end > range.start
+                        && markdown.as_bytes()[range.end - 1].is_ascii_whitespace()
+                    {
+                        range.end -= 1;
+                    }
+                    if range.start < range.end {
+                        ranges.push(range);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    ranges
 }
 
 pub(super) fn plain_selection_spans(source: &str, lines: &[Line<'static>]) -> Vec<Vec<SourceSpan>> {
@@ -139,6 +205,8 @@ struct Renderer<'a> {
     rendered_links: Vec<(usize, LinkSpan)>,
     selection_exclusions: Vec<Vec<Range<u16>>>,
     image: Option<ImageState>,
+    render_mermaid: bool,
+    mermaid_lines: Vec<Range<usize>>,
 }
 
 struct ListState {
@@ -160,8 +228,10 @@ struct ImageState {
     alt: String,
 }
 
+type RendererOutput = (Layout, Vec<Vec<Range<u16>>>, Vec<Range<usize>>);
+
 impl<'a> Renderer<'a> {
-    fn new(width: u16, theme: &'a Theme) -> Self {
+    fn new(width: u16, theme: &'a Theme, render_mermaid: bool) -> Self {
         Self {
             width,
             theme,
@@ -174,6 +244,8 @@ impl<'a> Renderer<'a> {
             rendered_links: Vec::new(),
             selection_exclusions: Vec::new(),
             image: None,
+            render_mermaid,
+            mermaid_lines: Vec::new(),
         }
     }
 
@@ -450,6 +522,15 @@ impl<'a> Renderer<'a> {
             self.blank();
             return;
         }
+        if self.width >= 6
+            && code.len() <= super::mermaid::MAX_SOURCE_BYTES
+            && self.render_mermaid
+            && language.as_deref().is_some_and(is_mermaid_language)
+            && self.try_mermaid(&code)
+        {
+            self.blank();
+            return;
+        }
         if self.width < 6 {
             self.narrow_code_block(&code, language.as_deref());
             self.blank();
@@ -660,7 +741,28 @@ impl<'a> Renderer<'a> {
         self.selection_exclusions[line].push(columns);
     }
 
-    fn finish(mut self) -> (Layout, Vec<Vec<Range<u16>>>) {
+    fn try_mermaid(&mut self, code: &str) -> bool {
+        let line = Style::default().fg(self.theme.border());
+        let styles = super::mermaid::MermaidStyles {
+            border: line,
+            node_text: Style::default().fg(self.theme.text()),
+            edge: line,
+            edge_label: Style::default().fg(self.theme.thinking_medium()),
+            title: Style::default()
+                .fg(self.theme.accent())
+                .add_modifier(Modifier::BOLD),
+        };
+        let Some(art) = super::mermaid::render(code, &styles, Some(usize::from(self.width))) else {
+            return false;
+        };
+        debug_assert_eq!(art.styled_lines.len(), art.plain_lines.len());
+        let start = self.lines.len();
+        self.lines.extend(art.styled_lines);
+        self.mermaid_lines.push(start..self.lines.len());
+        true
+    }
+
+    fn finish(mut self) -> RendererOutput {
         self.flush();
         while self.lines.last().is_some_and(|line| line.width() == 0) {
             self.lines.pop();
@@ -671,16 +773,21 @@ impl<'a> Renderer<'a> {
                 line_links.push(link);
             }
         }
-        (
-            Layout {
-                lines: self.lines,
-                links,
-                selections: Vec::new(),
-                envelopes: Vec::new(),
-            },
-            self.selection_exclusions,
-        )
+        let layout = Layout {
+            lines: self.lines,
+            links,
+            selections: Vec::new(),
+            envelopes: Vec::new(),
+        };
+        (layout, self.selection_exclusions, self.mermaid_lines)
     }
+}
+
+fn is_mermaid_language(language: &str) -> bool {
+    language
+        .split_whitespace()
+        .next()
+        .is_some_and(|language| language.eq_ignore_ascii_case("mermaid"))
 }
 
 #[derive(Clone)]
@@ -1344,9 +1451,83 @@ fn render_stacked_table(
 
 #[cfg(test)]
 mod tests {
-    use super::render;
+    use super::{render, render_assistant};
     use crate::tui::theme::Theme;
     use ratatui::style::{Color, Modifier};
+
+    #[test]
+    fn complete_mermaid_fences_render_as_selectable_terminal_art() {
+        let markdown = "```mermaid\nflowchart LR\n  A[Start] --> B[End]\n```";
+        let layout = render_assistant(markdown, 80, &Theme::default(), true);
+        let rendered = layout
+            .lines
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let content_start = markdown.find("flowchart").unwrap();
+        let content_end = markdown.find("\n```").unwrap();
+
+        assert!(rendered.contains("Start"), "{rendered}");
+        assert!(rendered.contains("End"), "{rendered}");
+        assert!(!rendered.contains("flowchart"), "{rendered}");
+        assert!(layout.lines.iter().all(|line| line.width() <= 80));
+        assert!(
+            layout
+                .selections
+                .iter()
+                .flatten()
+                .all(|span| { span.source == (content_start..content_end) })
+        );
+        assert!(layout.selections.iter().all(|spans| !spans.is_empty()));
+    }
+
+    #[test]
+    fn incomplete_assistant_mermaid_fences_remain_source_code() {
+        let markdown = "```mermaid\nflowchart LR\n  A[Start] --> B[End]";
+        let layout = render_assistant(markdown, 80, &Theme::default(), false);
+        let rendered = layout
+            .lines
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+
+        assert!(rendered[0].contains("mermaid"));
+        assert!(rendered.iter().any(|line| line.contains("flowchart LR")));
+        assert!(rendered.iter().any(|line| line.contains("A[Start]")));
+    }
+
+    #[test]
+    fn mermaid_rendering_never_exceeds_narrow_layout_widths() {
+        for width in 6..32 {
+            for source in [
+                "```mermaid\nflowchart LR\nA --> B\n```",
+                "```mermaid\nrequirementDiagram\nrequirement test\n```",
+            ] {
+                let layout = render_assistant(source, width, &Theme::default(), true);
+                assert!(
+                    layout
+                        .lines
+                        .iter()
+                        .all(|line| line.width() <= usize::from(width)),
+                    "Mermaid output exceeded width {width}: {:?}",
+                    layout.lines
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn generic_markdown_render_keeps_mermaid_as_source() {
+        let source = "```mermaid\nflowchart LR\nA --> B\n```";
+        let layout = render(source, 80, &Theme::default());
+        let rendered = layout
+            .lines
+            .iter()
+            .map(ToString::to_string)
+            .collect::<String>();
+        assert!(rendered.contains("flowchart LR"));
+    }
 
     #[test]
     fn requested_markdown_styles_are_applied() {
