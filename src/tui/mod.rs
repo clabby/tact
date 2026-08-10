@@ -14,6 +14,7 @@ mod scheduler;
 pub(crate) mod session;
 mod shell;
 mod spinner;
+mod storage;
 mod subagent_updates;
 mod terminal;
 pub(crate) mod theme;
@@ -62,7 +63,10 @@ use std::{
     collections::HashMap,
     io::{self, IsTerminal},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
@@ -245,6 +249,7 @@ struct PaneRuntime {
     previously_persisted: bool,
     journal: Option<TranscriptJournal>,
     writer_path: PathBuf,
+    persisted_transcript: Arc<AtomicBool>,
     event_streams_open: usize,
     next_turn: u64,
     next_shell: u64,
@@ -391,7 +396,8 @@ impl PaneRuntime {
     }
 
     fn exit_session_id(&self) -> Option<String> {
-        (self.previously_persisted || self.writer_path.is_file()).then(|| self.session_id.clone())
+        (self.previously_persisted || self.persisted_transcript.load(Ordering::Acquire))
+            .then(|| self.session_id.clone())
     }
 }
 
@@ -530,7 +536,7 @@ pub(crate) async fn run(
     let mut app = AppNode::new(theme, workspace.clone(), root);
     let prompt_warmup_config = config.path().to_path_buf();
     let mut recent_prompt_task = Some(tokio::spawn(async move {
-        session::load_recent_prompts_async(prompt_warmup_config, None)
+        session::load_recent_prompts_async(prompt_warmup_config)
             .await
             .map_err(Into::into)
     }));
@@ -852,19 +858,23 @@ pub(crate) async fn run(
                         let Some(runtime) = panes.get_mut(&pane) else {
                             continue;
                         };
-                        if let Some(snapshot) = snapshot {
-                            session::save_checkpoint(
-                                config.path(),
-                                &runtime.session_id,
-                                &snapshot,
+                        let resume_state = snapshot
+                            .as_ref()
+                            .map(|snapshot| {
+                                session::encode_checkpoint(
+                                    snapshot,
                                 &runtime.instructions,
                                 runtime.skills_catalog_present,
-                            )?;
-                        }
-                        let record = runtime.journal_mut()?.append_local(LocalEvent::WorkerTurnFinished {
-                            id,
-                            error,
-                        })?;
+                                )
+                            })
+                            .transpose()?;
+                        let event = LocalEvent::WorkerTurnFinished { id, error };
+                        let record = match resume_state {
+                            Some(resume_state) => runtime
+                                .journal_mut()?
+                                .append_local_with_resume_state(event, resume_state)?,
+                            None => runtime.journal_mut()?.append_local(event)?,
+                        };
                         schedule(app.update(AppEvent::Transcript { pane, record }), &mut scheduler);
                         apply_app_update!(app.update(AppEvent::WorkerTurnFinished(pane)));
                     }
@@ -1565,11 +1575,9 @@ fn open_pane(
         previously_persisted,
         skills_catalog_present,
     } = session;
-    if pane == PaneId::Main && generation == 0 {
-        session::remove_obsolete_checkpoints(config.path())?;
-    }
     let (mut journal, writer) = TranscriptJournal::open(config.path(), session_id)?;
     let writer_path = journal.path().to_path_buf();
+    let persisted_transcript = journal.persistence_flag();
     journal.defer_start(SessionStarted {
         session_id: session_id.to_owned(),
         parent_session_id: parent_session_id.map(str::to_owned),
@@ -1604,6 +1612,7 @@ fn open_pane(
         previously_persisted,
         journal: Some(journal),
         writer_path,
+        persisted_transcript,
         event_streams_open: 1,
         next_turn: 1,
         next_shell: 1,
@@ -2070,7 +2079,7 @@ fn apply_pane_effect(
             if context.recent_prompt_task.is_none() {
                 let config_path = context.config.path().to_path_buf();
                 *context.recent_prompt_task = Some(tokio::spawn(async move {
-                    session::load_recent_prompts_async(config_path, None)
+                    session::load_recent_prompts_async(config_path)
                         .await
                         .map_err(Into::into)
                 }));
@@ -2551,9 +2560,9 @@ mod tests {
         tui::{
             components::RecentPromptDraft,
             pane::PaneId,
-            session::RecentPrompt,
+            session::{self, RecentPrompt},
             subagent_updates::ForwardedSubagentUpdate,
-            transcript::{LocalEvent, TurnId, load},
+            transcript::{LocalEvent, TurnId},
             worker::WorkerCommand,
         },
     };
@@ -2764,43 +2773,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn opening_a_session_removes_obsolete_checkpoints() {
-        let directory = tempdir().unwrap();
-        let config_path = directory.path().join("config.toml");
-        fs::write(&config_path, "").unwrap();
-        let config = Config::load(ConfigOverrides {
-            path: Some(config_path),
-            workspace: Some(directory.path().to_path_buf()),
-            ..ConfigOverrides::default()
-        })
-        .unwrap();
-        let obsolete = directory.path().join("checkpoints/6161.json.zst");
-        fs::create_dir_all(obsolete.parent().unwrap()).unwrap();
-        fs::write(&obsolete, b"obsolete checkpoint").unwrap();
-        let (sender, mut completions) = tokio::sync::mpsc::unbounded_channel();
-        let (_subagents, subagent_control, _updates) =
-            crate::core::extensions::subagents::channel(32);
-
-        let pane = open_pane(
-            PaneGeneration {
-                pane: PaneId::Main,
-                generation: 0,
-            },
-            PaneSession::new("main-session", None, false),
-            &config,
-            PaneSettings::new(ReasoningEffort::Low, ReasoningMode::Standard, false),
-            Arc::from("instructions"),
-            subagent_control,
-            &sender,
-        )
-        .unwrap();
-
-        assert!(!obsolete.exists());
-        drop(pane);
-        completions.recv().await.unwrap().result.unwrap();
-    }
-
-    #[tokio::test]
     async fn fork_pane_has_an_independent_session_and_persisted_transcript() {
         let directory = tempdir().unwrap();
         let config_path = directory.path().join("config.toml");
@@ -2867,7 +2839,6 @@ mod tests {
         let mut main = panes.remove(&PaneId::Main).unwrap();
         let mut fork = panes.remove(&PaneId::Fork(1)).unwrap();
         let main_path = main.writer_path.clone();
-        let fork_path = fork.writer_path.clone();
         fork.journal_mut()
             .unwrap()
             .append_local(LocalEvent::UserSubmitted {
@@ -2878,17 +2849,17 @@ mod tests {
 
         assert_eq!(main.session_id, "main-session");
         assert_eq!(fork.session_id, "fork-session");
-        assert_ne!(main.writer_path, fork.writer_path);
+        assert_eq!(main.writer_path, fork.writer_path);
 
         drop(main.journal.take());
         drop(fork.journal.take());
         for _ in 0..2 {
             completions.recv().await.unwrap().result.unwrap();
         }
-        assert!(!main_path.exists());
+        assert!(main_path.exists());
         assert!(main.exit_session_id().is_none());
         assert_eq!(fork.exit_session_id().as_deref(), Some("fork-session"));
-        let records = load(&fork_path).unwrap();
+        let records = session::load_transcript(config.path(), "fork-session").unwrap();
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].kind(), "session.started");
         let started = records[0]
@@ -2925,7 +2896,6 @@ mod tests {
             &sender,
         )
         .unwrap();
-        let old_path = old.writer_path.clone();
         old.journal_mut()
             .unwrap()
             .append_local(LocalEvent::UserSubmitted {
@@ -2948,13 +2918,12 @@ mod tests {
             &sender,
         )
         .unwrap();
-        let new_path = new.writer_path.clone();
         drop(new.journal.take());
 
         for _ in 0..2 {
             completions.recv().await.unwrap().result.unwrap();
         }
-        let old_records = load(&old_path).unwrap();
+        let old_records = session::load_transcript(config.path(), "old-session").unwrap();
 
         assert_eq!(old_records.last().unwrap().kind(), "session.ended");
         let ended = old_records
@@ -2963,7 +2932,11 @@ mod tests {
             .decode_payload::<crate::tui::transcript::SessionEnded>()
             .unwrap();
         assert_eq!(ended.outcome, super::SessionOutcome::Closed);
-        assert!(!new_path.exists());
+        assert!(
+            session::load_transcript(config.path(), "new-session")
+                .unwrap()
+                .is_empty()
+        );
         assert!(new.exit_session_id().is_none());
     }
 }
