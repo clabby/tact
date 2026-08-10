@@ -405,6 +405,11 @@ impl Command {
             update::UpdateStatus::UseCargo { command } => {
                 println!("This tact binary is managed by Cargo. Update it with `{command}`.");
             }
+            update::UpdateStatus::UsePackageManager { manager } => {
+                println!(
+                    "This tact binary is managed by {manager}. Update it with your package manager."
+                );
+            }
         }
         Ok(())
     }

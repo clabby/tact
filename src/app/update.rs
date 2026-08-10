@@ -136,6 +136,7 @@ pub(crate) enum UpdateStatus {
     UpToDate { version: Version },
     Updated { from: Version, to: Version },
     UseCargo { command: String },
+    UsePackageManager { manager: String },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -328,7 +329,9 @@ fn update_artifact_target(
 ) -> Result<Option<SupportedTarget>, UpdateError> {
     match installation {
         InstallationKind::ReleaseArchive => SupportedTarget::from_triple(target).map(Some),
-        InstallationKind::CratesIo { .. } | InstallationKind::Development => Ok(None),
+        InstallationKind::CratesIo { .. }
+        | InstallationKind::External { .. }
+        | InstallationKind::Development => Ok(None),
     }
 }
 
@@ -336,6 +339,11 @@ pub(crate) async fn install_latest() -> Result<UpdateStatus, UpdateError> {
     if let InstallationKind::CratesIo { root } = installation() {
         return Ok(UpdateStatus::UseCargo {
             command: cargo_update_command(root, default_cargo_install_root().as_deref()),
+        });
+    }
+    if let InstallationKind::External { manager } = installation() {
+        return Ok(UpdateStatus::UsePackageManager {
+            manager: manager.clone(),
         });
     }
     let target = SupportedTarget::current()?;
@@ -925,6 +933,16 @@ mod tests {
 
         assert_eq!(
             update_artifact_target(&installation, "x86_64-unknown-linux-musl").unwrap(),
+            None,
+        );
+        assert_eq!(
+            update_artifact_target(
+                &InstallationKind::External {
+                    manager: "nix".to_owned(),
+                },
+                "x86_64-unknown-linux-musl",
+            )
+            .unwrap(),
             None,
         );
         assert!(

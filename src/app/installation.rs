@@ -18,7 +18,15 @@ struct CargoInstallMetadata {
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum InstallationKind {
     ReleaseArchive,
-    CratesIo { root: PathBuf },
+    CratesIo {
+        root: PathBuf,
+    },
+    /// Managed by an external package manager, declared at build time through
+    /// the `TACT_PACKAGE_MANAGER` environment variable. Updates are delegated
+    /// to the named manager instead of replacing the binary in place.
+    External {
+        manager: String,
+    },
     Development,
 }
 
@@ -31,9 +39,12 @@ impl InstallationKind {
 pub(crate) fn current() -> &'static InstallationKind {
     INSTALLATION.get_or_init(|| {
         let explicitly_released = matches!(env!("TACT_RELEASE_BUILD"), "true");
+        let package_manager =
+            Some(env!("TACT_PACKAGE_MANAGER")).filter(|manager| !manager.is_empty());
         let executable = env::current_exe().ok();
         detect(
             explicitly_released,
+            package_manager,
             executable.as_deref(),
             installed_packages,
         )
@@ -42,6 +53,7 @@ pub(crate) fn current() -> &'static InstallationKind {
 
 fn detect(
     explicitly_released: bool,
+    package_manager: Option<&str>,
     executable: Option<&Path>,
     installed_packages: impl FnOnce(&Path) -> Option<String>,
 ) -> InstallationKind {
@@ -49,6 +61,11 @@ fn detect(
         executable.and_then(|executable| crates_io_install_root(executable, installed_packages))
     {
         return InstallationKind::CratesIo { root };
+    }
+    if let Some(manager) = package_manager {
+        return InstallationKind::External {
+            manager: manager.to_owned(),
+        };
     }
     if explicitly_released {
         return InstallationKind::ReleaseArchive;
@@ -166,13 +183,22 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            detect(false, Some(&executable), |_| None),
+            detect(false, None, Some(&executable), |_| None),
             InstallationKind::CratesIo {
                 root: root.path().to_path_buf(),
             }
         );
         assert_eq!(
-            detect(true, Some(&executable), |_| None),
+            detect(true, None, Some(&executable), |_| None),
+            InstallationKind::CratesIo {
+                root: root.path().to_path_buf(),
+            }
+        );
+        // Cargo's ownership records outrank build-time declarations, like the
+        // release flag above: a cargo-managed binary must be updated through
+        // Cargo regardless of how it was produced.
+        assert_eq!(
+            detect(false, Some("nix"), Some(&executable), |_| None),
             InstallationKind::CratesIo {
                 root: root.path().to_path_buf(),
             }
@@ -182,13 +208,41 @@ mod tests {
     #[test]
     fn release_archives_and_repository_builds_are_distinct() {
         assert_eq!(
-            detect(true, Some(Path::new("/work/target/release/tact")), |_| None),
+            detect(
+                true,
+                None,
+                Some(Path::new("/work/target/release/tact")),
+                |_| None
+            ),
             InstallationKind::ReleaseArchive,
         );
         assert_eq!(
-            detect(false, Some(Path::new("/work/target/debug/tact")), |_| None),
+            detect(
+                false,
+                None,
+                Some(Path::new("/work/target/debug/tact")),
+                |_| None
+            ),
             InstallationKind::Development,
         );
+    }
+
+    #[test]
+    fn package_manager_declarations_identify_external_installations() {
+        let executable = Path::new("/nix/store/cafebabe-tact-1.2.3/bin/tact");
+        let external = InstallationKind::External {
+            manager: "nix".to_owned(),
+        };
+
+        assert_eq!(
+            detect(false, Some("nix"), Some(executable), |_| None),
+            external
+        );
+        assert_eq!(
+            detect(true, Some("nix"), Some(executable), |_| None),
+            external
+        );
+        assert!(!external.is_development());
     }
 
     #[test]
@@ -198,7 +252,7 @@ mod tests {
         fs::create_dir(root.path().join("bin")).unwrap();
 
         assert_eq!(
-            detect(false, Some(&executable), |_| {
+            detect(false, None, Some(&executable), |_| {
                 Some("tact v1.2.3:\n    tact\n".to_owned())
             }),
             InstallationKind::CratesIo {
