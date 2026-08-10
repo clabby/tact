@@ -118,7 +118,10 @@ pub(crate) fn load_checkpoint(
     config_path: &Path,
     session_id: &str,
 ) -> Result<ResumeState, SessionError> {
-    let encoded = SessionStorage::open(config_path)?
+    let encoded = SessionStorage::open_read_only(config_path)?
+        .ok_or_else(|| SessionError::MissingCheckpoint {
+            session_id: session_id.to_owned(),
+        })?
         .load_resume_state(session_id)?
         .ok_or_else(|| SessionError::MissingCheckpoint {
             session_id: session_id.to_owned(),
@@ -143,7 +146,10 @@ pub(crate) fn list(
     config_path: &Path,
     workspace: &Path,
 ) -> Result<Vec<SessionSummary>, SessionError> {
-    SessionStorage::open(config_path)?
+    let Some(storage) = SessionStorage::open_read_only(config_path)? else {
+        return Ok(Vec::new());
+    };
+    storage
         .list_sessions(workspace)?
         .into_iter()
         .map(|session| {
@@ -173,7 +179,10 @@ pub(crate) async fn load_recent_prompts_async(
     config_path: PathBuf,
 ) -> Result<Vec<RecentPrompt>, SessionError> {
     tokio::task::spawn_blocking(move || {
-        let prompts = SessionStorage::open(&config_path)?.recent_prompts(MAX_RECENT_PROMPTS)?;
+        let Some(storage) = SessionStorage::open_read_only(&config_path)? else {
+            return Ok(Vec::new());
+        };
+        let prompts = storage.recent_prompts(MAX_RECENT_PROMPTS)?;
         Ok(prompts
             .into_iter()
             .map(|prompt| RecentPrompt {
@@ -193,9 +202,10 @@ pub(crate) fn load_transcript(
     config_path: &Path,
     session_id: &str,
 ) -> Result<Vec<Arc<TranscriptRecord>>, SessionError> {
-    SessionStorage::open(config_path)?
-        .load_records(session_id)
-        .map_err(Into::into)
+    let Some(storage) = SessionStorage::open_read_only(config_path)? else {
+        return Ok(Vec::new());
+    };
+    storage.load_records(session_id).map_err(Into::into)
 }
 
 pub(crate) async fn load_transcript_async(
@@ -232,13 +242,18 @@ pub(crate) fn format_age(started_at_unix_ms: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{encode_checkpoint, load_checkpoint, save_checkpoint};
+    use super::{encode_checkpoint, load_checkpoint, load_transcript, save_checkpoint};
     use crate::{
         app::config::{ReasoningEffort, ReasoningMode},
-        tui::transcript::{LocalEvent, SessionStarted, TranscriptJournal, TurnId},
+        tui::{
+            storage::{SessionStorage, database_path},
+            transcript::{LocalEvent, SessionStarted, TranscriptJournal, TranscriptRecord, TurnId},
+        },
     };
     use nanocodex::agent::session::SessionSnapshot;
+    use rusqlite::Connection;
     use serde_json::{Value, json};
+    use std::sync::Arc;
     use tempfile::tempdir;
 
     fn snapshot(lineage: &str) -> SessionSnapshot {
@@ -262,6 +277,63 @@ mod tests {
             ]
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn loading_a_missing_session_does_not_create_storage() {
+        let directory = tempdir().unwrap();
+        let config = directory.path().join("config.toml");
+
+        assert!(load_transcript(&config, "missing").unwrap().is_empty());
+        assert!(!database_path(&config).exists());
+    }
+
+    #[test]
+    fn loading_a_session_does_not_require_a_writer_lock() {
+        let directory = tempdir().unwrap();
+        let config = directory.path().join("config.toml");
+        let records = [
+            Arc::new(
+                TranscriptRecord::from_local(
+                    1,
+                    1,
+                    LocalEvent::SessionStarted(SessionStarted {
+                        session_id: "session".to_owned(),
+                        parent_session_id: None,
+                        model: "model".to_owned(),
+                        effort: ReasoningEffort::Medium,
+                        reasoning_mode: ReasoningMode::Standard,
+                        fast_mode: false,
+                        workspace: "/work".into(),
+                        application_version: "test".to_owned(),
+                    }),
+                )
+                .unwrap(),
+            ),
+            Arc::new(
+                TranscriptRecord::from_local(
+                    2,
+                    2,
+                    LocalEvent::UserSubmitted {
+                        id: TurnId::new(1),
+                        text: "inspect storage".to_owned(),
+                    },
+                )
+                .unwrap(),
+            ),
+        ];
+        SessionStorage::open(&config)
+            .unwrap()
+            .append_records("session", &records)
+            .unwrap();
+        let writer = Connection::open(database_path(&config)).unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+
+        let loaded = load_transcript(&config, "session").unwrap();
+
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[0].kind(), "session.started");
+        assert_eq!(loaded[1].kind(), "user.submitted");
     }
 
     #[test]

@@ -16,7 +16,6 @@ use thiserror::Error;
 
 const FORMAT_VERSION: i32 = 2;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
-const RECORD_COMPRESSION_LEVEL: i32 = 1;
 const STATE_COMPRESSION_LEVEL: i32 = 3;
 
 #[derive(Debug, Error)]
@@ -105,6 +104,41 @@ impl SessionStorage {
         })
     }
 
+    pub(crate) fn open_read_only(config_path: &Path) -> Result<Option<Self>, StorageError> {
+        let path = database_path(config_path);
+        if !path.exists() {
+            return Ok(None);
+        }
+        let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        let connection =
+            Connection::open_with_flags(&path, flags).map_err(|source| StorageError::Open {
+                path: path.clone(),
+                source,
+            })?;
+        connection
+            .busy_timeout(BUSY_TIMEOUT)
+            .and_then(|_| connection.execute_batch("PRAGMA query_only = ON;"))
+            .map_err(|source| StorageError::Configure {
+                path: path.clone(),
+                source,
+            })?;
+        let version = database_version(&connection, &path)?;
+        if version == 0 {
+            return Ok(None);
+        }
+        if version != FORMAT_VERSION {
+            return Err(StorageError::UnsupportedVersion {
+                path,
+                found: version,
+            });
+        }
+        Ok(Some(Self {
+            path,
+            connection,
+            active_turns: HashMap::new(),
+        }))
+    }
+
     pub(crate) fn append_records(
         &mut self,
         session_id: &str,
@@ -132,6 +166,7 @@ impl SessionStorage {
             .transaction()
             .map_err(|source| query(&path, source))?;
         let mut active_turn = self.active_turns.get(session_id).copied();
+        let mut encoded = Vec::new();
         for record in records {
             if record.source() == "tact" && record.kind() == "worker.turn_accepted" {
                 #[derive(serde::Deserialize)]
@@ -140,7 +175,16 @@ impl SessionStorage {
                 }
                 active_turn = Some(record.decode_payload::<AcceptedTurn>()?.id);
             }
-            append_record(&transaction, &path, session_id, active_turn, record)?;
+            encoded.clear();
+            serde_json::to_writer(&mut encoded, record.as_ref())?;
+            append_record(
+                &transaction,
+                &path,
+                session_id,
+                active_turn,
+                record,
+                &encoded,
+            )?;
         }
         if let Some(compressed) = compressed_state {
             write_resume_state(&transaction, &path, session_id, &compressed)?;
@@ -160,18 +204,30 @@ impl SessionStorage {
     ) -> Result<Vec<Arc<TranscriptRecord>>, StorageError> {
         let mut statement = self
             .connection
-            .prepare("SELECT record_zstd FROM events WHERE session_id = ?1 ORDER BY event_id")
+            .prepare("SELECT record_json FROM events WHERE session_id = ?1 ORDER BY event_id")
             .map_err(|source| query(&self.path, source))?;
-        let rows = statement
-            .query_map([session_id], |row| row.get::<_, Vec<u8>>(0))
+        let mut rows = statement
+            .query([session_id])
             .map_err(|source| query(&self.path, source))?;
-        let compressed = rows
-            .map(|row| row.map_err(|source| query(&self.path, source)))
-            .collect::<Result<Vec<_>, _>>()?;
-        compressed
-            .iter()
-            .map(|record| decode_record(record).map(Arc::new))
-            .collect()
+        let mut records = Vec::new();
+        while let Some(row) = rows.next().map_err(|source| query(&self.path, source))? {
+            let encoded = row
+                .get_ref(0)
+                .map_err(|source| query(&self.path, source))?
+                .as_blob()
+                .map_err(|source| {
+                    query(
+                        &self.path,
+                        rusqlite::Error::FromSqlConversionFailure(
+                            0,
+                            rusqlite::types::Type::Blob,
+                            Box::new(source),
+                        ),
+                    )
+                })?;
+            records.push(Arc::new(decode_record(encoded)?));
+        }
+        Ok(records)
     }
 
     #[cfg(test)]
@@ -267,9 +323,8 @@ fn write_resume_state(
     Ok(())
 }
 
-fn decode_record(compressed: &[u8]) -> Result<TranscriptRecord, StorageError> {
-    let encoded = zstd::decode_all(compressed).map_err(StorageError::Decode)?;
-    let record = serde_json::from_slice::<TranscriptRecord>(&encoded)?;
+fn decode_record(encoded: &[u8]) -> Result<TranscriptRecord, StorageError> {
+    let record = serde_json::from_slice::<TranscriptRecord>(encoded)?;
     if record.schema_version() != SCHEMA_VERSION {
         return Err(StorageError::UnsupportedRecordVersion {
             found: record.schema_version(),
@@ -306,10 +361,11 @@ fn configure(connection: &Connection, path: &Path) -> Result<(), StorageError> {
 }
 
 fn initialize(connection: &Connection, path: &Path) -> Result<(), StorageError> {
-    let version = connection
-        .query_row("PRAGMA user_version", [], |row| row.get::<_, i32>(0))
-        .map_err(|source| query(path, source))?;
-    if version != 0 && version != FORMAT_VERSION {
+    let version = database_version(connection, path)?;
+    if version == FORMAT_VERSION {
+        return Ok(());
+    }
+    if version != 0 {
         return Err(StorageError::UnsupportedVersion {
             path: path.to_path_buf(),
             found: version,
@@ -328,7 +384,7 @@ fn initialize(connection: &Connection, path: &Path) -> Result<(), StorageError> 
              CREATE TABLE IF NOT EXISTS events(\n\
                  event_id INTEGER PRIMARY KEY AUTOINCREMENT,\n\
                  session_id TEXT NOT NULL REFERENCES sessions(session_id),\n\
-                 record_zstd BLOB NOT NULL, prompt_text TEXT, prompt_recorded_at_ms INTEGER,\n\
+                 record_json BLOB NOT NULL, prompt_text TEXT, prompt_recorded_at_ms INTEGER,\n\
                  assistant_stream TEXT,\n\
                  CHECK((prompt_text IS NULL) = (prompt_recorded_at_ms IS NULL))\n\
              ) STRICT;\n\
@@ -346,12 +402,19 @@ fn initialize(connection: &Connection, path: &Path) -> Result<(), StorageError> 
         .map_err(|source| query(path, source))
 }
 
+fn database_version(connection: &Connection, path: &Path) -> Result<i32, StorageError> {
+    connection
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .map_err(|source| query(path, source))
+}
+
 fn append_record(
     transaction: &Transaction<'_>,
     path: &Path,
     session_id: &str,
     active_turn: Option<u64>,
     record: &TranscriptRecord,
+    encoded: &[u8],
 ) -> Result<(), StorageError> {
     if record.source() == "tact" && record.kind() == "session.started" {
         let started = record.decode_payload::<SessionStarted>()?;
@@ -369,17 +432,14 @@ fn append_record(
             )
             .map_err(|source| query(path, source))?;
     }
-    let encoded = serde_json::to_vec(record)?;
-    let compressed = zstd::encode_all(encoded.as_slice(), RECORD_COMPRESSION_LEVEL)
-        .map_err(StorageError::Compress)?;
     transaction
         .execute(
             "INSERT INTO events(\n\
-                 session_id, record_zstd, prompt_text, prompt_recorded_at_ms, assistant_stream\n\
+                 session_id, record_json, prompt_text, prompt_recorded_at_ms, assistant_stream\n\
              ) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
                 session_id,
-                compressed,
+                encoded,
                 prompt_text,
                 prompt_text
                     .as_ref()
