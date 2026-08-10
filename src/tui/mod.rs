@@ -95,7 +95,7 @@ type NewSessionTask = JoinHandle<(
 
 type SessionListTask = JoinHandle<(PaneId, Result<Vec<SessionSummary>>)>;
 
-type RecentPromptTask = JoinHandle<(PaneId, String, Result<Vec<RecentPrompt>>)>;
+type RecentPromptTask = JoinHandle<Result<Vec<RecentPrompt>>>;
 
 type ResumeSessionTask = JoinHandle<(
     PaneId,
@@ -263,6 +263,13 @@ struct WriterCompletion {
     session_id: String,
     generation: u64,
     result: std::result::Result<(), TranscriptError>,
+}
+
+struct RecentPromptRequest {
+    pane: PaneId,
+    session_id: String,
+    workspace: PathBuf,
+    current_prompts: Vec<RecentPromptDraft>,
 }
 
 enum MemoryOperation {
@@ -521,6 +528,14 @@ pub(crate) async fn run(
         theme.set_system_scheme(scheme);
     }
     let mut app = AppNode::new(theme, workspace.clone(), root);
+    let prompt_warmup_config = config.path().to_path_buf();
+    let mut recent_prompt_task = Some(tokio::spawn(async move {
+        session::load_recent_prompts_async(prompt_warmup_config, None)
+            .await
+            .map_err(Into::into)
+    }));
+    let mut recent_prompt_cache = None::<Vec<RecentPrompt>>;
+    let mut recent_prompt_request = None::<RecentPromptRequest>;
     let mut update_check_task = spawn_update_check();
     let (system_theme_sender, mut system_theme_updates) = mpsc::unbounded_channel();
     theme::watch_system_scheme(system_theme_sender, shutdown.clone());
@@ -530,7 +545,6 @@ pub(crate) async fn run(
     let mut fast_mode_task = None::<FastModeUpdateTask>;
     let mut new_session_task = None::<NewSessionTask>;
     let mut session_list_task = None::<SessionListTask>;
-    let mut recent_prompt_task = None::<RecentPromptTask>;
     let mut handoff_controller = HandoffController::new();
     let mut review_controller = ReviewController::new();
     let (auxiliary_sender, mut auxiliary_jobs) = mpsc::unbounded_channel();
@@ -565,6 +579,8 @@ pub(crate) async fn run(
                     new_session_task: &mut new_session_task,
                     session_list_task: &mut session_list_task,
                     recent_prompt_task: &mut recent_prompt_task,
+                    recent_prompt_cache: &mut recent_prompt_cache,
+                    recent_prompt_request: &mut recent_prompt_request,
                     handoff_controller: &mut handoff_controller,
                     review_controller: &mut review_controller,
                     auxiliary_sender: &auxiliary_sender,
@@ -1255,25 +1271,28 @@ pub(crate) async fn run(
                     .await
             }, if recent_prompt_task.is_some() && !stopping => {
                 recent_prompt_task = None;
-                input = Some(EventStream::new());
-                let (pane, session_id, prompts) =
-                    result.map_err(RuntimeError::SessionTask)?;
-                match prompts {
-                    Ok(prompts) => schedule(
-                        app.update(AppEvent::RecentPromptsLoaded {
-                            pane,
-                            session_id,
-                            prompts,
-                        }),
-                        &mut scheduler,
-                    ),
-                    Err(error) => schedule(
-                        app.update(AppEvent::RecentPromptLoadFailed {
-                            pane,
-                            error: format!("Could not load recent prompts: {error}"),
-                        }),
-                        &mut scheduler,
-                    ),
+                let prompts = result.map_err(RuntimeError::SessionTask)?;
+                match (prompts, recent_prompt_request.take()) {
+                    (Ok(prompts), Some(request)) => {
+                        recent_prompt_cache = Some(prompts.clone());
+                        input = Some(EventStream::new());
+                        schedule(
+                            app.update(recent_prompts_loaded_event(prompts, request)),
+                            &mut scheduler,
+                        );
+                    }
+                    (Ok(prompts), None) => recent_prompt_cache = Some(prompts),
+                    (Err(error), Some(request)) => {
+                        input = Some(EventStream::new());
+                        schedule(
+                            app.update(AppEvent::RecentPromptLoadFailed {
+                                pane: request.pane,
+                                error: format!("Could not load recent prompts: {error}"),
+                            }),
+                            &mut scheduler,
+                        );
+                    }
+                    (Err(_), None) => {}
                 }
                 scheduler.request_immediate(Instant::now());
             }
@@ -1660,6 +1679,33 @@ fn merge_recent_prompts(
     prompts
 }
 
+fn remember_recent_prompt(cache: &mut Option<Vec<RecentPrompt>>, prompt: RecentPrompt) {
+    let Some(cache) = cache else {
+        return;
+    };
+    let index = cache
+        .partition_point(|existing| existing.recorded_at_unix_ms >= prompt.recorded_at_unix_ms);
+    cache.insert(index, prompt);
+    cache.truncate(session::MAX_RECENT_PROMPTS);
+}
+
+fn recent_prompts_loaded_event(
+    persisted: Vec<RecentPrompt>,
+    request: RecentPromptRequest,
+) -> AppEvent {
+    let prompts = merge_recent_prompts(
+        persisted,
+        request.current_prompts,
+        &request.session_id,
+        &request.workspace,
+    );
+    AppEvent::RecentPromptsLoaded {
+        pane: request.pane,
+        session_id: request.session_id,
+        prompts,
+    }
+}
+
 struct EffectContext<'a> {
     app: &'a mut AppNode,
     commands: &'a tokio::sync::mpsc::UnboundedSender<WorkerCommand>,
@@ -1673,6 +1719,8 @@ struct EffectContext<'a> {
     new_session_task: &'a mut Option<NewSessionTask>,
     session_list_task: &'a mut Option<SessionListTask>,
     recent_prompt_task: &'a mut Option<RecentPromptTask>,
+    recent_prompt_cache: &'a mut Option<Vec<RecentPrompt>>,
+    recent_prompt_request: &'a mut Option<RecentPromptRequest>,
     handoff_controller: &'a mut HandoffController,
     review_controller: &'a mut ReviewController,
     auxiliary_sender: &'a mpsc::UnboundedSender<AuxiliaryJobRequest>,
@@ -1734,6 +1782,15 @@ fn apply_pane_effect(
                     id,
                     text: prompt.display_text().to_owned(),
                 })?;
+            remember_recent_prompt(
+                context.recent_prompt_cache,
+                RecentPrompt {
+                    text: prompt.display_text().to_owned(),
+                    recorded_at_unix_ms: record.recorded_at_unix_ms(),
+                    session_id: runtime.session_id.clone(),
+                    workspace: context.workspace.to_path_buf(),
+                },
+            );
             schedule(
                 context.app.update(AppEvent::Transcript { pane, record }),
                 context.scheduler,
@@ -1986,32 +2043,38 @@ fn apply_pane_effect(
             }));
         }
         components::RootEffect::LoadRecentPrompts(current_prompts) => {
-            *context.input = None;
-            let config_path = context.config.path().to_path_buf();
-            let workspace = context.workspace.to_path_buf();
             let session_id = context
                 .panes
                 .get(&pane)
                 .expect("recent-prompt pane must exist")
                 .session_id
                 .clone();
-            *context.recent_prompt_task = Some(tokio::spawn(async move {
-                let prompts = session::load_recent_prompts_async(
-                    config_path,
-                    Some(session_id.clone()),
-                )
-                    .await
-                    .map(|prompts| {
-                        merge_recent_prompts(
-                            prompts,
-                            current_prompts,
-                            &session_id,
-                            &workspace,
-                        )
-                    })
-                    .map_err(Into::into);
-                (pane, session_id, prompts)
-            }));
+            let request = RecentPromptRequest {
+                pane,
+                session_id,
+                workspace: context.workspace.to_path_buf(),
+                current_prompts,
+            };
+            if let Some(prompts) = context.recent_prompt_cache.clone() {
+                schedule(
+                    context
+                        .app
+                        .update(recent_prompts_loaded_event(prompts, request)),
+                    context.scheduler,
+                );
+                return Ok(());
+            }
+
+            *context.input = None;
+            *context.recent_prompt_request = Some(request);
+            if context.recent_prompt_task.is_none() {
+                let config_path = context.config.path().to_path_buf();
+                *context.recent_prompt_task = Some(tokio::spawn(async move {
+                    session::load_recent_prompts_async(config_path, None)
+                        .await
+                        .map_err(Into::into)
+                }));
+            }
         }
         components::RootEffect::Handoff => start_handoff(context, pane),
         components::RootEffect::Review { download_assets } => {
@@ -2165,7 +2228,16 @@ fn apply_pane_effect(
             let runtime = context.panes.get_mut(&pane).expect("steer pane must exist");
             let record = runtime
                 .journal_mut()?
-                .append_local(LocalEvent::UserSteered { text })?;
+                .append_local(LocalEvent::UserSteered { text: text.clone() })?;
+            remember_recent_prompt(
+                context.recent_prompt_cache,
+                RecentPrompt {
+                    text,
+                    recorded_at_unix_ms: record.recorded_at_unix_ms(),
+                    session_id: runtime.session_id.clone(),
+                    workspace: context.workspace.to_path_buf(),
+                },
+            );
             schedule(
                 context.app.update(AppEvent::Transcript { pane, record }),
                 context.scheduler,

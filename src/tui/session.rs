@@ -13,9 +13,10 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
     fs::{self, File},
+    hash::{Hash, Hasher},
     io::{self, BufReader, BufWriter, Write},
     path::{Path, PathBuf},
-    sync::{Arc, OnceLock},
+    sync::{Arc, Mutex, MutexGuard, OnceLock},
     time::{SystemTime, UNIX_EPOCH},
 };
 use tempfile::NamedTempFile;
@@ -27,7 +28,8 @@ const COMPRESSION_LEVEL: i32 = 3;
 const CHECKPOINT_FORMAT_VERSION: u32 = 1;
 const SEGMENT_SUMMARY_FORMAT_VERSION: u32 = 2;
 const PROJECTION_FORMAT_VERSION: u32 = 1;
-const MAX_RECENT_PROMPTS: usize = 100;
+pub(crate) const MAX_RECENT_PROMPTS: usize = 100;
+const MAX_TRANSCRIPT_LOADER_THREADS: usize = 16;
 
 #[cfg(unix)]
 use std::os::unix::fs::DirBuilderExt;
@@ -411,12 +413,14 @@ fn load_recent_prompts_from_segment(
     path: &Path,
     excluded_session_id: Option<&str>,
 ) -> Result<Vec<LoadedRecentPrompt>, SessionError> {
+    let _index_guard = lock_segment_index(path);
     if let Some(index) = read_segment_index(path) {
         if excluded_session_id == Some(index.summary.session_id.as_str()) {
             return Ok(Vec::new());
         }
         return Ok(loaded_recent_prompts(path, index.prompts));
     }
+    let source_fingerprint = transcript_fingerprint_entry(path)?;
     let segment = transcript::load_matching_segment_filtered(
         path,
         |first| {
@@ -438,9 +442,7 @@ fn load_recent_prompts_from_segment(
         return Ok(Vec::new());
     };
     let prompts = recent_prompts(&segment.records, &summary);
-    if segment.complete {
-        write_segment_index(path, &summary, &prompts);
-    }
+    write_segment_index_if_unchanged(path, &summary, &prompts, &source_fingerprint);
     Ok(loaded_recent_prompts(path, prompts))
 }
 
@@ -484,6 +486,7 @@ fn load_catalog_segment(
     path: &Path,
     workspace: &Path,
 ) -> Result<Option<SessionSummary>, SessionError> {
+    let _index_guard = lock_segment_index(path);
     if let Some(index) = read_segment_index(path) {
         return Ok((index.summary.workspace == workspace).then_some(index.summary));
     }
@@ -634,6 +637,7 @@ fn load_session_segment(
     path: &Path,
     session_id: &str,
 ) -> Result<Option<LoadedSessionSegment>, SessionError> {
+    let _index_guard = lock_segment_index(path);
     if let Some(index) = read_segment_index(path)
         && index.summary.session_id != session_id
     {
@@ -669,7 +673,7 @@ fn transcript_loader() -> &'static rayon::ThreadPool {
     POOL.get_or_init(|| {
         let available = std::thread::available_parallelism().map_or(1, usize::from);
         rayon::ThreadPoolBuilder::new()
-            .num_threads(available.min(4))
+            .num_threads(available.min(MAX_TRANSCRIPT_LOADER_THREADS))
             .thread_name(|index| format!("tact-transcript-loader-{index}"))
             .build()
             .expect("the transcript loading thread pool should initialize")
@@ -829,26 +833,48 @@ fn read_segment_index(transcript_path: &Path) -> Option<SegmentIndex> {
     })
 }
 
+fn lock_segment_index(path: &Path) -> MutexGuard<'static, ()> {
+    const LOCK_COUNT: usize = 64;
+    static LOCKS: OnceLock<Box<[Mutex<()>]>> = OnceLock::new();
+    let locks = LOCKS.get_or_init(|| {
+        (0..LOCK_COUNT)
+            .map(|_| Mutex::new(()))
+            .collect::<Vec<_>>()
+            .into_boxed_slice()
+    });
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    path.hash(&mut hasher);
+    let index = usize::try_from(hasher.finish()).unwrap_or(0) % locks.len();
+    locks[index]
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 fn write_segment_index(
     transcript_path: &Path,
     summary: &SessionSummary,
     prompts: &[StoredRecentPrompt],
 ) {
-    let Some(directory) = transcript_path.parent() else {
+    let Ok(source_fingerprint) = transcript_fingerprint_entry(transcript_path) else {
         return;
     };
-    let Ok(metadata) = fs::metadata(transcript_path) else {
+    write_segment_index_if_unchanged(transcript_path, summary, prompts, &source_fingerprint);
+}
+
+fn write_segment_index_if_unchanged(
+    transcript_path: &Path,
+    summary: &SessionSummary,
+    prompts: &[StoredRecentPrompt],
+    source_fingerprint: &TranscriptFingerprint,
+) {
+    let Some(directory) = transcript_path.parent() else {
         return;
     };
     let stored = StoredSegmentSummary {
         format_version: SEGMENT_SUMMARY_FORMAT_VERSION,
-        transcript_filename: transcript_path
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .into_owned(),
-        transcript_bytes: metadata.len(),
-        transcript_modified_unix_ns: modified_unix_ns(&metadata),
+        transcript_filename: source_fingerprint.filename.clone(),
+        transcript_bytes: source_fingerprint.bytes,
+        transcript_modified_unix_ns: source_fingerprint.modified_unix_ns,
         summary: summary.clone(),
         prompts: prompts.to_vec(),
     };
@@ -861,7 +887,16 @@ fn write_segment_index(
     if temporary.write_all(&encoded).is_err() {
         return;
     }
-    drop(temporary.persist(segment_summary_path(transcript_path)));
+    if transcript_fingerprint_entry(transcript_path).ok().as_ref() != Some(source_fingerprint) {
+        return;
+    }
+    let cache_path = segment_summary_path(transcript_path);
+    if temporary.persist(&cache_path).is_err() {
+        return;
+    }
+    if transcript_fingerprint_entry(transcript_path).ok().as_ref() != Some(source_fingerprint) {
+        drop(fs::remove_file(cache_path));
+    }
 }
 
 fn segment_summary_path(transcript_path: &Path) -> PathBuf {
@@ -1013,22 +1048,24 @@ fn try_write_transcript_projection(
 fn transcript_fingerprint(config_path: &Path) -> Result<Vec<TranscriptFingerprint>, SessionError> {
     transcript_paths(config_path)?
         .into_iter()
-        .map(|path| {
-            let metadata = fs::metadata(&path).map_err(|source| SessionError::ReadDirectory {
-                path: path.clone(),
-                source,
-            })?;
-            Ok(TranscriptFingerprint {
-                filename: path
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .into_owned(),
-                bytes: metadata.len(),
-                modified_unix_ns: modified_unix_ns(&metadata),
-            })
-        })
+        .map(|path| transcript_fingerprint_entry(&path))
         .collect()
+}
+
+fn transcript_fingerprint_entry(path: &Path) -> Result<TranscriptFingerprint, SessionError> {
+    let metadata = fs::metadata(path).map_err(|source| SessionError::ReadDirectory {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    Ok(TranscriptFingerprint {
+        filename: path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned(),
+        bytes: metadata.len(),
+        modified_unix_ns: modified_unix_ns(&metadata),
+    })
 }
 
 fn modified_unix_ns(metadata: &fs::Metadata) -> u128 {
@@ -1926,7 +1963,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn incomplete_segments_do_not_create_recent_prompt_caches() {
+    async fn stable_incomplete_segments_create_recent_prompt_caches() {
         let directory = tempdir().unwrap();
         let config = directory.path().join("config.toml");
         let transcript_directory = crate::tui::transcript::storage_directory(&config);
@@ -1960,6 +1997,6 @@ mod tests {
         let prompts = load_recent_prompts_async(config, None).await.unwrap();
 
         assert_eq!(prompts[0].text, "durable line");
-        assert!(!segment_summary_path(&transcript).exists());
+        assert!(segment_summary_path(&transcript).is_file());
     }
 }
