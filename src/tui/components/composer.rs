@@ -39,7 +39,7 @@ use unicode_width::UnicodeWidthStr;
 
 const MIN_CONTENT_ROWS: usize = 3;
 const MAX_CONTENT_ROWS: usize = 6;
-const ENTRY_HINT: &str = " / actions · @ files ";
+const ENTRY_HINT: &str = " / actions · @ files · @@ sessions ";
 const DEVELOPMENT_BADGE: &str = " ◉ dev ";
 
 #[derive(Debug, Eq, PartialEq)]
@@ -1448,9 +1448,9 @@ mod tests {
         let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
         let terminal = render(&mut composer, 60, 5);
         let footer = if crate::app::installation::current().is_development() {
-            "╰─ / actions · @ files ───────────────────── ◉ dev  /work ─╯"
+            "╰─ / actions · @ files · @@ sessions ─────── ◉ dev  /work ─╯"
         } else {
-            "╰─ / actions · @ files ──────────────────────────── /work ─╯"
+            "╰─ / actions · @ files · @@ sessions ───────────────── /work ─╯"
         };
 
         assert_eq!(
@@ -1629,7 +1629,7 @@ mod tests {
     #[test]
     fn entry_hint_is_only_shown_for_an_empty_draft_with_room() {
         let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
-        assert!(rows(&render(&mut composer, 40, 5))[4].contains("/ actions · @ files"));
+        assert!(rows(&render(&mut composer, 60, 5))[4].contains("@@ sessions"));
 
         composer.replace_draft("hello".to_owned());
         assert!(!rows(&render(&mut composer, 40, 5))[4].contains("/ actions"));

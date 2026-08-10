@@ -14,7 +14,7 @@ mod scheduler;
 pub(crate) mod session;
 mod shell;
 mod spinner;
-mod storage;
+pub(crate) mod storage;
 mod subagent_updates;
 mod terminal;
 pub(crate) mod theme;
@@ -2031,7 +2031,7 @@ fn apply_pane_effect(
                 (pane, effort, reasoning_mode, fast_mode, configured)
             }));
         }
-        components::RootEffect::LoadSessions => {
+        components::RootEffect::LoadSessions(kind) => {
             *context.input = None;
             let config_path = context.config.path().to_path_buf();
             let workspace = context.workspace.to_path_buf();
@@ -2042,7 +2042,8 @@ fn apply_pane_effect(
                 .session_id
                 .clone();
             *context.session_list_task = Some(tokio::spawn(async move {
-                let sessions = session::list_async(config_path, workspace)
+                let resumable_only = matches!(kind, components::SessionListKind::Resume);
+                let sessions = session::list_async(config_path, workspace, resumable_only)
                     .await
                     .map(|mut sessions| {
                     sessions.retain(|session| session.session_id != active_session_id);

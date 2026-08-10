@@ -669,7 +669,7 @@ fn benchmarks(criterion: &mut Criterion) {
 
     sessions.bench_function("catalog_semantic_archive", |bencher| {
         bencher.iter(|| {
-            black_box(session::list(&fixture.config_path, &fixture.workspace).unwrap());
+            black_box(session::list(&fixture.config_path, &fixture.workspace, true).unwrap());
         });
     });
 

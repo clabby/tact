@@ -755,7 +755,10 @@ fn is_control_c(event: &Event) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{AppEffect, AppEvent, AppNode, RootEffect, RootEvent, RootNode, SPLIT_HINT};
+    use super::{
+        super::SessionListKind, AppEffect, AppEvent, AppNode, RootEffect, RootEvent, RootNode,
+        SPLIT_HINT,
+    };
     use crate::{
         app::config::{ReasoningEffort, ReasoningMode},
         core::extensions::memory::{MemoryKey, MemoryRecord},
@@ -871,7 +874,7 @@ mod tests {
             update.effects.as_slice(),
             [AppEffect::Pane {
                 pane: PaneId::Main,
-                effect: RootEffect::LoadSessions,
+                effect: RootEffect::LoadSessions(SessionListKind::Resume),
             }]
         ));
         assert_eq!(update.render, super::RenderRequest::Immediate);

@@ -8,7 +8,10 @@ use super::{
         AgentDirectoryEntry, AgentSummary, OutputContract, Registry, RootAgentGuard, forward_events,
     },
 };
-use crate::core::extensions::memory::{MemoryStore, MemoryTool};
+use crate::core::extensions::{
+    memory::{MemoryStore, MemoryTool},
+    sessions::SessionTool,
+};
 use nanocodex::{
     Tool, Tools,
     agent::AgentHandle,
@@ -20,6 +23,7 @@ use nanocodex::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
+    path::PathBuf,
     sync::{Arc, Weak},
     time::Duration,
 };
@@ -497,8 +501,11 @@ pub(crate) fn install_tools(
     registry: Arc<Registry>,
     memory: Option<MemoryStore>,
     subagents_enabled: bool,
+    session_config_path: PathBuf,
 ) -> Result<Tools, ToolsBuildError> {
-    let mut tools = tools.into_builder();
+    let mut tools = tools
+        .into_builder()
+        .tool(SessionTool::new(session_config_path));
     if subagents_enabled {
         tools = tools
             .tool(SpawnAgent {

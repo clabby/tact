@@ -75,6 +75,33 @@ pub(crate) struct StoredPrompt {
     pub(crate) workspace: PathBuf,
 }
 
+#[derive(Debug)]
+pub(crate) struct StoredRecord {
+    pub(crate) event_id: i64,
+    encoded: Vec<u8>,
+}
+
+#[derive(Debug)]
+pub(crate) struct DecodedStoredRecord {
+    pub(crate) event_id: i64,
+    pub(crate) record: TranscriptRecord,
+}
+
+impl StoredRecord {
+    pub(crate) fn decode(self) -> Result<DecodedStoredRecord, StorageError> {
+        Ok(DecodedStoredRecord {
+            event_id: self.event_id,
+            record: decode_record(&self.encoded)?,
+        })
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct StoredRecordPage {
+    pub(crate) records: Vec<StoredRecord>,
+    pub(crate) next_cursor: Option<i64>,
+}
+
 pub(crate) struct SessionStorage {
     path: PathBuf,
     connection: Connection,
@@ -138,7 +165,6 @@ impl SessionStorage {
             active_turns: HashMap::new(),
         }))
     }
-
     pub(crate) fn append_records(
         &mut self,
         session_id: &str,
@@ -230,6 +256,57 @@ impl SessionStorage {
         Ok(records)
     }
 
+    pub(crate) fn load_record_page(
+        &self,
+        session_id: &str,
+        after_event_id: Option<i64>,
+        limit: usize,
+    ) -> Result<Option<StoredRecordPage>, StorageError> {
+        let exists = self
+            .connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sessions WHERE session_id = ?1)",
+                [session_id],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(|source| query(&self.path, source))?;
+        if !exists {
+            return Ok(None);
+        }
+
+        let after_event_id = after_event_id.unwrap_or(0);
+        let row_limit = i64::try_from(limit.saturating_add(1)).unwrap_or(i64::MAX);
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT event_id, record_json FROM events\n\
+                 WHERE session_id = ?1 AND event_id > ?2\n\
+                 ORDER BY event_id LIMIT ?3",
+            )
+            .map_err(|source| query(&self.path, source))?;
+        let rows = statement
+            .query_map(params![session_id, after_event_id, row_limit], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
+            })
+            .map_err(|source| query(&self.path, source))?;
+        let mut encoded = rows
+            .map(|row| row.map_err(|source| query(&self.path, source)))
+            .collect::<Result<Vec<_>, StorageError>>()?;
+        let has_more = encoded.len() > limit;
+        encoded.truncate(limit);
+        let records = encoded
+            .into_iter()
+            .map(|(event_id, encoded)| StoredRecord { event_id, encoded })
+            .collect::<Vec<_>>();
+        let next_cursor = has_more
+            .then(|| records.last().map(|record| record.event_id))
+            .flatten();
+        Ok(Some(StoredRecordPage {
+            records,
+            next_cursor,
+        }))
+    }
+
     #[cfg(test)]
     pub(crate) fn save_resume_state(
         &mut self,
@@ -239,6 +316,21 @@ impl SessionStorage {
         let compressed =
             zstd::encode_all(encoded, STATE_COMPRESSION_LEVEL).map_err(StorageError::Compress)?;
         write_resume_state(&self.connection, &self.path, session_id, &compressed)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn append_raw_record(
+        &self,
+        session_id: &str,
+        encoded: &[u8],
+    ) -> Result<(), StorageError> {
+        self.connection
+            .execute(
+                "INSERT INTO events(session_id, record_json) VALUES (?1, ?2)",
+                params![session_id, encoded],
+            )
+            .map_err(|source| query(&self.path, source))?;
+        Ok(())
     }
 
     pub(crate) fn load_resume_state(
@@ -262,17 +354,25 @@ impl SessionStorage {
     pub(crate) fn list_sessions(
         &self,
         workspace: &Path,
+        resumable_only: bool,
     ) -> Result<Vec<StoredSession>, StorageError> {
         let workspace = workspace.to_string_lossy();
+        let statement_sql = if resumable_only {
+            "SELECT s.session_id, s.started_at_ms, s.model, s.effort, s.reasoning_mode,\n\
+                    s.workspace, s.preview\n\
+             FROM sessions s INNER JOIN resume_states r ON r.session_id = s.session_id\n\
+             WHERE s.workspace = ?1\n\
+             ORDER BY s.updated_at_ms DESC, s.session_id"
+        } else {
+            "SELECT s.session_id, s.started_at_ms, s.model, s.effort, s.reasoning_mode,\n\
+                    s.workspace, s.preview\n\
+             FROM sessions s\n\
+             WHERE s.workspace = ?1\n\
+             ORDER BY s.updated_at_ms DESC, s.session_id"
+        };
         let mut statement = self
             .connection
-            .prepare(
-                "SELECT s.session_id, s.started_at_ms, s.model, s.effort, s.reasoning_mode,\n\
-                        s.workspace, s.preview\n\
-                 FROM sessions s INNER JOIN resume_states r ON r.session_id = s.session_id\n\
-                 WHERE s.workspace = ?1\n\
-                 ORDER BY s.updated_at_ms DESC, s.session_id",
-            )
+            .prepare(statement_sql)
             .map_err(|source| query(&self.path, source))?;
         let rows = statement
             .query_map([workspace.as_ref()], decode_session)
@@ -650,7 +750,7 @@ mod tests {
         tui::transcript::{LocalEvent, SessionStarted, TranscriptRecord, TurnId},
     };
     use rusqlite::Connection;
-    use std::{fs, sync::Arc};
+    use std::{fs, path::Path, sync::Arc};
     use tempfile::tempdir;
 
     #[test]
@@ -697,6 +797,15 @@ mod tests {
     }
 
     #[test]
+    fn read_only_open_does_not_create_missing_v2_storage() {
+        let directory = tempdir().unwrap();
+        let config = directory.path().join("config.toml");
+
+        assert!(SessionStorage::open_read_only(&config).unwrap().is_none());
+        assert!(!database_path(&config).exists());
+    }
+
+    #[test]
     fn recent_prompts_use_occurrence_time_not_writer_commit_order() {
         let directory = tempdir().unwrap();
         let config = directory.path().join("config.toml");
@@ -707,6 +816,83 @@ mod tests {
         let prompts = storage.recent_prompts(10).unwrap();
         assert_eq!(prompts[0].text, "newer prompt");
         assert_eq!(prompts[1].text, "older prompt");
+    }
+
+    #[test]
+    fn transcript_pages_continue_by_event_id_without_loading_the_session() {
+        let directory = tempdir().unwrap();
+        let config = directory.path().join("config.toml");
+        let mut storage = SessionStorage::open(&config).unwrap();
+        append_prompt(&mut storage, "session", 100, "first prompt");
+        append_prompt_record(&mut storage, "session", 3, 200, "second prompt");
+
+        let first = storage
+            .load_record_page("session", None, 2)
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.records.len(), 2);
+        assert!(first.next_cursor.is_some());
+
+        let second = storage
+            .load_record_page("session", first.next_cursor, 2)
+            .unwrap()
+            .unwrap();
+        assert_eq!(second.records.len(), 1);
+        assert!(second.next_cursor.is_none());
+        assert!(second.records[0].event_id > first.records[1].event_id);
+    }
+
+    #[test]
+    fn transcript_page_does_not_decode_its_lookahead_record() {
+        let directory = tempdir().unwrap();
+        let config = directory.path().join("config.toml");
+        let mut storage = SessionStorage::open(&config).unwrap();
+        append_prompt(&mut storage, "session", 100, "prompt");
+        storage.append_raw_record("session", b"not-json").unwrap();
+
+        let page = storage
+            .load_record_page("session", None, 2)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(page.records.len(), 2);
+        assert!(page.next_cursor.is_some());
+    }
+
+    #[test]
+    fn transcript_page_distinguishes_a_missing_session_from_an_empty_page() {
+        let directory = tempdir().unwrap();
+        let config = directory.path().join("config.toml");
+        let storage = SessionStorage::open(&config).unwrap();
+
+        assert!(
+            storage
+                .load_record_page("missing", None, 10)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn mentionable_sessions_include_sessions_without_resume_state() {
+        let directory = tempdir().unwrap();
+        let config = directory.path().join("config.toml");
+        let mut storage = SessionStorage::open(&config).unwrap();
+        append_prompt(&mut storage, "resumable", 100, "resumable prompt");
+        append_prompt(&mut storage, "transcript-only", 200, "failed turn prompt");
+        storage.save_resume_state("resumable", b"state").unwrap();
+
+        let resumable = storage.list_sessions(Path::new("/work"), true).unwrap();
+        let mentionable = storage.list_sessions(Path::new("/work"), false).unwrap();
+
+        assert_eq!(
+            resumable
+                .iter()
+                .map(|session| session.session_id.as_str())
+                .collect::<Vec<_>>(),
+            ["resumable"]
+        );
+        assert_eq!(mentionable.len(), 2);
     }
 
     fn append_prompt(storage: &mut SessionStorage, session_id: &str, at: u64, text: &str) {
@@ -741,5 +927,26 @@ mod tests {
             ),
         ];
         storage.append_records(session_id, &records).unwrap();
+    }
+
+    fn append_prompt_record(
+        storage: &mut SessionStorage,
+        session_id: &str,
+        sequence: u64,
+        at: u64,
+        text: &str,
+    ) {
+        let record = Arc::new(
+            TranscriptRecord::from_local(
+                sequence,
+                at,
+                LocalEvent::UserSubmitted {
+                    id: TurnId::new(sequence),
+                    text: text.to_owned(),
+                },
+            )
+            .unwrap(),
+        );
+        storage.append_records(session_id, &[record]).unwrap();
     }
 }

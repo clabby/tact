@@ -62,6 +62,14 @@ const TACT_INSTRUCTIONS: &str = concat!(
     "file before reading or changing it."
 );
 
+const SESSION_REFERENCE_INSTRUCTIONS: &str = concat!(
+    "Session references use `@@<session-id>`. When the user references one, use `read_session` ",
+    "to inspect only the relevant bounded transcript pages. Prefer record-kind filters. For broad ",
+    "searches, use code mode to page with `next_cursor`, filter the results, and stop as soon as ",
+    "you have enough evidence. Do not treat the ID itself as session content or load additional ",
+    "pages unless they are needed."
+);
+
 const MEMORY_INSTRUCTIONS: &str = concat!(
     "Global memory is available through the explicit `memory` tool. At the beginning of every ",
     "substantial task, use code mode to scan memory before planning or delegating. Await the scan ",
@@ -181,6 +189,7 @@ impl ConfiguredAgent {
         let memory_enabled = config.memory().enabled();
         let subagents_enabled = config.subagents().enabled();
         let memory = memory_enabled.then(|| MemoryStore::new(config.memory_path()));
+        let session_config_path = config.path().to_path_buf();
         let (subagents, subagent_control, subagent_updates) =
             subagents::channel(agent_config.max_subagents());
         let mut builder = Nanocodex::builder(openai)
@@ -195,6 +204,7 @@ impl ConfiguredAgent {
                     Arc::clone(&subagents),
                     memory.clone(),
                     subagents_enabled,
+                    session_config_path.clone(),
                 )
             });
         if let Some(codex_home) = config.codex_home() {
@@ -387,6 +397,7 @@ fn session_instructions(
             let instructions = reconcile_memory_instructions(instructions, false);
             let instructions = reconcile_tact_instructions(instructions);
             let instructions = reconcile_tool_orchestration_instructions(instructions);
+            let instructions = reconcile_session_reference_instructions(instructions);
             let instructions = reconcile_subagent_instructions(instructions, subagents_enabled);
             let instructions = reconcile_memory_instructions(instructions, memory_enabled);
             let skills = if catalog_present.unwrap_or(true) {
@@ -444,6 +455,7 @@ fn fresh_instructions_with_catalog(
         .unwrap_or_else(|| ResponsesServiceConfig::default().system_prompt.to_string());
     instructions = reconcile_tact_instructions(instructions);
     instructions = reconcile_tool_orchestration_instructions(instructions);
+    instructions = reconcile_session_reference_instructions(instructions);
     if subagents_enabled {
         instructions.push_str("\n\n");
         instructions.push_str(SUBAGENT_INSTRUCTIONS);
@@ -491,6 +503,19 @@ fn reconcile_tool_orchestration_instructions(mut instructions: String) -> String
     instructions
 }
 
+fn reconcile_session_reference_instructions(mut instructions: String) -> String {
+    let separator_and_instructions = format!("\n\n{SESSION_REFERENCE_INSTRUCTIONS}");
+    let occurrences = instructions.matches(&separator_and_instructions).count();
+    if occurrences == 1 {
+        return instructions;
+    }
+    if occurrences > 1 {
+        instructions = instructions.replace(&separator_and_instructions, "");
+    }
+    instructions.push_str(&separator_and_instructions);
+    instructions
+}
+
 fn reconcile_subagent_instructions(mut instructions: String, enabled: bool) -> String {
     let separator_and_instructions = format!("\n\n{SUBAGENT_INSTRUCTIONS}");
     if enabled {
@@ -521,9 +546,10 @@ impl Cancellation {
 #[cfg(test)]
 mod tests {
     use super::{
-        ConfiguredAgent, MEMORY_INSTRUCTIONS, MEMORY_REVIEW_CHECKPOINT, SUBAGENT_INSTRUCTIONS,
-        TACT_INSTRUCTIONS, TOOL_ORCHESTRATION_INSTRUCTIONS, fresh_instructions,
-        reconcile_tact_instructions, session_instructions,
+        ConfiguredAgent, MEMORY_INSTRUCTIONS, MEMORY_REVIEW_CHECKPOINT,
+        SESSION_REFERENCE_INSTRUCTIONS, SUBAGENT_INSTRUCTIONS, TACT_INSTRUCTIONS,
+        TOOL_ORCHESTRATION_INSTRUCTIONS, fresh_instructions, reconcile_tact_instructions,
+        session_instructions,
     };
     use crate::{
         app::{
@@ -596,12 +622,14 @@ mod tests {
 
         assert_eq!(
             fresh_instructions(None, None, &disabled),
-            format!("{default}\n\n{TOOL_ORCHESTRATION_INSTRUCTIONS}\n\n{SUBAGENT_INSTRUCTIONS}")
+            format!(
+                "{default}\n\n{TOOL_ORCHESTRATION_INSTRUCTIONS}\n\n{SESSION_REFERENCE_INSTRUCTIONS}\n\n{SUBAGENT_INSTRUCTIONS}"
+            )
         );
         assert_eq!(
             fresh_instructions(Some("Custom instructions."), None, &disabled),
             format!(
-                "Custom instructions.\n\n{TACT_INSTRUCTIONS}\n\n{TOOL_ORCHESTRATION_INSTRUCTIONS}\n\n{SUBAGENT_INSTRUCTIONS}"
+                "Custom instructions.\n\n{TACT_INSTRUCTIONS}\n\n{TOOL_ORCHESTRATION_INSTRUCTIONS}\n\n{SESSION_REFERENCE_INSTRUCTIONS}\n\n{SUBAGENT_INSTRUCTIONS}"
             )
         );
     }
@@ -644,7 +672,7 @@ mod tests {
         assert_eq!(
             instructions,
             format!(
-                "{default}\n\n{TOOL_ORCHESTRATION_INSTRUCTIONS}\n\n{SUBAGENT_INSTRUCTIONS}\n\nProject instructions."
+                "{default}\n\n{TOOL_ORCHESTRATION_INSTRUCTIONS}\n\n{SESSION_REFERENCE_INSTRUCTIONS}\n\n{SUBAGENT_INSTRUCTIONS}\n\nProject instructions."
             )
         );
         assert_eq!(
@@ -654,7 +682,7 @@ mod tests {
                 &disabled
             ),
             format!(
-                "Replacement.\n\n{TACT_INSTRUCTIONS}\n\n{TOOL_ORCHESTRATION_INSTRUCTIONS}\n\n{SUBAGENT_INSTRUCTIONS}\n\nProject instructions."
+                "Replacement.\n\n{TACT_INSTRUCTIONS}\n\n{TOOL_ORCHESTRATION_INSTRUCTIONS}\n\n{SESSION_REFERENCE_INSTRUCTIONS}\n\n{SUBAGENT_INSTRUCTIONS}\n\nProject instructions."
             )
         );
     }
@@ -706,7 +734,7 @@ mod tests {
         let instructions = fresh_instructions(Some("Keep this first."), None, &enabled);
 
         assert!(instructions.starts_with(&format!(
-            "Keep this first.\n\n{TACT_INSTRUCTIONS}\n\n{TOOL_ORCHESTRATION_INSTRUCTIONS}\n\n{SUBAGENT_INSTRUCTIONS}\n\n## Available local skills"
+            "Keep this first.\n\n{TACT_INSTRUCTIONS}\n\n{TOOL_ORCHESTRATION_INSTRUCTIONS}\n\n{SESSION_REFERENCE_INSTRUCTIONS}\n\n{SUBAGENT_INSTRUCTIONS}\n\n## Available local skills"
         )));
         assert!(instructions.contains("Run focused tests."));
         assert!(!instructions.contains("SECRET-BODY"));
@@ -765,7 +793,9 @@ mod tests {
             )
             .text
             .as_ref(),
-            format!("{stored}\n\n{TACT_INSTRUCTIONS}\n\n{TOOL_ORCHESTRATION_INSTRUCTIONS}")
+            format!(
+                "{stored}\n\n{TACT_INSTRUCTIONS}\n\n{TOOL_ORCHESTRATION_INSTRUCTIONS}\n\n{SESSION_REFERENCE_INSTRUCTIONS}"
+            )
         );
         let restored = session_instructions(
             None,
@@ -777,7 +807,9 @@ mod tests {
         );
         assert_eq!(
             restored.text.as_ref(),
-            format!("{stored}\n\n{TACT_INSTRUCTIONS}\n\n{TOOL_ORCHESTRATION_INSTRUCTIONS}")
+            format!(
+                "{stored}\n\n{TACT_INSTRUCTIONS}\n\n{TOOL_ORCHESTRATION_INSTRUCTIONS}\n\n{SESSION_REFERENCE_INSTRUCTIONS}"
+            )
         );
         assert_eq!(
             restored.skills.as_ref(),
@@ -845,7 +877,9 @@ mod tests {
             )
             .text
             .as_ref(),
-            format!("Old default.\n\n{TACT_INSTRUCTIONS}\n\n{TOOL_ORCHESTRATION_INSTRUCTIONS}")
+            format!(
+                "Old default.\n\n{TACT_INSTRUCTIONS}\n\n{TOOL_ORCHESTRATION_INSTRUCTIONS}\n\n{SESSION_REFERENCE_INSTRUCTIONS}"
+            )
         );
         assert_eq!(
             session_instructions(
@@ -858,7 +892,9 @@ mod tests {
             )
             .text
             .as_ref(),
-            format!("Old custom.\n\n{TACT_INSTRUCTIONS}\n\n{TOOL_ORCHESTRATION_INSTRUCTIONS}")
+            format!(
+                "Old custom.\n\n{TACT_INSTRUCTIONS}\n\n{TOOL_ORCHESTRATION_INSTRUCTIONS}\n\n{SESSION_REFERENCE_INSTRUCTIONS}"
+            )
         );
     }
 
@@ -913,7 +949,9 @@ mod tests {
         );
         assert_eq!(
             restored_disabled.text.as_ref(),
-            format!("Stored.\n\n{TACT_INSTRUCTIONS}\n\n{TOOL_ORCHESTRATION_INSTRUCTIONS}")
+            format!(
+                "Stored.\n\n{TACT_INSTRUCTIONS}\n\n{TOOL_ORCHESTRATION_INSTRUCTIONS}\n\n{SESSION_REFERENCE_INSTRUCTIONS}"
+            )
         );
     }
 

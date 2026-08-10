@@ -145,12 +145,13 @@ pub(crate) fn load_checkpoint(
 pub(crate) fn list(
     config_path: &Path,
     workspace: &Path,
+    resumable_only: bool,
 ) -> Result<Vec<SessionSummary>, SessionError> {
     let Some(storage) = SessionStorage::open_read_only(config_path)? else {
         return Ok(Vec::new());
     };
     storage
-        .list_sessions(workspace)?
+        .list_sessions(workspace, resumable_only)?
         .into_iter()
         .map(|session| {
             Ok(SessionSummary {
@@ -169,8 +170,9 @@ pub(crate) fn list(
 pub(crate) async fn list_async(
     config_path: PathBuf,
     workspace: PathBuf,
+    resumable_only: bool,
 ) -> Result<Vec<SessionSummary>, SessionError> {
-    tokio::task::spawn_blocking(move || list(&config_path, &workspace))
+    tokio::task::spawn_blocking(move || list(&config_path, &workspace, resumable_only))
         .await
         .map_err(SessionError::StorageTask)?
 }

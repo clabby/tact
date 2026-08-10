@@ -243,10 +243,6 @@ impl TranscriptRecord {
         self.schema_version
     }
 
-    #[allow(
-        dead_code,
-        reason = "used when the planned session picker loads transcripts"
-    )]
     pub(crate) const fn sequence(&self) -> u64 {
         self.sequence
     }
@@ -261,6 +257,10 @@ impl TranscriptRecord {
 
     pub(crate) fn source(&self) -> &str {
         &self.source
+    }
+
+    pub(crate) fn payload_json(&self) -> &str {
+        self.payload.get()
     }
 
     pub(crate) fn decode_payload<'a, T>(&'a self) -> Result<T, serde_json::Error>

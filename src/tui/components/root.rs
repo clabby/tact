@@ -18,7 +18,7 @@ use super::{
         ReviewConfirmationEffect, ReviewConfirmationEvent, ReviewDownloadConfirmation,
     },
     selection::{Selection, Surface, TextSpan},
-    session_picker::{SessionPicker, SessionPickerEffect, SessionPickerEvent},
+    session_picker::{SessionPicker, SessionPickerEffect, SessionPickerEvent, SessionPickerMode},
     skill_picker::{SkillPicker, SkillPickerEffect, SkillPickerEvent},
     subagents::{SubagentEffect, SubagentOverlay, SubagentTree},
     theme_selector::{ThemeSelector, ThemeSelectorEffect, ThemeSelectorEvent},
@@ -211,6 +211,12 @@ pub(crate) struct RecentPromptDraft {
 }
 
 #[derive(Debug, Eq, PartialEq)]
+pub(crate) enum SessionListKind {
+    Resume,
+    Mention,
+}
+
+#[derive(Debug, Eq, PartialEq)]
 pub(crate) enum RootEffect {
     Submit(Submission),
     RunShell(String),
@@ -223,7 +229,7 @@ pub(crate) enum RootEffect {
     OpenLink(String),
     ReloadConfig,
     NewSession,
-    LoadSessions,
+    LoadSessions(SessionListKind),
     LoadRecentPrompts(Vec<RecentPromptDraft>),
     LoadMemories,
     DeleteMemory(MemoryKey),
@@ -319,6 +325,7 @@ pub(crate) struct RootNode {
     subagents: SubagentTree,
     context_diagnostics: ContextDiagnostics,
     recent_prompts: Vec<RecentPromptDraft>,
+    pending_session_mention: Option<usize>,
 }
 
 impl RootNode {
@@ -352,6 +359,7 @@ impl RootNode {
             subagents: SubagentTree::new(thinking),
             context_diagnostics: ContextDiagnostics::default(),
             recent_prompts: Vec::new(),
+            pending_session_mention: None,
         }
     }
 
@@ -1195,6 +1203,18 @@ impl RootNode {
             return ComponentUpdate::none();
         }
 
+        let starts_session_mention = is_file_finder_trigger(&event)
+            && self
+                .mention_query(start, '@')
+                .is_some_and(|query| query.is_empty());
+        if starts_session_mention {
+            let composer =
+                self.update_composer(ComposerEvent::Terminal(event), RenderRequest::Immediate);
+            let mut sessions = self.load_session_mentions(start);
+            sessions.render = sessions.render.max(composer.render);
+            return sessions;
+        }
+
         if is_mention_edit(&event) {
             let keep_open = mention_edit_continues_query(&event, is_file_query_character);
             let update =
@@ -1562,6 +1582,7 @@ impl RootNode {
 
     pub(super) fn load_sessions(&mut self) -> ComponentUpdate<RootEffect> {
         self.overlay = None;
+        self.pending_session_mention = None;
         self.interactive = false;
         let _ = self
             .composer
@@ -1572,7 +1593,25 @@ impl RootNode {
                 now: Instant::now(),
             });
         ComponentUpdate {
-            effects: vec![RootEffect::LoadSessions],
+            effects: vec![RootEffect::LoadSessions(SessionListKind::Resume)],
+            render: RenderRequest::Immediate,
+        }
+    }
+
+    fn load_session_mentions(&mut self, start: usize) -> ComponentUpdate<RootEffect> {
+        self.overlay = None;
+        self.pending_session_mention = Some(start);
+        self.interactive = false;
+        let _ = self
+            .composer
+            .component_mut()
+            .update(ComposerEvent::Activity {
+                active: true,
+                status: Some("Loading sessions…".to_owned()),
+                now: Instant::now(),
+            });
+        ComponentUpdate {
+            effects: vec![RootEffect::LoadSessions(SessionListKind::Mention)],
             render: RenderRequest::Immediate,
         }
     }
@@ -1661,7 +1700,14 @@ impl RootNode {
                 status: None,
                 now: Instant::now(),
             });
-        self.overlay = Some(Overlay::Sessions(Node::new(SessionPicker::new(sessions))));
+        let mode = if self.pending_session_mention.is_some() {
+            SessionPickerMode::Mention
+        } else {
+            SessionPickerMode::Resume
+        };
+        self.overlay = Some(Overlay::Sessions(Node::new(SessionPicker::new(
+            sessions, mode,
+        ))));
         ComponentUpdate::render(RenderRequest::Immediate)
     }
 
@@ -1673,6 +1719,7 @@ impl RootNode {
         match update.effects.into_iter().next() {
             Some(SessionPickerEffect::Dismiss) => {
                 self.overlay = None;
+                self.pending_session_mention = None;
                 ComponentUpdate::render(RenderRequest::Immediate)
             }
             Some(SessionPickerEffect::Resume(session_id)) => {
@@ -1691,6 +1738,19 @@ impl RootNode {
                     render: RenderRequest::Immediate,
                 }
             }
+            Some(SessionPickerEffect::Mention(session_id)) => {
+                self.overlay = None;
+                let Some(start) = self.pending_session_mention.take() else {
+                    return ComponentUpdate::none();
+                };
+                self.update_composer(
+                    ComposerEvent::ReplaceRange {
+                        range: start..self.composer.component().cursor(),
+                        text: format!("@@{session_id} "),
+                    },
+                    RenderRequest::Immediate,
+                )
+            }
             None => ComponentUpdate {
                 effects: Vec::new(),
                 render: update.render,
@@ -1699,6 +1759,7 @@ impl RootNode {
     }
 
     fn session_load_failed(&mut self, message: String) -> ComponentUpdate<RootEffect> {
+        self.pending_session_mention = None;
         self.interactive = true;
         let _ = self
             .composer
@@ -2704,7 +2765,7 @@ fn is_plain_key(event: &Event, character: char) -> bool {
 mod tests {
     use super::{
         Component, ComposerChromeTarget, ConfirmationAction, Overlay, RenderRequest, RootEffect,
-        RootEvent, RootNode, SubagentOverlay, ThreadState, TranscriptEvent,
+        RootEvent, RootNode, SessionListKind, SubagentOverlay, ThreadState, TranscriptEvent,
     };
     use crate::{
         app::config::{ReasoningEffort, ReasoningMode},
@@ -2714,7 +2775,7 @@ mod tests {
             subagents::{AgentDescriptor, AgentId, AgentMessageUpdate, AgentStatus, AgentUpdate},
         },
         tui::{
-            session::RecentPrompt,
+            session::{RecentPrompt, SessionSummary},
             theme::{Theme, ThemeMode},
             transcript::{LocalEvent, TranscriptRecord, TurnId},
         },
@@ -3611,6 +3672,54 @@ mod tests {
         assert!(matches!(&root.overlay, Some(Overlay::FileFinder(_))));
         assert!(update.effects.is_empty());
         assert_eq!(update.render, super::RenderRequest::None);
+    }
+
+    #[test]
+    fn second_at_switches_from_files_to_session_mentions() {
+        let workspace = tempfile::tempdir().unwrap();
+        let mut root = RootNode::new(workspace.path(), ReasoningEffort::Medium);
+        for character in "compare ".chars() {
+            root.update(key(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+        root.update(key(KeyCode::Char('@'), KeyModifiers::NONE));
+
+        let loading = root.update(key(KeyCode::Char('@'), KeyModifiers::NONE));
+
+        assert_eq!(root.composer().draft(), "compare @@");
+        assert!(root.overlay.is_none());
+        assert_eq!(
+            loading.effects,
+            [RootEffect::LoadSessions(SessionListKind::Mention)]
+        );
+
+        root.update(RootEvent::SessionsLoaded(vec![SessionSummary {
+            session_id: "session-123".to_owned(),
+            started_at_unix_ms: 1,
+            model: "model".to_owned(),
+            effort: ReasoningEffort::Medium,
+            reasoning_mode: ReasoningMode::Standard,
+            workspace: workspace.path().to_path_buf(),
+            preview: "earlier investigation".to_owned(),
+        }]));
+        assert!(matches!(&root.overlay, Some(Overlay::Sessions(_))));
+
+        root.update(key(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(root.overlay.is_none());
+        assert_eq!(root.composer().draft(), "compare @@session-123 ");
+    }
+
+    #[test]
+    fn later_at_closes_file_suggestions_without_opening_sessions() {
+        let workspace = tempfile::tempdir().unwrap();
+        let mut root = RootNode::new(workspace.path(), ReasoningEffort::Medium);
+        for character in "@someone@".chars() {
+            let update = root.update(key(KeyCode::Char(character), KeyModifiers::NONE));
+            assert!(update.effects.is_empty());
+        }
+
+        assert!(root.overlay.is_none());
+        assert_eq!(root.composer().draft(), "@someone@");
     }
 
     #[test]
