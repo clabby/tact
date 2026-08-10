@@ -13,6 +13,7 @@ use super::{
     memory::{MemoryBrowser, MemoryBrowserEffect, MemoryBrowserEvent},
     node::{Component, ComponentUpdate, Node, RenderRequest},
     queue::{MessageQueue, QueueEffect, QueueEvent, QueueId},
+    recent_prompt_picker::{RecentPromptPicker, RecentPromptPickerEffect, RecentPromptPickerEvent},
     review_confirmation::{
         ReviewConfirmationEffect, ReviewConfirmationEvent, ReviewDownloadConfirmation,
     },
@@ -33,7 +34,7 @@ use crate::{
     tui::{
         context::ContextDiagnostics,
         prompt::Submission,
-        session::SessionSummary,
+        session::{RecentPrompt, SessionSummary},
         theme::{Theme, ThemeMode},
         transcript::TranscriptRecord,
     },
@@ -161,6 +162,11 @@ pub(crate) enum RootEvent {
     ForkReady,
     NewSessionFailed(String),
     SessionsLoaded(Vec<SessionSummary>),
+    RecentPromptsLoaded {
+        session_id: String,
+        prompts: Vec<RecentPrompt>,
+    },
+    RecentPromptLoadFailed(String),
     SessionLoadFailed(String),
     MemoriesLoaded(Vec<MemoryRecord>),
     MemoryLoadFailed(String),
@@ -195,6 +201,13 @@ pub(crate) struct RestoredSessionProjection {
     transcript: Transcript,
     context_diagnostics: ContextDiagnostics,
     context_tokens: Option<u64>,
+    recent_prompts: Vec<RecentPromptDraft>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RecentPromptDraft {
+    pub(crate) text: String,
+    pub(crate) recorded_at_unix_ms: u64,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -211,6 +224,7 @@ pub(crate) enum RootEffect {
     ReloadConfig,
     NewSession,
     LoadSessions,
+    LoadRecentPrompts(Vec<RecentPromptDraft>),
     LoadMemories,
     DeleteMemory(MemoryKey),
     ResumeSession(String),
@@ -247,6 +261,7 @@ enum Overlay {
     Skills(SkillMention),
     Keybindings(Node<KeybindingsHelp>),
     Memory(Node<MemoryBrowser>),
+    RecentPrompts(Node<RecentPromptPicker>),
     Sessions(Node<SessionPicker>),
     ReviewDownload(Node<ReviewDownloadConfirmation>),
     Subagents(SubagentOverlay),
@@ -303,6 +318,7 @@ pub(crate) struct RootNode {
     preferred_reasoning_mode: ReasoningMode,
     subagents: SubagentTree,
     context_diagnostics: ContextDiagnostics,
+    recent_prompts: Vec<RecentPromptDraft>,
 }
 
 impl RootNode {
@@ -335,6 +351,7 @@ impl RootNode {
             preferred_reasoning_mode: ReasoningMode::Standard,
             subagents: SubagentTree::new(thinking),
             context_diagnostics: ContextDiagnostics::default(),
+            recent_prompts: Vec::new(),
         }
     }
 
@@ -473,7 +490,11 @@ impl RootNode {
         let mut transcript = Transcript::with_effort(thinking);
         let mut context_diagnostics = ContextDiagnostics::default();
         let mut context_tokens = None;
+        let mut recent_prompts = Vec::new();
         for record in records {
+            if let Some(prompt) = recent_prompt(&record) {
+                recent_prompts.push(prompt);
+            }
             let observation = context_diagnostics.observe(&record);
             if observation.completed_tokens.is_some() {
                 context_tokens = observation.completed_tokens;
@@ -485,6 +506,7 @@ impl RootNode {
             transcript,
             context_diagnostics,
             context_tokens,
+            recent_prompts,
         }
     }
 
@@ -506,6 +528,7 @@ impl RootNode {
         self.set_fast_mode(fast_mode);
         self.transcript = Node::new(projection.transcript);
         self.context_diagnostics = projection.context_diagnostics;
+        self.recent_prompts = projection.recent_prompts;
         if let Some(tokens) = projection.context_tokens {
             let _ = self
                 .composer
@@ -634,6 +657,7 @@ impl RootNode {
                 Overlay::Skills(mention) => mention.picker.render(frame, area, theme),
                 Overlay::Keybindings(help) => help.render(frame, area, theme),
                 Overlay::Memory(browser) => browser.render(frame, area, theme),
+                Overlay::RecentPrompts(picker) => picker.render(frame, area, theme),
                 Overlay::Sessions(picker) => picker.render(frame, area, theme),
                 Overlay::ReviewDownload(confirmation) => {
                     confirmation.render(frame, area, theme);
@@ -737,6 +761,9 @@ impl RootNode {
         }
         if is_control_key(&event, 's') {
             return self.open_effort();
+        }
+        if is_control_key(&event, 'r') {
+            return self.load_recent_prompts();
         }
         if is_control_key(&event, 'f') {
             return self.open_fork();
@@ -1110,6 +1137,7 @@ impl RootNode {
             Some(Overlay::Skills(_)) => self.update_skill_picker(event),
             Some(Overlay::Keybindings(_)) => self.update_keybindings(event),
             Some(Overlay::Memory(_)) => self.update_memory(MemoryBrowserEvent::Terminal(event)),
+            Some(Overlay::RecentPrompts(_)) => self.update_recent_prompt_picker(event),
             Some(Overlay::Sessions(_)) => self.update_session_picker(event),
             Some(Overlay::ReviewDownload(_)) => self.update_review_confirmation(event),
             Some(Overlay::Subagents(SubagentOverlay::Tree)) => {
@@ -1547,6 +1575,80 @@ impl RootNode {
             effects: vec![RootEffect::LoadSessions],
             render: RenderRequest::Immediate,
         }
+    }
+
+    fn load_recent_prompts(&mut self) -> ComponentUpdate<RootEffect> {
+        self.overlay = None;
+        self.interactive = false;
+        let _ = self
+            .composer
+            .component_mut()
+            .update(ComposerEvent::Activity {
+                active: true,
+                status: Some("Loading recent prompts…".to_owned()),
+                now: Instant::now(),
+            });
+        ComponentUpdate {
+            effects: vec![RootEffect::LoadRecentPrompts(self.recent_prompts.clone())],
+            render: RenderRequest::Immediate,
+        }
+    }
+
+    fn recent_prompts_loaded(
+        &mut self,
+        session_id: String,
+        prompts: Vec<RecentPrompt>,
+    ) -> ComponentUpdate<RootEffect> {
+        self.interactive = true;
+        let _ = self
+            .composer
+            .component_mut()
+            .update(ComposerEvent::Activity {
+                active: false,
+                status: None,
+                now: Instant::now(),
+            });
+        self.overlay = Some(Overlay::RecentPrompts(Node::new(RecentPromptPicker::new(
+            prompts, session_id,
+        ))));
+        ComponentUpdate::render(RenderRequest::Immediate)
+    }
+
+    fn update_recent_prompt_picker(&mut self, event: Event) -> ComponentUpdate<RootEffect> {
+        let Some(Overlay::RecentPrompts(picker)) = &mut self.overlay else {
+            return ComponentUpdate::none();
+        };
+        let update = picker.update(RecentPromptPickerEvent::Terminal(event));
+        match update.effects.into_iter().next() {
+            Some(RecentPromptPickerEffect::Dismiss) => {
+                self.overlay = None;
+                ComponentUpdate::render(RenderRequest::Immediate)
+            }
+            Some(RecentPromptPickerEffect::Insert(prompt)) => {
+                self.overlay = None;
+                self.update_composer(
+                    ComposerEvent::ReplaceDraft(prompt),
+                    RenderRequest::Immediate,
+                )
+            }
+            None => ComponentUpdate {
+                effects: Vec::new(),
+                render: update.render,
+            },
+        }
+    }
+
+    fn recent_prompt_load_failed(&mut self, message: String) -> ComponentUpdate<RootEffect> {
+        self.interactive = true;
+        self.notification = Some(Notification::plain(message, Color::Red));
+        self.update_composer(
+            ComposerEvent::Activity {
+                active: false,
+                status: None,
+                now: Instant::now(),
+            },
+            RenderRequest::Immediate,
+        )
     }
 
     fn sessions_loaded(&mut self, sessions: Vec<SessionSummary>) -> ComponentUpdate<RootEffect> {
@@ -2047,6 +2149,9 @@ impl Component for RootNode {
                 RenderRequest::Streaming,
             ),
             RootEvent::Transcript(record) => {
+                if let Some(prompt) = recent_prompt(&record) {
+                    self.recent_prompts.push(prompt);
+                }
                 let steer_applied = record.kind() == "run.steered";
                 let turn_timer = turn_timer_event(&record);
                 let observation = self.context_diagnostics.observe(&record);
@@ -2229,6 +2334,11 @@ impl Component for RootNode {
             RootEvent::ForkReady => self.fork_ready(),
             RootEvent::NewSessionFailed(message) => self.new_session_failed(message),
             RootEvent::SessionsLoaded(sessions) => self.sessions_loaded(sessions),
+            RootEvent::RecentPromptsLoaded {
+                session_id,
+                prompts,
+            } => self.recent_prompts_loaded(session_id, prompts),
+            RootEvent::RecentPromptLoadFailed(message) => self.recent_prompt_load_failed(message),
             RootEvent::SessionLoadFailed(message) => self.session_load_failed(message),
             RootEvent::MemoriesLoaded(records) => {
                 self.update_memory(MemoryBrowserEvent::Loaded(records))
@@ -2311,6 +2421,22 @@ fn turn_timer_event(record: &TranscriptRecord) -> Option<ComposerEvent> {
         });
     }
     matches!(record.kind(), "run.completed" | "run.failed").then_some(ComposerEvent::TurnFinished)
+}
+
+fn recent_prompt(record: &TranscriptRecord) -> Option<RecentPromptDraft> {
+    #[derive(serde::Deserialize)]
+    struct UserPrompt {
+        text: String,
+    }
+
+    if record.source() != "tact" || !matches!(record.kind(), "user.submitted" | "user.steered") {
+        return None;
+    }
+    let prompt = record.decode_payload::<UserPrompt>().ok()?;
+    Some(RecentPromptDraft {
+        text: prompt.text,
+        recorded_at_unix_ms: record.recorded_at_unix_ms(),
+    })
 }
 
 fn render_notification(
@@ -2588,6 +2714,7 @@ mod tests {
             subagents::{AgentDescriptor, AgentId, AgentMessageUpdate, AgentStatus, AgentUpdate},
         },
         tui::{
+            session::RecentPrompt,
             theme::{Theme, ThemeMode},
             transcript::{LocalEvent, TranscriptRecord, TurnId},
         },
@@ -4805,6 +4932,83 @@ mod tests {
         let reopened = root.update(key(KeyCode::Char('s'), KeyModifiers::CONTROL));
         assert!(matches!(&root.overlay, Some(Overlay::Effort(_))));
         assert_eq!(reopened.render, super::RenderRequest::Immediate);
+    }
+
+    #[test]
+    fn control_r_loads_recent_prompts_and_inserts_from_the_current_session() {
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        root.update(RootEvent::ReplaceDraft("keep while loading".to_owned()));
+
+        let loading = root.update(key(KeyCode::Char('r'), KeyModifiers::CONTROL));
+
+        assert_eq!(loading.effects, [RootEffect::LoadRecentPrompts(Vec::new())]);
+        assert_eq!(root.composer().draft(), "keep while loading");
+        assert!(!root.interactive);
+
+        root.update(RootEvent::RecentPromptsLoaded {
+            session_id: "current".to_owned(),
+            prompts: vec![
+                RecentPrompt {
+                    text: "other prompt".to_owned(),
+                    recorded_at_unix_ms: 2,
+                    session_id: "other".to_owned(),
+                    workspace: "/other".into(),
+                },
+                RecentPrompt {
+                    text: "  current\n\n    prompt  ".to_owned(),
+                    recorded_at_unix_ms: 1,
+                    session_id: "current".to_owned(),
+                    workspace: "/work".into(),
+                },
+            ],
+        });
+        assert!(matches!(&root.overlay, Some(Overlay::RecentPrompts(_))));
+
+        root.update(key(KeyCode::Char('f'), KeyModifiers::NONE));
+        root.update(key(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(root.overlay.is_none());
+        assert_eq!(root.composer().draft(), "  current\n\n    prompt  ");
+    }
+
+    #[test]
+    fn recent_prompt_load_failure_preserves_the_draft() {
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        root.update(RootEvent::ReplaceDraft("keep me".to_owned()));
+        root.update(key(KeyCode::Char('r'), KeyModifiers::CONTROL));
+
+        root.update(RootEvent::RecentPromptLoadFailed("load failed".to_owned()));
+
+        assert!(root.interactive);
+        assert_eq!(root.composer().draft(), "keep me");
+        assert!(root.notification.is_some());
+    }
+
+    #[test]
+    fn control_r_includes_the_in_memory_prompt_before_loading_disk_history() {
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        let prompt = TranscriptRecord::from_local(
+            1,
+            42,
+            LocalEvent::UserSubmitted {
+                id: TurnId::new(1),
+                text: "just submitted".to_owned(),
+            },
+        )
+        .unwrap();
+        root.update(RootEvent::Transcript(Arc::new(prompt)));
+
+        let loading = root.update(key(KeyCode::Char('r'), KeyModifiers::CONTROL));
+
+        assert_eq!(
+            loading.effects,
+            [RootEffect::LoadRecentPrompts(vec![
+                super::RecentPromptDraft {
+                    text: "just submitted".to_owned(),
+                    recorded_at_unix_ms: 42,
+                },
+            ])]
+        );
     }
 
     #[test]

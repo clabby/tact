@@ -13,9 +13,10 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
     fs::{self, File},
+    hash::{Hash, Hasher},
     io::{self, BufReader, BufWriter, Write},
     path::{Path, PathBuf},
-    sync::{Arc, OnceLock},
+    sync::{Arc, Mutex, MutexGuard, OnceLock},
     time::{SystemTime, UNIX_EPOCH},
 };
 use tempfile::NamedTempFile;
@@ -25,8 +26,10 @@ use zstd::stream::{read::Decoder, write::Encoder};
 
 const COMPRESSION_LEVEL: i32 = 3;
 const CHECKPOINT_FORMAT_VERSION: u32 = 1;
-const SEGMENT_SUMMARY_FORMAT_VERSION: u32 = 1;
+const SEGMENT_SUMMARY_FORMAT_VERSION: u32 = 2;
 const PROJECTION_FORMAT_VERSION: u32 = 1;
+pub(crate) const MAX_RECENT_PROMPTS: usize = 100;
+const MAX_TRANSCRIPT_LOADER_THREADS: usize = 16;
 
 #[cfg(unix)]
 use std::os::unix::fs::DirBuilderExt;
@@ -42,6 +45,20 @@ pub(crate) struct SessionSummary {
     pub(crate) preview: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub(crate) struct RecentPrompt {
+    pub(crate) text: String,
+    pub(crate) recorded_at_unix_ms: u64,
+    pub(crate) session_id: String,
+    pub(crate) workspace: PathBuf,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+struct StoredRecentPrompt {
+    prompt: RecentPrompt,
+    sequence: u64,
+}
+
 #[derive(Deserialize, Serialize)]
 struct StoredSegmentSummary {
     format_version: u32,
@@ -49,6 +66,18 @@ struct StoredSegmentSummary {
     transcript_bytes: u64,
     transcript_modified_unix_ns: u128,
     summary: SessionSummary,
+    prompts: Vec<StoredRecentPrompt>,
+}
+
+struct SegmentIndex {
+    summary: SessionSummary,
+    prompts: Vec<StoredRecentPrompt>,
+}
+
+struct LoadedRecentPrompt {
+    prompt: RecentPrompt,
+    transcript_filename: String,
+    sequence: u64,
 }
 
 #[derive(Deserialize, Eq, PartialEq, Serialize)]
@@ -341,6 +370,98 @@ pub(crate) async fn list_async(
         .map_err(|_| SessionError::TranscriptLoaderStopped)?
 }
 
+pub(crate) async fn load_recent_prompts_async(
+    config_path: PathBuf,
+    excluded_session_id: Option<String>,
+) -> Result<Vec<RecentPrompt>, SessionError> {
+    let (sender, receiver) = oneshot::channel();
+    transcript_loader().spawn(move || {
+        drop(sender.send(load_recent_prompts_parallel_inner(
+            &config_path,
+            excluded_session_id.as_deref(),
+        )));
+    });
+    receiver
+        .await
+        .map_err(|_| SessionError::TranscriptLoaderStopped)?
+}
+
+fn load_recent_prompts_parallel_inner(
+    config_path: &Path,
+    excluded_session_id: Option<&str>,
+) -> Result<Vec<RecentPrompt>, SessionError> {
+    let segments = transcript_paths(config_path)?
+        .into_par_iter()
+        .map(|path| load_recent_prompts_from_segment(&path, excluded_session_id))
+        .collect::<Vec<_>>()
+        .into_iter()
+        .collect::<Result<Vec<_>, SessionError>>()?;
+    let mut prompts = segments.into_iter().flatten().collect::<Vec<_>>();
+    prompts.sort_unstable_by(|left, right| {
+        right
+            .prompt
+            .recorded_at_unix_ms
+            .cmp(&left.prompt.recorded_at_unix_ms)
+            .then_with(|| right.transcript_filename.cmp(&left.transcript_filename))
+            .then_with(|| right.sequence.cmp(&left.sequence))
+    });
+    prompts.truncate(MAX_RECENT_PROMPTS);
+    Ok(prompts.into_iter().map(|loaded| loaded.prompt).collect())
+}
+
+fn load_recent_prompts_from_segment(
+    path: &Path,
+    excluded_session_id: Option<&str>,
+) -> Result<Vec<LoadedRecentPrompt>, SessionError> {
+    let _index_guard = lock_segment_index(path);
+    if let Some(index) = read_segment_index(path) {
+        if excluded_session_id == Some(index.summary.session_id.as_str()) {
+            return Ok(Vec::new());
+        }
+        return Ok(loaded_recent_prompts(path, index.prompts));
+    }
+    let source_fingerprint = transcript_fingerprint_entry(path)?;
+    let segment = transcript::load_matching_segment_filtered(
+        path,
+        |first| {
+            session_started_record(first)
+                .is_none_or(|started| excluded_session_id != Some(started.session_id.as_str()))
+        },
+        |record| {
+            record.source() == "tact"
+                && matches!(
+                    record.kind(),
+                    "session.started" | "user.submitted" | "user.steered" | "effort.changed"
+                )
+        },
+    )?;
+    let Some(segment) = segment else {
+        return Ok(Vec::new());
+    };
+    let Some(summary) = summarize_segment(&segment.records) else {
+        return Ok(Vec::new());
+    };
+    let prompts = recent_prompts(&segment.records, &summary);
+    write_segment_index_if_unchanged(path, &summary, &prompts, &source_fingerprint);
+    Ok(loaded_recent_prompts(path, prompts))
+}
+
+fn loaded_recent_prompts(path: &Path, prompts: Vec<StoredRecentPrompt>) -> Vec<LoadedRecentPrompt> {
+    let transcript_filename = path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    prompts
+        .into_iter()
+        .map(|stored| LoadedRecentPrompt {
+            prompt: stored.prompt,
+            transcript_filename: transcript_filename.clone(),
+            sequence: stored.sequence,
+        })
+        .collect()
+}
+
 #[allow(dead_code, reason = "used by session catalog benchmarks")]
 pub(crate) fn list_parallel(
     config_path: &Path,
@@ -365,8 +486,9 @@ fn load_catalog_segment(
     path: &Path,
     workspace: &Path,
 ) -> Result<Option<SessionSummary>, SessionError> {
-    if let Some(summary) = read_segment_summary(path) {
-        return Ok((summary.workspace == workspace).then_some(summary));
+    let _index_guard = lock_segment_index(path);
+    if let Some(index) = read_segment_index(path) {
+        return Ok((index.summary.workspace == workspace).then_some(index.summary));
     }
     let segment = transcript::load_matching_segment_filtered(
         path,
@@ -375,7 +497,7 @@ fn load_catalog_segment(
             record.source() == "tact"
                 && matches!(
                     record.kind(),
-                    "session.started" | "user.submitted" | "effort.changed"
+                    "session.started" | "user.submitted" | "user.steered" | "effort.changed"
                 )
         },
     )?;
@@ -386,7 +508,8 @@ fn load_catalog_segment(
     if segment.complete
         && let Some(summary) = &summary
     {
-        write_segment_summary(path, summary);
+        let prompts = recent_prompts(&segment.records, summary);
+        write_segment_index(path, summary, &prompts);
     }
     Ok(summary.filter(|summary| summary.workspace == workspace))
 }
@@ -514,8 +637,9 @@ fn load_session_segment(
     path: &Path,
     session_id: &str,
 ) -> Result<Option<LoadedSessionSegment>, SessionError> {
-    if let Some(summary) = read_segment_summary(path)
-        && summary.session_id != session_id
+    let _index_guard = lock_segment_index(path);
+    if let Some(index) = read_segment_index(path)
+        && index.summary.session_id != session_id
     {
         return Ok(None);
     }
@@ -534,7 +658,8 @@ fn load_session_segment(
     if segment.complete
         && let Some(summary) = summarize_segment(&segment.records)
     {
-        write_segment_summary(path, &summary);
+        let prompts = recent_prompts(&segment.records, &summary);
+        write_segment_index(path, &summary, &prompts);
     }
     Ok(matches.then_some(LoadedSessionSegment {
         records: segment.records,
@@ -548,7 +673,7 @@ fn transcript_loader() -> &'static rayon::ThreadPool {
     POOL.get_or_init(|| {
         let available = std::thread::available_parallelism().map_or(1, usize::from);
         rayon::ThreadPoolBuilder::new()
-            .num_threads(available.min(4))
+            .num_threads(available.min(MAX_TRANSCRIPT_LOADER_THREADS))
             .thread_name(|index| format!("tact-transcript-loader-{index}"))
             .build()
             .expect("the transcript loading thread pool should initialize")
@@ -660,7 +785,39 @@ fn summarize_segment(records: &[Arc<TranscriptRecord>]) -> Option<SessionSummary
     })
 }
 
-fn read_segment_summary(transcript_path: &Path) -> Option<SessionSummary> {
+fn recent_prompts(
+    records: &[Arc<TranscriptRecord>],
+    summary: &SessionSummary,
+) -> Vec<StoredRecentPrompt> {
+    #[derive(Deserialize)]
+    struct UserPrompt {
+        text: String,
+    }
+
+    let mut prompts = records
+        .iter()
+        .filter(|record| {
+            record.source() == "tact" && matches!(record.kind(), "user.submitted" | "user.steered")
+        })
+        .filter_map(|record| {
+            let payload = record.decode_payload::<UserPrompt>().ok()?;
+            Some(StoredRecentPrompt {
+                prompt: RecentPrompt {
+                    text: payload.text,
+                    recorded_at_unix_ms: record.recorded_at_unix_ms(),
+                    session_id: summary.session_id.clone(),
+                    workspace: summary.workspace.clone(),
+                },
+                sequence: record.sequence(),
+            })
+        })
+        .collect::<Vec<_>>();
+    let obsolete = prompts.len().saturating_sub(MAX_RECENT_PROMPTS);
+    prompts.drain(..obsolete);
+    prompts
+}
+
+fn read_segment_index(transcript_path: &Path) -> Option<SegmentIndex> {
     let metadata = fs::metadata(transcript_path).ok()?;
     let stored = serde_json::from_slice::<StoredSegmentSummary>(
         &fs::read(segment_summary_path(transcript_path)).ok()?,
@@ -670,26 +827,56 @@ fn read_segment_summary(transcript_path: &Path) -> Option<SessionSummary> {
         && stored.transcript_filename == transcript_path.file_name()?.to_string_lossy().as_ref()
         && stored.transcript_bytes == metadata.len()
         && stored.transcript_modified_unix_ns == modified_unix_ns(&metadata))
-    .then_some(stored.summary)
+    .then_some(SegmentIndex {
+        summary: stored.summary,
+        prompts: stored.prompts,
+    })
 }
 
-fn write_segment_summary(transcript_path: &Path, summary: &SessionSummary) {
-    let Some(directory) = transcript_path.parent() else {
+fn lock_segment_index(path: &Path) -> MutexGuard<'static, ()> {
+    const LOCK_COUNT: usize = 64;
+    static LOCKS: OnceLock<Box<[Mutex<()>]>> = OnceLock::new();
+    let locks = LOCKS.get_or_init(|| {
+        (0..LOCK_COUNT)
+            .map(|_| Mutex::new(()))
+            .collect::<Vec<_>>()
+            .into_boxed_slice()
+    });
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    path.hash(&mut hasher);
+    let index = usize::try_from(hasher.finish()).unwrap_or(0) % locks.len();
+    locks[index]
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn write_segment_index(
+    transcript_path: &Path,
+    summary: &SessionSummary,
+    prompts: &[StoredRecentPrompt],
+) {
+    let Ok(source_fingerprint) = transcript_fingerprint_entry(transcript_path) else {
         return;
     };
-    let Ok(metadata) = fs::metadata(transcript_path) else {
+    write_segment_index_if_unchanged(transcript_path, summary, prompts, &source_fingerprint);
+}
+
+fn write_segment_index_if_unchanged(
+    transcript_path: &Path,
+    summary: &SessionSummary,
+    prompts: &[StoredRecentPrompt],
+    source_fingerprint: &TranscriptFingerprint,
+) {
+    let Some(directory) = transcript_path.parent() else {
         return;
     };
     let stored = StoredSegmentSummary {
         format_version: SEGMENT_SUMMARY_FORMAT_VERSION,
-        transcript_filename: transcript_path
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .into_owned(),
-        transcript_bytes: metadata.len(),
-        transcript_modified_unix_ns: modified_unix_ns(&metadata),
+        transcript_filename: source_fingerprint.filename.clone(),
+        transcript_bytes: source_fingerprint.bytes,
+        transcript_modified_unix_ns: source_fingerprint.modified_unix_ns,
         summary: summary.clone(),
+        prompts: prompts.to_vec(),
     };
     let Ok(encoded) = serde_json::to_vec(&stored) else {
         return;
@@ -700,7 +887,16 @@ fn write_segment_summary(transcript_path: &Path, summary: &SessionSummary) {
     if temporary.write_all(&encoded).is_err() {
         return;
     }
-    drop(temporary.persist(segment_summary_path(transcript_path)));
+    if transcript_fingerprint_entry(transcript_path).ok().as_ref() != Some(source_fingerprint) {
+        return;
+    }
+    let cache_path = segment_summary_path(transcript_path);
+    if temporary.persist(&cache_path).is_err() {
+        return;
+    }
+    if transcript_fingerprint_entry(transcript_path).ok().as_ref() != Some(source_fingerprint) {
+        drop(fs::remove_file(cache_path));
+    }
 }
 
 fn segment_summary_path(transcript_path: &Path) -> PathBuf {
@@ -852,22 +1048,24 @@ fn try_write_transcript_projection(
 fn transcript_fingerprint(config_path: &Path) -> Result<Vec<TranscriptFingerprint>, SessionError> {
     transcript_paths(config_path)?
         .into_iter()
-        .map(|path| {
-            let metadata = fs::metadata(&path).map_err(|source| SessionError::ReadDirectory {
-                path: path.clone(),
-                source,
-            })?;
-            Ok(TranscriptFingerprint {
-                filename: path
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .into_owned(),
-                bytes: metadata.len(),
-                modified_unix_ns: modified_unix_ns(&metadata),
-            })
-        })
+        .map(|path| transcript_fingerprint_entry(&path))
         .collect()
+}
+
+fn transcript_fingerprint_entry(path: &Path) -> Result<TranscriptFingerprint, SessionError> {
+    let metadata = fs::metadata(path).map_err(|source| SessionError::ReadDirectory {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    Ok(TranscriptFingerprint {
+        filename: path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned(),
+        bytes: metadata.len(),
+        modified_unix_ns: modified_unix_ns(&metadata),
+    })
 }
 
 fn modified_unix_ns(metadata: &fs::Metadata) -> u128 {
@@ -1005,9 +1203,10 @@ fn create_private_directory(path: &Path) -> Result<(), SessionError> {
 mod tests {
     use super::{
         encode_filename, format_age, initialize_transcript_loader, list, list_async,
-        load_checkpoint, load_transcript, load_transcript_async, obsolete_checkpoint_path,
-        save_checkpoint, transcript_fingerprint, transcript_loader, transcript_paths,
-        transcript_projection_path, write_transcript_projection,
+        load_checkpoint, load_recent_prompts_async, load_transcript, load_transcript_async,
+        obsolete_checkpoint_path, save_checkpoint, segment_summary_path, transcript_fingerprint,
+        transcript_loader, transcript_paths, transcript_projection_path,
+        write_transcript_projection,
     };
     use crate::{
         app::config::{ReasoningEffort, ReasoningMode},
@@ -1020,6 +1219,7 @@ mod tests {
     use serde_json::{Value, json, value::to_raw_value};
     use std::{fs, io::Write, path::Path, sync::Arc};
     use tempfile::tempdir;
+    use zstd::stream::write::Encoder;
 
     fn snapshot(lineage: &str) -> SessionSnapshot {
         serde_json::from_value(json!({
@@ -1069,6 +1269,43 @@ mod tests {
             .unwrap();
         drop(journal);
         writer.into_task().await.unwrap().unwrap();
+    }
+
+    fn started(session_id: &str, workspace: &str) -> LocalEvent {
+        LocalEvent::SessionStarted(SessionStarted {
+            session_id: session_id.to_owned(),
+            parent_session_id: None,
+            model: "model".to_owned(),
+            effort: ReasoningEffort::Medium,
+            reasoning_mode: ReasoningMode::Standard,
+            fast_mode: false,
+            workspace: workspace.into(),
+            application_version: "test".to_owned(),
+        })
+    }
+
+    fn write_segment(
+        config: &Path,
+        filename: &str,
+        events: impl IntoIterator<Item = (u64, LocalEvent)>,
+    ) -> std::path::PathBuf {
+        let directory = crate::tui::transcript::storage_directory(config);
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join(filename);
+        let file = fs::File::create(&path).unwrap();
+        let mut output = Encoder::new(file, 3).unwrap();
+        for (index, (recorded_at_unix_ms, event)) in events.into_iter().enumerate() {
+            let record = crate::tui::transcript::TranscriptRecord::from_local(
+                u64::try_from(index + 1).unwrap(),
+                recorded_at_unix_ms,
+                event,
+            )
+            .unwrap();
+            serde_json::to_writer(&mut output, &record).unwrap();
+            output.write_all(b"\n").unwrap();
+        }
+        output.finish().unwrap();
+        path
     }
 
     fn write_projection_cache(config: &Path, session_id: &str) {
@@ -1512,5 +1749,254 @@ mod tests {
         let started = super::session_started(&records).unwrap();
 
         assert_eq!(started.session_id, "session-one");
+    }
+
+    #[tokio::test]
+    async fn recent_prompts_are_global_exact_and_filterable_by_session() {
+        let directory = tempdir().unwrap();
+        let config = directory.path().join("config.toml");
+        write_segment(
+            &config,
+            "0001-first.jsonl.zst",
+            [
+                (1, started("current", "/work/one")),
+                (
+                    10,
+                    LocalEvent::UserSubmitted {
+                        id: TurnId::new(1),
+                        text: "  exact\n  indentation  ".to_owned(),
+                    },
+                ),
+                (
+                    20,
+                    LocalEvent::UserSteered {
+                        text: "duplicate".to_owned(),
+                    },
+                ),
+            ],
+        );
+        write_segment(
+            &config,
+            "0002-second.jsonl.zst",
+            [
+                (2, started("other", "/work/two")),
+                (
+                    30,
+                    LocalEvent::UserSubmitted {
+                        id: TurnId::new(2),
+                        text: "duplicate".to_owned(),
+                    },
+                ),
+            ],
+        );
+
+        let prompts = load_recent_prompts_async(config, None).await.unwrap();
+
+        assert_eq!(
+            prompts
+                .iter()
+                .map(|prompt| prompt.text.as_str())
+                .collect::<Vec<_>>(),
+            ["duplicate", "duplicate", "  exact\n  indentation  "]
+        );
+        assert_eq!(prompts[0].session_id, "other");
+        assert_eq!(prompts[0].workspace, Path::new("/work/two"));
+        let current = prompts
+            .iter()
+            .filter(|prompt| prompt.session_id == "current")
+            .collect::<Vec<_>>();
+        assert_eq!(current.len(), 2);
+        assert!(
+            current
+                .iter()
+                .all(|prompt| prompt.workspace == Path::new("/work/one"))
+        );
+
+        let without_current = load_recent_prompts_async(
+            directory.path().join("config.toml"),
+            Some("current".to_owned()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(without_current.len(), 1);
+        assert_eq!(without_current[0].session_id, "other");
+    }
+
+    #[tokio::test]
+    async fn recent_prompt_order_has_deterministic_tie_breakers() {
+        let directory = tempdir().unwrap();
+        let config = directory.path().join("config.toml");
+        write_segment(
+            &config,
+            "0001-a.jsonl.zst",
+            [
+                (1, started("a", "/a")),
+                (
+                    100,
+                    LocalEvent::UserSteered {
+                        text: "a-first".to_owned(),
+                    },
+                ),
+                (
+                    100,
+                    LocalEvent::UserSteered {
+                        text: "a-second".to_owned(),
+                    },
+                ),
+            ],
+        );
+        write_segment(
+            &config,
+            "0002-b.jsonl.zst",
+            [
+                (1, started("b", "/b")),
+                (
+                    100,
+                    LocalEvent::UserSteered {
+                        text: "b".to_owned(),
+                    },
+                ),
+            ],
+        );
+
+        let prompts = load_recent_prompts_async(config, None).await.unwrap();
+
+        assert_eq!(
+            prompts
+                .iter()
+                .map(|prompt| prompt.text.as_str())
+                .collect::<Vec<_>>(),
+            ["b", "a-second", "a-first"]
+        );
+    }
+
+    #[tokio::test]
+    async fn recent_prompt_loading_is_bounded_to_the_newest_entries() {
+        let directory = tempdir().unwrap();
+        let config = directory.path().join("config.toml");
+        let mut events = vec![(1, started("session", "/work"))];
+        events.extend((0..=super::MAX_RECENT_PROMPTS).map(|index| {
+            (
+                u64::try_from(index + 10).unwrap(),
+                LocalEvent::UserSteered {
+                    text: format!("prompt {index}"),
+                },
+            )
+        }));
+        write_segment(&config, "prompts.jsonl.zst", events);
+
+        let prompts = load_recent_prompts_async(config, None).await.unwrap();
+
+        assert_eq!(prompts.len(), super::MAX_RECENT_PROMPTS);
+        assert_eq!(prompts[0].text, "prompt 100");
+        assert_eq!(prompts.last().unwrap().text, "prompt 1");
+    }
+
+    #[tokio::test]
+    async fn recent_prompt_cache_is_reused_and_invalidated() {
+        let directory = tempdir().unwrap();
+        let config = directory.path().join("config.toml");
+        let transcript = write_segment(
+            &config,
+            "segment.jsonl.zst",
+            [
+                (1, started("session", "/work")),
+                (
+                    10,
+                    LocalEvent::UserSubmitted {
+                        id: TurnId::new(1),
+                        text: "first".to_owned(),
+                    },
+                ),
+            ],
+        );
+        let first = load_recent_prompts_async(config.clone(), None)
+            .await
+            .unwrap();
+        let cache = segment_summary_path(&transcript);
+        assert_eq!(first[0].text, "first");
+        assert!(cache.is_file());
+        let cached_bytes = fs::read(&cache).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mut permissions = fs::metadata(&transcript).unwrap().permissions();
+            permissions.set_mode(0o000);
+            fs::set_permissions(&transcript, permissions).unwrap();
+        }
+        let warm = load_recent_prompts_async(config.clone(), None)
+            .await
+            .unwrap();
+        assert_eq!(warm, first);
+        assert_eq!(fs::read(&cache).unwrap(), cached_bytes);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mut permissions = fs::metadata(&transcript).unwrap().permissions();
+            permissions.set_mode(0o600);
+            fs::set_permissions(&transcript, permissions).unwrap();
+        }
+
+        fs::write(&transcript, b"not a zstd transcript").unwrap();
+        let error = load_recent_prompts_async(config.clone(), None)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, super::SessionError::Transcript(_)));
+
+        write_segment(
+            &config,
+            "segment.jsonl.zst",
+            [
+                (1, started("session", "/work")),
+                (
+                    20,
+                    LocalEvent::UserSteered {
+                        text: "replacement".to_owned(),
+                    },
+                ),
+            ],
+        );
+        let replacement = load_recent_prompts_async(config, None).await.unwrap();
+        assert_eq!(replacement[0].text, "replacement");
+    }
+
+    #[tokio::test]
+    async fn stable_incomplete_segments_create_recent_prompt_caches() {
+        let directory = tempdir().unwrap();
+        let config = directory.path().join("config.toml");
+        let transcript_directory = crate::tui::transcript::storage_directory(&config);
+        fs::create_dir_all(&transcript_directory).unwrap();
+        let transcript = transcript_directory.join("active.jsonl.zst");
+        let mut output = Encoder::new(fs::File::create(&transcript).unwrap(), 3).unwrap();
+        for (index, (recorded_at_unix_ms, event)) in [
+            (1, started("session", "/work")),
+            (
+                10,
+                LocalEvent::UserSubmitted {
+                    id: TurnId::new(1),
+                    text: "durable line".to_owned(),
+                },
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let record = crate::tui::transcript::TranscriptRecord::from_local(
+                u64::try_from(index + 1).unwrap(),
+                recorded_at_unix_ms,
+                event,
+            )
+            .unwrap();
+            serde_json::to_writer(&mut output, &record).unwrap();
+            output.write_all(b"\n").unwrap();
+        }
+        output.flush().unwrap();
+
+        let prompts = load_recent_prompts_async(config, None).await.unwrap();
+
+        assert_eq!(prompts[0].text, "durable line");
+        assert!(segment_summary_path(&transcript).is_file());
     }
 }
