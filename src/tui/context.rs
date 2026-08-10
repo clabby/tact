@@ -60,13 +60,6 @@ pub(crate) struct ContextObservation {
     pub(crate) completed_tokens: Option<u64>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ApiEventProjection {
-    Discard,
-    Retain,
-    LatestOutbound,
-}
-
 impl Default for ContextDiagnostics {
     fn default() -> Self {
         Self {
@@ -96,10 +89,7 @@ impl ContextDiagnostics {
     pub(crate) fn observe(&mut self, record: &TranscriptRecord) -> ContextObservation {
         match (record.source(), record.kind()) {
             ("agent", "api.event") => self.observe_api_event(record),
-            ("agent", "model.call.completed") => {
-                self.observe_model_call_completed(record);
-                ContextObservation::default()
-            }
+            ("agent", "model.call.completed") => self.observe_model_call_completed(record),
             ("agent", "model.compaction.started") => {
                 self.observe_compaction_started(record);
                 ContextObservation::default()
@@ -166,11 +156,14 @@ impl ContextDiagnostics {
         ContextObservation { completed_tokens }
     }
 
-    fn observe_model_call_completed(&mut self, record: &TranscriptRecord) {
+    fn observe_model_call_completed(&mut self, record: &TranscriptRecord) -> ContextObservation {
         let Ok(payload) = record.decode_payload::<ModelCallCompleted>() else {
-            return;
+            return ContextObservation::default();
         };
-        self.set_usage(payload.usage.map(usage_into_tokens));
+        let usage = payload.usage.map(usage_into_tokens);
+        let completed_tokens = usage.map(|usage| usage.total);
+        self.set_usage(usage);
+        ContextObservation { completed_tokens }
     }
 
     fn observe_context_snapshot(&mut self, record: &TranscriptRecord) {
@@ -275,31 +268,6 @@ fn usage_into_tokens(usage: Usage) -> TokenUsage {
 
 fn raw_value_is_string(value: &RawValue) -> bool {
     value.get().trim_start().starts_with('"')
-}
-
-pub(crate) fn api_event_projection(record: &TranscriptRecord) -> ApiEventProjection {
-    if record.source() != "agent" || record.kind() != "api.event" {
-        return ApiEventProjection::Retain;
-    }
-    let Ok(payload) = record.decode_payload::<ApiEvent>() else {
-        return ApiEventProjection::Retain;
-    };
-    if payload.phase != "generation" {
-        return ApiEventProjection::Discard;
-    }
-    match payload.direction {
-        "outbound" => ApiEventProjection::LatestOutbound,
-        "inbound" => {
-            let completed = serde_json::from_str::<ResponseEvent>(payload.event.get())
-                .is_ok_and(|event| event.kind == "response.completed");
-            if completed {
-                ApiEventProjection::Retain
-            } else {
-                ApiEventProjection::Discard
-            }
-        }
-        _ => ApiEventProjection::Discard,
-    }
 }
 
 pub(crate) fn outbound_context_snapshot(record: &TranscriptRecord) -> Option<(bool, bool)> {

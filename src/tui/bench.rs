@@ -79,6 +79,7 @@ mod pane;
 mod prompt;
 mod session;
 mod spinner;
+mod storage;
 mod theme;
 #[path = "transcript/mod.rs"]
 pub(crate) mod transcript;
@@ -86,7 +87,9 @@ pub(crate) mod transcript;
 // `config.rs` uses the production module path while this benchmark compiles the
 // same internal modules directly into its private target.
 mod tui {
-    pub(crate) use crate::{context, format, pane, prompt, session, spinner, theme, transcript};
+    pub(crate) use crate::{
+        context, format, pane, prompt, session, spinner, storage, theme, transcript,
+    };
 }
 
 use components::{AppEvent, AppNode, RootNode};
@@ -98,9 +101,7 @@ use pane::PaneId;
 use ratatui::{Terminal, backend::TestBackend};
 use serde_json::{json, value::to_raw_value};
 use std::{
-    fs::{self, File},
     hint::black_box,
-    io::BufWriter,
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -108,13 +109,12 @@ use std::{
 use tempfile::TempDir;
 use theme::Theme;
 use transcript::{LocalEvent, SessionStarted, TranscriptRecord, TurnId};
-use zstd::stream::write::Encoder;
 
 const WIDTH: u16 = 120;
 const HEIGHT: u16 = 40;
-const TARGET_API_EVENTS: u64 = 15_000;
+const TARGET_SEMANTIC_EVENTS: u64 = 15_000;
 const UNRELATED_SESSIONS: u64 = 6;
-const UNRELATED_API_EVENTS: u64 = 4_000;
+const UNRELATED_SEMANTIC_EVENTS: u64 = 4_000;
 
 struct Harness {
     app: AppNode,
@@ -129,12 +129,8 @@ struct PersistenceFixture {
 }
 
 impl PersistenceFixture {
-    fn api_heavy_archive() -> Self {
-        Self::archive_with_target_segments(1)
-    }
-
-    fn multi_segment_archive() -> Self {
-        Self::archive_with_target_segments(4)
+    fn semantic_archive() -> Self {
+        Self::archive()
     }
 
     fn mixed_archive() -> Self {
@@ -153,32 +149,27 @@ impl PersistenceFixture {
         }
     }
 
-    fn archive_with_target_segments(target_segments: u64) -> Self {
+    fn archive() -> Self {
         let directory = tempfile::tempdir().unwrap();
         let config_path = directory.path().join("config.toml");
         let workspace = PathBuf::from("/benchmark-workspace");
         let session_id = "target-session".to_owned();
 
-        let events_per_segment = TARGET_API_EVENTS / target_segments;
-        for index in 0..target_segments {
-            write_session_segment(
-                &config_path,
-                index.saturating_add(1),
-                &session_id,
-                &workspace,
-                events_per_segment,
-            );
-        }
+        write_session(
+            &config_path,
+            &session_id,
+            &workspace,
+            TARGET_SEMANTIC_EVENTS,
+        );
         save_benchmark_checkpoint(&config_path, &session_id);
 
         for index in 0..UNRELATED_SESSIONS {
             let unrelated = format!("unrelated-session-{index}");
-            write_session_segment(
+            write_session(
                 &config_path,
-                target_segments.saturating_add(index).saturating_add(1),
                 &unrelated,
                 &workspace,
-                UNRELATED_API_EVENTS,
+                UNRELATED_SEMANTIC_EVENTS,
             );
             save_benchmark_checkpoint(&config_path, &unrelated);
         }
@@ -193,27 +184,6 @@ impl PersistenceFixture {
 
     fn load_transcript(&self) -> Vec<Arc<TranscriptRecord>> {
         session::load_transcript(&self.config_path, &self.session_id).unwrap()
-    }
-
-    fn clear_projection_cache(&self) {
-        let path = self
-            .config_path
-            .parent()
-            .unwrap()
-            .join("transcript-projections");
-        match fs::remove_dir_all(path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => panic!("failed to clear projection cache: {error}"),
-        }
-    }
-
-    fn load_transcript_parallel(&self) -> Vec<Arc<TranscriptRecord>> {
-        session::load_transcript_parallel(&self.config_path, &self.session_id).unwrap()
-    }
-
-    fn list_parallel(&self) -> Vec<session::SessionSummary> {
-        session::list_parallel(&self.config_path, &self.workspace).unwrap()
     }
 }
 
@@ -433,18 +403,8 @@ fn agent_record(
     ))
 }
 
-fn write_session_segment(
-    config_path: &Path,
-    started_at: u64,
-    session_id: &str,
-    workspace: &Path,
-    api_events: u64,
-) {
-    let directory = transcript::storage_directory(config_path);
-    fs::create_dir_all(&directory).unwrap();
-    let path = directory.join(format!("{started_at}-{session_id}.jsonl.zst"));
-    let output = BufWriter::new(File::create(path).unwrap());
-    let mut output = Encoder::new(output, 1).unwrap();
+fn write_session(config_path: &Path, session_id: &str, workspace: &Path, event_count: u64) {
+    let mut records = Vec::with_capacity(event_count.saturating_add(1) as usize);
     let started = local_record(
         1,
         LocalEvent::SessionStarted(SessionStarted {
@@ -458,40 +418,30 @@ fn write_session_segment(
             application_version: "benchmark".to_owned(),
         }),
     );
-    serde_json::to_writer(&mut output, started.as_ref()).unwrap();
-    std::io::Write::write_all(&mut output, b"\n").unwrap();
+    records.push(started);
 
     let padding = "x".repeat(512);
-    for index in 0..api_events {
+    for index in 0..event_count {
         let sequence = index.saturating_add(2);
         let record = agent_record(
             sequence,
-            AgentEventKind::ApiEvent,
+            AgentEventKind::ToolResult,
             json!({
-                "direction": "inbound",
-                "phase": "generation",
-                "event": {
-                    "type": "response.output_text.delta",
-                    "delta": "token",
-                    "metadata": {
-                        "padding": padding,
-                        "sequence": index,
-                    },
-                },
+                "call_id": format!("benchmark-{index}"),
+                "output": padding,
+                "sequence": index,
             }),
         );
-        serde_json::to_writer(&mut output, record.as_ref()).unwrap();
-        std::io::Write::write_all(&mut output, b"\n").unwrap();
+        records.push(record);
     }
-    output.finish().unwrap();
+    storage::SessionStorage::open(config_path)
+        .unwrap()
+        .append_records(session_id, &records)
+        .unwrap();
 }
 
 fn write_mixed_session_segment(config_path: &Path, session_id: &str, workspace: &Path, turns: u64) {
-    let directory = transcript::storage_directory(config_path);
-    fs::create_dir_all(&directory).unwrap();
-    let path = directory.join(format!("1-{session_id}.jsonl.zst"));
-    let output = BufWriter::new(File::create(path).unwrap());
-    let mut output = Encoder::new(output, 1).unwrap();
+    let mut records = Vec::new();
     let started = local_record(
         1,
         LocalEvent::SessionStarted(SessionStarted {
@@ -505,13 +455,12 @@ fn write_mixed_session_segment(config_path: &Path, session_id: &str, workspace: 
             application_version: "benchmark".to_owned(),
         }),
     );
-    serde_json::to_writer(&mut output, started.as_ref()).unwrap();
-    std::io::Write::write_all(&mut output, b"\n").unwrap();
-    for record in mixed_projection_records(turns) {
-        serde_json::to_writer(&mut output, record.as_ref()).unwrap();
-        std::io::Write::write_all(&mut output, b"\n").unwrap();
-    }
-    output.finish().unwrap();
+    records.push(started);
+    records.extend(mixed_projection_records(turns));
+    storage::SessionStorage::open(config_path)
+        .unwrap()
+        .append_records(session_id, &records)
+        .unwrap();
 }
 
 fn save_benchmark_checkpoint(config_path: &Path, session_id: &str) {
@@ -537,14 +486,12 @@ fn save_benchmark_checkpoint(config_path: &Path, session_id: &str) {
         }]
     }))
     .unwrap();
-    session::save_checkpoint(
-        config_path,
-        session_id,
-        &snapshot,
-        "benchmark instructions",
-        false,
-    )
-    .unwrap();
+    let resume_state =
+        session::encode_checkpoint(&snapshot, "benchmark instructions", false).unwrap();
+    storage::SessionStorage::open(config_path)
+        .unwrap()
+        .append_records_and_resume_state(session_id, &[], Some(&resume_state))
+        .unwrap();
 }
 
 fn benchmarks(criterion: &mut Criterion) {
@@ -712,79 +659,29 @@ fn benchmarks(criterion: &mut Criterion) {
             BatchSize::SmallInput,
         );
     });
-    let fixture = PersistenceFixture::api_heavy_archive();
-    let multi_segment_fixture = PersistenceFixture::multi_segment_archive();
+    let fixture = PersistenceFixture::semantic_archive();
     let mixed_fixture = PersistenceFixture::mixed_archive();
     let restored_records = fixture.load_transcript();
     let mixed_records = mixed_projection_records(1_000);
-    // Keep lazy thread creation outside CodSpeed's single measured iteration.
-    session::initialize_transcript_loader();
     let mut sessions = criterion.benchmark_group("session");
     sessions.sample_size(10);
     sessions.measurement_time(Duration::from_secs(5));
 
-    sessions.bench_function("catalog_api_heavy_archive", |bencher| {
+    sessions.bench_function("catalog_semantic_archive", |bencher| {
         bencher.iter(|| {
             black_box(session::list(&fixture.config_path, &fixture.workspace).unwrap());
         });
     });
 
-    sessions.bench_function("catalog_api_heavy_archive_parallel", |bencher| {
-        bencher.iter(|| black_box(fixture.list_parallel()));
-    });
-
-    sessions.bench_function("load_known_api_heavy_transcript", |bencher| {
+    sessions.bench_function("load_known_semantic_transcript", |bencher| {
         bencher.iter(|| black_box(fixture.load_transcript()));
     });
-
-    sessions.bench_function("load_known_api_heavy_transcript_cold", |bencher| {
-        bencher.iter_batched(
-            || fixture.clear_projection_cache(),
-            |()| black_box(fixture.load_transcript()),
-            BatchSize::LargeInput,
-        );
-    });
-
-    sessions.bench_function("load_known_multi_segment_transcript", |bencher| {
-        bencher.iter(|| black_box(multi_segment_fixture.load_transcript()));
-    });
-
-    sessions.bench_function("load_known_multi_segment_transcript_parallel", |bencher| {
-        bencher.iter(|| black_box(multi_segment_fixture.load_transcript_parallel()));
-    });
-
-    sessions.bench_function("load_known_multi_segment_transcript_cold", |bencher| {
-        bencher.iter_batched(
-            || multi_segment_fixture.clear_projection_cache(),
-            |()| black_box(multi_segment_fixture.load_transcript()),
-            BatchSize::LargeInput,
-        );
-    });
-
-    sessions.bench_function(
-        "load_known_multi_segment_transcript_parallel_cold",
-        |bencher| {
-            bencher.iter_batched(
-                || multi_segment_fixture.clear_projection_cache(),
-                |()| black_box(multi_segment_fixture.load_transcript_parallel()),
-                BatchSize::LargeInput,
-            );
-        },
-    );
 
     sessions.bench_function("load_mixed_transcript", |bencher| {
         bencher.iter(|| black_box(mixed_fixture.load_transcript()));
     });
 
-    sessions.bench_function("load_mixed_transcript_cold", |bencher| {
-        bencher.iter_batched(
-            || mixed_fixture.clear_projection_cache(),
-            |()| black_box(mixed_fixture.load_transcript()),
-            BatchSize::LargeInput,
-        );
-    });
-
-    sessions.bench_function("project_api_heavy_transcript", |bencher| {
+    sessions.bench_function("project_semantic_transcript", |bencher| {
         bencher.iter_batched(
             || {
                 (
@@ -830,7 +727,7 @@ fn benchmarks(criterion: &mut Criterion) {
         );
     });
 
-    sessions.bench_function("resume_api_heavy_transcript", |bencher| {
+    sessions.bench_function("resume_semantic_transcript", |bencher| {
         bencher.iter(|| {
             let records = fixture.load_transcript();
             let mut root = RootNode::new(&fixture.workspace, ReasoningEffort::Medium);
@@ -845,26 +742,6 @@ fn benchmarks(criterion: &mut Criterion) {
             black_box(root);
         });
     });
-    sessions.bench_function("resume_api_heavy_transcript_cold", |bencher| {
-        bencher.iter_batched(
-            || fixture.clear_projection_cache(),
-            |()| {
-                let records = fixture.load_transcript();
-                let mut root = RootNode::new(&fixture.workspace, ReasoningEffort::Medium);
-                root.restore_session(
-                    &fixture.workspace,
-                    ReasoningEffort::Medium,
-                    ReasoningMode::Standard,
-                    ReasoningMode::Standard,
-                    false,
-                    records,
-                );
-                black_box(root);
-            },
-            BatchSize::LargeInput,
-        );
-    });
-
     sessions.bench_function("resume_mixed_transcript", |bencher| {
         bencher.iter(|| {
             let records = mixed_fixture.load_transcript();
@@ -881,25 +758,6 @@ fn benchmarks(criterion: &mut Criterion) {
         });
     });
 
-    sessions.bench_function("resume_mixed_transcript_cold", |bencher| {
-        bencher.iter_batched(
-            || mixed_fixture.clear_projection_cache(),
-            |()| {
-                let records = mixed_fixture.load_transcript();
-                let mut root = RootNode::new(&mixed_fixture.workspace, ReasoningEffort::Medium);
-                root.restore_session(
-                    &mixed_fixture.workspace,
-                    ReasoningEffort::Medium,
-                    ReasoningMode::Standard,
-                    ReasoningMode::Standard,
-                    false,
-                    records,
-                );
-                black_box(root);
-            },
-            BatchSize::LargeInput,
-        );
-    });
     sessions.finish();
 }
 
