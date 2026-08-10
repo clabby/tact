@@ -54,8 +54,23 @@ tact update
 
 The updater verifies both the release checksum and signature before replacing a release-installer
 binary. If Cargo owns the installation, tact instead prints `cargo install tact --locked` so
-Cargo's records stay accurate. Automatic update notifications are shown only by official release
-builds.
+Cargo's records stay accurate, and builds declared through `TACT_PACKAGE_MANAGER` defer to the
+named package manager. Automatic update notifications are shown by every installation except
+development builds.
+
+### Packaging
+
+Distribution packagers can declare the package manager that owns the installation at build time:
+
+```sh
+TACT_PACKAGE_MANAGER=nix cargo build --release
+```
+
+Such builds keep update notifications and the managed review interface, but `tact update` points
+at the owning package manager instead of replacing the binary in place. When building from a
+source archive without the git repository, the metadata reported by `tact --version` can be
+provided through the `TACT_GIT_SHA`, `TACT_GIT_BRANCH`, `TACT_GIT_COMMIT_TIMESTAMP`, and
+`TACT_GIT_DIRTY` environment variables.
 
 ## Authentication
 

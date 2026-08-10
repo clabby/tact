@@ -10,6 +10,7 @@ fn main() {
     println!("cargo::rerun-if-changed=.git/index");
     println!("cargo::rerun-if-env-changed=SOURCE_DATE_EPOCH");
     println!("cargo::rerun-if-env-changed=TACT_RELEASE_BUILD");
+    println!("cargo::rerun-if-env-changed=TACT_PACKAGE_MANAGER");
 
     set(
         "TACT_GIT_SHA",
@@ -35,6 +36,10 @@ fn main() {
     println!(
         "cargo::rustc-env=TACT_RELEASE_BUILD={}",
         env::var("TACT_RELEASE_BUILD").is_ok_and(|value| value == "1")
+    );
+    println!(
+        "cargo::rustc-env=TACT_PACKAGE_MANAGER={}",
+        env::var("TACT_PACKAGE_MANAGER").unwrap_or_default()
     );
     set(
         "TACT_RUSTC_VERSION",
