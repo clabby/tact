@@ -19,7 +19,8 @@ use ratatui::{
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-const KEY_BINDINGS: [&str; 3] = ["↑↓ move", "enter/tab resume", "esc close"];
+const RESUME_KEY_BINDINGS: [&str; 3] = ["↑↓ move", "enter/tab resume", "esc close"];
+const MENTION_KEY_BINDINGS: [&str; 3] = ["↑↓ move", "enter/tab insert", "esc close"];
 const SEARCH_LABEL: &str = "Search: ";
 
 pub(super) enum SessionPickerEvent {
@@ -30,6 +31,13 @@ pub(super) enum SessionPickerEvent {
 pub(super) enum SessionPickerEffect {
     Dismiss,
     Resume(String),
+    Mention(String),
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum SessionPickerMode {
+    Resume,
+    Mention,
 }
 
 pub(super) struct SessionPicker {
@@ -37,16 +45,18 @@ pub(super) struct SessionPicker {
     query: String,
     matches: Vec<usize>,
     selected: usize,
+    mode: SessionPickerMode,
 }
 
 impl SessionPicker {
-    pub(super) fn new(sessions: Vec<SessionSummary>) -> Self {
+    pub(super) fn new(sessions: Vec<SessionSummary>, mode: SessionPickerMode) -> Self {
         let matches = (0..sessions.len()).collect();
         Self {
             sessions,
             query: String::new(),
             matches,
             selected: 0,
+            mode,
         }
     }
 
@@ -77,7 +87,7 @@ impl SessionPicker {
                 }
                 ComponentUpdate::render(RenderRequest::Immediate)
             }
-            KeyCode::Enter | KeyCode::Tab => self.resume_selected(),
+            KeyCode::Enter | KeyCode::Tab => self.select(),
             KeyCode::Char(character)
                 if !key
                     .modifiers
@@ -98,13 +108,16 @@ impl SessionPicker {
         ComponentUpdate::render(RenderRequest::Immediate)
     }
 
-    fn resume_selected(&mut self) -> ComponentUpdate<SessionPickerEffect> {
+    fn select(&mut self) -> ComponentUpdate<SessionPickerEffect> {
         let Some(index) = self.matches.get(self.selected) else {
             return ComponentUpdate::none();
         };
-        Self::effect(SessionPickerEffect::Resume(
-            self.sessions[*index].session_id.clone(),
-        ))
+        let session_id = self.sessions[*index].session_id.clone();
+        let effect = match self.mode {
+            SessionPickerMode::Resume => SessionPickerEffect::Resume(session_id),
+            SessionPickerMode::Mention => SessionPickerEffect::Mention(session_id),
+        };
+        Self::effect(effect)
     }
 
     fn effect(effect: SessionPickerEffect) -> ComponentUpdate<SessionPickerEffect> {
@@ -150,9 +163,12 @@ impl SessionPicker {
             return;
         }
         if self.matches.is_empty() {
+            let message = match self.mode {
+                SessionPickerMode::Resume => "  No resumable sessions found",
+                SessionPickerMode::Mention => "  No other sessions found",
+            };
             frame.render_widget(
-                Paragraph::new("  No resumable sessions found")
-                    .style(Style::default().fg(theme.muted())),
+                Paragraph::new(message).style(Style::default().fg(theme.muted())),
                 area,
             );
             return;
@@ -217,8 +233,11 @@ impl Component for SessionPicker {
     }
 
     fn render(&mut self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
-        let layout =
-            Floating::new("Resume session", 76, 18, &KEY_BINDINGS).render(frame, area, theme);
+        let (title, key_bindings) = match self.mode {
+            SessionPickerMode::Resume => ("Resume session", &RESUME_KEY_BINDINGS),
+            SessionPickerMode::Mention => ("Mention session", &MENTION_KEY_BINDINGS),
+        };
+        let layout = Floating::new(title, 76, 18, key_bindings).render(frame, area, theme);
         if layout.body.is_empty() {
             return;
         }
@@ -249,7 +268,9 @@ fn visible_tail(query: &str, width: usize) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::{Component, SessionPicker, SessionPickerEffect, SessionPickerEvent};
+    use super::{
+        Component, SessionPicker, SessionPickerEffect, SessionPickerEvent, SessionPickerMode,
+    };
     use crate::{
         app::config::{ReasoningEffort, ReasoningMode},
         tui::session::SessionSummary,
@@ -275,10 +296,10 @@ mod tests {
 
     #[test]
     fn search_selects_a_session_by_preview() {
-        let mut picker = SessionPicker::new(vec![
-            summary("one", "fix parser"),
-            summary("two", "write docs"),
-        ]);
+        let mut picker = SessionPicker::new(
+            vec![summary("one", "fix parser"), summary("two", "write docs")],
+            SessionPickerMode::Resume,
+        );
         for character in "docs".chars() {
             picker.update(key(KeyCode::Char(character)));
         }
@@ -289,11 +310,24 @@ mod tests {
     }
 
     #[test]
+    fn mention_mode_returns_a_reference_instead_of_resuming() {
+        let mut picker = SessionPicker::new(
+            vec![summary("one", "fix parser")],
+            SessionPickerMode::Mention,
+        );
+
+        assert_eq!(
+            picker.update(key(KeyCode::Enter)).effects,
+            [SessionPickerEffect::Mention("one".to_owned())]
+        );
+    }
+
+    #[test]
     fn tab_resumes_the_selected_session() {
-        let mut picker = SessionPicker::new(vec![
-            summary("one", "fix parser"),
-            summary("two", "write docs"),
-        ]);
+        let mut picker = SessionPicker::new(
+            vec![summary("one", "fix parser"), summary("two", "write docs")],
+            SessionPickerMode::Resume,
+        );
         for character in "docs".chars() {
             picker.update(key(KeyCode::Char(character)));
         }
@@ -306,10 +340,10 @@ mod tests {
 
     #[test]
     fn arrows_navigate_while_typing_continues_to_search() {
-        let mut picker = SessionPicker::new(vec![
-            summary("one", "fix parser"),
-            summary("two", "write docs"),
-        ]);
+        let mut picker = SessionPicker::new(
+            vec![summary("one", "fix parser"), summary("two", "write docs")],
+            SessionPickerMode::Resume,
+        );
 
         picker.update(key(KeyCode::Down));
         assert_eq!(

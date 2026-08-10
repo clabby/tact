@@ -2,6 +2,7 @@
 
 mod mcp;
 pub(crate) mod memory;
+pub(crate) mod sessions;
 mod skills;
 pub(crate) mod subagents;
 
