@@ -10,7 +10,7 @@ use crate::{
     core::extensions::{Skill, memory::MemoryRecord, subagents::AgentUpdate},
     tui::{
         pane::PaneId,
-        session::SessionSummary,
+        session::{RecentPrompt, SessionSummary},
         theme::{ColorScheme, Theme, ThemeMode},
         transcript::TranscriptRecord,
     },
@@ -111,6 +111,15 @@ pub(crate) enum AppEvent {
     SessionsLoaded {
         pane: PaneId,
         sessions: Vec<SessionSummary>,
+    },
+    RecentPromptsLoaded {
+        pane: PaneId,
+        session_id: String,
+        prompts: Vec<RecentPrompt>,
+    },
+    RecentPromptLoadFailed {
+        pane: PaneId,
+        error: String,
     },
     SessionLoadFailed {
         pane: PaneId,
@@ -324,6 +333,20 @@ impl AppNode {
             }
             AppEvent::SessionsLoaded { pane, sessions } => {
                 self.update_root(pane, RootEvent::SessionsLoaded(sessions))
+            }
+            AppEvent::RecentPromptsLoaded {
+                pane,
+                session_id,
+                prompts,
+            } => self.update_root(
+                pane,
+                RootEvent::RecentPromptsLoaded {
+                    session_id,
+                    prompts,
+                },
+            ),
+            AppEvent::RecentPromptLoadFailed { pane, error } => {
+                self.update_root(pane, RootEvent::RecentPromptLoadFailed(error))
             }
             AppEvent::SessionLoadFailed { pane, error } => {
                 self.update_root(pane, RootEvent::SessionLoadFailed(error))

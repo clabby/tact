@@ -36,7 +36,7 @@ use crate::{
     tui::{
         agent_events::ForwardedAgentEvent,
         components::{
-            AppEffect, AppEvent, AppNode, ComponentUpdate, RenderRequest,
+            AppEffect, AppEvent, AppNode, ComponentUpdate, RecentPromptDraft, RenderRequest,
             RestoredSessionProjection, RootNode,
         },
         editor::EditorOutcome,
@@ -45,7 +45,7 @@ use crate::{
         prompt::Submission,
         review_controller::{ReviewCompletion, ReviewController, ReviewIdentity, ReviewTask},
         scheduler::{RenderScheduler, STREAM_FRAME_INTERVAL},
-        session::SessionSummary,
+        session::{RecentPrompt, SessionSummary},
         shell::ShellExecution,
         subagent_updates::ForwardedSubagentUpdate,
         terminal::TerminalSession,
@@ -94,6 +94,8 @@ type NewSessionTask = JoinHandle<(
 )>;
 
 type SessionListTask = JoinHandle<(PaneId, Result<Vec<SessionSummary>>)>;
+
+type RecentPromptTask = JoinHandle<(PaneId, String, Result<Vec<RecentPrompt>>)>;
 
 type ResumeSessionTask = JoinHandle<(
     PaneId,
@@ -528,6 +530,7 @@ pub(crate) async fn run(
     let mut fast_mode_task = None::<FastModeUpdateTask>;
     let mut new_session_task = None::<NewSessionTask>;
     let mut session_list_task = None::<SessionListTask>;
+    let mut recent_prompt_task = None::<RecentPromptTask>;
     let mut handoff_controller = HandoffController::new();
     let mut review_controller = ReviewController::new();
     let (auxiliary_sender, mut auxiliary_jobs) = mpsc::unbounded_channel();
@@ -561,6 +564,7 @@ pub(crate) async fn run(
                     fast_mode_task: &mut fast_mode_task,
                     new_session_task: &mut new_session_task,
                     session_list_task: &mut session_list_task,
+                    recent_prompt_task: &mut recent_prompt_task,
                     handoff_controller: &mut handoff_controller,
                     review_controller: &mut review_controller,
                     auxiliary_sender: &auxiliary_sender,
@@ -1245,6 +1249,35 @@ pub(crate) async fn run(
                 scheduler.request_immediate(Instant::now());
             }
             result = async {
+                recent_prompt_task
+                    .as_mut()
+                    .expect("recent-prompt branch is disabled without a task")
+                    .await
+            }, if recent_prompt_task.is_some() && !stopping => {
+                recent_prompt_task = None;
+                input = Some(EventStream::new());
+                let (pane, session_id, prompts) =
+                    result.map_err(RuntimeError::SessionTask)?;
+                match prompts {
+                    Ok(prompts) => schedule(
+                        app.update(AppEvent::RecentPromptsLoaded {
+                            pane,
+                            session_id,
+                            prompts,
+                        }),
+                        &mut scheduler,
+                    ),
+                    Err(error) => schedule(
+                        app.update(AppEvent::RecentPromptLoadFailed {
+                            pane,
+                            error: format!("Could not load recent prompts: {error}"),
+                        }),
+                        &mut scheduler,
+                    ),
+                }
+                scheduler.request_immediate(Instant::now());
+            }
+            result = async {
                 review_controller
                     .task_mut()
                     .expect("review branch is disabled without a task")
@@ -1605,6 +1638,28 @@ fn close_pane_journal(
     Ok(())
 }
 
+fn merge_recent_prompts(
+    mut persisted: Vec<RecentPrompt>,
+    current: Vec<RecentPromptDraft>,
+    session_id: &str,
+    workspace: &Path,
+) -> Vec<RecentPrompt> {
+    persisted.retain(|prompt| prompt.session_id != session_id);
+    let mut prompts = current
+        .into_iter()
+        .rev()
+        .map(|prompt| RecentPrompt {
+            text: prompt.text,
+            recorded_at_unix_ms: prompt.recorded_at_unix_ms,
+            session_id: session_id.to_owned(),
+            workspace: workspace.to_path_buf(),
+        })
+        .collect::<Vec<_>>();
+    prompts.extend(persisted);
+    prompts.sort_by_key(|prompt| std::cmp::Reverse(prompt.recorded_at_unix_ms));
+    prompts
+}
+
 struct EffectContext<'a> {
     app: &'a mut AppNode,
     commands: &'a tokio::sync::mpsc::UnboundedSender<WorkerCommand>,
@@ -1617,6 +1672,7 @@ struct EffectContext<'a> {
     fast_mode_task: &'a mut Option<FastModeUpdateTask>,
     new_session_task: &'a mut Option<NewSessionTask>,
     session_list_task: &'a mut Option<SessionListTask>,
+    recent_prompt_task: &'a mut Option<RecentPromptTask>,
     handoff_controller: &'a mut HandoffController,
     review_controller: &'a mut ReviewController,
     auxiliary_sender: &'a mpsc::UnboundedSender<AuxiliaryJobRequest>,
@@ -1927,6 +1983,34 @@ fn apply_pane_effect(
                     sessions
                 });
                 (pane, sessions.map_err(Into::into))
+            }));
+        }
+        components::RootEffect::LoadRecentPrompts(current_prompts) => {
+            *context.input = None;
+            let config_path = context.config.path().to_path_buf();
+            let workspace = context.workspace.to_path_buf();
+            let session_id = context
+                .panes
+                .get(&pane)
+                .expect("recent-prompt pane must exist")
+                .session_id
+                .clone();
+            *context.recent_prompt_task = Some(tokio::spawn(async move {
+                let prompts = session::load_recent_prompts_async(
+                    config_path,
+                    Some(session_id.clone()),
+                )
+                    .await
+                    .map(|prompts| {
+                        merge_recent_prompts(
+                            prompts,
+                            current_prompts,
+                            &session_id,
+                            &workspace,
+                        )
+                    })
+                    .map_err(Into::into);
+                (pane, session_id, prompts)
             }));
         }
         components::RootEffect::Handoff => start_handoff(context, pane),
@@ -2380,8 +2464,8 @@ mod tests {
     use super::{
         MemoryCompletion, MemoryOperation, PaneGeneration, PaneSession, PaneSettings,
         PendingSubmission, close_pane_journal, configured_memory_store, current_unix_ms,
-        is_image_paste, local_link_path, next_memory_generation, open_pane, run_memory_operation,
-        send_submission, subagent_pane, validate_interactive,
+        is_image_paste, local_link_path, merge_recent_prompts, next_memory_generation, open_pane,
+        run_memory_operation, send_submission, subagent_pane, validate_interactive,
     };
     use crate::{
         app::{
@@ -2393,7 +2477,9 @@ mod tests {
             subagents::{AgentId, AgentStatus, AgentUpdate},
         },
         tui::{
+            components::RecentPromptDraft,
             pane::PaneId,
+            session::RecentPrompt,
             subagent_updates::ForwardedSubagentUpdate,
             transcript::{LocalEvent, TurnId, load},
             worker::WorkerCommand,
@@ -2418,6 +2504,44 @@ mod tests {
             KeyCode::Char('v'),
             KeyModifiers::NONE,
         ))));
+    }
+
+    #[test]
+    fn current_session_prompts_replace_the_persisted_snapshot() {
+        let persisted = vec![
+            RecentPrompt {
+                text: "stale current".to_owned(),
+                recorded_at_unix_ms: 20,
+                session_id: "current".to_owned(),
+                workspace: "/work".into(),
+            },
+            RecentPrompt {
+                text: "other".to_owned(),
+                recorded_at_unix_ms: 15,
+                session_id: "other".to_owned(),
+                workspace: "/other".into(),
+            },
+        ];
+        let current = vec![
+            RecentPromptDraft {
+                text: "first".to_owned(),
+                recorded_at_unix_ms: 10,
+            },
+            RecentPromptDraft {
+                text: "just submitted".to_owned(),
+                recorded_at_unix_ms: 20,
+            },
+        ];
+
+        let prompts = merge_recent_prompts(persisted, current, "current", Path::new("/work"));
+
+        assert_eq!(
+            prompts
+                .iter()
+                .map(|prompt| prompt.text.as_str())
+                .collect::<Vec<_>>(),
+            ["just submitted", "other", "first"]
+        );
     }
 
     #[test]

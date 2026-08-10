@@ -16,10 +16,11 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr;
 
 const FOOTER: [&str; 1] = ["esc close"];
-const BINDINGS: [(&str, &str); 20] = [
+const BINDINGS: [(&str, &str); 21] = [
     ("ctrl+s", "change reasoning effort"),
     ("ctrl+f", "fork session · when available"),
     ("ctrl+g", "edit prompt in $EDITOR"),
+    ("ctrl+r", "recent prompts"),
     ("ctrl+z", "restore the last cleared draft"),
     ("ctrl/cmd+v", "paste clipboard image"),
     ("ctrl+o", "expand · collapse all tool calls"),
@@ -74,7 +75,7 @@ impl Component for KeybindingsHelp {
 
     fn render(&mut self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
         let layout =
-            Floating::new("Keyboard shortcuts", 72, 23, &FOOTER).render(frame, area, theme);
+            Floating::new("Keyboard shortcuts", 72, 24, &FOOTER).render(frame, area, theme);
         if layout.body.is_empty() {
             return;
         }
@@ -152,7 +153,7 @@ mod tests {
     #[test]
     fn popup_documents_context_sensitive_composer_shortcuts() {
         let mut help = KeybindingsHelp;
-        let mut terminal = Terminal::new(TestBackend::new(80, 22)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(80, 26)).unwrap();
 
         terminal
             .draw(|frame| help.render(frame, frame.area(), &Theme::default()))
@@ -167,6 +168,7 @@ mod tests {
             .collect::<Vec<_>>();
         for expected in [
             "ctrl/cmd+v",
+            "ctrl+r",
             "ctrl+z",
             "ctrl+c ctrl+c",
             "clear input · when composer is focused and nonempty",
