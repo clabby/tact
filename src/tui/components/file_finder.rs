@@ -34,7 +34,7 @@ pub(super) enum FileFinderEffect {
 }
 
 pub(super) struct FileFinder {
-    files: Vec<String>,
+    paths: Vec<String>,
     query: String,
     selected: usize,
     matches: Vec<usize>,
@@ -42,10 +42,10 @@ pub(super) struct FileFinder {
 
 impl FileFinder {
     pub(super) fn new(workspace: &Path) -> Self {
-        let files = discover_files(workspace);
-        let matches = (0..files.len()).collect();
+        let paths = discover_paths(workspace);
+        let matches = (0..paths.len()).collect();
         Self {
-            files,
+            paths,
             query: String::new(),
             selected: 0,
             matches,
@@ -90,7 +90,7 @@ impl FileFinder {
             return ComponentUpdate::none();
         };
         ComponentUpdate {
-            effects: vec![FileFinderEffect::Insert(self.files[*index].clone())],
+            effects: vec![FileFinderEffect::Insert(self.paths[*index].clone())],
             render: RenderRequest::Immediate,
         }
     }
@@ -98,12 +98,12 @@ impl FileFinder {
     fn refresh_matches(&mut self) {
         let query = self.query.to_ascii_lowercase();
         let mut matches = self
-            .files
+            .paths
             .iter()
             .enumerate()
             .filter_map(|(index, path)| fuzzy_score(path, &query).map(|score| (index, score)))
             .collect::<Vec<_>>();
-        matches.sort_by_key(|(index, score)| (Reverse(*score), self.files[*index].as_str()));
+        matches.sort_by_key(|(index, score)| (Reverse(*score), self.paths[*index].as_str()));
         self.matches = matches.into_iter().map(|(index, _)| index).collect();
         self.selected = 0;
     }
@@ -138,13 +138,13 @@ impl FileFinder {
         );
     }
 
-    fn render_files(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
+    fn render_paths(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
         if area.is_empty() {
             return;
         }
 
         let items = self.matches.iter().map(|index| {
-            ListItem::new(self.files[*index].as_str()).style(Style::default().fg(theme.text()))
+            ListItem::new(self.paths[*index].as_str()).style(Style::default().fg(theme.text()))
         });
         let list = List::new(items)
             .highlight_style(
@@ -176,7 +176,8 @@ impl Component for FileFinder {
             return;
         }
 
-        let layout = Floating::new("Files", 72, 14, &KEY_BINDINGS).render(frame, area, theme);
+        let layout = Floating::new("Files and directories", 72, 14, &KEY_BINDINGS)
+            .render(frame, area, theme);
         if layout.body.is_empty() {
             return;
         }
@@ -184,17 +185,17 @@ impl Component for FileFinder {
             height: 1,
             ..layout.body
         };
-        let files_area = Rect {
+        let paths_area = Rect {
             y: layout.body.y + 1,
             height: layout.body.height.saturating_sub(1),
             ..layout.body
         };
         self.render_search(frame, search_area, theme);
-        self.render_files(frame, files_area, theme);
+        self.render_paths(frame, paths_area, theme);
     }
 }
 
-fn discover_files(workspace: &Path) -> Vec<String> {
+fn discover_paths(workspace: &Path) -> Vec<String> {
     let mut paths = Vec::new();
     visit_directory(workspace, workspace, &mut paths);
     paths.sort_unstable();
@@ -214,20 +215,32 @@ fn visit_directory(workspace: &Path, directory: &Path, paths: &mut Vec<String>) 
             continue;
         };
         if file_type.is_dir() {
-            if !is_skipped_directory(&path) {
-                visit_directory(workspace, &path, paths);
+            if is_skipped_directory(&path) {
+                continue;
             }
+
+            if let Some(relative) = relative_path(workspace, &path) {
+                paths.push(format!("{relative}/"));
+            }
+            visit_directory(workspace, &path, paths);
         } else if file_type.is_file()
-            && let Ok(relative) = path.strip_prefix(workspace)
+            && let Some(relative) = relative_path(workspace, &path)
         {
-            let relative = relative
-                .to_string_lossy()
-                .replace(std::path::MAIN_SEPARATOR, "/");
-            if !relative.chars().any(char::is_control) {
-                paths.push(relative);
-            }
+            paths.push(relative);
         }
     }
+}
+
+fn relative_path(workspace: &Path, path: &Path) -> Option<String> {
+    let relative = path
+        .strip_prefix(workspace)
+        .ok()?
+        .to_string_lossy()
+        .replace(std::path::MAIN_SEPARATOR, "/");
+    if relative.chars().any(char::is_control) {
+        return None;
+    }
+    Some(relative)
 }
 
 fn is_skipped_directory(path: &Path) -> bool {
@@ -283,7 +296,7 @@ pub(super) fn visible_query_tail(query: &str, width: usize) -> &str {
 #[cfg(test)]
 mod tests {
     use super::{
-        Component, FileFinder, FileFinderEffect, FileFinderEvent, discover_files, fuzzy_score,
+        Component, FileFinder, FileFinderEffect, FileFinderEvent, discover_paths, fuzzy_score,
     };
     use crate::tui::theme::Theme;
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
@@ -306,12 +319,18 @@ mod tests {
     }
 
     #[test]
-    fn discovers_relative_workspace_files_and_skips_build_directories() {
+    fn discovers_relative_workspace_paths_and_skips_build_directories() {
         let workspace = workspace();
 
         assert_eq!(
-            discover_files(workspace.path()),
-            ["README.md", "src/components/file_finder.rs", "src/lib.rs"]
+            discover_paths(workspace.path()),
+            [
+                "README.md",
+                "src/",
+                "src/components/",
+                "src/components/file_finder.rs",
+                "src/lib.rs"
+            ]
         );
     }
 
@@ -323,7 +342,7 @@ mod tests {
 
         assert_eq!(finder.matches.len(), 1);
         assert_eq!(
-            finder.files[finder.matches[0]],
+            finder.paths[finder.matches[0]],
             "src/components/file_finder.rs"
         );
         assert!(fuzzy_score("src/file_finder.rs", "ff").is_some());
@@ -339,6 +358,18 @@ mod tests {
         assert_eq!(
             finder.update(key(KeyCode::Enter)).effects,
             [FileFinderEffect::Insert("README.md".to_owned())]
+        );
+    }
+
+    #[test]
+    fn enter_inserts_a_directory_with_a_trailing_slash() {
+        let workspace = workspace();
+        let mut finder = FileFinder::new(workspace.path());
+        finder.update(FileFinderEvent::Query("components/".to_owned()));
+
+        assert_eq!(
+            finder.update(key(KeyCode::Enter)).effects,
+            [FileFinderEffect::Insert("src/components/".to_owned())]
         );
     }
 
@@ -362,9 +393,7 @@ mod tests {
 
         assert_eq!(
             finder.update(key(KeyCode::Enter)).effects,
-            [FileFinderEffect::Insert(
-                "src/components/file_finder.rs".to_owned()
-            )]
+            [FileFinderEffect::Insert("src/".to_owned())]
         );
     }
 
@@ -375,7 +404,7 @@ mod tests {
         finder.update(FileFinderEvent::Query("read".to_owned()));
 
         assert_eq!(finder.matches.len(), 1);
-        assert_eq!(finder.files[finder.matches[0]], "README.md");
+        assert_eq!(finder.paths[finder.matches[0]], "README.md");
         assert_eq!(
             finder.update(key(KeyCode::Esc)).effects,
             [FileFinderEffect::Dismiss]
@@ -397,6 +426,13 @@ mod tests {
         assert_eq!(buffer[(75, 16)].symbol(), "╯");
         assert_eq!(buffer[(5, 5)].symbol(), "›");
         assert_eq!(buffer[(5, 5)].fg, Theme::default().accent());
+        assert!(buffer.content().chunks(80).any(|cells| {
+            cells
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>()
+                .contains("Files and directories")
+        }));
         assert!(buffer.content().chunks(80).any(|cells| {
             cells
                 .iter()
