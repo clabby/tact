@@ -39,7 +39,7 @@ use unicode_width::UnicodeWidthStr;
 
 const MIN_CONTENT_ROWS: usize = 3;
 const MAX_CONTENT_ROWS: usize = 6;
-const ENTRY_HINT: &str = " / actions · @ files · @@ sessions ";
+const ENTRY_HINT: &str = " / actions · @ paths · @@ sessions ";
 const DEVELOPMENT_BADGE: &str = " ◉ dev ";
 
 #[derive(Debug, Eq, PartialEq)]
@@ -1448,9 +1448,9 @@ mod tests {
         let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
         let terminal = render(&mut composer, 60, 5);
         let footer = if crate::app::installation::current().is_development() {
-            "╰─ / actions · @ files · @@ sessions ─────── ◉ dev  /work ─╯"
+            "╰─ / actions · @ paths · @@ sessions ─────── ◉ dev  /work ─╯"
         } else {
-            "╰─ / actions · @ files · @@ sessions ───────────────── /work ─╯"
+            "╰─ / actions · @ paths · @@ sessions ───────────────── /work ─╯"
         };
 
         assert_eq!(
