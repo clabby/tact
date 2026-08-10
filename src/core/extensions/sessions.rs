@@ -218,7 +218,7 @@ fn bounded_output(
 
         let truncated = OutputRecord {
             event_id,
-            record: truncated_record(&stored, 256),
+            record: truncated_record(&stored, 256)?,
         };
         let included = if push_if_fits(&mut output, truncated, max_bytes)? {
             true
@@ -227,7 +227,7 @@ fn bounded_output(
                 &mut output,
                 OutputRecord {
                     event_id,
-                    record: truncated_record(&stored, 0),
+                    record: truncated_record(&stored, 0)?,
                 },
                 max_bytes,
             )?
@@ -280,24 +280,23 @@ impl Write for ByteCounter {
     }
 }
 
-fn truncated_record(stored: &DecodedStoredRecord, preview_bytes: usize) -> Value {
+fn truncated_record(
+    stored: &DecodedStoredRecord,
+    preview_bytes: usize,
+) -> Result<Value, serde_json::Error> {
     let payload = stored.record.payload_json();
     let mut preview_end = preview_bytes.min(payload.len());
     while !payload.is_char_boundary(preview_end) {
         preview_end = preview_end.saturating_sub(1);
     }
-    json!({
-        "schema_version": stored.record.schema_version(),
-        "sequence": stored.record.sequence(),
-        "recorded_at_unix_ms": stored.record.recorded_at_unix_ms(),
-        "source": stored.record.source(),
-        "type": stored.record.kind(),
-        "payload": {
-            "truncated": true,
-            "original_bytes": payload.len(),
-            "preview": &payload[..preview_end]
-        }
-    })
+
+    let mut record = serde_json::to_value(&stored.record)?;
+    record["payload"] = json!({
+        "truncated": true,
+        "original_bytes": payload.len(),
+        "preview": &payload[..preview_end]
+    });
+    Ok(record)
 }
 
 fn input_schema() -> Value {
@@ -362,16 +361,17 @@ fn output_schema() -> Value {
 
 #[cfg(test)]
 mod tests {
-    use super::{APPROX_BYTES_PER_TOKEN, MAX_PAGE_SIZE, SessionTool};
+    use super::{APPROX_BYTES_PER_TOKEN, MAX_PAGE_SIZE, SessionTool, truncated_record};
     use crate::{
         app::config::{ReasoningEffort, ReasoningMode},
         tui::{
-            storage::SessionStorage,
+            storage::{DecodedStoredRecord, SessionStorage},
             transcript::{LocalEvent, SessionStarted, TranscriptRecord, TurnId},
         },
     };
     use nanocodex::{
         Tool,
+        agent::events::{AgentEvent, AgentEventKind},
         tools::contract::{ToolContext, ToolInput, ToolOutputBody},
     };
     use serde_json::{Value, json, value::to_raw_value};
@@ -390,6 +390,32 @@ mod tests {
         assert_eq!(input["additionalProperties"], json!(false));
         assert_eq!(input["properties"]["limit"]["maximum"], MAX_PAGE_SIZE);
         assert_eq!(output["additionalProperties"], json!(false));
+    }
+
+    #[test]
+    fn truncated_agent_records_preserve_correlation_metadata() {
+        let stored = DecodedStoredRecord {
+            event_id: 7,
+            record: TranscriptRecord::from_agent(
+                11,
+                13,
+                AgentEvent {
+                    protocol_version: 2,
+                    request_id: Arc::from("request"),
+                    seq: 17,
+                    kind: AgentEventKind::ToolResult,
+                    payload: to_raw_value(&json!({"output": "x".repeat(10_000)}))
+                        .unwrap()
+                        .into(),
+                },
+            ),
+        };
+
+        let truncated = truncated_record(&stored, 0).unwrap();
+
+        assert_eq!(truncated["agent"]["protocol_version"], 2);
+        assert_eq!(truncated["agent"]["request_id"], "request");
+        assert_eq!(truncated["agent"]["sequence"], 17);
     }
 
     #[tokio::test]

@@ -243,10 +243,6 @@ impl TranscriptRecord {
         self.schema_version
     }
 
-    pub(crate) const fn sequence(&self) -> u64 {
-        self.sequence
-    }
-
     pub(crate) const fn recorded_at_unix_ms(&self) -> u64 {
         self.recorded_at_unix_ms
     }
