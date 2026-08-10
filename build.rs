@@ -11,16 +11,24 @@ fn main() {
     println!("cargo::rerun-if-env-changed=SOURCE_DATE_EPOCH");
     println!("cargo::rerun-if-env-changed=TACT_RELEASE_BUILD");
 
-    set("TACT_GIT_SHA", git(&["rev-parse", "--short=12", "HEAD"]));
+    set(
+        "TACT_GIT_SHA",
+        env_override("TACT_GIT_SHA").or_else(|| git(&["rev-parse", "--short=12", "HEAD"])),
+    );
     set(
         "TACT_GIT_BRANCH",
-        git(&["branch", "--show-current"]).filter(|branch| !branch.is_empty()),
+        env_override("TACT_GIT_BRANCH")
+            .or_else(|| git(&["branch", "--show-current"]))
+            .filter(|branch| !branch.is_empty()),
     );
     set(
         "TACT_GIT_COMMIT_TIMESTAMP",
-        git(&["log", "-1", "--format=%cI"]),
+        env_override("TACT_GIT_COMMIT_TIMESTAMP").or_else(|| git(&["log", "-1", "--format=%cI"])),
     );
-    set("TACT_GIT_DIRTY", dirty_state());
+    set(
+        "TACT_GIT_DIRTY",
+        env_override("TACT_GIT_DIRTY").or_else(dirty_state),
+    );
     set("TACT_BUILD_TIMESTAMP", Some(build_timestamp()));
     set("TACT_BUILD_TARGET", env::var("TARGET").ok());
     set("TACT_BUILD_PROFILE", env::var("PROFILE").ok());
@@ -35,6 +43,13 @@ fn main() {
             &["--version"],
         ),
     );
+}
+
+/// Reads `name` from the build environment, letting builds without a git
+/// checkout, such as distribution packaging, provide the repository metadata.
+fn env_override(name: &str) -> Option<String> {
+    println!("cargo::rerun-if-env-changed={name}");
+    env::var(name).ok().filter(|value| !value.is_empty())
 }
 
 fn git(arguments: &[&str]) -> Option<String> {
