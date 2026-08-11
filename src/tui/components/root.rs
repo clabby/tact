@@ -812,7 +812,7 @@ impl RootNode {
         if is_control_key(&event, 'r') {
             return self.load_recent_prompts();
         }
-        if is_control_key(&event, 'f') {
+        if is_control_key(&event, 't') {
             return self.open_fork();
         }
         if is_escape(&event) {
@@ -956,7 +956,7 @@ impl RootNode {
     }
 
     fn update_review_input(&mut self, event: Event) -> ComponentUpdate<RootEffect> {
-        if is_control_key(&event, 'f') {
+        if is_control_key(&event, 't') {
             self.key_confirmation = None;
             return self.open_fork();
         }
@@ -5791,11 +5791,11 @@ mod tests {
     }
 
     #[test]
-    fn control_f_can_fork_during_an_active_review() {
+    fn control_t_can_fork_during_an_active_review() {
         let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
         root.update(RootEvent::ReviewStarted);
 
-        let update = root.update(key(KeyCode::Char('f'), KeyModifiers::CONTROL));
+        let update = root.update(key(KeyCode::Char('t'), KeyModifiers::CONTROL));
 
         assert_eq!(update.effects, [RootEffect::Fork]);
     }

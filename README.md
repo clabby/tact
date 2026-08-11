@@ -318,7 +318,7 @@ development server watches browser sources, rebuilds them, and reloads connected
 
 ### Session Forking
 
-Press `Ctrl+F` or choose **Fork session** from the Actions menu to open an independent session next
+Press `Ctrl+T` or choose **Fork session** from the Actions menu to open an independent session next
 to the current one. The fork starts from the stable conversation history available at that point;
 new prompts, model responses, and transcripts then remain independent in each pane.
 

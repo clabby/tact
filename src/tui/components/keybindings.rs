@@ -16,10 +16,10 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr;
 
 const FOOTER: [&str; 1] = ["esc close"];
-const BINDINGS: [(&str, &str); 22] = [
+const BINDINGS: [(&str, &str); 25] = [
     ("ctrl+s", "change reasoning effort"),
     ("ctrl+d", "select model · before first prompt"),
-    ("ctrl+f", "fork session · when available"),
+    ("ctrl+t", "fork session · when available"),
     ("ctrl+g", "edit prompt in $EDITOR"),
     ("ctrl+r", "recent prompts"),
     ("ctrl+z", "restore the last cleared draft"),
@@ -33,8 +33,14 @@ const BINDINGS: [(&str, &str); 22] = [
     ("esc esc", "interrupt the active response"),
     ("enter", "submit prompt"),
     ("shift+enter/ctrl+j", "insert newline"),
+    ("ctrl+a/e", "move to line start · end"),
+    ("ctrl+b/f", "move to previous · next character"),
+    ("alt/option+b/f", "move to previous · next word"),
     ("alt/option+backspace", "delete previous word"),
-    ("↑/↓", "move cursor · prompt history at edge"),
+    (
+        "↑/↓ · ctrl+p/n",
+        "move lines · history for empty/recalled prompts",
+    ),
     ("tab", "focus queue · when present"),
     ("/", "open actions · empty prompt only"),
     ("@", "insert workspace file"),
@@ -76,7 +82,7 @@ impl Component for KeybindingsHelp {
 
     fn render(&mut self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
         let layout =
-            Floating::new("Keyboard shortcuts", 72, 24, &FOOTER).render(frame, area, theme);
+            Floating::new("Keyboard shortcuts", 72, 27, &FOOTER).render(frame, area, theme);
         if layout.body.is_empty() {
             return;
         }
@@ -154,7 +160,7 @@ mod tests {
     #[test]
     fn popup_documents_context_sensitive_composer_shortcuts() {
         let mut help = KeybindingsHelp;
-        let mut terminal = Terminal::new(TestBackend::new(80, 26)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(80, 29)).unwrap();
 
         terminal
             .draw(|frame| help.render(frame, frame.area(), &Theme::default()))
@@ -169,15 +175,24 @@ mod tests {
             .collect::<Vec<_>>();
         for expected in [
             "ctrl/cmd+v",
+            "ctrl+t",
+            "fork session · when available",
             "ctrl+r",
             "ctrl+z",
             "ctrl+c ctrl+c",
             "clear input · when composer is focused and nonempty",
             "split closes pane · else exit",
             "shift+enter/ctrl+j",
+            "ctrl+a/e",
+            "move to line start · end",
+            "ctrl+b/f",
+            "move to previous · next character",
+            "alt/option+b/f",
+            "move to previous · next word",
             "alt/option+backspace",
             "delete previous word",
-            "prompt history at edge",
+            "ctrl+p/n",
+            "history for empty/recalled prompts",
             "focus queue · when present",
             "open actions · empty prompt only",
             "insert workspace file",
