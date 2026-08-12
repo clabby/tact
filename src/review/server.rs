@@ -461,6 +461,7 @@ impl ReviewServer {
         token: String,
         assets: super::ReviewAssets,
     ) -> Result<Self, std::io::Error> {
+        crate::install_tls_provider();
         let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
         let address = listener.local_addr()?;
         let (outcome_tx, outcome) = oneshot::channel();
