@@ -10,6 +10,7 @@ use crate::{
 use nanocodex::{Model, agent::session::SessionSnapshot};
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::HashSet,
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -80,6 +81,14 @@ pub(crate) enum SessionError {
         "session {session_id} uses resume-state format {found}; expected {RESUME_STATE_FORMAT_VERSION}"
     )]
     IncompatibleCheckpoint { session_id: String, found: u32 },
+    #[error("session lineage contains a cycle at {session_id}")]
+    LineageCycle { session_id: String },
+    #[error("session lineage references missing ancestor {session_id}")]
+    MissingAncestor { session_id: String },
+    #[error("stored transcript for {session_id} has no matching session start")]
+    InvalidLineageStart { session_id: String },
+    #[error("session {session_id} does not contain lineage boundary {sequence}")]
+    InvalidLineageBoundary { session_id: String, sequence: u64 },
     #[error("the session storage task stopped unexpectedly: {0}")]
     StorageTask(#[source] tokio::task::JoinError),
 }
@@ -207,7 +216,87 @@ pub(crate) fn load_transcript(
     let Some(storage) = SessionStorage::open_read_only(config_path)? else {
         return Ok(Vec::new());
     };
-    storage.load_records(session_id).map_err(Into::into)
+    let mut records = Vec::new();
+    load_lineage(
+        &storage,
+        session_id,
+        None,
+        &mut HashSet::new(),
+        &mut records,
+    )?;
+    Ok(records)
+}
+
+fn load_lineage(
+    storage: &SessionStorage,
+    session_id: &str,
+    through_sequence: Option<u64>,
+    loading: &mut HashSet<String>,
+    records: &mut Vec<Arc<TranscriptRecord>>,
+) -> Result<(), SessionError> {
+    if through_sequence == Some(0) {
+        return Ok(());
+    }
+    if !loading.insert(session_id.to_owned()) {
+        return Err(SessionError::LineageCycle {
+            session_id: session_id.to_owned(),
+        });
+    }
+    let (local, boundary_found, session_found) = match through_sequence {
+        Some(sequence) => {
+            let prefix = storage.load_records_through(session_id, sequence)?;
+            (prefix.records, prefix.boundary_found, prefix.session_found)
+        }
+        None => (storage.load_records(session_id)?, true, true),
+    };
+    if local.is_empty() {
+        loading.remove(session_id);
+        if through_sequence.is_some() && !session_found {
+            return Err(SessionError::MissingAncestor {
+                session_id: session_id.to_owned(),
+            });
+        }
+        if let Some(sequence) = through_sequence
+            && !boundary_found
+        {
+            return Err(SessionError::InvalidLineageBoundary {
+                session_id: session_id.to_owned(),
+                sequence,
+            });
+        }
+        return Ok(());
+    }
+    if let Some(sequence) = through_sequence
+        && !boundary_found
+    {
+        loading.remove(session_id);
+        return Err(SessionError::InvalidLineageBoundary {
+            session_id: session_id.to_owned(),
+            sequence,
+        });
+    }
+    let started = local
+        .iter()
+        .find(|record| record.source() == "tact" && record.kind() == "session.started")
+        .and_then(|record| record.decode_payload::<SessionStarted>().ok());
+    if through_sequence.is_some()
+        && !started
+            .as_ref()
+            .is_some_and(|started| started.session_id == session_id)
+    {
+        return Err(SessionError::InvalidLineageStart {
+            session_id: session_id.to_owned(),
+        });
+    }
+    if let Some(started) = started
+        && let (Some(parent), Some(parent_sequence)) =
+            (started.parent_session_id, started.parent_sequence)
+    {
+        load_lineage(storage, &parent, Some(parent_sequence), loading, records)?;
+    }
+    records.extend(local);
+    loading.remove(session_id);
+    Ok(())
 }
 
 pub(crate) async fn load_transcript_async(
@@ -222,6 +311,7 @@ pub(crate) async fn load_transcript_async(
 pub(crate) fn reasoning_mode(records: &[Arc<TranscriptRecord>]) -> ReasoningMode {
     records
         .iter()
+        .rev()
         .find(|record| record.source() == "tact" && record.kind() == "session.started")
         .and_then(|record| record.decode_payload::<SessionStarted>().ok())
         .map_or(ReasoningMode::Standard, |started| started.reasoning_mode)
@@ -230,10 +320,37 @@ pub(crate) fn reasoning_mode(records: &[Arc<TranscriptRecord>]) -> ReasoningMode
 pub(crate) fn model(records: &[Arc<TranscriptRecord>]) -> Model {
     records
         .iter()
+        .rev()
         .find(|record| record.source() == "tact" && record.kind() == "session.started")
         .and_then(|record| record.decode_payload::<SessionStarted>().ok())
         .and_then(|started| started.model.parse().ok())
         .unwrap_or(Model::Sol)
+}
+
+pub(crate) fn next_sequence(records: &[Arc<TranscriptRecord>]) -> u64 {
+    let current_session_id = records.iter().rev().find_map(|record| {
+        (record.source() == "tact" && record.kind() == "session.started")
+            .then(|| record.decode_payload::<SessionStarted>().ok())
+            .flatten()
+            .map(|started| started.session_id)
+    });
+    let Some(current_session_id) = current_session_id else {
+        return 1;
+    };
+    let mut segment = None::<String>;
+    let mut maximum = 0;
+    for record in records {
+        if record.source() == "tact" && record.kind() == "session.started" {
+            segment = record
+                .decode_payload::<SessionStarted>()
+                .ok()
+                .map(|started| started.session_id);
+        }
+        if segment.as_deref() == Some(&current_session_id) {
+            maximum = maximum.max(record.sequence());
+        }
+    }
+    maximum.saturating_add(1).max(1)
 }
 
 pub(crate) fn format_age(started_at_unix_ms: u64) -> String {
@@ -290,6 +407,46 @@ mod tests {
         .unwrap()
     }
 
+    fn started(
+        sequence: u64,
+        session_id: &str,
+        parent_session_id: Option<&str>,
+        parent_sequence: Option<u64>,
+    ) -> Arc<TranscriptRecord> {
+        Arc::new(
+            TranscriptRecord::from_local(
+                sequence,
+                sequence,
+                LocalEvent::SessionStarted(SessionStarted {
+                    session_id: session_id.to_owned(),
+                    parent_session_id: parent_session_id.map(str::to_owned),
+                    parent_sequence,
+                    model: Model::Luna.to_string(),
+                    effort: ReasoningEffort::Medium,
+                    reasoning_mode: ReasoningMode::Standard,
+                    fast_mode: false,
+                    workspace: "/work".into(),
+                    application_version: "test".to_owned(),
+                }),
+            )
+            .unwrap(),
+        )
+    }
+
+    fn prompt(sequence: u64, text: &str) -> Arc<TranscriptRecord> {
+        Arc::new(
+            TranscriptRecord::from_local(
+                sequence,
+                sequence,
+                LocalEvent::UserSubmitted {
+                    id: TurnId::new(sequence),
+                    text: text.to_owned(),
+                },
+            )
+            .unwrap(),
+        )
+    }
+
     #[test]
     fn loading_a_missing_session_does_not_create_storage() {
         let directory = tempdir().unwrap();
@@ -307,6 +464,7 @@ mod tests {
             LocalEvent::SessionStarted(SessionStarted {
                 session_id: "session".to_owned(),
                 parent_session_id: None,
+                parent_sequence: None,
                 model: Model::Luna.to_string(),
                 effort: ReasoningEffort::Medium,
                 reasoning_mode: ReasoningMode::Standard,
@@ -333,6 +491,7 @@ mod tests {
                     LocalEvent::SessionStarted(SessionStarted {
                         session_id: "session".to_owned(),
                         parent_session_id: None,
+                        parent_sequence: None,
                         model: "model".to_owned(),
                         effort: ReasoningEffort::Medium,
                         reasoning_mode: ReasoningMode::Standard,
@@ -367,6 +526,157 @@ mod tests {
         assert_eq!(loaded.len(), 2);
         assert_eq!(loaded[0].kind(), "session.started");
         assert_eq!(loaded[1].kind(), "user.submitted");
+    }
+
+    #[test]
+    fn fork_resume_loads_its_parent_only_through_the_fork_boundary() {
+        let directory = tempdir().unwrap();
+        let config = directory.path().join("config.toml");
+        let mut storage = SessionStorage::open(&config).unwrap();
+        storage
+            .append_records(
+                "parent",
+                &[
+                    started(1, "parent", None, None),
+                    prompt(2, "before the fork"),
+                    prompt(3, "later in the parent"),
+                ],
+            )
+            .unwrap();
+        storage
+            .append_records(
+                "fork",
+                &[
+                    started(1, "fork", Some("parent"), Some(2)),
+                    prompt(2, "inside the fork"),
+                    prompt(3, "later in the fork"),
+                ],
+            )
+            .unwrap();
+        storage
+            .append_records(
+                "grandchild",
+                &[
+                    started(1, "grandchild", Some("fork"), Some(2)),
+                    prompt(2, "inside the grandchild"),
+                ],
+            )
+            .unwrap();
+
+        let loaded = load_transcript(&config, "grandchild").unwrap();
+        let prompts = loaded
+            .iter()
+            .filter(|record| record.kind() == "user.submitted")
+            .map(|record| record.payload_json().to_owned())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            prompts,
+            [
+                r#"{"id":2,"text":"before the fork"}"#,
+                r#"{"id":2,"text":"inside the fork"}"#,
+                r#"{"id":2,"text":"inside the grandchild"}"#,
+            ]
+        );
+        assert_eq!(
+            loaded
+                .iter()
+                .filter(|record| record.kind() == "session.started")
+                .count(),
+            3
+        );
+    }
+
+    #[test]
+    fn resumed_session_sequences_continue_after_every_existing_segment() {
+        let records = [
+            started(1, "parent", None, None),
+            prompt(8, "parent prompt"),
+            started(1, "fork", None, None),
+            prompt(2, "first fork segment"),
+            started(3, "fork", None, None),
+            prompt(4, "second fork segment"),
+        ];
+
+        assert_eq!(super::next_sequence(&records), 5);
+    }
+
+    #[test]
+    fn fork_resume_rejects_a_missing_nonempty_ancestor() {
+        let directory = tempdir().unwrap();
+        let config = directory.path().join("config.toml");
+        let started = started(1, "fork", Some("missing"), Some(1));
+        SessionStorage::open(&config)
+            .unwrap()
+            .append_records("fork", &[started])
+            .unwrap();
+
+        let error = load_transcript(&config, "fork").unwrap_err();
+
+        assert!(matches!(
+            error,
+            super::SessionError::MissingAncestor { session_id } if session_id == "missing"
+        ));
+    }
+
+    #[test]
+    fn fork_resume_rejects_a_lineage_cycle() {
+        let directory = tempdir().unwrap();
+        let config = directory.path().join("config.toml");
+        let mut storage = SessionStorage::open(&config).unwrap();
+        storage
+            .append_records("one", &[started(1, "one", Some("two"), Some(1))])
+            .unwrap();
+        storage
+            .append_records("two", &[started(1, "two", Some("one"), Some(1))])
+            .unwrap();
+
+        let error = load_transcript(&config, "one").unwrap_err();
+
+        assert!(matches!(
+            error,
+            super::SessionError::LineageCycle { session_id } if session_id == "one"
+        ));
+    }
+
+    #[test]
+    fn fork_resume_stops_decoding_at_the_parent_boundary() {
+        let directory = tempdir().unwrap();
+        let config = directory.path().join("config.toml");
+        let mut storage = SessionStorage::open(&config).unwrap();
+        storage
+            .append_records(
+                "parent",
+                &[started(1, "parent", None, None), prompt(2, "inherited")],
+            )
+            .unwrap();
+        storage.append_raw_record("parent", b"not-json").unwrap();
+        storage
+            .append_records("fork", &[started(1, "fork", Some("parent"), Some(2))])
+            .unwrap();
+
+        let loaded = load_transcript(&config, "fork").unwrap();
+
+        assert_eq!(loaded.len(), 3);
+        assert_eq!(loaded[1].payload_json(), r#"{"id":2,"text":"inherited"}"#);
+    }
+
+    #[test]
+    fn fork_resume_rejects_a_boundary_that_is_not_persisted() {
+        let directory = tempdir().unwrap();
+        let config = directory.path().join("config.toml");
+        let mut storage = SessionStorage::open(&config).unwrap();
+        storage
+            .append_records(
+                "parent",
+                &[started(1, "parent", None, None), prompt(3, "after gap")],
+            )
+            .unwrap();
+        storage
+            .append_records("fork", &[started(1, "fork", Some("parent"), Some(2))])
+            .unwrap();
+
+        assert!(load_transcript(&config, "fork").is_err());
     }
 
     #[test]
@@ -416,6 +726,7 @@ mod tests {
         journal.defer_start(SessionStarted {
             session_id: "session".to_owned(),
             parent_session_id: None,
+            parent_sequence: None,
             model: nanocodex::oai::MODEL.to_owned(),
             effort: ReasoningEffort::Medium,
             reasoning_mode: ReasoningMode::Standard,
@@ -452,6 +763,7 @@ mod tests {
         journal.defer_start(SessionStarted {
             session_id: "session".to_owned(),
             parent_session_id: None,
+            parent_sequence: None,
             model: nanocodex::oai::MODEL.to_owned(),
             effort: ReasoningEffort::Medium,
             reasoning_mode: ReasoningMode::Standard,

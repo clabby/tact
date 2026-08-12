@@ -33,6 +33,8 @@ pub(crate) struct SessionStarted {
     pub(crate) session_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) parent_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) parent_sequence: Option<u64>,
     pub(crate) model: String,
     pub(crate) effort: ReasoningEffort,
     pub(crate) reasoning_mode: ReasoningMode,
@@ -245,6 +247,10 @@ impl TranscriptRecord {
 
     pub(crate) const fn recorded_at_unix_ms(&self) -> u64 {
         self.recorded_at_unix_ms
+    }
+
+    pub(crate) const fn sequence(&self) -> u64 {
+        self.sequence
     }
 
     pub(crate) fn kind(&self) -> &str {

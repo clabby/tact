@@ -264,6 +264,10 @@ impl Transcript {
         snapshot
     }
 
+    pub(crate) const fn is_active(&self) -> bool {
+        self.model.is_active()
+    }
+
     pub(crate) const fn set_effort(&mut self, effort: ReasoningEffort) {
         self.effort = effort;
     }
@@ -1610,6 +1614,12 @@ fn render_entry(
         EntryKind::DirectedMessage(thread) => {
             layout_without_links(message::render(thread, width, theme, expanded))
         }
+        EntryKind::ForkedFrom { session_id } => {
+            layout_without_links(vec![Line::from(Span::styled(
+                format!("◇ Forked from @@{session_id}"),
+                Style::default().fg(theme.muted()),
+            ))])
+        }
         EntryKind::EffortChanged { to } => layout_without_links(vec![Line::from(vec![
             Span::styled("◇ Effort changed to ", Style::default().fg(theme.muted())),
             Span::styled(
@@ -1820,17 +1830,20 @@ mod tests {
         Transcript, TranscriptEvent, unix_milliseconds,
     };
     use crate::{
-        app::config::ReasoningEffort,
+        app::config::{ReasoningEffort, ReasoningMode},
         core::extensions::subagents::{AgentMessageUpdate, MessageSender},
         tui::{
             theme::Theme,
-            transcript::{EntryKind, LocalEvent, TranscriptRecord, TurnId},
+            transcript::{EntryKind, LocalEvent, SessionStarted, TranscriptRecord, TurnId},
         },
     };
     use crossterm::event::{
         Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     };
-    use nanocodex::agent::events::{AgentEvent, AgentEventKind};
+    use nanocodex::{
+        Model,
+        agent::events::{AgentEvent, AgentEventKind},
+    };
     use ratatui::{Terminal, backend::TestBackend, layout::Position, style::Color};
     use serde_json::{json, value::to_raw_value};
     use std::{sync::Arc, time::Duration};
@@ -1968,6 +1981,39 @@ mod tests {
                 .selection_span_nearest(Position::new(0, 0))
                 .is_some()
         );
+    }
+
+    #[test]
+    fn fork_start_renders_its_parent_session_boundary() {
+        let mut transcript = Transcript::new();
+        transcript.update(TranscriptEvent::Record(Arc::new(
+            TranscriptRecord::from_local(
+                1,
+                1,
+                LocalEvent::SessionStarted(SessionStarted {
+                    session_id: "fork".to_owned(),
+                    parent_session_id: Some("parent".to_owned()),
+                    parent_sequence: Some(0),
+                    model: Model::Luna.to_string(),
+                    effort: ReasoningEffort::Medium,
+                    reasoning_mode: ReasoningMode::Standard,
+                    fast_mode: false,
+                    workspace: "/work".into(),
+                    application_version: "test".to_owned(),
+                }),
+            )
+            .unwrap(),
+        )));
+
+        let backend = render(&mut transcript, 40, 3);
+        let output = backend
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(output.contains("Forked from @@parent"));
     }
 
     #[test]

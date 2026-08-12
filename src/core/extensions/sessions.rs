@@ -431,6 +431,7 @@ mod tests {
                     LocalEvent::SessionStarted(SessionStarted {
                         session_id: "referenced".to_owned(),
                         parent_session_id: None,
+                        parent_sequence: None,
                         model: "model".to_owned(),
                         effort: ReasoningEffort::Medium,
                         reasoning_mode: ReasoningMode::Standard,

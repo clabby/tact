@@ -53,7 +53,10 @@ pub(crate) enum WorkerCommand {
         enabled: bool,
     },
     CancelAll(PaneId),
-    OpenFork(PaneId),
+    OpenFork {
+        pane: PaneId,
+        parent_sequence: u64,
+    },
     ClosePane(PaneId),
 }
 
@@ -79,6 +82,7 @@ pub(crate) enum WorkerEvent {
         id: TurnId,
         error: Option<String>,
         snapshot: Option<Box<SessionSnapshot>>,
+        terminal_expected: bool,
     },
     SteerAdmitted {
         pane: PaneId,
@@ -103,6 +107,7 @@ pub(crate) enum WorkerEvent {
     ForkOpened {
         pane: PaneId,
         parent: PaneId,
+        parent_sequence: u64,
         events: AgentEvents,
     },
     ForkFailed {
@@ -381,7 +386,10 @@ async fn run(
                         cancel_pane(pane, &controls, &mut cancelled, &updates).await;
                         continue;
                     }
-                    WorkerCommand::OpenFork(pane) => {
+                    WorkerCommand::OpenFork {
+                        pane,
+                        parent_sequence,
+                    } => {
                         if fork.is_some() {
                             drop(updates.send(WorkerEvent::ForkFailed {
                                 pane,
@@ -407,6 +415,7 @@ async fn run(
                                 drop(updates.send(WorkerEvent::ForkOpened {
                                     pane,
                                     parent: *main_pane,
+                                    parent_sequence,
                                     events,
                                 }));
                             }
@@ -624,6 +633,7 @@ fn reject_turn(request: TurnRequest, error: String, updates: &mpsc::UnboundedSen
             id: request.id,
             error: Some(error),
             snapshot: None,
+            terminal_expected: false,
         })),
         TurnPurpose::Auxiliary(completion) => {
             drop(completion.send(Err(AuxiliaryError::Failed(error))));
@@ -752,6 +762,7 @@ fn finish_turn(
                 id: TurnId::new(0),
                 error: Some(format!("turn task stopped unexpectedly: {error}")),
                 snapshot: None,
+                terminal_expected: false,
             }));
             return;
         }
@@ -774,6 +785,7 @@ fn finish_turn(
                 id: key.id,
                 error,
                 snapshot,
+                terminal_expected: true,
             }));
         }
         TurnPurpose::Auxiliary(completion) => {

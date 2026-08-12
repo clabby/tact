@@ -78,7 +78,10 @@ pub(crate) enum AppEvent {
         index: usize,
         text: String,
     },
-    WorkerTurnFinished(PaneId),
+    WorkerTurnFinished {
+        pane: PaneId,
+        terminal_expected: bool,
+    },
     ShellFinished(PaneId),
     TurnsCancelled(PaneId),
     SteerAdmitted {
@@ -93,7 +96,9 @@ pub(crate) enum AppEvent {
         pane: PaneId,
         id: QueueId,
     },
-    ForkReady(PaneId),
+    ForkReady {
+        pane: PaneId,
+    },
     ForkFailed {
         pane: PaneId,
         error: String,
@@ -184,7 +189,7 @@ pub(crate) enum AppEvent {
 
 pub(crate) enum AppEffect {
     Pane { pane: PaneId, effect: RootEffect },
-    OpenFork(PaneId),
+    OpenFork { pane: PaneId, parent: PaneId },
     ClosePane(PaneId),
     SetTheme(ThemeMode),
     Shutdown,
@@ -286,9 +291,10 @@ impl AppNode {
             AppEvent::QueueEditorFinished { pane, index, text } => {
                 self.update_root(pane, RootEvent::RestoreQueued { index, text })
             }
-            AppEvent::WorkerTurnFinished(pane) => {
-                self.update_root(pane, RootEvent::WorkerTurnFinished)
-            }
+            AppEvent::WorkerTurnFinished {
+                pane,
+                terminal_expected,
+            } => self.update_root(pane, RootEvent::WorkerTurnFinished { terminal_expected }),
             AppEvent::ShellFinished(pane) => self.update_root(pane, RootEvent::ShellFinished),
             AppEvent::TurnsCancelled(pane) => self.update_root(pane, RootEvent::TurnsCancelled),
             AppEvent::SteerAdmitted { pane, id } => {
@@ -300,7 +306,7 @@ impl AppNode {
             AppEvent::SteerFailed { pane, id } => {
                 self.update_root(pane, RootEvent::SteerFailed { id })
             }
-            AppEvent::ForkReady(pane) => self.update_root(pane, RootEvent::ForkReady),
+            AppEvent::ForkReady { pane } => self.update_root(pane, RootEvent::ForkReady),
             AppEvent::ForkFailed { pane, error } => {
                 self.remove_pane(pane);
                 let Some(target) = self.main_pane() else {
@@ -617,7 +623,8 @@ impl AppNode {
             match effect {
                 RootEffect::Fork => {
                     if self.fork.is_none() && self.main.is_some() {
-                        effects.push(AppEffect::OpenFork(self.begin_fork()));
+                        let (pane, parent) = self.begin_fork();
+                        effects.push(AppEffect::OpenFork { pane, parent });
                     }
                 }
                 RootEffect::Shutdown => {
@@ -673,11 +680,11 @@ impl AppNode {
         }
     }
 
-    fn begin_fork(&mut self) -> PaneId {
+    fn begin_fork(&mut self) -> (PaneId, PaneId) {
         if let Some((_, main)) = &mut self.main {
             main.component_mut().set_fork_available(false);
         }
-        let (_, main) = self
+        let (parent, main) = self
             .main
             .as_ref()
             .expect("forking requires the primary pane");
@@ -687,7 +694,7 @@ impl AppNode {
         self.next_fork = self.next_fork.saturating_add(1);
         self.fork = Some((pane, Node::new(fork)));
         self.focus = pane;
-        pane
+        (pane, *parent)
     }
 
     fn remove_pane(&mut self, pane: PaneId) {
@@ -941,7 +948,10 @@ mod tests {
 
         assert!(matches!(
             update.effects.as_slice(),
-            [AppEffect::OpenFork(PaneId::Fork(1))]
+            [AppEffect::OpenFork {
+                pane: PaneId::Fork(1),
+                parent: PaneId::Main,
+            }]
         ));
         let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
         terminal.draw(|frame| app.render(frame)).unwrap();
@@ -997,7 +1007,9 @@ mod tests {
     fn fork_effort_changes_do_not_change_the_primary_composer() {
         let mut app = app();
         app.update(control('f'));
-        app.update(AppEvent::ForkReady(PaneId::Fork(1)));
+        app.update(AppEvent::ForkReady {
+            pane: PaneId::Fork(1),
+        });
         app.update(control('s'));
         app.update(AppEvent::Terminal(Event::Key(KeyEvent::new(
             KeyCode::Right,
@@ -1033,7 +1045,9 @@ mod tests {
     fn preferred_reasoning_mode_is_shared_without_changing_running_sessions() {
         let mut app = app();
         app.update(control('f'));
-        app.update(AppEvent::ForkReady(PaneId::Fork(1)));
+        app.update(AppEvent::ForkReady {
+            pane: PaneId::Fork(1),
+        });
 
         app.set_preferred_reasoning_mode(ReasoningMode::Pro);
 
@@ -1089,7 +1103,9 @@ mod tests {
     fn control_c_clears_the_focused_fork_composer_before_closing_it() {
         let mut app = app();
         app.update(control('f'));
-        app.update(AppEvent::ForkReady(PaneId::Fork(1)));
+        app.update(AppEvent::ForkReady {
+            pane: PaneId::Fork(1),
+        });
         app.update(AppEvent::Terminal(Event::Key(KeyEvent::new(
             KeyCode::Char('h'),
             KeyModifiers::NONE,
@@ -1181,7 +1197,9 @@ mod tests {
     fn promoted_fork_can_open_another_fork() {
         let mut app = app();
         app.update(control('f'));
-        app.update(AppEvent::ForkReady(PaneId::Fork(1)));
+        app.update(AppEvent::ForkReady {
+            pane: PaneId::Fork(1),
+        });
         let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
         terminal.draw(|frame| app.render(frame)).unwrap();
         app.update(AppEvent::Terminal(Event::Mouse(MouseEvent {
@@ -1197,7 +1215,10 @@ mod tests {
 
         assert!(matches!(
             fork.effects.as_slice(),
-            [AppEffect::OpenFork(PaneId::Fork(2))]
+            [AppEffect::OpenFork {
+                pane: PaneId::Fork(2),
+                parent: PaneId::Fork(1),
+            }]
         ));
         assert_eq!(app.main_pane(), Some(PaneId::Fork(1)));
         assert!(app.root(PaneId::Fork(2)).is_some());
@@ -1274,7 +1295,9 @@ mod tests {
         let mut app = app();
         app.set_memory_enabled(true);
         app.update(control('f'));
-        app.update(AppEvent::ForkReady(PaneId::Fork(1)));
+        app.update(AppEvent::ForkReady {
+            pane: PaneId::Fork(1),
+        });
 
         for pane in [PaneId::Main, PaneId::Fork(1)] {
             let update = open_memory(&mut app, pane);
@@ -1305,7 +1328,9 @@ mod tests {
     fn config_reload_updates_memory_action_availability_for_every_root() {
         let mut app = app();
         app.update(control('f'));
-        app.update(AppEvent::ForkReady(PaneId::Fork(1)));
+        app.update(AppEvent::ForkReady {
+            pane: PaneId::Fork(1),
+        });
 
         app.update(AppEvent::ConfigReloaded {
             pane: PaneId::Main,

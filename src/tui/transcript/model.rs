@@ -1,6 +1,6 @@
 use super::{
-    DirectedMessageEntry, EntryId, EntryKind, MessageDelivery, MessagePhase, ShellId, ToolEntry,
-    ToolState, TranscriptEntry, TranscriptRecord, TransientStatus,
+    DirectedMessageEntry, EntryId, EntryKind, MessageDelivery, MessagePhase, SessionStarted,
+    ShellId, ToolEntry, ToolState, TranscriptEntry, TranscriptRecord, TransientStatus,
 };
 use crate::{
     app::config::ReasoningEffort,
@@ -230,6 +230,11 @@ impl TranscriptModel {
 
     fn apply_local(&mut self, record: &TranscriptRecord) -> ModelChange {
         let changed = match record.kind() {
+            "session.started" => self.decode_local::<SessionStarted>(record).map(|payload| {
+                if let Some(session_id) = payload.parent_session_id {
+                    self.push(EntryKind::ForkedFrom { session_id });
+                }
+            }),
             "user.submitted" => self.decode_local::<UserSubmitted>(record).map(|payload| {
                 self.push(EntryKind::User { text: payload.text });
             }),
