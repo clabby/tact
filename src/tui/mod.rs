@@ -149,6 +149,7 @@ struct RestoredSession {
     projection: RestoredSessionProjection,
     reasoning_mode: ReasoningMode,
     model: Model,
+    next_sequence: u64,
 }
 
 enum EditorTarget {
@@ -205,6 +206,8 @@ struct PaneGeneration {
 struct PaneSession<'a> {
     id: &'a str,
     parent_id: Option<&'a str>,
+    parent_sequence: Option<u64>,
+    next_sequence: u64,
     previously_persisted: bool,
     skills_catalog_present: bool,
 }
@@ -234,19 +237,29 @@ impl PaneSettings {
 }
 
 impl<'a> PaneSession<'a> {
-    const fn new(id: &'a str, parent_id: Option<&'a str>, skills_catalog_present: bool) -> Self {
+    const fn new(
+        id: &'a str,
+        parent_id: Option<&'a str>,
+        parent_sequence: Option<u64>,
+        next_sequence: u64,
+        skills_catalog_present: bool,
+    ) -> Self {
         Self {
             id,
             parent_id,
+            parent_sequence,
+            next_sequence,
             previously_persisted: false,
             skills_catalog_present,
         }
     }
 
-    const fn persisted(id: &'a str, skills_catalog_present: bool) -> Self {
+    const fn persisted(id: &'a str, next_sequence: u64, skills_catalog_present: bool) -> Self {
         Self {
             id,
             parent_id: None,
+            parent_sequence: None,
+            next_sequence,
             previously_persisted: true,
             skills_catalog_present,
         }
@@ -441,7 +454,7 @@ pub(crate) async fn run(
         StartupMode::NewSession | StartupMode::ResumeSelector => None,
     };
     let resuming = resume_session_id.is_some();
-    let (configured, restored_projection, reasoning_mode, model) =
+    let (configured, restored_projection, reasoning_mode, model, next_sequence) =
         if let Some(session_id) = resume_session_id {
             let restored_config = config.clone();
             let config_path = restored_config.path().to_path_buf();
@@ -459,6 +472,7 @@ pub(crate) async fn run(
             tokio::task::spawn_blocking(move || -> Result<_> {
                 let reasoning_mode = session::reasoning_mode(&records);
                 let model = session::model(&records);
+                let next_sequence = session::next_sequence(&records);
                 let projection = RootNode::project_session(initial_effort, records);
                 let configured = ConfiguredAgent::from_config_with_session(
                     &restored_config,
@@ -468,7 +482,13 @@ pub(crate) async fn run(
                     Some(&session_id),
                     Some(snapshot),
                 )?;
-                Ok((configured, Some(projection), reasoning_mode, model))
+                Ok((
+                    configured,
+                    Some(projection),
+                    reasoning_mode,
+                    model,
+                    next_sequence,
+                ))
             })
             .await
             .map_err(RuntimeError::SessionTask)??
@@ -478,6 +498,7 @@ pub(crate) async fn run(
                 None,
                 preferred_reasoning_mode,
                 Model::Sol,
+                1,
             )
         };
     let mut terminal = TerminalSession::enter().map_err(RuntimeError::Terminal)?;
@@ -501,9 +522,9 @@ pub(crate) async fn run(
                 generation: 0,
             },
             if resuming {
-                PaneSession::persisted(&main_session_id, !skills.is_empty())
+                PaneSession::persisted(&main_session_id, next_sequence, !skills.is_empty())
             } else {
-                PaneSession::new(&main_session_id, None, !skills.is_empty())
+                PaneSession::new(&main_session_id, None, None, 1, !skills.is_empty())
             },
             &config,
             PaneSettings::new(initial_effort, reasoning_mode, initial_fast_mode, model),
@@ -617,7 +638,8 @@ pub(crate) async fn run(
                     memory_generations: &mut memory_generations,
                     subagent_shutdowns: &mut subagent_shutdowns,
                 },
-            )?;
+            )
+            .await?;
         };
     }
 
@@ -870,7 +892,13 @@ pub(crate) async fn run(
                             .journal_mut()?.append_local(LocalEvent::WorkerTurnAccepted { id })?;
                         schedule(app.update(AppEvent::Transcript { pane, record }), &mut scheduler);
                     }
-                    WorkerEvent::TurnFinished { pane, id, error, snapshot } => {
+                    WorkerEvent::TurnFinished {
+                        pane,
+                        id,
+                        error,
+                        snapshot,
+                        terminal_expected,
+                    } => {
                         let Some(runtime) = panes.get_mut(&pane) else {
                             continue;
                         };
@@ -892,7 +920,10 @@ pub(crate) async fn run(
                             None => runtime.journal_mut()?.append_local(event)?,
                         };
                         schedule(app.update(AppEvent::Transcript { pane, record }), &mut scheduler);
-                        apply_app_update!(app.update(AppEvent::WorkerTurnFinished(pane)));
+                        apply_app_update!(app.update(AppEvent::WorkerTurnFinished {
+                            pane,
+                            terminal_expected,
+                        }));
                     }
                     WorkerEvent::SteerAdmitted { pane, queue_id } => {
                         apply_app_update!(app.update(AppEvent::SteerAdmitted { pane, id: queue_id }));
@@ -937,45 +968,48 @@ pub(crate) async fn run(
                         }
                         schedule(app.update(AppEvent::TurnsCancelled(pane)), &mut scheduler);
                     }
-                    WorkerEvent::ForkOpened { pane, events } => {
+                    WorkerEvent::ForkOpened {
+                        pane,
+                        parent: main_pane,
+                        parent_sequence,
+                        events,
+                    } => {
                         let session_id = events.request_id().to_owned();
                         let parent_session_id = panes
-                            .get(&PaneId::Main)
+                            .get(&main_pane)
                             .map(|runtime| runtime.session_id.clone());
                         let effort = app
                             .root(pane)
                             .map(|root| root.composer().effort())
                             .unwrap_or_else(|| config.agent().thinking());
                         let fast_mode = panes
-                            .get(&PaneId::Main)
+                            .get(&main_pane)
                             .expect("main pane must exist")
                             .current_fast_mode;
                         let reasoning_mode = panes
-                            .get(&PaneId::Main)
+                            .get(&main_pane)
                             .expect("main pane must exist")
                             .reasoning_mode;
                         let model = panes
-                            .get(&PaneId::Main)
+                            .get(&main_pane)
                             .expect("main pane must exist")
                             .current_model;
                         let subagent_control = panes
-                            .get(&PaneId::Main)
+                            .get(&main_pane)
                             .expect("main pane must exist")
                             .subagent_control
                             .clone();
                         let instructions = Arc::clone(
                             &panes
-                                .get(&PaneId::Main)
+                                .get(&main_pane)
                                 .expect("main pane must exist")
                                 .instructions,
                         );
                         let skills_catalog_present = panes
-                            .get(&PaneId::Main)
+                            .get(&main_pane)
                             .expect("main pane must exist")
                             .skills_catalog_present;
-                        panes.insert(
-                            pane,
-                            open_pane(
+                        let mut runtime = open_pane(
                                 PaneGeneration {
                                     pane,
                                     generation: 0,
@@ -983,6 +1017,8 @@ pub(crate) async fn run(
                                 PaneSession::new(
                                     &session_id,
                                     parent_session_id.as_deref(),
+                                    Some(parent_sequence),
+                                    1,
                                     skills_catalog_present,
                                 ),
                                 &config,
@@ -990,11 +1026,20 @@ pub(crate) async fn run(
                                 instructions,
                                 subagent_control.clone(),
                                 &writer_sender,
-                            )?,
-                        );
+                            )?;
+                        let started = runtime
+                            .journal_mut()?
+                            .persist_start()
+                            .await?
+                            .expect("a new fork must have a deferred session start");
+                        panes.insert(pane, runtime);
                         writers_open = writers_open.saturating_add(1);
                         agent_events::forward(pane, 0, events, agent_event_sender.clone());
-                        apply_app_update!(app.update(AppEvent::ForkReady(pane)));
+                        apply_app_update!(app.update(AppEvent::Transcript {
+                            pane,
+                            record: started,
+                        }));
+                        apply_app_update!(app.update(AppEvent::ForkReady { pane }));
                     }
                     WorkerEvent::ForkFailed { pane, error } => {
                         apply_app_update!(app.update(AppEvent::ForkFailed { pane, error }));
@@ -1019,7 +1064,7 @@ pub(crate) async fn run(
                         }
                         runtime.current_effort = effort;
                         runtime.subagent_control.set_thinking(effort.into());
-                        if pane == PaneId::Main {
+                        if app.main_pane() == Some(pane) {
                             config.set_thinking(effort);
                         }
                         input = Some(EventStream::new());
@@ -1041,7 +1086,7 @@ pub(crate) async fn run(
                         }
                         runtime.current_fast_mode = enabled;
                         runtime.subagent_control.set_fast_mode(enabled);
-                        if pane == PaneId::Main {
+                        if app.main_pane() == Some(pane) {
                             config.set_fast_mode(enabled);
                         }
                         input = Some(EventStream::new());
@@ -1382,6 +1427,7 @@ pub(crate) async fn run(
                         projection,
                         reasoning_mode,
                         model,
+                        next_sequence,
                     }) => {
                         let ConfiguredAgent {
                             agent,
@@ -1411,7 +1457,11 @@ pub(crate) async fn run(
                             pane,
                             open_pane(
                                 PaneGeneration { pane, generation },
-                                PaneSession::persisted(&session_id, !skills.is_empty()),
+                                PaneSession::persisted(
+                                    &session_id,
+                                    next_sequence,
+                                    !skills.is_empty(),
+                                ),
                                 &config,
                                 PaneSettings::new(effort, reasoning_mode, fast_mode, model),
                                 instructions,
@@ -1492,8 +1542,9 @@ pub(crate) async fn run(
         }
     }
 
-    let session_id = panes
-        .get(&PaneId::Main)
+    let session_id = app
+        .main_pane()
+        .and_then(|pane| panes.get(&pane))
         .and_then(PaneRuntime::exit_session_id);
     drop(terminal);
     if let Some(error) = writer_error {
@@ -1548,7 +1599,7 @@ fn install_configured_agent(
         pane,
         open_pane(
             PaneGeneration { pane, generation },
-            PaneSession::new(&session_id, None, !skills.is_empty()),
+            PaneSession::new(&session_id, None, None, 1, !skills.is_empty()),
             config,
             settings,
             instructions,
@@ -1599,15 +1650,19 @@ fn open_pane(
     let PaneSession {
         id: session_id,
         parent_id: parent_session_id,
+        parent_sequence,
+        next_sequence,
         previously_persisted,
         skills_catalog_present,
     } = session;
-    let (mut journal, writer) = TranscriptJournal::open(config.path(), session_id)?;
+    let (mut journal, writer) =
+        TranscriptJournal::open_at(config.path(), session_id, next_sequence)?;
     let writer_path = journal.path().to_path_buf();
     let persisted_transcript = journal.persistence_flag();
     journal.defer_start(SessionStarted {
         session_id: session_id.to_owned(),
         parent_session_id: parent_session_id.map(str::to_owned),
+        parent_sequence,
         model: model.to_string(),
         effort,
         reasoning_mode,
@@ -1773,13 +1828,30 @@ struct EffectContext<'a> {
     subagent_shutdowns: &'a mut JoinSet<()>,
 }
 
-fn apply_update(update: ComponentUpdate<AppEffect>, mut context: EffectContext<'_>) -> Result<()> {
+async fn apply_update(
+    update: ComponentUpdate<AppEffect>,
+    mut context: EffectContext<'_>,
+) -> Result<()> {
     for effect in update.effects {
         match effect {
-            AppEffect::OpenFork(pane) => context
-                .commands
-                .send(WorkerCommand::OpenFork(pane))
-                .map_err(|_| RuntimeError::AgentWorkerStopped)?,
+            AppEffect::OpenFork { pane, parent } => {
+                let parent_sequence = {
+                    let journal = context
+                        .panes
+                        .get_mut(&parent)
+                        .expect("fork parent pane must have a runtime")
+                        .journal_mut()?;
+                    journal.flush().await?;
+                    journal.last_sequence()
+                };
+                context
+                    .commands
+                    .send(WorkerCommand::OpenFork {
+                        pane,
+                        parent_sequence,
+                    })
+                    .map_err(|_| RuntimeError::AgentWorkerStopped)?;
+            }
             AppEffect::ClosePane(pane) => {
                 if let Some(runtime) = context.panes.get(&pane) {
                     schedule_subagent_shutdown(runtime, context.subagent_shutdowns);
@@ -1939,8 +2011,9 @@ fn apply_pane_effect(
         } => {
             *context.input = None;
             let config = context.config.clone();
+            let is_main = context.app.main_pane() == Some(pane);
             *context.effort_task = Some(tokio::task::spawn_blocking(move || {
-                if pane == PaneId::Main {
+                if is_main {
                     config.persist_thinking(effort)?;
                 }
                 config.persist_reasoning_mode(reasoning_mode)?;
@@ -1990,7 +2063,7 @@ fn apply_pane_effect(
         }
         components::RootEffect::SetFastMode(enabled) => {
             *context.input = None;
-            let config = (pane == PaneId::Main).then(|| context.config.clone());
+            let config = (context.app.main_pane() == Some(pane)).then(|| context.config.clone());
             *context.fast_mode_task = Some(tokio::task::spawn_blocking(move || {
                 if let Some(config) = config {
                     config.persist_fast_mode(enabled)?;
@@ -2239,6 +2312,7 @@ fn apply_pane_effect(
                     tokio::task::spawn_blocking(move || -> Result<_> {
                     let reasoning_mode = session::reasoning_mode(&records);
                     let model = session::model(&records);
+                    let next_sequence = session::next_sequence(&records);
                     let projection = RootNode::project_session(effort, records);
                     let configured = ConfiguredAgent::from_config_with_session(
                         &config,
@@ -2253,6 +2327,7 @@ fn apply_pane_effect(
                         projection,
                         reasoning_mode,
                         model,
+                        next_sequence,
                     })
                     })
                     .await
@@ -2877,7 +2952,7 @@ mod tests {
                 pane: PaneId::Main,
                 generation: 0,
             },
-            PaneSession::new("main-session", None, false),
+            PaneSession::new("main-session", None, None, 1, false),
             &config,
             PaneSettings::new(
                 ReasoningEffort::Low,
@@ -2895,7 +2970,7 @@ mod tests {
                 pane: PaneId::Fork(1),
                 generation: 0,
             },
-            PaneSession::new("fork-session", Some("main-session"), false),
+            PaneSession::new("fork-session", Some("main-session"), Some(0), 1, false),
             &config,
             PaneSettings::new(
                 ReasoningEffort::Low,
@@ -2985,7 +3060,7 @@ mod tests {
                 pane: PaneId::Main,
                 generation: 0,
             },
-            PaneSession::new("old-session", None, false),
+            PaneSession::new("old-session", None, None, 1, false),
             &config,
             PaneSettings::new(
                 ReasoningEffort::Medium,
@@ -3012,7 +3087,7 @@ mod tests {
                 pane: PaneId::Main,
                 generation: 1,
             },
-            PaneSession::new("new-session", None, false),
+            PaneSession::new("new-session", None, None, 1, false),
             &config,
             PaneSettings::new(
                 ReasoningEffort::Medium,

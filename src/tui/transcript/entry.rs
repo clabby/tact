@@ -48,6 +48,7 @@ pub(crate) enum EntryKind {
     Reasoning { text: String },
     Tool(ToolEntry),
     DirectedMessage(DirectedMessageEntry),
+    ForkedFrom { session_id: String },
     EffortChanged { to: ReasoningEffort },
     FastModeChanged { enabled: bool },
     Interrupted { count: usize },

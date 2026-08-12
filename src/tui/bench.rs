@@ -410,6 +410,7 @@ fn write_session(config_path: &Path, session_id: &str, workspace: &Path, event_c
         LocalEvent::SessionStarted(SessionStarted {
             session_id: session_id.to_owned(),
             parent_session_id: None,
+            parent_sequence: None,
             model: nanocodex::oai::MODEL.to_owned(),
             effort: ReasoningEffort::Medium,
             reasoning_mode: ReasoningMode::Standard,
@@ -447,6 +448,7 @@ fn write_mixed_session_segment(config_path: &Path, session_id: &str, workspace: 
         LocalEvent::SessionStarted(SessionStarted {
             session_id: session_id.to_owned(),
             parent_session_id: None,
+            parent_sequence: None,
             model: nanocodex::oai::MODEL.to_owned(),
             effort: ReasoningEffort::Medium,
             reasoning_mode: ReasoningMode::Standard,

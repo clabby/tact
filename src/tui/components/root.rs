@@ -158,7 +158,9 @@ pub(crate) enum RootEvent {
         index: usize,
         text: String,
     },
-    WorkerTurnFinished,
+    WorkerTurnFinished {
+        terminal_expected: bool,
+    },
     ShellFinished,
     TurnsCancelled,
     ForkReady,
@@ -324,6 +326,8 @@ pub(crate) struct RootNode {
     composer_content_area: Rect,
     queue_area: Rect,
     in_flight_turns: usize,
+    unmatched_worker_turns: usize,
+    unmatched_agent_turns: usize,
     in_flight_shells: usize,
     blocking_task: Option<BlockingTask>,
     review_url: Option<String>,
@@ -358,6 +362,8 @@ impl RootNode {
             composer_content_area: Rect::default(),
             queue_area: Rect::default(),
             in_flight_turns: 0,
+            unmatched_worker_turns: 0,
+            unmatched_agent_turns: 0,
             in_flight_shells: 0,
             blocking_task: None,
             review_url: None,
@@ -928,7 +934,7 @@ impl RootNode {
             self.overlay = Some(Overlay::Actions(Node::new(ActionsMenu::new(
                 ActionAvailability {
                     new_session: new_session_enabled,
-                    fork: self.fork_available,
+                    fork: self.can_fork(),
                     fast_mode: self.composer.component().fast_mode(),
                     memory: self.memory_enabled,
                     model: self.thread == ThreadState::New,
@@ -1598,7 +1604,7 @@ impl RootNode {
     }
 
     fn open_fork(&mut self) -> ComponentUpdate<RootEffect> {
-        if !self.fork_available {
+        if !self.can_fork() {
             return ComponentUpdate::none();
         }
         self.overlay = None;
@@ -1606,6 +1612,10 @@ impl RootNode {
             effects: vec![RootEffect::Fork],
             render: RenderRequest::Immediate,
         }
+    }
+
+    fn can_fork(&self) -> bool {
+        self.fork_available && self.in_flight_turns == 0 && !self.transcript.component().is_active()
     }
 
     fn open_new_session(&mut self) -> ComponentUpdate<RootEffect> {
@@ -2067,6 +2077,27 @@ impl RootNode {
         self.submit_next_queued()
     }
 
+    fn worker_turn_finished(&mut self, terminal_expected: bool) -> ComponentUpdate<RootEffect> {
+        if !terminal_expected {
+            return self.turn_finished();
+        }
+        if self.unmatched_agent_turns > 0 {
+            self.unmatched_agent_turns -= 1;
+            return self.turn_finished();
+        }
+        self.unmatched_worker_turns = self.unmatched_worker_turns.saturating_add(1);
+        ComponentUpdate::none()
+    }
+
+    fn agent_turn_finished(&mut self) -> ComponentUpdate<RootEffect> {
+        if self.unmatched_worker_turns > 0 {
+            self.unmatched_worker_turns -= 1;
+            return self.turn_finished();
+        }
+        self.unmatched_agent_turns = self.unmatched_agent_turns.saturating_add(1);
+        ComponentUpdate::none()
+    }
+
     fn turns_cancelled(&mut self) -> ComponentUpdate<RootEffect> {
         self.queue.component_mut().cancel_steers();
         ComponentUpdate::render(RenderRequest::Immediate)
@@ -2308,6 +2339,7 @@ impl Component for RootNode {
                     self.recent_prompts.push(prompt);
                 }
                 let steer_applied = record.kind() == "run.steered";
+                let turn_finished = matches!(record.kind(), "run.completed" | "run.failed");
                 let turn_timer = turn_timer_event(&record);
                 let observation = self.context_diagnostics.observe(&record);
                 if let Some(Overlay::ContextDiagnostics(panel)) = &mut self.overlay {
@@ -2333,6 +2365,11 @@ impl Component for RootNode {
                     let applied = self.steer_applied();
                     update.effects.extend(applied.effects);
                     update.render = update.render.max(applied.render);
+                }
+                if turn_finished {
+                    let finished = self.agent_turn_finished();
+                    update.effects.extend(finished.effects);
+                    update.render = update.render.max(finished.render);
                 }
                 update
             }
@@ -2480,7 +2517,9 @@ impl Component for RootNode {
                 )
             }
             RootEvent::RestoreQueued { index, text } => self.restore_queued(index, text),
-            RootEvent::WorkerTurnFinished => self.turn_finished(),
+            RootEvent::WorkerTurnFinished { terminal_expected } => {
+                self.worker_turn_finished(terminal_expected)
+            }
             RootEvent::ShellFinished => {
                 self.in_flight_shells = self.in_flight_shells.saturating_sub(1);
                 ComponentUpdate::none()
@@ -4317,7 +4356,9 @@ mod tests {
         root.queue.component_mut().push("first".to_owned());
         root.queue.component_mut().push("second".to_owned());
 
-        let update = root.update(super::RootEvent::WorkerTurnFinished);
+        let update = root.update(super::RootEvent::WorkerTurnFinished {
+            terminal_expected: false,
+        });
         assert_eq!(
             update.effects,
             [RootEffect::Submit("first\n\nsecond".to_owned().into())]
@@ -4363,12 +4404,16 @@ mod tests {
             panic!("enter should issue a steer");
         };
         let id = *id;
-        let finished = root.update(super::RootEvent::WorkerTurnFinished);
+        let finished = root.update(super::RootEvent::WorkerTurnFinished {
+            terminal_expected: false,
+        });
         assert!(finished.effects.is_empty());
         assert_eq!(root.queue.component().len(), 2);
 
         root.update(super::RootEvent::SteerPromoted(id));
-        let promoted_finished = root.update(super::RootEvent::WorkerTurnFinished);
+        let promoted_finished = root.update(super::RootEvent::WorkerTurnFinished {
+            terminal_expected: false,
+        });
         assert_eq!(
             promoted_finished.effects,
             [RootEffect::Submit("later".to_owned().into())]
@@ -4390,7 +4435,9 @@ mod tests {
         assert_eq!(interrupt.effects, [RootEffect::CancelTurns]);
 
         root.update(super::RootEvent::TurnsCancelled);
-        let finished = root.update(super::RootEvent::WorkerTurnFinished);
+        let finished = root.update(super::RootEvent::WorkerTurnFinished {
+            terminal_expected: false,
+        });
         assert_eq!(
             finished.effects,
             [RootEffect::Submit(
@@ -4415,7 +4462,9 @@ mod tests {
 
         root.update(super::RootEvent::TurnsCancelled);
         let applied = root.update(run_steered());
-        let finished = root.update(super::RootEvent::WorkerTurnFinished);
+        let finished = root.update(super::RootEvent::WorkerTurnFinished {
+            terminal_expected: false,
+        });
 
         assert_eq!(
             applied.effects,
@@ -5495,7 +5544,9 @@ mod tests {
             root.update(key(KeyCode::Char(character), KeyModifiers::NONE));
         }
         root.update(key(KeyCode::Enter, KeyModifiers::NONE));
-        root.update(super::RootEvent::WorkerTurnFinished);
+        root.update(super::RootEvent::WorkerTurnFinished {
+            terminal_expected: false,
+        });
         root.update(key(KeyCode::Char('/'), KeyModifiers::NONE));
         for character in "clear".chars() {
             root.update(key(KeyCode::Char(character), KeyModifiers::NONE));
@@ -5747,6 +5798,108 @@ mod tests {
         let update = root.update(key(KeyCode::Char('f'), KeyModifiers::CONTROL));
 
         assert_eq!(update.effects, [RootEffect::Fork]);
+    }
+
+    #[test]
+    fn fork_waits_for_worker_and_agent_turn_state_to_agree() {
+        let mut worker_before_started = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        worker_before_started.in_flight_turns = 1;
+        worker_before_started.update(RootEvent::WorkerTurnFinished {
+            terminal_expected: true,
+        });
+        assert!(
+            worker_before_started
+                .update(key(KeyCode::Char('f'), KeyModifiers::CONTROL))
+                .effects
+                .is_empty()
+        );
+        worker_before_started.update(RootEvent::Transcript(agent_record(
+            1,
+            AgentEventKind::RunStarted,
+            json!({}),
+        )));
+        worker_before_started.update(RootEvent::Transcript(agent_record(
+            2,
+            AgentEventKind::RunCompleted,
+            json!({}),
+        )));
+        assert_eq!(
+            worker_before_started
+                .update(key(KeyCode::Char('f'), KeyModifiers::CONTROL))
+                .effects,
+            [RootEffect::Fork]
+        );
+
+        let mut before_started = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        before_started.in_flight_turns = 1;
+
+        assert!(
+            before_started
+                .update(key(KeyCode::Char('f'), KeyModifiers::CONTROL))
+                .effects
+                .is_empty()
+        );
+
+        before_started.update(RootEvent::Transcript(agent_record(
+            1,
+            AgentEventKind::RunStarted,
+            json!({}),
+        )));
+        assert!(
+            before_started
+                .update(key(KeyCode::Char('f'), KeyModifiers::CONTROL))
+                .effects
+                .is_empty()
+        );
+        before_started.update(RootEvent::Transcript(agent_record(
+            2,
+            AgentEventKind::RunCompleted,
+            json!({}),
+        )));
+        assert!(
+            before_started
+                .update(key(KeyCode::Char('f'), KeyModifiers::CONTROL))
+                .effects
+                .is_empty()
+        );
+        before_started.update(RootEvent::WorkerTurnFinished {
+            terminal_expected: true,
+        });
+        assert_eq!(
+            before_started
+                .update(key(KeyCode::Char('f'), KeyModifiers::CONTROL))
+                .effects,
+            [RootEffect::Fork]
+        );
+
+        let mut before_terminal = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        before_terminal.in_flight_turns = 1;
+        before_terminal.update(RootEvent::Transcript(agent_record(
+            1,
+            AgentEventKind::RunStarted,
+            json!({}),
+        )));
+        before_terminal.update(RootEvent::WorkerTurnFinished {
+            terminal_expected: true,
+        });
+
+        assert!(
+            before_terminal
+                .update(key(KeyCode::Char('f'), KeyModifiers::CONTROL))
+                .effects
+                .is_empty()
+        );
+        before_terminal.update(RootEvent::Transcript(agent_record(
+            2,
+            AgentEventKind::RunCompleted,
+            json!({}),
+        )));
+        assert_eq!(
+            before_terminal
+                .update(key(KeyCode::Char('f'), KeyModifiers::CONTROL))
+                .effects,
+            [RootEffect::Fork]
+        );
     }
 
     #[test]

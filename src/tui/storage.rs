@@ -108,6 +108,12 @@ pub(crate) struct SessionStorage {
     active_turns: HashMap<String, u64>,
 }
 
+pub(crate) struct RecordPrefix {
+    pub(crate) records: Vec<Arc<TranscriptRecord>>,
+    pub(crate) boundary_found: bool,
+    pub(crate) session_found: bool,
+}
+
 impl SessionStorage {
     pub(crate) fn open(config_path: &Path) -> Result<Self, StorageError> {
         let path = database_path(config_path);
@@ -228,6 +234,29 @@ impl SessionStorage {
         &self,
         session_id: &str,
     ) -> Result<Vec<Arc<TranscriptRecord>>, StorageError> {
+        Ok(self.load_record_prefix(session_id, None)?.records)
+    }
+
+    pub(crate) fn load_records_through(
+        &self,
+        session_id: &str,
+        through_sequence: u64,
+    ) -> Result<RecordPrefix, StorageError> {
+        if through_sequence == 0 {
+            return Ok(RecordPrefix {
+                records: Vec::new(),
+                boundary_found: true,
+                session_found: false,
+            });
+        }
+        self.load_record_prefix(session_id, Some(through_sequence))
+    }
+
+    fn load_record_prefix(
+        &self,
+        session_id: &str,
+        through_sequence: Option<u64>,
+    ) -> Result<RecordPrefix, StorageError> {
         let mut statement = self
             .connection
             .prepare("SELECT record_json FROM events WHERE session_id = ?1 ORDER BY event_id")
@@ -236,7 +265,9 @@ impl SessionStorage {
             .query([session_id])
             .map_err(|source| query(&self.path, source))?;
         let mut records = Vec::new();
+        let mut session_found = false;
         while let Some(row) = rows.next().map_err(|source| query(&self.path, source))? {
+            session_found = true;
             let encoded = row
                 .get_ref(0)
                 .map_err(|source| query(&self.path, source))?
@@ -251,9 +282,25 @@ impl SessionStorage {
                         ),
                     )
                 })?;
-            records.push(Arc::new(decode_record(encoded)?));
+            let record = Arc::new(decode_record(encoded)?);
+            if through_sequence.is_some_and(|end| record.sequence() > end) {
+                break;
+            }
+            let boundary_found = through_sequence == Some(record.sequence());
+            records.push(record);
+            if boundary_found {
+                return Ok(RecordPrefix {
+                    records,
+                    boundary_found: true,
+                    session_found,
+                });
+            }
         }
-        Ok(records)
+        Ok(RecordPrefix {
+            records,
+            boundary_found: through_sequence.is_none(),
+            session_found,
+        })
     }
 
     pub(crate) fn load_record_page(
@@ -904,6 +951,7 @@ mod tests {
                     LocalEvent::SessionStarted(SessionStarted {
                         session_id: session_id.to_owned(),
                         parent_session_id: None,
+                        parent_sequence: None,
                         model: "model".to_owned(),
                         effort: ReasoningEffort::Medium,
                         reasoning_mode: ReasoningMode::Standard,

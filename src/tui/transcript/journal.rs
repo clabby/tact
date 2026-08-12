@@ -13,14 +13,19 @@ use std::{
     },
     time::{SystemTime, UNIX_EPOCH},
 };
-use tokio::{sync::mpsc, task::JoinHandle};
+use tokio::{
+    sync::{mpsc, oneshot},
+    task::JoinHandle,
+};
 
 pub(crate) struct TranscriptJournal {
     path: PathBuf,
-    sender: mpsc::UnboundedSender<PendingWrite>,
+    sender: mpsc::UnboundedSender<JournalCommand>,
     persisted: Arc<AtomicBool>,
     pending_start: Option<SessionStarted>,
     next_sequence: u64,
+    last_sequence: u64,
+    empty: bool,
 }
 
 pub(crate) struct TranscriptWriter {
@@ -32,10 +37,27 @@ struct PendingWrite {
     resume_state: Option<Vec<u8>>,
 }
 
+enum JournalCommand {
+    Write(PendingWrite),
+    Flush(oneshot::Sender<()>),
+}
+
 impl TranscriptJournal {
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "used by focused persistence tests")
+    )]
     pub(crate) fn open(
         config_path: &Path,
         session_id: &str,
+    ) -> Result<(Self, TranscriptWriter), TranscriptError> {
+        Self::open_at(config_path, session_id, 1)
+    }
+
+    pub(crate) fn open_at(
+        config_path: &Path,
+        session_id: &str,
+        next_sequence: u64,
     ) -> Result<(Self, TranscriptWriter), TranscriptError> {
         let path = database_path(config_path);
         let (sender, receiver) = mpsc::unbounded_channel();
@@ -52,7 +74,9 @@ impl TranscriptJournal {
                 sender,
                 persisted,
                 pending_start: None,
-                next_sequence: 1,
+                next_sequence,
+                last_sequence: next_sequence.saturating_sub(1),
+                empty: true,
             },
             TranscriptWriter { task },
         ))
@@ -71,7 +95,29 @@ impl TranscriptJournal {
     }
 
     pub(crate) fn is_empty(&self) -> bool {
-        self.next_sequence == 1
+        self.empty
+    }
+
+    pub(crate) const fn last_sequence(&self) -> u64 {
+        self.last_sequence
+    }
+
+    pub(crate) async fn flush(&self) -> Result<(), TranscriptError> {
+        let (completion, completed) = oneshot::channel();
+        self.sender
+            .send(JournalCommand::Flush(completion))
+            .map_err(|_| TranscriptError::WriterStopped(self.path.clone()))?;
+        completed
+            .await
+            .map_err(|_| TranscriptError::WriterStopped(self.path.clone()))
+    }
+
+    pub(crate) async fn persist_start(
+        &mut self,
+    ) -> Result<Option<Arc<TranscriptRecord>>, TranscriptError> {
+        let record = self.start_if_needed()?;
+        self.flush().await?;
+        Ok(record)
     }
 
     pub(crate) fn set_initial_effort(&mut self, effort: crate::app::config::ReasoningEffort) {
@@ -95,7 +141,7 @@ impl TranscriptJournal {
         &mut self,
         event: AgentEvent,
     ) -> Result<Arc<TranscriptRecord>, TranscriptError> {
-        self.start_if_needed()?;
+        drop(self.start_if_needed()?);
         let record = TranscriptRecord::from_agent(self.next_sequence, unix_milliseconds(), event);
         self.next_sequence = self.next_sequence.saturating_add(1);
         if record.kind() == "api.event" {
@@ -114,7 +160,7 @@ impl TranscriptJournal {
         &mut self,
         event: LocalEvent,
     ) -> Result<Arc<TranscriptRecord>, TranscriptError> {
-        self.start_if_needed()?;
+        drop(self.start_if_needed()?);
         self.append_local_record(event)
     }
 
@@ -123,17 +169,17 @@ impl TranscriptJournal {
         event: LocalEvent,
         resume_state: Vec<u8>,
     ) -> Result<Arc<TranscriptRecord>, TranscriptError> {
-        self.start_if_needed()?;
+        drop(self.start_if_needed()?);
         let record = self.local_record(event)?;
         self.send(record, Some(resume_state))
     }
 
-    fn start_if_needed(&mut self) -> Result<(), TranscriptError> {
+    fn start_if_needed(&mut self) -> Result<Option<Arc<TranscriptRecord>>, TranscriptError> {
         let Some(started) = self.pending_start.take() else {
-            return Ok(());
+            return Ok(None);
         };
-        self.append_local_record(LocalEvent::SessionStarted(started))?;
-        Ok(())
+        self.append_local_record(LocalEvent::SessionStarted(started))
+            .map(Some)
     }
 
     fn append_local_record(
@@ -145,6 +191,7 @@ impl TranscriptJournal {
     }
 
     fn local_record(&mut self, event: LocalEvent) -> Result<TranscriptRecord, TranscriptError> {
+        self.empty = false;
         let sequence = self.next_sequence;
         self.next_sequence = self.next_sequence.saturating_add(1);
         TranscriptRecord::from_local(sequence, unix_milliseconds(), event).map_err(|source| {
@@ -156,17 +203,18 @@ impl TranscriptJournal {
     }
 
     fn send(
-        &self,
+        &mut self,
         record: TranscriptRecord,
         resume_state: Option<Vec<u8>>,
     ) -> Result<Arc<TranscriptRecord>, TranscriptError> {
         let record = Arc::new(record);
         self.sender
-            .send(PendingWrite {
+            .send(JournalCommand::Write(PendingWrite {
                 record: Arc::clone(&record),
                 resume_state,
-            })
+            }))
             .map_err(|_| TranscriptError::WriterStopped(self.path.clone()))?;
+        self.last_sequence = record.sequence();
         Ok(record)
     }
 }
@@ -178,40 +226,62 @@ impl TranscriptWriter {
 }
 
 fn write_journal(
-    mut receiver: mpsc::UnboundedReceiver<PendingWrite>,
+    mut receiver: mpsc::UnboundedReceiver<JournalCommand>,
     config_path: &Path,
     session_id: &str,
     persisted: &AtomicBool,
 ) -> Result<(), TranscriptError> {
-    let Some(first) = receiver.blocking_recv() else {
-        return Ok(());
-    };
-    let mut storage = SessionStorage::open(config_path)?;
-    let mut batch = vec![first];
-    loop {
-        while let Ok(record) = receiver.try_recv() {
-            batch.push(record);
+    let mut storage = None;
+    let mut batch = Vec::new();
+    while let Some(command) = receiver.blocking_recv() {
+        let mut commands = vec![command];
+        while let Ok(command) = receiver.try_recv() {
+            commands.push(command);
         }
-        let records = batch
-            .iter()
-            .map(|pending| Arc::clone(&pending.record))
-            .collect::<Vec<_>>();
-        let resume_state = batch
-            .iter()
-            .rev()
-            .find_map(|pending| pending.resume_state.as_deref());
-        if let Some(resume_state) = resume_state {
-            storage.append_records_and_resume_state(session_id, &records, Some(resume_state))?;
-        } else {
-            storage.append_records(session_id, &records)?;
+        for command in commands {
+            match command {
+                JournalCommand::Write(record) => batch.push(record),
+                JournalCommand::Flush(completion) => {
+                    write_batch(&mut storage, &mut batch, config_path, session_id, persisted)?;
+                    let _ = completion.send(());
+                }
+            }
         }
-        persisted.store(true, Ordering::Release);
-        batch.clear();
-        let Some(record) = receiver.blocking_recv() else {
-            return Ok(());
-        };
-        batch.push(record);
+        write_batch(&mut storage, &mut batch, config_path, session_id, persisted)?;
     }
+    Ok(())
+}
+
+fn write_batch(
+    storage: &mut Option<SessionStorage>,
+    batch: &mut Vec<PendingWrite>,
+    config_path: &Path,
+    session_id: &str,
+    persisted: &AtomicBool,
+) -> Result<(), TranscriptError> {
+    if batch.is_empty() {
+        return Ok(());
+    }
+    let storage = match storage {
+        Some(storage) => storage,
+        None => storage.insert(SessionStorage::open(config_path)?),
+    };
+    let records = batch
+        .iter()
+        .map(|pending| Arc::clone(&pending.record))
+        .collect::<Vec<_>>();
+    let resume_state = batch
+        .iter()
+        .rev()
+        .find_map(|pending| pending.resume_state.as_deref());
+    if let Some(resume_state) = resume_state {
+        storage.append_records_and_resume_state(session_id, &records, Some(resume_state))?;
+    } else {
+        storage.append_records(session_id, &records)?;
+    }
+    persisted.store(true, Ordering::Release);
+    batch.clear();
+    Ok(())
 }
 
 fn unix_milliseconds() -> u64 {
@@ -241,6 +311,7 @@ mod tests {
         SessionStarted {
             session_id: session_id.to_owned(),
             parent_session_id: None,
+            parent_sequence: None,
             model: "model".to_owned(),
             effort: ReasoningEffort::Medium,
             reasoning_mode: ReasoningMode::Standard,
@@ -269,6 +340,89 @@ mod tests {
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].kind(), "session.started");
         assert_eq!(records[1].kind(), "user.submitted");
+    }
+
+    #[tokio::test]
+    async fn persist_start_makes_an_untouched_fork_available_to_descendants() {
+        let directory = tempdir().unwrap();
+        let config = directory.path().join("config.toml");
+        let (mut journal, writer) = TranscriptJournal::open(&config, "fork").unwrap();
+        let mut fork = started("fork");
+        fork.parent_session_id = Some("parent".to_owned());
+        fork.parent_sequence = Some(0);
+        journal.defer_start(fork);
+
+        let record = journal.persist_start().await.unwrap().unwrap();
+
+        assert_eq!(record.sequence(), 1);
+        assert_eq!(journal.last_sequence(), 1);
+        let records = SessionStorage::open(&config)
+            .unwrap()
+            .load_records("fork")
+            .unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].kind(), "session.started");
+        drop(journal);
+        writer.into_task().await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn untouched_nested_forks_restore_every_lineage_edge() {
+        let directory = tempdir().unwrap();
+        let config = directory.path().join("config.toml");
+        let (mut parent, parent_writer) = TranscriptJournal::open(&config, "parent").unwrap();
+        parent.defer_start(started("parent"));
+        parent
+            .append_local(LocalEvent::UserSubmitted {
+                id: TurnId::new(1),
+                text: "parent prompt".to_owned(),
+            })
+            .unwrap();
+        parent.flush().await.unwrap();
+
+        let (mut fork, fork_writer) = TranscriptJournal::open(&config, "fork").unwrap();
+        let mut fork_start = started("fork");
+        fork_start.parent_session_id = Some("parent".to_owned());
+        fork_start.parent_sequence = Some(parent.last_sequence());
+        fork.defer_start(fork_start);
+        fork.persist_start().await.unwrap();
+
+        let (mut grandchild, grandchild_writer) =
+            TranscriptJournal::open(&config, "grandchild").unwrap();
+        let mut grandchild_start = started("grandchild");
+        grandchild_start.parent_session_id = Some("fork".to_owned());
+        grandchild_start.parent_sequence = Some(fork.last_sequence());
+        grandchild.defer_start(grandchild_start);
+        grandchild
+            .append_local(LocalEvent::UserSubmitted {
+                id: TurnId::new(1),
+                text: "grandchild prompt".to_owned(),
+            })
+            .unwrap();
+        grandchild.flush().await.unwrap();
+
+        let records = session::load_transcript(&config, "grandchild").unwrap();
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| record.kind() == "session.started")
+                .count(),
+            3
+        );
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| record.kind() == "user.submitted")
+                .count(),
+            2
+        );
+
+        drop(parent);
+        drop(fork);
+        drop(grandchild);
+        parent_writer.into_task().await.unwrap().unwrap();
+        fork_writer.into_task().await.unwrap().unwrap();
+        grandchild_writer.into_task().await.unwrap().unwrap();
     }
 
     #[tokio::test]
