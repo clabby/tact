@@ -11,6 +11,7 @@ use super::{
     floating::Floating,
     keybindings::{KeybindingsEffect, KeybindingsEvent, KeybindingsHelp},
     memory::{MemoryBrowser, MemoryBrowserEffect, MemoryBrowserEvent},
+    model_selector::{ModelSelector, ModelSelectorEffect, ModelSelectorEvent},
     node::{Component, ComponentUpdate, Node, RenderRequest},
     queue::{MessageQueue, QueueEffect, QueueEvent, QueueId},
     recent_prompt_picker::{RecentPromptPicker, RecentPromptPickerEffect, RecentPromptPickerEvent},
@@ -40,6 +41,7 @@ use crate::{
     },
 };
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind};
+use nanocodex::Model;
 use ratatui::{
     Frame,
     layout::{Position, Rect},
@@ -183,6 +185,7 @@ pub(crate) enum RootEvent {
         reasoning_mode: ReasoningMode,
         preferred_reasoning_mode: ReasoningMode,
         fast_mode: bool,
+        model: Model,
         skills: Arc<[Skill]>,
     },
     NotifyError(String),
@@ -248,6 +251,7 @@ pub(crate) enum RootEffect {
         effort: ReasoningEffort,
         reasoning_mode: ReasoningMode,
     },
+    SetModel(Model),
     SetFastMode(bool),
     SetMaxSubagents(usize),
     SetTheme(ThemeMode),
@@ -262,6 +266,7 @@ enum Overlay {
     Actions(Node<ActionsMenu>),
     ContextDiagnostics(Node<ContextDiagnosticsPanel>),
     Effort(Node<EffortSelector>),
+    Model(Node<ModelSelector>),
     Theme(Node<ThemeSelector>),
     FileFinder(FileMention),
     Skills(SkillMention),
@@ -293,6 +298,12 @@ struct SkillMention {
 enum ThreadState {
     New,
     Started,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum DraftReset {
+    Clear,
+    Preserve,
 }
 
 /// Owns layout and routing so future screen components do not widen the event loop.
@@ -372,6 +383,7 @@ impl RootNode {
                 self.composer.component().context_tokens(),
             ));
         root.set_fast_mode(self.composer.component().fast_mode());
+        root.set_model(self.composer.component().model());
         root.set_reasoning_modes(
             self.composer.component().reasoning_mode(),
             self.preferred_reasoning_mode,
@@ -423,6 +435,13 @@ impl RootNode {
             .update(ComposerEvent::SetFastMode(enabled));
     }
 
+    pub(crate) fn set_model(&mut self, model: Model) {
+        let _ = self
+            .composer
+            .component_mut()
+            .update(ComposerEvent::SetModel(model));
+    }
+
     pub(crate) fn set_reasoning_modes(&mut self, actual: ReasoningMode, preferred: ReasoningMode) {
         self.preferred_reasoning_mode = preferred;
         let _ = self
@@ -450,10 +469,15 @@ impl RootNode {
         thinking: ReasoningEffort,
         reasoning_mode: ReasoningMode,
         preferred_reasoning_mode: ReasoningMode,
+        draft_reset: DraftReset,
     ) {
         let current_draft = self.composer.component_mut().take_draft();
-        let replaced_draft = current_draft.is_some();
-        let discarded_draft = current_draft.or_else(|| self.discarded_draft.take());
+        let previous_discarded_draft = self.discarded_draft.take();
+        let replaced_draft = current_draft.is_some() && matches!(draft_reset, DraftReset::Clear);
+        let (preserved_draft, discarded_draft) = match draft_reset {
+            DraftReset::Clear => (None, current_draft.or(previous_discarded_draft)),
+            DraftReset::Preserve => (current_draft, previous_discarded_draft),
+        };
         let fork_available = self.fork_available;
         let memory_enabled = self.memory_enabled;
         let theme_mode = self.theme_mode;
@@ -465,6 +489,9 @@ impl RootNode {
         self.memory_enabled = memory_enabled;
         self.theme_mode = theme_mode;
         self.set_max_subagents(max_subagents);
+        if let Some(draft) = preserved_draft {
+            self.composer.component_mut().restore_draft(draft);
+        }
         if replaced_draft {
             self.show_draft_saved();
         }
@@ -532,6 +559,7 @@ impl RootNode {
             thinking,
             reasoning_mode,
             preferred_reasoning_mode,
+            DraftReset::Clear,
         );
         self.set_fast_mode(fast_mode);
         self.transcript = Node::new(projection.transcript);
@@ -561,12 +589,13 @@ impl RootNode {
     }
 
     pub(crate) fn animation_deadline(&self) -> Option<Instant> {
-        let effort = match &self.overlay {
+        let selector = match &self.overlay {
             Some(Overlay::Effort(selector)) => selector.component().animation_deadline(),
+            Some(Overlay::Model(selector)) => selector.component().animation_deadline(),
             _ => None,
         };
         [
-            effort,
+            selector,
             self.transcript.component().animation_deadline(),
             self.composer.component().animation_deadline(),
             self.queue.component().animation_deadline(),
@@ -660,6 +689,7 @@ impl RootNode {
                 Overlay::Actions(actions) => actions.render(frame, area, theme),
                 Overlay::ContextDiagnostics(panel) => panel.render(frame, area, theme),
                 Overlay::Effort(selector) => selector.render(frame, area, theme),
+                Overlay::Model(selector) => selector.render(frame, area, theme),
                 Overlay::Theme(selector) => selector.render(frame, area, theme),
                 Overlay::FileFinder(mention) => mention.finder.render(frame, area, theme),
                 Overlay::Skills(mention) => mention.picker.render(frame, area, theme),
@@ -769,6 +799,9 @@ impl RootNode {
         }
         if is_control_key(&event, 's') {
             return self.open_effort();
+        }
+        if is_control_key(&event, 'm') {
+            return self.open_model();
         }
         if is_control_key(&event, 'r') {
             return self.load_recent_prompts();
@@ -897,6 +930,7 @@ impl RootNode {
                     fork: self.fork_available,
                     fast_mode: self.composer.component().fast_mode(),
                     memory: self.memory_enabled,
+                    model: self.thread == ThreadState::New,
                 },
             ))));
             return ComponentUpdate::render(RenderRequest::Immediate);
@@ -1138,6 +1172,9 @@ impl RootNode {
             Some(Overlay::Actions(_)) => self.update_actions(event),
             Some(Overlay::ContextDiagnostics(_)) => self.update_context_diagnostics(event),
             Some(Overlay::Effort(_)) => self.update_effort(EffortEvent::Terminal { event, now }),
+            Some(Overlay::Model(_)) => {
+                self.update_model(ModelSelectorEvent::Terminal { event, now })
+            }
             Some(Overlay::Theme(_)) => {
                 self.update_theme_selector(ThemeSelectorEvent::Terminal(event))
             }
@@ -1355,6 +1392,9 @@ impl RootNode {
             Some(ActionsEffect::Trigger(Action::Effort)) => {
                 return self.open_effort();
             }
+            Some(ActionsEffect::Trigger(Action::Model)) => {
+                return self.open_model();
+            }
             Some(ActionsEffect::Trigger(Action::FastMode)) => {
                 self.overlay = None;
                 let enabled = !self.composer.component().fast_mode();
@@ -1521,6 +1561,16 @@ impl RootNode {
         self.overlay = Some(Overlay::Effort(Node::new(EffortSelector::new(
             self.composer.component().effort(),
             self.preferred_reasoning_mode == ReasoningMode::Pro,
+        ))));
+        ComponentUpdate::render(RenderRequest::Immediate)
+    }
+
+    fn open_model(&mut self) -> ComponentUpdate<RootEffect> {
+        if self.thread != ThreadState::New {
+            return ComponentUpdate::none();
+        }
+        self.overlay = Some(Overlay::Model(Node::new(ModelSelector::new(
+            self.composer.component().model(),
         ))));
         ComponentUpdate::render(RenderRequest::Immediate)
     }
@@ -1865,6 +1915,42 @@ impl RootNode {
         }
     }
 
+    fn update_model(&mut self, event: ModelSelectorEvent) -> ComponentUpdate<RootEffect> {
+        let Some(Overlay::Model(selector)) = &mut self.overlay else {
+            return ComponentUpdate::none();
+        };
+        let update = selector.update(event);
+        let Some(effect) = update.effects.into_iter().next() else {
+            return ComponentUpdate {
+                effects: Vec::new(),
+                render: update.render,
+            };
+        };
+
+        self.overlay = None;
+        match effect {
+            ModelSelectorEffect::Dismiss => ComponentUpdate::render(RenderRequest::Immediate),
+            ModelSelectorEffect::Apply(model) if model == self.composer.component().model() => {
+                ComponentUpdate::render(RenderRequest::Immediate)
+            }
+            ModelSelectorEffect::Apply(model) => {
+                self.interactive = false;
+                let _ = self
+                    .composer
+                    .component_mut()
+                    .update(ComposerEvent::Activity {
+                        active: true,
+                        status: Some(format!("Starting {} session…", model_name(model))),
+                        now: Instant::now(),
+                    });
+                ComponentUpdate {
+                    effects: vec![RootEffect::SetModel(model)],
+                    render: RenderRequest::Immediate,
+                }
+            }
+        }
+    }
+
     fn update_focus(&mut self) -> ComponentUpdate<RootEffect> {
         let focus_queue = !self.queue.component().focused() && !self.queue.component().is_empty();
         self.queue.component_mut().set_focused(focus_queue);
@@ -2081,6 +2167,7 @@ impl RootNode {
             RenderRequest::None
         };
         let effort = self.update_effort(EffortEvent::AnimationFrame(now));
+        let model = self.update_model(ModelSelectorEvent::AnimationFrame(now));
         let transcript = self.update_transcript(TranscriptEvent::AnimationFrame(now));
         let composer =
             self.update_composer(ComposerEvent::AnimationFrame(now), RenderRequest::Streaming);
@@ -2103,9 +2190,15 @@ impl RootNode {
             RenderRequest::None
         };
         ComponentUpdate {
-            effects: effort.effects.into_iter().chain(composer.effects).collect(),
+            effects: effort
+                .effects
+                .into_iter()
+                .chain(model.effects)
+                .chain(composer.effects)
+                .collect(),
             render: effort
                 .render
+                .max(model.render)
                 .max(transcript.render)
                 .max(composer.render)
                 .max(queue.render)
@@ -2419,6 +2512,7 @@ impl Component for RootNode {
                 reasoning_mode,
                 preferred_reasoning_mode,
                 fast_mode,
+                model,
                 skills,
             } => {
                 let workspace = self.workspace.clone();
@@ -2430,6 +2524,7 @@ impl Component for RootNode {
                     fast_mode,
                     *projection,
                 );
+                self.set_model(model);
                 self.set_skills(skills);
                 ComponentUpdate::render(RenderRequest::Immediate)
             }
@@ -2678,6 +2773,15 @@ fn is_file_query_character(character: char) -> bool {
     character.is_alphanumeric() || matches!(character, '_' | '-' | '.' | '/')
 }
 
+fn model_name(model: Model) -> &'static str {
+    match model {
+        Model::Luna => "Luna",
+        Model::Terra => "Terra",
+        Model::Sol => "Sol",
+        _ => "Sol",
+    }
+}
+
 fn is_skill_query_character(character: char) -> bool {
     character.is_ascii_alphanumeric() || character == '-'
 }
@@ -2764,8 +2868,9 @@ fn is_plain_key(event: &Event, character: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        Component, ComposerChromeTarget, ConfirmationAction, Overlay, RenderRequest, RootEffect,
-        RootEvent, RootNode, SessionListKind, SubagentOverlay, ThreadState, TranscriptEvent,
+        Component, ComposerChromeTarget, ConfirmationAction, DraftReset, Overlay, RenderRequest,
+        RootEffect, RootEvent, RootNode, SessionListKind, SubagentOverlay, ThreadState,
+        TranscriptEvent,
     };
     use crate::{
         app::config::{ReasoningEffort, ReasoningMode},
@@ -2784,9 +2889,12 @@ mod tests {
         Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
         MouseEventKind,
     };
-    use nanocodex::agent::{
-        events::{AgentEvent, AgentEventKind},
-        input::{PromptInput, UserInput},
+    use nanocodex::{
+        Model,
+        agent::{
+            events::{AgentEvent, AgentEventKind},
+            input::{PromptInput, UserInput},
+        },
     };
     use ratatui::{
         Terminal,
@@ -4000,6 +4108,7 @@ mod tests {
             ReasoningEffort::High,
             ReasoningMode::Standard,
             ReasoningMode::Standard,
+            DraftReset::Clear,
         );
         root.update(key(KeyCode::Char('z'), KeyModifiers::CONTROL));
 
@@ -4966,6 +5075,7 @@ mod tests {
             ReasoningEffort::Medium,
             ReasoningMode::Pro,
             ReasoningMode::Pro,
+            DraftReset::Clear,
         );
         assert_eq!(root.composer().reasoning_mode(), ReasoningMode::Pro);
 
@@ -5041,6 +5151,59 @@ mod tests {
         let reopened = root.update(key(KeyCode::Char('s'), KeyModifiers::CONTROL));
         assert!(matches!(&root.overlay, Some(Overlay::Effort(_))));
         assert_eq!(reopened.render, super::RenderRequest::Immediate);
+    }
+
+    #[test]
+    fn control_m_selects_a_model_only_before_the_first_prompt() {
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+
+        let opened = root.update(key(KeyCode::Char('m'), KeyModifiers::CONTROL));
+        assert!(matches!(&root.overlay, Some(Overlay::Model(_))));
+        assert_eq!(opened.render, super::RenderRequest::Immediate);
+
+        root.update(key(KeyCode::Left, KeyModifiers::NONE));
+        let selected = root.update(key(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(selected.effects, [RootEffect::SetModel(Model::Terra)]);
+
+        root.interactive = true;
+        root.thread = super::ThreadState::Started;
+        let blocked = root.update(key(KeyCode::Char('m'), KeyModifiers::CONTROL));
+        assert!(blocked.effects.is_empty());
+        assert!(root.overlay.is_none());
+    }
+
+    #[test]
+    fn fork_inherits_the_model_and_cannot_change_it() {
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        root.set_model(Model::Luna);
+
+        let mut fork = root.fork(Path::new("/work"), ReasoningEffort::Medium);
+
+        assert_eq!(fork.composer().model(), Model::Luna);
+        let update = fork.update(key(KeyCode::Char('m'), KeyModifiers::CONTROL));
+        assert!(update.effects.is_empty());
+        assert!(fork.overlay.is_none());
+    }
+
+    #[test]
+    fn model_action_opens_only_for_a_new_thread() {
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        root.update(key(KeyCode::Char('/'), KeyModifiers::NONE));
+        for character in "intelligence".chars() {
+            root.update(key(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+        root.update(key(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(root.overlay, Some(Overlay::Model(_))));
+
+        root.overlay = None;
+        root.thread = ThreadState::Started;
+        root.update(key(KeyCode::Char('/'), KeyModifiers::NONE));
+        for character in "intelligence".chars() {
+            root.update(key(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+        let blocked = root.update(key(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(blocked.effects.is_empty());
+        assert!(matches!(root.overlay, Some(Overlay::Actions(_))));
     }
 
     #[test]
@@ -5291,6 +5454,7 @@ mod tests {
             ReasoningEffort::Low,
             ReasoningMode::Standard,
             ReasoningMode::Standard,
+            DraftReset::Clear,
         );
         let fork = root.fork(Path::new("/work"), ReasoningEffort::Low);
         assert!(root.memory_enabled);
@@ -5332,6 +5496,7 @@ mod tests {
             ReasoningEffort::Medium,
             ReasoningMode::Standard,
             ReasoningMode::Standard,
+            DraftReset::Clear,
         );
 
         assert!(root.interactive);

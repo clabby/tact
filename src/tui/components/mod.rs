@@ -9,6 +9,7 @@ mod file_finder;
 mod floating;
 mod keybindings;
 mod memory;
+mod model_selector;
 mod node;
 mod queue;
 mod recent_prompt_picker;
@@ -27,5 +28,5 @@ pub(crate) use app::{AppEffect, AppEvent, AppNode};
 pub(crate) use node::{ComponentUpdate, RenderRequest};
 pub(crate) use queue::QueueId;
 pub(crate) use root::{
-    RecentPromptDraft, RestoredSessionProjection, RootEffect, RootNode, SessionListKind,
+    DraftReset, RecentPromptDraft, RestoredSessionProjection, RootEffect, RootNode, SessionListKind,
 };
