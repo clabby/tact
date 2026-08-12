@@ -13,12 +13,12 @@ use super::{
 };
 use futures_util::future::join_all;
 use jsonschema::Validator;
-use nanocodex::{AgentEvents, Nanocodex, NanocodexError};
+use nanocodex::{AgentEvents, Model, Nanocodex, NanocodexError, Thinking};
 use serde::Serialize;
 use serde_json::Value;
 use std::{
     collections::HashMap,
-    sync::{Arc, Weak},
+    sync::{Arc, Mutex, OnceLock, Weak},
     time::Duration,
 };
 use tokio::{
@@ -74,6 +74,23 @@ pub(crate) struct Registry {
     revision: watch::Sender<u64>,
     capacity: Capacity,
     message_lock: tokio::sync::Mutex<()>,
+    agent_factory: OnceLock<AgentFactory>,
+}
+
+/// Owns the clean-agent recipe and the settings inherited by the next spawn.
+/// Per-agent tool factories hold only a weak registry reference, keeping this ownership acyclic.
+struct AgentFactory {
+    build: Box<AgentBuilder>,
+    settings: Mutex<AgentSettings>,
+}
+
+type AgentBuilder =
+    dyn Fn(Model, Thinking, bool) -> Result<(Nanocodex, AgentEvents), NanocodexError> + Send + Sync;
+
+#[derive(Clone, Copy)]
+struct AgentSettings {
+    thinking: Thinking,
+    fast_mode: bool,
 }
 
 /// Identifies whether a tool call belongs to a coordinating root agent.
@@ -120,6 +137,7 @@ pub(super) struct ClosedSessions {
 #[derive(Clone, Serialize)]
 pub(super) struct AgentSummary {
     pub(super) agent_id: AgentId,
+    pub(super) model: Model,
     pub(super) role: String,
     pub(super) task: String,
     pub(super) parent_agent_id: Option<AgentId>,
@@ -131,6 +149,7 @@ pub(super) struct AgentSummary {
 #[derive(Serialize)]
 pub(super) struct AgentDirectoryEntry {
     pub(super) agent_id: AgentId,
+    pub(super) model: Model,
     pub(super) role: String,
     pub(super) task: String,
     pub(super) parent_agent_id: Option<AgentId>,
@@ -380,6 +399,7 @@ impl RegistryState {
                 let can_manage = can_message && scope.topology.authorize(session_id, id).is_ok();
                 Some(AgentDirectoryEntry {
                     agent_id: id,
+                    model: session.descriptor.model,
                     role: bounded_summary(&session.descriptor.role),
                     task: bounded_summary(&session.descriptor.task),
                     parent_agent_id: session.descriptor.parent,
@@ -741,6 +761,66 @@ impl Registry {
             revision,
             capacity: Capacity::new(max_concurrency),
             message_lock: tokio::sync::Mutex::new(()),
+            agent_factory: OnceLock::new(),
+        }
+    }
+
+    pub(crate) fn set_agent_factory<F>(
+        &self,
+        thinking: Thinking,
+        fast_mode: bool,
+        factory: F,
+    ) -> Result<(), NanocodexError>
+    where
+        F: Fn(Model, Thinking, bool) -> Result<(Nanocodex, AgentEvents), NanocodexError>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.agent_factory
+            .set(AgentFactory {
+                build: Box::new(factory),
+                settings: Mutex::new(AgentSettings {
+                    thinking,
+                    fast_mode,
+                }),
+            })
+            .map_err(|_| {
+                NanocodexError::InvalidRequest("subagent factory is already configured".to_owned())
+            })
+    }
+
+    pub(super) fn spawn_agent(
+        &self,
+        model: Model,
+    ) -> Result<(Nanocodex, AgentEvents), NanocodexError> {
+        let factory = self.agent_factory.get().ok_or_else(|| {
+            NanocodexError::InvalidRequest("subagent factory is not configured".to_owned())
+        })?;
+        let settings = *factory
+            .settings
+            .lock()
+            .expect("subagent settings lock should not be poisoned");
+        (factory.build)(model, settings.thinking, settings.fast_mode)
+    }
+
+    fn set_agent_thinking(&self, thinking: Thinking) {
+        if let Some(factory) = self.agent_factory.get() {
+            factory
+                .settings
+                .lock()
+                .expect("subagent settings lock should not be poisoned")
+                .thinking = thinking;
+        }
+    }
+
+    fn set_agent_fast_mode(&self, fast_mode: bool) {
+        if let Some(factory) = self.agent_factory.get() {
+            factory
+                .settings
+                .lock()
+                .expect("subagent settings lock should not be poisoned")
+                .fast_mode = fast_mode;
         }
     }
 
@@ -1439,10 +1519,13 @@ impl Registry {
 }
 
 impl RootAgentGuard {
+    #[cfg(test)]
     pub(crate) fn new(registry: &Arc<Registry>) -> Self {
-        Self {
-            registry: Arc::downgrade(registry),
-        }
+        Self::from_weak(Arc::downgrade(registry))
+    }
+
+    pub(crate) fn from_weak(registry: Weak<Registry>) -> Self {
+        Self { registry }
     }
 
     pub(crate) async fn require_root(&self, session_id: &str) -> std::io::Result<()> {
@@ -1496,6 +1579,7 @@ impl ChildSession {
         };
         AgentSummary {
             agent_id: self.descriptor.id,
+            model: self.descriptor.model,
             role: self.descriptor.role.clone(),
             task: self.descriptor.task.clone(),
             parent_agent_id: self.descriptor.parent,
@@ -1513,6 +1597,14 @@ pub(crate) struct SubagentControl {
 impl SubagentControl {
     pub(crate) fn set_max_concurrency(&self, limit: usize) {
         self.registry.set_max_concurrency(limit);
+    }
+
+    pub(crate) fn set_thinking(&self, thinking: Thinking) {
+        self.registry.set_agent_thinking(thinking);
+    }
+
+    pub(crate) fn set_fast_mode(&self, enabled: bool) {
+        self.registry.set_agent_fast_mode(enabled);
     }
 
     pub(crate) async fn cancel_all(&self, root_session_id: &str) {
@@ -1589,7 +1681,7 @@ mod tests {
         AgentUpdate, MessageDeliveryState, MessageDisposition, MessagePriority, MessagePurpose,
     };
     use nanocodex::{
-        Nanocodex, OpenAi,
+        Model, Nanocodex, NanocodexError, OpenAi, Thinking,
         oai::{
             ResponseError,
             tower::{ResponsesAttempt, ResponsesServiceResponse},
@@ -1599,7 +1691,7 @@ mod tests {
     use std::{
         future::{Pending, pending},
         result::Result as StdResult,
-        sync::Arc,
+        sync::{Arc, Mutex},
         task::{Context, Poll},
         time::Duration,
     };
@@ -1608,6 +1700,34 @@ mod tests {
         time::timeout,
     };
     use tower::Service;
+
+    #[test]
+    fn agent_factory_receives_the_declared_model() {
+        let (updates, _receiver) = mpsc::unbounded_channel();
+        let registry = Registry::new(updates, 1);
+        let seen = Arc::new(Mutex::new(None));
+        let captured = Arc::clone(&seen);
+        registry
+            .set_agent_factory(
+                Thinking::Medium,
+                false,
+                move |model, thinking, fast_mode| {
+                    *captured.lock().unwrap() = Some((model, thinking, fast_mode));
+                    Err(NanocodexError::InvalidRequest(
+                        "stop after capture".to_owned(),
+                    ))
+                },
+            )
+            .unwrap();
+        registry.set_agent_thinking(Thinking::Low);
+        registry.set_agent_fast_mode(true);
+
+        assert!(registry.spawn_agent(Model::Luna).is_err());
+        assert_eq!(
+            *seen.lock().unwrap(),
+            Some((Model::Luna, Thinking::Low, true))
+        );
+    }
 
     #[derive(Clone)]
     struct PendingService {
@@ -1695,6 +1815,7 @@ mod tests {
         let descriptor = AgentDescriptor {
             id: reservation.id,
             session_id: session_id.clone(),
+            model: Model::Sol,
             role: format!("agent-{}", reservation.id),
             task: "wait forever".to_owned(),
             parent,
@@ -1774,6 +1895,7 @@ mod tests {
         let descriptor = AgentDescriptor {
             id,
             session_id: session_id.to_owned(),
+            model: Model::Sol,
             role: format!("agent-{id}"),
             task: "test lifecycle".to_owned(),
             parent,

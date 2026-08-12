@@ -3183,6 +3183,7 @@ mod tests {
             AgentDescriptor {
                 id: AgentId::new(1),
                 session_id: "child".to_owned(),
+                model: Model::Sol,
                 role: "worker".to_owned(),
                 task: "work".to_owned(),
                 parent: None,
@@ -3210,6 +3211,7 @@ mod tests {
         root.update(RootEvent::Subagent(AgentUpdate::Added(AgentDescriptor {
             id: AgentId::new(1),
             session_id: "child".to_owned(),
+            model: Model::Sol,
             role: "worker".to_owned(),
             task: "verify ordering".to_owned(),
             parent: None,
@@ -3296,6 +3298,7 @@ mod tests {
             root.update(RootEvent::Subagent(AgentUpdate::Added(AgentDescriptor {
                 id: AgentId::new(id),
                 session_id: format!("child-{id}"),
+                model: Model::Sol,
                 role: role.to_owned(),
                 task: "coordinate with a peer".to_owned(),
                 parent: None,
@@ -3338,6 +3341,7 @@ mod tests {
             AgentDescriptor {
                 id: AgentId::new(1),
                 session_id: "child".to_owned(),
+                model: Model::Sol,
                 role: "worker".to_owned(),
                 task: "work".to_owned(),
                 parent: None,
