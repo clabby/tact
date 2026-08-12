@@ -10,7 +10,7 @@ use nanocodex::Model;
 use ratatui::{
     Frame,
     layout::{Alignment, Rect},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::Paragraph,
 };
@@ -141,9 +141,14 @@ impl ModelSelector {
             };
             buffer.set_string(column, area.y, "━", Style::default().fg(color));
         }
-        for (index, model) in MODELS.iter().copied().enumerate() {
+        for index in 0..MODELS.len() {
             let column = model_column(left, width, index);
-            buffer.set_string(column, area.y, "●", Style::default().fg(theme.model(model)));
+            let color = if column <= indicator_column {
+                selected_color
+            } else {
+                theme.muted()
+            };
+            buffer.set_string(column, area.y, "●", Style::default().fg(color));
         }
         buffer.set_string(
             indicator_column,
@@ -213,7 +218,6 @@ impl Component for ModelSelector {
                     .fg(theme.model(model))
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled("  ·  smarter →", Style::default().fg(Color::Green)),
         ]);
         frame.render_widget(
             Paragraph::new(title).alignment(Alignment::Center),
@@ -254,7 +258,7 @@ fn model_name(model: Model) -> &'static str {
 mod tests {
     use super::*;
     use crossterm::event::{KeyEvent, KeyModifiers};
-    use ratatui::{Terminal, backend::TestBackend};
+    use ratatui::{Terminal, backend::TestBackend, style::Color};
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -284,6 +288,17 @@ mod tests {
             }
         }
         panic!("label not rendered: {label:?}");
+    }
+
+    fn rendered_stop_colors(selector: &mut ModelSelector) -> Vec<Color> {
+        render(selector)
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .filter(|cell| cell.symbol() == "●")
+            .map(|cell| cell.fg)
+            .collect()
     }
 
     #[test]
@@ -342,6 +357,36 @@ mod tests {
 
         assert!(!rail.is_empty());
         assert!(rail.iter().all(|cell| cell.fg == Color::Yellow));
+    }
+
+    #[test]
+    fn stops_use_the_filled_bar_color_only_when_covered() {
+        assert_eq!(
+            rendered_stop_colors(&mut ModelSelector::new(Model::Luna)),
+            [Color::DarkGray, Color::DarkGray]
+        );
+        assert_eq!(
+            rendered_stop_colors(&mut ModelSelector::new(Model::Terra)),
+            [Color::Green, Color::DarkGray]
+        );
+        assert_eq!(
+            rendered_stop_colors(&mut ModelSelector::new(Model::Sol)),
+            [Color::Yellow, Color::Yellow]
+        );
+    }
+
+    #[test]
+    fn title_does_not_describe_the_model_order() {
+        let terminal = render(&mut ModelSelector::new(Model::Terra));
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(!rendered.contains("smarter"));
     }
 
     #[test]
