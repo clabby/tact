@@ -436,6 +436,7 @@ impl RootNode {
     }
 
     pub(crate) fn set_model(&mut self, model: Model) {
+        self.transcript.component_mut().set_model(model);
         let _ = self
             .composer
             .component_mut()
@@ -5036,7 +5037,7 @@ mod tests {
         terminal
             .draw(|frame| root.render(frame, frame.area(), &theme))
             .unwrap();
-        let plasma = terminal
+        let artwork = terminal
             .backend()
             .buffer()
             .content()
@@ -5045,12 +5046,8 @@ mod tests {
             .flatten()
             .filter(|cell| cell.symbol() != " ")
             .collect::<Vec<_>>();
-        assert!(!plasma.is_empty());
-        assert!(
-            plasma
-                .iter()
-                .all(|cell| matches!(cell.fg, Color::Yellow) || cell.fg == theme.code_text())
-        );
+        assert!(!artwork.is_empty());
+        assert!(artwork.iter().all(|cell| cell.fg == Color::Yellow));
     }
 
     #[test]

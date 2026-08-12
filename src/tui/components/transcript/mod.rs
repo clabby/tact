@@ -25,6 +25,7 @@ use crate::{
 };
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind};
 use empty::EmptyLogo;
+use nanocodex::Model;
 use ratatui::{
     Frame,
     buffer::Buffer,
@@ -89,6 +90,7 @@ pub(crate) struct Transcript {
     pending_expandable_anchor: Option<PendingExpandableAnchor>,
     empty_logo: EmptyLogo,
     effort: ReasoningEffort,
+    home_model: Model,
     pinned_prompt: Option<PinnedPrompt>,
     updates_banner_area: Option<Rect>,
 }
@@ -253,6 +255,7 @@ impl Transcript {
             pending_expandable_anchor: None,
             empty_logo: EmptyLogo::new(Instant::now()),
             effort,
+            home_model: Model::Sol,
             pinned_prompt: None,
             updates_banner_area: None,
         }
@@ -261,11 +264,16 @@ impl Transcript {
     pub(crate) fn fork_snapshot(&self) -> Self {
         let mut snapshot = Self::with_effort(self.effort);
         snapshot.model = self.model.fork_snapshot();
+        snapshot.home_model = self.home_model;
         snapshot
     }
 
     pub(crate) const fn set_effort(&mut self, effort: ReasoningEffort) {
         self.effort = effort;
+    }
+
+    pub(crate) const fn set_model(&mut self, model: Model) {
+        self.home_model = model;
     }
 
     pub(super) fn render_chrome(&mut self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
@@ -1459,7 +1467,7 @@ impl Component for Transcript {
         self.selection_rows.clear();
         Clear.render(area, frame.buffer_mut());
         if self.is_empty() {
-            self.empty_logo.render(frame, area, theme, self.effort);
+            self.empty_logo.render(frame, area, theme, self.home_model);
             return;
         }
         let mut plan = self.render_plan(area.width, area.height, theme);
@@ -1830,7 +1838,10 @@ mod tests {
     use crossterm::event::{
         Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     };
-    use nanocodex::agent::events::{AgentEvent, AgentEventKind};
+    use nanocodex::{
+        Model,
+        agent::events::{AgentEvent, AgentEventKind},
+    };
     use ratatui::{Terminal, backend::TestBackend, layout::Position, style::Color};
     use serde_json::{json, value::to_raw_value};
     use std::{sync::Arc, time::Duration};
@@ -2548,7 +2559,7 @@ mod tests {
         let mut transcript = Transcript::new();
 
         let empty = render(&mut transcript, 41, 14);
-        assert_ne!(empty.buffer()[(5, 2)].symbol(), " ");
+        assert_ne!(empty.buffer()[(20, 6)].symbol(), " ");
         let deadline = transcript
             .animation_deadline()
             .expect("empty transcript should schedule the logo");
@@ -2561,8 +2572,24 @@ mod tests {
 
         transcript.update(TranscriptEvent::Record(user(1, "hello")));
         let populated = render(&mut transcript, 41, 14);
-        assert_eq!(populated.buffer()[(5, 2)].symbol(), " ");
+        assert_eq!(populated.buffer()[(20, 6)].symbol(), " ");
         assert!(transcript.animation_deadline().is_none());
+    }
+
+    #[test]
+    fn empty_logo_tracks_the_selected_model() {
+        let mut transcript = Transcript::new();
+
+        for (model, color) in [
+            (Model::Luna, Color::White),
+            (Model::Terra, Color::Green),
+            (Model::Sol, Color::Yellow),
+        ] {
+            transcript.set_model(model);
+            let rendered = render(&mut transcript, 41, 14);
+
+            assert_eq!(rendered.buffer()[(20, 6)].fg, color);
+        }
     }
 
     #[test]
