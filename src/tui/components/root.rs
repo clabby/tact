@@ -800,7 +800,7 @@ impl RootNode {
         if is_control_key(&event, 's') {
             return self.open_effort();
         }
-        if is_control_key(&event, 'm') {
+        if is_control_key(&event, 'd') {
             return self.open_model();
         }
         if is_control_key(&event, 'r') {
@@ -847,6 +847,7 @@ impl RootNode {
             let position = Position::new(mouse.column, mouse.row);
             match self.composer.component().chrome_target(position) {
                 Some(ComposerChromeTarget::Effort) => return self.open_effort(),
+                Some(ComposerChromeTarget::Model) => return self.open_model(),
                 Some(ComposerChromeTarget::Subagents) => {
                     self.overlay = Some(Overlay::Subagents(SubagentOverlay::Tree));
                     return ComponentUpdate::render(RenderRequest::Immediate);
@@ -3144,14 +3145,21 @@ mod tests {
     }
 
     #[test]
-    fn clicking_composer_chrome_opens_effort_and_subagents() {
+    fn clicking_composer_chrome_opens_model_effort_and_subagents() {
         let mut terminal = Terminal::new(TestBackend::new(100, 16)).unwrap();
         let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
         terminal
             .draw(|frame| root.render(frame, frame.area(), &Theme::default()))
             .unwrap();
         let top = root.composer_area.y;
+        let model_x = text_column(terminal.backend().buffer(), top, "gpt-5.6-sol");
         let effort_x = text_column(terminal.backend().buffer(), top, "medium");
+        assert_eq!(
+            root.composer
+                .component()
+                .chrome_target(Position::new(model_x, top)),
+            Some(ComposerChromeTarget::Model)
+        );
         assert_eq!(
             root.composer
                 .component()
@@ -3159,6 +3167,10 @@ mod tests {
             Some(ComposerChromeTarget::Effort)
         );
 
+        root.update(mouse(MouseEventKind::Down(MouseButton::Left), model_x, top));
+        assert!(matches!(root.overlay, Some(Overlay::Model(_))));
+
+        root.overlay = None;
         root.update(mouse(
             MouseEventKind::Down(MouseButton::Left),
             effort_x,
@@ -5154,10 +5166,10 @@ mod tests {
     }
 
     #[test]
-    fn control_m_selects_a_model_only_before_the_first_prompt() {
+    fn control_d_selects_a_model_only_before_the_first_prompt() {
         let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
 
-        let opened = root.update(key(KeyCode::Char('m'), KeyModifiers::CONTROL));
+        let opened = root.update(key(KeyCode::Char('d'), KeyModifiers::CONTROL));
         assert!(matches!(&root.overlay, Some(Overlay::Model(_))));
         assert_eq!(opened.render, super::RenderRequest::Immediate);
 
@@ -5167,7 +5179,7 @@ mod tests {
 
         root.interactive = true;
         root.thread = super::ThreadState::Started;
-        let blocked = root.update(key(KeyCode::Char('m'), KeyModifiers::CONTROL));
+        let blocked = root.update(key(KeyCode::Char('d'), KeyModifiers::CONTROL));
         assert!(blocked.effects.is_empty());
         assert!(root.overlay.is_none());
     }
@@ -5180,7 +5192,7 @@ mod tests {
         let mut fork = root.fork(Path::new("/work"), ReasoningEffort::Medium);
 
         assert_eq!(fork.composer().model(), Model::Luna);
-        let update = fork.update(key(KeyCode::Char('m'), KeyModifiers::CONTROL));
+        let update = fork.update(key(KeyCode::Char('d'), KeyModifiers::CONTROL));
         assert!(update.effects.is_empty());
         assert!(fork.overlay.is_none());
     }

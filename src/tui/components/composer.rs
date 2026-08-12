@@ -52,6 +52,7 @@ pub(crate) enum ComposerEffect {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ComposerChromeTarget {
     Effort,
+    Model,
     Subagents,
 }
 
@@ -113,6 +114,7 @@ pub(crate) struct Composer {
     subagent_wave: Option<WavedText>,
     turn_timers: VecDeque<TurnTimer>,
     effort_hit_area: Option<Rect>,
+    model_hit_area: Option<Rect>,
     subagent_hit_area: Option<Rect>,
     layout: Option<CachedLayout>,
     history: PromptHistory,
@@ -210,6 +212,7 @@ impl Composer {
             subagent_wave: None,
             turn_timers: VecDeque::new(),
             effort_hit_area: None,
+            model_hit_area: None,
             subagent_hit_area: None,
             layout: None,
             history: PromptHistory::default(),
@@ -374,6 +377,12 @@ impl Composer {
             .is_some_and(|area| area.contains(position))
         {
             return Some(ComposerChromeTarget::Subagents);
+        }
+        if self
+            .model_hit_area
+            .is_some_and(|area| area.contains(position))
+        {
+            return Some(ComposerChromeTarget::Model);
         }
         self.effort_hit_area
             .is_some_and(|area| area.contains(position))
@@ -1001,6 +1010,7 @@ impl Composer {
 
     fn render_chrome(&mut self, buffer: &mut Buffer, area: Rect, theme: &Theme) {
         self.effort_hit_area = None;
+        self.model_hit_area = None;
         self.subagent_hit_area = None;
         let shell_mode = self.draft.starts_with('!');
         let border = self.border_style(theme);
@@ -1121,6 +1131,16 @@ impl Composer {
             Style::default().fg(theme.muted()),
         );
         let model_start = right_start + u16::try_from(timer.width()).unwrap_or(u16::MAX);
+        if model_start < content_end {
+            self.model_hit_area = Some(Rect::new(
+                model_start,
+                top,
+                u16::try_from(model.width())
+                    .unwrap_or(u16::MAX)
+                    .min(content_end.saturating_sub(model_start)),
+                1,
+            ));
+        }
         buffer.set_stringn(
             model_start,
             top,
