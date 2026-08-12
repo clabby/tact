@@ -102,6 +102,7 @@ pub(crate) enum WorkerEvent {
     },
     ForkOpened {
         pane: PaneId,
+        parent: PaneId,
         events: AgentEvents,
     },
     ForkFailed {
@@ -246,7 +247,7 @@ async fn run(
     updates: mpsc::UnboundedSender<WorkerEvent>,
     shutdown: CancellationToken,
 ) {
-    let mut main = Some(agent);
+    let mut main = Some((PaneId::Main, agent));
     let mut fork = None::<(PaneId, Nanocodex)>;
     let mut controls = HashMap::<TurnKey, TurnControl>::new();
     let mut memory_reviews = HashMap::from([(PaneId::Main, memory_review)]);
@@ -334,22 +335,18 @@ async fn run(
                         memory_review,
                     } => {
                         debug_assert!(!controls.keys().any(|key| key.pane == pane));
-                        let retired = match pane {
-                            PaneId::Main => {
-                                memory_reviews.insert(pane, memory_review);
-                                main.replace(agent)
-                            }
-                            PaneId::Fork(_) if fork.as_ref().is_some_and(|(id, _)| *id == pane) => {
-                                memory_reviews.insert(pane, memory_review);
-                                fork.replace((pane, agent)).map(|(_, agent)| agent)
-                            }
-                            PaneId::Fork(_) => {
-                                drop(updates.send(WorkerEvent::ForkFailed {
-                                    pane,
-                                    error: "session pane is no longer available".to_owned(),
-                                }));
-                                Some(agent)
-                            }
+                        let retired = if main.as_ref().is_some_and(|(id, _)| *id == pane) {
+                            memory_reviews.insert(pane, memory_review);
+                            main.replace((pane, agent)).map(|(_, agent)| agent)
+                        } else if fork.as_ref().is_some_and(|(id, _)| *id == pane) {
+                            memory_reviews.insert(pane, memory_review);
+                            fork.replace((pane, agent)).map(|(_, agent)| agent)
+                        } else {
+                            drop(updates.send(WorkerEvent::ForkFailed {
+                                pane,
+                                error: "session pane is no longer available".to_owned(),
+                            }));
+                            Some(agent)
                         };
                         if let Some(retired) = retired {
                             drop(retired.shutdown().await);
@@ -392,7 +389,7 @@ async fn run(
                             }));
                             continue;
                         }
-                        let Some(agent) = main.as_ref() else {
+                        let Some((main_pane, agent)) = main.as_ref() else {
                             drop(updates.send(WorkerEvent::ForkFailed {
                                 pane,
                                 error: "the primary session is no longer available".to_owned(),
@@ -402,12 +399,16 @@ async fn run(
                         match agent.fork().await {
                             Ok((agent, events)) => {
                                 let memory_review = *memory_reviews
-                                    .get(&PaneId::Main)
+                                    .get(main_pane)
                                     .expect("the primary pane must have memory-review state");
                                 let memory_review = memory_review.forked();
                                 memory_reviews.insert(pane, memory_review);
                                 fork = Some((pane, agent));
-                                drop(updates.send(WorkerEvent::ForkOpened { pane, events }));
+                                drop(updates.send(WorkerEvent::ForkOpened {
+                                    pane,
+                                    parent: *main_pane,
+                                    events,
+                                }));
                             }
                             Err(error) => drop(updates.send(WorkerEvent::ForkFailed {
                                 pane,
@@ -417,12 +418,14 @@ async fn run(
                         continue;
                     }
                     WorkerCommand::ClosePane(pane) => {
-                        let agent = match pane {
-                            PaneId::Main => main.take(),
-                            PaneId::Fork(_) if fork.as_ref().is_some_and(|(id, _)| *id == pane) => {
-                                fork.take().map(|(_, agent)| agent)
-                            }
-                            PaneId::Fork(_) => None,
+                        let agent = if main.as_ref().is_some_and(|(id, _)| *id == pane) {
+                            let agent = main.take().map(|(_, agent)| agent);
+                            main = fork.take();
+                            agent
+                        } else if fork.as_ref().is_some_and(|(id, _)| *id == pane) {
+                            fork.take().map(|(_, agent)| agent)
+                        } else {
+                            None
                         };
                         memory_reviews.remove(&pane);
                         close_pane(pane, agent, &controls, &mut cancelled, &updates).await;
@@ -461,7 +464,7 @@ async fn run(
 
     drop(cancel_turns(&controls, None).await);
     let (main_shutdown, fork_shutdown) = tokio::join!(
-        shutdown_agent(main.take()),
+        shutdown_agent(main.take().map(|(_, agent)| agent)),
         shutdown_agent(fork.take().map(|(_, agent)| agent)),
     );
     let shutdown_error = main_shutdown.err().or_else(|| fork_shutdown.err());
@@ -790,15 +793,12 @@ fn finish_turn(
 
 fn agent_for<'a>(
     pane: PaneId,
-    main: Option<&'a Nanocodex>,
+    main: Option<&'a (PaneId, Nanocodex)>,
     fork: Option<&'a (PaneId, Nanocodex)>,
 ) -> Option<&'a Nanocodex> {
-    match pane {
-        PaneId::Main => main,
-        PaneId::Fork(_) => fork
-            .filter(|(fork_pane, _)| *fork_pane == pane)
-            .map(|(_, agent)| agent),
-    }
+    main.filter(|(main_pane, _)| *main_pane == pane)
+        .or_else(|| fork.filter(|(fork_pane, _)| *fork_pane == pane))
+        .map(|(_, agent)| agent)
 }
 
 async fn cancel_pane(

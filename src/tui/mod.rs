@@ -937,40 +937,44 @@ pub(crate) async fn run(
                         }
                         schedule(app.update(AppEvent::TurnsCancelled(pane)), &mut scheduler);
                     }
-                    WorkerEvent::ForkOpened { pane, events } => {
+                    WorkerEvent::ForkOpened {
+                        pane,
+                        parent: main_pane,
+                        events,
+                    } => {
                         let session_id = events.request_id().to_owned();
                         let parent_session_id = panes
-                            .get(&PaneId::Main)
+                            .get(&main_pane)
                             .map(|runtime| runtime.session_id.clone());
                         let effort = app
                             .root(pane)
                             .map(|root| root.composer().effort())
                             .unwrap_or_else(|| config.agent().thinking());
                         let fast_mode = panes
-                            .get(&PaneId::Main)
+                            .get(&main_pane)
                             .expect("main pane must exist")
                             .current_fast_mode;
                         let reasoning_mode = panes
-                            .get(&PaneId::Main)
+                            .get(&main_pane)
                             .expect("main pane must exist")
                             .reasoning_mode;
                         let model = panes
-                            .get(&PaneId::Main)
+                            .get(&main_pane)
                             .expect("main pane must exist")
                             .current_model;
                         let subagent_control = panes
-                            .get(&PaneId::Main)
+                            .get(&main_pane)
                             .expect("main pane must exist")
                             .subagent_control
                             .clone();
                         let instructions = Arc::clone(
                             &panes
-                                .get(&PaneId::Main)
+                                .get(&main_pane)
                                 .expect("main pane must exist")
                                 .instructions,
                         );
                         let skills_catalog_present = panes
-                            .get(&PaneId::Main)
+                            .get(&main_pane)
                             .expect("main pane must exist")
                             .skills_catalog_present;
                         panes.insert(
@@ -1019,7 +1023,7 @@ pub(crate) async fn run(
                         }
                         runtime.current_effort = effort;
                         runtime.subagent_control.set_thinking(effort.into());
-                        if pane == PaneId::Main {
+                        if app.main_pane() == Some(pane) {
                             config.set_thinking(effort);
                         }
                         input = Some(EventStream::new());
@@ -1041,7 +1045,7 @@ pub(crate) async fn run(
                         }
                         runtime.current_fast_mode = enabled;
                         runtime.subagent_control.set_fast_mode(enabled);
-                        if pane == PaneId::Main {
+                        if app.main_pane() == Some(pane) {
                             config.set_fast_mode(enabled);
                         }
                         input = Some(EventStream::new());
@@ -1492,8 +1496,9 @@ pub(crate) async fn run(
         }
     }
 
-    let session_id = panes
-        .get(&PaneId::Main)
+    let session_id = app
+        .main_pane()
+        .and_then(|pane| panes.get(&pane))
         .and_then(PaneRuntime::exit_session_id);
     drop(terminal);
     if let Some(error) = writer_error {
@@ -1939,8 +1944,9 @@ fn apply_pane_effect(
         } => {
             *context.input = None;
             let config = context.config.clone();
+            let is_main = context.app.main_pane() == Some(pane);
             *context.effort_task = Some(tokio::task::spawn_blocking(move || {
-                if pane == PaneId::Main {
+                if is_main {
                     config.persist_thinking(effort)?;
                 }
                 config.persist_reasoning_mode(reasoning_mode)?;
@@ -1990,7 +1996,7 @@ fn apply_pane_effect(
         }
         components::RootEffect::SetFastMode(enabled) => {
             *context.input = None;
-            let config = (pane == PaneId::Main).then(|| context.config.clone());
+            let config = (context.app.main_pane() == Some(pane)).then(|| context.config.clone());
             *context.fast_mode_task = Some(tokio::task::spawn_blocking(move || {
                 if let Some(config) = config {
                     config.persist_fast_mode(enabled)?;

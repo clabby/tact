@@ -1,4 +1,4 @@
-//! Stable identities for the primary and optional forked sessions.
+//! Stable identities for sessions that can move between primary and fork roles.
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum PaneId {

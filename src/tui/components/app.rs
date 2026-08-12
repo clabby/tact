@@ -193,7 +193,7 @@ pub(crate) enum AppEffect {
 pub(crate) struct AppNode {
     theme: Theme,
     workspace: PathBuf,
-    main: Option<Node<RootNode>>,
+    main: Option<(PaneId, Node<RootNode>)>,
     fork: Option<(PaneId, Node<RootNode>)>,
     focus: PaneId,
     main_area: Rect,
@@ -207,7 +207,7 @@ impl AppNode {
         Self {
             theme,
             workspace,
-            main: Some(Node::new(root)),
+            main: Some((PaneId::Main, Node::new(root))),
             fork: None,
             focus: PaneId::Main,
             main_area: Rect::default(),
@@ -217,11 +217,12 @@ impl AppNode {
     }
 
     pub(crate) fn open_resume_selector(&mut self) -> ComponentUpdate<AppEffect> {
-        let Some(root) = self.main.as_mut() else {
+        let Some((pane, root)) = self.main.as_mut() else {
             return ComponentUpdate::none();
         };
+        let pane = *pane;
         let update = root.component_mut().load_sessions();
-        self.map_root_update(PaneId::Main, update)
+        self.map_root_update(pane, update)
     }
 
     pub(crate) fn update(&mut self, event: AppEvent) -> ComponentUpdate<AppEffect> {
@@ -302,10 +303,11 @@ impl AppNode {
             AppEvent::ForkReady(pane) => self.update_root(pane, RootEvent::ForkReady),
             AppEvent::ForkFailed { pane, error } => {
                 self.remove_pane(pane);
-                let target = if self.main.is_some() {
-                    PaneId::Main
-                } else {
-                    self.focus
+                let Some(target) = self.main_pane() else {
+                    return ComponentUpdate {
+                        effects: vec![AppEffect::Shutdown],
+                        render: RenderRequest::Immediate,
+                    };
                 };
                 self.update_root(
                     target,
@@ -405,11 +407,7 @@ impl AppNode {
                 self.update_root(pane, RootEvent::ConfirmReviewDownload)
             }
             AppEvent::UpdateAvailable(version) => {
-                let pane = if self.main.is_some() {
-                    PaneId::Main
-                } else {
-                    self.focus
-                };
+                let pane = self.main_pane().unwrap_or(self.focus);
                 self.update_root(pane, RootEvent::UpdateAvailable(version))
             }
             AppEvent::ConfigReloaded {
@@ -421,7 +419,7 @@ impl AppNode {
             } => {
                 self.theme.replace_from_config(theme);
                 let mode = self.theme.mode();
-                if let Some(main) = &mut self.main {
+                if let Some((_, main)) = &mut self.main {
                     main.component_mut().set_theme_mode(mode);
                 }
                 if let Some((_, fork)) = &mut self.fork {
@@ -455,12 +453,12 @@ impl AppNode {
         let Some((fork_pane, fork)) = &mut self.fork else {
             self.main_area = area;
             self.fork_area = Rect::default();
-            if let Some(main) = &mut self.main {
+            if let Some((main_pane, main)) = &mut self.main {
                 main.component_mut().render_focused(
                     frame,
                     area,
                     &self.theme,
-                    self.focus == PaneId::Main,
+                    self.focus == *main_pane,
                 );
             }
             return;
@@ -490,12 +488,12 @@ impl AppNode {
             height: self.fork_area.height.saturating_sub(hint_height),
             ..self.fork_area
         };
-        if let Some(main) = &mut self.main {
+        if let Some((main_pane, main)) = &mut self.main {
             main.component_mut().render_focused(
                 frame,
                 main_content,
                 &self.theme,
-                self.focus == PaneId::Main,
+                self.focus == *main_pane,
             );
         }
         fork.component_mut().render_focused(
@@ -521,7 +519,7 @@ impl AppNode {
         [
             self.main
                 .as_ref()
-                .and_then(|root| root.component().animation_deadline()),
+                .and_then(|(_, root)| root.component().animation_deadline()),
             self.fork
                 .as_ref()
                 .and_then(|(_, root)| root.component().animation_deadline()),
@@ -555,8 +553,10 @@ impl AppNode {
             let position = Position::new(mouse.column, mouse.row);
             if self.fork_area.contains(position) {
                 self.focus = self.fork.as_ref().map_or(PaneId::Main, |(pane, _)| *pane);
-            } else if self.main_area.contains(position) {
-                self.focus = PaneId::Main;
+            } else if self.main_area.contains(position)
+                && let Some(main_pane) = self.main_pane()
+            {
+                self.focus = main_pane;
             }
         }
         self.update_root(self.focus, RootEvent::Terminal(event))
@@ -586,10 +586,10 @@ impl AppNode {
     }
 
     fn update_all(&mut self, event: RootEvent) -> ComponentUpdate<AppEffect> {
-        let main = self.main.take().map(|mut root| {
+        let main = self.main.take().map(|(pane, mut root)| {
             let update = root.update(event_for_other_pane(&event));
-            self.main = Some(root);
-            self.map_root_update(PaneId::Main, update)
+            self.main = Some((pane, root));
+            self.map_root_update(pane, update)
         });
         let fork = self.fork.take().map(|(pane, mut root)| {
             let update = root.update(event);
@@ -638,7 +638,7 @@ impl AppNode {
 
     fn set_theme_mode(&mut self, mode: ThemeMode) {
         self.theme.set_mode(mode);
-        if let Some(main) = &mut self.main {
+        if let Some((_, main)) = &mut self.main {
             main.component_mut().set_theme_mode(mode);
         }
         if let Some((_, fork)) = &mut self.fork {
@@ -647,7 +647,7 @@ impl AppNode {
     }
 
     pub(crate) fn set_max_subagents(&mut self, limit: usize) {
-        if let Some(main) = &mut self.main {
+        if let Some((_, main)) = &mut self.main {
             main.component_mut().set_max_subagents(limit);
         }
         if let Some((_, fork)) = &mut self.fork {
@@ -656,7 +656,7 @@ impl AppNode {
     }
 
     pub(crate) fn set_preferred_reasoning_mode(&mut self, mode: ReasoningMode) {
-        if let Some(main) = &mut self.main {
+        if let Some((_, main)) = &mut self.main {
             main.component_mut().set_preferred_reasoning_mode(mode);
         }
         if let Some((_, fork)) = &mut self.fork {
@@ -665,7 +665,7 @@ impl AppNode {
     }
 
     pub(crate) fn set_memory_enabled(&mut self, enabled: bool) {
-        if let Some(main) = &mut self.main {
+        if let Some((_, main)) = &mut self.main {
             main.component_mut().set_memory_enabled(enabled);
         }
         if let Some((_, fork)) = &mut self.fork {
@@ -674,10 +674,10 @@ impl AppNode {
     }
 
     fn begin_fork(&mut self) -> PaneId {
-        if let Some(main) = &mut self.main {
+        if let Some((_, main)) = &mut self.main {
             main.component_mut().set_fork_available(false);
         }
-        let main = self
+        let (_, main) = self
             .main
             .as_ref()
             .expect("forking requires the primary pane");
@@ -691,45 +691,49 @@ impl AppNode {
     }
 
     fn remove_pane(&mut self, pane: PaneId) {
-        match pane {
-            PaneId::Main => self.main = None,
-            PaneId::Fork(_) if self.fork.as_ref().is_some_and(|(id, _)| *id == pane) => {
-                self.fork = None;
-            }
-            PaneId::Fork(_) => return,
+        if self.main.as_ref().is_some_and(|(id, _)| *id == pane) {
+            self.main = self.fork.take();
+        } else if self.fork.as_ref().is_some_and(|(id, _)| *id == pane) {
+            self.fork = None;
+        } else {
+            return;
         }
-        if self.main.is_some() {
-            self.focus = PaneId::Main;
-            if self.fork.is_none()
-                && let Some(main) = &mut self.main
-            {
+        if let Some((main_pane, main)) = &mut self.main {
+            self.focus = *main_pane;
+            if self.fork.is_none() {
                 main.component_mut().set_fork_available(true);
             }
-        } else if self.fork.is_some() {
-            self.focus = self.fork.as_ref().map_or(PaneId::Main, |(pane, _)| *pane);
         }
+    }
+
+    pub(crate) fn main_pane(&self) -> Option<PaneId> {
+        self.main.as_ref().map(|(pane, _)| *pane)
     }
 
     fn pane(&self, pane: PaneId) -> Option<&Node<RootNode>> {
-        match pane {
-            PaneId::Main => self.main.as_ref(),
-            PaneId::Fork(_) => self
-                .fork
-                .as_ref()
-                .filter(|(fork_pane, _)| *fork_pane == pane)
-                .map(|(_, root)| root),
-        }
+        self.main
+            .as_ref()
+            .filter(|(main_pane, _)| *main_pane == pane)
+            .or_else(|| {
+                self.fork
+                    .as_ref()
+                    .filter(|(fork_pane, _)| *fork_pane == pane)
+            })
+            .map(|(_, root)| root)
     }
 
     fn pane_mut(&mut self, pane: PaneId) -> Option<&mut Node<RootNode>> {
-        match pane {
-            PaneId::Main => self.main.as_mut(),
-            PaneId::Fork(_) => self
-                .fork
-                .as_mut()
-                .filter(|(fork_pane, _)| *fork_pane == pane)
-                .map(|(_, root)| root),
+        if self
+            .main
+            .as_ref()
+            .is_some_and(|(main_pane, _)| *main_pane == pane)
+        {
+            return self.main.as_mut().map(|(_, root)| root);
         }
+        self.fork
+            .as_mut()
+            .filter(|(fork_pane, _)| *fork_pane == pane)
+            .map(|(_, root)| root)
     }
 }
 
@@ -1142,6 +1146,84 @@ mod tests {
         ));
         assert!(app.root(PaneId::Main).is_none());
         assert!(app.root(PaneId::Fork(1)).is_some());
+    }
+
+    #[test]
+    fn closing_the_primary_promotes_the_fork() {
+        let mut app = app();
+        app.update(control('f'));
+        let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        app.update(AppEvent::Terminal(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 10,
+            row: 5,
+            modifiers: KeyModifiers::NONE,
+        })));
+        app.update(control('c'));
+
+        let close = app.update(control('c'));
+
+        assert!(matches!(
+            close.effects.as_slice(),
+            [AppEffect::ClosePane(PaneId::Main)]
+        ));
+        assert_eq!(app.main_pane(), Some(PaneId::Fork(1)));
+        assert!(!rendered(&mut app, 100, 20).contains(SPLIT_HINT.trim()));
+
+        app.update(control('c'));
+        let shutdown = app.update(control('c'));
+
+        assert!(matches!(shutdown.effects.as_slice(), [AppEffect::Shutdown]));
+    }
+
+    #[test]
+    fn promoted_fork_can_open_another_fork() {
+        let mut app = app();
+        app.update(control('f'));
+        app.update(AppEvent::ForkReady(PaneId::Fork(1)));
+        let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        app.update(AppEvent::Terminal(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 10,
+            row: 5,
+            modifiers: KeyModifiers::NONE,
+        })));
+        app.update(control('c'));
+        app.update(control('c'));
+
+        let fork = app.update(control('f'));
+
+        assert!(matches!(
+            fork.effects.as_slice(),
+            [AppEffect::OpenFork(PaneId::Fork(2))]
+        ));
+        assert_eq!(app.main_pane(), Some(PaneId::Fork(1)));
+        assert!(app.root(PaneId::Fork(2)).is_some());
+    }
+
+    #[test]
+    fn failed_pending_fork_shuts_down_after_its_parent_closes() {
+        let mut app = app();
+        app.update(control('f'));
+        let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        app.update(AppEvent::Terminal(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 10,
+            row: 5,
+            modifiers: KeyModifiers::NONE,
+        })));
+        app.update(control('c'));
+        app.update(control('c'));
+
+        let update = app.update(AppEvent::ForkFailed {
+            pane: PaneId::Fork(1),
+            error: "fork failed".to_owned(),
+        });
+
+        assert!(matches!(update.effects.as_slice(), [AppEffect::Shutdown]));
     }
 
     #[test]
