@@ -176,6 +176,7 @@ pub(crate) struct MemoryConfig {
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct SubagentsConfig {
     enabled: bool,
+    allow_luna: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -237,6 +238,7 @@ struct MemoryConfigFile {
 #[serde(default, deny_unknown_fields)]
 struct SubagentsConfigFile {
     enabled: Option<bool>,
+    allow_luna: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -406,6 +408,7 @@ impl Config {
             },
             subagents: SubagentsConfig {
                 enabled: file.subagents.enabled.unwrap_or(true),
+                allow_luna: file.subagents.allow_luna.unwrap_or(true),
             },
             theme: file.theme,
             reload,
@@ -979,6 +982,10 @@ impl SubagentsConfig {
     pub(crate) const fn enabled(&self) -> bool {
         self.enabled
     }
+
+    pub(crate) const fn allow_luna(&self) -> bool {
+        self.allow_luna
+    }
 }
 
 impl ReasoningEffort {
@@ -1227,7 +1234,7 @@ mod tests {
         assert_table_fields(&rendered["mcp_servers"], &[]);
         assert_table_fields(&rendered["skills"], &["enabled", "roots"]);
         assert_table_fields(&rendered["memory"], &["enabled"]);
-        assert_table_fields(&rendered["subagents"], &["enabled"]);
+        assert_table_fields(&rendered["subagents"], &["enabled", "allow_luna"]);
         assert_table_fields(&rendered["theme"], &["mode", "light", "dark"]);
         let palette_fields = [
             "text",
@@ -1329,8 +1336,10 @@ mod tests {
             let config = load_config(contents).unwrap();
 
             assert!(config.subagents().enabled());
+            assert!(config.subagents().allow_luna());
             let rendered: toml::Value = toml::from_str(&config.to_toml().unwrap()).unwrap();
             assert_eq!(rendered["subagents"]["enabled"].as_bool(), Some(true));
+            assert_eq!(rendered["subagents"]["allow_luna"].as_bool(), Some(true));
         }
     }
 
@@ -1344,8 +1353,19 @@ mod tests {
     }
 
     #[test]
+    fn luna_subagents_can_be_disabled_from_the_config_file() {
+        let config = load_config("[subagents]\nallow_luna = false\n").unwrap();
+
+        assert!(config.subagents().enabled());
+        assert!(!config.subagents().allow_luna());
+        let rendered: toml::Value = toml::from_str(&config.to_toml().unwrap()).unwrap();
+        assert_eq!(rendered["subagents"]["allow_luna"].as_bool(), Some(false));
+    }
+
+    #[test]
     fn unknown_subagent_fields_are_rejected() {
-        let error = load_config("[subagents]\nenabled = true\nlimit = 4\n").unwrap_err();
+        let error =
+            load_config("[subagents]\nenabled = true\nallow_luna = true\nlimit = 4\n").unwrap_err();
 
         assert!(matches!(error, Error::Config(ConfigError::Parse { .. })));
     }
