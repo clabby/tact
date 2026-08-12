@@ -59,6 +59,7 @@ use crate::{
 };
 use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
 use futures_util::StreamExt;
+use nanocodex::Model;
 use std::{
     collections::HashMap,
     io::{self, IsTerminal},
@@ -94,6 +95,8 @@ type NewSessionTask = JoinHandle<(
     ReasoningEffort,
     ReasoningMode,
     bool,
+    Model,
+    components::DraftReset,
     Result<ConfiguredAgent>,
 )>;
 
@@ -145,6 +148,7 @@ struct RestoredSession {
     configured: ConfiguredAgent,
     projection: RestoredSessionProjection,
     reasoning_mode: ReasoningMode,
+    model: Model,
 }
 
 enum EditorTarget {
@@ -210,14 +214,21 @@ struct PaneSettings {
     effort: ReasoningEffort,
     reasoning_mode: ReasoningMode,
     fast_mode: bool,
+    model: Model,
 }
 
 impl PaneSettings {
-    const fn new(effort: ReasoningEffort, reasoning_mode: ReasoningMode, fast_mode: bool) -> Self {
+    const fn new(
+        effort: ReasoningEffort,
+        reasoning_mode: ReasoningMode,
+        fast_mode: bool,
+        model: Model,
+    ) -> Self {
         Self {
             effort,
             reasoning_mode,
             fast_mode,
+            model,
         }
     }
 }
@@ -258,6 +269,7 @@ struct PaneRuntime {
     current_effort: ReasoningEffort,
     reasoning_mode: ReasoningMode,
     current_fast_mode: bool,
+    current_model: Model,
     active_shells: usize,
     generation: u64,
     subagent_control: SubagentControl,
@@ -429,7 +441,7 @@ pub(crate) async fn run(
         StartupMode::NewSession | StartupMode::ResumeSelector => None,
     };
     let resuming = resume_session_id.is_some();
-    let (configured, restored_projection, reasoning_mode) =
+    let (configured, restored_projection, reasoning_mode, model) =
         if let Some(session_id) = resume_session_id {
             let restored_config = config.clone();
             let config_path = restored_config.path().to_path_buf();
@@ -446,6 +458,7 @@ pub(crate) async fn run(
             let records = records?;
             tokio::task::spawn_blocking(move || -> Result<_> {
                 let reasoning_mode = session::reasoning_mode(&records);
+                let model = session::model(&records);
                 let projection = RootNode::project_session(initial_effort, records);
                 let configured = ConfiguredAgent::from_config_with_session(
                     &restored_config,
@@ -454,7 +467,7 @@ pub(crate) async fn run(
                     Some(&session_id),
                     Some(snapshot),
                 )?;
-                Ok((configured, Some(projection), reasoning_mode))
+                Ok((configured, Some(projection), reasoning_mode, model))
             })
             .await
             .map_err(RuntimeError::SessionTask)??
@@ -463,6 +476,7 @@ pub(crate) async fn run(
                 ConfiguredAgent::from_config(&config)?,
                 None,
                 preferred_reasoning_mode,
+                Model::Sol,
             )
         };
     let mut terminal = TerminalSession::enter().map_err(RuntimeError::Terminal)?;
@@ -491,7 +505,7 @@ pub(crate) async fn run(
                 PaneSession::new(&main_session_id, None, !skills.is_empty())
             },
             &config,
-            PaneSettings::new(initial_effort, reasoning_mode, initial_fast_mode),
+            PaneSettings::new(initial_effort, reasoning_mode, initial_fast_mode, model),
             instructions,
             subagent_control.clone(),
             &writer_sender,
@@ -528,6 +542,7 @@ pub(crate) async fn run(
             projection,
         );
     }
+    root.set_model(model);
     root.set_skills(skills);
     let mut theme = config.theme().clone();
     if let Some(scheme) = theme::detect_system_scheme() {
@@ -938,6 +953,10 @@ pub(crate) async fn run(
                             .get(&PaneId::Main)
                             .expect("main pane must exist")
                             .reasoning_mode;
+                        let model = panes
+                            .get(&PaneId::Main)
+                            .expect("main pane must exist")
+                            .current_model;
                         let subagent_control = panes
                             .get(&PaneId::Main)
                             .expect("main pane must exist")
@@ -966,7 +985,7 @@ pub(crate) async fn run(
                                     skills_catalog_present,
                                 ),
                                 &config,
-                                PaneSettings::new(effort, reasoning_mode, fast_mode),
+                                PaneSettings::new(effort, reasoning_mode, fast_mode, model),
                                 instructions,
                                 subagent_control.clone(),
                                 &writer_sender,
@@ -1171,7 +1190,7 @@ pub(crate) async fn run(
                         let skills = install_configured_agent(
                             pane,
                             configured,
-                            PaneSettings::new(effort, reasoning_mode, fast_mode),
+                            PaneSettings::new(effort, reasoning_mode, fast_mode, Model::Sol),
                             &config,
                             &mut panes,
                             &commands,
@@ -1211,14 +1230,14 @@ pub(crate) async fn run(
             }, if new_session_task.is_some() && !stopping => {
                 new_session_task = None;
                 input = Some(EventStream::new());
-                let (pane, effort, reasoning_mode, fast_mode, configured) =
+                let (pane, effort, reasoning_mode, fast_mode, model, draft_reset, configured) =
                     result.map_err(RuntimeError::NewSessionTask)?;
                 match configured {
                     Ok(configured) => {
                         let skills = install_configured_agent(
                             pane,
                             configured,
-                            PaneSettings::new(effort, reasoning_mode, fast_mode),
+                            PaneSettings::new(effort, reasoning_mode, fast_mode, model),
                             &config,
                             &mut panes,
                             &commands,
@@ -1235,6 +1254,8 @@ pub(crate) async fn run(
                                 effort,
                                 reasoning_mode,
                                 fast_mode,
+                                model,
+                                draft_reset,
                                 skills,
                             }),
                             &mut scheduler,
@@ -1357,6 +1378,7 @@ pub(crate) async fn run(
                         configured,
                         projection,
                         reasoning_mode,
+                        model,
                     }) => {
                         let ConfiguredAgent {
                             agent,
@@ -1388,7 +1410,7 @@ pub(crate) async fn run(
                                 PaneGeneration { pane, generation },
                                 PaneSession::persisted(&session_id, !skills.is_empty()),
                                 &config,
-                                PaneSettings::new(effort, reasoning_mode, fast_mode),
+                                PaneSettings::new(effort, reasoning_mode, fast_mode, model),
                                 instructions,
                                 subagent_control.clone(),
                                 &writer_sender,
@@ -1421,6 +1443,7 @@ pub(crate) async fn run(
                                 reasoning_mode,
                                 preferred_reasoning_mode,
                                 fast_mode,
+                                model,
                                 skills,
                             }),
                             &mut scheduler,
@@ -1568,6 +1591,7 @@ fn open_pane(
         effort,
         reasoning_mode,
         fast_mode,
+        model,
     } = settings;
     let PaneSession {
         id: session_id,
@@ -1581,7 +1605,7 @@ fn open_pane(
     journal.defer_start(SessionStarted {
         session_id: session_id.to_owned(),
         parent_session_id: parent_session_id.map(str::to_owned),
-        model: nanocodex::oai::MODEL.to_owned(),
+        model: model.to_string(),
         effort,
         reasoning_mode,
         fast_mode,
@@ -1621,6 +1645,7 @@ fn open_pane(
         current_effort: effort,
         reasoning_mode,
         current_fast_mode: fast_mode,
+        current_model: model,
         active_shells: 0,
         generation,
         subagent_control,
@@ -1923,6 +1948,43 @@ fn apply_pane_effect(
                 })
             }));
         }
+        components::RootEffect::SetModel(model) => {
+            *context.input = None;
+            let effort = context
+                .app
+                .root(pane)
+                .expect("model pane must exist")
+                .composer()
+                .effort();
+            let reasoning_mode = context
+                .panes
+                .get(&pane)
+                .expect("model pane must have a runtime")
+                .reasoning_mode;
+            let fast_mode = context
+                .panes
+                .get(&pane)
+                .expect("model pane must have a runtime")
+                .current_fast_mode;
+            let config = context.config.clone();
+            *context.new_session_task = Some(tokio::task::spawn_blocking(move || {
+                let configured = ConfiguredAgent::from_config_with_model(
+                    &config,
+                    effort,
+                    reasoning_mode,
+                    model,
+                );
+                (
+                    pane,
+                    effort,
+                    reasoning_mode,
+                    fast_mode,
+                    model,
+                    components::DraftReset::Preserve,
+                    configured,
+                )
+            }));
+        }
         components::RootEffect::SetFastMode(enabled) => {
             *context.input = None;
             let config = (pane == PaneId::Main).then(|| context.config.clone());
@@ -2028,7 +2090,15 @@ fn apply_pane_effect(
                     None,
                     None,
                 );
-                (pane, effort, reasoning_mode, fast_mode, configured)
+                (
+                    pane,
+                    effort,
+                    reasoning_mode,
+                    fast_mode,
+                    Model::Sol,
+                    components::DraftReset::Clear,
+                    configured,
+                )
             }));
         }
         components::RootEffect::LoadSessions(kind) => {
@@ -2164,6 +2234,7 @@ fn apply_pane_effect(
                     let records = records?;
                     tokio::task::spawn_blocking(move || -> Result<_> {
                     let reasoning_mode = session::reasoning_mode(&records);
+                    let model = session::model(&records);
                     let projection = RootNode::project_session(effort, records);
                     let configured = ConfiguredAgent::from_config_with_session(
                         &config,
@@ -2176,6 +2247,7 @@ fn apply_pane_effect(
                         configured,
                         projection,
                         reasoning_mode,
+                        model,
                     })
                     })
                     .await
@@ -2567,6 +2639,7 @@ mod tests {
             worker::WorkerCommand,
         },
     };
+    use nanocodex::Model;
     use std::{collections::HashMap, fs, path::Path, sync::Arc};
     use tempfile::tempdir;
 
@@ -2794,7 +2867,12 @@ mod tests {
             },
             PaneSession::new("main-session", None, false),
             &config,
-            PaneSettings::new(ReasoningEffort::Low, ReasoningMode::Standard, false),
+            PaneSettings::new(
+                ReasoningEffort::Low,
+                ReasoningMode::Standard,
+                false,
+                Model::Luna,
+            ),
             Arc::from("instructions"),
             subagent_control.clone(),
             &sender,
@@ -2807,7 +2885,12 @@ mod tests {
             },
             PaneSession::new("fork-session", Some("main-session"), false),
             &config,
-            PaneSettings::new(ReasoningEffort::Low, ReasoningMode::Standard, false),
+            PaneSettings::new(
+                ReasoningEffort::Low,
+                ReasoningMode::Standard,
+                false,
+                Model::Luna,
+            ),
             Arc::from("instructions"),
             subagent_control.clone(),
             &sender,
@@ -2867,6 +2950,7 @@ mod tests {
             .decode_payload::<crate::tui::transcript::SessionStarted>()
             .unwrap();
         assert_eq!(started.parent_session_id.as_deref(), Some("main-session"));
+        assert_eq!(started.model, Model::Luna.to_string());
         assert_eq!(records[1].kind(), "user.submitted");
     }
 
@@ -2891,7 +2975,12 @@ mod tests {
             },
             PaneSession::new("old-session", None, false),
             &config,
-            PaneSettings::new(ReasoningEffort::Medium, ReasoningMode::Standard, false),
+            PaneSettings::new(
+                ReasoningEffort::Medium,
+                ReasoningMode::Standard,
+                false,
+                Model::Sol,
+            ),
             Arc::from("instructions"),
             subagent_control.clone(),
             &sender,
@@ -2913,7 +3002,12 @@ mod tests {
             },
             PaneSession::new("new-session", None, false),
             &config,
-            PaneSettings::new(ReasoningEffort::Medium, ReasoningMode::Standard, false),
+            PaneSettings::new(
+                ReasoningEffort::Medium,
+                ReasoningMode::Standard,
+                false,
+                Model::Sol,
+            ),
             Arc::from("instructions"),
             subagent_control,
             &sender,

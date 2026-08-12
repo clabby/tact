@@ -7,7 +7,7 @@ use crate::{
         transcript::{SessionStarted, TranscriptRecord},
     },
 };
-use nanocodex::agent::session::SessionSnapshot;
+use nanocodex::{Model, agent::session::SessionSnapshot};
 use serde::{Deserialize, Serialize};
 use std::{
     path::{Path, PathBuf},
@@ -227,6 +227,15 @@ pub(crate) fn reasoning_mode(records: &[Arc<TranscriptRecord>]) -> ReasoningMode
         .map_or(ReasoningMode::Standard, |started| started.reasoning_mode)
 }
 
+pub(crate) fn model(records: &[Arc<TranscriptRecord>]) -> Model {
+    records
+        .iter()
+        .find(|record| record.source() == "tact" && record.kind() == "session.started")
+        .and_then(|record| record.decode_payload::<SessionStarted>().ok())
+        .and_then(|started| started.model.parse().ok())
+        .unwrap_or(Model::Sol)
+}
+
 pub(crate) fn format_age(started_at_unix_ms: u64) -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -244,7 +253,7 @@ pub(crate) fn format_age(started_at_unix_ms: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{encode_checkpoint, load_checkpoint, load_transcript, save_checkpoint};
+    use super::{encode_checkpoint, load_checkpoint, load_transcript, model, save_checkpoint};
     use crate::{
         app::config::{ReasoningEffort, ReasoningMode},
         tui::{
@@ -252,7 +261,7 @@ mod tests {
             transcript::{LocalEvent, SessionStarted, TranscriptJournal, TranscriptRecord, TurnId},
         },
     };
-    use nanocodex::agent::session::SessionSnapshot;
+    use nanocodex::{Model, agent::session::SessionSnapshot};
     use rusqlite::Connection;
     use serde_json::{Value, json};
     use std::sync::Arc;
@@ -288,6 +297,28 @@ mod tests {
 
         assert!(load_transcript(&config, "missing").unwrap().is_empty());
         assert!(!database_path(&config).exists());
+    }
+
+    #[test]
+    fn restored_model_comes_from_the_session_start_record() {
+        let record = TranscriptRecord::from_local(
+            1,
+            1,
+            LocalEvent::SessionStarted(SessionStarted {
+                session_id: "session".to_owned(),
+                parent_session_id: None,
+                model: Model::Luna.to_string(),
+                effort: ReasoningEffort::Medium,
+                reasoning_mode: ReasoningMode::Standard,
+                fast_mode: false,
+                workspace: "/work".into(),
+                application_version: "test".to_owned(),
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(model(&[Arc::new(record)]), Model::Luna);
+        assert_eq!(model(&[]), Model::Sol);
     }
 
     #[test]

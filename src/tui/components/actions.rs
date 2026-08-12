@@ -16,7 +16,7 @@ use ratatui::{
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-const ACTIONS: [Action; 14] = [
+const ACTIONS: [Action; 15] = [
     Action::Effort,
     Action::FastMode,
     Action::Theme,
@@ -31,6 +31,7 @@ const ACTIONS: [Action; 14] = [
     Action::DebugContext,
     Action::Handoff,
     Action::Review,
+    Action::Model,
 ];
 const KEY_BINDINGS: [&str; 3] = ["↑↓ move", "enter/tab open", "esc close"];
 const SEARCH_LABEL: &str = "Search: ";
@@ -45,6 +46,7 @@ pub(super) struct ActionAvailability {
     pub(super) fork: bool,
     pub(super) fast_mode: bool,
     pub(super) memory: bool,
+    pub(super) model: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -53,6 +55,7 @@ pub(super) enum Action {
     Review,
     Subagents,
     Effort,
+    Model,
     FastMode,
     Theme,
     NewSession,
@@ -259,6 +262,7 @@ impl ActionsMenu {
             Action::Handoff | Action::Review => self.availability.new_session,
             Action::Subagents => true,
             Action::Effort => true,
+            Action::Model => self.availability.model,
             Action::FastMode => true,
             Action::Theme => true,
             Action::NewSession => self.availability.new_session,
@@ -288,6 +292,7 @@ impl ActionsMenu {
                 "Prepare handoff · finish active work first"
             }
             Action::FastMode if self.availability.fast_mode => "Disable fast mode",
+            Action::Model if !self.availability.model => "Select model · start a new session first",
             Action::Memory if !self.availability.memory => {
                 "Memory · enable in config: memory.enabled = true"
             }
@@ -303,6 +308,7 @@ impl Action {
             Self::Review => "Review changes",
             Self::Subagents => "Subagents",
             Self::Effort => "Change effort",
+            Self::Model => "Select model",
             Self::FastMode => "Enable fast mode",
             Self::Theme => "Select theme",
             Self::NewSession => "New session",
@@ -322,6 +328,7 @@ impl Action {
             Self::Review => Some("review"),
             Self::Subagents => Some("agents"),
             Self::Effort => Some("thinking"),
+            Self::Model => Some("intelligence"),
             Self::FastMode => Some("priority"),
             Self::Theme => Some("appearance"),
             Self::NewSession => Some("clear"),
@@ -417,6 +424,7 @@ mod tests {
             fork: true,
             fast_mode: false,
             memory: true,
+            model: true,
         }
     }
 
@@ -588,6 +596,30 @@ mod tests {
             enabled.update(key(KeyCode::Enter)).effects,
             [ActionsEffect::Trigger(Action::Effort)]
         );
+    }
+
+    #[test]
+    fn model_action_is_available_only_before_the_first_prompt() {
+        let mut enabled = ActionsMenu::new(available());
+        for character in "intelligence".chars() {
+            enabled.update(key(KeyCode::Char(character)));
+        }
+        assert_eq!(
+            enabled.update(key(KeyCode::Enter)).effects,
+            [ActionsEffect::Trigger(Action::Model)]
+        );
+
+        let mut availability = available();
+        availability.model = false;
+        let mut disabled = ActionsMenu::new(availability);
+        for character in "intelligence".chars() {
+            disabled.update(key(KeyCode::Char(character)));
+        }
+        let terminal = render(&mut disabled);
+        assert!((0..20).any(|row| {
+            row_segment(&terminal, row, 0, 60).contains("Select model · start a new session first")
+        }));
+        assert!(disabled.update(key(KeyCode::Enter)).effects.is_empty());
     }
 
     #[test]
