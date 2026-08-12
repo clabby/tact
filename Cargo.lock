@@ -2439,8 +2439,7 @@ dependencies = [
 [[package]]
 name = "nanocodex"
 version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6910a6f7aceeaa50264c66cc53c207291dfc9829ec9a050818137814a1d30f90"
+source = "git+https://github.com/clabby/nanocodex?branch=cl%2Fstructured-events#1b7743130d318f3889e4eccad9e821812f29c860"
 dependencies = [
  "nanocodex-agent",
  "nanocodex-oai-api",
@@ -2450,8 +2449,7 @@ dependencies = [
 [[package]]
 name = "nanocodex-agent"
 version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "791f01cdbd33729f7fb5ad84e92b27d3b3eccae20fdd18da9bdb5ff33f95ed2d"
+source = "git+https://github.com/clabby/nanocodex?branch=cl%2Fstructured-events#1b7743130d318f3889e4eccad9e821812f29c860"
 dependencies = [
  "chrono",
  "futures-util",
@@ -2473,8 +2471,7 @@ dependencies = [
 [[package]]
 name = "nanocodex-oai-api"
 version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d23e2fbd39b8ecb34efe21a2eb362a0de14f86c436df99f21ed6e904d15ba774"
+source = "git+https://github.com/clabby/nanocodex?branch=cl%2Fstructured-events#1b7743130d318f3889e4eccad9e821812f29c860"
 dependencies = [
  "async-trait",
  "base64",
@@ -2500,8 +2497,7 @@ dependencies = [
 [[package]]
 name = "nanocodex-tools"
 version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fc20017ac00d3eeef1a6a2bc5ad63f8b72734e9cbc5a48032fe2b916c8a6b98c"
+source = "git+https://github.com/clabby/nanocodex?branch=cl%2Fstructured-events#1b7743130d318f3889e4eccad9e821812f29c860"
 dependencies = [
  "async-trait",
  "base64",
@@ -2531,8 +2527,7 @@ dependencies = [
 [[package]]
 name = "nanocodex-tools-macros"
 version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c94504a431686ef9eab7210a2f9ea4d3f2489a3fbe2fc343239be535e3061045"
+source = "git+https://github.com/clabby/nanocodex?branch=cl%2Fstructured-events#1b7743130d318f3889e4eccad9e821812f29c860"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",

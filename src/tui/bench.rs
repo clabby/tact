@@ -233,6 +233,7 @@ fn mixed_projection_records(turns: u64) -> Vec<Arc<TranscriptRecord>> {
 
         if turn % 4 == 0 {
             let call_id = format!("tool-{turn}");
+            let output = format!("test output for package {turn}\n").repeat(16);
             records.push(agent_record(
                 sequence,
                 AgentEventKind::ToolCall,
@@ -252,7 +253,11 @@ fn mixed_projection_records(turns: u64) -> Vec<Arc<TranscriptRecord>> {
                     "status": "completed",
                     "duration_ns": 1_000_000_u64,
                     "result": {
-                        "output": format!("test output for package {turn}\n").repeat(16),
+                        "output": output.as_str(),
+                        "exit_code": 0,
+                    },
+                    "structured_result": {
+                        "output": output.as_str(),
                         "exit_code": 0,
                     },
                     "metadata": null,
@@ -331,6 +336,7 @@ impl Harness {
                     "status": "completed",
                     "duration_ns": 1_000_000_u64,
                     "result": {"output": output.as_str(), "exit_code": 0},
+                    "structured_result": {"output": output.as_str(), "exit_code": 0},
                     "metadata": null,
                 }),
             ));
@@ -366,6 +372,7 @@ impl Harness {
                 "status": "completed",
                 "duration_ns": 1_000_000_u64,
                 "result": "Done!",
+                "structured_result": {},
                 "metadata": null,
             }),
         ));

@@ -40,7 +40,7 @@ futures-util = "0.3.33"
 jsonschema = { version = "0.48.5", default-features = false }
 miette = { version = "7.6.0", features = ["fancy"] }
 minisign-verify = "0.2.5"
-nanocodex = "0.4.0"
+nanocodex = { git = "https://github.com/clabby/nanocodex", branch = "cl/structured-events" }
 pulldown-cmark = { version = "0.13.4", default-features = false }
 png = "0.18.1"
 ratatui = "0.30.2"
