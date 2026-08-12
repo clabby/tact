@@ -20,7 +20,7 @@ use crate::{
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use history::PromptHistory;
 use layout::{VisualLayout, byte_at_column, grapheme_at_column};
-use nanocodex::oai::MODEL;
+use nanocodex::Model;
 use ratatui::{
     Frame,
     buffer::Buffer,
@@ -65,6 +65,7 @@ pub(crate) enum ComposerEvent {
     },
     ReplaceDraft(String),
     SetEffort(ReasoningEffort),
+    SetModel(Model),
     SetReasoningMode(ReasoningMode),
     SetFastMode(bool),
     Activity {
@@ -101,6 +102,7 @@ pub(crate) struct Composer {
     context_tokens: u64,
     workspace: String,
     thinking: ReasoningEffort,
+    model: Model,
     reasoning_mode: ReasoningMode,
     fast_mode: bool,
     activity_wave: Option<WavedText>,
@@ -197,6 +199,7 @@ impl Composer {
             context_tokens: 0,
             workspace: shorten_home(workspace),
             thinking,
+            model: Model::Sol,
             reasoning_mode: ReasoningMode::Standard,
             fast_mode: false,
             activity_wave: None,
@@ -254,6 +257,13 @@ impl Composer {
                     return ComposerUpdate::unchanged();
                 }
                 self.thinking = effort;
+                ComposerUpdate::changed()
+            }
+            ComposerEvent::SetModel(model) => {
+                if self.model == model {
+                    return ComposerUpdate::unchanged();
+                }
+                self.model = model;
                 ComposerUpdate::changed()
             }
             ComposerEvent::SetReasoningMode(mode) => {
@@ -540,6 +550,10 @@ impl Composer {
 
     pub(crate) const fn effort(&self) -> ReasoningEffort {
         self.thinking
+    }
+
+    pub(crate) const fn model(&self) -> Model {
+        self.model
     }
 
     pub(crate) const fn fast_mode(&self) -> bool {
@@ -1031,7 +1045,7 @@ impl Composer {
         } else {
             format!("{usage_before_subagents}{} ", subagent_segment.trim_start())
         };
-        let model = format!(" {MODEL} ");
+        let model = format!(" {} ", self.model);
         let timer = self
             .turn_timers
             .front()
@@ -1387,7 +1401,10 @@ mod tests {
         tui::theme::Theme,
     };
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
-    use nanocodex::agent::input::{PromptInput, UserInput};
+    use nanocodex::{
+        Model,
+        agent::input::{PromptInput, UserInput},
+    };
     use ratatui::{
         Terminal,
         backend::TestBackend,
@@ -1463,6 +1480,17 @@ mod tests {
                 footer,
             ]
         );
+    }
+
+    #[test]
+    fn composer_chrome_uses_the_selected_session_model() {
+        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        composer.update(ComposerEvent::SetModel(Model::Luna));
+
+        let terminal = render(&mut composer, 60, 5);
+
+        assert!(rows(&terminal)[0].contains(" gpt-5.6-luna "));
+        assert!(!rows(&terminal)[0].contains(" gpt-5.6-sol "));
     }
 
     #[test]

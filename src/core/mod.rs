@@ -17,8 +17,8 @@ use crate::{
     tui::session::ResumeState,
 };
 use nanocodex::{
-    AgentEvents, Nanocodex, NanocodexError, OpenAi, Tools, TurnControl, agent::session::SessionId,
-    oai::tower::ResponsesServiceConfig,
+    AgentEvents, Model, Nanocodex, NanocodexError, OpenAi, Tools, TurnControl,
+    agent::session::SessionId, oai::tower::ResponsesServiceConfig,
 };
 #[cfg(feature = "harbor-evals")]
 use orchestration::{OrchestrationRecorder, RunOutcome};
@@ -149,10 +149,25 @@ impl ConfiguredAgent {
     }
 
     pub(crate) fn from_config(config: &Config) -> Result<Self> {
-        Self::from_config_with_session(
+        Self::from_config_with_model(
             config,
             config.agent().thinking(),
             config.agent().reasoning_mode(),
+            Model::Sol,
+        )
+    }
+
+    pub(crate) fn from_config_with_model(
+        config: &Config,
+        thinking: ReasoningEffort,
+        reasoning_mode: ReasoningMode,
+        model: Model,
+    ) -> Result<Self> {
+        Self::from_config_with_session_and_model(
+            config,
+            thinking,
+            reasoning_mode,
+            model,
             None,
             None,
         )
@@ -162,6 +177,24 @@ impl ConfiguredAgent {
         config: &Config,
         thinking: ReasoningEffort,
         reasoning_mode: ReasoningMode,
+        session_id: Option<&str>,
+        resume: Option<ResumeState>,
+    ) -> Result<Self> {
+        Self::from_config_with_session_and_model(
+            config,
+            thinking,
+            reasoning_mode,
+            Model::Sol,
+            session_id,
+            resume,
+        )
+    }
+
+    fn from_config_with_session_and_model(
+        config: &Config,
+        thinking: ReasoningEffort,
+        reasoning_mode: ReasoningMode,
+        model: Model,
         session_id: Option<&str>,
         resume: Option<ResumeState>,
     ) -> Result<Self> {
@@ -193,6 +226,7 @@ impl ConfiguredAgent {
         let (subagents, subagent_control, subagent_updates) =
             subagents::channel(agent_config.max_subagents());
         let mut builder = Nanocodex::builder(openai)
+            .model(model)
             .workspace(workspace)
             .thinking(thinking.into())
             .reasoning_mode(reasoning_mode.into())

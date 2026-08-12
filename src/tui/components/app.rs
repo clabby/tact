@@ -3,7 +3,7 @@
 use super::{
     node::{ComponentUpdate, Node, RenderRequest},
     queue::QueueId,
-    root::{RestoredSessionProjection, RootEffect, RootEvent, RootNode},
+    root::{DraftReset, RestoredSessionProjection, RootEffect, RootEvent, RootNode},
 };
 use crate::{
     app::config::{ReasoningEffort, ReasoningMode},
@@ -16,6 +16,7 @@ use crate::{
     },
 };
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
+use nanocodex::Model;
 use ratatui::{
     Frame,
     layout::{Position, Rect},
@@ -102,6 +103,8 @@ pub(crate) enum AppEvent {
         effort: ReasoningEffort,
         reasoning_mode: ReasoningMode,
         fast_mode: bool,
+        model: Model,
+        draft_reset: DraftReset,
         skills: Arc<[Skill]>,
     },
     NewSessionFailed {
@@ -149,6 +152,7 @@ pub(crate) enum AppEvent {
         reasoning_mode: ReasoningMode,
         preferred_reasoning_mode: ReasoningMode,
         fast_mode: bool,
+        model: Model,
         skills: Arc<[Skill]>,
     },
     NotifyError {
@@ -267,6 +271,7 @@ impl AppNode {
                         effort,
                         reasoning_mode,
                         reasoning_mode,
+                        DraftReset::Clear,
                     );
                     root.component_mut().set_fast_mode(fast_mode);
                     root.component_mut().set_skills(skills);
@@ -312,6 +317,8 @@ impl AppNode {
                 effort,
                 reasoning_mode,
                 fast_mode,
+                model,
+                draft_reset,
                 skills,
             } => {
                 let workspace = self.workspace.clone();
@@ -323,8 +330,10 @@ impl AppNode {
                     effort,
                     reasoning_mode,
                     reasoning_mode,
+                    draft_reset,
                 );
                 root.component_mut().set_fast_mode(fast_mode);
+                root.component_mut().set_model(model);
                 root.component_mut().set_skills(skills);
                 ComponentUpdate::render(RenderRequest::Immediate)
             }
@@ -372,6 +381,7 @@ impl AppNode {
                 reasoning_mode,
                 preferred_reasoning_mode,
                 fast_mode,
+                model,
                 skills,
             } => self.update_root(
                 pane,
@@ -381,6 +391,7 @@ impl AppNode {
                     reasoning_mode,
                     preferred_reasoning_mode,
                     fast_mode,
+                    model,
                     skills,
                 },
             ),
@@ -756,8 +767,8 @@ fn is_control_c(event: &Event) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        super::SessionListKind, AppEffect, AppEvent, AppNode, RootEffect, RootEvent, RootNode,
-        SPLIT_HINT,
+        super::SessionListKind, AppEffect, AppEvent, AppNode, DraftReset, RootEffect, RootEvent,
+        RootNode, SPLIT_HINT,
     };
     use crate::{
         app::config::{ReasoningEffort, ReasoningMode},
@@ -771,6 +782,7 @@ mod tests {
     use crossterm::event::{
         Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     };
+    use nanocodex::Model;
     use ratatui::{Terminal, backend::TestBackend};
     use semver::Version;
     use std::{path::PathBuf, sync::Arc};
@@ -786,6 +798,29 @@ mod tests {
             KeyCode::Char(character),
             KeyModifiers::CONTROL,
         )))
+    }
+
+    #[test]
+    fn model_session_replacement_preserves_the_draft_in_place() {
+        let mut app = app();
+        app.update(AppEvent::EditorDraft {
+            pane: PaneId::Main,
+            draft: "send with luna".to_owned(),
+        });
+
+        app.update(AppEvent::NewSessionReady {
+            pane: PaneId::Main,
+            effort: ReasoningEffort::Low,
+            reasoning_mode: ReasoningMode::Standard,
+            fast_mode: false,
+            model: Model::Luna,
+            draft_reset: DraftReset::Preserve,
+            skills: Arc::from([]),
+        });
+
+        let root = app.root(PaneId::Main).unwrap();
+        assert_eq!(root.composer().draft(), "send with luna");
+        assert_eq!(root.composer().model(), Model::Luna);
     }
 
     fn memory_record(id: i64, content: &str) -> MemoryRecord {
