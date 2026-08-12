@@ -599,7 +599,11 @@ impl TranscriptModel {
         let payload = record.decode_payload::<ToolResultPayload>()?;
         let resumed_shell = self.shell_followups.remove(&payload.call_id);
         let shell_followup = payload.tool == "write_stdin";
-        let result = normalize_result(payload.result);
+        let result = if matches!(payload.tool.as_str(), "exec_command" | "write_stdin") {
+            normalize_result(payload.structured_result)
+        } else {
+            normalize_result(payload.result)
+        };
         let resumed_result = resumed_shell.map(|_| result.clone());
         let state = tool_result_state(&payload.tool, &payload.status, &result);
         let entry_state = if resumed_shell.is_some() && state == ToolState::Running {
@@ -1217,6 +1221,7 @@ struct ToolResultPayload {
     status: String,
     duration_ns: u64,
     result: Value,
+    structured_result: Value,
     metadata: Option<Value>,
 }
 
@@ -1889,7 +1894,12 @@ mod tests {
                 "tool": "exec_command",
                 "status": "completed",
                 "duration_ns": 1_u64,
-                "result": {"output": "running", "session_id": 7},
+                "result": "Wall time: 0.0000 seconds\nProcess running with session ID 7\nOutput:\nrunning",
+                "structured_result": {
+                    "output": "running",
+                    "session_id": 7,
+                    "wall_time_seconds": 0.0,
+                },
                 "metadata": null,
             }),
         ));
@@ -1916,7 +1926,12 @@ mod tests {
                 "tool": "write_stdin",
                 "status": "completed",
                 "duration_ns": 2_u64,
-                "result": {"output": " done", "exit_code": 0},
+                "result": "Wall time: 0.0000 seconds\nProcess exited with code 0\nOutput:\n done",
+                "structured_result": {
+                    "output": " done",
+                    "exit_code": 0,
+                    "wall_time_seconds": 0.0,
+                },
                 "metadata": null,
             }),
         ));
@@ -1960,7 +1975,12 @@ mod tests {
                 "tool": "exec_command",
                 "status": "completed",
                 "duration_ns": 1_u64,
-                "result": {"output": "running", "session_id": 7},
+                "result": "Wall time: 0.0000 seconds\nProcess running with session ID 7\nOutput:\nrunning",
+                "structured_result": {
+                    "output": "running",
+                    "session_id": 7,
+                    "wall_time_seconds": 0.0,
+                },
                 "metadata": null,
             }),
         ));
@@ -1991,7 +2011,12 @@ mod tests {
                 "tool": "write_stdin",
                 "status": "completed",
                 "duration_ns": 2_u64,
-                "result": {"output": " still", "session_id": 7},
+                "result": "Wall time: 0.0000 seconds\nProcess running with session ID 7\nOutput:\n still",
+                "structured_result": {
+                    "output": " still",
+                    "session_id": 7,
+                    "wall_time_seconds": 0.0,
+                },
                 "metadata": null,
             }),
         ));
@@ -2022,7 +2047,12 @@ mod tests {
                 "tool": "write_stdin",
                 "status": "completed",
                 "duration_ns": 2_u64,
-                "result": {"output": " done", "exit_code": 0},
+                "result": "Wall time: 0.0000 seconds\nProcess exited with code 0\nOutput:\n done",
+                "structured_result": {
+                    "output": " done",
+                    "exit_code": 0,
+                    "wall_time_seconds": 0.0,
+                },
                 "metadata": null,
             }),
         ));
@@ -2061,7 +2091,8 @@ mod tests {
                 "tool": "exec_command",
                 "status": "completed",
                 "duration_ns": 1_u64,
-                "result": {"output": "", "exit_code": null},
+                "result": "Wall time: 0.0000 seconds\nOutput:\n",
+                "structured_result": {"output": "", "wall_time_seconds": 0.0},
                 "metadata": null,
             }),
         ));
@@ -2143,7 +2174,12 @@ mod tests {
                 "tool": "exec_command",
                 "status": "completed",
                 "duration_ns": 10,
-                "result": {"output": "ok", "exit_code": 0},
+                "result": "Wall time: 0.0000 seconds\nProcess exited with code 0\nOutput:\nok",
+                "structured_result": {
+                    "output": "ok",
+                    "exit_code": 0,
+                    "wall_time_seconds": 0.0,
+                },
                 "metadata": null,
             }),
         ));
@@ -2239,6 +2275,7 @@ mod tests {
                 "status": "completed",
                 "duration_ns": 10,
                 "result": [{"text": "Script running"}],
+                "structured_result": [{"text": "Script running"}],
                 "metadata": null,
             }),
         ));
