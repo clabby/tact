@@ -131,7 +131,7 @@ impl ModelSelector {
         let indicator_column = left.saturating_add(
             (f64::from(width) * self.displayed_position / (MODELS.len() - 1) as f64).round() as u16,
         );
-        let selected_color = model_color(theme, MODELS[self.selected]);
+        let selected_color = theme.model(MODELS[self.selected]);
         let buffer = frame.buffer_mut();
         for column in left..=right {
             let color = if column <= indicator_column {
@@ -141,14 +141,9 @@ impl ModelSelector {
             };
             buffer.set_string(column, area.y, "━", Style::default().fg(color));
         }
-        for index in 0..MODELS.len() {
+        for (index, model) in MODELS.iter().copied().enumerate() {
             let column = model_column(left, width, index);
-            let color = if index <= self.displayed_position.round() as usize {
-                selected_color
-            } else {
-                theme.muted()
-            };
-            buffer.set_string(column, area.y, "●", Style::default().fg(color));
+            buffer.set_string(column, area.y, "●", Style::default().fg(theme.model(model)));
         }
         buffer.set_string(
             indicator_column,
@@ -160,18 +155,18 @@ impl ModelSelector {
         );
 
         let labels = [
-            (model_column(left, width, 0), "Luna"),
-            (model_column(left, width, 1), "Terra"),
-            (model_column(left, width, 2), "Sol"),
+            (model_column(left, width, 0), Model::Luna, "Luna"),
+            (model_column(left, width, 1), Model::Terra, "Terra"),
+            (model_column(left, width, 2), Model::Sol, "Sol"),
         ];
-        for (column, label) in labels {
+        for (column, model, label) in labels {
             let label_width = u16::try_from(label.len()).unwrap_or(u16::MAX);
             let start = column.saturating_sub(label_width / 2).max(area.x);
             buffer.set_string(
                 start,
                 area.y.saturating_add(1),
                 label,
-                Style::default().fg(theme.text()),
+                Style::default().fg(theme.model(model)),
             );
         }
     }
@@ -215,7 +210,7 @@ impl Component for ModelSelector {
             Span::styled(
                 model_name(model),
                 Style::default()
-                    .fg(model_color(theme, model))
+                    .fg(theme.model(model))
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled("  ·  smarter →", Style::default().fg(Color::Green)),
@@ -255,15 +250,6 @@ fn model_name(model: Model) -> &'static str {
     }
 }
 
-fn model_color(theme: &Theme, model: Model) -> Color {
-    match model {
-        Model::Luna => theme.thinking_low(),
-        Model::Terra => theme.thinking_high(),
-        Model::Sol => theme.thinking_max(),
-        _ => theme.thinking_max(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -275,11 +261,29 @@ mod tests {
     }
 
     fn render(selector: &mut ModelSelector) -> Terminal<TestBackend> {
-        let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(60, 9)).unwrap();
         terminal
             .draw(|frame| selector.render(frame, frame.area(), &Theme::default()))
             .unwrap();
         terminal
+    }
+
+    fn rendered_label_color(selector: &mut ModelSelector, label: &str) -> Color {
+        let terminal = render(selector);
+        let buffer = terminal.backend().buffer();
+        let label = label.chars().collect::<Vec<_>>();
+        let label_width = u16::try_from(label.len()).unwrap();
+        for y in 0..buffer.area.height {
+            for x in 0..=buffer.area.width.saturating_sub(label_width) {
+                if label.iter().enumerate().all(|(offset, character)| {
+                    buffer[(x + u16::try_from(offset).unwrap(), y)].symbol()
+                        == character.to_string()
+                }) {
+                    return buffer[(x, y)].fg;
+                }
+            }
+        }
+        panic!("label not rendered: {label:?}");
     }
 
     #[test]
@@ -313,6 +317,31 @@ mod tests {
         selector.update_key(key(KeyCode::Left), now);
         selector.update_key(key(KeyCode::Left), now);
         assert_eq!(selector.selected, 0);
+    }
+
+    #[test]
+    fn every_stop_keeps_its_model_color() {
+        let mut selector = ModelSelector::new(Model::Sol);
+
+        assert_eq!(rendered_label_color(&mut selector, "Luna"), Color::White);
+        assert_eq!(rendered_label_color(&mut selector, "Terra"), Color::Green);
+        assert_eq!(rendered_label_color(&mut selector, "Sol"), Color::Yellow);
+    }
+
+    #[test]
+    fn filled_bar_uses_the_selected_model_color() {
+        let mut selector = ModelSelector::new(Model::Sol);
+        let terminal = render(&mut selector);
+        let rail = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .filter(|cell| cell.symbol() == "━")
+            .collect::<Vec<_>>();
+
+        assert!(!rail.is_empty());
+        assert!(rail.iter().all(|cell| cell.fg == Color::Yellow));
     }
 
     #[test]

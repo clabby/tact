@@ -1126,7 +1126,7 @@ impl Composer {
             top,
             &model,
             usize::from(content_end.saturating_sub(model_start)),
-            Style::default().fg(theme.accent()),
+            Style::default().fg(theme.model(self.model)),
         );
         let effort_start = model_start + u16::try_from(model.width()).unwrap_or(u16::MAX);
         if effort_start < content_end {
@@ -1483,14 +1483,27 @@ mod tests {
     }
 
     #[test]
-    fn composer_chrome_uses_the_selected_session_model() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
-        composer.update(ComposerEvent::SetModel(Model::Luna));
+    fn composer_chrome_uses_the_model_palette() {
+        for (model, color) in [
+            (Model::Luna, Color::White),
+            (Model::Terra, Color::Green),
+            (Model::Sol, Color::Yellow),
+        ] {
+            let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+            composer.update(ComposerEvent::SetModel(model));
+            let terminal = render(&mut composer, 60, 5);
+            let label = model.to_string().chars().collect::<Vec<_>>();
+            let line = rows(&terminal)[0].chars().collect::<Vec<_>>();
+            let start = line
+                .windows(label.len())
+                .position(|window| window == label)
+                .unwrap();
 
-        let terminal = render(&mut composer, 60, 5);
-
-        assert!(rows(&terminal)[0].contains(" gpt-5.6-luna "));
-        assert!(!rows(&terminal)[0].contains(" gpt-5.6-sol "));
+            assert_eq!(
+                terminal.backend().buffer()[(u16::try_from(start).unwrap(), 0)].fg,
+                color
+            );
+        }
     }
 
     #[test]
