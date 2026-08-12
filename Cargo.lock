@@ -2438,8 +2438,9 @@ dependencies = [
 
 [[package]]
 name = "nanocodex"
-version = "0.4.0"
-source = "git+https://github.com/clabby/nanocodex?branch=cl%2Fstructured-events#1b7743130d318f3889e4eccad9e821812f29c860"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "223def7aa7a85ccdb7bc0ecfef6a9f36ee332db6730c10a757cfd382e08487d4"
 dependencies = [
  "nanocodex-agent",
  "nanocodex-oai-api",
@@ -2448,8 +2449,9 @@ dependencies = [
 
 [[package]]
 name = "nanocodex-agent"
-version = "0.4.0"
-source = "git+https://github.com/clabby/nanocodex?branch=cl%2Fstructured-events#1b7743130d318f3889e4eccad9e821812f29c860"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "61bf178f13a34a0e77a4039644d48e823b613c7ebbcfcc6fbf88f7442cb924f8"
 dependencies = [
  "chrono",
  "futures-util",
@@ -2470,8 +2472,9 @@ dependencies = [
 
 [[package]]
 name = "nanocodex-oai-api"
-version = "0.4.0"
-source = "git+https://github.com/clabby/nanocodex?branch=cl%2Fstructured-events#1b7743130d318f3889e4eccad9e821812f29c860"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "feb1a99937e9af21fb452d6ebfde1151d2cfaa763c98e22540593a5e22525478"
 dependencies = [
  "async-trait",
  "base64",
@@ -2496,8 +2499,9 @@ dependencies = [
 
 [[package]]
 name = "nanocodex-tools"
-version = "0.4.0"
-source = "git+https://github.com/clabby/nanocodex?branch=cl%2Fstructured-events#1b7743130d318f3889e4eccad9e821812f29c860"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c2749e5464e7251c1f67e8f1ab6c608c175f66a1c5c64e0fbd8b27b7928cc343"
 dependencies = [
  "async-trait",
  "base64",
@@ -2526,8 +2530,9 @@ dependencies = [
 
 [[package]]
 name = "nanocodex-tools-macros"
-version = "0.4.0"
-source = "git+https://github.com/clabby/nanocodex?branch=cl%2Fstructured-events#1b7743130d318f3889e4eccad9e821812f29c860"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9e27623b5720bc25e4d52e10eba53c0fac0a68213b55b9f1fd91021165429930"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
