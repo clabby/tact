@@ -1,4 +1,4 @@
-use nanocodex::agent::events::AgentEvent;
+use nanocodex::{Model, agent::events::AgentEvent};
 use serde::{Deserialize, Serialize};
 use std::{
     fmt,
@@ -264,6 +264,7 @@ impl AgentStatus {
 pub(crate) struct AgentDescriptor {
     pub(crate) id: AgentId,
     pub(crate) session_id: String,
+    pub(crate) model: Model,
     pub(crate) role: String,
     pub(crate) task: String,
     pub(crate) parent: Option<AgentId>,

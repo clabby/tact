@@ -6,8 +6,11 @@ use crate::{
         AgentDescriptor, AgentId, AgentMessageUpdate, AgentStatus, AgentUpdate, ScopedAgentUpdate,
     },
 };
-use nanocodex::agent::events::{
-    AgentEvent, AgentEventData, AgentEventKind, EventUsage, RunEvent, RunTerminal,
+use nanocodex::{
+    Model,
+    agent::events::{
+        AgentEvent, AgentEventData, AgentEventKind, EventUsage, RunEvent, RunTerminal,
+    },
 };
 use serde::Serialize;
 use std::{
@@ -93,6 +96,7 @@ enum UpdateRecord<'a> {
 struct AgentRecord<'a> {
     id: AgentId,
     session_id: &'a str,
+    model: Model,
     role: &'a str,
     task: &'a str,
     origin: AgentOrigin,
@@ -116,6 +120,7 @@ enum SummaryRecord {
 #[derive(Serialize)]
 struct AgentSummary {
     id: AgentId,
+    model: Model,
     role: String,
     parent_id: Option<AgentId>,
     origin: AgentOrigin,
@@ -283,6 +288,7 @@ impl Recorder {
             .values()
             .map(|agent| AgentSummary {
                 id: agent.descriptor.id,
+                model: agent.descriptor.model,
                 role: agent.descriptor.role.clone(),
                 parent_id: agent.descriptor.parent,
                 origin: AgentOrigin::Spawn,
@@ -384,6 +390,7 @@ impl<'a> From<&'a AgentDescriptor> for AgentRecord<'a> {
         Self {
             id: descriptor.id,
             session_id: &descriptor.session_id,
+            model: descriptor.model,
             role: &descriptor.role,
             task: &descriptor.task,
             origin: AgentOrigin::Spawn,
@@ -398,7 +405,10 @@ mod tests {
     use crate::core::extensions::subagents::{
         AgentDescriptor, AgentId, AgentStatus, AgentUpdate, ScopedAgentUpdate,
     };
-    use nanocodex::agent::events::{AgentEvent, AgentEventKind};
+    use nanocodex::{
+        Model,
+        agent::events::{AgentEvent, AgentEventKind},
+    };
     use serde_json::{Value, json, value::to_raw_value};
     use std::{fs, sync::Arc};
     use tempfile::tempdir;
@@ -422,6 +432,7 @@ mod tests {
             "websocket_reconnects": 0,
             "response_attempts": model_calls,
             "response_retries": 0,
+            "billing_uncertain_response_attempts": 0,
             "connection_duration_ns": 100,
             "retry_backoff_duration_ns": 0,
             "model_duration_ns": 900_000,
@@ -463,6 +474,7 @@ mod tests {
                 update: AgentUpdate::Added(AgentDescriptor {
                     id,
                     session_id: "child".to_owned(),
+                    model: Model::Sol,
                     role: "researcher".to_owned(),
                     task: "inspect the task".to_owned(),
                     parent: None,

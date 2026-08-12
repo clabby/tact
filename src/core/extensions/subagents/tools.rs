@@ -13,8 +13,7 @@ use crate::core::extensions::{
     sessions::SessionTool,
 };
 use nanocodex::{
-    Tool, Tools,
-    agent::AgentHandle,
+    Model, Tool, Tools,
     tools::{
         ToolsBuildError,
         contract::{ToolContext, ToolDefinition, ToolInput, ToolOutput, ToolResult, async_trait},
@@ -42,12 +41,30 @@ const WAIT_AGENT_TOOL: &str = "wait_agent";
 struct AgentTask {
     role: String,
     task: String,
+    model: SubagentModel,
     output_schema: Value,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum SubagentModel {
+    Selected,
+    Luna,
+}
+
+impl SubagentModel {
+    const fn resolve(self, selected: Model) -> Model {
+        match self {
+            Self::Selected => selected,
+            Self::Luna => Model::Luna,
+        }
+    }
 }
 
 #[derive(Serialize)]
 struct AgentStartReport {
     agent_id: AgentId,
+    model: Model,
     role: String,
     status: AgentStatus,
 }
@@ -109,8 +126,8 @@ fn json_output(value: &impl Serialize) -> ToolResult {
 }
 
 struct SpawnAgent {
-    parent: AgentHandle,
     registry: Weak<Registry>,
+    selected_model: Model,
 }
 
 #[async_trait]
@@ -130,11 +147,16 @@ impl Tool for SpawnAgent {
                         "type": "string",
                         "description": "A complete, focused task for the subagent."
                     },
+                    "model": {
+                        "type": "string",
+                        "enum": ["selected", "luna"],
+                        "description": "Use `selected` for the session's selected model or `luna` when low latency matters more than reasoning capability."
+                    },
                     "output_schema": {
                         "description": "The JSON Schema that every successful result from this agent must satisfy. Use an object with one string field for a free-form report."
                     }
                 },
-                "required": ["role", "task", "output_schema"],
+                "required": ["role", "task", "model", "output_schema"],
                 "additionalProperties": false
             }),
         )
@@ -145,8 +167,10 @@ impl Tool for SpawnAgent {
         let AgentTask {
             role,
             task,
+            model,
             output_schema,
         } = input.decode_json()?;
+        let model = model.resolve(self.selected_model);
         let contract = OutputContract::compile(&output_schema)?;
         let registry = self
             .registry
@@ -155,11 +179,12 @@ impl Tool for SpawnAgent {
         let capacity = registry.reserve_turn()?;
         let reservation = registry.reserve(context.session_id()).await?;
         let id = reservation.id;
-        let (child, events) = self.parent.spawn().await?;
+        let (child, events) = registry.spawn_agent(model)?;
         let session_id = child.session_id().to_string();
         let descriptor = AgentDescriptor {
             id,
             session_id,
+            model,
             role: role.clone(),
             task: task.clone(),
             parent: reservation.parent,
@@ -195,6 +220,7 @@ impl Tool for SpawnAgent {
             .await?;
         json_output(&AgentStartReport {
             agent_id: id,
+            model,
             role,
             status: AgentStatus::Running,
         })
@@ -497,8 +523,8 @@ impl Tool for ChangeAgentLifecycle {
 
 pub(crate) fn install_tools(
     tools: Tools,
-    parent: AgentHandle,
-    registry: Arc<Registry>,
+    registry: Weak<Registry>,
+    selected_model: Model,
     memory: Option<MemoryStore>,
     subagents_enabled: bool,
     session_config_path: PathBuf,
@@ -509,32 +535,32 @@ pub(crate) fn install_tools(
     if subagents_enabled {
         tools = tools
             .tool(SpawnAgent {
-                parent,
-                registry: Arc::downgrade(&registry),
+                registry: registry.clone(),
+                selected_model,
             })
             .tool(SubmitResult {
-                registry: Arc::downgrade(&registry),
+                registry: registry.clone(),
             })
             .tool(SendAgentMessage {
-                registry: Arc::downgrade(&registry),
+                registry: registry.clone(),
             })
             .tool(ListAgents {
-                registry: Arc::downgrade(&registry),
+                registry: registry.clone(),
             })
             .tool(WaitAgent {
-                registry: Arc::downgrade(&registry),
+                registry: registry.clone(),
             })
             .tool(ChangeAgentLifecycle {
-                registry: Arc::downgrade(&registry),
+                registry: registry.clone(),
                 operation: LifecycleOperation::Interrupt,
             })
             .tool(ChangeAgentLifecycle {
-                registry: Arc::downgrade(&registry),
+                registry: registry.clone(),
                 operation: LifecycleOperation::Close,
             });
     }
     if let Some(store) = memory {
-        tools = tools.tool(MemoryTool::new(store, RootAgentGuard::new(&registry)));
+        tools = tools.tool(MemoryTool::new(store, RootAgentGuard::from_weak(registry)));
     }
     tools.build()
 }
@@ -544,6 +570,7 @@ fn spawn_agent_output_schema() -> Value {
         "type": "object",
         "properties": {
             "agent_id": { "type": "integer" },
+            "model": { "type": "string" },
             "role": { "type": "string" },
             "status": {
                 "type": "object",
@@ -552,7 +579,7 @@ fn spawn_agent_output_schema() -> Value {
                 "additionalProperties": false
             }
         },
-        "required": ["agent_id", "role", "status"],
+        "required": ["agent_id", "model", "role", "status"],
         "additionalProperties": false
     })
 }
@@ -567,13 +594,14 @@ fn wait_agent_output_schema() -> Value {
                     "type": "object",
                     "properties": {
                         "agent_id": { "type": "integer" },
+                        "model": { "type": "string" },
                         "role": { "type": "string" },
                         "task": { "type": "string" },
                         "parent_agent_id": { "type": ["integer", "null"] },
                         "status": agent_status_schema(),
                         "last_output": {}
                     },
-                    "required": ["agent_id", "role", "task", "parent_agent_id", "status"],
+                    "required": ["agent_id", "model", "role", "task", "parent_agent_id", "status"],
                     "additionalProperties": false
                 }
             },
@@ -617,11 +645,41 @@ fn agent_status_schema() -> Value {
 
 #[cfg(test)]
 mod tests {
-    use super::{SendAgentMessage, SubmitResult, WaitAgent};
+    use super::{SendAgentMessage, SpawnAgent, SubagentModel, SubmitResult, WaitAgent};
     use crate::core::extensions::subagents::runtime::Registry;
-    use nanocodex::Tool;
+    use nanocodex::{Model, Tool};
     use serde_json::json;
     use std::sync::Weak;
+
+    #[test]
+    fn spawn_agent_requires_an_explicit_bounded_model_choice() {
+        let definition = SpawnAgent {
+            registry: Weak::<Registry>::new(),
+            selected_model: Model::Terra,
+        }
+        .definition();
+        let parameters = definition.parameters().unwrap().as_value();
+        let output = definition.output_schema().unwrap();
+
+        assert_eq!(
+            parameters["properties"]["model"]["enum"],
+            json!(["selected", "luna"])
+        );
+        assert!(
+            parameters["required"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("model"))
+        );
+        assert_eq!(SubagentModel::Selected.resolve(Model::Terra), Model::Terra);
+        assert_eq!(SubagentModel::Luna.resolve(Model::Terra), Model::Luna);
+        assert!(
+            output.as_value()["required"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("model"))
+        );
+    }
 
     #[test]
     fn send_message_definition_names_deferred_delivery_and_queued_waiting() {
@@ -658,8 +716,17 @@ mod tests {
         .definition();
         let description =
             &definition.parameters().unwrap().as_value()["properties"]["agent_ids"]["description"];
+        let output = definition.output_schema().unwrap();
+        let agent = &output.as_value()["properties"]["agents"]["items"];
 
         assert!(description.as_str().unwrap().contains("spawn_agent"));
         assert!(!description.as_str().unwrap().contains("fork_agent"));
+        assert_eq!(agent["properties"]["model"], json!({ "type": "string" }));
+        assert!(
+            agent["required"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("model"))
+        );
     }
 }
