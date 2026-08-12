@@ -40,10 +40,15 @@ const SUBAGENT_INSTRUCTIONS: &str = concat!(
     "across agents in parallel, await and reduce their results, then dispatch dependent stages. Do ",
     "not repeat delegated work yourself; wait for delegated work to finish, then use its results for ",
     "the next step. Double-check their results against the relevant evidence before relying on them. ",
+    "For each `spawn_agent` call, declare `model`: use `luna` for straightforward tasks that need ",
+    "little reasoning when speed matters more, and use `selected` otherwise. ",
     "Use schemas that expose the fields downstream stages need, and use loops to iterate until the ",
     "completion condition is met. Keep concurrent write scopes disjoint. You own final synthesis and ",
     "verification."
 );
+const SUBAGENT_INSTRUCTIONS_START: &str =
+    "For larger tasks, delegate meaningful, separable work to subagents;";
+const SUBAGENT_INSTRUCTIONS_END: &str = "verification.";
 
 const TOOL_ORCHESTRATION_INSTRUCTIONS: &str = concat!(
     "Use code mode to orchestrate related tool calls when the next calls can be determined from ",
@@ -177,6 +182,7 @@ impl ConfiguredAgent {
         config: &Config,
         thinking: ReasoningEffort,
         reasoning_mode: ReasoningMode,
+        model: Model,
         session_id: Option<&str>,
         resume: Option<ResumeState>,
     ) -> Result<Self> {
@@ -184,7 +190,7 @@ impl ConfiguredAgent {
             config,
             thinking,
             reasoning_mode,
-            Model::Sol,
+            model,
             session_id,
             resume,
         )
@@ -225,17 +231,18 @@ impl ConfiguredAgent {
         let session_config_path = config.path().to_path_buf();
         let (subagents, subagent_control, subagent_updates) =
             subagents::channel(agent_config.max_subagents());
+        let subagent_registry = Arc::downgrade(&subagents);
         let mut builder = Nanocodex::builder(openai)
             .model(model)
             .workspace(workspace)
             .thinking(thinking.into())
             .reasoning_mode(reasoning_mode.into())
             .fast_mode(agent_config.fast_mode())
-            .tools_factory(move |agent| {
+            .tools_factory(move |_agent| {
                 subagents::install_tools(
                     tools.clone(),
-                    agent,
-                    Arc::clone(&subagents),
+                    subagent_registry.clone(),
+                    model,
                     memory.clone(),
                     subagents_enabled,
                     session_config_path.clone(),
@@ -262,6 +269,19 @@ impl ConfiguredAgent {
             memory_enabled,
         );
         builder = builder.instructions(Arc::clone(&instructions));
+        let subagent_builder = builder.clone();
+        subagents.set_agent_factory(
+            thinking.into(),
+            agent_config.fast_mode(),
+            move |model, thinking, fast_mode| {
+                subagent_builder
+                    .clone()
+                    .model(model)
+                    .thinking(thinking)
+                    .fast_mode(fast_mode)
+                    .build()
+            },
+        )?;
         if let Some(session_id) = session_id {
             let session_id = session_id
                 .parse::<SessionId>()
@@ -551,18 +571,20 @@ fn reconcile_session_reference_instructions(mut instructions: String) -> String 
 }
 
 fn reconcile_subagent_instructions(mut instructions: String, enabled: bool) -> String {
-    let separator_and_instructions = format!("\n\n{SUBAGENT_INSTRUCTIONS}");
-    if enabled {
-        if instructions.contains(&separator_and_instructions) {
-            return instructions;
-        }
-        instructions.push_str(&separator_and_instructions);
-        return instructions;
-    }
-
-    while let Some(start) = instructions.find(&separator_and_instructions) {
-        let end = start.saturating_add(separator_and_instructions.len());
+    let start_marker = format!("\n\n{SUBAGENT_INSTRUCTIONS_START}");
+    while let Some(start) = instructions.find(&start_marker) {
+        let body_start = start.saturating_add(2);
+        let Some(relative_end) = instructions[body_start..].find(SUBAGENT_INSTRUCTIONS_END) else {
+            break;
+        };
+        let end = body_start
+            .saturating_add(relative_end)
+            .saturating_add(SUBAGENT_INSTRUCTIONS_END.len());
         instructions.replace_range(start..end, "");
+    }
+    if enabled {
+        instructions.push_str("\n\n");
+        instructions.push_str(SUBAGENT_INSTRUCTIONS);
     }
     instructions
 }
@@ -1029,6 +1051,8 @@ mod tests {
         assert!(SUBAGENT_INSTRUCTIONS.contains("wait for delegated work to finish"));
         assert!(SUBAGENT_INSTRUCTIONS.contains("Do not repeat delegated work yourself"));
         assert!(SUBAGENT_INSTRUCTIONS.contains("Double-check their results"));
+        assert!(SUBAGENT_INSTRUCTIONS.contains("use `luna` for straightforward tasks"));
+        assert!(SUBAGENT_INSTRUCTIONS.contains("use `selected` otherwise"));
     }
 
     #[test]
@@ -1073,6 +1097,22 @@ mod tests {
         );
         assert!(restored_enabled.text.contains(SUBAGENT_INSTRUCTIONS));
         assert!(restored_enabled.text.ends_with(MEMORY_INSTRUCTIONS));
+
+        let legacy = SUBAGENT_INSTRUCTIONS.replace(
+            "For each `spawn_agent` call, declare `model`: use `luna` for straightforward tasks \
+             that need little reasoning when speed matters more, and use `selected` otherwise. ",
+            "",
+        );
+        let restored_legacy = session_instructions(
+            None,
+            None,
+            &skills,
+            Some((format!("Stored.\n\n{legacy}"), Some(false))),
+            true,
+            false,
+        );
+        assert!(restored_legacy.text.contains(SUBAGENT_INSTRUCTIONS));
+        assert!(!restored_legacy.text.contains(&legacy));
     }
 
     #[test]

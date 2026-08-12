@@ -464,6 +464,7 @@ pub(crate) async fn run(
                     &restored_config,
                     initial_effort,
                     reasoning_mode,
+                    model,
                     Some(&session_id),
                     Some(snapshot),
                 )?;
@@ -1017,6 +1018,7 @@ pub(crate) async fn run(
                             schedule(app.update(AppEvent::Transcript { pane, record }), &mut scheduler);
                         }
                         runtime.current_effort = effort;
+                        runtime.subagent_control.set_thinking(effort.into());
                         if pane == PaneId::Main {
                             config.set_thinking(effort);
                         }
@@ -1038,6 +1040,7 @@ pub(crate) async fn run(
                             schedule(app.update(AppEvent::Transcript { pane, record }), &mut scheduler);
                         }
                         runtime.current_fast_mode = enabled;
+                        runtime.subagent_control.set_fast_mode(enabled);
                         if pane == PaneId::Main {
                             config.set_fast_mode(enabled);
                         }
@@ -2087,6 +2090,7 @@ fn apply_pane_effect(
                     &config,
                     effort,
                     reasoning_mode,
+                    Model::Sol,
                     None,
                     None,
                 );
@@ -2240,6 +2244,7 @@ fn apply_pane_effect(
                         &config,
                         effort,
                         reasoning_mode,
+                        model,
                         Some(&session_id),
                         Some(snapshot),
                     )?;
@@ -2434,7 +2439,14 @@ async fn prepare_handoff(
     let reasoning_mode = config.agent().reasoning_mode();
     let fast_mode = config.agent().fast_mode();
     let task = tokio::task::spawn_blocking(move || {
-        ConfiguredAgent::from_config_with_session(&config, effort, reasoning_mode, None, None)
+        ConfiguredAgent::from_config_with_session(
+            &config,
+            effort,
+            reasoning_mode,
+            Model::Sol,
+            None,
+            None,
+        )
     });
     let configured = tokio::select! {
         result = task => result
