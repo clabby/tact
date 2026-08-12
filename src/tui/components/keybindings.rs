@@ -18,7 +18,7 @@ use unicode_width::UnicodeWidthStr;
 const FOOTER: [&str; 1] = ["esc close"];
 const BINDINGS: [(&str, &str); 22] = [
     ("ctrl+s", "change reasoning effort"),
-    ("ctrl+m", "select model · before first prompt"),
+    ("ctrl+d", "select model · before first prompt"),
     ("ctrl+f", "fork session · when available"),
     ("ctrl+g", "edit prompt in $EDITOR"),
     ("ctrl+r", "recent prompts"),
