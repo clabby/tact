@@ -57,10 +57,6 @@ const SUBAGENT_INSTRUCTIONS_SELECTED_ONLY: &str = concat!(
     "completion condition is met. Keep concurrent write scopes disjoint. You own final synthesis and ",
     "verification."
 );
-const SUBAGENT_INSTRUCTIONS_START: &str =
-    "For larger tasks, delegate meaningful, separable work to subagents;";
-const SUBAGENT_INSTRUCTIONS_END: &str = "verification.";
-
 const TOOL_ORCHESTRATION_INSTRUCTIONS: &str = concat!(
     "Use code mode to orchestrate related tool calls when the next calls can be determined from ",
     "tool results without additional model judgment or user input. Keep the complete lifecycle in ",
@@ -488,13 +484,6 @@ fn session_instructions_with_luna(
             }
         },
         |(instructions, catalog_present)| {
-            let instructions = reconcile_memory_instructions(instructions, false);
-            let instructions = reconcile_tact_instructions(instructions);
-            let instructions = reconcile_tool_orchestration_instructions(instructions);
-            let instructions = reconcile_session_reference_instructions(instructions);
-            let instructions =
-                reconcile_subagent_instructions(instructions, subagents_enabled, allow_luna);
-            let instructions = reconcile_memory_instructions(instructions, memory_enabled);
             let skills = if catalog_present.unwrap_or(true) {
                 SkillCatalog::available_in(&instructions).into()
             } else {
@@ -506,27 +495,6 @@ fn session_instructions_with_luna(
             }
         },
     )
-}
-
-fn reconcile_memory_instructions(mut instructions: String, memory_enabled: bool) -> String {
-    if memory_enabled {
-        if instructions.ends_with(MEMORY_INSTRUCTIONS) {
-            return instructions;
-        }
-        instructions.push_str("\n\n");
-        instructions.push_str(MEMORY_INSTRUCTIONS);
-        return instructions;
-    }
-
-    let Some(prefix) = instructions.strip_suffix(MEMORY_INSTRUCTIONS) else {
-        return instructions;
-    };
-    let Some(prefix) = prefix.strip_suffix("\n\n") else {
-        return instructions;
-    };
-    let retained_bytes = prefix.len();
-    instructions.truncate(retained_bytes);
-    instructions
 }
 
 #[cfg(test)]
@@ -618,29 +586,6 @@ fn subagent_instructions(allow_luna: bool) -> &'static str {
     } else {
         SUBAGENT_INSTRUCTIONS_SELECTED_ONLY
     }
-}
-
-fn reconcile_subagent_instructions(
-    mut instructions: String,
-    enabled: bool,
-    allow_luna: bool,
-) -> String {
-    let start_marker = format!("\n\n{SUBAGENT_INSTRUCTIONS_START}");
-    while let Some(start) = instructions.find(&start_marker) {
-        let body_start = start.saturating_add(2);
-        let Some(relative_end) = instructions[body_start..].find(SUBAGENT_INSTRUCTIONS_END) else {
-            break;
-        };
-        let end = body_start
-            .saturating_add(relative_end)
-            .saturating_add(SUBAGENT_INSTRUCTIONS_END.len());
-        instructions.replace_range(start..end, "");
-    }
-    if enabled {
-        instructions.push_str("\n\n");
-        instructions.push_str(subagent_instructions(allow_luna));
-    }
-    instructions
 }
 
 impl Cancellation {
@@ -753,22 +698,6 @@ mod tests {
         assert!(!fresh.text.contains("You are Codex"));
         assert!(fresh.text.contains(TACT_INSTRUCTIONS));
         assert!(fresh.text.contains("`tact config path`"));
-
-        let restored = session_instructions(
-            None,
-            None,
-            &skills,
-            Some((
-                "You are Codex. Stored instructions.".to_owned(),
-                Some(false),
-            )),
-            false,
-            false,
-        );
-
-        assert!(restored.text.starts_with("You are Tact,"));
-        assert!(!restored.text.contains("You are Codex"));
-        assert!(restored.text.contains(TACT_INSTRUCTIONS));
     }
 
     #[test]
@@ -903,9 +832,7 @@ mod tests {
             )
             .text
             .as_ref(),
-            format!(
-                "{stored}\n\n{TACT_INSTRUCTIONS}\n\n{TOOL_ORCHESTRATION_INSTRUCTIONS}\n\n{SESSION_REFERENCE_INSTRUCTIONS}"
-            )
+            stored
         );
         let restored = session_instructions(
             None,
@@ -915,12 +842,7 @@ mod tests {
             false,
             false,
         );
-        assert_eq!(
-            restored.text.as_ref(),
-            format!(
-                "{stored}\n\n{TACT_INSTRUCTIONS}\n\n{TOOL_ORCHESTRATION_INSTRUCTIONS}\n\n{SESSION_REFERENCE_INSTRUCTIONS}"
-            )
-        );
+        assert_eq!(restored.text.as_ref(), stored);
         assert_eq!(
             restored.skills.as_ref(),
             [Skill::new("old-skill", "The original catalog entry.")]
@@ -965,7 +887,7 @@ mod tests {
     }
 
     #[test]
-    fn restored_session_reuses_stored_instructions_before_builtin_guidance() {
+    fn restored_session_ignores_current_instruction_sources() {
         let directory = tempdir().unwrap();
         let skill = directory.path().join("new");
         fs::create_dir(&skill).unwrap();
@@ -987,9 +909,7 @@ mod tests {
             )
             .text
             .as_ref(),
-            format!(
-                "Old default.\n\n{TACT_INSTRUCTIONS}\n\n{TOOL_ORCHESTRATION_INSTRUCTIONS}\n\n{SESSION_REFERENCE_INSTRUCTIONS}"
-            )
+            "Old default."
         );
         assert_eq!(
             session_instructions(
@@ -1002,10 +922,41 @@ mod tests {
             )
             .text
             .as_ref(),
-            format!(
-                "Old custom.\n\n{TACT_INSTRUCTIONS}\n\n{TOOL_ORCHESTRATION_INSTRUCTIONS}\n\n{SESSION_REFERENCE_INSTRUCTIONS}"
-            )
+            "Old custom."
         );
+    }
+
+    #[test]
+    fn restored_session_preserves_the_exact_model_instructions() {
+        let directory = tempdir().unwrap();
+        let skill = directory.path().join("review");
+        fs::create_dir(&skill).unwrap();
+        fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: review\ndescription: Review code carefully.\n---\n",
+        )
+        .unwrap();
+        let enabled = SkillsConfig::from_roots(true, vec![directory.path().to_path_buf()]);
+        let original = session_instructions(
+            None,
+            Some("Project instructions."),
+            &enabled,
+            None,
+            true,
+            true,
+        );
+
+        let restored = session_instructions(
+            None,
+            None,
+            &enabled,
+            Some((original.text.to_string(), Some(true))),
+            true,
+            true,
+        );
+
+        assert_eq!(restored.text, original.text);
+        assert_eq!(restored.skills, original.skills);
     }
 
     #[test]
@@ -1039,34 +990,10 @@ mod tests {
         );
         assert!(!enabled.text.contains("Most turns should not call it"));
         assert!(!enabled.text.contains("memory record:"));
-
-        let restored_enabled = session_instructions(
-            None,
-            None,
-            &skills,
-            Some(("Stored.".to_owned(), Some(false))),
-            false,
-            true,
-        );
-        assert!(restored_enabled.text.ends_with(MEMORY_INSTRUCTIONS));
-        let restored_disabled = session_instructions(
-            None,
-            None,
-            &skills,
-            Some((format!("Stored.\n\n{MEMORY_INSTRUCTIONS}"), Some(false))),
-            false,
-            false,
-        );
-        assert_eq!(
-            restored_disabled.text.as_ref(),
-            format!(
-                "Stored.\n\n{TACT_INSTRUCTIONS}\n\n{TOOL_ORCHESTRATION_INSTRUCTIONS}\n\n{SESSION_REFERENCE_INSTRUCTIONS}"
-            )
-        );
     }
 
     #[test]
-    fn tool_orchestration_instructions_cover_dependent_calls_and_restored_sessions() {
+    fn tool_orchestration_instructions_cover_dependent_calls() {
         let skills = SkillsConfig::from_roots(false, Vec::new());
         let fresh = session_instructions(None, None, &skills, None, false, false);
 
@@ -1077,27 +1004,6 @@ mod tests {
         );
         assert!(fresh.text.contains("continue calling `write_stdin`"));
         assert!(fresh.text.contains("do not move nested process polling"));
-
-        let duplicated = format!(
-            "Stored.\n\n{TOOL_ORCHESTRATION_INSTRUCTIONS}\n\nAppendix.\n\n{TOOL_ORCHESTRATION_INSTRUCTIONS}"
-        );
-        let restored = session_instructions(
-            None,
-            None,
-            &skills,
-            Some((duplicated, Some(false))),
-            false,
-            false,
-        );
-
-        assert_eq!(
-            restored
-                .text
-                .matches(TOOL_ORCHESTRATION_INSTRUCTIONS)
-                .count(),
-            1
-        );
-        assert!(restored.text.contains("Appendix."));
     }
 
     #[test]
@@ -1110,63 +1016,13 @@ mod tests {
     }
 
     #[test]
-    fn subagent_instructions_follow_the_config_for_fresh_and_restored_sessions() {
+    fn subagent_instructions_follow_the_config_for_fresh_sessions() {
         let skills = SkillsConfig::from_roots(false, Vec::new());
         let enabled = session_instructions(None, None, &skills, None, true, false);
         let disabled = session_instructions(None, None, &skills, None, false, false);
 
         assert!(enabled.text.contains(SUBAGENT_INSTRUCTIONS));
         assert!(!disabled.text.contains(SUBAGENT_INSTRUCTIONS));
-
-        let restored_disabled = session_instructions(
-            None,
-            None,
-            &skills,
-            Some((enabled.text.to_string(), Some(false))),
-            false,
-            false,
-        );
-        assert!(!restored_disabled.text.contains(SUBAGENT_INSTRUCTIONS));
-
-        let duplicated =
-            format!("Stored.\n\n{SUBAGENT_INSTRUCTIONS}\n\nAppendix.\n\n{SUBAGENT_INSTRUCTIONS}");
-        let restored_duplicates = session_instructions(
-            None,
-            None,
-            &skills,
-            Some((duplicated, Some(false))),
-            false,
-            false,
-        );
-        assert!(!restored_duplicates.text.contains(SUBAGENT_INSTRUCTIONS));
-        assert!(restored_duplicates.text.contains("Appendix."));
-
-        let restored_enabled = session_instructions(
-            None,
-            None,
-            &skills,
-            Some((disabled.text.to_string(), Some(false))),
-            true,
-            true,
-        );
-        assert!(restored_enabled.text.contains(SUBAGENT_INSTRUCTIONS));
-        assert!(restored_enabled.text.ends_with(MEMORY_INSTRUCTIONS));
-
-        let legacy = SUBAGENT_INSTRUCTIONS.replace(
-            "For each `spawn_agent` call, declare `model`: use `luna` for straightforward tasks \
-             that need little reasoning when speed matters more, and use `selected` otherwise. ",
-            "",
-        );
-        let restored_legacy = session_instructions(
-            None,
-            None,
-            &skills,
-            Some((format!("Stored.\n\n{legacy}"), Some(false))),
-            true,
-            false,
-        );
-        assert!(restored_legacy.text.contains(SUBAGENT_INSTRUCTIONS));
-        assert!(!restored_legacy.text.contains(&legacy));
     }
 
     #[test]
@@ -1189,18 +1045,6 @@ mod tests {
                 .contains(SUBAGENT_INSTRUCTIONS_SELECTED_ONLY)
         );
         assert!(!luna_disabled.text.contains("use `luna`"));
-
-        let restored = session_instructions_with_luna(
-            None,
-            None,
-            &skills,
-            Some((luna_enabled.text.to_string(), Some(false))),
-            true,
-            false,
-            false,
-        );
-        assert!(restored.text.contains(SUBAGENT_INSTRUCTIONS_SELECTED_ONLY));
-        assert!(!restored.text.contains("use `luna`"));
     }
 
     #[test]
