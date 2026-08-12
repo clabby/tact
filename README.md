@@ -147,6 +147,7 @@ enabled = false
 
 [subagents]
 enabled = true
+allow_luna = true
 
 [theme]
 mode = "auto" # auto, light, or dark
@@ -247,6 +248,14 @@ This setting applies when a session starts or is restored. Reloading the configu
 change the tool surface of an already-running session. `agent.max_subagents` controls concurrency
 when the feature is enabled; setting it does not enable or disable subagents. See the
 [subagent design](docs/subagents.md) for the tool, lifecycle, messaging, and authority contracts.
+
+By default, agents may choose Luna for straightforward delegated work where latency matters more
+than reasoning capability. Require every subagent to use the session's selected model with:
+
+```toml
+[subagents]
+allow_luna = false
+```
 
 ### Memory
 
