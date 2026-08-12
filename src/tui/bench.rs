@@ -252,13 +252,13 @@ fn mixed_projection_records(turns: u64) -> Vec<Arc<TranscriptRecord>> {
                     "tool": "exec_command",
                     "status": "completed",
                     "duration_ns": 1_000_000_u64,
-                    "result": {
-                        "output": output.as_str(),
-                        "exit_code": 0,
-                    },
+                    "result": format!(
+                        "Wall time: 0.0000 seconds\nProcess exited with code 0\nOutput:\n{output}"
+                    ),
                     "structured_result": {
                         "output": output.as_str(),
                         "exit_code": 0,
+                        "wall_time_seconds": 0.0,
                     },
                     "metadata": null,
                 }),
@@ -335,8 +335,14 @@ impl Harness {
                     "tool": "exec_command",
                     "status": "completed",
                     "duration_ns": 1_000_000_u64,
-                    "result": {"output": output.as_str(), "exit_code": 0},
-                    "structured_result": {"output": output.as_str(), "exit_code": 0},
+                    "result": format!(
+                        "Wall time: 0.0000 seconds\nProcess exited with code 0\nOutput:\n{output}"
+                    ),
+                    "structured_result": {
+                        "output": output.as_str(),
+                        "exit_code": 0,
+                        "wall_time_seconds": 0.0,
+                    },
                     "metadata": null,
                 }),
             ));

@@ -1894,8 +1894,12 @@ mod tests {
                 "tool": "exec_command",
                 "status": "completed",
                 "duration_ns": 1_u64,
-                "result": "Process running with session ID 7",
-                "structured_result": {"output": "running", "session_id": 7},
+                "result": "Wall time: 0.0000 seconds\nProcess running with session ID 7\nOutput:\nrunning",
+                "structured_result": {
+                    "output": "running",
+                    "session_id": 7,
+                    "wall_time_seconds": 0.0,
+                },
                 "metadata": null,
             }),
         ));
@@ -1922,8 +1926,12 @@ mod tests {
                 "tool": "write_stdin",
                 "status": "completed",
                 "duration_ns": 2_u64,
-                "result": {"output": " done", "exit_code": 0},
-                "structured_result": {"output": " done", "exit_code": 0},
+                "result": "Wall time: 0.0000 seconds\nProcess exited with code 0\nOutput:\n done",
+                "structured_result": {
+                    "output": " done",
+                    "exit_code": 0,
+                    "wall_time_seconds": 0.0,
+                },
                 "metadata": null,
             }),
         ));
@@ -1967,8 +1975,12 @@ mod tests {
                 "tool": "exec_command",
                 "status": "completed",
                 "duration_ns": 1_u64,
-                "result": {"output": "running", "session_id": 7},
-                "structured_result": {"output": "running", "session_id": 7},
+                "result": "Wall time: 0.0000 seconds\nProcess running with session ID 7\nOutput:\nrunning",
+                "structured_result": {
+                    "output": "running",
+                    "session_id": 7,
+                    "wall_time_seconds": 0.0,
+                },
                 "metadata": null,
             }),
         ));
@@ -1999,8 +2011,12 @@ mod tests {
                 "tool": "write_stdin",
                 "status": "completed",
                 "duration_ns": 2_u64,
-                "result": "Process running with session ID 7",
-                "structured_result": {"output": " still", "session_id": 7},
+                "result": "Wall time: 0.0000 seconds\nProcess running with session ID 7\nOutput:\n still",
+                "structured_result": {
+                    "output": " still",
+                    "session_id": 7,
+                    "wall_time_seconds": 0.0,
+                },
                 "metadata": null,
             }),
         ));
@@ -2031,8 +2047,12 @@ mod tests {
                 "tool": "write_stdin",
                 "status": "completed",
                 "duration_ns": 2_u64,
-                "result": "Process exited with code 0",
-                "structured_result": {"output": " done", "exit_code": 0},
+                "result": "Wall time: 0.0000 seconds\nProcess exited with code 0\nOutput:\n done",
+                "structured_result": {
+                    "output": " done",
+                    "exit_code": 0,
+                    "wall_time_seconds": 0.0,
+                },
                 "metadata": null,
             }),
         ));
@@ -2071,8 +2091,8 @@ mod tests {
                 "tool": "exec_command",
                 "status": "completed",
                 "duration_ns": 1_u64,
-                "result": {"output": "", "exit_code": null},
-                "structured_result": {"output": "", "exit_code": null},
+                "result": "Wall time: 0.0000 seconds\nOutput:\n",
+                "structured_result": {"output": "", "wall_time_seconds": 0.0},
                 "metadata": null,
             }),
         ));
@@ -2154,8 +2174,12 @@ mod tests {
                 "tool": "exec_command",
                 "status": "completed",
                 "duration_ns": 10,
-                "result": {"output": "ok", "exit_code": 0},
-                "structured_result": {"output": "ok", "exit_code": 0},
+                "result": "Wall time: 0.0000 seconds\nProcess exited with code 0\nOutput:\nok",
+                "structured_result": {
+                    "output": "ok",
+                    "exit_code": 0,
+                    "wall_time_seconds": 0.0,
+                },
                 "metadata": null,
             }),
         ));

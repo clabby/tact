@@ -1911,8 +1911,14 @@ mod tests {
                 "tool": "exec_command",
                 "status": "completed",
                 "duration_ns": 1_200_000_000_u64,
-                "result": {"output": output, "exit_code": 0},
-                "structured_result": {"output": output, "exit_code": 0},
+                "result": format!(
+                    "Wall time: 1.2000 seconds\nProcess exited with code 0\nOutput:\n{output}"
+                ),
+                "structured_result": {
+                    "output": output,
+                    "exit_code": 0,
+                    "wall_time_seconds": 1.2,
+                },
                 "metadata": null,
             }),
         )));
@@ -3134,8 +3140,12 @@ mod tests {
                 "tool": "exec_command",
                 "status": "completed",
                 "duration_ns": 2_500_000_000_u64,
-                "result": {"output": "done", "exit_code": 0},
-                "structured_result": {"output": "done", "exit_code": 0},
+                "result": "Wall time: 2.5000 seconds\nProcess exited with code 0\nOutput:\ndone",
+                "structured_result": {
+                    "output": "done",
+                    "exit_code": 0,
+                    "wall_time_seconds": 2.5,
+                },
                 "metadata": null,
             }),
         )));
@@ -3192,8 +3202,12 @@ mod tests {
                 "tool": "exec_command",
                 "status": "completed",
                 "duration_ns": 10_u64,
-                "result": {"output": "ok", "exit_code": 0},
-                "structured_result": {"output": "ok", "exit_code": 0},
+                "result": "Wall time: 0.0000 seconds\nProcess exited with code 0\nOutput:\nok",
+                "structured_result": {
+                    "output": "ok",
+                    "exit_code": 0,
+                    "wall_time_seconds": 0.0,
+                },
                 "metadata": null,
             }),
         )));
@@ -3316,14 +3330,8 @@ mod tests {
                 "tool": "custom_operation",
                 "status": "failed",
                 "duration_ns": 1_200_000_000_u64,
-                "result": {
-                    "output": "error[E0277]: the size for values of type `Self` cannot be known at compilation time",
-                    "exit_code": 101
-                },
-                "structured_result": {
-                    "output": "error[E0277]: the size for values of type `Self` cannot be known at compilation time",
-                    "exit_code": 101
-                },
+                "result": "error[E0277]: the size for values of type `Self` cannot be known at compilation time",
+                "structured_result": "error[E0277]: the size for values of type `Self` cannot be known at compilation time",
                 "metadata": null,
             }),
         )));
@@ -3409,13 +3417,11 @@ mod tests {
                 "tool": "exec_command",
                 "status": "completed",
                 "duration_ns": 1_u64,
-                "result": {
-                    "output": "first output line\nsecond output line",
-                    "session_id": 7
-                },
+                "result": "Wall time: 0.0000 seconds\nProcess running with session ID 7\nOutput:\nfirst output line\nsecond output line",
                 "structured_result": {
                     "output": "first output line\nsecond output line",
-                    "session_id": 7
+                    "session_id": 7,
+                    "wall_time_seconds": 0.0,
                 },
                 "metadata": null,
             }),
