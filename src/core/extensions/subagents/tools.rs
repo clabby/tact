@@ -22,6 +22,7 @@ use nanocodex::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
+    io,
     path::PathBuf,
     sync::{Arc, Weak},
     time::Duration,
@@ -53,10 +54,14 @@ enum SubagentModel {
 }
 
 impl SubagentModel {
-    const fn resolve(self, selected: Model) -> Model {
+    fn resolve(self, selected: Model, allow_luna: bool) -> Result<Model, io::Error> {
         match self {
-            Self::Selected => selected,
-            Self::Luna => Model::Luna,
+            Self::Selected => Ok(selected),
+            Self::Luna if allow_luna => Ok(Model::Luna),
+            Self::Luna => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Luna subagents are disabled by `subagents.allow_luna`",
+            )),
         }
     }
 }
@@ -128,11 +133,23 @@ fn json_output(value: &impl Serialize) -> ToolResult {
 struct SpawnAgent {
     registry: Weak<Registry>,
     selected_model: Model,
+    allow_luna: bool,
 }
 
 #[async_trait]
 impl Tool for SpawnAgent {
     fn definition(&self) -> ToolDefinition {
+        let (models, model_description) = if self.allow_luna {
+            (
+                json!(["selected", "luna"]),
+                "Use `selected` for the session's selected model or `luna` when low latency matters more than reasoning capability.",
+            )
+        } else {
+            (
+                json!(["selected"]),
+                "Use `selected` for the session's selected model.",
+            )
+        };
         ToolDefinition::function(
             SPAWN_AGENT_TOOL,
             "Starts a reusable clean-room subagent without inherited conversation history and immediately returns its ID.",
@@ -149,8 +166,8 @@ impl Tool for SpawnAgent {
                     },
                     "model": {
                         "type": "string",
-                        "enum": ["selected", "luna"],
-                        "description": "Use `selected` for the session's selected model or `luna` when low latency matters more than reasoning capability."
+                        "enum": models,
+                        "description": model_description
                     },
                     "output_schema": {
                         "description": "The JSON Schema that every successful result from this agent must satisfy. Use an object with one string field for a free-form report."
@@ -170,7 +187,7 @@ impl Tool for SpawnAgent {
             model,
             output_schema,
         } = input.decode_json()?;
-        let model = model.resolve(self.selected_model);
+        let model = model.resolve(self.selected_model, self.allow_luna)?;
         let contract = OutputContract::compile(&output_schema)?;
         let registry = self
             .registry
@@ -525,6 +542,7 @@ pub(crate) fn install_tools(
     tools: Tools,
     registry: Weak<Registry>,
     selected_model: Model,
+    allow_luna: bool,
     memory: Option<MemoryStore>,
     subagents_enabled: bool,
     session_config_path: PathBuf,
@@ -537,6 +555,7 @@ pub(crate) fn install_tools(
             .tool(SpawnAgent {
                 registry: registry.clone(),
                 selected_model,
+                allow_luna,
             })
             .tool(SubmitResult {
                 registry: registry.clone(),
@@ -656,6 +675,7 @@ mod tests {
         let definition = SpawnAgent {
             registry: Weak::<Registry>::new(),
             selected_model: Model::Terra,
+            allow_luna: true,
         }
         .definition();
         let parameters = definition.parameters().unwrap().as_value();
@@ -671,13 +691,42 @@ mod tests {
                 .unwrap()
                 .contains(&json!("model"))
         );
-        assert_eq!(SubagentModel::Selected.resolve(Model::Terra), Model::Terra);
-        assert_eq!(SubagentModel::Luna.resolve(Model::Terra), Model::Luna);
+        assert_eq!(
+            SubagentModel::Selected.resolve(Model::Terra, true).unwrap(),
+            Model::Terra
+        );
+        assert_eq!(
+            SubagentModel::Luna.resolve(Model::Terra, true).unwrap(),
+            Model::Luna
+        );
         assert!(
             output.as_value()["required"]
                 .as_array()
                 .unwrap()
                 .contains(&json!("model"))
+        );
+    }
+
+    #[test]
+    fn spawn_agent_excludes_and_rejects_luna_when_disabled() {
+        let definition = SpawnAgent {
+            registry: Weak::<Registry>::new(),
+            selected_model: Model::Terra,
+            allow_luna: false,
+        }
+        .definition();
+        let parameters = definition.parameters().unwrap().as_value();
+
+        assert_eq!(
+            parameters["properties"]["model"]["enum"],
+            json!(["selected"])
+        );
+        assert!(
+            SubagentModel::Luna
+                .resolve(Model::Terra, false)
+                .unwrap_err()
+                .to_string()
+                .contains("subagents.allow_luna")
         );
     }
 

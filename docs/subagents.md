@@ -21,6 +21,18 @@ The setting applies when an agent runtime is created. Reloading configuration do
 tool surface or instructions of an existing runtime. A later new or restored session uses the
 reloaded setting.
 
+Subagents may use Luna instead of the session's selected model by default. This lets the parent
+favor latency for straightforward delegated work. Disable that choice independently of the tool
+surface:
+
+```toml
+[subagents]
+allow_luna = false
+```
+
+When disabled, `spawn_agent` accepts only `selected` and the built-in delegation instructions no
+longer recommend Luna. If the session itself selected Luna, `selected` still resolves to Luna.
+
 `agent.max_subagents` is independent of the enable switch:
 
 ```toml
@@ -39,7 +51,7 @@ An enabled runtime installs seven tools:
 
 | Tool | Contract |
 | --- | --- |
-| `spawn_agent` | Create a clean child session with a role, focused task, and required output schema. |
+| `spawn_agent` | Create a clean child session with a role, focused task, model choice, and required output schema. |
 | `submit_result` | Submit the current subagent turn's final JSON value. The value must satisfy its output schema and use the current turn token. |
 | `send_agent_message` | Send a bounded directed message within the current task tree. |
 | `list_agents` | List visible agents, their status, topology, and the caller's messaging and management authority. |
@@ -199,6 +211,7 @@ checked in code.
 The implementation preserves these invariants:
 
 - disabling subagents removes both their tools and their fixed delegation instructions;
+- disabling `subagents.allow_luna` removes the explicit Luna choice from the tool and instructions;
 - memory remains independent from the subagent enable switch;
 - every child starts with clean conversation context and a caller-supplied output contract;
 - task-tree scope prevents cross-root access;

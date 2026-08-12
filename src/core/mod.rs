@@ -46,6 +46,17 @@ const SUBAGENT_INSTRUCTIONS: &str = concat!(
     "completion condition is met. Keep concurrent write scopes disjoint. You own final synthesis and ",
     "verification."
 );
+const SUBAGENT_INSTRUCTIONS_SELECTED_ONLY: &str = concat!(
+    "For larger tasks, delegate meaningful, separable work to subagents; handle trivial or tightly ",
+    "coupled work directly. Use code mode to build multi-agent pipelines: map independent subtasks ",
+    "across agents in parallel, await and reduce their results, then dispatch dependent stages. Do ",
+    "not repeat delegated work yourself; wait for delegated work to finish, then use its results for ",
+    "the next step. Double-check their results against the relevant evidence before relying on them. ",
+    "For each `spawn_agent` call, declare `model` as `selected`. ",
+    "Use schemas that expose the fields downstream stages need, and use loops to iterate until the ",
+    "completion condition is met. Keep concurrent write scopes disjoint. You own final synthesis and ",
+    "verification."
+);
 const SUBAGENT_INSTRUCTIONS_START: &str =
     "For larger tasks, delegate meaningful, separable work to subagents;";
 const SUBAGENT_INSTRUCTIONS_END: &str = "verification.";
@@ -227,6 +238,7 @@ impl ConfiguredAgent {
         let tools = tools.build().map_err(NanocodexError::from)?;
         let memory_enabled = config.memory().enabled();
         let subagents_enabled = config.subagents().enabled();
+        let allow_luna_subagents = config.subagents().allow_luna();
         let memory = memory_enabled.then(|| MemoryStore::new(config.memory_path()));
         let session_config_path = config.path().to_path_buf();
         let (subagents, subagent_control, subagent_updates) =
@@ -243,6 +255,7 @@ impl ConfiguredAgent {
                     tools.clone(),
                     subagent_registry.clone(),
                     model,
+                    allow_luna_subagents,
                     memory.clone(),
                     subagents_enabled,
                     session_config_path.clone(),
@@ -260,12 +273,13 @@ impl ConfiguredAgent {
         let SessionInstructions {
             text: instructions,
             skills,
-        } = session_instructions(
+        } = session_instructions_with_luna(
             agent_config.instructions(),
             agent_config.append_instructions(),
             config.skills(),
             restored_instructions,
             subagents_enabled,
+            allow_luna_subagents,
             memory_enabled,
         );
         builder = builder.instructions(Arc::clone(&instructions));
@@ -420,12 +434,33 @@ impl ConfiguredAgent {
     }
 }
 
+#[cfg(test)]
 fn session_instructions(
     custom: Option<&str>,
     appended: Option<&str>,
     skills: &SkillsConfig,
     restored: Option<(String, Option<bool>)>,
     subagents_enabled: bool,
+    memory_enabled: bool,
+) -> SessionInstructions {
+    session_instructions_with_luna(
+        custom,
+        appended,
+        skills,
+        restored,
+        subagents_enabled,
+        true,
+        memory_enabled,
+    )
+}
+
+fn session_instructions_with_luna(
+    custom: Option<&str>,
+    appended: Option<&str>,
+    skills: &SkillsConfig,
+    restored: Option<(String, Option<bool>)>,
+    subagents_enabled: bool,
+    allow_luna: bool,
     memory_enabled: bool,
 ) -> SessionInstructions {
     restored.map_or_else(
@@ -436,8 +471,13 @@ fn session_instructions(
                 .map(SkillCatalog::available_in)
                 .unwrap_or_default()
                 .into();
-            let mut instructions =
-                fresh_instructions_with_catalog(custom, appended, &catalog, subagents_enabled);
+            let mut instructions = fresh_instructions_with_catalog(
+                custom,
+                appended,
+                &catalog,
+                subagents_enabled,
+                allow_luna,
+            );
             if memory_enabled {
                 instructions.push_str("\n\n");
                 instructions.push_str(MEMORY_INSTRUCTIONS);
@@ -452,7 +492,8 @@ fn session_instructions(
             let instructions = reconcile_tact_instructions(instructions);
             let instructions = reconcile_tool_orchestration_instructions(instructions);
             let instructions = reconcile_session_reference_instructions(instructions);
-            let instructions = reconcile_subagent_instructions(instructions, subagents_enabled);
+            let instructions =
+                reconcile_subagent_instructions(instructions, subagents_enabled, allow_luna);
             let instructions = reconcile_memory_instructions(instructions, memory_enabled);
             let skills = if catalog_present.unwrap_or(true) {
                 SkillCatalog::available_in(&instructions).into()
@@ -495,7 +536,7 @@ fn fresh_instructions(
     skills: &SkillsConfig,
 ) -> String {
     let catalog = SkillCatalog::load(skills);
-    fresh_instructions_with_catalog(custom, appended, &catalog, true)
+    fresh_instructions_with_catalog(custom, appended, &catalog, true, true)
 }
 
 fn fresh_instructions_with_catalog(
@@ -503,6 +544,7 @@ fn fresh_instructions_with_catalog(
     appended: Option<&str>,
     catalog: &SkillCatalog,
     subagents_enabled: bool,
+    allow_luna: bool,
 ) -> String {
     let mut instructions = custom
         .map(str::to_owned)
@@ -512,7 +554,7 @@ fn fresh_instructions_with_catalog(
     instructions = reconcile_session_reference_instructions(instructions);
     if subagents_enabled {
         instructions.push_str("\n\n");
-        instructions.push_str(SUBAGENT_INSTRUCTIONS);
+        instructions.push_str(subagent_instructions(allow_luna));
     }
     if let Some(appended) = appended {
         instructions.push_str("\n\n");
@@ -570,7 +612,19 @@ fn reconcile_session_reference_instructions(mut instructions: String) -> String 
     instructions
 }
 
-fn reconcile_subagent_instructions(mut instructions: String, enabled: bool) -> String {
+fn subagent_instructions(allow_luna: bool) -> &'static str {
+    if allow_luna {
+        SUBAGENT_INSTRUCTIONS
+    } else {
+        SUBAGENT_INSTRUCTIONS_SELECTED_ONLY
+    }
+}
+
+fn reconcile_subagent_instructions(
+    mut instructions: String,
+    enabled: bool,
+    allow_luna: bool,
+) -> String {
     let start_marker = format!("\n\n{SUBAGENT_INSTRUCTIONS_START}");
     while let Some(start) = instructions.find(&start_marker) {
         let body_start = start.saturating_add(2);
@@ -584,7 +638,7 @@ fn reconcile_subagent_instructions(mut instructions: String, enabled: bool) -> S
     }
     if enabled {
         instructions.push_str("\n\n");
-        instructions.push_str(SUBAGENT_INSTRUCTIONS);
+        instructions.push_str(subagent_instructions(allow_luna));
     }
     instructions
 }
@@ -603,9 +657,9 @@ impl Cancellation {
 mod tests {
     use super::{
         ConfiguredAgent, MEMORY_INSTRUCTIONS, MEMORY_REVIEW_CHECKPOINT,
-        SESSION_REFERENCE_INSTRUCTIONS, SUBAGENT_INSTRUCTIONS, TACT_INSTRUCTIONS,
-        TOOL_ORCHESTRATION_INSTRUCTIONS, fresh_instructions, reconcile_tact_instructions,
-        session_instructions,
+        SESSION_REFERENCE_INSTRUCTIONS, SUBAGENT_INSTRUCTIONS, SUBAGENT_INSTRUCTIONS_SELECTED_ONLY,
+        TACT_INSTRUCTIONS, TOOL_ORCHESTRATION_INSTRUCTIONS, fresh_instructions,
+        reconcile_tact_instructions, session_instructions, session_instructions_with_luna,
     };
     use crate::{
         app::{
@@ -1113,6 +1167,40 @@ mod tests {
         );
         assert!(restored_legacy.text.contains(SUBAGENT_INSTRUCTIONS));
         assert!(!restored_legacy.text.contains(&legacy));
+    }
+
+    #[test]
+    fn luna_delegation_instructions_follow_the_config() {
+        let skills = SkillsConfig::from_roots(false, Vec::new());
+        let luna_enabled =
+            session_instructions_with_luna(None, None, &skills, None, true, true, false);
+        let luna_disabled =
+            session_instructions_with_luna(None, None, &skills, None, true, false, false);
+
+        assert!(luna_enabled.text.contains(SUBAGENT_INSTRUCTIONS));
+        assert!(
+            !luna_enabled
+                .text
+                .contains(SUBAGENT_INSTRUCTIONS_SELECTED_ONLY)
+        );
+        assert!(
+            luna_disabled
+                .text
+                .contains(SUBAGENT_INSTRUCTIONS_SELECTED_ONLY)
+        );
+        assert!(!luna_disabled.text.contains("use `luna`"));
+
+        let restored = session_instructions_with_luna(
+            None,
+            None,
+            &skills,
+            Some((luna_enabled.text.to_string(), Some(false))),
+            true,
+            false,
+            false,
+        );
+        assert!(restored.text.contains(SUBAGENT_INSTRUCTIONS_SELECTED_ONLY));
+        assert!(!restored.text.contains("use `luna`"));
     }
 
     #[test]
