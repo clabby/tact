@@ -1,6 +1,7 @@
 //! Configurable terminal colors and light/dark mode selection.
 
 use crate::app::config::ReasoningEffort;
+use nanocodex::Model;
 use ratatui::style::Color;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use std::{fmt, str::FromStr};
@@ -166,6 +167,15 @@ impl Theme {
             ReasoningEffort::High => self.thinking_high(),
             ReasoningEffort::Xhigh => self.thinking_xhigh(),
             ReasoningEffort::Max => self.thinking_max(),
+        }
+    }
+
+    pub(crate) const fn model(&self, model: Model) -> Color {
+        match model {
+            Model::Luna => Color::White,
+            Model::Terra => Color::Green,
+            Model::Sol => Color::Yellow,
+            _ => Color::Yellow,
         }
     }
 
@@ -357,6 +367,7 @@ impl fmt::Display for ColorName {
 #[cfg(test)]
 mod tests {
     use super::{ColorScheme, SYSTEM_SCHEME_POLL_INTERVAL, Theme, ThemeMode};
+    use nanocodex::Model;
     use ratatui::style::Color;
 
     #[test]
@@ -373,6 +384,15 @@ mod tests {
     #[test]
     fn system_theme_polling_is_perceptually_immediate() {
         assert!(SYSTEM_SCHEME_POLL_INTERVAL <= std::time::Duration::from_millis(100));
+    }
+
+    #[test]
+    fn models_have_a_shared_semantic_palette() {
+        let theme = Theme::default();
+
+        assert_eq!(theme.model(Model::Luna), Color::White);
+        assert_eq!(theme.model(Model::Terra), Color::Green);
+        assert_eq!(theme.model(Model::Sol), Color::Yellow);
     }
 
     #[test]
