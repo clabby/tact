@@ -897,8 +897,10 @@ mod tests {
     }
 
     #[test]
-    fn resolves_one_process_tls_provider() {
-        rustls::ClientConfig::builder();
+    fn installs_one_process_tls_provider() {
+        crate::install_tls_provider();
+
+        assert!(rustls::crypto::CryptoProvider::get_default().is_some());
     }
 
     #[test]

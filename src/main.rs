@@ -12,7 +12,12 @@ use app::Cli;
 use clap::Parser;
 use miette::{Report, Result};
 
+pub(crate) fn install_tls_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    install_tls_provider();
     Cli::parse().run().await.map_err(Report::new)
 }
