@@ -5809,7 +5809,7 @@ mod tests {
         });
         assert!(
             worker_before_started
-                .update(key(KeyCode::Char('f'), KeyModifiers::CONTROL))
+                .update(key(KeyCode::Char('t'), KeyModifiers::CONTROL))
                 .effects
                 .is_empty()
         );
@@ -5825,7 +5825,7 @@ mod tests {
         )));
         assert_eq!(
             worker_before_started
-                .update(key(KeyCode::Char('f'), KeyModifiers::CONTROL))
+                .update(key(KeyCode::Char('t'), KeyModifiers::CONTROL))
                 .effects,
             [RootEffect::Fork]
         );
@@ -5835,7 +5835,7 @@ mod tests {
 
         assert!(
             before_started
-                .update(key(KeyCode::Char('f'), KeyModifiers::CONTROL))
+                .update(key(KeyCode::Char('t'), KeyModifiers::CONTROL))
                 .effects
                 .is_empty()
         );
@@ -5847,7 +5847,7 @@ mod tests {
         )));
         assert!(
             before_started
-                .update(key(KeyCode::Char('f'), KeyModifiers::CONTROL))
+                .update(key(KeyCode::Char('t'), KeyModifiers::CONTROL))
                 .effects
                 .is_empty()
         );
@@ -5858,7 +5858,7 @@ mod tests {
         )));
         assert!(
             before_started
-                .update(key(KeyCode::Char('f'), KeyModifiers::CONTROL))
+                .update(key(KeyCode::Char('t'), KeyModifiers::CONTROL))
                 .effects
                 .is_empty()
         );
@@ -5867,7 +5867,7 @@ mod tests {
         });
         assert_eq!(
             before_started
-                .update(key(KeyCode::Char('f'), KeyModifiers::CONTROL))
+                .update(key(KeyCode::Char('t'), KeyModifiers::CONTROL))
                 .effects,
             [RootEffect::Fork]
         );
@@ -5885,7 +5885,7 @@ mod tests {
 
         assert!(
             before_terminal
-                .update(key(KeyCode::Char('f'), KeyModifiers::CONTROL))
+                .update(key(KeyCode::Char('t'), KeyModifiers::CONTROL))
                 .effects
                 .is_empty()
         );
@@ -5896,7 +5896,7 @@ mod tests {
         )));
         assert_eq!(
             before_terminal
-                .update(key(KeyCode::Char('f'), KeyModifiers::CONTROL))
+                .update(key(KeyCode::Char('t'), KeyModifiers::CONTROL))
                 .effects,
             [RootEffect::Fork]
         );

@@ -1167,7 +1167,7 @@ mod tests {
     #[test]
     fn closing_the_primary_promotes_the_fork() {
         let mut app = app();
-        app.update(control('f'));
+        app.update(control('t'));
         let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
         terminal.draw(|frame| app.render(frame)).unwrap();
         app.update(AppEvent::Terminal(Event::Mouse(MouseEvent {
@@ -1196,7 +1196,7 @@ mod tests {
     #[test]
     fn promoted_fork_can_open_another_fork() {
         let mut app = app();
-        app.update(control('f'));
+        app.update(control('t'));
         app.update(AppEvent::ForkReady {
             pane: PaneId::Fork(1),
         });
@@ -1211,7 +1211,7 @@ mod tests {
         app.update(control('c'));
         app.update(control('c'));
 
-        let fork = app.update(control('f'));
+        let fork = app.update(control('t'));
 
         assert!(matches!(
             fork.effects.as_slice(),
@@ -1227,7 +1227,7 @@ mod tests {
     #[test]
     fn failed_pending_fork_shuts_down_after_its_parent_closes() {
         let mut app = app();
-        app.update(control('f'));
+        app.update(control('t'));
         let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
         terminal.draw(|frame| app.render(frame)).unwrap();
         app.update(AppEvent::Terminal(Event::Mouse(MouseEvent {
