@@ -1227,7 +1227,7 @@ mod tests {
     #[test]
     fn promoted_fork_refreshes_an_open_actions_menu() {
         let mut app = app();
-        app.update(control('f'));
+        app.update(control('t'));
         app.update(AppEvent::ForkReady {
             pane: PaneId::Fork(1),
         });
