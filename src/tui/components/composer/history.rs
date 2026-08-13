@@ -44,9 +44,8 @@ impl PromptHistory {
         Some(self.browsing.take()?.saved_draft)
     }
 
-    pub(super) fn should_navigate(&self, draft: &str, cursor: usize) -> bool {
-        let at_draft_edge = cursor == 0 || cursor == draft.len();
-        draft.is_empty() || (self.browsing.is_some() && at_draft_edge)
+    pub(super) fn is_browsing(&self) -> bool {
+        self.browsing.is_some()
     }
 
     pub(super) fn detach(&mut self) {

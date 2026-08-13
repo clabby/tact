@@ -629,6 +629,9 @@ impl Composer {
         }
 
         if key.modifiers == KeyModifiers::CONTROL {
+            if matches!(key.code, KeyCode::Char('a' | 'b' | 'e' | 'f')) {
+                self.history.detach();
+            }
             return match key.code {
                 KeyCode::Char('a') => ComposerUpdate::from_change(self.move_to_logical_edge(false)),
                 KeyCode::Char('b') => ComposerUpdate::from_change(self.move_left()),
@@ -652,11 +655,17 @@ impl Composer {
             return ComposerUpdate::unchanged();
         }
 
-        let moves_by_word =
-            matches!(key.code, KeyCode::Char('b' | 'f')) && key.modifiers == KeyModifiers::ALT;
-        let detaches_history = matches!(key.code, KeyCode::Char(_)) && !moves_by_word
-            || matches!(key.code, KeyCode::Backspace | KeyCode::Delete)
-            || key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::SHIFT);
+        let detaches_history = matches!(
+            key.code,
+            KeyCode::Char(_)
+                | KeyCode::Left
+                | KeyCode::Right
+                | KeyCode::Home
+                | KeyCode::End
+                | KeyCode::Backspace
+                | KeyCode::Delete
+        ) || key.code == KeyCode::Enter
+            && key.modifiers.contains(KeyModifiers::SHIFT);
         if detaches_history {
             self.history.detach();
         }
@@ -729,25 +738,27 @@ impl Composer {
     }
 
     fn move_up(&mut self) -> bool {
-        if self.history.should_navigate(&self.draft, self.cursor)
-            && let Some(prompt) = self.history.previous(&self.draft)
-        {
-            self.replace_draft(prompt);
+        if !self.history.is_browsing() && self.move_vertical(-1) {
             return true;
         }
 
-        self.move_vertical(-1)
+        let Some(prompt) = self.history.previous(&self.draft) else {
+            return false;
+        };
+        self.replace_draft(prompt);
+        true
     }
 
     fn move_down(&mut self) -> bool {
-        if self.history.should_navigate(&self.draft, self.cursor)
-            && let Some(prompt) = self.history.next()
-        {
-            self.replace_draft(prompt);
-            return true;
+        if !self.history.is_browsing() {
+            return self.move_vertical(1);
         }
 
-        self.move_vertical(1)
+        let Some(prompt) = self.history.next() else {
+            return false;
+        };
+        self.replace_draft(prompt);
+        true
     }
 
     fn insert(&mut self, text: &str) {
@@ -847,76 +858,33 @@ impl Composer {
     }
 
     fn move_by_word(&mut self, forward: bool) -> bool {
-        const SEPARATORS: &str = "`~!@#$%^&*()-=+[{]}\\|;:'\",.<>/?";
-
-        #[derive(Clone, Copy, Eq, PartialEq)]
-        enum PieceKind {
-            Separator,
-            Word,
-        }
-
-        let character_kind = |character: char| {
-            if SEPARATORS.contains(character) {
-                PieceKind::Separator
-            } else {
-                PieceKind::Word
-            }
-        };
-
-        // Skip whitespace next to the cursor, then inspect only the adjacent non-whitespace run.
-        let (source, source_start) = if forward {
-            let suffix = &self.draft[self.cursor..];
-            let run_start = suffix.len() - suffix.trim_start_matches(char::is_whitespace).len();
-            let run = &suffix[run_start..];
-            let run_end = run.find(char::is_whitespace).unwrap_or(run.len());
-            (&run[..run_end], self.cursor + run_start)
-        } else {
-            let prefix = &self.draft[..self.cursor];
-            let run_end = prefix.trim_end_matches(char::is_whitespace).len();
-            let run_start = prefix[..run_end]
-                .char_indices()
-                .rfind(|&(_, character)| character.is_whitespace())
-                .map_or(0, |(index, character)| index + character.len_utf8());
-            (&prefix[run_start..run_end], run_start)
-        };
-        let mut candidate: Option<(Range<usize>, PieceKind)> = None;
-        let mut append_piece = |range: Range<usize>, kind: PieceKind| {
-            if kind == PieceKind::Separator
-                && let Some((previous, PieceKind::Separator)) = candidate.as_mut()
-                && previous.end == range.start
-            {
-                previous.end = range.end;
-                return;
-            }
-            if !forward || candidate.is_none() {
-                candidate = Some((range, kind));
-            }
-        };
-
-        // Use Unicode word boundaries, but keep adjacent punctuation together as one movement.
-        for (segment_start, segment) in source.split_word_bound_indices() {
-            let mut characters = segment.char_indices();
-            let Some((_, first_character)) = characters.next() else {
-                continue;
-            };
-            let mut piece_start = 0;
-            let mut kind = character_kind(first_character);
-            for (index, character) in characters {
-                let next_kind = character_kind(character);
-                if next_kind == kind {
-                    continue;
+        let is_word = |grapheme: &str| grapheme.chars().any(char::is_alphanumeric);
+        let target = if forward {
+            let mut found_word = false;
+            let mut target = self.draft.len();
+            for (offset, grapheme) in self.draft[self.cursor..].grapheme_indices(true) {
+                if is_word(grapheme) {
+                    found_word = true;
+                    target = self.cursor + offset + grapheme.len();
+                } else if found_word {
+                    break;
                 }
-                append_piece(segment_start + piece_start..segment_start + index, kind);
-                piece_start = index;
-                kind = next_kind;
             }
-            append_piece(
-                segment_start + piece_start..segment_start + segment.len(),
-                kind,
-            );
-        }
+            target
+        } else {
+            let mut found_word = false;
+            let mut target = 0;
+            for (offset, grapheme) in self.draft[..self.cursor].grapheme_indices(true).rev() {
+                if is_word(grapheme) {
+                    found_word = true;
+                    target = offset;
+                } else if found_word {
+                    break;
+                }
+            }
+            target
+        };
 
-        // Image labels participate in word segmentation, but the cursor cannot stop inside one.
         let adjust_position_out_of_image = |position: usize, prefer_start: bool| {
             let Some(image) = self
                 .images
@@ -931,10 +899,6 @@ impl Composer {
                 image.range.end
             }
         };
-        let boundary = candidate.map_or(if forward { source.len() } else { 0 }, |(span, _)| {
-            if forward { span.end } else { span.start }
-        });
-        let target = source_start + boundary;
         let target = adjust_position_out_of_image(target, !forward);
         if target == self.cursor {
             return false;
@@ -1002,17 +966,7 @@ impl Composer {
         let layout = VisualLayout::new(&self.draft, self.cursor, self.last_width.max(1));
         let target_row = layout.cursor_row.saturating_add_signed(direction);
         if target_row == layout.cursor_row || target_row >= layout.lines.len() {
-            let target = if direction.is_negative() {
-                0
-            } else {
-                self.draft.len()
-            };
-            if target == self.cursor {
-                return false;
-            }
-            self.cursor = target;
-            self.preferred_column = None;
-            return true;
+            return false;
         }
 
         let desired = *self.preferred_column.get_or_insert(layout.cursor_column);
@@ -1044,26 +998,15 @@ impl Composer {
     }
 
     fn move_to_logical_edge(&mut self, end: bool) -> bool {
-        let edge_at = |cursor: usize| {
-            if end {
-                self.draft[cursor..]
-                    .find('\n')
-                    .map_or(self.draft.len(), |offset| cursor + offset)
-            } else {
-                self.draft[..cursor]
-                    .rfind('\n')
-                    .map_or(0, |offset| offset + '\n'.len_utf8())
-            }
+        let target = if end {
+            self.draft[self.cursor..]
+                .find('\n')
+                .map_or(self.draft.len(), |offset| self.cursor + offset)
+        } else {
+            self.draft[..self.cursor]
+                .rfind('\n')
+                .map_or(0, |offset| offset + '\n'.len_utf8())
         };
-        let mut target = edge_at(self.cursor);
-        if target == self.cursor {
-            let adjacent = if end {
-                self.cursor.saturating_add(1).min(self.draft.len())
-            } else {
-                self.cursor.saturating_sub(1)
-            };
-            target = edge_at(adjacent);
-        }
         if target == self.cursor {
             return false;
         }
@@ -2043,19 +1986,21 @@ mod tests {
     }
 
     #[test]
-    fn readline_shortcuts_move_by_character_and_logical_line() {
+    fn readline_shortcuts_move_by_character_and_stay_on_the_logical_line() {
         let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
         composer.replace_draft("one\ntwo\nthree".to_owned());
         composer.cursor = "one\nt".len();
 
         composer.update(key(KeyCode::Char('a'), KeyModifiers::CONTROL));
         assert_eq!(composer.cursor(), "one\n".len());
-        composer.update(key(KeyCode::Char('a'), KeyModifiers::CONTROL));
-        assert_eq!(composer.cursor(), 0);
+        let update = composer.update(key(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        assert!(!update.changed);
+        assert_eq!(composer.cursor(), "one\n".len());
 
         composer.update(key(KeyCode::Char('e'), KeyModifiers::CONTROL));
-        assert_eq!(composer.cursor(), "one".len());
-        composer.update(key(KeyCode::Char('e'), KeyModifiers::CONTROL));
+        assert_eq!(composer.cursor(), "one\ntwo".len());
+        let update = composer.update(key(KeyCode::Char('e'), KeyModifiers::CONTROL));
+        assert!(!update.changed);
         assert_eq!(composer.cursor(), "one\ntwo".len());
 
         composer.update(key(KeyCode::Char('b'), KeyModifiers::CONTROL));
@@ -2087,21 +2032,17 @@ mod tests {
     }
 
     #[test]
-    fn readline_word_movement_stops_at_punctuation_and_cjk_boundaries() {
+    fn readline_word_movement_skips_delimiters_between_alphanumeric_words() {
         let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
         composer.replace_draft("foo...bar".to_owned());
 
         composer.update(key(KeyCode::Char('b'), KeyModifiers::ALT));
         assert_eq!(composer.cursor(), "foo...".len());
         composer.update(key(KeyCode::Char('b'), KeyModifiers::ALT));
-        assert_eq!(composer.cursor(), "foo".len());
-        composer.update(key(KeyCode::Char('b'), KeyModifiers::ALT));
         assert_eq!(composer.cursor(), 0);
 
         composer.update(key(KeyCode::Char('f'), KeyModifiers::ALT));
         assert_eq!(composer.cursor(), "foo".len());
-        composer.update(key(KeyCode::Char('f'), KeyModifiers::ALT));
-        assert_eq!(composer.cursor(), "foo...".len());
         composer.update(key(KeyCode::Char('f'), KeyModifiers::ALT));
         assert_eq!(composer.cursor(), composer.draft().len());
 
@@ -2109,7 +2050,7 @@ mod tests {
         composer.update(key(KeyCode::Char('b'), KeyModifiers::ALT));
         assert_eq!(composer.cursor(), "can'".len());
         composer.update(key(KeyCode::Char('b'), KeyModifiers::ALT));
-        assert_eq!(composer.cursor(), "can".len());
+        assert_eq!(composer.cursor(), 0);
 
         composer.replace_draft("alpha   beta".to_owned());
         composer.cursor = "alpha ".len();
@@ -2122,11 +2063,9 @@ mod tests {
         composer.replace_draft("你好".to_owned());
         composer.cursor = 0;
         composer.update(key(KeyCode::Char('f'), KeyModifiers::ALT));
-        assert_eq!(composer.cursor(), "你".len());
-        composer.update(key(KeyCode::Char('f'), KeyModifiers::ALT));
         assert_eq!(composer.cursor(), composer.draft().len());
         composer.update(key(KeyCode::Char('b'), KeyModifiers::ALT));
-        assert_eq!(composer.cursor(), "你".len());
+        assert_eq!(composer.cursor(), 0);
     }
 
     #[test]
@@ -2149,14 +2088,13 @@ mod tests {
         composer.update(ComposerEvent::PasteImage(
             "data:image/png;base64,attached".to_owned(),
         ));
-        composer.last_width = 3;
-        let image = composer.images[0].range.clone();
+        render(&mut composer, 5, 5);
 
-        composer.cursor = image.start;
+        composer.update(key(KeyCode::Char('a'), KeyModifiers::CONTROL));
         composer.update(key(KeyCode::Char('n'), KeyModifiers::CONTROL));
-        assert_eq!(composer.cursor(), image.end);
+        assert_eq!(composer.cursor(), composer.draft().len());
         composer.update(key(KeyCode::Char('p'), KeyModifiers::CONTROL));
-        assert_eq!(composer.cursor(), image.start);
+        assert_eq!(composer.cursor(), 0);
 
         let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
         composer.update(ComposerEvent::Terminal(Event::Paste("a".to_owned())));
@@ -2186,42 +2124,45 @@ mod tests {
     }
 
     #[test]
-    fn readline_vertical_movement_uses_history_only_for_empty_or_recalled_drafts() {
+    fn readline_vertical_shortcuts_restore_the_unsent_draft_after_history() {
         let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
         composer.replace_draft("older".to_owned());
         composer.update(key(KeyCode::Enter, KeyModifiers::NONE));
         composer.replace_draft("newer".to_owned());
         composer.update(key(KeyCode::Enter, KeyModifiers::NONE));
+        composer.replace_draft("top\nbottom".to_owned());
 
-        composer.update(key(KeyCode::Char('p'), KeyModifiers::CONTROL));
-        assert_eq!(composer.draft(), "newer");
-        composer.update(key(KeyCode::Char('b'), KeyModifiers::ALT));
-        assert_eq!(composer.cursor(), 0);
-        composer.update(key(KeyCode::Char('p'), KeyModifiers::CONTROL));
-        assert_eq!(composer.draft(), "older");
-        composer.update(key(KeyCode::Char('p'), KeyModifiers::CONTROL));
-        assert_eq!(composer.cursor(), 0);
-        composer.update(key(KeyCode::Char('n'), KeyModifiers::CONTROL));
-        assert_eq!(composer.draft(), "newer");
-        composer.update(key(KeyCode::Char('n'), KeyModifiers::CONTROL));
-        assert!(composer.draft().is_empty());
-
-        composer.update(ComposerEvent::ReplaceDraft("top\nbottom".to_owned()));
-
-        composer.update(key(KeyCode::Char('p'), KeyModifiers::CONTROL));
-        assert_eq!(composer.cursor(), "top".len());
-        composer.update(key(KeyCode::Char('p'), KeyModifiers::CONTROL));
-        assert_eq!(composer.cursor(), 0);
         composer.update(key(KeyCode::Char('p'), KeyModifiers::CONTROL));
         assert_eq!(composer.draft(), "top\nbottom");
-        assert_eq!(composer.cursor(), 0);
+        assert_eq!(composer.cursor(), "top".len());
+        composer.update(key(KeyCode::Char('p'), KeyModifiers::CONTROL));
+        assert_eq!(composer.draft(), "newer");
+        composer.update(key(KeyCode::Char('p'), KeyModifiers::CONTROL));
+        assert_eq!(composer.draft(), "older");
+        composer.update(key(KeyCode::Char('n'), KeyModifiers::CONTROL));
+        assert_eq!(composer.draft(), "newer");
+        composer.update(key(KeyCode::Char('n'), KeyModifiers::CONTROL));
+        assert_eq!(composer.draft(), "top\nbottom");
+        assert_eq!(composer.cursor(), composer.draft().len());
+    }
 
-        composer.update(key(KeyCode::Char('n'), KeyModifiers::CONTROL));
-        assert_eq!(composer.cursor(), "top\n".len());
-        composer.update(key(KeyCode::Char('n'), KeyModifiers::CONTROL));
-        assert_eq!(composer.cursor(), composer.draft().len());
-        composer.update(key(KeyCode::Char('n'), KeyModifiers::CONTROL));
-        assert_eq!(composer.cursor(), composer.draft().len());
+    #[test]
+    fn readline_horizontal_shortcuts_detach_recalled_history() {
+        for (code, modifiers) in [
+            (KeyCode::Char('a'), KeyModifiers::CONTROL),
+            (KeyCode::Char('b'), KeyModifiers::CONTROL),
+            (KeyCode::Char('b'), KeyModifiers::ALT),
+        ] {
+            let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+            composer.replace_draft("previous".to_owned());
+            composer.update(key(KeyCode::Enter, KeyModifiers::NONE));
+            composer.update(key(KeyCode::Up, KeyModifiers::NONE));
+
+            composer.update(key(code, modifiers));
+            composer.update(key(KeyCode::Char('n'), KeyModifiers::CONTROL));
+
+            assert_eq!(composer.draft(), "previous");
+        }
     }
 
     #[test]
@@ -2275,13 +2216,16 @@ mod tests {
     }
 
     #[test]
-    fn arrows_cycle_submitted_prompts_only_from_an_empty_or_recalled_draft() {
+    fn arrows_cycle_submitted_prompts_and_restore_the_unsent_draft() {
         let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
         for prompt in ["first", "second"] {
             composer.replace_draft(prompt.to_owned());
             composer.update(key(KeyCode::Enter, KeyModifiers::NONE));
         }
+        composer.replace_draft("unfinished\nline".to_owned());
 
+        composer.update(key(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(composer.draft(), "unfinished\nline");
         composer.update(key(KeyCode::Up, KeyModifiers::NONE));
         assert_eq!(composer.draft(), "second");
         composer.update(key(KeyCode::Up, KeyModifiers::NONE));
@@ -2289,13 +2233,7 @@ mod tests {
         composer.update(key(KeyCode::Down, KeyModifiers::NONE));
         assert_eq!(composer.draft(), "second");
         composer.update(key(KeyCode::Down, KeyModifiers::NONE));
-        assert!(composer.draft().is_empty());
-
-        composer.update(ComposerEvent::ReplaceDraft("unfinished\nline".to_owned()));
-        composer.update(key(KeyCode::Up, KeyModifiers::NONE));
-        composer.update(key(KeyCode::Up, KeyModifiers::NONE));
         assert_eq!(composer.draft(), "unfinished\nline");
-        assert_eq!(composer.cursor(), 0);
     }
 
     #[test]
