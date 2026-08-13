@@ -22,23 +22,21 @@ pub(super) fn present(tool: &ToolEntry, width: u16, theme: &Theme, expanded: boo
         return presentation;
     }
 
-    let mut details = operation_details(&tool.arguments, width, theme);
+    let details = operation_details(&tool.arguments, width, theme);
+    let mut presentation = presentation.unselectable_details(details);
     let result_size = tool
         .result
         .as_ref()
         .map_or(0, |result| result.to_string().len());
     if let Some(result) = tool.result.as_ref().and_then(Value::as_str) {
-        details.extend(super::super::markdown::wrap_plain(
-            &clean_result(result),
-            width,
-            Style::default().fg(theme.text()),
-        ));
+        let result = clean_result(result);
+        presentation =
+            presentation.selectable_plain(result, width, Style::default().fg(theme.text()));
     } else if let Some(result) = &tool.result {
-        details.extend(super::render_result(result, width, theme));
+        let (source, details) = super::selectable_result(result, width, theme);
+        presentation = presentation.selectable_details(source, details);
     }
-    presentation
-        .details(details)
-        .footer(format!("web result · {}", format_bytes(result_size)))
+    presentation.footer(format!("web result · {}", format_bytes(result_size)))
 }
 
 fn summary(arguments: &Value) -> String {

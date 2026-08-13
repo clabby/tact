@@ -41,7 +41,9 @@ pub(super) fn present(tool: &ToolEntry, width: u16, theme: &Theme, expanded: boo
     } else {
         super::super::markdown::render(&format!("```diff\n{patch}\n```"), width, theme).lines
     };
-    presentation.details(details).footer("patch details")
+    presentation
+        .unselectable_details(details)
+        .footer("patch details")
 }
 
 fn file_operation(line: &str) -> Option<(&'static str, &str)> {

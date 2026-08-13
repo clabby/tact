@@ -36,7 +36,9 @@ fn view_image(tool: &ToolEntry, width: u16, theme: &Theme, expanded: bool) -> Pr
         width,
         Style::default().fg(theme.accent()),
     );
-    presentation.details(details).footer("binary data hidden")
+    presentation
+        .unselectable_details(details)
+        .footer("binary data hidden")
 }
 
 fn image_generation(tool: &ToolEntry, width: u16, theme: &Theme, expanded: bool) -> Presentation {
@@ -73,6 +75,6 @@ fn image_generation(tool: &ToolEntry, width: u16, theme: &Theme, expanded: bool)
         ));
     }
     presentation
-        .details(details)
+        .unselectable_details(details)
         .footer("image generation details")
 }

@@ -26,24 +26,28 @@ pub(super) fn present(tool: &ToolEntry, width: u16, theme: &Theme, expanded: boo
         return presentation;
     }
 
-    let mut details = Vec::new();
     if let Some(workdir) = tool.arguments.get("workdir").and_then(Value::as_str) {
-        details.extend(super::super::markdown::wrap_plain(
+        presentation = presentation.unselectable_details(super::super::markdown::wrap_plain(
             &format!("cwd {}", shorten_home(Path::new(workdir))),
             width,
             Style::default().fg(theme.muted()),
         ));
     }
-    let command = command_spans(command)
+    let rendered_command = command_spans(command)
         .into_iter()
         .map(|mut span| {
             span.style = span.style.bg(theme.code_background());
             span
         })
         .collect::<Vec<_>>();
-    details.extend(super::super::markdown::wrap_spans(&command, width, true));
+    let prompt_exclusions = [std::iter::once(0..2).collect::<Vec<_>>()];
+    presentation = presentation.selectable_details_excluding(
+        command,
+        super::super::markdown::wrap_spans(&rendered_command, width, true),
+        &prompt_exclusions,
+    );
     for substep in &tool.substeps {
-        details.extend(super::super::markdown::wrap_plain(
+        presentation = presentation.unselectable_details(super::super::markdown::wrap_plain(
             &format!("↳ {substep}"),
             width,
             Style::default().fg(theme.muted()),
@@ -56,15 +60,12 @@ pub(super) fn present(tool: &ToolEntry, width: u16, theme: &Theme, expanded: boo
         .and_then(Value::as_str)
         .unwrap_or_default();
     if !output.is_empty() {
-        details.extend(super::super::markdown::wrap_plain(
-            output,
-            width,
-            Style::default().fg(theme.text()),
-        ));
+        presentation =
+            presentation.selectable_plain(output, width, Style::default().fg(theme.text()));
     }
     let line_count = output.lines().count();
     let line_label = if line_count == 1 { "line" } else { "lines" };
-    presentation.details(details).footer(format!(
+    presentation.footer(format!(
         "{line_count} {line_label} · {}",
         format_bytes(output.len())
     ))
@@ -105,10 +106,15 @@ fn stdin(tool: &ToolEntry, width: u16, theme: &Theme, expanded: bool) -> Present
     if !expanded {
         return presentation;
     }
-    let details = tool.result.as_ref().map_or_else(Vec::new, |result| {
-        super::render_result(result, width, theme)
-    });
-    presentation.details(details).footer("process interaction")
+    match &tool.result {
+        Some(result) => {
+            let (source, details) = super::selectable_result(result, width, theme);
+            presentation
+                .selectable_details(source, details)
+                .footer("process interaction")
+        }
+        None => presentation.footer("process interaction"),
+    }
 }
 
 fn shell_outcome(result: Option<&Value>) -> Option<String> {

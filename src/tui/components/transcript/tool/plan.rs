@@ -56,6 +56,6 @@ pub(super) fn present(tool: &ToolEntry, width: u16, theme: &Theme, expanded: boo
         }
     }
     presentation
-        .details(details)
+        .unselectable_details(details)
         .footer(format!("{completed}/{total} complete"))
 }
