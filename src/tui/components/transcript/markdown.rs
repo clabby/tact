@@ -14,6 +14,7 @@ pub(super) struct Layout {
     pub(super) links: Vec<Vec<LinkSpan>>,
     pub(super) selections: Vec<Vec<SourceSpan>>,
     pub(super) envelopes: Vec<SourceEnvelope>,
+    pub(super) selection_source: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -42,6 +43,7 @@ pub(super) fn render(markdown: &str, width: u16, theme: &Theme) -> Layout {
             links: Vec::new(),
             selections: Vec::new(),
             envelopes: Vec::new(),
+            selection_source: None,
         };
     }
     let options = Options::ENABLE_TABLES
@@ -75,8 +77,16 @@ pub(super) fn render(markdown: &str, width: u16, theme: &Theme) -> Layout {
 }
 
 pub(super) fn plain_selection_spans(source: &str, lines: &[Line<'static>]) -> Vec<Vec<SourceSpan>> {
+    plain_selection_spans_excluding(source, lines, &[])
+}
+
+pub(super) fn plain_selection_spans_excluding(
+    source: &str,
+    lines: &[Line<'static>],
+    exclusions: &[Vec<Range<u16>>],
+) -> Vec<Vec<SourceSpan>> {
     let graphemes = source_graphemes(source, source, 0..source.len());
-    align_source_graphemes(&graphemes, lines, &[])
+    align_source_graphemes(&graphemes, lines, exclusions)
 }
 
 pub(super) fn wrap_plain(text: &str, width: u16, style: Style) -> Vec<Line<'static>> {
@@ -677,6 +687,7 @@ impl<'a> Renderer<'a> {
                 links,
                 selections: Vec::new(),
                 envelopes: Vec::new(),
+                selection_source: None,
             },
             self.selection_exclusions,
         )

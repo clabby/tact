@@ -103,6 +103,7 @@ struct CachedEntry {
     links: Vec<Vec<markdown::LinkSpan>>,
     selections: Vec<Vec<markdown::SourceSpan>>,
     envelopes: Vec<markdown::SourceEnvelope>,
+    selection_source: Option<String>,
 }
 
 #[derive(Default)]
@@ -611,7 +612,11 @@ impl Transcript {
         };
         let anchor = if self.cache.selections(exact).is_empty() {
             if !across_entries {
-                selection_source(self.model.entry(exact.entry)?)?;
+                let entry = self.model.entry(exact.entry)?;
+                if matches!(entry.kind, EntryKind::Tool(_)) {
+                    return None;
+                }
+                self.cache.selection_source(entry)?;
             }
             self.selection_rows
                 .iter()
@@ -653,7 +658,7 @@ impl Transcript {
             if block < start.block || block > end.block {
                 continue;
             }
-            let Some(source) = selection_source(entry) else {
+            let Some(source) = self.cache.selection_source(entry) else {
                 continue;
             };
             let Some(selected) = range.source_range(block, source.len()) else {
@@ -1355,6 +1360,13 @@ impl LayoutCache {
             .map_or(&[], Vec::as_slice)
     }
 
+    fn selection_source<'a>(&'a self, entry: &'a TranscriptEntry) -> Option<&'a str> {
+        self.entries
+            .get(&entry.id)
+            .and_then(|cached| cached.selection_source.as_deref())
+            .or_else(|| entry_selection_source(entry))
+    }
+
     fn expand_selection(&self, entry: EntryId, mut selected: Range<usize>) -> Range<usize> {
         let Some(cached) = self.entries.get(&entry) else {
             return selected;
@@ -1400,6 +1412,7 @@ impl CachedEntry {
             links: layout.links,
             selections: layout.selections,
             envelopes: layout.envelopes,
+            selection_source: layout.selection_source,
         }
     }
 
@@ -1601,15 +1614,22 @@ fn render_entry(
         EntryKind::Tool(tool) => {
             let indent = nested_tool_indent(entry, width);
             let tool_width = width.saturating_sub(indent);
-            let mut lines = if let Some(duration_ns) = live_duration_ns {
-                tool::render_live(tool, duration_ns, tool_width, theme, expanded)
-            } else if expanded {
-                tool::render_expanded(tool, tool_width, theme)
-            } else {
-                tool::render(tool, tool_width, theme)
-            };
-            indent_nested_tool(indent, &mut lines, theme, expanded, entry.trailing_spacer);
-            layout_without_links(lines)
+            let mut layout =
+                tool::render_layout(tool, live_duration_ns, tool_width, theme, expanded);
+            indent_nested_tool(
+                indent,
+                &mut layout.lines,
+                theme,
+                expanded,
+                entry.trailing_spacer,
+            );
+            for spans in &mut layout.selections {
+                for span in spans {
+                    span.columns.start = span.columns.start.saturating_add(indent);
+                    span.columns.end = span.columns.end.saturating_add(indent);
+                }
+            }
+            layout
         }
         EntryKind::DirectedMessage(thread) => {
             layout_without_links(message::render(thread, width, theme, expanded))
@@ -1760,7 +1780,7 @@ fn indent_nested_tool(
     }
 }
 
-fn selection_source(entry: &TranscriptEntry) -> Option<&str> {
+fn entry_selection_source(entry: &TranscriptEntry) -> Option<&str> {
     match &entry.kind {
         EntryKind::User { text }
         | EntryKind::Assistant { text, .. }
@@ -1777,6 +1797,7 @@ fn layout_without_links(lines: Vec<Line<'static>>) -> markdown::Layout {
         links,
         selections,
         envelopes: Vec::new(),
+        selection_source: None,
     }
 }
 
@@ -1816,6 +1837,7 @@ fn render_user(text: &str, width: u16, theme: &Theme) -> markdown::Layout {
         lines,
         selections,
         envelopes: Vec::new(),
+        selection_source: None,
     }
 }
 
@@ -2456,6 +2478,31 @@ mod tests {
 
         assert!(transcript.selection_span(position).is_none());
         assert!(transcript.selection_span_nearest(position).is_some());
+    }
+
+    #[test]
+    fn expanded_tool_details_are_selectable_but_the_summary_remains_clickable() {
+        let mut transcript = Transcript::new();
+        shell(&mut transcript, 1, "selectable output");
+        drop(render(&mut transcript, 60, 12));
+        transcript.focus_expandables();
+        transcript.update(TranscriptEvent::Expandable(ExpandableCommand::Toggle));
+        let backend = render(&mut transcript, 60, 12);
+        let row_containing = |text: &str| {
+            (0..backend.buffer().area.height)
+                .find(|&row| {
+                    (0..backend.buffer().area.width)
+                        .map(|column| backend.buffer()[(column, row)].symbol())
+                        .collect::<String>()
+                        .contains(text)
+                })
+                .unwrap()
+        };
+        let summary = Position::new(10, row_containing("Shell"));
+        let output = Position::new(10, row_containing("selectable output"));
+
+        assert!(transcript.selection_span(summary).is_none());
+        assert!(transcript.selection_span(output).is_some());
     }
 
     #[test]

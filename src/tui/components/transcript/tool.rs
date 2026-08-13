@@ -7,7 +7,9 @@ mod send_message;
 mod shell;
 mod web;
 
-use super::markdown::{sanitize, wrap_plain, wrap_spans};
+use super::markdown::{
+    Layout, SourceSpan, plain_selection_spans_excluding, sanitize, wrap_plain, wrap_spans,
+};
 use crate::tui::{
     format::{format_duration, humanize_tool},
     theme::Theme,
@@ -18,17 +20,21 @@ use ratatui::{
     text::{Line, Span},
 };
 use serde_json::Value;
+use std::ops::Range;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
+#[cfg(test)]
 pub(super) fn render(tool: &ToolEntry, width: u16, theme: &Theme) -> Vec<Line<'static>> {
-    render_state(tool, None, width, theme, false)
+    render_layout(tool, None, width, theme, false).lines
 }
 
+#[cfg(test)]
 pub(super) fn render_expanded(tool: &ToolEntry, width: u16, theme: &Theme) -> Vec<Line<'static>> {
-    render_state(tool, None, width, theme, true)
+    render_layout(tool, None, width, theme, true).lines
 }
 
+#[cfg(test)]
 pub(super) fn render_live(
     tool: &ToolEntry,
     duration_ns: u64,
@@ -36,18 +42,24 @@ pub(super) fn render_live(
     theme: &Theme,
     expanded: bool,
 ) -> Vec<Line<'static>> {
-    render_state(tool, Some(duration_ns), width, theme, expanded)
+    render_layout(tool, Some(duration_ns), width, theme, expanded).lines
 }
 
-fn render_state(
+pub(super) fn render_layout(
     tool: &ToolEntry,
     live_duration_ns: Option<u64>,
     width: u16,
     theme: &Theme,
     expanded: bool,
-) -> Vec<Line<'static>> {
+) -> Layout {
     if width == 0 {
-        return Vec::new();
+        return Layout {
+            lines: Vec::new(),
+            links: Vec::new(),
+            selections: Vec::new(),
+            envelopes: Vec::new(),
+            selection_source: None,
+        };
     }
     let detail_width = width.saturating_sub(6).max(1);
     let presentation = present(tool, detail_width, theme, expanded);
@@ -60,10 +72,42 @@ fn render_state(
         expanded,
     );
     if !expanded {
-        return lines;
+        return Layout {
+            links: vec![Vec::new(); lines.len()],
+            selections: vec![Vec::new(); lines.len()],
+            lines,
+            envelopes: Vec::new(),
+            selection_source: None,
+        };
     }
-    append_details(&mut lines, presentation, width, theme);
-    lines
+    let detail_start = lines.len();
+    let Presentation {
+        details,
+        footer,
+        selection_source,
+        mut detail_selections,
+        ..
+    } = presentation;
+    let selection_source = (!selection_source.is_empty()).then_some(selection_source);
+    append_details(&mut lines, details, footer, width, theme);
+    let mut selections = vec![Vec::new(); lines.len()];
+    let prefix = if width < 7 { 0 } else { 6 };
+    for (index, spans) in detail_selections.iter_mut().enumerate() {
+        let row = detail_start + index;
+        for span in &mut *spans {
+            span.columns.start = span.columns.start.saturating_add(prefix);
+            span.columns.end = span.columns.end.saturating_add(prefix).min(width);
+        }
+        spans.retain(|span| span.columns.start < span.columns.end);
+        selections[row] = std::mem::take(spans);
+    }
+    Layout {
+        links: vec![Vec::new(); lines.len()],
+        lines,
+        selections,
+        envelopes: Vec::new(),
+        selection_source,
+    }
 }
 
 pub(super) fn render_live_summary(
@@ -108,6 +152,8 @@ pub(super) struct Presentation {
     details: Vec<Line<'static>>,
     footer: Option<String>,
     summary_overflow: SummaryOverflow,
+    selection_source: String,
+    detail_selections: Vec<Vec<SourceSpan>>,
 }
 
 enum Subject {
@@ -132,6 +178,8 @@ impl Presentation {
             details: Vec::new(),
             footer: None,
             summary_overflow: SummaryOverflow::Wrap,
+            selection_source: String::new(),
+            detail_selections: Vec::new(),
         }
     }
 
@@ -143,6 +191,8 @@ impl Presentation {
             details: Vec::new(),
             footer: None,
             summary_overflow: SummaryOverflow::Wrap,
+            selection_source: String::new(),
+            detail_selections: Vec::new(),
         }
     }
 
@@ -151,9 +201,56 @@ impl Presentation {
         self
     }
 
-    pub(super) fn details(mut self, details: Vec<Line<'static>>) -> Self {
-        self.details = details;
+    pub(super) fn unselectable_details(mut self, details: Vec<Line<'static>>) -> Self {
+        self.detail_selections
+            .resize_with(self.detail_selections.len() + details.len(), Vec::new);
+        self.details.extend(details);
         self
+    }
+
+    pub(super) fn selectable_details(
+        self,
+        source: impl Into<String>,
+        details: Vec<Line<'static>>,
+    ) -> Self {
+        self.selectable_details_excluding(source, details, &[])
+    }
+
+    pub(super) fn selectable_details_excluding(
+        mut self,
+        source: impl Into<String>,
+        details: Vec<Line<'static>>,
+        exclusions: &[Vec<Range<u16>>],
+    ) -> Self {
+        let source = source.into();
+        let offset = if self.selection_source.is_empty() {
+            0
+        } else {
+            self.selection_source.push('\n');
+            self.selection_source.len()
+        };
+        let mut selections = plain_selection_spans_excluding(&source, &details, exclusions);
+        for spans in &mut selections {
+            for span in spans {
+                span.source.start = span.source.start.saturating_add(offset);
+                span.source.end = span.source.end.saturating_add(offset);
+            }
+        }
+        self.selection_source.push_str(&source);
+        self.details.extend(details);
+        self.detail_selections.extend(selections);
+        self
+    }
+
+    pub(super) fn selectable_plain(
+        self,
+        source: impl Into<String>,
+        width: u16,
+        style: Style,
+    ) -> Self {
+        let source = source.into();
+        let lines = wrap_plain(&source, width, style);
+        self.selectable_details(source, lines)
     }
 
     pub(super) fn footer(mut self, footer: impl Into<String>) -> Self {
@@ -368,19 +465,15 @@ fn push_subject(spans: &mut Vec<Span<'static>>, subject: &Subject, theme: &Theme
 
 fn append_details(
     lines: &mut Vec<Line<'static>>,
-    presentation: Presentation,
+    details: Vec<Line<'static>>,
+    footer: Option<String>,
     width: u16,
     theme: &Theme,
 ) {
     let rail = Style::default().fg(theme.border());
     if width < 7 {
-        lines.extend(
-            presentation
-                .details
-                .into_iter()
-                .map(|line| truncate_line(line, width)),
-        );
-        if let Some(footer) = presentation.footer {
+        lines.extend(details.into_iter().map(|line| truncate_line(line, width)));
+        if let Some(footer) = footer {
             lines.push(Line::from(Span::styled(
                 truncate(&sanitize(&footer), width),
                 Style::default().fg(theme.muted()),
@@ -388,14 +481,14 @@ fn append_details(
         }
         return;
     }
-    for detail in presentation.details {
+    for detail in details {
         lines.push(Line::from(
             std::iter::once(Span::styled("    │ ", rail))
                 .chain(detail.spans)
                 .collect::<Vec<_>>(),
         ));
     }
-    let footer = presentation.footer.unwrap_or_else(|| "details".to_owned());
+    let footer = footer.unwrap_or_else(|| "details".to_owned());
     let footer = truncate(&sanitize(&footer), width.saturating_sub(6));
     lines.push(Line::from(vec![
         Span::styled("    └ ", rail),
@@ -425,27 +518,41 @@ fn generic(tool: &ToolEntry, width: u16, theme: &Theme, expanded: bool) -> Prese
     if !expanded {
         return presentation;
     }
-    let mut details = pretty_value(&tool.arguments, width, theme);
+    let details = pretty_value(&tool.arguments, width, theme);
+    presentation = presentation.unselectable_details(details);
     if let Some(result) = &tool.result {
-        details.extend(render_result(result, width, theme));
+        let (source, details) = selectable_result(result, width, theme);
+        presentation = presentation.selectable_details(source, details);
     }
-    presentation.details = details;
     presentation.footer = Some("arguments and result".to_owned());
     presentation
 }
 
-pub(super) fn render_result(value: &Value, width: u16, theme: &Theme) -> Vec<Line<'static>> {
+pub(super) fn selectable_result(
+    value: &Value,
+    width: u16,
+    theme: &Theme,
+) -> (String, Vec<Line<'static>>) {
     if contains_image_data(value) {
-        return wrap_plain(
-            &format!("image data · {}", format_bytes(value.to_string().len())),
-            width,
-            Style::default().fg(theme.muted()),
-        );
+        let source = format!("image data · {}", format_bytes(value.to_string().len()));
+        let details = wrap_plain(&source, width, Style::default().fg(theme.muted()));
+        return (source, details);
     }
     if let Some(text) = value.as_str() {
-        return wrap_plain(text, width, Style::default().fg(theme.text()));
+        return (
+            text.to_owned(),
+            wrap_plain(text, width, Style::default().fg(theme.text())),
+        );
     }
-    pretty_value(value, width, theme)
+    let source = serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string());
+    let details = wrap_plain(
+        &source,
+        width,
+        Style::default()
+            .fg(theme.code_text())
+            .bg(theme.code_background()),
+    );
+    (source, details)
 }
 
 pub(super) fn pretty_value(value: &Value, width: u16, theme: &Theme) -> Vec<Line<'static>> {
@@ -544,7 +651,7 @@ fn status_style(state: ToolState, theme: &Theme) -> Style {
 
 #[cfg(test)]
 mod tests {
-    use super::{render, render_expanded, render_live};
+    use super::{render, render_expanded, render_layout, render_live};
     use crate::tui::{
         theme::Theme,
         transcript::{ToolEntry, ToolState},
@@ -919,6 +1026,11 @@ mod tests {
         assert!(rendered.contains("Second line"));
         assert!(!rendered.contains("cite"));
         assert!(!rendered.contains("wordlim"));
+
+        let source = render_layout(&web, None, 80, &Theme::default(), true)
+            .selection_source
+            .expect("expanded web results should be selectable");
+        assert_eq!(source, " Useful content\nSecond line");
     }
 
     #[test]

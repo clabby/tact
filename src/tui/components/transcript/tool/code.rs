@@ -33,31 +33,31 @@ pub(super) fn present(tool: &ToolEntry, width: u16, theme: &Theme, expanded: boo
     if !expanded {
         return presentation;
     }
-    let mut details =
+    let details =
         super::super::markdown::render(&format!("```javascript\n{source}\n```"), width, theme)
             .lines;
+    let mut presentation = presentation.unselectable_details(details);
     if let Some(result) = &tool.result {
         if let Some(items) = result.as_array() {
             for item in items {
                 if let Some(text) = item.get("text").and_then(Value::as_str) {
-                    details.extend(super::super::markdown::wrap_plain(
+                    presentation = presentation.selectable_plain(
                         text,
                         width,
                         Style::default().fg(theme.text()),
-                    ));
+                    );
                 }
             }
         } else {
-            details.extend(super::render_result(result, width, theme));
+            let (source, details) = super::selectable_result(result, width, theme);
+            presentation = presentation.selectable_details(source, details);
         }
     }
     let size = tool
         .result
         .as_ref()
         .map_or(0, |result| result.to_string().len());
-    presentation
-        .details(details)
-        .footer(format!("{emitted} outputs · {}", format_bytes(size)))
+    presentation.footer(format!("{emitted} outputs · {}", format_bytes(size)))
 }
 
 fn wait(tool: &ToolEntry, width: u16, theme: &Theme, expanded: bool) -> Presentation {
@@ -65,9 +65,11 @@ fn wait(tool: &ToolEntry, width: u16, theme: &Theme, expanded: bool) -> Presenta
     if !expanded {
         return presentation;
     }
-    let mut details = super::pretty_value(&tool.arguments, width, theme);
+    let details = super::pretty_value(&tool.arguments, width, theme);
+    let mut presentation = presentation.unselectable_details(details);
     if let Some(result) = &tool.result {
-        details.extend(super::render_result(result, width, theme));
+        let (source, details) = super::selectable_result(result, width, theme);
+        presentation = presentation.selectable_details(source, details);
     }
-    presentation.details(details).footer("wait diagnostics")
+    presentation.footer("wait diagnostics")
 }

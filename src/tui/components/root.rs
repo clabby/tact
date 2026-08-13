@@ -4784,6 +4784,126 @@ mod tests {
     }
 
     #[test]
+    fn transcript_selection_copies_shell_command_and_output_without_chrome_or_soft_wraps() {
+        let mut terminal = Terminal::new(TestBackend::new(40, 16)).unwrap();
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        let command = "$HOME/bin/printf output";
+        let output = "alpha beta gamma delta epsilon zeta\nsecond line";
+        root.update(super::RootEvent::Transcript(agent_record(
+            1,
+            AgentEventKind::ToolCall,
+            json!({
+                "call_id": "workflow",
+                "tool": "exec",
+                "arguments": "await tools.exec_command({cmd: '$HOME/bin/printf output'})",
+            }),
+        )));
+        root.update(super::RootEvent::Transcript(agent_record(
+            2,
+            AgentEventKind::ToolCall,
+            json!({
+                "call_id": "workflow/shell",
+                "tool": "exec_command",
+                "arguments": {"cmd": command},
+            }),
+        )));
+        root.update(super::RootEvent::Transcript(agent_record(
+            3,
+            AgentEventKind::ToolResult,
+            json!({
+                "call_id": "workflow/shell",
+                "tool": "exec_command",
+                "status": "completed",
+                "duration_ns": 1_u64,
+                "result": format!(
+                    "Wall time: 0.0000 seconds\nProcess exited with code 0\nOutput:\n{output}"
+                ),
+                "structured_result": {
+                    "output": output,
+                    "exit_code": 0,
+                    "wall_time_seconds": 0.0,
+                },
+                "metadata": null,
+            }),
+        )));
+        root.update(key(KeyCode::Char('o'), KeyModifiers::CONTROL));
+        terminal
+            .draw(|frame| root.render(frame, frame.area(), &Theme::default()))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let command_row = (0..buffer.area.height)
+            .rfind(|&row| {
+                (0..buffer.area.width)
+                    .map(|column| buffer[(column, row)].symbol())
+                    .collect::<String>()
+                    .contains(command)
+            })
+            .expect("the expanded shell command should be visible");
+        let command_start = text_column(buffer, command_row, command);
+        let command_end = command_start + u16::try_from(command.len()).unwrap();
+
+        root.update(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            command_start,
+            command_row,
+        ));
+        root.update(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            command_end,
+            command_row,
+        ));
+        let update = root.update(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            command_end,
+            command_row,
+        ));
+        assert_eq!(update.effects, [RootEffect::Copy(command.to_owned())]);
+
+        let first_row = (0..buffer.area.height)
+            .find(|&row| {
+                (0..buffer.area.width)
+                    .map(|column| buffer[(column, row)].symbol())
+                    .collect::<String>()
+                    .contains("alpha")
+            })
+            .expect("the first output line should be visible");
+        let last_row = (0..buffer.area.height)
+            .find(|&row| {
+                (0..buffer.area.width)
+                    .map(|column| buffer[(column, row)].symbol())
+                    .collect::<String>()
+                    .contains("second line")
+            })
+            .expect("the second output line should be visible");
+        let start = text_column(buffer, first_row, "alpha");
+        let end = text_column(buffer, last_row, "second line") + 10;
+
+        root.update(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            start,
+            first_row,
+        ));
+        root.update(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            end,
+            last_row,
+        ));
+        terminal
+            .draw(|frame| root.render(frame, frame.area(), &Theme::default()))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        assert_ne!(buffer[(0, first_row)].bg, Color::Yellow);
+        assert_ne!(
+            buffer[(start.saturating_sub(1), first_row)].bg,
+            Color::Yellow
+        );
+        assert_eq!(buffer[(start, first_row)].bg, Color::Yellow);
+
+        let update = root.update(mouse(MouseEventKind::Up(MouseButton::Left), end, last_row));
+        assert_eq!(update.effects, [RootEffect::Copy(output.to_owned())]);
+    }
+
+    #[test]
     fn transcript_selection_copies_original_markdown_syntax() {
         let mut terminal = Terminal::new(TestBackend::new(64, 12)).unwrap();
         let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);

@@ -66,7 +66,7 @@ pub(super) fn present(tool: &ToolEntry, width: u16, theme: &Theme, expanded: boo
             Style::default().fg(theme.muted()),
         ));
     }
-    presentation = presentation.details(details).footer(footer);
+    presentation = presentation.unselectable_details(details).footer(footer);
     presentation
 }
 

@@ -239,19 +239,18 @@ fn scan(
     }
 
     let shown = candidates.len().min(MAX_SCAN_CANDIDATES);
-    let mut details = Vec::new();
+    let mut presentation = presentation;
     for candidate in candidates.iter().take(shown) {
-        details.extend(wrap(
-            &format!(
-                "{} · score {}",
-                candidate.key.display(),
-                format_score(candidate.score)
-            ),
-            width,
-            Style::default().fg(theme.accent()),
-        ));
+        let label = format!(
+            "{} · score {}",
+            candidate.key.display(),
+            format_score(candidate.score)
+        );
+        presentation =
+            presentation.selectable_plain(&label, width, Style::default().fg(theme.accent()));
         let preview = super::truncate(candidate.preview, MAX_PREVIEW_WIDTH);
-        details.extend(wrap(&preview, width, Style::default().fg(theme.text())));
+        presentation =
+            presentation.selectable_plain(&preview, width, Style::default().fg(theme.text()));
     }
     let footer = if abstained {
         "memory scan abstained".to_owned()
@@ -260,7 +259,7 @@ fn scan(
     } else {
         count_label(candidates.len(), "candidate", "candidates")
     };
-    presentation.details(details).footer(footer)
+    presentation.footer(footer)
 }
 
 fn read(
@@ -284,11 +283,11 @@ fn read(
         return presentation;
     }
 
-    let mut details = Vec::new();
+    let mut presentation = presentation;
     for memory in &memories {
-        details.extend(memory_details(memory, width, theme));
+        presentation = selectable_memory_details(presentation, memory, width, theme);
     }
-    presentation.details(details).footer(count)
+    presentation.footer(count)
 }
 
 fn put(
@@ -313,7 +312,7 @@ fn put(
             return presentation;
         }
         return presentation
-            .details(wrap(content, width, Style::default().fg(theme.text())))
+            .unselectable_details(wrap(content, width, Style::default().fg(theme.text())))
             .footer("memory content");
     };
 
@@ -326,9 +325,7 @@ fn put(
     if !expanded {
         return presentation;
     }
-    presentation
-        .details(memory_details(&memory, width, theme))
-        .footer("memory record")
+    selectable_memory_details(presentation, &memory, width, theme).footer("memory record")
 }
 
 fn delete(
@@ -346,30 +343,28 @@ fn delete(
     if !expanded {
         return presentation;
     }
+    let key = key.display();
     presentation
-        .details(wrap(
-            &key.display(),
-            width,
-            Style::default().fg(theme.accent()),
-        ))
+        .selectable_plain(&key, width, Style::default().fg(theme.accent()))
         .footer("memory key")
 }
 
-fn memory_details(memory: &Memory<'_>, width: u16, theme: &Theme) -> Vec<Line<'static>> {
-    let mut details = wrap(
-        &memory.key.display(),
-        width,
-        Style::default().fg(theme.accent()),
-    );
-    details.extend(wrap(
-        memory.content,
-        width,
-        Style::default().fg(theme.text()),
-    ));
+fn selectable_memory_details(
+    presentation: Presentation,
+    memory: &Memory<'_>,
+    width: u16,
+    theme: &Theme,
+) -> Presentation {
+    let key = memory.key.display();
+    let mut presentation =
+        presentation.selectable_plain(&key, width, Style::default().fg(theme.accent()));
+    presentation =
+        presentation.selectable_plain(memory.content, width, Style::default().fg(theme.text()));
     if let Some(metadata) = selected_metadata(memory.fields) {
-        details.extend(wrap(&metadata, width, Style::default().fg(theme.muted())));
+        presentation =
+            presentation.selectable_plain(&metadata, width, Style::default().fg(theme.muted()));
     }
-    details
+    presentation
 }
 
 fn selected_metadata(fields: &Map<String, Value>) -> Option<String> {
@@ -448,7 +443,7 @@ fn format_score(score: f64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{render, render_expanded};
+    use super::super::{render, render_expanded, render_layout};
     use crate::tui::{
         theme::Theme,
         transcript::{ToolEntry, ToolState},
@@ -659,6 +654,15 @@ mod tests {
         assert!(!rendered.contains("must not be shown"));
         assert!(rendered.contains("8 of 12 candidates"));
         assert!(!rendered.contains(&"x".repeat(241)));
+
+        let source = render_layout(&tool, None, 80, &Theme::default(), true)
+            .selection_source
+            .expect("scan results should be selectable");
+        assert!(source.contains("0@v3 · score 0.875"));
+        assert!(source.contains("preview-0"));
+        assert!(!source.contains("8@v3 · score"));
+        assert!(!source.contains("must not be shown"));
+        assert!(!source.contains(&"x".repeat(241)));
     }
 
     #[test]
@@ -686,6 +690,12 @@ mod tests {
             assert!(rendered.contains("created 10 · updated 20"), "{rendered}");
             assert!(rendered.contains("scans 2"), "{rendered}");
             assert!(rendered.contains("uses 1"), "{rendered}");
+
+            let source = render_layout(&tool, None, 100, &Theme::default(), true)
+                .selection_source
+                .expect("memory records should be selectable");
+            assert!(source.contains("Use explicit data flow."));
+            assert!(source.contains("created 10 · updated 20"));
         }
     }
 
