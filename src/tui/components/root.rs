@@ -5478,7 +5478,10 @@ mod tests {
         });
         assert!(matches!(&root.overlay, Some(Overlay::RecentPrompts(_))));
 
-        root.update(key(KeyCode::Char('f'), KeyModifiers::NONE));
+        root.update(key(KeyCode::Char('f'), KeyModifiers::CONTROL));
+        for character in "crp".chars() {
+            root.update(key(KeyCode::Char(character), KeyModifiers::NONE));
+        }
         root.update(key(KeyCode::Enter, KeyModifiers::NONE));
 
         assert!(root.overlay.is_none());
