@@ -189,8 +189,20 @@ impl MessageQueue {
     }
 
     pub(super) fn steer_failed(&mut self, id: QueueId) {
-        if let Some(item) = self.items.iter_mut().find(|item| item.id == id) {
-            item.state = QueueItemState::Queued;
+        let Some(index) = self.items.iter().position(|item| item.id == id) else {
+            return;
+        };
+        let selected = self.items.get(self.selected).map(|item| item.id);
+        let mut item = self.items.remove(index);
+        item.state = QueueItemState::Queued;
+        let index = self.steer_lane_len();
+        self.items.insert(index, item);
+        if let Some(selected) = selected {
+            self.selected = self
+                .items
+                .iter()
+                .position(|item| item.id == selected)
+                .unwrap_or(index);
         }
         self.sync_steering_wave();
     }
@@ -250,6 +262,20 @@ impl MessageQueue {
         let item = self.items.remove(index);
         self.repair_selection();
         Some((index, item))
+    }
+
+    fn steer_lane_len(&self) -> usize {
+        self.items
+            .iter()
+            .take_while(|item| {
+                matches!(
+                    item.state,
+                    QueueItemState::SubmittingSteer
+                        | QueueItemState::AdmittedSteer
+                        | QueueItemState::CancelledSteer
+                )
+            })
+            .count()
     }
 
     fn remove_id(&mut self, id: QueueId) -> Option<Submission> {
@@ -346,8 +372,9 @@ impl MessageQueue {
                 item.state = QueueItemState::SubmittingSteer;
                 let id = item.id;
                 let prompt = item.prompt.clone();
-                self.items.insert(0, item);
-                self.selected = 0;
+                let index = self.steer_lane_len();
+                self.items.insert(index, item);
+                self.selected = index;
                 self.sync_steering_wave();
                 return ComponentUpdate {
                     effects: vec![QueueEffect::Steer { id, prompt }],
@@ -587,6 +614,91 @@ mod tests {
         assert!(rows[1].contains("priority"));
         assert!(rows[3].contains("first"));
         assert!(rows[5].contains("last"));
+    }
+
+    #[test]
+    fn subsequent_steers_follow_pending_steers_in_submission_order() {
+        let mut queue = MessageQueue::default();
+        queue.push("regular".to_owned());
+        queue.push("first steer".to_owned());
+
+        let first = queue.update(key(KeyCode::Enter, KeyModifiers::NONE));
+        let [QueueEffect::Steer { id: first_id, .. }] = first.effects.as_slice() else {
+            panic!("enter should begin the first steer");
+        };
+        queue.push("second steer".to_owned());
+        let second = queue.update(key(KeyCode::Enter, KeyModifiers::NONE));
+        let [QueueEffect::Steer { id: second_id, .. }] = second.effects.as_slice() else {
+            panic!("enter should begin the second steer");
+        };
+
+        assert!(queue.steer_admitted(*first_id).is_none());
+        assert!(queue.steer_admitted(*second_id).is_none());
+        assert_eq!(
+            queue
+                .steer_applied()
+                .map(|prompt| prompt.display_text().to_owned()),
+            Some("first steer".to_owned())
+        );
+        assert_eq!(
+            queue
+                .steer_applied()
+                .map(|prompt| prompt.display_text().to_owned()),
+            Some("second steer".to_owned())
+        );
+        assert_eq!(
+            queue
+                .drain_ready()
+                .into_iter()
+                .map(|prompt| prompt.display_text().to_owned())
+                .collect::<Vec<_>>(),
+            ["regular"]
+        );
+    }
+
+    #[test]
+    fn failed_steer_does_not_split_the_pending_steer_lane() {
+        let mut queue = MessageQueue::default();
+        queue.push("first steer".to_owned());
+        let first = queue.update(key(KeyCode::Enter, KeyModifiers::NONE));
+        let [QueueEffect::Steer { id: first_id, .. }] = first.effects.as_slice() else {
+            panic!("enter should begin the first steer");
+        };
+        queue.push("second steer".to_owned());
+        let second = queue.update(key(KeyCode::Enter, KeyModifiers::NONE));
+        let [QueueEffect::Steer { id: second_id, .. }] = second.effects.as_slice() else {
+            panic!("enter should begin the second steer");
+        };
+
+        queue.steer_failed(*first_id);
+        assert!(queue.steer_admitted(*second_id).is_none());
+        queue.push("third steer".to_owned());
+        let third = queue.update(key(KeyCode::Enter, KeyModifiers::NONE));
+        let [QueueEffect::Steer { id: third_id, .. }] = third.effects.as_slice() else {
+            panic!("enter should begin the third steer");
+        };
+        assert!(queue.steer_admitted(*third_id).is_none());
+
+        assert_eq!(
+            queue
+                .steer_applied()
+                .map(|prompt| prompt.display_text().to_owned()),
+            Some("second steer".to_owned())
+        );
+        assert_eq!(
+            queue
+                .steer_applied()
+                .map(|prompt| prompt.display_text().to_owned()),
+            Some("third steer".to_owned())
+        );
+        assert_eq!(
+            queue
+                .drain_ready()
+                .into_iter()
+                .map(|prompt| prompt.display_text().to_owned())
+                .collect::<Vec<_>>(),
+            ["first steer"]
+        );
     }
 
     #[test]
