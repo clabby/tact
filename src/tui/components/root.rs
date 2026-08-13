@@ -1424,7 +1424,7 @@ impl RootNode {
             }
             Some(ActionsEffect::Trigger(Action::Fork)) => return self.open_fork(),
             Some(ActionsEffect::Trigger(Action::Keybindings)) => {
-                self.overlay = Some(Overlay::Keybindings(Node::new(KeybindingsHelp)));
+                self.overlay = Some(Overlay::Keybindings(Node::new(KeybindingsHelp::default())));
             }
             Some(ActionsEffect::Trigger(Action::ReloadConfig)) => {
                 self.overlay = None;

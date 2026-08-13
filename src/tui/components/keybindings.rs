@@ -15,7 +15,7 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
-const FOOTER: [&str; 1] = ["esc close"];
+const FOOTER: [&str; 2] = ["↑↓ scroll", "esc close"];
 const BINDINGS: [(&str, &str); 25] = [
     ("ctrl+s", "change reasoning effort"),
     ("ctrl+d", "select model · before first prompt"),
@@ -37,10 +37,7 @@ const BINDINGS: [(&str, &str); 25] = [
     ("ctrl+b/f", "move to previous · next character"),
     ("alt/option+b/f", "move to previous · next word"),
     ("alt/option+backspace", "delete previous word"),
-    (
-        "↑/↓ · ctrl+p/n",
-        "move lines · history for empty/recalled prompts",
-    ),
+    ("↑/↓ · ctrl+p/n", "move lines · prompt history at edge"),
     ("tab", "focus queue · when present"),
     ("/", "open actions · empty prompt only"),
     ("@", "insert workspace file"),
@@ -59,38 +56,57 @@ pub(super) enum KeybindingsEffect {
     Dismiss,
 }
 
-pub(super) struct KeybindingsHelp;
+#[derive(Default)]
+pub(super) struct KeybindingsHelp {
+    scroll: u16,
+}
 
 impl Component for KeybindingsHelp {
     type Event = KeybindingsEvent;
     type Effect = KeybindingsEffect;
 
     fn update(&mut self, event: Self::Event) -> ComponentUpdate<Self::Effect> {
-        let KeybindingsEvent::Terminal(Event::Key(key)) = event else {
-            return ComponentUpdate::none();
-        };
-        if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
-            || key.code != KeyCode::Esc
-        {
-            return ComponentUpdate::none();
+        match event {
+            KeybindingsEvent::Terminal(Event::Key(key))
+                if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
+            {
+                match key.code {
+                    KeyCode::Esc => {
+                        return ComponentUpdate {
+                            effects: vec![KeybindingsEffect::Dismiss],
+                            render: RenderRequest::Immediate,
+                        };
+                    }
+                    KeyCode::Up => self.scroll = self.scroll.saturating_sub(1),
+                    KeyCode::Down => self.scroll = self.scroll.saturating_add(1),
+                    _ => return ComponentUpdate::none(),
+                }
+            }
+            KeybindingsEvent::Terminal(_) => return ComponentUpdate::none(),
         }
-        ComponentUpdate {
-            effects: vec![KeybindingsEffect::Dismiss],
-            render: RenderRequest::Immediate,
-        }
+        ComponentUpdate::render(RenderRequest::Immediate)
     }
 
     fn render(&mut self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
+        let height = u16::try_from(BINDINGS.len())
+            .unwrap_or(u16::MAX)
+            .saturating_add(3);
         let layout =
-            Floating::new("Keyboard shortcuts", 72, 27, &FOOTER).render(frame, area, theme);
+            Floating::new("Keyboard shortcuts", 72, height, &FOOTER).render(frame, area, theme);
         if layout.body.is_empty() {
             return;
         }
+        let max_scroll = BINDINGS
+            .len()
+            .saturating_sub(usize::from(layout.body.height));
+        self.scroll = self
+            .scroll
+            .min(u16::try_from(max_scroll).unwrap_or(u16::MAX));
         let lines = BINDINGS
             .iter()
             .map(|&(key, description)| binding_line(key, description, layout.body.width, theme))
             .collect::<Vec<_>>();
-        frame.render_widget(Paragraph::new(lines), layout.body);
+        frame.render_widget(Paragraph::new(lines).scroll((self.scroll, 0)), layout.body);
     }
 }
 
@@ -116,14 +132,14 @@ fn binding_line(
 
 #[cfg(test)]
 mod tests {
-    use super::{Component, KeybindingsEffect, KeybindingsEvent, KeybindingsHelp};
+    use super::{BINDINGS, Component, KeybindingsEffect, KeybindingsEvent, KeybindingsHelp};
     use crate::tui::theme::Theme;
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use ratatui::{Terminal, backend::TestBackend, style::Color};
 
     #[test]
     fn popup_right_aligns_muted_descriptions() {
-        let mut help = KeybindingsHelp;
+        let mut help = KeybindingsHelp::default();
         let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
 
         terminal
@@ -159,7 +175,7 @@ mod tests {
 
     #[test]
     fn popup_documents_context_sensitive_composer_shortcuts() {
-        let mut help = KeybindingsHelp;
+        let mut help = KeybindingsHelp::default();
         let mut terminal = Terminal::new(TestBackend::new(80, 29)).unwrap();
 
         terminal
@@ -192,12 +208,49 @@ mod tests {
             "alt/option+backspace",
             "delete previous word",
             "ctrl+p/n",
-            "history for empty/recalled prompts",
+            "prompt history at edge",
             "focus queue · when present",
             "open actions · empty prompt only",
             "insert workspace file",
             "local shell command · prompt start",
             "mouse click/drag",
+            "pgup/pgdn · wheel",
+            "scroll transcript",
+            "ctrl+home/end",
+            "jump to start · follow latest",
+            "↑↓ scroll",
+        ] {
+            assert!(rendered.iter().any(|line| line.contains(expected)));
+        }
+    }
+
+    #[test]
+    fn compact_popup_scrolls_to_late_shortcuts() {
+        let mut help = KeybindingsHelp::default();
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+
+        for _ in &BINDINGS {
+            help.update(KeybindingsEvent::Terminal(Event::Key(KeyEvent::new(
+                KeyCode::Down,
+                KeyModifiers::NONE,
+            ))));
+            terminal
+                .draw(|frame| help.render(frame, frame.area(), &Theme::default()))
+                .unwrap();
+        }
+
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .chunks(80)
+            .map(|cells| cells.iter().map(|cell| cell.symbol()).collect::<String>())
+            .collect::<Vec<_>>();
+        for expected in [
+            "local shell command · prompt start",
+            "mouse click/drag",
+            "scroll transcript",
+            "jump to start · follow latest",
         ] {
             assert!(rendered.iter().any(|line| line.contains(expected)));
         }
@@ -205,7 +258,7 @@ mod tests {
 
     #[test]
     fn narrow_terminals_do_not_overflow_the_popup() {
-        let mut help = KeybindingsHelp;
+        let mut help = KeybindingsHelp::default();
         let mut terminal = Terminal::new(TestBackend::new(8, 4)).unwrap();
 
         terminal
@@ -217,7 +270,7 @@ mod tests {
 
     #[test]
     fn escape_dismisses_the_popup() {
-        let mut help = KeybindingsHelp;
+        let mut help = KeybindingsHelp::default();
 
         let update = help.update(KeybindingsEvent::Terminal(Event::Key(KeyEvent::new(
             KeyCode::Esc,
