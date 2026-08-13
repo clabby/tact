@@ -154,8 +154,8 @@ pub(crate) enum RootEvent {
     ReviewCancelled,
     ReviewFinished(String),
     ReviewFailed(String),
-    RestoreQueued {
-        index: usize,
+    FinishQueuedEdit {
+        id: QueueId,
         text: String,
     },
     WorkerTurnFinished {
@@ -227,7 +227,7 @@ pub(crate) enum RootEffect {
     RunShell(String),
     OpenDraftEditor,
     OpenQueueEditor {
-        index: usize,
+        id: QueueId,
         text: String,
     },
     OpenConfigEditor,
@@ -1991,8 +1991,8 @@ impl RootNode {
         for effect in update.effects {
             match effect {
                 QueueEffect::Blur => {}
-                QueueEffect::Edit { index, text } => {
-                    effects.push(RootEffect::OpenQueueEditor { index, text });
+                QueueEffect::Edit { id, text } => {
+                    effects.push(RootEffect::OpenQueueEditor { id, text });
                 }
                 QueueEffect::Steer { id, prompt } => {
                     effects.push(RootEffect::Steer { id, prompt });
@@ -2139,19 +2139,11 @@ impl RootNode {
         update
     }
 
-    fn restore_queued(&mut self, index: usize, text: String) -> ComponentUpdate<RootEffect> {
-        if text.trim().is_empty() {
+    fn finish_queued_edit(&mut self, id: QueueId, text: String) -> ComponentUpdate<RootEffect> {
+        if !self.queue.component_mut().finish_edit(id, text) {
             return ComponentUpdate::render(RenderRequest::Immediate);
         }
-        if self.in_flight_turns == 0 && !self.queue.component().has_pending_steer() {
-            self.in_flight_turns = 1;
-            return ComponentUpdate {
-                effects: vec![RootEffect::Submit(text.into())],
-                render: RenderRequest::Immediate,
-            };
-        }
-        self.queue.component_mut().restore(index, text);
-        ComponentUpdate::render(RenderRequest::Immediate)
+        self.submit_next_queued()
     }
 
     fn submit_next_queued(&mut self) -> ComponentUpdate<RootEffect> {
@@ -2520,7 +2512,7 @@ impl Component for RootNode {
                     RenderRequest::Immediate,
                 )
             }
-            RootEvent::RestoreQueued { index, text } => self.restore_queued(index, text),
+            RootEvent::FinishQueuedEdit { id, text } => self.finish_queued_edit(id, text),
             RootEvent::WorkerTurnFinished { terminal_expected } => {
                 self.worker_turn_finished(terminal_expected)
             }
@@ -2912,9 +2904,9 @@ fn is_plain_key(event: &Event, character: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        Component, ComposerChromeTarget, ConfirmationAction, DraftReset, Overlay, RenderRequest,
-        RootEffect, RootEvent, RootNode, SessionListKind, SubagentOverlay, ThreadState,
-        TranscriptEvent,
+        Component, ComposerChromeTarget, ConfirmationAction, DraftReset, Overlay, QueueId,
+        RenderRequest, RootEffect, RootEvent, RootNode, SessionListKind, SubagentOverlay,
+        ThreadState, TranscriptEvent,
     };
     use crate::{
         app::config::{ReasoningEffort, ReasoningMode},
@@ -4372,7 +4364,7 @@ mod tests {
     }
 
     #[test]
-    fn editing_removes_a_message_until_the_editor_returns() {
+    fn editing_keeps_a_message_queued_until_the_editor_returns() {
         let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
         root.in_flight_turns = 1;
         root.queue.component_mut().push("original".to_owned());
@@ -4382,17 +4374,78 @@ mod tests {
         assert_eq!(
             edit.effects,
             [RootEffect::OpenQueueEditor {
-                index: 0,
+                id: QueueId::new(0),
                 text: "original".to_owned(),
             }]
         );
-        assert!(root.queue.component().is_empty());
+        assert_eq!(root.queue.component().len(), 1);
 
-        root.update(super::RootEvent::RestoreQueued {
-            index: 0,
+        root.update(super::RootEvent::FinishQueuedEdit {
+            id: QueueId::new(0),
             text: "edited".to_owned(),
         });
         assert_eq!(root.queue.component().len(), 1);
+    }
+
+    #[test]
+    fn editing_blocks_queue_dequeue_until_the_editor_returns() {
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        root.in_flight_turns = 1;
+        root.queue.component_mut().push("edit me".to_owned());
+        root.queue.component_mut().push("later".to_owned());
+        root.queue.component_mut().set_focused(true);
+        root.update(key(KeyCode::Up, KeyModifiers::NONE));
+
+        let edit = root.update(key(KeyCode::Char('e'), KeyModifiers::NONE));
+        assert!(matches!(
+            edit.effects.as_slice(),
+            [RootEffect::OpenQueueEditor { id, text }]
+                if *id == QueueId::new(0) && text == "edit me"
+        ));
+
+        let finished = root.update(super::RootEvent::WorkerTurnFinished {
+            terminal_expected: false,
+        });
+        assert!(finished.effects.is_empty());
+        assert_eq!(root.in_flight_turns, 0);
+
+        let restored = root.update(super::RootEvent::FinishQueuedEdit {
+            id: QueueId::new(0),
+            text: "edited".to_owned(),
+        });
+        assert_eq!(
+            restored.effects,
+            [RootEffect::Submit("edited\n\nlater".to_owned().into())]
+        );
+        assert_eq!(root.in_flight_turns, 1);
+        assert!(root.queue.component().is_empty());
+    }
+
+    #[test]
+    fn blank_queue_edit_discards_the_item_and_releases_later_messages() {
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        root.in_flight_turns = 1;
+        root.queue.component_mut().push("discard me".to_owned());
+        root.queue.component_mut().push("later".to_owned());
+        root.queue.component_mut().set_focused(true);
+        root.update(key(KeyCode::Up, KeyModifiers::NONE));
+
+        root.update(key(KeyCode::Char('e'), KeyModifiers::NONE));
+        let finished = root.update(super::RootEvent::WorkerTurnFinished {
+            terminal_expected: false,
+        });
+        assert!(finished.effects.is_empty());
+
+        let edited = root.update(super::RootEvent::FinishQueuedEdit {
+            id: QueueId::new(0),
+            text: "  \n".to_owned(),
+        });
+        assert_eq!(
+            edited.effects,
+            [RootEffect::Submit("later".to_owned().into())]
+        );
+        assert_eq!(root.in_flight_turns, 1);
+        assert!(root.queue.component().is_empty());
     }
 
     #[test]

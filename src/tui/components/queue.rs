@@ -32,7 +32,7 @@ impl QueueId {
 #[derive(Debug, Eq, PartialEq)]
 pub(super) enum QueueEffect {
     Blur,
-    Edit { index: usize, text: String },
+    Edit { id: QueueId, text: String },
     Steer { id: QueueId, prompt: Submission },
 }
 
@@ -50,6 +50,7 @@ struct QueueItem {
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum QueueItemState {
     Queued,
+    Editing,
     SubmittingSteer,
     AdmittedSteer,
     CancelledSteer,
@@ -88,18 +89,19 @@ impl MessageQueue {
         self.selected = self.items.len() - 1;
     }
 
-    pub(super) fn restore(&mut self, index: usize, text: String) {
-        let index = index.min(self.items.len());
-        self.items.insert(
-            index,
-            QueueItem {
-                id: QueueId(self.next_id),
-                prompt: text.into(),
-                state: QueueItemState::Queued,
-            },
-        );
-        self.next_id = self.next_id.saturating_add(1);
+    pub(super) fn finish_edit(&mut self, id: QueueId, text: String) -> bool {
+        let Some(index) = self.items.iter().position(|item| item.id == id) else {
+            return false;
+        };
+        if text.trim().is_empty() {
+            self.items.remove(index);
+            self.repair_selection();
+            return true;
+        }
+        self.items[index].prompt = text.into();
+        self.items[index].state = QueueItemState::Queued;
         self.selected = index;
+        true
     }
 
     pub(super) fn drain_ready(&mut self) -> Vec<Submission> {
@@ -194,10 +196,14 @@ impl MessageQueue {
     }
 
     pub(super) fn cancel_steers(&mut self) {
-        self.items
-            .sort_by_key(|item| item.state == QueueItemState::Queued);
+        self.items.sort_by_key(|item| {
+            matches!(item.state, QueueItemState::Queued | QueueItemState::Editing)
+        });
         for item in &mut self.items {
-            if item.state != QueueItemState::Queued {
+            if matches!(
+                item.state,
+                QueueItemState::SubmittingSteer | QueueItemState::AdmittedSteer
+            ) {
                 item.state = QueueItemState::CancelledSteer;
             }
         }
@@ -313,12 +319,16 @@ impl MessageQueue {
                 self.remove_selected().is_some()
             }
             KeyCode::Char('e') => {
-                let Some((index, item)) = self.remove_selected() else {
+                let Some(item) = self.items.get_mut(self.selected) else {
                     return ComponentUpdate::none();
                 };
+                if item.state != QueueItemState::Queued {
+                    return ComponentUpdate::none();
+                }
+                item.state = QueueItemState::Editing;
                 return ComponentUpdate {
                     effects: vec![QueueEffect::Edit {
-                        index,
+                        id: item.id,
                         text: item.prompt.display_text().to_owned(),
                     }],
                     render: RenderRequest::Immediate,
@@ -507,7 +517,8 @@ fn truncate(text: &str, width: usize) -> Cow<'_, str> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Component, MessageQueue, QueueEffect, QueueEvent, STEERING_TEXT, Submission, truncate,
+        Component, MessageQueue, QueueEffect, QueueEvent, QueueId, STEERING_TEXT, Submission,
+        truncate,
     };
     use crate::tui::theme::Theme;
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
@@ -579,20 +590,41 @@ mod tests {
     }
 
     #[test]
-    fn edit_removes_the_item_before_emitting_the_effect() {
+    fn edit_blocks_the_item_before_emitting_the_effect() {
         let mut queue = MessageQueue::default();
         queue.push("edit me".to_owned());
 
         let update = queue.update(key(KeyCode::Char('e'), KeyModifiers::NONE));
 
-        assert!(queue.is_empty());
+        assert_eq!(queue.len(), 1);
+        assert!(queue.drain_ready().is_empty());
         assert_eq!(
             update.effects,
             [QueueEffect::Edit {
-                index: 0,
+                id: QueueId::new(0),
                 text: "edit me".to_owned(),
             }]
         );
+    }
+
+    #[test]
+    fn cancelling_turns_does_not_reorder_an_item_being_edited() {
+        let mut queue = MessageQueue::default();
+        queue.push("first".to_owned());
+        queue.push("edit me".to_owned());
+        queue.push("last".to_owned());
+        queue.update(key(KeyCode::Up, KeyModifiers::NONE));
+
+        queue.update(key(KeyCode::Char('e'), KeyModifiers::NONE));
+        queue.cancel_steers();
+        assert!(queue.finish_edit(QueueId::new(1), "edited".to_owned()));
+
+        let prompts = queue
+            .drain_ready()
+            .into_iter()
+            .map(|prompt| prompt.display_text().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(prompts, ["first", "edited", "last"]);
     }
 
     #[test]
