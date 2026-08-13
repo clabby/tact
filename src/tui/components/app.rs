@@ -1225,6 +1225,48 @@ mod tests {
     }
 
     #[test]
+    fn promoted_fork_refreshes_an_open_actions_menu() {
+        let mut app = app();
+        app.update(control('f'));
+        app.update(AppEvent::ForkReady {
+            pane: PaneId::Fork(1),
+        });
+        let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        app.update(AppEvent::Terminal(Event::Key(KeyEvent::new(
+            KeyCode::Char('/'),
+            KeyModifiers::NONE,
+        ))));
+        app.update(AppEvent::Terminal(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 10,
+            row: 5,
+            modifiers: KeyModifiers::NONE,
+        })));
+        app.update(control('c'));
+        app.update(control('c'));
+        for character in "btw".chars() {
+            app.update(AppEvent::Terminal(Event::Key(KeyEvent::new(
+                KeyCode::Char(character),
+                KeyModifiers::NONE,
+            ))));
+        }
+
+        let fork = app.update(AppEvent::Terminal(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        ))));
+
+        assert!(matches!(
+            fork.effects.as_slice(),
+            [AppEffect::OpenFork {
+                pane: PaneId::Fork(2),
+                parent: PaneId::Fork(1),
+            }]
+        ));
+    }
+
+    #[test]
     fn failed_pending_fork_shuts_down_after_its_parent_closes() {
         let mut app = app();
         app.update(control('t'));
