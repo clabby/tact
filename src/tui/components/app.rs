@@ -944,7 +944,7 @@ mod tests {
             record: Arc::new(record),
         });
 
-        let update = app.update(control('f'));
+        let update = app.update(control('t'));
 
         assert!(matches!(
             update.effects.as_slice(),
@@ -971,7 +971,7 @@ mod tests {
         let mut app = app();
         app.update_root(PaneId::Main, RootEvent::ContextTokens(136_000));
 
-        app.update(control('f'));
+        app.update(control('t'));
 
         assert_eq!(
             app.root(PaneId::Fork(1))
@@ -1006,7 +1006,7 @@ mod tests {
     #[test]
     fn fork_effort_changes_do_not_change_the_primary_composer() {
         let mut app = app();
-        app.update(control('f'));
+        app.update(control('t'));
         app.update(AppEvent::ForkReady {
             pane: PaneId::Fork(1),
         });
@@ -1044,7 +1044,7 @@ mod tests {
     #[test]
     fn preferred_reasoning_mode_is_shared_without_changing_running_sessions() {
         let mut app = app();
-        app.update(control('f'));
+        app.update(control('t'));
         app.update(AppEvent::ForkReady {
             pane: PaneId::Fork(1),
         });
@@ -1063,7 +1063,7 @@ mod tests {
         let mut app = app();
         assert!(!rendered(&mut app, 100, 20).contains(SPLIT_HINT.trim()));
 
-        app.update(control('f'));
+        app.update(control('t'));
         let rendered = rendered(&mut app, 100, 20);
 
         assert!(rendered.contains(SPLIT_HINT.trim()));
@@ -1072,7 +1072,7 @@ mod tests {
     #[test]
     fn split_hint_is_hidden_at_narrow_widths() {
         let mut app = app();
-        app.update(control('f'));
+        app.update(control('t'));
 
         let rendered = rendered(&mut app, 40, 10);
 
@@ -1082,7 +1082,7 @@ mod tests {
     #[test]
     fn control_c_closes_only_the_focused_pane_when_multiplexed() {
         let mut app = app();
-        app.update(control('f'));
+        app.update(control('t'));
 
         let confirmation = app.update(control('c'));
 
@@ -1102,7 +1102,7 @@ mod tests {
     #[test]
     fn control_c_clears_the_focused_fork_composer_before_closing_it() {
         let mut app = app();
-        app.update(control('f'));
+        app.update(control('t'));
         app.update(AppEvent::ForkReady {
             pane: PaneId::Fork(1),
         });
@@ -1139,7 +1139,7 @@ mod tests {
     #[test]
     fn clicking_a_pane_focuses_the_session_that_control_c_closes() {
         let mut app = app();
-        app.update(control('f'));
+        app.update(control('t'));
         let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
         terminal.draw(|frame| app.render(frame)).unwrap();
         app.update(AppEvent::Terminal(Event::Mouse(MouseEvent {
@@ -1167,7 +1167,7 @@ mod tests {
     #[test]
     fn closing_the_primary_promotes_the_fork() {
         let mut app = app();
-        app.update(control('f'));
+        app.update(control('t'));
         let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
         terminal.draw(|frame| app.render(frame)).unwrap();
         app.update(AppEvent::Terminal(Event::Mouse(MouseEvent {
@@ -1196,7 +1196,7 @@ mod tests {
     #[test]
     fn promoted_fork_can_open_another_fork() {
         let mut app = app();
-        app.update(control('f'));
+        app.update(control('t'));
         app.update(AppEvent::ForkReady {
             pane: PaneId::Fork(1),
         });
@@ -1211,7 +1211,7 @@ mod tests {
         app.update(control('c'));
         app.update(control('c'));
 
-        let fork = app.update(control('f'));
+        let fork = app.update(control('t'));
 
         assert!(matches!(
             fork.effects.as_slice(),
@@ -1227,7 +1227,7 @@ mod tests {
     #[test]
     fn promoted_fork_refreshes_an_open_actions_menu() {
         let mut app = app();
-        app.update(control('f'));
+        app.update(control('t'));
         app.update(AppEvent::ForkReady {
             pane: PaneId::Fork(1),
         });
@@ -1269,7 +1269,7 @@ mod tests {
     #[test]
     fn failed_pending_fork_shuts_down_after_its_parent_closes() {
         let mut app = app();
-        app.update(control('f'));
+        app.update(control('t'));
         let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
         terminal.draw(|frame| app.render(frame)).unwrap();
         app.update(AppEvent::Terminal(Event::Mouse(MouseEvent {
@@ -1292,7 +1292,7 @@ mod tests {
     #[test]
     fn a_second_fork_is_unavailable_until_the_first_closes() {
         let mut app = app();
-        app.update(control('f'));
+        app.update(control('t'));
         let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
         terminal.draw(|frame| app.render(frame)).unwrap();
         app.update(AppEvent::Terminal(Event::Mouse(MouseEvent {
@@ -1302,7 +1302,7 @@ mod tests {
             modifiers: KeyModifiers::NONE,
         })));
 
-        let update = app.update(control('f'));
+        let update = app.update(control('t'));
 
         assert!(update.effects.is_empty());
         assert!(app.root(PaneId::Fork(1)).is_some());
@@ -1312,7 +1312,7 @@ mod tests {
     #[test]
     fn fork_failure_closes_the_pending_pane_and_surfaces_the_error() {
         let mut app = app();
-        app.update(control('f'));
+        app.update(control('t'));
 
         app.update(AppEvent::ForkFailed {
             pane: PaneId::Fork(1),
@@ -1336,7 +1336,7 @@ mod tests {
     fn memory_operations_and_completions_keep_their_pane_identity() {
         let mut app = app();
         app.set_memory_enabled(true);
-        app.update(control('f'));
+        app.update(control('t'));
         app.update(AppEvent::ForkReady {
             pane: PaneId::Fork(1),
         });
@@ -1369,7 +1369,7 @@ mod tests {
     #[test]
     fn config_reload_updates_memory_action_availability_for_every_root() {
         let mut app = app();
-        app.update(control('f'));
+        app.update(control('t'));
         app.update(AppEvent::ForkReady {
             pane: PaneId::Fork(1),
         });

@@ -816,7 +816,7 @@ impl RootNode {
         if is_control_key(&event, 'r') {
             return self.load_recent_prompts();
         }
-        if is_control_key(&event, 'f') {
+        if is_control_key(&event, 't') {
             return self.open_fork();
         }
         if is_escape(&event) {
@@ -960,7 +960,7 @@ impl RootNode {
     }
 
     fn update_review_input(&mut self, event: Event) -> ComponentUpdate<RootEffect> {
-        if is_control_key(&event, 'f') {
+        if is_control_key(&event, 't') {
             self.key_confirmation = None;
             return self.open_fork();
         }
@@ -1428,7 +1428,7 @@ impl RootNode {
             }
             Some(ActionsEffect::Trigger(Action::Fork)) => return self.open_fork(),
             Some(ActionsEffect::Trigger(Action::Keybindings)) => {
-                self.overlay = Some(Overlay::Keybindings(Node::new(KeybindingsHelp)));
+                self.overlay = Some(Overlay::Keybindings(Node::new(KeybindingsHelp::default())));
             }
             Some(ActionsEffect::Trigger(Action::ReloadConfig)) => {
                 self.overlay = None;
@@ -5795,11 +5795,11 @@ mod tests {
     }
 
     #[test]
-    fn control_f_can_fork_during_an_active_review() {
+    fn control_t_can_fork_during_an_active_review() {
         let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
         root.update(RootEvent::ReviewStarted);
 
-        let update = root.update(key(KeyCode::Char('f'), KeyModifiers::CONTROL));
+        let update = root.update(key(KeyCode::Char('t'), KeyModifiers::CONTROL));
 
         assert_eq!(update.effects, [RootEffect::Fork]);
     }
@@ -5813,7 +5813,7 @@ mod tests {
         });
         assert!(
             worker_before_started
-                .update(key(KeyCode::Char('f'), KeyModifiers::CONTROL))
+                .update(key(KeyCode::Char('t'), KeyModifiers::CONTROL))
                 .effects
                 .is_empty()
         );
@@ -5829,7 +5829,7 @@ mod tests {
         )));
         assert_eq!(
             worker_before_started
-                .update(key(KeyCode::Char('f'), KeyModifiers::CONTROL))
+                .update(key(KeyCode::Char('t'), KeyModifiers::CONTROL))
                 .effects,
             [RootEffect::Fork]
         );
@@ -5839,7 +5839,7 @@ mod tests {
 
         assert!(
             before_started
-                .update(key(KeyCode::Char('f'), KeyModifiers::CONTROL))
+                .update(key(KeyCode::Char('t'), KeyModifiers::CONTROL))
                 .effects
                 .is_empty()
         );
@@ -5851,7 +5851,7 @@ mod tests {
         )));
         assert!(
             before_started
-                .update(key(KeyCode::Char('f'), KeyModifiers::CONTROL))
+                .update(key(KeyCode::Char('t'), KeyModifiers::CONTROL))
                 .effects
                 .is_empty()
         );
@@ -5862,7 +5862,7 @@ mod tests {
         )));
         assert!(
             before_started
-                .update(key(KeyCode::Char('f'), KeyModifiers::CONTROL))
+                .update(key(KeyCode::Char('t'), KeyModifiers::CONTROL))
                 .effects
                 .is_empty()
         );
@@ -5871,7 +5871,7 @@ mod tests {
         });
         assert_eq!(
             before_started
-                .update(key(KeyCode::Char('f'), KeyModifiers::CONTROL))
+                .update(key(KeyCode::Char('t'), KeyModifiers::CONTROL))
                 .effects,
             [RootEffect::Fork]
         );
@@ -5889,7 +5889,7 @@ mod tests {
 
         assert!(
             before_terminal
-                .update(key(KeyCode::Char('f'), KeyModifiers::CONTROL))
+                .update(key(KeyCode::Char('t'), KeyModifiers::CONTROL))
                 .effects
                 .is_empty()
         );
@@ -5900,7 +5900,7 @@ mod tests {
         )));
         assert_eq!(
             before_terminal
-                .update(key(KeyCode::Char('f'), KeyModifiers::CONTROL))
+                .update(key(KeyCode::Char('t'), KeyModifiers::CONTROL))
                 .effects,
             [RootEffect::Fork]
         );
