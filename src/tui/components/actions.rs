@@ -91,6 +91,10 @@ impl ActionsMenu {
         }
     }
 
+    pub(super) fn set_fork_available(&mut self, available: bool) {
+        self.availability.fork = available;
+    }
+
     fn update_key(&mut self, key: KeyEvent) -> ComponentUpdate<ActionsEffect> {
         if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
             return ComponentUpdate::none();

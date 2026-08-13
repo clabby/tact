@@ -414,6 +414,10 @@ impl RootNode {
 
     pub(crate) fn set_fork_available(&mut self, available: bool) {
         self.fork_available = available;
+        let can_fork = self.can_fork();
+        if let Some(Overlay::Actions(actions)) = &mut self.overlay {
+            actions.component_mut().set_fork_available(can_fork);
+        }
     }
 
     pub(crate) fn set_skills(&mut self, skills: Arc<[Skill]>) {
