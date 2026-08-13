@@ -8,6 +8,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Clear, Paragraph},
 };
+use unicode_width::UnicodeWidthStr;
 
 const KEY_BINDING_SEPARATOR: &str = " · ";
 
@@ -86,29 +87,47 @@ impl<'a> Floating<'a> {
         frame.render_widget(Clear, popup);
         frame.render_widget(block, popup);
 
-        let (body, footer) = if self.key_bindings.is_empty() {
-            (inner, Rect::default())
-        } else {
-            split_footer(inner)
-        };
-        self.render_key_bindings(frame, footer, theme);
+        let key_bindings = self.key_binding_lines(inner.width);
+        let footer_height = u16::try_from(key_bindings.len()).unwrap_or(u16::MAX);
+        let (body, footer) = split_footer(inner, footer_height);
+        if !footer.is_empty() {
+            frame.render_widget(
+                Paragraph::new(key_bindings)
+                    .style(Style::default().fg(theme.border()))
+                    .alignment(Alignment::Center),
+                footer,
+            );
+        }
         FloatingLayout { body }
     }
 
-    fn render_key_bindings(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
-        if area.is_empty() || self.key_bindings.is_empty() {
-            return;
+    fn key_binding_lines(&self, width: u16) -> Vec<Line<'a>> {
+        if width == 0 {
+            return Vec::new();
         }
 
-        let mut spans = Vec::with_capacity(self.key_bindings.len().saturating_mul(2));
-        for (index, key_binding) in self.key_bindings.iter().enumerate() {
-            if index > 0 {
+        let width = usize::from(width);
+        let separator_width = KEY_BINDING_SEPARATOR.width();
+        let mut lines = Vec::new();
+        let mut spans = Vec::new();
+        let mut line_width = 0;
+        for key_binding in self.key_bindings {
+            let key_binding_width = key_binding.width();
+            if !spans.is_empty() && line_width + separator_width + key_binding_width > width {
+                lines.push(Line::from(std::mem::take(&mut spans)));
+                line_width = 0;
+            }
+            if !spans.is_empty() {
                 spans.push(Span::raw(KEY_BINDING_SEPARATOR));
+                line_width += separator_width;
             }
             spans.push(Span::raw(*key_binding));
+            line_width += key_binding_width;
         }
-        let line = Line::from(spans).style(Style::default().fg(theme.border()));
-        frame.render_widget(Paragraph::new(line).alignment(Alignment::Center), area);
+        if !spans.is_empty() {
+            lines.push(Line::from(spans));
+        }
+        lines
     }
 }
 
@@ -133,17 +152,18 @@ fn top_centered(area: Rect, width: u16, height: u16) -> Rect {
     }
 }
 
-fn split_footer(inner: Rect) -> (Rect, Rect) {
-    if inner.is_empty() {
-        return (inner, inner);
+fn split_footer(inner: Rect, footer_height: u16) -> (Rect, Rect) {
+    let footer_height = footer_height.min(inner.height);
+    if footer_height == 0 {
+        return (inner, Rect::default());
     }
     let footer = Rect {
-        y: inner.bottom() - 1,
-        height: 1,
+        y: inner.bottom() - footer_height,
+        height: footer_height,
         ..inner
     };
     let body = Rect {
-        height: inner.height - 1,
+        height: inner.height - footer_height,
         ..inner
     };
     (body, footer)
@@ -153,7 +173,7 @@ fn split_footer(inner: Rect) -> (Rect, Rect) {
 mod tests {
     use super::Floating;
     use crate::tui::theme::Theme;
-    use ratatui::{Terminal, backend::TestBackend, style::Color};
+    use ratatui::{Terminal, backend::TestBackend, layout::Rect, style::Color};
 
     #[test]
     fn floating_centers_rounded_chrome_and_border_colored_key_bindings() {
@@ -175,5 +195,38 @@ mod tests {
         assert_eq!(buffer[(4, 5)].symbol(), "l");
         assert_eq!(buffer[(9, 5)].symbol(), "·");
         assert_eq!(buffer[(9, 5)].fg, Color::DarkGray);
+    }
+
+    #[test]
+    fn floating_wraps_key_bindings_without_clipping_menu_help() {
+        let mut terminal = Terminal::new(TestBackend::new(30, 10)).unwrap();
+        let mut body = Rect::default();
+
+        terminal
+            .draw(|frame| {
+                body = Floating::new(
+                    "Test",
+                    24,
+                    8,
+                    &["first option", "second option", "third option"],
+                )
+                .render(frame, frame.area(), &Theme::default())
+                .body;
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let rendered = (0..buffer.area.height)
+            .map(|row| {
+                (0..buffer.area.width)
+                    .map(|column| buffer[(column, row)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(body.height, 3);
+        assert!(rendered.contains("first option"));
+        assert!(rendered.contains("second option"));
+        assert!(rendered.contains("third option"));
     }
 }

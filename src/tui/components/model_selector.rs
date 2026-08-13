@@ -226,13 +226,15 @@ impl Component for ModelSelector {
                 ..layout.body
             },
         );
+        let slider_offset = if layout.body.height >= 4 { 2 } else { 1 };
         self.render_slider(
             frame,
             Rect {
-                y: layout.body.y.saturating_add(2),
+                y: layout.body.y.saturating_add(slider_offset),
                 height: 2,
                 ..layout.body
-            },
+            }
+            .intersection(layout.body),
             theme,
         );
     }
@@ -387,6 +389,31 @@ mod tests {
             .collect::<String>();
 
         assert!(!rendered.contains("smarter"));
+    }
+
+    #[test]
+    fn narrow_selector_does_not_overwrite_wrapped_menu_help() {
+        let mut terminal = Terminal::new(TestBackend::new(30, 7)).unwrap();
+        terminal
+            .draw(|frame| {
+                ModelSelector::new(Model::Sol).render(frame, frame.area(), &Theme::default());
+            })
+            .unwrap();
+
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("←/→ model"));
+        assert!(rendered.contains("enter apply"));
+        assert!(rendered.contains("esc cancel"));
+        assert!(rendered.contains('◆'));
+        assert!(rendered.contains("Sol"));
+        assert_eq!(terminal.backend().buffer()[(0, 6)].symbol(), "╰");
+        assert_eq!(terminal.backend().buffer()[(29, 6)].symbol(), "╯");
     }
 
     #[test]
