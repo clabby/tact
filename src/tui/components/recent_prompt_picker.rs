@@ -1,6 +1,7 @@
 //! Picker for prompts from the current session or all persisted sessions.
 
 use super::{
+    file_finder::{fuzzy_score, visible_query_tail},
     floating::Floating,
     node::{Component, ComponentUpdate, RenderRequest},
 };
@@ -13,15 +14,20 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
 };
+use std::cmp::Reverse;
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
-const KEY_BINDINGS: [&str; 5] = [
+const KEY_BINDINGS: [&str; 6] = [
+    "type search",
     "↑↓ move",
     "pgup/pgdn preview",
     "enter/tab select",
-    "f scope",
+    "ctrl+f scope",
     "esc close",
 ];
 const LIST_HEIGHT: u16 = 7;
+const SEARCH_LABEL: &str = "Search: ";
 
 pub(super) enum RecentPromptPickerEvent {
     Terminal(Event),
@@ -43,6 +49,7 @@ pub(super) struct RecentPromptPicker {
     prompts: Vec<RecentPrompt>,
     current_session_id: String,
     scope: RecentPromptScope,
+    query: String,
     visible: Vec<usize>,
     selected: usize,
     preview_scroll: u16,
@@ -55,6 +62,7 @@ impl RecentPromptPicker {
             prompts,
             current_session_id,
             scope: RecentPromptScope::Global,
+            query: String::new(),
             visible,
             selected: 0,
             preview_scroll: 0,
@@ -73,6 +81,14 @@ impl RecentPromptPicker {
 
         match key.code {
             KeyCode::Esc => Self::effect(RecentPromptPickerEffect::Dismiss),
+            KeyCode::Backspace if !self.query.is_empty() => {
+                if let Some((index, _)) = self.query.grapheme_indices(true).next_back() {
+                    self.query.truncate(index);
+                    self.refresh_visible();
+                }
+                ComponentUpdate::render(RenderRequest::Immediate)
+            }
+            KeyCode::Backspace => Self::effect(RecentPromptPickerEffect::Dismiss),
             KeyCode::Up => {
                 self.selected = self.selected.saturating_sub(1);
                 self.preview_scroll = 0;
@@ -94,9 +110,25 @@ impl RecentPromptPicker {
                 ComponentUpdate::render(RenderRequest::Immediate)
             }
             KeyCode::Enter | KeyCode::Tab => self.select(),
-            KeyCode::Char('f') if key.modifiers == KeyModifiers::NONE => self.toggle_scope(),
+            KeyCode::Char('f') if key.modifiers == KeyModifiers::CONTROL => self.toggle_scope(),
+            KeyCode::Char(character)
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                self.query.push(character);
+                self.refresh_visible();
+                ComponentUpdate::render(RenderRequest::Immediate)
+            }
             _ => ComponentUpdate::none(),
         }
+    }
+
+    fn insert_paste(&mut self, text: &str) -> ComponentUpdate<RecentPromptPickerEffect> {
+        self.query
+            .extend(text.chars().filter(|character| !character.is_control()));
+        self.refresh_visible();
+        ComponentUpdate::render(RenderRequest::Immediate)
     }
 
     fn toggle_scope(&mut self) -> ComponentUpdate<RecentPromptPickerEffect> {
@@ -109,16 +141,22 @@ impl RecentPromptPicker {
     }
 
     fn refresh_visible(&mut self) {
-        self.visible = self
+        let query = self.query.to_ascii_lowercase();
+        let mut visible = self
             .prompts
             .iter()
             .enumerate()
-            .filter(|(_, prompt)| {
-                self.scope == RecentPromptScope::Global
-                    || prompt.session_id == self.current_session_id
+            .filter_map(|(index, prompt)| {
+                if self.scope == RecentPromptScope::CurrentSession
+                    && prompt.session_id != self.current_session_id
+                {
+                    return None;
+                }
+                fuzzy_score(&prompt.text, &query).map(|score| (index, score))
             })
-            .map(|(index, _)| index)
-            .collect();
+            .collect::<Vec<_>>();
+        visible.sort_by_key(|(index, score)| (Reverse(*score), *index));
+        self.visible = visible.into_iter().map(|(index, _)| index).collect();
         self.selected = 0;
         self.preview_scroll = 0;
     }
@@ -151,8 +189,12 @@ impl RecentPromptPicker {
             RecentPromptScope::Global => "Global",
             RecentPromptScope::CurrentSession => "Current session",
         };
+        let block = Block::new()
+            .borders(Borders::TOP)
+            .border_style(Style::default().fg(theme.border()));
         frame.render_widget(
             Paragraph::new(Line::from(vec![
+                Span::raw("  "),
                 Span::styled("Scope: ", Style::default().fg(theme.muted())),
                 Span::styled(
                     scope,
@@ -160,6 +202,27 @@ impl RecentPromptPicker {
                         .fg(theme.text())
                         .add_modifier(Modifier::BOLD),
                 ),
+            ]))
+            .block(block),
+            area,
+        );
+    }
+
+    fn render_search(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
+        if area.is_empty() {
+            return;
+        }
+
+        let marker = "  ";
+        let prefix_width = marker.width() + SEARCH_LABEL.width();
+        let query_width = usize::from(area.width).saturating_sub(prefix_width);
+        let query = visible_query_tail(&self.query, query_width);
+        let label_style = Style::default().fg(theme.muted());
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(marker, label_style),
+                Span::styled(SEARCH_LABEL, label_style),
+                Span::styled(query, Style::default().fg(theme.text())),
             ])),
             area,
         );
@@ -170,9 +233,13 @@ impl RecentPromptPicker {
             return;
         }
         if self.visible.is_empty() {
+            let message = if self.query.is_empty() {
+                "No prompts in this scope"
+            } else {
+                "No prompts match"
+            };
             frame.render_widget(
-                Paragraph::new("No prompts in this scope")
-                    .style(Style::default().fg(theme.muted())),
+                Paragraph::new(message).style(Style::default().fg(theme.muted())),
                 area,
             );
             return;
@@ -230,6 +297,7 @@ impl Component for RecentPromptPicker {
     fn update(&mut self, event: Self::Event) -> ComponentUpdate<Self::Effect> {
         match event {
             RecentPromptPickerEvent::Terminal(Event::Key(key)) => self.update_key(key),
+            RecentPromptPickerEvent::Terminal(Event::Paste(text)) => self.insert_paste(&text),
             RecentPromptPickerEvent::Terminal(_) => ComponentUpdate::none(),
         }
     }
@@ -245,11 +313,19 @@ impl Component for RecentPromptPicker {
             return;
         }
 
-        let scope_area = Rect {
-            height: 1,
+        let search_area = Rect {
+            height: layout.body.height.min(1),
             ..layout.body
         };
-        let remaining_height = layout.body.height.saturating_sub(scope_area.height);
+        let scope_area = Rect {
+            y: search_area.bottom(),
+            height: layout.body.height.saturating_sub(search_area.height).min(2),
+            ..layout.body
+        };
+        let remaining_height = layout
+            .body
+            .height
+            .saturating_sub(search_area.height + scope_area.height);
         let list_height = LIST_HEIGHT.min(remaining_height.saturating_add(1) / 2);
         let list_area = Rect {
             y: scope_area.bottom(),
@@ -262,6 +338,7 @@ impl Component for RecentPromptPicker {
             ..layout.body
         };
 
+        self.render_search(frame, search_area, theme);
         self.render_scope(frame, scope_area, theme);
         self.render_prompts(frame, list_area, theme);
         self.render_preview(frame, preview_area, theme);
@@ -330,16 +407,34 @@ mod tests {
     }
 
     #[test]
-    fn unmodified_f_toggles_current_session_filter() {
+    fn typing_fuzzy_searches_prompt_text_before_selection() {
         let mut picker = picker();
+
+        for character in "XcP".chars() {
+            picker.update(key(KeyCode::Char(character)));
+        }
+
+        assert_eq!(
+            picker.update(key(KeyCode::Enter)).effects,
+            [RecentPromptPickerEffect::Insert(
+                "  exact\n\n    prompt  ".to_owned()
+            )]
+        );
+    }
+
+    #[test]
+    fn control_f_toggles_current_session_filter() {
+        let mut picker = picker();
+
+        picker.update(key(KeyCode::Char('f')));
+        assert_eq!(picker.scope(), RecentPromptScope::Global);
+        assert!(picker.visible.is_empty());
+        picker.update(key(KeyCode::Backspace));
 
         picker.update(key_with_modifiers(
             KeyCode::Char('f'),
             KeyModifiers::CONTROL,
         ));
-        assert_eq!(picker.scope(), RecentPromptScope::Global);
-
-        picker.update(key(KeyCode::Char('f')));
         assert_eq!(picker.scope(), RecentPromptScope::CurrentSession);
         assert_eq!(picker.visible, [1, 2]);
         assert_eq!(
@@ -349,9 +444,33 @@ mod tests {
             )]
         );
 
-        picker.update(key(KeyCode::Char('f')));
+        picker.update(key_with_modifiers(
+            KeyCode::Char('f'),
+            KeyModifiers::CONTROL,
+        ));
         assert_eq!(picker.scope(), RecentPromptScope::Global);
         assert_eq!(picker.visible, [0, 1, 2]);
+    }
+
+    #[test]
+    fn paste_and_backspace_edit_the_search_query() {
+        let mut picker = picker();
+
+        picker.update(RecentPromptPickerEvent::Terminal(Event::Paste(
+            "x\ncp".to_owned(),
+        )));
+        assert_eq!(picker.query, "xcp");
+        assert_eq!(picker.visible, [1]);
+
+        for expected in ["xc", "x", ""] {
+            assert!(picker.update(key(KeyCode::Backspace)).effects.is_empty());
+            assert_eq!(picker.query, expected);
+        }
+        assert_eq!(picker.visible, [0, 1, 2]);
+        assert_eq!(
+            picker.update(key(KeyCode::Backspace)).effects,
+            [RecentPromptPickerEffect::Dismiss]
+        );
     }
 
     #[test]
@@ -403,12 +522,21 @@ mod tests {
             .unwrap();
 
         let buffer = terminal.backend().buffer();
-        assert_eq!(buffer[(5, 12)].symbol(), "f");
-        assert_eq!(buffer[(7, 13)].symbol(), "i");
-        assert_eq!(buffer[(5, 14)].symbol(), " ");
-        assert_eq!(buffer[(5, 15)].symbol(), "l");
-        assert_eq!(buffer[(9, 15)].symbol(), " ");
-        assert_eq!(buffer[(10, 15)].symbol(), " ");
+        let preview_border = (0..buffer.area.height)
+            .find(|&row| {
+                (0..buffer.area.width)
+                    .map(|column| buffer[(column, row)].symbol())
+                    .collect::<String>()
+                    .contains("Preview")
+            })
+            .expect("preview border");
+        let first_row = preview_border + 1;
+        assert_eq!(buffer[(5, first_row)].symbol(), "f");
+        assert_eq!(buffer[(7, first_row + 1)].symbol(), "i");
+        assert_eq!(buffer[(5, first_row + 2)].symbol(), " ");
+        assert_eq!(buffer[(5, first_row + 3)].symbol(), "l");
+        assert_eq!(buffer[(9, first_row + 3)].symbol(), " ");
+        assert_eq!(buffer[(10, first_row + 3)].symbol(), " ");
     }
 
     #[test]
@@ -421,12 +549,29 @@ mod tests {
             .unwrap();
 
         let buffer = terminal.backend().buffer();
-        let row = (0..buffer.area.height)
+        let rows = (0..buffer.area.height)
             .map(|y| {
                 (0..buffer.area.width)
                     .map(|x| buffer[(x, y)].symbol())
                     .collect::<String>()
             })
+            .collect::<Vec<_>>();
+        let search_row = rows
+            .iter()
+            .position(|row| row.contains("Search:"))
+            .expect("search row");
+        let scope_row = rows
+            .iter()
+            .position(|row| row.contains("Scope:"))
+            .expect("scope row");
+        assert_eq!(scope_row, search_row + 2);
+        assert!(rows[search_row + 1].contains("────────"));
+        assert_eq!(
+            rows[search_row].find("Search:"),
+            rows[scope_row].find("Scope:")
+        );
+        let row = rows
+            .into_iter()
             .find(|row| row.contains("1. newest"))
             .expect("numbered prompt row");
         assert!(row.contains("/work/other"));
@@ -443,5 +588,25 @@ mod tests {
             .unwrap();
 
         assert_eq!(terminal.backend().buffer().area.width, 3);
+    }
+
+    #[test]
+    fn short_terminal_preserves_the_help_footer_and_bottom_border() {
+        let mut picker = picker();
+        let mut terminal = Terminal::new(TestBackend::new(100, 5)).unwrap();
+
+        terminal
+            .draw(|frame| picker.render(frame, frame.area(), &Theme::default()))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let footer = (2..=3)
+            .flat_map(|row| {
+                (0..buffer.area.width).map(move |column| buffer[(column, row)].symbol())
+            })
+            .collect::<String>();
+        assert!(footer.contains("type search"));
+        assert_eq!(buffer[(9, 4)].symbol(), "╰");
+        assert_eq!(buffer[(90, 4)].symbol(), "╯");
     }
 }
