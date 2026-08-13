@@ -37,8 +37,8 @@ use crate::{
     tui::{
         agent_events::ForwardedAgentEvent,
         components::{
-            AppEffect, AppEvent, AppNode, ComponentUpdate, RecentPromptDraft, RenderRequest,
-            RestoredSessionProjection, RootNode,
+            AppEffect, AppEvent, AppNode, ComponentUpdate, QueueId, RecentPromptDraft,
+            RenderRequest, RestoredSessionProjection, RootNode,
         },
         editor::EditorOutcome,
         handoff_controller::{HandoffCompletion, HandoffController, PreparedHandoff},
@@ -159,7 +159,7 @@ enum EditorTarget {
     },
     Queue {
         pane: PaneId,
-        index: usize,
+        id: QueueId,
         text: String,
     },
     Config(PathBuf),
@@ -173,7 +173,7 @@ enum EditorCompletion {
     },
     Queue {
         pane: PaneId,
-        index: usize,
+        id: QueueId,
         original: String,
         outcome: EditorOutcome,
     },
@@ -1159,7 +1159,7 @@ pub(crate) async fn run(
                     }
                     EditorCompletion::Queue {
                         pane,
-                        index,
+                        id,
                         original,
                         outcome,
                     } => {
@@ -1167,10 +1167,11 @@ pub(crate) async fn run(
                             EditorOutcome::Updated(text) => text,
                             EditorOutcome::Unchanged => original,
                         };
-                        schedule(
-                            app.update(AppEvent::QueueEditorFinished { pane, index, text }),
-                            &mut scheduler,
-                        );
+                        apply_app_update!(app.update(AppEvent::QueueEditorFinished {
+                            pane,
+                            id,
+                            text,
+                        }));
                     }
                     EditorCompletion::Draft { outcome: EditorOutcome::Unchanged, .. }
                     | EditorCompletion::Config
@@ -1969,8 +1970,8 @@ fn apply_pane_effect(
                         .draft()
                         .to_owned(),
                 },
-                components::RootEffect::OpenQueueEditor { index, text } => {
-                    EditorTarget::Queue { pane, index, text }
+                components::RootEffect::OpenQueueEditor { id, text } => {
+                    EditorTarget::Queue { pane, id, text }
                 }
                 components::RootEffect::OpenConfigEditor => {
                     EditorTarget::Config(context.config.path().to_path_buf())
@@ -1987,11 +1988,11 @@ fn apply_pane_effect(
                         let outcome = editor::edit(&text, &workspace).await?;
                         Ok(EditorCompletion::Draft { pane, outcome })
                     }
-                    EditorTarget::Queue { pane, index, text } => {
+                    EditorTarget::Queue { pane, id, text } => {
                         let outcome = editor::edit(&text, &workspace).await?;
                         Ok(EditorCompletion::Queue {
                             pane,
-                            index,
+                            id,
                             original: text,
                             outcome,
                         })
