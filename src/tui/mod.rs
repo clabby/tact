@@ -2352,7 +2352,7 @@ fn apply_pane_effect(
                 )
             }));
         }
-        components::RootEffect::Copy(text) => match clipboard::copy_text(&text) {
+        components::RootEffect::Copy(text) => match copy_selection(context.terminal, &text) {
             Ok(()) => schedule(
                 context.app.update(AppEvent::NotifySuccess {
                     pane,
@@ -2360,26 +2360,10 @@ fn apply_pane_effect(
                 }),
                 context.scheduler,
             ),
-            Err(native_error) => {
-                match context.terminal.copy_to_clipboard(&text) {
-                    Ok(()) => schedule(
-                        context.app.update(AppEvent::NotifySuccess {
-                            pane,
-                            message: "Sent selection to the terminal clipboard.".to_owned(),
-                        }),
-                        context.scheduler,
-                    ),
-                    Err(terminal_error) => schedule(
-                        context.app.update(AppEvent::NotifyError {
-                            pane,
-                            error: format!(
-                                "Could not copy selection: {native_error}; terminal fallback failed: {terminal_error}"
-                            ),
-                        }),
-                        context.scheduler,
-                    ),
-                }
-            }
+            Err(error) => schedule(
+                context.app.update(AppEvent::NotifyError { pane, error }),
+                context.scheduler,
+            ),
         },
         components::RootEffect::Steer { id, prompt } => {
             let runtime = context.panes.get_mut(&pane).expect("steer pane must exist");
@@ -2444,6 +2428,42 @@ fn apply_pane_effect(
         }
     }
     Ok(())
+}
+
+/// Copies `text` to the system clipboard through the most reliable channel for the
+/// platform, returning a user-facing error message only when every channel fails.
+///
+/// On Linux the OSC 52 terminal escape leads: the terminal emulator owns clipboard
+/// persistence, so the selection survives after tact writes it. `arboard` is only a
+/// fallback there because it cannot be trusted on Wayland/X11 — it reports success
+/// while releasing selection ownership immediately, leaving the clipboard empty
+/// (which previously shadowed the working OSC 52 path). macOS keeps the native
+/// `pbcopy` path first, since it is reliable and does not depend on the terminal
+/// supporting OSC 52.
+#[cfg(not(target_os = "macos"))]
+fn copy_selection(terminal: &mut TerminalSession, text: &str) -> std::result::Result<(), String> {
+    match terminal.copy_to_clipboard(text) {
+        Ok(()) => Ok(()),
+        Err(terminal_error) => clipboard::copy_text(text).map_err(|native_error| {
+            format!(
+                "Could not copy selection: terminal copy failed: {terminal_error}; \
+                 native fallback failed: {native_error}"
+            )
+        }),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn copy_selection(terminal: &mut TerminalSession, text: &str) -> std::result::Result<(), String> {
+    match clipboard::copy_text(text) {
+        Ok(()) => Ok(()),
+        Err(native_error) => terminal.copy_to_clipboard(text).map_err(|terminal_error| {
+            format!(
+                "Could not copy selection: {native_error}; \
+                 terminal fallback failed: {terminal_error}"
+            )
+        }),
+    }
 }
 
 fn start_handoff(context: &mut EffectContext<'_>, pane: PaneId) {
