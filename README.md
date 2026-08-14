@@ -41,7 +41,7 @@ To build the current source instead:
 ```sh
 git clone https://github.com/clabby/tact.git
 cd tact
-cargo install --path .
+cargo install --locked --path bin/tact
 ```
 
 ### Updates
@@ -272,13 +272,37 @@ Tact's bounded cross-session memory is disabled by default. Opt in explicitly:
 enabled = true
 ```
 
-Memory is global to the selected Tact configuration, not scoped to a workspace. Tact stores it in
-`memory/v1.sqlite3` beside the selected `config.toml`, and agents access it only through explicit
-memory tool calls. The corpus is never inserted into prompts automatically. For later user
-messages and in-flight steers, Tact adds a fixed, content-free checkpoint asking the agent to
-review the conversation and update memory when it finds a durable conclusion. See the
+Local memory is global to the selected Tact configuration, not scoped to a workspace. Tact stores
+it in `memory/v1.sqlite3` beside the selected `config.toml`. Agents access the selected local or
+remote backend only through explicit memory tool calls, and the corpus is never inserted into
+prompts automatically. For later user messages and in-flight steers, Tact adds a fixed,
+content-free checkpoint asking the agent to review the conversation and update memory when it
+finds a durable conclusion. See the
 [global memory design](docs/memory.md) for the tool contract, limits, privacy model, and evaluation
 criteria.
+
+To share memory with a team, configure an authenticated remote backend. Each person uses a distinct
+namespace and may receive either writer or read-only credentials. Tact chooses exactly one backend
+for each runtime: remote inside a configured workspace root and local outside all configured roots.
+
+```toml
+[memory.remote]
+endpoint = "https://memory.example.com/"
+namespace = "alice"
+bearer_token = "replace-with-a-secret-token"
+workspace_roots = ["/path/to/team-projects"]
+```
+
+Keep the configuration file private with mode `0600`: it contains the bearer token directly. Remote
+memory with a direct token currently requires Unix so Tact can verify the file permissions.
+`tact config show` and debug output redact the token. An in-scope remote error is returned to the
+caller and never falls back to local memory. Runtime operations never upload local records.
+
+Use `tact memory upload [--dry-run]` from any directory to reconcile the complete global local
+store to the writer's personal namespace. Use `tact memory pull --all` or repeat
+`--namespace NAME` to non-destructively merge remote records into the local schema v1
+store. The [memory guide](docs/memory.md#remote-memory) includes the selection and transfer
+contracts, the remote HTTP contract, and an in-memory server walkthrough.
 
 Config reload applies memory-browser availability immediately. Like other agent tool and prompt
 settings, the agent-facing memory setting applies when a new session starts or is restored; an

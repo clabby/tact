@@ -15,7 +15,7 @@ release *args='':
             cargo_args+=("$arg")
         fi
     done
-    TACT_RELEASE_BUILD="$release_build" cargo build --release "${cargo_args[@]}"
+    TACT_RELEASE_BUILD="$release_build" cargo build --release --package tact --bin tact "${cargo_args[@]}"
 
 check-fmt:
     just fmt --check
@@ -82,18 +82,28 @@ build-harbor-agent platform='':
     #!/usr/bin/env bash
     set -euo pipefail
     docker_context=$(just --quiet _local-docker-context)
-    test -z "$(find src -type l -print -quit)" || {
-        echo 'refusing to build Harbor agent with symlinks below src/' >&2
-        exit 1
-    }
-    test -z "$(find src -type f ! -name '*.rs' -print -quit)" || {
-        echo 'refusing to send non-Rust files below src/ to the Harbor build' >&2
-        exit 1
-    }
+    for source_tree in bin/tact/src crates/memory/src examples/memory-server/src; do
+        test -z "$(find "$source_tree" -type l -print -quit)" || {
+            echo "refusing to build Harbor agent with symlinks below $source_tree/" >&2
+            exit 1
+        }
+        test -z "$(find "$source_tree" -type f ! -name '*.rs' -print -quit)" || {
+            echo "refusing to send non-Rust files below $source_tree/ to the Harbor build" >&2
+            exit 1
+        }
+    done
     build_context=$(mktemp -d)
     trap 'rm -rf -- "$build_context"' EXIT
-    cp Cargo.toml Cargo.lock build.rs README.md LICENSE.md "$build_context/"
-    cp -R src "$build_context/src"
+    cp Cargo.toml Cargo.lock README.md LICENSE.md "$build_context/"
+    mkdir -p "$build_context/bin/tact"
+    cp bin/tact/Cargo.toml bin/tact/build.rs "$build_context/bin/tact/"
+    cp -R bin/tact/src "$build_context/bin/tact/src"
+    mkdir -p "$build_context/crates/memory"
+    cp crates/memory/Cargo.toml "$build_context/crates/memory/"
+    cp -R crates/memory/src "$build_context/crates/memory/src"
+    mkdir -p "$build_context/examples/memory-server"
+    cp examples/memory-server/Cargo.toml "$build_context/examples/memory-server/"
+    cp -R examples/memory-server/src "$build_context/examples/memory-server/src"
     platform_args=()
     if [[ -n "{{platform}}" ]]; then
         platform_args=(--platform "{{platform}}")

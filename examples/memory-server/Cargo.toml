@@ -1,0 +1,23 @@
+[package]
+name = "tact-memory-server-example"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+publish = false
+license.workspace = true
+repository.workspace = true
+description = "In-memory example deployment for the tact-memory server module"
+
+[lints]
+workspace = true
+
+[dependencies]
+axum.workspace = true
+clap.workspace = true
+tact-memory.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+zeroize.workspace = true
