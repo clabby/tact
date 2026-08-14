@@ -580,6 +580,8 @@ async fn committed_patch(
         "--find-renames",
         "--find-copies",
         "--no-ext-diff",
+        "--src-prefix=a/",
+        "--dst-prefix=b/",
     ];
     if full_context {
         arguments.push(FULL_CONTEXT);
@@ -604,7 +606,14 @@ async fn append_untracked_files(
         .filter(|path| !path.is_empty())
     {
         let path = std::str::from_utf8(bytes)?;
-        let mut arguments = vec!["diff", "--binary", "--no-ext-diff", "--no-index"];
+        let mut arguments = vec![
+            "diff",
+            "--binary",
+            "--no-ext-diff",
+            "--src-prefix=a/",
+            "--dst-prefix=b/",
+            "--no-index",
+        ];
         if full_context {
             arguments.push(FULL_CONTEXT);
         }
@@ -638,6 +647,8 @@ async fn working_tree_patch(
         "--find-renames",
         "--find-copies",
         "--no-ext-diff",
+        "--src-prefix=a/",
+        "--dst-prefix=b/",
     ];
     if full_context {
         arguments.push(FULL_CONTEXT);
@@ -827,6 +838,37 @@ mod tests {
 
         assert!(snapshot.patch.contains("+feature"));
         assert_ne!(snapshot.base, "HEAD");
+    }
+
+    #[tokio::test]
+    async fn review_patch_uses_canonical_prefixes_despite_git_configuration() {
+        for setting in ["diff.mnemonicPrefix", "diff.noprefix"] {
+            let repository = repository();
+            git(repository.path(), ["checkout", "--quiet", "-b", "feature"]);
+            fs::write(repository.path().join("committed.txt"), "committed\n").unwrap();
+            git(repository.path(), ["add", "committed.txt"]);
+            git(repository.path(), ["commit", "--quiet", "-m", "feature"]);
+            fs::write(repository.path().join("tracked.txt"), "working tree\n").unwrap();
+            fs::write(repository.path().join("untracked.txt"), "untracked\n").unwrap();
+            git(repository.path(), ["config", setting, "true"]);
+
+            let context = load(repository.path()).await.unwrap();
+            let snapshot = context.collect(context.full_range()).await.unwrap();
+            let headers = snapshot
+                .patch
+                .lines()
+                .filter(|line| line.starts_with("diff --git "))
+                .collect::<Vec<_>>();
+
+            assert_eq!(headers.len(), 3, "{setting}: {}", snapshot.patch);
+            assert!(
+                headers
+                    .iter()
+                    .all(|header| header.starts_with("diff --git a/") && header.contains(" b/")),
+                "{setting}: {}",
+                snapshot.patch
+            );
+        }
     }
 
     #[tokio::test]
