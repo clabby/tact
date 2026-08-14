@@ -8,6 +8,7 @@ use crate::{
     app::{
         config::{Config, ReasoningEffort, ReasoningMode, SkillsConfig},
         error::{Result, RuntimeError},
+        hook,
     },
     core::extensions::{
         Skill, SkillCatalog, mcp_provider,
@@ -149,7 +150,7 @@ impl ConfiguredAgent {
         shutdown: CancellationToken,
         #[cfg(feature = "harbor-evals")] orchestration_log: Option<PathBuf>,
     ) -> Result<()> {
-        Self::from_config(config)?
+        let result = Self::from_config(config)?
             .run(
                 prompt,
                 shutdown,
@@ -157,7 +158,11 @@ impl ConfiguredAgent {
                 #[cfg(feature = "harbor-evals")]
                 orchestration_log,
             )
-            .await
+            .await;
+        if let Some(command) = config.agent().completion_hook() {
+            drop(hook::execute(command, config.agent().workspace()).await);
+        }
+        result
     }
 
     pub(crate) fn from_config(config: &Config) -> Result<Self> {

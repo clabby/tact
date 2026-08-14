@@ -25,6 +25,7 @@ use crate::{
     app::{
         config::{Config, ReasoningEffort, ReasoningMode},
         error::{Result, RuntimeError},
+        hook,
     },
     core::{
         ConfiguredAgent,
@@ -920,6 +921,13 @@ pub(crate) async fn run(
                             None => runtime.journal_mut()?.append_local(event)?,
                         };
                         schedule(app.update(AppEvent::Transcript { pane, record }), &mut scheduler);
+                        if let Some(command) = config.agent().completion_hook() {
+                            let command = command.to_owned();
+                            let workspace = workspace.clone();
+                            tokio::spawn(async move {
+                                drop(hook::execute(&command, &workspace).await);
+                            });
+                        }
                         apply_app_update!(app.update(AppEvent::WorkerTurnFinished {
                             pane,
                             terminal_expected,

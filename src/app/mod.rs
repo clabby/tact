@@ -5,6 +5,7 @@ pub(crate) mod browser;
 mod cli;
 pub(crate) mod config;
 pub(crate) mod error;
+pub(crate) mod hook;
 pub(crate) mod installation;
 mod secret;
 mod shutdown;
