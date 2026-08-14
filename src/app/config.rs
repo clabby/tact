@@ -153,6 +153,8 @@ pub(crate) struct AgentConfig {
     websocket_url: Option<String>,
     #[serde(serialize_with = "serialize_optional_string")]
     api_base_url: Option<String>,
+    #[serde(serialize_with = "serialize_optional_string")]
+    completion_hook: Option<String>,
 }
 
 /// Filesystem locations from which local model skills may be discovered.
@@ -289,6 +291,7 @@ struct AgentConfigFile {
     image_generation: Option<bool>,
     websocket_url: Option<String>,
     api_base_url: Option<String>,
+    completion_hook: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -400,6 +403,7 @@ impl Config {
                     overrides.websocket_url.or(file.agent.websocket_url),
                 ),
                 api_base_url: optional_string(overrides.api_base_url.or(file.agent.api_base_url)),
+                completion_hook: optional_string(file.agent.completion_hook),
             },
             mcp_servers,
             skills,
@@ -929,6 +933,10 @@ impl AgentConfig {
     pub(crate) fn api_base_url(&self) -> Option<&str> {
         self.api_base_url.as_deref()
     }
+
+    pub(crate) fn completion_hook(&self) -> Option<&str> {
+        self.completion_hook.as_deref()
+    }
 }
 
 impl SkillsConfig {
@@ -1229,6 +1237,7 @@ mod tests {
                 "image_generation",
                 "websocket_url",
                 "api_base_url",
+                "completion_hook",
             ],
         );
         assert_table_fields(&rendered["mcp_servers"], &[]);
@@ -1268,6 +1277,7 @@ mod tests {
             "append_instructions",
             "websocket_url",
             "api_base_url",
+            "completion_hook",
         ] {
             assert_eq!(rendered["agent"][field].as_str(), Some(""), "{field}");
         }
@@ -1279,10 +1289,23 @@ mod tests {
         assert_eq!(rendered["theme"]["dark"]["accent"].as_str(), Some("blue"));
 
         let reloaded = load_config(&config.to_toml().unwrap()).unwrap();
+        assert!(reloaded.agent.completion_hook.is_none());
         assert!(reloaded.agent.instructions.is_none());
         assert!(reloaded.agent.append_instructions.is_none());
         assert!(reloaded.agent.websocket_url.is_none());
         assert!(reloaded.agent.api_base_url.is_none());
+    }
+
+    #[test]
+    fn completion_hook_can_be_configured() {
+        let config = load_config("[agent]\ncompletion_hook = \"notify-send done\"\n").unwrap();
+
+        assert_eq!(config.agent().completion_hook(), Some("notify-send done"));
+        let rendered: toml::Value = toml::from_str(&config.to_toml().unwrap()).unwrap();
+        assert_eq!(
+            rendered["agent"]["completion_hook"].as_str(),
+            Some("notify-send done")
+        );
     }
 
     #[test]

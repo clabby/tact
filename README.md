@@ -135,6 +135,7 @@ web_search = true
 image_generation = true
 websocket_url = ""
 api_base_url = ""
+completion_hook = ""
 
 [mcp_servers]
 
@@ -178,6 +179,11 @@ thinking_high = "yellow"
 thinking_xhigh = "red"
 thinking_max = "magenta"
 ```
+
+Set `agent.completion_hook` to a shell command to run after each conversation turn finishes. Tact
+runs the command in the configured workspace and ignores its output and exit status. Interactive
+sessions start the hook asynchronously so it does not block the UI; `tact run` waits for the hook
+before exiting.
 
 The workspace defaults to the directory where tact starts. Relative paths in the configuration are
 resolved from the configuration file's directory; relative command-line paths are resolved from the
