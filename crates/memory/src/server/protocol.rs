@@ -8,6 +8,10 @@ use serde::{Deserialize, Serialize};
 pub const NAMESPACE_HEADER: &str = "x-tact-memory-namespace";
 /// Maximum UTF-8 bytes accepted in a namespace.
 pub const MAX_NAMESPACE_BYTES: usize = 128;
+/// Header carrying an opaque server-issued bookmark between requests.
+pub const BOOKMARK_HEADER: &str = "x-tact-memory-bookmark";
+/// Maximum UTF-8 bytes accepted in a bookmark.
+pub const MAX_BOOKMARK_BYTES: usize = 4 * 1024;
 
 /// Session-negotiation route.
 pub const SESSION_PATH: &str = concatcp!("v", crate::VERSION, "/session");
@@ -35,6 +39,11 @@ pub fn is_valid_namespace(namespace: &str) -> bool {
         && namespace
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+}
+
+/// Returns whether an opaque bookmark is non-empty and bounded.
+pub fn is_valid_bookmark(bookmark: &str) -> bool {
+    !bookmark.is_empty() && bookmark.len() <= MAX_BOOKMARK_BYTES
 }
 
 /// Authorization role returned by session negotiation.

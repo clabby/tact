@@ -67,6 +67,16 @@ Choose limits from observed corpus size and Worker CPU usage. When the corpus ex
 bound, scans return a storage-capacity error. Export and mutation operations remain available so
 operators can reduce or migrate the corpus without editing D1 directly.
 
+## Read replication
+
+The Worker opens a first-unconstrained D1 session for a request without a bookmark. After read
+replication is enabled on the database, scan corpus queries, list, and export may be served by a
+replica. A D1-backed request without a bookmark can observe a stale snapshot, including temporarily
+missing a recent write or returning a recently deleted record. Full record reads and mutations
+update durable state and remain primary-bound. The remote client carries each returned bookmark
+into its next request, so one client and its clones form a monotonic logical session across requests
+and observe their successful writes.
+
 ## Deployment
 
 Create the D1 database:

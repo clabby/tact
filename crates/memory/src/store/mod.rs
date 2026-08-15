@@ -44,7 +44,7 @@ pub trait MemoryStore: Clone + Send + Sync + 'static {
         keys: &[MemoryKey],
     ) -> impl Future<Output = Result<Vec<MemoryRecord>, MemoryError>> + Send;
 
-    /// Lists a deterministic visible window after pruning probation.
+    /// Lists a deterministic window that excludes expired probationary records.
     ///
     /// Implementations return at most [`MemoryLimits::records`] records so interactive inspection
     /// does not grow with the complete shared corpus. Full transfer uses paginated export instead.
