@@ -707,31 +707,63 @@ fn markdown_selection_spans(
     exclusions: &[Vec<Range<u16>>],
 ) -> (Vec<Vec<SourceSpan>>, Vec<SourceEnvelope>) {
     let mut graphemes = Vec::<SourceGrapheme>::new();
-    let mut envelopes = Vec::<(TagEnd, Range<usize>, usize, bool)>::new();
+    let mut envelopes = Vec::<(TagEnd, Range<usize>, usize, bool, Option<String>)>::new();
     let mut source_envelopes = Vec::new();
     for (event, range) in Parser::new_ext(markdown, options).into_offset_iter() {
         match event {
             Event::Start(tag) => {
+                let destination = match &tag {
+                    Tag::Link { dest_url, .. } => Some(sanitize(dest_url)),
+                    _ => None,
+                };
                 let preserve_delimiters = !matches!(tag, Tag::CodeBlock(_));
-                envelopes.push((tag.to_end(), range, graphemes.len(), preserve_delimiters));
+                envelopes.push((
+                    tag.to_end(),
+                    range,
+                    graphemes.len(),
+                    preserve_delimiters,
+                    destination,
+                ));
             }
             Event::End(end) => {
                 let Some(index) = envelopes.iter().rposition(|(tag, ..)| *tag == end) else {
                     continue;
                 };
-                let (_, range, first, preserve_delimiters) = envelopes.remove(index);
-                if !preserve_delimiters || first == graphemes.len() {
-                    continue;
+                let (_, source, first, preserve_delimiters, destination) = envelopes.remove(index);
+                if preserve_delimiters && first != graphemes.len() {
+                    source_envelopes.push(SourceEnvelope {
+                        content: graphemes[first].source.start
+                            ..graphemes
+                                .last()
+                                .expect("the envelope has content")
+                                .source
+                                .end,
+                        source: source.clone(),
+                    });
                 }
-                source_envelopes.push(SourceEnvelope {
-                    content: graphemes[first].source.start
-                        ..graphemes
-                            .last()
-                            .expect("the envelope has content")
-                            .source
-                            .end,
-                    source: range,
-                });
+                if let Some(destination) = destination {
+                    let label = graphemes[first..]
+                        .iter()
+                        .map(|grapheme| grapheme.text.as_str())
+                        .collect::<String>();
+                    if label.trim() != destination {
+                        let destination_source = markdown
+                            .get(source.clone())
+                            .and_then(|link| link.rfind(&destination))
+                            .map_or_else(
+                                || source.clone(),
+                                |offset| {
+                                    let start = source.start.saturating_add(offset);
+                                    start..start.saturating_add(destination.len())
+                                },
+                            );
+                        graphemes.extend(source_graphemes(
+                            markdown,
+                            &format!(" ↗ {destination}"),
+                            destination_source,
+                        ));
+                    }
+                }
             }
             Event::Text(text) | Event::Code(text) | Event::Html(text) | Event::InlineHtml(text) => {
                 graphemes.extend(source_graphemes(markdown, &sanitize(&text), range));
