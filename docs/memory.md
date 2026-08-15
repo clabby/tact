@@ -16,7 +16,8 @@ enabled = true
 
 When enabled, every runtime selects exactly one backend:
 
-- inside any configured `memory.remote.workspace_roots`, it uses only the remote backend;
+- inside any configured `memory.remote.workspace_roots` or a linked worktree from one, it uses only
+  the remote backend;
 - outside all configured roots, it uses only the local backend; and
 - with memory disabled, it uses no backend.
 
@@ -25,9 +26,11 @@ to the caller. Tact never falls back to local memory for an in-scope workspace. 
 workspace on one authoritative corpus instead of silently splitting writes between stores.
 
 Relative workspace roots are resolved against the directory containing `config.toml`. Tact uses
-canonical path targets when deciding whether a workspace is in scope. The selection applies to the
-memory tool and the TUI memory browser. Configuration reload changes browser availability
-immediately; an existing agent retains the tool surface and instructions with which it started.
+canonical path targets when deciding whether a workspace is in scope. A Git worktree is also in
+scope when its repository is rooted inside a configured directory or another worktree of the same
+repository is configured. The selection applies to the memory tool and the TUI memory browser.
+Configuration reload changes browser availability immediately; an existing agent retains the tool
+surface and instructions with which it started.
 
 ## Local memory
 

@@ -1129,12 +1129,13 @@ impl RemoteMemoryConfig {
         self.bearer_token.expose_secret()
     }
 
-    /// Checks the target of an already-canonical workspace against every configured root target.
+    /// Checks an already-canonical workspace against configured roots and their Git worktrees.
     pub(crate) fn matches_workspace(
         &self,
         canonical_workspace: &Path,
     ) -> std::result::Result<bool, RemoteMemoryConfigError> {
         let mut matches = false;
+        let mut canonical_roots = Vec::with_capacity(self.workspace_roots.len());
         for root in &self.workspace_roots {
             let canonical_root = root.canonicalize().map_err(|source| {
                 RemoteMemoryConfigError::ResolveWorkspaceRoot {
@@ -1147,10 +1148,65 @@ impl RemoteMemoryConfig {
                     root.clone(),
                 ));
             }
-            matches |= canonical_workspace.starts_with(canonical_root);
+            matches |= canonical_workspace.starts_with(&canonical_root);
+            canonical_roots.push(canonical_root);
         }
-        Ok(matches)
+        if matches {
+            return Ok(true);
+        }
+
+        let Some(workspace_repository) = repository_common_directory(canonical_workspace) else {
+            return Ok(false);
+        };
+        for root in canonical_roots {
+            if workspace_repository.starts_with(&root)
+                || repository_common_directory(&root).as_ref() == Some(&workspace_repository)
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
+}
+
+fn repository_common_directory(path: &Path) -> Option<PathBuf> {
+    for directory in path.ancestors() {
+        let dot_git = directory.join(".git");
+        let Ok(metadata) = dot_git.symlink_metadata() else {
+            continue;
+        };
+        if metadata.is_dir() {
+            return dot_git.canonicalize().ok();
+        }
+        if !metadata.is_file() {
+            return None;
+        }
+
+        let contents = fs::read_to_string(&dot_git).ok()?;
+        let target = Path::new(contents.trim().strip_prefix("gitdir: ")?);
+        let target = if target.is_absolute() {
+            target.to_path_buf()
+        } else {
+            directory.join(target)
+        };
+        let git_directory = target.canonicalize().ok()?;
+
+        let common_directory_file = git_directory.join("commondir");
+        let registered_git_file = fs::read_to_string(git_directory.join("gitdir")).ok()?;
+        let registered_git_file = Path::new(registered_git_file.trim());
+        let registered_git_file = if registered_git_file.is_absolute() {
+            registered_git_file.to_path_buf()
+        } else {
+            git_directory.join(registered_git_file)
+        };
+        if registered_git_file.canonicalize().ok()? != dot_git.canonicalize().ok()? {
+            return None;
+        }
+
+        let contents = fs::read_to_string(common_directory_file).ok()?;
+        return git_directory.join(contents.trim()).canonicalize().ok();
+    }
+    None
 }
 
 impl SubagentsConfig {
@@ -1943,6 +1999,64 @@ mod tests {
         assert!(
             !remote
                 .matches_workspace(&allowed.join("escape").canonicalize().unwrap())
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn remote_memory_scope_includes_only_registered_linked_worktrees() {
+        let directory = tempdir().unwrap();
+        let repository = directory.path().join("repository");
+        let git_directory = repository.join(".git");
+        let worktree = directory.path().join("feature-worktree");
+        let unregistered = directory.path().join("unregistered-worktree");
+        let worktree_git_directory = git_directory.join("worktrees/feature");
+        fs::create_dir_all(&worktree_git_directory).unwrap();
+        fs::create_dir(&worktree).unwrap();
+        fs::create_dir(&unregistered).unwrap();
+        fs::write(worktree_git_directory.join("commondir"), "../..\n").unwrap();
+        fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", worktree_git_directory.display()),
+        )
+        .unwrap();
+        fs::write(
+            worktree_git_directory.join("gitdir"),
+            format!("{}\n", worktree.join(".git").display()),
+        )
+        .unwrap();
+        fs::write(
+            unregistered.join(".git"),
+            format!("gitdir: {}\n", git_directory.display()),
+        )
+        .unwrap();
+        let config_path = directory.path().join("config.toml");
+        fs::write(
+            &config_path,
+            remote_memory_config(
+                "https://memory.example/v1",
+                "personal",
+                "TACT_MEMORY_TOKEN",
+                repository.to_str().unwrap(),
+            ),
+        )
+        .unwrap();
+        let config = load_config_at(config_path, directory.path()).unwrap();
+
+        assert!(
+            config
+                .memory()
+                .remote()
+                .unwrap()
+                .matches_workspace(&worktree.canonicalize().unwrap())
+                .unwrap()
+        );
+        assert!(
+            !config
+                .memory()
+                .remote()
+                .unwrap()
+                .matches_workspace(&unregistered.canonicalize().unwrap())
                 .unwrap()
         );
     }
