@@ -3,7 +3,7 @@ members = ["bin/tact", "crates/*", "examples/tact-memory-cloudflare"]
 resolver = "3"
 
 [workspace.package]
-version = "0.5.4"
+version = "0.6.0"
 edition = "2024"
 rust-version = "1.97.0"
 authors = ["Ben Clabby"]
@@ -54,8 +54,8 @@ sha2 = "0.10.9"
 shlex = "2.0.1"
 syntect = { version = "5.3.0", default-features = false, features = ["default-syntaxes", "regex-onig"] }
 tar = "0.4.44"
-tact-memory = { version = "0.5.4", path = "crates/memory", default-features = false }
-tact-subagents = { version = "0.5.4", path = "crates/subagents" }
+tact-memory = { version = "0.6.0", path = "crates/memory", default-features = false }
+tact-subagents = { version = "0.6.0", path = "crates/subagents" }
 tempfile = "3.27.0"
 thiserror = "2.0.19"
 tokio = { version = "1.53.1", features = ["io-util", "macros", "process", "rt-multi-thread", "signal", "sync", "time"] }
