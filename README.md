@@ -285,7 +285,8 @@ criteria.
 
 To share memory with a team, configure an authenticated remote backend. Each person uses a distinct
 namespace and may receive either writer or read-only credentials. Tact chooses exactly one backend
-for each runtime: remote inside a configured workspace root and local outside all configured roots.
+for each runtime: remote inside a configured workspace root or a linked worktree from one, and local
+outside all configured roots.
 
 ```toml
 [memory.remote]
