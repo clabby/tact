@@ -9,6 +9,9 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  cache:
+    uses: ./.github/workflows/cache.yaml
+
   review-web:
     runs-on: ubuntu-latest
     name: Review Web
@@ -33,6 +36,7 @@ jobs:
         run: bun run typecheck
 
   cargo-tests:
+    needs: cache
     runs-on: ${{ matrix.os }}
     name: Tests (${{ matrix.os }})
     timeout-minutes: 30
@@ -49,13 +53,15 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          cache-on-failure: true
+          shared-key: build
+          save-if: false
       - uses: taiki-e/install-action@just
       - uses: taiki-e/install-action@nextest
       - name: cargo test
         run: just test --locked
 
   cargo-build:
+    needs: cache
     runs-on: ubuntu-latest
     name: Build (${{ matrix.toolchain }})
     timeout-minutes: 20
@@ -75,7 +81,8 @@ jobs:
           toolchain: ${{ matrix.toolchain }}
       - uses: Swatinem/rust-cache@v2
         with:
-          cache-on-failure: true
+          shared-key: build
+          save-if: false
       - uses: taiki-e/install-action@just
       - name: Check standalone tact package
         run: cargo check --package tact --locked
@@ -83,6 +90,7 @@ jobs:
         run: just build --locked --all-features
 
   cargo-portability:
+    needs: cache
     runs-on: ubuntu-latest
     name: Features + WebAssembly
     timeout-minutes: 20
@@ -97,7 +105,8 @@ jobs:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
         with:
-          cache-on-failure: true
+          shared-key: build
+          save-if: false
       - uses: taiki-e/install-action@cargo-hack
       - uses: taiki-e/install-action@just
       - name: Install Bun
@@ -118,6 +127,7 @@ jobs:
         run: npm run deploy:check --prefix examples/tact-memory-cloudflare
 
   cargo-lint:
+    needs: cache
     runs-on: ubuntu-latest
     timeout-minutes: 20
     name: Clippy
@@ -137,11 +147,13 @@ jobs:
           components: rustfmt
       - uses: Swatinem/rust-cache@v2
         with:
-          cache-on-failure: true
+          shared-key: build
+          save-if: false
       - name: fmt + lint
         run: just lint
 
   cargo-doc:
+    needs: cache
     runs-on: ubuntu-latest
     name: Docs (lint + test)
     timeout-minutes: 20
@@ -155,13 +167,15 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          cache-on-failure: true
+          shared-key: build
+          save-if: false
       - name: doclint
         run: just check-docs
       - name: doctest
         run: just test-docs
 
   cargo-build-benches:
+    needs: cache
     runs-on: ubuntu-latest
     timeout-minutes: 20
     name: Build Benchmarks
@@ -176,6 +190,14 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          cache-on-failure: true
+          shared-key: build
+          save-if: false
       - name: build benches
         run: cargo bench --no-run --all
+
+  benchmarks:
+    needs: cache
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/codspeed.yml

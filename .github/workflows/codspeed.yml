@@ -1,10 +1,7 @@
 name: CodSpeed Benchmarks
 
 on:
-  push:
-    branches: [main]
-  pull_request:
-  workflow_dispatch:
+  workflow_call:
 
 jobs:
   benchmarks:
@@ -21,7 +18,8 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          cache-on-failure: true
+          shared-key: build
+          save-if: false
       - name: Install cargo-codspeed
         uses: taiki-e/install-action@v2
         with:

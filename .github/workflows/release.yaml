@@ -42,9 +42,13 @@ jobs:
             exit 1
           fi
 
+  cache:
+    needs: validate
+    uses: ./.github/workflows/cache.yaml
+
   build:
     name: Build ${{ matrix.target }}
-    needs: validate
+    needs: cache
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
@@ -61,7 +65,7 @@ jobs:
           - os: macos-latest
             target: aarch64-apple-darwin
             archive_ext: tar.gz
-          - os: macos-latest
+          - os: macos-15-intel
             target: x86_64-apple-darwin
             archive_ext: tar.gz
     steps:
@@ -75,8 +79,8 @@ jobs:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
-          key: ${{ matrix.target }}
-          cache-on-failure: true
+          shared-key: build
+          save-if: false
       - name: Build with Cargo
         run: cargo build --locked --release --package tact --bin tact --target ${{ matrix.target }}
         env:
@@ -227,9 +231,6 @@ jobs:
           path: ${{ runner.temp }}/signed-release
       - name: Install Rust stable toolchain
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-        with:
-          cache-on-failure: true
       - name: Publish crates in dependency order
         shell: bash
         run: |

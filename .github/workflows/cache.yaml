@@ -1,0 +1,49 @@
+name: Cache
+
+on:
+  workflow_call:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            warm_ci: true
+          - os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            warm_ci: false
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            warm_ci: true
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            warm_ci: false
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust stable toolchain
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: build
+      - name: Build CI artifacts
+        if: matrix.warm_ci
+        run: cargo test --locked --workspace --all-targets --all-features --no-run
+      - name: Build release binary
+        run: cargo build --locked --release --package tact --bin tact --target ${{ matrix.target }}
+        env:
+          TACT_RELEASE_BUILD: "1"
