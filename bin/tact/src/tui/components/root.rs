@@ -5014,6 +5014,56 @@ mod tests {
     }
 
     #[test]
+    fn transcript_selection_highlights_rendered_link_destinations() {
+        let mut terminal = Terminal::new(TestBackend::new(120, 12)).unwrap();
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        let markdown = "See [inclusion.rs](/workspace/glue/src/inclusion.rs) or [mailbox.rs](/workspace/glue/src/mailbox.rs).";
+        root.update(super::RootEvent::Transcript(agent_record(
+            1,
+            AgentEventKind::AssistantMessage,
+            json!({
+                "model_call_index": 1,
+                "item_id": "answer",
+                "phase": "final_answer",
+                "text": markdown,
+            }),
+        )));
+        terminal
+            .draw(|frame| root.render(frame, frame.area(), &Theme::default()))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let row = (0..buffer.area.height)
+            .find(|&row| {
+                (0..buffer.area.width)
+                    .map(|column| buffer[(column, row)].symbol())
+                    .collect::<String>()
+                    .contains("See inclusion.rs")
+            })
+            .expect("message should be visible");
+        let start = text_column(buffer, row, "See");
+        let rendered_link = "mailbox.rs ↗ /workspace/glue/src/mailbox.rs";
+        let end = text_column(buffer, row, rendered_link)
+            + u16::try_from(rendered_link.chars().count()).unwrap();
+
+        root.update(mouse(MouseEventKind::Down(MouseButton::Left), start, row));
+        root.update(mouse(MouseEventKind::Drag(MouseButton::Left), end, row));
+        terminal
+            .draw(|frame| root.render(frame, frame.area(), &Theme::default()))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        for column in start..end {
+            let cell = &buffer[(column, row)];
+            assert_eq!(
+                (cell.fg, cell.bg, cell.modifier),
+                (Color::Black, Color::Yellow, Modifier::empty()),
+                "selected cell at column {column} ({:?}) retained link styling",
+                cell.symbol()
+            );
+        }
+    }
+
+    #[test]
     fn partial_transcript_selection_does_not_copy_unmatched_markdown_delimiters() {
         let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
         let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
