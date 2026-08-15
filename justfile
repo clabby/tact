@@ -37,6 +37,12 @@ test-docs:
 check-docs:
     cargo doc --no-deps
 
+check-features *args='':
+    cargo hack check --package tact-memory --feature-powerset --no-dev-deps {{args}}
+
+check-wasm *args='':
+    cargo check --package tact-memory-cloudflare --target wasm32-unknown-unknown {{args}}
+
 bench *args='':
     cargo bench {{args}}
 

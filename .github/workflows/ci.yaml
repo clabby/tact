@@ -77,8 +77,39 @@ jobs:
         with:
           cache-on-failure: true
       - uses: taiki-e/install-action@just
+      - name: Check standalone tact package
+        run: cargo check --package tact --locked
       - name: build
         run: just build --locked --all-features
+
+  cargo-portability:
+    runs-on: ubuntu-latest
+    name: Features + WebAssembly
+    timeout-minutes: 20
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: recursive
+      - name: Install Rust stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - uses: taiki-e/install-action@cargo-hack
+      - uses: taiki-e/install-action@just
+      - name: Install Worker build tool
+        run: cargo install worker-build --version 0.8.5 --locked
+      - name: Check tact-memory feature powerset
+        run: just check-features
+      - name: Check Cloudflare Worker WebAssembly target
+        run: just check-wasm --locked
+      - name: Install Cloudflare Worker dependencies
+        run: npm ci --prefix crates/memory-cloudflare
+      - name: Bundle Cloudflare Worker
+        run: npm run deploy:check --prefix crates/memory-cloudflare
 
   cargo-lint:
     runs-on: ubuntu-latest

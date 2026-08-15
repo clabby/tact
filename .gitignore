@@ -9,3 +9,7 @@
 __pycache__/
 *.pyc
 .DS_Store
+.dev.vars
+.wrangler/
+crates/memory-cloudflare/bundled/
+crates/memory-cloudflare/node_modules/

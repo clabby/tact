@@ -1,0 +1,28 @@
+[package]
+name = "tact-memory-cloudflare"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Cloudflare Worker deployment for shared Tact memory"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[lints]
+workspace = true
+
+[dependencies]
+axum.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tact-memory = { workspace = true, features = ["server"] }
+thiserror.workspace = true
+tower = { workspace = true, features = ["util"] }
+tracing-subscriber.workspace = true
+tracing-web.workspace = true
+worker.workspace = true
+zeroize.workspace = true

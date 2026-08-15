@@ -1,0 +1,29 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "tact-memory",
+  "main": "build/worker/shim.mjs",
+  "compatibility_date": "2026-08-14",
+  "workers_dev": true,
+  "vars": {
+    "TACT_MEMORY_SCAN_MAX_RECORDS": "10240",
+    "TACT_MEMORY_SCAN_MAX_CONTENT_BYTES": "5242880"
+  },
+  "build": {
+    "command": "worker-build --release"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "tact-memory",
+      "database_id": "REPLACE_WITH_D1_DATABASE_ID",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  },
+  "limits": {
+    "cpu_ms": 1000
+  }
+}

@@ -9,14 +9,18 @@
 //! the same [crate::MemoryStore] contract. The workspace's `tact-memory-server-example` package
 //! demonstrates the server with a process-lifetime in-memory backend.
 
+#[cfg(feature = "server")]
 mod credential;
 pub mod protocol;
+#[cfg(feature = "server")]
 mod router;
 
+#[cfg(feature = "server")]
 pub use credential::{Credential, CredentialError};
 #[cfg(test)]
 pub(crate) use router::MAX_JSON_BODY_BYTES;
+#[cfg(feature = "server")]
 pub use router::{MemoryServer, ServerBuildError};
 
-#[cfg(test)]
+#[cfg(all(test, feature = "server"))]
 mod tests;

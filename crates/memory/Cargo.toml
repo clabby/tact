@@ -12,22 +12,34 @@ description = "Bounded local and remote memory for Tact"
 [lints]
 workspace = true
 
+[features]
+default = ["client", "local", "native-server", "tool"]
+client = ["dep:reqwest", "dep:rustls", "dep:tokio", "dep:url", "dep:zeroize"]
+local = ["dep:rusqlite", "dep:tokio", "dep:zeroize"]
+native-server = ["server", "dep:tokio", "tower/limit"]
+server = ["dep:axum", "dep:sha2", "dep:tower", "dep:tracing", "dep:web-time", "dep:zeroize"]
+tool = ["client", "local", "dep:nanocodex", "dep:zeroize"]
+
 [dependencies]
-axum.workspace = true
+axum = { workspace = true, optional = true }
 const_format.workspace = true
-nanocodex.workspace = true
-reqwest.workspace = true
-rusqlite.workspace = true
-rustls.workspace = true
+nanocodex = { workspace = true, optional = true }
+reqwest = { workspace = true, optional = true }
+rusqlite = { workspace = true, optional = true }
+rustls = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
-sha2.workspace = true
+sha2 = { workspace = true, optional = true }
 thiserror.workspace = true
-tokio.workspace = true
-tower = { workspace = true, features = ["limit", "util"] }
-tracing.workspace = true
-url.workspace = true
-zeroize.workspace = true
+tower = { workspace = true, features = ["util"], optional = true }
+tracing = { workspace = true, optional = true }
+url = { workspace = true, optional = true }
+web-time = { workspace = true, optional = true }
+zeroize = { workspace = true, optional = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { workspace = true, optional = true }
 
 [dev-dependencies]
+axum = { workspace = true, features = ["http1", "tokio"] }
 tempfile.workspace = true
