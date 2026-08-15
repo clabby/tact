@@ -1,4 +1,4 @@
-//! Cloudflare Worker deployment for the shared Tact memory protocol.
+//! Cloudflare Worker example for the shared Tact memory protocol.
 //!
 //! The Worker binds a D1 database to the Cloudflare memory store and delegates the HTTP protocol,
 //! authentication, authorization, request bounds, and error surface to [`tact_memory`].

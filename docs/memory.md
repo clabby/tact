@@ -213,25 +213,24 @@ records together with the requested namespace selection.
 
 ## Local server walkthrough
 
-The example server keeps its records in memory for local testing. From the repository root, start
-two writers plus a read-only observer:
+The example runs the production-shaped Cloudflare Worker and D1 backend locally through Wrangler.
+Install its build dependencies and start it from the repository root:
 
 ```console
-export ALICE_MEMORY_TOKEN='alice-local-test-token-000000000001'
-export BOB_MEMORY_TOKEN='bob-local-test-token-00000000000002'
-export OBSERVER_MEMORY_TOKEN='observer-local-test-token-00000001'
-
-cargo run -p tact-memory-server-example -- \
-  --listen 127.0.0.1:8787 \
-  --writer alice=ALICE_MEMORY_TOKEN \
-  --writer bob=BOB_MEMORY_TOKEN \
-  --reader observer=OBSERVER_MEMORY_TOKEN
+cargo install worker-build --version 0.8.5 --locked
+cd examples/tact-memory-cloudflare
+npm ci
+cp credentials.example.toml credentials.toml
+chmod 600 credentials.toml
+npm run migrate:local
+npm run dev
 ```
 
-All example-server records are lost when the process exits.
-
-The example-server CLI reads each startup credential from the named environment variable. This
-is separate from Tact client configuration, which stores its bearer token directly as shown below.
+Set independent tokens for Alice, Bob, and a read-only observer in the ignored `credentials.toml`
+before starting the server. Each `[[credentials]]` table declares a namespace, a `reader` or
+`writer` role, and a token; the supplied example shows the complete format. `bun run dev` validates
+the file and generates the local Worker secret. Wrangler prints the local endpoint, normally
+`http://127.0.0.1:8787/`, and persists local D1 state outside the process.
 
 Create `/tmp/tact-alice/config.toml` with mode `0600`:
 
@@ -280,12 +279,15 @@ Finally, run the observer inside the configured workspace. It can scan, read, an
 namespaces, including its own, but any put, replace, or delete must fail as read-only. The failure
 must not create a local record.
 
-For deterministic validation without model credentials, run:
+For deterministic validation without model credentials, run from the repository root:
 
 ```console
 cargo test -p tact-memory
 cargo test -p tact
+just check-wasm --locked
 ```
+
+See `examples/tact-memory-cloudflare/README.md` for deploying the same Worker to Cloudflare.
 
 ## Record and retrieval contract
 

@@ -10,6 +10,7 @@ __pycache__/
 *.pyc
 .DS_Store
 .dev.vars
+examples/tact-memory-cloudflare/credentials.toml
 .wrangler/
-crates/memory-cloudflare/bundled/
-crates/memory-cloudflare/node_modules/
+examples/tact-memory-cloudflare/bundled/
+examples/tact-memory-cloudflare/node_modules/

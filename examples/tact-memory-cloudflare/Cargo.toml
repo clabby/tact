@@ -7,7 +7,7 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 publish = false
-description = "Cloudflare Worker deployment for shared Tact memory"
+description = "Cloudflare Worker and D1 backend for shared Tact memory"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -26,3 +26,6 @@ tracing-subscriber.workspace = true
 tracing-web.workspace = true
 worker.workspace = true
 zeroize.workspace = true
+
+[dev-dependencies]
+rusqlite.workspace = true

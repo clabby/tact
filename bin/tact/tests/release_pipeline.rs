@@ -50,7 +50,7 @@ fn just_recipes_forward_command_arguments() {
 fn harbor_context_contains_every_workspace_member() {
     assert_contains(
         JUSTFILE,
-        "for source_tree in bin/tact/src crates/memory/src crates/subagents/src examples/memory-server/src; do",
+        "for source_tree in bin/tact/src crates/memory/src crates/subagents/src examples/tact-memory-cloudflare/src; do",
     );
     assert_contains(
         JUSTFILE,
@@ -62,16 +62,15 @@ fn harbor_context_contains_every_workspace_member() {
     );
     assert_contains(
         JUSTFILE,
-        "cp examples/memory-server/Cargo.toml \"$build_context/examples/memory-server/\"",
+        "cp examples/tact-memory-cloudflare/Cargo.toml \"$build_context/examples/tact-memory-cloudflare/\"",
     );
     assert_contains(
         JUSTFILE,
-        "cp -R examples/memory-server/src \"$build_context/examples/memory-server/src\"",
+        "cp -R examples/tact-memory-cloudflare/src \"$build_context/examples/tact-memory-cloudflare/src\"",
     );
-    assert!(
-        !JUSTFILE
-            .contains("cp -R examples/memory-server \"$build_context/examples/memory-server\"")
-    );
+    assert!(!JUSTFILE.contains(
+        "cp -R examples/tact-memory-cloudflare \"$build_context/examples/tact-memory-cloudflare\""
+    ));
 }
 
 #[test]
