@@ -10,7 +10,7 @@ RUN apk add --no-cache musl-dev
 COPY . .
 RUN --mount=type=cache,id=tact-harbor-cargo-registry,target=/usr/local/cargo/registry \
     --mount=type=cache,id=tact-harbor-target-${TARGETARCH},target=/build/target \
-    cargo build --locked --profile "${CARGO_PROFILE}" --features harbor-evals && \
+    cargo build --locked --profile "${CARGO_PROFILE}" --package tact --bin tact --features harbor-evals && \
     case "${CARGO_PROFILE}" in \
         dev) artifact_dir=debug ;; \
         *) artifact_dir="${CARGO_PROFILE}" ;; \

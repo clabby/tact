@@ -1,327 +1,331 @@
-# Global shared memory
+# Local and remote shared memory
 
-This document specifies Tact's first persistent agent-memory design. It implements the deliberately
-minimal experiment proposed in [issue 25](https://github.com/clabby/tact/issues/25): preserve a
-small set of durable conclusions across sessions without turning every prompt into a growing memory
-dump. The feature is useful only if it improves repeated work while remaining quiet, bounded, and
-easy to remove.
+Tact memory stores a small set of durable conclusions across sessions. Records enter model context
+only after an explicit `scan` or `read`; Tact never inserts the corpus into prompts automatically.
+Memory content is data, not a higher-priority instruction layer. Current user requests, system
+policy, and `AGENTS.md` still govern the agent.
 
-## Product contract
+## Backend selection
 
-Memory is disabled by default. It is enabled only by explicit configuration:
+Memory is disabled by default:
 
 ```toml
 [memory]
 enabled = true
 ```
 
-Enabling memory makes one database available at:
+When enabled, every runtime selects exactly one backend:
+
+- inside any configured `memory.remote.workspace_roots`, it uses only the remote backend;
+- outside all configured roots, it uses only the local backend; and
+- with memory disabled, it uses no backend.
+
+An in-scope remote configuration, authentication, network, protocol, or storage failure is returned
+to the caller. Tact never falls back to local memory for an in-scope workspace. This keeps a team
+workspace on one authoritative corpus instead of silently splitting writes between stores.
+
+Relative workspace roots are resolved against the directory containing `config.toml`. Tact uses
+canonical path targets when deciding whether a workspace is in scope. The selection applies to the
+memory tool and the TUI memory browser. Configuration reload changes browser availability
+immediately; an existing agent retains the tool surface and instructions with which it started.
+
+## Local memory
+
+The local store is:
 
 ```text
 <config-dir>/memory/v1.sqlite3
 ```
 
-`<config-dir>` is the parent directory of the selected `config.toml`, including a file selected by
-`--config`, `TACT_CONFIG`, or `TACT_HOME`. The path does not depend on the current workspace and
-remains stable across configuration reloads.
+`<config-dir>` is the parent of the selected `config.toml`, including one selected by `--config`,
+`TACT_CONFIG`, or `TACT_HOME`. There is one global local corpus per configuration directory. It has
+no workspace, repository, branch, session, agent, or author namespace. Workspace-specific records
+must state their scope in their content.
 
-There is exactly one corpus for every Tact process that selects that configuration directory. It
-has no workspace, repository, branch, session, or agent namespace, and queries never apply an
-implicit workspace filter. A preference learned in one workspace can therefore be found in any
-other workspace. Workspace-specific conclusions must name their scope in their content, for
-example, "In the `commonware` repository, release tags use ...". This convention helps retrieval
-but is not an access-control boundary.
+The SQLite schema remains v1, and the existing `memories` record format is unchanged. Tact lazily
+adds backward-compatible allocator metadata so IDs are not reused after deletion or snapshot sync;
+older builds ignore that metadata. No v2 migration is required.
 
-Memory content is data, not a higher-priority instruction layer. Current user requests, system
-policy, and `AGENTS.md` continue to govern the agent.
+## Remote memory
 
-## Explicit access
+Configure the remote service and the workspaces that must use it:
 
-Tact exposes one tagged `memory` tool with four operations. It does not inject records, candidate
-lists, summaries, or search results into the system prompt or the beginning of a turn. The prompt
-may state that the tool exists, but the first stored-memory token appears only after an agent calls
-`scan` or `read`.
+```toml
+[memory]
+enabled = true
 
-| Operation | Callers | Contract |
+[memory.remote]
+endpoint = "https://memory.example.com/"
+namespace = "alice"
+bearer_token = "replace-with-a-secret-token"
+workspace_roots = ["/path/to/team-projects"]
+```
+
+The bearer token is stored directly in `config.toml`. Keep that file private and set its mode to
+`0600`. Direct-token remote memory configuration currently requires Unix so Tact can verify these
+permissions. `tact config show` and configuration debug output redact the token. Do not put the token in
+logs, errors, status output, rendered configuration, or tests.
+
+The service authenticates the token and derives its namespace and reader or writer role. The
+configured namespace is an assertion checked against that identity. A writer may put, replace, and
+delete only records in its own namespace. A reader can scan, read, and list but cannot mutate.
+Remote keys retain the author's namespace, including records returned to another user.
+
+Local and remote modes expose the same memory operations and meanings:
+
+| Operation | Contract |
+| --- | --- |
+| `scan` | Search the selected backend and return at most five compact candidates. |
+| `read` | Fetch complete records by exact current key. Missing or stale keys are omitted. |
+| `put` | Add one atomic conclusion, or replace a known record using its key and expected version. |
+| `delete` | Remove a known record using its key and expected version. |
+| `list` | List records without changing scan or read telemetry. |
+
+The agent tool uses one exact key shape throughout. Pass scan candidate keys unchanged in the
+`keys` array when reading, and pass one complete `key` when deleting:
+
+```json
+{"operation":"read","keys":[{"namespace":"alice","id":7,"version":1}]}
+{"operation":"delete","key":{"namespace":"alice","id":7,"version":1}}
+```
+
+Root agents may mutate; child agents may only scan and read. Reader credentials make remote
+mutation unavailable regardless of agent role. Remote operations include the caller's namespace:
+an author can scan, read, and list their own remote records as well as records from other authors.
+Normalized duplicate content may exist in separate namespaces because ownership remains per author.
+
+The remote API is an authenticated JSON/HTTP interface. Its protocol generation is
+`tact_memory::VERSION`; routes and the session compatibility check use that same value:
+
+| Method and path | Role | Contract |
 | --- | --- | --- |
-| `scan` | Root and child agents | Search active records and return at most five compact candidate cards. A card contains identity, version, score, and a deterministic preview. Content at 64 bytes or fewer is returned in full. Longer content is a UTF-8-safe prefix of at most 64 bytes. |
-| `read` | Root and child agents | Fetch complete content and metadata by stable ID. The ID list has no separate record cap. Missing IDs are omitted from the result. |
-| `put` | Root agent only | Add one atomic conclusion or replace a known record. A replacement supplies the stable ID and expected version. The tool rejects stale versions rather than overwriting concurrent work. The agent should scan before putting to avoid duplicates. |
-| `delete` | Root agent only | Delete a known record using its stable ID and expected version. The tool rejects stale versions. |
+| `GET /v{VERSION}/session` | reader | Return protocol version, authenticated namespace, and role. |
+| `POST /v{VERSION}/memories/scan` | reader | Search caller-visible records and return at most five candidates. |
+| `POST /v{VERSION}/memories/read` | reader | Resolve exact caller-visible keys. |
+| `POST /v{VERSION}/memories/list` | reader | List caller-visible records without telemetry changes. |
+| `POST /v{VERSION}/memories/put` | writer | Create a server-authored record or replace an exact current key in the writer's namespace. |
+| `POST /v{VERSION}/memories/delete` | writer | Delete an exact current key in the writer's namespace. |
+| `POST /v{VERSION}/memories/sync` | writer | Atomically reconcile the writer's namespace to a complete local snapshot. |
+| `POST /v{VERSION}/memories/export` | reader | Page through all or selected caller-visible namespaces. |
 
-When memory is enabled, Tact appends a fixed, model-only memory-review checkpoint to every accepted
-user message after the first turn, including restored and forked-session continuations. It also
-appends the checkpoint to every accepted in-flight steer and to a steer promoted into a new turn.
-The checkpoint identifies itself as Tact control text and contains no user text, candidate memory,
-path, or session identifier. It tells the root agent to review the full available conversation and
-store any warranted durable conclusion before its final answer. A review that finds no durable
-change makes no memory call. The original user submission remains unchanged for display and
-transcript journaling.
+Each request sends a bearer credential and a configured namespace assertion. Authentication derives
+the actual namespace and role from the credential; a mismatched assertion is rejected. Mutation
+bodies cannot select a target namespace. Namespaces contain at most 128 ASCII letters, digits,
+periods, hyphens, or underscores.
 
-The model-visible checkpoint becomes part of Nanocodex's conversation state and completed session
-checkpoint, so a resumed model can see the same control text. It is not written as a separate user
-transcript event and never copies the triggering message into the control text.
+Put allocates IDs, versions, timestamps, telemetry, and probation state on the server. Replacement
+checks the exact current key, increments the version, and resets server-owned state. Clients do not
+send local record metadata through ordinary put. Read omits missing or stale keys and updates read
+telemetry. Scan ranks at the store, returns no more than the requested limit or five candidates,
+and updates telemetry only for returned records. Ordinary requests do not transfer the remote
+corpus. List returns a deterministic inspection window of at most 512 visible records; production
+backends should enforce that bound in their storage query. Export preserves every namespaced record
+and uses stable bounded pages with an opaque continuation position; it does not deduplicate
+equivalent content.
+Stable exports must neither omit nor repeat records. A backend must define transaction or snapshot
+behavior that makes concurrent changes predictable.
 
-The checkpoint is a structural prompt trigger, not an independent memory manager. There is no
-automatic search, read-after-scan, write at turn completion, persisted candidate queue, or
-background model pass. A scan returns candidates for the agent to judge. It does not silently treat
-every returned candidate as relevant. Outside a requested review, not calling the tool remains the
-ordinary no-op path.
+### Remote server integration
 
-Child agents may scan and read because shared conclusions can prevent repeated work. They may not
-put, replace, or delete. Root-only mutation gives the session's coordinating agent one place to
-resolve scope, duplication, and contradictions. This is an authorization check in Tact, not merely
-an instruction in the prompt.
+The `tact-memory` crate exposes one async `MemoryStore` trait. Local SQLite, the authenticated HTTP
+client, the runtime-selected backend, and server-side backends implement that contract.
+`tact_memory::server::MemoryServer<S>` is the generic Axum wrapper. It authenticates a request,
+passes its namespace to a factory, and uses the resulting namespace-bound store.
 
-## Record policy
+Tact uses one shared secret-content detector at its client-side storage boundaries. The selected
+store rejects unsafe puts and snapshots before they reach either backend; local and remote clients
+also suppress unsafe records that predate or bypass that check. Server-side `MemoryStore`
+implementations remain content-policy agnostic and enforce storage invariants, not Tact's agent
+policy.
 
-A record is one self-contained conclusion that can be used without reconstructing the conversation
-that produced it. Good records include a durable user correction, a stable preference, or an
-expensive-to-rediscover operational fact. Each record should include qualifications that affect its
-truth: the relevant repository or service, the observed version, and a date when freshness matters.
-Repository- and code-specific conclusions are first-class candidates when they can materially help
-later changes or review and would be expensive to rediscover. They must name their stable logical
-scope because the store has no implicit workspace boundary.
+The server wrapper owns bearer authentication, namespace and role checks, request validation and
+bounds, protocol errors, and operation tracing that excludes tokens and memory content. A store
+owns persistence, indexes, transactions, pagination, telemetry concurrency, capacity enforcement,
+and backend errors. It must make version-checked mutations atomic, serialize conflicting writes,
+keep upload sync atomic, and provide stable export pagination. The server-side store captures the
+authoritative time for remote timestamps, telemetry, and probation unless a protocol operation
+explicitly preserves local snapshot identity.
 
-Do not store transcripts, reasoning traces, task plans, raw tool output, credentials, transient
-state, generic knowledge, or facts that a cheap repository search will recover. Do not bundle a
-list of unrelated facts into one record. Atomic conclusions make replacement precise and reduce the
-chance that one stale clause invalidates an otherwise useful record.
+Backends return semantic `MemoryError` variants for conflicts, bounds, and validation. A custom
+backend wraps implementation-specific failures with `MemoryError::backend` or
+`MemoryError::unavailable`; concrete database error types are not part of the shared contract.
 
-Every record carries creation and last-modification times, separate scan and read telemetry, a
-stable logical ID, and a monotonically increasing version. Tact v1 intentionally does not persist
-the writing model, provider, session, agent, or workspace. This keeps the surface and data model
-small, but means the database cannot attribute a conclusion beyond the fact that it entered through
-Tact's root-only memory tool or the trusted TUI browser.
+The HTTP wrapper limits the router to 64 in-flight requests, times out store operations after 30
+seconds, and keeps operation futures attached to request tasks. The hosting executable owns signal
+handling and graceful shutdown. Backend implementations own their connection, task, and durability
+lifecycle.
 
-`put` creates version 1 for a new stable ID. Replacement increments the version after atomically
-checking `expected_version`; it does not append a second active fact. `delete` checks the expected
-version and physically removes the current row. Version checks prevent one Tact process from
-silently replacing or deleting a value that another process changed after it was scanned.
+Other backends must preserve the same semantics. SQL backends need transactional version checks,
+per-namespace uniqueness, capacity checks, and a deterministic export cursor. Cloudflare D1 or
+Durable Objects need a transactional or single-writer boundary. Database-native search is valid
+only when it reproduces visible scan behavior and the five-result bound.
 
-Deletion means "remove this record from Tact's database and retrieval surface," not "prove that
-every byte once associated with this record has been destroyed." The privacy consequences are
-described below.
+Remote errors are JSON objects containing only a stable code. Responses and traces must not echo
+request content, bearer tokens, database diagnostics, or credential details. Authentication,
+authorization, stale keys, invalid or oversized requests, capacity, and transient storage failures
+remain distinguishable through the defined status and error mapping. The client surfaces all
+in-scope remote failures and never switches to local memory after one. Production deployments need
+HTTPS, private credentials, and storage encryption appropriate to the deployment.
 
-## Retrieval and abstention
+Runtime operations never upload local records, write through to another backend, combine backend
+results, or schedule background synchronization.
 
-The first version uses an ordinary SQLite table and performs lexical ranking in process. It does not
-create an FTS virtual table or an embedding index. This keeps the data model inspectable and avoids
-adding a model-dependent retrieval service before a lexical baseline demonstrates utility.
+## Explicit transfer commands
 
-Ranking uses standard BM25 with `k1 = 1.2` and `b = 0.75`. The values match SQLite FTS5's
-[documented BM25 constants](https://www.sqlite.org/fts5.html#the_bm25_function), but Tact computes
-the score itself; this reference does not imply that Tact uses FTS5. The probabilistic basis is
-described by Robertson and Zaragoza in
-[The Probabilistic Relevance Framework: BM25 and Beyond](https://www.nowpublishers.com/article/Details/INR-019).
+Transfer commands operate on the global local store and therefore work from any directory. They
+ignore `memory.enabled` and runtime workspace-root selection; configured remote credentials still
+govern authentication and authorization.
 
-Terms absent from a record contribute no score rather than vetoing that record. This lets a verbose
-query retrieve memories that match coherent subsets of its terms. Records matching more terms or
-rarer terms rank higher through BM25. A scan abstains only when the query has no searchable terms or
-when no active record shares a term with it.
+### Upload local memory
 
-This recall-oriented behavior is bounded at candidate retrieval. `scan` returns no more than five
-compact candidate cards. A preview returns the complete record when it is at most 64 bytes. Longer
-records return a UTF-8-safe prefix of at most 64 bytes. The preview is deliberately not a semantic
-summary. `read` has no separate ID cap and returns complete records for the IDs the agent selects.
-For a short record, scan and read can therefore contain the same text. Read remains a deliberate-use
-operation that updates separate telemetry and clears probation.
+```console
+tact memory upload --dry-run
+tact memory upload
+```
 
-## Telemetry and probation
+Upload requires configured remote memory and a writer credential. It treats the complete live local
+store as the authoritative snapshot for the writer's personal namespace. The client checks for a
+concurrently changing local snapshot for up to three reconciliation passes. The service inserts
+missing rows, replaces divergent generations or versions, preserves identical rows, and removes
+rows in that namespace that are absent locally. Other namespaces are never changed. `--dry-run`
+reports the local snapshot without contacting or modifying the service.
 
-Candidate retrieval and deliberate consumption are different events. Tact therefore stores scan
-telemetry separately from read telemetry:
+Upload is an explicit administrative action. Runtime operations never trigger it and an outage
+does not create a queue for later upload.
 
-- returning a record from `scan` updates its scan count and last-scanned time only;
-- returning full content from `read` updates its read count and last-read time only; and
-- an abstaining or failed operation does not fabricate a per-record hit.
+### Pull remote memory
 
-Neither signal changes a record's truth. Keeping them separate shows whether a record is merely easy
-to retrieve or was actually selected for use, and prevents a broad scan from graduating every
-candidate.
+```console
+tact memory pull --all
+tact memory pull --namespace alice --namespace bob
+```
 
-A newly model-authored record enters seven days of unread probation. If it has no successful model
-`read` by the end of that period, it is eligible for pruning. A scan is not a read. Replacement
-changes the content and starts probation again for the new version. Seven days is an experimental
-Tact constant, not a retention period established by memory research.
+Pull accepts reader or writer credentials and requires either `--all` or at least one
+`--namespace NAME`. It pages through the selected remote export and non-destructively merges its
+records into local schema v1. Existing local content is preserved. Records with equivalent
+normalized content are deduplicated. Because local v1 has no author field, imported records lose
+their namespace provenance after merging.
 
-## Bounds and transactional behavior
+The complete pull is atomic with respect to capacity and errors: validation, pagination, merge, and
+capacity checks must succeed before any local change becomes visible. A failed or over-capacity
+pull leaves the local store unchanged. A successful command reports fetched, inserted, and skipped
+records together with the requested namespace selection.
 
-All limits apply to the single global corpus, not separately to each workspace:
+## Local server walkthrough
 
-| Limit | Tact v1 value | Meaning |
-| --- | ---: | --- |
-| Record content | 1 KiB | At most 1,024 bytes of UTF-8 content in one conclusion. |
-| Rows | 512 | At most 512 live memory rows in the database. Deleted rows are removed rather than retained as tombstones. |
-| Total content | 256 KiB | At most 262,144 bytes of record content across stored rows. |
-| Main database file | 4 MiB | Maximum size of `v1.sqlite3` itself, including tables, indexes, metadata, and free pages. SQLite sidecar files are not covered by this number. |
-| Scan results | 5 | Maximum candidate cards returned by one scan. |
+The example server keeps its records in memory for local testing. From the repository root, start
+two writers plus a read-only observer:
 
-The store prunes expired unread probation records before rejecting a capacity-increasing mutation.
-It must not silently evict a graduated active conclusion merely to make a new put succeed. If the
-row, content, or file bound still cannot be met, `put` fails without a partial write. Delete remains
-available at capacity.
+```console
+export ALICE_MEMORY_TOKEN='alice-local-test-token-000000000001'
+export BOB_MEMORY_TOKEN='bob-local-test-token-00000000000002'
+export OBSERVER_MEMORY_TOKEN='observer-local-test-token-00000001'
 
-Every put, replacement, delete, telemetry update, and related bound check is one database
-transaction. SQLite provides
-[atomic, consistent, isolated, and durable transactions](https://www.sqlite.org/transactional.html),
-including all-or-nothing behavior across process, operating-system, and power failures. Tact also
-sets a database page limit so growth beyond the main-file cap fails with `SQLITE_FULL`; SQLite
-documents this mechanism under
-[maximum pages in a database file](https://www.sqlite.org/limits.html#max_page_count). Application
-checks remain necessary for the much smaller row and content limits.
+cargo run -p tact-memory-server-example -- \
+  --listen 127.0.0.1:8787 \
+  --writer alice=ALICE_MEMORY_TOKEN \
+  --writer bob=BOB_MEMORY_TOKEN \
+  --reader observer=OBSERVER_MEMORY_TOKEN
+```
 
-SQLite is opened lazily. Merely enabling memory does not put corpus content into the model context,
-and a session that never uses memory pays no retrieval-token cost.
+All example-server records are lost when the process exits.
 
-## Human browser
+The example-server CLI reads each startup credential from the named environment variable. This
+is separate from Tact client configuration, which stores its bearer token directly as shown below.
 
-The TUI provides a direct memory browser. It reads records from the local store without routing them
-through the model or synthesizing a memory-tool event. Browsing therefore consumes no model tokens
-and does not increment scan or read telemetry, graduate probation, or affect ranking.
+Create `/tmp/tact-alice/config.toml` with mode `0600`:
 
-The browser defaults to most-useful-first order, where usefulness is the deliberate read count, not
-the number of times a scan returned the memory as a candidate. Press `f` to cycle through most
-useful, newest, oldest, and least useful. Newest and oldest use the current record version's update
-time; deterministic age ordering breaks usefulness ties.
+```toml
+[memory]
+enabled = true
 
-Deleting from the browser requires explicit confirmation. The browser submits the displayed
-record's expected version; if the row changed while the confirmation was open, deletion fails and
-the view reloads rather than deleting the newer value. This trusted user action bypasses the
-root-agent-only tool restriction but uses the same transactional store operation.
+[memory.remote]
+endpoint = "http://127.0.0.1:8787/"
+namespace = "alice"
+bearer_token = "alice-local-test-token-000000000001"
+workspace_roots = ["/absolute/path/to/this/repository"]
+```
 
-Configuration reload changes browser availability immediately. Existing agent runtimes keep the
-tool surface and system instructions with which they were created; the reloaded agent-facing
-memory setting takes effect when a new session starts or is restored. The reload notification calls
-out this split explicitly.
+Create equivalent homes for Bob and the observer, changing namespace and token. Give Alice a local
+record while running outside the configured workspace, then upload it from any directory:
 
-## Secrets, deletion, and retained copies
+```console
+chmod 600 /tmp/tact-alice/config.toml
 
-Tact applies best-effort secret rejection before a put. The check rejects obvious private-key
-blocks, authentication headers, credential-bearing URLs, common provider-token shapes, and values
-assigned to credential-like names. The rejection error does not echo the candidate secret. This is
-defense in depth around the model instruction never to store credentials; it is not a complete
-secret scanner and cannot recognize every private value or encoded secret.
+TACT_HOME=/tmp/tact-alice cargo run -p tact -- \
+  --workspace /tmp run 'Store a durable memory that the team uses cargo nextest in CI.'
+TACT_HOME=/tmp/tact-alice cargo run -p tact -- memory upload --dry-run
+TACT_HOME=/tmp/tact-alice cargo run -p tact -- memory upload
+```
 
-The memory database is local and unencrypted. Anyone who can read the selected Tact configuration
-directory may be able to inspect it. File permissions reduce accidental exposure but are not
-cryptographic protection.
+Verify that Bob uses remote memory exclusively inside the configured workspace and sees Alice's
+namespaced record:
 
-Secret rejection applies only to the memory write. By that point, the value may already exist in the
-current model context, command output, or Tact's append-only transcript and checkpoint. Deleting or
-disabling memory does not rewrite those stores, provider-side records, backups, filesystem
-snapshots, or other copies.
+```console
+TACT_HOME=/tmp/tact-bob cargo run -p tact -- \
+  --workspace /absolute/path/to/this/repository \
+  run 'Scan memory for the team CI runner, read the result, and report its namespace.'
+```
 
-Tact zeroizes the typed put-content and secret-screening buffers owned by the memory implementation.
-Nanocodex's raw tool arguments and conversation records, Serde's parser internals, SQLite's internal
-bindings and pages, and operating-system copies are outside that ownership boundary and do not
-provide the same guarantee.
+Pull Alice and Bob into Bob's local v1 store, then use that local store outside the remote root:
 
-SQL row deletion immediately removes a record from normal memory retrieval, but SQLite may retain
-old bytes in free pages or transaction sidecars. SQLite's
-[`secure_delete` documentation](https://www.sqlite.org/pragma.html#pragma_secure_delete) explains
-both its overwrite behavior and its limitations. Rollback journals can contain prior pages, while
-WAL mode creates additional `-wal` and `-shm` files and appends changes before checkpointing, as
-described in SQLite's [WAL documentation](https://www.sqlite.org/wal.html). The 4 MiB limit covers
-only the main database, not these temporary or quasi-persistent files.
+```console
+TACT_HOME=/tmp/tact-bob cargo run -p tact -- \
+  memory pull --namespace alice --namespace bob
+TACT_HOME=/tmp/tact-bob cargo run -p tact -- \
+  --workspace /tmp run 'Scan local memory for the team CI runner.'
+```
 
-Even physical row deletion, `secure_delete`, checkpointing, and `VACUUM` cannot promise forensic
-erasure from SSD wear-leveling, snapshots, backups, or storage already copied elsewhere. Tact must
-describe delete as removal from product-visible retrieval, never as proof of physical erasure.
-FTS5 has additional shadow-table deletion concerns documented in its
-[secure-delete option](https://www.sqlite.org/fts5.html#the_secure_delete_configuration_option);
-Tact v1 does not use FTS5, but this is one reason not to casually change the storage design.
+Finally, run the observer inside the configured workspace. It can scan, read, and list all visible
+namespaces, including its own, but any put, replace, or delete must fail as read-only. The failure
+must not create a local record.
 
-## Research-derived principles
+For deterministic validation without model credentials, run:
 
-The design borrows principles from prior work; the papers do not validate Tact's exact constants or
-global coding-agent setting.
+```console
+cargo test -p tact-memory
+cargo test -p tact
+```
 
-- [LongMemEval](https://arxiv.org/abs/2410.10813) separates extraction, multi-session and temporal
-  reasoning, knowledge updates, and abstention. Tact consequently evaluates update correctness and
-  correct refusal to retrieve, rather than reporting recall alone.
-- [LongMemEval-V2](https://arxiv.org/abs/2605.12493) evaluates static and dynamic state, workflows,
-  environment gotchas, and premise awareness while framing memory as compact evidence gathering.
-  It motivates testing durable operational conclusions and downstream task utility. Its reported
-  coding-agent method also has high latency, supporting a fixed in-turn review checkpoint rather
-  than a separate background history-processing pass.
-- [MemGPT](https://arxiv.org/abs/2310.08560) treats external memory as a tier accessed under a
-  limited context window. Tact adopts explicit movement into active context, not automatic corpus
-  injection.
-- [Generative Agents](https://arxiv.org/abs/2304.03442) combines relevance, recency, importance, and
-  reflection over an experience stream. It supports distinguishing retrieval signals, but its full
-  experience log and reflection pipeline are broader than Tact's atomic conclusions.
-- [MemoryBank](https://arxiv.org/abs/2305.10250) explores time-based forgetting and reinforcement.
-  It motivates testing decay, but does not establish a seven-day TTL for coding-agent facts.
-- [Mem0](https://arxiv.org/abs/2504.19413) evaluates extraction, consolidation, update, and
-  retrieval of salient conversational facts, including latency and token cost. Tact keeps the
-  atomic-update idea while deferring Mem0's extra model pipeline and graph representation.
-- [Memory-R1](https://aclanthology.org/2026.acl-long.583/) learns `ADD`, `UPDATE`, `DELETE`, and
-  `NOOP` behavior with reinforcement learning. Tact has no trained memory manager, so mutation is
-  root-only, version-checked, bounded, and easy for the user to undo.
-- [BEIR](https://arxiv.org/abs/2104.08663) finds BM25 to be a robust zero-shot retrieval baseline
-  across heterogeneous tasks, while more expensive methods have tradeoffs. That justifies measuring
-  a lexical baseline first; it does not prove BM25 is sufficient for Tact.
+## Record and retrieval contract
 
-SQLite is selected for transactional concurrent mutation and enforceable bounds, not because this
-small dataset needs a database server. Its official
-[transaction](https://www.sqlite.org/lang_transaction.html),
-[FTS5](https://www.sqlite.org/fts5.html), and [limits](https://www.sqlite.org/limits.html)
-documentation defines the behavior Tact relies on or deliberately avoids.
+A record is one self-contained conclusion. Good records include durable user preferences,
+corrections, authorization boundaries, or expensive-to-rediscover operational facts. Do not store
+transcripts, reasoning, plans, raw output, credentials, transient state, generic knowledge, or facts
+that a cheap repository search can recover.
 
-## Tact constants requiring calibration
+Records carry a stable ID, monotonically increasing version, timestamps, and separate scan and read
+telemetry. A replacement and delete check the expected version so concurrent work cannot be
+silently overwritten. Remote keys add the server-authenticated author namespace; local keys do not.
 
-The product invariants are opt-in operation, no automatic corpus injection, one global corpus,
-explicit tool access, a content-free in-turn feedback checkpoint, root-only mutation, bounded
-storage, and honest deletion language. The following are initial Tact choices rather than
-conclusions established by the cited research:
+Retrieval uses lexical BM25 with `k1 = 1.2` and `b = 0.75`. A scan abstains when its query has no
+searchable terms or no active record shares a term. Ordinary scans return at most five cards and do
+not transfer the corpus to the caller. A short record is its own preview; a longer preview is a
+UTF-8-safe prefix of at most 64 bytes. `read` is the only operation that returns complete selected
+content and increments deliberate-read telemetry.
 
-- seven days of unread probation.
-- 1 KiB per record, 512 rows, 256 KiB of content, and a 4 MiB main database.
-- five scan candidates and a 64-byte preview.
-- the tokenizer and no-overlap abstention rule.
-- BM25 `k1 = 1.2` and `b = 0.75` for this corpus, despite being established baseline values.
+New model-authored records enter seven days of unread probation. A scan does not graduate a record;
+a successful read does. Replacement starts probation for the new version. The remote service uses
+server time and server-owned telemetry.
 
-Evaluation may tune these values while the experiment remains disabled by default. Tuning must be
-pre-registered against held-out scenarios; production anecdotes are not a license to increase
-limits or add embeddings, graphs, or reflection.
+## Bounds and transactions
 
-## Evaluation and kill criteria
+| Limit | v1 value |
+| --- | ---: |
+| Record content | 1 KiB |
+| Rows | 512 |
+| Total content | 256 KiB |
+| Local main database file | 4 MiB |
+| Scan results | 5 |
 
-Evaluate memory with paired runs using the same model, effort, task, and starting state, with memory
-enabled for one run and disabled for the other. Counterbalance run order. The scenario set must
-cover durable corrections, rebuttals, direction-changing steers, later scope refinements,
-preferences, expensive workspace gotchas, stale replacements, contradictions, cross-workspace name
-collisions, irrelevant queries, secret-shaped content, and adversarial repository text.
+Bounds apply to the global local corpus and independently to each remote writer namespace. A store
+may prune expired unread probation records before rejecting a capacity-increasing mutation, but it
+does not evict active graduated records to make room. Mutations, telemetry updates, bound checks,
+authoritative upload reconciliation, and local pull merge are transactional at their documented
+scope.
 
-Measure at least:
-
-- task completion and correctness after the relevant fact crosses a session boundary.
-- scan precision and recall at five, read precision, ranking quality, and correct abstention.
-- duplicate puts, correct replacement, contradiction rate, forbidden writes, and probation
-  survival.
-- scan and read counts separately, including candidates repeatedly scanned but never read.
-- p50/p95 tool latency, memory tokens added to context, main/sidecar disk use, and failure behavior
-  at every bound.
-
-Release is blocked unless deterministic tests prove zero corpus tokens without an explicit call,
-child mutation denial, optimistic-version conflicts, atomic updates, all storage/output bounds, TUI
-delete confirmation, and rejection of the maintained secret fixture set. The best-effort nature of
-secret detection remains explicit even when all known fixtures pass.
-
-Before running the held-out evaluation, set minimum acceptable gains, non-inferiority margins for
-contradictions and false retrieval, abstention targets, and latency/context budgets. Keep the
-feature disabled if results are inconclusive. Remove it if the planned paired evaluation shows flat
-or negative task utility, if contradiction or cross-workspace false-memory costs exceed the
-pre-registered margin, if correct abstention cannot meet its target, or if latency/context cost
-exceeds its budget. A failed minimal experiment is not a reason to add embeddings, autonomous
-reflection, larger limits, or more writes.
-
-## Out of scope: checked-in memory
-
-Tact v1 does not read, write, import, export, or commit repository-owned memory. In particular, it
-does not put a mutable SQLite database in the working tree, and a repository cannot gain access to
-global records by declaring colliding identifiers. Human-reviewable checked-in memory has a
-different trust, provenance, instruction-injection, merge, and privacy model. The separate design
-questions are recorded in [issue 25](https://github.com/clabby/tact/issues/25) and must not be added
-as an incremental extension of this global private store.
+The local database is unencrypted. Anyone who can read the configuration directory may be able to
+inspect it. Production remote storage encryption and HTTPS termination belong to its deployment.
+Deletion removes a record from Tact's retrieval surface but cannot promise forensic erasure from
+SQLite sidecars, storage media, backups, snapshots, transcripts, model-provider records, or other
+copies.

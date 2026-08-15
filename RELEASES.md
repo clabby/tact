@@ -6,7 +6,7 @@ publishes every distribution from that tag.
 ## One-time setup
 
 - Add a repository Actions secret named `CARGO_REGISTRY_TOKEN` containing a crates.io API token
-  with permission to publish the `tact` crate.
+  with permission to publish the `tact` and `tact-memory` crates.
 - Give GitHub Actions read/write workflow permissions so `GITHUB_TOKEN` can create GitHub Releases
   and publish images to GHCR.
 - Ensure the releaser can push `main` and create repository tags.
@@ -20,8 +20,8 @@ are omitted from the generated changelog.
 
 ## Publish a release
 
-Start from a clean, up-to-date `main`. Bump the package version in `Cargo.toml` and refresh the root
-package entry in `Cargo.lock`:
+Start from a clean, up-to-date `main`. Bump the workspace package version in `Cargo.toml` and
+refresh the `tact` package entry in `Cargo.lock`:
 
 ```sh
 cargo check
@@ -54,7 +54,8 @@ Creating the remote tag is the point of no return. Never reuse or move a publish
   version;
 - builds official Linux x86-64 and ARM64 and macOS Intel and Apple Silicon binaries;
 - packages, checksums, and signs all four archives with an ephemeral minisign key;
-- injects the public key into the crate metadata and publishes the crate to crates.io;
+- publishes `tact-memory`, then injects the public key into the binary crate metadata and publishes
+  `tact` to crates.io;
 - generates the release body from the checked-in template and tagged history with `git-cliff`;
 - creates the GitHub Release with the release body, archives, checksums, signatures, and public key;
 - builds the `linux/amd64` and `linux/arm64` GHCR images from the exact signed Linux binaries;

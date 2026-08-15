@@ -78,7 +78,7 @@ jobs:
           key: ${{ matrix.target }}
           cache-on-failure: true
       - name: Build with Cargo
-        run: cargo build --locked --release --target ${{ matrix.target }}
+        run: cargo build --locked --release --package tact --bin tact --target ${{ matrix.target }}
         env:
           TACT_RELEASE_BUILD: "1"
       - name: Package binary
@@ -178,7 +178,7 @@ jobs:
             printf '\n[package.metadata.binstall.signing]\n'
             printf 'algorithm = "minisign"\n'
             printf 'pubkey = "%s"\n' "$(tail -n 1 minisign.pub)"
-          } >> Cargo.toml
+          } >> bin/tact/Cargo.toml
           cp minisign.pub dist/minisign.pub
 
           for archive in dist/*.tar.gz; do
@@ -205,11 +205,12 @@ jobs:
           name: signed-release
           path: |
             Cargo.toml
+            bin/tact/Cargo.toml
             dist
           if-no-files-found: error
 
-  publish_crate:
-    name: Publish Crate
+  publish_crates:
+    name: Publish Crates
     needs: sign
     runs-on: ubuntu-latest
     permissions:
@@ -224,53 +225,76 @@ jobs:
         with:
           name: signed-release
           path: ${{ runner.temp }}/signed-release
-      - name: Install signed crate manifest
-        run: cp "${RUNNER_TEMP}/signed-release/Cargo.toml" Cargo.toml
       - name: Install Rust stable toolchain
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           cache-on-failure: true
-      - name: Verify crate package
-        run: cargo package --locked --allow-dirty
-      - name: Publish crate
+      - name: Publish crates in dependency order
         shell: bash
         run: |
           set -euo pipefail
 
-          version=$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "tact") | .version')
-          crate="target/package/tact-${version}.crate"
-          test -f "$crate"
-          local_checksum=$(sha256sum "$crate" | cut -d ' ' -f 1)
+          publish_package() {
+            local package="$1"
+            shift
+            local version
+            local crate
+            local local_checksum
+            local published_checksum
 
-          for attempt in {1..5}; do
-            if cargo publish --locked --allow-dirty --no-verify; then
-              exit 0
+            version=$(cargo metadata --locked --no-deps --format-version 1 | jq -r ".packages[] | select(.name == \"${package}\") | .version")
+            crate="target/package/${package}-${version}.crate"
+            test -f "$crate"
+            local_checksum=$(sha256sum "$crate" | cut -d ' ' -f 1)
+
+            for attempt in {1..5}; do
+              if cargo publish --locked --no-verify -p "$package" "$@"; then
+                return 0
+              fi
+
+              if [[ "$attempt" -lt 5 ]]; then
+                sleep $((attempt * 15))
+              fi
+            done
+
+            published_checksum=$(curl --fail --silent --show-error \
+              --retry 6 --retry-delay 5 --retry-all-errors \
+              --user-agent "tact-release-workflow/${version} (https://github.com/clabby/tact)" \
+              "https://crates.io/api/v1/crates/${package}/${version}" \
+              | jq -er '.version.checksum')
+
+            if [[ "$published_checksum" != "$local_checksum" ]]; then
+              echo "crates.io has different contents for ${package} ${version}" >&2
+              return 1
             fi
 
-            if [[ "$attempt" -lt 5 ]]; then
-              sleep $((attempt * 15))
+            echo "cargo publish reported failure, but crates.io has the exact packaged ${package} crate"
+          }
+
+          cargo package --locked -p tact-memory
+          publish_package tact-memory
+
+          cp "${RUNNER_TEMP}/signed-release/bin/tact/Cargo.toml" bin/tact/Cargo.toml
+          for attempt in {1..10}; do
+            if cargo package --locked --allow-dirty -p tact; then
+              break
             fi
+
+            if [[ "$attempt" = 10 ]]; then
+              exit 1
+            fi
+
+            sleep 15
           done
 
-          published_checksum=$(curl --fail --silent --show-error \
-            --retry 6 --retry-delay 5 --retry-all-errors \
-            --user-agent "tact-release-workflow/${version} (https://github.com/clabby/tact)" \
-            "https://crates.io/api/v1/crates/tact/${version}" \
-            | jq -er '.version.checksum')
-
-          if [[ "$published_checksum" != "$local_checksum" ]]; then
-            echo "crates.io has different contents for tact ${version}" >&2
-            exit 1
-          fi
-
-          echo "cargo publish reported failure, but crates.io has the exact packaged crate"
+          publish_package tact --allow-dirty
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
   release:
     name: Publish GitHub Release
-    needs: publish_crate
+    needs: publish_crates
     runs-on: ubuntu-latest
     permissions:
       contents: write
