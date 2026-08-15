@@ -1,5 +1,7 @@
 const RELEASE_WORKFLOW: &str = include_str!("../../../.github/workflows/release.yaml");
+const CACHE_WORKFLOW: &str = include_str!("../../../.github/workflows/cache.yaml");
 const CI_WORKFLOW: &str = include_str!("../../../.github/workflows/ci.yaml");
+const CODSPEED_WORKFLOW: &str = include_str!("../../../.github/workflows/codspeed.yml");
 const RELEASE_TEMPLATE: &str = include_str!("../../../.github/RELEASE_TEMPLATE.md");
 const CHANGELOG_CONFIG: &str = include_str!("../../../cliff.toml");
 const RELEASE_INSTRUCTIONS: &str = include_str!("../../../RELEASES.md");
@@ -17,6 +19,13 @@ fn assert_contains(document: &str, expected: &str) {
 
 fn workflow(document: &str) -> serde_yaml::Value {
     serde_yaml::from_str(document).expect("workflow should be valid YAML")
+}
+
+fn assert_rust_caches_restore_only(document: &str) {
+    let cache_steps = document.matches("Swatinem/rust-cache@").count();
+    assert!(cache_steps > 0);
+    assert_eq!(document.matches("shared-key: build").count(), cache_steps);
+    assert_eq!(document.matches("save-if: false").count(), cache_steps);
 }
 
 fn number_after(document: &str, marker: &str) -> u32 {
@@ -51,6 +60,10 @@ fn harbor_context_contains_every_workspace_member() {
     assert_contains(
         JUSTFILE,
         "for source_tree in bin/tact/src crates/memory/src crates/subagents/src examples/tact-memory-cloudflare/src; do",
+    );
+    assert_contains(
+        JUSTFILE,
+        "cp crates/memory/Cargo.toml crates/memory/README.md \"$build_context/crates/memory/\"",
     );
     assert_contains(
         JUSTFILE,
@@ -176,6 +189,103 @@ fn release_tag_must_be_on_main() {
         RELEASE_WORKFLOW,
         "git merge-base --is-ancestor \"$GITHUB_SHA\" origin/main",
     );
+}
+
+#[test]
+fn shared_cache_reads_everywhere_and_writes_only_on_main() {
+    let release = workflow(RELEASE_WORKFLOW);
+    let steps = release["jobs"]["build"]["steps"]
+        .as_sequence()
+        .expect("release build should contain steps");
+    let cache = steps
+        .iter()
+        .find(|step| {
+            step["uses"]
+                .as_str()
+                .is_some_and(|action| action.starts_with("Swatinem/rust-cache@"))
+        })
+        .expect("release build should restore a Rust cache");
+
+    assert_eq!(cache["with"]["save-if"], false);
+    assert_eq!(cache["with"]["shared-key"], "build");
+    assert!(cache["with"]["key"].is_null());
+
+    let shared = workflow(CACHE_WORKFLOW);
+    let main_steps = shared["jobs"]["build"]["steps"]
+        .as_sequence()
+        .expect("shared cache job should contain steps");
+    let main_cache = main_steps
+        .iter()
+        .find(|step| {
+            step["uses"]
+                .as_str()
+                .is_some_and(|action| action.starts_with("Swatinem/rust-cache@"))
+        })
+        .expect("shared cache job should save a Rust cache");
+    assert_eq!(main_cache["with"]["shared-key"], "build");
+    assert_eq!(
+        main_cache["with"]["save-if"],
+        "${{ github.ref == 'refs/heads/main' }}"
+    );
+    assert!(main_cache["with"]["key"].is_null());
+    assert_eq!(CACHE_WORKFLOW.matches("Swatinem/rust-cache@").count(), 1);
+    let ci_artifacts = main_steps
+        .iter()
+        .find(|step| step["name"] == "Build CI artifacts")
+        .expect("shared cache job should warm CI artifacts on main");
+    assert_eq!(
+        ci_artifacts["if"],
+        "github.ref == 'refs/heads/main' && matrix.warm_ci"
+    );
+    let release_binary = main_steps
+        .iter()
+        .find(|step| step["name"] == "Build release binary")
+        .expect("shared cache job should warm release artifacts on main");
+    assert_eq!(release_binary["if"], "github.ref == 'refs/heads/main'");
+    let matrix_pairs = |workflow: &serde_yaml::Value, job: &str| {
+        workflow["jobs"][job]["strategy"]["matrix"]["include"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .map(|entry| (entry["os"].clone(), entry["target"].clone()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        matrix_pairs(&shared, "build"),
+        matrix_pairs(&release, "build")
+    );
+    let ci = workflow(CI_WORKFLOW);
+    assert_eq!(
+        ci["jobs"]["cache"]["uses"],
+        "./.github/workflows/cache.yaml"
+    );
+    assert!(ci["jobs"]["cache"]["if"].is_null());
+    assert_eq!(
+        release["jobs"]["cache"]["uses"],
+        "./.github/workflows/cache.yaml"
+    );
+    assert_eq!(release["jobs"]["cache"]["needs"], "validate");
+    assert_eq!(release["jobs"]["build"]["needs"], "cache");
+    for job in [
+        "cargo-tests",
+        "cargo-build",
+        "cargo-portability",
+        "cargo-lint",
+        "cargo-doc",
+        "cargo-build-benches",
+    ] {
+        assert_eq!(ci["jobs"][job]["needs"], "cache");
+        assert!(ci["jobs"][job]["if"].is_null());
+    }
+    assert_eq!(ci["jobs"]["benchmarks"]["needs"], "cache");
+    assert!(ci["jobs"]["benchmarks"]["if"].is_null());
+    assert_eq!(
+        ci["jobs"]["benchmarks"]["uses"],
+        "./.github/workflows/codspeed.yml"
+    );
+    assert_rust_caches_restore_only(CI_WORKFLOW);
+    assert_rust_caches_restore_only(CODSPEED_WORKFLOW);
+    assert_contains(RELEASE_INSTRUCTIONS, "`main` CI run");
 }
 
 #[test]

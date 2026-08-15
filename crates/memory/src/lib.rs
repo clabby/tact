@@ -1,27 +1,5 @@
-//! Bounded memory storage for local agents and shared teams.
-//!
-//! # Architecture
-//!
-//! [`MemoryStore`] is the asynchronous storage contract. [`LocalMemoryStore`] preserves Tact's
-//! schema-v1 on-disk format, [`RemoteMemoryClient`] carries the same operations over authenticated
-//! HTTP, and [`server::MemoryServer`] exposes any namespace-bound implementation through the same
-//! protocol. [`SelectedMemoryStore`] lets an application choose one local or remote backend without
-//! merging their runtime results.
-//!
-//! # Remote protocol
-//!
-//! [`server::protocol`] contains the versioned JSON types and route constants shared by clients
-//! and servers. Every compatibility check and route derives from [`VERSION`]. Remote credentials
-//! bind each writer to one author namespace; record keys retain that namespace for attribution and
-//! optimistic concurrency.
-//!
-//! # Bounds and secrets
-//!
-//! Implementations enforce record, content, query, and aggregate corpus bounds.
-//! Tact applies one shared secret-content detector at client-side storage boundaries: mutations
-//! are rejected before reaching the selected backend, and local or remote records that predate
-//! that check are suppressed before use. Server-side backends remain storage-policy agnostic.
-//! [`RemoteToken`] owns bearer credentials in zeroizing storage and redacts its debug representation.
+#![doc = include_str!("../README.md")]
+
 /// Incompatible remote-memory protocol generation.
 ///
 /// Route paths and session negotiation derive from this single value. Increment it only when

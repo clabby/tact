@@ -1,5 +1,10 @@
 # tact-subagents
 
+[![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/clabby/tact/ci.yaml?style=for-the-badge&label=CI)](https://github.com/clabby/tact/actions/workflows/ci.yaml)
+[![Crates.io License](https://img.shields.io/crates/l/tact-subagents?style=for-the-badge)](https://crates.io/crates/tact-subagents)
+[![Crates.io MSRV](https://img.shields.io/crates/msrv/tact-subagents?style=for-the-badge)](https://crates.io/crates/tact-subagents)
+[![Crates.io Version](https://img.shields.io/crates/v/tact-subagents?style=for-the-badge)](https://crates.io/crates/tact-subagents)
+
 `tact-subagents` provides structured child-agent orchestration for Nanocodex applications. It owns
 clean child sessions, a scoped task tree, bounded concurrent turns, directed messages, structured
 result validation, and lifecycle tools.

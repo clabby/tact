@@ -8,6 +8,7 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 description = "Bounded local and remote memory for Tact"
+readme = "README.md"
 
 [lints]
 workspace = true

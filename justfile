@@ -105,7 +105,7 @@ build-harbor-agent platform='':
     cp bin/tact/Cargo.toml bin/tact/build.rs "$build_context/bin/tact/"
     cp -R bin/tact/src "$build_context/bin/tact/src"
     mkdir -p "$build_context/crates/memory"
-    cp crates/memory/Cargo.toml "$build_context/crates/memory/"
+    cp crates/memory/Cargo.toml crates/memory/README.md "$build_context/crates/memory/"
     cp -R crates/memory/src "$build_context/crates/memory/src"
     mkdir -p "$build_context/crates/subagents"
     cp crates/subagents/Cargo.toml crates/subagents/README.md "$build_context/crates/subagents/"
