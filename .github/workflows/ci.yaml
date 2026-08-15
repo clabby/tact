@@ -51,7 +51,7 @@ jobs:
           submodules: recursive
       - name: Install Rust stable toolchain
         uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: build
           save-if: false
@@ -79,7 +79,7 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ matrix.toolchain }}
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: build
           save-if: false
@@ -103,7 +103,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: build
           save-if: false
@@ -114,7 +114,9 @@ jobs:
         with:
           bun-version: 1.3.14
       - name: Install Worker build tool
-        run: cargo install worker-build --version 0.8.5 --locked
+        uses: taiki-e/install-action@v2
+        with:
+          tool: worker-build@0.8.5
       - name: Check tact-memory feature powerset
         run: just check-features
       - name: Check Cloudflare Worker WebAssembly target
@@ -141,14 +143,14 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: build
+          save-if: false
       - name: Install Rust nightly formatting toolchain
         uses: dtolnay/rust-toolchain@nightly
         with:
           components: rustfmt
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: build
-          save-if: false
       - name: fmt + lint
         run: just lint
 
@@ -165,7 +167,7 @@ jobs:
       - uses: taiki-e/install-action@just
       - name: Install Rust stable toolchain
         uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: build
           save-if: false
@@ -188,7 +190,7 @@ jobs:
       - uses: taiki-e/install-action@just
       - name: Install Rust stable toolchain
         uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: build
           save-if: false
