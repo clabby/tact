@@ -54,6 +54,10 @@ fn harbor_context_contains_every_workspace_member() {
     );
     assert_contains(
         JUSTFILE,
+        "cp crates/memory/Cargo.toml crates/memory/README.md \"$build_context/crates/memory/\"",
+    );
+    assert_contains(
+        JUSTFILE,
         "cp crates/subagents/Cargo.toml crates/subagents/README.md \"$build_context/crates/subagents/\"",
     );
     assert_contains(
