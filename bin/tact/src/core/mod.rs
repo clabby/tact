@@ -10,10 +10,7 @@ use crate::{
         error::{ConfigError, Result, RuntimeError},
         hook,
     },
-    core::extensions::{
-        Skill, SkillCatalog, mcp_provider,
-        subagents::{self, ScopedAgentUpdate, SubagentControl},
-    },
+    core::extensions::{Skill, SkillCatalog, mcp_provider, sessions::SessionTool},
     tui::session::ResumeState,
 };
 use nanocodex::{
@@ -29,7 +26,10 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
-use tact_memory::{RemoteMemoryClient, RemoteToken, SelectedMemoryStore};
+use tact_memory::{
+    MemoryTool, MutationAuthorizer, RemoteMemoryClient, RemoteToken, SelectedMemoryStore,
+};
+use tact_subagents::{RootAgentAuthority, ScopedAgentUpdate, Subagents, WeakSubagents};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -129,7 +129,7 @@ pub(crate) struct ConfiguredAgent {
     pub(crate) skills: Arc<[Skill]>,
     pub(crate) memory_enabled: bool,
     pub(crate) subagent_updates: mpsc::UnboundedReceiver<ScopedAgentUpdate>,
-    pub(crate) subagent_control: SubagentControl,
+    pub(crate) subagent_control: Subagents,
 }
 
 struct SessionInstructions {
@@ -242,9 +242,8 @@ impl ConfiguredAgent {
         let subagents_enabled = config.subagents().enabled();
         let allow_luna_subagents = config.subagents().allow_luna();
         let session_config_path = config.path().to_path_buf();
-        let (subagents, subagent_control, subagent_updates) =
-            subagents::channel(agent_config.max_subagents());
-        let subagent_registry = Arc::downgrade(&subagents);
+        let (subagent_control, subagent_updates) = Subagents::new(agent_config.max_subagents());
+        let subagents = subagent_control.downgrade();
         let mut builder = Nanocodex::builder(openai)
             .model(model)
             .workspace(workspace)
@@ -252,9 +251,9 @@ impl ConfiguredAgent {
             .reasoning_mode(reasoning_mode.into())
             .fast_mode(agent_config.fast_mode())
             .tools_factory(move |_agent| {
-                subagents::install_tools(
+                install_agent_tools(
                     tools.clone(),
-                    subagent_registry.clone(),
+                    &subagents,
                     model,
                     allow_luna_subagents,
                     memory.clone(),
@@ -285,7 +284,7 @@ impl ConfiguredAgent {
         );
         builder = builder.instructions(Arc::clone(&instructions));
         let subagent_builder = builder.clone();
-        subagents.set_agent_factory(
+        subagent_control.set_agent_factory(
             thinking.into(),
             agent_config.fast_mode(),
             move |model, thinking, fast_mode| {
@@ -433,6 +432,45 @@ impl ConfiguredAgent {
 
         Ok(workspace)
     }
+}
+
+#[derive(Clone)]
+struct RootMemoryAuthorizer(RootAgentAuthority);
+
+#[nanocodex::tools::contract::async_trait]
+impl MutationAuthorizer for RootMemoryAuthorizer {
+    async fn authorize_memory_mutation(&self, session_id: &str) -> std::io::Result<()> {
+        self.0
+            .require_root(session_id)
+            .await
+            .map_err(std::io::Error::other)
+    }
+}
+
+fn install_agent_tools(
+    tools: Tools,
+    subagents: &WeakSubagents,
+    selected_model: Model,
+    allow_luna: bool,
+    memory: Option<SelectedMemoryStore>,
+    subagents_enabled: bool,
+    session_config_path: PathBuf,
+) -> std::result::Result<Tools, nanocodex::tools::ToolsBuildError> {
+    let mut tools = tools
+        .into_builder()
+        .tool(SessionTool::new(session_config_path));
+    if let Some(store) = memory {
+        tools = tools.tool(MemoryTool::new(
+            store,
+            RootMemoryAuthorizer(subagents.root_agent_authority()),
+        ));
+    }
+    let tools = if subagents_enabled {
+        subagents.install_tools(tools, selected_model, allow_luna)
+    } else {
+        tools
+    };
+    tools.build()
 }
 
 pub(crate) fn configured_memory_store(
@@ -1163,8 +1201,7 @@ mod tests {
             .build()
             .unwrap();
         let (agent, events) = Nanocodex::builder(openai).build().unwrap();
-        let (_registry, subagent_control, subagent_updates) =
-            crate::core::extensions::subagents::channel(32);
+        let (subagent_control, subagent_updates) = tact_subagents::Subagents::new(32);
         let configured = ConfiguredAgent {
             agent,
             events,

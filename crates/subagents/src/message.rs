@@ -198,9 +198,7 @@ fn validate_body(body: &str) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{MAX_MESSAGE_BYTES, MAX_RETAINED_MESSAGES, MessageThreads};
-    use crate::core::extensions::subagents::{
-        AgentId, MessageDisposition, MessagePriority, MessagePurpose, MessageSender,
-    };
+    use crate::{AgentId, MessageDisposition, MessagePriority, MessagePurpose, MessageSender};
 
     #[test]
     fn replies_inherit_threads_and_require_the_original_recipient() {
@@ -310,7 +308,7 @@ mod tests {
                 AgentId::new(2),
                 MessagePriority::Deferred,
                 MessagePurpose::Coordinate,
-                Some(crate::core::extensions::subagents::MessageId::new(1)),
+                Some(crate::MessageId::new(1)),
                 "answer".to_owned(),
             )
             .unwrap_err();

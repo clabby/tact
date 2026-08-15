@@ -7,13 +7,14 @@ use std::{
 
 static NEXT_RUNTIME_ID: AtomicU64 = AtomicU64::new(0);
 
+/// Identifies a child within one root session's task tree.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(transparent)]
-pub(crate) struct AgentId(u64);
+pub struct AgentId(u64);
 
 impl AgentId {
-    #[cfg(test)]
-    pub(crate) const fn new(value: u64) -> Self {
+    /// Creates an identifier from its wire value.
+    pub const fn new(value: u64) -> Self {
         Self(value)
     }
 
@@ -29,13 +30,14 @@ impl fmt::Display for AgentId {
     }
 }
 
+/// Identifies a directed message within one root session.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(transparent)]
-pub(crate) struct MessageId(u64);
+pub struct MessageId(u64);
 
 impl MessageId {
-    #[cfg(test)]
-    pub(crate) const fn new(value: u64) -> Self {
+    /// Creates an identifier from its wire value.
+    pub const fn new(value: u64) -> Self {
         Self(value)
     }
 
@@ -51,13 +53,14 @@ impl fmt::Display for MessageId {
     }
 }
 
+/// Correlates the messages in one two-party conversation.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(transparent)]
-pub(crate) struct ThreadId(u64);
+pub struct ThreadId(u64);
 
 impl ThreadId {
-    #[cfg(test)]
-    pub(crate) const fn new(value: u64) -> Self {
+    /// Creates an identifier from its wire value.
+    pub const fn new(value: u64) -> Self {
         Self(value)
     }
 
@@ -72,11 +75,17 @@ impl fmt::Display for ThreadId {
     }
 }
 
+/// Identifies the origin of a directed message.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub(crate) enum MessageSender {
+pub enum MessageSender {
+    /// The root session that owns the task tree.
     Root,
-    Agent { agent_id: AgentId },
+    /// A child session in the task tree.
+    Agent {
+        /// The sending child.
+        agent_id: AgentId,
+    },
 }
 
 impl MessageSender {
@@ -88,16 +97,20 @@ impl MessageSender {
     }
 }
 
+/// Controls when a directed message interrupts its recipient.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum MessagePriority {
+pub enum MessagePriority {
+    /// Deliver after the recipient's active turn, or start an idle recipient.
     #[default]
     Deferred,
+    /// Steer an active turn at its next safe model boundary.
     Urgent,
 }
 
 impl MessagePriority {
-    pub(crate) const fn as_str(self) -> &'static str {
+    /// Returns the stable wire name used in prompts and tool results.
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Deferred => "deferred",
             Self::Urgent => "urgent",
@@ -105,19 +118,26 @@ impl MessagePriority {
     }
 }
 
+/// Describes the coordination intent of a directed message.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum MessagePurpose {
+pub enum MessagePurpose {
+    /// Replace the recipient's task when the sender has management authority.
     Delegate,
+    /// Share ordinary coordination context without replacing the task.
     #[default]
     Coordinate,
+    /// Report evidence or a result that may affect another agent's work.
     Finding,
+    /// Ask the recipient for information.
     Question,
+    /// Answer the message identified by `in_reply_to`.
     Reply,
 }
 
 impl MessagePurpose {
-    pub(crate) const fn as_str(self) -> &'static str {
+    /// Returns the stable wire name used in prompts and tool results.
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Delegate => "delegate",
             Self::Coordinate => "coordinate",
@@ -128,25 +148,38 @@ impl MessagePurpose {
     }
 }
 
+/// Reports how a recipient accepted a message.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum MessageDisposition {
+pub enum MessageDisposition {
+    /// The message started a new turn on an idle recipient.
     Started,
+    /// The message will run after the recipient's active turn.
     Queued,
+    /// The message steered the recipient's active turn.
     Steered,
 }
 
+/// A bounded directed message between agents in one task tree.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub(crate) struct AgentMessage {
-    pub(crate) id: MessageId,
-    pub(crate) thread_id: ThreadId,
-    pub(crate) from: MessageSender,
-    pub(crate) to: AgentId,
-    pub(crate) priority: MessagePriority,
-    pub(crate) purpose: MessagePurpose,
+pub struct AgentMessage {
+    /// The message identity.
+    pub id: MessageId,
+    /// The conversation containing this message.
+    pub thread_id: ThreadId,
+    /// The message origin.
+    pub from: MessageSender,
+    /// The recipient child.
+    pub to: AgentId,
+    /// The requested delivery behavior.
+    pub priority: MessagePriority,
+    /// The coordination intent.
+    pub purpose: MessagePurpose,
+    /// The prior message answered by this reply.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) in_reply_to: Option<MessageId>,
-    pub(crate) body: String,
+    pub in_reply_to: Option<MessageId>,
+    /// The bounded UTF-8 message body.
+    pub body: String,
 }
 
 impl AgentMessage {
@@ -185,26 +218,47 @@ impl AgentMessage {
     }
 }
 
+/// The retained messages in one two-party conversation.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub(crate) struct AgentThread {
-    pub(crate) id: ThreadId,
-    pub(crate) participants: [MessageSender; 2],
-    pub(crate) messages: Vec<AgentMessage>,
+pub struct AgentThread {
+    /// The thread identity.
+    pub id: ThreadId,
+    /// The two endpoints permitted to participate in the thread.
+    pub participants: [MessageSender; 2],
+    /// Retained messages in delivery order.
+    pub messages: Vec<AgentMessage>,
 }
 
+/// Tracks admission and terminal delivery separately.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
-pub(crate) enum MessageDeliveryState {
-    Admitted { disposition: MessageDisposition },
-    Delivered { disposition: MessageDisposition },
-    Failed { error: String },
+pub enum MessageDeliveryState {
+    /// The recipient mailbox accepted the message.
+    Admitted {
+        /// How the recipient accepted the message.
+        disposition: MessageDisposition,
+    },
+    /// The recipient incorporated the message into a turn.
+    Delivered {
+        /// How the recipient accepted the message.
+        disposition: MessageDisposition,
+    },
+    /// Delivery reached a terminal failure.
+    Failed {
+        /// A bounded description of the failure.
+        error: String,
+    },
 }
 
+/// A complete thread snapshot emitted when one message changes state.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub(crate) struct AgentMessageUpdate {
-    pub(crate) message_id: MessageId,
-    pub(crate) thread: AgentThread,
-    pub(crate) delivery: MessageDeliveryState,
+pub struct AgentMessageUpdate {
+    /// The message whose delivery state changed.
+    pub message_id: MessageId,
+    /// The current retained thread.
+    pub thread: AgentThread,
+    /// The message's new delivery state.
+    pub delivery: MessageDeliveryState,
 }
 
 pub(super) fn agent_prompt(id: AgentId, task: &str) -> String {
@@ -228,20 +282,35 @@ pub(super) fn agent_prompt(id: AgentId, task: &str) -> String {
     )
 }
 
+/// The lifecycle state of a child session.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
-pub(crate) enum AgentStatus {
+pub enum AgentStatus {
+    /// The child exists but has not started a turn.
     Pending,
+    /// The child has an active turn.
     Running,
-    Completed { output: serde_json::Value },
+    /// The child submitted a schema-valid result.
+    Completed {
+        /// The validated structured result.
+        output: serde_json::Value,
+    },
+    /// The most recent turn was interrupted and the session remains reusable.
     Interrupted,
-    Failed { error: String },
+    /// The most recent turn failed and the session remains reusable.
+    Failed {
+        /// A bounded description of the failure.
+        error: String,
+    },
+    /// The runtime is stopping the child and rejecting new work.
     Closing,
+    /// The child is terminal and cannot be reused.
     Closed,
 }
 
 impl AgentStatus {
-    pub(crate) const fn is_active(&self) -> bool {
+    /// Returns whether the child still owns or is stopping active work.
+    pub const fn is_active(&self) -> bool {
         matches!(self, Self::Pending | Self::Running | Self::Closing)
     }
 
@@ -260,31 +329,59 @@ impl AgentStatus {
     }
 }
 
+/// Describes a child session and its position in the task tree.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct AgentDescriptor {
-    pub(crate) id: AgentId,
-    pub(crate) session_id: String,
-    pub(crate) model: Model,
-    pub(crate) role: String,
-    pub(crate) task: String,
-    pub(crate) parent: Option<AgentId>,
+pub struct AgentDescriptor {
+    /// The child identity within its root session.
+    pub id: AgentId,
+    /// The underlying Nanocodex session identity.
+    pub session_id: String,
+    /// The model selected for the child.
+    pub model: Model,
+    /// The short specialization assigned by the caller.
+    pub role: String,
+    /// The child's current delegated task.
+    pub task: String,
+    /// The child that spawned this agent, or `None` for a direct child of the root.
+    pub parent: Option<AgentId>,
 }
 
+/// A typed observation emitted by a [`Subagents`](crate::Subagents) runtime.
 #[derive(Debug)]
-pub(crate) enum AgentUpdate {
+pub enum AgentUpdate {
+    /// A child was created or its delegated task changed.
     Added(AgentDescriptor),
-    Event { id: AgentId, event: AgentEvent },
-    Status { id: AgentId, status: AgentStatus },
+    /// The child emitted a Nanocodex event.
+    Event {
+        /// The child that emitted the event.
+        id: AgentId,
+        /// The underlying session event.
+        event: AgentEvent,
+    },
+    /// A child's lifecycle state changed.
+    Status {
+        /// The affected child.
+        id: AgentId,
+        /// The new lifecycle state.
+        status: AgentStatus,
+    },
+    /// A directed message changed delivery state.
     Message(AgentMessageUpdate),
 }
 
-pub(crate) struct ScopedAgentUpdate {
-    pub(crate) root_session_id: String,
-    pub(crate) update: AgentUpdate,
+/// Associates one runtime update with its owning root session.
+pub struct ScopedAgentUpdate {
+    /// The root Nanocodex session that owns the task tree.
+    pub root_session_id: String,
+    /// The typed runtime observation.
+    pub update: AgentUpdate,
 }
 
-#[derive(Clone, Copy, Eq, PartialEq)]
-pub(crate) struct SubagentRuntimeId(u64);
+/// Identifies one in-process runtime instance.
+///
+/// Consumers can discard late updates whose runtime identity no longer matches the active root.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct SubagentRuntimeId(u64);
 
 impl SubagentRuntimeId {
     pub(super) fn next() -> Self {

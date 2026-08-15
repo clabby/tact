@@ -21,6 +21,7 @@ use std::{
     sync::{Arc, Mutex, OnceLock, Weak},
     time::Duration,
 };
+use thiserror::Error;
 use tokio::{
     sync::{mpsc, oneshot, watch},
     task::JoinHandle,
@@ -98,8 +99,19 @@ struct AgentSettings {
 /// Clean subagents are registered by session before they can execute a turn. Root sessions and
 /// user-created forks are intentionally absent from that map and retain mutation authority.
 #[derive(Clone)]
-pub(crate) struct RootAgentGuard {
+pub struct RootAgentAuthority {
     registry: Weak<Registry>,
+}
+
+/// Failure to establish root-session authority.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum AuthorityError {
+    /// The owning subagent runtime has already closed.
+    #[error("subagent runtime is closed")]
+    RuntimeClosed,
+    /// The caller is a registered child session.
+    #[error("operation is only available to root agents")]
+    ChildSession,
 }
 
 #[derive(Default)]
@@ -1518,34 +1530,21 @@ impl Registry {
     }
 }
 
-impl RootAgentGuard {
-    #[cfg(test)]
-    pub(crate) fn new(registry: &Arc<Registry>) -> Self {
-        Self::from_weak(Arc::downgrade(registry))
-    }
-
-    pub(crate) fn from_weak(registry: Weak<Registry>) -> Self {
-        Self { registry }
-    }
-
-    pub(crate) async fn require_root(&self, session_id: &str) -> std::io::Result<()> {
+impl RootAgentAuthority {
+    /// Rejects callers that belong to a child session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the runtime has closed or `session_id` belongs to a registered child.
+    pub async fn require_root(&self, session_id: &str) -> Result<(), AuthorityError> {
         let registry = self
             .registry
             .upgrade()
-            .ok_or_else(|| std::io::Error::other("subagent runtime is closed"))?;
+            .ok_or(AuthorityError::RuntimeClosed)?;
         if registry.is_root_session(session_id).await {
             return Ok(());
         }
-        Err(std::io::Error::other(
-            "memory mutation is only available to root agents",
-        ))
-    }
-}
-
-#[nanocodex::tools::contract::async_trait]
-impl tact_memory::MutationAuthorizer for RootAgentGuard {
-    async fn authorize_memory_mutation(&self, session_id: &str) -> std::io::Result<()> {
-        self.require_root(session_id).await
+        Err(AuthorityError::ChildSession)
     }
 }
 
@@ -1596,35 +1595,128 @@ impl ChildSession {
     }
 }
 
+/// Owns the child sessions, shared capacity, and tool state for one agent runtime.
 #[derive(Clone)]
-pub(crate) struct SubagentControl {
-    registry: Arc<Registry>,
+pub struct Subagents {
+    pub(crate) registry: Arc<Registry>,
 }
 
-impl SubagentControl {
-    pub(crate) fn set_max_concurrency(&self, limit: usize) {
+/// A non-owning handle used by factories installed into child sessions.
+///
+/// Keeping tool factories weak prevents the runtime from retaining itself through the child-agent
+/// factory it owns.
+#[derive(Clone)]
+pub struct WeakSubagents {
+    pub(crate) registry: Weak<Registry>,
+}
+
+impl Subagents {
+    /// Creates an isolated runtime and its typed update stream.
+    ///
+    /// The receiver carries model events as well as lifecycle changes. Keep it alive and drain it
+    /// continuously for the lifetime of the runtime. Dropping it ends event forwarding and makes
+    /// later lifecycle changes unobservable. A zero concurrency limit creates the runtime but
+    /// rejects child turns until the limit is raised.
+    pub fn new(max_concurrency: usize) -> (Self, mpsc::UnboundedReceiver<ScopedAgentUpdate>) {
+        let (updates, receiver) = mpsc::unbounded_channel();
+        let registry = Arc::new(Registry::new(updates, max_concurrency));
+        (Self { registry }, receiver)
+    }
+
+    /// Returns a non-owning handle for tool factories and other runtime-owned callbacks.
+    pub fn downgrade(&self) -> WeakSubagents {
+        WeakSubagents {
+            registry: Arc::downgrade(&self.registry),
+        }
+    }
+
+    /// Configures how clean child sessions are constructed.
+    ///
+    /// The factory must return a new session and its event stream on every call. The runtime
+    /// supplies the requested model and the current inherited settings. A runtime accepts exactly
+    /// one factory; a second call returns [`NanocodexError::InvalidRequest`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NanocodexError::InvalidRequest`] if a factory is already configured.
+    pub fn set_agent_factory<F>(
+        &self,
+        thinking: Thinking,
+        fast_mode: bool,
+        factory: F,
+    ) -> Result<(), NanocodexError>
+    where
+        F: Fn(Model, Thinking, bool) -> Result<(Nanocodex, AgentEvents), NanocodexError>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.registry
+            .set_agent_factory(thinking, fast_mode, factory)
+    }
+
+    /// Returns a root-session authority checker for application-owned tools.
+    pub fn root_agent_authority(&self) -> RootAgentAuthority {
+        self.downgrade().root_agent_authority()
+    }
+
+    /// Changes the maximum number of concurrently active child turns.
+    ///
+    /// Lowering the limit does not cancel active turns. New reservations fail until the active
+    /// count falls below the new limit.
+    pub fn set_max_concurrency(&self, limit: usize) {
         self.registry.set_max_concurrency(limit);
     }
 
-    pub(crate) fn set_thinking(&self, thinking: Thinking) {
+    /// Changes the reasoning effort inherited by newly created child sessions.
+    pub fn set_thinking(&self, thinking: Thinking) {
         self.registry.set_agent_thinking(thinking);
     }
 
-    pub(crate) fn set_fast_mode(&self, enabled: bool) {
+    /// Changes the fast-mode setting inherited by newly created child sessions.
+    pub fn set_fast_mode(&self, enabled: bool) {
         self.registry.set_agent_fast_mode(enabled);
     }
 
-    pub(crate) async fn cancel_all(&self, root_session_id: &str) {
+    /// Attempts to interrupt every active child without closing reusable sessions.
+    ///
+    /// Shutdown is best effort and bounded. Individual child failures are reflected in updates.
+    pub async fn cancel_all(&self, root_session_id: &str) {
         self.registry.cancel_all(root_session_id).await;
     }
 
-    pub(crate) async fn close_all(&self, root_session_id: &str) {
+    /// Attempts to close and join every child owned by a root session.
+    ///
+    /// Shutdown is best effort and bounded. Individual child failures are reflected in updates.
+    pub async fn close_all(&self, root_session_id: &str) {
         drop(self.registry.close_all(root_session_id).await);
     }
 
-    pub(crate) fn runtime_id(&self) -> SubagentRuntimeId {
+    /// Returns the identity used to reject updates from a replaced runtime.
+    pub fn runtime_id(&self) -> SubagentRuntimeId {
         self.registry.id
     }
+}
+
+impl WeakSubagents {
+    /// Returns a root-session authority checker that does not keep the runtime alive.
+    pub fn root_agent_authority(&self) -> RootAgentAuthority {
+        RootAgentAuthority {
+            registry: self.registry.clone(),
+        }
+    }
+}
+
+#[cfg(test)]
+fn channel(
+    max_concurrency: usize,
+) -> (
+    Arc<Registry>,
+    Subagents,
+    mpsc::UnboundedReceiver<ScopedAgentUpdate>,
+) {
+    let (subagents, updates) = Subagents::new(max_concurrency);
+    (Arc::clone(&subagents.registry), subagents, updates)
 }
 
 pub(super) fn forward_events(
@@ -1663,28 +1755,14 @@ fn send_update(
         .is_ok()
 }
 
-pub(crate) fn channel(
-    max_concurrency: usize,
-) -> (
-    Arc<Registry>,
-    SubagentControl,
-    mpsc::UnboundedReceiver<ScopedAgentUpdate>,
-) {
-    let (updates, receiver) = mpsc::unbounded_channel();
-    let registry = Arc::new(Registry::new(updates, max_concurrency));
-    let control = SubagentControl {
-        registry: Arc::clone(&registry),
-    };
-    (registry, control, receiver)
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        AgentDescriptor, AgentId, AgentStatus, ChildSession, OutputContract, Registry,
-        RegistryState, RootAgentGuard, complete_session, completion_instructions, forward_events,
+        AgentDescriptor, AgentId, AgentStatus, AuthorityError, ChildSession, OutputContract,
+        Registry, RegistryState, RootAgentAuthority, Subagents, complete_session,
+        completion_instructions, forward_events,
     };
-    use crate::core::extensions::subagents::{
+    use crate::{
         AgentUpdate, MessageDeliveryState, MessageDisposition, MessagePriority, MessagePurpose,
     };
     use nanocodex::{
@@ -1774,7 +1852,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn root_agent_guard_rejects_registered_child_sessions() {
+    async fn root_agent_authority_rejects_registered_child_sessions() {
         let (updates, _updates_receiver) = mpsc::unbounded_channel();
         let registry = Arc::new(Registry::new(updates, 1));
         registry
@@ -1783,13 +1861,42 @@ mod tests {
             .await
             .root_by_session
             .insert("child".to_owned(), "root".to_owned());
-        let guard = RootAgentGuard::new(&registry);
+        let guard = RootAgentAuthority {
+            registry: Arc::downgrade(&registry),
+        };
 
         assert!(guard.require_root("root").await.is_ok());
         assert!(guard.require_root("fork").await.is_ok());
         assert_eq!(
-            guard.require_root("child").await.unwrap_err().to_string(),
-            "memory mutation is only available to root agents"
+            guard.require_root("child").await,
+            Err(AuthorityError::ChildSession)
+        );
+        drop(registry);
+        assert_eq!(
+            guard.require_root("root").await,
+            Err(AuthorityError::RuntimeClosed)
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_owned_agent_factory_does_not_keep_the_runtime_alive() {
+        let (subagents, mut updates) = Subagents::new(1);
+        let weak = subagents.downgrade();
+        let factory_weak = weak.clone();
+        subagents
+            .set_agent_factory(Thinking::Medium, false, move |_, _, _| {
+                let _ = &factory_weak;
+                Err(NanocodexError::InvalidRequest("unused factory".to_owned()))
+            })
+            .unwrap();
+
+        drop(subagents);
+
+        assert!(weak.registry.upgrade().is_none());
+        assert!(updates.recv().await.is_none());
+        assert_eq!(
+            weak.root_agent_authority().require_root("root").await,
+            Err(AuthorityError::RuntimeClosed)
         );
     }
 
@@ -1866,7 +1973,7 @@ mod tests {
 
     async fn next_message_update(
         updates: &mut tokio::sync::mpsc::UnboundedReceiver<super::ScopedAgentUpdate>,
-    ) -> crate::core::extensions::subagents::AgentMessageUpdate {
+    ) -> crate::AgentMessageUpdate {
         timeout(Duration::from_secs(5), async {
             loop {
                 let update = updates
@@ -2530,7 +2637,7 @@ mod tests {
             insert_pending_runtime_session(&registry, "main", None, Arc::new(Notify::new())).await;
         mark_reusable(&registry, "main", target).await;
 
-        for index in 0..crate::core::extensions::subagents::harness::DEFERRED_CAPACITY {
+        for index in 0..crate::harness::DEFERRED_CAPACITY {
             let receipt = registry
                 .send_message(
                     &sender_session,
@@ -2557,7 +2664,7 @@ mod tests {
             .unwrap_err();
         assert!(normal_error.to_string().contains("mailbox"));
 
-        for index in 0..crate::core::extensions::subagents::harness::URGENT_CAPACITY {
+        for index in 0..crate::harness::URGENT_CAPACITY {
             let receipt = registry
                 .send_message(
                     &sender_session,

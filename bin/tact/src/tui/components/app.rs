@@ -7,7 +7,7 @@ use super::{
 };
 use crate::{
     app::config::{ReasoningEffort, ReasoningMode},
-    core::extensions::{Skill, subagents::AgentUpdate},
+    core::extensions::Skill,
     tui::{
         pane::PaneId,
         session::{RecentPrompt, SessionSummary},
@@ -26,6 +26,7 @@ use ratatui::{
 use semver::Version;
 use std::{path::PathBuf, sync::Arc, time::Instant};
 use tact_memory::{MemoryAccess, MemoryKey, MemoryRecord, MemorySource};
+use tact_subagents::AgentUpdate;
 use unicode_width::UnicodeWidthStr;
 
 const SPLIT_HINT: &str = " mouse: focus · Ctrl+C: clear · Ctrl+C×2: close ";

@@ -2,13 +2,7 @@ use super::{
     DirectedMessageEntry, EntryId, EntryKind, MessageDelivery, MessagePhase, SessionStarted,
     ShellId, ToolEntry, ToolState, TranscriptEntry, TranscriptRecord, TransientStatus,
 };
-use crate::{
-    app::config::ReasoningEffort,
-    core::extensions::subagents::{
-        AgentMessageUpdate, MessageDeliveryState, MessageDisposition, MessageSender, ThreadId,
-    },
-    tui::format::humanize_tool,
-};
+use crate::{app::config::ReasoningEffort, tui::format::humanize_tool};
 use nanocodex::{
     agent::events::{
         AssistantDelta, AssistantMessage, CompactionCompleted, CompactionFailed,
@@ -21,6 +15,9 @@ use serde_json::Value;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     path::PathBuf,
+};
+use tact_subagents::{
+    AgentMessageUpdate, MessageDeliveryState, MessageDisposition, MessageSender, ThreadId,
 };
 
 const MAX_RETAINED_MESSAGE_THREADS: usize = 256;
@@ -1255,7 +1252,6 @@ mod tests {
     };
     use crate::{
         app::config::ReasoningEffort,
-        core::extensions::subagents::{AgentId, AgentMessageUpdate, MessageSender, ThreadId},
         tui::transcript::{
             LocalEvent, SessionEnded, SessionOutcome, ShellId, TranscriptRecord, TurnId,
         },
@@ -1264,6 +1260,7 @@ mod tests {
     use serde::Serialize;
     use serde_json::{json, value::to_raw_value};
     use std::sync::Arc;
+    use tact_subagents::{AgentId, AgentMessageUpdate, MessageSender, ThreadId};
 
     fn agent(kind: AgentEventKind, payload: impl Serialize) -> TranscriptRecord {
         agent_at(1, kind, payload)
@@ -1346,7 +1343,7 @@ mod tests {
         assert_eq!(thread.deliveries.len(), 1);
         assert!(matches!(
             thread.deliveries[0].state,
-            crate::core::extensions::subagents::MessageDeliveryState::Delivered { .. }
+            tact_subagents::MessageDeliveryState::Delivered { .. }
         ));
 
         let mut snapshot = model.fork_snapshot();

@@ -1,11 +1,6 @@
 //! Structured child-agent evidence for headless runs.
 
-use crate::{
-    app::error::RuntimeError,
-    core::extensions::subagents::{
-        AgentDescriptor, AgentId, AgentMessageUpdate, AgentStatus, AgentUpdate, ScopedAgentUpdate,
-    },
-};
+use crate::app::error::RuntimeError;
 use nanocodex::{
     Model,
     agent::events::{
@@ -18,6 +13,9 @@ use std::{
     fs::File,
     io::{BufWriter, Write},
     path::PathBuf,
+};
+use tact_subagents::{
+    AgentDescriptor, AgentId, AgentMessageUpdate, AgentStatus, AgentUpdate, ScopedAgentUpdate,
 };
 use tokio::{
     sync::{mpsc, oneshot},
@@ -402,15 +400,13 @@ impl<'a> From<&'a AgentDescriptor> for AgentRecord<'a> {
 #[cfg(test)]
 mod tests {
     use super::{OrchestrationRecorder, RunOutcome};
-    use crate::core::extensions::subagents::{
-        AgentDescriptor, AgentId, AgentStatus, AgentUpdate, ScopedAgentUpdate,
-    };
     use nanocodex::{
         Model,
         agent::events::{AgentEvent, AgentEventKind},
     };
     use serde_json::{Value, json, value::to_raw_value};
     use std::{fs, sync::Arc};
+    use tact_subagents::{AgentDescriptor, AgentId, AgentStatus, AgentUpdate, ScopedAgentUpdate};
     use tempfile::tempdir;
     use tokio::sync::mpsc;
 

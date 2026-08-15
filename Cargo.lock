@@ -4399,6 +4399,7 @@ dependencies = [
  "shlex",
  "syntect",
  "tact-memory",
+ "tact-subagents",
  "tar",
  "tempfile",
  "thiserror 2.0.19",
@@ -4448,6 +4449,20 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "zeroize",
+]
+
+[[package]]
+name = "tact-subagents"
+version = "0.5.4"
+dependencies = [
+ "futures-util",
+ "jsonschema",
+ "nanocodex",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "tokio",
+ "tower",
 ]
 
 [[package]]

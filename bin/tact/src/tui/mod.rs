@@ -27,10 +27,7 @@ use crate::{
         error::{Result, RuntimeError},
         hook,
     },
-    core::{
-        ConfiguredAgent,
-        extensions::{Skill, subagents::SubagentControl},
-    },
+    core::{ConfiguredAgent, extensions::Skill},
     tui::{
         agent_events::ForwardedAgentEvent,
         components::{
@@ -71,6 +68,7 @@ use tact_memory::{
     MemoryAccess, MemoryError, MemoryKey, MemoryRecord, MemorySource, MemoryStore,
     SelectedMemoryStore,
 };
+use tact_subagents::Subagents;
 use tokio::{
     sync::mpsc,
     task::{JoinHandle, JoinSet},
@@ -286,7 +284,7 @@ struct PaneRuntime {
     current_model: Model,
     active_shells: usize,
     generation: u64,
-    subagent_control: SubagentControl,
+    subagent_control: Subagents,
 }
 
 struct WriterCompletion {
@@ -1656,7 +1654,7 @@ fn open_pane(
     config: &Config,
     settings: PaneSettings,
     instructions: Arc<str>,
-    subagent_control: SubagentControl,
+    subagent_control: Subagents,
     writer_updates: &mpsc::UnboundedSender<WriterCompletion>,
 ) -> Result<PaneRuntime> {
     let PaneGeneration { pane, generation } = identity;
@@ -2747,10 +2745,7 @@ mod tests {
             config::{Config, ConfigOverrides, ReasoningEffort, ReasoningMode},
             error::{Error, RuntimeError},
         },
-        core::{
-            configured_memory_store,
-            extensions::subagents::{AgentId, AgentStatus, AgentUpdate},
-        },
+        core::configured_memory_store,
         tui::{
             components::RecentPromptDraft,
             pane::PaneId,
@@ -2763,6 +2758,7 @@ mod tests {
     use nanocodex::Model;
     use std::{collections::HashMap, fs, path::Path, sync::Arc};
     use tact_memory::{MemoryStore, SelectedMemoryStore};
+    use tact_subagents::{AgentId, AgentStatus, AgentUpdate};
     use tempfile::tempdir;
 
     #[test]
@@ -2993,8 +2989,7 @@ mod tests {
         })
         .unwrap();
         let (sender, mut completions) = tokio::sync::mpsc::unbounded_channel();
-        let (_subagents, subagent_control, _updates) =
-            crate::core::extensions::subagents::channel(32);
+        let (subagent_control, _updates) = tact_subagents::Subagents::new(32);
         let main = open_pane(
             PaneGeneration {
                 pane: PaneId::Main,
@@ -3043,8 +3038,7 @@ mod tests {
 
         assert_eq!(subagent_pane(&panes, &fork_update), Some(PaneId::Fork(1)));
 
-        let (_other_registry, other_control, _other_updates) =
-            crate::core::extensions::subagents::channel(32);
+        let (other_control, _other_updates) = tact_subagents::Subagents::new(32);
         let stale_update = ForwardedSubagentUpdate {
             runtime_id: other_control.runtime_id(),
             root_session_id: "fork-session".to_owned(),
@@ -3101,8 +3095,7 @@ mod tests {
         })
         .unwrap();
         let (sender, mut completions) = tokio::sync::mpsc::unbounded_channel();
-        let (_subagents, subagent_control, _updates) =
-            crate::core::extensions::subagents::channel(32);
+        let (subagent_control, _updates) = tact_subagents::Subagents::new(32);
         let mut old = open_pane(
             PaneGeneration {
                 pane: PaneId::Main,

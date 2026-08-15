@@ -27,10 +27,7 @@ use super::{
 };
 use crate::{
     app::config::{ReasoningEffort, ReasoningMode},
-    core::extensions::{
-        Skill,
-        subagents::{AgentUpdate, MessageSender},
-    },
+    core::extensions::Skill,
     tui::{
         context::ContextDiagnostics,
         prompt::Submission,
@@ -55,6 +52,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tact_memory::{MemoryAccess, MemoryKey, MemoryRecord, MemorySource};
+use tact_subagents::{AgentUpdate, MessageSender};
 
 const KEY_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(2);
 const SELECTION_SCROLL_INTERVAL: Duration = Duration::from_millis(60);
@@ -2923,10 +2921,7 @@ mod tests {
     };
     use crate::{
         app::config::{ReasoningEffort, ReasoningMode},
-        core::extensions::{
-            Skill,
-            subagents::{AgentDescriptor, AgentId, AgentMessageUpdate, AgentStatus, AgentUpdate},
-        },
+        core::extensions::Skill,
         tui::{
             session::{RecentPrompt, SessionSummary},
             theme::{Theme, ThemeMode},
@@ -2959,6 +2954,7 @@ mod tests {
         time::{Duration, Instant},
     };
     use tact_memory::{MemoryAccess, MemoryKey, MemoryRecord, MemorySource};
+    use tact_subagents::{AgentDescriptor, AgentId, AgentMessageUpdate, AgentStatus, AgentUpdate};
 
     fn local_memory_access() -> MemoryAccess {
         MemoryAccess {

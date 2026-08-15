@@ -1,5 +1,5 @@
 [workspace]
-members = ["bin/tact", "crates/memory", "examples/memory-server"]
+members = ["bin/tact", "crates/*", "examples/memory-server"]
 resolver = "3"
 
 [workspace.package]
@@ -55,6 +55,7 @@ shlex = "2.0.1"
 syntect = { version = "5.3.0", default-features = false, features = ["default-syntaxes", "regex-onig"] }
 tar = "0.4.44"
 tact-memory = { version = "0.5.4", path = "crates/memory" }
+tact-subagents = { version = "0.5.4", path = "crates/subagents" }
 tempfile = "3.27.0"
 thiserror = "2.0.19"
 tokio = { version = "1.53.1", features = ["io-util", "macros", "process", "rt-multi-thread", "signal", "sync", "time"] }
