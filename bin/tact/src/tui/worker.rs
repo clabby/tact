@@ -3,10 +3,7 @@
 use crate::{
     app::config::ReasoningEffort,
     core::MEMORY_REVIEW_CHECKPOINT,
-    tui::{
-        components::QueueId, pane::PaneId, prompt::Submission, storage::database_path,
-        transcript::TurnId,
-    },
+    tui::{components::QueueId, pane::PaneId, prompt::Submission, transcript::TurnId},
 };
 use nanocodex::{
     AgentEvents, Nanocodex, NanocodexError, TurnControl,
@@ -80,17 +77,13 @@ pub(crate) enum AuxiliaryContext {
 
 pub(crate) struct ReflectionContext {
     config_path: PathBuf,
-    current_session: String,
-    session_database: PathBuf,
     workspace: PathBuf,
 }
 
 impl ReflectionContext {
-    pub(crate) fn new(config_path: &Path, workspace: &Path, current_session: &str) -> Self {
+    pub(crate) fn new(config_path: &Path, workspace: &Path) -> Self {
         Self {
             config_path: config_path.to_path_buf(),
-            current_session: current_session.to_owned(),
-            session_database: database_path(config_path),
             workspace: workspace.to_path_buf(),
         }
     }
@@ -98,8 +91,6 @@ impl ReflectionContext {
     fn prompt(&self) -> String {
         let context = serde_json::json!({
             "config_path": self.config_path.to_string_lossy(),
-            "current_session": self.current_session,
-            "session_database": self.session_database.to_string_lossy(),
             "workspace": self.workspace.to_string_lossy(),
         });
         format!("<reflection_context>\n{context}\n</reflection_context>")
@@ -212,17 +203,11 @@ const REFLECTION_PROMPT: &str = concat!(
     "session and produce a report for the user. Start with the current conversation. Use the ",
     "additional instructions to narrow the topic or identify other workspaces, sessions, or task ",
     "families; otherwise sample relevant recent history from the current workspace.\n\n",
-    "Discover historical candidates in bounded stages. Use code mode to run bounded `SELECT` ",
-    "queries with `sqlite3 -readonly` against the supplied Tact V2 session database. Inspect only ",
-    "`sessions(session_id, workspace, started_at_ms, updated_at_ms, preview)` and ",
-    "`events(session_id, event_id, prompt_text, prompt_recorded_at_ms)`: first summarize workspaces ",
-    "and recent sessions, then inspect short recent prompt previews for the selected scope. By ",
-    "default, stay within the current workspace, inspect at most 30 recent sessions, and return at ",
-    "most 100 prompt previews truncated to 512 characters. Expand in another bounded batch only when ",
-    "the user's instructions or the evidence justify it. Exclude the supplied current session ID ",
-    "from historical candidates so current evidence is not counted twice. Never select `record_json` or ",
-    "`resume_states`, issue a write or pragma that changes state, or emit an unbounded result. If ",
-    "SQLite is unavailable, state that limitation instead of adding tooling. ",
+    "Discover historical candidates in bounded stages with `find_sessions`. By default, pass the ",
+    "supplied current workspace and inspect its recent sessions. Use `contains_any` when the topic ",
+    "suggests useful literal prompt patterns; omit the workspace only when the additional ",
+    "instructions or evidence justify cross-workspace discovery. The tool excludes this conversation ",
+    "automatically. Pass `next_cursor` back only when another bounded page is needed. ",
     "After selecting a small number of high-value session IDs, use `read_session` with exact kinds ",
     "to read only enough context to establish what happened. A targeted `user.submitted` search can ",
     "locate a candidate event; a separate call starting from that event ID can retrieve the adjacent ",
@@ -1117,11 +1102,8 @@ mod tests {
 
     #[test]
     fn reflection_prompt_is_read_only_and_ends_with_reviewable_actions() {
-        let context = ReflectionContext::new(
-            Path::new("/tact/config.toml"),
-            Path::new("/work/current"),
-            "current-session",
-        );
+        let context =
+            ReflectionContext::new(Path::new("/tact/config.toml"), Path::new("/work/current"));
         let prompt = reflection_prompt(
             &Submission::text("Focus on validation gaps.".to_owned()),
             &context,
@@ -1130,10 +1112,11 @@ mod tests {
 
         assert!(text.contains("Focus on validation gaps."));
         assert!(text.contains("self-contained Tact reflection turn"));
-        assert!(text.contains("sqlite3 -readonly"));
-        assert!(text.contains(r#""session_database":"/tact/sessions/v2.sqlite3""#));
+        assert!(text.contains("`find_sessions`"));
+        assert!(text.contains("`read_session`"));
         assert!(text.contains(r#""workspace":"/work/current""#));
-        assert!(text.contains(r#""current_session":"current-session""#));
+        assert!(!text.contains("sqlite3"));
+        assert!(!text.contains("session_database"));
         assert!(text.contains("global-memory scans"));
         assert!(text.contains("config show"));
         assert!(text.contains("read-only analysis turn"));

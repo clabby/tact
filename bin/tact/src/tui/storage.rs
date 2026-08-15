@@ -4,7 +4,9 @@ use crate::{
     app::config::{ReasoningEffort, ReasoningMode},
     tui::transcript::{SCHEMA_VERSION, SessionStarted, TranscriptRecord},
 };
-use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
+use rusqlite::{
+    Connection, OpenFlags, OptionalExtension, Transaction, params, params_from_iter, types::Value,
+};
 use std::{
     collections::HashMap,
     fs,
@@ -60,11 +62,17 @@ pub(crate) enum StorageError {
 pub(crate) struct StoredSession {
     pub(crate) session_id: String,
     pub(crate) started_at_unix_ms: u64,
+    pub(crate) updated_at_unix_ms: u64,
     pub(crate) model: String,
     pub(crate) effort: ReasoningEffort,
     pub(crate) reasoning_mode: ReasoningMode,
     pub(crate) workspace: PathBuf,
     pub(crate) preview: String,
+}
+
+pub(crate) struct SessionSearchPage {
+    pub(crate) sessions: Vec<StoredSession>,
+    pub(crate) next_cursor: Option<(u64, String)>,
 }
 
 #[derive(Debug)]
@@ -132,6 +140,7 @@ impl SessionStorage {
             })?;
         configure(&connection, &path)?;
         initialize(&connection, &path)?;
+        ensure_discovery_indexes(&connection, &path)?;
         set_private_file_permissions(&path)?;
         Ok(Self {
             path,
@@ -426,13 +435,13 @@ impl SessionStorage {
         let workspace = workspace.to_string_lossy();
         let statement_sql = if resumable_only {
             "SELECT s.session_id, s.started_at_ms, s.model, s.effort, s.reasoning_mode,\n\
-                    s.workspace, s.preview\n\
+                    s.workspace, s.preview, s.updated_at_ms\n\
              FROM sessions s INNER JOIN resume_states r ON r.session_id = s.session_id\n\
              WHERE s.workspace = ?1\n\
              ORDER BY s.updated_at_ms DESC, s.session_id"
         } else {
             "SELECT s.session_id, s.started_at_ms, s.model, s.effort, s.reasoning_mode,\n\
-                    s.workspace, s.preview\n\
+                    s.workspace, s.preview, s.updated_at_ms\n\
              FROM sessions s\n\
              WHERE s.workspace = ?1\n\
              ORDER BY s.updated_at_ms DESC, s.session_id"
@@ -446,6 +455,113 @@ impl SessionStorage {
             .map_err(|source| query(&self.path, source))?;
         rows.map(|row| row.map_err(|source| query(&self.path, source)))
             .collect()
+    }
+
+    pub(crate) fn find_sessions(
+        &self,
+        current_session: &str,
+        workspace: Option<&Path>,
+        contains_any: Option<&[String]>,
+        cursor: Option<(u64, &str)>,
+        limit: usize,
+    ) -> Result<SessionSearchPage, StorageError> {
+        let mut parameters = vec![Value::Text(current_session.to_owned())];
+        let mut candidate_filters = String::new();
+        if let Some(workspace) = workspace {
+            parameters.push(Value::Text(workspace.to_string_lossy().into_owned()));
+            candidate_filters.push_str(&format!("AND s.workspace = ?{}\n", parameters.len()));
+        }
+        if let Some((updated_at, session_id)) = cursor {
+            parameters.push(Value::Integer(to_sql_u64(updated_at)));
+            let updated_at_parameter = parameters.len();
+            parameters.push(Value::Text(session_id.to_owned()));
+            let session_id_parameter = parameters.len();
+            candidate_filters.push_str(&format!(
+                "AND (s.updated_at_ms < ?{updated_at_parameter}\n\
+                 OR (s.updated_at_ms = ?{updated_at_parameter}\n\
+                     AND s.session_id > ?{session_id_parameter}))\n"
+            ));
+        }
+        parameters.push(Value::Integer(
+            i64::try_from(limit.saturating_add(1)).unwrap_or(i64::MAX),
+        ));
+        let limit_parameter = parameters.len();
+        let matches = contains_any.map_or_else(
+            || "1".to_owned(),
+            |patterns| {
+                let search_parameters = patterns
+                    .iter()
+                    .enumerate()
+                    .map(|(index, pattern)| {
+                        parameters.push(Value::Text(pattern.to_owned()));
+                        index.saturating_add(limit_parameter).saturating_add(1)
+                    })
+                    .collect::<Vec<_>>();
+                let preview = search_parameters
+                    .iter()
+                    .map(|parameter| {
+                        format!("instr(lower(c.search_preview), lower(?{parameter})) > 0")
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" OR ");
+                let prompts = search_parameters
+                    .iter()
+                    .map(|parameter| {
+                        format!("instr(lower(e.prompt_text), lower(?{parameter})) > 0")
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" OR ");
+                format!(
+                    "(({preview}) OR EXISTS(\n\
+                     SELECT 1 FROM events e WHERE e.session_id = c.session_id\n\
+                     AND e.prompt_text IS NOT NULL AND ({prompts})\n\
+                 ))"
+                )
+            },
+        );
+        let query_sql = format!(
+            "WITH candidates AS MATERIALIZED (\n\
+                 SELECT s.session_id, s.started_at_ms, s.model, s.effort, s.reasoning_mode,\n\
+                        s.workspace, s.preview AS search_preview, s.updated_at_ms\n\
+                 FROM sessions s\n\
+                 WHERE s.session_id != ?1\n\
+                   {candidate_filters}\
+                 ORDER BY s.updated_at_ms DESC, s.session_id\n\
+                 LIMIT ?{limit_parameter}\n\
+             )\n\
+             SELECT c.session_id, c.started_at_ms, c.model, c.effort, c.reasoning_mode,\n\
+                    c.workspace, substr(c.search_preview, 1, 513), c.updated_at_ms, {matches}\n\
+             FROM candidates c\n\
+             ORDER BY c.updated_at_ms DESC, c.session_id"
+        );
+        let mut statement = self
+            .connection
+            .prepare(&query_sql)
+            .map_err(|source| query(&self.path, source))?;
+        let rows = statement
+            .query_map(params_from_iter(parameters), |row| {
+                Ok((decode_session(row)?, row.get::<_, bool>(8)?))
+            })
+            .map_err(|source| query(&self.path, source))?;
+        let mut candidates = rows
+            .map(|row| row.map_err(|source| query(&self.path, source)))
+            .collect::<Result<Vec<_>, _>>()?;
+        let has_more = candidates.len() > limit;
+        candidates.truncate(limit);
+        let next_cursor = if has_more {
+            candidates
+                .last()
+                .map(|session| (session.0.updated_at_unix_ms, session.0.session_id.clone()))
+        } else {
+            None
+        };
+        Ok(SessionSearchPage {
+            sessions: candidates
+                .into_iter()
+                .filter_map(|(session, matches)| matches.then_some(session))
+                .collect(),
+            next_cursor,
+        })
     }
 
     pub(crate) fn recent_prompts(&self, limit: usize) -> Result<Vec<StoredPrompt>, StorageError> {
@@ -565,6 +681,17 @@ fn initialize(connection: &Connection, path: &Path) -> Result<(), StorageError> 
                  session_id TEXT PRIMARY KEY, state_zstd BLOB NOT NULL\n\
              ) STRICT;\n\
              PRAGMA user_version = 2; COMMIT;",
+        )
+        .map_err(|source| query(path, source))
+}
+
+fn ensure_discovery_indexes(connection: &Connection, path: &Path) -> Result<(), StorageError> {
+    connection
+        .execute_batch(
+            "CREATE INDEX IF NOT EXISTS sessions_by_recency\n\
+                 ON sessions(updated_at_ms DESC, session_id);\n\
+             CREATE INDEX IF NOT EXISTS sessions_by_workspace_recency\n\
+                 ON sessions(workspace, updated_at_ms DESC, session_id);",
         )
         .map_err(|source| query(path, source))
 }
@@ -744,6 +871,7 @@ fn decode_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredSession> {
     Ok(StoredSession {
         session_id: row.get(0)?,
         started_at_unix_ms: from_sql_u64(row.get(1)?),
+        updated_at_unix_ms: from_sql_u64(row.get(7)?),
         model: row.get(2)?,
         effort: decode_json_column(3, &effort)?,
         reasoning_mode: decode_json_column(4, &reasoning_mode)?,
@@ -982,6 +1110,44 @@ mod tests {
             ["resumable"]
         );
         assert_eq!(mentionable.len(), 2);
+    }
+
+    #[test]
+    fn session_discovery_filters_excludes_and_continues_in_stable_order() {
+        let directory = tempdir().unwrap();
+        let config = directory.path().join("config.toml");
+        let mut storage = SessionStorage::open(&config).unwrap();
+        append_prompt(&mut storage, "current", 300, "needle");
+        append_prompt(&mut storage, "alpha", 200, "first needle");
+        append_prompt(&mut storage, "beta", 200, "second NEEDLE");
+        append_prompt(&mut storage, "unrelated", 100, "different topic");
+        let patterns = vec!["needle".to_owned()];
+
+        let first = storage
+            .find_sessions(
+                "current",
+                Some(Path::new("/work")),
+                Some(&patterns),
+                None,
+                1,
+            )
+            .unwrap();
+        assert_eq!(first.sessions.len(), 1);
+        assert_eq!(first.sessions[0].session_id, "alpha");
+        assert_eq!(first.sessions[0].updated_at_unix_ms, 200);
+        assert_eq!(first.next_cursor, Some((200, "alpha".to_owned())));
+
+        let second = storage
+            .find_sessions(
+                "current",
+                Some(Path::new("/work")),
+                Some(&patterns),
+                Some((200, "alpha")),
+                1,
+            )
+            .unwrap();
+        assert_eq!(second.sessions.len(), 1);
+        assert_eq!(second.sessions[0].session_id, "beta");
     }
 
     fn append_prompt(storage: &mut SessionStorage, session_id: &str, at: u64, text: &str) {

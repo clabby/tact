@@ -10,7 +10,10 @@ use crate::{
         error::{ConfigError, Result, RuntimeError},
         hook,
     },
-    core::extensions::{Skill, SkillCatalog, mcp_provider, sessions::SessionTool},
+    core::extensions::{
+        Skill, SkillCatalog, mcp_provider,
+        sessions::{FindSessionsTool, ReadSessionTool},
+    },
     tui::session::ResumeState,
 };
 use nanocodex::{
@@ -79,8 +82,9 @@ const SESSION_REFERENCE_INSTRUCTIONS: &str = concat!(
     "Session references use `@@<session-id>`. When the user references one, use `read_session` ",
     "to scan the relevant transcript records in one bounded call. Prefer record-kind and text ",
     "filters, and provide multiple text patterns together when useful. Pass `next_cursor` back only ",
-    "when the scan could not finish and more evidence is needed. Do not treat the ID itself as ",
-    "session content."
+    "when the scan could not finish and more evidence is needed. Use `find_sessions` for bounded ",
+    "discovery when an exact session ID is not already known. Do not treat an ID itself as session ",
+    "content."
 );
 
 const MEMORY_INSTRUCTIONS: &str = concat!(
@@ -458,7 +462,8 @@ fn install_agent_tools(
 ) -> std::result::Result<Tools, nanocodex::tools::ToolsBuildError> {
     let mut tools = tools
         .into_builder()
-        .tool(SessionTool::new(session_config_path));
+        .tool(FindSessionsTool::new(session_config_path.clone()))
+        .tool(ReadSessionTool::new(session_config_path));
     if let Some(store) = memory {
         tools = tools.tool(MemoryTool::new(
             store,

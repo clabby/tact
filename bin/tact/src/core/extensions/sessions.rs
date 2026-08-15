@@ -1,7 +1,7 @@
-//! Bounded, read-only access to V2 session transcripts.
+//! Bounded discovery and read-only access to V2 session transcripts.
 
 use crate::tui::{
-    storage::{DecodedStoredRecord, SessionStorage, StorageError},
+    storage::{DecodedStoredRecord, SessionStorage, StorageError, StoredSession},
     transcript::TranscriptRecord,
 };
 use nanocodex::{
@@ -12,7 +12,11 @@ use nanocodex::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::{io, io::Write, path::PathBuf};
+use std::{
+    io,
+    io::Write,
+    path::{Path, PathBuf},
+};
 use thiserror::Error;
 
 const APPROX_BYTES_PER_TOKEN: usize = 4;
@@ -23,6 +27,41 @@ const MAX_SCANNED_BYTES: usize = 16 * 1024 * 1024;
 const MAX_KIND_FILTERS: usize = 16;
 const MAX_TEXT_FILTERS: usize = 16;
 const MAX_TEXT_FILTER_BYTES: usize = 256;
+const MAX_FOUND_SESSIONS: usize = 30;
+const MAX_WORKSPACE_BYTES: usize = 4_096;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FindSessionsInput {
+    #[serde(default)]
+    workspace: Option<PathBuf>,
+    #[serde(default)]
+    contains_any: Option<Vec<String>>,
+    #[serde(default)]
+    cursor: Option<SessionCursor>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct SessionCursor {
+    updated_at_ms: u64,
+    session_id: String,
+}
+
+#[derive(Serialize)]
+struct FindSessionsOutput {
+    sessions: Vec<FoundSession>,
+    next_cursor: Option<SessionCursor>,
+}
+
+#[derive(Serialize)]
+struct FoundSession {
+    session_id: String,
+    workspace: PathBuf,
+    started_at_ms: u64,
+    updated_at_ms: u64,
+    preview: String,
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -63,7 +102,7 @@ struct TextMatch {
 }
 
 #[derive(Debug, Error)]
-enum ReadError {
+enum SessionToolError {
     #[error(transparent)]
     Storage(#[from] StorageError),
     #[error(transparent)]
@@ -72,11 +111,11 @@ enum ReadError {
     OutputBudgetTooSmall,
 }
 
-pub(crate) struct SessionTool {
+pub(crate) struct ReadSessionTool {
     config_path: PathBuf,
 }
 
-impl SessionTool {
+impl ReadSessionTool {
     pub(crate) const fn new(config_path: PathBuf) -> Self {
         Self { config_path }
     }
@@ -108,21 +147,7 @@ impl SessionTool {
         }) {
             return Err(io::Error::other("record kinds must contain 1 to 64 bytes").into());
         }
-        if contains_any
-            .as_ref()
-            .is_some_and(|patterns| patterns.is_empty() || patterns.len() > MAX_TEXT_FILTERS)
-        {
-            return Err(io::Error::other("provide between 1 and 16 session text patterns").into());
-        }
-        if contains_any.as_ref().is_some_and(|patterns| {
-            patterns
-                .iter()
-                .any(|pattern| pattern.is_empty() || pattern.len() > MAX_TEXT_FILTER_BYTES)
-        }) {
-            return Err(
-                io::Error::other("session text patterns must contain 1 to 256 bytes").into(),
-            );
-        }
+        validate_text_filters(contains_any.as_deref())?;
 
         let config_path = self.config_path.clone();
         let requested_id = session_id.clone();
@@ -145,15 +170,36 @@ impl SessionTool {
     }
 }
 
+fn validate_text_filters(contains_any: Option<&[String]>) -> Result<(), io::Error> {
+    if contains_any
+        .as_ref()
+        .is_some_and(|patterns| patterns.is_empty() || patterns.len() > MAX_TEXT_FILTERS)
+    {
+        return Err(io::Error::other(
+            "provide between 1 and 16 session text patterns",
+        ));
+    }
+    if contains_any.is_some_and(|patterns| {
+        patterns
+            .iter()
+            .any(|pattern| pattern.is_empty() || pattern.len() > MAX_TEXT_FILTER_BYTES)
+    }) {
+        return Err(io::Error::other(
+            "session text patterns must contain 1 to 256 bytes",
+        ));
+    }
+    Ok(())
+}
+
 #[async_trait]
-impl Tool for SessionTool {
+impl Tool for ReadSessionTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::function(
             "read_session",
-            "Scans a known Tact V2 session incrementally and returns one bounded set of relevant records without loading the full transcript. The session ID may come from an explicit @@ reference or Tact's built-in reflection workflow. Use kinds and contains_any to filter during the scan. Cursor is an exclusive event-ID boundary: pass next_cursor back to continue a bounded scan, or pass a matched event_id to read following context.",
-            input_schema(),
+            "Scans a known Tact V2 session incrementally and returns one bounded set of relevant records without loading the full transcript. The session ID may come from an explicit @@ reference or find_sessions. Use kinds and contains_any to filter during the scan. Cursor is an exclusive event-ID boundary: pass next_cursor back to continue a bounded scan, or pass a matched event_id to read following context.",
+            read_input_schema(),
         )
-        .with_output_schema(output_schema())
+        .with_output_schema(read_output_schema())
     }
 
     async fn execute(&self, input: ToolInput, context: ToolContext<'_>) -> ToolResult {
@@ -174,6 +220,152 @@ impl Tool for SessionTool {
     }
 }
 
+pub(crate) struct FindSessionsTool {
+    config_path: PathBuf,
+}
+
+impl FindSessionsTool {
+    pub(crate) const fn new(config_path: PathBuf) -> Self {
+        Self { config_path }
+    }
+
+    async fn find(
+        &self,
+        current_session: String,
+        input: FindSessionsInput,
+        output_token_budget: usize,
+    ) -> ToolResult {
+        validate_text_filters(input.contains_any.as_deref())?;
+        if input.workspace.as_ref().is_some_and(|workspace| {
+            workspace.as_os_str().is_empty()
+                || workspace.to_string_lossy().len() > MAX_WORKSPACE_BYTES
+        }) {
+            return Err(io::Error::other("workspace paths must contain 1 to 4096 bytes").into());
+        }
+        if input
+            .cursor
+            .as_ref()
+            .is_some_and(|cursor| cursor.session_id.trim().is_empty())
+        {
+            return Err(io::Error::other("session cursor ID is empty").into());
+        }
+
+        let config_path = self.config_path.clone();
+        let output = tokio::task::spawn_blocking(move || {
+            let Some(storage) = SessionStorage::open_read_only(&config_path)? else {
+                return Ok(FindSessionsOutput {
+                    sessions: Vec::new(),
+                    next_cursor: None,
+                });
+            };
+            bounded_session_search(
+                &storage,
+                &current_session,
+                input.workspace.as_deref(),
+                input.contains_any.as_deref(),
+                input.cursor,
+                output_token_budget,
+            )
+        })
+        .await??;
+        Ok(ToolOutput::from_json(serde_json::to_value(output)?, true))
+    }
+}
+
+#[async_trait]
+impl Tool for FindSessionsTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::function(
+            "find_sessions",
+            "Finds bounded recent Tact V2 sessions before using read_session. It excludes the caller's current session, optionally scopes to one exact workspace, and optionally matches ASCII-case-insensitive literal patterns against stored user prompts. Omit workspace only for cross-workspace discovery. Pass next_cursor back only when another page is needed.",
+            find_input_schema(),
+        )
+        .with_output_schema(find_output_schema())
+    }
+
+    async fn execute(&self, input: ToolInput, context: ToolContext<'_>) -> ToolResult {
+        self.find(
+            context.session_id().to_owned(),
+            input.decode_json()?,
+            context.output_token_budget(),
+        )
+        .await
+    }
+}
+
+fn bounded_session_search(
+    storage: &SessionStorage,
+    current_session: &str,
+    workspace: Option<&Path>,
+    contains_any: Option<&[String]>,
+    cursor: Option<SessionCursor>,
+    output_token_budget: usize,
+) -> Result<FindSessionsOutput, SessionToolError> {
+    let max_bytes = output_token_budget.saturating_mul(APPROX_BYTES_PER_TOKEN);
+    let page = storage.find_sessions(
+        current_session,
+        workspace,
+        contains_any,
+        cursor
+            .as_ref()
+            .map(|cursor| (cursor.updated_at_ms, cursor.session_id.as_str())),
+        MAX_FOUND_SESSIONS,
+    )?;
+    let next_page = page
+        .next_cursor
+        .map(|(updated_at_ms, session_id)| SessionCursor {
+            updated_at_ms,
+            session_id,
+        });
+    let mut output = FindSessionsOutput {
+        sessions: Vec::new(),
+        next_cursor: next_page.clone(),
+    };
+    if serialized_len(&output)? > max_bytes {
+        return Err(SessionToolError::OutputBudgetTooSmall);
+    }
+
+    let returned_sessions = page.sessions.len();
+    let mut last_cursor = None;
+    for (index, session) in page.sessions.into_iter().enumerate() {
+        let next = SessionCursor {
+            updated_at_ms: session.updated_at_unix_ms,
+            session_id: session.session_id.clone(),
+        };
+        output.sessions.push(found_session(session));
+        output.next_cursor = if index.saturating_add(1) < returned_sessions {
+            Some(next.clone())
+        } else {
+            next_page.clone()
+        };
+        if serialized_len(&output)? > max_bytes {
+            output.sessions.pop();
+            if last_cursor.is_none() {
+                return Err(SessionToolError::OutputBudgetTooSmall);
+            }
+            output.next_cursor = last_cursor;
+            return Ok(output);
+        }
+        last_cursor = Some(next);
+    }
+    Ok(output)
+}
+
+fn found_session(session: StoredSession) -> FoundSession {
+    let mut characters = session.preview.chars();
+    let mut preview = characters.by_ref().take(512).collect::<String>();
+    if characters.next().is_some() {
+        preview.push('…');
+    }
+    FoundSession {
+        session_id: session.session_id,
+        workspace: session.workspace,
+        started_at_ms: session.started_at_unix_ms,
+        updated_at_ms: session.updated_at_unix_ms,
+        preview,
+    }
+}
+
 fn bounded_output(
     storage: &SessionStorage,
     session_id: String,
@@ -181,7 +373,7 @@ fn bounded_output(
     kinds: Option<&[String]>,
     contains_any: Option<&[String]>,
     output_token_budget: usize,
-) -> Result<Option<ReadSessionOutput>, ReadError> {
+) -> Result<Option<ReadSessionOutput>, SessionToolError> {
     let max_bytes = output_token_budget.saturating_mul(APPROX_BYTES_PER_TOKEN);
     let mut cursor = initial_cursor.unwrap_or(0);
     let mut scanned_bytes = 0usize;
@@ -193,7 +385,7 @@ fn bounded_output(
     };
     let empty_output_bytes = serialized_len(&output)?;
     if empty_output_bytes.saturating_add(CURSOR_RESERVE_BYTES) > max_bytes {
-        return Err(ReadError::OutputBudgetTooSmall);
+        return Err(SessionToolError::OutputBudgetTooSmall);
     }
 
     loop {
@@ -288,7 +480,7 @@ fn bounded_output(
                 )?
             };
             if !included {
-                return Err(ReadError::OutputBudgetTooSmall);
+                return Err(SessionToolError::OutputBudgetTooSmall);
             }
             cursor = event_id;
             return finish_output(output, records_remain.then_some(cursor), max_bytes);
@@ -304,10 +496,10 @@ fn finish_output(
     mut output: ReadSessionOutput,
     next_cursor: Option<i64>,
     max_bytes: usize,
-) -> Result<Option<ReadSessionOutput>, ReadError> {
+) -> Result<Option<ReadSessionOutput>, SessionToolError> {
     output.next_cursor = next_cursor;
     if serialized_len(&output)? > max_bytes {
-        return Err(ReadError::OutputBudgetTooSmall);
+        return Err(SessionToolError::OutputBudgetTooSmall);
     }
     Ok(Some(output))
 }
@@ -399,14 +591,87 @@ fn truncated_record(
     Ok(record)
 }
 
-fn input_schema() -> Value {
+fn find_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "workspace": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": MAX_WORKSPACE_BYTES,
+                "description": "Optional exact workspace path. Supply the current workspace by default; omit only for intentional cross-workspace discovery."
+            },
+            "contains_any": {
+                "type": "array",
+                "items": { "type": "string", "minLength": 1, "maxLength": MAX_TEXT_FILTER_BYTES },
+                "minItems": 1,
+                "maxItems": MAX_TEXT_FILTERS,
+                "uniqueItems": true,
+                "description": "Optional ASCII-case-insensitive literal patterns matched against stored user prompts; a session is returned when any pattern matches."
+            },
+            "cursor": {
+                "type": "object",
+                "properties": {
+                    "updated_at_ms": { "type": "integer", "minimum": 0 },
+                    "session_id": { "type": "string", "minLength": 1 }
+                },
+                "required": ["updated_at_ms", "session_id"],
+                "additionalProperties": false,
+                "description": "An exclusive continuation cursor returned as next_cursor by an earlier find_sessions call."
+            }
+        },
+        "additionalProperties": false
+    })
+}
+
+fn find_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "sessions": {
+                "type": "array",
+                "maxItems": MAX_FOUND_SESSIONS,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "session_id": { "type": "string" },
+                        "workspace": { "type": "string" },
+                        "started_at_ms": { "type": "integer", "minimum": 0 },
+                        "updated_at_ms": { "type": "integer", "minimum": 0 },
+                        "preview": { "type": "string" }
+                    },
+                    "required": ["session_id", "workspace", "started_at_ms", "updated_at_ms", "preview"],
+                    "additionalProperties": false
+                }
+            },
+            "next_cursor": {
+                "anyOf": [
+                    {
+                        "type": "object",
+                        "properties": {
+                            "updated_at_ms": { "type": "integer", "minimum": 0 },
+                            "session_id": { "type": "string" }
+                        },
+                        "required": ["updated_at_ms", "session_id"],
+                        "additionalProperties": false
+                    },
+                    { "type": "null" }
+                ]
+            }
+        },
+        "required": ["sessions", "next_cursor"],
+        "additionalProperties": false
+    })
+}
+
+fn read_input_schema() -> Value {
     json!({
         "type": "object",
         "properties": {
             "session_id": {
                 "type": "string",
                 "minLength": 1,
-                "description": "An exact Tact V2 session ID from an explicit @@ reference or the built-in reflection workflow."
+                "description": "An exact Tact V2 session ID from an explicit @@ reference or find_sessions."
             },
             "cursor": {
                 "type": "integer",
@@ -435,7 +700,7 @@ fn input_schema() -> Value {
     })
 }
 
-fn output_schema() -> Value {
+fn read_output_schema() -> Value {
     json!({
         "type": "object",
         "properties": {
@@ -463,8 +728,8 @@ fn output_schema() -> Value {
 #[cfg(test)]
 mod tests {
     use super::{
-        APPROX_BYTES_PER_TOKEN, MAX_TEXT_FILTERS, STORAGE_PAGE_SIZE, SessionTool,
-        find_ignore_ascii_case, truncated_record,
+        APPROX_BYTES_PER_TOKEN, FindSessionsTool, MAX_FOUND_SESSIONS, MAX_TEXT_FILTERS,
+        ReadSessionTool, STORAGE_PAGE_SIZE, find_ignore_ascii_case, truncated_record,
     };
     use crate::{
         app::config::{ReasoningEffort, ReasoningMode},
@@ -483,15 +748,15 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn definition_exposes_a_closed_bounded_reader() {
+    fn read_definition_exposes_a_closed_bounded_reader() {
         let directory = tempdir().unwrap();
-        let tool = SessionTool::new(directory.path().join("config.toml"));
+        let tool = ReadSessionTool::new(directory.path().join("config.toml"));
         let definition = tool.definition();
         let input = definition.parameters().unwrap().as_value();
         let output = definition.output_schema().unwrap().as_value();
 
         assert_eq!(definition.name(), "read_session");
-        assert!(definition.description().contains("built-in reflection"));
+        assert!(definition.description().contains("find_sessions"));
         assert!(
             definition
                 .description()
@@ -502,7 +767,7 @@ mod tests {
             input["properties"]["session_id"]["description"]
                 .as_str()
                 .unwrap()
-                .contains("built-in reflection")
+                .contains("find_sessions")
         );
         assert!(
             input["properties"]["cursor"]["description"]
@@ -515,6 +780,24 @@ mod tests {
             input["properties"]["contains_any"]["maxItems"],
             MAX_TEXT_FILTERS
         );
+        assert_eq!(output["additionalProperties"], json!(false));
+    }
+
+    #[test]
+    fn find_definition_exposes_bounded_discovery() {
+        let directory = tempdir().unwrap();
+        let tool = FindSessionsTool::new(directory.path().join("config.toml"));
+        let definition = tool.definition();
+        let input = definition.parameters().unwrap().as_value();
+        let output = definition.output_schema().unwrap().as_value();
+
+        assert_eq!(definition.name(), "find_sessions");
+        assert!(definition.description().contains("current session"));
+        assert!(definition.description().contains("read_session"));
+        assert_eq!(input["additionalProperties"], json!(false));
+        assert_eq!(input["properties"]["contains_any"]["maxItems"], 16);
+        assert_eq!(input["properties"]["cursor"]["additionalProperties"], false);
+        assert_eq!(output["properties"]["sessions"]["maxItems"], 30);
         assert_eq!(output["additionalProperties"], json!(false));
     }
 
@@ -575,6 +858,92 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn finds_stored_sessions_without_returning_the_current_session() {
+        let directory = tempdir().unwrap();
+        let config_path = directory.path().join("config.toml");
+        let mut storage = SessionStorage::open(&config_path).unwrap();
+        append_session(&mut storage, "current", "/work", 400, "validation needle");
+        append_session(&mut storage, "matching", "/work", 300, "Validation Needle");
+        append_session(&mut storage, "unrelated", "/work", 200, "different topic");
+        append_session(&mut storage, "other", "/other", 100, "validation needle");
+
+        let tool = FindSessionsTool::new(config_path);
+        let output = execute_find(
+            &tool,
+            "current",
+            json!({
+                "workspace": "/work",
+                "contains_any": ["validation needle"]
+            }),
+            1_000,
+        )
+        .await;
+
+        assert_eq!(output["sessions"].as_array().unwrap().len(), 1);
+        assert_eq!(output["sessions"][0]["session_id"], "matching");
+        assert_eq!(output["sessions"][0]["workspace"], "/work");
+        assert_eq!(output["sessions"][0]["updated_at_ms"], 300);
+        assert!(output["next_cursor"].is_null());
+
+        let cross_workspace = execute_find(&tool, "current", json!({}), 1_000).await;
+        assert_eq!(
+            cross_workspace["sessions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|session| session["session_id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["matching", "unrelated", "other"]
+        );
+    }
+
+    #[tokio::test]
+    async fn session_find_continuation_starts_after_the_last_returned_session() {
+        let directory = tempdir().unwrap();
+        let config_path = directory.path().join("config.toml");
+        let mut storage = SessionStorage::open(&config_path).unwrap();
+        for index in 0..=MAX_FOUND_SESSIONS {
+            append_session(
+                &mut storage,
+                &format!("session-{index:02}"),
+                "/work",
+                1_000_u64.saturating_sub(u64::try_from(index).unwrap()),
+                "prompt",
+            );
+        }
+
+        let tool = FindSessionsTool::new(config_path);
+        let first = execute_find(&tool, "current", json!({"workspace": "/work"}), 10_000).await;
+        assert_eq!(
+            first["sessions"].as_array().unwrap().len(),
+            MAX_FOUND_SESSIONS
+        );
+        let cursor = first["next_cursor"].clone();
+        assert!(cursor.is_object());
+
+        let second = execute_find(
+            &tool,
+            "current",
+            json!({"workspace": "/work", "cursor": cursor}),
+            10_000,
+        )
+        .await;
+        assert_eq!(second["sessions"].as_array().unwrap().len(), 1);
+        assert_eq!(second["sessions"][0]["session_id"], "session-30");
+        assert!(second["next_cursor"].is_null());
+
+        let sparse = execute_find(
+            &tool,
+            "current",
+            json!({"workspace": "/work", "contains_any": ["absent"]}),
+            10_000,
+        )
+        .await;
+        assert!(sparse["sessions"].as_array().unwrap().is_empty());
+        assert!(sparse["next_cursor"].is_object());
+    }
+
+    #[tokio::test]
     async fn reads_a_referenced_session_end_to_end() {
         let directory = tempdir().unwrap();
         let config_path = directory.path().join("config.toml");
@@ -598,7 +967,7 @@ mod tests {
             .append_raw_record("referenced", b"not-json")
             .unwrap();
 
-        let tool = SessionTool::new(config_path);
+        let tool = ReadSessionTool::new(config_path);
         let input = ToolInput::Function(
             to_raw_value(&json!({
                 "session_id": "referenced",
@@ -665,7 +1034,7 @@ mod tests {
         }
         storage.append_records("searched", &records).unwrap();
 
-        let tool = SessionTool::new(config_path);
+        let tool = ReadSessionTool::new(config_path);
         let input = ToolInput::Function(
             to_raw_value(&json!({
                 "session_id": "searched",
@@ -725,7 +1094,7 @@ mod tests {
             )),
         ];
         storage.append_records("adjacent", &records).unwrap();
-        let tool = SessionTool::new(config_path);
+        let tool = ReadSessionTool::new(config_path);
 
         let matched = execute(
             &tool,
@@ -789,7 +1158,7 @@ mod tests {
         ];
         storage.append_records("continued", &records).unwrap();
 
-        let tool = SessionTool::new(config_path);
+        let tool = ReadSessionTool::new(config_path);
         let first = execute_search(&tool, None, 300).await;
         assert_eq!(first["records"].as_array().unwrap().len(), 1);
         assert_eq!(
@@ -812,7 +1181,7 @@ mod tests {
         assert!(second["next_cursor"].is_null());
     }
 
-    async fn execute_search(tool: &SessionTool, cursor: Option<i64>, budget: usize) -> Value {
+    async fn execute_search(tool: &ReadSessionTool, cursor: Option<i64>, budget: usize) -> Value {
         execute(
             tool,
             json!({
@@ -826,7 +1195,7 @@ mod tests {
         .await
     }
 
-    async fn execute(tool: &SessionTool, input: Value, budget: usize) -> Value {
+    async fn execute(tool: &ReadSessionTool, input: Value, budget: usize) -> Value {
         let input = ToolInput::Function(to_raw_value(&input).unwrap());
         let context = ToolContext::new("test-model", "current", "continuation-call", &[], budget);
         let output = tool.execute(input, context).await.unwrap();
@@ -834,6 +1203,69 @@ mod tests {
             panic!("session reader returned non-text output");
         };
         serde_json::from_str(&output).unwrap()
+    }
+
+    async fn execute_find(
+        tool: &FindSessionsTool,
+        current_session: &str,
+        input: Value,
+        budget: usize,
+    ) -> Value {
+        let input = ToolInput::Function(to_raw_value(&input).unwrap());
+        let context = ToolContext::new(
+            "test-model",
+            current_session,
+            "find-sessions-call",
+            &[],
+            budget,
+        );
+        let output = tool.execute(input, context).await.unwrap();
+        let ToolOutputBody::Text(output) = output.output else {
+            panic!("session finder returned non-text output");
+        };
+        assert!(output.len() <= budget.saturating_mul(APPROX_BYTES_PER_TOKEN));
+        serde_json::from_str(&output).unwrap()
+    }
+
+    fn append_session(
+        storage: &mut SessionStorage,
+        session_id: &str,
+        workspace: &str,
+        at: u64,
+        prompt: &str,
+    ) {
+        let records = [
+            Arc::new(
+                TranscriptRecord::from_local(
+                    1,
+                    at.saturating_sub(1),
+                    LocalEvent::SessionStarted(SessionStarted {
+                        session_id: session_id.to_owned(),
+                        parent_session_id: None,
+                        parent_sequence: None,
+                        model: "model".to_owned(),
+                        effort: ReasoningEffort::Medium,
+                        reasoning_mode: ReasoningMode::Standard,
+                        fast_mode: false,
+                        workspace: workspace.into(),
+                        application_version: "test".to_owned(),
+                    }),
+                )
+                .unwrap(),
+            ),
+            Arc::new(
+                TranscriptRecord::from_local(
+                    2,
+                    at,
+                    LocalEvent::UserSubmitted {
+                        id: TurnId::new(1),
+                        text: prompt.to_owned(),
+                    },
+                )
+                .unwrap(),
+            ),
+        ];
+        storage.append_records(session_id, &records).unwrap();
     }
 
     fn session_started(session_id: &str) -> Arc<TranscriptRecord> {
