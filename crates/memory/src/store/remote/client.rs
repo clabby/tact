@@ -102,8 +102,8 @@ pub enum RemoteClientError {
 
 /// Authenticated HTTP implementation of [`MemoryStore`].
 ///
-/// Clones share any D1 bookmark returned by the server. Their requests are serialized to preserve
-/// one monotonic logical session because opaque bookmarks cannot be merged.
+/// Clones share any consistency token returned by the server. Their requests are serialized to
+/// preserve one monotonic logical session because opaque tokens cannot be merged.
 #[derive(Clone)]
 pub struct RemoteMemoryClient {
     inner: Arc<RemoteClientInner>,
@@ -126,7 +126,7 @@ struct RemoteClientInner {
     token: RemoteToken,
     client: Client,
     role: tokio::sync::OnceCell<RemoteRole>,
-    d1_bookmark: tokio::sync::Mutex<Option<String>>,
+    consistency_token: tokio::sync::Mutex<Option<String>>,
 }
 
 impl RemoteMemoryClient {
@@ -164,7 +164,7 @@ impl RemoteMemoryClient {
                 token,
                 client,
                 role: tokio::sync::OnceCell::new(),
-                d1_bookmark: tokio::sync::Mutex::new(None),
+                consistency_token: tokio::sync::Mutex::new(None),
             }),
         })
     }
@@ -496,9 +496,9 @@ impl RemoteMemoryClient {
         Request: Serialize + ?Sized,
         Response: DeserializeOwned,
     {
-        // D1 bookmarks are opaque, so concurrent responses cannot be merged safely. Holding this
-        // guard across the exchange makes this client and its clones one monotonic session.
-        let mut d1_bookmark = self.inner.d1_bookmark.lock().await;
+        // Consistency tokens are opaque, so concurrent responses cannot be merged safely. Holding
+        // this guard across the exchange makes this client and its clones one monotonic session.
+        let mut consistency_token = self.inner.consistency_token.lock().await;
         let url = self
             .inner
             .endpoint
@@ -512,17 +512,17 @@ impl RemoteMemoryClient {
             // Reqwest owns a transient, non-zeroizing header copy for the request lifetime.
             .bearer_auth(self.inner.token.expose())
             .header(protocol::NAMESPACE_HEADER, &self.inner.namespace);
-            let request = match d1_bookmark.as_deref() {
-                Some(bookmark) => request.header(protocol::D1_BOOKMARK_HEADER, bookmark),
+            let request = match consistency_token.as_deref() {
+                Some(token) => request.header(protocol::CONSISTENCY_TOKEN_HEADER, token),
                 None => request,
             };
 
             match request.send().await {
                 Ok(response) if response.status().is_success() => {
-                    let response_bookmark = d1_bookmark_from_headers(response.headers())?;
+                    let response_token = consistency_token_from_headers(response.headers())?;
                     let decoded = decode_response(response).await?;
-                    if let Some(response_bookmark) = response_bookmark {
-                        *d1_bookmark = Some(response_bookmark);
+                    if let Some(response_token) = response_token {
+                        *consistency_token = Some(response_token);
                     }
                     return Ok(decoded);
                 }
@@ -653,10 +653,10 @@ fn response_retry_delay(headers: &reqwest::header::HeaderMap, fallback: Duration
         .unwrap_or(fallback)
 }
 
-fn d1_bookmark_from_headers(
+fn consistency_token_from_headers(
     headers: &reqwest::header::HeaderMap,
 ) -> Result<Option<String>, RemoteClientError> {
-    let mut values = headers.get_all(protocol::D1_BOOKMARK_HEADER).iter();
+    let mut values = headers.get_all(protocol::CONSISTENCY_TOKEN_HEADER).iter();
     let Some(value) = values.next() else {
         return Ok(None);
     };
@@ -664,16 +664,16 @@ fn d1_bookmark_from_headers(
         return Err(RemoteClientError::InvalidResponse);
     }
 
-    let bookmark = value
+    let token = value
         .to_str()
         .map_err(|_| RemoteClientError::InvalidResponse)?;
-    if bookmark.is_empty() {
+    if token.is_empty() {
         return Ok(None);
     }
-    if !protocol::is_valid_d1_bookmark(bookmark) {
+    if !protocol::is_valid_consistency_token(token) {
         return Err(RemoteClientError::InvalidResponse);
     }
-    Ok(Some(bookmark.to_owned()))
+    Ok(Some(token.to_owned()))
 }
 
 async fn response_error(response: Response) -> RemoteClientError {

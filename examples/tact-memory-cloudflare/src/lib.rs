@@ -39,22 +39,24 @@ pub async fn fetch(
 ) -> Result<axum::response::Response> {
     initialize_tracing();
 
-    let bookmark_headers = request.headers().get_all(protocol::D1_BOOKMARK_HEADER);
-    let mut bookmarks = bookmark_headers.iter();
-    let bookmark = match (bookmarks.next(), bookmarks.next()) {
+    let token_headers = request
+        .headers()
+        .get_all(protocol::CONSISTENCY_TOKEN_HEADER);
+    let mut tokens = token_headers.iter();
+    let consistency_token = match (tokens.next(), tokens.next()) {
         (None, None) => None,
         (Some(value), None) => match value.to_str() {
-            Ok(value) if protocol::is_valid_d1_bookmark(value) => Some(value.to_owned()),
+            Ok(value) if protocol::is_valid_consistency_token(value) => Some(value.to_owned()),
             _ => return Ok(bad_request()),
         },
         _ => return Ok(bad_request()),
     };
 
-    // A new session may begin on a stale nearby replica; a supplied bookmark resumes at least as
-    // fresh as the client's preceding response. D1 forwards mutations to the primary.
+    // A new session may begin on a stale nearby replica; a supplied consistency token resumes at
+    // least as fresh as the client's preceding response. D1 forwards mutations to the primary.
     let database = environment.d1(DATABASE_BINDING)?;
-    let session = Arc::new(match bookmark.as_deref() {
-        Some(bookmark) => database.with_session(Some(bookmark))?,
+    let session = Arc::new(match consistency_token.as_deref() {
+        Some(token) => database.with_session(Some(token))?,
         None => database.with_session_constraint(D1SessionConstraint::FirstUnconstrained)?,
     });
 
@@ -77,13 +79,13 @@ pub async fn fetch(
         .await
         .map_err(worker_error)?;
     if let Some(bookmark) = session.get_bookmark()? {
-        if !protocol::is_valid_d1_bookmark(&bookmark) {
+        if !protocol::is_valid_consistency_token(&bookmark) {
             return Err(invalid_d1_bookmark());
         }
         let value = HeaderValue::from_str(&bookmark).map_err(|_| invalid_d1_bookmark())?;
         response
             .headers_mut()
-            .insert(protocol::D1_BOOKMARK_HEADER, value);
+            .insert(protocol::CONSISTENCY_TOKEN_HEADER, value);
     }
     Ok(response)
 }

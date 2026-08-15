@@ -69,13 +69,13 @@ operators can reduce or migrate the corpus without editing D1 directly.
 
 ## Read replication
 
-The Worker opens a first-unconstrained D1 session for a request without a bookmark. After read
-replication is enabled on the database, scan corpus queries, list, and export may be served by a
-replica. A D1-backed request without a bookmark can observe a stale snapshot, including temporarily
-missing a recent write or returning a recently deleted record. Full record reads and mutations
-update durable state and remain primary-bound. The remote client carries each returned D1 bookmark
-into its next request, so one client and its clones form a monotonic logical session across requests
-and observe their successful writes.
+The Worker opens a first-unconstrained D1 session for a request without a consistency token. After
+read replication is enabled on the database, scan corpus queries, list, and export may be served by
+a replica. A D1-backed request without a consistency token can observe a stale snapshot, including
+temporarily missing a recent write or returning a recently deleted record. Full record reads and
+mutations update durable state and remain primary-bound. The Worker exposes each D1 bookmark as an
+opaque consistency token that the remote client carries into its next request, so one client and
+its clones form a monotonic logical session across requests and observe their successful writes.
 
 ## Deployment
 

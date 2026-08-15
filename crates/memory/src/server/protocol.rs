@@ -8,10 +8,10 @@ use serde::{Deserialize, Serialize};
 pub const NAMESPACE_HEADER: &str = "x-tact-memory-namespace";
 /// Maximum UTF-8 bytes accepted in a namespace.
 pub const MAX_NAMESPACE_BYTES: usize = 128;
-/// Header carrying an opaque D1 session bookmark between requests.
-pub const D1_BOOKMARK_HEADER: &str = "x-d1-bookmark";
-/// Maximum UTF-8 bytes accepted in a D1 session bookmark.
-pub const MAX_D1_BOOKMARK_BYTES: usize = 4 * 1024;
+/// Header carrying an opaque server-issued consistency token between requests.
+pub const CONSISTENCY_TOKEN_HEADER: &str = "x-tact-memory-consistency-token";
+/// Maximum UTF-8 bytes accepted in a consistency token.
+pub const MAX_CONSISTENCY_TOKEN_BYTES: usize = 4 * 1024;
 
 /// Session-negotiation route.
 pub const SESSION_PATH: &str = concatcp!("v", crate::VERSION, "/session");
@@ -41,9 +41,9 @@ pub fn is_valid_namespace(namespace: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
 }
 
-/// Returns whether an opaque D1 session bookmark is non-empty and bounded.
-pub fn is_valid_d1_bookmark(bookmark: &str) -> bool {
-    !bookmark.is_empty() && bookmark.len() <= MAX_D1_BOOKMARK_BYTES
+/// Returns whether an opaque consistency token is non-empty and bounded.
+pub fn is_valid_consistency_token(token: &str) -> bool {
+    !token.is_empty() && token.len() <= MAX_CONSISTENCY_TOKEN_BYTES
 }
 
 /// Authorization role returned by session negotiation.
