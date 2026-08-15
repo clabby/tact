@@ -150,7 +150,7 @@ impl Tool for SessionTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::function(
             "read_session",
-            "Scans a referenced Tact V2 session incrementally and returns one bounded set of relevant records without loading the full transcript. Use kinds and contains_any to filter during the scan. Pass next_cursor back as cursor only when the bounded scan could not finish and more evidence is needed.",
+            "Scans a known Tact V2 session incrementally and returns one bounded set of relevant records without loading the full transcript. The session ID may come from an explicit @@ reference or Tact's built-in reflection workflow. Use kinds and contains_any to filter during the scan. Cursor is an exclusive event-ID boundary: pass next_cursor back to continue a bounded scan, or pass a matched event_id to read following context.",
             input_schema(),
         )
         .with_output_schema(output_schema())
@@ -406,12 +406,12 @@ fn input_schema() -> Value {
             "session_id": {
                 "type": "string",
                 "minLength": 1,
-                "description": "The exact ID following @@ in the user's prompt."
+                "description": "An exact Tact V2 session ID from an explicit @@ reference or the built-in reflection workflow."
             },
             "cursor": {
                 "type": "integer",
                 "minimum": 0,
-                "description": "The next_cursor returned by a preceding bounded scan. Omit for the first scan."
+                "description": "An exclusive event-ID boundary. Use next_cursor to continue a bounded scan or a matched event_id to read following context; omit to start at the beginning."
             },
             "kinds": {
                 "type": "array",
@@ -491,7 +491,25 @@ mod tests {
         let output = definition.output_schema().unwrap().as_value();
 
         assert_eq!(definition.name(), "read_session");
+        assert!(definition.description().contains("built-in reflection"));
+        assert!(
+            definition
+                .description()
+                .contains("exclusive event-ID boundary")
+        );
         assert_eq!(input["additionalProperties"], json!(false));
+        assert!(
+            input["properties"]["session_id"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("built-in reflection")
+        );
+        assert!(
+            input["properties"]["cursor"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("matched event_id")
+        );
         assert!(input["properties"].get("limit").is_none());
         assert_eq!(
             input["properties"]["contains_any"]["maxItems"],
@@ -670,6 +688,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn matched_event_id_reads_the_following_context() {
+        let directory = tempdir().unwrap();
+        let config_path = directory.path().join("config.toml");
+        let mut storage = SessionStorage::open(&config_path).unwrap();
+        let records = [
+            session_started("adjacent"),
+            Arc::new(
+                TranscriptRecord::from_local(
+                    2,
+                    2,
+                    LocalEvent::UserSubmitted {
+                        id: TurnId::new(1),
+                        text: "validation needle".to_owned(),
+                    },
+                )
+                .unwrap(),
+            ),
+            Arc::new(TranscriptRecord::from_agent(
+                3,
+                3,
+                AgentEvent {
+                    protocol_version: 2,
+                    request_id: Arc::from("request"),
+                    seq: 1,
+                    kind: AgentEventKind::AssistantMessage,
+                    payload: to_raw_value(&json!({
+                        "model_call_index": 1,
+                        "item_id": "answer",
+                        "phase": "final_answer",
+                        "text": "following response"
+                    }))
+                    .unwrap()
+                    .into(),
+                },
+            )),
+        ];
+        storage.append_records("adjacent", &records).unwrap();
+        let tool = SessionTool::new(config_path);
+
+        let matched = execute(
+            &tool,
+            json!({
+                "session_id": "adjacent",
+                "kinds": ["user.submitted"],
+                "contains_any": ["validation needle"]
+            }),
+            1_000,
+        )
+        .await;
+        let event_id = matched["records"][0]["event_id"].as_i64().unwrap();
+        let following = execute(
+            &tool,
+            json!({
+                "session_id": "adjacent",
+                "cursor": event_id,
+                "kinds": ["assistant.message"]
+            }),
+            1_000,
+        )
+        .await;
+
+        assert_eq!(following["records"].as_array().unwrap().len(), 1);
+        assert_eq!(following["records"][0]["event_id"], 3);
+        assert_eq!(
+            following["records"][0]["record"]["payload"]["text"],
+            "following response"
+        );
+    }
+
+    #[tokio::test]
     async fn output_continuation_resumes_before_the_first_omitted_match() {
         let directory = tempdir().unwrap();
         let config_path = directory.path().join("config.toml");
@@ -725,15 +813,21 @@ mod tests {
     }
 
     async fn execute_search(tool: &SessionTool, cursor: Option<i64>, budget: usize) -> Value {
-        let input = ToolInput::Function(
-            to_raw_value(&json!({
+        execute(
+            tool,
+            json!({
                 "session_id": "continued",
                 "cursor": cursor,
                 "kinds": ["user.submitted"],
                 "contains_any": ["match"]
-            }))
-            .unwrap(),
-        );
+            }),
+            budget,
+        )
+        .await
+    }
+
+    async fn execute(tool: &SessionTool, input: Value, budget: usize) -> Value {
+        let input = ToolInput::Function(to_raw_value(&input).unwrap());
         let context = ToolContext::new("test-model", "current", "continuation-call", &[], budget);
         let output = tool.execute(input, context).await.unwrap();
         let ToolOutputBody::Text(output) = output.output else {

@@ -49,6 +49,7 @@ pub(crate) enum EntryKind {
     ForkedFrom { session_id: String },
     EffortChanged { to: ReasoningEffort },
     FastModeChanged { enabled: bool },
+    ReflectionStarted,
     Interrupted { count: usize },
     ContextCompacted { duration_ns: u64 },
     TurnCompleted { duration_ns: u64 },

@@ -229,6 +229,7 @@ pub(crate) enum SessionListKind {
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum RootEffect {
     Submit(Submission),
+    Reflect(Submission),
     RunShell(String),
     OpenDraftEditor,
     OpenQueueEditor {
@@ -346,6 +347,7 @@ pub(crate) struct RootNode {
     context_diagnostics: ContextDiagnostics,
     recent_prompts: Vec<RecentPromptDraft>,
     pending_session_mention: Option<usize>,
+    reflection_input: bool,
 }
 
 impl RootNode {
@@ -382,6 +384,7 @@ impl RootNode {
             context_diagnostics: ContextDiagnostics::default(),
             recent_prompts: Vec::new(),
             pending_session_mention: None,
+            reflection_input: false,
         }
     }
 
@@ -746,6 +749,9 @@ impl RootNode {
         if is_confirmation_key_repeat(&event) {
             return ComponentUpdate::none();
         }
+        if self.reflection_input && is_escape(&event) {
+            return self.cancel_reflection();
+        }
         if self.blocking_task.is_some() && is_control_c(&event) {
             return self.update_key_confirmation(ConfirmationAction::Exit, Instant::now());
         }
@@ -789,6 +795,9 @@ impl RootNode {
     ) -> ComponentUpdate<RootEffect> {
         if !self.interactive {
             return ComponentUpdate::none();
+        }
+        if self.reflection_input && is_plain_enter(&event) {
+            return self.submit_reflection();
         }
         if let Some(Overlay::Subagents(SubagentOverlay::Transcript(id))) = self.overlay
             && is_control_key(&event, 'o')
@@ -935,7 +944,10 @@ impl RootNode {
             }));
             return update;
         }
-        if self.composer.component().draft().is_empty() && is_actions_trigger(&event) {
+        if !self.reflection_input
+            && self.composer.component().draft().is_empty()
+            && is_actions_trigger(&event)
+        {
             let new_session_enabled = self.in_flight_turns == 0
                 && self.in_flight_shells == 0
                 && self.blocking_task.is_none()
@@ -1466,6 +1478,16 @@ impl RootNode {
                 self.overlay = Some(Overlay::ContextDiagnostics(Node::new(
                     ContextDiagnosticsPanel::new(self.context_diagnostics.clone()),
                 )));
+            }
+            Some(ActionsEffect::Trigger(Action::Reflection)) => {
+                self.overlay = None;
+                self.reflection_input = true;
+                return self.update_composer(
+                    ComposerEvent::InputMode(Some(
+                        "Reflection instructions · enter start · esc cancel".to_owned(),
+                    )),
+                    RenderRequest::Immediate,
+                );
             }
             Some(ActionsEffect::Trigger(Action::Review)) => {
                 self.overlay = None;
@@ -2048,6 +2070,29 @@ impl RootNode {
         };
 
         ComponentUpdate { effects, render }
+    }
+
+    fn submit_reflection(&mut self) -> ComponentUpdate<RootEffect> {
+        let instructions = self
+            .composer
+            .component_mut()
+            .take_submission()
+            .unwrap_or_else(|| Submission::text(String::new()));
+        self.reflection_input = false;
+        let mode = self.update_composer(ComposerEvent::InputMode(None), RenderRequest::Immediate);
+        self.thread = ThreadState::Started;
+        self.in_flight_turns = self.in_flight_turns.saturating_add(1);
+        let transcript = self.update_transcript(TranscriptEvent::FollowTail);
+        ComponentUpdate {
+            effects: vec![RootEffect::Reflect(instructions)],
+            render: mode.render.max(transcript.render),
+        }
+    }
+
+    fn cancel_reflection(&mut self) -> ComponentUpdate<RootEffect> {
+        self.reflection_input = false;
+        self.composer.component_mut().replace_draft(String::new());
+        self.update_composer(ComposerEvent::InputMode(None), RenderRequest::Immediate)
     }
 
     fn discard_draft(&mut self) -> ComponentUpdate<RootEffect> {
@@ -5626,6 +5671,63 @@ mod tests {
         assert!(root.overlay.is_none());
         assert_eq!(update.effects, [RootEffect::OpenConfigEditor]);
         assert_eq!(update.render, super::RenderRequest::Immediate);
+    }
+
+    #[test]
+    fn reflection_action_collects_hidden_optional_instructions() {
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        root.update(key(KeyCode::Char('/'), KeyModifiers::NONE));
+        for character in "reflection".chars() {
+            root.update(key(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+        root.update(key(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(root.reflection_input);
+        assert!(render_root_text(&mut root, 100, 20).contains("Reflection instructions"));
+        for character in "Focus on validation gaps.".chars() {
+            root.update(key(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+        let submitted = root.update(key(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(
+            submitted.effects,
+            [RootEffect::Reflect(
+                "Focus on validation gaps.".to_owned().into()
+            )]
+        );
+        assert!(!root.reflection_input);
+        assert!(root.thread == ThreadState::Started);
+        assert_eq!(root.in_flight_turns, 1);
+        assert!(root.composer().draft().is_empty());
+        root.update(key(KeyCode::Up, KeyModifiers::NONE));
+        assert!(root.composer().draft().is_empty());
+    }
+
+    #[test]
+    fn reflection_can_start_without_instructions_or_be_cancelled() {
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        root.update(key(KeyCode::Char('/'), KeyModifiers::NONE));
+        for character in "reflection".chars() {
+            root.update(key(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+        root.update(key(KeyCode::Enter, KeyModifiers::NONE));
+        root.update(key(KeyCode::Char('x'), KeyModifiers::NONE));
+
+        let cancelled = root.update(key(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(cancelled.effects.is_empty());
+        assert!(!root.reflection_input);
+        assert!(root.composer().draft().is_empty());
+
+        root.update(key(KeyCode::Char('/'), KeyModifiers::NONE));
+        for character in "reflection".chars() {
+            root.update(key(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+        root.update(key(KeyCode::Enter, KeyModifiers::NONE));
+        let submitted = root.update(key(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            submitted.effects,
+            [RootEffect::Reflect("".to_owned().into())]
+        );
     }
 
     #[test]

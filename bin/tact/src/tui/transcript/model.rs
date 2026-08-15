@@ -238,6 +238,9 @@ impl TranscriptModel {
             "user.steered" => self.decode_local::<UserSteered>(record).map(|payload| {
                 self.push(EntryKind::User { text: payload.text });
             }),
+            "reflection.started" => self.decode_local::<ReflectionStarted>(record).map(|_| {
+                self.push(EntryKind::ReflectionStarted);
+            }),
             "shell.started" => self
                 .decode_local::<ShellStarted>(record)
                 .map(|payload| self.shell_started(payload, record.recorded_at_unix_ms())),
@@ -1045,6 +1048,7 @@ fn visibility(source: &str, kind: &str) -> EventVisibility {
     if source == "tact" {
         return match kind {
             "user.submitted"
+            | "reflection.started"
             | "worker.turns_interrupted"
             | "effort.changed"
             | "fast_mode.changed" => EventVisibility::Persistent,
@@ -1148,6 +1152,12 @@ struct UserSubmitted {
 #[derive(Deserialize)]
 struct UserSteered {
     text: String,
+}
+
+#[derive(Deserialize)]
+struct ReflectionStarted {
+    #[serde(rename = "id")]
+    _id: u64,
 }
 
 #[derive(Deserialize)]
@@ -1655,6 +1665,24 @@ mod tests {
         assert!(
             matches!(&model.entries()[0].kind, EntryKind::User { text, .. } if text == "hello")
         );
+    }
+
+    #[test]
+    fn reflection_start_is_a_persistent_typed_entry() {
+        let mut model = TranscriptModel::default();
+        let record = TranscriptRecord::from_local(
+            1,
+            1,
+            LocalEvent::ReflectionStarted { id: TurnId::new(3) },
+        )
+        .unwrap();
+
+        model.apply(&record);
+
+        assert!(matches!(
+            model.entries().first().map(|entry| &entry.kind),
+            Some(EntryKind::ReflectionStarted)
+        ));
     }
 
     #[test]

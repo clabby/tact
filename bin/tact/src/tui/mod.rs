@@ -48,7 +48,7 @@ use crate::{
             LocalEvent, SessionEnded, SessionOutcome, SessionStarted, ShellId, TranscriptError,
             TranscriptJournal, TurnId,
         },
-        worker::{AuxiliaryContext, AuxiliaryError, WorkerCommand, WorkerEvent},
+        worker::{AuxiliaryContext, AuxiliaryError, ReflectionContext, WorkerCommand, WorkerEvent},
     },
 };
 use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
@@ -1933,6 +1933,35 @@ fn apply_pane_effect(
                 debug_assert!(runtime.pending_submission.is_none());
                 runtime.pending_submission = Some(submission);
             }
+        }
+        components::RootEffect::Reflect(instructions) => {
+            let runtime = context
+                .panes
+                .get_mut(&pane)
+                .expect("UI pane must have a runtime");
+            debug_assert_eq!(runtime.active_shells, 0);
+            let id = TurnId::new(runtime.next_turn);
+            runtime.next_turn = runtime.next_turn.saturating_add(1);
+            let record = runtime
+                .journal_mut()?
+                .append_local(LocalEvent::ReflectionStarted { id })?;
+            schedule(
+                context.app.update(AppEvent::Transcript { pane, record }),
+                context.scheduler,
+            );
+            context
+                .commands
+                .send(WorkerCommand::Reflect {
+                    pane,
+                    id,
+                    instructions,
+                    context: ReflectionContext::new(
+                        context.config.path(),
+                        context.workspace,
+                        &runtime.session_id,
+                    ),
+                })
+                .map_err(|_| RuntimeError::AgentWorkerStopped)?;
         }
         components::RootEffect::RunShell(command) => {
             let runtime = context
