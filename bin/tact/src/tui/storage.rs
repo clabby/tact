@@ -84,13 +84,16 @@ pub(crate) struct StoredRecord {
 #[derive(Debug)]
 pub(crate) struct DecodedStoredRecord {
     pub(crate) event_id: i64,
+    pub(crate) encoded_bytes: usize,
     pub(crate) record: TranscriptRecord,
 }
 
 impl StoredRecord {
     pub(crate) fn decode(self) -> Result<DecodedStoredRecord, StorageError> {
+        let encoded_bytes = self.encoded.len();
         Ok(DecodedStoredRecord {
             event_id: self.event_id,
+            encoded_bytes,
             record: decode_record(&self.encoded)?,
         })
     }
@@ -308,6 +311,7 @@ impl SessionStorage {
         session_id: &str,
         after_event_id: Option<i64>,
         limit: usize,
+        max_bytes: usize,
     ) -> Result<Option<StoredRecordPage>, StorageError> {
         let exists = self
             .connection
@@ -326,25 +330,41 @@ impl SessionStorage {
         let mut statement = self
             .connection
             .prepare(
-                "SELECT event_id, record_json FROM events\n\
+                "SELECT event_id, length(record_json), record_json FROM events\n\
                  WHERE session_id = ?1 AND event_id > ?2\n\
                  ORDER BY event_id LIMIT ?3",
             )
             .map_err(|source| query(&self.path, source))?;
-        let rows = statement
-            .query_map(params![session_id, after_event_id, row_limit], |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
-            })
+        let mut rows = statement
+            .query(params![session_id, after_event_id, row_limit])
             .map_err(|source| query(&self.path, source))?;
-        let mut encoded = rows
-            .map(|row| row.map_err(|source| query(&self.path, source)))
-            .collect::<Result<Vec<_>, StorageError>>()?;
-        let has_more = encoded.len() > limit;
-        encoded.truncate(limit);
-        let records = encoded
-            .into_iter()
-            .map(|(event_id, encoded)| StoredRecord { event_id, encoded })
-            .collect::<Vec<_>>();
+        let mut records = Vec::new();
+        let mut loaded_bytes = 0usize;
+        let mut has_more = false;
+        while let Some(row) = rows.next().map_err(|source| query(&self.path, source))? {
+            if records.len() == limit {
+                has_more = true;
+                break;
+            }
+            let encoded_bytes = row
+                .get::<_, i64>(1)
+                .map_err(|source| query(&self.path, source))?;
+            let encoded_bytes = usize::try_from(encoded_bytes).unwrap_or(usize::MAX);
+            // The first record is always admitted so a caller can advance past a single oversized
+            // event. Every additional record must fit within the requested page byte budget.
+            if !records.is_empty() && loaded_bytes.saturating_add(encoded_bytes) > max_bytes {
+                has_more = true;
+                break;
+            }
+            let encoded = row
+                .get::<_, Vec<u8>>(2)
+                .map_err(|source| query(&self.path, source))?;
+            loaded_bytes = loaded_bytes.saturating_add(encoded.len());
+            records.push(StoredRecord {
+                event_id: row.get(0).map_err(|source| query(&self.path, source))?,
+                encoded,
+            });
+        }
         let next_cursor = has_more
             .then(|| records.last().map(|record| record.event_id))
             .flatten();
@@ -874,14 +894,14 @@ mod tests {
         append_prompt_record(&mut storage, "session", 3, 200, "second prompt");
 
         let first = storage
-            .load_record_page("session", None, 2)
+            .load_record_page("session", None, 2, usize::MAX)
             .unwrap()
             .unwrap();
         assert_eq!(first.records.len(), 2);
         assert!(first.next_cursor.is_some());
 
         let second = storage
-            .load_record_page("session", first.next_cursor, 2)
+            .load_record_page("session", first.next_cursor, 2, usize::MAX)
             .unwrap()
             .unwrap();
         assert_eq!(second.records.len(), 1);
@@ -898,12 +918,34 @@ mod tests {
         storage.append_raw_record("session", b"not-json").unwrap();
 
         let page = storage
-            .load_record_page("session", None, 2)
+            .load_record_page("session", None, 2, usize::MAX)
             .unwrap()
             .unwrap();
 
         assert_eq!(page.records.len(), 2);
         assert!(page.next_cursor.is_some());
+    }
+
+    #[test]
+    fn transcript_page_byte_budget_allows_one_oversized_record_for_progress() {
+        let directory = tempdir().unwrap();
+        let config = directory.path().join("config.toml");
+        let mut storage = SessionStorage::open(&config).unwrap();
+        append_prompt(&mut storage, "session", 100, "prompt");
+
+        let first = storage
+            .load_record_page("session", None, 100, 1)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(first.records.len(), 1);
+        assert!(first.next_cursor.is_some());
+        let second = storage
+            .load_record_page("session", first.next_cursor, 100, 1)
+            .unwrap()
+            .unwrap();
+        assert_eq!(second.records.len(), 1);
+        assert!(second.next_cursor.is_none());
     }
 
     #[test]
@@ -914,7 +956,7 @@ mod tests {
 
         assert!(
             storage
-                .load_record_page("missing", None, 10)
+                .load_record_page("missing", None, 10, usize::MAX)
                 .unwrap()
                 .is_none()
         );

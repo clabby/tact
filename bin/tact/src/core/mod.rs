@@ -77,10 +77,10 @@ const TACT_INSTRUCTIONS: &str = concat!(
 
 const SESSION_REFERENCE_INSTRUCTIONS: &str = concat!(
     "Session references use `@@<session-id>`. When the user references one, use `read_session` ",
-    "to inspect only the relevant bounded transcript pages. Prefer record-kind filters. For broad ",
-    "searches, use code mode to page with `next_cursor`, filter the results, and stop as soon as ",
-    "you have enough evidence. Do not treat the ID itself as session content or load additional ",
-    "pages unless they are needed."
+    "to scan the relevant transcript records in one bounded call. Prefer record-kind and text ",
+    "filters, and provide multiple text patterns together when useful. Pass `next_cursor` back only ",
+    "when the scan could not finish and more evidence is needed. Do not treat the ID itself as ",
+    "session content."
 );
 
 const MEMORY_INSTRUCTIONS: &str = concat!(
