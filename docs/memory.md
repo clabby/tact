@@ -142,7 +142,7 @@ The server wrapper owns bearer authentication, namespace and role checks, reques
 bounds, protocol errors, and operation tracing that excludes tokens and memory content. A store
 owns persistence, indexes, transactions, pagination, telemetry concurrency, capacity enforcement,
 and backend errors. It must make version-checked mutations atomic, serialize conflicting writes,
-keep upload sync atomic, and provide stable export pagination. The server-side store captures the
+keep snapshot replacement atomic, and provide stable export pagination. The server-side store captures the
 authoritative time for remote timestamps, telemetry, and probation unless a protocol operation
 explicitly preserves local snapshot identity.
 
@@ -167,7 +167,7 @@ remain distinguishable through the defined status and error mapping. The client 
 in-scope remote failures and never switches to local memory after one. Production deployments need
 HTTPS, private credentials, and storage encryption appropriate to the deployment.
 
-Runtime operations never upload local records, write through to another backend, combine backend
+Runtime operations never push local records, write through to another backend, combine backend
 results, or schedule background synchronization.
 
 ## Explicit transfer commands
@@ -176,22 +176,22 @@ Transfer commands operate on the global local store and therefore work from any 
 ignore `memory.enabled` and runtime workspace-root selection; configured remote credentials still
 govern authentication and authorization.
 
-### Upload local memory
+### Push local memory
 
 ```console
-tact memory upload --dry-run
-tact memory upload
+tact memory push --dry-run
+tact memory push
 ```
 
-Upload requires configured remote memory and a writer credential. It treats the complete live local
+Push requires configured remote memory and a writer credential. It treats the complete live local
 store as the authoritative snapshot for the writer's personal namespace. The client checks for a
 concurrently changing local snapshot for up to three reconciliation passes. The service inserts
 missing rows, replaces divergent generations or versions, preserves identical rows, and removes
 rows in that namespace that are absent locally. Other namespaces are never changed. `--dry-run`
 reports the local snapshot without contacting or modifying the service.
 
-Upload is an explicit administrative action. Runtime operations never trigger it and an outage
-does not create a queue for later upload.
+Push is an explicit administrative action. Runtime operations never trigger it and an outage does
+not create a queue for a later push.
 
 ### Pull remote memory
 
@@ -246,15 +246,15 @@ workspace_roots = ["/absolute/path/to/this/repository"]
 ```
 
 Create equivalent homes for Bob and the observer, changing namespace and token. Give Alice a local
-record while running outside the configured workspace, then upload it from any directory:
+record while running outside the configured workspace, then push it from any directory:
 
 ```console
 chmod 600 /tmp/tact-alice/config.toml
 
 TACT_HOME=/tmp/tact-alice cargo run -p tact -- \
   --workspace /tmp run 'Store a durable memory that the team uses cargo nextest in CI.'
-TACT_HOME=/tmp/tact-alice cargo run -p tact -- memory upload --dry-run
-TACT_HOME=/tmp/tact-alice cargo run -p tact -- memory upload
+TACT_HOME=/tmp/tact-alice cargo run -p tact -- memory push --dry-run
+TACT_HOME=/tmp/tact-alice cargo run -p tact -- memory push
 ```
 
 Verify that Bob uses remote memory exclusively inside the configured workspace and sees Alice's
@@ -323,7 +323,7 @@ server time and server-owned telemetry.
 Bounds apply to the global local corpus and independently to each remote writer namespace. A store
 may prune expired unread probation records before rejecting a capacity-increasing mutation, but it
 does not evict active graduated records to make room. Mutations, telemetry updates, bound checks,
-authoritative upload reconciliation, and local pull merge are transactional at their documented
+authoritative push reconciliation, and local pull merge are transactional at their documented
 scope.
 
 The local database is unencrypted. Anyone who can read the configuration directory may be able to

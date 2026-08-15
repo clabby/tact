@@ -72,7 +72,7 @@ operators can reduce or migrate the corpus without editing D1 directly.
 Create the D1 database:
 
 ```sh
-npx wrangler d1 create tact-memory
+bun x wrangler d1 create tact-memory
 ```
 
 Replace `REPLACE_WITH_D1_DATABASE_ID` in `wrangler.jsonc` with the returned database ID. Apply the

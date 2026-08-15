@@ -48,16 +48,16 @@ pub(crate) enum Error {
 pub(crate) enum MemoryTransferError {
     #[error("remote memory is not configured")]
     RemoteNotConfigured,
-    #[error("failed to read the local memory snapshot for upload: {0}")]
+    #[error("failed to read the local memory snapshot for push: {0}")]
     Local(#[source] MemoryError),
     #[error(
         "local memories kept changing while the remote snapshot was synchronized; retry once writes settle"
     )]
     LocalChanged,
-    #[error("memory upload failed: {0}")]
-    Upload(#[source] RemoteClientError),
-    #[error("remote memory rejected the upload: {0}")]
-    UploadStore(#[source] MemoryError),
+    #[error("memory push failed: {0}")]
+    Push(#[source] RemoteClientError),
+    #[error("remote memory rejected the push: {0}")]
+    PushStore(#[source] MemoryError),
     #[error("memory pull failed: {0}")]
     Pull(#[source] RemoteClientError),
     #[error("remote memory rejected the pull: {0}")]
