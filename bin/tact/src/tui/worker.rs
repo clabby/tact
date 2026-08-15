@@ -207,12 +207,13 @@ const REFLECTION_PROMPT: &str = concat!(
     "supplied current workspace and inspect its recent sessions. Use `contains_any` when the topic ",
     "suggests useful literal prompt patterns; omit the workspace only when the additional ",
     "instructions or evidence justify cross-workspace discovery. The tool excludes this conversation ",
-    "automatically. Pass `next_cursor` back only when another bounded page is needed. ",
+    "automatically. Use `parent_session_id` to avoid counting forks or descendants as independent ",
+    "evidence. Pass `next_cursor` back only when another bounded page is needed. ",
     "After selecting a small number of high-value session IDs, use `read_session` with exact kinds ",
-    "to read only enough context to establish what happened. A targeted `user.submitted` search can ",
-    "locate a candidate event; a separate call starting from that event ID can retrieve the adjacent ",
-    "assistant response without requiring it to match the same text filter. Stop when the evidence ",
-    "is sufficient.\n\n",
+    "to read only enough context to establish what happened. Targeted searches over both ",
+    "`user.submitted` and `user.steered` can locate candidate corrections; a separate call starting ",
+    "from a matched event ID can retrieve the adjacent assistant response without requiring it to ",
+    "match the same text filter. Stop when the evidence is sufficient.\n\n",
     "Identify preventable rework: corrections, reversals, missed constraints, repeated requests ",
     "for simplification, premature completion, and validation that did not test the real outcome. ",
     "Distinguish durable lessons from new scope, changed requirements, first-time preferences, and ",
@@ -237,11 +238,12 @@ const REFLECTION_PROMPT: &str = concat!(
 
 const REFLECTION_REPORT_ENDING: &str = concat!(
     "Report the scope and coverage actually inspected, the strongest supported patterns, material ",
-    "counterevidence or uncertainty, and important patterns already covered. End the report with ",
-    "sections named `Findings` and `Recommended actions`. Findings should state the supported ",
-    "conclusions and their scope. Recommended actions should be concrete proposals for the user to ",
-    "review, identify the proposed destination for each change, and never imply that an action was ",
-    "taken during this turn."
+    "counterevidence or uncertainty, and important patterns already covered. Do not claim exact ",
+    "frequencies unless the relevant scope was inspected exhaustively; otherwise describe recurrence ",
+    "as sampled evidence. End the report with sections named `Findings` and `Recommended actions`. ",
+    "Findings should state the supported conclusions and their scope. Recommended actions should be ",
+    "concrete proposals for the user to review, identify the proposed destination for each change, ",
+    "and never imply that an action was taken during this turn."
 );
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1114,6 +1116,9 @@ mod tests {
         assert!(text.contains("self-contained Tact reflection turn"));
         assert!(text.contains("`find_sessions`"));
         assert!(text.contains("`read_session`"));
+        assert!(text.contains("`parent_session_id`"));
+        assert!(text.contains("`user.submitted` and `user.steered`"));
+        assert!(text.contains("unless the relevant scope was inspected exhaustively"));
         assert!(text.contains(r#""workspace":"/work/current""#));
         assert!(!text.contains("sqlite3"));
         assert!(!text.contains("session_database"));
