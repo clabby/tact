@@ -39,6 +39,7 @@ pub async fn fetch(
 ) -> Result<axum::response::Response> {
     initialize_tracing();
 
+    // A request can resume only one D1 session, so reject malformed or duplicate bookmarks.
     let bookmark_headers = request.headers().get_all(protocol::BOOKMARK_HEADER);
     let mut bookmarks = bookmark_headers.iter();
     let bookmark = match (bookmarks.next(), bookmarks.next()) {

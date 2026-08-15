@@ -101,9 +101,6 @@ pub enum RemoteClientError {
 }
 
 /// Authenticated HTTP implementation of [`MemoryStore`].
-///
-/// Clones share any bookmark returned by the server. Their requests are serialized to preserve one
-/// monotonic logical session because opaque bookmarks cannot be merged.
 #[derive(Clone)]
 pub struct RemoteMemoryClient {
     inner: Arc<RemoteClientInner>,
