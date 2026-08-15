@@ -6,8 +6,8 @@
 //! indexing, capacity, telemetry, and stable export pagination.
 //!
 //! Production deployments can bind PlanetScale, Cloudflare, PostgreSQL, or another store through
-//! the same [crate::MemoryStore] contract. The workspace's `tact-memory-server-example` package
-//! demonstrates the server with a process-lifetime in-memory backend.
+//! the same [crate::MemoryStore] contract. The workspace's `tact-memory-cloudflare` package
+//! demonstrates a Cloudflare Worker backed by D1.
 
 #[cfg(feature = "server")]
 mod credential;

@@ -3,11 +3,14 @@
   "private": true,
   "scripts": {
     "build": "worker-build --release",
-    "dev": "wrangler dev",
+    "credentials:local": "bun run scripts/credentials.ts local",
+    "credentials:push": "bun run scripts/credentials.ts push",
+    "dev": "bun run credentials:local && wrangler dev",
     "migrate:local": "wrangler d1 migrations apply DB --local",
     "migrate:remote": "wrangler d1 migrations apply DB --remote",
     "deploy": "wrangler deploy",
-    "deploy:check": "wrangler deploy --dry-run --outdir bundled"
+    "deploy:check": "wrangler deploy --dry-run --outdir bundled",
+    "test": "bun test scripts"
   },
   "devDependencies": {
     "wrangler": "4.123.0"

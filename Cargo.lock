@@ -4497,6 +4497,7 @@ name = "tact-memory-cloudflare"
 version = "0.5.4"
 dependencies = [
  "axum",
+ "rusqlite",
  "serde",
  "serde_json",
  "tact-memory",
@@ -4505,20 +4506,6 @@ dependencies = [
  "tracing-subscriber",
  "tracing-web",
  "worker",
- "zeroize",
-]
-
-[[package]]
-name = "tact-memory-server-example"
-version = "0.5.4"
-dependencies = [
- "axum",
- "clap",
- "tact-memory",
- "thiserror 2.0.19",
- "tokio",
- "tracing",
- "tracing-subscriber",
  "zeroize",
 ]
 

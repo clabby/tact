@@ -1,1 +1,0 @@
-TACT_MEMORY_CREDENTIALS="writer alice replace-with-a-long-random-token\nreader auditor replace-with-a-different-long-random-token"

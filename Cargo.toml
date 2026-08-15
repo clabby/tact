@@ -1,5 +1,5 @@
 [workspace]
-members = ["bin/tact", "crates/*", "examples/memory-server"]
+members = ["bin/tact", "crates/*", "examples/tact-memory-cloudflare"]
 resolver = "3"
 
 [workspace.package]

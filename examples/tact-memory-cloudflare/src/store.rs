@@ -22,7 +22,7 @@ use worker::{
     send::SendFuture,
 };
 
-const RECORD_COLUMNS: &str = "namespace, CAST(id AS TEXT) AS id, CAST(version AS TEXT) AS version, content, CAST(created_at_ms AS TEXT) AS created_at_ms, CAST(updated_at_ms AS TEXT) AS updated_at_ms, CAST(last_scanned_at_ms AS TEXT) AS last_scanned_at_ms, CAST(scan_count AS TEXT) AS scan_count, CAST(last_used_at_ms AS TEXT) AS last_used_at_ms, CAST(use_count AS TEXT) AS use_count, CAST(probation_until_ms AS TEXT) AS probation_until_ms";
+const RECORD_COLUMNS: &str = "memories.namespace AS namespace, CAST(memories.id AS TEXT) AS id, CAST(memories.version AS TEXT) AS version, memories.content AS content, CAST(memories.created_at_ms AS TEXT) AS created_at_ms, CAST(memories.updated_at_ms AS TEXT) AS updated_at_ms, CAST(memories.last_scanned_at_ms AS TEXT) AS last_scanned_at_ms, CAST(memories.scan_count AS TEXT) AS scan_count, CAST(memories.last_used_at_ms AS TEXT) AS last_used_at_ms, CAST(memories.use_count AS TEXT) AS use_count, CAST(memories.probation_until_ms AS TEXT) AS probation_until_ms";
 const PRUNE_SQL: &str =
     "DELETE FROM memories WHERE probation_until_ms <= CAST(? AS INTEGER) AND use_count = 0";
 
@@ -634,4 +634,45 @@ fn validate_snapshot(memories: &[MemoryRecord]) -> Result<(), MemoryError> {
 
 fn current_time_ms() -> i64 {
     Date::now().as_millis().try_into().unwrap_or(i64::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RECORD_COLUMNS;
+    use rusqlite::{Connection, params};
+
+    #[test]
+    fn read_projection_is_unambiguous() {
+        let database = Connection::open_in_memory().unwrap();
+        database
+            .execute_batch(
+                "CREATE TABLE memories (
+                    namespace TEXT NOT NULL,
+                    id INTEGER NOT NULL,
+                    version INTEGER NOT NULL,
+                    content TEXT NOT NULL,
+                    created_at_ms INTEGER NOT NULL,
+                    updated_at_ms INTEGER NOT NULL,
+                    last_scanned_at_ms INTEGER,
+                    scan_count INTEGER NOT NULL,
+                    last_used_at_ms INTEGER,
+                    use_count INTEGER NOT NULL,
+                    probation_until_ms INTEGER
+                );
+                INSERT INTO memories VALUES ('ben', 1, 1, 'fixture', 1, 1, NULL, 0, NULL, 0, NULL);",
+            )
+            .unwrap();
+        let sql = format!(
+            "WITH requested AS (SELECT CAST(key AS INTEGER) AS ordinal, value ->> '$.namespace' AS namespace, CAST(value ->> '$.id' AS INTEGER) AS id, value ->> '$.version' AS version FROM json_each(?)) SELECT {RECORD_COLUMNS} FROM requested JOIN memories USING (namespace, id) WHERE requested.version IS NULL OR CAST(requested.version AS INTEGER) = memories.version ORDER BY requested.ordinal"
+        );
+        let request = r#"[{"namespace":"ben","id":"1","version":"1"}]"#;
+
+        let content = database
+            .query_row(&sql, params![request], |row| {
+                row.get::<_, String>("content")
+            })
+            .unwrap();
+
+        assert_eq!(content, "fixture");
+    }
 }

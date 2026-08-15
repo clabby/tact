@@ -88,7 +88,7 @@ build-harbor-agent platform='':
     #!/usr/bin/env bash
     set -euo pipefail
     docker_context=$(just --quiet _local-docker-context)
-    for source_tree in bin/tact/src crates/memory/src crates/subagents/src examples/memory-server/src; do
+    for source_tree in bin/tact/src crates/memory/src crates/subagents/src examples/tact-memory-cloudflare/src; do
         test -z "$(find "$source_tree" -type l -print -quit)" || {
             echo "refusing to build Harbor agent with symlinks below $source_tree/" >&2
             exit 1
@@ -110,9 +110,9 @@ build-harbor-agent platform='':
     mkdir -p "$build_context/crates/subagents"
     cp crates/subagents/Cargo.toml crates/subagents/README.md "$build_context/crates/subagents/"
     cp -R crates/subagents/src "$build_context/crates/subagents/src"
-    mkdir -p "$build_context/examples/memory-server"
-    cp examples/memory-server/Cargo.toml "$build_context/examples/memory-server/"
-    cp -R examples/memory-server/src "$build_context/examples/memory-server/src"
+    mkdir -p "$build_context/examples/tact-memory-cloudflare"
+    cp examples/tact-memory-cloudflare/Cargo.toml "$build_context/examples/tact-memory-cloudflare/"
+    cp -R examples/tact-memory-cloudflare/src "$build_context/examples/tact-memory-cloudflare/src"
     platform_args=()
     if [[ -n "{{platform}}" ]]; then
         platform_args=(--platform "{{platform}}")
