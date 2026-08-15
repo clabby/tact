@@ -1067,25 +1067,25 @@ async fn retrying_list(
 }
 
 #[derive(Clone, Default)]
-struct ConsistencyTokenState {
+struct BookmarkState {
     requests: Arc<Mutex<Vec<Option<String>>>>,
 }
 
-async fn consistent_list(
-    axum::extract::State(state): axum::extract::State<ConsistencyTokenState>,
+async fn bookmarked_list(
+    axum::extract::State(state): axum::extract::State<BookmarkState>,
     headers: axum::http::HeaderMap,
 ) -> Response<Body> {
-    let token = headers
-        .get(protocol::CONSISTENCY_TOKEN_HEADER)
+    let bookmark = headers
+        .get(protocol::BOOKMARK_HEADER)
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned);
-    state.requests.lock().unwrap().push(token.clone());
+    state.requests.lock().unwrap().push(bookmark.clone());
 
     tokio::time::sleep(Duration::from_millis(50)).await;
-    let response_token = match token.as_deref() {
-        None => "token-1",
-        Some("token-1") => "token-2",
-        Some("token-2") => "token-3",
+    let response_bookmark = match bookmark.as_deref() {
+        None => "bookmark-1",
+        Some("bookmark-1") => "bookmark-2",
+        Some("bookmark-2") => "bookmark-3",
         _ => return StatusCode::CONFLICT.into_response(),
     };
     let mut response = Json(ListResponse {
@@ -1093,8 +1093,8 @@ async fn consistent_list(
     })
     .into_response();
     response.headers_mut().insert(
-        protocol::CONSISTENCY_TOKEN_HEADER,
-        response_token.parse().unwrap(),
+        protocol::BOOKMARK_HEADER,
+        response_bookmark.parse().unwrap(),
     );
     response
 }
@@ -1272,10 +1272,10 @@ async fn client_retries_safe_operations_but_does_not_replay_put_responses() {
 }
 
 #[tokio::test]
-async fn client_carries_consistency_tokens_across_concurrent_clones() {
-    let state = ConsistencyTokenState::default();
+async fn client_carries_bookmarks_across_concurrent_clones() {
+    let state = BookmarkState::default();
     let app = Router::new()
-        .route(&format!("/{}", protocol::LIST_PATH), post(consistent_list))
+        .route(&format!("/{}", protocol::LIST_PATH), post(bookmarked_list))
         .with_state(state.clone());
     let (endpoint, task) = live_server(app).await;
     let client = RemoteMemoryClient::new(
@@ -1292,7 +1292,11 @@ async fn client_carries_consistency_tokens_across_concurrent_clones() {
     assert!(client.list().await.unwrap().is_empty());
     assert_eq!(
         *state.requests.lock().unwrap(),
-        vec![None, Some("token-1".to_owned()), Some("token-2".to_owned()),]
+        vec![
+            None,
+            Some("bookmark-1".to_owned()),
+            Some("bookmark-2".to_owned()),
+        ]
     );
     task.abort();
 }
