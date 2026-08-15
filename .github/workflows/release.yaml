@@ -42,13 +42,9 @@ jobs:
             exit 1
           fi
 
-  cache:
-    needs: validate
-    uses: ./.github/workflows/cache.yaml
-
   build:
     name: Build ${{ matrix.target }}
-    needs: cache
+    needs: validate
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
@@ -231,6 +227,10 @@ jobs:
           path: ${{ runner.temp }}/signed-release
       - name: Install Rust stable toolchain
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: build
+          save-if: false
       - name: Publish crates in dependency order
         shell: bash
         run: |
