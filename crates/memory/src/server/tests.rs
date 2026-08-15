@@ -1066,6 +1066,39 @@ async fn retrying_list(
     .into_response()
 }
 
+#[derive(Clone, Default)]
+struct BookmarkState {
+    requests: Arc<Mutex<Vec<Option<String>>>>,
+}
+
+async fn bookmarked_list(
+    axum::extract::State(state): axum::extract::State<BookmarkState>,
+    headers: axum::http::HeaderMap,
+) -> Response<Body> {
+    let bookmark = headers
+        .get(protocol::D1_BOOKMARK_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    state.requests.lock().unwrap().push(bookmark.clone());
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let response_bookmark = match bookmark.as_deref() {
+        None => "bookmark-1",
+        Some("bookmark-1") => "bookmark-2",
+        Some("bookmark-2") => "bookmark-3",
+        _ => return StatusCode::CONFLICT.into_response(),
+    };
+    let mut response = Json(ListResponse {
+        memories: Vec::new(),
+    })
+    .into_response();
+    response.headers_mut().insert(
+        protocol::D1_BOOKMARK_HEADER,
+        response_bookmark.parse().unwrap(),
+    );
+    response
+}
+
 async fn unavailable_put(
     axum::extract::State(state): axum::extract::State<RetryState>,
 ) -> Response<Body> {
@@ -1235,6 +1268,36 @@ async fn client_retries_safe_operations_but_does_not_replay_put_responses() {
         })
     ));
     assert_eq!(state.put_calls.load(Ordering::SeqCst), 1);
+    task.abort();
+}
+
+#[tokio::test]
+async fn client_carries_d1_bookmarks_across_concurrent_clones() {
+    let state = BookmarkState::default();
+    let app = Router::new()
+        .route(&format!("/{}", protocol::LIST_PATH), post(bookmarked_list))
+        .with_state(state.clone());
+    let (endpoint, task) = live_server(app).await;
+    let client = RemoteMemoryClient::new(
+        &endpoint,
+        "alice".to_owned(),
+        RemoteToken::new(ALICE_TOKEN.to_owned()).unwrap(),
+    )
+    .unwrap();
+    let clone = client.clone();
+
+    let (first, second) = tokio::join!(client.list(), clone.list());
+    assert!(first.unwrap().is_empty());
+    assert!(second.unwrap().is_empty());
+    assert!(client.list().await.unwrap().is_empty());
+    assert_eq!(
+        *state.requests.lock().unwrap(),
+        vec![
+            None,
+            Some("bookmark-1".to_owned()),
+            Some("bookmark-2".to_owned()),
+        ]
+    );
     task.abort();
 }
 

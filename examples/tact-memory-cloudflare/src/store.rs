@@ -17,7 +17,7 @@ use tact_memory::{
 };
 use thiserror::Error;
 use worker::{
-    D1Database, Date,
+    D1DatabaseSession, Date,
     d1::{D1PreparedStatement, D1Result, D1Type},
     send::SendFuture,
 };
@@ -25,6 +25,7 @@ use worker::{
 const RECORD_COLUMNS: &str = "memories.namespace AS namespace, CAST(memories.id AS TEXT) AS id, CAST(memories.version AS TEXT) AS version, memories.content AS content, CAST(memories.created_at_ms AS TEXT) AS created_at_ms, CAST(memories.updated_at_ms AS TEXT) AS updated_at_ms, CAST(memories.last_scanned_at_ms AS TEXT) AS last_scanned_at_ms, CAST(memories.scan_count AS TEXT) AS scan_count, CAST(memories.last_used_at_ms AS TEXT) AS last_used_at_ms, CAST(memories.use_count AS TEXT) AS use_count, CAST(memories.probation_until_ms AS TEXT) AS probation_until_ms";
 const PRUNE_SQL: &str =
     "DELETE FROM memories WHERE probation_until_ms <= CAST(? AS INTEGER) AND use_count = 0";
+const VISIBLE_RECORD_SQL: &str = "(memories.probation_until_ms IS NULL OR memories.probation_until_ms > CAST(? AS INTEGER) OR memories.use_count != 0)";
 
 /// Deployment-selected bound for exact Worker-side BM25 retrieval.
 #[derive(Clone, Copy, Debug)]
@@ -36,21 +37,21 @@ pub(crate) struct ScanBudget {
 /// Namespace-bound shared memory backed by Cloudflare D1.
 #[derive(Clone, Debug)]
 pub(crate) struct CloudflareMemoryStore {
-    database: Arc<D1Database>,
+    session: Arc<D1DatabaseSession>,
     namespace: Arc<str>,
     scan_budget: ScanBudget,
 }
 
 impl CloudflareMemoryStore {
-    /// Binds `database` mutations to `namespace`; reads remain shared.
+    /// Binds a request-scoped D1 session to one writer namespace; reads remain shared.
     pub(crate) fn new(
-        database: impl Into<Arc<D1Database>>,
-        namespace: impl Into<String>,
+        session: Arc<D1DatabaseSession>,
+        namespace: String,
         scan_budget: ScanBudget,
     ) -> Self {
         Self {
-            database: database.into(),
-            namespace: Arc::from(namespace.into()),
+            session,
+            namespace: Arc::from(namespace),
             scan_budget,
         }
     }
@@ -61,7 +62,7 @@ impl CloudflareMemoryStore {
         sql: impl Into<String>,
         values: &[D1Type<'_>],
     ) -> Result<D1PreparedStatement, MemoryError> {
-        self.database
+        self.session
             .prepare(sql)
             .bind_refs(values)
             .map_err(MessageError::backend)
@@ -76,7 +77,7 @@ impl CloudflareMemoryStore {
         statements: Vec<D1PreparedStatement>,
     ) -> Result<Vec<D1Result>, MemoryError> {
         let results = self
-            .database
+            .session
             .batch(statements)
             .await
             .map_err(|error| MemoryError::unavailable(MessageError(error.to_string())))?;
@@ -102,45 +103,46 @@ impl MemoryStore for CloudflareMemoryStore {
                     maximum_bytes: limits.query_bytes,
                 });
             }
-            let now = current_time_ms();
+            let now = current_time_ms().to_string();
             let scan_budget = store.scan_budget;
+            let corpus_size_sql = format!(
+                "SELECT COUNT(*) AS record_count, COALESCE(SUM(length(CAST(content AS BLOB))), 0) AS content_bytes FROM memories WHERE {VISIBLE_RECORD_SQL}"
+            );
             let corpus_sql = format!(
-                "SELECT {RECORD_COLUMNS} FROM memories WHERE (SELECT COUNT(*) FROM memories) <= {} AND (SELECT COALESCE(SUM(length(CAST(content AS BLOB))), 0) FROM memories) <= {} ORDER BY namespace, id",
+                "SELECT {RECORD_COLUMNS} FROM memories WHERE {VISIBLE_RECORD_SQL} AND (SELECT COUNT(*) FROM memories WHERE {VISIBLE_RECORD_SQL}) <= {} AND (SELECT COALESCE(SUM(length(CAST(content AS BLOB))), 0) FROM memories WHERE {VISIBLE_RECORD_SQL}) <= {} ORDER BY namespace, id",
                 scan_budget.records, scan_budget.content_bytes
             );
             let statements = vec![
-                store.statement(PRUNE_SQL, &[D1Type::Text(&now.to_string())])?,
-                store.database.prepare("SELECT COUNT(*) AS record_count, COALESCE(SUM(length(CAST(content AS BLOB))), 0) AS content_bytes FROM memories"),
-                store.database.prepare(corpus_sql),
+                store.statement(corpus_size_sql, &[D1Type::Text(&now)])?,
+                store.statement(
+                    corpus_sql,
+                    &[D1Type::Text(&now), D1Type::Text(&now), D1Type::Text(&now)],
+                )?,
             ];
             let results = store.batch(statements).await?;
-            let corpus = results[1].one::<CorpusRow>()?;
+            let corpus = results[0].one::<CorpusRow>()?;
             if corpus.record_count > scan_budget.records
                 || corpus.content_bytes > scan_budget.content_bytes
             {
                 return Err(MemoryError::StorageCapacity);
             }
-            let records = results[2].records()?;
+            let records = results[1].records()?;
             let scan = MemoryScan::rank(&query, &records, limit.min(limits.scan_results));
-            if !scan.candidates.is_empty() {
-                let updates = scan
-                    .candidates
-                    .iter()
-                    .map(|candidate| {
-                        let namespace = candidate.key.namespace.as_deref().unwrap_or_default();
-                        store.statement(
-                            "UPDATE memories SET last_scanned_at_ms = CAST(? AS INTEGER), scan_count = CASE WHEN scan_count < 9223372036854775807 THEN scan_count + 1 ELSE scan_count END WHERE namespace = ? AND id = CAST(? AS INTEGER) AND version = CAST(? AS INTEGER)",
-                            &[
-                                D1Type::Text(&now.to_string()),
-                                D1Type::Text(namespace),
-                                D1Type::Text(&candidate.key.id.to_string()),
-                                D1Type::Text(&candidate.key.version.to_string()),
-                            ],
-                        )
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                store.batch(updates).await?;
+            let mut updates = Vec::with_capacity(scan.candidates.len() + 1);
+            updates.push(store.statement(PRUNE_SQL, &[D1Type::Text(&now)])?);
+            for candidate in &scan.candidates {
+                let namespace = candidate.key.namespace.as_deref().unwrap_or_default();
+                updates.push(store.statement(
+                    "UPDATE memories SET last_scanned_at_ms = CAST(? AS INTEGER), scan_count = CASE WHEN scan_count < 9223372036854775807 THEN scan_count + 1 ELSE scan_count END WHERE namespace = ? AND id = CAST(? AS INTEGER) AND version = CAST(? AS INTEGER)",
+                    &[
+                        D1Type::Text(&now),
+                        D1Type::Text(namespace),
+                        D1Type::Text(&candidate.key.id.to_string()),
+                        D1Type::Text(&candidate.key.version.to_string()),
+                    ],
+                )?);
             }
+            store.batch(updates).await?;
             Ok(scan)
         })
     }
@@ -180,16 +182,13 @@ impl MemoryStore for CloudflareMemoryStore {
         SendFuture::new(async move {
             let now = current_time_ms().to_string();
             let sql = format!(
-                "SELECT {RECORD_COLUMNS} FROM memories ORDER BY namespace, id LIMIT {}",
+                "SELECT {RECORD_COLUMNS} FROM memories WHERE {VISIBLE_RECORD_SQL} ORDER BY namespace, id LIMIT {}",
                 MemoryLimits::PRODUCTION.records
             );
             let results = store
-                .batch(vec![
-                    store.statement(PRUNE_SQL, &[D1Type::Text(&now)])?,
-                    store.database.prepare(sql),
-                ])
+                .batch(vec![store.statement(sql, &[D1Type::Text(&now)])?])
                 .await?;
-            results[1].records()
+            results[0].records()
         })
     }
 
@@ -290,26 +289,24 @@ impl MemoryStore for CloudflareMemoryStore {
                 .map_or("0".to_owned(), |value| value.id.to_string());
             let bounded = limit.clamp(1, protocol::MAX_EXPORT_PAGE_RECORDS);
             let sql = format!(
-                "SELECT {RECORD_COLUMNS} FROM memories WHERE (? = 'null' OR namespace IN (SELECT value FROM json_each(?))) AND (? = '0' OR namespace > ? OR (namespace = ? AND id > CAST(? AS INTEGER))) ORDER BY namespace, id LIMIT {}",
+                "SELECT {RECORD_COLUMNS} FROM memories WHERE {VISIBLE_RECORD_SQL} AND (? = 'null' OR namespace IN (SELECT value FROM json_each(?))) AND (? = '0' OR namespace > ? OR (namespace = ? AND id > CAST(? AS INTEGER))) ORDER BY namespace, id LIMIT {}",
                 bounded + 1
             );
             let results = store
-                .batch(vec![
-                    store.statement(PRUNE_SQL, &[D1Type::Text(&now)])?,
-                    store.statement(
-                        sql,
-                        &[
-                            D1Type::Text(&selected),
-                            D1Type::Text(&selected),
-                            D1Type::Text(has_cursor),
-                            D1Type::Text(cursor_namespace),
-                            D1Type::Text(cursor_namespace),
-                            D1Type::Text(&cursor_id),
-                        ],
-                    )?,
-                ])
+                .batch(vec![store.statement(
+                    sql,
+                    &[
+                        D1Type::Text(&now),
+                        D1Type::Text(&selected),
+                        D1Type::Text(&selected),
+                        D1Type::Text(has_cursor),
+                        D1Type::Text(cursor_namespace),
+                        D1Type::Text(cursor_namespace),
+                        D1Type::Text(&cursor_id),
+                    ],
+                )?])
                 .await?;
-            let mut records = results[1].records()?;
+            let mut records = results[0].records()?;
             let has_more = records.len() > bounded;
             records.truncate(bounded);
             let next = has_more.then(|| {

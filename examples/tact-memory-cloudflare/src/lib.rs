@@ -8,15 +8,23 @@ mod config;
 mod store;
 
 use auth::{CREDENTIALS_SECRET, parse_credentials};
-use axum::body::Body;
+use axum::{
+    Json,
+    body::Body,
+    http::{HeaderValue, StatusCode},
+    response::IntoResponse,
+};
 use config::scan_budget;
 use std::sync::{Arc, Once};
 use store::CloudflareMemoryStore;
-use tact_memory::server::MemoryServer;
+use tact_memory::server::{
+    MemoryServer,
+    protocol::{self, ErrorResponse, RemoteErrorCode},
+};
 use tower::ServiceExt;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use tracing_web::{MakeConsoleWriter, performance_layer};
-use worker::{Context, Env, HttpRequest, Result, event};
+use worker::{Context, D1SessionConstraint, Env, HttpRequest, Result, event};
 use zeroize::Zeroizing;
 
 const DATABASE_BINDING: &str = "DB";
@@ -30,22 +38,68 @@ pub async fn fetch(
     _context: Context,
 ) -> Result<axum::response::Response> {
     initialize_tracing();
-    let database = Arc::new(environment.d1(DATABASE_BINDING)?);
+
+    let bookmark_headers = request.headers().get_all(protocol::D1_BOOKMARK_HEADER);
+    let mut bookmarks = bookmark_headers.iter();
+    let bookmark = match (bookmarks.next(), bookmarks.next()) {
+        (None, None) => None,
+        (Some(value), None) => match value.to_str() {
+            Ok(value) if protocol::is_valid_d1_bookmark(value) => Some(value.to_owned()),
+            _ => return Ok(bad_request()),
+        },
+        _ => return Ok(bad_request()),
+    };
+
+    // A new session may begin on a stale nearby replica; a supplied bookmark resumes at least as
+    // fresh as the client's preceding response. D1 forwards mutations to the primary.
+    let database = environment.d1(DATABASE_BINDING)?;
+    let session = Arc::new(match bookmark.as_deref() {
+        Some(bookmark) => database.with_session(Some(bookmark))?,
+        None => database.with_session_constraint(D1SessionConstraint::FirstUnconstrained)?,
+    });
+
     // Cloudflare owns another non-zeroizing copy behind `Secret`. This crate zeroizes only the
     // Rust string returned by the binding and every credential copy it constructs.
     let document = Zeroizing::new(environment.secret(CREDENTIALS_SECRET)?.to_string());
     let credentials = parse_credentials(document).map_err(worker_error)?;
     let scan_budget = scan_budget(&environment).map_err(worker_error)?;
+    let store_session = Arc::clone(&session);
     let server = MemoryServer::new(
-        move |namespace| CloudflareMemoryStore::new(Arc::clone(&database), namespace, scan_budget),
+        move |namespace| {
+            CloudflareMemoryStore::new(Arc::clone(&store_session), namespace, scan_budget)
+        },
         credentials,
     )
     .map_err(worker_error)?;
-    server
+    let mut response = server
         .router()
         .oneshot(request.map(Body::new))
         .await
-        .map_err(worker_error)
+        .map_err(worker_error)?;
+    if let Some(bookmark) = session.get_bookmark()? {
+        if !protocol::is_valid_d1_bookmark(&bookmark) {
+            return Err(invalid_d1_bookmark());
+        }
+        let value = HeaderValue::from_str(&bookmark).map_err(|_| invalid_d1_bookmark())?;
+        response
+            .headers_mut()
+            .insert(protocol::D1_BOOKMARK_HEADER, value);
+    }
+    Ok(response)
+}
+
+fn bad_request() -> axum::response::Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(ErrorResponse {
+            code: RemoteErrorCode::BadRequest,
+        }),
+    )
+        .into_response()
+}
+
+fn invalid_d1_bookmark() -> worker::Error {
+    worker::Error::RustError("D1 returned an invalid session bookmark".to_owned())
 }
 
 fn initialize_tracing() {
