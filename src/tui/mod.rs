@@ -2053,12 +2053,8 @@ fn apply_pane_effect(
                 .current_fast_mode;
             let config = context.config.clone();
             *context.new_session_task = Some(tokio::task::spawn_blocking(move || {
-                let configured = ConfiguredAgent::from_config_with_model(
-                    &config,
-                    effort,
-                    reasoning_mode,
-                    model,
-                );
+                let configured =
+                    ConfiguredAgent::from_config_with_model(&config, effort, reasoning_mode, model);
                 (
                     pane,
                     effort,
@@ -2132,9 +2128,7 @@ fn apply_pane_effect(
                 *context.memory_store = configured_memory_store(&config);
                 context.app.set_max_subagents(max_subagents);
                 for runtime in context.panes.values() {
-                    runtime
-                        .subagent_control
-                        .set_max_concurrency(max_subagents);
+                    runtime.subagent_control.set_max_concurrency(max_subagents);
                 }
                 *context.config = config;
                 let message = if workspace_changed {
@@ -2202,9 +2196,9 @@ fn apply_pane_effect(
                 let sessions = session::list_async(config_path, workspace, resumable_only)
                     .await
                     .map(|mut sessions| {
-                    sessions.retain(|session| session.session_id != active_session_id);
-                    sessions
-                });
+                        sessions.retain(|session| session.session_id != active_session_id);
+                        sessions
+                    });
                 (pane, sessions.map_err(Into::into))
             }));
         }
@@ -2261,9 +2255,7 @@ fn apply_pane_effect(
                 }
                 Ok(crate::review::AssetAvailability::DownloadRequired) if !download_assets => {
                     schedule(
-                        context
-                            .app
-                            .update(AppEvent::ConfirmReviewDownload { pane }),
+                        context.app.update(AppEvent::ConfirmReviewDownload { pane }),
                         context.scheduler,
                     );
                     return Ok(());
@@ -2319,40 +2311,34 @@ fn apply_pane_effect(
                     let snapshot = snapshot.map_err(RuntimeError::SessionTask)??;
                     let records = records?;
                     tokio::task::spawn_blocking(move || -> Result<_> {
-                    let reasoning_mode = session::reasoning_mode(&records);
-                    let model = session::model(&records);
-                    let next_sequence = session::next_sequence(&records);
-                    let projection = RootNode::project_session(effort, records);
-                    let configured = ConfiguredAgent::from_config_with_session(
-                        &config,
-                        effort,
-                        reasoning_mode,
-                        model,
-                        Some(&session_id),
-                        Some(snapshot),
-                    )?;
-                    Ok(RestoredSession {
-                        configured,
-                        projection,
-                        reasoning_mode,
-                        model,
-                        next_sequence,
-                    })
+                        let reasoning_mode = session::reasoning_mode(&records);
+                        let model = session::model(&records);
+                        let next_sequence = session::next_sequence(&records);
+                        let projection = RootNode::project_session(effort, records);
+                        let configured = ConfiguredAgent::from_config_with_session(
+                            &config,
+                            effort,
+                            reasoning_mode,
+                            model,
+                            Some(&session_id),
+                            Some(snapshot),
+                        )?;
+                        Ok(RestoredSession {
+                            configured,
+                            projection,
+                            reasoning_mode,
+                            model,
+                            next_sequence,
+                        })
                     })
                     .await
                     .map_err(RuntimeError::SessionTask)?
                 }
                 .await;
-                (
-                    pane,
-                    effort,
-                    preferred_reasoning_mode,
-                    fast_mode,
-                    restored,
-                )
+                (pane, effort, preferred_reasoning_mode, fast_mode, restored)
             }));
         }
-        components::RootEffect::Copy(text) => match clipboard::copy_text(&text) {
+        components::RootEffect::Copy(text) => match copy_selection(context.terminal, &text) {
             Ok(()) => schedule(
                 context.app.update(AppEvent::NotifySuccess {
                     pane,
@@ -2360,26 +2346,10 @@ fn apply_pane_effect(
                 }),
                 context.scheduler,
             ),
-            Err(native_error) => {
-                match context.terminal.copy_to_clipboard(&text) {
-                    Ok(()) => schedule(
-                        context.app.update(AppEvent::NotifySuccess {
-                            pane,
-                            message: "Sent selection to the terminal clipboard.".to_owned(),
-                        }),
-                        context.scheduler,
-                    ),
-                    Err(terminal_error) => schedule(
-                        context.app.update(AppEvent::NotifyError {
-                            pane,
-                            error: format!(
-                                "Could not copy selection: {native_error}; terminal fallback failed: {terminal_error}"
-                            ),
-                        }),
-                        context.scheduler,
-                    ),
-                }
-            }
+            Err(error) => schedule(
+                context.app.update(AppEvent::NotifyError { pane, error }),
+                context.scheduler,
+            ),
         },
         components::RootEffect::Steer { id, prompt } => {
             let runtime = context.panes.get_mut(&pane).expect("steer pane must exist");
@@ -2415,10 +2385,7 @@ fn apply_pane_effect(
             );
         }
         components::RootEffect::CancelTurns => {
-            let runtime = context
-                .panes
-                .get(&pane)
-                .expect("cancelled pane must exist");
+            let runtime = context.panes.get(&pane).expect("cancelled pane must exist");
             let subagents = runtime.subagent_control.clone();
             let root_session_id = runtime.session_id.clone();
             tokio::spawn(async move { subagents.cancel_all(&root_session_id).await });
@@ -2444,6 +2411,42 @@ fn apply_pane_effect(
         }
     }
     Ok(())
+}
+
+/// Copies `text` to the system clipboard through the most reliable channel for the
+/// platform, returning a user-facing error message only when every channel fails.
+///
+/// On Linux the OSC 52 terminal escape leads: the terminal emulator owns clipboard
+/// persistence, so the selection survives after tact writes it. `arboard` is only a
+/// fallback there because it cannot be trusted on Wayland/X11 — it reports success
+/// while releasing selection ownership immediately, leaving the clipboard empty
+/// (which previously shadowed the working OSC 52 path). macOS keeps the native
+/// `pbcopy` path first, since it is reliable and does not depend on the terminal
+/// supporting OSC 52.
+#[cfg(not(target_os = "macos"))]
+fn copy_selection(terminal: &mut TerminalSession, text: &str) -> std::result::Result<(), String> {
+    match terminal.copy_to_clipboard(text) {
+        Ok(()) => Ok(()),
+        Err(terminal_error) => clipboard::copy_text(text).map_err(|native_error| {
+            format!(
+                "Could not copy selection: terminal copy failed: {terminal_error}; \
+                 native fallback failed: {native_error}"
+            )
+        }),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn copy_selection(terminal: &mut TerminalSession, text: &str) -> std::result::Result<(), String> {
+    match clipboard::copy_text(text) {
+        Ok(()) => Ok(()),
+        Err(native_error) => terminal.copy_to_clipboard(text).map_err(|terminal_error| {
+            format!(
+                "Could not copy selection: {native_error}; \
+                 terminal fallback failed: {terminal_error}"
+            )
+        }),
+    }
 }
 
 fn start_handoff(context: &mut EffectContext<'_>, pane: PaneId) {
