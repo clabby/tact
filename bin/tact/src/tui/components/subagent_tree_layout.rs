@@ -1,7 +1,7 @@
 //! Deterministic world-space layout for the subagent hierarchy.
 
-use crate::core::extensions::subagents::AgentId;
 use std::collections::{HashMap, HashSet};
+use tact_subagents::AgentId;
 
 pub(super) const NODE_WIDTH: i32 = 24;
 pub(super) const NODE_HEIGHT: i32 = 4;
@@ -225,7 +225,7 @@ fn place_subtree(
 #[cfg(test)]
 mod tests {
     use super::{HORIZONTAL_GAP, LayoutNode, NODE_WIDTH, TreeLayout};
-    use crate::core::extensions::subagents::AgentId;
+    use tact_subagents::AgentId;
 
     fn node(id: u64, parent: Option<u64>) -> LayoutNode {
         LayoutNode {

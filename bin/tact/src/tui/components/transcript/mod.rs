@@ -13,7 +13,6 @@ use super::{
 };
 use crate::{
     app::config::ReasoningEffort,
-    core::extensions::subagents::{AgentMessageUpdate, MessageSender},
     tui::{
         format::{duration_display_tick, format_duration, format_turn_duration},
         spinner::Spinner,
@@ -39,6 +38,7 @@ use std::{
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+use tact_subagents::{AgentMessageUpdate, MessageSender};
 
 const EXPANDABLE_FOCUS_HINTS: [&str; 2] =
     ["↑↓ item · Enter toggle · Esc back", "↑↓ item · Enter · Esc"];
@@ -1853,7 +1853,6 @@ mod tests {
     };
     use crate::{
         app::config::{ReasoningEffort, ReasoningMode},
-        core::extensions::subagents::{AgentMessageUpdate, MessageSender},
         tui::{
             theme::Theme,
             transcript::{EntryKind, LocalEvent, SessionStarted, TranscriptRecord, TurnId},
@@ -1869,6 +1868,7 @@ mod tests {
     use ratatui::{Terminal, backend::TestBackend, layout::Position, style::Color};
     use serde_json::{json, value::to_raw_value};
     use std::{sync::Arc, time::Duration};
+    use tact_subagents::{AgentMessageUpdate, MessageSender};
 
     fn user(sequence: u64, text: impl Into<String>) -> Arc<TranscriptRecord> {
         Arc::new(

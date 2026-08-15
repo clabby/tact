@@ -275,6 +275,9 @@ jobs:
           cargo package --locked -p tact-memory
           publish_package tact-memory
 
+          cargo package --locked -p tact-subagents
+          publish_package tact-subagents
+
           cp "${RUNNER_TEMP}/signed-release/bin/tact/Cargo.toml" bin/tact/Cargo.toml
           for attempt in {1..10}; do
             if cargo package --locked --allow-dirty -p tact; then

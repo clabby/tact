@@ -47,10 +47,18 @@ fn just_recipes_forward_command_arguments() {
 }
 
 #[test]
-fn harbor_context_contains_the_memory_server_workspace_member() {
+fn harbor_context_contains_every_workspace_member() {
     assert_contains(
         JUSTFILE,
-        "for source_tree in bin/tact/src crates/memory/src examples/memory-server/src; do",
+        "for source_tree in bin/tact/src crates/memory/src crates/subagents/src examples/memory-server/src; do",
+    );
+    assert_contains(
+        JUSTFILE,
+        "cp crates/subagents/Cargo.toml crates/subagents/README.md \"$build_context/crates/subagents/\"",
+    );
+    assert_contains(
+        JUSTFILE,
+        "cp -R crates/subagents/src \"$build_context/crates/subagents/src\"",
     );
     assert_contains(
         JUSTFILE,
@@ -316,7 +324,7 @@ fn publish_recovery_requires_the_exact_packaged_crate() {
 }
 
 #[test]
-fn memory_crate_is_published_before_tact() {
+fn library_crates_are_published_before_tact() {
     let workflow = workflow(RELEASE_WORKFLOW);
     assert_eq!(workflow["jobs"]["publish_crates"]["needs"], "sign");
 
@@ -333,6 +341,8 @@ fn memory_crate_is_published_before_tact() {
         "publish_package()",
         "cargo package --locked -p tact-memory",
         "publish_package tact-memory",
+        "cargo package --locked -p tact-subagents",
+        "publish_package tact-subagents",
         "cp \"${RUNNER_TEMP}/signed-release/bin/tact/Cargo.toml\" bin/tact/Cargo.toml",
         "cargo package --locked --allow-dirty -p tact",
         "publish_package tact --allow-dirty",
@@ -341,9 +351,10 @@ fn memory_crate_is_published_before_tact() {
     }
 
     let memory = publish.find("publish_package tact-memory").unwrap();
+    let subagents = publish.find("publish_package tact-subagents").unwrap();
     let signed_manifest = publish.find("cp \"${RUNNER_TEMP}").unwrap();
     let tact = publish.find("publish_package tact --allow-dirty").unwrap();
-    assert!(memory < signed_manifest && signed_manifest < tact);
+    assert!(memory < signed_manifest && subagents < signed_manifest && signed_manifest < tact);
 }
 
 #[test]

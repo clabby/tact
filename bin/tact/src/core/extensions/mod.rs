@@ -3,7 +3,6 @@
 mod mcp;
 pub(crate) mod sessions;
 mod skills;
-pub(crate) mod subagents;
 
 pub(super) use mcp::provider as mcp_provider;
 pub(crate) use skills::Skill;

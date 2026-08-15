@@ -55,6 +55,7 @@ shlex.workspace = true
 syntect.workspace = true
 tar.workspace = true
 tact-memory.workspace = true
+tact-subagents.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

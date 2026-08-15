@@ -10,9 +10,6 @@ use super::{
 };
 use crate::{
     app::config::DEFAULT_MAX_SUBAGENTS,
-    core::extensions::subagents::{
-        AgentDescriptor, AgentId, AgentStatus, AgentUpdate, MessageSender,
-    },
     tui::{theme::Theme, transcript::TranscriptRecord},
 };
 use crossterm::event::{Event, KeyCode, KeyEventKind};
@@ -29,6 +26,7 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
+use tact_subagents::{AgentDescriptor, AgentId, AgentStatus, AgentUpdate, MessageSender};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -1070,13 +1068,7 @@ fn model_name(model: Model) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{SubagentEffect, SubagentTree};
-    use crate::{
-        app::config::ReasoningEffort,
-        core::extensions::subagents::{
-            AgentDescriptor, AgentId, AgentMessageUpdate, AgentStatus, AgentUpdate,
-        },
-        tui::theme::Theme,
-    };
+    use crate::{app::config::ReasoningEffort, tui::theme::Theme};
     use crossterm::event::{
         Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     };
@@ -1090,6 +1082,7 @@ mod tests {
         sync::Arc,
         time::{Duration, Instant},
     };
+    use tact_subagents::{AgentDescriptor, AgentId, AgentMessageUpdate, AgentStatus, AgentUpdate};
 
     fn descriptor() -> AgentDescriptor {
         AgentDescriptor {

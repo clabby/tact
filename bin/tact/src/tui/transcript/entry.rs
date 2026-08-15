@@ -1,8 +1,6 @@
-use crate::{
-    app::config::ReasoningEffort,
-    core::extensions::subagents::{AgentThread, MessageDeliveryState, MessageId, MessageSender},
-};
+use crate::app::config::ReasoningEffort;
 use serde_json::Value;
+use tact_subagents::{AgentThread, MessageDeliveryState, MessageId, MessageSender};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct EntryId(usize);

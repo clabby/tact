@@ -250,6 +250,8 @@ Subagents are enabled by default. Disable their tools and built-in delegation in
 enabled = false
 ```
 
+The reusable runtime and Nanocodex tool surface are published as the `tact-subagents` crate.
+
 This setting applies when a session starts or is restored. Reloading the configuration does not
 change the tool surface of an already-running session. `agent.max_subagents` controls concurrency
 when the feature is enabled; setting it does not enable or disable subagents. See the

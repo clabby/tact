@@ -4,6 +4,12 @@ This document specifies Tact's subagent runtime. The feature lets one agent dele
 to clean child sessions, coordinate a task tree, and collect typed results without sharing the
 parent's conversation history.
 
+The reusable runtime and tool surface live in the `tact-subagents` crate. Applications construct a
+`Subagents` runtime, provide a factory for clean Nanocodex sessions, install its tools, and consume
+typed `ScopedAgentUpdate` values. Tool factories capture `WeakSubagents`, which prevents the
+runtime-owned child factory from creating a strong ownership cycle. Tact keeps configuration,
+session references, memory policy, headless recording, and TUI presentation in the binary.
+
 ## Product contract
 
 Subagents are enabled by default. They can be disabled explicitly:

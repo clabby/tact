@@ -4,15 +4,12 @@ use super::{
         AgentDescriptor, AgentId, AgentStatus, AgentUpdate, MessageId, MessagePriority,
         MessagePurpose, agent_prompt,
     },
-    runtime::{
-        AgentDirectoryEntry, AgentSummary, OutputContract, Registry, RootAgentGuard, forward_events,
-    },
+    runtime::{AgentDirectoryEntry, AgentSummary, OutputContract, Registry, forward_events},
 };
-use crate::core::extensions::sessions::SessionTool;
 use nanocodex::{
-    Model, Tool, Tools,
+    Model, Tool,
     tools::{
-        ToolsBuildError,
+        ToolsBuilder,
         contract::{ToolContext, ToolDefinition, ToolInput, ToolOutput, ToolResult, async_trait},
     },
 };
@@ -20,11 +17,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     io,
-    path::PathBuf,
     sync::{Arc, Weak},
     time::Duration,
 };
-use tact_memory::{MemoryTool, SelectedMemoryStore};
 use tokio::sync::oneshot;
 
 const DEFAULT_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -536,20 +531,19 @@ impl Tool for ChangeAgentLifecycle {
     }
 }
 
-pub(crate) fn install_tools(
-    tools: Tools,
-    registry: Weak<Registry>,
-    selected_model: Model,
-    allow_luna: bool,
-    memory: Option<SelectedMemoryStore>,
-    subagents_enabled: bool,
-    session_config_path: PathBuf,
-) -> Result<Tools, ToolsBuildError> {
-    let mut tools = tools
-        .into_builder()
-        .tool(SessionTool::new(session_config_path));
-    if subagents_enabled {
-        tools = tools
+impl super::runtime::WeakSubagents {
+    /// Adds the child-agent tool surface to a Nanocodex tool builder.
+    ///
+    /// The returned builder is not finalized, so applications can compose their own tools and
+    /// perform duplicate-name validation once with [`ToolsBuilder::build`].
+    pub fn install_tools(
+        &self,
+        tools: ToolsBuilder,
+        selected_model: Model,
+        allow_luna: bool,
+    ) -> ToolsBuilder {
+        let registry = self.registry.clone();
+        tools
             .tool(SpawnAgent {
                 registry: registry.clone(),
                 selected_model,
@@ -572,14 +566,10 @@ pub(crate) fn install_tools(
                 operation: LifecycleOperation::Interrupt,
             })
             .tool(ChangeAgentLifecycle {
-                registry: registry.clone(),
+                registry,
                 operation: LifecycleOperation::Close,
-            });
+            })
     }
-    if let Some(store) = memory {
-        tools = tools.tool(MemoryTool::new(store, RootAgentGuard::from_weak(registry)));
-    }
-    tools.build()
 }
 
 fn spawn_agent_output_schema() -> Value {
@@ -663,7 +653,7 @@ fn agent_status_schema() -> Value {
 #[cfg(test)]
 mod tests {
     use super::{SendAgentMessage, SpawnAgent, SubagentModel, SubmitResult, WaitAgent};
-    use crate::core::extensions::subagents::runtime::Registry;
+    use crate::runtime::Registry;
     use nanocodex::{Model, Tool};
     use serde_json::json;
     use std::sync::Weak;

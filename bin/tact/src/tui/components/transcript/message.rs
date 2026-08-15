@@ -1,16 +1,14 @@
 //! Collapsible presentation for one directed-message thread.
 
 use super::markdown::{sanitize, wrap_plain, wrap_spans};
-use crate::{
-    core::extensions::subagents::{
-        AgentId, AgentMessage, MessageDeliveryState, MessageDisposition, MessagePriority,
-        MessagePurpose, MessageSender,
-    },
-    tui::{theme::Theme, transcript::DirectedMessageEntry},
-};
+use crate::tui::{theme::Theme, transcript::DirectedMessageEntry};
 use ratatui::{
     style::{Modifier, Style},
     text::{Line, Span},
+};
+use tact_subagents::{
+    AgentId, AgentMessage, MessageDeliveryState, MessageDisposition, MessagePriority,
+    MessagePurpose, MessageSender,
 };
 
 pub(super) fn render(
@@ -316,11 +314,9 @@ fn first_line(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::render;
-    use crate::{
-        core::extensions::subagents::{AgentMessageUpdate, MessageDeliveryState},
-        tui::{theme::Theme, transcript::DirectedMessageEntry},
-    };
+    use crate::tui::{theme::Theme, transcript::DirectedMessageEntry};
     use serde_json::json;
+    use tact_subagents::{AgentMessageUpdate, MessageDeliveryState};
 
     fn entry() -> DirectedMessageEntry {
         let update = serde_json::from_value::<AgentMessageUpdate>(json!({

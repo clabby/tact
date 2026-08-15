@@ -10,9 +10,6 @@ pub(crate) mod error;
 pub(crate) mod installation;
 #[path = "../app/secret.rs"]
 pub(crate) mod secret;
-#[path = "../core/extensions/subagents/model.rs"]
-mod subagent_model;
-
 mod app {
     pub(crate) use crate::{config, error, installation, secret};
 }
@@ -61,14 +58,6 @@ mod core {
                 pub(crate) use_count: u64,
                 pub(crate) probation_until_ms: Option<i64>,
             }
-        }
-
-        pub(crate) mod subagents {
-            pub(crate) use crate::subagent_model::{
-                AgentDescriptor, AgentId, AgentMessage, AgentMessageUpdate, AgentStatus,
-                AgentThread, AgentUpdate, MessageDeliveryState, MessageDisposition, MessageId,
-                MessagePriority, MessagePurpose, MessageSender, ThreadId,
-            };
         }
     }
 }

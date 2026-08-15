@@ -1,4 +1,4 @@
-//! Reusable child-agent tools and the typed runtime/UI update boundary.
+#![doc = include_str!("../README.md")]
 
 mod capacity;
 mod harness;
@@ -8,10 +8,9 @@ mod runtime;
 mod task_tree;
 mod tools;
 
-pub(crate) use model::{
+pub use model::{
     AgentDescriptor, AgentId, AgentMessage, AgentMessageUpdate, AgentStatus, AgentThread,
     AgentUpdate, MessageDeliveryState, MessageDisposition, MessageId, MessagePriority,
     MessagePurpose, MessageSender, ScopedAgentUpdate, SubagentRuntimeId, ThreadId,
 };
-pub(crate) use runtime::{SubagentControl, channel};
-pub(crate) use tools::install_tools;
+pub use runtime::{AuthorityError, RootAgentAuthority, Subagents, WeakSubagents};
