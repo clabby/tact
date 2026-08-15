@@ -298,9 +298,9 @@ workspace_roots = ["/path/to/team-projects"]
 Keep the configuration file private with mode `0600`: it contains the bearer token directly. Remote
 memory with a direct token currently requires Unix so Tact can verify the file permissions.
 `tact config show` and debug output redact the token. An in-scope remote error is returned to the
-caller and never falls back to local memory. Runtime operations never upload local records.
+caller and never falls back to local memory. Runtime operations never push local records.
 
-Use `tact memory upload [--dry-run]` from any directory to reconcile the complete global local
+Use `tact memory push [--dry-run]` from any directory to reconcile the complete global local
 store to the writer's personal namespace. Use `tact memory pull --all` or repeat
 `--namespace NAME` to non-destructively merge remote records into the local schema v1
 store. The [memory guide](docs/memory.md#remote-memory) includes the selection and transfer

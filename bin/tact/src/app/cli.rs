@@ -189,8 +189,8 @@ enum Command {
 #[derive(Debug, Subcommand)]
 enum MemoryCommand {
     /// Replace the remote personal namespace with the complete local corpus.
-    Upload {
-        /// Report the local corpus that would be uploaded without contacting the remote.
+    Push {
+        /// Report the local corpus that would be pushed without contacting the remote.
         #[arg(long)]
         dry_run: bool,
     },
@@ -498,13 +498,13 @@ impl Command {
 impl MemoryCommand {
     async fn run(self, config: &Config) -> Result<()> {
         match self {
-            Self::Upload { dry_run } => upload_memories(config, dry_run).await,
+            Self::Push { dry_run } => push_memories(config, dry_run).await,
             Self::Pull { all, namespace } => pull_memories(config, all, namespace).await,
         }
     }
 }
 
-async fn upload_memories(config: &Config, dry_run: bool) -> Result<()> {
+async fn push_memories(config: &Config, dry_run: bool) -> Result<()> {
     use crate::app::error::MemoryTransferError;
     use tact_memory::{
         MemoryStore, RemoteMemoryClient, RemoteRole, RemoteToken, SelectedMemoryStore,
@@ -523,7 +523,7 @@ async fn upload_memories(config: &Config, dry_run: bool) -> Result<()> {
         .sum::<usize>();
     if dry_run {
         println!(
-            "Would upload {} memories ({} content bytes) as the complete snapshot for namespace `{}`; remote-only rows may be deleted.",
+            "Would push {} memories ({} content bytes) as the complete snapshot for namespace `{}`; remote-only rows may be deleted.",
             memories.len(),
             content_bytes,
             remote.namespace()
@@ -532,28 +532,23 @@ async fn upload_memories(config: &Config, dry_run: bool) -> Result<()> {
     }
 
     let token =
-        RemoteToken::new(remote.bearer_token().to_owned()).map_err(MemoryTransferError::Upload)?;
+        RemoteToken::new(remote.bearer_token().to_owned()).map_err(MemoryTransferError::Push)?;
     let client = RemoteMemoryClient::new(remote.endpoint(), remote.namespace().to_owned(), token)
-        .map_err(MemoryTransferError::Upload)?;
-    if client
-        .session()
-        .await
-        .map_err(MemoryTransferError::Upload)?
-        != RemoteRole::Writer
-    {
-        return Err(MemoryTransferError::Upload(tact_memory::RemoteClientError::ReadOnly).into());
+        .map_err(MemoryTransferError::Push)?;
+    if client.session().await.map_err(MemoryTransferError::Push)? != RemoteRole::Writer {
+        return Err(MemoryTransferError::Push(tact_memory::RemoteClientError::ReadOnly).into());
     }
     let remote_store = SelectedMemoryStore::remote(client);
     for _ in 0..3 {
         let report = remote_store
             .sync(&memories)
             .await
-            .map_err(MemoryTransferError::UploadStore)?;
+            .map_err(MemoryTransferError::PushStore)?;
 
         let current = export_memories(store.clone()).await?;
         if same_replication_snapshot(&memories, &current) {
             println!(
-                "Uploaded {} memories to namespace `{}`: {} inserted, {} replaced, {} unchanged, {} deleted.",
+                "Pushed {} memories to namespace `{}`: {} inserted, {} replaced, {} unchanged, {} deleted.",
                 memories.len(),
                 remote.namespace(),
                 report.inserted,
@@ -724,8 +719,8 @@ fn read_mcp_environment(
 #[cfg(test)]
 mod tests {
     use super::{
-        Cli, McpCommand, MemoryCommand, read_mcp_environment, resume_command,
-        same_replication_snapshot, upload_memories,
+        Cli, McpCommand, MemoryCommand, push_memories, read_mcp_environment, resume_command,
+        same_replication_snapshot,
     };
     use crate::app::{
         cli::Command,
@@ -1102,8 +1097,8 @@ mod tests {
     }
 
     #[test]
-    fn memory_upload_supports_a_dry_run_and_old_sync_is_rejected() {
-        let command = Cli::try_parse_from(["tact", "memory", "upload", "--dry-run"])
+    fn memory_push_supports_a_dry_run_and_old_names_are_rejected() {
+        let command = Cli::try_parse_from(["tact", "memory", "push", "--dry-run"])
             .unwrap()
             .command
             .unwrap();
@@ -1111,10 +1106,11 @@ mod tests {
         assert!(matches!(
             &command,
             Command::Memory {
-                command: MemoryCommand::Upload { dry_run: true }
+                command: MemoryCommand::Push { dry_run: true }
             }
         ));
         assert!(command.requires_config());
+        assert!(Cli::try_parse_from(["tact", "memory", "upload"]).is_err());
         assert!(Cli::try_parse_from(["tact", "sync-memories"]).is_err());
     }
 
@@ -1156,7 +1152,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn upload_outside_workspace_roots_uses_the_async_remote_client() {
+    async fn push_outside_workspace_roots_uses_the_async_remote_client() {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let directory = tempdir().unwrap();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1188,13 +1184,13 @@ mod tests {
         })
         .unwrap();
 
-        let result = upload_memories(&config, false).await;
+        let result = push_memories(&config, false).await;
 
         assert!(matches!(result, Err(Error::MemoryTransfer(_))));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn upload_reconciles_a_local_write_that_races_the_first_snapshot() {
+    async fn push_reconciles_a_local_write_that_races_the_first_snapshot() {
         use axum::{
             Json, Router,
             extract::State,
@@ -1288,7 +1284,7 @@ mod tests {
             .unwrap();
 
         let sync_config = config.clone();
-        let sync_task = tokio::spawn(async move { upload_memories(&sync_config, false).await });
+        let sync_task = tokio::spawn(async move { push_memories(&sync_config, false).await });
         state.first_snapshot.notified().await;
         LocalMemoryStore::new(config.memory_path())
             .put("concurrent write", None)
