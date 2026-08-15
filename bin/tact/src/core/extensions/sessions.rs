@@ -57,6 +57,7 @@ struct FindSessionsOutput {
 #[derive(Serialize)]
 struct FoundSession {
     session_id: String,
+    parent_session_id: Option<String>,
     workspace: PathBuf,
     started_at_ms: u64,
     updated_at_ms: u64,
@@ -277,7 +278,7 @@ impl Tool for FindSessionsTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::function(
             "find_sessions",
-            "Finds bounded recent Tact V2 sessions before using read_session. It excludes the caller's current session, optionally scopes to one exact workspace, and optionally matches ASCII-case-insensitive literal patterns against stored user prompts. Omit workspace only for cross-workspace discovery. Pass next_cursor back only when another page is needed.",
+            "Finds bounded recent Tact V2 sessions before using read_session. It excludes the caller's current session, reports parent session IDs for lineage checks, optionally scopes to one exact workspace, and optionally matches ASCII-case-insensitive literal patterns against stored user prompts. Omit workspace only for cross-workspace discovery. Pass next_cursor back only when another page is needed.",
             find_input_schema(),
         )
         .with_output_schema(find_output_schema())
@@ -359,6 +360,7 @@ fn found_session(session: StoredSession) -> FoundSession {
     }
     FoundSession {
         session_id: session.session_id,
+        parent_session_id: session.parent_session_id,
         workspace: session.workspace,
         started_at_ms: session.started_at_unix_ms,
         updated_at_ms: session.updated_at_unix_ms,
@@ -635,12 +637,16 @@ fn find_output_schema() -> Value {
                     "type": "object",
                     "properties": {
                         "session_id": { "type": "string" },
+                        "parent_session_id": {
+                            "type": ["string", "null"],
+                            "description": "The direct parent session ID for a fork or descendant, or null for a root session."
+                        },
                         "workspace": { "type": "string" },
                         "started_at_ms": { "type": "integer", "minimum": 0 },
                         "updated_at_ms": { "type": "integer", "minimum": 0 },
                         "preview": { "type": "string" }
                     },
-                    "required": ["session_id", "workspace", "started_at_ms", "updated_at_ms", "preview"],
+                    "required": ["session_id", "parent_session_id", "workspace", "started_at_ms", "updated_at_ms", "preview"],
                     "additionalProperties": false
                 }
             },
@@ -798,6 +804,10 @@ mod tests {
         assert_eq!(input["properties"]["contains_any"]["maxItems"], 16);
         assert_eq!(input["properties"]["cursor"]["additionalProperties"], false);
         assert_eq!(output["properties"]["sessions"]["maxItems"], 30);
+        assert_eq!(
+            output["properties"]["sessions"]["items"]["properties"]["parent_session_id"]["type"],
+            json!(["string", "null"])
+        );
         assert_eq!(output["additionalProperties"], json!(false));
     }
 
@@ -862,10 +872,38 @@ mod tests {
         let directory = tempdir().unwrap();
         let config_path = directory.path().join("config.toml");
         let mut storage = SessionStorage::open(&config_path).unwrap();
-        append_session(&mut storage, "current", "/work", 400, "validation needle");
-        append_session(&mut storage, "matching", "/work", 300, "Validation Needle");
-        append_session(&mut storage, "unrelated", "/work", 200, "different topic");
-        append_session(&mut storage, "other", "/other", 100, "validation needle");
+        append_session(
+            &mut storage,
+            "current",
+            None,
+            "/work",
+            400,
+            "validation needle",
+        );
+        append_session(
+            &mut storage,
+            "matching",
+            Some("root-session"),
+            "/work",
+            300,
+            "Validation Needle",
+        );
+        append_session(
+            &mut storage,
+            "unrelated",
+            None,
+            "/work",
+            200,
+            "different topic",
+        );
+        append_session(
+            &mut storage,
+            "other",
+            None,
+            "/other",
+            100,
+            "validation needle",
+        );
 
         let tool = FindSessionsTool::new(config_path);
         let output = execute_find(
@@ -881,6 +919,7 @@ mod tests {
 
         assert_eq!(output["sessions"].as_array().unwrap().len(), 1);
         assert_eq!(output["sessions"][0]["session_id"], "matching");
+        assert_eq!(output["sessions"][0]["parent_session_id"], "root-session");
         assert_eq!(output["sessions"][0]["workspace"], "/work");
         assert_eq!(output["sessions"][0]["updated_at_ms"], 300);
         assert!(output["next_cursor"].is_null());
@@ -906,6 +945,7 @@ mod tests {
             append_session(
                 &mut storage,
                 &format!("session-{index:02}"),
+                None,
                 "/work",
                 1_000_u64.saturating_sub(u64::try_from(index).unwrap()),
                 "prompt",
@@ -1230,6 +1270,7 @@ mod tests {
     fn append_session(
         storage: &mut SessionStorage,
         session_id: &str,
+        parent_session_id: Option<&str>,
         workspace: &str,
         at: u64,
         prompt: &str,
@@ -1241,7 +1282,7 @@ mod tests {
                     at.saturating_sub(1),
                     LocalEvent::SessionStarted(SessionStarted {
                         session_id: session_id.to_owned(),
-                        parent_session_id: None,
+                        parent_session_id: parent_session_id.map(str::to_owned),
                         parent_sequence: None,
                         model: "model".to_owned(),
                         effort: ReasoningEffort::Medium,

@@ -324,7 +324,8 @@ a later explicit request.
 
 The built-in workflow starts with the current conversation, uses `find_sessions` to discover a
 bounded set of relevant historical sessions, then uses `read_session` to inspect only the strongest
-candidates. It checks supported lessons against existing memories and active instructions, and
+candidates. Parent-session lineage helps the agent avoid counting related forks as independent
+evidence. It checks supported lessons against existing memories and active instructions, and
 recommends whether each lesson belongs in memory, always-on configuration, or nowhere. Additional
 instructions can narrow the topic or expand the workspace and task-family scope. The report states
 the coverage and uncertainty of its evidence; it does not apply its recommendations.

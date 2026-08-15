@@ -61,6 +61,7 @@ pub(crate) enum StorageError {
 #[derive(Debug)]
 pub(crate) struct StoredSession {
     pub(crate) session_id: String,
+    pub(crate) parent_session_id: Option<String>,
     pub(crate) started_at_unix_ms: u64,
     pub(crate) updated_at_unix_ms: u64,
     pub(crate) model: String,
@@ -435,13 +436,13 @@ impl SessionStorage {
         let workspace = workspace.to_string_lossy();
         let statement_sql = if resumable_only {
             "SELECT s.session_id, s.started_at_ms, s.model, s.effort, s.reasoning_mode,\n\
-                    s.workspace, s.preview, s.updated_at_ms\n\
+                    s.workspace, s.preview, s.updated_at_ms, s.parent_session_id\n\
              FROM sessions s INNER JOIN resume_states r ON r.session_id = s.session_id\n\
              WHERE s.workspace = ?1\n\
              ORDER BY s.updated_at_ms DESC, s.session_id"
         } else {
             "SELECT s.session_id, s.started_at_ms, s.model, s.effort, s.reasoning_mode,\n\
-                    s.workspace, s.preview, s.updated_at_ms\n\
+                    s.workspace, s.preview, s.updated_at_ms, s.parent_session_id\n\
              FROM sessions s\n\
              WHERE s.workspace = ?1\n\
              ORDER BY s.updated_at_ms DESC, s.session_id"
@@ -522,7 +523,8 @@ impl SessionStorage {
         let query_sql = format!(
             "WITH candidates AS MATERIALIZED (\n\
                  SELECT s.session_id, s.started_at_ms, s.model, s.effort, s.reasoning_mode,\n\
-                        s.workspace, s.preview AS search_preview, s.updated_at_ms\n\
+                        s.workspace, s.preview AS search_preview, s.updated_at_ms,\n\
+                        s.parent_session_id\n\
                  FROM sessions s\n\
                  WHERE s.session_id != ?1\n\
                    {candidate_filters}\
@@ -530,7 +532,8 @@ impl SessionStorage {
                  LIMIT ?{limit_parameter}\n\
              )\n\
              SELECT c.session_id, c.started_at_ms, c.model, c.effort, c.reasoning_mode,\n\
-                    c.workspace, substr(c.search_preview, 1, 513), c.updated_at_ms, {matches}\n\
+                    c.workspace, substr(c.search_preview, 1, 513), c.updated_at_ms,\n\
+                    c.parent_session_id, {matches}\n\
              FROM candidates c\n\
              ORDER BY c.updated_at_ms DESC, c.session_id"
         );
@@ -540,7 +543,7 @@ impl SessionStorage {
             .map_err(|source| query(&self.path, source))?;
         let rows = statement
             .query_map(params_from_iter(parameters), |row| {
-                Ok((decode_session(row)?, row.get::<_, bool>(8)?))
+                Ok((decode_session(row)?, row.get::<_, bool>(9)?))
             })
             .map_err(|source| query(&self.path, source))?;
         let mut candidates = rows
@@ -870,6 +873,7 @@ fn decode_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredSession> {
     let reasoning_mode = row.get::<_, String>(4)?;
     Ok(StoredSession {
         session_id: row.get(0)?,
+        parent_session_id: row.get(8)?,
         started_at_unix_ms: from_sql_u64(row.get(1)?),
         updated_at_unix_ms: from_sql_u64(row.get(7)?),
         model: row.get(2)?,
