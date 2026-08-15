@@ -21,6 +21,19 @@ fn workflow(document: &str) -> serde_yaml::Value {
     serde_yaml::from_str(document).expect("workflow should be valid YAML")
 }
 
+fn rust_cache_step<'a>(workflow: &'a serde_yaml::Value, job: &str) -> &'a serde_yaml::Value {
+    workflow["jobs"][job]["steps"]
+        .as_sequence()
+        .unwrap_or_else(|| panic!("{job} should contain steps"))
+        .iter()
+        .find(|step| {
+            step["uses"]
+                .as_str()
+                .is_some_and(|action| action.starts_with("Swatinem/rust-cache@"))
+        })
+        .unwrap_or_else(|| panic!("{job} should restore a Rust cache"))
+}
+
 fn assert_rust_caches_restore_only(document: &str) {
     let cache_steps = document.matches("Swatinem/rust-cache@").count();
     assert!(cache_steps > 0);
@@ -194,34 +207,18 @@ fn release_tag_must_be_on_main() {
 #[test]
 fn shared_cache_reads_everywhere_and_writes_only_on_main() {
     let release = workflow(RELEASE_WORKFLOW);
-    let steps = release["jobs"]["build"]["steps"]
-        .as_sequence()
-        .expect("release build should contain steps");
-    let cache = steps
-        .iter()
-        .find(|step| {
-            step["uses"]
-                .as_str()
-                .is_some_and(|action| action.starts_with("Swatinem/rust-cache@"))
-        })
-        .expect("release build should restore a Rust cache");
-
-    assert_eq!(cache["with"]["save-if"], false);
-    assert_eq!(cache["with"]["shared-key"], "build");
-    assert!(cache["with"]["key"].is_null());
+    for job in ["build", "publish_crates"] {
+        let cache = rust_cache_step(&release, job);
+        assert_eq!(cache["with"]["save-if"], false);
+        assert_eq!(cache["with"]["shared-key"], "build");
+        assert!(cache["with"]["key"].is_null());
+    }
 
     let shared = workflow(CACHE_WORKFLOW);
     let main_steps = shared["jobs"]["build"]["steps"]
         .as_sequence()
         .expect("shared cache job should contain steps");
-    let main_cache = main_steps
-        .iter()
-        .find(|step| {
-            step["uses"]
-                .as_str()
-                .is_some_and(|action| action.starts_with("Swatinem/rust-cache@"))
-        })
-        .expect("shared cache job should save a Rust cache");
+    let main_cache = rust_cache_step(&shared, "build");
     assert_eq!(main_cache["with"]["shared-key"], "build");
     assert_eq!(
         main_cache["with"]["save-if"],
@@ -260,12 +257,8 @@ fn shared_cache_reads_everywhere_and_writes_only_on_main() {
         "./.github/workflows/cache.yaml"
     );
     assert!(ci["jobs"]["cache"]["if"].is_null());
-    assert_eq!(
-        release["jobs"]["cache"]["uses"],
-        "./.github/workflows/cache.yaml"
-    );
-    assert_eq!(release["jobs"]["cache"]["needs"], "validate");
-    assert_eq!(release["jobs"]["build"]["needs"], "cache");
+    assert!(release["jobs"]["cache"].is_null());
+    assert_eq!(release["jobs"]["build"]["needs"], "validate");
     for job in [
         "cargo-tests",
         "cargo-build",
