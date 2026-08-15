@@ -1955,11 +1955,7 @@ fn apply_pane_effect(
                     pane,
                     id,
                     instructions,
-                    context: ReflectionContext::new(
-                        context.config.path(),
-                        context.workspace,
-                        &runtime.session_id,
-                    ),
+                    context: ReflectionContext::new(context.config.path(), context.workspace),
                 })
                 .map_err(|_| RuntimeError::AgentWorkerStopped)?;
         }
