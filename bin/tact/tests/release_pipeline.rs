@@ -192,7 +192,7 @@ fn release_tag_must_be_on_main() {
 }
 
 #[test]
-fn shared_cache_job_is_the_only_writer_for_ci_and_release() {
+fn shared_cache_reads_everywhere_and_writes_only_on_main() {
     let release = workflow(RELEASE_WORKFLOW);
     let steps = release["jobs"]["build"]["steps"]
         .as_sequence()
@@ -223,9 +223,25 @@ fn shared_cache_job_is_the_only_writer_for_ci_and_release() {
         })
         .expect("shared cache job should save a Rust cache");
     assert_eq!(main_cache["with"]["shared-key"], "build");
-    assert!(main_cache["with"]["save-if"].is_null());
+    assert_eq!(
+        main_cache["with"]["save-if"],
+        "${{ github.ref == 'refs/heads/main' }}"
+    );
     assert!(main_cache["with"]["key"].is_null());
     assert_eq!(CACHE_WORKFLOW.matches("Swatinem/rust-cache@").count(), 1);
+    let ci_artifacts = main_steps
+        .iter()
+        .find(|step| step["name"] == "Build CI artifacts")
+        .expect("shared cache job should warm CI artifacts on main");
+    assert_eq!(
+        ci_artifacts["if"],
+        "github.ref == 'refs/heads/main' && matrix.warm_ci"
+    );
+    let release_binary = main_steps
+        .iter()
+        .find(|step| step["name"] == "Build release binary")
+        .expect("shared cache job should warm release artifacts on main");
+    assert_eq!(release_binary["if"], "github.ref == 'refs/heads/main'");
     let matrix_pairs = |workflow: &serde_yaml::Value, job: &str| {
         workflow["jobs"][job]["strategy"]["matrix"]["include"]
             .as_sequence()
@@ -243,6 +259,7 @@ fn shared_cache_job_is_the_only_writer_for_ci_and_release() {
         ci["jobs"]["cache"]["uses"],
         "./.github/workflows/cache.yaml"
     );
+    assert!(ci["jobs"]["cache"]["if"].is_null());
     assert_eq!(
         release["jobs"]["cache"]["uses"],
         "./.github/workflows/cache.yaml"
@@ -258,8 +275,10 @@ fn shared_cache_job_is_the_only_writer_for_ci_and_release() {
         "cargo-build-benches",
     ] {
         assert_eq!(ci["jobs"][job]["needs"], "cache");
+        assert!(ci["jobs"][job]["if"].is_null());
     }
     assert_eq!(ci["jobs"]["benchmarks"]["needs"], "cache");
+    assert!(ci["jobs"]["benchmarks"]["if"].is_null());
     assert_eq!(
         ci["jobs"]["benchmarks"]["uses"],
         "./.github/workflows/codspeed.yml"

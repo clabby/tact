@@ -40,10 +40,12 @@ jobs:
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           shared-key: build
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Build CI artifacts
-        if: matrix.warm_ci
+        if: github.ref == 'refs/heads/main' && matrix.warm_ci
         run: cargo test --locked --workspace --all-targets --all-features --no-run
       - name: Build release binary
+        if: github.ref == 'refs/heads/main'
         run: cargo build --locked --release --package tact --bin tact --target ${{ matrix.target }}
         env:
           TACT_RELEASE_BUILD: "1"
