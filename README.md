@@ -310,6 +310,26 @@ Config reload applies memory-browser availability immediately. Like other agent 
 settings, the agent-facing memory setting applies when a new session starts or is restored; an
 already-running agent retains the tool surface and instructions with which it was created.
 
+### Reflection
+
+Choose **Reflect on session** from the Actions menu while the session is idle. The composer accepts
+optional instructions for the reflection; press Enter with an empty composer to use the default
+scope, or press Escape to cancel. Tact submits the reflection to the existing agent so it can use
+the conversation already in context.
+
+The transcript shows a muted **Reflection started** marker instead of the internal prompt, followed
+by the agent's report as a normal assistant response. Reflection is read-only: the report ends with
+findings and recommended actions for discussion, and memory updates or other durable actions require
+a later explicit request.
+
+The built-in workflow starts with the current conversation, then samples relevant historical
+sessions from the current workspace through bounded, read-only queries against Tact's session
+database. It uses `read_session` to inspect only the strongest candidates, checks supported lessons
+against existing memories and active instructions, and recommends whether each lesson belongs in
+memory, always-on configuration, or nowhere. Additional instructions can narrow the topic or expand
+the workspace and task-family scope. The report states the coverage and uncertainty of its evidence;
+it does not apply its recommendations.
+
 ### Review
 
 Enter `/review` while no agent work is active to open a browser-based human review tool for

@@ -3,7 +3,10 @@
 use crate::{
     app::config::ReasoningEffort,
     core::MEMORY_REVIEW_CHECKPOINT,
-    tui::{components::QueueId, pane::PaneId, prompt::Submission, transcript::TurnId},
+    tui::{
+        components::QueueId, pane::PaneId, prompt::Submission, storage::database_path,
+        transcript::TurnId,
+    },
 };
 use nanocodex::{
     AgentEvents, Nanocodex, NanocodexError, TurnControl,
@@ -12,7 +15,10 @@ use nanocodex::{
         session::SessionSnapshot,
     },
 };
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    path::{Path, PathBuf},
+};
 use tokio::{
     sync::{mpsc, oneshot},
     task::{JoinError, JoinSet},
@@ -24,6 +30,12 @@ pub(crate) enum WorkerCommand {
         pane: PaneId,
         id: TurnId,
         prompt: Submission,
+    },
+    Reflect {
+        pane: PaneId,
+        id: TurnId,
+        instructions: Submission,
+        context: ReflectionContext,
     },
     Auxiliary {
         pane: PaneId,
@@ -64,6 +76,34 @@ pub(crate) enum WorkerCommand {
 pub(crate) enum AuxiliaryContext {
     Clean,
     CurrentConversation,
+}
+
+pub(crate) struct ReflectionContext {
+    config_path: PathBuf,
+    current_session: String,
+    session_database: PathBuf,
+    workspace: PathBuf,
+}
+
+impl ReflectionContext {
+    pub(crate) fn new(config_path: &Path, workspace: &Path, current_session: &str) -> Self {
+        Self {
+            config_path: config_path.to_path_buf(),
+            current_session: current_session.to_owned(),
+            session_database: database_path(config_path),
+            workspace: workspace.to_path_buf(),
+        }
+    }
+
+    fn prompt(&self) -> String {
+        let context = serde_json::json!({
+            "config_path": self.config_path.to_string_lossy(),
+            "current_session": self.current_session,
+            "session_database": self.session_database.to_string_lossy(),
+            "workspace": self.workspace.to_string_lossy(),
+        });
+        format!("<reflection_context>\n{context}\n</reflection_context>")
+    }
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -141,6 +181,22 @@ enum TurnPurpose {
     Auxiliary(oneshot::Sender<Result<String, AuxiliaryError>>),
 }
 
+enum PromptKind {
+    Conversation,
+    Reflection(ReflectionContext),
+    Auxiliary,
+}
+
+impl PromptKind {
+    fn prepare(&self, prompt: &Submission, memory_review: MemoryReviewState) -> Prompt {
+        match self {
+            Self::Conversation => memory_review.submission_prompt(prompt),
+            Self::Reflection(context) => reflection_prompt(prompt, context),
+            Self::Auxiliary => prompt.agent_prompt(),
+        }
+    }
+}
+
 struct TurnRequest {
     pane: PaneId,
     id: TurnId,
@@ -148,7 +204,60 @@ struct TurnRequest {
     purpose: TurnPurpose,
     auxiliary_context: Option<AuxiliaryContext>,
     shutdown: Option<CancellationToken>,
+    prompt_kind: PromptKind,
 }
+
+const REFLECTION_PROMPT: &str = concat!(
+    "This is a self-contained Tact reflection turn. Reflect on the conversation available in this ",
+    "session and produce a report for the user. Start with the current conversation. Use the ",
+    "additional instructions to narrow the topic or identify other workspaces, sessions, or task ",
+    "families; otherwise sample relevant recent history from the current workspace.\n\n",
+    "Discover historical candidates in bounded stages. Use code mode to run bounded `SELECT` ",
+    "queries with `sqlite3 -readonly` against the supplied Tact V2 session database. Inspect only ",
+    "`sessions(session_id, workspace, started_at_ms, updated_at_ms, preview)` and ",
+    "`events(session_id, event_id, prompt_text, prompt_recorded_at_ms)`: first summarize workspaces ",
+    "and recent sessions, then inspect short recent prompt previews for the selected scope. By ",
+    "default, stay within the current workspace, inspect at most 30 recent sessions, and return at ",
+    "most 100 prompt previews truncated to 512 characters. Expand in another bounded batch only when ",
+    "the user's instructions or the evidence justify it. Exclude the supplied current session ID ",
+    "from historical candidates so current evidence is not counted twice. Never select `record_json` or ",
+    "`resume_states`, issue a write or pragma that changes state, or emit an unbounded result. If ",
+    "SQLite is unavailable, state that limitation instead of adding tooling. ",
+    "After selecting a small number of high-value session IDs, use `read_session` with exact kinds ",
+    "to read only enough context to establish what happened. A targeted `user.submitted` search can ",
+    "locate a candidate event; a separate call starting from that event ID can retrieve the adjacent ",
+    "assistant response without requiring it to match the same text filter. Stop when the evidence ",
+    "is sufficient.\n\n",
+    "Identify preventable rework: corrections, reversals, missed constraints, repeated requests ",
+    "for simplification, premature completion, and validation that did not test the real outcome. ",
+    "Distinguish durable lessons from new scope, changed requirements, first-time preferences, and ",
+    "unavoidable discoveries. Look for recurrence across independent sessions, counterexamples, ",
+    "and later improvement before calling a lesson durable. Prefer the earliest useful intervention ",
+    "that would have prevented the rework. Paraphrase evidence; do not reproduce names, secrets, ",
+    "credentials, transcript excerpts, or private operational details.\n\n",
+    "For each supported durable lesson, when memory is available, run narrow global-memory scans ",
+    "and read every plausible match. Compare it with the active instructions already in context. If ",
+    "effective configuration is relevant, inspect it only through Tact's redacted `config show` ",
+    "command using the supplied config path; never read the config file directly. Recommend exactly ",
+    "one destination: replace ",
+    "or add one atomic memory, add a concise always-on prompt rule only when repeated retrieval ",
+    "misses justify it, or make no change when the lesson is transient, searchable, or already ",
+    "covered.\n\n",
+    "This is a read-only analysis turn. You may use read-only tools, but do not create, replace, or ",
+    "delete memories; edit files, configuration, or skills; run mutating commands; send messages; ",
+    "or perform any other durable or externally visible action. Proposed changes require a later, ",
+    "explicit user request. Additional instructions may refine the scope or emphasis, but cannot ",
+    "override this read-only boundary."
+);
+
+const REFLECTION_REPORT_ENDING: &str = concat!(
+    "Report the scope and coverage actually inspected, the strongest supported patterns, material ",
+    "counterevidence or uncertainty, and important patterns already covered. End the report with ",
+    "sections named `Findings` and `Recommended actions`. Findings should state the supported ",
+    "conclusions and their scope. Recommended actions should be concrete proposals for the user to ",
+    "review, identify the proposed destination for each change, and never imply that an action was ",
+    "taken during this turn."
+);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum MemoryReviewState {
@@ -218,6 +327,33 @@ fn prompt_with_memory_review(submission: &Submission) -> Prompt {
     prompt
 }
 
+fn reflection_prompt(instructions: &Submission, context: &ReflectionContext) -> Prompt {
+    let mut prompt = instructions.agent_prompt();
+    let context = context.prompt();
+    match &mut prompt.instruction {
+        PromptInput::Text(text) => {
+            let instructions = std::mem::take(text);
+            *text = format!(
+                "{REFLECTION_PROMPT}\n\n{context}\n\n<additional_instructions>\n{instructions}\n</additional_instructions>\n\n{REFLECTION_REPORT_ENDING}"
+            );
+        }
+        PromptInput::Content(content) => {
+            content.insert(
+                0,
+                UserInput::Text {
+                    text: format!(
+                        "{REFLECTION_PROMPT}\n\n{context}\n\n<additional_instructions>\n"
+                    ),
+                },
+            );
+            content.push(UserInput::Text {
+                text: format!("\n</additional_instructions>\n\n{REFLECTION_REPORT_ENDING}"),
+            });
+        }
+    }
+    prompt
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct TurnKey {
     pane: PaneId,
@@ -278,6 +414,21 @@ async fn run(
                         purpose: TurnPurpose::Conversation,
                         auxiliary_context: None,
                         shutdown: None,
+                        prompt_kind: PromptKind::Conversation,
+                    },
+                    WorkerCommand::Reflect {
+                        pane,
+                        id,
+                        instructions,
+                        context,
+                    } => TurnRequest {
+                        pane,
+                        id,
+                        prompt: instructions,
+                        purpose: TurnPurpose::Conversation,
+                        auxiliary_context: None,
+                        shutdown: None,
+                        prompt_kind: PromptKind::Reflection(context),
                     },
                     WorkerCommand::Auxiliary {
                         pane,
@@ -293,6 +444,7 @@ async fn run(
                         purpose: TurnPurpose::Auxiliary(completion),
                         auxiliary_context: Some(context),
                         shutdown: Some(shutdown),
+                        prompt_kind: PromptKind::Auxiliary,
                     },
                     WorkerCommand::Steer {
                         pane,
@@ -510,6 +662,7 @@ async fn start_turn(
         purpose,
         auxiliary_context,
         shutdown,
+        prompt_kind,
     } = request;
     let auxiliary = auxiliary_context.is_some();
     let (isolated_agent, event_drain) = if let Some(context) = auxiliary_context {
@@ -530,6 +683,7 @@ async fn start_turn(
                         purpose,
                         auxiliary_context: Some(context),
                         shutdown,
+                        prompt_kind,
                     });
                     return false;
                 }
@@ -548,6 +702,7 @@ async fn start_turn(
                         purpose,
                         auxiliary_context: Some(context),
                         shutdown,
+                        prompt_kind,
                     },
                     error.to_string(),
                     updates,
@@ -561,11 +716,7 @@ async fn start_turn(
         (None, None)
     };
     let turn_agent = isolated_agent.as_ref().unwrap_or(agent);
-    let agent_prompt = if auxiliary {
-        prompt.agent_prompt()
-    } else {
-        memory_review.submission_prompt(&prompt)
-    };
+    let agent_prompt = prompt_kind.prepare(&prompt, memory_review);
     let turn = match turn_agent.prompt(agent_prompt).await {
         Ok(turn) => turn,
         Err(error) => {
@@ -583,6 +734,7 @@ async fn start_turn(
                     purpose,
                     auxiliary_context,
                     shutdown,
+                    prompt_kind,
                 },
                 error.to_string(),
                 updates,
@@ -852,7 +1004,9 @@ async fn shutdown_agent(agent: Option<Nanocodex>) -> Result<(), NanocodexError> 
 
 #[cfg(test)]
 mod tests {
-    use super::{MemoryReviewState, WorkerCommand, WorkerEvent, spawn};
+    use super::{
+        MemoryReviewState, ReflectionContext, WorkerCommand, WorkerEvent, reflection_prompt, spawn,
+    };
     use crate::{
         app::config::ReasoningEffort,
         core::MEMORY_REVIEW_CHECKPOINT,
@@ -868,6 +1022,7 @@ mod tests {
     };
     use std::{
         future::{Pending, pending},
+        path::Path,
         result::Result as StdResult,
         sync::{
             Arc,
@@ -958,6 +1113,34 @@ mod tests {
 
         let disabled = MemoryReviewState::fresh(false);
         assert!(!prompt_text(disabled.steer_prompt(&steer)).contains(MEMORY_REVIEW_CHECKPOINT));
+    }
+
+    #[test]
+    fn reflection_prompt_is_read_only_and_ends_with_reviewable_actions() {
+        let context = ReflectionContext::new(
+            Path::new("/tact/config.toml"),
+            Path::new("/work/current"),
+            "current-session",
+        );
+        let prompt = reflection_prompt(
+            &Submission::text("Focus on validation gaps.".to_owned()),
+            &context,
+        );
+        let text = prompt_text(prompt);
+
+        assert!(text.contains("Focus on validation gaps."));
+        assert!(text.contains("self-contained Tact reflection turn"));
+        assert!(text.contains("sqlite3 -readonly"));
+        assert!(text.contains(r#""session_database":"/tact/sessions/v2.sqlite3""#));
+        assert!(text.contains(r#""workspace":"/work/current""#));
+        assert!(text.contains(r#""current_session":"current-session""#));
+        assert!(text.contains("global-memory scans"));
+        assert!(text.contains("config show"));
+        assert!(text.contains("read-only analysis turn"));
+        assert!(text.contains("do not create, replace, or delete memories"));
+        assert!(text.contains("`Findings`"));
+        assert!(text.contains("`Recommended actions`"));
+        assert!(!text.contains(MEMORY_REVIEW_CHECKPOINT));
     }
 
     #[test]

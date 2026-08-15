@@ -69,6 +69,7 @@ pub(crate) enum ComposerEvent {
     SetModel(Model),
     SetReasoningMode(ReasoningMode),
     SetFastMode(bool),
+    InputMode(Option<String>),
     Activity {
         active: bool,
         status: Option<String>,
@@ -106,6 +107,7 @@ pub(crate) struct Composer {
     model: Model,
     reasoning_mode: ReasoningMode,
     fast_mode: bool,
+    input_mode: Option<String>,
     activity_wave: Option<WavedText>,
     activity_status: Option<String>,
     review_wave: Option<WavedText>,
@@ -204,6 +206,7 @@ impl Composer {
             model: Model::Sol,
             reasoning_mode: ReasoningMode::Standard,
             fast_mode: false,
+            input_mode: None,
             activity_wave: None,
             activity_status: None,
             review_wave: None,
@@ -281,6 +284,13 @@ impl Composer {
                     return ComposerUpdate::unchanged();
                 }
                 self.fast_mode = enabled;
+                ComposerUpdate::changed()
+            }
+            ComposerEvent::InputMode(mode) => {
+                if self.input_mode == mode {
+                    return ComposerUpdate::unchanged();
+                }
+                self.input_mode = mode;
                 ComposerUpdate::changed()
             }
             ComposerEvent::Activity {
@@ -594,6 +604,30 @@ impl Composer {
         self.layout = None;
     }
 
+    pub(crate) fn take_submission(&mut self) -> Option<Submission> {
+        let trimmed = self.draft.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+
+        let start = self.draft.len() - self.draft.trim_start().len();
+        let end = start + trimmed.len();
+        let text = trimmed.to_owned();
+        let images = self
+            .images
+            .iter()
+            .filter(|image| image.range.start >= start && image.range.end <= end)
+            .map(|image| {
+                (
+                    image.range.start - start..image.range.end - start,
+                    image.data_url.clone(),
+                )
+            });
+        let prompt = Submission::multimodal(text, images);
+        self.replace_draft(String::new());
+        Some(prompt)
+    }
+
     pub(crate) fn take_draft(&mut self) -> Option<ComposerDraft> {
         if self.draft.is_empty() {
             return None;
@@ -707,9 +741,6 @@ impl Composer {
             return ComposerUpdate::unchanged();
         }
 
-        let start = self.draft.len() - self.draft.trim_start().len();
-        let end = start + trimmed.len();
-
         if self.images.is_empty() && self.draft.starts_with('!') {
             let command = trimmed.trim_start_matches('!').trim().to_owned();
             if command.is_empty() {
@@ -720,20 +751,10 @@ impl Composer {
             return ComposerUpdate::effect(ComposerEffect::RunShell(command), true);
         }
 
-        let text = trimmed.to_owned();
-        let images = self
-            .images
-            .iter()
-            .filter(|image| image.range.start >= start && image.range.end <= end)
-            .map(|image| {
-                (
-                    image.range.start - start..image.range.end - start,
-                    image.data_url.clone(),
-                )
-            });
-        let prompt = Submission::multimodal(text.clone(), images);
-        self.history.record(text);
-        self.replace_draft(String::new());
+        let prompt = self
+            .take_submission()
+            .expect("non-empty composer draft must produce a submission");
+        self.history.record(prompt.display_text().to_owned());
         ComposerUpdate::effect(ComposerEffect::Submit(prompt), true)
     }
 
@@ -1133,6 +1154,11 @@ impl Composer {
         let content_width = usize::from(area.width - 4);
         let content_end = content_start + u16::try_from(content_width).unwrap_or(u16::MAX);
         let usage_prefix = format!(" {}%/272k ", context_percent(self.context_tokens));
+        let input_mode_segment = self
+            .input_mode
+            .as_ref()
+            .map(|mode| format!("{mode} "))
+            .unwrap_or_default();
         let review_segment = self
             .review_status
             .as_ref()
@@ -1144,7 +1170,7 @@ impl Composer {
         } else {
             String::new()
         };
-        let usage_before_activity = format!("{usage_prefix}{review_segment}");
+        let usage_before_activity = format!("{usage_prefix}{input_mode_segment}{review_segment}");
         let usage_before_subagents = self.activity_wave.as_ref().map_or_else(
             || usage_before_activity.clone(),
             |_| format!("{usage_before_activity}{status_segment} "),

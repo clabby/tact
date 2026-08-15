@@ -1674,6 +1674,10 @@ fn render_entry(
                 ),
             ])])
         }
+        EntryKind::ReflectionStarted => layout_without_links(vec![Line::from(Span::styled(
+            "◇ Reflection started",
+            Style::default().fg(theme.muted()),
+        ))]),
         EntryKind::Interrupted { count } => {
             let label = if *count == 1 {
                 "◇ Interrupted response".to_owned()
@@ -2528,6 +2532,27 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
         assert!(rendered.contains("◇ Turn completed · 1m 5s"));
+    }
+
+    #[test]
+    fn reflection_start_renders_as_a_marker() {
+        let mut transcript = Transcript::new();
+        transcript.update(TranscriptEvent::Record(Arc::new(
+            TranscriptRecord::from_local(
+                1,
+                1,
+                LocalEvent::ReflectionStarted { id: TurnId::new(1) },
+            )
+            .unwrap(),
+        )));
+
+        let rendered = render(&mut transcript, 60, 4)
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("◇ Reflection started"));
     }
 
     #[test]

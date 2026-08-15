@@ -68,6 +68,9 @@ pub(crate) enum LocalEvent {
     UserSteered {
         text: String,
     },
+    ReflectionStarted {
+        id: TurnId,
+    },
     ShellStarted {
         id: ShellId,
         command: String,
@@ -163,6 +166,10 @@ impl TranscriptRecord {
             LocalEvent::UserSteered { text } => {
                 ("user.steered", to_raw_value(&UserSteered { text })?)
             }
+            LocalEvent::ReflectionStarted { id } => (
+                "reflection.started",
+                to_raw_value(&ReflectionStarted { id })?,
+            ),
             LocalEvent::ShellStarted {
                 id,
                 command,
@@ -282,6 +289,11 @@ struct UserSubmitted {
 #[derive(Serialize)]
 struct UserSteered {
     text: String,
+}
+
+#[derive(Serialize)]
+struct ReflectionStarted {
+    id: TurnId,
 }
 
 #[derive(Serialize)]
@@ -487,5 +499,19 @@ mod tests {
 
         assert_eq!(encoded["type"], "user.steered");
         assert_eq!(encoded["payload"]["text"], "change direction");
+    }
+
+    #[test]
+    fn reflection_start_contains_only_its_turn_id() {
+        let record = TranscriptRecord::from_local(
+            1,
+            123,
+            LocalEvent::ReflectionStarted { id: TurnId::new(9) },
+        )
+        .unwrap();
+        let encoded = serde_json::to_value(record).unwrap();
+
+        assert_eq!(encoded["type"], "reflection.started");
+        assert_eq!(encoded["payload"], json!({"id": 9}));
     }
 }

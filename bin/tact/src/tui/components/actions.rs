@@ -16,7 +16,7 @@ use ratatui::{
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-const ACTIONS: [Action; 15] = [
+const ACTIONS: [Action; 16] = [
     Action::Effort,
     Action::FastMode,
     Action::Theme,
@@ -29,6 +29,7 @@ const ACTIONS: [Action; 15] = [
     Action::Memory,
     Action::Subagents,
     Action::DebugContext,
+    Action::Reflection,
     Action::Handoff,
     Action::Review,
     Action::Model,
@@ -66,6 +67,7 @@ pub(super) enum Action {
     EditConfig,
     Memory,
     DebugContext,
+    Reflection,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -263,7 +265,7 @@ impl ActionsMenu {
 
     const fn is_enabled(&self, action: Action) -> bool {
         match action {
-            Action::Handoff | Action::Review => self.availability.new_session,
+            Action::Handoff | Action::Review | Action::Reflection => self.availability.new_session,
             Action::Subagents => true,
             Action::Effort => true,
             Action::Model => self.availability.model,
@@ -295,6 +297,9 @@ impl ActionsMenu {
             Action::Handoff if !self.availability.new_session => {
                 "Prepare handoff · finish active work first"
             }
+            Action::Reflection if !self.availability.new_session => {
+                "Reflect on session · finish active work first"
+            }
             Action::FastMode if self.availability.fast_mode => "Disable fast mode",
             Action::Model if !self.availability.model => "Select model · start a new session first",
             Action::Memory if !self.availability.memory => {
@@ -323,6 +328,7 @@ impl Action {
             Self::EditConfig => "Edit config",
             Self::Memory => "Memory",
             Self::DebugContext => "Debug context",
+            Self::Reflection => "Reflect on session",
         }
     }
 
@@ -340,6 +346,7 @@ impl Action {
             Self::Fork => Some("btw"),
             Self::ReloadConfig => Some("refresh"),
             Self::Memory => Some("remember/forget"),
+            Self::Reflection => Some("reflection"),
             Self::Keybindings | Self::EditConfig | Self::DebugContext => None,
         }
     }
@@ -369,7 +376,7 @@ impl Component for ActionsMenu {
             return;
         }
 
-        let layout = Floating::new("Actions", 58, 18, &KEY_BINDINGS).render(frame, area, theme);
+        let layout = Floating::new("Actions", 58, 19, &KEY_BINDINGS).render(frame, area, theme);
         if layout.body.is_empty() {
             return;
         }
@@ -453,60 +460,64 @@ mod tests {
         let terminal = render(&mut menu);
 
         assert_eq!(
-            row_segment(&terminal, 1, 1, 58),
+            row_segment(&terminal, 0, 1, 58),
             "╭─────────────────────── Actions ────────────────────────╮"
         );
         assert_eq!(
-            row_segment(&terminal, 2, 1, 58),
+            row_segment(&terminal, 1, 1, 58),
             "│  Search:                                               │"
         );
         assert_eq!(
-            row_segment(&terminal, 3, 1, 58),
+            row_segment(&terminal, 2, 1, 58),
             "│› Change effort (alias: thinking)                       │"
         );
         assert_eq!(
-            row_segment(&terminal, 4, 1, 58),
+            row_segment(&terminal, 3, 1, 58),
             "│  Enable fast mode (alias: priority)                    │"
         );
         assert_eq!(
-            row_segment(&terminal, 5, 1, 58),
+            row_segment(&terminal, 4, 1, 58),
             "│  Select theme (alias: appearance)                      │"
         );
         assert_eq!(
-            row_segment(&terminal, 6, 1, 58),
+            row_segment(&terminal, 5, 1, 58),
             "│  New session (alias: clear)                            │"
         );
         assert_eq!(
-            row_segment(&terminal, 7, 1, 58),
+            row_segment(&terminal, 6, 1, 58),
             "│  Resume session (alias: restore)                       │"
         );
         assert_eq!(
-            row_segment(&terminal, 8, 1, 58),
+            row_segment(&terminal, 7, 1, 58),
             "│  Fork session (alias: btw)                             │"
         );
         assert_eq!(
-            row_segment(&terminal, 9, 1, 58),
+            row_segment(&terminal, 8, 1, 58),
             "│  Keyboard shortcuts                                    │"
         );
         assert_eq!(
-            row_segment(&terminal, 10, 1, 58),
+            row_segment(&terminal, 9, 1, 58),
             "│  Reload config (alias: refresh)                        │"
         );
         assert_eq!(
-            row_segment(&terminal, 11, 1, 58),
+            row_segment(&terminal, 10, 1, 58),
             "│  Edit config                                           │"
         );
         assert_eq!(
-            row_segment(&terminal, 12, 1, 58),
+            row_segment(&terminal, 11, 1, 58),
             "│  Memory (alias: remember/forget)                       │"
         );
         assert_eq!(
-            row_segment(&terminal, 13, 1, 58),
+            row_segment(&terminal, 12, 1, 58),
             "│  Subagents (alias: agents)                             │"
         );
         assert_eq!(
-            row_segment(&terminal, 14, 1, 58),
+            row_segment(&terminal, 13, 1, 58),
             "│  Debug context                                         │"
+        );
+        assert_eq!(
+            row_segment(&terminal, 14, 1, 58),
+            "│  Reflect on session (alias: reflection)                │"
         );
         assert_eq!(
             row_segment(&terminal, 15, 1, 58),
@@ -525,7 +536,7 @@ mod tests {
             "╰────────────────────────────────────────────────────────╯"
         );
         assert_eq!(
-            terminal.backend().buffer()[(18, 3)].fg,
+            terminal.backend().buffer()[(18, 2)].fg,
             Theme::default().muted()
         );
     }
@@ -640,6 +651,26 @@ mod tests {
     }
 
     #[test]
+    fn reflection_action_is_searchable_and_waits_for_idle_work() {
+        let mut enabled = ActionsMenu::new(available());
+        for character in "reflection".chars() {
+            enabled.update(key(KeyCode::Char(character)));
+        }
+        assert_eq!(
+            enabled.update(key(KeyCode::Enter)).effects,
+            [ActionsEffect::Trigger(Action::Reflection)]
+        );
+
+        let mut availability = available();
+        availability.new_session = false;
+        let mut disabled = ActionsMenu::new(availability);
+        for character in "reflection".chars() {
+            disabled.update(key(KeyCode::Char(character)));
+        }
+        assert!(disabled.update(key(KeyCode::Enter)).effects.is_empty());
+    }
+
+    #[test]
     fn fast_mode_action_reflects_the_current_setting() {
         let mut enabled = ActionsMenu::new(available());
         for character in "priority".chars() {
@@ -655,7 +686,7 @@ mod tests {
         let mut disabled = ActionsMenu::new(availability);
         let terminal = render(&mut disabled);
         assert_eq!(
-            row_segment(&terminal, 4, 1, 58),
+            row_segment(&terminal, 3, 1, 58),
             "│  Disable fast mode (alias: priority)                   │"
         );
     }
@@ -701,11 +732,11 @@ mod tests {
         disabled.update(key(KeyCode::Down));
         let terminal = render(&mut disabled);
         assert_eq!(
-            row_segment(&terminal, 6, 1, 58),
+            row_segment(&terminal, 5, 1, 58),
             "│› New session · finish active work first (alias: clear) │"
         );
         assert_eq!(
-            terminal.backend().buffer()[(4, 6)].fg,
+            terminal.backend().buffer()[(4, 5)].fg,
             Theme::default().muted()
         );
     }
@@ -784,11 +815,11 @@ mod tests {
 
         let terminal = render(&mut disabled);
         assert_eq!(
-            row_segment(&terminal, 3, 1, 58),
+            row_segment(&terminal, 2, 1, 58),
             "│› Memory · enable in config: memory.enabled = true      │"
         );
         assert_eq!(
-            terminal.backend().buffer()[(4, 3)].fg,
+            terminal.backend().buffer()[(4, 2)].fg,
             Theme::default().muted()
         );
     }
