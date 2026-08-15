@@ -17,20 +17,25 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
+#[cfg(feature = "native-server")]
+use std::time::Duration;
 use std::{
     collections::{HashMap, HashSet},
     future::Future,
     sync::Arc,
-    time::{Duration, Instant},
 };
 use thiserror::Error;
+#[cfg(feature = "native-server")]
 use tower::limit::ConcurrencyLimitLayer;
 use tracing::info;
+use web_time::Instant;
 
 /// Covers worst-case JSON escaping for a full local corpus while bounding allocation.
 pub(crate) const MAX_JSON_BODY_BYTES: usize = 2 * 1024 * 1024;
 
+#[cfg(feature = "native-server")]
 const MAX_IN_FLIGHT_REQUESTS: usize = 64;
+#[cfg(feature = "native-server")]
 const STORE_OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Failure to assemble the server's authentication table.
@@ -88,10 +93,10 @@ impl<S: MemoryStore> MemoryServer<S> {
 
     /// Constructs an Axum router sharing this server's credentials and namespace factory.
     ///
-    /// Each router enforces a two-MiB JSON body limit, at most 64 in-flight requests, and a
-    /// 30-second timeout per store operation. Operation futures remain owned by request tasks.
+    /// Each router enforces a two-MiB JSON body limit. The `native-server` feature additionally
+    /// limits the process to 64 in-flight requests and applies a 30-second store timeout.
     pub fn router(&self) -> Router {
-        Router::new()
+        let router = Router::new()
             .route(&route(protocol::SESSION_PATH), get(session))
             .route(&route(protocol::SCAN_PATH), post(scan))
             .route(&route(protocol::READ_PATH), post(read))
@@ -100,9 +105,10 @@ impl<S: MemoryStore> MemoryServer<S> {
             .route(&route(protocol::DELETE_PATH), post(delete))
             .route(&route(protocol::SYNC_PATH), post(sync))
             .route(&route(protocol::EXPORT_PATH), post(export))
-            .layer(DefaultBodyLimit::max(MAX_JSON_BODY_BYTES))
-            .layer(ConcurrencyLimitLayer::new(MAX_IN_FLIGHT_REQUESTS))
-            .with_state(self.state.clone())
+            .layer(DefaultBodyLimit::max(MAX_JSON_BODY_BYTES));
+        #[cfg(feature = "native-server")]
+        let router = router.layer(ConcurrencyLimitLayer::new(MAX_IN_FLIGHT_REQUESTS));
+        router.with_state(self.state.clone())
     }
 }
 
@@ -607,19 +613,26 @@ where
     T: Send + 'static,
     C: FnOnce(&T) -> OperationCounts,
 {
-    match tokio::time::timeout(STORE_OPERATION_TIMEOUT, operation).await {
+    #[cfg(not(feature = "native-server"))]
+    let result = operation.await;
+    #[cfg(feature = "native-server")]
+    let result = match tokio::time::timeout(STORE_OPERATION_TIMEOUT, operation).await {
         Err(_) => {
             let error = ApiError::unavailable();
             trace.failure(error, request_counts);
-            Err(error)
+            return Err(error);
         }
-        Ok(Ok(value)) => {
+        Ok(result) => result,
+    };
+
+    match result {
+        Ok(value) => {
             let mut counts = success_counts(&value);
             counts.input_count = request_counts.input_count;
             trace.success(counts);
             Ok(value)
         }
-        Ok(Err(source)) => {
+        Err(source) => {
             let error = ApiError::from(source);
             trace.failure(error, request_counts);
             Err(error)

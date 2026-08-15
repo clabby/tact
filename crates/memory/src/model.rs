@@ -201,7 +201,8 @@ impl From<StoredMemory> for MemoryRecord {
     }
 }
 
-pub(crate) fn normalize_identity(content: &str) -> String {
+/// Normalizes authored content for backend-enforced duplicate detection.
+pub fn normalize_identity(content: &str) -> String {
     content
         .split_whitespace()
         .map(str::to_lowercase)

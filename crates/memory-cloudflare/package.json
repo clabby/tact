@@ -1,0 +1,15 @@
+{
+  "name": "tact-memory-cloudflare",
+  "private": true,
+  "scripts": {
+    "build": "worker-build --release",
+    "dev": "wrangler dev",
+    "migrate:local": "wrangler d1 migrations apply DB --local",
+    "migrate:remote": "wrangler d1 migrations apply DB --remote",
+    "deploy": "wrangler deploy",
+    "deploy:check": "wrangler deploy --dry-run --outdir bundled"
+  },
+  "devDependencies": {
+    "wrangler": "4.123.0"
+  }
+}

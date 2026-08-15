@@ -1,21 +1,25 @@
 //! Storage contract, backend selection, and shared failures.
 
+#[cfg(feature = "local")]
 mod local;
+#[cfg(feature = "client")]
 mod remote;
 
+#[cfg(all(feature = "client", feature = "local"))]
+use crate::{MemoryAccess, MemorySource, secrets::contains_likely_secret};
 use crate::{
-    MemoryAccess, MemoryKey, MemoryLimits, MemoryRecord, MemoryScan, MemorySource,
-    secrets::contains_likely_secret,
+    MemoryKey, MemoryLimits, MemoryRecord, MemoryScan,
     server::protocol::{self, ExportCursor, SyncReport},
 };
+#[cfg(feature = "local")]
 pub use local::LocalMemoryStore;
+#[cfg(feature = "client")]
 pub use remote::{RemoteClientError, RemoteMemoryClient, RemoteToken};
-use std::{
-    error::Error,
-    future::Future,
-    path::PathBuf,
-    time::{SystemTime, UNIX_EPOCH},
-};
+#[cfg(all(feature = "client", feature = "local"))]
+use std::path::PathBuf;
+#[cfg(feature = "local")]
+use std::time::{SystemTime, UNIX_EPOCH};
+use std::{error::Error, future::Future};
 use thiserror::Error;
 
 /// Ordinary operations shared by local and authenticated remote memory backends.
@@ -130,6 +134,7 @@ pub trait MemoryStore: Clone + Send + Sync + 'static {
 }
 
 /// Runtime-selected local-or-remote memory backend.
+#[cfg(all(feature = "client", feature = "local"))]
 #[derive(Clone, Debug)]
 pub enum SelectedMemoryStore {
     /// Private local SQLite storage.
@@ -138,6 +143,7 @@ pub enum SelectedMemoryStore {
     Remote(RemoteMemoryClient),
 }
 
+#[cfg(all(feature = "client", feature = "local"))]
 impl SelectedMemoryStore {
     /// Selects a private local SQLite backend.
     pub fn local(path: impl Into<PathBuf>) -> Self {
@@ -174,6 +180,7 @@ impl SelectedMemoryStore {
     }
 }
 
+#[cfg(all(feature = "client", feature = "local"))]
 impl MemoryStore for SelectedMemoryStore {
     fn scan(
         &self,
@@ -262,6 +269,7 @@ impl MemoryStore for SelectedMemoryStore {
     }
 }
 
+#[cfg(all(feature = "client", feature = "local"))]
 fn reject_unsafe(content: &str) -> Result<(), MemoryError> {
     if contains_likely_secret(content) {
         return Err(MemoryError::SecretRejected);
@@ -269,6 +277,7 @@ fn reject_unsafe(content: &str) -> Result<(), MemoryError> {
     Ok(())
 }
 
+#[cfg(feature = "local")]
 fn current_time_ms() -> i64 {
     let milliseconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -375,6 +384,7 @@ impl MemoryError {
     }
 }
 
+#[cfg(feature = "client")]
 impl From<RemoteClientError> for MemoryError {
     fn from(source: RemoteClientError) -> Self {
         match source {

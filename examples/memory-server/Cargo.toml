@@ -13,9 +13,9 @@ description = "In-memory example deployment for the tact-memory server module"
 workspace = true
 
 [dependencies]
-axum.workspace = true
+axum = { workspace = true, features = ["http1", "tokio"] }
 clap.workspace = true
-tact-memory.workspace = true
+tact-memory = { workspace = true, features = ["native-server"] }
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
