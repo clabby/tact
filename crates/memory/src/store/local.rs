@@ -51,16 +51,8 @@ pub struct LocalMemoryStore {
 }
 
 impl LocalMemoryStore {
-    /// Opens or creates a private local SQLite store at `path` on first use.
-    pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self {
-            path: Arc::new(path.into()),
-            limits: MemoryLimits::PRODUCTION,
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn with_limits(path: impl Into<PathBuf>, limits: MemoryLimits) -> Self {
+    /// Opens or creates a private local SQLite store with explicit resource limits.
+    pub fn new(path: impl Into<PathBuf>, limits: MemoryLimits) -> Self {
         Self {
             path: Arc::new(path.into()),
             limits,
@@ -949,7 +941,10 @@ mod allocator_tests {
     #[test]
     fn allocation_reconciles_rows_inserted_by_a_legacy_writer() {
         let directory = tempfile::tempdir().unwrap();
-        let store = LocalMemoryStore::new(directory.path().join("memory.sqlite3"));
+        let store = LocalMemoryStore::new(
+            directory.path().join("memory.sqlite3"),
+            MemoryLimits::PRODUCTION,
+        );
         let mut connection = store.open().unwrap();
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -970,7 +965,7 @@ mod allocator_tests {
     fn legacy_writers_cannot_reuse_retired_ids() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("memory.sqlite3");
-        let store = LocalMemoryStore::new(&path);
+        let store = LocalMemoryStore::new(&path, MemoryLimits::PRODUCTION);
         let memory = store.put_local("retired", None, 1).unwrap();
         store.delete_local(memory.key).unwrap();
 

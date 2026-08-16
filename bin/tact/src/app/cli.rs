@@ -515,8 +515,9 @@ async fn push_memories(config: &Config, dry_run: bool) -> Result<()> {
         .remote()
         .ok_or(MemoryTransferError::RemoteNotConfigured)?;
 
-    let store = SelectedMemoryStore::local(config.memory_path());
-    let mut memories = export_memories(store.clone()).await?;
+    let limits = config.memory().limits();
+    let store = SelectedMemoryStore::local(config.memory_path(), limits);
+    let mut memories = export_memories(store.clone(), limits).await?;
     let content_bytes = memories
         .iter()
         .map(|memory| memory.content.len())
@@ -545,7 +546,7 @@ async fn push_memories(config: &Config, dry_run: bool) -> Result<()> {
             .await
             .map_err(MemoryTransferError::PushStore)?;
 
-        let current = export_memories(store.clone()).await?;
+        let current = export_memories(store.clone(), limits).await?;
         if same_replication_snapshot(&memories, &current) {
             println!(
                 "Pushed {} memories to namespace `{}`: {} inserted, {} replaced, {} unchanged, {} deleted.",
@@ -580,11 +581,11 @@ async fn pull_memories(config: &Config, all: bool, namespaces: Vec<String>) -> R
     client.session().await.map_err(MemoryTransferError::Pull)?;
     let selection = (!all).then_some(namespaces.as_slice());
     let memories = SelectedMemoryStore::remote(client)
-        .export_all(selection)
+        .export_all(selection, config.memory().limits())
         .await
         .map_err(MemoryTransferError::PullStore)?;
     let fetched = memories.len();
-    let report = LocalMemoryStore::new(config.memory_path())
+    let report = LocalMemoryStore::new(config.memory_path(), config.memory().limits())
         .merge_remote_export(memories)
         .await
         .map_err(MemoryTransferError::Merge)?;
@@ -602,12 +603,13 @@ async fn pull_memories(config: &Config, all: bool, namespaces: Vec<String>) -> R
 
 async fn export_memories(
     store: tact_memory::SelectedMemoryStore,
+    limits: tact_memory::MemoryLimits,
 ) -> std::result::Result<Vec<tact_memory::MemoryRecord>, crate::app::error::MemoryTransferError> {
     use crate::app::error::MemoryTransferError;
     use tact_memory::MemoryStore;
 
     let mut memories = store
-        .export_all(None)
+        .export_all(None, limits)
         .await
         .map_err(MemoryTransferError::Local)?;
     memories.sort_unstable_by_key(|memory| memory.key.id);
@@ -1278,7 +1280,7 @@ mod tests {
             ..ConfigOverrides::default()
         })
         .unwrap();
-        LocalMemoryStore::new(config.memory_path())
+        LocalMemoryStore::new(config.memory_path(), config.memory().limits())
             .put("before sync", None)
             .await
             .unwrap();
@@ -1286,7 +1288,7 @@ mod tests {
         let sync_config = config.clone();
         let sync_task = tokio::spawn(async move { push_memories(&sync_config, false).await });
         state.first_snapshot.notified().await;
-        LocalMemoryStore::new(config.memory_path())
+        LocalMemoryStore::new(config.memory_path(), config.memory().limits())
             .put("concurrent write", None)
             .await
             .unwrap();
