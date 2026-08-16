@@ -145,6 +145,8 @@ roots = []
 
 [memory]
 enabled = false
+max_records = 512
+max_total_content_bytes = 262144
 
 [subagents]
 enabled = true
@@ -274,14 +276,17 @@ Tact's bounded cross-session memory is disabled by default. Opt in explicitly:
 enabled = true
 ```
 
-Local memory is global to the selected Tact configuration, not scoped to a workspace. Tact stores
-it in `memory/v1.sqlite3` beside the selected `config.toml`. Agents access the selected local or
-remote backend only through explicit memory tool calls, and the corpus is never inserted into
-prompts automatically. For later user messages and in-flight steers, Tact adds a fixed,
-content-free checkpoint asking the agent to review the conversation and update memory when it
-finds a durable conclusion. See the
-[global memory design](docs/memory.md) for the tool contract, limits, privacy model, and evaluation
-criteria.
+Local memory is global to the selected Tact configuration, not scoped to a workspace. Tact stores it
+in `memory/v1.sqlite3` beside the selected `config.toml`. Its default capacity is 512 records and
+256 KiB of authored content. Set `memory.max_records` and `memory.max_total_content_bytes` to
+positive integers to change those local limits. They also bound the local snapshots used by explicit
+push and pull commands; remote namespace capacity remains owned by the remote service.
+
+Agents access the selected local or remote backend only through explicit memory tool calls, and the
+corpus is never inserted into prompts automatically. For later user messages and in-flight steers,
+Tact adds a fixed, content-free checkpoint asking the agent to review the conversation and update
+memory when it finds a durable conclusion. See the [global memory design](docs/memory.md) for the
+tool contract, limits, privacy model, and evaluation criteria.
 
 To share memory with a team, configure an authenticated remote backend. Each person uses a distinct
 namespace and may receive either writer or read-only credentials. Tact chooses exactly one backend

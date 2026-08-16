@@ -485,7 +485,7 @@ pub(crate) fn configured_memory_store(
     if !config.memory().enabled() {
         return Ok(None);
     }
-    let store = SelectedMemoryStore::local(config.memory_path());
+    let store = SelectedMemoryStore::local(config.memory_path(), config.memory().limits());
     let Some(remote) = config.memory().remote() else {
         return Ok(Some(store));
     };
@@ -708,7 +708,7 @@ mod tests {
         task::{Context, Poll},
         time::Duration,
     };
-    use tact_memory::MemorySource;
+    use tact_memory::{MemoryError, MemorySource, MemoryStore};
     use tempfile::tempdir;
     use tokio::{sync::Notify, time::timeout};
     use tokio_util::sync::CancellationToken;
@@ -752,6 +752,42 @@ mod tests {
         assert_eq!(local.source(), MemorySource::Local);
         let remote = configured_memory_store(&config, &allowed).unwrap().unwrap();
         assert_eq!(remote.source(), MemorySource::Remote);
+    }
+
+    #[tokio::test]
+    async fn configured_memory_store_applies_local_capacity() {
+        let directory = tempdir().unwrap();
+        let config_path = directory.path().join("config.toml");
+        fs::write(
+            &config_path,
+            "[memory]\nenabled = true\nmax_records = 3\nmax_total_content_bytes = 5\n",
+        )
+        .unwrap();
+        let config = Config::load(ConfigOverrides {
+            path: Some(config_path),
+            auth_file: Some(directory.path().join("auth.json")),
+            workspace: Some(directory.path().to_path_buf()),
+            ..ConfigOverrides::default()
+        })
+        .unwrap();
+        let store = configured_memory_store(&config, directory.path())
+            .unwrap()
+            .unwrap();
+
+        store.put("abc", None).await.unwrap();
+        let second = store.put("de", None).await.unwrap();
+        assert!(matches!(
+            store.put("f", None).await,
+            Err(MemoryError::ContentCapacity { maximum_bytes: 5 })
+        ));
+
+        store.delete(second.key).await.unwrap();
+        store.put("f", None).await.unwrap();
+        store.put("g", None).await.unwrap();
+        assert!(matches!(
+            store.put("h", None).await,
+            Err(MemoryError::RecordCapacity { maximum: 3 })
+        ));
     }
 
     impl Service<ResponsesAttempt> for PendingService {

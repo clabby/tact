@@ -12,6 +12,8 @@ Memory is disabled by default:
 ```toml
 [memory]
 enabled = true
+max_records = 512
+max_total_content_bytes = 262144
 ```
 
 When enabled, every runtime selects exactly one backend:
@@ -44,6 +46,13 @@ The local store is:
 `TACT_CONFIG`, or `TACT_HOME`. There is one global local corpus per configuration directory. It has
 no workspace, repository, branch, session, agent, or author namespace. Workspace-specific records
 must state their scope in their content.
+
+`max_records` and `max_total_content_bytes` are positive integer limits for this global local
+corpus. They default to 512 records and 262,144 authored-content bytes. Lowering a limit does not
+delete existing records; it prevents mutations that would leave the live corpus above the new
+bound. Explicit push and pull commands use the same configured limits while collecting or merging
+the local snapshot. Remote namespace capacity is configured by the service and is not changed by
+these local settings.
 
 The SQLite schema remains v1, and the existing `memories` record format is unchanged. Tact lazily
 adds backward-compatible allocator metadata so IDs are not reused after deletion or snapshot sync;
@@ -315,7 +324,7 @@ server time and server-owned telemetry.
 
 ## Bounds and transactions
 
-| Limit | v1 value |
+| Limit | Default v1 value |
 | --- | ---: |
 | Record content | 1 KiB |
 | Rows | 512 |
@@ -323,11 +332,15 @@ server time and server-owned telemetry.
 | Local main database file | 4 MiB |
 | Scan results | 5 |
 
-Bounds apply to the global local corpus and independently to each remote writer namespace. A store
-may prune expired unread probation records before rejecting a capacity-increasing mutation, but it
-does not evict active graduated records to make room. Mutations, telemetry updates, bound checks,
-authoritative push reconciliation, and local pull merge are transactional at their documented
-scope.
+The row and total-content defaults can be overridden for the global local corpus with
+`memory.max_records` and `memory.max_total_content_bytes`. Remote namespace capacity remains
+server-owned and is not changed by these client settings. The record-content, local database-file,
+and scan-result limits are not configurable.
+
+A store may prune expired unread probation records before rejecting a capacity-increasing mutation,
+but it does not evict active graduated records to make room. Mutations, telemetry updates, bound
+checks, authoritative push reconciliation, and local pull merge are transactional at their
+documented scope.
 
 The local database is unencrypted. Anyone who can read the configuration directory may be able to
 inspect it. Production remote storage encryption and HTTPS termination belong to its deployment.

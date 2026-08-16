@@ -13,9 +13,11 @@ use std::{
     ffi::OsString,
     fmt, fs,
     io::{ErrorKind, Write},
+    num::NonZeroUsize,
     path::{Path, PathBuf},
     sync::Arc,
 };
+use tact_memory::MemoryLimits;
 use tempfile::NamedTempFile;
 use toml_edit::{Array, DocumentMut, Item, Table, value};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
@@ -169,9 +171,11 @@ pub(crate) struct SkillsConfig {
 }
 
 /// Effective global memory configuration.
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub(crate) struct MemoryConfig {
     enabled: bool,
+    max_records: usize,
+    max_total_content_bytes: usize,
     #[serde(serialize_with = "serialize_remote_memory_config")]
     remote: Option<RemoteMemoryConfig>,
 }
@@ -245,6 +249,8 @@ struct SkillsConfigFile {
 #[serde(default, deny_unknown_fields)]
 struct MemoryConfigFile {
     enabled: bool,
+    max_records: Option<NonZeroUsize>,
+    max_total_content_bytes: Option<NonZeroUsize>,
     remote: RemoteMemoryConfigFile,
 }
 
@@ -1056,6 +1062,13 @@ impl MemoryConfig {
     ) -> std::result::Result<Self, RemoteMemoryConfigError> {
         Ok(Self {
             enabled: file.enabled,
+            max_records: file
+                .max_records
+                .map_or(MemoryLimits::PRODUCTION.records, NonZeroUsize::get),
+            max_total_content_bytes: file.max_total_content_bytes.map_or(
+                MemoryLimits::PRODUCTION.total_content_bytes,
+                NonZeroUsize::get,
+            ),
             remote: RemoteMemoryConfig::new(file.remote, config_dir)?,
         })
     }
@@ -1064,8 +1077,27 @@ impl MemoryConfig {
         self.enabled
     }
 
+    pub(crate) const fn limits(&self) -> MemoryLimits {
+        MemoryLimits {
+            records: self.max_records,
+            total_content_bytes: self.max_total_content_bytes,
+            ..MemoryLimits::PRODUCTION
+        }
+    }
+
     pub(crate) const fn remote(&self) -> Option<&RemoteMemoryConfig> {
         self.remote.as_ref()
+    }
+}
+
+impl Default for MemoryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_records: MemoryLimits::PRODUCTION.records,
+            max_total_content_bytes: MemoryLimits::PRODUCTION.total_content_bytes,
+            remote: None,
+        }
     }
 }
 
@@ -1425,6 +1457,7 @@ mod tests {
         path::{Path, PathBuf},
         sync::Arc,
     };
+    use tact_memory::MemoryLimits;
     use tempfile::tempdir;
     use zeroize::{Zeroize, ZeroizeOnDrop};
 
@@ -1556,7 +1589,15 @@ mod tests {
         );
         assert_table_fields(&rendered["mcp_servers"], &[]);
         assert_table_fields(&rendered["skills"], &["enabled", "roots"]);
-        assert_table_fields(&rendered["memory"], &["enabled", "remote"]);
+        assert_table_fields(
+            &rendered["memory"],
+            &[
+                "enabled",
+                "max_records",
+                "max_total_content_bytes",
+                "remote",
+            ],
+        );
         assert_table_fields(
             &rendered["memory"]["remote"],
             &["endpoint", "namespace", "bearer_token", "workspace_roots"],
@@ -1605,6 +1646,14 @@ mod tests {
         );
         assert_eq!(rendered["theme"]["mode"].as_str(), Some("auto"));
         assert_eq!(rendered["theme"]["dark"]["accent"].as_str(), Some("blue"));
+        assert_eq!(
+            rendered["memory"]["max_records"].as_integer(),
+            Some(MemoryLimits::PRODUCTION.records as i64)
+        );
+        assert_eq!(
+            rendered["memory"]["max_total_content_bytes"].as_integer(),
+            Some(MemoryLimits::PRODUCTION.total_content_bytes as i64)
+        );
         assert_eq!(rendered["memory"]["remote"]["endpoint"].as_str(), Some(""));
         assert_eq!(rendered["memory"]["remote"]["namespace"].as_str(), Some(""));
         assert_eq!(
@@ -1654,6 +1703,7 @@ mod tests {
         .unwrap();
 
         assert!(!config.memory().enabled());
+        assert_eq!(config.memory().limits(), MemoryLimits::PRODUCTION);
 
         let rendered: toml::Value = toml::from_str(&config.to_toml().unwrap()).unwrap();
         assert_eq!(rendered["memory"]["enabled"].as_bool(), Some(false));
@@ -1682,6 +1732,39 @@ mod tests {
 
         let rendered: toml::Value = toml::from_str(&config.to_toml().unwrap()).unwrap();
         assert_eq!(rendered["memory"]["enabled"].as_bool(), Some(true));
+    }
+
+    #[test]
+    fn local_memory_capacity_can_be_configured_and_rendered() {
+        let config =
+            load_config("[memory]\nmax_records = 1024\nmax_total_content_bytes = 1048576\n")
+                .unwrap();
+
+        let limits = config.memory().limits();
+        assert_eq!(limits.records, 1_024);
+        assert_eq!(limits.total_content_bytes, 1_048_576);
+        assert_eq!(limits.content_bytes, MemoryLimits::PRODUCTION.content_bytes);
+
+        let rendered_toml = config.to_toml().unwrap();
+        let rendered: toml::Value = toml::from_str(&rendered_toml).unwrap();
+        assert_eq!(rendered["memory"]["max_records"].as_integer(), Some(1_024));
+        assert_eq!(
+            rendered["memory"]["max_total_content_bytes"].as_integer(),
+            Some(1_048_576)
+        );
+        assert_eq!(
+            load_config(&rendered_toml).unwrap().memory().limits(),
+            limits
+        );
+    }
+
+    #[test]
+    fn local_memory_capacity_must_be_positive() {
+        for field in ["max_records", "max_total_content_bytes"] {
+            let error = load_config(&format!("[memory]\n{field} = 0\n")).unwrap_err();
+
+            assert!(matches!(error, Error::Config(ConfigError::Parse { .. })));
+        }
     }
 
     #[test]

@@ -11,11 +11,11 @@ struct MemoryStore(ProductionMemoryStore);
 
 impl MemoryStore {
     fn new(path: impl Into<PathBuf>) -> Self {
-        Self(ProductionMemoryStore::new(path))
+        Self(ProductionMemoryStore::new(path, MemoryLimits::PRODUCTION))
     }
 
     fn with_limits(path: impl Into<PathBuf>, limits: MemoryLimits) -> Self {
-        Self(ProductionMemoryStore::with_limits(path, limits))
+        Self(ProductionMemoryStore::new(path, limits))
     }
 
     fn scan(
@@ -85,7 +85,10 @@ fn tiny_limits() -> MemoryLimits {
 #[tokio::test]
 async fn local_sync_preserves_complete_state_and_the_id_high_water_mark() {
     let directory = tempfile::tempdir().unwrap();
-    let store = ProductionMemoryStore::new(directory.path().join("memory.sqlite3"));
+    let store = ProductionMemoryStore::new(
+        directory.path().join("memory.sqlite3"),
+        MemoryLimits::PRODUCTION,
+    );
     let first = super::MemoryStore::put(&store, "first", None)
         .await
         .unwrap();
@@ -110,6 +113,75 @@ async fn local_sync_preserves_complete_state_and_the_id_high_water_mark() {
     super::MemoryStore::sync(&store, &[]).await.unwrap();
     let next = super::MemoryStore::put(&store, "next", None).await.unwrap();
     assert!(next.key.id > first.key.id);
+}
+
+#[tokio::test]
+async fn export_collector_honors_explicit_capacity() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut store_limits = MemoryLimits::PRODUCTION;
+    store_limits.records = 3;
+    let store = ProductionMemoryStore::new(directory.path().join("memory.sqlite3"), store_limits);
+    for content in ["one", "two", "three"] {
+        store.put(content, None).await.unwrap();
+    }
+
+    let mut export_limits = store_limits;
+    export_limits.records = 2;
+    assert!(matches!(
+        store.export_all(None, export_limits).await,
+        Err(MemoryError::RecordCapacity { maximum: 2 })
+    ));
+
+    export_limits.records = 3;
+    export_limits.total_content_bytes = 8;
+    assert!(matches!(
+        store.export_all(None, export_limits).await,
+        Err(MemoryError::ContentCapacity { maximum_bytes: 8 })
+    ));
+
+    let exported = store.export_all(None, store_limits).await.unwrap();
+    assert_eq!(exported.len(), 3);
+}
+
+#[tokio::test]
+async fn explicit_capacity_can_exceed_production_defaults() {
+    let directory = tempfile::tempdir().unwrap();
+    let limits = MemoryLimits {
+        records: MemoryLimits::PRODUCTION.records + 1,
+        total_content_bytes: MemoryLimits::PRODUCTION.total_content_bytes + 512,
+        ..MemoryLimits::PRODUCTION
+    };
+    let records = (1..=limits.records)
+        .map(|id| {
+            let id = i64::try_from(id).unwrap();
+            MemoryRecord {
+                key: MemoryKey::local(id, 1),
+                content: format!("{id:04}{}", "x".repeat(508)),
+                created_at_ms: 1,
+                updated_at_ms: 1,
+                last_scanned_at_ms: None,
+                scan_count: 0,
+                last_used_at_ms: None,
+                use_count: 0,
+                probation_until_ms: None,
+            }
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        records
+            .iter()
+            .map(|record| record.content.len())
+            .sum::<usize>(),
+        limits.total_content_bytes
+    );
+    let store = ProductionMemoryStore::new(directory.path().join("memory.sqlite3"), limits);
+
+    store.sync(&records).await.unwrap();
+    assert_eq!(store.list().await.unwrap().len(), limits.records);
+    assert!(matches!(
+        store.put("one more", None).await,
+        Err(MemoryError::RecordCapacity { maximum }) if maximum == limits.records
+    ));
 }
 
 #[test]
@@ -542,7 +614,7 @@ fn remote_record(namespace: &str, id: i64, content: &str) -> MemoryRecord {
 async fn pulling_remote_memories_merges_atomically_without_changing_schema_v1() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("memory/v1.sqlite3");
-    let store = ProductionMemoryStore::new(path.clone());
+    let store = ProductionMemoryStore::new(path.clone(), MemoryLimits::PRODUCTION);
     store.put("existing conclusion", None).await.unwrap();
 
     let report = store
@@ -571,8 +643,7 @@ async fn failed_remote_merge_preserves_the_existing_local_corpus() {
     let directory = tempfile::tempdir().unwrap();
     let mut limits = MemoryLimits::PRODUCTION;
     limits.records = 1;
-    let store =
-        ProductionMemoryStore::with_limits(directory.path().join("memory/v1.sqlite3"), limits);
+    let store = ProductionMemoryStore::new(directory.path().join("memory/v1.sqlite3"), limits);
     let existing = store.put("existing conclusion", None).await.unwrap();
 
     assert!(matches!(
