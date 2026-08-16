@@ -84,13 +84,15 @@ pub trait MemoryStore: Clone + Send + Sync + 'static {
         limit: usize,
     ) -> impl Future<Output = Result<(Vec<MemoryRecord>, Option<ExportCursor>), MemoryError>> + Send;
 
-    /// Collects a complete bounded export through the paginated storage contract.
+    /// Collects a complete export through the paginated storage contract within caller-provided
+    /// record and content bounds.
     ///
     /// The collector rejects non-progressing cursors and stops before retaining more records or
-    /// content than a local store can import.
+    /// content than `limits` permits.
     fn export_all(
         &self,
         namespaces: Option<&[String]>,
+        limits: MemoryLimits,
     ) -> impl Future<Output = Result<Vec<MemoryRecord>, MemoryError>> + Send {
         async move {
             let mut cursor = None;
@@ -114,11 +116,19 @@ pub trait MemoryStore: Clone + Send + Sync + 'static {
                 content_bytes = content_bytes
                     .checked_add(page_bytes.ok_or(MemoryError::InvalidPagination)?)
                     .ok_or(MemoryError::InvalidPagination)?;
-                if next_record_count > MemoryLimits::PRODUCTION.records
-                    || content_bytes > MemoryLimits::PRODUCTION.total_content_bytes
-                    || next_cursor
-                        .as_ref()
-                        .is_some_and(|next| cursor.as_ref() == Some(next))
+                if next_record_count > limits.records {
+                    return Err(MemoryError::RecordCapacity {
+                        maximum: limits.records,
+                    });
+                }
+                if content_bytes > limits.total_content_bytes {
+                    return Err(MemoryError::ContentCapacity {
+                        maximum_bytes: limits.total_content_bytes,
+                    });
+                }
+                if next_cursor
+                    .as_ref()
+                    .is_some_and(|next| cursor.as_ref() == Some(next))
                     || (page.is_empty() && next_cursor.is_some())
                 {
                     return Err(MemoryError::InvalidPagination);
@@ -145,9 +155,9 @@ pub enum SelectedMemoryStore {
 
 #[cfg(all(feature = "client", feature = "local"))]
 impl SelectedMemoryStore {
-    /// Selects a private local SQLite backend.
-    pub fn local(path: impl Into<PathBuf>) -> Self {
-        Self::Local(LocalMemoryStore::new(path))
+    /// Selects a private local SQLite backend with explicit resource limits.
+    pub fn local(path: impl Into<PathBuf>, limits: MemoryLimits) -> Self {
+        Self::Local(LocalMemoryStore::new(path, limits))
     }
 
     /// Selects an authenticated remote HTTP backend.
