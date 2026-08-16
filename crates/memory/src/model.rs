@@ -119,7 +119,7 @@ pub struct MemoryLimits {
 }
 
 impl MemoryLimits {
-    /// Limits used by production local and reference remote stores.
+    /// Baseline limits used by production stores; local configuration may override corpus capacity.
     pub const PRODUCTION: Self = Self {
         content_bytes: 1_024,
         records: 512,

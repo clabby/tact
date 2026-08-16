@@ -2842,7 +2842,7 @@ mod tests {
     };
     use nanocodex::Model;
     use std::{cell::Cell, collections::HashMap, fs, path::Path, sync::Arc};
-    use tact_memory::{MemoryStore, SelectedMemoryStore};
+    use tact_memory::{MemoryLimits, MemoryStore, SelectedMemoryStore};
     use tact_subagents::{AgentId, AgentStatus, AgentUpdate};
     use tempfile::tempdir;
 
@@ -3054,7 +3054,10 @@ mod tests {
     #[tokio::test]
     async fn memory_list_inspection_does_not_change_use_telemetry() {
         let directory = tempdir().unwrap();
-        let store = SelectedMemoryStore::local(directory.path().join("memory.sqlite3"));
+        let store = SelectedMemoryStore::local(
+            directory.path().join("memory.sqlite3"),
+            MemoryLimits::PRODUCTION,
+        );
         store.put("inspect without using", None).await.unwrap();
 
         let MemoryCompletion::Listed {
@@ -3091,7 +3094,10 @@ mod tests {
     #[tokio::test]
     async fn stale_human_delete_is_reported_to_the_originating_pane() {
         let directory = tempdir().unwrap();
-        let store = SelectedMemoryStore::local(directory.path().join("memory.sqlite3"));
+        let store = SelectedMemoryStore::local(
+            directory.path().join("memory.sqlite3"),
+            MemoryLimits::PRODUCTION,
+        );
         let original = store.put("old value", None).await.unwrap();
         store
             .put("new value", Some(original.key.clone()))
