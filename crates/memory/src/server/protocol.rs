@@ -67,20 +67,34 @@ pub struct SessionResponse {
     pub role: RemoteRole,
 }
 
+/// Authenticated namespace scope for one scan request.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScanScope {
+    /// Every visible namespace, ranked as one corpus.
+    All,
+    /// Only the authenticated namespace.
+    Own,
+    /// Every visible namespace other than the authenticated namespace.
+    Others,
+}
+
 /// Request for semantic retrieval.
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScanRequest {
     /// Search text, bounded by [`crate::MemoryLimits::query_bytes`].
     pub query: String,
-    /// Maximum candidates requested from the server.
+    /// Namespace scope derived relative to the authenticated principal.
+    pub scope: ScanScope,
+    /// Maximum candidates requested from this scope.
     pub limit: usize,
 }
 
 /// Response to [`ScanRequest`].
 #[derive(Debug, Deserialize, Serialize)]
 pub struct ScanResponse {
-    /// Candidates in descending rank.
+    /// Candidates from the requested scope in descending rank.
     pub candidates: Vec<MemoryCandidate>,
 }
 

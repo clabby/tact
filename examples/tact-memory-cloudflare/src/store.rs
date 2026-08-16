@@ -11,8 +11,8 @@ use row::{CapacityRow, CorpusRow, DecodeResult, ReplaceRow, SyncRow, VersionRow}
 use serde::Serialize;
 use std::{collections::HashSet, fmt::Display, future::Future, sync::Arc};
 use tact_memory::{
-    MemoryError, MemoryKey, MemoryLimits, MemoryRecord, MemoryScan, MemoryStore,
-    normalize_identity,
+    MemoryCandidate, MemoryError, MemoryKey, MemoryLimits, MemoryNamespaceFilter, MemoryRecord,
+    MemoryStore, normalize_identity,
     server::protocol::{self, ExportCursor, SyncReport},
 };
 use thiserror::Error;
@@ -32,6 +32,15 @@ const VISIBLE_RECORD_SQL: &str = "(memories.probation_until_ms IS NULL OR memori
 pub(crate) struct ScanBudget {
     pub(crate) records: usize,
     pub(crate) content_bytes: usize,
+    pub(crate) results: usize,
+}
+
+impl ScanBudget {
+    fn result_limit(self, requested: usize) -> usize {
+        requested
+            .min(self.results)
+            .min(MemoryLimits::PRODUCTION.scan_results)
+    }
 }
 
 /// Namespace-bound shared memory backed by Cloudflare D1.
@@ -92,8 +101,9 @@ impl MemoryStore for CloudflareMemoryStore {
     fn scan(
         &self,
         query: &str,
+        namespaces: MemoryNamespaceFilter,
         limit: usize,
-    ) -> impl Future<Output = Result<MemoryScan, MemoryError>> + Send {
+    ) -> impl Future<Output = Result<Vec<MemoryCandidate>, MemoryError>> + Send {
         let store = self.clone();
         let query = query.to_owned();
         SendFuture::new(async move {
@@ -105,19 +115,37 @@ impl MemoryStore for CloudflareMemoryStore {
             }
             let now = current_time_ms().to_string();
             let scan_budget = store.scan_budget;
+            let (namespace_sql, namespace) = match &namespaces {
+                MemoryNamespaceFilter::All => ("", None),
+                MemoryNamespaceFilter::Exact(namespace) => {
+                    (" AND memories.namespace = ?", Some(namespace.as_str()))
+                }
+                MemoryNamespaceFilter::OtherThan(namespace) => {
+                    (" AND memories.namespace != ?", Some(namespace.as_str()))
+                }
+            };
             let corpus_size_sql = format!(
-                "SELECT COUNT(*) AS record_count, COALESCE(SUM(length(CAST(content AS BLOB))), 0) AS content_bytes FROM memories WHERE {VISIBLE_RECORD_SQL}"
+                "SELECT COUNT(*) AS record_count, COALESCE(SUM(length(CAST(content AS BLOB))), 0) AS content_bytes FROM memories WHERE {VISIBLE_RECORD_SQL}{namespace_sql}"
             );
             let corpus_sql = format!(
-                "SELECT {RECORD_COLUMNS} FROM memories WHERE {VISIBLE_RECORD_SQL} AND (SELECT COUNT(*) FROM memories WHERE {VISIBLE_RECORD_SQL}) <= {} AND (SELECT COALESCE(SUM(length(CAST(content AS BLOB))), 0) FROM memories WHERE {VISIBLE_RECORD_SQL}) <= {} ORDER BY namespace, id",
+                "SELECT {RECORD_COLUMNS} FROM memories WHERE {VISIBLE_RECORD_SQL}{namespace_sql} AND (SELECT COUNT(*) FROM memories WHERE {VISIBLE_RECORD_SQL}{namespace_sql}) <= {} AND (SELECT COALESCE(SUM(length(CAST(content AS BLOB))), 0) FROM memories WHERE {VISIBLE_RECORD_SQL}{namespace_sql}) <= {} ORDER BY namespace, id",
                 scan_budget.records, scan_budget.content_bytes
             );
+            let bindings = |repetitions| {
+                let mut values = Vec::new();
+                for _ in 0..repetitions {
+                    values.push(D1Type::Text(&now));
+                    if let Some(namespace) = namespace {
+                        values.push(D1Type::Text(namespace));
+                    }
+                }
+                values
+            };
+            let corpus_size_bindings = bindings(1);
+            let corpus_bindings = bindings(3);
             let statements = vec![
-                store.statement(corpus_size_sql, &[D1Type::Text(&now)])?,
-                store.statement(
-                    corpus_sql,
-                    &[D1Type::Text(&now), D1Type::Text(&now), D1Type::Text(&now)],
-                )?,
+                store.statement(corpus_size_sql, &corpus_size_bindings)?,
+                store.statement(corpus_sql, &corpus_bindings)?,
             ];
             let results = store.batch(statements).await?;
             let corpus = results[0].one::<CorpusRow>()?;
@@ -127,10 +155,16 @@ impl MemoryStore for CloudflareMemoryStore {
                 return Err(MemoryError::StorageCapacity);
             }
             let records = results[1].records()?;
-            let scan = MemoryScan::rank(&query, &records, limit.min(limits.scan_results));
-            let mut updates = Vec::with_capacity(scan.candidates.len() + 1);
+            let candidates = MemoryCandidate::rank(
+                &query,
+                records
+                    .iter()
+                    .filter(|record| namespaces.includes(&record.key)),
+                scan_budget.result_limit(limit),
+            );
+            let mut updates = Vec::with_capacity(candidates.len() + 1);
             updates.push(store.statement(PRUNE_SQL, &[D1Type::Text(&now)])?);
-            for candidate in &scan.candidates {
+            for candidate in &candidates {
                 let namespace = candidate.key.namespace.as_deref().unwrap_or_default();
                 updates.push(store.statement(
                     "UPDATE memories SET last_scanned_at_ms = CAST(? AS INTEGER), scan_count = CASE WHEN scan_count < 9223372036854775807 THEN scan_count + 1 ELSE scan_count END WHERE namespace = ? AND id = CAST(? AS INTEGER) AND version = CAST(? AS INTEGER)",
@@ -143,7 +177,7 @@ impl MemoryStore for CloudflareMemoryStore {
                 )?);
             }
             store.batch(updates).await?;
-            Ok(scan)
+            Ok(candidates)
         })
     }
 
@@ -635,8 +669,29 @@ fn current_time_ms() -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::RECORD_COLUMNS;
+    use super::{RECORD_COLUMNS, ScanBudget};
     use rusqlite::{Connection, params};
+    use tact_memory::MemoryLimits;
+
+    #[test]
+    fn scan_result_limit_honors_request_deployment_and_protocol_bounds() {
+        let budget = ScanBudget {
+            records: 1,
+            content_bytes: 1,
+            results: 3,
+        };
+        assert_eq!(budget.result_limit(2), 2);
+        assert_eq!(budget.result_limit(5), 3);
+
+        let oversized = ScanBudget {
+            results: usize::MAX,
+            ..budget
+        };
+        assert_eq!(
+            oversized.result_limit(usize::MAX),
+            MemoryLimits::PRODUCTION.scan_results
+        );
+    }
 
     #[test]
     fn read_projection_is_unambiguous() {

@@ -5,10 +5,12 @@ use super::{
     protocol::{
         self, DeleteRequest, ErrorResponse, ExportRequest, ExportResponse, ListResponse,
         PutRequest, PutResponse, ReadRequest, ReadResponse, RemoteErrorCode, RemoteRole,
-        ScanRequest, ScanResponse, SessionResponse, SyncRequest,
+        ScanRequest, ScanResponse, ScanScope, SessionResponse, SyncRequest,
     },
 };
-use crate::{MemoryError, MemoryKey, MemoryLimits, MemoryRecord, MemoryStore};
+use crate::{
+    MemoryError, MemoryKey, MemoryLimits, MemoryNamespaceFilter, MemoryRecord, MemoryStore,
+};
 use axum::{
     Json, Router,
     body::Body,
@@ -164,19 +166,21 @@ async fn scan<S: MemoryStore>(
         };
         return operation.error_response(error, counts);
     }
+    let namespaces = match request.scope {
+        ScanScope::All => MemoryNamespaceFilter::All,
+        ScanScope::Own => MemoryNamespaceFilter::Exact(principal.namespace.clone()),
+        ScanScope::Others => MemoryNamespaceFilter::OtherThan(principal.namespace.clone()),
+    };
     let store = (state.store_factory)(principal.namespace);
     match run_store(
         operation,
         counts,
-        store.scan(&request.query, request.limit),
-        |scan| OperationCounts::candidates(scan.candidates.len()),
+        store.scan(&request.query, namespaces, request.limit),
+        |candidates| OperationCounts::candidates(candidates.len()),
     )
     .await
     {
-        Ok(scan) => Json(ScanResponse {
-            candidates: scan.candidates,
-        })
-        .into_response(),
+        Ok(candidates) => Json(ScanResponse { candidates }).into_response(),
         Err(error) => error.into_response(),
     }
 }

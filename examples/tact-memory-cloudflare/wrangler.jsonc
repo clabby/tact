@@ -6,7 +6,8 @@
   "workers_dev": true,
   "vars": {
     "TACT_MEMORY_SCAN_MAX_RECORDS": "10240",
-    "TACT_MEMORY_SCAN_MAX_CONTENT_BYTES": "5242880"
+    "TACT_MEMORY_SCAN_MAX_CONTENT_BYTES": "5242880",
+    "TACT_MEMORY_SCAN_MAX_RESULTS": "5"
   },
   "build": {
     "command": "worker-build --release"
