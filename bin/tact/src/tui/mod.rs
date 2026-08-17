@@ -2463,13 +2463,42 @@ fn apply_pane_effect(
     Ok(())
 }
 
-/// Copies text through the platform's most reliable clipboard channel.
+/// Copies text to tmux and through the platform's most reliable clipboard channel.
 ///
-/// On Linux the terminal leads because it retains clipboard ownership after Tact
-/// exits. On macOS the native pasteboard leads because it does not depend on OSC 52
-/// support. Each platform falls back to the other channel.
-#[cfg(not(target_os = "macos"))]
+/// Tmux paste buffers are loaded explicitly and forwarded to the outer terminal
+/// because tmux may ignore OSC 52 from pane applications. On Linux the terminal leads
+/// because it retains clipboard ownership after Tact exits. On macOS the native
+/// pasteboard leads because it does not depend on OSC 52 support. Each platform falls
+/// back to the other channel.
 fn copy_selection(terminal: &mut TerminalSession, text: &str) -> std::result::Result<(), String> {
+    let tmux_copy = std::env::var_os("TMUX")
+        .map(|_| clipboard::copy_to_tmux(text).map_err(|error| error.to_string()));
+    let platform_copy = copy_platform_selection(terminal, text);
+
+    copy_result(tmux_copy, platform_copy)
+}
+
+fn copy_result(
+    tmux_copy: Option<std::result::Result<(), String>>,
+    platform_copy: std::result::Result<(), String>,
+) -> std::result::Result<(), String> {
+    match tmux_copy {
+        Some(Ok(())) => Ok(()),
+        Some(Err(tmux_error)) => platform_copy.map_err(|platform_error| {
+            format!(
+                "Could not copy selection to tmux: {tmux_error}; \
+                 platform fallback failed: {platform_error}"
+            )
+        }),
+        None => platform_copy,
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn copy_platform_selection(
+    terminal: &mut TerminalSession,
+    text: &str,
+) -> std::result::Result<(), String> {
     match terminal.copy_to_clipboard(text) {
         Ok(()) => Ok(()),
         Err(terminal_error) => clipboard::copy_text(text).map_err(|native_error| {
@@ -2482,7 +2511,10 @@ fn copy_selection(terminal: &mut TerminalSession, text: &str) -> std::result::Re
 }
 
 #[cfg(target_os = "macos")]
-fn copy_selection(terminal: &mut TerminalSession, text: &str) -> std::result::Result<(), String> {
+fn copy_platform_selection(
+    terminal: &mut TerminalSession,
+    text: &str,
+) -> std::result::Result<(), String> {
     match clipboard::copy_text(text) {
         Ok(()) => Ok(()),
         Err(native_error) => terminal.copy_to_clipboard(text).map_err(|terminal_error| {
@@ -2761,8 +2793,8 @@ fn request_render(request: RenderRequest, scheduler: &mut RenderScheduler) {
 mod tests {
     use super::{
         MemoryCompletion, MemoryOperation, PaneGeneration, PaneSession, PaneSettings,
-        PendingSubmission, close_pane_journal, invalidate_memory_generations, is_image_paste,
-        local_link_path, merge_recent_prompts, next_memory_generation, open_pane,
+        PendingSubmission, close_pane_journal, copy_result, invalidate_memory_generations,
+        is_image_paste, local_link_path, merge_recent_prompts, next_memory_generation, open_pane,
         run_memory_operation, send_submission, subagent_pane, validate_interactive,
     };
     use crate::{
@@ -2802,6 +2834,22 @@ mod tests {
             KeyCode::Char('v'),
             KeyModifiers::NONE,
         ))));
+    }
+
+    #[test]
+    fn successful_tmux_copy_ignores_platform_failure() {
+        assert_eq!(
+            copy_result(Some(Ok(())), Err("platform failed".to_owned())),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn successful_platform_copy_falls_back_from_tmux_failure() {
+        assert_eq!(
+            copy_result(Some(Err("tmux failed".to_owned())), Ok(())),
+            Ok(())
+        );
     }
 
     #[test]

@@ -3,13 +3,78 @@
 use arboard::Clipboard;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use png::{BitDepth, ColorType, Encoder, EncodingError};
-#[cfg(target_os = "macos")]
 use std::{
     io::{self, Write},
+    path::{Path, PathBuf},
     process::{Command, ExitStatus, Stdio},
 };
-#[cfg(target_os = "macos")]
 use thiserror::Error;
+
+pub(crate) fn copy_to_tmux(text: &str) -> Result<(), TmuxCopyError> {
+    copy_with_tmux(text, Path::new("tmux"))
+}
+
+#[derive(Debug, Error)]
+pub(crate) enum TmuxCopyError {
+    #[error("could not launch {program}: {source}")]
+    Launch {
+        program: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("could not write to {program}: {source}")]
+    Write {
+        program: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("could not wait for {program}: {source}")]
+    Wait {
+        program: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("{program} exited with {status}")]
+    Exit {
+        program: PathBuf,
+        status: ExitStatus,
+    },
+}
+
+fn copy_with_tmux(text: &str, program: &Path) -> Result<(), TmuxCopyError> {
+    let mut child = Command::new(program)
+        .args(["load-buffer", "-w", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|source| TmuxCopyError::Launch {
+            program: program.to_path_buf(),
+            source,
+        })?;
+    let write_result = child
+        .stdin
+        .take()
+        .expect("piped tmux stdin must be available")
+        .write_all(text.as_bytes())
+        .map_err(|source| TmuxCopyError::Write {
+            program: program.to_path_buf(),
+            source,
+        });
+    let status = child.wait().map_err(|source| TmuxCopyError::Wait {
+        program: program.to_path_buf(),
+        source,
+    })?;
+    write_result?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(TmuxCopyError::Exit {
+            program: program.to_path_buf(),
+            status,
+        })
+    }
+}
 
 #[cfg(not(target_os = "macos"))]
 pub(crate) fn copy_text(text: &str) -> Result<(), arboard::Error> {
@@ -119,13 +184,40 @@ fn encode_png(width: usize, height: usize, pixels: &[u8]) -> Result<Vec<u8>, Enc
 mod tests {
     #[cfg(target_os = "macos")]
     use super::copy_with_pbcopy;
-    use super::encode_png;
+    use super::{copy_with_tmux, encode_png};
+    use std::{fs, os::unix::fs::PermissionsExt};
 
     #[test]
     fn clipboard_pixels_are_encoded_as_png() {
         let encoded = encode_png(1, 1, &[255, 0, 0, 255]).unwrap();
 
         assert_eq!(&encoded[..8], b"\x89PNG\r\n\x1a\n");
+    }
+
+    #[test]
+    fn tmux_copy_loads_buffer_from_stdin() {
+        let directory = tempfile::tempdir().unwrap();
+        let program = directory.path().join("tmux");
+        fs::write(
+            &program,
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$(dirname \"$0\")/args\"\n\
+             cat > \"$(dirname \"$0\")/buffer\"\n",
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&program).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&program, permissions).unwrap();
+
+        copy_with_tmux("copy me\n", &program).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(directory.path().join("args")).unwrap(),
+            "load-buffer\n-w\n-\n"
+        );
+        assert_eq!(
+            fs::read(directory.path().join("buffer")).unwrap(),
+            b"copy me\n"
+        );
     }
 
     #[cfg(target_os = "macos")]
