@@ -17,6 +17,7 @@ pub(super) fn present(tool: &ToolEntry, width: u16, theme: &Theme, expanded: boo
     match operation {
         Operation::Scan { query } => scan(query, result, width, theme, expanded),
         Operation::Read { keys } => read(keys, result, width, theme, expanded),
+        Operation::Inspect { cursor } => inspect(cursor, result, width, theme, expanded),
         Operation::Put { content, replace } => {
             put(content, replace, result, width, theme, expanded)
         }
@@ -30,6 +31,9 @@ enum Operation<'a> {
     },
     Read {
         keys: Vec<MemoryKey>,
+    },
+    Inspect {
+        cursor: Option<MemoryKey>,
     },
     Put {
         content: &'a str,
@@ -50,6 +54,12 @@ impl<'a> Operation<'a> {
             "read" => Some(Self::Read {
                 keys: parse_keys(arguments.get("keys").or_else(|| arguments.get("ids"))?)?,
             }),
+            "inspect" => Some(Self::Inspect {
+                cursor: match arguments.get("cursor") {
+                    Some(cursor) => Some(MemoryKey::parse(cursor)?),
+                    None => None,
+                },
+            }),
             "put" => Some(Self::Put {
                 content: arguments.get("content")?.as_str()?,
                 replace: match arguments.get("replace") {
@@ -68,6 +78,7 @@ impl<'a> Operation<'a> {
         match self {
             Self::Scan { .. } => "scan",
             Self::Read { .. } => "read",
+            Self::Inspect { .. } => "inspect",
             Self::Put { .. } => "put",
             Self::Delete { .. } => "delete",
         }
@@ -84,6 +95,11 @@ enum ResultValue<'a> {
     Read {
         backend: Option<Backend>,
         memories: Vec<Memory<'a>>,
+    },
+    Inspect {
+        backend: Option<Backend>,
+        memories: InspectionMemories<'a>,
+        complete: bool,
     },
     Put {
         backend: Option<Backend>,
@@ -124,6 +140,17 @@ impl<'a> ResultValue<'a> {
                     .map(Memory::parse)
                     .collect::<Option<Vec<_>>>()?,
             }),
+            "inspect" => {
+                let coverage = result.get("coverage")?;
+                if coverage.get("consistency")?.as_str()? != "best_effort" {
+                    return None;
+                }
+                Some(Self::Inspect {
+                    backend: Backend::parse(result.get("backend")),
+                    memories: InspectionMemories::parse(result)?,
+                    complete: coverage.get("complete")?.as_bool()?,
+                })
+            }
             "put" => Some(Self::Put {
                 backend: Backend::parse(result.get("backend")),
                 memory: Memory::parse(result.get("memory")?)?,
@@ -280,6 +307,48 @@ struct Memory<'a> {
     fields: &'a Map<String, Value>,
 }
 
+struct InspectionMemories<'a> {
+    ours: Vec<InspectionMemory<'a>>,
+    theirs: Vec<InspectionMemory<'a>>,
+}
+
+impl<'a> InspectionMemories<'a> {
+    fn parse(result: &'a Value) -> Option<Self> {
+        Some(Self {
+            ours: parse_inspection_memories(result.get("ours")?)?,
+            theirs: parse_inspection_memories(result.get("theirs")?)?,
+        })
+    }
+
+    fn total(&self) -> usize {
+        self.ours.len().saturating_add(self.theirs.len())
+    }
+}
+
+struct InspectionMemory<'a> {
+    key: MemoryKey,
+    preview: &'a str,
+    fields: &'a Map<String, Value>,
+}
+
+impl<'a> InspectionMemory<'a> {
+    fn parse(value: &'a Value) -> Option<Self> {
+        Some(Self {
+            key: MemoryKey::parse(value)?,
+            preview: value.get("preview")?.as_str()?,
+            fields: value.as_object()?,
+        })
+    }
+}
+
+fn parse_inspection_memories(value: &Value) -> Option<Vec<InspectionMemory<'_>>> {
+    value
+        .as_array()?
+        .iter()
+        .map(InspectionMemory::parse)
+        .collect::<Option<Vec<_>>>()
+}
+
 impl<'a> Memory<'a> {
     fn parse(value: &'a Value) -> Option<Self> {
         Some(Self {
@@ -399,6 +468,67 @@ fn read(
     presentation.footer(count)
 }
 
+fn inspect(
+    cursor: Option<MemoryKey>,
+    result: ResultValue<'_>,
+    width: u16,
+    theme: &Theme,
+    expanded: bool,
+) -> Presentation {
+    let subject = cursor.as_ref().map_or_else(
+        || "first page".to_owned(),
+        |cursor| format!("after {}", cursor.display()),
+    );
+    let ResultValue::Inspect {
+        backend,
+        memories,
+        complete,
+    } = result
+    else {
+        return Presentation::new("Memory inspect", subject);
+    };
+    let count = count_label(memories.total(), "record", "records");
+    let coverage = if complete {
+        "complete"
+    } else {
+        "more available"
+    };
+    let presentation =
+        completed_presentation(backend.as_ref(), "inspect", "Memory inspect", subject)
+            .outcome(format!("{count} · {coverage}"));
+    if !expanded {
+        return presentation;
+    }
+
+    let mut presentation = presentation;
+    presentation = append_inspection_group(presentation, "Ours", &memories.ours, width, theme);
+    presentation = append_inspection_group(presentation, "Theirs", &memories.theirs, width, theme);
+    presentation.footer(format!("{count} · best-effort page"))
+}
+
+fn append_inspection_group(
+    mut presentation: Presentation,
+    label: &str,
+    memories: &[InspectionMemory<'_>],
+    width: u16,
+    theme: &Theme,
+) -> Presentation {
+    presentation = presentation.selectable_plain(label, width, Style::default().fg(theme.accent()));
+    for memory in memories {
+        let key = memory.key.display();
+        presentation =
+            presentation.selectable_plain(&key, width, Style::default().fg(theme.accent()));
+        let preview = super::truncate(memory.preview, MAX_PREVIEW_WIDTH);
+        presentation =
+            presentation.selectable_plain(&preview, width, Style::default().fg(theme.text()));
+        if let Some(metadata) = selected_metadata(memory.fields) {
+            presentation =
+                presentation.selectable_plain(&metadata, width, Style::default().fg(theme.muted()));
+        }
+    }
+    presentation
+}
+
 fn put(
     content: &str,
     replace: Option<MemoryKey>,
@@ -491,6 +621,7 @@ fn selected_metadata(fields: &Map<String, Value>) -> Option<String> {
         ("last_used_at_ms", "last used"),
         ("use_count", "uses"),
         ("probation_until_ms", "probation until"),
+        ("content_bytes", "bytes"),
     ]
     .into_iter()
     .filter_map(|(field, label)| scalar(fields.get(field)?).map(|value| format!("{label} {value}")))
@@ -601,6 +732,25 @@ mod tests {
         })
     }
 
+    fn inspection_record(namespace: Option<&str>, id: i64, preview: &str) -> Value {
+        let mut key = json!({"id": id, "version": 1});
+        if let Some(namespace) = namespace {
+            key["namespace"] = json!(namespace);
+        }
+        json!({
+            "key": key,
+            "preview": preview,
+            "content_bytes": preview.len(),
+            "created_at_ms": 10,
+            "updated_at_ms": 20,
+            "last_scanned_at_ms": null,
+            "scan_count": 2,
+            "last_used_at_ms": 30,
+            "use_count": 1,
+            "probation_until_ms": null
+        })
+    }
+
     #[test]
     fn summaries_cover_operations_states_and_results() {
         let cases = [
@@ -634,6 +784,25 @@ mod tests {
                     ),
                 ),
                 "Memory read  7@v2 · 1 memory",
+            ),
+            (
+                memory(
+                    json!({"operation": "inspect"}),
+                    ToolState::Succeeded,
+                    Some(json!({
+                        "operation": "inspect",
+                        "backend": {"source": "local", "namespace": null, "role": null},
+                        "ours": [inspection_record(None, 7, "Use early returns.")],
+                        "theirs": [],
+                        "next_cursor": null,
+                        "coverage": {
+                            "records": 1,
+                            "complete": true,
+                            "consistency": "best_effort"
+                        }
+                    })),
+                ),
+                "Memory inspect · local · first page · 1 record · complete",
             ),
             (
                 memory(
@@ -801,6 +970,40 @@ mod tests {
         assert!(expanded.contains("alice:1@v1"), "{expanded}");
         assert!(expanded.contains("bob:1@v1"), "{expanded}");
         assert!(expanded.contains("10 candidates"), "{expanded}");
+    }
+
+    #[test]
+    fn inspection_presents_attributed_groups_and_best_effort_coverage() {
+        let tool = memory(
+            json!({"operation": "inspect", "cursor": {"namespace": "alice", "id": 4}}),
+            ToolState::Succeeded,
+            Some(json!({
+                "operation": "inspect",
+                "backend": {"source": "remote", "namespace": "alice", "role": "reader"},
+                "ours": [inspection_record(Some("alice"), 5, "Our durable rule.")],
+                "theirs": [inspection_record(Some("bob"), 1, "Their related rule.")],
+                "next_cursor": {"namespace": "bob", "id": 1},
+                "coverage": {
+                    "records": 2,
+                    "complete": false,
+                    "consistency": "best_effort"
+                }
+            })),
+        );
+
+        let collapsed = text(&render(&tool, 100, &Theme::default()));
+        assert!(
+            collapsed
+                .contains("Memory inspect · remote · after alice:4 · 2 records · more available"),
+            "{collapsed}"
+        );
+        let expanded = text(&render_expanded(&tool, 100, &Theme::default()));
+        assert!(expanded.contains("Ours"), "{expanded}");
+        assert!(expanded.contains("Theirs"), "{expanded}");
+        assert!(expanded.contains("alice:5@v1"), "{expanded}");
+        assert!(expanded.contains("bob:1@v1"), "{expanded}");
+        assert!(expanded.contains("bytes 17"), "{expanded}");
+        assert!(expanded.contains("best-effort page"), "{expanded}");
     }
 
     #[test]

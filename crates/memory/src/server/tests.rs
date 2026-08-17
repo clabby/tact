@@ -1209,6 +1209,25 @@ async fn unsafe_scan() -> Json<ScanResponse> {
     })
 }
 
+async fn secret_then_safe_export(Json(request): Json<ExportRequest>) -> Json<ExportResponse> {
+    let mut memory = match request.cursor {
+        None => record(1, 1, "password=hunter2"),
+        Some(ExportCursor { namespace, id }) if namespace == "alice" && id == 1 => {
+            record(2, 1, "safe record after suppressed page")
+        }
+        cursor => panic!("unexpected export cursor: {cursor:?}"),
+    };
+    memory.key = MemoryKey::remote("alice".to_owned(), memory.key.id, 1);
+    let next_cursor = (memory.key.id == 1).then(|| ExportCursor {
+        namespace: "alice".to_owned(),
+        id: 1,
+    });
+    Json(ExportResponse {
+        memories: vec![memory],
+        next_cursor,
+    })
+}
+
 async fn malformed_scan() -> Json<ScanResponse> {
     Json(ScanResponse {
         candidates: vec![MemoryCandidate {
@@ -1810,6 +1829,28 @@ async fn client_enforces_the_requested_export_page_size() {
         source.downcast_ref::<RemoteClientError>(),
         Some(RemoteClientError::InvalidResponse)
     ));
+    task.abort();
+}
+
+#[tokio::test]
+async fn complete_export_advances_past_a_secret_only_filtered_page() {
+    let app = Router::new().route(
+        &format!("/{}", protocol::EXPORT_PATH),
+        post(secret_then_safe_export),
+    );
+    let (endpoint, task) = live_server(app).await;
+    let client = RemoteMemoryClient::new(
+        &endpoint,
+        "alice".to_owned(),
+        RemoteToken::new(ALICE_TOKEN.to_owned()).unwrap(),
+    )
+    .unwrap();
+
+    let memories = client.export_all(None).await.unwrap();
+
+    assert_eq!(memories.len(), 1);
+    assert_eq!(memories[0].key, MemoryKey::remote("alice".to_owned(), 2, 1));
+    assert_eq!(memories[0].content, "safe record after suppressed page");
     task.abort();
 }
 

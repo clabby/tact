@@ -334,6 +334,14 @@ recommends whether each lesson belongs in memory, always-on configuration, or no
 instructions can narrow the topic or expand the workspace and task-family scope. The report states
 the coverage and uncertainty of its evidence; it does not apply its recommendations.
 
+Ordinary reflection remains session-first and uses targeted memory scans. If the optional
+instructions explicitly request a memory-corpus audit, inspection, or cleanup review, Reflection can
+page through compact, telemetry-neutral memory inspection results and read selected full records.
+It reports exact keys and versions, backend and namespace scope, coverage, truncation, and
+uncertainty; pagination is best-effort rather than a coherent snapshot. Reflection may recommend
+replacing or deleting duplicate, stale, oversized, low-value, or retrieval-conflicting records, but
+it remains report-only and never performs those mutations.
+
 ### Review
 
 Enter `/review` while no agent work is active to open a browser-based human review tool for

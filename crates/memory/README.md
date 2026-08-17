@@ -16,8 +16,8 @@ The crate exposes four integration boundaries:
   application choose one local or remote backend for a runtime.
 - `RemoteMemoryClient` and `MemoryServer` share versioned protocol types and preserve author
   namespaces across authenticated operations.
-- `MemoryTool` exposes explicit scan, read, put, and delete operations to Nanocodex sessions under
-  an application-provided mutation authority.
+- `MemoryTool` exposes explicit scan, read, inspection, put, and delete operations to Nanocodex
+  sessions under an application-provided mutation authority.
 
 Each `MemoryStore` scan request returns one bounded candidate vector selected by a
 `MemoryNamespaceFilter`. The agent-facing remote scan makes separate requests for the authenticated
