@@ -27,7 +27,7 @@ use crate::{
         error::{Result, RuntimeError},
         hook,
     },
-    core::{ConfiguredAgent, extensions::Skill},
+    core::{ConfiguredAgent, SessionMemoryPolicy, extensions::Skill},
     tui::{
         agent_events::ForwardedAgentEvent,
         components::{
@@ -217,6 +217,7 @@ struct PaneSettings {
     reasoning_mode: ReasoningMode,
     fast_mode: bool,
     model: Model,
+    memory_policy: SessionMemoryPolicy,
 }
 
 impl PaneSettings {
@@ -225,12 +226,14 @@ impl PaneSettings {
         reasoning_mode: ReasoningMode,
         fast_mode: bool,
         model: Model,
+        memory_policy: SessionMemoryPolicy,
     ) -> Self {
         Self {
             effort,
             reasoning_mode,
             fast_mode,
             model,
+            memory_policy,
         }
     }
 }
@@ -269,6 +272,7 @@ struct PaneRuntime {
     session_id: String,
     instructions: Arc<str>,
     skills_catalog_present: bool,
+    memory_policy: SessionMemoryPolicy,
     previously_persisted: bool,
     journal: Option<TranscriptJournal>,
     writer_path: PathBuf,
@@ -449,6 +453,7 @@ fn subagent_pane(
 pub(crate) async fn run(
     mut config: Config,
     startup: StartupMode,
+    launch_memory_policy: SessionMemoryPolicy,
     shutdown: CancellationToken,
 ) -> Result<Option<String>> {
     ensure_interactive()?;
@@ -469,7 +474,11 @@ pub(crate) async fn run(
             let config_path = restored_config.path().to_path_buf();
             let checkpoint_session_id = session_id.clone();
             let checkpoint = tokio::task::spawn_blocking(move || {
-                session::load_checkpoint(&config_path, &checkpoint_session_id)
+                session::load_checkpoint_with_policy(
+                    &config_path,
+                    &checkpoint_session_id,
+                    launch_memory_policy,
+                )
             });
             let transcript = session::load_transcript_async(
                 restored_config.path().to_path_buf(),
@@ -488,6 +497,7 @@ pub(crate) async fn run(
                     initial_effort,
                     reasoning_mode,
                     model,
+                    launch_memory_policy,
                     Some(&session_id),
                     Some(snapshot),
                 )?;
@@ -503,7 +513,7 @@ pub(crate) async fn run(
             .map_err(RuntimeError::SessionTask)??
         } else {
             (
-                ConfiguredAgent::from_config(&config)?,
+                ConfiguredAgent::from_config(&config, launch_memory_policy)?,
                 None,
                 preferred_reasoning_mode,
                 Model::Sol,
@@ -517,6 +527,7 @@ pub(crate) async fn run(
         instructions,
         skills,
         memory_enabled,
+        memory_policy,
         subagent_updates,
         subagent_control,
     } = configured;
@@ -536,7 +547,13 @@ pub(crate) async fn run(
                 PaneSession::new(&main_session_id, None, None, 1, !skills.is_empty())
             },
             &config,
-            PaneSettings::new(initial_effort, reasoning_mode, initial_fast_mode, model),
+            PaneSettings::new(
+                initial_effort,
+                reasoning_mode,
+                initial_fast_mode,
+                model,
+                memory_policy,
+            ),
             instructions,
             subagent_control.clone(),
             &writer_sender,
@@ -558,6 +575,7 @@ pub(crate) async fn run(
         subagent_sender.clone(),
     );
     let mut root = RootNode::new(&workspace, initial_effort);
+    root.set_default_memory_policy(launch_memory_policy);
     root.set_reasoning_modes(reasoning_mode, preferred_reasoning_mode);
     root.set_fast_mode(initial_fast_mode);
     root.set_max_subagents(initial_max_subagents);
@@ -623,6 +641,7 @@ pub(crate) async fn run(
                     commands: &commands,
                     workspace: &workspace,
                     config: &mut config,
+                    launch_memory_policy,
                     shutdown: &shutdown,
                     input: &mut input,
                     editor_task: &mut editor_task,
@@ -916,8 +935,9 @@ pub(crate) async fn run(
                             .map(|snapshot| {
                                 session::encode_checkpoint(
                                     snapshot,
-                                &runtime.instructions,
-                                runtime.skills_catalog_present,
+                                    &runtime.instructions,
+                                    runtime.skills_catalog_present,
+                                    runtime.memory_policy,
                                 )
                             })
                             .transpose()?;
@@ -1010,6 +1030,10 @@ pub(crate) async fn run(
                             .get(&main_pane)
                             .expect("main pane must exist")
                             .current_model;
+                        let memory_policy = panes
+                            .get(&main_pane)
+                            .expect("main pane must exist")
+                            .memory_policy;
                         let subagent_control = panes
                             .get(&main_pane)
                             .expect("main pane must exist")
@@ -1038,7 +1062,13 @@ pub(crate) async fn run(
                                     skills_catalog_present,
                                 ),
                                 &config,
-                                PaneSettings::new(effort, reasoning_mode, fast_mode, model),
+                                PaneSettings::new(
+                                    effort,
+                                    reasoning_mode,
+                                    fast_mode,
+                                    model,
+                                    memory_policy,
+                                ),
                                 instructions,
                                 subagent_control.clone(),
                                 &writer_sender,
@@ -1255,7 +1285,13 @@ pub(crate) async fn run(
                         let skills = install_configured_agent(
                             pane,
                             configured,
-                            PaneSettings::new(effort, reasoning_mode, fast_mode, Model::Sol),
+                            PaneSettings::new(
+                                effort,
+                                reasoning_mode,
+                                fast_mode,
+                                Model::Sol,
+                                SessionMemoryPolicy::Configured,
+                            ),
                             &config,
                             &mut panes,
                             &commands,
@@ -1302,7 +1338,13 @@ pub(crate) async fn run(
                         let skills = install_configured_agent(
                             pane,
                             configured,
-                            PaneSettings::new(effort, reasoning_mode, fast_mode, model),
+                            PaneSettings::new(
+                                effort,
+                                reasoning_mode,
+                                fast_mode,
+                                model,
+                                SessionMemoryPolicy::Configured,
+                            ),
                             &config,
                             &mut panes,
                             &commands,
@@ -1452,6 +1494,7 @@ pub(crate) async fn run(
                             instructions,
                             skills,
                             memory_enabled,
+                            memory_policy,
                             subagent_updates,
                             subagent_control,
                         } = configured;
@@ -1480,7 +1523,13 @@ pub(crate) async fn run(
                                     !skills.is_empty(),
                                 ),
                                 &config,
-                                PaneSettings::new(effort, reasoning_mode, fast_mode, model),
+                                PaneSettings::new(
+                                    effort,
+                                    reasoning_mode,
+                                    fast_mode,
+                                    model,
+                                    memory_policy,
+                                ),
                                 instructions,
                                 subagent_control.clone(),
                                 &writer_sender,
@@ -1594,6 +1643,7 @@ fn install_configured_agent(
         instructions,
         skills,
         memory_enabled,
+        memory_policy,
         subagent_updates,
         subagent_control,
     } = configured;
@@ -1618,7 +1668,10 @@ fn install_configured_agent(
             PaneGeneration { pane, generation },
             PaneSession::new(&session_id, None, None, 1, !skills.is_empty()),
             config,
-            settings,
+            PaneSettings {
+                memory_policy,
+                ..settings
+            },
             instructions,
             subagent_control.clone(),
             writer_sender,
@@ -1663,6 +1716,7 @@ fn open_pane(
         reasoning_mode,
         fast_mode,
         model,
+        memory_policy,
     } = settings;
     let PaneSession {
         id: session_id,
@@ -1684,6 +1738,7 @@ fn open_pane(
         effort,
         reasoning_mode,
         fast_mode,
+        memory_policy,
         workspace: config.agent().workspace().to_path_buf(),
         application_version: env!("CARGO_PKG_VERSION").to_owned(),
     });
@@ -1708,6 +1763,7 @@ fn open_pane(
         session_id: session_id.to_owned(),
         instructions,
         skills_catalog_present,
+        memory_policy,
         previously_persisted,
         journal: Some(journal),
         writer_path,
@@ -1820,6 +1876,7 @@ struct EffectContext<'a> {
     commands: &'a tokio::sync::mpsc::UnboundedSender<WorkerCommand>,
     workspace: &'a Path,
     config: &'a mut Config,
+    launch_memory_policy: SessionMemoryPolicy,
     shutdown: &'a CancellationToken,
     input: &'a mut Option<EventStream>,
     editor_task: &'a mut Option<EditorTask>,
@@ -2084,10 +2141,20 @@ fn apply_pane_effect(
                 .get(&pane)
                 .expect("model pane must have a runtime")
                 .current_fast_mode;
+            let memory_policy = context
+                .panes
+                .get(&pane)
+                .expect("model pane must have a runtime")
+                .memory_policy;
             let config = context.config.clone();
             *context.new_session_task = Some(tokio::task::spawn_blocking(move || {
-                let configured =
-                    ConfiguredAgent::from_config_with_model(&config, effort, reasoning_mode, model);
+                let configured = ConfiguredAgent::from_config_with_model(
+                    &config,
+                    effort,
+                    reasoning_mode,
+                    model,
+                    memory_policy,
+                );
                 (
                     pane,
                     effort,
@@ -2205,11 +2272,12 @@ fn apply_pane_effect(
                 context.scheduler,
             ),
         },
-        components::RootEffect::NewSession => {
+        components::RootEffect::NewSession(session) => {
             *context.input = None;
             let effort = context.config.agent().thinking();
             let reasoning_mode = context.config.agent().reasoning_mode();
             let config = context.config.clone();
+            let memory_policy = session.memory_policy();
             *context.new_session_task = Some(tokio::task::spawn_blocking(move || {
                 let fast_mode = config.agent().fast_mode();
                 let configured = ConfiguredAgent::from_config_with_session(
@@ -2217,6 +2285,7 @@ fn apply_pane_effect(
                     effort,
                     reasoning_mode,
                     Model::Sol,
+                    memory_policy,
                     None,
                     None,
                 );
@@ -2348,11 +2417,16 @@ fn apply_pane_effect(
             let preferred_reasoning_mode = context.config.agent().reasoning_mode();
             let fast_mode = context.config.agent().fast_mode();
             let config = context.config.clone();
+            let memory_policy = context.launch_memory_policy;
             *context.resume_session_task = Some(tokio::spawn(async move {
                 let config_path = config.path().to_path_buf();
                 let checkpoint_session_id = session_id.clone();
                 let checkpoint = tokio::task::spawn_blocking(move || {
-                    session::load_checkpoint(&config_path, &checkpoint_session_id)
+                    session::load_checkpoint_with_policy(
+                        &config_path,
+                        &checkpoint_session_id,
+                        memory_policy,
+                    )
                 });
                 let transcript =
                     session::load_transcript_async(config.path().to_path_buf(), session_id.clone());
@@ -2370,6 +2444,7 @@ fn apply_pane_effect(
                             effort,
                             reasoning_mode,
                             model,
+                            memory_policy,
                             Some(&session_id),
                             Some(snapshot),
                         )?;
@@ -2506,6 +2581,7 @@ fn start_handoff(context: &mut EffectContext<'_>, pane: PaneId) {
         return;
     };
     let pane_generation = runtime.generation;
+    let memory_policy = runtime.memory_policy;
     let id = TurnId::new(runtime.next_turn);
     runtime.next_turn = runtime.next_turn.saturating_add(1);
     let commands = context.commands.clone();
@@ -2537,7 +2613,7 @@ fn start_handoff(context: &mut EffectContext<'_>, pane: PaneId) {
                             )),
                         }
                     };
-                    let result = prepare_handoff(result, config, cancellation).await;
+                    let result = prepare_handoff(result, config, memory_policy, cancellation).await;
                     HandoffCompletion { identity, result }
                 })
             });
@@ -2555,6 +2631,7 @@ fn start_handoff(context: &mut EffectContext<'_>, pane: PaneId) {
 async fn prepare_handoff(
     result: std::result::Result<String, AuxiliaryError>,
     config: Config,
+    memory_policy: SessionMemoryPolicy,
     cancellation: CancellationToken,
 ) -> std::result::Result<PreparedHandoff, AuxiliaryError> {
     let prompt = result?;
@@ -2576,6 +2653,7 @@ async fn prepare_handoff(
             effort,
             reasoning_mode,
             Model::Sol,
+            memory_policy,
             None,
             None,
         )
@@ -2770,7 +2848,7 @@ mod tests {
             config::{Config, ConfigOverrides, ReasoningEffort, ReasoningMode},
             error::{Error, RuntimeError},
         },
-        core::configured_memory_store,
+        core::{SessionMemoryPolicy, configured_memory_store},
         tui::{
             components::RecentPromptDraft,
             pane::PaneId,
@@ -3033,6 +3111,7 @@ mod tests {
                 ReasoningMode::Standard,
                 false,
                 Model::Luna,
+                SessionMemoryPolicy::Configured,
             ),
             Arc::from("instructions"),
             subagent_control.clone(),
@@ -3051,6 +3130,7 @@ mod tests {
                 ReasoningMode::Standard,
                 false,
                 Model::Luna,
+                SessionMemoryPolicy::Configured,
             ),
             Arc::from("instructions"),
             subagent_control.clone(),
@@ -3139,6 +3219,7 @@ mod tests {
                 ReasoningMode::Standard,
                 false,
                 Model::Sol,
+                SessionMemoryPolicy::Configured,
             ),
             Arc::from("instructions"),
             subagent_control.clone(),
@@ -3166,6 +3247,7 @@ mod tests {
                 ReasoningMode::Standard,
                 false,
                 Model::Sol,
+                SessionMemoryPolicy::Configured,
             ),
             Arc::from("instructions"),
             subagent_control,

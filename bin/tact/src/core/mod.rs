@@ -126,12 +126,31 @@ pub(crate) const MEMORY_REVIEW_CHECKPOINT: &str = concat!(
     "</memory_review_checkpoint>"
 );
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SessionMemoryPolicy {
+    #[default]
+    Configured,
+    Disabled,
+}
+
+impl SessionMemoryPolicy {
+    pub(crate) const fn restrict(self, other: Self) -> Self {
+        if matches!(self, Self::Disabled) || matches!(other, Self::Disabled) {
+            Self::Disabled
+        } else {
+            Self::Configured
+        }
+    }
+}
+
 pub(crate) struct ConfiguredAgent {
     pub(crate) agent: Nanocodex,
     pub(crate) events: AgentEvents,
     pub(crate) instructions: Arc<str>,
     pub(crate) skills: Arc<[Skill]>,
     pub(crate) memory_enabled: bool,
+    pub(crate) memory_policy: SessionMemoryPolicy,
     pub(crate) subagent_updates: mpsc::UnboundedReceiver<ScopedAgentUpdate>,
     pub(crate) subagent_control: Subagents,
 }
@@ -150,11 +169,12 @@ enum Cancellation {
 impl ConfiguredAgent {
     pub(crate) async fn run_from_config(
         config: &Config,
+        memory_policy: SessionMemoryPolicy,
         prompt: String,
         shutdown: CancellationToken,
         #[cfg(feature = "harbor-evals")] orchestration_log: Option<PathBuf>,
     ) -> Result<()> {
-        let result = Self::from_config(config)?
+        let result = Self::from_config(config, memory_policy)?
             .run(
                 prompt,
                 shutdown,
@@ -169,12 +189,13 @@ impl ConfiguredAgent {
         result
     }
 
-    pub(crate) fn from_config(config: &Config) -> Result<Self> {
+    pub(crate) fn from_config(config: &Config, memory_policy: SessionMemoryPolicy) -> Result<Self> {
         Self::from_config_with_model(
             config,
             config.agent().thinking(),
             config.agent().reasoning_mode(),
             Model::Sol,
+            memory_policy,
         )
     }
 
@@ -183,12 +204,14 @@ impl ConfiguredAgent {
         thinking: ReasoningEffort,
         reasoning_mode: ReasoningMode,
         model: Model,
+        memory_policy: SessionMemoryPolicy,
     ) -> Result<Self> {
         Self::from_config_with_session_and_model(
             config,
             thinking,
             reasoning_mode,
             model,
+            memory_policy,
             None,
             None,
         )
@@ -199,6 +222,7 @@ impl ConfiguredAgent {
         thinking: ReasoningEffort,
         reasoning_mode: ReasoningMode,
         model: Model,
+        memory_policy: SessionMemoryPolicy,
         session_id: Option<&str>,
         resume: Option<ResumeState>,
     ) -> Result<Self> {
@@ -207,6 +231,7 @@ impl ConfiguredAgent {
             thinking,
             reasoning_mode,
             model,
+            memory_policy,
             session_id,
             resume,
         )
@@ -217,6 +242,7 @@ impl ConfiguredAgent {
         thinking: ReasoningEffort,
         reasoning_mode: ReasoningMode,
         model: Model,
+        requested_memory_policy: SessionMemoryPolicy,
         session_id: Option<&str>,
         resume: Option<ResumeState>,
     ) -> Result<Self> {
@@ -241,7 +267,18 @@ impl ConfiguredAgent {
             tools = tools.provider(mcp);
         }
         let tools = tools.build().map_err(NanocodexError::from)?;
-        let memory = configured_memory_store(config, &workspace)?;
+        let (snapshot, restored_instructions, stored_memory_policy) = resume
+            .map(ResumeState::into_parts)
+            .map_or((None, None, SessionMemoryPolicy::Configured), |parts| {
+                let (snapshot, instructions, catalog_present, memory_policy) = parts;
+                (
+                    Some(snapshot),
+                    Some((instructions, catalog_present)),
+                    memory_policy,
+                )
+            });
+        let memory_policy = requested_memory_policy.restrict(stored_memory_policy);
+        let memory = session_memory_store(config, &workspace, memory_policy)?;
         let memory_enabled = memory.is_some();
         let subagents_enabled = config.subagents().enabled();
         let allow_luna_subagents = config.subagents().allow_luna();
@@ -268,12 +305,6 @@ impl ConfiguredAgent {
         if let Some(codex_home) = config.codex_home() {
             builder = builder.codex_home(codex_home);
         }
-        let (snapshot, restored_instructions) = resume.map(ResumeState::into_parts).map_or(
-            (None, None),
-            |(snapshot, instructions, catalog_present)| {
-                (Some(snapshot), Some((instructions, catalog_present)))
-            },
-        );
         let SessionInstructions {
             text: instructions,
             skills,
@@ -285,6 +316,7 @@ impl ConfiguredAgent {
             subagents_enabled,
             allow_luna_subagents,
             memory_enabled,
+            matches!(memory_policy, SessionMemoryPolicy::Disabled),
         );
         builder = builder.instructions(Arc::clone(&instructions));
         let subagent_builder = builder.clone();
@@ -317,6 +349,7 @@ impl ConfiguredAgent {
             instructions,
             skills,
             memory_enabled,
+            memory_policy,
             subagent_updates,
             subagent_control,
         })
@@ -509,6 +542,17 @@ pub(crate) fn configured_memory_store(
     Ok(Some(SelectedMemoryStore::remote(client)))
 }
 
+fn session_memory_store(
+    config: &Config,
+    workspace: &Path,
+    policy: SessionMemoryPolicy,
+) -> Result<Option<SelectedMemoryStore>> {
+    match policy {
+        SessionMemoryPolicy::Configured => configured_memory_store(config, workspace),
+        SessionMemoryPolicy::Disabled => Ok(None),
+    }
+}
+
 #[cfg(test)]
 fn session_instructions(
     custom: Option<&str>,
@@ -526,6 +570,7 @@ fn session_instructions(
         subagents_enabled,
         true,
         memory_enabled,
+        false,
     )
 }
 
@@ -537,6 +582,7 @@ fn session_instructions_with_luna(
     subagents_enabled: bool,
     allow_luna: bool,
     memory_enabled: bool,
+    remove_memory_appendix: bool,
 ) -> SessionInstructions {
     restored.map_or_else(
         || {
@@ -562,7 +608,13 @@ fn session_instructions_with_luna(
                 skills: session_skills,
             }
         },
-        |(instructions, catalog_present)| {
+        |(mut instructions, catalog_present)| {
+            if remove_memory_appendix {
+                let appendix = format!("\n\n{MEMORY_INSTRUCTIONS}");
+                if let Some(without_appendix) = instructions.strip_suffix(&appendix) {
+                    instructions.truncate(without_appendix.len());
+                }
+            }
             let skills = if catalog_present.unwrap_or(true) {
                 SkillCatalog::available_in(&instructions).into()
             } else {
@@ -682,9 +734,10 @@ mod tests {
     use super::{
         ConfiguredAgent, MEMORY_INSTRUCTIONS, MEMORY_REVIEW_CHECKPOINT,
         SESSION_REFERENCE_INSTRUCTIONS, SUBAGENT_INSTRUCTIONS, SUBAGENT_INSTRUCTIONS_SELECTED_ONLY,
-        TACT_INSTRUCTIONS, TOOL_ORCHESTRATION_INSTRUCTIONS, configured_memory_store,
-        fresh_instructions, reconcile_tact_instructions, session_instructions,
-        session_instructions_with_luna,
+        SessionMemoryPolicy, TACT_INSTRUCTIONS, TOOL_ORCHESTRATION_INSTRUCTIONS,
+        configured_memory_store, fresh_instructions, install_agent_tools,
+        reconcile_tact_instructions, session_instructions, session_instructions_with_luna,
+        session_memory_store,
     };
     use crate::{
         app::{
@@ -708,7 +761,7 @@ mod tests {
         task::{Context, Poll},
         time::Duration,
     };
-    use tact_memory::{MemoryError, MemorySource, MemoryStore};
+    use tact_memory::{MemoryError, MemoryLimits, MemorySource, MemoryStore, SelectedMemoryStore};
     use tempfile::tempdir;
     use tokio::{sync::Notify, time::timeout};
     use tokio_util::sync::CancellationToken;
@@ -752,6 +805,123 @@ mod tests {
         assert_eq!(local.source(), MemorySource::Local);
         let remote = configured_memory_store(&config, &allowed).unwrap().unwrap();
         assert_eq!(remote.source(), MemorySource::Remote);
+    }
+
+    #[test]
+    fn disabled_policy_short_circuits_a_broken_remote_backend() {
+        let directory = tempdir().unwrap();
+        let config_path = directory.path().join("config.toml");
+        fs::write(
+            &config_path,
+            format!(
+                "[memory]\nenabled = true\n[memory.remote]\nendpoint = \"http://127.0.0.1:1/\"\nnamespace = \"personal\"\nbearer_token = \"   \"\nworkspace_roots = [\"{}\"]\n",
+                directory.path().display()
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&config_path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let config = Config::load(ConfigOverrides {
+            path: Some(config_path),
+            auth_file: Some(directory.path().join("auth.json")),
+            workspace: Some(directory.path().to_path_buf()),
+            ..ConfigOverrides::default()
+        })
+        .unwrap();
+
+        assert!(
+            session_memory_store(&config, directory.path(), SessionMemoryPolicy::Configured)
+                .is_err()
+        );
+        assert!(
+            session_memory_store(&config, directory.path(), SessionMemoryPolicy::Disabled)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn disabled_policy_removes_only_the_owned_restored_memory_appendix() {
+        let skills = SkillsConfig::from_roots(false, Vec::new());
+        let restored = format!("Exact restored instructions.\n\n{MEMORY_INSTRUCTIONS}");
+        let disabled = session_instructions_with_luna(
+            None,
+            None,
+            &skills,
+            Some((restored, Some(false))),
+            true,
+            true,
+            false,
+            true,
+        );
+        assert_eq!(disabled.text.as_ref(), "Exact restored instructions.");
+
+        let similar =
+            format!("Exact restored instructions.\n\n{MEMORY_INSTRUCTIONS}\nUser suffix.");
+        let preserved = session_instructions_with_luna(
+            None,
+            None,
+            &skills,
+            Some((similar.clone(), Some(false))),
+            true,
+            true,
+            false,
+            true,
+        );
+        assert_eq!(preserved.text.as_ref(), similar);
+    }
+
+    #[test]
+    fn disabled_memory_policy_is_restrictive() {
+        assert_eq!(
+            SessionMemoryPolicy::Configured.restrict(SessionMemoryPolicy::Configured),
+            SessionMemoryPolicy::Configured
+        );
+        assert_eq!(
+            SessionMemoryPolicy::Configured.restrict(SessionMemoryPolicy::Disabled),
+            SessionMemoryPolicy::Disabled
+        );
+        assert_eq!(
+            SessionMemoryPolicy::Disabled.restrict(SessionMemoryPolicy::Configured),
+            SessionMemoryPolicy::Disabled
+        );
+    }
+
+    #[test]
+    fn absent_memory_store_omits_the_memory_tool() {
+        let directory = tempdir().unwrap();
+        let base = nanocodex::Tools::builder().build().unwrap();
+        let (subagents, _) = tact_subagents::Subagents::new(4);
+        let weak = subagents.downgrade();
+        let without = install_agent_tools(
+            base.clone(),
+            &weak,
+            nanocodex::Model::Sol,
+            true,
+            None,
+            true,
+            directory.path().join("config.toml"),
+        )
+        .unwrap();
+        let with = install_agent_tools(
+            base,
+            &weak,
+            nanocodex::Model::Sol,
+            true,
+            Some(SelectedMemoryStore::local(
+                directory.path().join("memory.sqlite3"),
+                MemoryLimits::PRODUCTION,
+            )),
+            true,
+            directory.path().join("config.toml"),
+        )
+        .unwrap();
+
+        assert!(!format!("{without:?}").contains("\"memory\""));
+        assert!(format!("{with:?}").contains("\"memory\""));
     }
 
     #[tokio::test]
@@ -1181,9 +1351,9 @@ mod tests {
     fn luna_delegation_instructions_follow_the_config() {
         let skills = SkillsConfig::from_roots(false, Vec::new());
         let luna_enabled =
-            session_instructions_with_luna(None, None, &skills, None, true, true, false);
+            session_instructions_with_luna(None, None, &skills, None, true, true, false, false);
         let luna_disabled =
-            session_instructions_with_luna(None, None, &skills, None, true, false, false);
+            session_instructions_with_luna(None, None, &skills, None, true, false, false, false);
 
         assert!(luna_enabled.text.contains(SUBAGENT_INSTRUCTIONS));
         assert!(
@@ -1249,6 +1419,7 @@ mod tests {
             instructions: ResponsesServiceConfig::default().system_prompt,
             skills: Arc::from([]),
             memory_enabled: false,
+            memory_policy: SessionMemoryPolicy::Configured,
             subagent_updates,
             subagent_control,
         };

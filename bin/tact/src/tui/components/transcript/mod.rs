@@ -2031,6 +2031,7 @@ mod tests {
                     effort: ReasoningEffort::Medium,
                     reasoning_mode: ReasoningMode::Standard,
                     fast_mode: false,
+                    memory_policy: Default::default(),
                     workspace: "/work".into(),
                     application_version: "test".to_owned(),
                 }),

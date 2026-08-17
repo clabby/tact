@@ -419,6 +419,7 @@ fn write_session(config_path: &Path, session_id: &str, workspace: &Path, event_c
             effort: ReasoningEffort::Medium,
             reasoning_mode: ReasoningMode::Standard,
             fast_mode: false,
+            memory_policy: Default::default(),
             workspace: workspace.to_path_buf(),
             application_version: "benchmark".to_owned(),
         }),
@@ -457,6 +458,7 @@ fn write_mixed_session_segment(config_path: &Path, session_id: &str, workspace: 
             effort: ReasoningEffort::Medium,
             reasoning_mode: ReasoningMode::Standard,
             fast_mode: false,
+            memory_policy: Default::default(),
             workspace: workspace.to_path_buf(),
             application_version: "benchmark".to_owned(),
         }),
@@ -492,8 +494,13 @@ fn save_benchmark_checkpoint(config_path: &Path, session_id: &str) {
         }]
     }))
     .unwrap();
-    let resume_state =
-        session::encode_checkpoint(&snapshot, "benchmark instructions", false).unwrap();
+    let resume_state = session::encode_checkpoint(
+        &snapshot,
+        "benchmark instructions",
+        false,
+        Default::default(),
+    )
+    .unwrap();
     storage::SessionStorage::open(config_path)
         .unwrap()
         .append_records_and_resume_state(session_id, &[], Some(&resume_state))

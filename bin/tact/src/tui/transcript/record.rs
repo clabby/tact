@@ -1,4 +1,7 @@
-use crate::app::config::{ReasoningEffort, ReasoningMode};
+use crate::{
+    app::config::{ReasoningEffort, ReasoningMode},
+    core::SessionMemoryPolicy,
+};
 use nanocodex::agent::events::{AgentEvent, AgentEventKind};
 use serde::{Deserialize, Serialize};
 use serde_json::value::{RawValue, to_raw_value};
@@ -39,6 +42,8 @@ pub(crate) struct SessionStarted {
     pub(crate) effort: ReasoningEffort,
     pub(crate) reasoning_mode: ReasoningMode,
     pub(crate) fast_mode: bool,
+    #[serde(default)]
+    pub(crate) memory_policy: SessionMemoryPolicy,
     pub(crate) workspace: PathBuf,
     pub(crate) application_version: String,
 }
