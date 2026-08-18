@@ -16,11 +16,12 @@ use ratatui::{
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-const ACTIONS: [Action; 16] = [
+const ACTIONS: [Action; 17] = [
     Action::Effort,
     Action::FastMode,
     Action::Theme,
     Action::NewSession,
+    Action::NewSessionAlternate,
     Action::ResumeSession,
     Action::Fork,
     Action::Keybindings,
@@ -48,6 +49,7 @@ pub(super) struct ActionAvailability {
     pub(super) fast_mode: bool,
     pub(super) memory: bool,
     pub(super) model: bool,
+    pub(super) default_memory_disabled: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -60,6 +62,7 @@ pub(super) enum Action {
     FastMode,
     Theme,
     NewSession,
+    NewSessionAlternate,
     ResumeSession,
     Fork,
     Keybindings,
@@ -271,7 +274,7 @@ impl ActionsMenu {
             Action::Model => self.availability.model,
             Action::FastMode => true,
             Action::Theme => true,
-            Action::NewSession => self.availability.new_session,
+            Action::NewSession | Action::NewSessionAlternate => self.availability.new_session,
             Action::ResumeSession => self.availability.new_session,
             Action::Fork => self.availability.fork,
             Action::Keybindings => true,
@@ -287,6 +290,13 @@ impl ActionsMenu {
             Action::NewSession if !self.availability.new_session => {
                 "New session · finish active work first"
             }
+            Action::NewSessionAlternate if !self.availability.new_session => {
+                "New session with alternate memory policy · finish active work first"
+            }
+            Action::NewSessionAlternate if self.availability.default_memory_disabled => {
+                "New session with configured memory"
+            }
+            Action::NewSessionAlternate => "New session without memory",
             Action::ResumeSession if !self.availability.new_session => {
                 "Resume session · finish active work first"
             }
@@ -321,6 +331,7 @@ impl Action {
             Self::FastMode => "Enable fast mode",
             Self::Theme => "Select theme",
             Self::NewSession => "New session",
+            Self::NewSessionAlternate => "New session without memory",
             Self::ResumeSession => "Resume session",
             Self::Fork => "Fork session",
             Self::Keybindings => "Keyboard shortcuts",
@@ -342,6 +353,7 @@ impl Action {
             Self::FastMode => Some("priority"),
             Self::Theme => Some("appearance"),
             Self::NewSession => Some("clear"),
+            Self::NewSessionAlternate => None,
             Self::ResumeSession => Some("restore"),
             Self::Fork => Some("btw"),
             Self::ReloadConfig => Some("refresh"),
@@ -352,6 +364,21 @@ impl Action {
     }
 
     fn matches(self, query: &str) -> bool {
+        if self == Self::NewSessionAlternate {
+            if query.is_empty() {
+                return true;
+            }
+            if query.eq_ignore_ascii_case("memory")
+                || query.eq_ignore_ascii_case("remember")
+                || query.eq_ignore_ascii_case("forget")
+            {
+                return false;
+            }
+            return contains_ignore_ascii_case("New session without memory", query)
+                || contains_ignore_ascii_case("New session with configured memory", query)
+                || contains_ignore_ascii_case("private", query)
+                || contains_ignore_ascii_case("no memory", query);
+        }
         contains_ignore_ascii_case(self.label(), query)
             || self
                 .alias()
@@ -436,6 +463,7 @@ mod tests {
             fast_mode: false,
             memory: true,
             model: true,
+            default_memory_disabled: false,
         }
     }
 
@@ -485,47 +513,47 @@ mod tests {
         );
         assert_eq!(
             row_segment(&terminal, 6, 1, 58),
-            "│  Resume session (alias: restore)                       │"
+            "│  New session without memory                            │"
         );
         assert_eq!(
             row_segment(&terminal, 7, 1, 58),
-            "│  Fork session (alias: btw)                             │"
+            "│  Resume session (alias: restore)                       │"
         );
         assert_eq!(
             row_segment(&terminal, 8, 1, 58),
-            "│  Keyboard shortcuts                                    │"
+            "│  Fork session (alias: btw)                             │"
         );
         assert_eq!(
             row_segment(&terminal, 9, 1, 58),
-            "│  Reload config (alias: refresh)                        │"
+            "│  Keyboard shortcuts                                    │"
         );
         assert_eq!(
             row_segment(&terminal, 10, 1, 58),
-            "│  Edit config                                           │"
+            "│  Reload config (alias: refresh)                        │"
         );
         assert_eq!(
             row_segment(&terminal, 11, 1, 58),
-            "│  Memory (alias: remember/forget)                       │"
+            "│  Edit config                                           │"
         );
         assert_eq!(
             row_segment(&terminal, 12, 1, 58),
-            "│  Subagents (alias: agents)                             │"
+            "│  Memory (alias: remember/forget)                       │"
         );
         assert_eq!(
             row_segment(&terminal, 13, 1, 58),
-            "│  Debug context                                         │"
+            "│  Subagents (alias: agents)                             │"
         );
         assert_eq!(
             row_segment(&terminal, 14, 1, 58),
-            "│  Reflect on session (alias: reflection)                │"
+            "│  Debug context                                         │"
         );
         assert_eq!(
             row_segment(&terminal, 15, 1, 58),
-            "│  Prepare handoff (alias: handoff)                      │"
+            "│  Reflect on session (alias: reflection)                │"
         );
         assert_eq!(
             row_segment(&terminal, 16, 1, 58),
-            "│  Review changes (alias: review)                        │"
+            "│  Prepare handoff (alias: handoff)                      │"
         );
         assert_eq!(
             row_segment(&terminal, 17, 1, 58),
@@ -742,6 +770,29 @@ mod tests {
     }
 
     #[test]
+    fn alternate_new_session_action_is_searchable_for_both_window_defaults() {
+        let mut without_memory = ActionsMenu::new(available());
+        for character in "without memory".chars() {
+            without_memory.update(key(KeyCode::Char(character)));
+        }
+        assert_eq!(
+            without_memory.update(key(KeyCode::Enter)).effects,
+            [ActionsEffect::Trigger(Action::NewSessionAlternate)]
+        );
+
+        let mut availability = available();
+        availability.default_memory_disabled = true;
+        let mut configured = ActionsMenu::new(availability);
+        for character in "configured memory".chars() {
+            configured.update(key(KeyCode::Char(character)));
+        }
+        assert_eq!(
+            configured.update(key(KeyCode::Enter)).effects,
+            [ActionsEffect::Trigger(Action::NewSessionAlternate)]
+        );
+    }
+
+    #[test]
     fn resume_session_action_supports_restore_alias() {
         let mut menu = ActionsMenu::new(available());
         for character in "restore".chars() {
@@ -794,7 +845,7 @@ mod tests {
 
     #[test]
     fn memory_aliases_are_searchable_and_disabled_state_explains_configuration() {
-        for alias in ["remember", "forget"] {
+        for alias in ["memory", "remember", "forget"] {
             let mut enabled = ActionsMenu::new(available());
             for character in alias.chars() {
                 enabled.update(key(KeyCode::Char(character)));

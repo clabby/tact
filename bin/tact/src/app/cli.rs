@@ -6,7 +6,7 @@ use crate::{
         error::{AuthResult, Error, Result, RuntimeError},
         shutdown, update,
     },
-    core::ConfiguredAgent,
+    core::{ConfiguredAgent, SessionMemoryPolicy},
     tui,
 };
 use clap::{ArgAction, Parser, Subcommand, builder::NonEmptyStringValueParser};
@@ -142,6 +142,10 @@ pub(crate) struct Cli {
     /// Resume a persisted interactive session.
     #[arg(long, global = true, env = "TACT_RESUME", value_name = "SESSION_ID")]
     resume: Option<String>,
+
+    /// Disable agent access to global memory for sessions created or resumed by this invocation.
+    #[arg(long, global = true, env = "TACT_NO_MEMORY")]
+    no_memory: bool,
 
     #[command(subcommand)]
     command: Option<Command>,
@@ -360,23 +364,34 @@ impl Cli {
             Config::load(overrides)?
         };
 
+        let memory_policy = if self.no_memory {
+            SessionMemoryPolicy::Disabled
+        } else {
+            SessionMemoryPolicy::Configured
+        };
         match self.command {
-            Some(Command::Resume) => Self::run_tui(config, tui::StartupMode::ResumeSelector).await,
-            Some(command) => command.run_with_config(&config).await,
+            Some(Command::Resume) => {
+                Self::run_tui(config, tui::StartupMode::ResumeSelector, memory_policy).await
+            }
+            Some(command) => command.run_with_config(&config, memory_policy).await,
             None => {
                 let startup = self
                     .resume
                     .map_or(tui::StartupMode::NewSession, |session_id| {
                         tui::StartupMode::ResumeSession(session_id)
                     });
-                Self::run_tui(config, startup).await
+                Self::run_tui(config, startup, memory_policy).await
             }
         }
     }
 
-    async fn run_tui(config: Config, startup: tui::StartupMode) -> Result<()> {
+    async fn run_tui(
+        config: Config,
+        startup: tui::StartupMode,
+        memory_policy: SessionMemoryPolicy,
+    ) -> Result<()> {
         let shutdown = CancellationToken::new();
-        let run = tui::run(config, startup, shutdown.clone());
+        let run = tui::run(config, startup, memory_policy, shutdown.clone());
         tokio::pin!(run);
 
         let result = tokio::select! {
@@ -444,7 +459,11 @@ impl Command {
         Ok(())
     }
 
-    async fn run_with_config(self, config: &Config) -> Result<()> {
+    async fn run_with_config(
+        self,
+        config: &Config,
+        memory_policy: SessionMemoryPolicy,
+    ) -> Result<()> {
         match self {
             Self::Auth { command } => command.run(config).await.map_err(Into::into),
             Self::Config { command } => command.run(config),
@@ -456,6 +475,7 @@ impl Command {
             } => {
                 Self::run_agent(
                     config,
+                    memory_policy,
                     prompt,
                     #[cfg(feature = "harbor-evals")]
                     orchestration_log,
@@ -470,12 +490,14 @@ impl Command {
 
     async fn run_agent(
         config: &Config,
+        memory_policy: SessionMemoryPolicy,
         prompt: String,
         #[cfg(feature = "harbor-evals")] orchestration_log: Option<PathBuf>,
     ) -> Result<()> {
         let shutdown = CancellationToken::new();
         let run = ConfiguredAgent::run_from_config(
             config,
+            memory_policy,
             prompt,
             shutdown.clone(),
             #[cfg(feature = "harbor-evals")]
@@ -1051,6 +1073,22 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn no_memory_accepts_cli_and_environment_sources() {
+        let cli = Cli::try_parse_from(["tact", "--no-memory", "run", "inspect"]).unwrap();
+        assert!(cli.no_memory);
+
+        let command = Cli::command();
+        let argument = command
+            .get_arguments()
+            .find(|argument| argument.get_id() == "no_memory")
+            .expect("no-memory argument must exist");
+        assert_eq!(
+            argument.get_env().and_then(|value| value.to_str()),
+            Some("TACT_NO_MEMORY")
+        );
+    }
+
     #[cfg(feature = "harbor-evals")]
     #[test]
     fn run_accepts_an_orchestration_log() {
@@ -1328,6 +1366,7 @@ mod tests {
             ("websocket_url", "TACT_WEBSOCKET_URL"),
             ("api_base_url", "TACT_API_BASE_URL"),
             ("resume", "TACT_RESUME"),
+            ("no_memory", "TACT_NO_MEMORY"),
         ];
         let arguments = command
             .get_arguments()

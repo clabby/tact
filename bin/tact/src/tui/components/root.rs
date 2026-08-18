@@ -27,7 +27,7 @@ use super::{
 };
 use crate::{
     app::config::{ReasoningEffort, ReasoningMode},
-    core::extensions::Skill,
+    core::{SessionMemoryPolicy, extensions::Skill},
     tui::{
         context::ContextDiagnostics,
         prompt::Submission,
@@ -226,6 +226,21 @@ pub(crate) enum SessionListKind {
     Mention,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum NewSession {
+    ConfiguredMemory,
+    WithoutMemory,
+}
+
+impl NewSession {
+    pub(crate) const fn memory_policy(self) -> SessionMemoryPolicy {
+        match self {
+            Self::ConfiguredMemory => SessionMemoryPolicy::Configured,
+            Self::WithoutMemory => SessionMemoryPolicy::Disabled,
+        }
+    }
+}
+
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum RootEffect {
     Submit(Submission),
@@ -239,7 +254,7 @@ pub(crate) enum RootEffect {
     OpenConfigEditor,
     OpenLink(String),
     ReloadConfig,
-    NewSession,
+    NewSession(NewSession),
     LoadSessions(SessionListKind),
     LoadRecentPrompts(Vec<RecentPromptDraft>),
     LoadMemories,
@@ -340,6 +355,7 @@ pub(crate) struct RootNode {
     fork_available: bool,
     skills: Arc<[Skill]>,
     memory_enabled: bool,
+    default_memory_policy: SessionMemoryPolicy,
     interactive: bool,
     theme_mode: ThemeMode,
     preferred_reasoning_mode: ReasoningMode,
@@ -377,6 +393,7 @@ impl RootNode {
             fork_available: true,
             skills: Arc::from([]),
             memory_enabled: false,
+            default_memory_policy: SessionMemoryPolicy::Configured,
             interactive: true,
             theme_mode: ThemeMode::Auto,
             preferred_reasoning_mode: ReasoningMode::Standard,
@@ -407,6 +424,7 @@ impl RootNode {
         root.fork_available = false;
         root.set_skills(Arc::clone(&self.skills));
         root.memory_enabled = self.memory_enabled;
+        root.default_memory_policy = self.default_memory_policy;
         root.theme_mode = self.theme_mode;
         root.context_diagnostics = self.context_diagnostics.clone();
         root.interactive = false;
@@ -426,6 +444,10 @@ impl RootNode {
         if let Some(Overlay::Actions(actions)) = &mut self.overlay {
             actions.component_mut().set_fork_available(can_fork);
         }
+    }
+
+    pub(crate) fn set_default_memory_policy(&mut self, policy: SessionMemoryPolicy) {
+        self.default_memory_policy = policy;
     }
 
     pub(crate) fn set_skills(&mut self, skills: Arc<[Skill]>) {
@@ -959,6 +981,10 @@ impl RootNode {
                     fast_mode: self.composer.component().fast_mode(),
                     memory: self.memory_enabled,
                     model: self.thread == ThreadState::New,
+                    default_memory_disabled: matches!(
+                        self.default_memory_policy,
+                        SessionMemoryPolicy::Disabled
+                    ),
                 },
             ))));
             return ComponentUpdate::render(RenderRequest::Immediate);
@@ -1438,7 +1464,18 @@ impl RootNode {
                 ))));
             }
             Some(ActionsEffect::Trigger(Action::NewSession)) => {
-                return self.open_new_session();
+                let session = match self.default_memory_policy {
+                    SessionMemoryPolicy::Configured => NewSession::ConfiguredMemory,
+                    SessionMemoryPolicy::Disabled => NewSession::WithoutMemory,
+                };
+                return self.open_new_session(session);
+            }
+            Some(ActionsEffect::Trigger(Action::NewSessionAlternate)) => {
+                let session = match self.default_memory_policy {
+                    SessionMemoryPolicy::Configured => NewSession::WithoutMemory,
+                    SessionMemoryPolicy::Disabled => NewSession::ConfiguredMemory,
+                };
+                return self.open_new_session(session);
             }
             Some(ActionsEffect::Trigger(Action::ResumeSession)) => {
                 return self.load_sessions();
@@ -1649,7 +1686,7 @@ impl RootNode {
         self.fork_available && self.in_flight_turns == 0 && !self.transcript.component().is_active()
     }
 
-    fn open_new_session(&mut self) -> ComponentUpdate<RootEffect> {
+    fn open_new_session(&mut self, session: NewSession) -> ComponentUpdate<RootEffect> {
         if self.in_flight_turns > 0
             || self.in_flight_shells > 0
             || !self.queue.component().is_empty()
@@ -1667,7 +1704,7 @@ impl RootNode {
                 now: Instant::now(),
             });
         ComponentUpdate {
-            effects: vec![RootEffect::NewSession],
+            effects: vec![RootEffect::NewSession(session)],
             render: RenderRequest::Immediate,
         }
     }
@@ -2960,8 +2997,8 @@ fn is_plain_key(event: &Event, character: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        Component, ComposerChromeTarget, ConfirmationAction, DraftReset, Overlay, QueueId,
-        RenderRequest, RootEffect, RootEvent, RootNode, SessionListKind, SubagentOverlay,
+        Component, ComposerChromeTarget, ConfirmationAction, DraftReset, NewSession, Overlay,
+        QueueId, RenderRequest, RootEffect, RootEvent, RootNode, SessionListKind, SubagentOverlay,
         ThreadState, TranscriptEvent,
     };
     use crate::{
@@ -5913,7 +5950,10 @@ mod tests {
 
         let requested = root.update(key(KeyCode::Enter, KeyModifiers::NONE));
 
-        assert_eq!(requested.effects, [RootEffect::NewSession]);
+        assert_eq!(
+            requested.effects,
+            [RootEffect::NewSession(NewSession::ConfiguredMemory)]
+        );
         assert!(root.overlay.is_none());
         assert!(!root.interactive);
 
@@ -5929,6 +5969,31 @@ mod tests {
         assert!(matches!(root.thread, ThreadState::New));
         assert!(root.composer().draft().is_empty());
         assert_eq!(root.in_flight_turns, 0);
+    }
+
+    #[test]
+    fn disabled_window_defaults_new_sessions_and_offers_configured_memory_explicitly() {
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        root.set_default_memory_policy(crate::core::SessionMemoryPolicy::Disabled);
+        root.update(key(KeyCode::Char('/'), KeyModifiers::NONE));
+        for character in "clear".chars() {
+            root.update(key(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+        assert_eq!(
+            root.update(key(KeyCode::Enter, KeyModifiers::NONE)).effects,
+            [RootEffect::NewSession(NewSession::WithoutMemory)]
+        );
+
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        root.set_default_memory_policy(crate::core::SessionMemoryPolicy::Disabled);
+        root.update(key(KeyCode::Char('/'), KeyModifiers::NONE));
+        for character in "configured memory".chars() {
+            root.update(key(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+        assert_eq!(
+            root.update(key(KeyCode::Enter, KeyModifiers::NONE)).effects,
+            [RootEffect::NewSession(NewSession::ConfiguredMemory)]
+        );
     }
 
     #[test]

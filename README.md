@@ -316,6 +316,17 @@ Config reload applies memory-browser availability immediately. Like other agent 
 settings, the agent-facing memory setting applies when a new session starts or is restored; an
 already-running agent retains the tool surface and instructions with which it was created.
 
+Use `tact --no-memory` or `TACT_NO_MEMORY=true` to prevent sessions created or resumed by that
+invocation from constructing a memory backend or receiving the memory tool, instructions, and
+follow-up checkpoint. In the Actions menu, **New session without memory** creates one such session;
+a window launched with `--no-memory` uses that privacy-safe default and offers **New session with
+configured memory** as an explicit alternative. The global memory browser remains controlled by
+configuration and independent of the current session policy.
+
+This is not an incognito mode. Transcripts, resumable checkpoints, session history, resume hints,
+and other ordinary Tact persistence remain enabled. The policy only controls agent access to global
+memory, and a session stored without memory cannot re-enable it when resumed.
+
 ### Reflection
 
 Choose **Reflect on session** from the Actions menu while the session is idle. The composer accepts

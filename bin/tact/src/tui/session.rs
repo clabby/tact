@@ -2,8 +2,9 @@
 
 use crate::{
     app::config::{ReasoningEffort, ReasoningMode},
+    core::SessionMemoryPolicy,
     tui::{
-        storage::{SessionStorage, StorageError},
+        storage::{ResumeStateRevision, SessionStorage, StorageError},
         transcript::{SessionStarted, TranscriptRecord},
     },
 };
@@ -45,28 +46,38 @@ struct StoredResumeState {
     snapshot: SessionSnapshot,
     instructions: String,
     skills_catalog_present: bool,
+    #[serde(default)]
+    memory_policy: SessionMemoryPolicy,
 }
 
 pub(crate) struct ResumeState {
     snapshot: SessionSnapshot,
     instructions: String,
     skills_catalog_present: bool,
+    memory_policy: SessionMemoryPolicy,
 }
 
 impl ResumeState {
-    fn new(snapshot: SessionSnapshot, instructions: String, skills_catalog_present: bool) -> Self {
+    fn new(
+        snapshot: SessionSnapshot,
+        instructions: String,
+        skills_catalog_present: bool,
+        memory_policy: SessionMemoryPolicy,
+    ) -> Self {
         Self {
             snapshot,
             instructions,
             skills_catalog_present,
+            memory_policy,
         }
     }
 
-    pub(crate) fn into_parts(self) -> (SessionSnapshot, String, Option<bool>) {
+    pub(crate) fn into_parts(self) -> (SessionSnapshot, String, Option<bool>, SessionMemoryPolicy) {
         (
             self.snapshot,
             self.instructions,
             Some(self.skills_catalog_present),
+            self.memory_policy,
         )
     }
 }
@@ -100,8 +111,14 @@ pub(crate) fn save_checkpoint(
     snapshot: &SessionSnapshot,
     instructions: &str,
     skills_catalog_present: bool,
+    memory_policy: SessionMemoryPolicy,
 ) -> Result<(), SessionError> {
-    let encoded = encode_checkpoint(snapshot, instructions, skills_catalog_present)?;
+    let encoded = encode_checkpoint(
+        snapshot,
+        instructions,
+        skills_catalog_present,
+        memory_policy,
+    )?;
     SessionStorage::open(config_path)?
         .save_resume_state(session_id, &encoded)
         .map_err(Into::into)
@@ -111,18 +128,21 @@ pub(crate) fn encode_checkpoint(
     snapshot: &SessionSnapshot,
     instructions: &str,
     skills_catalog_present: bool,
+    memory_policy: SessionMemoryPolicy,
 ) -> Result<Vec<u8>, SessionError> {
     let state = StoredResumeState {
         format_version: RESUME_STATE_FORMAT_VERSION,
         snapshot: snapshot.clone(),
         instructions: instructions.to_owned(),
         skills_catalog_present,
+        memory_policy,
     };
     serde_json::to_vec(&state)
         .map_err(StorageError::from)
         .map_err(Into::into)
 }
 
+#[cfg(test)]
 pub(crate) fn load_checkpoint(
     config_path: &Path,
     session_id: &str,
@@ -147,7 +167,65 @@ pub(crate) fn load_checkpoint(
         stored.snapshot,
         stored.instructions,
         stored.skills_catalog_present,
+        stored.memory_policy,
     ))
+}
+
+pub(crate) fn load_checkpoint_with_policy(
+    config_path: &Path,
+    session_id: &str,
+    requested_policy: SessionMemoryPolicy,
+) -> Result<ResumeState, SessionError> {
+    let storage = SessionStorage::open(config_path)?;
+    let current = storage
+        .load_resume_state_revision(session_id)?
+        .ok_or_else(|| SessionError::MissingCheckpoint {
+            session_id: session_id.to_owned(),
+        })?;
+    restrict_checkpoint_policy(&storage, session_id, requested_policy, current)
+}
+
+fn restrict_checkpoint_policy(
+    storage: &SessionStorage,
+    session_id: &str,
+    requested_policy: SessionMemoryPolicy,
+    mut current: ResumeStateRevision,
+) -> Result<ResumeState, SessionError> {
+    loop {
+        let mut stored = serde_json::from_slice::<StoredResumeState>(current.encoded())
+            .map_err(StorageError::from)?;
+        if stored.format_version != RESUME_STATE_FORMAT_VERSION {
+            return Err(SessionError::IncompatibleCheckpoint {
+                session_id: session_id.to_owned(),
+                found: stored.format_version,
+            });
+        }
+        let effective_policy = requested_policy.restrict(stored.memory_policy);
+        if effective_policy == stored.memory_policy {
+            return Ok(ResumeState::new(
+                stored.snapshot,
+                stored.instructions,
+                stored.skills_catalog_present,
+                stored.memory_policy,
+            ));
+        }
+
+        stored.memory_policy = effective_policy;
+        let encoded = serde_json::to_vec(&stored).map_err(StorageError::from)?;
+        if storage.replace_resume_state_if_current(session_id, &current, &encoded)? {
+            return Ok(ResumeState::new(
+                stored.snapshot,
+                stored.instructions,
+                stored.skills_catalog_present,
+                stored.memory_policy,
+            ));
+        }
+        current = storage
+            .load_resume_state_revision(session_id)?
+            .ok_or_else(|| SessionError::MissingCheckpoint {
+                session_id: session_id.to_owned(),
+            })?;
+    }
 }
 
 #[allow(dead_code, reason = "used by session benchmarks")]
@@ -370,9 +448,13 @@ pub(crate) fn format_age(started_at_unix_ms: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{encode_checkpoint, load_checkpoint, load_transcript, model, save_checkpoint};
+    use super::{
+        encode_checkpoint, load_checkpoint, load_checkpoint_with_policy, load_transcript, model,
+        restrict_checkpoint_policy, save_checkpoint,
+    };
     use crate::{
         app::config::{ReasoningEffort, ReasoningMode},
+        core::SessionMemoryPolicy,
         tui::{
             storage::{SessionStorage, database_path},
             transcript::{LocalEvent, SessionStarted, TranscriptJournal, TranscriptRecord, TurnId},
@@ -425,6 +507,7 @@ mod tests {
                     effort: ReasoningEffort::Medium,
                     reasoning_mode: ReasoningMode::Standard,
                     fast_mode: false,
+                    memory_policy: Default::default(),
                     workspace: "/work".into(),
                     application_version: "test".to_owned(),
                 }),
@@ -469,6 +552,7 @@ mod tests {
                 effort: ReasoningEffort::Medium,
                 reasoning_mode: ReasoningMode::Standard,
                 fast_mode: false,
+                memory_policy: Default::default(),
                 workspace: "/work".into(),
                 application_version: "test".to_owned(),
             }),
@@ -496,6 +580,7 @@ mod tests {
                         effort: ReasoningEffort::Medium,
                         reasoning_mode: ReasoningMode::Standard,
                         fast_mode: false,
+                        memory_policy: Default::default(),
                         workspace: "/work".into(),
                         application_version: "test".to_owned(),
                     }),
@@ -684,10 +769,18 @@ mod tests {
         let directory = tempdir().unwrap();
         let config = directory.path().join("config.toml");
         let expected = snapshot("lineage");
-        save_checkpoint(&config, "session", &expected, "exact instructions", true).unwrap();
+        save_checkpoint(
+            &config,
+            "session",
+            &expected,
+            "exact instructions",
+            true,
+            Default::default(),
+        )
+        .unwrap();
 
         let restored = load_checkpoint(&config, "session").unwrap();
-        let (actual, instructions, catalog) = restored.into_parts();
+        let (actual, instructions, catalog, policy) = restored.into_parts();
 
         assert_eq!(
             serde_json::to_value(actual).unwrap(),
@@ -695,19 +788,154 @@ mod tests {
         );
         assert_eq!(instructions, "exact instructions");
         assert_eq!(catalog, Some(true));
+        assert_eq!(policy, SessionMemoryPolicy::Configured);
         assert!(directory.path().join("sessions/v2.sqlite3").is_file());
         assert!(!directory.path().join("checkpoints").exists());
+    }
+
+    #[test]
+    fn resume_state_defaults_legacy_policy_and_preserves_disabled_policy() {
+        let directory = tempdir().unwrap();
+        let config = directory.path().join("config.toml");
+        let expected = snapshot("lineage");
+        let encoded = encode_checkpoint(
+            &expected,
+            "instructions",
+            true,
+            SessionMemoryPolicy::Configured,
+        )
+        .unwrap();
+        let mut legacy = serde_json::from_slice::<Value>(&encoded).unwrap();
+        legacy.as_object_mut().unwrap().remove("memory_policy");
+        SessionStorage::open(&config)
+            .unwrap()
+            .save_resume_state("legacy", &serde_json::to_vec(&legacy).unwrap())
+            .unwrap();
+
+        let (_, _, _, legacy_policy) = load_checkpoint(&config, "legacy").unwrap().into_parts();
+        assert_eq!(legacy_policy, SessionMemoryPolicy::Configured);
+
+        save_checkpoint(
+            &config,
+            "disabled",
+            &expected,
+            "instructions",
+            true,
+            SessionMemoryPolicy::Disabled,
+        )
+        .unwrap();
+        let (_, _, _, disabled_policy) = load_checkpoint(&config, "disabled").unwrap().into_parts();
+        assert_eq!(disabled_policy, SessionMemoryPolicy::Disabled);
+    }
+
+    #[test]
+    fn restrictive_resume_policy_persists_without_a_new_snapshot() {
+        let directory = tempdir().unwrap();
+        let config = directory.path().join("config.toml");
+        let expected = snapshot("configured-lineage");
+        save_checkpoint(
+            &config,
+            "session",
+            &expected,
+            "exact instructions",
+            true,
+            SessionMemoryPolicy::Configured,
+        )
+        .unwrap();
+
+        let restricted =
+            load_checkpoint_with_policy(&config, "session", SessionMemoryPolicy::Disabled).unwrap();
+        let (restricted_snapshot, restricted_instructions, restricted_catalog, restricted_policy) =
+            restricted.into_parts();
+        assert_eq!(
+            serde_json::to_value(restricted_snapshot).unwrap(),
+            serde_json::to_value(&expected).unwrap()
+        );
+        assert_eq!(restricted_instructions, "exact instructions");
+        assert_eq!(restricted_catalog, Some(true));
+        assert_eq!(restricted_policy, SessionMemoryPolicy::Disabled);
+
+        let later =
+            load_checkpoint_with_policy(&config, "session", SessionMemoryPolicy::Configured)
+                .unwrap();
+        let (later_snapshot, later_instructions, later_catalog, later_policy) = later.into_parts();
+        assert_eq!(
+            serde_json::to_value(later_snapshot).unwrap(),
+            serde_json::to_value(expected).unwrap()
+        );
+        assert_eq!(later_instructions, "exact instructions");
+        assert_eq!(later_catalog, Some(true));
+        assert_eq!(later_policy, SessionMemoryPolicy::Disabled);
+    }
+
+    #[test]
+    fn stale_restriction_update_preserves_a_newer_checkpoint() {
+        let directory = tempdir().unwrap();
+        let config = directory.path().join("config.toml");
+        save_checkpoint(
+            &config,
+            "session",
+            &snapshot("old-lineage"),
+            "old instructions",
+            false,
+            SessionMemoryPolicy::Configured,
+        )
+        .unwrap();
+
+        let storage = SessionStorage::open(&config).unwrap();
+        let stale = storage
+            .load_resume_state_revision("session")
+            .unwrap()
+            .unwrap();
+
+        let newer = snapshot("newer-lineage");
+        save_checkpoint(
+            &config,
+            "session",
+            &newer,
+            "newer instructions",
+            true,
+            SessionMemoryPolicy::Configured,
+        )
+        .unwrap();
+        let restricted =
+            restrict_checkpoint_policy(&storage, "session", SessionMemoryPolicy::Disabled, stale)
+                .unwrap();
+        let (actual, instructions, catalog, policy) = restricted.into_parts();
+        assert_eq!(
+            serde_json::to_value(actual).unwrap(),
+            serde_json::to_value(newer).unwrap()
+        );
+        assert_eq!(instructions, "newer instructions");
+        assert_eq!(catalog, Some(true));
+        assert_eq!(policy, SessionMemoryPolicy::Disabled);
     }
 
     #[test]
     fn newer_successful_snapshot_atomically_replaces_the_previous_state() {
         let directory = tempdir().unwrap();
         let config = directory.path().join("config.toml");
-        save_checkpoint(&config, "session", &snapshot("first"), "first", false).unwrap();
-        save_checkpoint(&config, "session", &snapshot("second"), "second", true).unwrap();
+        save_checkpoint(
+            &config,
+            "session",
+            &snapshot("first"),
+            "first",
+            false,
+            Default::default(),
+        )
+        .unwrap();
+        save_checkpoint(
+            &config,
+            "session",
+            &snapshot("second"),
+            "second",
+            true,
+            Default::default(),
+        )
+        .unwrap();
 
         let restored = load_checkpoint(&config, "session").unwrap();
-        let (snapshot, instructions, catalog) = restored.into_parts();
+        let (snapshot, instructions, catalog, _) = restored.into_parts();
         let snapshot = serde_json::to_value(snapshot).unwrap();
 
         assert_eq!(snapshot["lineage_id"], Value::String("second".to_owned()));
@@ -720,7 +948,15 @@ mod tests {
         let directory = tempdir().unwrap();
         let config = directory.path().join("config.toml");
         let expected = snapshot("successful");
-        save_checkpoint(&config, "session", &expected, "instructions", true).unwrap();
+        save_checkpoint(
+            &config,
+            "session",
+            &expected,
+            "instructions",
+            true,
+            Default::default(),
+        )
+        .unwrap();
 
         let (mut journal, writer) = TranscriptJournal::open(&config, "session").unwrap();
         journal.defer_start(SessionStarted {
@@ -731,6 +967,7 @@ mod tests {
             effort: ReasoningEffort::Medium,
             reasoning_mode: ReasoningMode::Standard,
             fast_mode: false,
+            memory_policy: Default::default(),
             workspace: "/work".into(),
             application_version: "test".to_owned(),
         });
@@ -744,7 +981,7 @@ mod tests {
         writer.into_task().await.unwrap().unwrap();
 
         let restored = load_checkpoint(&config, "session").unwrap();
-        let (actual, _, _) = restored.into_parts();
+        let (actual, _, _, _) = restored.into_parts();
         assert_eq!(
             serde_json::to_value(actual).unwrap(),
             serde_json::to_value(expected).unwrap()
@@ -758,7 +995,8 @@ mod tests {
         let directory = tempdir().unwrap();
         let config = directory.path().join("config.toml");
         let expected = snapshot("successful");
-        let resume_state = encode_checkpoint(&expected, "instructions", true).unwrap();
+        let resume_state =
+            encode_checkpoint(&expected, "instructions", true, Default::default()).unwrap();
         let (mut journal, writer) = TranscriptJournal::open(&config, "session").unwrap();
         journal.defer_start(SessionStarted {
             session_id: "session".to_owned(),
@@ -768,6 +1006,7 @@ mod tests {
             effort: ReasoningEffort::Medium,
             reasoning_mode: ReasoningMode::Standard,
             fast_mode: false,
+            memory_policy: Default::default(),
             workspace: "/work".into(),
             application_version: "test".to_owned(),
         });
@@ -785,7 +1024,7 @@ mod tests {
 
         let records = super::load_transcript(&config, "session").unwrap();
         assert_eq!(records.last().unwrap().kind(), "worker.turn_finished");
-        let (actual, instructions, catalog) =
+        let (actual, instructions, catalog, _) =
             load_checkpoint(&config, "session").unwrap().into_parts();
         assert_eq!(
             serde_json::to_value(actual).unwrap(),

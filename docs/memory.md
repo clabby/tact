@@ -34,6 +34,23 @@ repository is configured. The selection applies to the memory tool and the TUI m
 Configuration reload changes browser availability immediately; an existing agent retains the tool
 surface and instructions with which it started.
 
+## Per-session memory policy
+
+`tact --no-memory` and `TACT_NO_MEMORY=true` disable agent memory for sessions created or resumed by
+that invocation. Disabled sessions do not construct the selected backend and do not expose the
+memory tool, memory instructions, or follow-up memory-review checkpoint to root or child agents.
+The Actions menu can create a session without memory independently of the configured backend. A
+window launched without memory keeps that default for ordinary new sessions and exposes an explicit
+**New session with configured memory** action when memory access is wanted.
+
+The policy is persisted with resumable state and session history. Older sessions default to the
+configured policy. A stored disabled policy remains disabled on resume, while `--no-memory` can
+further restrict an older configured session. The global memory browser is independent and remains
+available when enabled in configuration.
+
+This policy is not incognito. Tact continues to write transcripts, checkpoints, session history,
+and resume hints. It only removes the agent's global-memory integration.
+
 ## Local memory
 
 The local store is:

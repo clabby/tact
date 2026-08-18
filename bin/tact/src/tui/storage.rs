@@ -126,6 +126,17 @@ pub(crate) struct RecordPrefix {
     pub(crate) session_found: bool,
 }
 
+pub(crate) struct ResumeStateRevision {
+    encoded: Vec<u8>,
+    compressed: Vec<u8>,
+}
+
+impl ResumeStateRevision {
+    pub(crate) fn encoded(&self) -> &[u8] {
+        &self.encoded
+    }
+}
+
 impl SessionStorage {
     pub(crate) fn open(config_path: &Path) -> Result<Self, StorageError> {
         let path = database_path(config_path);
@@ -410,10 +421,20 @@ impl SessionStorage {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn load_resume_state(
         &self,
         session_id: &str,
     ) -> Result<Option<Vec<u8>>, StorageError> {
+        Ok(self
+            .load_resume_state_revision(session_id)?
+            .map(|state| state.encoded))
+    }
+
+    pub(crate) fn load_resume_state_revision(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<ResumeStateRevision>, StorageError> {
         let compressed = self
             .connection
             .query_row(
@@ -424,8 +445,34 @@ impl SessionStorage {
             .optional()
             .map_err(|source| query(&self.path, source))?;
         compressed
-            .map(|compressed| zstd::decode_all(compressed.as_slice()).map_err(StorageError::Decode))
+            .map(|compressed| {
+                let encoded =
+                    zstd::decode_all(compressed.as_slice()).map_err(StorageError::Decode)?;
+                Ok(ResumeStateRevision {
+                    encoded,
+                    compressed,
+                })
+            })
             .transpose()
+    }
+
+    pub(crate) fn replace_resume_state_if_current(
+        &self,
+        session_id: &str,
+        current: &ResumeStateRevision,
+        encoded: &[u8],
+    ) -> Result<bool, StorageError> {
+        let compressed =
+            zstd::encode_all(encoded, STATE_COMPRESSION_LEVEL).map_err(StorageError::Compress)?;
+        let updated = self
+            .connection
+            .execute(
+                "UPDATE resume_states SET state_zstd = ?1\n\
+                 WHERE session_id = ?2 AND state_zstd = ?3",
+                params![compressed, session_id, &current.compressed],
+            )
+            .map_err(|source| query(&self.path, source))?;
+        Ok(updated == 1)
     }
 
     pub(crate) fn list_sessions(
@@ -1168,6 +1215,7 @@ mod tests {
                         effort: ReasoningEffort::Medium,
                         reasoning_mode: ReasoningMode::Standard,
                         fast_mode: false,
+                        memory_policy: Default::default(),
                         workspace: "/work".into(),
                         application_version: "test".to_owned(),
                     }),
