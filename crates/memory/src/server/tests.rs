@@ -53,13 +53,19 @@ struct TestMemoryState {
 struct TestMemoryStore {
     database: TestMemoryDatabase,
     namespace: String,
+    limits: MemoryLimits,
 }
 
 impl TestMemoryDatabase {
     fn bind(&self, namespace: String) -> TestMemoryStore {
+        self.bind_with_limits(namespace, MemoryLimits::PRODUCTION)
+    }
+
+    fn bind_with_limits(&self, namespace: String, limits: MemoryLimits) -> TestMemoryStore {
         TestMemoryStore {
             database: self.clone(),
             namespace,
+            limits,
         }
     }
 }
@@ -69,6 +75,16 @@ fn memory_app(credentials: Vec<Credential>) -> Router {
     MemoryServer::new(move |namespace| database.bind(namespace), credentials)
         .unwrap()
         .router()
+}
+
+fn memory_app_with_limits(credentials: Vec<Credential>, limits: MemoryLimits) -> Router {
+    let database = TestMemoryDatabase::default();
+    MemoryServer::new(
+        move |namespace| database.bind_with_limits(namespace, limits),
+        credentials,
+    )
+    .unwrap()
+    .router()
 }
 
 fn now_ms() -> i64 {
@@ -216,9 +232,9 @@ impl MemoryStore for TestMemoryStore {
             .sum::<usize>()
             .saturating_sub(replacing_bytes)
             .saturating_add(content.len());
-        if total_bytes > MemoryLimits::PRODUCTION.total_content_bytes {
+        if total_bytes > self.limits.total_content_bytes {
             return Err(MemoryError::ContentCapacity {
-                maximum_bytes: MemoryLimits::PRODUCTION.total_content_bytes,
+                maximum_bytes: self.limits.total_content_bytes,
             });
         }
 
@@ -235,9 +251,9 @@ impl MemoryStore for TestMemoryStore {
             }
             (key.id, key.version + 1, existing.created_at_ms)
         } else {
-            if namespace_records.len() >= MemoryLimits::PRODUCTION.records {
+            if namespace_records.len() >= self.limits.records {
                 return Err(MemoryError::RecordCapacity {
-                    maximum: MemoryLimits::PRODUCTION.records,
+                    maximum: self.limits.records,
                 });
             }
             let next = state.next_ids.entry(self.namespace.clone()).or_insert(1);
@@ -254,9 +270,7 @@ impl MemoryStore for TestMemoryStore {
             scan_count: 0,
             last_used_at_ms: None,
             use_count: 0,
-            probation_until_ms: Some(
-                now.saturating_add(MemoryLimits::PRODUCTION.probation_duration_ms),
-            ),
+            probation_until_ms: Some(now.saturating_add(self.limits.probation_duration_ms)),
         };
         state
             .records
@@ -281,9 +295,9 @@ impl MemoryStore for TestMemoryStore {
 
     async fn sync(&self, memories: &[MemoryRecord]) -> Result<SyncReport, MemoryError> {
         let mut identities = HashSet::new();
-        if memories.len() > MemoryLimits::PRODUCTION.records {
+        if memories.len() > self.limits.records {
             return Err(MemoryError::RecordCapacity {
-                maximum: MemoryLimits::PRODUCTION.records,
+                maximum: self.limits.records,
             });
         }
         let total_bytes = memories.iter().try_fold(0usize, |total, memory| {
@@ -296,12 +310,12 @@ impl MemoryStore for TestMemoryStore {
             total
                 .checked_add(memory.content.len())
                 .ok_or(MemoryError::ContentCapacity {
-                    maximum_bytes: MemoryLimits::PRODUCTION.total_content_bytes,
+                    maximum_bytes: self.limits.total_content_bytes,
                 })
         })?;
-        if total_bytes > MemoryLimits::PRODUCTION.total_content_bytes {
+        if total_bytes > self.limits.total_content_bytes {
             return Err(MemoryError::ContentCapacity {
-                maximum_bytes: MemoryLimits::PRODUCTION.total_content_bytes,
+                maximum_bytes: self.limits.total_content_bytes,
             });
         }
 
@@ -837,6 +851,65 @@ async fn sync_rejects_duplicate_snapshot_ids_without_mutation() {
     )
     .await;
     assert!(exported.memories.is_empty());
+}
+
+#[tokio::test]
+async fn configured_namespace_capacity_governs_sync_and_export() {
+    let limits = MemoryLimits {
+        records: MemoryLimits::PRODUCTION.records + 1,
+        total_content_bytes: (MemoryLimits::PRODUCTION.records + 1)
+            * MemoryLimits::PRODUCTION.content_bytes,
+        ..MemoryLimits::PRODUCTION
+    };
+    let app = memory_app_with_limits(
+        vec![credential("alice", RemoteRole::Writer, ALICE_TOKEN)],
+        limits,
+    );
+    let (endpoint, task) = live_server(app).await;
+    let client = RemoteMemoryClient::new(
+        &endpoint,
+        "alice".to_owned(),
+        RemoteToken::new(ALICE_TOKEN.to_owned()).unwrap(),
+    )
+    .unwrap();
+    let memories = (1..=limits.records)
+        .map(|id| {
+            record(
+                i64::try_from(id).unwrap(),
+                1,
+                &format!("{id:04}{}", "x".repeat(508)),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let report = client.sync(&memories).await.unwrap();
+    assert_eq!(report.inserted, limits.records);
+
+    let exported = client.export_all(None, limits).await.unwrap();
+    assert_eq!(exported.len(), limits.records);
+    assert!(
+        exported
+            .iter()
+            .map(|memory| memory.content.len())
+            .sum::<usize>()
+            > 256 * 1_024
+    );
+
+    let report = client.sync(&[]).await.unwrap();
+    assert_eq!(report.deleted, limits.records);
+
+    let mut oversized = memories;
+    oversized.push(record(
+        i64::try_from(limits.records + 1).unwrap(),
+        1,
+        "one record too many",
+    ));
+    assert!(matches!(
+        client.sync(&oversized).await,
+        Err(MemoryError::RecordCapacity { maximum }) if maximum == limits.records
+    ));
+
+    task.abort();
 }
 
 #[tokio::test]
