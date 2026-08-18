@@ -12,7 +12,7 @@ use crate::{
     app::config::{ReasoningEffort, ReasoningMode},
     tui::{
         context::MODEL_WINDOW_TOKENS,
-        format::{format_turn_duration, shorten_home},
+        format::{format_turn_duration, normalize_line_endings, shorten_home},
         prompt::Submission,
         theme::Theme,
     },
@@ -595,7 +595,11 @@ impl Composer {
     }
 
     pub(crate) fn replace_draft(&mut self, draft: String) {
-        self.draft = draft;
+        self.draft = if draft.contains('\r') {
+            normalize_line_endings(&draft).into_owned()
+        } else {
+            draft
+        };
         self.images.clear();
         self.next_image = 1;
         self.cursor = self.draft.len();
@@ -783,6 +787,7 @@ impl Composer {
     }
 
     fn insert(&mut self, text: &str) {
+        let text = normalize_line_endings(text);
         self.move_cursor_out_of_image();
         for image in &mut self.images {
             if image.range.start >= self.cursor {
@@ -790,7 +795,7 @@ impl Composer {
                 image.range.end += text.len();
             }
         }
-        self.draft.insert_str(self.cursor, text);
+        self.draft.insert_str(self.cursor, &text);
         self.cursor += text.len();
         self.preferred_column = None;
         self.layout = None;
@@ -1933,6 +1938,19 @@ mod tests {
         assert_eq!(composer.draft(), "one\ntwo");
 
         composer.update(ComposerEvent::ReplaceDraft("edited\ndraft".to_owned()));
+        assert_eq!(composer.draft(), "edited\ndraft");
+        assert_eq!(composer.cursor(), composer.draft().len());
+    }
+
+    #[test]
+    fn paste_and_editor_replacement_normalize_carriage_returns() {
+        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        composer.update(ComposerEvent::Terminal(Event::Paste(
+            "one\r\ntwo\rthree".to_owned(),
+        )));
+        assert_eq!(composer.draft(), "one\ntwo\nthree");
+
+        composer.update(ComposerEvent::ReplaceDraft("edited\r\ndraft".to_owned()));
         assert_eq!(composer.draft(), "edited\ndraft");
         assert_eq!(composer.cursor(), composer.draft().len());
     }
