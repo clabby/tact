@@ -12,6 +12,7 @@ Memory is disabled by default:
 ```toml
 [memory]
 enabled = true
+max_records = 512
 ```
 
 When enabled, every runtime selects exactly one backend:
@@ -44,6 +45,14 @@ The local store is:
 `TACT_CONFIG`, or `TACT_HOME`. There is one global local corpus per configuration directory. It has
 no workspace, repository, branch, session, agent, or author namespace. Workspace-specific records
 must state their scope in their content.
+
+`max_records` is a positive integer limit for this global local corpus and defaults to 512 records.
+Each record remains limited to 1 KiB, so the count also bounds total authored content without a
+separate aggregate-content setting. Lowering the limit does not delete existing records. New inserts
+and snapshot transfers fail whenever their resulting corpus would exceed the configured count.
+Explicit push and pull commands use the same configured limit while collecting or merging the local
+snapshot. Remote namespace capacity is configured by the service and is not changed by this local
+setting.
 
 The SQLite schema remains v1, and the existing `memories` record format is unchanged. Tact lazily
 adds backward-compatible allocator metadata so IDs are not reused after deletion or snapshot sync;
@@ -315,19 +324,23 @@ server time and server-owned telemetry.
 
 ## Bounds and transactions
 
-| Limit | v1 value |
+| Limit | Default v1 value |
 | --- | ---: |
 | Record content | 1 KiB |
 | Rows | 512 |
-| Total content | 256 KiB |
 | Local main database file | 4 MiB |
 | Scan results | 5 |
 
-Bounds apply to the global local corpus and independently to each remote writer namespace. A store
-may prune expired unread probation records before rejecting a capacity-increasing mutation, but it
-does not evict active graduated records to make room. Mutations, telemetry updates, bound checks,
-authoritative push reconciliation, and local pull merge are transactional at their documented
-scope.
+The row default can be overridden for the global local corpus with `memory.max_records`. Its
+aggregate authored-content bound is derived from that count and the fixed 1 KiB per-record bound.
+Remote namespace record capacity follows the same derivation but remains deployment-owned; the
+Cloudflare example configures it with `TACT_MEMORY_MAX_RECORDS`. The record-content, local
+database-file, and scan-result limits are not configurable by the Tact client.
+
+A store may prune expired unread probation records before rejecting a capacity-increasing mutation,
+but it does not evict active graduated records to make room. Mutations, telemetry updates, bound
+checks, authoritative push reconciliation, and local pull merge are transactional at their
+documented scope.
 
 The local database is unencrypted. Anyone who can read the configuration directory may be able to
 inspect it. Production remote storage encryption and HTTPS termination belong to its deployment.

@@ -14,7 +14,7 @@ use axum::{
     http::{HeaderValue, StatusCode},
     response::IntoResponse,
 };
-use config::scan_budget;
+use config::{memory_limits, scan_budget};
 use std::sync::{Arc, Once};
 use store::CloudflareMemoryStore;
 use tact_memory::server::{
@@ -63,11 +63,17 @@ pub async fn fetch(
     // Rust string returned by the binding and every credential copy it constructs.
     let document = Zeroizing::new(environment.secret(CREDENTIALS_SECRET)?.to_string());
     let credentials = parse_credentials(document).map_err(worker_error)?;
+    let memory_limits = memory_limits(&environment).map_err(worker_error)?;
     let scan_budget = scan_budget(&environment).map_err(worker_error)?;
     let store_session = Arc::clone(&session);
     let server = MemoryServer::new(
         move |namespace| {
-            CloudflareMemoryStore::new(Arc::clone(&store_session), namespace, scan_budget)
+            CloudflareMemoryStore::new(
+                Arc::clone(&store_session),
+                namespace,
+                memory_limits,
+                scan_budget,
+            )
         },
         credentials,
     )
@@ -94,6 +100,7 @@ fn bad_request() -> axum::response::Response {
         StatusCode::BAD_REQUEST,
         Json(ErrorResponse {
             code: RemoteErrorCode::BadRequest,
+            maximum: None,
         }),
     )
         .into_response()

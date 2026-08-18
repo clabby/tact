@@ -119,16 +119,30 @@ pub struct MemoryLimits {
 }
 
 impl MemoryLimits {
-    /// Limits used by production local and reference remote stores.
+    /// Baseline limits used by production stores; configuration may override corpus capacity.
     pub const PRODUCTION: Self = Self {
         content_bytes: 1_024,
         records: 512,
-        total_content_bytes: 256 * 1_024,
+        total_content_bytes: 512 * 1_024,
         database_bytes: 4 * 1_024 * 1_024,
         scan_results: 5,
         query_bytes: 512,
         probation_duration_ms: PROBATION_DURATION_MS,
     };
+
+    /// Sets record capacity and derives the maximum reachable aggregate content.
+    ///
+    /// Returns `None` when that aggregate cannot be represented on the target platform.
+    pub const fn try_with_record_capacity(self, records: usize) -> Option<Self> {
+        let Some(total_content_bytes) = records.checked_mul(self.content_bytes) else {
+            return None;
+        };
+        Some(Self {
+            records,
+            total_content_bytes,
+            ..self
+        })
+    }
 }
 
 /// Backend selected by a [`crate::MemoryStore`].

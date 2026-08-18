@@ -46,8 +46,8 @@ pub trait MemoryStore: Clone + Send + Sync + 'static {
 
     /// Lists a deterministic window that excludes expired probationary records.
     ///
-    /// Implementations return at most [`MemoryLimits::records`] records so interactive inspection
-    /// does not grow with the complete shared corpus. Full transfer uses paginated export instead.
+    /// Implementations bound this result so interactive inspection does not grow with the complete
+    /// shared corpus. Full transfer uses paginated export instead.
     fn list(&self) -> impl Future<Output = Result<Vec<MemoryRecord>, MemoryError>> + Send;
 
     /// Inserts content or compare-and-swap replaces `replacement`.
@@ -84,13 +84,15 @@ pub trait MemoryStore: Clone + Send + Sync + 'static {
         limit: usize,
     ) -> impl Future<Output = Result<(Vec<MemoryRecord>, Option<ExportCursor>), MemoryError>> + Send;
 
-    /// Collects a complete bounded export through the paginated storage contract.
+    /// Collects a complete export through the paginated storage contract within caller-provided
+    /// record and content bounds.
     ///
     /// The collector rejects non-progressing cursors and stops before retaining more records or
-    /// content than a local store can import.
+    /// content than `limits` permits.
     fn export_all(
         &self,
         namespaces: Option<&[String]>,
+        limits: MemoryLimits,
     ) -> impl Future<Output = Result<Vec<MemoryRecord>, MemoryError>> + Send {
         async move {
             let mut cursor = None;
@@ -114,11 +116,19 @@ pub trait MemoryStore: Clone + Send + Sync + 'static {
                 content_bytes = content_bytes
                     .checked_add(page_bytes.ok_or(MemoryError::InvalidPagination)?)
                     .ok_or(MemoryError::InvalidPagination)?;
-                if next_record_count > MemoryLimits::PRODUCTION.records
-                    || content_bytes > MemoryLimits::PRODUCTION.total_content_bytes
-                    || next_cursor
-                        .as_ref()
-                        .is_some_and(|next| cursor.as_ref() == Some(next))
+                if next_record_count > limits.records {
+                    return Err(MemoryError::RecordCapacity {
+                        maximum: limits.records,
+                    });
+                }
+                if content_bytes > limits.total_content_bytes {
+                    return Err(MemoryError::ContentCapacity {
+                        maximum_bytes: limits.total_content_bytes,
+                    });
+                }
+                if next_cursor
+                    .as_ref()
+                    .is_some_and(|next| cursor.as_ref() == Some(next))
                     || (page.is_empty() && next_cursor.is_some())
                 {
                     return Err(MemoryError::InvalidPagination);
@@ -145,9 +155,9 @@ pub enum SelectedMemoryStore {
 
 #[cfg(all(feature = "client", feature = "local"))]
 impl SelectedMemoryStore {
-    /// Selects a private local SQLite backend.
-    pub fn local(path: impl Into<PathBuf>) -> Self {
-        Self::Local(LocalMemoryStore::new(path))
+    /// Selects a private local SQLite backend with explicit resource limits.
+    pub fn local(path: impl Into<PathBuf>, limits: MemoryLimits) -> Self {
+        Self::Local(LocalMemoryStore::new(path, limits))
     }
 
     /// Selects an authenticated remote HTTP backend.
@@ -394,28 +404,29 @@ impl From<RemoteClientError> for MemoryError {
             RemoteClientError::ReadOnly | RemoteClientError::NamespaceMismatch => {
                 Self::RemoteReadOnly
             }
-            RemoteClientError::Rejected { code } => match code {
+            RemoteClientError::Rejected { code, maximum } => match code {
                 protocol::RemoteErrorCode::QueryTooLarge => Self::QueryTooLarge {
-                    maximum_bytes: MemoryLimits::PRODUCTION.query_bytes,
+                    maximum_bytes: maximum.unwrap_or(MemoryLimits::PRODUCTION.query_bytes),
                 },
                 protocol::RemoteErrorCode::ContentTooLarge => Self::ContentTooLarge {
-                    maximum_bytes: MemoryLimits::PRODUCTION.content_bytes,
+                    maximum_bytes: maximum.unwrap_or(MemoryLimits::PRODUCTION.content_bytes),
                 },
                 protocol::RemoteErrorCode::RecordCapacity => Self::RecordCapacity {
-                    maximum: MemoryLimits::PRODUCTION.records,
+                    maximum: maximum.unwrap_or(MemoryLimits::PRODUCTION.records),
                 },
-                protocol::RemoteErrorCode::ContentCapacity => Self::ContentCapacity {
-                    maximum_bytes: MemoryLimits::PRODUCTION.total_content_bytes,
-                },
+                protocol::RemoteErrorCode::ContentCapacity => maximum
+                    .map_or(Self::StorageCapacity, |maximum_bytes| {
+                        Self::ContentCapacity { maximum_bytes }
+                    }),
                 protocol::RemoteErrorCode::Duplicate => Self::Duplicate,
                 protocol::RemoteErrorCode::NotFound => Self::NotFound,
                 protocol::RemoteErrorCode::Conflict => Self::Conflict,
                 protocol::RemoteErrorCode::Forbidden
                 | protocol::RemoteErrorCode::NamespaceMismatch => Self::RemoteReadOnly,
                 protocol::RemoteErrorCode::Unavailable => {
-                    Self::unavailable(RemoteClientError::Rejected { code })
+                    Self::unavailable(RemoteClientError::Rejected { code, maximum })
                 }
-                _ => Self::backend(RemoteClientError::Rejected { code }),
+                _ => Self::backend(RemoteClientError::Rejected { code, maximum }),
             },
             error => Self::backend(error),
         }
