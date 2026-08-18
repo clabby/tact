@@ -9,7 +9,7 @@ use super::{
     waved_text::WavedText,
 };
 use crate::{
-    app::config::{ReasoningEffort, ReasoningMode},
+    app::config::{PasteDisplay, ReasoningEffort, ReasoningMode},
     tui::{
         context::MODEL_WINDOW_TOKENS,
         format::{
@@ -44,6 +44,8 @@ const MIN_CONTENT_ROWS: usize = 3;
 const MAX_CONTENT_ROWS: usize = 6;
 const ENTRY_HINT: &str = " / actions · @ paths · @@ sessions ";
 const DEVELOPMENT_BADGE: &str = " ◉ dev ";
+const LARGE_PASTE_CHARACTER_THRESHOLD: usize = 1_000;
+const LARGE_PASTE_LINE_THRESHOLD: usize = 8;
 
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum ComposerEffect {
@@ -68,6 +70,7 @@ pub(crate) enum ComposerEvent {
         text: String,
     },
     ReplaceDraft(String),
+    SetPasteDisplay(PasteDisplay),
     SetEffort(ReasoningEffort),
     SetModel(Model),
     SetReasoningMode(ReasoningMode),
@@ -98,8 +101,9 @@ pub(crate) enum ComposerEvent {
 
 pub(crate) struct Composer {
     draft: String,
-    images: Vec<PastedImage>,
+    tokens: Vec<ComposerToken>,
     next_image: u64,
+    paste_display: PasteDisplay,
     cursor: usize,
     preferred_column: Option<usize>,
     scroll: usize,
@@ -127,14 +131,19 @@ pub(crate) struct Composer {
 
 pub(crate) struct ComposerDraft {
     text: String,
-    images: Vec<PastedImage>,
+    tokens: Vec<ComposerToken>,
     next_image: u64,
     cursor: usize,
 }
 
-struct PastedImage {
+struct ComposerToken {
     range: Range<usize>,
-    data_url: String,
+    payload: TokenPayload,
+}
+
+enum TokenPayload {
+    Image(String),
+    Paste(String),
 }
 
 struct CachedLayout {
@@ -197,8 +206,9 @@ impl Composer {
     pub(crate) fn new(workspace: &Path, thinking: ReasoningEffort) -> Self {
         Self {
             draft: String::new(),
-            images: Vec::new(),
+            tokens: Vec::new(),
             next_image: 1,
+            paste_display: PasteDisplay::default(),
             cursor: 0,
             preferred_column: None,
             scroll: 0,
@@ -234,7 +244,7 @@ impl Composer {
             ComposerEvent::Terminal(Event::Key(key)) => self.handle_key(key),
             ComposerEvent::Terminal(Event::Paste(text)) => {
                 self.history.detach();
-                self.insert(&text);
+                self.insert_pasted_text(&text);
                 ComposerUpdate::changed()
             }
             ComposerEvent::Terminal(_) => ComposerUpdate::unchanged(),
@@ -259,6 +269,16 @@ impl Composer {
             ComposerEvent::ReplaceDraft(draft) => {
                 self.history.detach();
                 self.replace_draft(draft);
+                ComposerUpdate::changed()
+            }
+            ComposerEvent::SetPasteDisplay(display) => {
+                if self.paste_display == display {
+                    return ComposerUpdate::unchanged();
+                }
+                self.paste_display = display;
+                if display == PasteDisplay::Inline {
+                    self.expand_all_pastes();
+                }
                 ComposerUpdate::changed()
             }
             ComposerEvent::SetEffort(effort) => {
@@ -499,7 +519,7 @@ impl Composer {
                 buffer,
                 Position::new(area.x + 1, y),
                 &self.draft,
-                &self.images,
+                &self.tokens,
                 line.start..line.end,
                 content_width,
                 theme,
@@ -544,8 +564,17 @@ impl Composer {
     }
 
     pub(super) fn selection_text(&self, selection: TextRange) -> Option<String> {
-        let range = selection.source_range(0, self.draft.len())?;
-        self.draft.get(range).map(ToOwned::to_owned)
+        let mut range = selection.source_range(0, self.draft.len())?;
+        for token in &self.tokens {
+            if matches!(token.payload, TokenPayload::Paste(_))
+                && range.start < token.range.end
+                && token.range.start < range.end
+            {
+                range.start = range.start.min(token.range.start);
+                range.end = range.end.max(token.range.end);
+            }
+        }
+        self.expanded_range(range)
     }
 
     pub(super) fn scroll_selection(&mut self, rows: isize, area: Rect) -> bool {
@@ -570,6 +599,29 @@ impl Composer {
         &self.draft
     }
 
+    pub(crate) fn editor_text(&self) -> String {
+        self.expanded_draft()
+    }
+
+    pub(crate) const fn paste_display(&self) -> PasteDisplay {
+        self.paste_display
+    }
+
+    pub(super) fn expand_paste_at(&mut self, position: Position, area: Rect) -> bool {
+        let Some(span) = self.selection_span(position, area) else {
+            return false;
+        };
+        let Some(index) = self.tokens.iter().position(|token| {
+            matches!(token.payload, TokenPayload::Paste(_))
+                && token.range.start < span.end
+                && span.start < token.range.end
+        }) else {
+            return false;
+        };
+        self.expand_paste(index);
+        true
+    }
+
     pub(crate) const fn effort(&self) -> ReasoningEffort {
         self.thinking
     }
@@ -591,9 +643,14 @@ impl Composer {
     }
 
     pub(crate) fn cursor_is_at_token_boundary(&self) -> bool {
-        self.draft[..self.cursor]
-            .chars()
-            .next_back()
+        self.tokens
+            .iter()
+            .find(|token| token.range.end == self.cursor)
+            .and_then(|token| match &token.payload {
+                TokenPayload::Paste(text) => text.chars().next_back(),
+                TokenPayload::Image(_) => None,
+            })
+            .or_else(|| self.draft[..self.cursor].chars().next_back())
             .is_none_or(char::is_whitespace)
     }
 
@@ -603,7 +660,7 @@ impl Composer {
         } else {
             draft
         };
-        self.images.clear();
+        self.tokens.clear();
         self.next_image = 1;
         self.cursor = self.draft.len();
         self.preferred_column = None;
@@ -612,24 +669,28 @@ impl Composer {
     }
 
     pub(crate) fn take_submission(&mut self) -> Option<Submission> {
-        let trimmed = self.draft.trim();
+        let expanded = self.expanded_draft();
+        self.take_submission_from(expanded)
+    }
+
+    fn take_submission_from(&mut self, expanded: String) -> Option<Submission> {
+        let trimmed = expanded.trim();
         if trimmed.is_empty() {
             return None;
         }
 
-        let start = self.draft.len() - self.draft.trim_start().len();
+        let start = expanded.len() - expanded.trim_start().len();
         let end = start + trimmed.len();
         let text = trimmed.to_owned();
-        let images = self
-            .images
-            .iter()
-            .filter(|image| image.range.start >= start && image.range.end <= end)
-            .map(|image| {
-                (
-                    image.range.start - start..image.range.end - start,
-                    image.data_url.clone(),
-                )
-            });
+        let images = self.tokens.iter().filter_map(|token| {
+            let TokenPayload::Image(data_url) = &token.payload else {
+                return None;
+            };
+            let range =
+                self.expanded_offset(token.range.start)..self.expanded_offset(token.range.end);
+            (range.start >= start && range.end <= end)
+                .then(|| (range.start - start..range.end - start, data_url.clone()))
+        });
         let prompt = Submission::multimodal(text, images);
         self.replace_draft(String::new());
         Some(prompt)
@@ -642,7 +703,7 @@ impl Composer {
 
         let draft = ComposerDraft {
             text: mem::take(&mut self.draft),
-            images: mem::take(&mut self.images),
+            tokens: mem::take(&mut self.tokens),
             next_image: mem::replace(&mut self.next_image, 1),
             cursor: mem::take(&mut self.cursor),
         };
@@ -655,9 +716,12 @@ impl Composer {
 
     pub(crate) fn restore_draft(&mut self, draft: ComposerDraft) {
         self.draft = draft.text;
-        self.images = draft.images;
+        self.tokens = draft.tokens;
         self.next_image = draft.next_image;
         self.cursor = draft.cursor;
+        if self.paste_display == PasteDisplay::Inline {
+            self.expand_all_pastes();
+        }
         self.history.detach();
         self.preferred_column = None;
         self.scroll = 0;
@@ -743,12 +807,17 @@ impl Composer {
     }
 
     fn submit(&mut self) -> ComposerUpdate {
-        let trimmed = self.draft.trim();
+        let expanded = self.expanded_draft();
+        let trimmed = expanded.trim();
         if trimmed.is_empty() {
             return ComposerUpdate::unchanged();
         }
 
-        if self.images.is_empty() && self.draft.starts_with('!') {
+        let has_images = self
+            .tokens
+            .iter()
+            .any(|token| matches!(token.payload, TokenPayload::Image(_)));
+        if !has_images && expanded.starts_with('!') {
             let command = trimmed.trim_start_matches('!').trim().to_owned();
             if command.is_empty() {
                 return ComposerUpdate::unchanged();
@@ -759,7 +828,7 @@ impl Composer {
         }
 
         let prompt = self
-            .take_submission()
+            .take_submission_from(expanded)
             .expect("non-empty composer draft must produce a submission");
         self.history.record(prompt.display_text().to_owned());
         ComposerUpdate::effect(ComposerEffect::Submit(prompt), true)
@@ -770,7 +839,8 @@ impl Composer {
             return true;
         }
 
-        let Some(prompt) = self.history.previous(&self.draft) else {
+        let current = self.expanded_draft();
+        let Some(prompt) = self.history.previous(&current) else {
             return false;
         };
         self.replace_draft(prompt);
@@ -791,11 +861,11 @@ impl Composer {
 
     fn insert(&mut self, text: &str) {
         let text = normalize_line_endings(text);
-        self.move_cursor_out_of_image();
-        for image in &mut self.images {
-            if image.range.start >= self.cursor {
-                image.range.start += text.len();
-                image.range.end += text.len();
+        self.move_cursor_out_of_token();
+        for token in &mut self.tokens {
+            if token.range.start >= self.cursor {
+                token.range.start += text.len();
+                token.range.end += text.len();
             }
         }
         self.draft.insert_str(self.cursor, &text);
@@ -804,15 +874,40 @@ impl Composer {
         self.layout = None;
     }
 
+    fn insert_pasted_text(&mut self, text: &str) {
+        let text = normalize_line_endings(text);
+        let character_count = text.chars().count();
+        let line_count = text.split('\n').count();
+        let collapse = self.paste_display == PasteDisplay::Auto
+            && (character_count >= LARGE_PASTE_CHARACTER_THRESHOLD
+                || line_count > LARGE_PASTE_LINE_THRESHOLD);
+        if !collapse {
+            self.insert(&text);
+            return;
+        }
+
+        let marker = if line_count > 1 {
+            format!("[paste · {character_count} chars · {line_count} lines]")
+        } else {
+            format!("[paste · {character_count} chars]")
+        };
+        self.move_cursor_out_of_token();
+        let start = self.cursor;
+        self.insert(&marker);
+        self.tokens.push(ComposerToken {
+            range: start..self.cursor,
+            payload: TokenPayload::Paste(text.into_owned()),
+        });
+        self.tokens.sort_by_key(|token| token.range.start);
+    }
+
     fn move_left(&mut self) -> bool {
         let Some(previous) = self.draft[..self.cursor].grapheme_indices(true).next_back() else {
             return false;
         };
         self.cursor = self
-            .images
-            .iter()
-            .find(|image| image.range.contains(&previous.0))
-            .map_or(previous.0, |image| image.range.start);
+            .token_containing(previous.0)
+            .map_or(previous.0, |range| range.start);
         self.preferred_column = None;
         true
     }
@@ -823,21 +918,19 @@ impl Composer {
         };
         let target = self.cursor + next.len();
         self.cursor = self
-            .images
-            .iter()
-            .find(|image| image.range.start < target && target < image.range.end)
-            .map_or(target, |image| image.range.end);
+            .token_containing_interior(target)
+            .map_or(target, |range| range.end);
         self.preferred_column = None;
         true
     }
 
     fn backspace(&mut self) -> bool {
         if let Some(index) = self
-            .images
+            .tokens
             .iter()
-            .position(|image| image.range.start < self.cursor && self.cursor <= image.range.end)
+            .position(|token| token.range.start < self.cursor && self.cursor <= token.range.end)
         {
-            let range = self.images.remove(index).range;
+            let range = self.tokens.remove(index).range;
             self.remove_range(range);
             return true;
         }
@@ -867,21 +960,21 @@ impl Composer {
             start = index;
         }
         let end = self.cursor;
-        if let Some(image_start) = self
-            .images
+        if let Some(token_start) = self
+            .tokens
             .iter()
-            .filter(|image| image.range.start < end && start < image.range.end)
-            .map(|image| image.range.start)
+            .filter(|token| token.range.start < end && start < token.range.end)
+            .map(|token| token.range.start)
             .min()
         {
-            start = image_start;
+            start = token_start;
         }
         if start == end {
             return false;
         }
 
-        self.images
-            .retain(|image| image.range.end <= start || image.range.start >= end);
+        self.tokens
+            .retain(|token| token.range.end <= start || token.range.start >= end);
         self.remove_range(start..end);
         true
     }
@@ -914,21 +1007,13 @@ impl Composer {
             target
         };
 
-        let adjust_position_out_of_image = |position: usize, prefer_start: bool| {
-            let Some(image) = self
-                .images
-                .iter()
-                .find(|image| image.range.start < position && position < image.range.end)
-            else {
+        let adjust_position_out_of_token = |position: usize, prefer_start: bool| {
+            let Some(range) = self.token_containing_interior(position) else {
                 return position;
             };
-            if prefer_start {
-                image.range.start
-            } else {
-                image.range.end
-            }
+            if prefer_start { range.start } else { range.end }
         };
-        let target = adjust_position_out_of_image(target, !forward);
+        let target = adjust_position_out_of_token(target, !forward);
         if target == self.cursor {
             return false;
         }
@@ -939,11 +1024,11 @@ impl Composer {
 
     fn delete(&mut self) -> bool {
         if let Some(index) = self
-            .images
+            .tokens
             .iter()
-            .position(|image| image.range.start <= self.cursor && self.cursor < image.range.end)
+            .position(|token| token.range.start <= self.cursor && self.cursor < token.range.end)
         {
-            let range = self.images.remove(index).range;
+            let range = self.tokens.remove(index).range;
             self.remove_range(range);
             return true;
         }
@@ -955,35 +1040,33 @@ impl Composer {
     }
 
     fn insert_image(&mut self, data_url: String) {
-        self.move_cursor_out_of_image();
+        self.move_cursor_out_of_token();
         let marker = format!("[Image #{}]", self.next_image);
         let start = self.cursor;
         self.insert(&marker);
-        self.images.push(PastedImage {
+        self.tokens.push(ComposerToken {
             range: start..self.cursor,
-            data_url,
+            payload: TokenPayload::Image(data_url),
         });
-        self.images.sort_by_key(|image| image.range.start);
+        self.tokens.sort_by_key(|token| token.range.start);
         self.next_image = self.next_image.saturating_add(1);
     }
 
-    fn move_cursor_out_of_image(&mut self) {
-        if let Some(image) = self
-            .images
-            .iter()
-            .find(|image| image.range.start < self.cursor && self.cursor < image.range.end)
-        {
-            self.cursor = image.range.end;
+    fn move_cursor_out_of_token(&mut self) {
+        if let Some(range) = self.token_containing_interior(self.cursor) {
+            self.cursor = range.end;
         }
     }
 
     fn remove_range(&mut self, range: Range<usize>) {
         let removed = range.len();
         self.draft.drain(range.clone());
-        for image in &mut self.images {
-            if image.range.start >= range.end {
-                image.range.start -= removed;
-                image.range.end -= removed;
+        self.tokens
+            .retain(|token| token.range.end <= range.start || token.range.start >= range.end);
+        for token in &mut self.tokens {
+            if token.range.start >= range.end {
+                token.range.start -= removed;
+                token.range.end -= removed;
             }
         }
         self.cursor = range.start;
@@ -1001,17 +1084,111 @@ impl Composer {
         let desired = *self.preferred_column.get_or_insert(layout.cursor_column);
         let target = byte_at_column(&self.draft, &layout.lines[target_row], desired);
         self.cursor = self
-            .images
-            .iter()
-            .find(|image| image.range.start < target && target < image.range.end)
-            .map_or(target, |image| {
+            .token_containing_interior(target)
+            .map_or(target, |range| {
                 if direction.is_negative() {
-                    image.range.start
+                    range.start
                 } else {
-                    image.range.end
+                    range.end
                 }
             });
         true
+    }
+
+    fn token_containing(&self, position: usize) -> Option<Range<usize>> {
+        self.tokens
+            .iter()
+            .map(|token| &token.range)
+            .find(|range| range.contains(&position))
+            .cloned()
+    }
+
+    fn token_containing_interior(&self, position: usize) -> Option<Range<usize>> {
+        self.tokens
+            .iter()
+            .map(|token| &token.range)
+            .find(|range| range.start < position && position < range.end)
+            .cloned()
+    }
+
+    fn expanded_draft(&self) -> String {
+        self.expanded_range(0..self.draft.len()).unwrap_or_default()
+    }
+
+    fn expanded_range(&self, range: Range<usize>) -> Option<String> {
+        let mut expanded = String::new();
+        let mut source = range.start;
+        for token in &self.tokens {
+            let TokenPayload::Paste(text) = &token.payload else {
+                continue;
+            };
+            if token.range.end <= range.start {
+                continue;
+            }
+            if token.range.start >= range.end {
+                break;
+            }
+            expanded.push_str(self.draft.get(source..token.range.start)?);
+            expanded.push_str(text);
+            source = token.range.end;
+        }
+        expanded.push_str(self.draft.get(source..range.end)?);
+        Some(expanded)
+    }
+
+    fn expanded_offset(&self, offset: usize) -> usize {
+        self.tokens
+            .iter()
+            .take_while(|token| token.range.end <= offset)
+            .filter_map(|token| match &token.payload {
+                TokenPayload::Paste(text) => Some((&token.range, text)),
+                TokenPayload::Image(_) => None,
+            })
+            .fold(offset, |mapped, (range, text)| {
+                if text.len() >= range.len() {
+                    mapped + text.len() - range.len()
+                } else {
+                    mapped - (range.len() - text.len())
+                }
+            })
+    }
+
+    fn expand_all_pastes(&mut self) {
+        while let Some(index) = self
+            .tokens
+            .iter()
+            .position(|token| matches!(token.payload, TokenPayload::Paste(_)))
+        {
+            self.expand_paste(index);
+        }
+    }
+
+    fn expand_paste(&mut self, index: usize) {
+        let token = self.tokens.remove(index);
+        let TokenPayload::Paste(text) = token.payload else {
+            unreachable!("expand_paste must receive a paste token");
+        };
+        let range = token.range;
+        let replacement_len = text.len();
+        let removed_len = range.len();
+        self.draft.replace_range(range.clone(), &text);
+
+        for token in &mut self.tokens {
+            if token.range.start >= range.end {
+                resize_range_after(&mut token.range, removed_len, replacement_len);
+            }
+        }
+        self.cursor = if self.cursor <= range.start {
+            self.cursor
+        } else if self.cursor < range.end {
+            range.start + replacement_len
+        } else if replacement_len >= removed_len {
+            self.cursor + replacement_len - removed_len
+        } else {
+            self.cursor - (removed_len - replacement_len)
+        };
+        self.preferred_column = None;
+        self.layout = None;
     }
 
     fn move_to_visual_edge(&mut self, end: bool) -> bool {
@@ -1108,7 +1285,7 @@ impl Composer {
             buffer,
             Position::new(area.x, area.y),
             &self.draft,
-            &self.images,
+            &self.tokens,
             line.start..line.end,
             width,
             theme,
@@ -1475,7 +1652,7 @@ fn render_draft_line(
     buffer: &mut Buffer,
     position: Position,
     draft: &str,
-    images: &[PastedImage],
+    tokens: &[ComposerToken],
     range: Range<usize>,
     width: usize,
     theme: &Theme,
@@ -1488,9 +1665,9 @@ fn render_draft_line(
         width,
         Style::default().fg(theme.text()),
     );
-    for image in images {
-        let start = image.range.start.max(range.start);
-        let end = image.range.end.min(range.end);
+    for token in tokens {
+        let start = token.range.start.max(range.start);
+        let end = token.range.end.min(range.end);
         if start >= end {
             continue;
         }
@@ -1504,6 +1681,18 @@ fn render_draft_line(
             width.saturating_sub(offset),
             Style::default().fg(Color::Blue),
         );
+    }
+}
+
+fn resize_range_after(range: &mut Range<usize>, removed: usize, replacement: usize) {
+    if replacement >= removed {
+        let added = replacement - removed;
+        range.start += added;
+        range.end += added;
+    } else {
+        let subtracted = removed - replacement;
+        range.start -= subtracted;
+        range.end -= subtracted;
     }
 }
 
@@ -1547,11 +1736,12 @@ fn render_selection(
 #[cfg(test)]
 mod tests {
     use super::{
-        super::selection::{Selection, Surface, TextRange},
-        Composer, ComposerEffect, ComposerEvent, context_percent,
+        super::selection::{Selection, Surface, TextRange, TextSpan},
+        Composer, ComposerEffect, ComposerEvent, ComposerToken, LARGE_PASTE_CHARACTER_THRESHOLD,
+        TokenPayload, context_percent,
     };
     use crate::{
-        app::config::{ReasoningEffort, ReasoningMode},
+        app::config::{PasteDisplay, ReasoningEffort, ReasoningMode},
         tui::theme::Theme,
     };
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
@@ -1612,6 +1802,21 @@ mod tests {
             .chunks(usize::from(buffer.area.width))
             .map(|cells| cells.iter().map(|cell| cell.symbol()).collect())
             .collect()
+    }
+
+    fn paste_tokens(composer: &Composer) -> Vec<&ComposerToken> {
+        composer
+            .tokens
+            .iter()
+            .filter(|token| matches!(token.payload, TokenPayload::Paste(_)))
+            .collect()
+    }
+
+    fn has_image(composer: &Composer) -> bool {
+        composer
+            .tokens
+            .iter()
+            .any(|token| matches!(token.payload, TokenPayload::Image(_)))
     }
 
     #[test]
@@ -1974,6 +2179,201 @@ mod tests {
     }
 
     #[test]
+    fn large_pastes_render_as_tokens_but_submit_exact_text() {
+        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let pasted = "x".repeat(LARGE_PASTE_CHARACTER_THRESHOLD);
+
+        composer.update(ComposerEvent::Terminal(Event::Paste(pasted.clone())));
+
+        assert_eq!(composer.draft(), "[paste · 1000 chars]");
+        assert_eq!(composer.editor_text(), pasted);
+        assert_eq!(paste_tokens(&composer).len(), 1);
+        let terminal = render(&mut composer, 40, 5);
+        assert_eq!(terminal.backend().buffer()[(1, 1)].fg, Color::Blue);
+        let submission = composer.take_submission().unwrap();
+        assert_eq!(submission.display_text(), pasted);
+    }
+
+    #[test]
+    fn automatic_paste_display_collapses_only_more_than_eight_lines() {
+        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let eight_lines = (1..=8)
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        composer.update(ComposerEvent::Terminal(Event::Paste(eight_lines.clone())));
+        assert_eq!(composer.draft(), eight_lines);
+
+        composer.replace_draft(String::new());
+        let nine_lines = (1..=9)
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        composer.update(ComposerEvent::Terminal(Event::Paste(nine_lines.clone())));
+        assert_eq!(composer.draft(), "[paste · 17 chars · 9 lines]");
+        assert_eq!(composer.editor_text(), nine_lines);
+    }
+
+    #[test]
+    fn inline_paste_display_keeps_large_pastes_expanded() {
+        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        composer.update(ComposerEvent::SetPasteDisplay(PasteDisplay::Inline));
+        let pasted = "x".repeat(LARGE_PASTE_CHARACTER_THRESHOLD);
+
+        composer.update(ComposerEvent::Terminal(Event::Paste(pasted.clone())));
+
+        assert_eq!(composer.draft(), pasted);
+        assert!(paste_tokens(&composer).is_empty());
+    }
+
+    #[test]
+    fn switching_to_inline_display_expands_existing_pastes() {
+        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let pasted = "x".repeat(LARGE_PASTE_CHARACTER_THRESHOLD);
+        composer.update(ComposerEvent::Terminal(Event::Paste(pasted.clone())));
+
+        composer.update(ComposerEvent::SetPasteDisplay(PasteDisplay::Inline));
+
+        assert_eq!(composer.draft(), pasted);
+        assert!(paste_tokens(&composer).is_empty());
+    }
+
+    #[test]
+    fn restoring_a_saved_paste_respects_inline_display() {
+        let mut original = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let pasted = "x".repeat(LARGE_PASTE_CHARACTER_THRESHOLD);
+        original.update(ComposerEvent::Terminal(Event::Paste(pasted.clone())));
+        let draft = original.take_draft().unwrap();
+        let mut restored = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        restored.update(ComposerEvent::SetPasteDisplay(PasteDisplay::Inline));
+
+        restored.restore_draft(draft);
+
+        assert_eq!(restored.draft(), pasted);
+        assert!(paste_tokens(&restored).is_empty());
+    }
+
+    #[test]
+    fn pasting_from_inside_a_wrapped_token_keeps_ranges_disjoint() {
+        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let first = "a".repeat(LARGE_PASTE_CHARACTER_THRESHOLD);
+        let second = "b".repeat(LARGE_PASTE_CHARACTER_THRESHOLD);
+        composer.update(ComposerEvent::Terminal(Event::Paste(first.clone())));
+        composer.last_width = 8;
+        composer.update(key(KeyCode::Home, KeyModifiers::NONE));
+        assert!(composer.cursor() > 0);
+        assert!(composer.cursor() < composer.draft().len());
+
+        composer.update(ComposerEvent::Terminal(Event::Paste(second.clone())));
+
+        assert_eq!(composer.editor_text(), format!("{first}{second}"));
+        let pastes = paste_tokens(&composer);
+        assert_eq!(pastes.len(), 2);
+        assert!(pastes[0].range.end <= pastes[1].range.start);
+    }
+
+    #[test]
+    fn paste_tokens_are_atomic_for_movement_and_deletion() {
+        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        composer.update(ComposerEvent::Terminal(Event::Paste(
+            "x".repeat(LARGE_PASTE_CHARACTER_THRESHOLD),
+        )));
+        let token_end = composer.draft().len();
+
+        composer.update(key(KeyCode::Left, KeyModifiers::NONE));
+        assert_eq!(composer.cursor(), 0);
+        composer.update(key(KeyCode::Right, KeyModifiers::NONE));
+        assert_eq!(composer.cursor(), token_end);
+        composer.update(key(KeyCode::Backspace, KeyModifiers::NONE));
+        assert!(composer.draft().is_empty());
+        assert!(paste_tokens(&composer).is_empty());
+    }
+
+    #[test]
+    fn whitespace_only_large_pastes_are_not_submitted() {
+        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        composer.update(ComposerEvent::Terminal(Event::Paste(
+            " ".repeat(LARGE_PASTE_CHARACTER_THRESHOLD),
+        )));
+
+        let update = composer.update(key(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(!update.changed);
+        assert!(update.effect.is_none());
+        assert_eq!(paste_tokens(&composer).len(), 1);
+    }
+
+    #[test]
+    fn history_restores_the_exact_unsent_paste() {
+        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        composer.replace_draft("sent".to_owned());
+        composer.update(key(KeyCode::Enter, KeyModifiers::NONE));
+        let pasted = "x".repeat(LARGE_PASTE_CHARACTER_THRESHOLD);
+        composer.update(ComposerEvent::Terminal(Event::Paste(pasted.clone())));
+
+        composer.update(key(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(composer.draft(), "sent");
+        composer.update(key(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(composer.draft(), pasted);
+    }
+
+    #[test]
+    fn clicking_a_paste_token_expands_it_for_editing() {
+        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let pasted = "x".repeat(LARGE_PASTE_CHARACTER_THRESHOLD);
+        composer.update(ComposerEvent::Terminal(Event::Paste(pasted.clone())));
+        let _ = render(&mut composer, 40, 5);
+
+        assert!(composer.expand_paste_at(Position::new(2, 1), Rect::new(1, 1, 38, 3)));
+        assert_eq!(composer.draft(), pasted);
+        assert!(paste_tokens(&composer).is_empty());
+    }
+
+    #[test]
+    fn copying_a_paste_token_returns_its_original_text() {
+        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let pasted = "x".repeat(LARGE_PASTE_CHARACTER_THRESHOLD);
+        composer.update(ComposerEvent::Terminal(Event::Paste(pasted.clone())));
+        let mut selection = Selection::default();
+        selection.begin(Surface::Composer, TextSpan::new(0, 2, 3));
+        selection.drag(TextSpan::new(0, 5, 6));
+
+        assert_eq!(
+            composer.selection_text(selection.range().unwrap()),
+            Some(pasted)
+        );
+    }
+
+    #[test]
+    fn expanding_pastes_preserves_image_positions() {
+        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let pasted = "x".repeat(LARGE_PASTE_CHARACTER_THRESHOLD);
+        composer.update(ComposerEvent::PasteImage(
+            "data:image/png;base64,before".to_owned(),
+        ));
+        composer.update(ComposerEvent::Terminal(Event::Paste(pasted.clone())));
+        composer.update(ComposerEvent::PasteImage(
+            "data:image/png;base64,after".to_owned(),
+        ));
+
+        let submission = composer.take_submission().unwrap();
+        assert_eq!(
+            submission.display_text(),
+            format!("[Image #1]{pasted}[Image #2]")
+        );
+        let PromptInput::Content(content) = submission.agent_prompt().instruction else {
+            panic!("image prompt should use multimodal content");
+        };
+        assert!(
+            matches!(&content[0], UserInput::Image { image_url, .. } if image_url.ends_with("before"))
+        );
+        assert!(matches!(&content[1], UserInput::Text { text } if text == &pasted));
+        assert!(
+            matches!(&content[2], UserInput::Image { image_url, .. } if image_url.ends_with("after"))
+        );
+    }
+
+    #[test]
     fn pasted_images_render_as_numbered_blue_tokens_and_submit_as_images() {
         let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
         composer.update(ComposerEvent::Terminal(Event::Paste("inspect ".to_owned())));
@@ -2018,7 +2418,7 @@ mod tests {
         composer.update(key(KeyCode::Backspace, KeyModifiers::NONE));
 
         assert!(composer.draft().is_empty());
-        assert!(composer.images.is_empty());
+        assert!(!has_image(&composer));
     }
 
     #[test]
@@ -2044,7 +2444,7 @@ mod tests {
         composer.update(key(KeyCode::Backspace, KeyModifiers::ALT));
 
         assert_eq!(composer.draft(), "inspect ");
-        assert!(composer.images.is_empty());
+        assert!(!has_image(&composer));
     }
 
     #[test]

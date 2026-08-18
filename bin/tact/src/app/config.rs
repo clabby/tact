@@ -58,6 +58,30 @@ pub(crate) enum ReasoningMode {
     Pro,
 }
 
+/// How pasted text is displayed in the composer.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum PasteDisplay {
+    /// Collapse large pastes into compact tokens.
+    #[default]
+    Auto,
+    /// Always show pasted text inline.
+    Inline,
+}
+
+/// Composer display configuration.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct ComposerConfig {
+    paste_display: PasteDisplay,
+}
+
+impl ComposerConfig {
+    pub(crate) const fn paste_display(&self) -> PasteDisplay {
+        self.paste_display
+    }
+}
+
 impl ReasoningMode {
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
@@ -89,6 +113,7 @@ pub(crate) struct Config {
     skills: SkillsConfig,
     memory: MemoryConfig,
     subagents: SubagentsConfig,
+    composer: ComposerConfig,
     theme: Theme,
     #[serde(skip)]
     reload: ReloadSource,
@@ -231,6 +256,7 @@ struct ConfigFile {
     skills: SkillsConfigFile,
     memory: MemoryConfigFile,
     subagents: SubagentsConfigFile,
+    composer: ComposerConfig,
     theme: Theme,
 }
 
@@ -451,6 +477,7 @@ impl Config {
                 enabled: file.subagents.enabled.unwrap_or(true),
                 allow_luna: file.subagents.allow_luna.unwrap_or(true),
             },
+            composer: file.composer,
             theme: file.theme,
             reload,
         })
@@ -517,6 +544,10 @@ impl Config {
 
     pub(crate) const fn subagents(&self) -> &SubagentsConfig {
         &self.subagents
+    }
+
+    pub(crate) const fn composer(&self) -> &ComposerConfig {
+        &self.composer
     }
 
     pub(crate) fn memory_path(&self) -> PathBuf {
@@ -1414,7 +1445,7 @@ impl Config {
 mod tests {
     use super::{
         AuthMode, Config, ConfigOverrides, Environment, McpEnvironment, McpSecretString,
-        McpServerConfig, ReasoningEffort, ReasoningMode, RemoteMemoryConfigFile,
+        McpServerConfig, PasteDisplay, ReasoningEffort, ReasoningMode, RemoteMemoryConfigFile,
         RemoteMemoryTokenFile, ThemeMode, validate_mcp_url,
     };
     use crate::app::error::{ConfigError, Error, McpUrlError, RemoteMemoryConfigError};
@@ -1519,6 +1550,7 @@ mod tests {
         assert_eq!(config.agent.max_subagents, 32);
         assert!(config.agent.web_search);
         assert!(config.agent.image_generation);
+        assert_eq!(config.composer.paste_display, PasteDisplay::Auto);
         assert_eq!(config.theme.border(), Color::DarkGray);
 
         let rendered_toml = config.to_toml().unwrap();
@@ -1533,6 +1565,7 @@ mod tests {
                 "skills",
                 "memory",
                 "subagents",
+                "composer",
                 "theme",
             ],
         );
@@ -1562,6 +1595,7 @@ mod tests {
             &["endpoint", "namespace", "bearer_token", "workspace_roots"],
         );
         assert_table_fields(&rendered["subagents"], &["enabled", "allow_luna"]);
+        assert_table_fields(&rendered["composer"], &["paste_display"]);
         assert_table_fields(&rendered["theme"], &["mode", "light", "dark"]);
         let palette_fields = [
             "text",
@@ -1579,6 +1613,7 @@ mod tests {
         assert_table_fields(&rendered["theme"]["light"], &palette_fields);
         assert_table_fields(&rendered["theme"]["dark"], &palette_fields);
         assert_eq!(rendered["auth"]["mode"].as_str(), Some("auto"));
+        assert_eq!(rendered["composer"]["paste_display"].as_str(), Some("auto"));
         assert_eq!(
             rendered["auth"]["file"].as_str(),
             home.join(".codex/auth.json").to_str()
@@ -1625,6 +1660,13 @@ mod tests {
         assert!(reloaded.agent.websocket_url.is_none());
         assert!(reloaded.agent.api_base_url.is_none());
         assert!(reloaded.memory().remote().is_none());
+    }
+
+    #[test]
+    fn composer_paste_display_can_be_set_inline() {
+        let config = load_config("[composer]\npaste_display = \"inline\"\n").unwrap();
+
+        assert_eq!(config.composer().paste_display(), PasteDisplay::Inline);
     }
 
     #[test]
