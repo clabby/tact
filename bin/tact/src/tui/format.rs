@@ -1,6 +1,8 @@
 //! Shared formatting for terminal-facing values.
 
 use std::{borrow::Cow, env, path::Path};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 pub(crate) fn normalize_line_endings(text: &str) -> Cow<'_, str> {
     if !text.contains('\r') {
@@ -19,6 +21,54 @@ pub(crate) fn normalize_line_endings(text: &str) -> Cow<'_, str> {
     }
     normalized.push_str(remaining);
     Cow::Owned(normalized)
+}
+
+pub(crate) fn sanitize_terminal_text(text: &str) -> Cow<'_, str> {
+    sanitize_terminal_text_with_break(text, '\n')
+}
+
+pub(crate) fn sanitize_terminal_text_inline(text: &str) -> Cow<'_, str> {
+    sanitize_terminal_text_with_break(text, ' ')
+}
+
+fn sanitize_terminal_text_with_break(text: &str, line_break: char) -> Cow<'_, str> {
+    let requires_sanitization = text.chars().any(|character| {
+        character == '\r'
+            || character == '\t'
+            || character.is_control() && character != '\n'
+            || character == '\n' && line_break != '\n'
+    });
+    if !requires_sanitization {
+        return Cow::Borrowed(text);
+    }
+
+    let mut sanitized = String::with_capacity(text.len());
+    let mut characters = text.chars().peekable();
+    while let Some(character) = characters.next() {
+        match character {
+            '\r' => {
+                if characters.peek() == Some(&'\n') {
+                    characters.next();
+                }
+                sanitized.push(line_break);
+            }
+            '\n' => sanitized.push(line_break),
+            '\t' => sanitized.push_str("    "),
+            character if character.is_control() => sanitized.push('�'),
+            character => sanitized.push(character),
+        }
+    }
+    Cow::Owned(sanitized)
+}
+
+pub(crate) fn terminal_text_width(text: &str) -> usize {
+    text.graphemes(true)
+        .map(|grapheme| match grapheme {
+            "\t" => 4,
+            grapheme if grapheme.contains(char::is_control) => 1,
+            grapheme => grapheme.width(),
+        })
+        .sum()
 }
 
 pub(crate) fn format_duration(nanoseconds: u64) -> String {
@@ -83,6 +133,7 @@ pub(crate) fn shorten_home(path: &Path) -> String {
 mod tests {
     use super::{
         duration_display_tick, format_duration, format_turn_duration, normalize_line_endings,
+        sanitize_terminal_text, sanitize_terminal_text_inline, terminal_text_width,
     };
 
     #[test]
@@ -92,6 +143,14 @@ mod tests {
             normalize_line_endings("one\r\ntwo\rthree"),
             "one\ntwo\nthree"
         );
+    }
+
+    #[test]
+    fn terminal_text_has_safe_multiline_and_inline_projections() {
+        let text = "one\r\ntwo\tthree\u{1b}";
+        assert_eq!(sanitize_terminal_text(text), "one\ntwo    three�");
+        assert_eq!(sanitize_terminal_text_inline(text), "one two    three�");
+        assert_eq!(terminal_text_width("two\tthree\u{1b}"), 13);
     }
 
     #[test]
