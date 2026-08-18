@@ -144,6 +144,8 @@ pub(crate) enum ConfigError {
     UnsupportedRemoteMemoryPermissions { path: PathBuf },
     #[error("failed to serialize the effective configuration: {0}")]
     Serialize(#[source] toml::ser::Error),
+    #[error("memory.max_records is too large for the fixed per-record content limit")]
+    MemoryRecordCapacityTooLarge,
     #[error("MCP server `{name}` is already configured")]
     McpServerExists { name: String },
     #[error("MCP server `{name}` has an invalid URL: {source}")]

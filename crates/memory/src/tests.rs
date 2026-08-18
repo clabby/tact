@@ -146,9 +146,9 @@ async fn export_collector_honors_explicit_capacity() {
 #[tokio::test]
 async fn explicit_record_capacity_can_exceed_production_defaults() {
     let directory = tempfile::tempdir().unwrap();
-    let mut limits = MemoryLimits::PRODUCTION;
-    limits.records += 1;
-    limits.total_content_bytes = limits.records.saturating_mul(limits.content_bytes);
+    let limits = MemoryLimits::PRODUCTION
+        .try_with_record_capacity(MemoryLimits::PRODUCTION.records + 1)
+        .unwrap();
     let records = (1..=limits.records)
         .map(|id| {
             let id = i64::try_from(id).unwrap();
@@ -169,7 +169,7 @@ async fn explicit_record_capacity_can_exceed_production_defaults() {
         .iter()
         .map(|record| record.content.len())
         .sum::<usize>();
-    assert!(total_content_bytes > MemoryLimits::PRODUCTION.total_content_bytes);
+    assert!(total_content_bytes > 256 * 1_024);
     assert!(total_content_bytes <= limits.total_content_bytes);
     let store = ProductionMemoryStore::new(directory.path().join("memory.sqlite3"), limits);
 
