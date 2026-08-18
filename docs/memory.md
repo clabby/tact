@@ -328,14 +328,14 @@ server time and server-owned telemetry.
 | --- | ---: |
 | Record content | 1 KiB |
 | Rows | 512 |
-| Remote namespace total content | 256 KiB |
 | Local main database file | 4 MiB |
 | Scan results | 5 |
 
 The row default can be overridden for the global local corpus with `memory.max_records`. Its
 aggregate authored-content bound is derived from that count and the fixed 1 KiB per-record bound.
-Remote namespace capacity remains server-owned and is not changed by this client setting. The
-record-content, local database-file, and scan-result limits are not configurable.
+Remote namespace record capacity follows the same derivation but remains deployment-owned; the
+Cloudflare example configures it with `TACT_MEMORY_MAX_RECORDS`. The record-content, local
+database-file, and scan-result limits are not configurable by the Tact client.
 
 A store may prune expired unread probation records before rejecting a capacity-increasing mutation,
 but it does not evict active graduated records to make room. Mutations, telemetry updates, bound

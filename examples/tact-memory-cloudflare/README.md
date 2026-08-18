@@ -56,6 +56,13 @@ bearer_token = "replace-with-a-high-entropy-token"
 workspace_roots = ["/absolute/path/to/team/workspace"]
 ```
 
+## Namespace capacity
+
+`TACT_MEMORY_MAX_RECORDS` sets the positive record limit for each writer namespace and defaults to
+512. Each record remains limited to 1 KiB, so aggregate authored-content capacity is derived from
+the record count instead of configured separately. Changing the deployment limit does not delete
+existing records; inserts and full snapshot syncs fail when their result would exceed it.
+
 ## Retrieval limits
 
 Tact performs exact BM25 ranking over a bounded shared corpus inside the Worker.
@@ -63,9 +70,10 @@ Tact performs exact BM25 ranking over a bounded shared corpus inside the Worker.
 authored content loaded from D1 for one scan. The defaults permit 10,240 records and 5 MiB of
 content.
 
-Choose limits from observed corpus size and Worker CPU usage. When the corpus exceeds either
-bound, scans return a storage-capacity error. Export and mutation operations remain available so
-operators can reduce or migrate the corpus without editing D1 directly.
+These scan budgets are independent of per-namespace storage capacity. Choose them from observed
+shared-corpus size and Worker CPU usage. When the corpus exceeds either bound, scans return a
+storage-capacity error. Export and mutation operations remain available so operators can reduce or
+migrate the corpus without editing D1 directly.
 
 ## Read replication
 
