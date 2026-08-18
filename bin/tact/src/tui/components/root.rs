@@ -1646,7 +1646,7 @@ impl RootNode {
     }
 
     fn can_fork(&self) -> bool {
-        self.fork_available && self.in_flight_turns == 0 && !self.transcript.component().is_active()
+        self.fork_available
     }
 
     fn open_new_session(&mut self) -> ComponentUpdate<RootEffect> {
@@ -6160,102 +6160,17 @@ mod tests {
     }
 
     #[test]
-    fn fork_waits_for_worker_and_agent_turn_state_to_agree() {
-        let mut worker_before_started = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
-        worker_before_started.in_flight_turns = 1;
-        worker_before_started.update(RootEvent::WorkerTurnFinished {
-            terminal_expected: true,
-        });
-        assert!(
-            worker_before_started
-                .update(key(KeyCode::Char('t'), KeyModifiers::CONTROL))
-                .effects
-                .is_empty()
-        );
-        worker_before_started.update(RootEvent::Transcript(agent_record(
+    fn active_turn_can_fork_from_the_latest_safe_boundary() {
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        root.in_flight_turns = 1;
+        root.update(RootEvent::Transcript(agent_record(
             1,
             AgentEventKind::RunStarted,
             json!({}),
         )));
-        worker_before_started.update(RootEvent::Transcript(agent_record(
-            2,
-            AgentEventKind::RunCompleted,
-            json!({}),
-        )));
+
         assert_eq!(
-            worker_before_started
-                .update(key(KeyCode::Char('t'), KeyModifiers::CONTROL))
-                .effects,
-            [RootEffect::Fork]
-        );
-
-        let mut before_started = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
-        before_started.in_flight_turns = 1;
-
-        assert!(
-            before_started
-                .update(key(KeyCode::Char('t'), KeyModifiers::CONTROL))
-                .effects
-                .is_empty()
-        );
-
-        before_started.update(RootEvent::Transcript(agent_record(
-            1,
-            AgentEventKind::RunStarted,
-            json!({}),
-        )));
-        assert!(
-            before_started
-                .update(key(KeyCode::Char('t'), KeyModifiers::CONTROL))
-                .effects
-                .is_empty()
-        );
-        before_started.update(RootEvent::Transcript(agent_record(
-            2,
-            AgentEventKind::RunCompleted,
-            json!({}),
-        )));
-        assert!(
-            before_started
-                .update(key(KeyCode::Char('t'), KeyModifiers::CONTROL))
-                .effects
-                .is_empty()
-        );
-        before_started.update(RootEvent::WorkerTurnFinished {
-            terminal_expected: true,
-        });
-        assert_eq!(
-            before_started
-                .update(key(KeyCode::Char('t'), KeyModifiers::CONTROL))
-                .effects,
-            [RootEffect::Fork]
-        );
-
-        let mut before_terminal = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
-        before_terminal.in_flight_turns = 1;
-        before_terminal.update(RootEvent::Transcript(agent_record(
-            1,
-            AgentEventKind::RunStarted,
-            json!({}),
-        )));
-        before_terminal.update(RootEvent::WorkerTurnFinished {
-            terminal_expected: true,
-        });
-
-        assert!(
-            before_terminal
-                .update(key(KeyCode::Char('t'), KeyModifiers::CONTROL))
-                .effects
-                .is_empty()
-        );
-        before_terminal.update(RootEvent::Transcript(agent_record(
-            2,
-            AgentEventKind::RunCompleted,
-            json!({}),
-        )));
-        assert_eq!(
-            before_terminal
-                .update(key(KeyCode::Char('t'), KeyModifiers::CONTROL))
+            root.update(key(KeyCode::Char('t'), KeyModifiers::CONTROL))
                 .effects,
             [RootEffect::Fork]
         );

@@ -229,6 +229,7 @@ impl TranscriptModel {
         let changed = match record.kind() {
             "session.started" => self.decode_local::<SessionStarted>(record).map(|payload| {
                 if let Some(session_id) = payload.parent_session_id {
+                    *self = self.fork_snapshot();
                     self.push(EntryKind::ForkedFrom { session_id });
                 }
             }),

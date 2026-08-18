@@ -267,10 +267,6 @@ impl Transcript {
         snapshot
     }
 
-    pub(crate) const fn is_active(&self) -> bool {
-        self.model.is_active()
-    }
-
     pub(crate) const fn set_effort(&mut self, effort: ReasoningEffort) {
         self.effort = effort;
     }
@@ -1907,6 +1903,27 @@ mod tests {
         )
     }
 
+    fn fork_started(sequence: u64, parent_sequence: u64) -> Arc<TranscriptRecord> {
+        Arc::new(
+            TranscriptRecord::from_local(
+                sequence,
+                sequence,
+                LocalEvent::SessionStarted(SessionStarted {
+                    session_id: "fork".to_owned(),
+                    parent_session_id: Some("parent".to_owned()),
+                    parent_sequence: Some(parent_sequence),
+                    model: Model::Luna.to_string(),
+                    effort: ReasoningEffort::Medium,
+                    reasoning_mode: ReasoningMode::Standard,
+                    fast_mode: false,
+                    workspace: "/work".into(),
+                    application_version: "test".to_owned(),
+                }),
+            )
+            .unwrap(),
+        )
+    }
+
     fn agent(sequence: u64, kind: AgentEventKind) -> Arc<TranscriptRecord> {
         agent_with_payload(sequence, kind, json!({}))
     }
@@ -2038,24 +2055,7 @@ mod tests {
     #[test]
     fn fork_start_renders_its_parent_session_boundary() {
         let mut transcript = Transcript::new();
-        transcript.update(TranscriptEvent::Record(Arc::new(
-            TranscriptRecord::from_local(
-                1,
-                1,
-                LocalEvent::SessionStarted(SessionStarted {
-                    session_id: "fork".to_owned(),
-                    parent_session_id: Some("parent".to_owned()),
-                    parent_sequence: Some(0),
-                    model: Model::Luna.to_string(),
-                    effort: ReasoningEffort::Medium,
-                    reasoning_mode: ReasoningMode::Standard,
-                    fast_mode: false,
-                    workspace: "/work".into(),
-                    application_version: "test".to_owned(),
-                }),
-            )
-            .unwrap(),
-        )));
+        transcript.update(TranscriptEvent::Record(fork_started(1, 0)));
 
         let backend = render(&mut transcript, 40, 3);
         let output = backend
@@ -2066,6 +2066,29 @@ mod tests {
             .collect::<String>();
 
         assert!(output.contains("Forked from @@parent"));
+    }
+
+    #[test]
+    fn fork_start_discards_the_active_parent_turn() {
+        let mut transcript = Transcript::new();
+        transcript.update(TranscriptEvent::Record(user(1, "completed")));
+        transcript.update(TranscriptEvent::Record(user(2, "still running")));
+        transcript.update(TranscriptEvent::Record(agent(
+            3,
+            AgentEventKind::RunStarted,
+        )));
+        transcript.update(TranscriptEvent::Record(fork_started(4, 3)));
+
+        assert!(!transcript.model.is_active());
+        assert_eq!(transcript.model.entries().len(), 2);
+        assert!(matches!(
+            &transcript.model.entries()[0].kind,
+            EntryKind::User { text } if text == "completed"
+        ));
+        assert!(matches!(
+            &transcript.model.entries()[1].kind,
+            EntryKind::ForkedFrom { session_id } if session_id == "parent"
+        ));
     }
 
     #[test]
