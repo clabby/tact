@@ -561,6 +561,7 @@ pub(crate) async fn run(
     root.set_reasoning_modes(reasoning_mode, preferred_reasoning_mode);
     root.set_fast_mode(initial_fast_mode);
     root.set_max_subagents(initial_max_subagents);
+    root.set_paste_display(config.composer().paste_display());
     let mut memory_store = crate::core::configured_memory_store(&config, &workspace)?;
     root.set_memory_enabled(memory_store.is_some());
     if let Some(projection) = restored_projection {
@@ -2008,8 +2009,7 @@ fn apply_pane_effect(
                         .root(pane)
                         .expect("editor pane must exist")
                         .composer()
-                        .draft()
-                        .to_owned(),
+                        .editor_text(),
                 },
                 components::RootEffect::OpenQueueEditor { id, text } => {
                     EditorTarget::Queue { pane, id, text }
@@ -2158,6 +2158,7 @@ fn apply_pane_effect(
                 let (config, workspace_changed) = reload.into_parts();
                 let theme = config.theme().clone();
                 let max_subagents = config.agent().max_subagents();
+                let paste_display = config.composer().paste_display();
                 let preferred_reasoning_mode = config.agent().reasoning_mode();
                 let memory_enabled = config.memory().enabled();
                 let selected_memory_store =
@@ -2177,6 +2178,7 @@ fn apply_pane_effect(
                 invalidate_memory_generations(context.memory_generations);
                 *context.memory_store = selected_memory_store;
                 context.app.set_max_subagents(max_subagents);
+                context.app.set_paste_display(paste_display);
                 for runtime in context.panes.values() {
                     runtime.subagent_control.set_max_concurrency(max_subagents);
                 }

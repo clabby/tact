@@ -26,7 +26,7 @@ use super::{
     transcript::{ScrollCommand, Transcript, TranscriptEvent},
 };
 use crate::{
-    app::config::{ReasoningEffort, ReasoningMode},
+    app::config::{PasteDisplay, ReasoningEffort, ReasoningMode},
     core::extensions::Skill,
     tui::{
         context::ContextDiagnostics,
@@ -403,6 +403,7 @@ impl RootNode {
             self.preferred_reasoning_mode,
         );
         root.set_max_subagents(self.subagents.max_subagents());
+        root.set_paste_display(self.composer.component().paste_display());
         root.thread = ThreadState::Started;
         root.fork_available = false;
         root.set_skills(Arc::clone(&self.skills));
@@ -481,6 +482,13 @@ impl RootNode {
         self.subagents.set_max_subagents(limit);
     }
 
+    pub(crate) fn set_paste_display(&mut self, display: PasteDisplay) {
+        let _ = self
+            .composer
+            .component_mut()
+            .update(ComposerEvent::SetPasteDisplay(display));
+    }
+
     pub(crate) fn reset_session(
         &mut self,
         workspace: &Path,
@@ -500,6 +508,7 @@ impl RootNode {
         let memory_enabled = self.memory_enabled;
         let theme_mode = self.theme_mode;
         let max_subagents = self.subagents.max_subagents();
+        let paste_display = self.composer.component().paste_display();
         *self = Self::new(workspace, thinking);
         self.set_reasoning_modes(reasoning_mode, preferred_reasoning_mode);
         self.discarded_draft = discarded_draft;
@@ -507,6 +516,7 @@ impl RootNode {
         self.memory_enabled = memory_enabled;
         self.theme_mode = theme_mode;
         self.set_max_subagents(max_subagents);
+        self.set_paste_display(paste_display);
         if let Some(draft) = preserved_draft {
             self.composer.component_mut().restore_draft(draft);
         }
@@ -1039,6 +1049,16 @@ impl RootNode {
         let position = Position::new(mouse.column, mouse.row);
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
+                if self.composer_content_area.contains(position)
+                    && self
+                        .composer
+                        .component_mut()
+                        .expand_paste_at(position, self.composer_content_area)
+                {
+                    self.selection.clear();
+                    self.selection_auto_scroll = None;
+                    return Some(ComponentUpdate::render(RenderRequest::Immediate));
+                }
                 let (surface, span) = self.selection_span_at(position)?;
                 self.selection.begin(surface, span);
                 self.selection_auto_scroll = None;
@@ -3755,6 +3775,28 @@ mod tests {
         let rendered = render_root_text(&mut root, 90, 20);
         assert!(rendered.contains("$autofix"));
         assert!(rendered.contains("Review and repair a pull request until clean."));
+    }
+
+    #[test]
+    fn mention_triggers_use_whitespace_at_the_end_of_collapsed_pastes() {
+        let pasted = format!("{} ", "x".repeat(999));
+        let workspace = tempfile::tempdir().unwrap();
+        let mut files = RootNode::new(workspace.path(), ReasoningEffort::Medium);
+        files.update(RootEvent::Terminal(Event::Paste(pasted.clone())));
+
+        files.update(key(KeyCode::Char('@'), KeyModifiers::NONE));
+
+        assert!(matches!(&files.overlay, Some(Overlay::FileFinder(_))));
+        assert_eq!(files.composer().draft(), "[paste · 1000 chars]@");
+
+        let mut skills = RootNode::new(workspace.path(), ReasoningEffort::Medium);
+        skills.set_skills(vec![Skill::new("autofix", "Repair a pull request.")].into());
+        skills.update(RootEvent::Terminal(Event::Paste(pasted)));
+
+        skills.update(key(KeyCode::Char('$'), KeyModifiers::NONE));
+
+        assert!(matches!(&skills.overlay, Some(Overlay::Skills(_))));
+        assert_eq!(skills.composer().draft(), "[paste · 1000 chars]$");
     }
 
     #[test]

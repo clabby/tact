@@ -680,6 +680,15 @@ impl AppNode {
         }
     }
 
+    pub(crate) fn set_paste_display(&mut self, display: crate::app::config::PasteDisplay) {
+        if let Some((_, main)) = &mut self.main {
+            main.component_mut().set_paste_display(display);
+        }
+        if let Some((_, fork)) = &mut self.fork {
+            fork.component_mut().set_paste_display(display);
+        }
+    }
+
     pub(crate) fn set_preferred_reasoning_mode(&mut self, mode: ReasoningMode) {
         if let Some((_, main)) = &mut self.main {
             main.component_mut().set_preferred_reasoning_mode(mode);

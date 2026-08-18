@@ -150,6 +150,9 @@ enabled = false
 enabled = true
 allow_luna = true
 
+[composer]
+paste_display = "auto" # auto or inline
+
 [theme]
 mode = "auto" # auto, light, or dark
 
