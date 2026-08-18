@@ -12,7 +12,10 @@ use crate::{
     app::config::{ReasoningEffort, ReasoningMode},
     tui::{
         context::MODEL_WINDOW_TOKENS,
-        format::{format_turn_duration, normalize_line_endings, shorten_home},
+        format::{
+            format_turn_duration, normalize_line_endings, sanitize_terminal_text, shorten_home,
+            terminal_text_width,
+        },
         prompt::Submission,
         theme::Theme,
     },
@@ -1477,10 +1480,11 @@ fn render_draft_line(
     width: usize,
     theme: &Theme,
 ) {
+    let rendered = sanitize_terminal_text(&draft[range.clone()]);
     buffer.set_stringn(
         position.x,
         position.y,
-        &draft[range.clone()],
+        rendered,
         width,
         Style::default().fg(theme.text()),
     );
@@ -1490,7 +1494,7 @@ fn render_draft_line(
         if start >= end {
             continue;
         }
-        let offset = draft[range.start..start].width();
+        let offset = terminal_text_width(&draft[range.start..start]);
         buffer.set_stringn(
             position
                 .x
@@ -1525,8 +1529,8 @@ fn render_selection(
     let Some(text) = draft.get(start..end) else {
         return;
     };
-    let offset = prefix.width();
-    let selected_width = text.width().min(width.saturating_sub(offset));
+    let offset = terminal_text_width(prefix);
+    let selected_width = terminal_text_width(text).min(width.saturating_sub(offset));
     if selected_width == 0 {
         return;
     }
@@ -1953,6 +1957,20 @@ mod tests {
         composer.update(ComposerEvent::ReplaceDraft("edited\r\ndraft".to_owned()));
         assert_eq!(composer.draft(), "edited\ndraft");
         assert_eq!(composer.cursor(), composer.draft().len());
+    }
+
+    #[test]
+    fn pasted_controls_are_visible_without_changing_the_submission() {
+        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let pasted = "one\ttwo\u{1b}three";
+        composer.update(ComposerEvent::Terminal(Event::Paste(pasted.to_owned())));
+
+        let terminal = render(&mut composer, 40, 5);
+        assert!(rows(&terminal)[1].contains("one    two�three"));
+        assert_eq!(terminal.backend().cursor_position(), Position::new(17, 1));
+
+        let submission = composer.take_submission().unwrap();
+        assert_eq!(submission.display_text(), pasted);
     }
 
     #[test]

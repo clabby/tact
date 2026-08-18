@@ -4,7 +4,7 @@ use super::{
     node::{Component, ComponentUpdate, RenderRequest},
     waved_text::WavedText,
 };
-use crate::tui::{prompt::Submission, theme::Theme};
+use crate::tui::{format::sanitize_terminal_text_inline, prompt::Submission, theme::Theme};
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::{
     Frame,
@@ -517,11 +517,7 @@ impl Component for MessageQueue {
 }
 
 fn truncate(text: &str, width: usize) -> Cow<'_, str> {
-    let text = if text.contains(['\n', '\r']) {
-        Cow::Owned(text.replace(['\n', '\r'], " "))
-    } else {
-        Cow::Borrowed(text)
-    };
+    let text = sanitize_terminal_text_inline(text);
     if UnicodeWidthStr::width(text.as_ref()) <= width {
         return text;
     }
@@ -614,6 +610,23 @@ mod tests {
         assert!(rows[1].contains("priority"));
         assert!(rows[3].contains("first"));
         assert!(rows[5].contains("last"));
+    }
+
+    #[test]
+    fn queued_controls_are_visible_without_changing_the_submission() {
+        let mut queue = MessageQueue::default();
+        let prompt = "one\ttwo\u{1b}three\nnext";
+        queue.push(prompt.to_owned());
+
+        let rows = rendered_rows(&mut queue, 40, 3);
+        assert!(rows[1].contains("one    two�three next"));
+
+        let update = queue.update(key(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(
+            update.effects.as_slice(),
+            [QueueEffect::Steer { prompt: submission, .. }]
+                if submission.display_text() == prompt
+        ));
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use crate::tui::theme::Theme;
+use crate::tui::{format::sanitize_terminal_text, theme::Theme};
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use ratatui::{
     style::{Modifier, Style},
@@ -125,16 +125,7 @@ fn wrap_plain_with_whitespace(
 }
 
 pub(super) fn sanitize(text: &str) -> String {
-    let mut sanitized = String::with_capacity(text.len());
-    for character in text.chars() {
-        match character {
-            '\n' => sanitized.push('\n'),
-            '\t' => sanitized.push_str("    "),
-            character if character.is_control() => sanitized.push('�'),
-            character => sanitized.push(character),
-        }
-    }
-    sanitized
+    sanitize_terminal_text(text).into_owned()
 }
 
 struct Renderer<'a> {

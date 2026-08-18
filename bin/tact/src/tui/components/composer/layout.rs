@@ -1,8 +1,8 @@
 //! Grapheme-aware soft and hard wrapping for the composer.
 
+use crate::tui::format::terminal_text_width;
 use std::ops::Range;
 use unicode_segmentation::UnicodeSegmentation;
-use unicode_width::UnicodeWidthStr;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct VisualLine {
@@ -99,7 +99,7 @@ fn wrap_logical_line(
 
         for (offset, grapheme) in text[line_start..end].grapheme_indices(true) {
             let grapheme_start = line_start + offset;
-            let grapheme_width = grapheme.width();
+            let grapheme_width = terminal_text_width(grapheme);
             if candidate_end > line_start && used + grapheme_width > width {
                 break;
             }
@@ -132,7 +132,7 @@ fn wrap_logical_line(
         lines.push(VisualLine {
             start: line_start,
             end: line_end,
-            width: text[line_start..line_end].width(),
+            width: terminal_text_width(&text[line_start..line_end]),
         });
         line_start = line_end;
     }
@@ -141,7 +141,10 @@ fn wrap_logical_line(
 fn locate_cursor(text: &str, lines: &[VisualLine], cursor: usize) -> (usize, usize) {
     for (row, line) in lines.iter().enumerate() {
         if cursor < line.end || (line.start == line.end && cursor == line.start) {
-            return (row, text[line.start..cursor.min(line.end)].width());
+            return (
+                row,
+                terminal_text_width(&text[line.start..cursor.min(line.end)]),
+            );
         }
         if cursor == line.end {
             let next_starts_here = lines.get(row + 1).is_some_and(|next| next.start == cursor);
@@ -159,7 +162,7 @@ fn locate_cursor(text: &str, lines: &[VisualLine], cursor: usize) -> (usize, usi
 pub(super) fn byte_at_column(text: &str, line: &VisualLine, target: usize) -> usize {
     let mut column = 0;
     for (offset, grapheme) in text[line.start..line.end].grapheme_indices(true) {
-        let next = column + grapheme.width();
+        let next = column + terminal_text_width(grapheme);
         if next > target {
             return line.start + offset;
         }
@@ -172,7 +175,7 @@ pub(super) fn grapheme_at_column(text: &str, line: &VisualLine, target: usize) -
     let mut column = 0;
     for (offset, grapheme) in text[line.start..line.end].grapheme_indices(true) {
         let start = line.start + offset;
-        let next = column + grapheme.width();
+        let next = column + terminal_text_width(grapheme);
         if next > target {
             return start..start + grapheme.len();
         }

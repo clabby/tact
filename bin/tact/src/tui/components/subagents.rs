@@ -10,7 +10,7 @@ use super::{
 };
 use crate::{
     app::config::DEFAULT_MAX_SUBAGENTS,
-    tui::{theme::Theme, transcript::TranscriptRecord},
+    tui::{format::sanitize_terminal_text_inline, theme::Theme, transcript::TranscriptRecord},
 };
 use crossterm::event::{Event, KeyCode, KeyEventKind};
 use nanocodex::Model;
@@ -971,6 +971,7 @@ fn draw_world_string(
         return;
     }
 
+    let text = sanitize_terminal_text_inline(text);
     let mut x = screen_x;
     for grapheme in text.graphemes(true) {
         let width = i32::try_from(UnicodeWidthStr::width(grapheme)).unwrap_or(i32::MAX);
@@ -1023,6 +1024,8 @@ fn inset(area: Rect, horizontal: u16, vertical: u16) -> Rect {
 }
 
 fn truncate_with_ellipsis(text: &str, width: u16) -> String {
+    let text = sanitize_terminal_text_inline(text);
+    let text = text.as_ref();
     if UnicodeWidthStr::width(text) <= usize::from(width) {
         return text.to_owned();
     }
@@ -1252,6 +1255,23 @@ mod tests {
         assert_eq!(tree.effort, ReasoningEffort::High);
         assert_eq!(tree.active_count(), 1);
         assert!(tree.contains(AgentId::new(1)));
+    }
+
+    #[test]
+    fn tree_nodes_do_not_write_control_characters_to_terminal_cells() {
+        let mut tree = SubagentTree::new(ReasoningEffort::Medium);
+        let mut agent = descriptor();
+        agent.role = "re\u{1b}\tsearcher".to_owned();
+        tree.apply(AgentUpdate::Added(agent));
+
+        let backend = render_tree(&mut tree);
+        assert!(
+            backend
+                .buffer()
+                .content
+                .iter()
+                .all(|cell| { !cell.symbol().chars().any(char::is_control) })
+        );
     }
 
     #[test]
