@@ -8,6 +8,47 @@ test("the diff view owns its scrollable viewport", async () => {
   expect(diffViewRule).toMatch(/overflow:\s*auto/);
 });
 
+test("review search integrates with the virtualized review lifecycle", async () => {
+  const app = await Bun.file(new URL("app.ts", import.meta.url)).text();
+  const styles = await Bun.file(new URL("styles.css", import.meta.url)).text();
+  const shortcuts = app.slice(app.indexOf("handleSearchShortcut"), app.indexOf("constructor("));
+  const open = app.slice(
+    app.indexOf("private openSearch"),
+    app.indexOf("private closeSearch"),
+  );
+  const close = app.slice(
+    app.indexOf("private closeSearch"),
+    app.indexOf("private resetSearch"),
+  );
+  const search = app.slice(
+    app.indexOf("private bindSearch"),
+    app.indexOf("private bindEvents"),
+  );
+  const cleanup = app.slice(app.indexOf("cleanUp()"), app.indexOf("private installPage"));
+
+  expect(app).toContain('id="review-search" role="search" hidden');
+  expect(shortcuts.indexOf('dialog[open]')).toBeLessThan(shortcuts.indexOf('key === "f"'));
+  expect(search).toContain("event.isComposing");
+  expect(search).toContain("moveSearchTarget(");
+  expect(search).toContain("this.searchPaused = true");
+  expect(search).toContain("occurrenceIndex + 1");
+  expect(search).toContain("[data-mobile-panel=diff]:not(.active)");
+  expect(search).toContain("CSS.highlights.set");
+  expect(search).toContain("data-line-type");
+  expect(open).not.toContain("this.revealSearchMatch()");
+  expect(close).not.toContain("this.searchMatch = undefined");
+  expect(app).toContain("deepActiveElement(document)");
+  expect(search).toContain('this.root.querySelector<HTMLElement>("#diff-view")');
+  expect(app).toContain("context.item.id === this.searchMatch?.itemId");
+  expect(app).toContain('phase === "unmount" ? null : node.shadowRoot');
+  expect(app).toContain("onSelectedLinesChange");
+  expect(app).toContain("if (this.searchIsOpen()) this.searchSelection = null");
+  expect(app.match(/this\.viewer\?\.clearSelectedLines\(\)/g)).toHaveLength(1);
+  expect(app).toContain('document.removeEventListener("keydown", this.handleSearchShortcut)');
+  expect(cleanup.indexOf("viewer?.cleanUp()")).toBeLessThan(cleanup.indexOf("CSS.highlights?.delete"));
+  expect(styles).toMatch(/\.review-search\s*{[^}]*position:\s*absolute/s);
+});
+
 test("new changes appear before the range selector", async () => {
   const app = await Bun.file(new URL("app.ts", import.meta.url)).text();
 
