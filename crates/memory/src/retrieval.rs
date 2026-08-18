@@ -184,7 +184,7 @@ fn split_camel_case(identifier: &str) -> Vec<&str> {
     components
 }
 
-fn preview(content: &str) -> String {
+pub(crate) fn preview(content: &str) -> String {
     if content.len() <= PREVIEW_MAX_BYTES {
         return content.to_owned();
     }

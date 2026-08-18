@@ -420,7 +420,7 @@ impl RemoteMemoryClient {
             let ordered = previous.as_ref().is_none_or(|previous| {
                 (namespace, memory.key.id) > (previous.namespace.as_str(), previous.id)
             });
-            if !Self::valid_record(memory) || !selected || !ordered {
+            if !Self::valid_record_structure(memory) || !selected || !ordered {
                 return Err(RemoteClientError::InvalidResponse);
             }
 
@@ -468,13 +468,17 @@ impl RemoteMemoryClient {
     }
 
     fn valid_record(memory: &MemoryRecord) -> bool {
+        Self::valid_record_structure(memory)
+            && !crate::secrets::contains_likely_secret(&memory.content)
+    }
+
+    fn valid_record_structure(memory: &MemoryRecord) -> bool {
         Self::valid_key(&memory.key)
             && memory.key.namespace.is_some()
             && !memory.content.trim().is_empty()
             && memory.content.len() <= MemoryLimits::PRODUCTION.content_bytes
             && memory.created_at_ms >= 0
             && memory.updated_at_ms >= memory.created_at_ms
-            && !crate::secrets::contains_likely_secret(&memory.content)
     }
 
     async fn get<Response>(&self, path: &str, replay: Replay) -> Result<Response, RemoteClientError>
@@ -643,7 +647,12 @@ impl MemoryStore for RemoteMemoryClient {
                 return Err(RemoteClientError::InvalidResponse.into());
             }
             Self::validate_export_page(namespaces.as_deref(), cursor.as_ref(), 0, 0, &response)?;
-            Ok((response.memories, response.next_cursor))
+            let memories = response
+                .memories
+                .into_iter()
+                .filter(Self::valid_record)
+                .collect();
+            Ok((memories, response.next_cursor))
         }
     }
 }
@@ -833,6 +842,17 @@ mod tests {
             0,
             &response(vec![memory("alpha", 1, "one")], Some(("alpha", 2))),
         )));
+    }
+
+    #[test]
+    fn export_page_validates_cursor_before_suppressing_secret_like_content() {
+        let page = response(
+            vec![memory("alpha", 1, "password=hunter2")],
+            Some(("alpha", 1)),
+        );
+
+        assert!(RemoteMemoryClient::validate_export_page(None, None, 0, 0, &page).is_ok());
+        assert!(!RemoteMemoryClient::valid_record(&page.memories[0]));
     }
 
     #[test]

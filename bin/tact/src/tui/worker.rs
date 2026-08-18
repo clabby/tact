@@ -229,6 +229,19 @@ const REFLECTION_PROMPT: &str = concat!(
     "or add one atomic memory, add a concise always-on prompt rule only when repeated retrieval ",
     "misses justify it, or make no change when the lesson is transient, searchable, or already ",
     "covered.\n\n",
+    "Ordinary reflection remains session-first and uses targeted memory retrieval. Only when the ",
+    "additional instructions explicitly ask to audit, inspect, or clean up the memory corpus, use ",
+    "the memory `inspect` operation to enumerate its fixed-size pages. Continue with each exact ",
+    "`next_cursor` issued by the preceding call until coverage is complete or a tool/output bound ",
+    "stops the audit. Treat pagination ",
+    "as best-effort under concurrent changes, not as one coherent snapshot. Compare full records with ",
+    "targeted `read` calls as needed to identify duplicates, stale or oversized records, low-value ",
+    "records, and records whose overlap may conflict during retrieval. Before recommending a change, ",
+    "run a narrow scan for the proposed conclusion and read every plausible match. Keep remote `ours` ",
+    "and `theirs` ownership distinct. Report exact keys and versions, backend and namespace scope, ",
+    "pages and records covered, truncation, secret-suppression limits, and uncertainty from concurrent ",
+    "changes or incomplete coverage. Do not inspect the corpus merely because ordinary reflection ",
+    "found a possible memory lesson.\n\n",
     "This is a read-only analysis turn. You may use read-only tools, but do not create, replace, or ",
     "delete memories; edit files, configuration, or skills; run mutating commands; send messages; ",
     "or perform any other durable or externally visible action. Proposed changes require a later, ",
@@ -1123,6 +1136,12 @@ mod tests {
         assert!(!text.contains("sqlite3"));
         assert!(!text.contains("session_database"));
         assert!(text.contains("global-memory scans"));
+        assert!(text.contains("explicitly ask to audit, inspect, or clean up"));
+        assert!(text.contains("memory `inspect` operation"));
+        assert!(text.contains("not as one coherent snapshot"));
+        assert!(text.contains("exact keys and versions"));
+        assert!(text.contains("Keep remote `ours` and `theirs` ownership distinct"));
+        assert!(text.contains("Do not inspect the corpus merely because ordinary reflection"));
         assert!(text.contains("config show"));
         assert!(text.contains("read-only analysis turn"));
         assert!(text.contains("do not create, replace, or delete memories"));

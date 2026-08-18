@@ -80,6 +80,7 @@ Local and remote modes expose the same memory operations and meanings:
 | --- | --- |
 | `scan` | Search the selected backend. Local scans populate `ours`; remote scans make separate requests returning up to five `ours` and five `theirs` candidates. |
 | `read` | Fetch complete records by exact current key. Missing or stale keys are omitted. |
+| `inspect` | Page through compact audit cards only for an explicitly requested corpus inspection. Inspection does not change scan/read telemetry. |
 | `put` | Add one atomic conclusion, or replace a known record using its key and expected version. |
 | `delete` | Remove a known record using its key and expected version. |
 | `list` | List records without changing scan or read telemetry. |
@@ -92,7 +93,7 @@ The agent tool uses one exact key shape throughout. Pass scan candidate keys unc
 {"operation":"delete","key":{"namespace":"alice","id":7,"version":1}}
 ```
 
-Root agents may mutate; child agents may only scan and read. Reader credentials make remote
+Root agents may mutate; child agents may only scan, inspect, and read. Reader credentials make remote
 mutation unavailable regardless of agent role. Remote operations include the caller's namespace:
 an author can scan, read, and list their own remote records as well as records from other authors.
 Scan keeps those sources explicit: `ours` contains one response scoped to the authenticated
@@ -102,6 +103,17 @@ the other out and their corpus-relative scores are not comparable. If either req
 returns an error rather than a partial result or a local fallback. The agent decides which records to
 read and apply. Normalized duplicate content may exist in separate namespaces because ownership
 remains per author.
+
+Agent-facing `inspect` is a read-only audit surface, not a transfer API. It fixes each page at 20
+records and exposes no page-size or namespace-selection controls. Each compact card includes the
+exact namespaced key, a 64-byte preview, content size, timestamps, and scan/read telemetry; use
+targeted `read` calls when full content is needed. Remote pages preserve `ours` and `theirs` groups.
+Continue only with the exact cursor issued by the immediately preceding `inspect` call; invented,
+skipped, reused, or stale cursors are rejected. Omit the cursor to start or restart an audit.
+`coverage.complete` and `next_cursor` report whether
+more pages were visible. Secret-like records remain suppressed. Pagination is best-effort under
+concurrent changes and does not claim one coherent snapshot. Calling `inspect` does not satisfy the
+scan-before-put requirement.
 
 The remote API is an authenticated JSON/HTTP interface. Its protocol generation is
 `tact_memory::VERSION`; routes and the session compatibility check use that same value:

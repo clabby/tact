@@ -113,8 +113,9 @@ pub trait MemoryStore: Clone + Send + Sync + 'static {
 
     /// Collects a complete bounded export through the paginated storage contract.
     ///
-    /// The collector rejects non-progressing cursors and stops before retaining more records or
-    /// content than a local store can import.
+    /// The collector follows progressing pages even when client policy filters every record from a
+    /// page. It bounds page requests, rejects non-progressing cursors, and stops before retaining
+    /// more records or content than a local store can import.
     fn export_all(
         &self,
         namespaces: Option<&[String]>,
@@ -123,7 +124,14 @@ pub trait MemoryStore: Clone + Send + Sync + 'static {
             let mut cursor = None;
             let mut records = Vec::new();
             let mut content_bytes = 0usize;
+            let mut page_requests = 0usize;
             loop {
+                page_requests = page_requests
+                    .checked_add(1)
+                    .ok_or(MemoryError::InvalidPagination)?;
+                if page_requests > MemoryLimits::PRODUCTION.records.saturating_add(1) {
+                    return Err(MemoryError::InvalidPagination);
+                }
                 let (page, next_cursor) = self
                     .export_page(
                         namespaces,
@@ -143,10 +151,13 @@ pub trait MemoryStore: Clone + Send + Sync + 'static {
                     .ok_or(MemoryError::InvalidPagination)?;
                 if next_record_count > MemoryLimits::PRODUCTION.records
                     || content_bytes > MemoryLimits::PRODUCTION.total_content_bytes
-                    || next_cursor
-                        .as_ref()
-                        .is_some_and(|next| cursor.as_ref() == Some(next))
-                    || (page.is_empty() && next_cursor.is_some())
+                    || next_cursor.as_ref().is_some_and(|next| {
+                        next.id <= 0
+                            || cursor.as_ref().is_some_and(|cursor| {
+                                (next.namespace.as_str(), next.id)
+                                    <= (cursor.namespace.as_str(), cursor.id)
+                            })
+                    })
                 {
                     return Err(MemoryError::InvalidPagination);
                 }
