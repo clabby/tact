@@ -191,7 +191,7 @@ impl MemoryStore for TestMemoryStore {
         prune_expired(&mut state, now_ms());
         Ok(visible_records(&state)
             .into_iter()
-            .take(MemoryLimits::PRODUCTION.records)
+            .take(protocol::MAX_LIST_RECORDS)
             .collect())
     }
 
@@ -855,12 +855,9 @@ async fn sync_rejects_duplicate_snapshot_ids_without_mutation() {
 
 #[tokio::test]
 async fn configured_namespace_capacity_governs_sync_and_export() {
-    let limits = MemoryLimits {
-        records: MemoryLimits::PRODUCTION.records + 1,
-        total_content_bytes: (MemoryLimits::PRODUCTION.records + 1)
-            * MemoryLimits::PRODUCTION.content_bytes,
-        ..MemoryLimits::PRODUCTION
-    };
+    let limits = MemoryLimits::PRODUCTION
+        .try_with_record_capacity(MemoryLimits::PRODUCTION.records + 1)
+        .unwrap();
     let app = memory_app_with_limits(
         vec![credential("alice", RemoteRole::Writer, ALICE_TOKEN)],
         limits,
@@ -1008,16 +1005,18 @@ async fn body_and_request_bounds_are_content_free_client_errors() {
         .await,
     ];
     let [query_error, content_error] = cases;
-    assert_error(
+    assert_error_with_maximum(
         query_error,
         StatusCode::PAYLOAD_TOO_LARGE,
         RemoteErrorCode::QueryTooLarge,
+        MemoryLimits::PRODUCTION.query_bytes,
     )
     .await;
-    assert_error(
+    assert_error_with_maximum(
         content_error,
         StatusCode::PAYLOAD_TOO_LARGE,
         RemoteErrorCode::ContentTooLarge,
+        MemoryLimits::PRODUCTION.content_bytes,
     )
     .await;
 
@@ -1064,7 +1063,7 @@ async fn body_and_request_bounds_are_content_free_client_errors() {
         ALICE_TOKEN,
         "alice",
         &ReadRequest {
-            ids: (1..=i64::try_from(MemoryLimits::PRODUCTION.records + 1).unwrap()).collect(),
+            ids: (1..=i64::try_from(protocol::MAX_READ_SELECTORS + 1).unwrap()).collect(),
             keys: Vec::new(),
         },
     )
@@ -1108,11 +1107,33 @@ async fn body_and_request_bounds_are_content_free_client_errors() {
 }
 
 async fn assert_error(response: Response<Body>, status: StatusCode, code: RemoteErrorCode) {
+    assert_error_response(response, status, code, None).await;
+}
+
+async fn assert_error_with_maximum(
+    response: Response<Body>,
+    status: StatusCode,
+    code: RemoteErrorCode,
+    maximum: usize,
+) {
+    assert_error_response(response, status, code, Some(maximum)).await;
+}
+
+async fn assert_error_response(
+    response: Response<Body>,
+    status: StatusCode,
+    code: RemoteErrorCode,
+    maximum: Option<usize>,
+) {
     assert_eq!(response.status(), status);
     let bytes = response_bytes(response).await;
     let decoded: ErrorResponse = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(decoded.code, code);
-    assert_eq!(bytes, serde_json::to_vec(&ErrorResponse { code }).unwrap());
+    assert_eq!(decoded.maximum, maximum);
+    assert_eq!(
+        bytes,
+        serde_json::to_vec(&ErrorResponse { code, maximum }).unwrap()
+    );
 }
 
 #[derive(Clone)]
@@ -1129,6 +1150,7 @@ async fn retrying_list(
             StatusCode::SERVICE_UNAVAILABLE,
             Json(ErrorResponse {
                 code: RemoteErrorCode::Unavailable,
+                maximum: None,
             }),
         )
             .into_response();
@@ -1180,6 +1202,7 @@ async fn unavailable_put(
         StatusCode::SERVICE_UNAVAILABLE,
         Json(ErrorResponse {
             code: RemoteErrorCode::Unavailable,
+            maximum: None,
         }),
     )
         .into_response()
@@ -1191,7 +1214,7 @@ async fn rate_limited() -> StatusCode {
 
 async fn oversized_list() -> Json<ListResponse> {
     Json(ListResponse {
-        memories: (1..=MemoryLimits::PRODUCTION.records + 1)
+        memories: (1..=protocol::MAX_LIST_RECORDS + 1)
             .map(|id| {
                 let mut memory = record(id as i64, 1, "visible");
                 memory.key = MemoryKey::remote("alice".to_owned(), id as i64, 1);
@@ -1337,7 +1360,8 @@ async fn client_retries_safe_operations_but_does_not_replay_put_responses() {
     assert!(matches!(
         source.downcast_ref::<RemoteClientError>(),
         Some(RemoteClientError::Rejected {
-            code: RemoteErrorCode::Unavailable
+            code: RemoteErrorCode::Unavailable,
+            maximum: None,
         })
     ));
     assert_eq!(state.put_calls.load(Ordering::SeqCst), 1);

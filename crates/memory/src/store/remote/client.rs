@@ -91,6 +91,8 @@ pub enum RemoteClientError {
     Rejected {
         /// Stable server failure category.
         code: RemoteErrorCode,
+        /// Applicable configured maximum supplied by the server.
+        maximum: Option<usize>,
     },
     /// Response violated bounds, ordering, or ownership constraints.
     #[error("remote memory server returned an invalid response")]
@@ -291,7 +293,7 @@ impl RemoteMemoryClient {
 
     async fn list(&self) -> Result<Vec<MemoryRecord>, RemoteClientError> {
         let response: ListResponse = self.post(protocol::LIST_PATH, &(), Replay::Safe).await?;
-        if response.memories.len() > MemoryLimits::PRODUCTION.records {
+        if response.memories.len() > protocol::MAX_LIST_RECORDS {
             return Err(RemoteClientError::InvalidResponse);
         }
         let mut seen = HashSet::new();
@@ -373,7 +375,7 @@ impl RemoteMemoryClient {
             .inserted
             .checked_add(report.replaced)
             .and_then(|count| count.checked_add(report.unchanged));
-        if applied != Some(memories.len()) || report.deleted > MemoryLimits::PRODUCTION.records {
+        if applied != Some(memories.len()) {
             return Err(RemoteClientError::InvalidResponse);
         }
         Ok(report)
@@ -382,20 +384,13 @@ impl RemoteMemoryClient {
     fn validate_export_page(
         namespaces: Option<&[String]>,
         cursor: Option<&protocol::ExportCursor>,
-        accumulated_records: usize,
-        accumulated_content_bytes: usize,
         response: &ExportResponse,
-    ) -> Result<usize, RemoteClientError> {
-        if response.memories.len() > protocol::MAX_EXPORT_PAGE_RECORDS
-            || accumulated_records
-                .checked_add(response.memories.len())
-                .is_none_or(|count| count > MemoryLimits::PRODUCTION.records)
-        {
+    ) -> Result<(), RemoteClientError> {
+        if response.memories.len() > protocol::MAX_EXPORT_PAGE_RECORDS {
             return Err(RemoteClientError::InvalidResponse);
         }
 
         let mut previous = cursor.cloned();
-        let mut page_content_bytes = 0usize;
         for memory in &response.memories {
             let Some(namespace) = memory.key.namespace.as_deref() else {
                 return Err(RemoteClientError::InvalidResponse);
@@ -406,16 +401,6 @@ impl RemoteMemoryClient {
                 (namespace, memory.key.id) > (previous.namespace.as_str(), previous.id)
             });
             if !Self::valid_record(memory) || !selected || !ordered {
-                return Err(RemoteClientError::InvalidResponse);
-            }
-
-            page_content_bytes = page_content_bytes
-                .checked_add(memory.content.len())
-                .ok_or(RemoteClientError::InvalidResponse)?;
-            if accumulated_content_bytes
-                .checked_add(page_content_bytes)
-                .is_none_or(|bytes| bytes > MemoryLimits::PRODUCTION.total_content_bytes)
-            {
                 return Err(RemoteClientError::InvalidResponse);
             }
             previous = Some(protocol::ExportCursor {
@@ -433,7 +418,7 @@ impl RemoteMemoryClient {
                 return Err(RemoteClientError::InvalidResponse);
             }
         }
-        Ok(page_content_bytes)
+        Ok(())
     }
 
     fn valid_key(key: &MemoryKey) -> bool {
@@ -619,7 +604,7 @@ impl MemoryStore for RemoteMemoryClient {
             if response.memories.len() > limit {
                 return Err(RemoteClientError::InvalidResponse.into());
             }
-            Self::validate_export_page(namespaces.as_deref(), cursor.as_ref(), 0, 0, &response)?;
+            Self::validate_export_page(namespaces.as_deref(), cursor.as_ref(), &response)?;
             Ok((response.memories, response.next_cursor))
         }
     }
@@ -675,10 +660,8 @@ fn bookmark_from_headers(
 
 async fn response_error(response: Response) -> RemoteClientError {
     let status = response.status();
-    let code = decode_response::<ErrorResponse>(response)
-        .await
-        .ok()
-        .map(|response| response.code);
+    let decoded = decode_response::<ErrorResponse>(response).await.ok();
+    let code = decoded.as_ref().map(|response| response.code);
     match (status, code) {
         (StatusCode::UNAUTHORIZED, _) | (_, Some(RemoteErrorCode::Unauthorized)) => {
             RemoteClientError::Unauthorized
@@ -690,7 +673,10 @@ async fn response_error(response: Response) -> RemoteClientError {
             RemoteClientError::ReadOnly
         }
         (_, Some(RemoteErrorCode::UnsupportedProtocol)) => RemoteClientError::IncompatibleProtocol,
-        (_, Some(code)) => RemoteClientError::Rejected { code },
+        (_, Some(code)) => RemoteClientError::Rejected {
+            code,
+            maximum: decoded.and_then(|response| response.maximum),
+        },
         (StatusCode::NOT_FOUND, None) => RemoteClientError::IncompatibleProtocol,
         (_, None) if status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS => {
             RemoteClientError::Unavailable
@@ -746,7 +732,7 @@ mod tests {
         }
     }
 
-    fn invalid(result: Result<usize, RemoteClientError>) -> bool {
+    fn invalid(result: Result<(), RemoteClientError>) -> bool {
         matches!(result, Err(RemoteClientError::InvalidResponse))
     }
 
@@ -769,6 +755,7 @@ mod tests {
         assert!(
             MemoryError::from(RemoteClientError::Rejected {
                 code: RemoteErrorCode::Unavailable,
+                maximum: None,
             })
             .is_retryable()
         );
@@ -776,8 +763,25 @@ mod tests {
         assert!(matches!(
             MemoryError::from(RemoteClientError::Rejected {
                 code: RemoteErrorCode::Conflict,
+                maximum: None,
             }),
             MemoryError::Conflict
+        ));
+        assert!(matches!(
+            MemoryError::from(RemoteClientError::Rejected {
+                code: RemoteErrorCode::ContentCapacity,
+                maximum: None,
+            }),
+            MemoryError::StorageCapacity
+        ));
+        assert!(matches!(
+            MemoryError::from(RemoteClientError::Rejected {
+                code: RemoteErrorCode::ContentCapacity,
+                maximum: Some(1_024),
+            }),
+            MemoryError::ContentCapacity {
+                maximum_bytes: 1_024
+            }
         ));
     }
 
@@ -785,29 +789,20 @@ mod tests {
     fn export_page_enforces_namespace_and_exact_cursor() {
         let selected = ["alpha".to_owned()];
 
-        assert_eq!(
-            RemoteMemoryClient::validate_export_page(
-                Some(&selected),
-                None,
-                0,
-                0,
-                &response(vec![memory("alpha", 1, "one")], Some(("alpha", 1))),
-            )
-            .expect("valid page"),
-            3
-        );
+        RemoteMemoryClient::validate_export_page(
+            Some(&selected),
+            None,
+            &response(vec![memory("alpha", 1, "one")], Some(("alpha", 1))),
+        )
+        .expect("valid page");
         assert!(invalid(RemoteMemoryClient::validate_export_page(
             Some(&selected),
             None,
-            0,
-            0,
             &response(vec![memory("beta", 1, "one")], None),
         )));
         assert!(invalid(RemoteMemoryClient::validate_export_page(
             Some(&selected),
             None,
-            0,
-            0,
             &response(vec![memory("alpha", 1, "one")], Some(("alpha", 2))),
         )));
     }
@@ -817,8 +812,6 @@ mod tests {
         assert!(invalid(RemoteMemoryClient::validate_export_page(
             None,
             None,
-            0,
-            0,
             &response(
                 vec![memory("alpha", 1, "one"), memory("alpha", 1, "two")],
                 None,
@@ -830,8 +823,6 @@ mod tests {
                 namespace: "beta".to_owned(),
                 id: 2,
             }),
-            2,
-            6,
             &response(vec![memory("alpha", 1, "one")], Some(("alpha", 1))),
         )));
     }
@@ -842,48 +833,26 @@ mod tests {
         let second = response(vec![memory("beta", 1, "two")], Some(("beta", 1)));
         let cycle = response(vec![memory("alpha", 1, "one")], Some(("alpha", 1)));
 
-        assert_eq!(
-            RemoteMemoryClient::validate_export_page(None, None, 0, 0, &first)
-                .expect("valid first page"),
-            3
-        );
-        assert_eq!(
-            RemoteMemoryClient::validate_export_page(
-                None,
-                first.next_cursor.as_ref(),
-                1,
-                3,
-                &second,
-            )
-            .expect("valid second page"),
-            3
-        );
+        RemoteMemoryClient::validate_export_page(None, None, &first).expect("valid first page");
+        RemoteMemoryClient::validate_export_page(None, first.next_cursor.as_ref(), &second)
+            .expect("valid second page");
         assert!(invalid(RemoteMemoryClient::validate_export_page(
             None,
             second.next_cursor.as_ref(),
-            2,
-            6,
             &cycle,
         )));
     }
 
     #[test]
-    fn export_page_rejects_aggregate_limits_before_accumulation() {
-        let page = response(vec![memory("alpha", 1, "x")], None);
+    fn export_page_rejects_more_than_the_protocol_page_bound() {
+        let memories = (1..=protocol::MAX_EXPORT_PAGE_RECORDS + 1)
+            .map(|id| memory("alpha", i64::try_from(id).unwrap(), "x"))
+            .collect();
 
         assert!(invalid(RemoteMemoryClient::validate_export_page(
             None,
             None,
-            MemoryLimits::PRODUCTION.records,
-            0,
-            &page,
-        )));
-        assert!(invalid(RemoteMemoryClient::validate_export_page(
-            None,
-            None,
-            0,
-            MemoryLimits::PRODUCTION.total_content_bytes,
-            &page,
+            &response(memories, None),
         )));
     }
 }

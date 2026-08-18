@@ -39,6 +39,7 @@ pub(crate) struct ScanBudget {
 pub(crate) struct CloudflareMemoryStore {
     session: Arc<D1DatabaseSession>,
     namespace: Arc<str>,
+    limits: MemoryLimits,
     scan_budget: ScanBudget,
 }
 
@@ -47,11 +48,13 @@ impl CloudflareMemoryStore {
     pub(crate) fn new(
         session: Arc<D1DatabaseSession>,
         namespace: String,
+        limits: MemoryLimits,
         scan_budget: ScanBudget,
     ) -> Self {
         Self {
             session,
             namespace: Arc::from(namespace),
+            limits,
             scan_budget,
         }
     }
@@ -183,7 +186,7 @@ impl MemoryStore for CloudflareMemoryStore {
             let now = current_time_ms().to_string();
             let sql = format!(
                 "SELECT {RECORD_COLUMNS} FROM memories WHERE {VISIBLE_RECORD_SQL} ORDER BY namespace, id LIMIT {}",
-                MemoryLimits::PRODUCTION.records
+                protocol::MAX_LIST_RECORDS
             );
             let results = store
                 .batch(vec![store.statement(sql, &[D1Type::Text(&now)])?])
@@ -245,7 +248,7 @@ impl MemoryStore for CloudflareMemoryStore {
         let store = self.clone();
         let memories = memories.to_vec();
         SendFuture::new(async move {
-            validate_snapshot(&memories)?;
+            validate_snapshot(&memories, store.limits)?;
             let payload = memories.iter().map(SyncRow::from).collect::<Vec<_>>();
             let json = serde_json::to_string(&payload).map_err(MessageError::backend)?;
             let now = current_time_ms().to_string();
@@ -327,7 +330,7 @@ impl MemoryStore for CloudflareMemoryStore {
 impl CloudflareMemoryStore {
     /// Inserts one record while atomically enforcing namespace capacity and deduplication.
     async fn insert(&self, content: String) -> Result<MemoryRecord, MemoryError> {
-        let limits = MemoryLimits::PRODUCTION;
+        let limits = self.limits;
         let now_ms = current_time_ms();
         let now = now_ms.to_string();
         let identity = normalize_identity(&content);
@@ -404,7 +407,7 @@ impl CloudflareMemoryStore {
 
     /// Replaces one record with optimistic concurrency and namespace capacity checks.
     async fn replace(&self, content: String, key: MemoryKey) -> Result<MemoryRecord, MemoryError> {
-        let limits = MemoryLimits::PRODUCTION;
+        let limits = self.limits;
         if key.version >= i64::MAX as u64 {
             return Err(MemoryError::Conflict);
         }
@@ -588,8 +591,7 @@ fn validate_content(content: &str) -> Result<(), MemoryError> {
     Ok(())
 }
 
-fn validate_snapshot(memories: &[MemoryRecord]) -> Result<(), MemoryError> {
-    let limits = MemoryLimits::PRODUCTION;
+fn validate_snapshot(memories: &[MemoryRecord], limits: MemoryLimits) -> Result<(), MemoryError> {
     if memories.len() > limits.records {
         return Err(MemoryError::RecordCapacity {
             maximum: limits.records,

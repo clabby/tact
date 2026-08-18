@@ -400,7 +400,7 @@ impl Config {
             })
             .collect::<Result<BTreeMap<_, _>>>()?;
         let skills = SkillsConfig::new(file.skills, config_dir, &environment);
-        let memory = MemoryConfig::new(file.memory, config_dir).map_err(ConfigError::from)?;
+        let memory = MemoryConfig::new(file.memory, config_dir)?;
         let codex_home = environment
             .codex_home
             .clone()
@@ -1054,15 +1054,16 @@ impl SkillsConfig {
 }
 
 impl MemoryConfig {
-    fn new(
-        file: MemoryConfigFile,
-        config_dir: &Path,
-    ) -> std::result::Result<Self, RemoteMemoryConfigError> {
+    fn new(file: MemoryConfigFile, config_dir: &Path) -> std::result::Result<Self, ConfigError> {
+        let max_records = file
+            .max_records
+            .map_or(MemoryLimits::PRODUCTION.records, NonZeroUsize::get);
+        MemoryLimits::PRODUCTION
+            .try_with_record_capacity(max_records)
+            .ok_or(ConfigError::MemoryRecordCapacityTooLarge)?;
         Ok(Self {
             enabled: file.enabled,
-            max_records: file
-                .max_records
-                .map_or(MemoryLimits::PRODUCTION.records, NonZeroUsize::get),
+            max_records,
             remote: RemoteMemoryConfig::new(file.remote, config_dir)?,
         })
     }
@@ -1073,13 +1074,9 @@ impl MemoryConfig {
 
     /// Returns local limits with aggregate content derived from the configured record count.
     pub(crate) fn limits(&self) -> MemoryLimits {
-        MemoryLimits {
-            records: self.max_records,
-            total_content_bytes: self
-                .max_records
-                .saturating_mul(MemoryLimits::PRODUCTION.content_bytes),
-            ..MemoryLimits::PRODUCTION
-        }
+        MemoryLimits::PRODUCTION
+            .try_with_record_capacity(self.max_records)
+            .expect("memory record capacity is validated during configuration loading")
     }
 
     pub(crate) const fn remote(&self) -> Option<&RemoteMemoryConfig> {
@@ -1747,6 +1744,20 @@ mod tests {
         let error = load_config("[memory]\nmax_records = 0\n").unwrap_err();
 
         assert!(matches!(error, Error::Config(ConfigError::Parse { .. })));
+    }
+
+    #[test]
+    fn local_memory_record_capacity_must_fit_aggregate_accounting() {
+        let first_overflowing_count = usize::MAX / MemoryLimits::PRODUCTION.content_bytes + 1;
+        let error = load_config(&format!(
+            "[memory]\nmax_records = {first_overflowing_count}\n"
+        ))
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            Error::Config(ConfigError::MemoryRecordCapacityTooLarge)
+        ));
     }
 
     #[test]

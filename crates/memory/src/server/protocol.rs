@@ -31,6 +31,12 @@ pub const SYNC_PATH: &str = concatcp!("v", crate::VERSION, "/memories/sync");
 pub const EXPORT_PATH: &str = concatcp!("v", crate::VERSION, "/memories/export");
 /// Maximum records returned by one export page.
 pub const MAX_EXPORT_PAGE_RECORDS: usize = 128;
+/// Maximum record selectors accepted by one read request.
+pub const MAX_READ_SELECTORS: usize = 512;
+/// Maximum records returned by the bounded interactive list operation.
+pub const MAX_LIST_RECORDS: usize = 512;
+/// Maximum namespaces selected explicitly by one export request.
+pub const MAX_EXPORT_NAMESPACES: usize = 512;
 
 /// Returns whether a namespace is non-empty, bounded, and URL/header safe.
 pub fn is_valid_namespace(namespace: &str) -> bool {
@@ -106,7 +112,7 @@ pub struct ReadResponse {
 /// Response containing a bounded deterministic window of visible records.
 #[derive(Debug, Deserialize, Serialize)]
 pub struct ListResponse {
-    /// At most [`crate::MemoryLimits::records`] records in deterministic store order.
+    /// At most [`MAX_LIST_RECORDS`] records in deterministic store order.
     pub memories: Vec<MemoryRecord>,
 }
 
@@ -228,4 +234,7 @@ pub enum RemoteErrorCode {
 pub struct ErrorResponse {
     /// Stable failure category.
     pub code: RemoteErrorCode,
+    /// Applicable configured maximum for a bounded operation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maximum: Option<usize>,
 }

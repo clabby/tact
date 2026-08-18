@@ -46,8 +46,8 @@ pub trait MemoryStore: Clone + Send + Sync + 'static {
 
     /// Lists a deterministic window that excludes expired probationary records.
     ///
-    /// Implementations return at most [`MemoryLimits::records`] records so interactive inspection
-    /// does not grow with the complete shared corpus. Full transfer uses paginated export instead.
+    /// Implementations bound this result so interactive inspection does not grow with the complete
+    /// shared corpus. Full transfer uses paginated export instead.
     fn list(&self) -> impl Future<Output = Result<Vec<MemoryRecord>, MemoryError>> + Send;
 
     /// Inserts content or compare-and-swap replaces `replacement`.
@@ -404,28 +404,29 @@ impl From<RemoteClientError> for MemoryError {
             RemoteClientError::ReadOnly | RemoteClientError::NamespaceMismatch => {
                 Self::RemoteReadOnly
             }
-            RemoteClientError::Rejected { code } => match code {
+            RemoteClientError::Rejected { code, maximum } => match code {
                 protocol::RemoteErrorCode::QueryTooLarge => Self::QueryTooLarge {
-                    maximum_bytes: MemoryLimits::PRODUCTION.query_bytes,
+                    maximum_bytes: maximum.unwrap_or(MemoryLimits::PRODUCTION.query_bytes),
                 },
                 protocol::RemoteErrorCode::ContentTooLarge => Self::ContentTooLarge {
-                    maximum_bytes: MemoryLimits::PRODUCTION.content_bytes,
+                    maximum_bytes: maximum.unwrap_or(MemoryLimits::PRODUCTION.content_bytes),
                 },
                 protocol::RemoteErrorCode::RecordCapacity => Self::RecordCapacity {
-                    maximum: MemoryLimits::PRODUCTION.records,
+                    maximum: maximum.unwrap_or(MemoryLimits::PRODUCTION.records),
                 },
-                protocol::RemoteErrorCode::ContentCapacity => Self::ContentCapacity {
-                    maximum_bytes: MemoryLimits::PRODUCTION.total_content_bytes,
-                },
+                protocol::RemoteErrorCode::ContentCapacity => maximum
+                    .map_or(Self::StorageCapacity, |maximum_bytes| {
+                        Self::ContentCapacity { maximum_bytes }
+                    }),
                 protocol::RemoteErrorCode::Duplicate => Self::Duplicate,
                 protocol::RemoteErrorCode::NotFound => Self::NotFound,
                 protocol::RemoteErrorCode::Conflict => Self::Conflict,
                 protocol::RemoteErrorCode::Forbidden
                 | protocol::RemoteErrorCode::NamespaceMismatch => Self::RemoteReadOnly,
                 protocol::RemoteErrorCode::Unavailable => {
-                    Self::unavailable(RemoteClientError::Rejected { code })
+                    Self::unavailable(RemoteClientError::Rejected { code, maximum })
                 }
-                _ => Self::backend(RemoteClientError::Rejected { code }),
+                _ => Self::backend(RemoteClientError::Rejected { code, maximum }),
             },
             error => Self::backend(error),
         }
