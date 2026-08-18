@@ -29,7 +29,14 @@ const LIST_KEYS: [&str; 5] = [
 const REMOTE_LIST_KEYS: [&str; 4] = [
     "↑↓ move",
     "enter inspect",
-    "ctrl+s sort",
+    "ctrl+s sort · ctrl+n namespaces",
+    "ctrl+r refresh · esc close",
+];
+const REMOTE_WRITABLE_LIST_KEYS: [&str; 5] = [
+    "↑↓ move",
+    "enter inspect",
+    "ctrl+s sort · ctrl+n namespaces",
+    "ctrl+d remove",
     "ctrl+r refresh · esc close",
 ];
 const DETAIL_KEYS: [&str; 3] = ["↑↓/pgup/pgdn scroll", "d delete", "r refresh · esc back"];
@@ -78,6 +85,7 @@ pub(super) struct MemoryBrowser {
     matches: Vec<usize>,
     selected_key: Option<MemoryKey>,
     sort: SortMode,
+    namespace_scope: NamespaceScope,
     state: BrowserState,
 }
 
@@ -87,6 +95,21 @@ enum SortMode {
     Newest,
     Oldest,
     LeastUseful,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NamespaceScope {
+    All,
+    Own,
+}
+
+impl NamespaceScope {
+    const fn next(self) -> Self {
+        match self {
+            Self::All => Self::Own,
+            Self::Own => Self::All,
+        }
+    }
 }
 
 impl SortMode {
@@ -181,6 +204,7 @@ impl MemoryBrowser {
             matches: Vec::new(),
             selected_key: None,
             sort: SortMode::MostUseful,
+            namespace_scope: NamespaceScope::All,
             state: BrowserState::Loading,
         }
     }
@@ -251,6 +275,9 @@ impl MemoryBrowser {
                 ComponentUpdate::render(RenderRequest::Immediate)
             }
             KeyCode::Char('s') if key.modifiers == KeyModifiers::CONTROL => self.cycle_sort(),
+            KeyCode::Char('n') if key.modifiers == KeyModifiers::CONTROL => {
+                self.cycle_namespace_scope()
+            }
             KeyCode::Char('r') if key.modifiers == KeyModifiers::CONTROL => self.refresh(),
             KeyCode::Char('d') if key.modifiers == KeyModifiers::CONTROL => {
                 self.confirm_selected(ReturnView::List)
@@ -423,12 +450,23 @@ impl MemoryBrowser {
         ComponentUpdate::render(RenderRequest::Immediate)
     }
 
+    fn cycle_namespace_scope(&mut self) -> ComponentUpdate<MemoryBrowserEffect> {
+        if !self.is_remote() {
+            return ComponentUpdate::none();
+        }
+        let fallback = self.selected_match_index().unwrap_or_default();
+        self.namespace_scope = self.namespace_scope.next();
+        self.rebuild_matches(fallback);
+        ComponentUpdate::render(RenderRequest::Immediate)
+    }
+
     fn rebuild_matches(&mut self, fallback: usize) {
         let query = self.query.to_lowercase();
         self.matches = self
             .records
             .iter()
             .enumerate()
+            .filter(|(_, record)| self.namespace_matches(record))
             .filter(|(_, record)| record_matches(record, &query))
             .map(|(index, _)| index)
             .collect();
@@ -486,6 +524,37 @@ impl MemoryBrowser {
             })
     }
 
+    fn is_remote(&self) -> bool {
+        self.access
+            .as_ref()
+            .is_some_and(|access| access.source == MemorySource::Remote)
+            || self.source == MemorySource::Remote
+    }
+
+    fn namespace_matches(&self, record: &MemoryRecord) -> bool {
+        self.namespace_scope == NamespaceScope::All
+            || !self.is_remote()
+            || self
+                .access
+                .as_ref()
+                .and_then(|access| access.namespace.as_deref())
+                .is_some_and(|namespace| record.key.namespace.as_deref() == Some(namespace))
+    }
+
+    fn namespace_scope_label(&self) -> Option<String> {
+        if !self.is_remote() {
+            return None;
+        }
+        Some(match self.namespace_scope {
+            NamespaceScope::All => "All namespaces".to_owned(),
+            NamespaceScope::Own => self
+                .access
+                .as_ref()
+                .and_then(|access| access.namespace.clone())
+                .unwrap_or_else(|| "Our namespace".to_owned()),
+        })
+    }
+
     fn context_label(&self) -> String {
         match self.access.as_ref() {
             Some(MemoryAccess {
@@ -509,14 +578,14 @@ impl MemoryBrowser {
                 ErrorAction::Load => &LOAD_ERROR_KEYS,
                 ErrorAction::Delete { .. } => &DELETE_ERROR_KEYS,
             },
-            BrowserState::List
-                if self
-                    .selected_key
-                    .as_ref()
-                    .is_some_and(|key| !self.can_delete(key)) =>
+            BrowserState::List if self.is_remote() => match self
+                .selected_key
+                .as_ref()
+                .is_some_and(|key| self.can_delete(key))
             {
-                &REMOTE_LIST_KEYS
-            }
+                true => &REMOTE_WRITABLE_LIST_KEYS,
+                false => &REMOTE_LIST_KEYS,
+            },
             BrowserState::List => &LIST_KEYS,
             BrowserState::Detail { key, .. } if self.can_delete(key) => &DETAIL_KEYS,
             BrowserState::Detail { .. } => &REMOTE_DETAIL_KEYS,
@@ -563,15 +632,20 @@ impl MemoryBrowser {
         if area.is_empty() {
             return;
         }
+        let scope = self
+            .namespace_scope_label()
+            .map_or_else(String::new, |scope| format!("  Namespaces: {scope}"));
         let sort = format!("  Sort: {}", self.sort.label());
         let query_width = usize::from(area.width)
             .saturating_sub(FILTER_LABEL.width())
+            .saturating_sub(scope.width())
             .saturating_sub(sort.width());
         let query = visible_tail(&self.query, query_width);
         frame.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled(FILTER_LABEL, Style::default().fg(theme.muted())),
                 Span::styled(query, Style::default().fg(theme.text())),
+                Span::styled(scope, Style::default().fg(theme.muted())),
                 Span::styled(sort, Style::default().fg(theme.muted())),
             ])),
             area,
@@ -594,7 +668,14 @@ impl MemoryBrowser {
             return;
         }
         if self.matches.is_empty() {
-            let message = format!(" No memories match “{}”.", self.query);
+            let message = if self.query.is_empty() {
+                format!(
+                    " No memories in {}.",
+                    self.namespace_scope_label().unwrap_or_default()
+                )
+            } else {
+                format!(" No memories match “{}”.", self.query)
+            };
             frame.render_widget(
                 Paragraph::new(fit_width(&message, usize::from(area.width)))
                     .style(Style::default().fg(theme.muted())),
@@ -1124,7 +1205,7 @@ fn place_word(word_width: usize, width: usize, lines: &mut usize, used: &mut usi
 mod tests {
     use super::{
         BrowserState, Component, MemoryBrowser, MemoryBrowserEffect, MemoryBrowserEvent,
-        ReturnView, SortMode,
+        NamespaceScope, ReturnView, SortMode,
     };
     use crate::tui::theme::Theme;
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -1305,13 +1386,13 @@ mod tests {
 
     #[test]
     fn lowercase_shortcut_letters_remain_available_to_the_filter() {
-        let mut browser = loaded(vec![record(1, 1, "factual preference")]);
+        let mut browser = loaded(vec![record(1, 1, "functional preference")]);
 
-        for character in "factual".chars() {
+        for character in "functional".chars() {
             browser.update(key(KeyCode::Char(character)));
         }
 
-        assert_eq!(browser.query, "factual");
+        assert_eq!(browser.query, "functional");
         assert_eq!(browser.matches, [0]);
         assert_eq!(
             browser
@@ -1361,6 +1442,41 @@ mod tests {
         let detail = render(&mut browser, 80, 20);
         assert!(detail.contains("alice"));
         assert!(browser.update(key(KeyCode::Char('d'))).effects.is_empty());
+    }
+
+    #[test]
+    fn remote_namespace_scope_toggles_between_all_and_authenticated_namespace() {
+        let mut browser = loaded_with_access(
+            remote_access("alice", RemoteRole::Writer),
+            vec![
+                remote_record("alice", 1, "owned invariant"),
+                remote_record("bob", 2, "shared convention"),
+            ],
+        );
+
+        assert_eq!(browser.namespace_scope, NamespaceScope::All);
+        assert_eq!(browser.matches.len(), 2);
+        let all = render(&mut browser, 100, 16);
+        assert!(all.contains("Namespaces: All namespaces"));
+        assert!(all.contains("owned invariant"));
+        assert!(all.contains("shared convention"));
+
+        browser.update(modified_key(KeyCode::Char('n'), KeyModifiers::CONTROL));
+
+        assert_eq!(browser.namespace_scope, NamespaceScope::Own);
+        assert_eq!(browser.matches.len(), 1);
+        assert_eq!(
+            browser.records[browser.matches[0]].key.namespace.as_deref(),
+            Some("alice")
+        );
+        let own = render(&mut browser, 100, 16);
+        assert!(own.contains("Namespaces: alice"));
+        assert!(own.contains("owned invariant"));
+        assert!(!own.contains("shared convention"));
+
+        browser.update(modified_key(KeyCode::Char('n'), KeyModifiers::CONTROL));
+        assert_eq!(browser.namespace_scope, NamespaceScope::All);
+        assert_eq!(browser.matches.len(), 2);
     }
 
     #[test]
