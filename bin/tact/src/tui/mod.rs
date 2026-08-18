@@ -2463,35 +2463,48 @@ fn apply_pane_effect(
     Ok(())
 }
 
-/// Copies text to tmux and through the platform's most reliable clipboard channel.
+/// Copies text through the clipboard channels available to Tact.
 ///
-/// Tmux paste buffers are loaded explicitly and forwarded to the outer terminal
-/// because tmux may ignore OSC 52 from pane applications. On Linux the terminal leads
-/// because it retains clipboard ownership after Tact exits. On macOS the native
-/// pasteboard leads because it does not depend on OSC 52 support. Each platform falls
-/// back to the other channel.
+/// On non-macOS and remote macOS sessions, Tact first tries the tmux server that
+/// directly contains it. `load-buffer -w` asks that server to forward the selection
+/// to its terminal when supported. Local macOS retains its native pasteboard-first path.
 fn copy_selection(terminal: &mut TerminalSession, text: &str) -> std::result::Result<(), String> {
-    let tmux_copy = std::env::var_os("TMUX")
-        .map(|_| clipboard::copy_to_tmux(text).map_err(|error| error.to_string()));
-    let platform_copy = copy_platform_selection(terminal, text);
+    let use_tmux = std::env::var_os("TMUX").is_some();
+    #[cfg(target_os = "macos")]
+    let use_tmux = use_tmux && is_remote_session();
 
-    copy_result(tmux_copy, platform_copy)
+    copy_selection_with(
+        use_tmux,
+        || clipboard::copy_to_tmux(text).map_err(|error| error.to_string()),
+        || copy_platform_selection(terminal, text),
+    )
 }
 
-fn copy_result(
-    tmux_copy: Option<std::result::Result<(), String>>,
-    platform_copy: std::result::Result<(), String>,
+fn copy_selection_with(
+    use_tmux: bool,
+    tmux_copy: impl FnOnce() -> std::result::Result<(), String>,
+    platform_copy: impl FnOnce() -> std::result::Result<(), String>,
 ) -> std::result::Result<(), String> {
-    match tmux_copy {
-        Some(Ok(())) => Ok(()),
-        Some(Err(tmux_error)) => platform_copy.map_err(|platform_error| {
-            format!(
-                "Could not copy selection to tmux: {tmux_error}; \
-                 platform fallback failed: {platform_error}"
-            )
-        }),
-        None => platform_copy,
+    if use_tmux {
+        match tmux_copy() {
+            Ok(()) => return Ok(()),
+            Err(tmux_error) => {
+                return platform_copy().map_err(|platform_error| {
+                    format!(
+                        "Could not copy selection to tmux: {tmux_error}; \
+                     platform fallback failed: {platform_error}"
+                    )
+                });
+            }
+        }
     }
+
+    platform_copy()
+}
+
+#[cfg(target_os = "macos")]
+fn is_remote_session() -> bool {
+    std::env::var_os("SSH_TTY").is_some() || std::env::var_os("SSH_CONNECTION").is_some()
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -2793,7 +2806,7 @@ fn request_render(request: RenderRequest, scheduler: &mut RenderScheduler) {
 mod tests {
     use super::{
         MemoryCompletion, MemoryOperation, PaneGeneration, PaneSession, PaneSettings,
-        PendingSubmission, close_pane_journal, copy_result, invalidate_memory_generations,
+        PendingSubmission, close_pane_journal, copy_selection_with, invalidate_memory_generations,
         is_image_paste, local_link_path, merge_recent_prompts, next_memory_generation, open_pane,
         run_memory_operation, send_submission, subagent_pane, validate_interactive,
     };
@@ -2813,7 +2826,7 @@ mod tests {
         },
     };
     use nanocodex::Model;
-    use std::{collections::HashMap, fs, path::Path, sync::Arc};
+    use std::{cell::Cell, collections::HashMap, fs, path::Path, sync::Arc};
     use tact_memory::{MemoryStore, SelectedMemoryStore};
     use tact_subagents::{AgentId, AgentStatus, AgentUpdate};
     use tempfile::tempdir;
@@ -2837,19 +2850,47 @@ mod tests {
     }
 
     #[test]
-    fn successful_tmux_copy_ignores_platform_failure() {
-        assert_eq!(
-            copy_result(Some(Ok(())), Err("platform failed".to_owned())),
-            Ok(())
+    fn successful_tmux_copy_skips_platform_fallback() {
+        let tmux_calls = Cell::new(0);
+        let platform_calls = Cell::new(0);
+
+        let result = copy_selection_with(
+            true,
+            || {
+                tmux_calls.set(tmux_calls.get() + 1);
+                Ok(())
+            },
+            || {
+                platform_calls.set(platform_calls.get() + 1);
+                Err("platform failed".to_owned())
+            },
         );
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(tmux_calls.get(), 1);
+        assert_eq!(platform_calls.get(), 0);
     }
 
     #[test]
-    fn successful_platform_copy_falls_back_from_tmux_failure() {
-        assert_eq!(
-            copy_result(Some(Err("tmux failed".to_owned())), Ok(())),
-            Ok(())
+    fn tmux_failure_calls_platform_fallback() {
+        let tmux_calls = Cell::new(0);
+        let platform_calls = Cell::new(0);
+
+        let result = copy_selection_with(
+            true,
+            || {
+                tmux_calls.set(tmux_calls.get() + 1);
+                Err("tmux failed".to_owned())
+            },
+            || {
+                platform_calls.set(platform_calls.get() + 1);
+                Ok(())
+            },
         );
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(tmux_calls.get(), 1);
+        assert_eq!(platform_calls.get(), 1);
     }
 
     #[test]
