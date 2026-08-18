@@ -14,7 +14,9 @@ use super::{
 use crate::{
     app::config::ReasoningEffort,
     tui::{
-        format::{duration_display_tick, format_duration, format_turn_duration},
+        format::{
+            duration_display_tick, format_duration, format_turn_duration, normalize_line_endings,
+        },
         spinner::Spinner,
         theme::Theme,
         transcript::{
@@ -1806,6 +1808,7 @@ fn layout_without_links(lines: Vec<Line<'static>>) -> markdown::Layout {
 }
 
 fn render_user(text: &str, width: u16, theme: &Theme) -> markdown::Layout {
+    let text = normalize_line_endings(text);
     let color = theme.thinking_medium();
     let content_width = width.saturating_sub(2).max(1);
     let mut lines = Vec::new();
@@ -1841,7 +1844,10 @@ fn render_user(text: &str, width: u16, theme: &Theme) -> markdown::Layout {
         lines,
         selections,
         envelopes: Vec::new(),
-        selection_source: None,
+        selection_source: match text {
+            std::borrow::Cow::Borrowed(_) => None,
+            std::borrow::Cow::Owned(text) => Some(text),
+        },
     }
 }
 
@@ -1853,7 +1859,7 @@ fn line_width(text: &str) -> usize {
 mod tests {
     use super::{
         Anchor, Component, ExpandableCommand, RenderRequest, ScrollCommand, ScrollState,
-        Transcript, TranscriptEvent, unix_milliseconds,
+        Transcript, TranscriptEvent, render_user, unix_milliseconds,
     };
     use crate::{
         app::config::{ReasoningEffort, ReasoningMode},
@@ -1873,6 +1879,19 @@ mod tests {
     use serde_json::{json, value::to_raw_value};
     use std::{sync::Arc, time::Duration};
     use tact_subagents::{AgentMessageUpdate, MessageSender};
+
+    #[test]
+    fn user_messages_normalize_carriage_returns() {
+        let layout = render_user("one\r\ntwo\rthree", 80, &Theme::default());
+        let rendered = layout
+            .lines
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+
+        assert_eq!(rendered, ["┃ one", "┃ two", "┃ three"]);
+        assert_eq!(layout.selection_source.as_deref(), Some("one\ntwo\nthree"));
+    }
 
     fn user(sequence: u64, text: impl Into<String>) -> Arc<TranscriptRecord> {
         Arc::new(
