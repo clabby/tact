@@ -70,6 +70,7 @@ import {
 } from "./review-settings";
 import { overviewDocument } from "./overview";
 import { parseReviewPatch } from "./review-diff";
+import { moveSearchTarget, searchReview, type ReviewSearchMatch } from "./review-search";
 import {
   expandRange,
   moveRangeBoundary,
@@ -83,6 +84,7 @@ import {
 } from "./range-selection";
 import "./styles.css";
 
+const SEARCH_HIGHLIGHT = "tact-review-search-match";
 const TREE_STYLES = `
   [data-type="item"] {
     --tact-tree-row-bg: var(--trees-bg);
@@ -209,9 +211,36 @@ export class ReviewApp {
   private readonly workerPool: WorkerPoolManager;
   private itemVersion = 0;
   private tree?: FileTree;
+  private searchCount = 0;
+  private searchIndex = 0;
+  private searchMatch?: ReviewSearchMatch;
+  private searchPaused = true;
+  private searchSelection?: CodeViewLineSelection | null;
+  private searchExpandedItem?: string;
+  private searchReturnFocus?: HTMLElement;
   private settings = loadReviewSettings(window.localStorage, document.cookie);
   private readonly colorScheme = window.matchMedia("(prefers-color-scheme: dark)");
   private state: ReviewState;
+  private readonly handleSearchShortcut = (event: KeyboardEvent) => {
+    if (event.isComposing || this.root.querySelector("dialog[open]")) return;
+    const key = event.key.toLowerCase();
+    if ((event.metaKey || event.ctrlKey) && key === "f") {
+      const changes = this.root.querySelector<HTMLElement>("#changes-panel");
+      if (this.state.terminal.kind === "finished" || !changes?.matches(".active:not([hidden])")) return;
+      event.preventDefault();
+      this.openSearch();
+      return;
+    }
+    if ((event.metaKey || event.ctrlKey) && key === "g" && this.searchIsOpen()) {
+      event.preventDefault();
+      this.moveSearch(event.shiftKey ? -1 : 1);
+      return;
+    }
+    if (event.key === "Escape" && this.searchIsOpen()) {
+      event.preventDefault();
+      this.closeSearch();
+    }
+  };
 
   constructor(
     private readonly root: HTMLElement,
@@ -324,6 +353,14 @@ export class ReviewApp {
           <iframe class="overview" title="Agent overview" sandbox="" hidden></iframe>
         </section>
         <section class="panel changes-panel active" id="changes-panel" role="tabpanel" aria-labelledby="changes-tab" data-panel="changes">
+          <div class="review-search" id="review-search" role="search" hidden>
+            <label class="sr-only" for="review-search-input">Find in changes</label>
+            <input id="review-search-input" type="search" placeholder="Find in changes" autocomplete="off" spellcheck="false" aria-describedby="review-search-count">
+            <span id="review-search-count" aria-live="polite">0 of 0</span>
+            <button class="small-icon-button search-previous" data-search-previous aria-label="Previous match" title="Previous match" disabled>${icon("chevron-down")}</button>
+            <button class="small-icon-button" data-search-next aria-label="Next match" title="Next match" disabled>${icon("chevron-down")}</button>
+            <button class="small-icon-button" data-search-close aria-label="Close search" title="Close search">${icon("close")}</button>
+          </div>
           <div class="mobile-navigation" role="tablist" aria-label="Changes navigation">
             <button class="active" role="tab" aria-selected="true" data-mobile-panel="diff">Diff</button>
             <button role="tab" aria-selected="false" tabindex="-1" data-mobile-panel="files">Files</button>
@@ -341,7 +378,7 @@ export class ReviewApp {
               </div>
             </div>
           </aside>
-          <main id="diff-view" class="diff-view" data-mobile-content="diff"></main>
+          <main id="diff-view" class="diff-view" data-mobile-content="diff" tabindex="-1"></main>
         </section>
         <footer class="review-bar">
           <label class="sr-only" for="review-summary">Overall review comment</label>
@@ -414,7 +451,9 @@ export class ReviewApp {
   cleanUp() {
     if (this.statusTimer !== undefined) window.clearInterval(this.statusTimer);
     if (this.questionPollTimer !== undefined) window.clearTimeout(this.questionPollTimer);
+    document.removeEventListener("keydown", this.handleSearchShortcut);
     this.viewer?.cleanUp();
+    CSS.highlights?.delete(SEARCH_HIGHLIGHT);
     this.tree?.cleanUp();
     this.workerPool.terminate();
   }
@@ -455,6 +494,7 @@ export class ReviewApp {
   }
 
   private installPage(page: ReviewPage) {
+    this.resetSearch();
     this.page = page;
     this.state = activatePage(this.state, page);
     const seenFiles = this.seenFiles();
@@ -776,6 +816,7 @@ export class ReviewApp {
       disableLineNumbers: !this.settings.lineNumbers,
       theme: diffTheme(this.settings),
       themeType: appearance(this.settings),
+      unsafeCSS: `::highlight(${SEARCH_HIGHLIGHT}) { color: #171717; background-color: #ffd54f; }`,
       hunkSeparators: "line-info" as const,
       expansionLineCount: 20,
       enableLineSelection: true,
@@ -785,6 +826,14 @@ export class ReviewApp {
       renderHeaderMetadata: (_file, context) => {
         if (context.item.type !== "diff") return null;
         return this.seenButton(context.item);
+      },
+      onSelectedLinesChange: (selection) => {
+        if (this.searchIsOpen()) this.searchSelection = selection;
+      },
+      onPostRender: (node, _instance, phase, context) => {
+        if (context.item.id === this.searchMatch?.itemId) {
+          this.updateSearchHighlight(phase === "unmount" ? null : node.shadowRoot);
+        }
       },
       ...commentSelectionCallbacks((selection) => this.openCommentComposer(selection)),
       renderAnnotation: (annotation: DiffLineAnnotation<AnnotationMetadata>) => this.annotationElement(annotation),
@@ -888,10 +937,201 @@ export class ReviewApp {
     item.collapsed = seen;
     item.version = ++this.itemVersion;
     this.viewer?.updateItem(item);
+    if (!seen && this.searchExpandedItem === path) this.searchExpandedItem = undefined;
     this.refreshTreeDecorations();
   }
 
+  private bindSearch() {
+    document.addEventListener("keydown", this.handleSearchShortcut);
+    const input = this.root.querySelector<HTMLInputElement>("#review-search-input");
+    input?.addEventListener("input", () => this.updateSearch());
+    input?.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" || event.isComposing) return;
+      event.preventDefault();
+      this.moveSearch(event.shiftKey ? -1 : 1);
+    });
+    this.root.querySelector("[data-search-previous]")?.addEventListener("click", () => this.moveSearch(-1));
+    this.root.querySelector("[data-search-next]")?.addEventListener("click", () => this.moveSearch(1));
+    this.root.querySelector("[data-search-close]")?.addEventListener("click", () => this.closeSearch());
+  }
+
+  private searchIsOpen() {
+    return this.root.querySelector<HTMLElement>("#review-search")?.hidden === false;
+  }
+
+  private openSearch() {
+    const panel = this.root.querySelector<HTMLElement>("#review-search");
+    const input = this.root.querySelector<HTMLInputElement>("#review-search-input");
+    if (!panel || !input) return;
+    if (panel.hidden) {
+      this.searchReturnFocus = deepActiveElement(document);
+      this.searchSelection = this.viewer?.getSelectedLines() ?? null;
+      panel.hidden = false;
+    }
+    input.focus();
+    input.select();
+  }
+
+  private closeSearch() {
+    const panel = this.root.querySelector<HTMLElement>("#review-search");
+    if (!panel || panel.hidden) return;
+    const restoreFocus = panel.contains(document.activeElement);
+    panel.hidden = true;
+    this.searchPaused = true;
+    this.updateSearchHighlight();
+    this.restoreSearchExpandedItem();
+    this.restoreSearchSelection();
+    this.searchSelection = undefined;
+    if (restoreFocus) {
+      const target = this.searchReturnFocus?.isConnected
+        ? this.searchReturnFocus
+        : this.root.querySelector<HTMLElement>("#diff-view");
+      queueMicrotask(() => target?.focus());
+    }
+    this.searchReturnFocus = undefined;
+  }
+
+  private resetSearch() {
+    this.closeSearch();
+    const input = this.root.querySelector<HTMLInputElement>("#review-search-input");
+    if (input) input.value = "";
+    this.searchCount = 0;
+    this.searchIndex = 0;
+    this.searchMatch = undefined;
+    this.searchPaused = true;
+    this.renderSearchStatus();
+  }
+
+  private updateSearch() {
+    const query = this.root.querySelector<HTMLInputElement>("#review-search-input")?.value ?? "";
+    this.restoreSearchExpandedItem();
+    this.restoreSearchSelection();
+    const result = searchReview(this.files, query);
+    this.searchCount = result.count;
+    this.searchIndex = 0;
+    this.searchMatch = result.match;
+    this.searchPaused = false;
+    this.renderSearchStatus();
+    if (result.match) this.revealSearchMatch();
+    else this.updateSearchHighlight();
+  }
+
+  private moveSearch(direction: -1 | 1) {
+    if (this.searchCount === 0) return;
+    const [index, occurrence] = moveSearchTarget(
+      this.searchMatch,
+      this.searchIndex,
+      this.searchCount,
+      direction,
+    );
+    this.searchIndex = index;
+    const query = this.root.querySelector<HTMLInputElement>("#review-search-input")?.value ?? "";
+    this.searchMatch = searchReview(this.files, query, index, occurrence).match;
+    this.searchPaused = false;
+    this.renderSearchStatus();
+    this.revealSearchMatch();
+  }
+
+  private revealSearchMatch() {
+    const match = this.searchMatch;
+    if (!match) return;
+    this.updateSearchHighlight();
+    this.root.querySelector<HTMLButtonElement>("[data-mobile-panel=diff]:not(.active)")?.click();
+    if (match.kind === "path") {
+      this.restoreSearchExpandedItem();
+      this.restoreSearchSelection();
+      this.viewer?.scrollTo({
+        type: "item",
+        id: match.itemId,
+        align: "start",
+        behavior: "smooth-auto",
+      });
+      return;
+    }
+
+    this.restoreSearchExpandedItem(match.itemId);
+    const item = this.items.find((candidate) => candidate.id === match.itemId);
+    if (item?.collapsed) {
+      item.collapsed = false;
+      item.version = ++this.itemVersion;
+      this.viewer?.updateItem(item);
+      if (this.seenFiles().has(item.id)) this.searchExpandedItem = item.id;
+    }
+    this.viewer?.setSelectedLines({
+      id: match.itemId,
+      range: {
+        start: match.lineNumber,
+        end: match.lineNumber,
+        side: match.side,
+        endSide: match.side,
+      },
+    }, { notify: false });
+    this.viewer?.scrollTo({
+      type: "line",
+      id: match.itemId,
+      lineNumber: match.lineNumber,
+      side: match.side,
+      align: "center",
+      behavior: "smooth-auto",
+    });
+  }
+
+  private updateSearchHighlight(
+    root: ShadowRoot | null | undefined = this.viewer?.getRenderedItems()
+      .find((candidate) => candidate.id === this.searchMatch?.itemId)?.element.shadowRoot,
+  ) {
+    CSS.highlights?.delete(SEARCH_HIGHLIGHT);
+    const match = this.searchMatch;
+    if (!CSS.highlights || this.searchPaused || !this.searchIsOpen() || match?.kind !== "content") return;
+    const split = root?.querySelector(`[data-${match.side}]`);
+    const lineType = match.side === "additions" ? "change-addition" : "change-deletion";
+    const line = split?.querySelector<HTMLElement>(`[data-line="${match.lineNumber}"]`)
+      ?? root?.querySelector<HTMLElement>(
+        `[data-unified] [data-line="${match.lineNumber}"]:is([data-line-type="${lineType}"], [data-line-type="context"])`,
+      );
+    const range = line ? textRange(line, match.start, match.length) : undefined;
+    if (range) CSS.highlights.set(SEARCH_HIGHLIGHT, new Highlight(range));
+  }
+
+  private restoreSearchSelection() {
+    if (this.searchSelection === undefined) return;
+    this.viewer?.setSelectedLines(this.searchSelection, { notify: false });
+  }
+
+  private clearSelectedLines() {
+    if (this.searchIsOpen()) this.searchSelection = null;
+    this.viewer?.clearSelectedLines();
+  }
+
+  private restoreSearchExpandedItem(keepItem?: string) {
+    const itemId = this.searchExpandedItem;
+    if (!itemId || itemId === keepItem) return;
+    this.searchExpandedItem = undefined;
+    const item = this.items.find((candidate) => candidate.id === itemId);
+    if (!item || !this.seenFiles().has(itemId) || item.collapsed) return;
+    item.collapsed = true;
+    item.version = ++this.itemVersion;
+    this.viewer?.updateItem(item);
+  }
+
+  private renderSearchStatus() {
+    const count = this.root.querySelector<HTMLElement>("#review-search-count");
+    const previous = this.root.querySelector<HTMLButtonElement>("[data-search-previous]");
+    const next = this.root.querySelector<HTMLButtonElement>("[data-search-next]");
+    const hasMatches = this.searchCount > 0;
+    if (previous) previous.disabled = !hasMatches;
+    if (next) next.disabled = !hasMatches;
+    if (!count) return;
+    const occurrence = this.searchMatch?.kind === "content" && this.searchMatch.occurrenceCount > 1
+      ? ` · ${this.searchMatch.occurrenceIndex + 1} of ${this.searchMatch.occurrenceCount} on line`
+      : "";
+    count.textContent = hasMatches
+      ? `${this.searchIndex + 1} of ${this.searchCount}${occurrence}`
+      : "0 of 0";
+  }
+
   private bindEvents() {
+    this.bindSearch();
     const tabs = [...this.root.querySelectorAll<HTMLButtonElement>("[data-tab]")];
     for (const [index, tab] of tabs.entries()) {
       tab.addEventListener("click", () => this.selectTab(tab.dataset.tab ?? "changes"));
@@ -1139,6 +1379,7 @@ export class ReviewApp {
   }
 
   private selectTab(name: string) {
+    if (name !== "changes") this.closeSearch();
     for (const tab of this.root.querySelectorAll<HTMLElement>("[data-tab]")) {
       const selected = tab.dataset.tab === name;
       tab.classList.toggle("active", selected);
@@ -1372,7 +1613,7 @@ export class ReviewApp {
   private closeCommentComposer() {
     const itemId = this.draft?.itemId;
     this.draft = undefined;
-    this.viewer?.clearSelectedLines();
+    this.clearSelectedLines();
     if (itemId) this.refreshItem(itemId);
     this.clearInlineError();
   }
@@ -1402,7 +1643,7 @@ export class ReviewApp {
     }
     const itemId = draft.itemId;
     this.draft = undefined;
-    this.viewer?.clearSelectedLines();
+    this.clearSelectedLines();
     this.refreshItem(itemId);
     this.refreshTreeDecorations();
     this.renderCommentList();
@@ -1570,7 +1811,7 @@ export class ReviewApp {
     }, draft.body, request, operationId);
     this.questions.push(thread);
     this.draft = undefined;
-    this.viewer?.clearSelectedLines();
+    this.clearSelectedLines();
     this.startQuestion(thread, request, operationId, page);
   }
 
@@ -2023,6 +2264,7 @@ export class ReviewApp {
       return;
     }
     this.state = finishTerminal(this.state, "submit");
+    this.closeSearch();
     const finished = this.root.querySelector<HTMLElement>("#finished");
     if (finished) finished.hidden = false;
   }
@@ -2048,6 +2290,7 @@ export class ReviewApp {
       return;
     }
     this.state = finishTerminal(this.state, "cancel");
+    this.closeSearch();
     const finished = this.root.querySelector<HTMLElement>("#finished");
     if (!finished) return;
     finished.innerHTML = "<div><span>✓</span><h2>Review cancelled</h2><p>You can return to Tact.</p></div>";
@@ -2075,6 +2318,34 @@ export class ReviewApp {
     if (!status || !status.classList.contains("error")) return;
     status.className = "terminal-status";
     status.textContent = "";
+  }
+}
+
+function deepActiveElement(root: Document | ShadowRoot): HTMLElement | undefined {
+  const active = root.activeElement;
+  if (!(active instanceof HTMLElement)) return;
+  return active.shadowRoot ? deepActiveElement(active.shadowRoot) ?? active : active;
+}
+
+function textRange(root: HTMLElement, start: number, length: number): Range | undefined {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  let offset = 0;
+  let first: Text | undefined;
+  let firstOffset = 0;
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    if (!(node instanceof Text)) continue;
+    const end = offset + node.length;
+    if (!first && start < end) {
+      first = node;
+      firstOffset = start - offset;
+    }
+    if (first && start + length <= end) {
+      const range = document.createRange();
+      range.setStart(first, firstOffset);
+      range.setEnd(node, start + length - offset);
+      return range;
+    }
+    offset = end;
   }
 }
 
