@@ -25,7 +25,7 @@ use crate::{
     app::{
         config::{Config, ReasoningEffort, ReasoningMode},
         error::{Result, RuntimeError},
-        hook,
+        herdr, hook,
     },
     core::{ConfiguredAgent, extensions::Skill},
     tui::{
@@ -55,7 +55,7 @@ use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers, 
 use futures_util::StreamExt;
 use nanocodex::Model;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     io::{self, IsTerminal},
     path::{Path, PathBuf},
     sync::{
@@ -521,6 +521,7 @@ pub(crate) async fn run(
         subagent_control,
     } = configured;
     let main_session_id = agent.session_id().to_string();
+    let mut herdr = herdr::Reporter::from_env(&main_session_id);
     let (writer_sender, mut writer_updates) = mpsc::unbounded_channel();
     let mut panes = HashMap::new();
     panes.insert(
@@ -605,6 +606,7 @@ pub(crate) async fn run(
     let mut scheduler = RenderScheduler::new(STREAM_FRAME_INTERVAL, Instant::now());
     let mut stopping = false;
     let mut worker_stopped = false;
+    let mut herdr_turns = HashSet::new();
     let mut worker_error = None::<nanocodex::NanocodexError>;
     let mut writer_error = None::<TranscriptError>;
     let mut writers_open = 1_usize;
@@ -897,6 +899,13 @@ pub(crate) async fn run(
                         worker_error = error;
                     }
                     WorkerEvent::TurnAccepted { pane, id } => {
+                        if herdr_turns.insert((pane, id)) && herdr_turns.len() == 1 {
+                            let session_id = app
+                                .main_pane()
+                                .and_then(|pane| panes.get(&pane))
+                                .map(|runtime| runtime.session_id.as_str());
+                            herdr.working(session_id);
+                        }
                         let record = panes.get_mut(&pane).expect("worker pane must exist")
                             .journal_mut()?.append_local(LocalEvent::WorkerTurnAccepted { id })?;
                         schedule(app.update(AppEvent::Transcript { pane, record }), &mut scheduler);
@@ -908,6 +917,13 @@ pub(crate) async fn run(
                         snapshot,
                         terminal_expected,
                     } => {
+                        if herdr_turns.remove(&(pane, id)) && herdr_turns.is_empty() {
+                            let session_id = app
+                                .main_pane()
+                                .and_then(|pane| panes.get(&pane))
+                                .map(|runtime| runtime.session_id.as_str());
+                            herdr.idle(session_id);
+                        }
                         let Some(runtime) = panes.get_mut(&pane) else {
                             continue;
                         };
