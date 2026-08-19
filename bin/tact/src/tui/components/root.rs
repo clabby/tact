@@ -52,7 +52,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tact_memory::{MemoryAccess, MemoryKey, MemoryRecord, MemorySource};
-use tact_subagents::{AgentUpdate, MessageSender};
+use tact_subagents::{AgentId, AgentStatus, AgentUpdate, MessageSender};
 
 const KEY_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(2);
 const SELECTION_SCROLL_INTERVAL: Duration = Duration::from_millis(60);
@@ -227,6 +227,7 @@ pub(crate) enum RootEffect {
     Submit(Submission),
     Reflect(Submission),
     RunShell(String),
+    ContinueSubagent(Submission),
     OpenDraftEditor,
     OpenConfigEditor,
     OpenLink(String),
@@ -2364,6 +2365,13 @@ impl RootNode {
 
     fn apply_subagent_update(&mut self, update: AgentUpdate) -> ComponentUpdate<RootEffect> {
         let previous_active = self.subagents.active_count();
+        let completion = match &update {
+            AgentUpdate::Status {
+                id,
+                status: AgentStatus::Completed { .. },
+            } => Some(*id),
+            _ => None,
+        };
         let root_message = match &update {
             AgentUpdate::Message(update)
                 if update.thread.messages.iter().any(|message| {
@@ -2403,8 +2411,32 @@ impl RootNode {
         if subagents_changed {
             result.render = result.render.max(RenderRequest::Immediate);
         }
+        if let Some(id) = completion
+            && subagents_changed
+            && self.subagents.is_direct_child(id)
+            && self.in_flight_turns == 0
+            && self.blocking_task.is_none()
+            && self.interactive
+        {
+            self.thread = ThreadState::Started;
+            self.in_flight_turns = 1;
+            result
+                .effects
+                .push(RootEffect::ContinueSubagent(subagent_completion_prompt(id)));
+        }
         result
     }
+}
+
+fn subagent_completion_prompt(id: AgentId) -> Submission {
+    Submission::text(format!(
+        "A subagent completed after the previous turn ended. Continue the current task by \
+         inspecting its structured result. In code mode, include completed agents when calling \
+         list_agents, find agent {id}, and expose only the result fields needed for the next step. \
+         Integrate or verify them as appropriate, perform any remaining work, and then respond to \
+         the user. Do not merely repeat the raw result.\n\n\
+         <subagent_completion agent_id=\"{id}\" />"
+    ))
 }
 
 impl Component for RootNode {
@@ -3514,6 +3546,88 @@ mod tests {
             .collect::<String>();
 
         assert!(!rendered.contains("subagents"));
+    }
+
+    #[test]
+    fn completed_direct_subagent_starts_a_continuation_when_idle() {
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        root.update(super::RootEvent::Subagent(AgentUpdate::Added(
+            AgentDescriptor {
+                id: AgentId::new(1),
+                session_id: "child".to_owned(),
+                model: Model::Sol,
+                role: "worker".to_owned(),
+                task: "inspect the queue".to_owned(),
+                parent: None,
+            },
+        )));
+
+        let update = root.update(super::RootEvent::Subagent(AgentUpdate::Status {
+            id: AgentId::new(1),
+            status: AgentStatus::Completed {
+                output: json!({ "report": "queue is sound" }),
+            },
+        }));
+
+        assert!(matches!(
+            update.effects.as_slice(),
+            [RootEffect::ContinueSubagent(prompt)]
+                if prompt.display_text().contains("list_agents")
+                    && prompt.display_text().contains("agent_id=\"1\"")
+                    && !prompt.display_text().contains("queue is sound")
+        ));
+        assert_eq!(root.in_flight_turns, 1);
+    }
+
+    #[test]
+    fn completed_subagent_does_not_start_a_competing_active_turn() {
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        root.in_flight_turns = 1;
+        root.update(super::RootEvent::Subagent(AgentUpdate::Added(
+            AgentDescriptor {
+                id: AgentId::new(1),
+                session_id: "child".to_owned(),
+                model: Model::Sol,
+                role: "worker".to_owned(),
+                task: "inspect the queue".to_owned(),
+                parent: None,
+            },
+        )));
+
+        let update = root.update(super::RootEvent::Subagent(AgentUpdate::Status {
+            id: AgentId::new(1),
+            status: AgentStatus::Completed {
+                output: json!({ "report": "queue is sound" }),
+            },
+        }));
+
+        assert!(update.effects.is_empty());
+        assert_eq!(root.in_flight_turns, 1);
+    }
+
+    #[test]
+    fn completed_nested_subagent_does_not_bypass_its_parent() {
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        root.update(super::RootEvent::Subagent(AgentUpdate::Added(
+            AgentDescriptor {
+                id: AgentId::new(2),
+                session_id: "grandchild".to_owned(),
+                model: Model::Sol,
+                role: "worker".to_owned(),
+                task: "inspect the queue".to_owned(),
+                parent: Some(AgentId::new(1)),
+            },
+        )));
+
+        let update = root.update(super::RootEvent::Subagent(AgentUpdate::Status {
+            id: AgentId::new(2),
+            status: AgentStatus::Completed {
+                output: json!({ "report": "queue is sound" }),
+            },
+        }));
+
+        assert!(update.effects.is_empty());
+        assert_eq!(root.in_flight_turns, 0);
     }
 
     #[test]

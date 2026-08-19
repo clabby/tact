@@ -167,6 +167,9 @@ impl SubagentTree {
                 let Some(node) = self.node_mut(id) else {
                     return false;
                 };
+                if node.status == status {
+                    return false;
+                }
                 node.status = status;
                 true
             }
@@ -219,6 +222,11 @@ impl SubagentTree {
 
     pub(super) fn contains(&self, id: AgentId) -> bool {
         self.nodes.iter().any(|node| node.descriptor.id == id)
+    }
+
+    pub(super) fn is_direct_child(&self, id: AgentId) -> bool {
+        self.node(id)
+            .is_some_and(|node| node.descriptor.parent.is_none())
     }
 
     pub(super) fn animation_deadline(&self) -> Option<Instant> {
