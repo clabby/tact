@@ -104,6 +104,17 @@ impl MessageQueue {
         true
     }
 
+    pub(super) fn cancel_edit(&mut self, id: QueueId) -> bool {
+        let Some(item) = self.items.iter_mut().find(|item| item.id == id) else {
+            return false;
+        };
+        if item.state != QueueItemState::Editing {
+            return false;
+        }
+        item.state = QueueItemState::Queued;
+        true
+    }
+
     pub(super) fn drain_ready(&mut self) -> Vec<Submission> {
         let ready = self
             .items
@@ -413,6 +424,8 @@ impl MessageQueue {
                 &["↑↓ select", "enter steer", "esc back"],
                 &["↑↓ select", "esc back"],
             ]
+        } else if selected.state == QueueItemState::Editing {
+            &[&["enter save", "esc cancel"], &["esc cancel"]]
         } else {
             &[&["↑↓ navigate", "esc back"]]
         };
@@ -750,6 +763,22 @@ mod tests {
             .map(|prompt| prompt.display_text().to_owned())
             .collect::<Vec<_>>();
         assert_eq!(prompts, ["first", "edited", "last"]);
+    }
+
+    #[test]
+    fn cancelling_an_edit_restores_the_original_item() {
+        let mut queue = MessageQueue::default();
+        queue.push("keep me".to_owned());
+        queue.update(key(KeyCode::Char('e'), KeyModifiers::NONE));
+
+        assert!(queue.cancel_edit(QueueId::new(0)));
+
+        let prompts = queue
+            .drain_ready()
+            .into_iter()
+            .map(|prompt| prompt.display_text().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(prompts, ["keep me"]);
     }
 
     #[test]
