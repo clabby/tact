@@ -802,13 +802,10 @@ pub(crate) async fn run(
             }
             Some(event) = subagent_events.recv(), if !stopping => {
                 if let Some(pane) = subagent_pane(&panes, &event) {
-                    schedule(
-                        app.update(AppEvent::Subagent {
-                            pane,
-                            update: event.update,
-                        }),
-                        &mut scheduler,
-                    );
+                    apply_app_update!(app.update(AppEvent::Subagent {
+                        pane,
+                        update: event.update,
+                    }));
                 }
             }
             Some(ready) = review_ready_updates.recv(), if !stopping => {
@@ -1937,6 +1934,26 @@ fn apply_pane_effect(
                 context.app.update(AppEvent::Transcript { pane, record }),
                 context.scheduler,
             );
+            let submission = PendingSubmission { id, prompt };
+            if runtime.active_shells == 0 {
+                send_submission(
+                    context.commands,
+                    pane,
+                    &mut runtime.pending_shell_context,
+                    submission,
+                )?;
+            } else {
+                debug_assert!(runtime.pending_submission.is_none());
+                runtime.pending_submission = Some(submission);
+            }
+        }
+        components::RootEffect::ContinueSubagent(prompt) => {
+            let runtime = context
+                .panes
+                .get_mut(&pane)
+                .expect("UI pane must have a runtime");
+            let id = TurnId::new(runtime.next_turn);
+            runtime.next_turn = runtime.next_turn.saturating_add(1);
             let submission = PendingSubmission { id, prompt };
             if runtime.active_shells == 0 {
                 send_submission(
