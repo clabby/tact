@@ -570,6 +570,10 @@ impl Composer {
         &self.draft
     }
 
+    pub(crate) fn input_mode(&self) -> Option<&str> {
+        self.input_mode.as_deref()
+    }
+
     pub(crate) const fn effort(&self) -> ReasoningEffort {
         self.thinking
     }

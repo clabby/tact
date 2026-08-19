@@ -152,10 +152,6 @@ pub(crate) enum RootEvent {
     ReviewCancelled,
     ReviewFinished(String),
     ReviewFailed(String),
-    FinishQueuedEdit {
-        id: QueueId,
-        text: String,
-    },
     WorkerTurnFinished {
         terminal_expected: bool,
     },
@@ -232,10 +228,6 @@ pub(crate) enum RootEffect {
     Reflect(Submission),
     RunShell(String),
     OpenDraftEditor,
-    OpenQueueEditor {
-        id: QueueId,
-        text: String,
-    },
     OpenConfigEditor,
     OpenLink(String),
     ReloadConfig,
@@ -302,6 +294,12 @@ struct SkillMention {
     start: usize,
 }
 
+struct QueueEdit {
+    id: QueueId,
+    original_draft: Option<ComposerDraft>,
+    original_input_mode: Option<String>,
+}
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum ThreadState {
     New,
@@ -325,6 +323,7 @@ pub(crate) struct RootNode {
     key_confirmation: Option<KeyConfirmation>,
     notification: Option<Notification>,
     discarded_draft: Option<ComposerDraft>,
+    queue_edit: Option<QueueEdit>,
     selection: Selection,
     selection_auto_scroll: Option<SelectionAutoScroll>,
     transcript_area: Rect,
@@ -362,6 +361,7 @@ impl RootNode {
             key_confirmation: None,
             notification: None,
             discarded_draft: None,
+            queue_edit: None,
             selection: Selection::default(),
             selection_auto_scroll: None,
             transcript_area: Rect::default(),
@@ -689,7 +689,7 @@ impl RootNode {
             focused
                 && self.blocking_task.is_none()
                 && !self.transcript.component().expandables_focused()
-                && !self.queue.component().focused(),
+                && (!self.queue.component().focused() || self.queue_edit.is_some()),
             composer_selection,
         );
         if self.selection.surface() == Some(Surface::Transcript)
@@ -795,6 +795,9 @@ impl RootNode {
     ) -> ComponentUpdate<RootEffect> {
         if !self.interactive {
             return ComponentUpdate::none();
+        }
+        if self.queue_edit.is_some() {
+            return self.update_queue_editor(event);
         }
         if self.reflection_input && is_plain_enter(&event) {
             return self.submit_reflection();
@@ -2015,21 +2018,77 @@ impl RootNode {
     fn update_queue(&mut self, event: Event) -> ComponentUpdate<RootEffect> {
         let update = self.queue.update(QueueEvent::Terminal(event));
         let mut effects = Vec::new();
+        let mut render = update.render;
         for effect in update.effects {
             match effect {
                 QueueEffect::Blur => {}
                 QueueEffect::Edit { id, text } => {
-                    effects.push(RootEffect::OpenQueueEditor { id, text });
+                    let edit = self.begin_queue_edit(id, text);
+                    effects.extend(edit.effects);
+                    render = render.max(edit.render);
                 }
                 QueueEffect::Steer { id, prompt } => {
                     effects.push(RootEffect::Steer { id, prompt });
                 }
             }
         }
-        ComponentUpdate {
-            effects,
-            render: update.render,
+        ComponentUpdate { effects, render }
+    }
+
+    fn begin_queue_edit(&mut self, id: QueueId, text: String) -> ComponentUpdate<RootEffect> {
+        let original_input_mode = self
+            .composer
+            .component()
+            .input_mode()
+            .map(ToOwned::to_owned);
+        let original_draft = self.composer.component_mut().take_draft();
+        self.composer.component_mut().replace_draft(text);
+        let _ = self
+            .composer
+            .component_mut()
+            .update(ComposerEvent::InputMode(Some(
+                "editing queued message · enter save · esc cancel".to_owned(),
+            )));
+        self.queue_edit = Some(QueueEdit {
+            id,
+            original_draft,
+            original_input_mode,
+        });
+        ComponentUpdate::render(RenderRequest::Immediate)
+    }
+
+    fn update_queue_editor(&mut self, event: Event) -> ComponentUpdate<RootEffect> {
+        if is_escape(&event) {
+            return self.finish_queue_edit(false);
         }
+        if is_plain_enter(&event) {
+            return self.finish_queue_edit(true);
+        }
+        self.update_composer(ComposerEvent::Terminal(event), RenderRequest::Immediate)
+    }
+
+    fn finish_queue_edit(&mut self, save: bool) -> ComponentUpdate<RootEffect> {
+        let Some(edit) = self.queue_edit.take() else {
+            return ComponentUpdate::none();
+        };
+        let text = save.then(|| self.composer.component().draft().to_owned());
+        self.composer.component_mut().replace_draft(String::new());
+        if let Some(draft) = edit.original_draft {
+            self.composer.component_mut().restore_draft(draft);
+        }
+        let _ = self
+            .composer
+            .component_mut()
+            .update(ComposerEvent::InputMode(edit.original_input_mode));
+
+        let restored = match text {
+            Some(text) => self.queue.component_mut().finish_edit(edit.id, text),
+            None => self.queue.component_mut().cancel_edit(edit.id),
+        };
+        if !restored {
+            return ComponentUpdate::render(RenderRequest::Immediate);
+        }
+        self.submit_next_queued()
     }
 
     fn update_composer(
@@ -2187,13 +2246,6 @@ impl RootNode {
             );
         }
         update
-    }
-
-    fn finish_queued_edit(&mut self, id: QueueId, text: String) -> ComponentUpdate<RootEffect> {
-        if !self.queue.component_mut().finish_edit(id, text) {
-            return ComponentUpdate::render(RenderRequest::Immediate);
-        }
-        self.submit_next_queued()
     }
 
     fn submit_next_queued(&mut self) -> ComponentUpdate<RootEffect> {
@@ -2562,7 +2614,6 @@ impl Component for RootNode {
                     RenderRequest::Immediate,
                 )
             }
-            RootEvent::FinishQueuedEdit { id, text } => self.finish_queued_edit(id, text),
             RootEvent::WorkerTurnFinished { terminal_expected } => {
                 self.worker_turn_finished(terminal_expected)
             }
@@ -2960,9 +3011,9 @@ fn is_plain_key(event: &Event, character: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        Component, ComposerChromeTarget, ConfirmationAction, DraftReset, Overlay, QueueId,
-        RenderRequest, RootEffect, RootEvent, RootNode, SessionListKind, SubagentOverlay,
-        ThreadState, TranscriptEvent,
+        Component, ComposerChromeTarget, ConfirmationAction, DraftReset, Overlay, RenderRequest,
+        RootEffect, RootEvent, RootNode, SessionListKind, SubagentOverlay, ThreadState,
+        TranscriptEvent,
     };
     use crate::{
         app::config::{ReasoningEffort, ReasoningMode},
@@ -4426,31 +4477,32 @@ mod tests {
     }
 
     #[test]
-    fn editing_keeps_a_message_queued_until_the_editor_returns() {
+    fn queue_edit_uses_the_composer_and_restores_its_draft_after_saving() {
         let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
         root.in_flight_turns = 1;
+        root.update(super::RootEvent::ReplaceDraft(
+            "unfinished draft".to_owned(),
+        ));
         root.queue.component_mut().push("original".to_owned());
         root.queue.component_mut().set_focused(true);
 
         let edit = root.update(key(KeyCode::Char('e'), KeyModifiers::NONE));
-        assert_eq!(
-            edit.effects,
-            [RootEffect::OpenQueueEditor {
-                id: QueueId::new(0),
-                text: "original".to_owned(),
-            }]
-        );
+        assert!(edit.effects.is_empty());
+        assert_eq!(root.composer.component().draft(), "original");
+        assert!(root.queue_edit.is_some());
         assert_eq!(root.queue.component().len(), 1);
 
-        root.update(super::RootEvent::FinishQueuedEdit {
-            id: QueueId::new(0),
-            text: "edited".to_owned(),
-        });
+        root.update(super::RootEvent::ReplaceDraft("edited".to_owned()));
+        let saved = root.update(key(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(saved.effects.is_empty());
+        assert_eq!(root.composer.component().draft(), "unfinished draft");
+        assert!(root.queue_edit.is_none());
         assert_eq!(root.queue.component().len(), 1);
     }
 
     #[test]
-    fn editing_blocks_queue_dequeue_until_the_editor_returns() {
+    fn editing_blocks_queue_dequeue_until_the_inline_edit_is_saved() {
         let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
         root.in_flight_turns = 1;
         root.queue.component_mut().push("edit me".to_owned());
@@ -4458,12 +4510,8 @@ mod tests {
         root.queue.component_mut().set_focused(true);
         root.update(key(KeyCode::Up, KeyModifiers::NONE));
 
-        let edit = root.update(key(KeyCode::Char('e'), KeyModifiers::NONE));
-        assert!(matches!(
-            edit.effects.as_slice(),
-            [RootEffect::OpenQueueEditor { id, text }]
-                if *id == QueueId::new(0) && text == "edit me"
-        ));
+        root.update(key(KeyCode::Char('e'), KeyModifiers::NONE));
+        assert_eq!(root.composer.component().draft(), "edit me");
 
         let finished = root.update(super::RootEvent::WorkerTurnFinished {
             terminal_expected: false,
@@ -4471,10 +4519,8 @@ mod tests {
         assert!(finished.effects.is_empty());
         assert_eq!(root.in_flight_turns, 0);
 
-        let restored = root.update(super::RootEvent::FinishQueuedEdit {
-            id: QueueId::new(0),
-            text: "edited".to_owned(),
-        });
+        root.update(super::RootEvent::ReplaceDraft("edited".to_owned()));
+        let restored = root.update(key(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(
             restored.effects,
             [RootEffect::Submit("edited\n\nlater".to_owned().into())]
@@ -4498,16 +4544,56 @@ mod tests {
         });
         assert!(finished.effects.is_empty());
 
-        let edited = root.update(super::RootEvent::FinishQueuedEdit {
-            id: QueueId::new(0),
-            text: "  \n".to_owned(),
-        });
+        root.update(super::RootEvent::ReplaceDraft("  \n".to_owned()));
+        let edited = root.update(key(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(
             edited.effects,
             [RootEffect::Submit("later".to_owned().into())]
         );
         assert_eq!(root.in_flight_turns, 1);
         assert!(root.queue.component().is_empty());
+    }
+
+    #[test]
+    fn escape_cancels_a_queue_edit_and_releases_the_original_message() {
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        root.in_flight_turns = 1;
+        root.update(super::RootEvent::ReplaceDraft("keep this draft".to_owned()));
+        root.queue.component_mut().push("keep original".to_owned());
+        root.queue.component_mut().set_focused(true);
+        root.update(key(KeyCode::Char('e'), KeyModifiers::NONE));
+        root.update(super::RootEvent::ReplaceDraft(
+            "discard this edit".to_owned(),
+        ));
+
+        let finished = root.update(super::RootEvent::WorkerTurnFinished {
+            terminal_expected: false,
+        });
+        assert!(finished.effects.is_empty());
+
+        let cancelled = root.update(key(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert_eq!(
+            cancelled.effects,
+            [RootEffect::Submit("keep original".to_owned().into())]
+        );
+        assert_eq!(root.composer.component().draft(), "keep this draft");
+        assert!(root.queue_edit.is_none());
+    }
+
+    #[test]
+    fn shift_enter_in_a_queue_edit_inserts_a_newline() {
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        root.in_flight_turns = 1;
+        root.queue.component_mut().push("first line".to_owned());
+        root.queue.component_mut().set_focused(true);
+        root.update(key(KeyCode::Char('e'), KeyModifiers::NONE));
+
+        let newline = root.update(key(KeyCode::Enter, KeyModifiers::SHIFT));
+
+        assert!(newline.effects.is_empty());
+        assert_eq!(root.composer.component().draft(), "first line\n");
+        assert!(root.queue_edit.is_some());
     }
 
     #[test]

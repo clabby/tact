@@ -31,8 +31,8 @@ use crate::{
     tui::{
         agent_events::ForwardedAgentEvent,
         components::{
-            AppEffect, AppEvent, AppNode, ComponentUpdate, QueueId, RecentPromptDraft,
-            RenderRequest, RestoredSessionProjection, RootNode,
+            AppEffect, AppEvent, AppNode, ComponentUpdate, RecentPromptDraft, RenderRequest,
+            RestoredSessionProjection, RootNode,
         },
         editor::EditorOutcome,
         handoff_controller::{HandoffCompletion, HandoffController, PreparedHandoff},
@@ -152,15 +152,7 @@ struct RestoredSession {
 }
 
 enum EditorTarget {
-    Draft {
-        pane: PaneId,
-        text: String,
-    },
-    Queue {
-        pane: PaneId,
-        id: QueueId,
-        text: String,
-    },
+    Draft { pane: PaneId, text: String },
     Config(PathBuf),
     File(PathBuf),
 }
@@ -168,12 +160,6 @@ enum EditorTarget {
 enum EditorCompletion {
     Draft {
         pane: PaneId,
-        outcome: EditorOutcome,
-    },
-    Queue {
-        pane: PaneId,
-        id: QueueId,
-        original: String,
         outcome: EditorOutcome,
     },
     Config,
@@ -1189,22 +1175,6 @@ pub(crate) async fn run(
                     EditorCompletion::Draft { pane, outcome: EditorOutcome::Updated(draft) } => {
                         schedule(app.update(AppEvent::EditorDraft { pane, draft }), &mut scheduler);
                     }
-                    EditorCompletion::Queue {
-                        pane,
-                        id,
-                        original,
-                        outcome,
-                    } => {
-                        let text = match outcome {
-                            EditorOutcome::Updated(text) => text,
-                            EditorOutcome::Unchanged => original,
-                        };
-                        apply_app_update!(app.update(AppEvent::QueueEditorFinished {
-                            pane,
-                            id,
-                            text,
-                        }));
-                    }
                     EditorCompletion::Draft { outcome: EditorOutcome::Unchanged, .. }
                     | EditorCompletion::Config
                     | EditorCompletion::File => {}
@@ -2011,7 +1981,6 @@ fn apply_pane_effect(
             }
         }
         editor_effect @ (components::RootEffect::OpenDraftEditor
-        | components::RootEffect::OpenQueueEditor { .. }
         | components::RootEffect::OpenConfigEditor
         | components::RootEffect::OpenLink(_)) => {
             context.terminal.suspend().map_err(RuntimeError::Terminal)?;
@@ -2027,9 +1996,6 @@ fn apply_pane_effect(
                         .draft()
                         .to_owned(),
                 },
-                components::RootEffect::OpenQueueEditor { id, text } => {
-                    EditorTarget::Queue { pane, id, text }
-                }
                 components::RootEffect::OpenConfigEditor => {
                     EditorTarget::Config(context.config.path().to_path_buf())
                 }
@@ -2044,15 +2010,6 @@ fn apply_pane_effect(
                     EditorTarget::Draft { pane, text } => {
                         let outcome = editor::edit(&text, &workspace).await?;
                         Ok(EditorCompletion::Draft { pane, outcome })
-                    }
-                    EditorTarget::Queue { pane, id, text } => {
-                        let outcome = editor::edit(&text, &workspace).await?;
-                        Ok(EditorCompletion::Queue {
-                            pane,
-                            id,
-                            original: text,
-                            outcome,
-                        })
                     }
                     EditorTarget::Config(path) => editor::edit_config(&path, &workspace)
                         .await

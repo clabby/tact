@@ -75,11 +75,6 @@ pub(crate) enum AppEvent {
         pane: PaneId,
         error: String,
     },
-    QueueEditorFinished {
-        pane: PaneId,
-        id: QueueId,
-        text: String,
-    },
     WorkerTurnFinished {
         pane: PaneId,
         terminal_expected: bool,
@@ -292,9 +287,6 @@ impl AppNode {
             AppEvent::HandoffCancelled(pane) => self.update_root(pane, RootEvent::HandoffCancelled),
             AppEvent::HandoffFailed { pane, error } => {
                 self.update_root(pane, RootEvent::HandoffFailed(error))
-            }
-            AppEvent::QueueEditorFinished { pane, id, text } => {
-                self.update_root(pane, RootEvent::FinishQueuedEdit { id, text })
             }
             AppEvent::WorkerTurnFinished {
                 pane,
