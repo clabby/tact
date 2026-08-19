@@ -2316,8 +2316,8 @@ impl RootNode {
         let completion = match &update {
             AgentUpdate::Status {
                 id,
-                status: AgentStatus::Completed { output },
-            } => Some((*id, output.clone())),
+                status: AgentStatus::Completed { .. },
+            } => Some(*id),
             _ => None,
         };
         let root_message = match &update {
@@ -2359,7 +2359,7 @@ impl RootNode {
         if subagents_changed {
             result.render = result.render.max(RenderRequest::Immediate);
         }
-        if let Some((id, output)) = completion
+        if let Some(id) = completion
             && subagents_changed
             && self.subagents.is_direct_child(id)
             && self.in_flight_turns == 0
@@ -2370,20 +2370,20 @@ impl RootNode {
             self.in_flight_turns = 1;
             result
                 .effects
-                .push(RootEffect::ContinueSubagent(subagent_completion_prompt(
-                    id, &output,
-                )));
+                .push(RootEffect::ContinueSubagent(subagent_completion_prompt(id)));
         }
         result
     }
 }
 
-fn subagent_completion_prompt(id: AgentId, output: &serde_json::Value) -> Submission {
+fn subagent_completion_prompt(id: AgentId) -> Submission {
     Submission::text(format!(
-        "A subagent completed after the previous turn ended. Continue the current task using its \
-         result. Integrate or verify it as appropriate, perform any remaining work, and then \
-         respond to the user. Do not merely repeat the raw result.\n\n\
-         <subagent_completion agent_id=\"{id}\">\n{output}\n</subagent_completion>"
+        "A subagent completed after the previous turn ended. Continue the current task by \
+         inspecting its structured result. In code mode, include completed agents when calling \
+         list_agents, find agent {id}, and expose only the result fields needed for the next step. \
+         Integrate or verify them as appropriate, perform any remaining work, and then respond to \
+         the user. Do not merely repeat the raw result.\n\n\
+         <subagent_completion agent_id=\"{id}\" />"
     ))
 }
 
@@ -3521,8 +3521,9 @@ mod tests {
         assert!(matches!(
             update.effects.as_slice(),
             [RootEffect::ContinueSubagent(prompt)]
-                if prompt.display_text().contains("queue is sound")
+                if prompt.display_text().contains("list_agents")
                     && prompt.display_text().contains("agent_id=\"1\"")
+                    && !prompt.display_text().contains("queue is sound")
         ));
         assert_eq!(root.in_flight_turns, 1);
     }
