@@ -1362,8 +1362,8 @@ impl Composer {
         let development_start =
             directory_start.saturating_sub(u16::try_from(development_width).unwrap_or(u16::MAX));
         let hint_space = usize::from(development_start.saturating_sub(content_start));
-        let entry_hint = entry_hint(theme);
-        if self.draft.is_empty() && entry_hint.width() <= hint_space {
+        let entry_hint = entry_hint(theme, self.draft.is_empty());
+        if entry_hint.width() <= hint_space {
             buffer.set_line(
                 content_start,
                 bottom,
@@ -1411,16 +1411,21 @@ impl Composer {
     }
 }
 
-fn entry_hint(theme: &Theme) -> Line<'static> {
-    Line::from(vec![
-        Span::raw(" "),
-        Span::styled("/", Style::reset()),
-        Span::styled(" actions · ", Style::default().fg(theme.muted())),
+fn entry_hint(theme: &Theme, include_actions: bool) -> Line<'static> {
+    let mut spans = vec![Span::raw(" ")];
+    if include_actions {
+        spans.extend([
+            Span::styled("/", Style::reset()),
+            Span::styled(" actions · ", Style::default().fg(theme.muted())),
+        ]);
+    }
+    spans.extend([
         Span::styled("@", Style::reset()),
         Span::styled(" paths · ", Style::default().fg(theme.muted())),
         Span::styled("@@", Style::reset()),
         Span::styled(" sessions ", Style::default().fg(theme.muted())),
-    ])
+    ]);
+    Line::from(spans)
 }
 
 impl Component for Composer {
@@ -1845,12 +1850,14 @@ mod tests {
     }
 
     #[test]
-    fn entry_hint_is_only_shown_for_an_empty_draft_with_room() {
+    fn entry_hint_keeps_file_and_session_shortcuts_visible_while_typing() {
         let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
         assert!(rows(&render(&mut composer, 60, 5))[4].contains("@@ sessions"));
 
         composer.replace_draft("hello".to_owned());
-        assert!(!rows(&render(&mut composer, 40, 5))[4].contains("/ actions"));
+        let footer = &rows(&render(&mut composer, 60, 5))[4];
+        assert!(!footer.contains("/ actions"));
+        assert!(footer.contains("@ paths · @@ sessions"));
 
         composer.replace_draft(String::new());
         assert!(!rows(&render(&mut composer, 20, 5))[4].contains("/ actions"));
