@@ -30,22 +30,26 @@ use tact_subagents::{AgentDescriptor, AgentId, AgentStatus, AgentUpdate, Message
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-const TREE_KEYS: [&str; 7] = [
-    "←/→ row",
-    "↑ parent",
-    "↓ child",
-    "enter inspect",
-    "-/+ limit",
-    "f filter",
-    "esc close",
+const TREE_KEYS: [(&str, &str); 7] = [
+    ("←/→", "row"),
+    ("↑", "parent"),
+    ("↓", "child"),
+    ("enter", "inspect"),
+    ("-/+", "limit"),
+    ("f", "filter"),
+    ("esc", "close"),
 ];
-const TRANSCRIPT_KEYS: [&str; 4] = [
-    "pgup/pgdn scroll",
-    "ctrl+home/end",
-    "ctrl+o expand all",
-    "esc back",
+const TRANSCRIPT_KEYS: [(&str, &str); 4] = [
+    ("pgup/pgdn", "scroll"),
+    ("ctrl+home/end", ""),
+    ("ctrl+o", "expand all"),
+    ("esc", "back"),
 ];
-const FOCUSED_ENTRY_KEYS: [&str; 3] = ["↑↓ item", "enter toggle", "esc blur, then back"];
+const FOCUSED_ENTRY_KEYS: [(&str, &str); 3] = [
+    ("↑↓", "item"),
+    ("enter", "toggle"),
+    ("esc", "blur, then back"),
+];
 const CAMERA_FRAME_INTERVAL: Duration = Duration::from_millis(16);
 const CAMERA_MIN_DURATION: Duration = Duration::from_millis(120);
 const CAMERA_MAX_DURATION: Duration = Duration::from_millis(240);
@@ -436,7 +440,7 @@ impl SubagentTree {
             model_name(node.descriptor.model),
             node.descriptor.id
         );
-        let keys: &[&str] = if node.transcript.component().expandables_focused() {
+        let keys: &[(&str, &str)] = if node.transcript.component().expandables_focused() {
             &FOCUSED_ENTRY_KEYS
         } else {
             &TRANSCRIPT_KEYS

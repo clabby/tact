@@ -29,6 +29,7 @@ use ratatui::{
     buffer::Buffer,
     layout::{Position, Rect},
     style::{Color, Modifier, Style},
+    text::{Line, Span},
 };
 use std::{
     collections::VecDeque,
@@ -42,7 +43,6 @@ use unicode_width::UnicodeWidthStr;
 
 const MIN_CONTENT_ROWS: usize = 3;
 const MAX_CONTENT_ROWS: usize = 6;
-const ENTRY_HINT: &str = " / actions · @ paths · @@ sessions ";
 const DEVELOPMENT_BADGE: &str = " ◉ dev ";
 
 #[derive(Debug, Eq, PartialEq)]
@@ -1362,15 +1362,13 @@ impl Composer {
         let development_start =
             directory_start.saturating_sub(u16::try_from(development_width).unwrap_or(u16::MAX));
         let hint_space = usize::from(development_start.saturating_sub(content_start));
-        if self.draft.is_empty() && ENTRY_HINT.width() <= hint_space {
-            buffer.set_stringn(
+        let entry_hint = entry_hint(theme);
+        if self.draft.is_empty() && entry_hint.width() <= hint_space {
+            buffer.set_line(
                 content_start,
                 bottom,
-                ENTRY_HINT,
-                hint_space,
-                Style::default()
-                    .fg(theme.muted())
-                    .add_modifier(Modifier::DIM),
+                &entry_hint,
+                u16::try_from(hint_space).unwrap_or(u16::MAX),
             );
         }
         if shell_mode {
@@ -1411,6 +1409,18 @@ impl Composer {
             theme.border()
         })
     }
+}
+
+fn entry_hint(theme: &Theme) -> Line<'static> {
+    Line::from(vec![
+        Span::raw(" "),
+        Span::styled("/", Style::reset()),
+        Span::styled(" actions · ", Style::default().fg(theme.muted())),
+        Span::styled("@", Style::reset()),
+        Span::styled(" paths · ", Style::default().fg(theme.muted())),
+        Span::styled("@@", Style::reset()),
+        Span::styled(" sessions ", Style::default().fg(theme.muted())),
+    ])
 }
 
 impl Component for Composer {
@@ -1573,6 +1583,7 @@ mod tests {
         path::Path,
         time::{Duration, Instant},
     };
+    use unicode_width::UnicodeWidthStr;
 
     fn key(code: KeyCode, modifiers: KeyModifiers) -> ComposerEvent {
         ComposerEvent::Terminal(Event::Key(KeyEvent::new(code, modifiers)))
@@ -1638,6 +1649,14 @@ mod tests {
                 footer,
             ]
         );
+
+        let buffer = terminal.backend().buffer();
+        let footer = &rows(&terminal)[4];
+        let action_key =
+            u16::try_from(footer[..footer.find("/ actions").unwrap()].width()).unwrap();
+        let action_help = action_key + 2;
+        assert_eq!(buffer[(action_key, 4)].fg, Color::Reset);
+        assert_eq!(buffer[(action_help, 4)].fg, Theme::default().muted());
     }
 
     #[test]

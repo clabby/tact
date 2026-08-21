@@ -17,7 +17,7 @@ use std::{cmp::Reverse, fs, path::Path};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-const KEY_BINDINGS: [&str; 3] = ["↑↓ move", "enter/tab insert", "esc close"];
+const KEY_BINDINGS: [(&str, &str); 3] = [("↑↓", "move"), ("enter/tab", "insert"), ("esc", "close")];
 const SEARCH_LABEL: &str = "Search: ";
 const FOCUS_MARKER: &str = "› ";
 const SKIPPED_DIRECTORIES: [&str; 4] = [".git", ".jj", "node_modules", "target"];

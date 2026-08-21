@@ -12,7 +12,7 @@ use ratatui::{
     widgets::{Paragraph, Wrap},
 };
 
-const KEY_BINDINGS: [&str; 2] = ["enter/y download", "esc/n cancel"];
+const KEY_BINDINGS: [(&str, &str); 2] = [("enter/y", "download"), ("esc/n", "cancel")];
 
 pub(super) enum ReviewConfirmationEvent {
     Terminal(Event),

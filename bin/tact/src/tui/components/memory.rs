@@ -19,33 +19,48 @@ use tact_memory::{MemoryAccess, MemoryKey, MemoryRecord, MemorySource, RemoteRol
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-const LIST_KEYS: [&str; 5] = [
-    "↑↓ move",
-    "enter inspect",
-    "ctrl+s sort",
-    "ctrl+d remove",
-    "ctrl+r refresh · esc close",
+const LIST_KEYS: [(&str, &str); 6] = [
+    ("↑↓", "move"),
+    ("enter", "inspect"),
+    ("ctrl+s", "sort"),
+    ("ctrl+d", "remove"),
+    ("ctrl+r", "refresh"),
+    ("esc", "close"),
 ];
-const REMOTE_LIST_KEYS: [&str; 4] = [
-    "↑↓ move",
-    "enter inspect",
-    "ctrl+s sort · ctrl+n namespaces",
-    "ctrl+r refresh · esc close",
+const REMOTE_LIST_KEYS: [(&str, &str); 6] = [
+    ("↑↓", "move"),
+    ("enter", "inspect"),
+    ("ctrl+s", "sort"),
+    ("ctrl+n", "namespaces"),
+    ("ctrl+r", "refresh"),
+    ("esc", "close"),
 ];
-const REMOTE_WRITABLE_LIST_KEYS: [&str; 5] = [
-    "↑↓ move",
-    "enter inspect",
-    "ctrl+s sort · ctrl+n namespaces",
-    "ctrl+d remove",
-    "ctrl+r refresh · esc close",
+const REMOTE_WRITABLE_LIST_KEYS: [(&str, &str); 7] = [
+    ("↑↓", "move"),
+    ("enter", "inspect"),
+    ("ctrl+s", "sort"),
+    ("ctrl+n", "namespaces"),
+    ("ctrl+d", "remove"),
+    ("ctrl+r", "refresh"),
+    ("esc", "close"),
 ];
-const DETAIL_KEYS: [&str; 3] = ["↑↓/pgup/pgdn scroll", "d delete", "r refresh · esc back"];
-const REMOTE_DETAIL_KEYS: [&str; 2] = ["↑↓/pgup/pgdn scroll", "r refresh · esc back"];
-const CONFIRM_KEYS: [&str; 2] = ["d/delete confirm", "esc cancel"];
-const DELETING_KEYS: [&str; 1] = ["deleting…"];
-const LOAD_ERROR_KEYS: [&str; 2] = ["r retry", "esc close"];
-const DELETE_ERROR_KEYS: [&str; 3] = ["d/delete retry", "r refresh", "esc back"];
-const LOADING_KEYS: [&str; 2] = ["r retry", "esc close"];
+const DETAIL_KEYS: [(&str, &str); 4] = [
+    ("↑↓/pgup/pgdn", "scroll"),
+    ("d", "delete"),
+    ("r", "refresh"),
+    ("esc", "back"),
+];
+const REMOTE_DETAIL_KEYS: [(&str, &str); 3] = [
+    ("↑↓/pgup/pgdn", "scroll"),
+    ("r", "refresh"),
+    ("esc", "back"),
+];
+const CONFIRM_KEYS: [(&str, &str); 2] = [("d/delete", "confirm"), ("esc", "cancel")];
+const DELETING_KEYS: [(&str, &str); 1] = [("", "deleting…")];
+const LOAD_ERROR_KEYS: [(&str, &str); 2] = [("r", "retry"), ("esc", "close")];
+const DELETE_ERROR_KEYS: [(&str, &str); 3] =
+    [("d/delete", "retry"), ("r", "refresh"), ("esc", "back")];
+const LOADING_KEYS: [(&str, &str); 2] = [("r", "retry"), ("esc", "close")];
 const FILTER_LABEL: &str = " Filter: ";
 const MAX_PREVIEW_GRAPHEMES: usize = 160;
 const MAX_ERROR_WIDTH: usize = 240;
@@ -571,7 +586,7 @@ impl MemoryBrowser {
         }
     }
 
-    fn footer(&self) -> &'static [&'static str] {
+    fn footer(&self) -> &'static [(&'static str, &'static str)] {
         match &self.state {
             BrowserState::Loading => &LOADING_KEYS,
             BrowserState::Error(error) => match error.action {

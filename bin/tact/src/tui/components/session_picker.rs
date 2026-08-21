@@ -19,8 +19,10 @@ use ratatui::{
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-const RESUME_KEY_BINDINGS: [&str; 3] = ["↑↓ move", "enter/tab resume", "esc close"];
-const MENTION_KEY_BINDINGS: [&str; 3] = ["↑↓ move", "enter/tab insert", "esc close"];
+const RESUME_KEY_BINDINGS: [(&str, &str); 3] =
+    [("↑↓", "move"), ("enter/tab", "resume"), ("esc", "close")];
+const MENTION_KEY_BINDINGS: [(&str, &str); 3] =
+    [("↑↓", "move"), ("enter/tab", "insert"), ("esc", "close")];
 const SEARCH_LABEL: &str = "Search: ";
 
 pub(super) enum SessionPickerEvent {
