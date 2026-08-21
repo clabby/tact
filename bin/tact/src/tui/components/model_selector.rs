@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 const MODELS: [Model; 3] = [Model::Luna, Model::Terra, Model::Sol];
 const ANIMATION_DURATION: Duration = Duration::from_millis(280);
 const ANIMATION_FRAME_INTERVAL: Duration = Duration::from_millis(16);
-const KEY_BINDINGS: [&str; 3] = ["←/→ model", "enter apply", "esc cancel"];
+const KEY_BINDINGS: [(&str, &str); 3] = [("←/→", "model"), ("enter", "apply"), ("esc", "cancel")];
 
 pub(super) enum ModelSelectorEvent {
     Terminal { event: Event, now: Instant },

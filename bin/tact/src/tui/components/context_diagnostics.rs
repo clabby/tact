@@ -18,7 +18,7 @@ use ratatui::{
     widgets::{Paragraph, Wrap},
 };
 
-const FOOTER: [&str; 2] = ["r refresh", "esc close"];
+const FOOTER: [(&str, &str); 2] = [("r", "refresh"), ("esc", "close")];
 
 pub(super) enum ContextDiagnosticsEvent {
     Terminal(Event),

@@ -14,7 +14,7 @@ use ratatui::{
     widgets::{List, ListItem, ListState},
 };
 
-const KEY_BINDINGS: [&str; 3] = ["↑↓ change", "enter apply", "esc cancel"];
+const KEY_BINDINGS: [(&str, &str); 3] = [("↑↓", "change"), ("enter", "apply"), ("esc", "cancel")];
 
 pub(super) enum ThemeSelectorEvent {
     Terminal(Event),

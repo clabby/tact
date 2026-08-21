@@ -18,13 +18,13 @@ use std::cmp::Reverse;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-const KEY_BINDINGS: [&str; 6] = [
-    "type search",
-    "↑↓ move",
-    "pgup/pgdn preview",
-    "enter/tab select",
-    "ctrl+f scope",
-    "esc close",
+const KEY_BINDINGS: [(&str, &str); 6] = [
+    ("type", "search"),
+    ("↑↓", "move"),
+    ("pgup/pgdn", "preview"),
+    ("enter/tab", "select"),
+    ("ctrl+f", "scope"),
+    ("esc", "close"),
 ];
 const LIST_HEIGHT: u16 = 7;
 const SEARCH_LABEL: &str = "Search: ";

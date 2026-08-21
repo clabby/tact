@@ -34,7 +34,7 @@ const ACTIONS: [Action; 16] = [
     Action::Review,
     Action::Model,
 ];
-const KEY_BINDINGS: [&str; 3] = ["↑↓ move", "enter/tab open", "esc close"];
+const KEY_BINDINGS: [(&str, &str); 3] = [("↑↓", "move"), ("enter/tab", "open"), ("esc", "close")];
 const SEARCH_LABEL: &str = "Search: ";
 const SELECTION_MARKER: &str = "› ";
 
@@ -423,7 +423,7 @@ mod tests {
     use super::{Action, ActionAvailability, ActionsEffect, ActionsEvent, ActionsMenu, Component};
     use crate::tui::theme::Theme;
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
-    use ratatui::{Terminal, backend::TestBackend};
+    use ratatui::{Terminal, backend::TestBackend, style::Color};
 
     fn key(code: KeyCode) -> ActionsEvent {
         ActionsEvent::Terminal(Event::Key(KeyEvent::new(code, KeyModifiers::NONE)))
@@ -537,6 +537,11 @@ mod tests {
         );
         assert_eq!(
             terminal.backend().buffer()[(18, 2)].fg,
+            Theme::default().muted()
+        );
+        assert_eq!(terminal.backend().buffer()[(12, 17)].fg, Color::Reset);
+        assert_eq!(
+            terminal.backend().buffer()[(15, 17)].fg,
             Theme::default().muted()
         );
     }

@@ -2822,9 +2822,7 @@ fn render_key_confirmation(
     let title = Line::from(vec![
         Span::styled(
             format!(" {} ", action.title_key()),
-            Style::default()
-                .fg(theme.accent())
-                .add_modifier(Modifier::BOLD),
+            Style::reset().add_modifier(Modifier::BOLD),
         ),
         Span::styled("then ", Style::default().fg(theme.muted())),
     ]);
@@ -2857,12 +2855,7 @@ fn render_key_confirmation(
 fn confirmation_line(key: &'static str, label: &'static str, theme: &Theme) -> Line<'static> {
     Line::from(vec![
         Span::raw(" "),
-        Span::styled(
-            key,
-            Style::default()
-                .fg(theme.code_text())
-                .add_modifier(Modifier::BOLD),
-        ),
+        Span::styled(key, Style::reset().add_modifier(Modifier::BOLD)),
         Span::styled(format!(" {label}"), Style::default().fg(theme.muted())),
     ])
 }

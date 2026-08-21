@@ -12,11 +12,13 @@ use unicode_width::UnicodeWidthStr;
 
 const KEY_BINDING_SEPARATOR: &str = " · ";
 
+pub(super) type KeyBinding = (&'static str, &'static str);
+
 pub(super) struct Floating<'a> {
     title: &'a str,
     width: u16,
     height: u16,
-    key_bindings: &'a [&'a str],
+    key_bindings: &'a [KeyBinding],
     placement: Placement,
     border_color: Option<Color>,
     title_color: Option<Color>,
@@ -38,7 +40,7 @@ impl<'a> Floating<'a> {
         title: &'a str,
         width: u16,
         height: u16,
-        key_bindings: &'a [&'a str],
+        key_bindings: &'a [KeyBinding],
     ) -> Self {
         Self {
             title,
@@ -87,21 +89,19 @@ impl<'a> Floating<'a> {
         frame.render_widget(Clear, popup);
         frame.render_widget(block, popup);
 
-        let key_bindings = self.key_binding_lines(inner.width);
+        let key_bindings = self.key_binding_lines(inner.width, theme);
         let footer_height = u16::try_from(key_bindings.len()).unwrap_or(u16::MAX);
         let (body, footer) = split_footer(inner, footer_height);
         if !footer.is_empty() {
             frame.render_widget(
-                Paragraph::new(key_bindings)
-                    .style(Style::default().fg(theme.border()))
-                    .alignment(Alignment::Center),
+                Paragraph::new(key_bindings).alignment(Alignment::Center),
                 footer,
             );
         }
         FloatingLayout { body }
     }
 
-    fn key_binding_lines(&self, width: u16) -> Vec<Line<'a>> {
+    fn key_binding_lines(&self, width: u16, theme: &Theme) -> Vec<Line<'a>> {
         if width == 0 {
             return Vec::new();
         }
@@ -111,17 +111,33 @@ impl<'a> Floating<'a> {
         let mut lines = Vec::new();
         let mut spans = Vec::new();
         let mut line_width = 0;
-        for key_binding in self.key_bindings {
-            let key_binding_width = key_binding.width();
+        for &(key, help) in self.key_bindings {
+            let key_binding_width =
+                key.width() + usize::from(!key.is_empty() && !help.is_empty()) + help.width();
             if !spans.is_empty() && line_width + separator_width + key_binding_width > width {
                 lines.push(Line::from(std::mem::take(&mut spans)));
                 line_width = 0;
             }
             if !spans.is_empty() {
-                spans.push(Span::raw(KEY_BINDING_SEPARATOR));
+                spans.push(Span::styled(
+                    KEY_BINDING_SEPARATOR,
+                    Style::default().fg(theme.muted()),
+                ));
                 line_width += separator_width;
             }
-            spans.push(Span::raw(*key_binding));
+            if !key.is_empty() {
+                spans.push(Span::styled(key, Style::reset()));
+            }
+            if !help.is_empty() {
+                spans.push(Span::styled(
+                    if key.is_empty() {
+                        help.to_owned()
+                    } else {
+                        format!(" {help}")
+                    },
+                    Style::default().fg(theme.muted()),
+                ));
+            }
             line_width += key_binding_width;
         }
         if !spans.is_empty() {
@@ -176,12 +192,12 @@ mod tests {
     use ratatui::{Terminal, backend::TestBackend, layout::Rect, style::Color};
 
     #[test]
-    fn floating_centers_rounded_chrome_and_border_colored_key_bindings() {
+    fn floating_centers_rounded_chrome_and_styles_keys_separately_from_help() {
         let mut terminal = Terminal::new(TestBackend::new(20, 8)).unwrap();
 
         terminal
             .draw(|frame| {
-                Floating::new("Test", 16, 6, &["left", "right"]).render(
+                Floating::new("Test", 16, 6, &[("left", "help")]).render(
                     frame,
                     frame.area(),
                     &Theme::default(),
@@ -192,9 +208,12 @@ mod tests {
         let buffer = terminal.backend().buffer();
         assert_eq!(buffer[(2, 1)].symbol(), "╭");
         assert_eq!(buffer[(17, 6)].symbol(), "╯");
-        assert_eq!(buffer[(4, 5)].symbol(), "l");
-        assert_eq!(buffer[(9, 5)].symbol(), "·");
-        assert_eq!(buffer[(9, 5)].fg, Color::DarkGray);
+        let row = 5;
+        let start = (0..20)
+            .find(|&column| buffer[(column, row)].symbol() == "l")
+            .unwrap();
+        assert_eq!(buffer[(start, row)].fg, Color::Reset);
+        assert_eq!(buffer[(start + 5, row)].fg, Theme::default().muted());
     }
 
     #[test]
@@ -208,7 +227,11 @@ mod tests {
                     "Test",
                     24,
                     8,
-                    &["first option", "second option", "third option"],
+                    &[
+                        ("first", "option"),
+                        ("second", "option"),
+                        ("third", "option"),
+                    ],
                 )
                 .render(frame, frame.area(), &Theme::default())
                 .body;

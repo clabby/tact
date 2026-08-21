@@ -9,14 +9,14 @@ use crossterm::event::{Event, KeyCode, KeyEventKind};
 use ratatui::{
     Frame,
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::Paragraph,
 };
 use unicode_width::UnicodeWidthStr;
 
-const FOOTER: [&str; 2] = ["↑↓ scroll", "esc close"];
-const BINDINGS: [(&str, &str); 25] = [
+const FOOTER: [(&str, &str); 2] = [("↑↓", "scroll"), ("esc", "close")];
+const BINDINGS: [(&str, &str); 26] = [
     ("ctrl+s", "change reasoning effort"),
     ("ctrl+d", "select model · before first prompt"),
     ("ctrl+t", "fork session · when available"),
@@ -32,6 +32,7 @@ const BINDINGS: [(&str, &str); 25] = [
     ("ctrl+c ctrl+c", "split closes pane · else exit"),
     ("esc esc", "interrupt the active response"),
     ("enter", "submit prompt"),
+    ("enter + enter", "submit prompt and steer"),
     ("shift+enter/ctrl+j", "insert newline"),
     ("ctrl+a/e", "move to line start · end"),
     ("ctrl+b/f", "move to previous · next character"),
@@ -122,7 +123,7 @@ fn binding_line(
         Span::styled(
             format!(" {key}"),
             Style::default()
-                .fg(Color::Green)
+                .fg(theme.accent())
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw(" ".repeat(gap)),
@@ -166,7 +167,10 @@ mod tests {
                 + unicode_width::UnicodeWidthStr::width(description);
             assert_eq!(end, 75);
         }
-        assert_eq!(buffer[(5, u16::try_from(row).unwrap())].fg, Color::Green);
+        assert_eq!(
+            buffer[(5, u16::try_from(row).unwrap())].fg,
+            Theme::default().accent()
+        );
         assert_eq!(
             buffer[(74, u16::try_from(row).unwrap())].fg,
             Color::DarkGray
@@ -198,6 +202,8 @@ mod tests {
             "ctrl+c ctrl+c",
             "clear input · when composer is focused and nonempty",
             "split closes pane · else exit",
+            "enter + enter",
+            "submit prompt and steer",
             "shift+enter/ctrl+j",
             "ctrl+a/e",
             "move to line start · end",

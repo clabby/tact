@@ -26,7 +26,12 @@ const ANIMATION_FRAME_INTERVAL: Duration = Duration::from_millis(16);
 const DIAL_WIDTH: u16 = 17;
 const DIAL_HEIGHT: u16 = 9;
 const DIAL_SAMPLES: usize = 96;
-const KEY_BINDINGS: [&str; 4] = ["←/→ effort", "p pro", "enter apply", "esc cancel"];
+const KEY_BINDINGS: [(&str, &str); 4] = [
+    ("←/→", "effort"),
+    ("p", "pro"),
+    ("enter", "apply"),
+    ("esc", "cancel"),
+];
 const FILLER_DOT: &str = "•";
 const THICK_DOT: &str = "●";
 
