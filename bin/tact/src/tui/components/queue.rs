@@ -467,7 +467,7 @@ impl Component for MessageQueue {
             spans.push(Span::styled(" ", Style::default().fg(border)));
             Line::from(spans)
         } else {
-            Line::styled(" queue ", Style::default().fg(border))
+            Line::styled(" queue · enter steer latest ", Style::default().fg(border))
         };
         let mut block = Block::new()
             .borders(Borders::ALL)
@@ -640,6 +640,16 @@ mod tests {
             [QueueEffect::Steer { prompt: submission, .. }]
                 if submission.display_text() == prompt
         ));
+    }
+
+    #[test]
+    fn queue_title_explains_how_to_steer_the_latest_message() {
+        let mut queue = MessageQueue::default();
+        queue.push("queued".to_owned());
+
+        let rows = rendered_rows(&mut queue, 100, 3);
+
+        assert!(rows[0].contains(" queue · enter steer latest "));
     }
 
     #[test]

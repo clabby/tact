@@ -16,7 +16,7 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr;
 
 const FOOTER: [&str; 2] = ["↑↓ scroll", "esc close"];
-const BINDINGS: [(&str, &str); 25] = [
+const BINDINGS: [(&str, &str); 26] = [
     ("ctrl+s", "change reasoning effort"),
     ("ctrl+d", "select model · before first prompt"),
     ("ctrl+t", "fork session · when available"),
@@ -32,6 +32,7 @@ const BINDINGS: [(&str, &str); 25] = [
     ("ctrl+c ctrl+c", "split closes pane · else exit"),
     ("esc esc", "interrupt the active response"),
     ("enter", "submit prompt"),
+    ("enter + enter", "submit prompt and steer"),
     ("shift+enter/ctrl+j", "insert newline"),
     ("ctrl+a/e", "move to line start · end"),
     ("ctrl+b/f", "move to previous · next character"),
@@ -198,6 +199,8 @@ mod tests {
             "ctrl+c ctrl+c",
             "clear input · when composer is focused and nonempty",
             "split closes pane · else exit",
+            "enter + enter",
+            "submit prompt and steer",
             "shift+enter/ctrl+j",
             "ctrl+a/e",
             "move to line start · end",
