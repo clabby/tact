@@ -2,7 +2,7 @@
 
 use crate::{
     app::config::ReasoningEffort,
-    core::MEMORY_REVIEW_CHECKPOINT,
+    core::{IMAGE_RENDERING_INSTRUCTIONS, MEMORY_REVIEW_CHECKPOINT},
     tui::{components::QueueId, pane::PaneId, prompt::Submission, transcript::TurnId},
 };
 use nanocodex::{
@@ -279,14 +279,14 @@ impl MemoryReviewState {
 
     fn submission_prompt(self, submission: &Submission) -> Prompt {
         match self {
-            Self::Disabled | Self::BeforeFirstTurn => submission.agent_prompt(),
+            Self::Disabled | Self::BeforeFirstTurn => prompt_with_image_rendering(submission),
             Self::FollowUp => prompt_with_memory_review(submission),
         }
     }
 
     fn steer_prompt(self, submission: &Submission) -> Prompt {
         match self {
-            Self::Disabled => submission.agent_prompt(),
+            Self::Disabled => prompt_with_image_rendering(submission),
             Self::BeforeFirstTurn | Self::FollowUp => prompt_with_memory_review(submission),
         }
     }
@@ -299,19 +299,29 @@ impl MemoryReviewState {
 }
 
 fn prompt_with_memory_review(submission: &Submission) -> Prompt {
+    let mut prompt = prompt_with_image_rendering(submission);
+    append_prompt_instructions(&mut prompt, MEMORY_REVIEW_CHECKPOINT);
+    prompt
+}
+
+fn prompt_with_image_rendering(submission: &Submission) -> Prompt {
     let mut prompt = submission.agent_prompt();
+    append_prompt_instructions(&mut prompt, IMAGE_RENDERING_INSTRUCTIONS);
+    prompt
+}
+
+fn append_prompt_instructions(prompt: &mut Prompt, instructions: &str) {
     match &mut prompt.instruction {
         PromptInput::Text(text) => {
             if !text.is_empty() {
                 text.push_str("\n\n");
             }
-            text.push_str(MEMORY_REVIEW_CHECKPOINT);
+            text.push_str(instructions);
         }
         PromptInput::Content(content) => content.push(UserInput::Text {
-            text: format!("\n\n{MEMORY_REVIEW_CHECKPOINT}"),
+            text: format!("\n\n{instructions}"),
         }),
     }
-    prompt
 }
 
 fn reflection_prompt(instructions: &Submission, context: &ReflectionContext) -> Prompt {
@@ -996,7 +1006,7 @@ mod tests {
     };
     use crate::{
         app::config::ReasoningEffort,
-        core::MEMORY_REVIEW_CHECKPOINT,
+        core::{IMAGE_RENDERING_INSTRUCTIONS, MEMORY_REVIEW_CHECKPOINT},
         tui::{components::QueueId, pane::PaneId, prompt::Submission, transcript::TurnId},
     };
     use nanocodex::{
@@ -1079,27 +1089,26 @@ mod tests {
         let steer = Submission::text("change direction".to_owned());
         let mut review = MemoryReviewState::fresh(true);
 
-        assert!(
-            !prompt_text(review.submission_prompt(&initial)).contains(MEMORY_REVIEW_CHECKPOINT)
-        );
+        let initial_prompt = prompt_text(review.submission_prompt(&initial));
+        assert!(!initial_prompt.contains(MEMORY_REVIEW_CHECKPOINT));
+        assert!(initial_prompt.contains(IMAGE_RENDERING_INSTRUCTIONS));
         review.turn_accepted();
+        let follow_up_prompt = prompt_text(review.submission_prompt(&follow_up));
         assert_eq!(
-            prompt_text(review.submission_prompt(&follow_up))
-                .matches(MEMORY_REVIEW_CHECKPOINT)
-                .count(),
+            follow_up_prompt.matches(MEMORY_REVIEW_CHECKPOINT).count(),
             1
         );
-        assert_eq!(
-            prompt_text(MemoryReviewState::fresh(true).steer_prompt(&steer))
-                .matches(MEMORY_REVIEW_CHECKPOINT)
-                .count(),
-            1
-        );
+        assert!(follow_up_prompt.contains(IMAGE_RENDERING_INSTRUCTIONS));
+        let steer_prompt = prompt_text(MemoryReviewState::fresh(true).steer_prompt(&steer));
+        assert_eq!(steer_prompt.matches(MEMORY_REVIEW_CHECKPOINT).count(), 1);
+        assert!(steer_prompt.contains(IMAGE_RENDERING_INSTRUCTIONS));
         assert_eq!(follow_up.display_text(), "actually, preserve ordering");
         assert_eq!(steer.display_text(), "change direction");
 
         let disabled = MemoryReviewState::fresh(false);
-        assert!(!prompt_text(disabled.steer_prompt(&steer)).contains(MEMORY_REVIEW_CHECKPOINT));
+        let disabled_prompt = prompt_text(disabled.steer_prompt(&steer));
+        assert!(!disabled_prompt.contains(MEMORY_REVIEW_CHECKPOINT));
+        assert!(disabled_prompt.contains(IMAGE_RENDERING_INSTRUCTIONS));
     }
 
     #[test]
