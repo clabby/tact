@@ -795,6 +795,11 @@ impl RootNode {
         update
     }
 
+    pub(crate) fn refresh_terminal_images(&mut self) {
+        self.transcript.component_mut().refresh_terminal_images();
+        self.subagents.refresh_terminal_images();
+    }
+
     fn update_terminal_without_confirmation(
         &mut self,
         mut event: Event,

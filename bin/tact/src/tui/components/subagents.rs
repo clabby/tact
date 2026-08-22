@@ -151,6 +151,12 @@ impl SubagentTree {
         }
     }
 
+    pub(super) fn refresh_terminal_images(&mut self) {
+        for node in &mut self.nodes {
+            node.transcript.component_mut().refresh_terminal_images();
+        }
+    }
+
     pub(super) fn apply(&mut self, update: AgentUpdate) -> bool {
         match update {
             AgentUpdate::Added(descriptor) => {

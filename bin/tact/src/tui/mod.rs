@@ -1167,6 +1167,7 @@ pub(crate) async fn run(
             }, if editor_task.is_some() && !stopping => {
                 editor_task = None;
                 terminal.resume().map_err(RuntimeError::Terminal)?;
+                app.refresh_terminal_images();
                 input = Some(EventStream::new());
                 match result.map_err(RuntimeError::ExternalEditorTask)?? {
                     EditorCompletion::Draft { pane, outcome: EditorOutcome::Updated(draft) } => {
