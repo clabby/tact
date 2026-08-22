@@ -127,6 +127,7 @@ pub(super) struct SubagentTree {
     filter: AgentFilter,
     effort: crate::app::config::ReasoningEffort,
     max_subagents: usize,
+    workspace: std::path::PathBuf,
 }
 
 impl SubagentTree {
@@ -139,6 +140,14 @@ impl SubagentTree {
             filter: AgentFilter::All,
             effort,
             max_subagents: DEFAULT_MAX_SUBAGENTS,
+            workspace: std::env::current_dir().unwrap_or_default(),
+        }
+    }
+
+    pub(super) fn set_workspace(&mut self, workspace: &std::path::Path) {
+        self.workspace = workspace.to_path_buf();
+        for node in &mut self.nodes {
+            node.transcript.component_mut().set_workspace(workspace);
         }
     }
 
@@ -149,10 +158,12 @@ impl SubagentTree {
                     node.descriptor = descriptor;
                 } else {
                     let id = descriptor.id;
+                    let mut transcript = Transcript::with_effort(self.effort);
+                    transcript.set_workspace(&self.workspace);
                     self.nodes.push(AgentNode {
                         descriptor,
                         status: AgentStatus::Running,
-                        transcript: Node::new(Transcript::with_effort(self.effort)),
+                        transcript: Node::new(transcript),
                     });
                     self.focused.get_or_insert(id);
                 }

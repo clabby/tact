@@ -55,6 +55,7 @@ pub(super) fn render_layout(
     if width == 0 {
         return Layout {
             lines: Vec::new(),
+            images: Vec::new(),
             links: Vec::new(),
             selections: Vec::new(),
             envelopes: Vec::new(),
@@ -76,6 +77,7 @@ pub(super) fn render_layout(
             links: vec![Vec::new(); lines.len()],
             selections: vec![Vec::new(); lines.len()],
             lines,
+            images: Vec::new(),
             envelopes: Vec::new(),
             selection_source: None,
         };
@@ -104,6 +106,7 @@ pub(super) fn render_layout(
     Layout {
         links: vec![Vec::new(); lines.len()],
         lines,
+        images: Vec::new(),
         selections,
         envelopes: Vec::new(),
         selection_source,

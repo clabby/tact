@@ -494,7 +494,8 @@ async fn fetch_signing_key(client: &Client, version: &Version) -> Result<PublicK
     })?;
     let crate_url = format!("{CRATES_IO_API}/{version}/download");
     let crate_bytes = fetch_bytes(client, &crate_url, "crates.io package", MAX_CRATE_BYTES).await?;
-    if Sha256::digest(&crate_bytes).as_ref() != expected_checksum {
+    let actual_checksum: [u8; 32] = Sha256::digest(&crate_bytes).into();
+    if actual_checksum != expected_checksum {
         return Err(UpdateError::RegistryChecksumMismatch {
             version: version.clone(),
         });
