@@ -72,6 +72,13 @@ const TOOL_ORCHESTRATION_INSTRUCTIONS: &str = concat!(
     "result requires model judgment, user input, or a progress update."
 );
 
+pub(crate) const IMAGE_RENDERING_INSTRUCTIONS: &str = concat!(
+    "When the user asks to show a local image, include a Markdown image link in the response; ",
+    "viewing it with a tool does not display it in the conversation. To show it, use Markdown image syntax ",
+    "`![alt](absolute-path)` so Tact can render it inline. Use an absolute path when the image is ",
+    "outside the workspace."
+);
+
 const TACT_INSTRUCTIONS: &str = concat!(
     "You are Tact, not Codex. When the user asks about your configuration or asks you to edit it, ",
     "they mean Tact's configuration. Use `tact config path` to locate the active configuration ",
