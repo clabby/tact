@@ -11,7 +11,7 @@ use crate::{
         hook,
     },
     core::extensions::{
-        Skill, SkillCatalog, mcp_provider,
+        CurrentSessionTool, Skill, SkillCatalog, mcp_provider,
         sessions::{FindSessionsTool, ReadSessionTool},
     },
     tui::session::ResumeState,
@@ -85,6 +85,15 @@ const SESSION_REFERENCE_INSTRUCTIONS: &str = concat!(
     "when the scan could not finish and more evidence is needed. Use `find_sessions` for bounded ",
     "discovery when an exact session ID is not already known. Do not treat an ID itself as session ",
     "content."
+);
+
+const SCRATCHPAD_INSTRUCTIONS: &str = concat!(
+    "Write temporary scripts, artifacts, and other session files that do not belong in the ",
+    "workspace under `$TACT_HOME/scratchpad/<session-id>`. Use `current_session` to obtain the ",
+    "active session ID before constructing this path, and create the session directory when ",
+    "needed. You may also use it for journaling during long tasks and for maintaining a long-lived ",
+    "session progress and decision log. Keep files that are part of the user's requested workspace ",
+    "changes in the workspace."
 );
 
 const MEMORY_INSTRUCTIONS: &str = concat!(
@@ -462,6 +471,7 @@ fn install_agent_tools(
 ) -> std::result::Result<Tools, nanocodex::tools::ToolsBuildError> {
     let mut tools = tools
         .into_builder()
+        .tool(CurrentSessionTool)
         .tool(FindSessionsTool::new(session_config_path.clone()))
         .tool(ReadSessionTool::new(session_config_path));
     if let Some(store) = memory {
@@ -599,6 +609,7 @@ fn fresh_instructions_with_catalog(
     instructions = reconcile_tact_instructions(instructions);
     instructions = reconcile_tool_orchestration_instructions(instructions);
     instructions = reconcile_session_reference_instructions(instructions);
+    instructions = reconcile_scratchpad_instructions(instructions);
     if subagents_enabled {
         instructions.push_str("\n\n");
         instructions.push_str(subagent_instructions(allow_luna));
@@ -659,6 +670,19 @@ fn reconcile_session_reference_instructions(mut instructions: String) -> String 
     instructions
 }
 
+fn reconcile_scratchpad_instructions(mut instructions: String) -> String {
+    let separator_and_instructions = format!("\n\n{SCRATCHPAD_INSTRUCTIONS}");
+    let occurrences = instructions.matches(&separator_and_instructions).count();
+    if occurrences == 1 {
+        return instructions;
+    }
+    if occurrences > 1 {
+        instructions = instructions.replace(&separator_and_instructions, "");
+    }
+    instructions.push_str(&separator_and_instructions);
+    instructions
+}
+
 fn subagent_instructions(allow_luna: bool) -> &'static str {
     if allow_luna {
         SUBAGENT_INSTRUCTIONS
@@ -680,7 +704,7 @@ impl Cancellation {
 #[cfg(test)]
 mod tests {
     use super::{
-        ConfiguredAgent, MEMORY_INSTRUCTIONS, MEMORY_REVIEW_CHECKPOINT,
+        ConfiguredAgent, MEMORY_INSTRUCTIONS, MEMORY_REVIEW_CHECKPOINT, SCRATCHPAD_INSTRUCTIONS,
         SESSION_REFERENCE_INSTRUCTIONS, SUBAGENT_INSTRUCTIONS, SUBAGENT_INSTRUCTIONS_SELECTED_ONLY,
         TACT_INSTRUCTIONS, TOOL_ORCHESTRATION_INSTRUCTIONS, configured_memory_store,
         fresh_instructions, reconcile_tact_instructions, session_instructions,
@@ -794,13 +818,13 @@ mod tests {
         assert_eq!(
             fresh_instructions(None, None, &disabled),
             format!(
-                "{default}\n\n{TOOL_ORCHESTRATION_INSTRUCTIONS}\n\n{SESSION_REFERENCE_INSTRUCTIONS}\n\n{SUBAGENT_INSTRUCTIONS}"
+                "{default}\n\n{TOOL_ORCHESTRATION_INSTRUCTIONS}\n\n{SESSION_REFERENCE_INSTRUCTIONS}\n\n{SCRATCHPAD_INSTRUCTIONS}\n\n{SUBAGENT_INSTRUCTIONS}"
             )
         );
         assert_eq!(
             fresh_instructions(Some("Custom instructions."), None, &disabled),
             format!(
-                "Custom instructions.\n\n{TACT_INSTRUCTIONS}\n\n{TOOL_ORCHESTRATION_INSTRUCTIONS}\n\n{SESSION_REFERENCE_INSTRUCTIONS}\n\n{SUBAGENT_INSTRUCTIONS}"
+                "Custom instructions.\n\n{TACT_INSTRUCTIONS}\n\n{TOOL_ORCHESTRATION_INSTRUCTIONS}\n\n{SESSION_REFERENCE_INSTRUCTIONS}\n\n{SCRATCHPAD_INSTRUCTIONS}\n\n{SUBAGENT_INSTRUCTIONS}"
             )
         );
     }
@@ -827,7 +851,7 @@ mod tests {
         assert_eq!(
             instructions,
             format!(
-                "{default}\n\n{TOOL_ORCHESTRATION_INSTRUCTIONS}\n\n{SESSION_REFERENCE_INSTRUCTIONS}\n\n{SUBAGENT_INSTRUCTIONS}\n\nProject instructions."
+                "{default}\n\n{TOOL_ORCHESTRATION_INSTRUCTIONS}\n\n{SESSION_REFERENCE_INSTRUCTIONS}\n\n{SCRATCHPAD_INSTRUCTIONS}\n\n{SUBAGENT_INSTRUCTIONS}\n\nProject instructions."
             )
         );
         assert_eq!(
@@ -837,7 +861,7 @@ mod tests {
                 &disabled
             ),
             format!(
-                "Replacement.\n\n{TACT_INSTRUCTIONS}\n\n{TOOL_ORCHESTRATION_INSTRUCTIONS}\n\n{SESSION_REFERENCE_INSTRUCTIONS}\n\n{SUBAGENT_INSTRUCTIONS}\n\nProject instructions."
+                "Replacement.\n\n{TACT_INSTRUCTIONS}\n\n{TOOL_ORCHESTRATION_INSTRUCTIONS}\n\n{SESSION_REFERENCE_INSTRUCTIONS}\n\n{SCRATCHPAD_INSTRUCTIONS}\n\n{SUBAGENT_INSTRUCTIONS}\n\nProject instructions."
             )
         );
     }
@@ -889,7 +913,7 @@ mod tests {
         let instructions = fresh_instructions(Some("Keep this first."), None, &enabled);
 
         assert!(instructions.starts_with(&format!(
-            "Keep this first.\n\n{TACT_INSTRUCTIONS}\n\n{TOOL_ORCHESTRATION_INSTRUCTIONS}\n\n{SESSION_REFERENCE_INSTRUCTIONS}\n\n{SUBAGENT_INSTRUCTIONS}\n\n## Available local skills"
+            "Keep this first.\n\n{TACT_INSTRUCTIONS}\n\n{TOOL_ORCHESTRATION_INSTRUCTIONS}\n\n{SESSION_REFERENCE_INSTRUCTIONS}\n\n{SCRATCHPAD_INSTRUCTIONS}\n\n{SUBAGENT_INSTRUCTIONS}\n\n## Available local skills"
         )));
         assert!(instructions.contains("Run focused tests."));
         assert!(!instructions.contains("SECRET-BODY"));
@@ -1120,6 +1144,22 @@ mod tests {
         );
         assert!(fresh.text.contains("continue calling `write_stdin`"));
         assert!(fresh.text.contains("do not move nested process polling"));
+    }
+
+    #[test]
+    fn scratchpad_instructions_scope_temporary_files_to_the_active_session() {
+        let skills = SkillsConfig::from_roots(false, Vec::new());
+        let fresh = session_instructions(None, None, &skills, None, false, false);
+
+        assert!(fresh.text.contains("$TACT_HOME/scratchpad/<session-id>"));
+        assert!(fresh.text.contains("Use `current_session`"));
+        assert!(fresh.text.contains("journaling during long tasks"));
+        assert!(fresh.text.contains("session progress and decision log"));
+        assert!(
+            fresh
+                .text
+                .contains("requested workspace changes in the workspace")
+        );
     }
 
     #[test]
