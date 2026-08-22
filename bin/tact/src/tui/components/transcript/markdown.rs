@@ -4,17 +4,24 @@ use ratatui::{
     style::{Modifier, Style},
     text::{Line, Span},
 };
-use std::{ops::Range, sync::Arc};
+use ratatui_image::sliced::SlicedProtocol;
+use std::{ops::Range, path::Path, sync::Arc};
 use syntect::easy::HighlightLines;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 pub(super) struct Layout {
     pub(super) lines: Vec<Line<'static>>,
+    pub(super) images: Vec<ImagePlacement>,
     pub(super) links: Vec<Vec<LinkSpan>>,
     pub(super) selections: Vec<Vec<SourceSpan>>,
     pub(super) envelopes: Vec<SourceEnvelope>,
     pub(super) selection_source: Option<String>,
+}
+
+pub(super) struct ImagePlacement {
+    pub(super) line: usize,
+    pub(super) protocol: Arc<SlicedProtocol>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -37,9 +44,31 @@ pub(super) struct LinkSpan {
 }
 
 pub(super) fn render(markdown: &str, width: u16, theme: &Theme) -> Layout {
+    let workspace = std::env::current_dir().unwrap_or_default();
+    render_in(markdown, width, theme, &workspace)
+}
+
+pub(super) fn render_in(markdown: &str, width: u16, theme: &Theme, workspace: &Path) -> Layout {
+    render_cached(
+        markdown,
+        width,
+        theme,
+        workspace,
+        &mut super::image::Cache::default(),
+    )
+}
+
+pub(super) fn render_cached(
+    markdown: &str,
+    width: u16,
+    theme: &Theme,
+    workspace: &Path,
+    images: &mut super::image::Cache,
+) -> Layout {
     if width == 0 {
         return Layout {
             lines: Vec::new(),
+            images: Vec::new(),
             links: Vec::new(),
             selections: Vec::new(),
             envelopes: Vec::new(),
@@ -53,7 +82,7 @@ pub(super) fn render(markdown: &str, width: u16, theme: &Theme) -> Layout {
         | Options::ENABLE_SMART_PUNCTUATION
         | Options::ENABLE_MATH
         | Options::ENABLE_GFM;
-    let mut renderer = Renderer::new(width, theme);
+    let mut renderer = Renderer::new(width, theme, workspace, images);
     let mut events = Parser::new_ext(markdown, options).peekable();
     while let Some(event) = events.next() {
         match event {
@@ -139,7 +168,10 @@ struct Renderer<'a> {
     links: Vec<LinkState>,
     rendered_links: Vec<(usize, LinkSpan)>,
     selection_exclusions: Vec<Vec<Range<u16>>>,
-    image: Option<ImageState>,
+    images: Vec<ImagePlacement>,
+    image: Option<String>,
+    workspace: &'a Path,
+    images_cache: &'a mut super::image::Cache,
 }
 
 struct ListState {
@@ -156,13 +188,13 @@ struct TaggedSpan {
     link: Option<Arc<str>>,
 }
 
-struct ImageState {
-    destination: String,
-    alt: String,
-}
-
 impl<'a> Renderer<'a> {
-    fn new(width: u16, theme: &'a Theme) -> Self {
+    fn new(
+        width: u16,
+        theme: &'a Theme,
+        workspace: &'a Path,
+        images_cache: &'a mut super::image::Cache,
+    ) -> Self {
         Self {
             width,
             theme,
@@ -174,7 +206,10 @@ impl<'a> Renderer<'a> {
             links: Vec::new(),
             rendered_links: Vec::new(),
             selection_exclusions: Vec::new(),
+            images: Vec::new(),
             image: None,
+            workspace,
+            images_cache,
         }
     }
 
@@ -287,10 +322,7 @@ impl<'a> Renderer<'a> {
                 );
             }
             Tag::Image { dest_url, .. } => {
-                self.image = Some(ImageState {
-                    destination: sanitize(&dest_url),
-                    alt: String::new(),
-                });
+                self.image = Some(sanitize(&dest_url));
             }
             Tag::FootnoteDefinition(label) => {
                 self.flush();
@@ -367,21 +399,26 @@ impl<'a> Renderer<'a> {
                 }
             }
             TagEnd::Image => {
-                if let Some(image) = self.image.take() {
-                    self.push_unlinked(Span::styled(
-                        format!("▧ {} · ", image.alt.trim()),
-                        Style::default().fg(self.theme.muted()),
-                    ));
-                    let destination = Arc::<str>::from(image.destination);
-                    self.push_linked(
-                        Span::styled(
-                            destination.to_string(),
-                            Style::default()
-                                .fg(self.theme.accent())
-                                .add_modifier(Modifier::UNDERLINED),
-                        ),
-                        destination,
-                    );
+                if let Some(destination) = self.image.take() {
+                    if let Some(protocol) =
+                        self.images_cache
+                            .load(&destination, self.workspace, self.width)
+                    {
+                        self.flush();
+                        let line = self.lines.len();
+                        let size = protocol.size();
+                        self.lines.extend(
+                            (0..size.height).map(|_| {
+                                Line::from(Span::raw(" ".repeat(usize::from(size.width))))
+                            }),
+                        );
+                        self.images.push(ImagePlacement { line, protocol });
+                    } else {
+                        self.push_unlinked(Span::styled(
+                            "image could not be rendered",
+                            Style::default().fg(ratatui::style::Color::Red),
+                        ));
+                    }
                 }
             }
             TagEnd::FootnoteDefinition
@@ -404,8 +441,7 @@ impl<'a> Renderer<'a> {
 
     fn text(&mut self, text: &str) {
         let text = sanitize(text);
-        if let Some(image) = &mut self.image {
-            image.alt.push_str(&text);
+        if self.image.is_some() {
             return;
         }
         if let Some(link) = self.links.last_mut() {
@@ -417,8 +453,7 @@ impl<'a> Renderer<'a> {
 
     fn span(&mut self, text: &str, style: Style) {
         let text = sanitize(text);
-        if let Some(image) = &mut self.image {
-            image.alt.push_str(&text);
+        if self.image.is_some() {
             return;
         }
         self.ensure_prefix();
@@ -675,6 +710,7 @@ impl<'a> Renderer<'a> {
         (
             Layout {
                 lines: self.lines,
+                images: self.images,
                 links,
                 selections: Vec::new(),
                 envelopes: Vec::new(),
@@ -1378,9 +1414,28 @@ fn render_stacked_table(
 
 #[cfg(test)]
 mod tests {
-    use super::render;
+    use super::{
+        super::image::{Cache, MAX_IMAGE_HEIGHT},
+        render, render_cached, render_in,
+    };
     use crate::tui::theme::Theme;
     use ratatui::style::{Color, Modifier};
+    use std::{fs::File, path::Path, sync::Arc};
+
+    fn write_png(path: &Path) {
+        write_solid_png(path, 1, 1);
+    }
+
+    fn write_solid_png(path: &Path, width: u32, height: u32) {
+        let file = File::create(path).unwrap();
+        let mut encoder = png::Encoder::new(file, width, height);
+        encoder.set_color(png::ColorType::Rgb);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().unwrap();
+        writer
+            .write_image_data(&[0xff, 0, 0].repeat((width * height) as usize))
+            .unwrap();
+    }
 
     #[test]
     fn requested_markdown_styles_are_applied() {
@@ -1588,5 +1643,88 @@ mod tests {
 
         assert!(!rendered.contains('\u{1b}'));
         assert!(rendered.contains('�'));
+    }
+
+    #[test]
+    fn renderable_inline_images_are_isolated_from_surrounding_text() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sample.png");
+        write_png(&path);
+        let layout = render_in(
+            "before ![sample](sample.png) after",
+            80,
+            &Theme::default(),
+            directory.path(),
+        );
+        let lines = layout
+            .lines
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+
+        assert_eq!(lines.first().map(|line| line.trim_end()), Some("before"));
+        assert_eq!(lines.last().map(|line| line.trim_start()), Some("after"));
+        assert!(lines.len() >= 3);
+        assert_eq!(layout.images.len(), 1);
+    }
+
+    #[test]
+    fn image_failures_are_red_and_remain_inline() {
+        let layout = render(
+            "before ![sample](/definitely/missing/image.png) after",
+            80,
+            &Theme::default(),
+        );
+
+        assert_eq!(layout.lines.len(), 1);
+        assert_eq!(
+            layout.lines[0].to_string(),
+            "before image could not be rendered after"
+        );
+        let error = layout.lines[0]
+            .spans
+            .iter()
+            .find(|span| span.content == "image could not be rendered")
+            .unwrap();
+        assert_eq!(error.style.fg, Some(Color::Red));
+    }
+
+    #[test]
+    fn streaming_markdown_reuses_unchanged_image_protocols() {
+        let directory = tempfile::tempdir().unwrap();
+        write_png(&directory.path().join("sample.png"));
+        let mut images = Cache::default();
+        let first = render_cached(
+            "before ![sample](sample.png)",
+            80,
+            &Theme::default(),
+            directory.path(),
+            &mut images,
+        );
+        let second = render_cached(
+            "before ![sample](sample.png) after",
+            80,
+            &Theme::default(),
+            directory.path(),
+            &mut images,
+        );
+
+        assert!(Arc::ptr_eq(
+            &first.images[0].protocol,
+            &second.images[0].protocol
+        ));
+        let protocol = Arc::downgrade(&second.images[0].protocol);
+        drop((first, second));
+        assert!(protocol.upgrade().is_none());
+    }
+
+    #[test]
+    fn tall_images_are_fitted_to_a_bounded_transcript_height() {
+        let directory = tempfile::tempdir().unwrap();
+        write_solid_png(&directory.path().join("tall.png"), 1, 1_000);
+
+        let layout = render_in("![tall](tall.png)", 80, &Theme::default(), directory.path());
+
+        assert!(layout.images[0].protocol.size().height <= MAX_IMAGE_HEIGHT);
     }
 }

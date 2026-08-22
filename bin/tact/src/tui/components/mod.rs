@@ -30,3 +30,4 @@ pub(crate) use queue::QueueId;
 pub(crate) use root::{
     DraftReset, RecentPromptDraft, RestoredSessionProjection, RootEffect, RootNode, SessionListKind,
 };
+pub(crate) use transcript::image::initialize as initialize_image_renderer;

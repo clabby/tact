@@ -352,8 +352,12 @@ pub(crate) struct RootNode {
 
 impl RootNode {
     pub(crate) fn new(workspace: &Path, thinking: ReasoningEffort) -> Self {
+        let mut transcript = Transcript::with_effort(thinking);
+        transcript.set_workspace(workspace);
+        let mut subagents = SubagentTree::new(thinking);
+        subagents.set_workspace(workspace);
         Self {
-            transcript: Node::new(Transcript::with_effort(thinking)),
+            transcript: Node::new(transcript),
             composer: Node::new(Composer::new(workspace, thinking)),
             queue: Node::new(MessageQueue::default()),
             workspace: workspace.to_path_buf(),
@@ -381,7 +385,7 @@ impl RootNode {
             interactive: true,
             theme_mode: ThemeMode::Auto,
             preferred_reasoning_mode: ReasoningMode::Standard,
-            subagents: SubagentTree::new(thinking),
+            subagents,
             context_diagnostics: ContextDiagnostics::default(),
             recent_prompts: Vec::new(),
             pending_session_mention: None,
@@ -571,7 +575,7 @@ impl RootNode {
         reasoning_mode: ReasoningMode,
         preferred_reasoning_mode: ReasoningMode,
         fast_mode: bool,
-        projection: RestoredSessionProjection,
+        mut projection: RestoredSessionProjection,
     ) {
         self.reset_session(
             workspace,
@@ -581,6 +585,7 @@ impl RootNode {
             DraftReset::Clear,
         );
         self.set_fast_mode(fast_mode);
+        projection.transcript.set_workspace(workspace);
         self.transcript = Node::new(projection.transcript);
         self.context_diagnostics = projection.context_diagnostics;
         self.recent_prompts = projection.recent_prompts;

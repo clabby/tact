@@ -3,6 +3,7 @@
 mod diff;
 mod empty;
 mod highlight;
+pub(crate) mod image;
 mod markdown;
 mod message;
 mod tool;
@@ -34,9 +35,11 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Clear, Widget},
 };
+use ratatui_image::sliced::{SignedPosition, SlicedImage};
 use std::{
     collections::{HashMap, hash_map::Entry},
     ops::Range,
+    path::Path,
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -102,18 +105,33 @@ struct CachedEntry {
     live_duration_ns: Option<u64>,
     tool_summary_lines: usize,
     lines: Vec<Line<'static>>,
+    images: Vec<markdown::ImagePlacement>,
     links: Vec<Vec<markdown::LinkSpan>>,
     selections: Vec<Vec<markdown::SourceSpan>>,
     envelopes: Vec<markdown::SourceEnvelope>,
     selection_source: Option<String>,
 }
 
-#[derive(Default)]
 struct LayoutCache {
     entries: HashMap<EntryId, CachedEntry>,
     live_tool_durations: HashMap<EntryId, u64>,
     expansion_overrides: HashMap<EntryId, bool>,
     expand_all: Option<bool>,
+    workspace: std::path::PathBuf,
+    images: image::Cache,
+}
+
+impl Default for LayoutCache {
+    fn default() -> Self {
+        Self {
+            entries: HashMap::new(),
+            live_tool_durations: HashMap::new(),
+            expansion_overrides: HashMap::new(),
+            expand_all: None,
+            workspace: std::env::current_dir().unwrap_or_default(),
+            images: image::Cache::default(),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -264,7 +282,14 @@ impl Transcript {
     pub(crate) fn fork_snapshot(&self) -> Self {
         let mut snapshot = Self::with_effort(self.effort);
         snapshot.model = self.model.fork_snapshot();
+        snapshot.cache.workspace.clone_from(&self.cache.workspace);
         snapshot
+    }
+
+    pub(crate) fn set_workspace(&mut self, workspace: &Path) {
+        self.cache.workspace = workspace.to_path_buf();
+        self.cache.entries.clear();
+        self.cache.images.clear();
     }
 
     pub(crate) const fn set_effort(&mut self, effort: ReasoningEffort) {
@@ -1264,6 +1289,8 @@ impl LayoutCache {
     }
 
     fn layout(&mut self, entry: &TranscriptEntry, width: u16, theme: &Theme) -> &[Line<'static>] {
+        let workspace = &self.workspace;
+        let images = &mut self.images;
         let expanded = self
             .expansion_overrides
             .get(&entry.id)
@@ -1284,6 +1311,8 @@ impl LayoutCache {
                         width,
                         theme,
                         expanded,
+                        workspace,
+                        images,
                     ));
                 } else if cached.live_duration_ns != live_duration_ns {
                     occupied
@@ -1298,6 +1327,8 @@ impl LayoutCache {
                 width,
                 theme,
                 expanded,
+                workspace,
+                images,
             )),
         };
         &cached.lines
@@ -1358,6 +1389,18 @@ impl LayoutCache {
             .map_or(&[], Vec::as_slice)
     }
 
+    fn image(&self, anchor: Anchor) -> Option<(usize, Arc<ratatui_image::sliced::SlicedProtocol>)> {
+        self.entries.get(&anchor.entry).and_then(|cached| {
+            cached.images.iter().find_map(|image| {
+                let end = image
+                    .line
+                    .saturating_add(usize::from(image.protocol.size().height));
+                (anchor.line >= image.line && anchor.line < end)
+                    .then(|| (image.line, Arc::clone(&image.protocol)))
+            })
+        })
+    }
+
     fn selection_source<'a>(&'a self, entry: &'a TranscriptEntry) -> Option<&'a str> {
         self.entries
             .get(&entry.id)
@@ -1392,8 +1435,18 @@ impl CachedEntry {
         width: u16,
         theme: &Theme,
         expanded: bool,
+        workspace: &Path,
+        images: &mut image::Cache,
     ) -> Self {
-        let layout = render_entry(entry, live_duration_ns, width, theme, expanded);
+        let layout = render_entry(
+            entry,
+            live_duration_ns,
+            width,
+            theme,
+            expanded,
+            workspace,
+            images,
+        );
         let tool_summary_lines = match (&entry.kind, live_duration_ns) {
             (EntryKind::Tool(tool), Some(duration_ns)) => {
                 render_live_tool_summary(entry, tool, duration_ns, width, theme, expanded).len()
@@ -1407,6 +1460,7 @@ impl CachedEntry {
             live_duration_ns,
             tool_summary_lines,
             lines: layout.lines,
+            images: layout.images,
             links: layout.links,
             selections: layout.selections,
             envelopes: layout.envelopes,
@@ -1495,6 +1549,12 @@ impl Component for Transcript {
             anchors,
         } = plan;
         let mut y = transcript_area.y.saturating_add(top_padding);
+        let mut visible_images: Vec<(
+            EntryId,
+            usize,
+            Arc<ratatui_image::sliced::SlicedProtocol>,
+            SignedPosition,
+        )> = Vec::new();
         for anchor in anchors {
             if let Some(line) = self.cache.line(anchor) {
                 frame
@@ -1514,6 +1574,23 @@ impl Component for Transcript {
                     }
                 }));
             self.selection_rows.push((y, anchor));
+            if let Some((line, protocol)) = self.cache.image(anchor)
+                && visible_images
+                    .last()
+                    .is_none_or(|(entry, start, ..)| (*entry, *start) != (anchor.entry, line))
+            {
+                let offset = i32::try_from(anchor.line.saturating_sub(line)).unwrap_or(i32::MAX);
+                let position = i32::from(y)
+                    .saturating_sub(i32::from(transcript_area.y))
+                    .saturating_sub(offset)
+                    .clamp(i32::from(i16::MIN), i32::from(i16::MAX));
+                visible_images.push((
+                    anchor.entry,
+                    line,
+                    protocol,
+                    SignedPosition::from((0, position as i16)),
+                ));
+            }
             if anchor.line == 0
                 && let Some(entry) = self.model.entry(anchor.entry)
             {
@@ -1559,6 +1636,9 @@ impl Component for Transcript {
             }
             y = y.saturating_add(1);
         }
+        for (_, _, protocol, position) in visible_images {
+            frame.render_widget(SlicedImage::new(&protocol, position), transcript_area);
+        }
     }
 }
 
@@ -1592,12 +1672,17 @@ fn render_entry(
     width: u16,
     theme: &Theme,
     expanded: bool,
+    workspace: &Path,
+    images: &mut image::Cache,
 ) -> markdown::Layout {
     let mut layout = match &entry.kind {
         EntryKind::User { text, .. } => render_user(text, width, theme),
-        EntryKind::Assistant { text, .. } => markdown::render(text, width, theme),
+        EntryKind::Assistant { text, .. } => {
+            markdown::render_cached(text, width, theme, workspace, images)
+        }
         EntryKind::Reasoning { text } => {
-            let mut layout = markdown::render(text, width.saturating_sub(2), theme);
+            let mut layout =
+                markdown::render_cached(text, width.saturating_sub(2), theme, workspace, images);
             for line in &mut layout.lines {
                 for span in &mut line.spans {
                     span.style = span.style.patch(
@@ -1796,6 +1881,7 @@ fn layout_without_links(lines: Vec<Line<'static>>) -> markdown::Layout {
     let selections = vec![Vec::new(); lines.len()];
     markdown::Layout {
         lines,
+        images: Vec::new(),
         links,
         selections,
         envelopes: Vec::new(),
@@ -1838,6 +1924,7 @@ fn render_user(text: &str, width: u16, theme: &Theme) -> markdown::Layout {
     markdown::Layout {
         links: vec![Vec::new(); lines.len()],
         lines,
+        images: Vec::new(),
         selections,
         envelopes: Vec::new(),
         selection_source: match text {
@@ -1873,7 +1960,7 @@ mod tests {
     };
     use ratatui::{Terminal, backend::TestBackend, layout::Position, style::Color};
     use serde_json::{json, value::to_raw_value};
-    use std::{sync::Arc, time::Duration};
+    use std::{fs::File, path::Path, sync::Arc, time::Duration};
     use tact_subagents::{AgentMessageUpdate, MessageSender};
 
     #[test]
@@ -2026,6 +2113,15 @@ mod tests {
         terminal.backend().clone()
     }
 
+    fn write_png(path: &Path) {
+        let file = File::create(path).unwrap();
+        let mut encoder = png::Encoder::new(file, 1, 1);
+        encoder.set_color(png::ColorType::Rgb);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().unwrap();
+        writer.write_image_data(&[0xff, 0, 0]).unwrap();
+    }
+
     fn scroll(transcript: &mut Transcript, event: Event) {
         let command = transcript
             .scroll_command(&event)
@@ -2050,6 +2146,37 @@ mod tests {
                 .selection_span_nearest(Position::new(0, 0))
                 .is_some()
         );
+    }
+
+    #[test]
+    fn assistant_markdown_images_render_between_surrounding_text_rows() {
+        let workspace = tempfile::tempdir().unwrap();
+        write_png(&workspace.path().join("sample.png"));
+        let mut transcript = Transcript::new();
+        transcript.set_workspace(workspace.path());
+        transcript.update(TranscriptEvent::Record(agent_with_payload(
+            1,
+            AgentEventKind::AssistantMessage,
+            json!({
+                "model_call_index": 1,
+                "item_id": "answer",
+                "phase": "final_answer",
+                "text": "before ![sample](sample.png) after",
+            }),
+        )));
+
+        let backend = render(&mut transcript, 20, 5);
+        let rows = backend
+            .buffer()
+            .content()
+            .chunks(20)
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+            .collect::<Vec<_>>();
+        let before = rows.iter().position(|row| row.contains("before")).unwrap();
+        let after = rows.iter().position(|row| row.contains("after")).unwrap();
+
+        assert_eq!(after, before + 2);
+        assert!(rows[before + 1].chars().any(|character| character != ' '));
     }
 
     #[test]
