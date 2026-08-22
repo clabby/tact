@@ -18,6 +18,7 @@ use std::{
 use thiserror::Error;
 
 const RESUME_STATE_FORMAT_VERSION: u32 = 2;
+const CONTRACT_MIGRATION_SNAPSHOT_VERSION: u32 = 1;
 pub(crate) const MAX_RECENT_PROMPTS: usize = 100;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -81,6 +82,10 @@ pub(crate) enum SessionError {
         "session {session_id} uses resume-state format {found}; expected {RESUME_STATE_FORMAT_VERSION}"
     )]
     IncompatibleCheckpoint { session_id: String, found: u32 },
+    #[error("failed to encode the session snapshot for contract migration: {0}")]
+    EncodeContractMigration(#[source] serde_json::Error),
+    #[error("failed to decode the migrated session snapshot: {0}")]
+    DecodeContractMigration(#[source] serde_json::Error),
     #[error("session lineage contains a cycle at {session_id}")]
     LineageCycle { session_id: String },
     #[error("session lineage references missing ancestor {session_id}")]
@@ -148,6 +153,29 @@ pub(crate) fn load_checkpoint(
         stored.instructions,
         stored.skills_catalog_present,
     ))
+}
+
+pub(crate) fn migrate_snapshot_contract(
+    snapshot: &SessionSnapshot,
+) -> Result<Option<SessionSnapshot>, SessionError> {
+    // Nanocodex snapshot format 1 interprets an absent request prefix as a history resume. Keep
+    // this wire adaptation version-gated so a dependency update cannot silently rewrite a new
+    // snapshot contract.
+    if snapshot.version() != CONTRACT_MIGRATION_SNAPSHOT_VERSION {
+        return Ok(None);
+    }
+    let mut value =
+        serde_json::to_value(snapshot).map_err(SessionError::EncodeContractMigration)?;
+    if value
+        .as_object_mut()
+        .and_then(|snapshot| snapshot.remove("request_prefix"))
+        .is_none()
+    {
+        return Ok(None);
+    }
+    serde_json::from_value(value)
+        .map(Some)
+        .map_err(SessionError::DecodeContractMigration)
 }
 
 #[allow(dead_code, reason = "used by session benchmarks")]
@@ -370,7 +398,10 @@ pub(crate) fn format_age(started_at_unix_ms: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{encode_checkpoint, load_checkpoint, load_transcript, model, save_checkpoint};
+    use super::{
+        encode_checkpoint, load_checkpoint, load_transcript, migrate_snapshot_contract, model,
+        save_checkpoint,
+    };
     use crate::{
         app::config::{ReasoningEffort, ReasoningMode},
         tui::{
@@ -697,6 +728,45 @@ mod tests {
         assert_eq!(catalog, Some(true));
         assert!(directory.path().join("sessions/v2.sqlite3").is_file());
         assert!(!directory.path().join("checkpoints").exists());
+    }
+
+    #[test]
+    fn contract_migration_discards_only_the_stored_request_prefix() {
+        let snapshot = snapshot("lineage");
+        let original = serde_json::to_value(&snapshot).unwrap();
+        let mut expected = original.clone();
+        expected
+            .as_object_mut()
+            .unwrap()
+            .remove("request_prefix")
+            .unwrap();
+
+        let migrated = migrate_snapshot_contract(&snapshot).unwrap().unwrap();
+
+        assert_eq!(serde_json::to_value(migrated).unwrap(), expected);
+        assert!(original.get("request_prefix").is_some());
+    }
+
+    #[test]
+    fn history_snapshots_do_not_need_contract_migration() {
+        let mut snapshot = serde_json::to_value(snapshot("lineage")).unwrap();
+        snapshot
+            .as_object_mut()
+            .unwrap()
+            .remove("request_prefix")
+            .unwrap();
+        let snapshot = serde_json::from_value(snapshot).unwrap();
+
+        assert!(migrate_snapshot_contract(&snapshot).unwrap().is_none());
+    }
+
+    #[test]
+    fn unknown_snapshot_formats_are_not_rewritten() {
+        let mut snapshot = serde_json::to_value(snapshot("lineage")).unwrap();
+        snapshot["version"] = json!(2);
+        let snapshot = serde_json::from_value(snapshot).unwrap();
+
+        assert!(migrate_snapshot_contract(&snapshot).unwrap().is_none());
     }
 
     #[test]
