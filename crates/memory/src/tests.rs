@@ -23,8 +23,9 @@ impl MemoryStore {
         query: &str,
         limit: usize,
         now_ms: i64,
-    ) -> Result<super::MemoryScan, MemoryError> {
-        self.0.scan_local(query, limit, now_ms)
+    ) -> Result<Vec<super::MemoryCandidate>, MemoryError> {
+        self.0
+            .scan_local(query, super::MemoryNamespaceFilter::All, limit, now_ms)
     }
 
     fn put(
@@ -257,14 +258,13 @@ fn scan_updates_only_returned_rows() {
         .unwrap();
     let unrelated = store.put("python network", None, 0).unwrap();
 
-    let scan = store.scan("rust sqlite", 1, 1).unwrap();
+    let candidates = store.scan("rust sqlite", 1, 1).unwrap();
 
-    assert!(!scan.abstained);
-    assert_eq!(scan.candidates.len(), 1);
+    assert_eq!(candidates.len(), 1);
     let records = store.list(1).unwrap();
     let scanned = records
         .iter()
-        .find(|record| record.key.id == scan.candidates[0].key.id)
+        .find(|record| record.key.id == candidates[0].key.id)
         .unwrap();
     assert_eq!(scanned.scan_count, 1);
     assert_eq!(scanned.last_scanned_at_ms, Some(1));
@@ -275,9 +275,7 @@ fn scan_updates_only_returned_rows() {
         }
     }
 
-    let abstained = store.scan("no-overlap", 2, 2).unwrap();
-    assert!(abstained.abstained);
-    assert!(abstained.candidates.is_empty());
+    assert!(store.scan("no-overlap", 2, 2).unwrap().is_empty());
     assert_eq!(
         store
             .list(2)
@@ -296,9 +294,9 @@ fn scan_clamps_results_to_the_production_limit() {
         store.put(&format!("shared term {index}"), None, 0).unwrap();
     }
 
-    let scan = store.scan("shared", usize::MAX, 1).unwrap();
+    let candidates = store.scan("shared", usize::MAX, 1).unwrap();
 
-    assert_eq!(scan.candidates.len(), 5);
+    assert_eq!(candidates.len(), 5);
 }
 
 #[test]
@@ -404,7 +402,7 @@ fn suppresses_unsafe_legacy_rows_but_keeps_them_deletable() {
     let id = connection.last_insert_rowid();
     drop(connection);
 
-    assert!(store.scan("hunter2", 1, 0).unwrap().abstained);
+    assert!(store.scan("hunter2", 1, 0).unwrap().is_empty());
     assert!(store.read(&[id], 0).unwrap().is_empty());
     assert!(store.list(0).unwrap().is_empty());
     store.delete(MemoryKey::local(id, 1), 0).unwrap();

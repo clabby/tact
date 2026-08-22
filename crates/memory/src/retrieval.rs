@@ -7,8 +7,12 @@ const BM25_K1: f64 = 1.2;
 const BM25_B: f64 = 0.75;
 const PREVIEW_MAX_BYTES: usize = 64;
 
-pub(super) fn rank(query: &str, memories: &[MemoryRecord], limit: usize) -> Vec<MemoryCandidate> {
-    if limit == 0 || memories.is_empty() {
+pub(super) fn rank<'a>(
+    query: &str,
+    memories: impl IntoIterator<Item = &'a MemoryRecord>,
+    limit: usize,
+) -> Vec<MemoryCandidate> {
+    if limit == 0 {
         return Vec::new();
     }
 
@@ -18,9 +22,12 @@ pub(super) fn rank(query: &str, memories: &[MemoryRecord], limit: usize) -> Vec<
     }
 
     let documents = memories
-        .iter()
+        .into_iter()
         .map(|memory| Document::new(memory, tokenize(&memory.content)))
         .collect::<Vec<_>>();
+    if documents.is_empty() {
+        return Vec::new();
+    }
     let average_document_length = documents
         .iter()
         .map(|document| document.length as f64)
@@ -192,7 +199,7 @@ fn preview(content: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{preview, rank, tokenize};
-    use crate::{MemoryKey, MemoryRecord};
+    use crate::{MemoryCandidate, MemoryKey, MemoryNamespaceFilter, MemoryRecord};
 
     fn memory(id: i64, content: &str) -> MemoryRecord {
         MemoryRecord {
@@ -206,6 +213,12 @@ mod tests {
             use_count: 0,
             probation_until_ms: None,
         }
+    }
+
+    fn remote_memory(namespace: &str, id: i64, content: &str) -> MemoryRecord {
+        let mut memory = memory(id, content);
+        memory.key = MemoryKey::remote(namespace.to_owned(), id, 1);
+        memory
     }
 
     #[test]
@@ -319,7 +332,7 @@ mod tests {
     }
 
     #[test]
-    fn no_overlap_abstains_and_scores_tie_by_id() {
+    fn no_overlap_returns_no_candidates_and_scores_tie_by_id() {
         let memories = [memory(2, "same"), memory(1, "same")];
 
         assert!(rank("different", &memories, 5).is_empty());
@@ -330,6 +343,36 @@ mod tests {
                 .collect::<Vec<_>>(),
             [1, 2]
         );
+    }
+
+    #[test]
+    fn namespace_filters_produce_independently_ranked_scan_requests() {
+        let memories = [
+            remote_memory("alice", 1, "shared concise"),
+            remote_memory("alice", 2, "shared verbose padding words"),
+            remote_memory("bob", 1, "shared concise"),
+            remote_memory("bob", 2, "shared verbose padding words"),
+        ];
+
+        let ours = MemoryNamespaceFilter::Exact("alice".to_owned());
+        let theirs = MemoryNamespaceFilter::OtherThan("alice".to_owned());
+        let ours = MemoryCandidate::rank(
+            "shared",
+            memories.iter().filter(|memory| ours.includes(&memory.key)),
+            1,
+        );
+        let theirs = MemoryCandidate::rank(
+            "shared",
+            memories
+                .iter()
+                .filter(|memory| theirs.includes(&memory.key)),
+            1,
+        );
+
+        assert_eq!(ours.len(), 1);
+        assert_eq!(ours[0].key.namespace.as_deref(), Some("alice"));
+        assert_eq!(theirs.len(), 1);
+        assert_eq!(theirs[0].key.namespace.as_deref(), Some("bob"));
     }
 
     #[test]
