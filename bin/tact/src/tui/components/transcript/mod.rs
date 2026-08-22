@@ -110,6 +110,7 @@ struct CachedEntry {
     selections: Vec<Vec<markdown::SourceSpan>>,
     envelopes: Vec<markdown::SourceEnvelope>,
     selection_source: Option<String>,
+    image_state: markdown::ImageState,
 }
 
 struct LayoutCache {
@@ -292,6 +293,10 @@ impl Transcript {
         self.cache.images.clear();
     }
 
+    pub(crate) fn refresh_terminal_images(&mut self) {
+        self.cache.refresh_terminal_images();
+    }
+
     pub(crate) const fn set_effort(&mut self, effort: ReasoningEffort) {
         self.effort = effort;
     }
@@ -330,6 +335,7 @@ impl Transcript {
             .into_iter()
             .chain(empty)
             .chain(self.retry_timer.and_then(|timer| timer.next_frame))
+            .chain(self.cache.images.animation_deadline())
             .min()
     }
 
@@ -459,13 +465,19 @@ impl Transcript {
             .as_mut()
             .is_some_and(|spinner| spinner.advance(now));
         let logo_changed = self.is_empty() && self.empty_logo.advance(now);
+        let images_changed = self.cache.poll_images(now);
         let activity = self.activity();
         ComponentUpdate {
             effects: (previous_activity != activity)
                 .then_some(activity)
                 .into_iter()
                 .collect(),
-            render: if retry_changed || timer_changed || tool_changed || logo_changed {
+            render: if retry_changed
+                || timer_changed
+                || tool_changed
+                || logo_changed
+                || images_changed
+            {
                 RenderRequest::Streaming
             } else {
                 RenderRequest::None
@@ -1282,6 +1294,33 @@ fn is_expandable(entry: &TranscriptEntry) -> bool {
 }
 
 impl LayoutCache {
+    fn refresh_terminal_images(&mut self) {
+        self.images.advance_terminal_generation();
+        self.entries
+            .retain(|_, entry| entry.image_state != markdown::ImageState::Pending);
+        for entry in self.entries.values_mut() {
+            for image in &mut entry.images {
+                image.retransmit = true;
+            }
+        }
+    }
+
+    fn poll_images(&mut self, now: Instant) -> bool {
+        let result = self.images.poll(now);
+        match result.layout_change {
+            image::LayoutChange::Ready => {
+                self.entries
+                    .retain(|_, entry| entry.image_state == markdown::ImageState::None);
+            }
+            image::LayoutChange::Pending => {
+                self.entries
+                    .retain(|_, entry| entry.image_state != markdown::ImageState::Pending);
+            }
+            image::LayoutChange::None => {}
+        }
+        result.render_changed
+    }
+
     fn forget(&mut self, id: EntryId) {
         self.entries.remove(&id);
         self.live_tool_durations.remove(&id);
@@ -1389,15 +1428,38 @@ impl LayoutCache {
             .map_or(&[], Vec::as_slice)
     }
 
-    fn image(&self, anchor: Anchor) -> Option<(usize, Arc<ratatui_image::sliced::SlicedProtocol>)> {
-        self.entries.get(&anchor.entry).and_then(|cached| {
-            cached.images.iter().find_map(|image| {
-                let end = image
-                    .line
-                    .saturating_add(usize::from(image.protocol.size().height));
-                (anchor.line >= image.line && anchor.line < end)
-                    .then(|| (image.line, Arc::clone(&image.protocol)))
-            })
+    fn image(
+        &mut self,
+        anchor: Anchor,
+    ) -> Option<(usize, Arc<ratatui_image::sliced::SlicedProtocol>)> {
+        let workspace = &self.workspace;
+        let images = &mut self.images;
+        self.entries.get_mut(&anchor.entry).and_then(|cached| {
+            let index = cached
+                .images
+                .partition_point(|image| image.line <= anchor.line)
+                .checked_sub(1)?;
+            let image = cached.images.get_mut(index)?;
+            let end = image
+                .line
+                .saturating_add(usize::from(image.protocol.size().height));
+            if anchor.line >= end {
+                return None;
+            }
+            if image.retransmit {
+                let size = image.protocol.size();
+                match images.retransmit(&image.destination, workspace, size) {
+                    image::LoadResult::Loaded(protocol) => {
+                        image.protocol = protocol;
+                        image.retransmit = false;
+                    }
+                    image::LoadResult::Failed | image::LoadResult::Unsupported => {
+                        image.retransmit = false;
+                    }
+                    image::LoadResult::Deferred => {}
+                }
+            }
+            Some((image.line, Arc::clone(&image.protocol)))
         })
     }
 
@@ -1465,6 +1527,7 @@ impl CachedEntry {
             selections: layout.selections,
             envelopes: layout.envelopes,
             selection_source: layout.selection_source,
+            image_state: layout.image_state,
         }
     }
 
@@ -1574,11 +1637,16 @@ impl Component for Transcript {
                     }
                 }));
             self.selection_rows.push((y, anchor));
-            if let Some((line, protocol)) = self.cache.image(anchor)
-                && visible_images
+            let covered_by_last_image =
+                visible_images
                     .last()
-                    .is_none_or(|(entry, start, ..)| (*entry, *start) != (anchor.entry, line))
-            {
+                    .is_some_and(|(entry, start, protocol, _)| {
+                        *entry == anchor.entry
+                            && anchor.line >= *start
+                            && anchor.line
+                                < start.saturating_add(usize::from(protocol.size().height))
+                    });
+            if !covered_by_last_image && let Some((line, protocol)) = self.cache.image(anchor) {
                 let offset = i32::try_from(anchor.line.saturating_sub(line)).unwrap_or(i32::MAX);
                 let position = i32::from(y)
                     .saturating_sub(i32::from(transcript_area.y))
@@ -1886,6 +1954,7 @@ fn layout_without_links(lines: Vec<Line<'static>>) -> markdown::Layout {
         selections,
         envelopes: Vec::new(),
         selection_source: None,
+        image_state: markdown::ImageState::None,
     }
 }
 
@@ -1931,6 +2000,7 @@ fn render_user(text: &str, width: u16, theme: &Theme) -> markdown::Layout {
             std::borrow::Cow::Borrowed(_) => None,
             std::borrow::Cow::Owned(text) => Some(text),
         },
+        image_state: markdown::ImageState::None,
     }
 }
 
@@ -1960,7 +2030,12 @@ mod tests {
     };
     use ratatui::{Terminal, backend::TestBackend, layout::Position, style::Color};
     use serde_json::{json, value::to_raw_value};
-    use std::{fs::File, path::Path, sync::Arc, time::Duration};
+    use std::{
+        fs::File,
+        path::Path,
+        sync::Arc,
+        time::{Duration, Instant},
+    };
     use tact_subagents::{AgentMessageUpdate, MessageSender};
 
     #[test]
@@ -2113,13 +2188,58 @@ mod tests {
         terminal.backend().clone()
     }
 
+    fn render_until_image_ready(
+        transcript: &mut Transcript,
+        width: u16,
+        height: u16,
+    ) -> TestBackend {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let backend = render(transcript, width, height);
+            if transcript
+                .cache
+                .entries
+                .values()
+                .any(|entry| !entry.images.is_empty())
+            {
+                return backend;
+            }
+            transcript.update(TranscriptEvent::AnimationFrame(Instant::now()));
+            assert!(Instant::now() < deadline, "image preparation timed out");
+            std::thread::yield_now();
+        }
+    }
+
     fn write_png(path: &Path) {
+        write_png_size(path, 1, 1);
+    }
+
+    fn write_png_size(path: &Path, width: u32, height: u32) {
         let file = File::create(path).unwrap();
-        let mut encoder = png::Encoder::new(file, 1, 1);
+        let mut encoder = png::Encoder::new(file, width, height);
         encoder.set_color(png::ColorType::Rgb);
         encoder.set_depth(png::BitDepth::Eight);
         let mut writer = encoder.write_header().unwrap();
-        writer.write_image_data(&[0xff, 0, 0]).unwrap();
+        writer
+            .write_image_data(&[0xff, 0, 0].repeat((width * height) as usize))
+            .unwrap();
+    }
+
+    fn transcript_with_image(workspace: &Path, text: &str) -> Transcript {
+        let mut transcript = Transcript::new();
+        transcript.cache.images = super::image::Cache::with_inline_images(true);
+        transcript.set_workspace(workspace);
+        transcript.update(TranscriptEvent::Record(agent_with_payload(
+            1,
+            AgentEventKind::AssistantMessage,
+            json!({
+                "model_call_index": 1,
+                "item_id": "answer",
+                "phase": "final_answer",
+                "text": text,
+            }),
+        )));
+        transcript
     }
 
     fn scroll(transcript: &mut Transcript, event: Event) {
@@ -2152,20 +2272,10 @@ mod tests {
     fn assistant_markdown_images_render_between_surrounding_text_rows() {
         let workspace = tempfile::tempdir().unwrap();
         write_png(&workspace.path().join("sample.png"));
-        let mut transcript = Transcript::new();
-        transcript.set_workspace(workspace.path());
-        transcript.update(TranscriptEvent::Record(agent_with_payload(
-            1,
-            AgentEventKind::AssistantMessage,
-            json!({
-                "model_call_index": 1,
-                "item_id": "answer",
-                "phase": "final_answer",
-                "text": "before ![sample](sample.png) after",
-            }),
-        )));
+        let mut transcript =
+            transcript_with_image(workspace.path(), "before ![sample](sample.png) after");
 
-        let backend = render(&mut transcript, 20, 5);
+        let backend = render_until_image_ready(&mut transcript, 20, 5);
         let rows = backend
             .buffer()
             .content()
@@ -2177,6 +2287,123 @@ mod tests {
 
         assert_eq!(after, before + 2);
         assert!(rows[before + 1].chars().any(|character| character != ' '));
+    }
+
+    #[test]
+    fn refreshing_terminal_images_preserves_their_dimensions() {
+        let workspace = tempfile::tempdir().unwrap();
+        write_png_size(&workspace.path().join("sample.png"), 80, 40);
+        let mut transcript = transcript_with_image(workspace.path(), "![sample](sample.png)");
+
+        let _ = render_until_image_ready(&mut transcript, 20, 3);
+        let original = Arc::clone(
+            &transcript
+                .cache
+                .entries
+                .values()
+                .find_map(|entry| entry.images.first())
+                .unwrap()
+                .protocol,
+        );
+        let original_size = original.size();
+        assert!(original_size.width > 1);
+        assert!(original_size.height > 1);
+
+        transcript.refresh_terminal_images();
+        let pending = &transcript
+            .cache
+            .entries
+            .values()
+            .find_map(|entry| entry.images.first())
+            .unwrap()
+            .protocol;
+        assert!(Arc::ptr_eq(&original, pending));
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let _ = render(&mut transcript, 20, 3);
+            transcript.update(TranscriptEvent::AnimationFrame(Instant::now()));
+            let retransmitted = &transcript
+                .cache
+                .entries
+                .values()
+                .find_map(|entry| entry.images.first())
+                .unwrap()
+                .protocol;
+            if !Arc::ptr_eq(&original, retransmitted) {
+                assert_eq!(retransmitted.size(), original_size);
+                break;
+            }
+            assert!(Instant::now() < deadline, "image retransmission timed out");
+            std::thread::yield_now();
+        }
+    }
+
+    #[test]
+    fn restored_images_present_a_link_before_native_image_hydration() {
+        let workspace = tempfile::tempdir().unwrap();
+        write_png(&workspace.path().join("sample.png"));
+        let mut transcript =
+            transcript_with_image(workspace.path(), "before ![sample](sample.png) after");
+        let first = render(&mut transcript, 40, 5);
+        let first_text = first
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(first_text.contains("sample ↗ sample.png"));
+        assert!(
+            transcript
+                .cache
+                .entries
+                .values()
+                .all(|entry| entry.images.is_empty())
+        );
+        assert!(transcript.animation_deadline().is_some());
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut rendered_completion = false;
+        while transcript
+            .cache
+            .entries
+            .values()
+            .all(|entry| entry.images.is_empty())
+        {
+            let update = transcript.update(TranscriptEvent::AnimationFrame(Instant::now()));
+            rendered_completion |= update.render == RenderRequest::Streaming;
+            let _ = render(&mut transcript, 40, 5);
+            assert!(Instant::now() < deadline, "image hydration timed out");
+            std::thread::yield_now();
+        }
+        assert!(rendered_completion);
+
+        assert!(
+            transcript
+                .cache
+                .entries
+                .values()
+                .any(|entry| !entry.images.is_empty())
+        );
+    }
+
+    #[test]
+    fn pending_image_hydration_restarts_after_terminal_refresh() {
+        let workspace = tempfile::tempdir().unwrap();
+        write_png(&workspace.path().join("sample.png"));
+        let mut transcript = transcript_with_image(workspace.path(), "![sample](sample.png)");
+
+        let _ = render(&mut transcript, 20, 3);
+        transcript.refresh_terminal_images();
+        let _ = render_until_image_ready(&mut transcript, 20, 3);
+
+        assert!(
+            transcript
+                .cache
+                .entries
+                .values()
+                .any(|entry| !entry.images.is_empty())
+        );
     }
 
     #[test]

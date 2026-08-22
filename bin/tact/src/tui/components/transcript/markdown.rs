@@ -17,11 +17,22 @@ pub(super) struct Layout {
     pub(super) selections: Vec<Vec<SourceSpan>>,
     pub(super) envelopes: Vec<SourceEnvelope>,
     pub(super) selection_source: Option<String>,
+    pub(super) image_state: ImageState,
+}
+
+#[derive(Clone, Copy, Default, Eq, PartialEq)]
+pub(super) enum ImageState {
+    #[default]
+    None,
+    Ready,
+    Pending,
 }
 
 pub(super) struct ImagePlacement {
     pub(super) line: usize,
+    pub(super) destination: Arc<str>,
     pub(super) protocol: Arc<SlicedProtocol>,
+    pub(super) retransmit: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -73,6 +84,7 @@ pub(super) fn render_cached(
             selections: Vec::new(),
             envelopes: Vec::new(),
             selection_source: None,
+            image_state: ImageState::None,
         };
     }
     let options = Options::ENABLE_TABLES
@@ -97,9 +109,14 @@ pub(super) fn render_cached(
             event => renderer.event(event),
         }
     }
-    let (mut layout, selection_exclusions) = renderer.finish();
-    let (selections, envelopes) =
-        markdown_selection_spans(markdown, &layout.lines, options, &selection_exclusions);
+    let (mut layout, selection_exclusions, image_selection_modes) = renderer.finish();
+    let (selections, envelopes) = markdown_selection_spans(
+        markdown,
+        &layout.lines,
+        options,
+        &selection_exclusions,
+        &image_selection_modes,
+    );
     layout.selections = selections;
     layout.envelopes = envelopes;
     layout
@@ -168,8 +185,10 @@ struct Renderer<'a> {
     links: Vec<LinkState>,
     rendered_links: Vec<(usize, LinkSpan)>,
     selection_exclusions: Vec<Vec<Range<u16>>>,
+    image_selection_modes: Vec<ImageSelectionMode>,
     images: Vec<ImagePlacement>,
-    image: Option<String>,
+    image_state: ImageState,
+    image: Option<LinkState>,
     workspace: &'a Path,
     images_cache: &'a mut super::image::Cache,
 }
@@ -181,6 +200,13 @@ struct ListState {
 struct LinkState {
     destination: Arc<str>,
     label: String,
+}
+
+#[derive(Clone, Copy)]
+enum ImageSelectionMode {
+    Hidden,
+    AltText,
+    Link,
 }
 
 struct TaggedSpan {
@@ -206,7 +232,9 @@ impl<'a> Renderer<'a> {
             links: Vec::new(),
             rendered_links: Vec::new(),
             selection_exclusions: Vec::new(),
+            image_selection_modes: Vec::new(),
             images: Vec::new(),
+            image_state: ImageState::None,
             image: None,
             workspace,
             images_cache,
@@ -322,7 +350,10 @@ impl<'a> Renderer<'a> {
                 );
             }
             Tag::Image { dest_url, .. } => {
-                self.image = Some(sanitize(&dest_url));
+                self.image = Some(LinkState {
+                    destination: Arc::from(sanitize(&dest_url)),
+                    label: String::new(),
+                });
             }
             Tag::FootnoteDefinition(label) => {
                 self.flush();
@@ -399,25 +430,45 @@ impl<'a> Renderer<'a> {
                 }
             }
             TagEnd::Image => {
-                if let Some(destination) = self.image.take() {
-                    if let Some(protocol) =
-                        self.images_cache
-                            .load(&destination, self.workspace, self.width)
+                if self.image_state == ImageState::None {
+                    self.image_state = ImageState::Ready;
+                }
+                if let Some(image) = self.image.take() {
+                    match self
+                        .images_cache
+                        .load(&image.destination, self.workspace, self.width)
                     {
-                        self.flush();
-                        let line = self.lines.len();
-                        let size = protocol.size();
-                        self.lines.extend(
-                            (0..size.height).map(|_| {
+                        super::image::LoadResult::Loaded(protocol) => {
+                            self.image_selection_modes.push(ImageSelectionMode::Hidden);
+                            self.flush();
+                            let line = self.lines.len();
+                            let size = protocol.size();
+                            self.lines.extend((0..size.height).map(|_| {
                                 Line::from(Span::raw(" ".repeat(usize::from(size.width))))
-                            }),
-                        );
-                        self.images.push(ImagePlacement { line, protocol });
-                    } else {
-                        self.push_unlinked(Span::styled(
-                            "image could not be rendered",
-                            Style::default().fg(ratatui::style::Color::Red),
-                        ));
+                            }));
+                            self.images.push(ImagePlacement {
+                                line,
+                                destination: image.destination,
+                                protocol,
+                                retransmit: false,
+                            });
+                        }
+                        super::image::LoadResult::Unsupported => {
+                            self.image_selection_modes.push(ImageSelectionMode::Link);
+                            self.render_image_link(image);
+                        }
+                        super::image::LoadResult::Deferred => {
+                            self.image_state = ImageState::Pending;
+                            self.image_selection_modes.push(ImageSelectionMode::Link);
+                            self.render_image_link(image);
+                        }
+                        super::image::LoadResult::Failed => {
+                            self.image_selection_modes.push(ImageSelectionMode::Hidden);
+                            self.push_unlinked(Span::styled(
+                                "image could not be rendered",
+                                Style::default().fg(ratatui::style::Color::Red),
+                            ));
+                        }
                     }
                 }
             }
@@ -441,7 +492,8 @@ impl<'a> Renderer<'a> {
 
     fn text(&mut self, text: &str) {
         let text = sanitize(text);
-        if self.image.is_some() {
+        if let Some(image) = &mut self.image {
+            image.label.push_str(&text);
             return;
         }
         if let Some(link) = self.links.last_mut() {
@@ -453,7 +505,8 @@ impl<'a> Renderer<'a> {
 
     fn span(&mut self, text: &str, style: Style) {
         let text = sanitize(text);
-        if self.image.is_some() {
+        if let Some(image) = &mut self.image {
+            image.label.push_str(&text);
             return;
         }
         self.ensure_prefix();
@@ -597,6 +650,9 @@ impl<'a> Renderer<'a> {
                     cell.clear();
                     in_cell = true;
                 }
+                Event::Start(Tag::Image { .. }) => {
+                    self.image_selection_modes.push(ImageSelectionMode::AltText)
+                }
                 Event::End(TagEnd::TableCell) => {
                     row.push(cell.trim().to_owned());
                     in_cell = false;
@@ -663,6 +719,36 @@ impl<'a> Renderer<'a> {
         });
     }
 
+    fn render_image_link(&mut self, image: LinkState) {
+        self.ensure_prefix();
+        let label = if image.label.is_empty() {
+            image.destination.to_string()
+        } else {
+            image.label
+        };
+        let include_destination = label.trim() != image.destination.as_ref();
+        self.push_linked(
+            Span::styled(
+                label,
+                Style::default()
+                    .fg(self.theme.accent())
+                    .add_modifier(Modifier::UNDERLINED),
+            ),
+            Arc::clone(&image.destination),
+        );
+        if include_destination {
+            self.push_linked(
+                Span::styled(
+                    format!(" ↗ {}", image.destination),
+                    Style::default()
+                        .fg(self.theme.accent())
+                        .add_modifier(Modifier::DIM),
+                ),
+                image.destination,
+            );
+        }
+    }
+
     fn flush(&mut self) {
         if self.current.is_empty() {
             return;
@@ -696,7 +782,7 @@ impl<'a> Renderer<'a> {
         self.selection_exclusions[line].push(columns);
     }
 
-    fn finish(mut self) -> (Layout, Vec<Vec<Range<u16>>>) {
+    fn finish(mut self) -> (Layout, Vec<Vec<Range<u16>>>, Vec<ImageSelectionMode>) {
         self.flush();
         while self.lines.last().is_some_and(|line| line.width() == 0) {
             self.lines.pop();
@@ -707,16 +793,19 @@ impl<'a> Renderer<'a> {
                 line_links.push(link);
             }
         }
+        let layout = Layout {
+            lines: self.lines,
+            images: self.images,
+            links,
+            selections: Vec::new(),
+            envelopes: Vec::new(),
+            selection_source: None,
+            image_state: self.image_state,
+        };
         (
-            Layout {
-                lines: self.lines,
-                images: self.images,
-                links,
-                selections: Vec::new(),
-                envelopes: Vec::new(),
-                selection_source: None,
-            },
+            layout,
             self.selection_exclusions,
+            self.image_selection_modes,
         )
     }
 }
@@ -732,15 +821,29 @@ fn markdown_selection_spans(
     lines: &[Line<'static>],
     options: Options,
     exclusions: &[Vec<Range<u16>>],
+    image_selection_modes: &[ImageSelectionMode],
 ) -> (Vec<Vec<SourceSpan>>, Vec<SourceEnvelope>) {
     let mut graphemes = Vec::<SourceGrapheme>::new();
-    let mut envelopes = Vec::<(TagEnd, Range<usize>, usize, bool, Option<String>)>::new();
+    let mut envelopes = Vec::<(TagEnd, Range<usize>, usize, bool, Option<String>, bool)>::new();
     let mut source_envelopes = Vec::new();
+    let mut image_modes = image_selection_modes.iter().copied();
+    let mut hidden_image_depth = 0_usize;
     for (event, range) in Parser::new_ext(markdown, options).into_offset_iter() {
         match event {
             Event::Start(tag) => {
+                let image_mode = matches!(tag, Tag::Image { .. })
+                    .then(|| image_modes.next().unwrap_or(ImageSelectionMode::Hidden));
+                let hidden_image = matches!(image_mode, Some(ImageSelectionMode::Hidden));
+                if hidden_image {
+                    hidden_image_depth = hidden_image_depth.saturating_add(1);
+                }
                 let destination = match &tag {
                     Tag::Link { dest_url, .. } => Some(sanitize(dest_url)),
+                    Tag::Image { dest_url, .. }
+                        if matches!(image_mode, Some(ImageSelectionMode::Link)) =>
+                    {
+                        Some(sanitize(dest_url))
+                    }
                     _ => None,
                 };
                 let preserve_delimiters = !matches!(tag, Tag::CodeBlock(_));
@@ -750,13 +853,15 @@ fn markdown_selection_spans(
                     graphemes.len(),
                     preserve_delimiters,
                     destination,
+                    hidden_image,
                 ));
             }
             Event::End(end) => {
                 let Some(index) = envelopes.iter().rposition(|(tag, ..)| *tag == end) else {
                     continue;
                 };
-                let (_, source, first, preserve_delimiters, destination) = envelopes.remove(index);
+                let (_, source, first, preserve_delimiters, destination, hidden_image) =
+                    envelopes.remove(index);
                 if preserve_delimiters && first != graphemes.len() {
                     source_envelopes.push(SourceEnvelope {
                         content: graphemes[first].source.start
@@ -791,47 +896,52 @@ fn markdown_selection_spans(
                         ));
                     }
                 }
+                if hidden_image {
+                    hidden_image_depth = hidden_image_depth.saturating_sub(1);
+                }
             }
-            Event::Text(text) | Event::Code(text) | Event::Html(text) | Event::InlineHtml(text) => {
+            Event::Text(text) | Event::Code(text) | Event::Html(text) | Event::InlineHtml(text)
+                if hidden_image_depth == 0 =>
+            {
                 graphemes.extend(source_graphemes(markdown, &sanitize(&text), range));
             }
-            Event::InlineMath(math) => {
+            Event::InlineMath(math) if hidden_image_depth == 0 => {
                 graphemes.extend(source_graphemes(
                     markdown,
                     &format!("${}$", sanitize(&math)),
                     range,
                 ));
             }
-            Event::DisplayMath(math) => {
+            Event::DisplayMath(math) if hidden_image_depth == 0 => {
                 graphemes.extend(source_graphemes(
                     markdown,
                     &format!("$${}$$", sanitize(&math)),
                     range,
                 ));
             }
-            Event::FootnoteReference(reference) => {
+            Event::FootnoteReference(reference) if hidden_image_depth == 0 => {
                 graphemes.extend(source_graphemes(
                     markdown,
                     &format!("[{}]", sanitize(&reference)),
                     range,
                 ));
             }
-            Event::SoftBreak => graphemes.push(SourceGrapheme {
+            Event::SoftBreak if hidden_image_depth == 0 => graphemes.push(SourceGrapheme {
                 text: " ".to_owned(),
                 source: range,
             }),
-            Event::HardBreak => graphemes.push(SourceGrapheme {
+            Event::HardBreak if hidden_image_depth == 0 => graphemes.push(SourceGrapheme {
                 text: "\n".to_owned(),
                 source: range,
             }),
-            Event::TaskListMarker(checked) => {
+            Event::TaskListMarker(checked) if hidden_image_depth == 0 => {
                 graphemes.extend(source_graphemes(
                     markdown,
                     if checked { "✓ " } else { "□ " },
                     range,
                 ));
             }
-            Event::Rule => {}
+            _ => {}
         }
     }
     (
@@ -1416,11 +1526,11 @@ fn render_stacked_table(
 mod tests {
     use super::{
         super::image::{Cache, MAX_IMAGE_HEIGHT},
-        render, render_cached, render_in,
+        ImageState, Layout, render, render_cached,
     };
     use crate::tui::theme::Theme;
     use ratatui::style::{Color, Modifier};
-    use std::{fs::File, path::Path, sync::Arc};
+    use std::{fs::File, path::Path, sync::Arc, time::Instant};
 
     fn write_png(path: &Path) {
         write_solid_png(path, 1, 1);
@@ -1435,6 +1545,29 @@ mod tests {
         writer
             .write_image_data(&[0xff, 0, 0].repeat((width * height) as usize))
             .unwrap();
+    }
+
+    fn render_inline_image_in(markdown: &str, width: u16, workspace: &Path) -> Layout {
+        let mut images = Cache::with_inline_images(true);
+        render_cached_until_ready(markdown, width, workspace, &mut images)
+    }
+
+    fn render_cached_until_ready(
+        markdown: &str,
+        width: u16,
+        workspace: &Path,
+        images: &mut Cache,
+    ) -> Layout {
+        let deadline = Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            let layout = render_cached(markdown, width, &Theme::default(), workspace, images);
+            if layout.image_state != ImageState::Pending {
+                return layout;
+            }
+            images.poll(Instant::now());
+            assert!(Instant::now() < deadline, "image preparation timed out");
+            std::thread::yield_now();
+        }
     }
 
     #[test]
@@ -1650,12 +1783,8 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("sample.png");
         write_png(&path);
-        let layout = render_in(
-            "before ![sample](sample.png) after",
-            80,
-            &Theme::default(),
-            directory.path(),
-        );
+        let layout =
+            render_inline_image_in("before ![sample](sample.png) after", 80, directory.path());
         let lines = layout
             .lines
             .iter()
@@ -1669,11 +1798,27 @@ mod tests {
     }
 
     #[test]
+    fn absolute_images_outside_the_workspace_are_rendered() {
+        let workspace = tempfile::tempdir().unwrap();
+        let scratchpad = tempfile::tempdir().unwrap();
+        let path = scratchpad.path().join("sample.png");
+        write_png(&path);
+
+        let layout = render_inline_image_in(
+            &format!("![sample]({})", path.display()),
+            80,
+            workspace.path(),
+        );
+
+        assert_eq!(layout.images.len(), 1);
+    }
+
+    #[test]
     fn image_failures_are_red_and_remain_inline() {
-        let layout = render(
+        let layout = render_inline_image_in(
             "before ![sample](/definitely/missing/image.png) after",
             80,
-            &Theme::default(),
+            Path::new("/workspace"),
         );
 
         assert_eq!(layout.lines.len(), 1);
@@ -1690,21 +1835,87 @@ mod tests {
     }
 
     #[test]
+    fn unsupported_image_backends_render_images_as_markdown_links() {
+        let mut images = Cache::with_inline_images(false);
+        let layout = render_cached(
+            "before ![sample](outside.png) after",
+            80,
+            &Theme::default(),
+            Path::new("/workspace"),
+            &mut images,
+        );
+
+        assert!(layout.images.is_empty());
+        assert_eq!(
+            layout.lines[0].to_string(),
+            "before sample ↗ outside.png after"
+        );
+        assert_eq!(layout.links[0].len(), 1);
+        assert_eq!(layout.links[0][0].destination.as_ref(), "outside.png");
+        let label = layout.lines[0]
+            .spans
+            .iter()
+            .find(|span| span.content == "sample")
+            .unwrap();
+        assert_eq!(label.style.fg, Some(Color::Blue));
+        assert!(label.style.add_modifier.contains(Modifier::UNDERLINED));
+    }
+
+    #[test]
+    fn native_images_do_not_map_invisible_link_text_into_selection() {
+        let directory = tempfile::tempdir().unwrap();
+        write_png(&directory.path().join("after"));
+        let markdown = "![sample](after) after";
+        let destination = markdown.find("after").unwrap();
+        let layout = render_inline_image_in(markdown, 80, directory.path());
+
+        assert!(
+            layout
+                .selections
+                .iter()
+                .flatten()
+                .all(|span| !span.source.contains(&destination))
+        );
+    }
+
+    #[test]
+    fn table_images_do_not_consume_later_fallback_selection_metadata() {
+        let markdown = concat!(
+            "| image |\n",
+            "|---|\n",
+            "| ![table](table.png) |\n\n",
+            "![sample](outside.png)",
+        );
+        let destination = markdown.rfind("outside.png").unwrap();
+        let mut images = Cache::with_inline_images(false);
+        let layout = render_cached(
+            markdown,
+            80,
+            &Theme::default(),
+            Path::new("/workspace"),
+            &mut images,
+        );
+
+        assert!(layout.selections.iter().flatten().any(|span| {
+            span.source.start >= destination
+                && span.source.end <= destination.saturating_add("outside.png".len())
+        }));
+    }
+
+    #[test]
     fn streaming_markdown_reuses_unchanged_image_protocols() {
         let directory = tempfile::tempdir().unwrap();
         write_png(&directory.path().join("sample.png"));
-        let mut images = Cache::default();
-        let first = render_cached(
+        let mut images = Cache::with_inline_images(true);
+        let first = render_cached_until_ready(
             "before ![sample](sample.png)",
             80,
-            &Theme::default(),
             directory.path(),
             &mut images,
         );
-        let second = render_cached(
+        let second = render_cached_until_ready(
             "before ![sample](sample.png) after",
             80,
-            &Theme::default(),
             directory.path(),
             &mut images,
         );
@@ -1715,7 +1926,7 @@ mod tests {
         ));
         let protocol = Arc::downgrade(&second.images[0].protocol);
         drop((first, second));
-        assert!(protocol.upgrade().is_none());
+        assert!(protocol.upgrade().is_some());
     }
 
     #[test]
@@ -1723,7 +1934,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         write_solid_png(&directory.path().join("tall.png"), 1, 1_000);
 
-        let layout = render_in("![tall](tall.png)", 80, &Theme::default(), directory.path());
+        let layout = render_inline_image_in("![tall](tall.png)", 80, directory.path());
 
         assert!(layout.images[0].protocol.size().height <= MAX_IMAGE_HEIGHT);
     }

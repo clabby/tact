@@ -60,6 +60,7 @@ pub(super) fn render_layout(
             selections: Vec::new(),
             envelopes: Vec::new(),
             selection_source: None,
+            image_state: super::markdown::ImageState::None,
         };
     }
     let detail_width = width.saturating_sub(6).max(1);
@@ -80,6 +81,7 @@ pub(super) fn render_layout(
             images: Vec::new(),
             envelopes: Vec::new(),
             selection_source: None,
+            image_state: super::markdown::ImageState::None,
         };
     }
     let detail_start = lines.len();
@@ -110,6 +112,7 @@ pub(super) fn render_layout(
         selections,
         envelopes: Vec::new(),
         selection_source,
+        image_state: super::markdown::ImageState::None,
     }
 }
 

@@ -546,6 +546,9 @@ impl AppNode {
     }
 
     fn update_terminal(&mut self, event: Event) -> ComponentUpdate<AppEffect> {
+        if matches!(event, Event::FocusGained) {
+            self.refresh_terminal_images();
+        }
         if matches!(event, Event::Resize(_, _)) {
             let mut update = self.update_all(RootEvent::Terminal(event));
             update.render = RenderRequest::Immediate;
@@ -576,6 +579,16 @@ impl AppNode {
             }
         }
         self.update_root(self.focus, RootEvent::Terminal(event))
+    }
+
+    pub(crate) fn refresh_terminal_images(&mut self) {
+        for root in [&mut self.main, &mut self.fork]
+            .into_iter()
+            .filter_map(Option::as_mut)
+            .map(|(_, root)| root)
+        {
+            root.component_mut().refresh_terminal_images();
+        }
     }
 
     fn render_split_hint(&self, frame: &mut Frame<'_>, area: Rect, divider_x: u16) {
