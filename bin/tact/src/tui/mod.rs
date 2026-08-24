@@ -77,9 +77,9 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 pub(crate) enum StartupMode {
-    NewSession,
+    NewSession(Model),
     ResumeSession(String),
-    ResumeSelector,
+    ResumeSelector(Model),
 }
 
 type EditorTask =
@@ -443,10 +443,10 @@ pub(crate) async fn run(
     let initial_fast_mode = config.agent().fast_mode();
     let initial_max_subagents = config.agent().max_subagents();
     let preferred_reasoning_mode = config.agent().reasoning_mode();
-    let open_resume_selector = matches!(&startup, StartupMode::ResumeSelector);
-    let resume_session_id = match startup {
-        StartupMode::ResumeSession(session_id) => Some(session_id),
-        StartupMode::NewSession | StartupMode::ResumeSelector => None,
+    let open_resume_selector = matches!(&startup, StartupMode::ResumeSelector(_));
+    let (resume_session_id, startup_model) = match startup {
+        StartupMode::NewSession(model) | StartupMode::ResumeSelector(model) => (None, model),
+        StartupMode::ResumeSession(session_id) => (Some(session_id), Model::Sol),
     };
     let resuming = resume_session_id.is_some();
     let (configured, restored_projection, reasoning_mode, model, next_sequence) =
@@ -489,10 +489,15 @@ pub(crate) async fn run(
             .map_err(RuntimeError::SessionTask)??
         } else {
             (
-                ConfiguredAgent::from_config(&config)?,
+                ConfiguredAgent::from_config_with_model(
+                    &config,
+                    initial_effort,
+                    preferred_reasoning_mode,
+                    startup_model,
+                )?,
                 None,
                 preferred_reasoning_mode,
-                Model::Sol,
+                startup_model,
                 1,
             )
         };

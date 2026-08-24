@@ -166,32 +166,29 @@ enum Cancellation {
 impl ConfiguredAgent {
     pub(crate) async fn run_from_config(
         config: &Config,
+        model: Model,
         prompt: String,
         shutdown: CancellationToken,
         #[cfg(feature = "harbor-evals")] orchestration_log: Option<PathBuf>,
     ) -> Result<()> {
-        let result = Self::from_config(config)?
-            .run(
-                prompt,
-                shutdown,
-                io::stdout(),
-                #[cfg(feature = "harbor-evals")]
-                orchestration_log,
-            )
-            .await;
+        let result = Self::from_config_with_model(
+            config,
+            config.agent().thinking(),
+            config.agent().reasoning_mode(),
+            model,
+        )?
+        .run(
+            prompt,
+            shutdown,
+            io::stdout(),
+            #[cfg(feature = "harbor-evals")]
+            orchestration_log,
+        )
+        .await;
         if let Some(command) = config.agent().completion_hook() {
             drop(hook::execute(command, config.agent().workspace()).await);
         }
         result
-    }
-
-    pub(crate) fn from_config(config: &Config) -> Result<Self> {
-        Self::from_config_with_model(
-            config,
-            config.agent().thinking(),
-            config.agent().reasoning_mode(),
-            Model::Sol,
-        )
     }
 
     pub(crate) fn from_config_with_model(
