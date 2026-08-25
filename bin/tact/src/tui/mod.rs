@@ -1239,12 +1239,13 @@ pub(crate) async fn run(
                             effort,
                             reasoning_mode,
                             fast_mode,
+                            model,
                             configured,
                         } = prepared;
                         let skills = install_configured_agent(
                             pane,
                             configured,
-                            PaneSettings::new(effort, reasoning_mode, fast_mode, Model::Sol),
+                            PaneSettings::new(effort, reasoning_mode, fast_mode, model),
                             &config,
                             &mut panes,
                             &commands,
@@ -1261,6 +1262,7 @@ pub(crate) async fn run(
                                 effort,
                                 reasoning_mode,
                                 fast_mode,
+                                model,
                                 skills,
                             }),
                             &mut scheduler,
@@ -2549,6 +2551,7 @@ fn start_handoff(context: &mut EffectContext<'_>, pane: PaneId) {
     let pane_generation = runtime.generation;
     let id = TurnId::new(runtime.next_turn);
     runtime.next_turn = runtime.next_turn.saturating_add(1);
+    let model = runtime.current_model;
     let commands = context.commands.clone();
     let config = context.config.clone();
     let started =
@@ -2578,7 +2581,7 @@ fn start_handoff(context: &mut EffectContext<'_>, pane: PaneId) {
                             )),
                         }
                     };
-                    let result = prepare_handoff(result, config, cancellation).await;
+                    let result = prepare_handoff(result, config, model, cancellation).await;
                     HandoffCompletion { identity, result }
                 })
             });
@@ -2596,6 +2599,7 @@ fn start_handoff(context: &mut EffectContext<'_>, pane: PaneId) {
 async fn prepare_handoff(
     result: std::result::Result<String, AuxiliaryError>,
     config: Config,
+    model: Model,
     cancellation: CancellationToken,
 ) -> std::result::Result<PreparedHandoff, AuxiliaryError> {
     let prompt = result?;
@@ -2616,7 +2620,7 @@ async fn prepare_handoff(
             &config,
             effort,
             reasoning_mode,
-            Model::Sol,
+            model,
             None,
             None,
         )
@@ -2635,6 +2639,7 @@ async fn prepare_handoff(
         effort,
         reasoning_mode,
         fast_mode,
+        model,
         configured,
     })
 }

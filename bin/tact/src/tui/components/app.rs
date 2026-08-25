@@ -68,6 +68,7 @@ pub(crate) enum AppEvent {
         effort: ReasoningEffort,
         reasoning_mode: ReasoningMode,
         fast_mode: bool,
+        model: Model,
         skills: Arc<[Skill]>,
     },
     HandoffCancelled(PaneId),
@@ -265,6 +266,7 @@ impl AppNode {
                 effort,
                 reasoning_mode,
                 fast_mode,
+                model,
                 skills,
             } => {
                 let workspace = self.workspace.clone();
@@ -280,6 +282,7 @@ impl AppNode {
                         DraftReset::Clear,
                     );
                     root.component_mut().set_fast_mode(fast_mode);
+                    root.component_mut().set_model(model);
                     root.component_mut().set_skills(skills);
                 }
                 self.update_root(pane, RootEvent::HandoffFinished(prompt))
@@ -1014,7 +1017,7 @@ mod tests {
     }
 
     #[test]
-    fn handoff_starts_a_fresh_session_with_an_editable_draft() {
+    fn handoff_starts_a_fresh_session_with_an_editable_draft_and_selected_model() {
         let mut app = app();
 
         let update = app.update(AppEvent::HandoffReady {
@@ -1023,6 +1026,7 @@ mod tests {
             effort: ReasoningEffort::High,
             reasoning_mode: ReasoningMode::Standard,
             fast_mode: false,
+            model: Model::Luna,
             skills: Arc::from([]),
         });
 
@@ -1032,6 +1036,7 @@ mod tests {
             root.composer().draft(),
             "Continue from the validated parser design."
         );
+        assert_eq!(root.composer().model(), Model::Luna);
     }
 
     #[test]
