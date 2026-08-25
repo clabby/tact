@@ -444,9 +444,9 @@ pub(crate) async fn run(
     let initial_max_subagents = config.agent().max_subagents();
     let preferred_reasoning_mode = config.agent().reasoning_mode();
     let open_resume_selector = matches!(&startup, StartupMode::ResumeSelector(_));
-    let (resume_session_id, startup_model) = match startup {
-        StartupMode::NewSession(model) | StartupMode::ResumeSelector(model) => (None, model),
-        StartupMode::ResumeSession(session_id) => (Some(session_id), Model::Sol),
+    let (resume_session_id, fresh_model) = match startup {
+        StartupMode::NewSession(model) | StartupMode::ResumeSelector(model) => (None, Some(model)),
+        StartupMode::ResumeSession(session_id) => (Some(session_id), None),
     };
     let resuming = resume_session_id.is_some();
     let (configured, restored_projection, reasoning_mode, model, next_sequence) =
@@ -488,16 +488,17 @@ pub(crate) async fn run(
             .await
             .map_err(RuntimeError::SessionTask)??
         } else {
+            let model = fresh_model.expect("a fresh TUI startup must select a model");
             (
                 ConfiguredAgent::from_config_with_model(
                     &config,
                     initial_effort,
                     preferred_reasoning_mode,
-                    startup_model,
+                    model,
                 )?,
                 None,
                 preferred_reasoning_mode,
-                startup_model,
+                model,
                 1,
             )
         };
@@ -2203,7 +2204,7 @@ fn apply_pane_effect(
                 context.scheduler,
             ),
         },
-        components::RootEffect::NewSession => {
+        components::RootEffect::NewSession(model) => {
             *context.input = None;
             let effort = context.config.agent().thinking();
             let reasoning_mode = context.config.agent().reasoning_mode();
@@ -2214,7 +2215,7 @@ fn apply_pane_effect(
                     &config,
                     effort,
                     reasoning_mode,
-                    Model::Sol,
+                    model,
                     None,
                     None,
                 );
@@ -2223,7 +2224,7 @@ fn apply_pane_effect(
                     effort,
                     reasoning_mode,
                     fast_mode,
-                    Model::Sol,
+                    model,
                     components::DraftReset::Clear,
                     configured,
                 )
