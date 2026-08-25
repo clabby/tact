@@ -11,6 +11,7 @@ use crate::{
 };
 use clap::{ArgAction, Parser, Subcommand, builder::NonEmptyStringValueParser};
 use crossterm::style::{Color, Stylize};
+use nanocodex::Model;
 use std::{env, env::VarError, fmt, path::PathBuf};
 use tokio_util::sync::CancellationToken;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
@@ -85,6 +86,10 @@ pub(crate) struct Cli {
         value_name = "MODE"
     )]
     reasoning_mode: Option<ReasoningMode>,
+
+    /// Model used when starting a new agent.
+    #[arg(long, global = true, env = "TACT_MODEL", value_name = "MODEL")]
+    model: Option<Model>,
 
     /// Maximum number of sub-agents that may run concurrently.
     #[arg(long, global = true, env = "TACT_MAX_SUBAGENTS", value_name = "COUNT")]
@@ -359,14 +364,17 @@ impl Cli {
         } else {
             Config::load(overrides)?
         };
+        let model = self.model.unwrap_or_default();
 
         match self.command {
-            Some(Command::Resume) => Self::run_tui(config, tui::StartupMode::ResumeSelector).await,
-            Some(command) => command.run_with_config(&config).await,
+            Some(Command::Resume) => {
+                Self::run_tui(config, tui::StartupMode::ResumeSelector(model)).await
+            }
+            Some(command) => command.run_with_config(&config, model).await,
             None => {
                 let startup = self
                     .resume
-                    .map_or(tui::StartupMode::NewSession, |session_id| {
+                    .map_or(tui::StartupMode::NewSession(model), |session_id| {
                         tui::StartupMode::ResumeSession(session_id)
                     });
                 Self::run_tui(config, startup).await
@@ -444,7 +452,7 @@ impl Command {
         Ok(())
     }
 
-    async fn run_with_config(self, config: &Config) -> Result<()> {
+    async fn run_with_config(self, config: &Config, model: Model) -> Result<()> {
         match self {
             Self::Auth { command } => command.run(config).await.map_err(Into::into),
             Self::Config { command } => command.run(config),
@@ -456,6 +464,7 @@ impl Command {
             } => {
                 Self::run_agent(
                     config,
+                    model,
                     prompt,
                     #[cfg(feature = "harbor-evals")]
                     orchestration_log,
@@ -470,12 +479,14 @@ impl Command {
 
     async fn run_agent(
         config: &Config,
+        model: Model,
         prompt: String,
         #[cfg(feature = "harbor-evals")] orchestration_log: Option<PathBuf>,
     ) -> Result<()> {
         let shutdown = CancellationToken::new();
         let run = ConfiguredAgent::run_from_config(
             config,
+            model,
             prompt,
             shutdown.clone(),
             #[cfg(feature = "harbor-evals")]
@@ -728,6 +739,7 @@ mod tests {
         error::{ConfigError, Error},
     };
     use clap::{CommandFactory, Parser, error::ErrorKind};
+    use nanocodex::Model;
     use std::{
         env::VarError,
         ffi::OsString,
@@ -804,6 +816,13 @@ mod tests {
     }
 
     #[test]
+    fn model_selects_the_initial_agent() {
+        let cli = Cli::try_parse_from(["tact", "--model", "terra"]).unwrap();
+
+        assert_eq!(cli.model, Some(Model::Terra));
+    }
+
+    #[test]
     fn resume_selects_a_persisted_tui_session() {
         let cli = Cli::try_parse_from(["tact", "--resume", "session one"]).unwrap();
 
@@ -831,6 +850,8 @@ mod tests {
             "chatgpt",
             "--auth-file",
             "auth.json",
+            "--model",
+            "luna",
             "--max-subagents",
             "12",
         ])
@@ -839,6 +860,7 @@ mod tests {
         assert_eq!(cli.config.unwrap(), PathBuf::from("tact.toml"));
         assert_eq!(cli.auth, Some(AuthMode::ChatGpt));
         assert_eq!(cli.auth_file.unwrap(), PathBuf::from("auth.json"));
+        assert_eq!(cli.model, Some(Model::Luna));
         assert_eq!(cli.max_subagents, Some(12));
         assert!(matches!(cli.command, Some(Command::Config { .. })));
     }
@@ -1318,6 +1340,7 @@ mod tests {
             ("workspace", "TACT_WORKSPACE"),
             ("thinking", "TACT_THINKING"),
             ("reasoning_mode", "TACT_REASONING_MODE"),
+            ("model", "TACT_MODEL"),
             ("max_subagents", "TACT_MAX_SUBAGENTS"),
             ("instructions", "TACT_INSTRUCTIONS"),
             ("append_instructions", "TACT_APPEND_INSTRUCTIONS"),

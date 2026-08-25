@@ -77,9 +77,9 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 pub(crate) enum StartupMode {
-    NewSession,
+    NewSession(Model),
     ResumeSession(String),
-    ResumeSelector,
+    ResumeSelector(Model),
 }
 
 type EditorTask =
@@ -443,10 +443,10 @@ pub(crate) async fn run(
     let initial_fast_mode = config.agent().fast_mode();
     let initial_max_subagents = config.agent().max_subagents();
     let preferred_reasoning_mode = config.agent().reasoning_mode();
-    let open_resume_selector = matches!(&startup, StartupMode::ResumeSelector);
-    let resume_session_id = match startup {
-        StartupMode::ResumeSession(session_id) => Some(session_id),
-        StartupMode::NewSession | StartupMode::ResumeSelector => None,
+    let open_resume_selector = matches!(&startup, StartupMode::ResumeSelector(_));
+    let (resume_session_id, fresh_model) = match startup {
+        StartupMode::NewSession(model) | StartupMode::ResumeSelector(model) => (None, Some(model)),
+        StartupMode::ResumeSession(session_id) => (Some(session_id), None),
     };
     let resuming = resume_session_id.is_some();
     let (configured, restored_projection, reasoning_mode, model, next_sequence) =
@@ -488,11 +488,17 @@ pub(crate) async fn run(
             .await
             .map_err(RuntimeError::SessionTask)??
         } else {
+            let model = fresh_model.expect("a fresh TUI startup must select a model");
             (
-                ConfiguredAgent::from_config(&config)?,
+                ConfiguredAgent::from_config_with_model(
+                    &config,
+                    initial_effort,
+                    preferred_reasoning_mode,
+                    model,
+                )?,
                 None,
                 preferred_reasoning_mode,
-                Model::Sol,
+                model,
                 1,
             )
         };
@@ -1234,12 +1240,13 @@ pub(crate) async fn run(
                             effort,
                             reasoning_mode,
                             fast_mode,
+                            model,
                             configured,
                         } = prepared;
                         let skills = install_configured_agent(
                             pane,
                             configured,
-                            PaneSettings::new(effort, reasoning_mode, fast_mode, Model::Sol),
+                            PaneSettings::new(effort, reasoning_mode, fast_mode, model),
                             &config,
                             &mut panes,
                             &commands,
@@ -1256,6 +1263,7 @@ pub(crate) async fn run(
                                 effort,
                                 reasoning_mode,
                                 fast_mode,
+                                model,
                                 skills,
                             }),
                             &mut scheduler,
@@ -2196,7 +2204,7 @@ fn apply_pane_effect(
                 context.scheduler,
             ),
         },
-        components::RootEffect::NewSession => {
+        components::RootEffect::NewSession(model) => {
             *context.input = None;
             let effort = context.config.agent().thinking();
             let reasoning_mode = context.config.agent().reasoning_mode();
@@ -2207,7 +2215,7 @@ fn apply_pane_effect(
                     &config,
                     effort,
                     reasoning_mode,
-                    Model::Sol,
+                    model,
                     None,
                     None,
                 );
@@ -2216,7 +2224,7 @@ fn apply_pane_effect(
                     effort,
                     reasoning_mode,
                     fast_mode,
-                    Model::Sol,
+                    model,
                     components::DraftReset::Clear,
                     configured,
                 )
@@ -2544,6 +2552,7 @@ fn start_handoff(context: &mut EffectContext<'_>, pane: PaneId) {
     let pane_generation = runtime.generation;
     let id = TurnId::new(runtime.next_turn);
     runtime.next_turn = runtime.next_turn.saturating_add(1);
+    let model = runtime.current_model;
     let commands = context.commands.clone();
     let config = context.config.clone();
     let started =
@@ -2573,7 +2582,7 @@ fn start_handoff(context: &mut EffectContext<'_>, pane: PaneId) {
                             )),
                         }
                     };
-                    let result = prepare_handoff(result, config, cancellation).await;
+                    let result = prepare_handoff(result, config, model, cancellation).await;
                     HandoffCompletion { identity, result }
                 })
             });
@@ -2591,6 +2600,7 @@ fn start_handoff(context: &mut EffectContext<'_>, pane: PaneId) {
 async fn prepare_handoff(
     result: std::result::Result<String, AuxiliaryError>,
     config: Config,
+    model: Model,
     cancellation: CancellationToken,
 ) -> std::result::Result<PreparedHandoff, AuxiliaryError> {
     let prompt = result?;
@@ -2611,7 +2621,7 @@ async fn prepare_handoff(
             &config,
             effort,
             reasoning_mode,
-            Model::Sol,
+            model,
             None,
             None,
         )
@@ -2630,6 +2640,7 @@ async fn prepare_handoff(
         effort,
         reasoning_mode,
         fast_mode,
+        model,
         configured,
     })
 }

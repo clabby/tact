@@ -232,7 +232,7 @@ pub(crate) enum RootEffect {
     OpenConfigEditor,
     OpenLink(String),
     ReloadConfig,
-    NewSession,
+    NewSession(Model),
     LoadSessions(SessionListKind),
     LoadRecentPrompts(Vec<RecentPromptDraft>),
     LoadMemories,
@@ -1681,7 +1681,7 @@ impl RootNode {
                 now: Instant::now(),
             });
         ComponentUpdate {
-            effects: vec![RootEffect::NewSession],
+            effects: vec![RootEffect::NewSession(self.composer.component().model())],
             render: RenderRequest::Immediate,
         }
     }
@@ -6102,6 +6102,7 @@ mod tests {
     #[test]
     fn new_session_action_clears_the_completed_thread_after_runtime_replacement() {
         let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        root.set_model(Model::Luna);
         for character in "old prompt".chars() {
             root.update(key(KeyCode::Char(character), KeyModifiers::NONE));
         }
@@ -6116,7 +6117,7 @@ mod tests {
 
         let requested = root.update(key(KeyCode::Enter, KeyModifiers::NONE));
 
-        assert_eq!(requested.effects, [RootEffect::NewSession]);
+        assert_eq!(requested.effects, [RootEffect::NewSession(Model::Luna)]);
         assert!(root.overlay.is_none());
         assert!(!root.interactive);
 

@@ -102,6 +102,16 @@ For scripts and integrations, `tact run` submits one prompt and streams Nanocode
 tact run "inspect the workspace"
 ```
 
+Choose the model for a newly started agent without changing configuration:
+
+```sh
+tact --model terra
+tact --model luna run "inspect the workspace"
+```
+
+`--model` accepts `sol`, `terra`, or `luna`; `TACT_MODEL` provides the same per-launch setting.
+Resumed sessions continue with the model recorded when they were created.
+
 ## Configuration
 
 The configuration file is optional. Tact reads `$TACT_HOME/config.toml`, or
