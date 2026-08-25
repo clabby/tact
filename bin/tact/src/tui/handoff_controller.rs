@@ -3,6 +3,7 @@ use crate::{
     core::ConfiguredAgent,
     tui::{pane::PaneId, worker::AuxiliaryError},
 };
+use nanocodex::ContextWindow;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -26,6 +27,7 @@ pub(crate) struct PreparedHandoff {
     pub(crate) effort: ReasoningEffort,
     pub(crate) reasoning_mode: ReasoningMode,
     pub(crate) fast_mode: bool,
+    pub(crate) context_window: ContextWindow,
     pub(crate) configured: ConfiguredAgent,
 }
 

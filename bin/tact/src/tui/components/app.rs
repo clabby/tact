@@ -16,7 +16,7 @@ use crate::{
     },
 };
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
-use nanocodex::Model;
+use nanocodex::{ContextWindow, Model};
 use ratatui::{
     Frame,
     layout::{Position, Rect},
@@ -68,6 +68,7 @@ pub(crate) enum AppEvent {
         effort: ReasoningEffort,
         reasoning_mode: ReasoningMode,
         fast_mode: bool,
+        context_window: ContextWindow,
         skills: Arc<[Skill]>,
     },
     HandoffCancelled(PaneId),
@@ -105,6 +106,7 @@ pub(crate) enum AppEvent {
         effort: ReasoningEffort,
         reasoning_mode: ReasoningMode,
         fast_mode: bool,
+        context_window: ContextWindow,
         model: Model,
         draft_reset: DraftReset,
         skills: Arc<[Skill]>,
@@ -157,6 +159,7 @@ pub(crate) enum AppEvent {
         reasoning_mode: ReasoningMode,
         preferred_reasoning_mode: ReasoningMode,
         fast_mode: bool,
+        context_window: ContextWindow,
         model: Model,
         skills: Arc<[Skill]>,
     },
@@ -265,6 +268,7 @@ impl AppNode {
                 effort,
                 reasoning_mode,
                 fast_mode,
+                context_window,
                 skills,
             } => {
                 let workspace = self.workspace.clone();
@@ -272,6 +276,7 @@ impl AppNode {
                     let Some(root) = self.pane_mut(pane) else {
                         return ComponentUpdate::none();
                     };
+                    root.component_mut().set_context_window(context_window);
                     root.component_mut().reset_session(
                         &workspace,
                         effort,
@@ -322,6 +327,7 @@ impl AppNode {
                 effort,
                 reasoning_mode,
                 fast_mode,
+                context_window,
                 model,
                 draft_reset,
                 skills,
@@ -330,6 +336,7 @@ impl AppNode {
                 let Some(root) = self.pane_mut(pane) else {
                     return ComponentUpdate::none();
                 };
+                root.component_mut().set_context_window(context_window);
                 root.component_mut().reset_session(
                     &workspace,
                     effort,
@@ -398,20 +405,27 @@ impl AppNode {
                 reasoning_mode,
                 preferred_reasoning_mode,
                 fast_mode,
+                context_window,
                 model,
                 skills,
-            } => self.update_root(
-                pane,
-                RootEvent::SessionRestored {
-                    projection,
-                    effort,
-                    reasoning_mode,
-                    preferred_reasoning_mode,
-                    fast_mode,
-                    model,
-                    skills,
-                },
-            ),
+            } => {
+                let Some(root) = self.pane_mut(pane) else {
+                    return ComponentUpdate::none();
+                };
+                root.component_mut().set_context_window(context_window);
+                self.update_root(
+                    pane,
+                    RootEvent::SessionRestored {
+                        projection,
+                        effort,
+                        reasoning_mode,
+                        preferred_reasoning_mode,
+                        fast_mode,
+                        model,
+                        skills,
+                    },
+                )
+            }
             AppEvent::NotifyError { pane, error } => {
                 self.update_root(pane, RootEvent::NotifyError(error))
             }
@@ -815,7 +829,7 @@ mod tests {
     use crossterm::event::{
         Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     };
-    use nanocodex::Model;
+    use nanocodex::{ContextWindow, Model};
     use ratatui::{Terminal, backend::TestBackend};
     use semver::Version;
     use std::{path::PathBuf, sync::Arc};
@@ -855,6 +869,7 @@ mod tests {
             effort: ReasoningEffort::Low,
             reasoning_mode: ReasoningMode::Standard,
             fast_mode: false,
+            context_window: ContextWindow::Standard,
             model: Model::Luna,
             draft_reset: DraftReset::Preserve,
             skills: Arc::from([]),
@@ -1023,6 +1038,7 @@ mod tests {
             effort: ReasoningEffort::High,
             reasoning_mode: ReasoningMode::Standard,
             fast_mode: false,
+            context_window: ContextWindow::Standard,
             skills: Arc::from([]),
         });
 

@@ -37,7 +37,7 @@ use crate::{
     },
 };
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind};
-use nanocodex::Model;
+use nanocodex::{ContextWindow, Model};
 use ratatui::{
     Frame,
     layout::{Position, Rect},
@@ -344,6 +344,7 @@ pub(crate) struct RootNode {
     theme_mode: ThemeMode,
     preferred_reasoning_mode: ReasoningMode,
     subagents: SubagentTree,
+    context_window: ContextWindow,
     context_diagnostics: ContextDiagnostics,
     recent_prompts: Vec<RecentPromptDraft>,
     pending_session_mention: Option<usize>,
@@ -386,6 +387,7 @@ impl RootNode {
             theme_mode: ThemeMode::Auto,
             preferred_reasoning_mode: ReasoningMode::Standard,
             subagents,
+            context_window: ContextWindow::Standard,
             context_diagnostics: ContextDiagnostics::default(),
             recent_prompts: Vec::new(),
             pending_session_mention: None,
@@ -395,6 +397,7 @@ impl RootNode {
 
     pub(crate) fn fork(&self, workspace: &Path, thinking: ReasoningEffort) -> Self {
         let mut root = Self::new(workspace, thinking);
+        root.set_context_window(self.context_window);
         root.transcript = Node::new(self.transcript.component().fork_snapshot());
         root.composer
             .component_mut()
@@ -486,6 +489,14 @@ impl RootNode {
         self.subagents.set_max_subagents(limit);
     }
 
+    pub(crate) fn set_context_window(&mut self, context_window: ContextWindow) {
+        self.context_window = context_window;
+        self.context_diagnostics.set_context_window(context_window);
+        self.composer
+            .component_mut()
+            .set_context_window(context_window);
+    }
+
     pub(crate) fn reset_session(
         &mut self,
         workspace: &Path,
@@ -505,7 +516,9 @@ impl RootNode {
         let memory_enabled = self.memory_enabled;
         let theme_mode = self.theme_mode;
         let max_subagents = self.subagents.max_subagents();
+        let context_window = self.context_window;
         *self = Self::new(workspace, thinking);
+        self.set_context_window(context_window);
         self.set_reasoning_modes(reasoning_mode, preferred_reasoning_mode);
         self.discarded_draft = discarded_draft;
         self.fork_available = fork_available;
@@ -586,6 +599,9 @@ impl RootNode {
         );
         self.set_fast_mode(fast_mode);
         projection.transcript.set_workspace(workspace);
+        projection
+            .context_diagnostics
+            .set_context_window(self.context_window);
         self.transcript = Node::new(projection.transcript);
         self.context_diagnostics = projection.context_diagnostics;
         self.recent_prompts = projection.recent_prompts;

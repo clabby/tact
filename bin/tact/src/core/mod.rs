@@ -266,6 +266,7 @@ impl ConfiguredAgent {
         let subagents = subagent_control.downgrade();
         let mut builder = Nanocodex::builder(openai)
             .model(model)
+            .context_window(agent_config.context_window())
             .workspace(workspace)
             .thinking(thinking.into())
             .reasoning_mode(reasoning_mode.into())

@@ -5,7 +5,7 @@ use crate::{
     tui::theme::{Theme, ThemeMode},
 };
 use clap::ValueEnum;
-use nanocodex::Thinking;
+use nanocodex::{ContextWindow, Thinking};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -142,6 +142,7 @@ pub(crate) struct AgentConfig {
     thinking: ReasoningEffort,
     reasoning_mode: ReasoningMode,
     fast_mode: bool,
+    context_window_1m: bool,
     max_subagents: usize,
     #[serde(serialize_with = "serialize_optional_string")]
     instructions: Option<String>,
@@ -321,6 +322,7 @@ struct AgentConfigFile {
     thinking: Option<ReasoningEffort>,
     reasoning_mode: Option<ReasoningMode>,
     fast_mode: Option<bool>,
+    context_window_1m: Option<bool>,
     max_subagents: Option<usize>,
     instructions: Option<String>,
     append_instructions: Option<String>,
@@ -420,6 +422,7 @@ impl Config {
                     .or(file.agent.reasoning_mode)
                     .unwrap_or_default(),
                 fast_mode: file.agent.fast_mode.unwrap_or(false),
+                context_window_1m: file.agent.context_window_1m.unwrap_or(false),
                 max_subagents: overrides
                     .max_subagents
                     .or(file.agent.max_subagents)
@@ -975,6 +978,14 @@ impl AgentConfig {
         self.fast_mode
     }
 
+    pub(crate) const fn context_window(&self) -> ContextWindow {
+        if self.context_window_1m {
+            ContextWindow::OneMillion
+        } else {
+            ContextWindow::Standard
+        }
+    }
+
     pub(crate) const fn max_subagents(&self) -> usize {
         self.max_subagents
     }
@@ -1516,6 +1527,7 @@ mod tests {
         assert_eq!(config.agent.thinking, ReasoningEffort::Medium);
         assert_eq!(config.agent.reasoning_mode, ReasoningMode::Standard);
         assert!(!config.agent.fast_mode);
+        assert!(!config.agent.context_window_1m);
         assert_eq!(config.agent.max_subagents, 32);
         assert!(config.agent.web_search);
         assert!(config.agent.image_generation);
@@ -1544,6 +1556,7 @@ mod tests {
                 "thinking",
                 "reasoning_mode",
                 "fast_mode",
+                "context_window_1m",
                 "max_subagents",
                 "instructions",
                 "append_instructions",
@@ -2455,7 +2468,7 @@ mod tests {
         let config_path = directory.path().join("config.toml");
         fs::write(
             &config_path,
-            "[agent]\nworkspace = \"workspace\"\nthinking = \"xhigh\"\nreasoning_mode = \"pro\"\nfast_mode = true\nmax_subagents = 7\n\
+            "[agent]\nworkspace = \"workspace\"\nthinking = \"xhigh\"\nreasoning_mode = \"pro\"\nfast_mode = true\ncontext_window_1m = true\nmax_subagents = 7\n\
              instructions = \"Be concise.\"\nappend_instructions = \"Use project conventions.\"\n\
              web_search = false\nimage_generation = false\n\
              websocket_url = \"wss://example.com/responses\"\n\
@@ -2480,6 +2493,10 @@ mod tests {
         assert_eq!(config.agent.thinking, ReasoningEffort::Xhigh);
         assert_eq!(config.agent.reasoning_mode, ReasoningMode::Pro);
         assert!(config.agent.fast_mode);
+        assert_eq!(
+            config.agent.context_window(),
+            nanocodex::ContextWindow::OneMillion
+        );
         assert_eq!(config.agent.max_subagents, 7);
         assert_eq!(config.agent.instructions.as_deref(), Some("Be concise."));
         assert_eq!(
@@ -2496,6 +2513,8 @@ mod tests {
             config.agent.api_base_url.as_deref(),
             Some("https://example.com/v1")
         );
+        let rendered: toml::Value = toml::from_str(&config.to_toml().unwrap()).unwrap();
+        assert_eq!(rendered["agent"]["context_window_1m"].as_bool(), Some(true));
     }
 
     #[test]

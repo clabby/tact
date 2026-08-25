@@ -11,7 +11,6 @@ use super::{
 use crate::{
     app::config::{ReasoningEffort, ReasoningMode},
     tui::{
-        context::MODEL_WINDOW_TOKENS,
         format::{
             format_turn_duration, normalize_line_endings, sanitize_terminal_text, shorten_home,
             terminal_text_width,
@@ -23,7 +22,7 @@ use crate::{
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use history::PromptHistory;
 use layout::{VisualLayout, byte_at_column, grapheme_at_column};
-use nanocodex::Model;
+use nanocodex::{ContextWindow, Model};
 use ratatui::{
     Frame,
     buffer::Buffer,
@@ -105,6 +104,7 @@ pub(crate) struct Composer {
     scroll: usize,
     last_width: usize,
     context_tokens: u64,
+    context_window: ContextWindow,
     workspace: String,
     thinking: ReasoningEffort,
     model: Model,
@@ -204,6 +204,7 @@ impl Composer {
             scroll: 0,
             last_width: 78,
             context_tokens: 0,
+            context_window: ContextWindow::Standard,
             workspace: shorten_home(workspace),
             thinking,
             model: Model::Sol,
@@ -227,6 +228,10 @@ impl Composer {
 
     pub(crate) const fn context_tokens(&self) -> u64 {
         self.context_tokens
+    }
+
+    pub(crate) const fn set_context_window(&mut self, context_window: ContextWindow) {
+        self.context_window = context_window;
     }
 
     pub(crate) fn update(&mut self, event: ComposerEvent) -> ComposerUpdate {
@@ -1165,7 +1170,11 @@ impl Composer {
         let content_start = area.x + 2;
         let content_width = usize::from(area.width - 4);
         let content_end = content_start + u16::try_from(content_width).unwrap_or(u16::MAX);
-        let usage_prefix = format!(" {}%/272k ", context_percent(self.context_tokens));
+        let usage_prefix = format!(
+            " {}%/{} ",
+            context_percent(self.context_tokens, self.context_window),
+            context_window_label(self.context_window),
+        );
         let input_mode_segment = self
             .input_mode
             .as_ref()
@@ -1479,11 +1488,16 @@ impl ComposerUpdate {
     }
 }
 
-fn context_percent(tokens: u64) -> u64 {
-    tokens
-        .saturating_mul(100)
-        .saturating_add(MODEL_WINDOW_TOKENS / 2)
-        / MODEL_WINDOW_TOKENS
+fn context_percent(tokens: u64, context_window: ContextWindow) -> u64 {
+    let token_limit = context_window.token_limit();
+    tokens.saturating_mul(100).saturating_add(token_limit / 2) / token_limit
+}
+
+fn context_window_label(context_window: ContextWindow) -> &'static str {
+    match context_window {
+        ContextWindow::Standard => "272k",
+        ContextWindow::OneMillion => "1M",
+    }
 }
 
 fn draw_symbol(buffer: &mut Buffer, x: u16, y: u16, symbol: &str, style: Style) {
@@ -1567,7 +1581,7 @@ fn render_selection(
 mod tests {
     use super::{
         super::selection::{Selection, Surface, TextRange},
-        Composer, ComposerEffect, ComposerEvent, context_percent,
+        Composer, ComposerEffect, ComposerEvent, context_percent, context_window_label,
     };
     use crate::{
         app::config::{ReasoningEffort, ReasoningMode},
@@ -1575,7 +1589,7 @@ mod tests {
     };
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use nanocodex::{
-        Model,
+        ContextWindow, Model,
         agent::input::{PromptInput, UserInput},
     };
     use ratatui::{
@@ -2460,9 +2474,11 @@ mod tests {
 
     #[test]
     fn context_percentage_is_rounded() {
-        assert_eq!(context_percent(0), 0);
-        assert_eq!(context_percent(136_000), 50);
-        assert_eq!(context_percent(1_400), 1);
+        assert_eq!(context_percent(0, ContextWindow::Standard), 0);
+        assert_eq!(context_percent(136_000, ContextWindow::Standard), 50);
+        assert_eq!(context_percent(1_400, ContextWindow::Standard), 1);
+        assert_eq!(context_percent(500_000, ContextWindow::OneMillion), 50);
+        assert_eq!(context_window_label(ContextWindow::OneMillion), "1M");
     }
 
     #[test]

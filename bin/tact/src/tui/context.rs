@@ -1,10 +1,12 @@
 //! Content-free context diagnostics projected from transcript telemetry.
 
 use crate::tui::transcript::TranscriptRecord;
-use nanocodex::oai::{
-    self,
-    events::{CompactionStarted, ModelCallCompleted},
-    responses::Usage,
+use nanocodex::{
+    ContextWindow,
+    oai::{
+        events::{CompactionStarted, ModelCallCompleted},
+        responses::Usage,
+    },
 };
 use serde::Deserialize;
 use serde_json::value::RawValue;
@@ -14,9 +16,6 @@ pub(crate) enum ContinuationMode {
     FullContext,
     PreviousResponse,
 }
-
-pub(crate) const MODEL_WINDOW_TOKENS: u64 = oai::CONTEXT_WINDOW_TOKENS;
-pub(crate) const AUTO_COMPACT_TOKEN_LIMIT: u64 = 244_800;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct TokenUsage {
@@ -62,9 +61,10 @@ pub(crate) struct ContextObservation {
 
 impl Default for ContextDiagnostics {
     fn default() -> Self {
+        let context_window = ContextWindow::Standard;
         Self {
-            model_window_tokens: MODEL_WINDOW_TOKENS,
-            auto_compact_token_limit: AUTO_COMPACT_TOKEN_LIMIT,
+            model_window_tokens: context_window.token_limit(),
+            auto_compact_token_limit: context_window.auto_compact_token_limit(),
             usage: None,
             continuation: None,
             prompt_cache: None,
@@ -77,6 +77,11 @@ impl Default for ContextDiagnostics {
 }
 
 impl ContextDiagnostics {
+    pub(crate) fn set_context_window(&mut self, context_window: ContextWindow) {
+        self.model_window_tokens = context_window.token_limit();
+        self.auto_compact_token_limit = context_window.auto_compact_token_limit();
+    }
+
     #[cfg(test)]
     fn rebuild<'a>(records: impl IntoIterator<Item = &'a TranscriptRecord>) -> Self {
         let mut diagnostics = Self::default();
@@ -288,6 +293,7 @@ pub(crate) fn outbound_context_snapshot(record: &TranscriptRecord) -> Option<(bo
 mod tests {
     use super::{ContextDiagnostics, ContinuationMode};
     use crate::tui::transcript::TranscriptRecord;
+    use nanocodex::ContextWindow;
     use nanocodex::agent::events::{AgentEvent, AgentEventKind};
     use serde_json::{Value, json, value::to_raw_value};
     use std::sync::Arc;
@@ -324,6 +330,16 @@ mod tests {
             "tool_calls": 0,
             "usage": usage
         })
+    }
+
+    #[test]
+    fn one_million_context_uses_matching_diagnostic_limits() {
+        let mut diagnostics = ContextDiagnostics::default();
+
+        diagnostics.set_context_window(ContextWindow::OneMillion);
+
+        assert_eq!(diagnostics.model_window_tokens, 1_000_000);
+        assert_eq!(diagnostics.auto_compact_token_limit, 900_000);
     }
 
     #[test]

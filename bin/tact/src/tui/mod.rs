@@ -53,7 +53,7 @@ use crate::{
 };
 use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
 use futures_util::StreamExt;
-use nanocodex::Model;
+use nanocodex::{ContextWindow, Model};
 use std::{
     collections::{HashMap, HashSet},
     io::{self, IsTerminal},
@@ -94,6 +94,7 @@ type NewSessionTask = JoinHandle<(
     ReasoningEffort,
     ReasoningMode,
     bool,
+    ContextWindow,
     Model,
     components::DraftReset,
     Result<ConfiguredAgent>,
@@ -148,6 +149,7 @@ struct RestoredSession {
     projection: RestoredSessionProjection,
     reasoning_mode: ReasoningMode,
     model: Model,
+    context_window: ContextWindow,
     next_sequence: u64,
 }
 
@@ -441,6 +443,7 @@ pub(crate) async fn run(
 
     let initial_effort = config.agent().thinking();
     let initial_fast_mode = config.agent().fast_mode();
+    let initial_context_window = config.agent().context_window();
     let initial_max_subagents = config.agent().max_subagents();
     let preferred_reasoning_mode = config.agent().reasoning_mode();
     let open_resume_selector = matches!(&startup, StartupMode::ResumeSelector);
@@ -545,6 +548,7 @@ pub(crate) async fn run(
         subagent_sender.clone(),
     );
     let mut root = RootNode::new(&workspace, initial_effort);
+    root.set_context_window(initial_context_window);
     root.set_reasoning_modes(reasoning_mode, preferred_reasoning_mode);
     root.set_fast_mode(initial_fast_mode);
     root.set_max_subagents(initial_max_subagents);
@@ -1234,6 +1238,7 @@ pub(crate) async fn run(
                             effort,
                             reasoning_mode,
                             fast_mode,
+                            context_window,
                             configured,
                         } = prepared;
                         let skills = install_configured_agent(
@@ -1256,6 +1261,7 @@ pub(crate) async fn run(
                                 effort,
                                 reasoning_mode,
                                 fast_mode,
+                                context_window,
                                 skills,
                             }),
                             &mut scheduler,
@@ -1279,7 +1285,7 @@ pub(crate) async fn run(
             }, if new_session_task.is_some() && !stopping => {
                 new_session_task = None;
                 input = Some(EventStream::new());
-                let (pane, effort, reasoning_mode, fast_mode, model, draft_reset, configured) =
+                let (pane, effort, reasoning_mode, fast_mode, context_window, model, draft_reset, configured) =
                     result.map_err(RuntimeError::NewSessionTask)?;
                 match configured {
                     Ok(configured) => {
@@ -1303,6 +1309,7 @@ pub(crate) async fn run(
                                 effort,
                                 reasoning_mode,
                                 fast_mode,
+                                context_window,
                                 model,
                                 draft_reset,
                                 skills,
@@ -1428,6 +1435,7 @@ pub(crate) async fn run(
                         projection,
                         reasoning_mode,
                         model,
+                        context_window,
                         next_sequence,
                     }) => {
                         let ConfiguredAgent {
@@ -1497,6 +1505,7 @@ pub(crate) async fn run(
                                 reasoning_mode,
                                 preferred_reasoning_mode,
                                 fast_mode,
+                                context_window,
                                 model,
                                 skills,
                             }),
@@ -2077,6 +2086,7 @@ fn apply_pane_effect(
                 .current_fast_mode;
             let config = context.config.clone();
             *context.new_session_task = Some(tokio::task::spawn_blocking(move || {
+                let context_window = config.agent().context_window();
                 let configured =
                     ConfiguredAgent::from_config_with_model(&config, effort, reasoning_mode, model);
                 (
@@ -2084,6 +2094,7 @@ fn apply_pane_effect(
                     effort,
                     reasoning_mode,
                     fast_mode,
+                    context_window,
                     model,
                     components::DraftReset::Preserve,
                     configured,
@@ -2203,6 +2214,7 @@ fn apply_pane_effect(
             let config = context.config.clone();
             *context.new_session_task = Some(tokio::task::spawn_blocking(move || {
                 let fast_mode = config.agent().fast_mode();
+                let context_window = config.agent().context_window();
                 let configured = ConfiguredAgent::from_config_with_session(
                     &config,
                     effort,
@@ -2216,6 +2228,7 @@ fn apply_pane_effect(
                     effort,
                     reasoning_mode,
                     fast_mode,
+                    context_window,
                     Model::Sol,
                     components::DraftReset::Clear,
                     configured,
@@ -2340,6 +2353,7 @@ fn apply_pane_effect(
             let fast_mode = context.config.agent().fast_mode();
             let config = context.config.clone();
             *context.resume_session_task = Some(tokio::spawn(async move {
+                let context_window = config.agent().context_window();
                 let config_path = config.path().to_path_buf();
                 let checkpoint_session_id = session_id.clone();
                 let checkpoint = tokio::task::spawn_blocking(move || {
@@ -2369,6 +2383,7 @@ fn apply_pane_effect(
                             projection,
                             reasoning_mode,
                             model,
+                            context_window,
                             next_sequence,
                         })
                     })
@@ -2606,6 +2621,7 @@ async fn prepare_handoff(
     let effort = config.agent().thinking();
     let reasoning_mode = config.agent().reasoning_mode();
     let fast_mode = config.agent().fast_mode();
+    let context_window = config.agent().context_window();
     let task = tokio::task::spawn_blocking(move || {
         ConfiguredAgent::from_config_with_session(
             &config,
@@ -2630,6 +2646,7 @@ async fn prepare_handoff(
         effort,
         reasoning_mode,
         fast_mode,
+        context_window,
         configured,
     })
 }

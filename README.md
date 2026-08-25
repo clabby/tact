@@ -128,6 +128,7 @@ workspace = "/path/to/workspace"
 thinking = "medium" # low, medium, high, xhigh, or max
 reasoning_mode = "standard" # standard or pro
 fast_mode = false
+context_window_1m = false
 max_subagents = 32
 instructions = ""
 append_instructions = ""
@@ -179,6 +180,11 @@ thinking_high = "yellow"
 thinking_xhigh = "red"
 thinking_max = "magenta"
 ```
+
+Set `agent.context_window_1m = true` only when the selected endpoint supports a one-million-token
+input context. Tact will retain up to 1,000,000 tokens and compact at 900,000; this changes its
+client-side history policy and does not increase the provider's capacity. The setting applies to
+new or restored sessions.
 
 Set `agent.completion_hook` to a shell command to run after each conversation turn finishes. Tact
 runs the command in the configured workspace and ignores its output and exit status. Interactive
