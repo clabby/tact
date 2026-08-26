@@ -3,12 +3,13 @@ use super::{
     protocol::{
         self, DeleteRequest, ErrorResponse, ExportCursor, ExportRequest, ExportResponse,
         ListResponse, PutRequest, PutResponse, ReadRequest, ReadResponse, RemoteErrorCode,
-        RemoteRole, ScanRequest, ScanResponse, SessionResponse, SyncReport, SyncRequest,
+        RemoteRole, ScanRequest, ScanResponse, ScanScope, SessionResponse, SyncReport, SyncRequest,
     },
 };
 use crate::{
-    MemoryCandidate, MemoryError, MemoryKey, MemoryLimits, MemoryRecord, MemoryScan, MemoryStore,
-    RemoteClientError, RemoteMemoryClient, RemoteToken, model::normalize_identity,
+    MemoryCandidate, MemoryError, MemoryKey, MemoryLimits, MemoryNamespaceFilter, MemoryRecord,
+    MemoryStore, RemoteClientError, RemoteMemoryClient, RemoteToken, SelectedMemoryStore,
+    model::normalize_identity,
 };
 use axum::{
     Json, Router,
@@ -93,33 +94,31 @@ fn visible_records(state: &TestMemoryState) -> Vec<MemoryRecord> {
 }
 
 impl MemoryStore for TestMemoryStore {
-    async fn scan(&self, query: &str, limit: usize) -> Result<MemoryScan, MemoryError> {
+    async fn scan(
+        &self,
+        query: &str,
+        namespaces: MemoryNamespaceFilter,
+        limit: usize,
+    ) -> Result<Vec<MemoryCandidate>, MemoryError> {
         let now = now_ms();
         let query = normalize_identity(query);
         let terms = query.split_whitespace().collect::<Vec<_>>();
         let mut state = self.database.state.lock().unwrap();
         prune_expired(&mut state, now);
-        let mut seen = HashSet::new();
-        let mut candidates = visible_records(&state)
+        let records = visible_records(&state)
             .into_iter()
             .filter(|record| {
                 let content = normalize_identity(&record.content);
                 terms.iter().all(|term| content.contains(term))
-                    && seen.insert(normalize_identity(&record.content))
             })
-            .map(|record| MemoryCandidate {
-                key: record.key,
-                preview: record.content,
-                score: 1.0,
-            })
-            .take(limit.min(MemoryLimits::PRODUCTION.scan_results))
             .collect::<Vec<_>>();
-        candidates.sort_by(|left, right| {
-            left.key
-                .namespace
-                .cmp(&right.key.namespace)
-                .then_with(|| left.key.id.cmp(&right.key.id))
-        });
+        let candidates = MemoryCandidate::rank(
+            &query,
+            records
+                .iter()
+                .filter(|record| namespaces.includes(&record.key)),
+            limit.min(MemoryLimits::PRODUCTION.scan_results),
+        );
         for candidate in &candidates {
             if let Some(record) = state
                 .records
@@ -129,10 +128,7 @@ impl MemoryStore for TestMemoryStore {
                 record.scan_count = record.scan_count.saturating_add(1);
             }
         }
-        Ok(MemoryScan {
-            abstained: candidates.is_empty(),
-            candidates,
-        })
+        Ok(candidates)
     }
 
     async fn read(
@@ -444,6 +440,32 @@ async fn send<T: Serialize>(
         .unwrap()
 }
 
+async fn scan(
+    app: &Router,
+    token: &str,
+    namespace: &str,
+    query: &str,
+    scope: ScanScope,
+    limit: usize,
+) -> Vec<MemoryCandidate> {
+    json::<ScanResponse>(
+        send(
+            app,
+            protocol::SCAN_PATH,
+            token,
+            namespace,
+            &ScanRequest {
+                query: query.to_owned(),
+                scope,
+                limit,
+            },
+        )
+        .await,
+    )
+    .await
+    .candidates
+}
+
 async fn json<T: DeserializeOwned>(response: Response<Body>) -> T {
     serde_json::from_slice(&response_bytes(response).await).unwrap()
 }
@@ -598,20 +620,12 @@ async fn scan_read_and_list_return_only_caller_visible_records() {
         [&alice.key, &bob.key]
     );
 
-    let scanned = send(
-        &app,
-        protocol::SCAN_PATH,
-        ALICE_TOKEN,
-        "alice",
-        &ScanRequest {
-            query: "concurrent sqlite".to_owned(),
-            limit: 5,
-        },
-    )
-    .await;
-    let scanned = json::<ScanResponse>(scanned).await.candidates;
-    assert_eq!(scanned.len(), 1);
-    assert_eq!(scanned[0].key, bob.key);
+    let ours = scan(&app, ALICE_TOKEN, "alice", "note", ScanScope::Own, 5).await;
+    let theirs = scan(&app, ALICE_TOKEN, "alice", "note", ScanScope::Others, 5).await;
+    assert_eq!(ours.len(), 1);
+    assert_eq!(ours[0].key, alice.key);
+    assert_eq!(theirs.len(), 1);
+    assert_eq!(theirs[0].key, bob.key);
 
     let read = send(
         &app,
@@ -628,6 +642,61 @@ async fn scan_read_and_list_return_only_caller_visible_records() {
     assert_eq!(read.len(), 2);
     assert!(read.iter().any(|memory| memory.key == alice.key));
     assert!(read.iter().any(|memory| memory.key == bob.key));
+}
+
+#[tokio::test]
+async fn scan_applies_the_limit_independently_to_ours_and_theirs() {
+    let app = memory_app(vec![
+        credential("alice", RemoteRole::Writer, ALICE_TOKEN),
+        credential("bob", RemoteRole::Writer, BOB_TOKEN),
+    ]);
+    for index in 0..6 {
+        put(
+            &app,
+            "alice",
+            ALICE_TOKEN,
+            &format!("namespace candidate alice {index}"),
+        )
+        .await;
+        put(
+            &app,
+            "bob",
+            BOB_TOKEN,
+            &format!("namespace candidate bob {index}"),
+        )
+        .await;
+    }
+
+    let ours = scan(
+        &app,
+        ALICE_TOKEN,
+        "alice",
+        "namespace candidate",
+        ScanScope::Own,
+        5,
+    )
+    .await;
+    let theirs = scan(
+        &app,
+        ALICE_TOKEN,
+        "alice",
+        "namespace candidate",
+        ScanScope::Others,
+        5,
+    )
+    .await;
+
+    assert_eq!(ours.len(), 5);
+    assert!(
+        ours.iter()
+            .all(|candidate| candidate.key.namespace.as_deref() == Some("alice"))
+    );
+    assert_eq!(theirs.len(), 5);
+    assert!(
+        theirs
+            .iter()
+            .all(|candidate| candidate.key.namespace.as_deref() == Some("bob"))
+    );
 }
 
 #[tokio::test]
@@ -918,6 +987,7 @@ async fn body_and_request_bounds_are_content_free_client_errors() {
             "alice",
             &ScanRequest {
                 query: "q".repeat(MemoryLimits::PRODUCTION.query_bytes + 1),
+                scope: ScanScope::All,
                 limit: 1,
             },
         )
@@ -955,6 +1025,7 @@ async fn body_and_request_bounds_are_content_free_client_errors() {
         "alice",
         &ScanRequest {
             query: "bounded".to_owned(),
+            scope: ScanScope::All,
             limit: MemoryLimits::PRODUCTION.scan_results + 1,
         },
     )
@@ -1138,6 +1209,16 @@ async fn unsafe_scan() -> Json<ScanResponse> {
     })
 }
 
+async fn malformed_scan() -> Json<ScanResponse> {
+    Json(ScanResponse {
+        candidates: vec![MemoryCandidate {
+            key: MemoryKey::remote("alice".to_owned(), 0, 1),
+            preview: "candidate".to_owned(),
+            score: 1.0,
+        }],
+    })
+}
+
 async fn oversized_scan() -> Json<ScanResponse> {
     Json(ScanResponse {
         candidates: (1..=2)
@@ -1172,6 +1253,69 @@ async fn ascending_score_scan() -> Json<ScanResponse> {
             })
             .collect(),
     })
+}
+
+async fn misclassified_scan() -> Json<ScanResponse> {
+    Json(ScanResponse {
+        candidates: vec![MemoryCandidate {
+            key: MemoryKey::remote("bob".to_owned(), 1, 1),
+            preview: "foreign candidate".to_owned(),
+            score: 1.0,
+        }],
+    })
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct ScopedScanRequest {
+    scope: ScanScope,
+    bookmark: Option<String>,
+}
+
+#[derive(Clone, Default)]
+struct ScanScopeLog {
+    requests: Arc<Mutex<Vec<ScopedScanRequest>>>,
+    fail_others: bool,
+}
+
+async fn scoped_scan(
+    axum::extract::State(log): axum::extract::State<ScanScopeLog>,
+    headers: axum::http::HeaderMap,
+    Json(request): Json<ScanRequest>,
+) -> Response<Body> {
+    let bookmark = headers
+        .get(protocol::BOOKMARK_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    log.requests.lock().unwrap().push(ScopedScanRequest {
+        scope: request.scope,
+        bookmark,
+    });
+    if log.fail_others && request.scope == ScanScope::Others {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+
+    let namespace = match request.scope {
+        ScanScope::All | ScanScope::Own => "alice",
+        ScanScope::Others => "bob",
+    };
+    let response_bookmark = match request.scope {
+        ScanScope::All => "bookmark-all",
+        ScanScope::Own => "bookmark-own",
+        ScanScope::Others => "bookmark-others",
+    };
+    let mut response = Json(ScanResponse {
+        candidates: vec![MemoryCandidate {
+            key: MemoryKey::remote(namespace.to_owned(), 1, 1),
+            preview: format!("{namespace} candidate"),
+            score: 1.0,
+        }],
+    })
+    .into_response();
+    response.headers_mut().insert(
+        protocol::BOOKMARK_HEADER,
+        response_bookmark.parse().unwrap(),
+    );
+    response
 }
 
 async fn oversized_export() -> Json<ExportResponse> {
@@ -1379,14 +1523,44 @@ async fn client_suppresses_unsafe_scan_previews() {
     )
     .unwrap();
 
-    assert!(
-        client
-            .scan("password", 5)
-            .await
-            .unwrap()
-            .candidates
-            .is_empty()
-    );
+    let candidates = client
+        .scan(
+            "password",
+            MemoryNamespaceFilter::Exact("alice".to_owned()),
+            5,
+        )
+        .await
+        .unwrap();
+    assert!(candidates.is_empty());
+    task.abort();
+}
+
+#[tokio::test]
+async fn client_rejects_structurally_invalid_scan_candidates() {
+    let app = Router::new().route(&format!("/{}", protocol::SCAN_PATH), post(malformed_scan));
+    let (endpoint, task) = live_server(app).await;
+    let client = RemoteMemoryClient::new(
+        &endpoint,
+        "alice".to_owned(),
+        RemoteToken::new(ALICE_TOKEN.to_owned()).unwrap(),
+    )
+    .unwrap();
+
+    let error = client
+        .scan(
+            "candidate",
+            MemoryNamespaceFilter::Exact("alice".to_owned()),
+            5,
+        )
+        .await
+        .unwrap_err();
+    let MemoryError::Backend { source } = error else {
+        panic!("expected backend error, got {error:?}");
+    };
+    assert!(matches!(
+        source.downcast_ref::<RemoteClientError>(),
+        Some(RemoteClientError::InvalidResponse)
+    ));
     task.abort();
 }
 
@@ -1401,7 +1575,14 @@ async fn client_rejects_oversized_scan_responses() {
     )
     .unwrap();
 
-    let error = client.scan("candidate", 1).await.unwrap_err();
+    let error = client
+        .scan(
+            "candidate",
+            MemoryNamespaceFilter::Exact("alice".to_owned()),
+            1,
+        )
+        .await
+        .unwrap_err();
     let MemoryError::Backend { source } = error else {
         panic!("expected backend error, got {error:?}");
     };
@@ -1426,7 +1607,14 @@ async fn client_rejects_ambiguous_versions_in_scan_responses() {
     )
     .unwrap();
 
-    let error = client.scan("version", 2).await.unwrap_err();
+    let error = client
+        .scan(
+            "version",
+            MemoryNamespaceFilter::Exact("alice".to_owned()),
+            2,
+        )
+        .await
+        .unwrap_err();
     let MemoryError::Backend { source } = error else {
         panic!("expected backend error, got {error:?}");
     };
@@ -1451,7 +1639,145 @@ async fn client_rejects_scan_responses_out_of_rank_order() {
     )
     .unwrap();
 
-    let error = client.scan("candidate", 2).await.unwrap_err();
+    let error = client
+        .scan(
+            "candidate",
+            MemoryNamespaceFilter::Exact("alice".to_owned()),
+            2,
+        )
+        .await
+        .unwrap_err();
+    let MemoryError::Backend { source } = error else {
+        panic!("expected backend error, got {error:?}");
+    };
+    assert!(matches!(
+        source.downcast_ref::<RemoteClientError>(),
+        Some(RemoteClientError::InvalidResponse)
+    ));
+    task.abort();
+}
+
+#[tokio::test]
+async fn selected_remote_store_scans_ours_and_theirs_with_two_requests() {
+    let log = ScanScopeLog::default();
+    let app = Router::new()
+        .route(&format!("/{}", protocol::SCAN_PATH), post(scoped_scan))
+        .with_state(log.clone());
+    let (endpoint, task) = live_server(app).await;
+    let client = RemoteMemoryClient::new(
+        &endpoint,
+        "alice".to_owned(),
+        RemoteToken::new(ALICE_TOKEN.to_owned()).unwrap(),
+    )
+    .unwrap();
+    let store = SelectedMemoryStore::remote(client);
+
+    let (ours, theirs) = store.scan_groups("candidate", 2).await.unwrap();
+
+    assert_eq!(ours.len(), 1);
+    assert_eq!(ours[0].key.namespace.as_deref(), Some("alice"));
+    assert_eq!(theirs.len(), 1);
+    assert_eq!(theirs[0].key.namespace.as_deref(), Some("bob"));
+    assert_eq!(
+        *log.requests.lock().unwrap(),
+        [
+            ScopedScanRequest {
+                scope: ScanScope::Own,
+                bookmark: None,
+            },
+            ScopedScanRequest {
+                scope: ScanScope::Others,
+                bookmark: Some("bookmark-own".to_owned()),
+            },
+        ]
+    );
+    task.abort();
+}
+
+#[tokio::test]
+async fn selected_remote_store_does_not_return_a_partial_scan_group() {
+    let log = ScanScopeLog {
+        fail_others: true,
+        ..ScanScopeLog::default()
+    };
+    let app = Router::new()
+        .route(&format!("/{}", protocol::SCAN_PATH), post(scoped_scan))
+        .with_state(log.clone());
+    let (endpoint, task) = live_server(app).await;
+    let client = RemoteMemoryClient::new(
+        &endpoint,
+        "alice".to_owned(),
+        RemoteToken::new(ALICE_TOKEN.to_owned()).unwrap(),
+    )
+    .unwrap();
+    let store = SelectedMemoryStore::remote(client);
+
+    assert!(store.scan_groups("candidate", 2).await.is_err());
+    assert_eq!(
+        *log.requests.lock().unwrap(),
+        [
+            ScopedScanRequest {
+                scope: ScanScope::Own,
+                bookmark: None,
+            },
+            ScopedScanRequest {
+                scope: ScanScope::Others,
+                bookmark: Some("bookmark-own".to_owned()),
+            },
+        ]
+    );
+    task.abort();
+}
+
+#[tokio::test]
+async fn client_rejects_filters_not_bound_to_its_authenticated_namespace() {
+    let log = ScanScopeLog::default();
+    let app = Router::new()
+        .route(&format!("/{}", protocol::SCAN_PATH), post(scoped_scan))
+        .with_state(log.clone());
+    let (endpoint, task) = live_server(app).await;
+    let client = RemoteMemoryClient::new(
+        &endpoint,
+        "alice".to_owned(),
+        RemoteToken::new(ALICE_TOKEN.to_owned()).unwrap(),
+    )
+    .unwrap();
+
+    for namespaces in [
+        MemoryNamespaceFilter::Exact("bob".to_owned()),
+        MemoryNamespaceFilter::OtherThan("bob".to_owned()),
+    ] {
+        assert!(matches!(
+            client.scan("candidate", namespaces, 1).await,
+            Err(MemoryError::RemoteReadOnly)
+        ));
+    }
+    assert!(log.requests.lock().unwrap().is_empty());
+    task.abort();
+}
+
+#[tokio::test]
+async fn client_rejects_scan_candidates_outside_the_requested_scope() {
+    let app = Router::new().route(
+        &format!("/{}", protocol::SCAN_PATH),
+        post(misclassified_scan),
+    );
+    let (endpoint, task) = live_server(app).await;
+    let client = RemoteMemoryClient::new(
+        &endpoint,
+        "alice".to_owned(),
+        RemoteToken::new(ALICE_TOKEN.to_owned()).unwrap(),
+    )
+    .unwrap();
+
+    let error = client
+        .scan(
+            "candidate",
+            MemoryNamespaceFilter::Exact("alice".to_owned()),
+            1,
+        )
+        .await
+        .unwrap_err();
     let MemoryError::Backend { source } = error else {
         panic!("expected backend error, got {error:?}");
     };
@@ -1661,14 +1987,10 @@ impl MemoryStore for AsyncStore {
     fn scan(
         &self,
         _query: &str,
+        _namespaces: MemoryNamespaceFilter,
         _limit: usize,
-    ) -> impl Future<Output = Result<MemoryScan, MemoryError>> + Send {
-        async {
-            Ok(MemoryScan {
-                abstained: true,
-                candidates: Vec::new(),
-            })
-        }
+    ) -> impl Future<Output = Result<Vec<MemoryCandidate>, MemoryError>> + Send {
+        async { Ok(Vec::new()) }
     }
 
     fn read(

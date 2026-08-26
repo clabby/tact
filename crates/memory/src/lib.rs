@@ -4,7 +4,7 @@
 ///
 /// Route paths and session negotiation derive from this single value. Increment it only when
 /// clients and servers must intentionally stop interoperating.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
 mod model;
 mod retrieval;
@@ -17,14 +17,14 @@ mod tool;
 
 pub use model::{
     MemoryAccess, MemoryCandidate, MemoryImportReport, MemoryKey, MemoryLimits, MemoryRecord,
-    MemoryScan, MemorySource, normalize_identity,
+    MemorySource, normalize_identity,
 };
 pub use server::protocol::RemoteRole;
 #[cfg(feature = "local")]
 pub use store::LocalMemoryStore;
 #[cfg(all(feature = "client", feature = "local"))]
 pub use store::SelectedMemoryStore;
-pub use store::{MemoryError, MemoryStore};
+pub use store::{MemoryError, MemoryNamespaceFilter, MemoryStore};
 #[cfg(feature = "client")]
 pub use store::{RemoteClientError, RemoteMemoryClient, RemoteToken};
 #[cfg(feature = "tool")]

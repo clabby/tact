@@ -59,11 +59,13 @@ workspace_roots = ["/absolute/path/to/team/workspace"]
 ## Retrieval limits
 
 Tact performs exact BM25 ranking over a bounded shared corpus inside the Worker.
-`TACT_MEMORY_SCAN_MAX_RECORDS` and `TACT_MEMORY_SCAN_MAX_CONTENT_BYTES` bound the records and
-authored content loaded from D1 for one scan. The defaults permit 10,240 records and 5 MiB of
-content.
+`TACT_MEMORY_SCAN_MAX_RECORDS`, `TACT_MEMORY_SCAN_MAX_CONTENT_BYTES`, and
+`TACT_MEMORY_SCAN_MAX_RESULTS` bound the records and authored content loaded from D1 and the
+candidates returned for one scan. The defaults permit 10,240 records, 5 MiB of content, and five
+candidates. The result limit may be set from 1 through 5 and is further bounded by the request. The
+client issues an `own` request followed by an `others` request for an agent-facing remote scan.
 
-Choose limits from observed corpus size and Worker CPU usage. When the corpus exceeds either
+Choose limits from observed corpus size and Worker CPU usage. When the corpus exceeds either corpus
 bound, scans return a storage-capacity error. Export and mutation operations remain available so
 operators can reduce or migrate the corpus without editing D1 directly.
 
