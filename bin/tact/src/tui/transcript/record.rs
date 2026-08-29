@@ -268,6 +268,12 @@ impl TranscriptRecord {
         &self.source
     }
 
+    pub(crate) fn agent_request_id(&self) -> Option<Arc<str>> {
+        self.agent
+            .as_ref()
+            .map(|metadata| Arc::clone(&metadata.request_id))
+    }
+
     pub(crate) fn payload_json(&self) -> &str {
         self.payload.get()
     }

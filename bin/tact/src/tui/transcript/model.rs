@@ -15,6 +15,7 @@ use serde_json::Value;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     path::PathBuf,
+    sync::Arc,
 };
 use tact_subagents::{
     AgentMessageUpdate, MessageDeliveryState, MessageDisposition, MessageSender, ThreadId,
@@ -49,7 +50,7 @@ pub(crate) struct TranscriptModel {
     next_entry_id: usize,
     assistants: HashMap<AssistantKey, EntryId>,
     active_assistants: HashMap<(u32, MessagePhase), EntryId>,
-    reasoning: HashMap<u32, EntryId>,
+    reasoning: HashMap<ReasoningKey, EntryId>,
     tools: HashMap<String, EntryId>,
     shell_sessions: HashMap<i64, EntryId>,
     shell_followups: HashMap<String, EntryId>,
@@ -71,6 +72,12 @@ struct AssistantKey {
     call: u32,
     item: Option<String>,
     phase: MessagePhase,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct ReasoningKey {
+    request: Option<Arc<str>>,
+    call: u32,
 }
 
 impl TranscriptModel {
@@ -200,6 +207,7 @@ impl TranscriptModel {
             return ModelChange::default();
         }
 
+        self.reasoning.clear();
         let EntryKind::DirectedMessage(message) = &mut self.entries[index].kind else {
             return ModelChange::default();
         };
@@ -351,6 +359,7 @@ impl TranscriptModel {
         let Some(id) = self.local_shells.remove(&payload.id) else {
             return;
         };
+        self.reasoning.clear();
         let failed = payload.error.is_some() || payload.exit_code != Some(0);
         self.update(id, |kind| {
             if let EntryKind::Tool(tool) = kind {
@@ -373,6 +382,18 @@ impl TranscriptModel {
 
     fn apply_agent(&mut self, record: &TranscriptRecord) -> ModelChange {
         let previous_activity = self.transient.clone();
+        if matches!(
+            record.kind(),
+            "assistant.delta"
+                | "assistant.message"
+                | "run.started"
+                | "run.completed"
+                | "run.failed"
+                | "tool.call"
+                | "tool.result"
+        ) {
+            self.reasoning.clear();
+        }
         let result = match record.kind() {
             "assistant.delta" => self.assistant_delta(record),
             "assistant.message" => self.assistant_message(record),
@@ -516,15 +537,20 @@ impl TranscriptModel {
 
     fn reasoning_delta(&mut self, record: &TranscriptRecord) -> Result<bool, serde_json::Error> {
         let payload = record.decode_payload::<ReasoningSummaryDelta>()?;
+        let key = ReasoningKey {
+            request: record.agent_request_id(),
+            call: payload.model_call_index,
+        };
         let id = self
             .reasoning
-            .get(&payload.model_call_index)
+            .get(&key)
             .copied()
+            .filter(|id| self.entries.last().is_some_and(|entry| entry.id == *id))
             .unwrap_or_else(|| {
                 let id = self.push(EntryKind::Reasoning {
                     text: String::new(),
                 });
-                self.reasoning.insert(payload.model_call_index, id);
+                self.reasoning.insert(key, id);
                 id
             });
         self.update(id, |kind| {
@@ -1362,12 +1388,21 @@ mod tests {
         kind: AgentEventKind,
         payload: impl Serialize,
     ) -> TranscriptRecord {
+        agent_for_at("session", recorded_at_unix_ms, kind, payload)
+    }
+
+    fn agent_for_at(
+        request_id: &str,
+        recorded_at_unix_ms: u64,
+        kind: AgentEventKind,
+        payload: impl Serialize,
+    ) -> TranscriptRecord {
         TranscriptRecord::from_agent(
             1,
             recorded_at_unix_ms,
             AgentEvent {
                 protocol_version: 1,
-                request_id: Arc::from("session"),
+                request_id: Arc::from(request_id),
                 seq: 1,
                 kind,
                 payload: to_raw_value(&payload).unwrap().into(),
@@ -1641,6 +1676,186 @@ mod tests {
             &model.entries()[0].kind,
             EntryKind::Reasoning { text } if text == "Inspecting the request and event ordering"
         ));
+    }
+
+    #[test]
+    fn concurrent_runs_do_not_share_reasoning_blocks() {
+        let mut model = TranscriptModel::default();
+        model.apply(&agent_for_at(
+            "run-a",
+            1,
+            AgentEventKind::ReasoningSummaryDelta,
+            json!({"model_call_index": 1, "text": "run a"}),
+        ));
+        model.apply(&agent_for_at(
+            "run-b",
+            2,
+            AgentEventKind::ReasoningSummaryDelta,
+            json!({"model_call_index": 1, "text": "run b"}),
+        ));
+
+        let reasoning = model
+            .entries()
+            .iter()
+            .filter_map(|entry| match &entry.kind {
+                EntryKind::Reasoning { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(reasoning, ["run a", "run b"]);
+    }
+
+    #[test]
+    fn reasoning_after_messages_and_tools_starts_new_blocks() {
+        let mut model = TranscriptModel::default();
+        model.apply(&agent(AgentEventKind::RunStarted, json!({})));
+        model.apply(&agent(
+            AgentEventKind::ReasoningSummaryDelta,
+            json!({"model_call_index": 1, "text": "before message"}),
+        ));
+        model.apply(&agent(
+            AgentEventKind::AssistantMessage,
+            json!({
+                "model_call_index": 1,
+                "item_id": "message",
+                "phase": "commentary",
+                "text": "status update",
+            }),
+        ));
+        model.apply(&agent(AgentEventKind::RunCompleted, json!({})));
+
+        model.apply(&agent(AgentEventKind::RunStarted, json!({})));
+        model.apply(&agent(
+            AgentEventKind::ReasoningSummaryDelta,
+            json!({"model_call_index": 1, "text": "after message"}),
+        ));
+        model.apply(&agent(
+            AgentEventKind::ToolCall,
+            json!({
+                "call_id": "tool",
+                "tool": "exec_command",
+                "arguments": {"cmd": "true"},
+            }),
+        ));
+        model.apply(&agent(
+            AgentEventKind::ReasoningSummaryDelta,
+            json!({"model_call_index": 1, "text": "after tool"}),
+        ));
+
+        let reasoning = model
+            .entries()
+            .iter()
+            .filter_map(|entry| match &entry.kind {
+                EntryKind::Reasoning { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(reasoning, ["before message", "after message", "after tool"]);
+    }
+
+    #[test]
+    fn reasoning_after_in_place_shell_followup_starts_new_block() {
+        let mut model = TranscriptModel::default();
+        model.apply(&agent_at(
+            1_000,
+            AgentEventKind::ToolCall,
+            json!({
+                "call_id": "shell",
+                "tool": "exec_command",
+                "arguments": {"cmd": "cargo test"},
+            }),
+        ));
+        model.apply(&agent_at(
+            2_000,
+            AgentEventKind::ToolResult,
+            json!({
+                "call_id": "shell",
+                "tool": "exec_command",
+                "status": "completed",
+                "duration_ns": 1_u64,
+                "result": "Process running with session ID 7",
+                "structured_result": {
+                    "output": "running",
+                    "session_id": 7,
+                    "wall_time_seconds": 0.0,
+                },
+                "metadata": null,
+            }),
+        ));
+        model.apply(&agent(
+            AgentEventKind::ReasoningSummaryDelta,
+            json!({"model_call_index": 1, "text": "before followup"}),
+        ));
+        model.apply(&agent_at(
+            3_000,
+            AgentEventKind::ToolCall,
+            json!({
+                "call_id": "stdin",
+                "tool": "write_stdin",
+                "arguments": {"session_id": 7},
+            }),
+        ));
+        model.apply(&agent_at(
+            4_000,
+            AgentEventKind::ToolResult,
+            json!({
+                "call_id": "stdin",
+                "tool": "write_stdin",
+                "status": "completed",
+                "duration_ns": 1_u64,
+                "result": "Process exited with code 0",
+                "structured_result": {
+                    "output": "done",
+                    "exit_code": 0,
+                    "wall_time_seconds": 0.0,
+                },
+                "metadata": null,
+            }),
+        ));
+        model.apply(&agent(
+            AgentEventKind::ReasoningSummaryDelta,
+            json!({"model_call_index": 1, "text": "after followup"}),
+        ));
+
+        let reasoning = model
+            .entries()
+            .iter()
+            .filter_map(|entry| match &entry.kind {
+                EntryKind::Reasoning { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(reasoning, ["before followup", "after followup"]);
+    }
+
+    #[test]
+    fn ignored_message_update_does_not_split_reasoning() {
+        let mut model = TranscriptModel::default();
+        let perspective = MessageSender::Agent {
+            agent_id: AgentId::new(1),
+        };
+        let admitted = message_update("admitted");
+        assert!(model.apply_message(perspective, admitted.clone()).changed);
+        model.apply(&agent(
+            AgentEventKind::ReasoningSummaryDelta,
+            json!({"model_call_index": 1, "text": "before no-op"}),
+        ));
+
+        assert!(!model.apply_message(perspective, admitted).changed);
+        model.apply(&agent(
+            AgentEventKind::ReasoningSummaryDelta,
+            json!({"model_call_index": 1, "text": " after no-op"}),
+        ));
+
+        let reasoning = model
+            .entries()
+            .iter()
+            .filter_map(|entry| match &entry.kind {
+                EntryKind::Reasoning { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(reasoning, ["before no-op after no-op"]);
     }
 
     #[test]
