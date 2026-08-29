@@ -30,6 +30,12 @@ enum EventVisibility {
     ErrorFallback,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CodeCellTerminal {
+    Completed,
+    Terminated,
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct ModelChange {
     pub(crate) changed: bool,
@@ -48,6 +54,7 @@ pub(crate) struct TranscriptModel {
     shell_sessions: HashMap<i64, EntryId>,
     shell_followups: HashMap<String, EntryId>,
     code_children: HashMap<EntryId, Vec<EntryId>>,
+    code_cells: HashMap<String, EntryId>,
     local_shells: HashMap<ShellId, EntryId>,
     message_threads: HashMap<ThreadId, EntryId>,
     message_order: VecDeque<ThreadId>,
@@ -644,6 +651,15 @@ impl TranscriptModel {
                 self.tools.insert(payload.call_id.clone(), id);
                 id
             });
+        let running_code_cell = (payload.tool == "exec")
+            .then(|| running_code_cell_id(&result))
+            .flatten()
+            .map(str::to_owned);
+        let observed_code_cell = (payload.tool == "wait")
+            .then(|| self.requested_code_cell(id))
+            .flatten()
+            .map(str::to_owned);
+        let code_cell_terminal = code_cell_terminal(&result);
         self.update(id, |kind| {
             if let EntryKind::Tool(tool) = kind {
                 tool.state = entry_state;
@@ -693,6 +709,16 @@ impl TranscriptModel {
             self.shell_sessions
                 .retain(|_, shell_entry| *shell_entry != id);
             self.running_tools.remove(&id);
+        }
+        if let Some(cell_id) = running_code_cell {
+            self.code_cells.insert(cell_id, id);
+        }
+        if let Some(cell_id) = observed_code_cell
+            && let Some(terminal) = code_cell_terminal
+            && let Some(parent) = self.code_cells.remove(&cell_id)
+            && terminal == CodeCellTerminal::Terminated
+        {
+            self.fail_unfinished_code_children(parent);
         }
         self.transient = self.is_active().then_some(TransientStatus::Thinking);
         Ok(true)
@@ -805,7 +831,23 @@ impl TranscriptModel {
             .copied()
             .filter(|id| !local_shells.contains(id))
             .collect::<Vec<_>>();
-        for id in &orphaned {
+        self.fail_unfinished_tools(&orphaned);
+    }
+
+    fn fail_unfinished_code_children(&mut self, parent: EntryId) {
+        let unfinished = self
+            .code_children
+            .get(&parent)
+            .into_iter()
+            .flatten()
+            .filter(|id| self.running_tools.contains(id))
+            .copied()
+            .collect::<Vec<_>>();
+        self.fail_unfinished_tools(&unfinished);
+    }
+
+    fn fail_unfinished_tools(&mut self, unfinished: &[EntryId]) {
+        for id in unfinished {
             self.update(*id, |kind| {
                 let EntryKind::Tool(tool) = kind else {
                     return;
@@ -823,7 +865,9 @@ impl TranscriptModel {
             });
             self.running_tools.remove(id);
         }
-        self.shell_sessions.retain(|_, id| !orphaned.contains(id));
+        self.shell_sessions.retain(|_, id| !unfinished.contains(id));
+        self.shell_followups
+            .retain(|_, id| !unfinished.contains(id));
     }
 
     pub(crate) fn agent_stream_closed(&mut self) -> bool {
@@ -921,6 +965,13 @@ impl TranscriptModel {
         let parent = self.tools.get(parent_call_id).copied()?;
         let entry = self.entry(parent)?;
         matches!(&entry.kind, EntryKind::Tool(tool) if tool.name == "exec").then_some(parent)
+    }
+
+    fn requested_code_cell(&self, id: EntryId) -> Option<&str> {
+        let EntryKind::Tool(tool) = &self.entry(id)?.kind else {
+            return None;
+        };
+        tool.arguments.get("cell_id")?.as_str()
     }
 
     fn next_code_child_parent(&self, parent: EntryId) -> Option<EntryId> {
@@ -1089,6 +1140,35 @@ fn tool_session_id(result: &Value) -> Option<i64> {
         return decoded.get("session_id").and_then(Value::as_i64);
     }
     result.get("session_id").and_then(Value::as_i64)
+}
+
+fn running_code_cell_id(result: &Value) -> Option<&str> {
+    code_mode_status(result)?
+        .strip_prefix("Script running with cell ID ")?
+        .split_whitespace()
+        .next()
+}
+
+fn code_cell_terminal(result: &Value) -> Option<CodeCellTerminal> {
+    let status = code_mode_status(result)?;
+    if status.starts_with("Script completed") {
+        Some(CodeCellTerminal::Completed)
+    } else if status.starts_with("Script terminated") {
+        Some(CodeCellTerminal::Terminated)
+    } else {
+        None
+    }
+}
+
+fn code_mode_status(result: &Value) -> Option<&str> {
+    match result {
+        Value::String(status) => Some(status),
+        Value::Array(items) => items
+            .iter()
+            .find_map(|item| item.get("text").and_then(Value::as_str)),
+        Value::Object(fields) => fields.get("text").and_then(Value::as_str),
+        Value::Null | Value::Bool(_) | Value::Number(_) => None,
+    }
 }
 
 fn tool_result_state(tool: &str, status: &str, result: &Value) -> ToolState {
@@ -2097,6 +2177,110 @@ mod tests {
             shell.result.as_ref().unwrap()["output"],
             "running still done"
         );
+    }
+
+    #[test]
+    fn terminating_a_code_cell_after_a_failed_wait_fails_its_unfinished_shell() {
+        let mut model = TranscriptModel::default();
+        model.apply(&agent(
+            AgentEventKind::ToolCall,
+            json!({
+                "call_id": "workflow",
+                "tool": "exec",
+                "arguments": "await tools.exec_command({cmd: 'sleep 100'})",
+            }),
+        ));
+        model.apply(&agent(
+            AgentEventKind::ToolCall,
+            json!({
+                "call_id": "workflow/code-1",
+                "tool": "exec_command",
+                "arguments": {"cmd": "sleep 100"},
+            }),
+        ));
+        model.apply(&agent(
+            AgentEventKind::ToolResult,
+            json!({
+                "call_id": "workflow/code-1",
+                "tool": "exec_command",
+                "status": "completed",
+                "duration_ns": 1_u64,
+                "result": "Process running with session ID 7",
+                "structured_result": {
+                    "output": "",
+                    "session_id": 7,
+                    "wall_time_seconds": 0.0,
+                },
+                "metadata": null,
+            }),
+        ));
+        model.apply(&agent(
+            AgentEventKind::ToolResult,
+            json!({
+                "call_id": "workflow",
+                "tool": "exec",
+                "status": "completed",
+                "duration_ns": 2_u64,
+                "result": [{"text": "Script running with cell ID 1"}],
+                "structured_result": [{"text": "Script running with cell ID 1"}],
+                "metadata": null,
+            }),
+        ));
+        model.apply(&agent(
+            AgentEventKind::ToolCall,
+            json!({
+                "call_id": "busy-wait",
+                "tool": "wait",
+                "arguments": {"cell_id": "1"},
+            }),
+        ));
+        model.apply(&agent(
+            AgentEventKind::ToolResult,
+            json!({
+                "call_id": "busy-wait",
+                "tool": "wait",
+                "status": "failed",
+                "duration_ns": 3_u64,
+                "result": [{
+                    "text": "Script failed\nWall time: 0.001 seconds\nOutput:\nexec cell 1 already has an active observer"
+                }],
+                "structured_result": [{
+                    "text": "Script failed\nWall time: 0.001 seconds\nOutput:\nexec cell 1 already has an active observer"
+                }],
+                "metadata": null,
+            }),
+        ));
+        assert!(model.has_running_tools());
+
+        model.apply(&agent(
+            AgentEventKind::ToolCall,
+            json!({
+                "call_id": "terminate",
+                "tool": "wait",
+                "arguments": {"cell_id": "1", "terminate": true},
+            }),
+        ));
+        model.apply(&agent(
+            AgentEventKind::ToolResult,
+            json!({
+                "call_id": "terminate",
+                "tool": "wait",
+                "status": "completed",
+                "duration_ns": 4_u64,
+                "result": [{"text": "Script terminated"}],
+                "structured_result": [{"text": "Script terminated"}],
+                "metadata": null,
+            }),
+        ));
+
+        assert!(!model.has_running_tools());
+        assert!(matches!(
+            &model.entries()[1].kind,
+            EntryKind::Tool(tool)
+                if tool.state == ToolState::Failed
+                    && tool.result.as_ref().and_then(|result| result["error"].as_str())
+                        == Some("tool call ended without a terminal result")
+        ));
     }
 
     #[test]
