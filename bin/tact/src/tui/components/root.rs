@@ -887,6 +887,7 @@ impl RootNode {
                 Some(ComposerChromeTarget::Effort) => return self.open_effort(),
                 Some(ComposerChromeTarget::Model) => return self.open_model(),
                 Some(ComposerChromeTarget::Subagents) => {
+                    self.subagents.open_tree();
                     self.overlay = Some(Overlay::Subagents(SubagentOverlay::Tree));
                     return ComponentUpdate::render(RenderRequest::Immediate);
                 }
@@ -1429,6 +1430,7 @@ impl RootNode {
         match update.effects.into_iter().next() {
             Some(ActionsEffect::Dismiss) => self.overlay = None,
             Some(ActionsEffect::Trigger(Action::Subagents)) => {
+                self.subagents.open_tree();
                 self.overlay = Some(Overlay::Subagents(SubagentOverlay::Tree));
             }
             Some(ActionsEffect::Trigger(Action::Effort)) => {
@@ -5693,6 +5695,48 @@ mod tests {
 
         assert_eq!(update.effects, [RootEffect::SetTheme(ThemeMode::Light)]);
         assert!(root.overlay.is_none());
+    }
+
+    #[test]
+    fn subagents_action_reopens_the_active_filter_on_the_oldest_active_agent() {
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        for (id, role) in [(1, "completed"), (2, "active")] {
+            root.update(RootEvent::Subagent(AgentUpdate::Added(AgentDescriptor {
+                id: AgentId::new(id),
+                session_id: format!("agent-{id}"),
+                model: Model::Sol,
+                role: role.to_owned(),
+                task: role.to_owned(),
+                parent: None,
+            })));
+        }
+        root.update(RootEvent::Subagent(AgentUpdate::Status {
+            id: AgentId::new(1),
+            status: AgentStatus::Completed {
+                output: json!({ "report": "done" }),
+            },
+        }));
+        root.subagents.update_tree(Event::Key(KeyEvent::new(
+            KeyCode::Char('f'),
+            KeyModifiers::NONE,
+        )));
+
+        root.update(key(KeyCode::Char('/'), KeyModifiers::NONE));
+        for character in "agents".chars() {
+            root.update(key(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+        root.update(key(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(
+            root.overlay,
+            Some(Overlay::Subagents(SubagentOverlay::Tree))
+        ));
+
+        root.update(key(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(
+            root.overlay,
+            Some(Overlay::Subagents(SubagentOverlay::Transcript(id)))
+                if id == AgentId::new(2)
+        ));
     }
 
     #[test]

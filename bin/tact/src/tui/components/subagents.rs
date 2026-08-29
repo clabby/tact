@@ -63,29 +63,36 @@ struct AgentNode {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum AgentFilter {
-    Running,
+    Active,
     All,
 }
 
 impl AgentFilter {
     const fn includes(self, status: &AgentStatus) -> bool {
         match self {
-            Self::Running => status.is_active(),
+            Self::Active => status.is_active(),
             Self::All => true,
         }
     }
 
     const fn label(self) -> &'static str {
         match self {
-            Self::Running => "running",
+            Self::Active => "active",
             Self::All => "all",
+        }
+    }
+
+    const fn helper(self) -> &'static str {
+        match self {
+            Self::Active => "filter: active",
+            Self::All => "filter: all",
         }
     }
 
     const fn toggled(self) -> Self {
         match self {
-            Self::Running => Self::All,
-            Self::All => Self::Running,
+            Self::Active => Self::All,
+            Self::All => Self::Active,
         }
     }
 }
@@ -137,7 +144,7 @@ impl SubagentTree {
             focused: None,
             remembered_children: HashMap::new(),
             camera: Camera::default(),
-            filter: AgentFilter::All,
+            filter: AgentFilter::Active,
             effort,
             max_subagents: DEFAULT_MAX_SUBAGENTS,
             workspace: std::env::current_dir().unwrap_or_default(),
@@ -282,6 +289,12 @@ impl SubagentTree {
         self.camera.center = Some(animation.to);
     }
 
+    pub(super) fn open_tree(&mut self) {
+        self.filter = AgentFilter::Active;
+        let layout = self.layout();
+        self.focus_oldest(&layout);
+    }
+
     pub(super) fn update_tree(&mut self, event: Event) -> Option<SubagentEffect> {
         self.update_tree_at(event, Instant::now())
     }
@@ -319,8 +332,7 @@ impl SubagentTree {
             KeyCode::Char('f') if key.modifiers.is_empty() => {
                 self.filter = self.filter.toggled();
                 let layout = self.layout();
-                self.ensure_focus(&layout);
-                self.recenter_on_focus(&layout, now);
+                self.focus_oldest(&layout);
                 None
             }
             KeyCode::Char('-') if key.modifiers.is_empty() => {
@@ -379,7 +391,9 @@ impl SubagentTree {
     }
 
     pub(super) fn render_tree(&mut self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
-        let layout = Floating::new("Sub-agent tree", area.width, area.height, &TREE_KEYS)
+        let mut keys = TREE_KEYS;
+        keys[5].1 = self.filter.helper();
+        let layout = Floating::new("Sub-agent tree", area.width, area.height, &keys)
             .render(frame, area, theme);
         if layout.body.is_empty() {
             return;
@@ -483,34 +497,10 @@ impl SubagentTree {
     }
 
     fn visible_ids(&self) -> Vec<AgentId> {
-        if self.filter == AgentFilter::All {
-            return self.nodes.iter().map(|node| node.descriptor.id).collect();
-        }
-
-        let mut visible = self
-            .nodes
+        self.nodes
             .iter()
             .filter(|node| self.filter.includes(&node.status))
             .map(|node| node.descriptor.id)
-            .collect::<Vec<_>>();
-        let mut cursor = 0;
-        while cursor < visible.len() {
-            let Some(parent) = self
-                .node(visible[cursor])
-                .and_then(|node| node.descriptor.parent)
-            else {
-                cursor += 1;
-                continue;
-            };
-            if !visible.contains(&parent) {
-                visible.push(parent);
-            }
-            cursor += 1;
-        }
-        self.nodes
-            .iter()
-            .map(|node| node.descriptor.id)
-            .filter(|id| visible.contains(id))
             .collect()
     }
 
@@ -522,6 +512,18 @@ impl SubagentTree {
             return;
         }
         self.focused = layout.roots().first().copied();
+        self.camera.center = self.focused.and_then(|id| layout.center(id));
+        self.camera.animation = None;
+    }
+
+    fn focus_oldest(&mut self, layout: &TreeLayout) {
+        self.focused = self
+            .nodes
+            .iter()
+            .filter(|node| self.filter.includes(&node.status))
+            .map(|node| node.descriptor.id)
+            .filter(|id| layout.position(*id).is_some())
+            .min();
         self.camera.center = self.focused.and_then(|id| layout.center(id));
         self.camera.animation = None;
     }
@@ -1099,7 +1101,7 @@ fn model_name(model: Model) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{SubagentEffect, SubagentTree};
+    use super::{AgentFilter, SubagentEffect, SubagentTree};
     use crate::{app::config::ReasoningEffort, tui::theme::Theme};
     use crossterm::event::{
         Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -1405,7 +1407,7 @@ mod tests {
     }
 
     #[test]
-    fn running_filter_hides_completed_agents_until_show_all_is_selected() {
+    fn active_filter_hides_completed_agents_until_show_all_is_selected() {
         let mut tree = SubagentTree::new(ReasoningEffort::Medium);
         tree.apply(AgentUpdate::Added(descriptor()));
         tree.apply(event(AgentEventKind::RunCompleted, json!({})));
@@ -1416,12 +1418,7 @@ mod tests {
             },
         });
 
-        assert_eq!(tree.visible_ids(), [AgentId::new(1)]);
-
-        tree.update_tree(Event::Key(KeyEvent::new(
-            KeyCode::Char('f'),
-            KeyModifiers::NONE,
-        )));
+        assert_eq!(tree.filter, AgentFilter::Active);
         assert!(tree.visible_ids().is_empty());
 
         tree.update_tree(Event::Key(KeyEvent::new(
@@ -1442,7 +1439,21 @@ mod tests {
     }
 
     #[test]
-    fn running_filter_retains_a_completed_ancestor_for_context() {
+    fn tree_helper_shows_the_selected_filter() {
+        let mut tree = SubagentTree::new(ReasoningEffort::Medium);
+
+        assert!(rendered_text(&render_tree(&mut tree)).contains("f filter: active"));
+
+        tree.update_tree(Event::Key(KeyEvent::new(
+            KeyCode::Char('f'),
+            KeyModifiers::NONE,
+        )));
+
+        assert!(rendered_text(&render_tree(&mut tree)).contains("f filter: all"));
+    }
+
+    #[test]
+    fn active_filter_promotes_children_of_completed_agents_to_roots() {
         let mut tree = SubagentTree::new(ReasoningEffort::Medium);
         let parent = descriptor();
         let mut child = descriptor();
@@ -1456,15 +1467,64 @@ mod tests {
                 output: json!({ "report": "done" }),
             },
         });
+        let visible = tree.visible_ids();
+
+        assert_eq!(visible, [AgentId::new(2)]);
+        assert_eq!(tree.layout().parent(AgentId::new(2)), None);
+    }
+
+    #[test]
+    fn opening_and_switching_filters_center_the_oldest_matching_agent() {
+        let mut tree = SubagentTree::new(ReasoningEffort::Medium);
+        for (id, role) in [(1, "oldest"), (2, "older active"), (3, "newer active")] {
+            tree.apply(AgentUpdate::Added(tree_descriptor(id, None, role)));
+        }
+        tree.apply(AgentUpdate::Status {
+            id: AgentId::new(1),
+            status: AgentStatus::Completed {
+                output: json!({ "report": "done" }),
+            },
+        });
+
         tree.update_tree(Event::Key(KeyEvent::new(
             KeyCode::Char('f'),
             KeyModifiers::NONE,
         )));
+        assert_eq!(tree.filter, AgentFilter::All);
+        assert_eq!(tree.focused, Some(AgentId::new(1)));
 
-        let visible = tree.visible_ids();
+        tree.open_tree();
+        assert_eq!(tree.filter, AgentFilter::Active);
+        assert_eq!(tree.focused, Some(AgentId::new(2)));
+        assert_eq!(tree.camera.center, tree.layout().center(AgentId::new(2)));
+        assert!(tree.camera.animation.is_none());
 
-        assert_eq!(visible, [AgentId::new(1), AgentId::new(2)]);
-        assert_eq!(tree.layout().parent(AgentId::new(2)), Some(AgentId::new(1)));
+        tree.update_tree(Event::Key(KeyEvent::new(
+            KeyCode::Char('f'),
+            KeyModifiers::NONE,
+        )));
+        assert_eq!(tree.filter, AgentFilter::All);
+        assert_eq!(tree.focused, Some(AgentId::new(1)));
+        assert_eq!(tree.camera.center, tree.layout().center(AgentId::new(1)));
+
+        tree.update_tree(Event::Key(KeyEvent::new(
+            KeyCode::Right,
+            KeyModifiers::NONE,
+        )));
+        tree.update_tree(Event::Key(KeyEvent::new(
+            KeyCode::Right,
+            KeyModifiers::NONE,
+        )));
+        assert_eq!(tree.focused, Some(AgentId::new(3)));
+
+        tree.update_tree(Event::Key(KeyEvent::new(
+            KeyCode::Char('f'),
+            KeyModifiers::NONE,
+        )));
+        assert_eq!(tree.filter, AgentFilter::Active);
+        assert_eq!(tree.focused, Some(AgentId::new(2)));
+        assert_eq!(tree.camera.center, tree.layout().center(AgentId::new(2)));
+        assert!(tree.camera.animation.is_none());
     }
 
     #[test]
