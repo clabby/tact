@@ -381,7 +381,7 @@ mod tests {
     use nanocodex::{Model, agent::session::SessionSnapshot};
     use rusqlite::Connection;
     use serde_json::{Value, json};
-    use std::sync::Arc;
+    use std::{sync::Arc, time::Duration};
     use tempfile::tempdir;
 
     fn snapshot(lineage: &str) -> SessionSnapshot {
@@ -793,5 +793,50 @@ mod tests {
         );
         assert_eq!(instructions, "instructions");
         assert_eq!(catalog, Some(true));
+    }
+
+    #[tokio::test]
+    async fn transient_write_lock_preserves_transcript_for_resume() {
+        let directory = tempdir().unwrap();
+        let config = directory.path().join("config.toml");
+        let initial_records = [started(1, "session", None, None)];
+        SessionStorage::open(&config)
+            .unwrap()
+            .append_records("session", &initial_records)
+            .unwrap();
+        let expected = snapshot("before-lock");
+        save_checkpoint(&config, "session", &expected, "instructions", true).unwrap();
+
+        let lock = Connection::open(database_path(&config)).unwrap();
+        lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let (mut journal, writer) = TranscriptJournal::open_at(&config, "session", 2).unwrap();
+        journal
+            .append_local(LocalEvent::UserSubmitted {
+                id: TurnId::new(1),
+                text: "first tail".to_owned(),
+            })
+            .unwrap();
+
+        tokio::time::sleep(Duration::from_secs(6)).await;
+        journal
+            .append_local(LocalEvent::UserSubmitted {
+                id: TurnId::new(2),
+                text: "second tail".to_owned(),
+            })
+            .unwrap();
+
+        lock.execute_batch("COMMIT").unwrap();
+        drop(journal);
+        writer.into_task().await.unwrap().unwrap();
+
+        let (restored, _, _) = load_checkpoint(&config, "session").unwrap().into_parts();
+        assert_eq!(
+            serde_json::to_value(restored).unwrap(),
+            serde_json::to_value(expected).unwrap()
+        );
+        let records = load_transcript(&config, "session").unwrap();
+        assert_eq!(records.len(), 3);
+        assert_eq!(records[1].kind(), "user.submitted");
+        assert_eq!(records[2].kind(), "user.submitted");
     }
 }

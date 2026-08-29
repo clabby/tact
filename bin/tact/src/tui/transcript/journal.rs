@@ -8,10 +8,11 @@ use nanocodex::agent::events::AgentEvent;
 use std::{
     path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, OnceLock,
         atomic::{AtomicBool, Ordering},
     },
-    time::{SystemTime, UNIX_EPOCH},
+    thread,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
     sync::{mpsc, oneshot},
@@ -22,11 +23,14 @@ pub(crate) struct TranscriptJournal {
     path: PathBuf,
     sender: mpsc::UnboundedSender<JournalCommand>,
     persisted: Arc<AtomicBool>,
+    failure: Arc<OnceLock<String>>,
     pending_start: Option<SessionStarted>,
     next_sequence: u64,
     last_sequence: u64,
     empty: bool,
 }
+
+const LOCK_RETRY_DELAY: Duration = Duration::from_millis(50);
 
 pub(crate) struct TranscriptWriter {
     task: JoinHandle<Result<(), TranscriptError>>,
@@ -62,17 +66,26 @@ impl TranscriptJournal {
         let path = database_path(config_path);
         let (sender, receiver) = mpsc::unbounded_channel();
         let persisted = Arc::new(AtomicBool::new(false));
+        let failure = Arc::new(OnceLock::new());
         let writer_config = config_path.to_path_buf();
         let writer_session = session_id.to_owned();
         let writer_persisted = Arc::clone(&persisted);
+        let writer_failure = Arc::clone(&failure);
         let task = tokio::task::spawn_blocking(move || {
-            write_journal(receiver, &writer_config, &writer_session, &writer_persisted)
+            write_journal(
+                receiver,
+                &writer_config,
+                &writer_session,
+                &writer_persisted,
+                &writer_failure,
+            )
         });
         Ok((
             Self {
                 path,
                 sender,
                 persisted,
+                failure,
                 pending_start: None,
                 next_sequence,
                 last_sequence: next_sequence.saturating_sub(1),
@@ -106,10 +119,8 @@ impl TranscriptJournal {
         let (completion, completed) = oneshot::channel();
         self.sender
             .send(JournalCommand::Flush(completion))
-            .map_err(|_| TranscriptError::WriterStopped(self.path.clone()))?;
-        completed
-            .await
-            .map_err(|_| TranscriptError::WriterStopped(self.path.clone()))
+            .map_err(|_| self.writer_stopped())?;
+        completed.await.map_err(|_| self.writer_stopped())
     }
 
     pub(crate) async fn persist_start(
@@ -213,9 +224,19 @@ impl TranscriptJournal {
                 record: Arc::clone(&record),
                 resume_state,
             }))
-            .map_err(|_| TranscriptError::WriterStopped(self.path.clone()))?;
+            .map_err(|_| self.writer_stopped())?;
         self.last_sequence = record.sequence();
         Ok(record)
+    }
+
+    fn writer_stopped(&self) -> TranscriptError {
+        self.failure.get().map_or_else(
+            || TranscriptError::WriterStopped(self.path.clone()),
+            |reason| TranscriptError::WriterFailed {
+                path: self.path.clone(),
+                reason: reason.clone(),
+            },
+        )
     }
 }
 
@@ -230,24 +251,47 @@ fn write_journal(
     config_path: &Path,
     session_id: &str,
     persisted: &AtomicBool,
+    failure: &OnceLock<String>,
 ) -> Result<(), TranscriptError> {
     let mut storage = None;
     let mut batch = Vec::new();
-    while let Some(command) = receiver.blocking_recv() {
-        let mut commands = vec![command];
+    let mut completions = Vec::new();
+    loop {
+        let mut commands = Vec::new();
+        if batch.is_empty() {
+            let Some(command) = receiver.blocking_recv() else {
+                break;
+            };
+            commands.push(command);
+        }
         while let Ok(command) = receiver.try_recv() {
             commands.push(command);
         }
         for command in commands {
             match command {
                 JournalCommand::Write(record) => batch.push(record),
-                JournalCommand::Flush(completion) => {
-                    write_batch(&mut storage, &mut batch, config_path, session_id, persisted)?;
+                JournalCommand::Flush(completion) => completions.push(completion),
+            }
+        }
+        match write_batch(&mut storage, &mut batch, config_path, session_id, persisted) {
+            Ok(()) => {
+                for completion in completions.drain(..) {
                     let _ = completion.send(());
                 }
             }
+            Err(error)
+                if matches!(
+                    &error,
+                    TranscriptError::Storage(source) if source.is_lock_contention()
+                ) =>
+            {
+                thread::sleep(LOCK_RETRY_DELAY);
+            }
+            Err(error) => {
+                let _ = failure.set(error.to_string());
+                return Err(error);
+            }
         }
-        write_batch(&mut storage, &mut batch, config_path, session_id, persisted)?;
     }
     Ok(())
 }
@@ -298,11 +342,12 @@ mod tests {
         app::config::{ReasoningEffort, ReasoningMode},
         tui::{
             session,
-            storage::SessionStorage,
+            storage::{SessionStorage, database_path},
             transcript::{LocalEvent, SessionStarted, TurnId},
         },
     };
     use nanocodex::agent::events::{AgentEvent, AgentEventKind};
+    use rusqlite::Connection;
     use serde_json::{json, value::to_raw_value};
     use std::sync::Arc;
     use tempfile::tempdir;
@@ -591,6 +636,49 @@ mod tests {
         drop(journal);
         writer.into_task().await.unwrap().unwrap();
         assert!(!directory.path().join("sessions").exists());
+    }
+
+    #[tokio::test]
+    async fn stopped_writer_reports_its_persistence_error_to_later_appends() {
+        let directory = tempdir().unwrap();
+        let config = directory.path().join("config.toml");
+        drop(SessionStorage::open(&config).unwrap());
+        let connection = Connection::open(database_path(&config)).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TRIGGER reject_sessions BEFORE INSERT ON sessions BEGIN
+                     SELECT RAISE(ABORT, 'forced persistence failure');
+                 END;",
+            )
+            .unwrap();
+
+        let (mut journal, writer) = TranscriptJournal::open(&config, "session").unwrap();
+        journal.defer_start(started("session"));
+        journal
+            .append_local(LocalEvent::UserSubmitted {
+                id: TurnId::new(1),
+                text: "first".to_owned(),
+            })
+            .unwrap();
+        let writer_error = writer.into_task().await.unwrap().unwrap_err();
+        assert!(
+            writer_error
+                .to_string()
+                .contains("forced persistence failure")
+        );
+
+        let append_error = journal
+            .append_local(LocalEvent::UserSubmitted {
+                id: TurnId::new(2),
+                text: "second".to_owned(),
+            })
+            .unwrap_err();
+
+        assert!(
+            append_error
+                .to_string()
+                .contains("forced persistence failure")
+        );
     }
 
     #[tokio::test]
