@@ -33,6 +33,8 @@ pub(crate) enum TranscriptError {
     },
     #[error("the transcript writer for {0} stopped unexpectedly")]
     WriterStopped(PathBuf),
+    #[error("the transcript writer for {path} stopped after persistence failed: {reason}")]
+    WriterFailed { path: PathBuf, reason: String },
     #[error("the transcript writer task stopped unexpectedly: {0}")]
     WriterTask(#[source] tokio::task::JoinError),
 }

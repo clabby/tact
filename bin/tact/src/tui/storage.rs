@@ -5,7 +5,8 @@ use crate::{
     tui::transcript::{SCHEMA_VERSION, SessionStarted, TranscriptRecord},
 };
 use rusqlite::{
-    Connection, OpenFlags, OptionalExtension, Transaction, params, params_from_iter, types::Value,
+    Connection, OpenFlags, OptionalExtension, Transaction, ffi::ErrorCode, params,
+    params_from_iter, types::Value,
 };
 use std::{
     collections::HashMap,
@@ -56,6 +57,21 @@ pub(crate) enum StorageError {
     Decode(#[source] std::io::Error),
     #[error("stored transcript record uses schema version {found}; expected {SCHEMA_VERSION}")]
     UnsupportedRecordVersion { found: u32 },
+}
+
+impl StorageError {
+    pub(crate) fn is_lock_contention(&self) -> bool {
+        let source = match self {
+            Self::Open { source, .. }
+            | Self::Configure { source, .. }
+            | Self::Query { source, .. } => source,
+            _ => return false,
+        };
+        matches!(
+            source.sqlite_error_code(),
+            Some(ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked)
+        )
+    }
 }
 
 #[derive(Debug)]
