@@ -775,6 +775,7 @@ async fn load_range(
     if session.generation != generation {
         return stale_snapshot("the review changed while this range was loading");
     }
+    let page = ReviewPage { generation, ..page };
     session.insert_page(page.clone());
     session.selected_page = page.clone();
     secure_json(StatusCode::OK, page)
@@ -1698,6 +1699,53 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(current["changed"], false);
+    }
+
+    #[tokio::test]
+    async fn range_load_after_refresh_uses_the_current_generation() {
+        let assets = tempfile::tempdir().unwrap();
+        for name in ["index.html", "app.js", "app.css"] {
+            std::fs::write(assets.path().join(name), "").unwrap();
+        }
+        let server = start_server(&assets).await;
+        let client = reqwest::Client::new();
+        fs::write(
+            server.state.backend.workspace.join("working.txt"),
+            "changed again\n",
+        )
+        .unwrap();
+
+        let refreshed = client
+            .post(server.endpoint_url("api/refresh"))
+            .json(&serde_json::json!({ "generation": 0 }))
+            .send()
+            .await
+            .unwrap()
+            .json::<serde_json::Value>()
+            .await
+            .unwrap();
+        let generation = refreshed["generation"].as_u64().unwrap();
+        let target_count = refreshed["range_targets"].as_array().unwrap().len();
+        let range = ReviewRange {
+            from: target_count - 2,
+            to: target_count - 1,
+        };
+
+        let response = client
+            .post(server.endpoint_url("api/range"))
+            .json(&serde_json::json!({
+                "generation": generation,
+                "range": range,
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let page = response.json::<serde_json::Value>().await.unwrap();
+        assert_eq!(page["generation"], generation);
+        assert_eq!(page["selected_range"], serde_json::json!(range));
+        assert!(page["patch"].as_str().unwrap().contains("changed again"));
+        server.cancel().await;
     }
 
     #[tokio::test]
