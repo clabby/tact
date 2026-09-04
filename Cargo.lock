@@ -469,6 +469,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
+name = "base64"
+version = "0.23.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
+
+[[package]]
 name = "base64-simd"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1036,7 +1042,7 @@ version = "0.29.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d8b9f2e4c67f833b660cdb0a3523065869fb35570177239812ed4c905aeff87b"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "bitflags 2.13.1",
  "crossterm_winapi",
  "derive_more",
@@ -1877,7 +1883,7 @@ version = "0.1.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "96547c2556ec9d12fb1578c4eaf448b04993e7fb79cbaad930a656880a6bdfa0"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "bytes",
  "futures-channel",
  "futures-util",
@@ -2536,10 +2542,11 @@ dependencies = [
 [[package]]
 name = "nanocodex"
 version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "223def7aa7a85ccdb7bc0ecfef6a9f36ee332db6730c10a757cfd382e08487d4"
+source = "git+https://github.com/gakonst/nanocodex?rev=4f3344400ee3d2a2446b96e342f8c9871aab9637#4f3344400ee3d2a2446b96e342f8c9871aab9637"
 dependencies = [
  "nanocodex-agent",
+ "nanocodex-durability",
+ "nanocodex-managed",
  "nanocodex-oai-api",
  "nanocodex-tools",
 ]
@@ -2547,8 +2554,7 @@ dependencies = [
 [[package]]
 name = "nanocodex-agent"
 version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "61bf178f13a34a0e77a4039644d48e823b613c7ebbcfcc6fbf88f7442cb924f8"
+source = "git+https://github.com/gakonst/nanocodex?rev=4f3344400ee3d2a2446b96e342f8c9871aab9637#4f3344400ee3d2a2446b96e342f8c9871aab9637"
 dependencies = [
  "chrono",
  "futures-util",
@@ -2568,13 +2574,48 @@ dependencies = [
 ]
 
 [[package]]
+name = "nanocodex-durability"
+version = "0.5.0"
+source = "git+https://github.com/gakonst/nanocodex?rev=4f3344400ee3d2a2446b96e342f8c9871aab9637#4f3344400ee3d2a2446b96e342f8c9871aab9637"
+dependencies = [
+ "nanocodex-agent",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "tokio",
+ "uuid",
+ "wasm-bindgen-futures",
+]
+
+[[package]]
+name = "nanocodex-managed"
+version = "0.5.0"
+source = "git+https://github.com/gakonst/nanocodex?rev=4f3344400ee3d2a2446b96e342f8c9871aab9637#4f3344400ee3d2a2446b96e342f8c9871aab9637"
+dependencies = [
+ "futures-util",
+ "nanocodex-agent",
+ "nanocodex-oai-api",
+ "nanocodex-tools",
+ "reqwest",
+ "rustls",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "tokio",
+ "tokio-tungstenite",
+ "tower",
+ "url",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
 name = "nanocodex-oai-api"
 version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "feb1a99937e9af21fb452d6ebfde1151d2cfaa763c98e22540593a5e22525478"
+source = "git+https://github.com/gakonst/nanocodex?rev=4f3344400ee3d2a2446b96e342f8c9871aab9637#4f3344400ee3d2a2446b96e342f8c9871aab9637"
 dependencies = [
  "async-trait",
- "base64",
+ "base64 0.22.1",
  "futures-util",
  "getrandom 0.4.3",
  "http",
@@ -2597,11 +2638,10 @@ dependencies = [
 [[package]]
 name = "nanocodex-tools"
 version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c2749e5464e7251c1f67e8f1ab6c608c175f66a1c5c64e0fbd8b27b7928cc343"
+source = "git+https://github.com/gakonst/nanocodex?rev=4f3344400ee3d2a2446b96e342f8c9871aab9637#4f3344400ee3d2a2446b96e342f8c9871aab9637"
 dependencies = [
  "async-trait",
- "base64",
+ "base64 0.22.1",
  "bm25",
  "futures-util",
  "getrandom 0.4.3",
@@ -2615,21 +2655,24 @@ dependencies = [
  "reqwest",
  "rmcp",
  "rquickjs",
+ "rustls",
  "schemars",
  "serde",
  "serde_json",
  "sha1",
  "thiserror 2.0.19",
  "tokio",
+ "tokio-tungstenite",
  "tokio-util",
  "tracing",
+ "url",
+ "uuid",
 ]
 
 [[package]]
 name = "nanocodex-tools-macros"
 version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9e27623b5720bc25e4d52e10eba53c0fac0a68213b55b9f1fd91021165429930"
+source = "git+https://github.com/gakonst/nanocodex?rev=4f3344400ee3d2a2446b96e342f8c9871aab9637#4f3344400ee3d2a2446b96e342f8c9871aab9637"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -2805,7 +2848,7 @@ version = "5.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "51e219e79014df21a225b1860a479e2dcd7cbd9130f4defd4bd0e191ea31d67d"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "chrono",
  "getrandom 0.2.17",
  "http",
@@ -3708,7 +3751,7 @@ version = "0.13.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "219c5811de6525e5416c7d5d53bb656d3afdbc6c5af816e0802bcfa42dbdc1c3"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "bytes",
  "futures-core",
  "futures-util",
@@ -3757,11 +3800,13 @@ dependencies = [
 
 [[package]]
 name = "rmcp"
-version = "1.8.0"
+version = "3.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1d1f571c72940a19d9532fe52dbea8bc9912bf1d766c2970bb824056b86f3f59"
+checksum = "fcd2b6dd3b18129368955f32661a7718969e8c152c7d8866434c09cf15a512e0"
 dependencies = [
  "async-trait",
+ "base64 0.23.1",
+ "bytes",
  "chrono",
  "futures",
  "http",
@@ -4580,7 +4625,7 @@ version = "0.6.7"
 dependencies = [
  "arboard",
  "axum",
- "base64",
+ "base64 0.22.1",
  "chrono",
  "clap",
  "codspeed-criterion-compat",
@@ -4763,7 +4808,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4676b37242ccbd1aabf56edb093a4827dc49086c0ffd764a5705899e0f35f8f7"
 dependencies = [
  "anyhow",
- "base64",
+ "base64 0.22.1",
  "bitflags 2.13.1",
  "fancy-regex 0.11.0",
  "filedescriptor",
