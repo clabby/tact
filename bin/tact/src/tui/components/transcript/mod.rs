@@ -619,24 +619,34 @@ impl Transcript {
     }
 
     pub(super) fn selection_span(&self, position: Position) -> Option<TextSpan> {
-        self.selection_span_with_fallback(position, false)
+        self.selection_span_with_fallback(position, false, None)
     }
 
+    #[cfg(test)]
     pub(super) fn selection_span_nearest(&self, position: Position) -> Option<TextSpan> {
-        self.selection_span_with_fallback(position, true)
+        self.selection_span_with_fallback(position, true, None)
+    }
+
+    pub(super) fn selection_span_nearest_from(
+        &self,
+        position: Position,
+        origin: TextSpan,
+    ) -> Option<TextSpan> {
+        self.selection_span_with_fallback(position, true, Some(origin))
     }
 
     fn selection_span_with_fallback(
         &self,
         position: Position,
         across_entries: bool,
+        origin: Option<TextSpan>,
     ) -> Option<TextSpan> {
-        let exact = self
+        let exact_row = self
             .selection_rows
             .iter()
             .find(|(row, _)| *row == position.y)
             .map(|(_, anchor)| *anchor);
-        let exact = match exact {
+        let exact = match exact_row {
             Some(exact) => exact,
             None if across_entries => self
                 .selection_rows
@@ -645,44 +655,54 @@ impl Transcript {
                 .map(|(_, anchor)| *anchor)?,
             None => return None,
         };
-        let anchor = if self.cache.selections(exact).is_empty() {
-            if !across_entries {
-                let entry = self.model.entry(exact.entry)?;
-                if matches!(entry.kind, EntryKind::Tool(_)) {
-                    return None;
-                }
-                self.cache.selection_source(entry)?;
+        let exact_has_selections = !self.cache.selections(exact).is_empty();
+        if !exact_has_selections && !across_entries {
+            let entry = self.model.entry(exact.entry)?;
+            if matches!(entry.kind, EntryKind::Tool(_)) {
+                return None;
             }
-            self.selection_rows
-                .iter()
-                .filter(|(_, anchor)| {
-                    (across_entries || anchor.entry == exact.entry)
-                        && !self.cache.selections(*anchor).is_empty()
-                })
-                .min_by_key(|(row, _)| row.abs_diff(position.y))
-                .map(|(_, anchor)| *anchor)?
-        } else {
-            exact
-        };
-        let spans = self.cache.selections(anchor);
+            self.cache.selection_source(entry)?;
+        }
         let column = position.x.saturating_sub(self.transcript_x);
-        let source = spans
-            .iter()
-            .find(|span| span.columns.contains(&column))
-            .or_else(|| {
-                spans.iter().min_by_key(|span| {
-                    if column < span.columns.start {
-                        span.columns.start - column
-                    } else {
-                        column.saturating_sub(span.columns.end.saturating_sub(1))
-                    }
-                })
-            })?;
-        Some(TextSpan::new(
-            anchor.entry.index(),
-            source.source.start,
-            source.source.end,
-        ))
+        let mut best = None::<((u16, u16), (usize, usize), TextSpan)>;
+        for (row, anchor) in &self.selection_rows {
+            if exact_row.is_some() && exact_has_selections && *row != position.y {
+                continue;
+            }
+            if !exact_has_selections && !across_entries && anchor.entry != exact.entry {
+                continue;
+            }
+            for span in self.cache.selections(*anchor) {
+                let column_distance = if column < span.columns.start {
+                    span.columns.start - column
+                } else {
+                    column.saturating_sub(span.columns.end.saturating_sub(1))
+                };
+                let distance = (row.abs_diff(position.y), column_distance);
+                let candidate =
+                    TextSpan::new(anchor.entry.index(), span.source.start, span.source.end);
+                let semantic_distance = origin.map_or((0, 0), |origin| {
+                    (
+                        origin.block.abs_diff(candidate.block),
+                        origin
+                            .start
+                            .abs_diff(candidate.start)
+                            .max(origin.end.abs_diff(candidate.end)),
+                    )
+                });
+                let replace =
+                    best.as_ref()
+                        .is_none_or(|(best_distance, best_semantic_distance, _)| {
+                            distance < *best_distance
+                                || (distance == *best_distance
+                                    && semantic_distance > *best_semantic_distance)
+                        });
+                if replace {
+                    best = Some((distance, semantic_distance, candidate));
+                }
+            }
+        }
+        best.map(|(_, _, span)| span)
     }
 
     pub(super) fn selection_text(&self, range: TextRange) -> Option<String> {

@@ -133,6 +133,12 @@ impl Selection {
         self.surface
     }
 
+    pub(super) fn anchor(&self) -> Option<TextSpan> {
+        self.pending
+            .map(|point| point.span)
+            .or_else(|| self.range.map(|range| range.anchor))
+    }
+
     pub(super) fn range(&self) -> Option<TextRange> {
         self.range.or_else(|| {
             self.pending.map(|point| TextRange {
