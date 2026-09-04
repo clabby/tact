@@ -27,7 +27,7 @@ use crate::{
         error::{Result, RuntimeError},
         herdr, hook,
     },
-    core::{ConfiguredAgent, extensions::Skill},
+    core::{ConfiguredAgent, extensions::Skill, supported_reasoning_mode},
     tui::{
         agent_events::ForwardedAgentEvent,
         components::{
@@ -489,15 +489,16 @@ pub(crate) async fn run(
             .map_err(RuntimeError::SessionTask)??
         } else {
             let model = fresh_model.expect("a fresh TUI startup must select a model");
+            let reasoning_mode = supported_reasoning_mode(model, preferred_reasoning_mode);
             (
                 ConfiguredAgent::from_config_with_model(
                     &config,
                     initial_effort,
-                    preferred_reasoning_mode,
+                    reasoning_mode,
                     model,
                 )?,
                 None,
-                preferred_reasoning_mode,
+                reasoning_mode,
                 model,
                 1,
             )
@@ -2080,17 +2081,9 @@ fn apply_pane_effect(
         }
         components::RootEffect::SetModel(model) => {
             *context.input = None;
-            let effort = context
-                .app
-                .root(pane)
-                .expect("model pane must exist")
-                .composer()
-                .effort();
-            let reasoning_mode = context
-                .panes
-                .get(&pane)
-                .expect("model pane must have a runtime")
-                .reasoning_mode;
+            let root = context.app.root(pane).expect("model pane must exist");
+            let effort = root.composer().effort();
+            let reasoning_mode = supported_reasoning_mode(model, root.preferred_reasoning_mode());
             let fast_mode = context
                 .panes
                 .get(&pane)
@@ -2220,7 +2213,8 @@ fn apply_pane_effect(
         components::RootEffect::NewSession(model) => {
             *context.input = None;
             let effort = context.config.agent().thinking();
-            let reasoning_mode = context.config.agent().reasoning_mode();
+            let reasoning_mode =
+                supported_reasoning_mode(model, context.config.agent().reasoning_mode());
             let config = context.config.clone();
             *context.new_session_task = Some(tokio::task::spawn_blocking(move || {
                 let fast_mode = config.agent().fast_mode();
@@ -2627,7 +2621,7 @@ async fn prepare_handoff(
     }
 
     let effort = config.agent().thinking();
-    let reasoning_mode = config.agent().reasoning_mode();
+    let reasoning_mode = supported_reasoning_mode(model, config.agent().reasoning_mode());
     let fast_mode = config.agent().fast_mode();
     let task = tokio::task::spawn_blocking(move || {
         ConfiguredAgent::from_config_with_session(
@@ -2823,7 +2817,8 @@ mod tests {
         MemoryCompletion, MemoryOperation, PaneGeneration, PaneSession, PaneSettings,
         PendingSubmission, close_pane_journal, copy_selection_with, invalidate_memory_generations,
         is_image_paste, local_link_path, merge_recent_prompts, next_memory_generation, open_pane,
-        run_memory_operation, send_submission, subagent_pane, validate_interactive,
+        run_memory_operation, send_submission, subagent_pane, supported_reasoning_mode,
+        validate_interactive,
     };
     use crate::{
         app::{
@@ -2845,6 +2840,18 @@ mod tests {
     use tact_memory::{MemoryStore, SelectedMemoryStore};
     use tact_subagents::{AgentId, AgentStatus, AgentUpdate};
     use tempfile::tempdir;
+
+    #[test]
+    fn astra_uses_standard_reasoning_without_changing_other_models() {
+        assert_eq!(
+            supported_reasoning_mode(Model::Astra, ReasoningMode::Pro),
+            ReasoningMode::Standard
+        );
+        assert_eq!(
+            supported_reasoning_mode(Model::Sol, ReasoningMode::Pro),
+            ReasoningMode::Pro
+        );
+    }
 
     #[test]
     fn control_or_super_v_requests_an_image_paste() {

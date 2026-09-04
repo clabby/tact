@@ -102,14 +102,15 @@ For scripts and integrations, `tact run` submits one prompt and streams Nanocode
 tact run "inspect the workspace"
 ```
 
-Choose the model for a newly started agent without changing configuration:
+Override the configured model for a newly started agent:
 
 ```sh
 tact --model terra
 tact --model luna run "inspect the workspace"
 ```
 
-`--model` accepts `sol`, `terra`, or `luna`; `TACT_MODEL` provides the same per-launch setting.
+`--model` accepts `sol`, `terra`, `luna`, or `astra`; `TACT_MODEL` provides the same per-launch
+override.
 Resumed sessions continue with the model recorded when they were created.
 
 ## Configuration
@@ -135,6 +136,7 @@ file = "/path/to/.codex/auth.json"
 
 [agent]
 workspace = "/path/to/workspace"
+model = "sol" # sol, terra, luna, or astra
 thinking = "medium" # low, medium, high, xhigh, or max
 reasoning_mode = "standard" # standard or pro
 fast_mode = false

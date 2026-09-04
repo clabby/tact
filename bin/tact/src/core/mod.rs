@@ -163,6 +163,14 @@ enum Cancellation {
     Failed(NanocodexError),
 }
 
+pub(crate) fn supported_reasoning_mode(model: Model, preferred: ReasoningMode) -> ReasoningMode {
+    if model.supports_reasoning_mode(preferred.into()) {
+        preferred
+    } else {
+        ReasoningMode::Standard
+    }
+}
+
 impl ConfiguredAgent {
     pub(crate) async fn run_from_config(
         config: &Config,
@@ -171,20 +179,17 @@ impl ConfiguredAgent {
         shutdown: CancellationToken,
         #[cfg(feature = "harbor-evals")] orchestration_log: Option<PathBuf>,
     ) -> Result<()> {
-        let result = Self::from_config_with_model(
-            config,
-            config.agent().thinking(),
-            config.agent().reasoning_mode(),
-            model,
-        )?
-        .run(
-            prompt,
-            shutdown,
-            io::stdout(),
-            #[cfg(feature = "harbor-evals")]
-            orchestration_log,
-        )
-        .await;
+        let reasoning_mode = supported_reasoning_mode(model, config.agent().reasoning_mode());
+        let result =
+            Self::from_config_with_model(config, config.agent().thinking(), reasoning_mode, model)?
+                .run(
+                    prompt,
+                    shutdown,
+                    io::stdout(),
+                    #[cfg(feature = "harbor-evals")]
+                    orchestration_log,
+                )
+                .await;
         if let Some(command) = config.agent().completion_hook() {
             drop(hook::execute(command, config.agent().workspace()).await);
         }

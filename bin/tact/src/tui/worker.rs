@@ -759,7 +759,11 @@ async fn start_turn(
         };
         let result = result.map(|result| CompletedTurn {
             final_message: result.final_message().to_owned(),
-            snapshot: (!auxiliary).then(|| Box::new(result.snapshot())),
+            snapshot: if auxiliary {
+                None
+            } else {
+                result.snapshot().map(Box::new)
+            },
         });
         if let Some(agent) = isolated_agent {
             drop(agent.shutdown().await);
@@ -843,7 +847,7 @@ async fn steer_turn(
             turns.spawn(async move {
                 let result = turn.await.map(|result| CompletedTurn {
                     final_message: result.final_message().to_owned(),
-                    snapshot: Some(Box::new(result.snapshot())),
+                    snapshot: result.snapshot().map(Box::new),
                 });
                 (key, TurnPurpose::Conversation, false, result)
             });

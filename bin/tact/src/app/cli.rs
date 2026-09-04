@@ -349,6 +349,7 @@ impl Cli {
             auth_mode: self.auth,
             auth_file: self.auth_file,
             workspace: self.workspace,
+            model: self.model,
             thinking: self.thinking,
             reasoning_mode: self.reasoning_mode,
             max_subagents: self.max_subagents,
@@ -364,7 +365,7 @@ impl Cli {
         } else {
             Config::load(overrides)?
         };
-        let model = self.model.unwrap_or_default();
+        let model = config.agent().model();
 
         match self.command {
             Some(Command::Resume) => {
@@ -636,7 +637,7 @@ impl AuthCommand {
     async fn run(self, config: &Config) -> AuthResult<()> {
         match self {
             Self::Login => config.auth().login().await,
-            Self::Status => config.auth().status(),
+            Self::Status => config.auth().status().await,
             Self::Logout => config.auth().logout(),
         }
     }
