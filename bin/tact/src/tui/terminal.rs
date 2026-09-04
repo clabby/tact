@@ -23,6 +23,7 @@ use ratatui::{
 use std::{
     io::{self, IsTerminal, Stdout, Write, stdin, stdout},
     panic,
+    path::Path,
     sync::{
         Once,
         atomic::{AtomicBool, Ordering},
@@ -251,6 +252,10 @@ impl TerminalSession {
         copy_to_clipboard(self.terminal.backend_mut(), text)
     }
 
+    pub(crate) fn report_working_directory(&mut self, path: &Path) -> io::Result<()> {
+        write_osc7_working_directory(self.terminal.backend_mut(), path)
+    }
+
     pub(crate) fn suspend(&mut self) -> io::Result<()> {
         if !self.active {
             return Ok(());
@@ -286,6 +291,14 @@ fn reset_after_resume<B: Backend>(terminal: &mut Terminal<B>) -> Result<(), B::E
 
 fn copy_to_clipboard(output: &mut impl Write, text: &str) -> io::Result<()> {
     execute!(output, CopyToClipboard::to_clipboard_from(text))
+}
+
+fn write_osc7_working_directory(output: &mut impl Write, path: &Path) -> io::Result<()> {
+    let uri = url::Url::from_directory_path(path).map_err(|()| {
+        io::Error::new(io::ErrorKind::InvalidInput, "working directory is relative")
+    })?;
+    write!(output, "\x1b]7;{uri}\x1b\\")?;
+    output.flush()
 }
 
 impl Drop for TerminalSession {
@@ -371,6 +384,7 @@ mod tests {
     use super::{
         MeasuredBackend, StableCursorBackend, activate_commands, begin_synchronized_update,
         copy_to_clipboard, end_synchronized_update, reset_after_resume, restore_commands,
+        write_osc7_working_directory,
     };
     use crate::{
         app::config::ReasoningEffort,
@@ -422,6 +436,15 @@ mod tests {
         copy_to_clipboard(&mut output, "copy me").unwrap();
 
         assert_eq!(output, b"\x1b]52;c;Y29weSBtZQ==\x1b\\");
+    }
+
+    #[test]
+    fn osc7_working_directory_uses_an_encoded_file_uri() {
+        let mut output = Vec::new();
+
+        write_osc7_working_directory(&mut output, Path::new("/work/with space")).unwrap();
+
+        assert_eq!(output, b"\x1b]7;file:///work/with%20space/\x1b\\");
     }
 
     #[test]

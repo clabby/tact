@@ -502,7 +502,11 @@ pub(crate) async fn run(
                 1,
             )
         };
+    let workspace = config.agent().workspace().to_path_buf();
     let mut terminal = TerminalSession::enter().map_err(RuntimeError::Terminal)?;
+    terminal
+        .report_working_directory(&workspace)
+        .map_err(RuntimeError::Terminal)?;
     let ConfiguredAgent {
         agent,
         events,
@@ -541,7 +545,6 @@ pub(crate) async fn run(
         worker::MemoryReviewState::fresh(memory_enabled)
     };
     let (commands, mut worker_updates) = worker::spawn(agent, memory_review, shutdown.clone());
-    let workspace = config.agent().workspace().to_path_buf();
     let (agent_event_sender, mut agent_events) = mpsc::unbounded_channel();
     agent_events::forward(PaneId::Main, 0, events, agent_event_sender.clone());
     let (subagent_sender, mut subagent_events) = mpsc::unbounded_channel();
@@ -775,7 +778,14 @@ pub(crate) async fn run(
                             continue;
                         }
                         let record = runtime.journal_mut()?.append_agent(event)?;
+                        // `tool.result` is the canonical completion event for every agent tool.
+                        let tool_finished = record.kind() == "tool.result";
                         apply_app_update!(app.update(AppEvent::Transcript { pane, record }));
+                        if tool_finished {
+                            terminal
+                                .report_working_directory(&workspace)
+                                .map_err(RuntimeError::Terminal)?;
+                        }
                     }
                     ForwardedAgentEvent::Closed { pane, session_id, generation } => {
                         let mut stream_closed = false;
@@ -1173,6 +1183,9 @@ pub(crate) async fn run(
             }, if editor_task.is_some() && !stopping => {
                 editor_task = None;
                 terminal.resume().map_err(RuntimeError::Terminal)?;
+                terminal
+                    .report_working_directory(&workspace)
+                    .map_err(RuntimeError::Terminal)?;
                 app.refresh_terminal_images();
                 input = Some(EventStream::new());
                 match result.map_err(RuntimeError::ExternalEditorTask)?? {
