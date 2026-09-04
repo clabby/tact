@@ -636,7 +636,7 @@ impl AuthCommand {
     async fn run(self, config: &Config) -> AuthResult<()> {
         match self {
             Self::Login => config.auth().login().await,
-            Self::Status => config.auth().status(),
+            Self::Status => config.auth().status().await,
             Self::Logout => config.auth().logout(),
         }
     }

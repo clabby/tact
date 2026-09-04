@@ -428,7 +428,6 @@ mod tests {
             "websocket_reconnects": 0,
             "response_attempts": model_calls,
             "response_retries": 0,
-            "billing_uncertain_response_attempts": 0,
             "connection_duration_ns": 100,
             "retry_backoff_duration_ns": 0,
             "model_duration_ns": 900_000,
