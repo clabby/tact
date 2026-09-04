@@ -5,7 +5,7 @@ use crate::{
     tui::theme::{Theme, ThemeMode},
 };
 use clap::ValueEnum;
-use nanocodex::Thinking;
+use nanocodex::{Model, Thinking};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -139,6 +139,7 @@ pub(crate) struct AuthConfig {
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct AgentConfig {
     workspace: PathBuf,
+    model: Model,
     thinking: ReasoningEffort,
     reasoning_mode: ReasoningMode,
     fast_mode: bool,
@@ -198,6 +199,7 @@ pub(crate) struct ConfigOverrides {
     pub(crate) auth_mode: Option<AuthMode>,
     pub(crate) auth_file: Option<PathBuf>,
     pub(crate) workspace: Option<PathBuf>,
+    pub(crate) model: Option<Model>,
     pub(crate) thinking: Option<ReasoningEffort>,
     pub(crate) reasoning_mode: Option<ReasoningMode>,
     pub(crate) max_subagents: Option<usize>,
@@ -318,6 +320,7 @@ struct AuthConfigFile {
 #[serde(default, deny_unknown_fields)]
 struct AgentConfigFile {
     workspace: Option<PathBuf>,
+    model: Option<Model>,
     thinking: Option<ReasoningEffort>,
     reasoning_mode: Option<ReasoningMode>,
     fast_mode: Option<bool>,
@@ -411,6 +414,7 @@ impl Config {
             ),
             agent: AgentConfig {
                 workspace,
+                model: overrides.model.or(file.agent.model).unwrap_or_default(),
                 thinking: overrides
                     .thinking
                     .or(file.agent.thinking)
@@ -963,6 +967,10 @@ impl AgentConfig {
         &self.workspace
     }
 
+    pub(crate) const fn model(&self) -> Model {
+        self.model
+    }
+
     pub(crate) const fn thinking(&self) -> ReasoningEffort {
         self.thinking
     }
@@ -1418,6 +1426,7 @@ mod tests {
         RemoteMemoryTokenFile, ThemeMode, validate_mcp_url,
     };
     use crate::app::error::{ConfigError, Error, McpUrlError, RemoteMemoryConfigError};
+    use nanocodex::Model;
     use ratatui::style::Color;
     use std::{
         collections::BTreeMap,
@@ -1513,6 +1522,7 @@ mod tests {
         assert_eq!(config.auth.mode, AuthMode::Auto);
         assert_eq!(config.auth.file, home.join(".codex/auth.json"));
         assert_eq!(config.agent.workspace, directory.path());
+        assert_eq!(config.agent.model, Model::Sol);
         assert_eq!(config.agent.thinking, ReasoningEffort::Medium);
         assert_eq!(config.agent.reasoning_mode, ReasoningMode::Standard);
         assert!(!config.agent.fast_mode);
@@ -1541,6 +1551,7 @@ mod tests {
             &rendered["agent"],
             &[
                 "workspace",
+                "model",
                 "thinking",
                 "reasoning_mode",
                 "fast_mode",
@@ -1583,6 +1594,7 @@ mod tests {
             rendered["auth"]["file"].as_str(),
             home.join(".codex/auth.json").to_str()
         );
+        assert_eq!(rendered["agent"]["model"].as_str(), Some("sol"));
         assert_eq!(
             rendered["agent"]["workspace"].as_str(),
             directory.path().to_str()
@@ -2352,7 +2364,7 @@ mod tests {
         fs::write(
             &config_path,
             "[auth]\nmode = \"auto\"\nfile = \"stored.json\"\n\
-             \n[agent]\nworkspace = \"configured\"\nthinking = \"low\"\nweb_search = true\n",
+             \n[agent]\nworkspace = \"configured\"\nmodel = \"astra\"\nthinking = \"low\"\nweb_search = true\n",
         )
         .unwrap();
 
@@ -2362,6 +2374,7 @@ mod tests {
                 auth_mode: Some(AuthMode::ChatGpt),
                 auth_file: Some("cli-auth.json".into()),
                 workspace: Some("cli-workspace".into()),
+                model: Some(Model::Luna),
                 thinking: Some(ReasoningEffort::High),
                 web_search: Some(false),
                 ..ConfigOverrides::default()
@@ -2377,6 +2390,7 @@ mod tests {
             config.agent.workspace,
             directory.path().join("cli-workspace")
         );
+        assert_eq!(config.agent.model, Model::Luna);
         assert_eq!(config.agent.thinking, ReasoningEffort::High);
         assert!(!config.agent.web_search);
     }
@@ -2455,7 +2469,7 @@ mod tests {
         let config_path = directory.path().join("config.toml");
         fs::write(
             &config_path,
-            "[agent]\nworkspace = \"workspace\"\nthinking = \"xhigh\"\nreasoning_mode = \"pro\"\nfast_mode = true\nmax_subagents = 7\n\
+            "[agent]\nworkspace = \"workspace\"\nmodel = \"astra\"\nthinking = \"xhigh\"\nreasoning_mode = \"pro\"\nfast_mode = true\nmax_subagents = 7\n\
              instructions = \"Be concise.\"\nappend_instructions = \"Use project conventions.\"\n\
              web_search = false\nimage_generation = false\n\
              websocket_url = \"wss://example.com/responses\"\n\
@@ -2477,6 +2491,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(config.agent.workspace, directory.path().join("workspace"));
+        assert_eq!(config.agent.model, Model::Astra);
         assert_eq!(config.agent.thinking, ReasoningEffort::Xhigh);
         assert_eq!(config.agent.reasoning_mode, ReasoningMode::Pro);
         assert!(config.agent.fast_mode);
