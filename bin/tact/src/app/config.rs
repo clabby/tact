@@ -41,8 +41,8 @@ pub(crate) enum AuthMode {
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum ReasoningEffort {
-    Low,
     #[default]
+    Low,
     Medium,
     High,
     Xhigh,
@@ -1522,8 +1522,8 @@ mod tests {
         assert_eq!(config.auth.mode, AuthMode::Auto);
         assert_eq!(config.auth.file, home.join(".codex/auth.json"));
         assert_eq!(config.agent.workspace, directory.path());
-        assert_eq!(config.agent.model, Model::Sol);
-        assert_eq!(config.agent.thinking, ReasoningEffort::Medium);
+        assert_eq!(config.agent.model, Model::Astra);
+        assert_eq!(config.agent.thinking, ReasoningEffort::Low);
         assert_eq!(config.agent.reasoning_mode, ReasoningMode::Standard);
         assert!(!config.agent.fast_mode);
         assert_eq!(config.agent.max_subagents, 32);
@@ -1594,12 +1594,12 @@ mod tests {
             rendered["auth"]["file"].as_str(),
             home.join(".codex/auth.json").to_str()
         );
-        assert_eq!(rendered["agent"]["model"].as_str(), Some("sol"));
+        assert_eq!(rendered["agent"]["model"].as_str(), Some("astra"));
         assert_eq!(
             rendered["agent"]["workspace"].as_str(),
             directory.path().to_str()
         );
-        assert_eq!(rendered["agent"]["thinking"].as_str(), Some("medium"));
+        assert_eq!(rendered["agent"]["thinking"].as_str(), Some("low"));
         assert_eq!(rendered["agent"]["fast_mode"].as_bool(), Some(false));
         assert_eq!(rendered["agent"]["max_subagents"].as_integer(), Some(32));
         for field in [

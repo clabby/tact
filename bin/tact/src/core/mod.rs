@@ -157,6 +157,30 @@ struct SessionInstructions {
     skills: Arc<[Skill]>,
 }
 
+impl SessionInstructions {
+    fn from_config(
+        config: &Config,
+        model: Model,
+        restored: Option<(String, Option<bool>)>,
+        memory_enabled: bool,
+    ) -> Self {
+        let agent = config.agent();
+        let defaults = ResponsesServiceConfig {
+            model,
+            ..ResponsesServiceConfig::default()
+        };
+        session_instructions_with_luna(
+            Some(agent.instructions().unwrap_or(&defaults.system_prompt())),
+            agent.append_instructions(),
+            config.skills(),
+            restored,
+            config.subagents().enabled(),
+            config.subagents().allow_luna(),
+            memory_enabled,
+        )
+    }
+}
+
 enum Cancellation {
     NotRequested,
     Requested,
@@ -295,17 +319,22 @@ impl ConfiguredAgent {
         let SessionInstructions {
             text: instructions,
             skills,
-        } = session_instructions_with_luna(
-            agent_config.instructions(),
-            agent_config.append_instructions(),
-            config.skills(),
-            restored_instructions,
-            subagents_enabled,
-            allow_luna_subagents,
+        } = SessionInstructions::from_config(
+            config,
+            model,
+            restored_instructions.clone(),
             memory_enabled,
         );
         builder = builder.instructions(Arc::clone(&instructions));
         let subagent_builder = builder.clone();
+        let selected_instructions = Arc::clone(&instructions);
+        let luna_instructions = SessionInstructions::from_config(
+            config,
+            Model::Luna,
+            restored_instructions,
+            memory_enabled,
+        )
+        .text;
         subagent_control.set_agent_factory(
             thinking.into(),
             agent_config.fast_mode(),
@@ -313,6 +342,11 @@ impl ConfiguredAgent {
                 subagent_builder
                     .clone()
                     .model(model)
+                    .instructions(Arc::clone(if model == Model::Luna {
+                        &luna_instructions
+                    } else {
+                        &selected_instructions
+                    }))
                     .thinking(thinking)
                     .fast_mode(fast_mode)
                     .build()
@@ -612,9 +646,11 @@ fn fresh_instructions_with_catalog(
     subagents_enabled: bool,
     allow_luna: bool,
 ) -> String {
-    let mut instructions = custom
-        .map(str::to_owned)
-        .unwrap_or_else(|| ResponsesServiceConfig::default().system_prompt.to_string());
+    let mut instructions = custom.map(str::to_owned).unwrap_or_else(|| {
+        ResponsesServiceConfig::default()
+            .system_prompt()
+            .into_owned()
+    });
     instructions = reconcile_tact_instructions(instructions);
     instructions = reconcile_tool_orchestration_instructions(instructions);
     instructions = reconcile_session_reference_instructions(instructions);
@@ -635,10 +671,14 @@ fn fresh_instructions_with_catalog(
 }
 
 fn reconcile_tact_instructions(mut instructions: String) -> String {
-    if let Some(rest) = instructions.strip_prefix("You are Codex") {
+    if let Some(rest) = instructions
+        .strip_prefix("You are Codex")
+        .or_else(|| instructions.strip_prefix("You are Nanocodex"))
+    {
         let rest = rest.trim_start_matches([',', '.']);
         instructions = format!("You are Tact,{rest}");
         instructions = instructions.replacen("As Codex,", "As Tact,", 1);
+        instructions = instructions.replacen("As Nanocodex,", "As Tact,", 1);
     }
 
     let separator_and_instructions = format!("\n\n{TACT_INSTRUCTIONS}");
@@ -715,9 +755,9 @@ mod tests {
     use super::{
         ConfiguredAgent, MEMORY_INSTRUCTIONS, MEMORY_REVIEW_CHECKPOINT, SCRATCHPAD_INSTRUCTIONS,
         SESSION_REFERENCE_INSTRUCTIONS, SUBAGENT_INSTRUCTIONS, SUBAGENT_INSTRUCTIONS_SELECTED_ONLY,
-        TACT_INSTRUCTIONS, TOOL_ORCHESTRATION_INSTRUCTIONS, configured_memory_store,
-        fresh_instructions, reconcile_tact_instructions, session_instructions,
-        session_instructions_with_luna,
+        SessionInstructions, TACT_INSTRUCTIONS, TOOL_ORCHESTRATION_INSTRUCTIONS,
+        configured_memory_store, fresh_instructions, reconcile_tact_instructions,
+        session_instructions, session_instructions_with_luna,
     };
     use crate::{
         app::{
@@ -727,7 +767,7 @@ mod tests {
         core::extensions::Skill,
     };
     use nanocodex::{
-        Nanocodex, OpenAi,
+        Model, Nanocodex, OpenAi,
         oai::{
             ResponseError,
             tower::{ResponsesAttempt, ResponsesServiceConfig, ResponsesServiceResponse},
@@ -821,7 +861,9 @@ mod tests {
     fn fresh_instructions_include_the_default_append() {
         let disabled = SkillsConfig::from_roots(false, Vec::new());
         let default = reconcile_tact_instructions(
-            ResponsesServiceConfig::default().system_prompt.to_string(),
+            ResponsesServiceConfig::default()
+                .system_prompt()
+                .into_owned(),
         );
 
         assert_eq!(
@@ -850,10 +892,64 @@ mod tests {
     }
 
     #[test]
+    fn configured_instructions_follow_the_selected_model_and_preserve_overrides() {
+        let directory = tempdir().unwrap();
+        let config_path = directory.path().join("config.toml");
+        fs::write(&config_path, "").unwrap();
+        for custom in [None, Some("Custom instructions.")] {
+            let config = Config::load(ConfigOverrides {
+                path: Some(config_path.clone()),
+                workspace: Some(directory.path().to_path_buf()),
+                model: Some(Model::Astra),
+                instructions: custom.map(str::to_owned),
+                append_instructions: Some("Project instructions.".to_owned()),
+                ..ConfigOverrides::default()
+            })
+            .unwrap();
+            for model in [Model::Sol, Model::Terra, Model::Luna, Model::Astra] {
+                let session = SessionInstructions::from_config(&config, model, None, true);
+                let defaults = ResponsesServiceConfig {
+                    model,
+                    ..ResponsesServiceConfig::default()
+                };
+                let expected = reconcile_tact_instructions(
+                    custom.unwrap_or(&defaults.system_prompt()).to_owned(),
+                );
+                assert!(session.text.starts_with(&expected), "{model:?}");
+                assert!(!session.text.contains("You are Nanocodex"));
+                assert!(!session.text.contains("As Nanocodex,"));
+                assert!(!session.text.contains("You are Codex"));
+                for section in [
+                    TACT_INSTRUCTIONS,
+                    "Project instructions.",
+                    MEMORY_INSTRUCTIONS,
+                ] {
+                    assert_eq!(session.text.matches(section).count(), 1, "{model:?}");
+                }
+                if custom.is_none() {
+                    assert_eq!(session.text.contains("GPT-6 Astra"), model == Model::Astra);
+                }
+
+                let stored = "You are Codex.\n\nStored instructions.\n";
+                let resumed = SessionInstructions::from_config(
+                    &config,
+                    model,
+                    Some((stored.to_owned(), Some(false))),
+                    true,
+                );
+                assert_eq!(resumed.text.as_ref(), stored);
+                assert!(resumed.skills.is_empty());
+            }
+        }
+    }
+
+    #[test]
     fn appended_instructions_extend_the_default_or_replacement() {
         let disabled = SkillsConfig::from_roots(false, Vec::new());
         let default = reconcile_tact_instructions(
-            ResponsesServiceConfig::default().system_prompt.to_string(),
+            ResponsesServiceConfig::default()
+                .system_prompt()
+                .into_owned(),
         );
 
         let instructions = fresh_instructions(None, Some("Project instructions."), &disabled);
@@ -890,7 +986,9 @@ mod tests {
 
         let instructions = fresh_instructions(None, None, &enabled);
         let default = reconcile_tact_instructions(
-            ResponsesServiceConfig::default().system_prompt.to_string(),
+            ResponsesServiceConfig::default()
+                .system_prompt()
+                .into_owned(),
         );
 
         assert!(instructions.starts_with(&default));
@@ -1259,7 +1357,7 @@ mod tests {
         let configured = ConfiguredAgent {
             agent,
             events,
-            instructions: ResponsesServiceConfig::default().system_prompt,
+            instructions: ResponsesServiceConfig::default().system_prompt().into(),
             skills: Arc::from([]),
             memory_enabled: false,
             subagent_updates,

@@ -2542,7 +2542,7 @@ dependencies = [
 [[package]]
 name = "nanocodex"
 version = "0.5.0"
-source = "git+https://github.com/gakonst/nanocodex?rev=4f3344400ee3d2a2446b96e342f8c9871aab9637#4f3344400ee3d2a2446b96e342f8c9871aab9637"
+source = "git+https://github.com/gakonst/nanocodex?rev=371ed9adf40271f9efa477b6a8a27381d0e2d8e3#371ed9adf40271f9efa477b6a8a27381d0e2d8e3"
 dependencies = [
  "nanocodex-agent",
  "nanocodex-durability",
@@ -2554,7 +2554,7 @@ dependencies = [
 [[package]]
 name = "nanocodex-agent"
 version = "0.5.0"
-source = "git+https://github.com/gakonst/nanocodex?rev=4f3344400ee3d2a2446b96e342f8c9871aab9637#4f3344400ee3d2a2446b96e342f8c9871aab9637"
+source = "git+https://github.com/gakonst/nanocodex?rev=371ed9adf40271f9efa477b6a8a27381d0e2d8e3#371ed9adf40271f9efa477b6a8a27381d0e2d8e3"
 dependencies = [
  "chrono",
  "futures-util",
@@ -2576,8 +2576,10 @@ dependencies = [
 [[package]]
 name = "nanocodex-durability"
 version = "0.5.0"
-source = "git+https://github.com/gakonst/nanocodex?rev=4f3344400ee3d2a2446b96e342f8c9871aab9637#4f3344400ee3d2a2446b96e342f8c9871aab9637"
+source = "git+https://github.com/gakonst/nanocodex?rev=371ed9adf40271f9efa477b6a8a27381d0e2d8e3#371ed9adf40271f9efa477b6a8a27381d0e2d8e3"
 dependencies = [
+ "base64 0.22.1",
+ "flate2",
  "nanocodex-agent",
  "serde",
  "serde_json",
@@ -2590,7 +2592,7 @@ dependencies = [
 [[package]]
 name = "nanocodex-managed"
 version = "0.5.0"
-source = "git+https://github.com/gakonst/nanocodex?rev=4f3344400ee3d2a2446b96e342f8c9871aab9637#4f3344400ee3d2a2446b96e342f8c9871aab9637"
+source = "git+https://github.com/gakonst/nanocodex?rev=371ed9adf40271f9efa477b6a8a27381d0e2d8e3#371ed9adf40271f9efa477b6a8a27381d0e2d8e3"
 dependencies = [
  "futures-util",
  "nanocodex-agent",
@@ -2612,7 +2614,7 @@ dependencies = [
 [[package]]
 name = "nanocodex-oai-api"
 version = "0.5.0"
-source = "git+https://github.com/gakonst/nanocodex?rev=4f3344400ee3d2a2446b96e342f8c9871aab9637#4f3344400ee3d2a2446b96e342f8c9871aab9637"
+source = "git+https://github.com/gakonst/nanocodex?rev=371ed9adf40271f9efa477b6a8a27381d0e2d8e3#371ed9adf40271f9efa477b6a8a27381d0e2d8e3"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -2638,7 +2640,7 @@ dependencies = [
 [[package]]
 name = "nanocodex-tools"
 version = "0.5.0"
-source = "git+https://github.com/gakonst/nanocodex?rev=4f3344400ee3d2a2446b96e342f8c9871aab9637#4f3344400ee3d2a2446b96e342f8c9871aab9637"
+source = "git+https://github.com/gakonst/nanocodex?rev=371ed9adf40271f9efa477b6a8a27381d0e2d8e3#371ed9adf40271f9efa477b6a8a27381d0e2d8e3"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -2672,7 +2674,7 @@ dependencies = [
 [[package]]
 name = "nanocodex-tools-macros"
 version = "0.5.0"
-source = "git+https://github.com/gakonst/nanocodex?rev=4f3344400ee3d2a2446b96e342f8c9871aab9637#4f3344400ee3d2a2446b96e342f8c9871aab9637"
+source = "git+https://github.com/gakonst/nanocodex?rev=371ed9adf40271f9efa477b6a8a27381d0e2d8e3#371ed9adf40271f9efa477b6a8a27381d0e2d8e3"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",

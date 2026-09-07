@@ -136,8 +136,8 @@ file = "/path/to/.codex/auth.json"
 
 [agent]
 workspace = "/path/to/workspace"
-model = "sol" # sol, terra, luna, or astra
-thinking = "medium" # low, medium, high, xhigh, or max
+model = "astra" # sol, terra, luna, or astra
+thinking = "low" # low, medium, high, xhigh, or max
 reasoning_mode = "standard" # standard or pro
 fast_mode = false
 max_subagents = 32
