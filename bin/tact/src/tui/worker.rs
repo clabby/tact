@@ -3,7 +3,12 @@
 use crate::{
     app::config::ReasoningEffort,
     core::{IMAGE_RENDERING_INSTRUCTIONS, MEMORY_REVIEW_CHECKPOINT},
-    tui::{components::QueueId, pane::PaneId, prompt::Submission, transcript::TurnId},
+    tui::{
+        components::QueueId,
+        pane::PaneId,
+        prompt::Submission,
+        transcript::{TerminalStopReason, TurnId},
+    },
 };
 use nanocodex::{
     AgentEvents, Nanocodex, NanocodexError, TurnControl,
@@ -112,6 +117,7 @@ pub(crate) enum WorkerEvent {
         pane: PaneId,
         id: TurnId,
         error: Option<String>,
+        terminal_stop: Option<TerminalStopReason>,
         snapshot: Option<Box<SessionSnapshot>>,
         terminal_expected: bool,
     },
@@ -785,6 +791,7 @@ fn reject_turn(request: TurnRequest, error: String, updates: &mpsc::UnboundedSen
             pane: request.pane,
             id: request.id,
             error: Some(error),
+            terminal_stop: None,
             snapshot: None,
             terminal_expected: false,
         })),
@@ -914,6 +921,7 @@ fn finish_turn(
                 pane: PaneId::Main,
                 id: TurnId::new(0),
                 error: Some(format!("turn task stopped unexpectedly: {error}")),
+                terminal_stop: None,
                 snapshot: None,
                 terminal_expected: false,
             }));
@@ -924,20 +932,27 @@ fn finish_turn(
     let was_cancelled = cancelled.remove(&key);
     match purpose {
         TurnPurpose::Conversation => {
-            let (error, snapshot) = match result {
-                Ok(completed) => (None, completed.snapshot),
+            let (error, snapshot, terminal_stop) = match result {
+                Ok(completed) => (None, completed.snapshot, None),
                 Err(NanocodexError::TurnCancelled)
                     if shutting_down || was_cancelled || cancelled_by_scope =>
                 {
-                    (None, None)
+                    (None, None, None)
                 }
-                Err(error) => (Some(error.to_string()), None),
+                Err(error) => {
+                    let terminal_stop = error
+                        .responses_error()
+                        .is_some_and(|source| source.is_misalignment_policy_violation())
+                        .then_some(TerminalStopReason::MisalignmentPolicyViolation);
+                    (Some(error.to_string()), None, terminal_stop)
+                }
             };
             drop(updates.send(WorkerEvent::TurnFinished {
                 pane: key.pane,
                 id: key.id,
                 error,
                 snapshot,
+                terminal_stop,
                 terminal_expected: true,
             }));
         }
@@ -1006,22 +1021,30 @@ async fn shutdown_agent(agent: Option<Nanocodex>) -> Result<(), NanocodexError> 
 #[cfg(test)]
 mod tests {
     use super::{
-        MemoryReviewState, ReflectionContext, WorkerCommand, WorkerEvent, reflection_prompt, spawn,
+        MemoryReviewState, ReflectionContext, TurnKey, TurnPurpose, WorkerCommand, WorkerEvent,
+        finish_turn, reflection_prompt, spawn,
     };
     use crate::{
         app::config::ReasoningEffort,
         core::{IMAGE_RENDERING_INSTRUCTIONS, MEMORY_REVIEW_CHECKPOINT},
-        tui::{components::QueueId, pane::PaneId, prompt::Submission, transcript::TurnId},
+        tui::{
+            components::QueueId,
+            pane::PaneId,
+            prompt::Submission,
+            transcript::{TerminalStopReason, TurnId},
+        },
     };
     use nanocodex::{
-        AgentEvents, Nanocodex, OpenAi,
+        AgentEvents, Nanocodex, NanocodexError, OpenAi,
         agent::input::{Prompt, PromptInput, UserInput},
         oai::{
             ResponseError,
-            tower::{ResponsesAttempt, ResponsesServiceResponse},
+            tower::{ResponsesAttempt, ResponsesServiceError, ResponsesServiceResponse},
+            transport::ResponsesError,
         },
     };
     use std::{
+        collections::{HashMap, HashSet},
         future::{Pending, pending},
         path::Path,
         result::Result as StdResult,
@@ -1033,11 +1056,76 @@ mod tests {
         time::Duration,
     };
     use tokio::{
-        sync::{Notify, oneshot},
+        sync::{Notify, mpsc, oneshot},
         time::timeout,
     };
     use tokio_util::sync::CancellationToken;
     use tower::Service;
+
+    #[test]
+    fn terminal_stop_classification_uses_the_typed_provider_code() {
+        let violation = r#"{"error":{"code":"misalignment_policy_violation","message":"conversation stopped"}}"#;
+        let ordinary =
+            r#"{"error":{"code":"server_error","message":"misalignment_policy_violation"}}"#;
+        let cases = [
+            (
+                ResponsesError::Api {
+                    event: violation.to_owned(),
+                },
+                true,
+            ),
+            (
+                ResponsesError::HttpRejected {
+                    status: 403,
+                    body: violation.to_owned(),
+                    retry_after: None,
+                },
+                true,
+            ),
+            (
+                ResponsesError::Api {
+                    event: ordinary.to_owned(),
+                },
+                false,
+            ),
+            (ResponsesError::UnexpectedEnd, false),
+        ];
+        for (source, stopped) in cases {
+            let error =
+                NanocodexError::Response(ResponseError::from(ResponsesServiceError::from(source)));
+            let (updates, mut received) = mpsc::unbounded_channel();
+            finish_turn(
+                Some(Ok((
+                    TurnKey {
+                        pane: PaneId::Main,
+                        id: TurnId::new(1),
+                    },
+                    TurnPurpose::Conversation,
+                    false,
+                    Err(error),
+                ))),
+                false,
+                &mut HashMap::new(),
+                &mut HashSet::new(),
+                &updates,
+            );
+            let WorkerEvent::TurnFinished {
+                error,
+                terminal_stop,
+                snapshot,
+                ..
+            } = received.try_recv().unwrap()
+            else {
+                panic!("expected terminal worker event");
+            };
+            assert!(error.is_some());
+            assert!(snapshot.is_none());
+            assert_eq!(
+                terminal_stop,
+                stopped.then_some(TerminalStopReason::MisalignmentPolicyViolation)
+            );
+        }
+    }
 
     #[derive(Clone)]
     struct PendingService {

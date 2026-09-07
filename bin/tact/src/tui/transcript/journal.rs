@@ -572,6 +572,7 @@ mod tests {
             .append_local(LocalEvent::WorkerTurnFinished {
                 id: TurnId::new(1),
                 error: Some("failed".to_owned()),
+                terminal_stop: None,
             })
             .unwrap();
         journal

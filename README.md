@@ -392,15 +392,17 @@ persisted separately and can be resumed like other sessions.
 
 ### Resume
 
-Tact checkpoints each completed turn and keeps an append-only transcript. Open **Resume session**
+Tact checkpoints each successful turn and keeps an append-only transcript. Ordinary failed turns
+retain the last successful checkpoint. A terminal provider policy stop makes the session
+non-resumable; its transcript remains available for inspection. Open **Resume session**
 from the Actions menu to search sessions for the current workspace, or resume a known ID directly:
 
 ```sh
 tact --resume SESSION_ID
 ```
 
-Tact prints the active session's resume command when it exits. Session files live beside the
-selected configuration in private, versioned `checkpoints` and `transcripts` directories.
+Tact prints the active session's resume command when it exits. Sessions are stored in
+`sessions/v2.sqlite3` beside the selected configuration.
 Checkpoints contain the complete model-visible conversation and are not redacted, so treat them as
 private data.
 
