@@ -914,6 +914,7 @@ pub(crate) async fn run(
                         pane,
                         id,
                         error,
+                        terminal_stop,
                         snapshot,
                         terminal_expected,
                     } => {
@@ -937,13 +938,17 @@ pub(crate) async fn run(
                                 )
                             })
                             .transpose()?;
-                        let event = LocalEvent::WorkerTurnFinished { id, error };
+                        let event = LocalEvent::WorkerTurnFinished { id, error, terminal_stop };
                         let record = match resume_state {
                             Some(resume_state) => runtime
                                 .journal_mut()?
                                 .append_local_with_resume_state(event, resume_state)?,
                             None => runtime.journal_mut()?.append_local(event)?,
                         };
+                        if terminal_stop.is_some() {
+                            // Resume reads must observe the stop before the pane admits another command.
+                            runtime.journal_mut()?.flush().await?;
+                        }
                         schedule(app.update(AppEvent::Transcript { pane, record }), &mut scheduler);
                         if let Some(command) = config.agent().completion_hook() {
                             let command = command.to_owned();
