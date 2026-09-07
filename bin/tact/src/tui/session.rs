@@ -753,6 +753,56 @@ mod tests {
         assert_eq!(records.last().unwrap().kind(), "worker.turn_finished");
     }
 
+    #[test]
+    fn terminal_provider_stop_blocks_the_last_successful_checkpoint() {
+        let directory = tempdir().unwrap();
+        let config = directory.path().join("config.toml");
+        let expected = snapshot("successful");
+        save_checkpoint(&config, "session", &expected, "instructions", true).unwrap();
+
+        let terminal_stop = serde_json::from_str::<TranscriptRecord>(
+            &json!({
+                "schema_version": 2,
+                "sequence": 2,
+                "recorded_at_unix_ms": 2,
+                "source": "tact",
+                "type": "worker.turn_finished",
+                "payload": {
+                    "id": 2,
+                    "error": "provider stopped conversation",
+                    "terminal_stop": "misalignment_policy_violation"
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let later_failure = TranscriptRecord::from_local(
+            3,
+            3,
+            LocalEvent::WorkerTurnFinished {
+                id: TurnId::new(3),
+                error: Some("agent stopped".to_owned()),
+            },
+        )
+        .unwrap();
+        SessionStorage::open(&config)
+            .unwrap()
+            .append_records(
+                "session",
+                &[
+                    started(1, "session", None, None),
+                    Arc::new(terminal_stop),
+                    Arc::new(later_failure),
+                ],
+            )
+            .unwrap();
+
+        assert!(
+            load_checkpoint(&config, "session").is_err(),
+            "a terminal provider stop must block the retained checkpoint even after a later failure"
+        );
+    }
+
     #[tokio::test]
     async fn successful_turn_publishes_its_tail_and_snapshot_together() {
         let directory = tempdir().unwrap();
