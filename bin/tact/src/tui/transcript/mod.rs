@@ -14,7 +14,7 @@ pub(crate) use journal::TranscriptJournal;
 pub(crate) use model::TranscriptModel;
 pub(crate) use record::{
     LocalEvent, SCHEMA_VERSION, SessionEnded, SessionOutcome, SessionStarted, ShellId,
-    TranscriptRecord, TurnId,
+    TerminalStopReason, TranscriptRecord, TurnId,
 };
 use std::path::PathBuf;
 use thiserror::Error;

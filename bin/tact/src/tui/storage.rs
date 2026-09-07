@@ -2,7 +2,7 @@
 
 use crate::{
     app::config::{ReasoningEffort, ReasoningMode},
-    tui::transcript::{SCHEMA_VERSION, SessionStarted, TranscriptRecord},
+    tui::transcript::{SCHEMA_VERSION, SessionStarted, TerminalStopReason, TranscriptRecord},
 };
 use rusqlite::{
     Connection, OpenFlags, OptionalExtension, Transaction, ffi::ErrorCode, params,
@@ -424,6 +424,25 @@ impl SessionStorage {
             )
             .map_err(|source| query(&self.path, source))?;
         Ok(())
+    }
+
+    pub(crate) fn terminal_stop(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<TerminalStopReason>, StorageError> {
+        let reason = self.connection.query_row(
+            "SELECT json_quote(json_extract(CAST(record_json AS TEXT), '$.payload.terminal_stop'))
+             FROM events WHERE session_id = ?1
+             AND json_extract(CAST(record_json AS TEXT), '$.source') = 'tact'
+             AND json_extract(CAST(record_json AS TEXT), '$.type') = 'worker.turn_finished'
+             AND json_type(CAST(record_json AS TEXT), '$.payload.terminal_stop') != 'null'
+             ORDER BY event_id LIMIT 1",
+            [session_id],
+            |row| row.get::<_, String>(0),
+        ).optional().map_err(|source| query(&self.path, source))?;
+        reason
+            .map(|reason| serde_json::from_str(&reason).map_err(Into::into))
+            .transpose()
     }
 
     pub(crate) fn load_resume_state(

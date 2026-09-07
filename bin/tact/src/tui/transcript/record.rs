@@ -51,6 +51,13 @@ pub(crate) enum SessionOutcome {
     Failed,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, thiserror::Error)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum TerminalStopReason {
+    #[error("provider misalignment policy violation")]
+    MisalignmentPolicyViolation,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct SessionEnded {
     pub(crate) outcome: SessionOutcome,
@@ -102,6 +109,7 @@ pub(crate) enum LocalEvent {
     WorkerTurnFinished {
         id: TurnId,
         error: Option<String>,
+        terminal_stop: Option<TerminalStopReason>,
     },
     WorkerTurnsInterrupted {
         count: usize,
@@ -220,9 +228,17 @@ impl TranscriptRecord {
             LocalEvent::WorkerTurnAccepted { id } => {
                 ("worker.turn_accepted", to_raw_value(&WorkerTurn { id })?)
             }
-            LocalEvent::WorkerTurnFinished { id, error } => (
+            LocalEvent::WorkerTurnFinished {
+                id,
+                error,
+                terminal_stop,
+            } => (
                 "worker.turn_finished",
-                to_raw_value(&WorkerTurnFinished { id, error })?,
+                to_raw_value(&WorkerTurnFinished {
+                    id,
+                    error,
+                    terminal_stop,
+                })?,
             ),
             LocalEvent::WorkerTurnsInterrupted { count, error } => (
                 "worker.turns_interrupted",
@@ -349,6 +365,8 @@ struct WorkerTurnFinished {
     id: TurnId,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    terminal_stop: Option<TerminalStopReason>,
 }
 
 #[derive(Serialize)]

@@ -4,7 +4,7 @@ use crate::{
     app::config::{ReasoningEffort, ReasoningMode},
     tui::{
         storage::{SessionStorage, StorageError},
-        transcript::{SessionStarted, TranscriptRecord},
+        transcript::{SessionStarted, TerminalStopReason, TranscriptRecord},
     },
 };
 use nanocodex::{Model, agent::session::SessionSnapshot};
@@ -77,6 +77,11 @@ pub(crate) enum SessionError {
     Storage(#[from] StorageError),
     #[error("no resumable state exists for session {session_id}")]
     MissingCheckpoint { session_id: String },
+    #[error("session {session_id} cannot be resumed: {reason}")]
+    TerminalStop {
+        session_id: String,
+        reason: TerminalStopReason,
+    },
     #[error(
         "session {session_id} uses resume-state format {found}; expected {RESUME_STATE_FORMAT_VERSION}"
     )]
@@ -127,14 +132,23 @@ pub(crate) fn load_checkpoint(
     config_path: &Path,
     session_id: &str,
 ) -> Result<ResumeState, SessionError> {
-    let encoded = SessionStorage::open_read_only(config_path)?
-        .ok_or_else(|| SessionError::MissingCheckpoint {
+    let storage = SessionStorage::open_read_only(config_path)?.ok_or_else(|| {
+        SessionError::MissingCheckpoint {
             session_id: session_id.to_owned(),
-        })?
-        .load_resume_state(session_id)?
-        .ok_or_else(|| SessionError::MissingCheckpoint {
+        }
+    })?;
+    if let Some(reason) = storage.terminal_stop(session_id)? {
+        return Err(SessionError::TerminalStop {
             session_id: session_id.to_owned(),
-        })?;
+            reason,
+        });
+    }
+    let encoded =
+        storage
+            .load_resume_state(session_id)?
+            .ok_or_else(|| SessionError::MissingCheckpoint {
+                session_id: session_id.to_owned(),
+            })?;
     let stored =
         serde_json::from_slice::<StoredResumeState>(&encoded).map_err(StorageError::from)?;
     if stored.format_version != RESUME_STATE_FORMAT_VERSION {
@@ -370,7 +384,10 @@ pub(crate) fn format_age(started_at_unix_ms: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{encode_checkpoint, load_checkpoint, load_transcript, model, save_checkpoint};
+    use super::{
+        SessionError, TerminalStopReason, encode_checkpoint, load_checkpoint, load_transcript,
+        model, save_checkpoint,
+    };
     use crate::{
         app::config::{ReasoningEffort, ReasoningMode},
         tui::{
@@ -738,6 +755,7 @@ mod tests {
             .append_local(LocalEvent::WorkerTurnFinished {
                 id: TurnId::new(2),
                 error: Some("API failed".to_owned()),
+                terminal_stop: None,
             })
             .unwrap();
         drop(journal);
@@ -751,6 +769,136 @@ mod tests {
         );
         let records = super::load_transcript(&config, "session").unwrap();
         assert_eq!(records.last().unwrap().kind(), "worker.turn_finished");
+    }
+
+    #[test]
+    fn terminal_provider_stop_blocks_the_last_successful_checkpoint() {
+        let directory = tempdir().unwrap();
+        let config = directory.path().join("config.toml");
+        let expected = snapshot("successful");
+        save_checkpoint(&config, "session", &expected, "instructions", true).unwrap();
+
+        let terminal_stop = serde_json::from_str::<TranscriptRecord>(
+            &json!({
+                "schema_version": 2,
+                "sequence": 2,
+                "recorded_at_unix_ms": 2,
+                "source": "tact",
+                "type": "worker.turn_finished",
+                "payload": {
+                    "id": 2,
+                    "error": "provider stopped conversation",
+                    "terminal_stop": "misalignment_policy_violation"
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let later_failure = TranscriptRecord::from_local(
+            3,
+            3,
+            LocalEvent::WorkerTurnFinished {
+                id: TurnId::new(3),
+                error: Some("agent stopped".to_owned()),
+                terminal_stop: None,
+            },
+        )
+        .unwrap();
+        SessionStorage::open(&config)
+            .unwrap()
+            .append_records(
+                "session",
+                &[
+                    started(1, "session", None, None),
+                    Arc::new(terminal_stop),
+                    Arc::new(later_failure),
+                ],
+            )
+            .unwrap();
+
+        assert!(
+            load_checkpoint(&config, "session").is_err(),
+            "a terminal provider stop must block the retained checkpoint even after a later failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_stop_round_trips_through_the_journal_without_a_checkpoint() {
+        let directory = tempdir().unwrap();
+        let config = directory.path().join("config.toml");
+        let (mut journal, writer) = TranscriptJournal::open(&config, "session").unwrap();
+        let start = started(1, "session", None, None);
+        journal.defer_start(start.decode_payload::<SessionStarted>().unwrap());
+        let reason = TerminalStopReason::MisalignmentPolicyViolation;
+        journal
+            .append_local(LocalEvent::WorkerTurnFinished {
+                id: TurnId::new(2),
+                error: Some("provider stopped conversation".to_owned()),
+                terminal_stop: Some(reason),
+            })
+            .unwrap();
+        journal.flush().await.unwrap();
+
+        assert!(matches!(load_checkpoint(&config, "session"),
+            Err(SessionError::TerminalStop { reason: actual, .. }) if actual == reason));
+        let records = load_transcript(&config, "session").unwrap();
+        let payload = records.last().unwrap().decode_payload::<Value>().unwrap();
+        assert_eq!(payload["terminal_stop"], "misalignment_policy_violation");
+        assert_eq!(
+            serde_json::from_value::<TerminalStopReason>(payload["terminal_stop"].clone()).unwrap(),
+            reason
+        );
+        drop(journal);
+        writer.into_task().await.unwrap().unwrap();
+    }
+
+    #[test]
+    fn unknown_terminal_stop_classification_fails_closed() {
+        let directory = tempdir().unwrap();
+        let config = directory.path().join("config.toml");
+        save_checkpoint(
+            &config,
+            "session",
+            &snapshot("successful"),
+            "instructions",
+            true,
+        )
+        .unwrap();
+        let record = TranscriptRecord::from_local(
+            2,
+            2,
+            LocalEvent::WorkerTurnFinished {
+                id: TurnId::new(2),
+                error: Some("provider stopped conversation".to_owned()),
+                terminal_stop: Some(TerminalStopReason::MisalignmentPolicyViolation),
+            },
+        )
+        .unwrap();
+        let mut encoded = serde_json::to_value(record).unwrap();
+        encoded["payload"]["terminal_stop"] = json!("future_provider_stop");
+        let record = serde_json::from_str(&encoded.to_string()).unwrap();
+        let mut storage = SessionStorage::open(&config).unwrap();
+        let expected = storage.load_resume_state("session").unwrap();
+        storage
+            .append_records(
+                "session",
+                &[started(1, "session", None, None), Arc::new(record)],
+            )
+            .unwrap();
+        drop(storage);
+
+        assert!(matches!(
+            load_checkpoint(&config, "session"),
+            Err(SessionError::Storage(_))
+        ));
+        assert_eq!(
+            SessionStorage::open_read_only(&config)
+                .unwrap()
+                .unwrap()
+                .load_resume_state("session")
+                .unwrap(),
+            expected
+        );
     }
 
     #[tokio::test]
@@ -776,6 +924,7 @@ mod tests {
                 LocalEvent::WorkerTurnFinished {
                     id: TurnId::new(1),
                     error: None,
+                    terminal_stop: None,
                 },
                 resume_state,
             )
