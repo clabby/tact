@@ -19,9 +19,9 @@ Subagents are enabled by default. They can be disabled explicitly:
 enabled = false
 ```
 
-Disabling the feature removes all subagent tools and Tact's built-in delegation instructions from
-new and restored sessions. It does not disable memory, skills, MCP servers, or ordinary code-mode
-tools.
+Disabling the feature removes all subagent tools and omits Tact's built-in delegation instructions
+from fresh sessions. Resumed parents retain their saved instructions. The setting does not disable
+memory, skills, MCP servers, or ordinary code-mode tools.
 
 The setting applies when an agent runtime is created. Reloading configuration does not mutate the
 tool surface or instructions of an existing runtime. A later new or restored session uses the
@@ -76,8 +76,11 @@ therefore installed independently of the subagent tool group.
 
 ## Clean sessions and output contracts
 
-`spawn_agent` creates a new Nanocodex session through the calling agent's spawn handle. The child
-does not inherit the caller's conversation. Its initial prompt contains:
+`spawn_agent` creates a new Nanocodex session through Tact's configured child factory. The child
+does not inherit the caller's conversation. Each child model's instructions are composed from the
+configuration and skill catalog when the root runtime starts. This includes configured replacement
+and appended instructions. A resumed parent keeps its saved instructions; its new children use
+these freshly composed instructions. Their initial prompt contains:
 
 - the assigned role and task;
 - its agent ID and place in the task tree;
@@ -216,8 +219,8 @@ checked in code.
 
 The implementation preserves these invariants:
 
-- disabling subagents removes both their tools and their fixed delegation instructions;
-- disabling `subagents.allow_luna` removes the explicit Luna choice from the tool and instructions;
+- disabling subagents removes their tools and omits their fixed instructions from fresh sessions;
+- disabling `subagents.allow_luna` removes the explicit Luna choice from the tool and fresh instructions;
 - memory remains independent from the subagent enable switch;
 - every child starts with clean conversation context and a caller-supplied output contract;
 - task-tree scope prevents cross-root access;

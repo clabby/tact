@@ -157,6 +157,36 @@ struct SessionInstructions {
     skills: Arc<[Skill]>,
 }
 
+struct AgentInstructions {
+    session: SessionInstructions,
+    selected: Arc<str>,
+    luna: Arc<str>,
+}
+
+impl AgentInstructions {
+    fn from_config(
+        config: &Config,
+        model: Model,
+        restored: Option<(String, Option<bool>)>,
+        memory_enabled: bool,
+    ) -> Self {
+        let selected = SessionInstructions::from_config(config, model, None, memory_enabled);
+        let luna = SessionInstructions::from_config(config, Model::Luna, None, memory_enabled).text;
+        let selected_text = Arc::clone(&selected.text);
+        let session = match restored {
+            Some(restored) => {
+                SessionInstructions::from_config(config, model, Some(restored), memory_enabled)
+            }
+            None => selected,
+        };
+        Self {
+            session,
+            selected: selected_text,
+            luna,
+        }
+    }
+}
+
 impl SessionInstructions {
     fn from_config(
         config: &Config,
@@ -316,25 +346,17 @@ impl ConfiguredAgent {
                 (Some(snapshot), Some((instructions, catalog_present)))
             },
         );
-        let SessionInstructions {
-            text: instructions,
-            skills,
-        } = SessionInstructions::from_config(
-            config,
-            model,
-            restored_instructions.clone(),
-            memory_enabled,
-        );
+        let AgentInstructions {
+            session:
+                SessionInstructions {
+                    text: instructions,
+                    skills,
+                },
+            selected: selected_instructions,
+            luna: luna_instructions,
+        } = AgentInstructions::from_config(config, model, restored_instructions, memory_enabled);
         builder = builder.instructions(Arc::clone(&instructions));
         let subagent_builder = builder.clone();
-        let selected_instructions = Arc::clone(&instructions);
-        let luna_instructions = SessionInstructions::from_config(
-            config,
-            Model::Luna,
-            restored_instructions,
-            memory_enabled,
-        )
-        .text;
         subagent_control.set_agent_factory(
             thinking.into(),
             agent_config.fast_mode(),
@@ -753,11 +775,11 @@ impl Cancellation {
 #[cfg(test)]
 mod tests {
     use super::{
-        ConfiguredAgent, MEMORY_INSTRUCTIONS, MEMORY_REVIEW_CHECKPOINT, SCRATCHPAD_INSTRUCTIONS,
-        SESSION_REFERENCE_INSTRUCTIONS, SUBAGENT_INSTRUCTIONS, SUBAGENT_INSTRUCTIONS_SELECTED_ONLY,
-        SessionInstructions, TACT_INSTRUCTIONS, TOOL_ORCHESTRATION_INSTRUCTIONS,
-        configured_memory_store, fresh_instructions, reconcile_tact_instructions,
-        session_instructions, session_instructions_with_luna,
+        AgentInstructions, ConfiguredAgent, MEMORY_INSTRUCTIONS, MEMORY_REVIEW_CHECKPOINT,
+        SCRATCHPAD_INSTRUCTIONS, SESSION_REFERENCE_INSTRUCTIONS, SUBAGENT_INSTRUCTIONS,
+        SUBAGENT_INSTRUCTIONS_SELECTED_ONLY, SessionInstructions, TACT_INSTRUCTIONS,
+        TOOL_ORCHESTRATION_INSTRUCTIONS, configured_memory_store, fresh_instructions,
+        reconcile_tact_instructions, session_instructions, session_instructions_with_luna,
     };
     use crate::{
         app::{
@@ -939,6 +961,49 @@ mod tests {
                 );
                 assert_eq!(resumed.text.as_ref(), stored);
                 assert!(resumed.skills.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn resumed_parent_preserves_its_prompt_while_clean_children_use_their_model() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        fs::write(&path, "[skills]\nenabled = false\n").unwrap();
+        for custom in [None, Some("Current custom instructions.")] {
+            let config = Config::load(ConfigOverrides {
+                path: Some(path.clone()),
+                workspace: Some(directory.path().to_path_buf()),
+                model: Some(Model::Astra),
+                instructions: custom.map(str::to_owned),
+                append_instructions: Some("Current project instructions.".to_owned()),
+                ..ConfigOverrides::default()
+            })
+            .unwrap();
+            let stored =
+                "You are Tact, an agent based on GPT-6 Astra.\n\nSaved project instructions.";
+            let instructions = AgentInstructions::from_config(
+                &config,
+                Model::Astra,
+                Some((stored.to_owned(), Some(false))),
+                true,
+            );
+            assert_eq!(instructions.session.text.as_ref(), stored);
+            for (model, actual) in [
+                (Model::Luna, &instructions.luna),
+                (Model::Astra, &instructions.selected),
+            ] {
+                let expected = SessionInstructions::from_config(&config, model, None, true);
+                assert!(
+                    actual == &expected.text,
+                    "{model:?} child must use fresh instructions"
+                );
+                assert!(!actual.contains("Saved project instructions."));
+                assert!(actual.contains("Current project instructions."));
+                assert_eq!(actual.matches(MEMORY_INSTRUCTIONS).count(), 1);
+                if custom.is_none() {
+                    assert_eq!(actual.contains("GPT-6 Astra"), model == Model::Astra);
+                }
             }
         }
     }
