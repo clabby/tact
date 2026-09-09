@@ -7,14 +7,14 @@ mod orchestration;
 use crate::{
     app::{
         config::{Config, ReasoningEffort, ReasoningMode, SkillsConfig},
-        error::{ConfigError, Result, RuntimeError},
+        error::{ConfigError, Error, Result, RuntimeError},
         hook,
     },
     core::extensions::{
         CurrentSessionTool, Skill, SkillCatalog, mcp_provider,
         sessions::{FindSessionsTool, ReadSessionTool},
     },
-    tui::session::ResumeState,
+    tui::session::{ResumeState, migrate_snapshot_contract},
 };
 use nanocodex::{
     AgentEvents, Model, Nanocodex, NanocodexError, OpenAi, Tools, TurnControl,
@@ -319,11 +319,21 @@ impl ConfiguredAgent {
                 .map_err(RuntimeError::InvalidSessionId)?;
             builder = builder.session_id(session_id);
         }
-        if let Some(snapshot) = snapshot {
-            builder = builder.resume(snapshot);
-        }
-
-        let (agent, events) = builder.build()?;
+        let (agent, events) = match snapshot {
+            Some(snapshot) => match builder.clone().resume(snapshot.clone()).build() {
+                Ok(result) => Ok(result),
+                Err(error @ NanocodexError::InvalidSessionSnapshot(_)) => {
+                    // The retry revalidates every retained field, so avoid coupling the fallback
+                    // to one Nanocodex error message.
+                    match migrate_snapshot_contract(&snapshot)? {
+                        Some(snapshot) => builder.resume(snapshot).build().map_err(Error::from),
+                        None => Err(error.into()),
+                    }
+                }
+                Err(error) => Err(error.into()),
+            },
+            None => builder.build().map_err(Error::from),
+        }?;
         Ok(Self {
             agent,
             events,
@@ -708,11 +718,11 @@ impl Cancellation {
 #[cfg(test)]
 mod tests {
     use super::{
-        ConfiguredAgent, MEMORY_INSTRUCTIONS, MEMORY_REVIEW_CHECKPOINT, SCRATCHPAD_INSTRUCTIONS,
-        SESSION_REFERENCE_INSTRUCTIONS, SUBAGENT_INSTRUCTIONS, SUBAGENT_INSTRUCTIONS_SELECTED_ONLY,
-        TACT_INSTRUCTIONS, TOOL_ORCHESTRATION_INSTRUCTIONS, configured_memory_store,
-        fresh_instructions, reconcile_tact_instructions, session_instructions,
-        session_instructions_with_luna,
+        ConfiguredAgent, CurrentSessionTool, MEMORY_INSTRUCTIONS, MEMORY_REVIEW_CHECKPOINT,
+        SCRATCHPAD_INSTRUCTIONS, SESSION_REFERENCE_INSTRUCTIONS, SUBAGENT_INSTRUCTIONS,
+        SUBAGENT_INSTRUCTIONS_SELECTED_ONLY, TACT_INSTRUCTIONS, TOOL_ORCHESTRATION_INSTRUCTIONS,
+        configured_memory_store, fresh_instructions, migrate_snapshot_contract,
+        reconcile_tact_instructions, session_instructions, session_instructions_with_luna,
     };
     use crate::{
         app::{
@@ -722,7 +732,8 @@ mod tests {
         core::extensions::Skill,
     };
     use nanocodex::{
-        Nanocodex, OpenAi,
+        Nanocodex, NanocodexError, OpenAi, Tools,
+        agent::session::SessionSnapshot,
         oai::{
             ResponseError,
             tower::{ResponsesAttempt, ResponsesServiceConfig, ResponsesServiceResponse},
@@ -731,6 +742,7 @@ mod tests {
     use std::{
         fs,
         future::{Pending, pending},
+        path::Path,
         result::Result as StdResult,
         sync::Arc,
         task::{Context, Poll},
@@ -795,6 +807,51 @@ mod tests {
             self.called.notify_one();
             pending()
         }
+    }
+
+    fn snapshot_with_older_tool_contract(workspace: &Path) -> SessionSnapshot {
+        serde_json::from_value(serde_json::json!({
+            "version": 1,
+            "model": nanocodex::oai::MODEL,
+            "lineage_id": "019c0d31-c308-7d91-bff4-5dca82d15ac6",
+            "prompt_cache_key": "older-tool-contract",
+            "workspace": workspace.to_str().unwrap(),
+            "request_prefix": [
+                {"type": "additional_tools", "role": "developer", "tools": []},
+                {"type": "message", "role": "developer", "content": []}
+            ],
+            "canonical_context": {
+                "type": "message", "role": "user",
+                "content": [{"type": "input_text", "text": "canonical"}]
+            },
+            "history": [
+                {"type": "message", "role": "user",
+                 "content": [{"type": "input_text", "text": "hello"}]}
+            ]
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn resumed_sessions_adopt_tools_added_after_the_checkpoint() {
+        let workspace = tempdir().unwrap();
+        let snapshot = snapshot_with_older_tool_contract(workspace.path());
+        let openai = OpenAi::builder("test-key").build().unwrap();
+        let tools = Tools::builder().tool(CurrentSessionTool).build().unwrap();
+        let builder = Nanocodex::builder(openai)
+            .workspace(workspace.path())
+            .instructions("stored instructions")
+            .tools(tools);
+
+        assert!(matches!(
+            builder.clone().resume(snapshot.clone()).build(),
+            Err(NanocodexError::InvalidSessionSnapshot(_))
+        ));
+        let snapshot = migrate_snapshot_contract(&snapshot).unwrap().unwrap();
+        let (agent, events) = builder.resume(snapshot).build().unwrap();
+
+        agent.shutdown().await.unwrap();
+        drop(events);
     }
 
     #[test]
