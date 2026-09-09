@@ -466,9 +466,10 @@ impl SubagentTree {
             return;
         };
         let title = format!(
-            "{} · {} · #{}",
+            "{} · {} ({}) · #{}",
             node.descriptor.role,
             model_name(node.descriptor.model),
+            node.descriptor.thinking,
             node.descriptor.id
         );
         let keys: &[(&str, &str)] = if node.transcript.component().expandables_focused() {
@@ -710,7 +711,11 @@ impl SubagentTree {
                 )),
                 Span::styled("    Model  ", Style::default().fg(theme.muted())),
                 Span::styled(
-                    model_name(node.descriptor.model),
+                    format!(
+                        "{} ({})",
+                        model_name(node.descriptor.model),
+                        node.descriptor.thinking
+                    ),
                     Style::default()
                         .fg(theme.model(node.descriptor.model))
                         .add_modifier(Modifier::BOLD),
@@ -1108,7 +1113,7 @@ mod tests {
         Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     };
     use nanocodex::{
-        Model,
+        Model, Thinking,
         agent::events::{AgentEvent, AgentEventKind},
     };
     use ratatui::{Terminal, backend::TestBackend, style::Color};
@@ -1124,6 +1129,7 @@ mod tests {
             id: AgentId::new(1),
             session_id: "child-session".to_owned(),
             model: Model::Luna,
+            thinking: Thinking::Low,
             role: "researcher".to_owned(),
             task: "Trace the event lifecycle".to_owned(),
             parent: None,
@@ -1260,6 +1266,7 @@ mod tests {
             id: AgentId::new(2),
             session_id: "second-session".to_owned(),
             model: Model::Sol,
+            thinking: Thinking::High,
             role: "reviewer".to_owned(),
             task: "Verify the event ordering".to_owned(),
             parent: None,
@@ -1271,6 +1278,7 @@ mod tests {
             id: AgentId::new(id),
             session_id: format!("agent-{id}"),
             model: Model::Sol,
+            thinking: Thinking::Medium,
             role: role.to_owned(),
             task: format!("Task for {role}"),
             parent: parent.map(AgentId::new),
@@ -1287,6 +1295,10 @@ mod tests {
         assert_eq!(tree.effort, ReasoningEffort::High);
         assert_eq!(tree.active_count(), 1);
         assert!(tree.contains(AgentId::new(1)));
+        assert!(rendered_text(&render_tree(&mut tree)).contains("Model  Luna (low)"));
+        assert!(
+            rendered_text(&render_transcript(&mut tree)).contains("researcher · Luna (low) · #1")
+        );
     }
 
     #[test]
@@ -1550,7 +1562,7 @@ mod tests {
         assert!(rendered.contains("researcher"));
         assert!(rendered.contains("running · 0 children"));
         assert!(rendered.contains("Trace the event lifecycle"));
-        assert!(rendered.contains("Model  Luna"));
+        assert!(rendered.contains("Model  Luna (low)"));
         let buffer = terminal.backend().buffer();
         let luna = buffer
             .content
