@@ -78,7 +78,7 @@ pub(crate) struct Registry {
     agent_factory: OnceLock<AgentFactory>,
 }
 
-/// Owns the clean-agent recipe and the settings inherited by the next spawn.
+/// Owns the clean-agent recipe and the settings applied to the next spawn.
 /// Per-agent tool factories hold only a weak registry reference, keeping this ownership acyclic.
 struct AgentFactory {
     build: Box<AgentBuilder>,
@@ -90,8 +90,23 @@ type AgentBuilder =
 
 #[derive(Clone, Copy)]
 struct AgentSettings {
-    thinking: Thinking,
+    max_thinking: Thinking,
     fast_mode: bool,
+}
+
+fn thinking_rank(thinking: Thinking) -> Result<u8, NanocodexError> {
+    Ok(match thinking {
+        Thinking::None => {
+            return Err(NanocodexError::InvalidRequest(
+                "subagent thinking must be low, medium, high, xhigh, or max".to_owned(),
+            ));
+        }
+        Thinking::Low => 1,
+        Thinking::Medium => 2,
+        Thinking::High => 3,
+        Thinking::Xhigh => 4,
+        Thinking::Max => 5,
+    })
 }
 
 /// Identifies whether a tool call belongs to a coordinating root agent.
@@ -779,7 +794,7 @@ impl Registry {
 
     pub(crate) fn set_agent_factory<F>(
         &self,
-        thinking: Thinking,
+        max_thinking: Thinking,
         fast_mode: bool,
         factory: F,
     ) -> Result<(), NanocodexError>
@@ -793,7 +808,7 @@ impl Registry {
             .set(AgentFactory {
                 build: Box::new(factory),
                 settings: Mutex::new(AgentSettings {
-                    thinking,
+                    max_thinking,
                     fast_mode,
                 }),
             })
@@ -805,6 +820,7 @@ impl Registry {
     pub(super) fn spawn_agent(
         &self,
         model: Model,
+        thinking: Thinking,
     ) -> Result<(Nanocodex, AgentEvents), NanocodexError> {
         let factory = self.agent_factory.get().ok_or_else(|| {
             NanocodexError::InvalidRequest("subagent factory is not configured".to_owned())
@@ -813,16 +829,22 @@ impl Registry {
             .settings
             .lock()
             .expect("subagent settings lock should not be poisoned");
-        (factory.build)(model, settings.thinking, settings.fast_mode)
+        if thinking_rank(thinking)? > thinking_rank(settings.max_thinking)? {
+            return Err(NanocodexError::InvalidRequest(format!(
+                "subagent thinking {thinking} exceeds configured maximum {}",
+                settings.max_thinking
+            )));
+        }
+        (factory.build)(model, thinking, settings.fast_mode)
     }
 
-    fn set_agent_thinking(&self, thinking: Thinking) {
+    fn set_agent_max_thinking(&self, max_thinking: Thinking) {
         if let Some(factory) = self.agent_factory.get() {
             factory
                 .settings
                 .lock()
                 .expect("subagent settings lock should not be poisoned")
-                .thinking = thinking;
+                .max_thinking = max_thinking;
         }
     }
 
@@ -1633,15 +1655,16 @@ impl Subagents {
     /// Configures how clean child sessions are constructed.
     ///
     /// The factory must return a new session and its event stream on every call. The runtime
-    /// supplies the requested model and the current inherited settings. A runtime accepts exactly
-    /// one factory; a second call returns [`NanocodexError::InvalidRequest`].
+    /// supplies the requested model and thinking effort, bounded by `max_thinking`, plus the current
+    /// fast-mode setting. A runtime accepts exactly one factory; a second call returns
+    /// [`NanocodexError::InvalidRequest`].
     ///
     /// # Errors
     ///
     /// Returns [`NanocodexError::InvalidRequest`] if a factory is already configured.
     pub fn set_agent_factory<F>(
         &self,
-        thinking: Thinking,
+        max_thinking: Thinking,
         fast_mode: bool,
         factory: F,
     ) -> Result<(), NanocodexError>
@@ -1652,7 +1675,7 @@ impl Subagents {
             + 'static,
     {
         self.registry
-            .set_agent_factory(thinking, fast_mode, factory)
+            .set_agent_factory(max_thinking, fast_mode, factory)
     }
 
     /// Returns a root-session authority checker for application-owned tools.
@@ -1668,9 +1691,9 @@ impl Subagents {
         self.registry.set_max_concurrency(limit);
     }
 
-    /// Changes the reasoning effort inherited by newly created child sessions.
-    pub fn set_thinking(&self, thinking: Thinking) {
-        self.registry.set_agent_thinking(thinking);
+    /// Changes the maximum reasoning effort allowed for newly created child sessions.
+    pub fn set_max_thinking(&self, thinking: Thinking) {
+        self.registry.set_agent_max_thinking(thinking);
     }
 
     /// Changes the fast-mode setting inherited by newly created child sessions.
@@ -1787,7 +1810,7 @@ mod tests {
     use tower::Service;
 
     #[test]
-    fn agent_factory_receives_the_declared_model() {
+    fn agent_factory_enforces_thinking_cap() {
         let (updates, _receiver) = mpsc::unbounded_channel();
         let registry = Registry::new(updates, 1);
         let seen = Arc::new(Mutex::new(None));
@@ -1804,14 +1827,33 @@ mod tests {
                 },
             )
             .unwrap();
-        registry.set_agent_thinking(Thinking::Low);
         registry.set_agent_fast_mode(true);
 
-        assert!(registry.spawn_agent(Model::Luna).is_err());
-        assert_eq!(
-            *seen.lock().unwrap(),
-            Some((Model::Luna, Thinking::Low, true))
-        );
+        for (maximum, requested, allowed) in [
+            (Thinking::Medium, Thinking::Low, true),
+            (Thinking::Medium, Thinking::Medium, true),
+            (Thinking::Medium, Thinking::High, false),
+            (Thinking::High, Thinking::Xhigh, false),
+            (Thinking::Xhigh, Thinking::High, true),
+            (Thinking::Max, Thinking::Max, true),
+            (Thinking::Low, Thinking::Medium, false),
+            (Thinking::Low, Thinking::Low, true),
+            (Thinking::Max, Thinking::None, false),
+        ] {
+            registry.set_agent_max_thinking(maximum);
+            let error = registry
+                .spawn_agent(Model::Luna, requested)
+                .err()
+                .expect("factory should stop after capture");
+            let actual = seen.lock().unwrap().take();
+            if allowed {
+                assert!(error.to_string().contains("stop after capture"));
+                assert_eq!(actual, Some((Model::Luna, requested, true)));
+            } else {
+                assert_eq!(actual, None);
+                assert!(matches!(error, NanocodexError::InvalidRequest(_)));
+            }
+        }
     }
 
     #[derive(Clone)]

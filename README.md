@@ -282,6 +282,11 @@ than reasoning capability. Require every subagent to use the session's selected 
 allow_luna = false
 ```
 
+Agents must set `thinking` when calling `spawn_agent`, at or below the `agent.thinking` cap. Use
+`low` for straightforward work or higher effort for difficult tasks when the cap allows. Requests
+above the cap fail. The choice applies only to the new child without changing the parent's effort
+or the cap. Changing the root session's effort updates the cap for future children.
+
 ### Memory
 
 Tact's bounded cross-session memory is disabled by default. Opt in explicitly:

@@ -57,7 +57,7 @@ An enabled runtime installs seven tools:
 
 | Tool | Contract |
 | --- | --- |
-| `spawn_agent` | Create a clean child session with a role, focused task, model choice, and required output schema. |
+| `spawn_agent` | Create a clean child session with a required role, focused task, model choice, thinking effort, and output schema. |
 | `submit_result` | Submit the current subagent turn's final JSON value. The value must satisfy its output schema and use the current turn token. |
 | `send_agent_message` | Send a bounded directed message within the current task tree. |
 | `list_agents` | List visible agents, their status, topology, and the caller's messaging and management authority. |
@@ -86,6 +86,31 @@ these freshly composed instructions. Their initial prompt contains:
 - its agent ID and place in the task tree;
 - coordination rules for peers and descendants; and
 - the required structured-output contract.
+
+The required `thinking` field chooses the child's reasoning effort at creation, at or below the
+`agent.thinking` cap. Requests above the cap fail with an error reporting the configured maximum.
+The choice applies only to the new child without changing the parent's effort or the cap. Changing
+the root session's effort updates the cap for future children and leaves existing children unchanged.
+
+Accepted values are `low`, `medium`, `high`, `xhigh`, and `max`. Use `low` for straightforward work
+and higher effort for demanding reasoning or review when the cap allows.
+
+Every `spawn_agent` call must provide `role`, `task`, `model`, `thinking`, and `output_schema`:
+
+```json
+{
+  "role": "reviewer",
+  "task": "Review the current workspace diff for correctness and report supported findings.",
+  "model": "selected",
+  "thinking": "low",
+  "output_schema": {
+    "type": "object",
+    "properties": { "findings": { "type": "string" } },
+    "required": ["findings"],
+    "additionalProperties": false
+  }
+}
+```
 
 The caller supplies a JSON Schema for the result. Tact compiles that schema before creating the
 child. A successful turn must call `submit_result` exactly once with a value that validates against
