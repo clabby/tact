@@ -202,6 +202,7 @@ impl Tool for SpawnAgent {
             id,
             session_id,
             model,
+            thinking,
             role: role.clone(),
             task: task.clone(),
             parent: reservation.parent,

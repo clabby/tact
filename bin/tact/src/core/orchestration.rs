@@ -401,7 +401,7 @@ impl<'a> From<&'a AgentDescriptor> for AgentRecord<'a> {
 mod tests {
     use super::{OrchestrationRecorder, RunOutcome};
     use nanocodex::{
-        Model,
+        Model, Thinking,
         agent::events::{AgentEvent, AgentEventKind},
     };
     use serde_json::{Value, json, value::to_raw_value};
@@ -470,6 +470,7 @@ mod tests {
                     id,
                     session_id: "child".to_owned(),
                     model: Model::Sol,
+                    thinking: Thinking::Medium,
                     role: "researcher".to_owned(),
                     task: "inspect the task".to_owned(),
                     parent: None,

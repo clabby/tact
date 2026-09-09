@@ -1,4 +1,4 @@
-use nanocodex::{Model, agent::events::AgentEvent};
+use nanocodex::{Model, Thinking, agent::events::AgentEvent};
 use serde::{Deserialize, Serialize};
 use std::{
     fmt,
@@ -338,6 +338,8 @@ pub struct AgentDescriptor {
     pub session_id: String,
     /// The model selected for the child.
     pub model: Model,
+    /// The reasoning effort selected when the child was spawned.
+    pub thinking: Thinking,
     /// The short specialization assigned by the caller.
     pub role: String,
     /// The child's current delegated task.
