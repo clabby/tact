@@ -58,10 +58,24 @@ workspace_roots = ["/absolute/path/to/team/workspace"]
 
 ## Namespace capacity
 
-`TACT_MEMORY_MAX_RECORDS` sets the positive record limit for each writer namespace and defaults to
-512. Each record remains limited to 1 KiB, so aggregate authored-content capacity is derived from
-the record count instead of configured separately. Changing the deployment limit does not delete
-existing records; inserts and full snapshot syncs fail when their result would exceed it.
+Set these positive integer limits in `wrangler.jsonc`. Each writer namespace has its own capacity,
+with the same configured limits applied to every namespace:
+
+| Variable | Limit | Default |
+| --- | --- | --- |
+| `TACT_MEMORY_MAX_RECORDS` | Number of records | 512 |
+| `TACT_MEMORY_MAX_RECORD_BYTES` | UTF-8 content bytes in one record | 1,024 (1 KiB) |
+| `TACT_MEMORY_MAX_TOTAL_BYTES` | Total UTF-8 content bytes across records | 262,144 (256 KiB) |
+
+The limits are independent. Increasing the record count does not change either byte limit.
+Changing a limit does not delete existing records. Inserts and snapshot syncs enforce count and
+content capacity. Replacements enforce the per-record limit and resulting total content bytes.
+
+`TACT_MEMORY_MAX_REQUEST_BYTES` separately limits the encoded JSON request body and defaults to
+2,097,152 bytes (2 MiB). Set it to a positive integer in `wrangler.jsonc`. The body includes record
+metadata and JSON escaping overhead as well as authored content. A full snapshot sync remains one
+atomic request, so raise this bound when larger snapshots need it. The client accepts responses up
+to 8 MiB.
 
 ## Retrieval limits
 

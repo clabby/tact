@@ -560,7 +560,7 @@ pub(crate) fn configured_memory_store(
     if !config.memory().enabled() {
         return Ok(None);
     }
-    let store = SelectedMemoryStore::local(config.memory_path(), config.memory().limits());
+    let store = SelectedMemoryStore::local(config.memory_path(), config.memory().local().limits());
     let Some(remote) = config.memory().remote() else {
         return Ok(Some(store));
     };
@@ -850,10 +850,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn configured_memory_store_applies_local_capacity() {
+    async fn configured_memory_store_applies_local_limits() {
         let directory = tempdir().unwrap();
         let config_path = directory.path().join("config.toml");
-        fs::write(&config_path, "[memory]\nenabled = true\nmax_records = 3\n").unwrap();
+        fs::write(
+            &config_path,
+            "[memory]\nenabled = true\n\n[memory.local]\nmax_records = 3\nmax_record_bytes = 4\nmax_total_bytes = 10\n",
+        )
+        .unwrap();
         let config = Config::load(ConfigOverrides {
             path: Some(config_path),
             auth_file: Some(directory.path().join("auth.json")),
@@ -865,9 +869,18 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        for content in ["a", "b", "c"] {
+        assert!(matches!(
+            store.put("abcde", None).await,
+            Err(MemoryError::ContentTooLarge { maximum_bytes: 4 })
+        ));
+        for content in ["aaaa", "bbbb"] {
             store.put(content, None).await.unwrap();
         }
+        assert!(matches!(
+            store.put("ccc", None).await,
+            Err(MemoryError::ContentCapacity { maximum_bytes: 10 })
+        ));
+        store.put("cc", None).await.unwrap();
         assert!(matches!(
             store.put("d", None).await,
             Err(MemoryError::RecordCapacity { maximum: 3 })

@@ -1,5 +1,5 @@
 use super::{
-    Credential, MAX_JSON_BODY_BYTES, MemoryServer, ServerBuildError,
+    Credential, MemoryServer, ServerBuildError,
     protocol::{
         self, DeleteRequest, ErrorResponse, ExportCursor, ExportRequest, ExportResponse,
         ListResponse, PutRequest, PutResponse, ReadRequest, ReadResponse, RemoteErrorCode,
@@ -29,6 +29,8 @@ use std::{
 };
 use tokio::sync::{Notify, Semaphore};
 use tower::ServiceExt;
+
+const MAX_JSON_BODY_BYTES: usize = 2 * 1_024 * 1_024;
 
 const ALICE_TOKEN: &str = "alice-test-token-000000000001";
 const BOB_TOKEN: &str = "bob-test-token-00000000000002";
@@ -74,7 +76,7 @@ fn memory_app(credentials: Vec<Credential>) -> Router {
     let database = TestMemoryDatabase::default();
     MemoryServer::new(move |namespace| database.bind(namespace), credentials)
         .unwrap()
-        .router()
+        .router(MAX_JSON_BODY_BYTES)
 }
 
 fn memory_app_with_limits(credentials: Vec<Credential>, limits: MemoryLimits) -> Router {
@@ -84,7 +86,7 @@ fn memory_app_with_limits(credentials: Vec<Credential>, limits: MemoryLimits) ->
         credentials,
     )
     .unwrap()
-    .router()
+    .router(MAX_JSON_BODY_BYTES)
 }
 
 fn now_ms() -> i64 {
@@ -204,6 +206,11 @@ impl MemoryStore for TestMemoryStore {
         if identity.is_empty() {
             return Err(MemoryError::EmptyContent);
         }
+        if content.len() > self.limits.content_bytes {
+            return Err(MemoryError::ContentTooLarge {
+                maximum_bytes: self.limits.content_bytes,
+            });
+        }
         let now = now_ms();
         let mut state = self.database.state.lock().unwrap();
         prune_expired(&mut state, now);
@@ -301,6 +308,11 @@ impl MemoryStore for TestMemoryStore {
             });
         }
         let total_bytes = memories.iter().try_fold(0usize, |total, memory| {
+            if memory.content.len() > self.limits.content_bytes {
+                return Err(MemoryError::ContentTooLarge {
+                    maximum_bytes: self.limits.content_bytes,
+                });
+            }
             if memory.key.id <= 0
                 || memory.key.version == 0
                 || !identities.insert(normalize_identity(&memory.content))
@@ -854,10 +866,122 @@ async fn sync_rejects_duplicate_snapshot_ids_without_mutation() {
 }
 
 #[tokio::test]
-async fn configured_namespace_capacity_governs_sync_and_export() {
-    let limits = MemoryLimits::PRODUCTION
-        .try_with_record_capacity(MemoryLimits::PRODUCTION.records + 1)
+async fn configured_request_limit_bounds_encoded_snapshots() {
+    for content in ["small".to_owned(), "\"".repeat(1_024 * 1_024)] {
+        let limits = MemoryLimits {
+            records: 1,
+            content_bytes: content.len(),
+            total_content_bytes: content.len(),
+            ..MemoryLimits::PRODUCTION
+        };
+        let database = TestMemoryDatabase::default();
+        let store = database.bind_with_limits("alice".to_owned(), limits);
+        let original = record(1, 1, "old");
+        store.sync(std::slice::from_ref(&original)).await.unwrap();
+        let server = MemoryServer::new(
+            move |namespace| database.bind_with_limits(namespace, limits),
+            [credential("alice", RemoteRole::Writer, ALICE_TOKEN)],
+        )
         .unwrap();
+        let snapshot = SyncRequest {
+            memories: vec![record(2, 1, &content)],
+        };
+        let encoded_bytes = serde_json::to_vec(&snapshot).unwrap().len();
+        if content.len() > 1_024 {
+            assert!(encoded_bytes > MAX_JSON_BODY_BYTES);
+        }
+
+        let response = send(
+            &server.router(encoded_bytes - 1),
+            protocol::SYNC_PATH,
+            ALICE_TOKEN,
+            "alice",
+            &snapshot,
+        )
+        .await;
+        assert_error(
+            response,
+            StatusCode::PAYLOAD_TOO_LARGE,
+            RemoteErrorCode::BadRequest,
+        )
+        .await;
+        let retained = store.list().await.unwrap();
+        assert_eq!(retained.len(), 1);
+        assert_eq!(retained[0].content, original.content);
+
+        let response = send(
+            &server.router(encoded_bytes),
+            protocol::SYNC_PATH,
+            ALICE_TOKEN,
+            "alice",
+            &snapshot,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let stored = store.list().await.unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].key.id, 2);
+        assert_eq!(stored[0].content, content);
+    }
+}
+
+#[tokio::test]
+async fn remote_export_reduces_pages_to_fit_the_response_bound() {
+    let limits = MemoryLimits {
+        records: 128,
+        content_bytes: 70 * 1_024,
+        total_content_bytes: 128 * 70 * 1_024,
+        ..MemoryLimits::PRODUCTION
+    };
+    let memories = (1..=limits.records)
+        .map(|id| {
+            record(
+                id as i64,
+                1,
+                &format!("{id:04}{}", "x".repeat(limits.content_bytes - 4)),
+            )
+        })
+        .collect::<Vec<_>>();
+    let database = TestMemoryDatabase::default();
+    let app = MemoryServer::new(
+        move |namespace| database.bind_with_limits(namespace, limits),
+        [credential("alice", RemoteRole::Writer, ALICE_TOKEN)],
+    )
+    .unwrap()
+    .router(16 * 1_024 * 1_024);
+    let (endpoint, task) = live_server(app).await;
+    let client = RemoteMemoryClient::new(
+        &endpoint,
+        "alice".to_owned(),
+        RemoteToken::new(ALICE_TOKEN.to_owned()).unwrap(),
+    )
+    .unwrap();
+    client.sync(&memories).await.unwrap();
+    assert_eq!(
+        client.read(&[1], &[]).await.unwrap()[0].content,
+        memories[0].content
+    );
+    assert_eq!(
+        client.export_page(None, None, 64).await.unwrap().0.len(),
+        64
+    );
+
+    let exported = client.export_all(None, limits).await.unwrap();
+    assert_eq!(exported.len(), memories.len());
+    for (actual, expected) in exported.iter().zip(&memories) {
+        assert_eq!(actual.key.id, expected.key.id);
+        assert_eq!(actual.content, expected.content);
+    }
+    task.abort();
+}
+
+#[tokio::test]
+async fn configured_namespace_capacity_governs_sync_and_export() {
+    let limits = MemoryLimits {
+        records: MemoryLimits::PRODUCTION.records + 1,
+        total_content_bytes: 512 * 1_024,
+        ..MemoryLimits::PRODUCTION
+    };
     let app = memory_app_with_limits(
         vec![credential("alice", RemoteRole::Writer, ALICE_TOKEN)],
         limits,
@@ -905,6 +1029,138 @@ async fn configured_namespace_capacity_governs_sync_and_export() {
         client.sync(&oversized).await,
         Err(MemoryError::RecordCapacity { maximum }) if maximum == limits.records
     ));
+
+    task.abort();
+}
+
+#[tokio::test]
+async fn configured_record_size_governs_remote_writes_and_round_trips() {
+    let limits = MemoryLimits {
+        content_bytes: 2_048,
+        records: 2,
+        total_content_bytes: 3_072,
+        ..MemoryLimits::PRODUCTION
+    };
+    let app = memory_app_with_limits(
+        vec![credential("alice", RemoteRole::Writer, ALICE_TOKEN)],
+        limits,
+    );
+    let (endpoint, task) = live_server(app).await;
+    let client = RemoteMemoryClient::new(
+        &endpoint,
+        "alice".to_owned(),
+        RemoteToken::new(ALICE_TOKEN.to_owned()).unwrap(),
+    )
+    .unwrap();
+    let content = "x".repeat(limits.content_bytes);
+    let written = client.put(&content, None).await.unwrap();
+    assert_eq!(written.content, content);
+    assert_eq!(
+        client.read(&[written.key.id], &[]).await.unwrap()[0].content,
+        content
+    );
+    assert_eq!(client.list().await.unwrap()[0].content, content);
+    assert_eq!(
+        client.export_all(None, limits).await.unwrap()[0].content,
+        content
+    );
+
+    let snapshot = record(10, 1, &"s".repeat(limits.content_bytes));
+    let report = client.sync(std::slice::from_ref(&snapshot)).await.unwrap();
+    assert_eq!(report.inserted, 1);
+    assert_eq!(report.deleted, 1);
+    let exported = client.export_all(None, limits).await.unwrap();
+    assert_eq!(exported[0].content, snapshot.content);
+
+    let oversized = "z".repeat(limits.content_bytes + 1);
+    assert!(matches!(
+        client.put(&oversized, Some(exported[0].key.clone())).await,
+        Err(MemoryError::ContentTooLarge { maximum_bytes })
+            if maximum_bytes == limits.content_bytes
+    ));
+    assert!(matches!(
+        client.sync(&[record(20, 1, &oversized)]).await,
+        Err(MemoryError::ContentTooLarge { maximum_bytes })
+            if maximum_bytes == limits.content_bytes
+    ));
+    assert_eq!(client.export_all(None, limits).await.unwrap(), exported);
+
+    task.abort();
+}
+
+#[tokio::test]
+async fn configured_namespace_limits_reject_mutations_atomically() {
+    let limits = MemoryLimits {
+        content_bytes: 8,
+        records: 2,
+        total_content_bytes: 10,
+        ..MemoryLimits::PRODUCTION
+    };
+    let app = memory_app_with_limits(
+        vec![
+            credential("alice", RemoteRole::Writer, ALICE_TOKEN),
+            credential("bob", RemoteRole::Writer, BOB_TOKEN),
+        ],
+        limits,
+    );
+    let (endpoint, task) = live_server(app).await;
+    let alice = RemoteMemoryClient::new(
+        &endpoint,
+        "alice".to_owned(),
+        RemoteToken::new(ALICE_TOKEN.to_owned()).unwrap(),
+    )
+    .unwrap();
+    let bob = RemoteMemoryClient::new(
+        &endpoint,
+        "bob".to_owned(),
+        RemoteToken::new(BOB_TOKEN.to_owned()).unwrap(),
+    )
+    .unwrap();
+    let first = alice.put("first", None).await.unwrap();
+    alice.put("next", None).await.unwrap();
+    bob.put("other", None).await.unwrap();
+    bob.put("more", None).await.unwrap();
+    let export_limits = MemoryLimits {
+        records: limits.records * 2,
+        total_content_bytes: limits.total_content_bytes * 2,
+        ..limits
+    };
+    let before = alice.export_all(None, export_limits).await.unwrap();
+    assert_eq!(before.len(), 4);
+
+    assert!(matches!(
+        alice.put("x", None).await,
+        Err(MemoryError::RecordCapacity { maximum }) if maximum == limits.records
+    ));
+    assert!(matches!(
+        alice.put("longest", Some(first.key.clone())).await,
+        Err(MemoryError::ContentCapacity { maximum_bytes })
+            if maximum_bytes == limits.total_content_bytes
+    ));
+    assert!(matches!(
+        alice.put("oversized", Some(first.key)).await,
+        Err(MemoryError::ContentTooLarge { maximum_bytes })
+            if maximum_bytes == limits.content_bytes
+    ));
+    assert!(matches!(
+        alice.sync(&[
+            record(1, 1, "one"),
+            record(2, 1, "four"),
+            record(3, 1, "x"),
+        ]).await,
+        Err(MemoryError::RecordCapacity { maximum }) if maximum == limits.records
+    ));
+    assert!(matches!(
+        alice.sync(&[record(1, 1, "first"), record(2, 1, "second")]).await,
+        Err(MemoryError::ContentCapacity { maximum_bytes })
+            if maximum_bytes == limits.total_content_bytes
+    ));
+    assert!(matches!(
+        alice.sync(&[record(1, 1, "oversized")]).await,
+        Err(MemoryError::ContentTooLarge { maximum_bytes })
+            if maximum_bytes == limits.content_bytes
+    ));
+    assert_eq!(alice.export_all(None, export_limits).await.unwrap(), before);
 
     task.abort();
 }
@@ -1005,18 +1261,18 @@ async fn body_and_request_bounds_are_content_free_client_errors() {
         .await,
     ];
     let [query_error, content_error] = cases;
-    assert_error_with_maximum(
+    assert_error_response(
         query_error,
         StatusCode::PAYLOAD_TOO_LARGE,
         RemoteErrorCode::QueryTooLarge,
-        MemoryLimits::PRODUCTION.query_bytes,
+        Some(MemoryLimits::PRODUCTION.query_bytes),
     )
     .await;
-    assert_error_with_maximum(
+    assert_error_response(
         content_error,
         StatusCode::PAYLOAD_TOO_LARGE,
         RemoteErrorCode::ContentTooLarge,
-        MemoryLimits::PRODUCTION.content_bytes,
+        Some(MemoryLimits::PRODUCTION.content_bytes),
     )
     .await;
 
@@ -1108,15 +1364,6 @@ async fn body_and_request_bounds_are_content_free_client_errors() {
 
 async fn assert_error(response: Response<Body>, status: StatusCode, code: RemoteErrorCode) {
     assert_error_response(response, status, code, None).await;
-}
-
-async fn assert_error_with_maximum(
-    response: Response<Body>,
-    status: StatusCode,
-    code: RemoteErrorCode,
-    maximum: usize,
-) {
-    assert_error_response(response, status, code, Some(maximum)).await;
 }
 
 async fn assert_error_response(
@@ -1585,6 +1832,65 @@ async fn client_enforces_the_requested_export_page_size() {
 }
 
 #[tokio::test]
+async fn client_does_not_retry_unrecoverable_export_responses() {
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let observed = requests.clone();
+    let app = Router::new().route(
+        &format!("/{}", protocol::EXPORT_PATH),
+        post(move |Json(request): Json<ExportRequest>| {
+            let observed = observed.clone();
+            async move {
+                observed.lock().unwrap().push(request.limit);
+                if request.limit == 1 {
+                    let mut memory = record(1, 1, &"x".repeat(8 * 1_024 * 1_024));
+                    memory.key.namespace = Some("alice".to_owned());
+                    return Json(ExportResponse {
+                        memories: vec![memory],
+                        next_cursor: None,
+                    })
+                    .into_response();
+                }
+                "{".into_response()
+            }
+        }),
+    );
+    let (endpoint, task) = live_server(app).await;
+    let client = RemoteMemoryClient::new(
+        &endpoint,
+        "alice".to_owned(),
+        RemoteToken::new(ALICE_TOKEN.to_owned()).unwrap(),
+    )
+    .unwrap();
+
+    let error = client.export_page(None, None, 1).await.unwrap_err();
+    let MemoryError::Backend { source } = error else {
+        panic!("expected backend error, got {error:?}");
+    };
+    assert!(matches!(
+        source.downcast_ref::<RemoteClientError>(),
+        Some(RemoteClientError::ResponseTooLarge)
+    ));
+    assert_eq!(*requests.lock().unwrap(), [1]);
+
+    let error = client
+        .export_page(None, None, protocol::MAX_EXPORT_PAGE_RECORDS)
+        .await
+        .unwrap_err();
+    let MemoryError::Backend { source } = error else {
+        panic!("expected backend error, got {error:?}");
+    };
+    assert!(matches!(
+        source.downcast_ref::<RemoteClientError>(),
+        Some(RemoteClientError::InvalidResponse)
+    ));
+    assert_eq!(
+        *requests.lock().unwrap(),
+        [1, protocol::MAX_EXPORT_PAGE_RECORDS]
+    );
+    task.abort();
+}
+
+#[tokio::test]
 async fn client_rejects_sync_reports_that_do_not_match_the_snapshot() {
     let app = Router::new().route(
         &format!("/{}", protocol::SYNC_PATH),
@@ -1853,7 +2159,7 @@ async fn generic_async_store_implementors_plug_into_the_public_server() {
         [credential("alice", RemoteRole::Writer, ALICE_TOKEN)],
     )
     .unwrap()
-    .router();
+    .router(MAX_JSON_BODY_BYTES);
 
     let mismatch = send(
         &app,
@@ -1915,7 +2221,7 @@ async fn router_limits_store_operations_to_64_in_flight() {
         [credential("alice", RemoteRole::Reader, ALICE_TOKEN)],
     )
     .unwrap()
-    .router();
+    .router(MAX_JSON_BODY_BYTES);
 
     let mut requests = tokio::task::JoinSet::new();
     for _ in 0..65 {

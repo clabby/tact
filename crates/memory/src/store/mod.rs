@@ -85,7 +85,7 @@ pub trait MemoryStore: Clone + Send + Sync + 'static {
     ) -> impl Future<Output = Result<(Vec<MemoryRecord>, Option<ExportCursor>), MemoryError>> + Send;
 
     /// Collects a complete export through the paginated storage contract within caller-provided
-    /// record and content bounds.
+    /// record-count, per-record, and aggregate-content bounds.
     ///
     /// The collector rejects non-progressing cursors and stops before retaining more records or
     /// content than `limits` permits.
@@ -111,10 +111,17 @@ pub trait MemoryStore: Clone + Send + Sync + 'static {
                     .checked_add(page.len())
                     .ok_or(MemoryError::InvalidPagination)?;
                 let page_bytes = page.iter().try_fold(0usize, |total, record| {
-                    total.checked_add(record.content.len())
-                });
+                    if record.content.len() > limits.content_bytes {
+                        return Err(MemoryError::ContentTooLarge {
+                            maximum_bytes: limits.content_bytes,
+                        });
+                    }
+                    total
+                        .checked_add(record.content.len())
+                        .ok_or(MemoryError::InvalidPagination)
+                })?;
                 content_bytes = content_bytes
-                    .checked_add(page_bytes.ok_or(MemoryError::InvalidPagination)?)
+                    .checked_add(page_bytes)
                     .ok_or(MemoryError::InvalidPagination)?;
                 if next_record_count > limits.records {
                     return Err(MemoryError::RecordCapacity {

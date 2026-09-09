@@ -507,13 +507,6 @@ impl LocalMemoryStore {
         connection
             .pragma_update(None, "page_size", DATABASE_PAGE_SIZE_BYTES as i64)
             .map_err(sqlite_error)?;
-        let page_size = connection
-            .query_row("PRAGMA page_size", [], |row| row.get::<_, i64>(0))
-            .map_err(sqlite_error)? as usize;
-        let maximum_pages = self.limits.database_bytes.div_ceil(page_size).max(1);
-        connection
-            .pragma_update(None, "max_page_count", maximum_pages as i64)
-            .map_err(sqlite_error)?;
         // The allocator table is a backward-compatible schema-v1 extension. Older builds ignore
         // it; current builds retain identity history even when every memory row is deleted.
         let transaction = connection

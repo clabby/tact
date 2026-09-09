@@ -17,8 +17,6 @@ mod router;
 
 #[cfg(feature = "server")]
 pub use credential::{Credential, CredentialError};
-#[cfg(test)]
-pub(crate) use router::MAX_JSON_BODY_BYTES;
 #[cfg(feature = "server")]
 pub use router::{MemoryServer, ServerBuildError};
 

@@ -175,9 +175,17 @@ pub(crate) struct SkillsConfig {
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct MemoryConfig {
     enabled: bool,
-    max_records: usize,
+    local: LocalMemoryConfig,
     #[serde(serialize_with = "serialize_remote_memory_config")]
     remote: Option<RemoteMemoryConfig>,
+}
+
+/// Effective local memory configuration.
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct LocalMemoryConfig {
+    max_records: usize,
+    max_record_bytes: usize,
+    max_total_bytes: usize,
 }
 
 /// Effective remote memory configuration.
@@ -250,8 +258,16 @@ struct SkillsConfigFile {
 #[serde(default, deny_unknown_fields)]
 struct MemoryConfigFile {
     enabled: bool,
-    max_records: Option<NonZeroUsize>,
+    local: LocalMemoryConfigFile,
     remote: RemoteMemoryConfigFile,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct LocalMemoryConfigFile {
+    max_records: Option<NonZeroUsize>,
+    max_record_bytes: Option<NonZeroUsize>,
+    max_total_bytes: Option<NonZeroUsize>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -403,7 +419,7 @@ impl Config {
             })
             .collect::<Result<BTreeMap<_, _>>>()?;
         let skills = SkillsConfig::new(file.skills, config_dir, &environment);
-        let memory = MemoryConfig::new(file.memory, config_dir)?;
+        let memory = MemoryConfig::new(file.memory, config_dir).map_err(ConfigError::from)?;
         let codex_home = environment
             .codex_home
             .clone()
@@ -1062,16 +1078,13 @@ impl SkillsConfig {
 }
 
 impl MemoryConfig {
-    fn new(file: MemoryConfigFile, config_dir: &Path) -> std::result::Result<Self, ConfigError> {
-        let max_records = file
-            .max_records
-            .map_or(MemoryLimits::PRODUCTION.records, NonZeroUsize::get);
-        MemoryLimits::PRODUCTION
-            .try_with_record_capacity(max_records)
-            .ok_or(ConfigError::MemoryRecordCapacityTooLarge)?;
+    fn new(
+        file: MemoryConfigFile,
+        config_dir: &Path,
+    ) -> std::result::Result<Self, RemoteMemoryConfigError> {
         Ok(Self {
             enabled: file.enabled,
-            max_records,
+            local: LocalMemoryConfig::new(file.local),
             remote: RemoteMemoryConfig::new(file.remote, config_dir)?,
         })
     }
@@ -1080,11 +1093,8 @@ impl MemoryConfig {
         self.enabled
     }
 
-    /// Returns local limits with aggregate content derived from the configured record count.
-    pub(crate) fn limits(&self) -> MemoryLimits {
-        MemoryLimits::PRODUCTION
-            .try_with_record_capacity(self.max_records)
-            .expect("memory record capacity is validated during configuration loading")
+    pub(crate) const fn local(&self) -> &LocalMemoryConfig {
+        &self.local
     }
 
     pub(crate) const fn remote(&self) -> Option<&RemoteMemoryConfig> {
@@ -1092,12 +1102,28 @@ impl MemoryConfig {
     }
 }
 
-impl Default for MemoryConfig {
-    fn default() -> Self {
+impl LocalMemoryConfig {
+    fn new(file: LocalMemoryConfigFile) -> Self {
         Self {
-            enabled: false,
-            max_records: MemoryLimits::PRODUCTION.records,
-            remote: None,
+            max_records: file
+                .max_records
+                .map_or(MemoryLimits::PRODUCTION.records, NonZeroUsize::get),
+            max_record_bytes: file
+                .max_record_bytes
+                .map_or(MemoryLimits::PRODUCTION.content_bytes, NonZeroUsize::get),
+            max_total_bytes: file.max_total_bytes.map_or(
+                MemoryLimits::PRODUCTION.total_content_bytes,
+                NonZeroUsize::get,
+            ),
+        }
+    }
+
+    pub(crate) const fn limits(&self) -> MemoryLimits {
+        MemoryLimits {
+            records: self.max_records,
+            content_bytes: self.max_record_bytes,
+            total_content_bytes: self.max_total_bytes,
+            ..MemoryLimits::PRODUCTION
         }
     }
 }
@@ -1593,7 +1619,11 @@ mod tests {
         );
         assert_table_fields(&rendered["mcp_servers"], &[]);
         assert_table_fields(&rendered["skills"], &["enabled", "roots"]);
-        assert_table_fields(&rendered["memory"], &["enabled", "max_records", "remote"]);
+        assert_table_fields(&rendered["memory"], &["enabled", "local", "remote"]);
+        assert_table_fields(
+            &rendered["memory"]["local"],
+            &["max_records", "max_record_bytes", "max_total_bytes"],
+        );
         assert_table_fields(
             &rendered["memory"]["remote"],
             &["endpoint", "namespace", "bearer_token", "workspace_roots"],
@@ -1644,8 +1674,16 @@ mod tests {
         assert_eq!(rendered["theme"]["mode"].as_str(), Some("auto"));
         assert_eq!(rendered["theme"]["dark"]["accent"].as_str(), Some("blue"));
         assert_eq!(
-            rendered["memory"]["max_records"].as_integer(),
+            rendered["memory"]["local"]["max_records"].as_integer(),
             Some(MemoryLimits::PRODUCTION.records as i64)
+        );
+        assert_eq!(
+            rendered["memory"]["local"]["max_record_bytes"].as_integer(),
+            Some(MemoryLimits::PRODUCTION.content_bytes as i64)
+        );
+        assert_eq!(
+            rendered["memory"]["local"]["max_total_bytes"].as_integer(),
+            Some(MemoryLimits::PRODUCTION.total_content_bytes as i64)
         );
         assert_eq!(rendered["memory"]["remote"]["endpoint"].as_str(), Some(""));
         assert_eq!(rendered["memory"]["remote"]["namespace"].as_str(), Some(""));
@@ -1696,13 +1734,7 @@ mod tests {
         .unwrap();
 
         assert!(!config.memory().enabled());
-        let limits = config.memory().limits();
-        assert_eq!(limits.records, MemoryLimits::PRODUCTION.records);
-        assert_eq!(limits.content_bytes, MemoryLimits::PRODUCTION.content_bytes);
-        assert_eq!(
-            limits.total_content_bytes,
-            limits.records * limits.content_bytes
-        );
+        assert_eq!(config.memory().local().limits(), MemoryLimits::PRODUCTION);
 
         let rendered: toml::Value = toml::from_str(&config.to_toml().unwrap()).unwrap();
         assert_eq!(rendered["memory"]["enabled"].as_bool(), Some(false));
@@ -1734,42 +1766,80 @@ mod tests {
     }
 
     #[test]
-    fn local_memory_record_capacity_can_be_configured_and_rendered() {
-        let config = load_config("[memory]\nmax_records = 1024\n").unwrap();
+    fn local_memory_limits_can_be_configured_and_rendered() {
+        let config = load_config(
+            "[memory.local]\nmax_records = 1024\nmax_record_bytes = 2048\nmax_total_bytes = 65536\n",
+        )
+        .unwrap();
 
-        let limits = config.memory().limits();
+        let limits = config.memory().local().limits();
         assert_eq!(limits.records, 1_024);
-        assert_eq!(limits.total_content_bytes, 1_048_576);
-        assert_eq!(limits.content_bytes, MemoryLimits::PRODUCTION.content_bytes);
+        assert_eq!(limits.content_bytes, 2_048);
+        assert_eq!(limits.total_content_bytes, 65_536);
 
         let rendered_toml = config.to_toml().unwrap();
         let rendered: toml::Value = toml::from_str(&rendered_toml).unwrap();
-        assert_eq!(rendered["memory"]["max_records"].as_integer(), Some(1_024));
         assert_eq!(
-            load_config(&rendered_toml).unwrap().memory().limits(),
+            rendered["memory"]["local"]["max_records"].as_integer(),
+            Some(1_024)
+        );
+        assert_eq!(
+            rendered["memory"]["local"]["max_record_bytes"].as_integer(),
+            Some(2_048)
+        );
+        assert_eq!(
+            rendered["memory"]["local"]["max_total_bytes"].as_integer(),
+            Some(65_536)
+        );
+        assert_eq!(
+            load_config(&rendered_toml)
+                .unwrap()
+                .memory()
+                .local()
+                .limits(),
             limits
         );
     }
 
     #[test]
-    fn local_memory_record_capacity_must_be_positive() {
-        let error = load_config("[memory]\nmax_records = 0\n").unwrap_err();
-
-        assert!(matches!(error, Error::Config(ConfigError::Parse { .. })));
+    fn local_memory_limits_default_independently() {
+        for (field, expected) in [
+            (
+                "max_records",
+                MemoryLimits {
+                    records: 7,
+                    ..MemoryLimits::PRODUCTION
+                },
+            ),
+            (
+                "max_record_bytes",
+                MemoryLimits {
+                    content_bytes: 7,
+                    ..MemoryLimits::PRODUCTION
+                },
+            ),
+            (
+                "max_total_bytes",
+                MemoryLimits {
+                    total_content_bytes: 7,
+                    ..MemoryLimits::PRODUCTION
+                },
+            ),
+        ] {
+            let config = load_config(&format!("[memory.local]\n{field} = 7\n")).unwrap();
+            assert_eq!(config.memory().local().limits(), expected, "{field}");
+        }
     }
 
     #[test]
-    fn local_memory_record_capacity_must_fit_aggregate_accounting() {
-        let first_overflowing_count = usize::MAX / MemoryLimits::PRODUCTION.content_bytes + 1;
-        let error = load_config(&format!(
-            "[memory]\nmax_records = {first_overflowing_count}\n"
-        ))
-        .unwrap_err();
-
-        assert!(matches!(
-            error,
-            Error::Config(ConfigError::MemoryRecordCapacityTooLarge)
-        ));
+    fn local_memory_limits_must_be_positive() {
+        for field in ["max_records", "max_record_bytes", "max_total_bytes"] {
+            let error = load_config(&format!("[memory.local]\n{field} = 0\n")).unwrap_err();
+            assert!(
+                matches!(error, Error::Config(ConfigError::Parse { .. })),
+                "{field}"
+            );
+        }
     }
 
     #[test]
