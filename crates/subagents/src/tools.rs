@@ -7,7 +7,7 @@ use super::{
     runtime::{AgentDirectoryEntry, AgentSummary, OutputContract, Registry, forward_events},
 };
 use nanocodex::{
-    Model, Tool,
+    Model, Thinking, Tool,
     tools::{
         ToolsBuilder,
         contract::{ToolContext, ToolDefinition, ToolInput, ToolOutput, ToolResult, async_trait},
@@ -36,6 +36,7 @@ struct AgentTask {
     role: String,
     task: String,
     model: SubagentModel,
+    thinking: Thinking,
     output_schema: Value,
 }
 
@@ -162,11 +163,16 @@ impl Tool for SpawnAgent {
                         "enum": models,
                         "description": model_description
                     },
+                    "thinking": {
+                        "type": "string",
+                        "enum": ["low", "medium", "high", "xhigh", "max"],
+                        "description": "Reasoning effort for this child, at or below the configured agent.thinking cap. Use lower effort for straightforward tasks and higher effort for demanding reasoning."
+                    },
                     "output_schema": {
                         "description": "The JSON Schema that every successful result from this agent must satisfy. Use an object with one string field for a free-form report."
                     }
                 },
-                "required": ["role", "task", "model", "output_schema"],
+                "required": ["role", "task", "model", "thinking", "output_schema"],
                 "additionalProperties": false
             }),
         )
@@ -178,6 +184,7 @@ impl Tool for SpawnAgent {
             role,
             task,
             model,
+            thinking,
             output_schema,
         } = input.decode_json()?;
         let model = model.resolve(self.selected_model, self.allow_luna)?;
@@ -189,7 +196,7 @@ impl Tool for SpawnAgent {
         let capacity = registry.reserve_turn()?;
         let reservation = registry.reserve(context.session_id()).await?;
         let id = reservation.id;
-        let (child, events) = registry.spawn_agent(model)?;
+        let (child, events) = registry.spawn_agent(model, thinking)?;
         let session_id = child.session_id().to_string();
         let descriptor = AgentDescriptor {
             id,
@@ -654,9 +661,13 @@ fn agent_status_schema() -> Value {
 mod tests {
     use super::{SendAgentMessage, SpawnAgent, SubagentModel, SubmitResult, WaitAgent};
     use crate::runtime::Registry;
-    use nanocodex::{Model, Tool};
-    use serde_json::json;
-    use std::sync::Weak;
+    use nanocodex::{
+        Model, NanocodexError, Thinking, Tool,
+        tools::contract::{ToolContext, ToolInput},
+    };
+    use serde_json::{json, value::to_raw_value};
+    use std::sync::{Arc, Weak};
+    use tokio::sync::mpsc;
 
     #[test]
     fn spawn_agent_requires_an_explicit_bounded_model_choice() {
@@ -716,6 +727,85 @@ mod tests {
                 .to_string()
                 .contains("subagents.allow_luna")
         );
+    }
+
+    #[tokio::test]
+    async fn spawn_agent_applies_thinking_per_child() {
+        let (updates, _receiver) = mpsc::unbounded_channel();
+        let registry = Arc::new(Registry::new(updates, 1));
+        let (captured, mut arguments) = mpsc::unbounded_channel();
+        registry
+            .set_agent_factory(Thinking::Max, false, move |model, thinking, fast_mode| {
+                captured.send((model, thinking, fast_mode)).unwrap();
+                Err(NanocodexError::InvalidRequest(
+                    "stop after capture".to_owned(),
+                ))
+            })
+            .unwrap();
+        let tool = SpawnAgent {
+            registry: Arc::downgrade(&registry),
+            selected_model: Model::Astra,
+            allow_luna: false,
+        };
+        let definition = tool.definition();
+        let validator =
+            jsonschema::validator_for(definition.parameters().unwrap().as_value()).unwrap();
+
+        for (thinking, expected) in [
+            ("low", Thinking::Low),
+            ("high", Thinking::High),
+            ("max", Thinking::Max),
+            ("low", Thinking::Low),
+        ] {
+            let input = json!({
+                "role": "reviewer",
+                "task": "Review a focused change.",
+                "model": "selected",
+                "thinking": thinking,
+                "output_schema": { "type": "object" }
+            });
+            assert!(validator.is_valid(&input));
+            let error = tool
+                .execute(
+                    ToolInput::Function(to_raw_value(&input).unwrap()),
+                    ToolContext::new("astra", "root", "spawn", &[], 128),
+                )
+                .await
+                .err()
+                .expect("factory should stop after capture");
+            assert!(error.to_string().contains("stop after capture"));
+            assert_eq!(
+                arguments.try_recv().unwrap(),
+                (Model::Astra, expected, false)
+            );
+        }
+
+        for thinking in [
+            None,
+            Some(json!(null)),
+            Some(json!("none")),
+            Some(json!("ultra")),
+        ] {
+            let mut input = json!({
+                "role": "reviewer",
+                "task": "Review a focused change.",
+                "model": "selected",
+                "output_schema": { "type": "object" }
+            });
+            if let Some(thinking) = thinking {
+                input["thinking"] = thinking;
+            }
+            assert!(!validator.is_valid(&input));
+            assert!(
+                tool.execute(
+                    ToolInput::Function(to_raw_value(&input).unwrap()),
+                    ToolContext::new("astra", "root", "spawn", &[], 128),
+                )
+                .await
+                .is_err()
+            );
+            assert!(arguments.try_recv().is_err());
+        }
     }
 
     #[test]

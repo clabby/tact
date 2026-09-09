@@ -1100,7 +1100,7 @@ pub(crate) async fn run(
                             schedule(app.update(AppEvent::Transcript { pane, record }), &mut scheduler);
                         }
                         runtime.current_effort = effort;
-                        runtime.subagent_control.set_thinking(effort.into());
+                        runtime.subagent_control.set_max_thinking(effort.into());
                         if app.main_pane() == Some(pane) {
                             config.set_thinking(effort);
                         }
