@@ -75,7 +75,6 @@ fn tiny_limits() -> MemoryLimits {
         content_bytes: 32,
         records: 4,
         total_content_bytes: 64,
-        database_bytes: 4 * 1_024 * 1_024,
         scan_results: 2,
         query_bytes: 16,
         probation_duration_ms: 10,
@@ -139,6 +138,13 @@ async fn export_collector_honors_explicit_capacity() {
         Err(MemoryError::ContentCapacity { maximum_bytes: 8 })
     ));
 
+    export_limits.total_content_bytes = store_limits.total_content_bytes;
+    export_limits.content_bytes = 4;
+    assert!(matches!(
+        store.export_all(None, export_limits).await,
+        Err(MemoryError::ContentTooLarge { maximum_bytes: 4 })
+    ));
+
     let exported = store.export_all(None, store_limits).await.unwrap();
     assert_eq!(exported.len(), 3);
 }
@@ -146,9 +152,11 @@ async fn export_collector_honors_explicit_capacity() {
 #[tokio::test]
 async fn explicit_record_capacity_can_exceed_production_defaults() {
     let directory = tempfile::tempdir().unwrap();
-    let limits = MemoryLimits::PRODUCTION
-        .try_with_record_capacity(MemoryLimits::PRODUCTION.records + 1)
-        .unwrap();
+    let limits = MemoryLimits {
+        records: MemoryLimits::PRODUCTION.records + 1,
+        total_content_bytes: 512 * 1_024,
+        ..MemoryLimits::PRODUCTION
+    };
     let records = (1..=limits.records)
         .map(|id| {
             let id = i64::try_from(id).unwrap();
@@ -213,6 +221,35 @@ fn enforces_exact_ascii_and_unicode_byte_bounds() {
         store.scan("ééééé", 1, 0),
         Err(MemoryError::QueryTooLarge { maximum_bytes: 8 })
     ));
+}
+
+#[tokio::test]
+async fn configured_content_capacity_can_exceed_four_mebibytes() {
+    let directory = tempfile::tempdir().unwrap();
+    let limits = MemoryLimits {
+        records: 4,
+        content_bytes: 3 * 1_024 * 1_024,
+        total_content_bytes: 5 * 1_024 * 1_024,
+        ..MemoryLimits::PRODUCTION
+    };
+    let path = directory.path().join("memory.sqlite3");
+    let store = ProductionMemoryStore::new(&path, limits);
+    let first = store
+        .put(&"a".repeat(limits.content_bytes), None)
+        .await
+        .unwrap();
+    let second = store
+        .put(&"b".repeat(2 * 1_024 * 1_024), None)
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        store.put("one more byte", None).await,
+        Err(MemoryError::ContentCapacity { maximum_bytes })
+            if maximum_bytes == limits.total_content_bytes
+    ));
+    let reopened = ProductionMemoryStore::new(path, limits);
+    assert_eq!(reopened.list().await.unwrap(), [first, second]);
 }
 
 #[test]
@@ -480,7 +517,7 @@ fn suppresses_unsafe_legacy_rows_but_keeps_them_deletable() {
 }
 
 #[test]
-fn database_uses_delete_journaling_and_the_page_limit() {
+fn database_uses_delete_journaling() {
     let (_directory, store) = store();
     store.put("integrity", None, 0).unwrap();
     let connection = store.open().unwrap();
@@ -491,16 +528,12 @@ fn database_uses_delete_journaling_and_the_page_limit() {
     let page_size: i64 = connection
         .query_row("PRAGMA page_size", [], |row| row.get(0))
         .unwrap();
-    let maximum_pages: i64 = connection
-        .query_row("PRAGMA max_page_count", [], |row| row.get(0))
-        .unwrap();
     let integrity: String = connection
         .query_row("PRAGMA integrity_check", [], |row| row.get(0))
         .unwrap();
 
     assert_eq!(journal_mode, "delete");
     assert_eq!(page_size, 4 * 1_024);
-    assert_eq!(maximum_pages * page_size, 4 * 1_024 * 1_024);
     assert_eq!(integrity, "ok");
 }
 

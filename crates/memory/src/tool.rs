@@ -258,7 +258,7 @@ fn memory_input_schema() -> Value {
                 "type": "object",
                 "properties": {
                     "operation": { "type": "string", "const": "put" },
-                    "content": { "type": "string", "minLength": 1, "maxLength": 1024 },
+                    "content": { "type": "string", "minLength": 1, "description": "Self-contained memory within the store's configured UTF-8 byte limit." },
                     "replace": memory_key_schema()
                 },
                 "required": ["operation", "content"],
@@ -663,5 +663,46 @@ mod tests {
             "memory content was rejected as a likely secret"
         );
         assert!(store.list().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn tool_accepts_records_above_the_default_size() {
+        let directory = tempdir().unwrap();
+        let limits = MemoryLimits {
+            content_bytes: 2_048,
+            ..MemoryLimits::PRODUCTION
+        };
+        let store = SelectedMemoryStore::local(directory.path().join("memory.sqlite3"), limits);
+        let tool = MemoryTool::new(store.clone(), TestAuthorizer);
+        let content = "é".repeat(limits.content_bytes / 2);
+        let definition = tool.definition();
+        let put_schema = definition.parameters().unwrap().as_value()["oneOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|operation| operation["properties"]["operation"]["const"] == json!("put"))
+            .unwrap();
+        assert!(
+            put_schema["properties"]["content"]
+                .get("maxLength")
+                .is_none()
+        );
+
+        tool.execute(
+            input(json!({ "operation": "scan", "query": "durable preference" })),
+            context("root"),
+        )
+        .await
+        .unwrap();
+        assert!(
+            tool.execute(
+                input(json!({ "operation": "put", "content": content })),
+                context("root"),
+            )
+            .await
+            .unwrap()
+            .success
+        );
+        assert_eq!(store.list().await.unwrap()[0].content, content);
     }
 }

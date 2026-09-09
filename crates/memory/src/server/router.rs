@@ -30,9 +30,6 @@ use tower::limit::ConcurrencyLimitLayer;
 use tracing::info;
 use web_time::Instant;
 
-/// Covers worst-case JSON escaping for a full local corpus while bounding allocation.
-pub(crate) const MAX_JSON_BODY_BYTES: usize = 2 * 1024 * 1024;
-
 #[cfg(feature = "native-server")]
 const MAX_IN_FLIGHT_REQUESTS: usize = 64;
 #[cfg(feature = "native-server")]
@@ -93,9 +90,10 @@ impl<S: MemoryStore> MemoryServer<S> {
 
     /// Constructs an Axum router sharing this server's credentials and namespace factory.
     ///
-    /// Each router enforces a two-MiB JSON body limit. The `native-server` feature additionally
-    /// limits the process to 64 in-flight requests and applies a 30-second store timeout.
-    pub fn router(&self) -> Router {
+    /// `max_request_bytes` bounds each encoded JSON request independently of storage capacity.
+    /// The `native-server` feature additionally limits the process to 64 in-flight requests and
+    /// applies a 30-second store timeout.
+    pub fn router(&self, max_request_bytes: usize) -> Router {
         let router = Router::new()
             .route(&route(protocol::SESSION_PATH), get(session))
             .route(&route(protocol::SCAN_PATH), post(scan))
@@ -105,7 +103,7 @@ impl<S: MemoryStore> MemoryServer<S> {
             .route(&route(protocol::DELETE_PATH), post(delete))
             .route(&route(protocol::SYNC_PATH), post(sync))
             .route(&route(protocol::EXPORT_PATH), post(export))
-            .layer(DefaultBodyLimit::max(MAX_JSON_BODY_BYTES));
+            .layer(DefaultBodyLimit::max(max_request_bytes));
         #[cfg(feature = "native-server")]
         let router = router.layer(ConcurrencyLimitLayer::new(MAX_IN_FLIGHT_REQUESTS));
         router.with_state(self.state.clone())
@@ -261,14 +259,6 @@ async fn put<S: MemoryStore>(
     let counts = OperationCounts::input(1);
     if request.content.trim().is_empty() {
         return operation.error_response(ApiError::bad_request(), counts);
-    }
-    if request.content.len() > MemoryLimits::PRODUCTION.content_bytes {
-        return operation.error_response(
-            ApiError::from(MemoryError::ContentTooLarge {
-                maximum_bytes: MemoryLimits::PRODUCTION.content_bytes,
-            }),
-            counts,
-        );
     }
     if request.replacement.as_ref().is_some_and(|key| {
         !valid_key(key) || key.namespace.as_deref() != Some(principal.namespace.as_str())
@@ -484,7 +474,6 @@ fn valid_snapshot(memories: &[MemoryRecord]) -> bool {
             && valid_key(&memory.key)
             && ids.insert(memory.key.id)
             && !memory.content.trim().is_empty()
-            && memory.content.len() <= MemoryLimits::PRODUCTION.content_bytes
             && memory.created_at_ms >= 0
             && memory.updated_at_ms >= memory.created_at_ms
     })

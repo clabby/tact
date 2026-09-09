@@ -97,6 +97,9 @@ pub enum RemoteClientError {
     /// Response violated bounds, ordering, or ownership constraints.
     #[error("remote memory server returned an invalid response")]
     InvalidResponse,
+    /// Encoded response exceeds the client transport bound.
+    #[error("remote memory response exceeds {MAX_RESPONSE_BYTES} bytes")]
+    ResponseTooLarge,
     /// Service remained unavailable after bounded retries.
     #[error("remote memory service is unavailable")]
     Unavailable,
@@ -442,7 +445,6 @@ impl RemoteMemoryClient {
         Self::valid_key(&memory.key)
             && memory.key.namespace.is_some()
             && !memory.content.trim().is_empty()
-            && memory.content.len() <= MemoryLimits::PRODUCTION.content_bytes
             && memory.created_at_ms >= 0
             && memory.updated_at_ms >= memory.created_at_ms
             && !crate::secrets::contains_likely_secret(&memory.content)
@@ -589,18 +591,26 @@ impl MemoryStore for RemoteMemoryClient {
         let namespaces = namespaces.map(<[String]>::to_vec);
         let cursor = cursor.cloned();
         async move {
-            let limit = limit.clamp(1, protocol::MAX_EXPORT_PAGE_RECORDS);
-            let response: ExportResponse = self
-                .post(
-                    protocol::EXPORT_PATH,
-                    &ExportRequest {
-                        namespaces: namespaces.clone(),
-                        cursor: cursor.clone(),
-                        limit,
-                    },
-                    Replay::Safe,
-                )
-                .await?;
+            let mut limit = limit.clamp(1, protocol::MAX_EXPORT_PAGE_RECORDS);
+            let response: ExportResponse = loop {
+                match self
+                    .post(
+                        protocol::EXPORT_PATH,
+                        &ExportRequest {
+                            namespaces: namespaces.clone(),
+                            cursor: cursor.clone(),
+                            limit,
+                        },
+                        Replay::Safe,
+                    )
+                    .await
+                {
+                    Ok(response) => break response,
+                    // Large records may require smaller pages within the same response bound
+                    Err(RemoteClientError::ResponseTooLarge) if limit > 1 => limit /= 2,
+                    Err(error) => return Err(error.into()),
+                }
+            };
             if response.memories.len() > limit {
                 return Err(RemoteClientError::InvalidResponse.into());
             }
@@ -696,7 +706,7 @@ where
         .map_err(|_| RemoteClientError::InvalidResponse)?
     {
         if bytes.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
-            return Err(RemoteClientError::InvalidResponse);
+            return Err(RemoteClientError::ResponseTooLarge);
         }
         bytes.extend_from_slice(&chunk);
     }

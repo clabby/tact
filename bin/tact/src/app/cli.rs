@@ -527,7 +527,7 @@ async fn push_memories(config: &Config, dry_run: bool) -> Result<()> {
         .remote()
         .ok_or(MemoryTransferError::RemoteNotConfigured)?;
 
-    let limits = config.memory().limits();
+    let limits = config.memory().local().limits();
     let store = SelectedMemoryStore::local(config.memory_path(), limits);
     let mut memories = export_memories(store.clone(), limits).await?;
     let content_bytes = memories
@@ -593,11 +593,11 @@ async fn pull_memories(config: &Config, all: bool, namespaces: Vec<String>) -> R
     client.session().await.map_err(MemoryTransferError::Pull)?;
     let selection = (!all).then_some(namespaces.as_slice());
     let memories = SelectedMemoryStore::remote(client)
-        .export_all(selection, config.memory().limits())
+        .export_all(selection, config.memory().local().limits())
         .await
         .map_err(MemoryTransferError::PullStore)?;
     let fetched = memories.len();
-    let report = LocalMemoryStore::new(config.memory_path(), config.memory().limits())
+    let report = LocalMemoryStore::new(config.memory_path(), config.memory().local().limits())
         .merge_remote_export(memories)
         .await
         .map_err(MemoryTransferError::Merge)?;
@@ -1303,7 +1303,7 @@ mod tests {
             ..ConfigOverrides::default()
         })
         .unwrap();
-        LocalMemoryStore::new(config.memory_path(), config.memory().limits())
+        LocalMemoryStore::new(config.memory_path(), config.memory().local().limits())
             .put("before sync", None)
             .await
             .unwrap();
@@ -1311,7 +1311,7 @@ mod tests {
         let sync_config = config.clone();
         let sync_task = tokio::spawn(async move { push_memories(&sync_config, false).await });
         state.first_snapshot.notified().await;
-        LocalMemoryStore::new(config.memory_path(), config.memory().limits())
+        LocalMemoryStore::new(config.memory_path(), config.memory().local().limits())
             .put("concurrent write", None)
             .await
             .unwrap();

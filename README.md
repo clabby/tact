@@ -157,7 +157,11 @@ roots = []
 
 [memory]
 enabled = false
+
+[memory.local]
 max_records = 512
+max_record_bytes = 1024
+max_total_bytes = 262144
 
 [subagents]
 enabled = true
@@ -288,11 +292,12 @@ enabled = true
 ```
 
 Local memory is global to the selected Tact configuration, not scoped to a workspace. Tact stores it
-in `memory/v1.sqlite3` beside the selected `config.toml`. Its default capacity is 512 records. Set
-`memory.max_records` to a positive integer to change that local limit. Each record remains limited
-to 1 KiB, so no separate aggregate-content setting is needed. The record limit also bounds the local
-snapshots used by explicit push and pull commands; remote namespace capacity remains owned by the
-remote service.
+in `memory/v1.sqlite3` beside the selected `config.toml`. Set `memory.local.max_records`,
+`memory.local.max_record_bytes`, and `memory.local.max_total_bytes` to positive integers to
+independently limit the record count, UTF-8 content bytes per record, and total content bytes. The
+defaults are 512 records, 1 KiB per record, and 256 KiB total. These limits also apply to local
+snapshots used by explicit push and pull commands. Remote limits are configured by the service.
+The Cloudflare example applies the same three limits separately to each namespace.
 
 Agents access the selected local or remote backend only through explicit memory tool calls, and the
 corpus is never inserted into prompts automatically. For later user messages and in-flight steers,

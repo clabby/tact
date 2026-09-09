@@ -14,7 +14,7 @@ use axum::{
     http::{HeaderValue, StatusCode},
     response::IntoResponse,
 };
-use config::{memory_limits, scan_budget};
+use config::{max_request_bytes, memory_limits, scan_budget};
 use std::sync::{Arc, Once};
 use store::CloudflareMemoryStore;
 use tact_memory::server::{
@@ -64,6 +64,7 @@ pub async fn fetch(
     let document = Zeroizing::new(environment.secret(CREDENTIALS_SECRET)?.to_string());
     let credentials = parse_credentials(document).map_err(worker_error)?;
     let memory_limits = memory_limits(&environment).map_err(worker_error)?;
+    let max_request_bytes = max_request_bytes(&environment).map_err(worker_error)?;
     let scan_budget = scan_budget(&environment).map_err(worker_error)?;
     let store_session = Arc::clone(&session);
     let server = MemoryServer::new(
@@ -79,7 +80,7 @@ pub async fn fetch(
     )
     .map_err(worker_error)?;
     let mut response = server
-        .router()
+        .router(max_request_bytes)
         .oneshot(request.map(Body::new))
         .await
         .map_err(worker_error)?;
