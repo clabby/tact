@@ -37,7 +37,7 @@ image = { version = "0.25.10", default-features = false, features = ["bmp", "dds
 jsonschema = { version = "0.48.5", default-features = false }
 miette = { version = "7.6.0", features = ["fancy"] }
 minisign-verify = "0.2.5"
-nanocodex = { git = "https://github.com/gakonst/nanocodex", rev = "371ed9adf40271f9efa477b6a8a27381d0e2d8e3" }
+nanocodex = { git = "https://github.com/gakonst/nanocodex", rev = "4be96acd90455fb2fad60b11f9a15968d0664274" }
 png = "0.18.1"
 pulldown-cmark = { version = "0.13.4", default-features = false }
 ratatui = "0.30.2"
