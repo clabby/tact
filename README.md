@@ -102,14 +102,15 @@ For scripts and integrations, `tact run` submits one prompt and streams Nanocode
 tact run "inspect the workspace"
 ```
 
-Choose the model for a newly started agent without changing configuration:
+Override the configured model for a newly started agent:
 
 ```sh
 tact --model terra
 tact --model luna run "inspect the workspace"
 ```
 
-`--model` accepts `sol`, `terra`, or `luna`; `TACT_MODEL` provides the same per-launch setting.
+`--model` accepts `sol`, `terra`, `luna`, or `astra`; `TACT_MODEL` provides the same per-launch
+override.
 Resumed sessions continue with the model recorded when they were created.
 
 ## Configuration
@@ -135,7 +136,8 @@ file = "/path/to/.codex/auth.json"
 
 [agent]
 workspace = "/path/to/workspace"
-thinking = "medium" # low, medium, high, xhigh, or max
+model = "astra" # sol, terra, luna, or astra
+thinking = "low" # low, medium, high, xhigh, or max
 reasoning_mode = "standard" # standard or pro
 fast_mode = false
 max_subagents = 32
@@ -390,15 +392,17 @@ persisted separately and can be resumed like other sessions.
 
 ### Resume
 
-Tact checkpoints each completed turn and keeps an append-only transcript. Open **Resume session**
+Tact checkpoints each successful turn and keeps an append-only transcript. Ordinary failed turns
+retain the last successful checkpoint. A terminal provider policy stop makes the session
+non-resumable; its transcript remains available for inspection. Open **Resume session**
 from the Actions menu to search sessions for the current workspace, or resume a known ID directly:
 
 ```sh
 tact --resume SESSION_ID
 ```
 
-Tact prints the active session's resume command when it exits. Session files live beside the
-selected configuration in private, versioned `checkpoints` and `transcripts` directories.
+Tact prints the active session's resume command when it exits. Sessions are stored in
+`sessions/v2.sqlite3` beside the selected configuration.
 Checkpoints contain the complete model-visible conversation and are not redacted, so treat them as
 private data.
 
