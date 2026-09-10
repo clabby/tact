@@ -78,7 +78,7 @@ Local and remote modes expose the same memory operations and meanings:
 
 | Operation | Contract |
 | --- | --- |
-| `scan` | Search the selected backend and return at most five compact candidates. |
+| `scan` | Search the selected backend. Local scans populate `ours`; remote scans make separate requests returning up to five `ours` and five `theirs` candidates. |
 | `read` | Fetch complete records by exact current key. Missing or stale keys are omitted. |
 | `put` | Add one atomic conclusion, or replace a known record using its key and expected version. |
 | `delete` | Remove a known record using its key and expected version. |
@@ -95,7 +95,13 @@ The agent tool uses one exact key shape throughout. Pass scan candidate keys unc
 Root agents may mutate; child agents may only scan and read. Reader credentials make remote
 mutation unavailable regardless of agent role. Remote operations include the caller's namespace:
 an author can scan, read, and list their own remote records as well as records from other authors.
-Normalized duplicate content may exist in separate namespaces because ownership remains per author.
+Scan keeps those sources explicit: `ours` contains one response scoped to the authenticated
+namespace and `theirs` contains a second response scoped to every other visible namespace. Every key
+retains its author namespace. The requests are independently ranked and bounded, so one cannot crowd
+the other out and their corpus-relative scores are not comparable. If either request fails, the scan
+returns an error rather than a partial result or a local fallback. The agent decides which records to
+read and apply. Normalized duplicate content may exist in separate namespaces because ownership
+remains per author.
 
 The remote API is an authenticated JSON/HTTP interface. Its protocol generation is
 `tact_memory::VERSION`; routes and the session compatibility check use that same value:
@@ -103,7 +109,7 @@ The remote API is an authenticated JSON/HTTP interface. Its protocol generation 
 | Method and path | Role | Contract |
 | --- | --- | --- |
 | `GET /v{VERSION}/session` | reader | Return protocol version, authenticated namespace, and role. |
-| `POST /v{VERSION}/memories/scan` | reader | Search caller-visible records and return at most five candidates. |
+| `POST /v{VERSION}/memories/scan` | reader | Search one requested scope (`all`, `own`, or `others`) and return at most five candidates. `own` and `others` are resolved from the authenticated principal. |
 | `POST /v{VERSION}/memories/read` | reader | Resolve exact caller-visible keys. |
 | `POST /v{VERSION}/memories/list` | reader | List caller-visible records without telemetry changes. |
 | `POST /v{VERSION}/memories/put` | writer | Create a server-authored record or replace an exact current key in the writer's namespace. |
@@ -119,12 +125,12 @@ periods, hyphens, or underscores.
 Put allocates IDs, versions, timestamps, telemetry, and probation state on the server. Replacement
 checks the exact current key, increments the version, and resets server-owned state. Clients do not
 send local record metadata through ordinary put. Read omits missing or stale keys and updates read
-telemetry. Scan ranks at the store, returns no more than the requested limit or five candidates,
-and updates telemetry only for returned records. Ordinary requests do not transfer the remote
-corpus. List returns a deterministic inspection window of at most 512 visible records; production
-backends should enforce that bound in their storage query. Export preserves every namespaced record
-and uses stable bounded pages with an opaque continuation position; it does not deduplicate
-equivalent content.
+telemetry. Each scan request ranks one namespace scope at the store, returns no more than the
+requested limit or five candidates, and updates telemetry only for returned records. Ordinary
+requests do not transfer the remote corpus. List returns a deterministic inspection window of at
+most 512 visible records; production backends should enforce that bound in their storage query.
+Export preserves every namespaced record and uses stable bounded pages with an opaque continuation
+position; it does not deduplicate equivalent content.
 Stable exports must neither omit nor repeat records. A backend must define transaction or snapshot
 behavior that makes concurrent changes predictable.
 
@@ -161,7 +167,7 @@ lifecycle.
 Other backends must preserve the same semantics. SQL backends need transactional version checks,
 per-namespace uniqueness, capacity checks, and a deterministic export cursor. Cloudflare D1 or
 Durable Objects need a transactional or single-writer boundary. Database-native search is valid
-only when it reproduces visible scan behavior and the five-result bound.
+only when it reproduces visible single-scope scan behavior and the five-results-per-request bound.
 
 Remote errors are JSON objects containing only a stable code. Responses and traces must not echo
 request content, bearer tokens, database diagnostics, or credential details. Authentication,
@@ -303,11 +309,13 @@ Records carry a stable ID, monotonically increasing version, timestamps, and sep
 telemetry. A replacement and delete check the expected version so concurrent work cannot be
 silently overwritten. Remote keys add the server-authenticated author namespace; local keys do not.
 
-Retrieval uses lexical BM25 with `k1 = 1.2` and `b = 0.75`. A scan abstains when its query has no
-searchable terms or no active record shares a term. Ordinary scans return at most five cards and do
-not transfer the corpus to the caller. A short record is its own preview; a longer preview is a
-UTF-8-safe prefix of at most 64 bytes. `read` is the only operation that returns complete selected
-content and increments deliberate-read telemetry.
+Retrieval uses lexical BM25 with `k1 = 1.2` and `b = 0.75`. A scan request returns an empty candidate
+vector when its query has no searchable terms or no active record in its scope shares a term. Each
+request returns at most five cards and does not transfer its corpus to the caller. An agent-facing
+remote scan sends the authenticated-namespace request first and the other-namespaces request second,
+then preserves those responses as `ours` and `theirs`. A short record is its own preview; a longer
+preview is a UTF-8-safe prefix of at most 64 bytes. `read` is the only operation that returns complete
+selected content and increments deliberate-read telemetry.
 
 New model-authored records enter seven days of unread probation. A scan does not graduate a record;
 a successful read does. Replacement starts probation for the new version. The remote service uses
@@ -315,13 +323,13 @@ server time and server-owned telemetry.
 
 ## Bounds and transactions
 
-| Limit | v1 value |
+| Limit | v2 value |
 | --- | ---: |
 | Record content | 1 KiB |
 | Rows | 512 |
 | Total content | 256 KiB |
 | Local main database file | 4 MiB |
-| Scan results | 5 |
+| Scan results per request | 5 |
 
 Bounds apply to the global local corpus and independently to each remote writer namespace. A store
 may prune expired unread probation records before rejecting a capacity-increasing mutation, but it

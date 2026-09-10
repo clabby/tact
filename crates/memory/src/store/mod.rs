@@ -8,7 +8,7 @@ mod remote;
 #[cfg(all(feature = "client", feature = "local"))]
 use crate::{MemoryAccess, MemorySource, secrets::contains_likely_secret};
 use crate::{
-    MemoryKey, MemoryLimits, MemoryRecord, MemoryScan,
+    MemoryCandidate, MemoryKey, MemoryLimits, MemoryRecord,
     server::protocol::{self, ExportCursor, SyncReport},
 };
 #[cfg(feature = "local")]
@@ -22,6 +22,31 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use std::{error::Error, future::Future};
 use thiserror::Error;
 
+/// Namespace selection applied by one memory scan.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum MemoryNamespaceFilter {
+    /// Includes every record visible to the store.
+    All,
+    /// Includes records from exactly one remote namespace.
+    Exact(String),
+    /// Includes remote records outside one namespace.
+    OtherThan(String),
+}
+
+impl MemoryNamespaceFilter {
+    /// Returns whether `key` belongs to this scan's namespace selection.
+    pub fn includes(&self, key: &MemoryKey) -> bool {
+        match self {
+            Self::All => true,
+            Self::Exact(namespace) => key.namespace.as_deref() == Some(namespace.as_str()),
+            Self::OtherThan(namespace) => key
+                .namespace
+                .as_deref()
+                .is_some_and(|candidate| candidate != namespace),
+        }
+    }
+}
+
 /// Ordinary operations shared by local and authenticated remote memory backends.
 ///
 /// Implementations own their namespace and storage boundary. Returned records are ordered
@@ -30,12 +55,14 @@ use thiserror::Error;
 /// Dropping a returned future requests cancellation. Implementations may finish an already-started
 /// atomic storage transaction after cancellation.
 pub trait MemoryStore: Clone + Send + Sync + 'static {
-    /// Searches visible records and records scan telemetry.
+    /// Searches records selected by `namespaces` and records telemetry for returned candidates.
+    /// `limit` bounds this request rather than any later composition of multiple scopes.
     fn scan(
         &self,
         query: &str,
+        namespaces: MemoryNamespaceFilter,
         limit: usize,
-    ) -> impl Future<Output = Result<MemoryScan, MemoryError>> + Send;
+    ) -> impl Future<Output = Result<Vec<MemoryCandidate>, MemoryError>> + Send;
 
     /// Reads unversioned IDs and versioned keys, recording use telemetry.
     fn read(
@@ -178,6 +205,41 @@ impl SelectedMemoryStore {
             }),
         }
     }
+
+    /// Returns the local group or two independently retrieved remote namespace groups.
+    ///
+    /// Remote requests run own-first so the client's shared bookmark makes the other-namespace
+    /// snapshot at least as fresh as the authenticated-namespace snapshot.
+    pub(crate) async fn scan_groups(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<(Vec<MemoryCandidate>, Vec<MemoryCandidate>), MemoryError> {
+        match self {
+            Self::Local(store) => Ok((
+                MemoryStore::scan(store, query, MemoryNamespaceFilter::All, limit).await?,
+                Vec::new(),
+            )),
+            Self::Remote(client) => {
+                let namespace = client.namespace().to_owned();
+                let ours = MemoryStore::scan(
+                    client,
+                    query,
+                    MemoryNamespaceFilter::Exact(namespace.clone()),
+                    limit,
+                )
+                .await?;
+                let theirs = MemoryStore::scan(
+                    client,
+                    query,
+                    MemoryNamespaceFilter::OtherThan(namespace),
+                    limit,
+                )
+                .await?;
+                Ok((ours, theirs))
+            }
+        }
+    }
 }
 
 #[cfg(all(feature = "client", feature = "local"))]
@@ -185,12 +247,13 @@ impl MemoryStore for SelectedMemoryStore {
     fn scan(
         &self,
         query: &str,
+        namespaces: MemoryNamespaceFilter,
         limit: usize,
-    ) -> impl Future<Output = Result<MemoryScan, MemoryError>> + Send {
+    ) -> impl Future<Output = Result<Vec<MemoryCandidate>, MemoryError>> + Send {
         async move {
             match self {
-                Self::Local(store) => MemoryStore::scan(store, query, limit).await,
-                Self::Remote(client) => MemoryStore::scan(client, query, limit).await,
+                Self::Local(store) => MemoryStore::scan(store, query, namespaces, limit).await,
+                Self::Remote(client) => MemoryStore::scan(client, query, namespaces, limit).await,
             }
         }
     }

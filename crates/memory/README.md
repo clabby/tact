@@ -19,6 +19,11 @@ The crate exposes four integration boundaries:
 - `MemoryTool` exposes explicit scan, read, put, and delete operations to Nanocodex sessions under
   an application-provided mutation authority.
 
+Each `MemoryStore` scan request returns one bounded candidate vector selected by a
+`MemoryNamespaceFilter`. The agent-facing remote scan makes separate requests for the authenticated
+namespace and all other visible namespaces, then exposes them as `ours` and `theirs`. Candidate keys
+preserve ownership because the requests' BM25 scores are relative to different corpora.
+
 Feature flags separate the local store, remote client, server, and Nanocodex tool integrations.
 Default features enable the complete native client, local, server, and tool surface; server-only
 deployments can select `server` without native-only dependencies.

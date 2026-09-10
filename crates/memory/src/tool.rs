@@ -1,6 +1,8 @@
 //! Explicit agent access to the global memory store.
 
-use super::{MemoryAccess, MemoryKey, MemoryRecord, MemoryStore, SelectedMemoryStore};
+use super::{
+    MemoryAccess, MemoryCandidate, MemoryKey, MemoryRecord, MemoryStore, SelectedMemoryStore,
+};
 use nanocodex::{
     Tool,
     tools::contract::{
@@ -59,8 +61,8 @@ impl<'de> Deserialize<'de> for MemoryContent {
 struct ScanOutput {
     operation: &'static str,
     backend: MemoryAccess,
-    abstained: bool,
-    candidates: Vec<ToolCandidate>,
+    ours: Vec<ToolCandidate>,
+    theirs: Vec<ToolCandidate>,
 }
 
 #[derive(Serialize)]
@@ -68,6 +70,16 @@ struct ToolCandidate {
     key: MemoryKey,
     preview: String,
     score: f64,
+}
+
+impl From<MemoryCandidate> for ToolCandidate {
+    fn from(candidate: MemoryCandidate) -> Self {
+        Self {
+            key: candidate.key,
+            preview: candidate.preview,
+            score: candidate.score,
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -128,21 +140,13 @@ where
             return Err(io::Error::other("memory scan limit must be between 1 and 5").into());
         }
         let backend = self.store.access().await?;
-        let scan = self.store.scan(&query, limit).await?;
+        let (ours, theirs) = self.store.scan_groups(&query, limit).await?;
         self.searched.store(true, Ordering::Release);
         json_output(&ScanOutput {
             operation: "scan",
             backend,
-            abstained: scan.abstained,
-            candidates: scan
-                .candidates
-                .into_iter()
-                .map(|candidate| ToolCandidate {
-                    key: candidate.key,
-                    preview: candidate.preview,
-                    score: candidate.score,
-                })
-                .collect(),
+            ours: ours.into_iter().map(ToolCandidate::from).collect(),
+            theirs: theirs.into_iter().map(ToolCandidate::from).collect(),
         })
     }
 
@@ -205,7 +209,7 @@ where
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::function(
             "memory",
-            "Explicitly searches, reads, stores, replaces, or deletes bounded memories in exactly one configured local or remote backend. Pass keys returned by scan unchanged when reading, for example {\"operation\":\"read\",\"keys\":[{\"id\":7,\"version\":1,\"namespace\":\"alice\"}]}. Remote reads include the authenticated and team namespaces. Put and delete are root-agent-only; remote mutation also requires a writer credential.",
+            "Explicitly searches, reads, stores, replaces, or deletes bounded memories in exactly one configured local or remote backend. A remote scan performs separate bounded retrievals for the authenticated namespace (ours) and other visible namespaces (theirs), so compare scores only within a group. Candidate keys identify their namespace. Pass keys returned by scan unchanged when reading, for example {\"operation\":\"read\",\"keys\":[{\"id\":7,\"version\":1,\"namespace\":\"alice\"}]}. Put and delete are root-agent-only; remote mutation also requires a writer credential.",
             memory_input_schema(),
         )
         .with_output_schema(memory_output_schema())
@@ -235,7 +239,13 @@ fn memory_input_schema() -> Value {
                 "properties": {
                     "operation": { "type": "string", "const": "scan" },
                     "query": { "type": "string", "minLength": 1, "maxLength": 512 },
-                    "limit": { "type": "integer", "minimum": 1, "maximum": 5, "default": 5 }
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 5,
+                        "default": 5,
+                        "description": "Maximum candidates returned by each of the ours and theirs scans."
+                    }
                 },
                 "required": ["operation", "query"],
                 "additionalProperties": false
@@ -280,6 +290,7 @@ fn memory_input_schema() -> Value {
 fn memory_output_schema() -> Value {
     let record = memory_record_schema();
     let backend = memory_backend_schema();
+    let candidates = memory_candidates_schema();
     json!({
         "oneOf": [
             {
@@ -287,23 +298,10 @@ fn memory_output_schema() -> Value {
                 "properties": {
                     "operation": { "type": "string", "const": "scan" },
                     "backend": backend.clone(),
-                    "abstained": { "type": "boolean" },
-                    "candidates": {
-                        "type": "array",
-                        "maxItems": 5,
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "key": memory_key_schema(),
-                                "preview": { "type": "string", "maxLength": 64 },
-                                "score": { "type": "number" }
-                            },
-                            "required": ["key", "preview", "score"],
-                            "additionalProperties": false
-                        }
-                    }
+                    "ours": candidates.clone(),
+                    "theirs": candidates
                 },
-                "required": ["operation", "backend", "abstained", "candidates"],
+                "required": ["operation", "backend", "ours", "theirs"],
                 "additionalProperties": false
             },
             {
@@ -338,6 +336,23 @@ fn memory_output_schema() -> Value {
                 "additionalProperties": false
             }
         ]
+    })
+}
+
+fn memory_candidates_schema() -> Value {
+    json!({
+        "type": "array",
+        "maxItems": 5,
+        "items": {
+            "type": "object",
+            "properties": {
+                "key": memory_key_schema(),
+                "preview": { "type": "string", "maxLength": 64 },
+                "score": { "type": "number" }
+            },
+            "required": ["key", "preview", "score"],
+            "additionalProperties": false
+        }
     })
 }
 
@@ -455,8 +470,16 @@ mod tests {
             .iter()
             .find(|operation| operation["properties"]["operation"]["const"] == json!("scan"))
             .expect("scan output should be exposed");
-        let candidate = &scan_output["properties"]["candidates"]["items"];
-        assert_eq!(candidate["properties"]["preview"]["maxLength"], json!(64));
+        for group in ["ours", "theirs"] {
+            let candidates = &scan_output["properties"][group];
+            assert_eq!(candidates["maxItems"], json!(5));
+            assert_eq!(
+                candidates["items"]["properties"]["preview"]["maxLength"],
+                json!(64)
+            );
+        }
+        assert!(scan_output["properties"].get("abstained").is_none());
+        assert!(scan_output["properties"].get("candidates").is_none());
     }
 
     #[test]

@@ -3,7 +3,7 @@ use crate::tui::{theme::Theme, transcript::ToolEntry};
 use ratatui::{style::Style, text::Line};
 use serde_json::{Map, Value};
 
-const MAX_SCAN_CANDIDATES: usize = 8;
+const MAX_SCAN_CANDIDATES_PER_GROUP: usize = 5;
 const MAX_PREVIEW_WIDTH: u16 = 240;
 
 pub(super) fn present(tool: &ToolEntry, width: u16, theme: &Theme, expanded: bool) -> Presentation {
@@ -79,8 +79,7 @@ enum ResultValue<'a> {
     Failed,
     Scan {
         backend: Option<Backend>,
-        abstained: bool,
-        candidates: Vec<Candidate<'a>>,
+        candidates: ScanCandidates<'a>,
     },
     Read {
         backend: Option<Backend>,
@@ -114,13 +113,7 @@ impl<'a> ResultValue<'a> {
         match expected_operation {
             "scan" => Some(Self::Scan {
                 backend: Backend::parse(result.get("backend")),
-                abstained: result.get("abstained")?.as_bool()?,
-                candidates: result
-                    .get("candidates")?
-                    .as_array()?
-                    .iter()
-                    .map(Candidate::parse)
-                    .collect::<Option<Vec<_>>>()?,
+                candidates: ScanCandidates::parse(result)?,
             }),
             "read" => Some(Self::Read {
                 backend: Backend::parse(result.get("backend")),
@@ -143,6 +136,32 @@ impl<'a> ResultValue<'a> {
             _ => None,
         }
     }
+}
+
+struct ScanCandidates<'a> {
+    ours: Vec<Candidate<'a>>,
+    theirs: Vec<Candidate<'a>>,
+}
+
+impl<'a> ScanCandidates<'a> {
+    fn parse(result: &'a Value) -> Option<Self> {
+        Some(Self {
+            ours: parse_candidates(result.get("ours")?)?,
+            theirs: parse_candidates(result.get("theirs")?)?,
+        })
+    }
+
+    fn total(&self) -> usize {
+        self.ours.len().saturating_add(self.theirs.len())
+    }
+}
+
+fn parse_candidates(value: &Value) -> Option<Vec<Candidate<'_>>> {
+    value
+        .as_array()?
+        .iter()
+        .map(Candidate::parse)
+        .collect::<Option<Vec<_>>>()
 }
 
 #[derive(Clone)]
@@ -280,17 +299,16 @@ fn scan(
 ) -> Presentation {
     let ResultValue::Scan {
         backend,
-        abstained,
         candidates,
     } = result
     else {
         return Presentation::new("Memory scan", query);
     };
-    let outcome = if abstained {
-        "abstained".to_owned()
-    } else {
-        count_label(candidates.len(), "candidate", "candidates")
-    };
+    let outcome = format!(
+        "{} ours · {} theirs",
+        candidates.ours.len(),
+        candidates.theirs.len()
+    );
     let presentation =
         completed_presentation(backend.as_ref(), "scan", "Memory scan", query.to_owned())
             .outcome(outcome);
@@ -298,9 +316,46 @@ fn scan(
         return presentation;
     }
 
-    let shown = candidates.len().min(MAX_SCAN_CANDIDATES);
     let mut presentation = presentation;
-    for candidate in candidates.iter().take(shown) {
+    presentation = append_scan_group(presentation, "Ours", &candidates.ours, width, theme);
+    presentation = append_scan_group(presentation, "Theirs", &candidates.theirs, width, theme);
+    let shown = candidates
+        .ours
+        .len()
+        .min(MAX_SCAN_CANDIDATES_PER_GROUP)
+        .saturating_add(candidates.theirs.len().min(MAX_SCAN_CANDIDATES_PER_GROUP));
+    let total = candidates.total();
+    let footer = if shown < total {
+        format!("{shown} of {total} candidates")
+    } else {
+        count_label(total, "candidate", "candidates")
+    };
+    presentation.footer(footer)
+}
+
+fn append_scan_group<'a>(
+    mut presentation: Presentation,
+    label: &str,
+    candidates: &'a [Candidate<'a>],
+    width: u16,
+    theme: &Theme,
+) -> Presentation {
+    presentation = presentation.selectable_plain(label, width, Style::default().fg(theme.accent()));
+    append_candidates(
+        presentation,
+        candidates.iter().take(MAX_SCAN_CANDIDATES_PER_GROUP),
+        width,
+        theme,
+    )
+}
+
+fn append_candidates<'a>(
+    mut presentation: Presentation,
+    candidates: impl Iterator<Item = &'a Candidate<'a>>,
+    width: u16,
+    theme: &Theme,
+) -> Presentation {
+    for candidate in candidates {
         let label = format!(
             "{} · score {}",
             candidate.key.display(),
@@ -312,14 +367,7 @@ fn scan(
         presentation =
             presentation.selectable_plain(&preview, width, Style::default().fg(theme.text()));
     }
-    let footer = if abstained {
-        "memory scan abstained".to_owned()
-    } else if shown < candidates.len() {
-        format!("{shown} of {} candidates", candidates.len())
-    } else {
-        count_label(candidates.len(), "candidate", "candidates")
-    };
-    presentation.footer(footer)
+    presentation
 }
 
 fn read(
@@ -568,9 +616,14 @@ mod tests {
                 memory(
                     json!({"operation": "scan", "query": "Rust style", "limit": 4}),
                     ToolState::Succeeded,
-                    Some(json!({"operation": "scan", "abstained": true, "candidates": []})),
+                    Some(json!({
+                        "operation": "scan",
+                        "backend": {"source": "local", "namespace": null, "role": null},
+                        "ours": [],
+                        "theirs": []
+                    })),
                 ),
-                "Memory scan  Rust style · abstained",
+                "Memory scan · local · Rust style · 0 ours · 0 theirs",
             ),
             (
                 memory(
@@ -680,7 +733,7 @@ mod tests {
     }
 
     #[test]
-    fn completed_results_label_the_backend_even_when_empty_or_abstaining() {
+    fn completed_results_label_the_backend_even_when_empty() {
         let cases = [
             (
                 memory(
@@ -689,11 +742,11 @@ mod tests {
                     Some(json!({
                         "operation": "scan",
                         "backend": {"source": "local", "namespace": null, "role": null},
-                        "abstained": true,
-                        "candidates": []
+                        "ours": [],
+                        "theirs": []
                     })),
                 ),
-                "Memory scan · local · style · abstained",
+                "Memory scan · local · style · 0 ours · 0 theirs",
             ),
             (
                 memory(
@@ -713,6 +766,41 @@ mod tests {
             let rendered = text(&render(&tool, 100, &Theme::default()));
             assert!(rendered.contains(expected), "{rendered}");
         }
+    }
+
+    #[test]
+    fn remote_scan_presents_separately_retrieved_ours_and_theirs() {
+        let namespace_candidates = |namespace: &str| {
+            (1..=5)
+                .map(|id| {
+                    json!({
+                        "key": {"namespace": namespace, "id": id, "version": 1},
+                        "preview": format!("{namespace} guidance {id}"),
+                        "score": 1.0 / f64::from(id)
+                    })
+                })
+                .collect::<Vec<_>>()
+        };
+        let tool = memory(
+            json!({"operation": "scan", "query": "guidance"}),
+            ToolState::Succeeded,
+            Some(json!({
+                "operation": "scan",
+                "backend": {"source": "remote", "namespace": "alice", "role": "writer"},
+                "ours": namespace_candidates("alice"),
+                "theirs": namespace_candidates("bob")
+            })),
+        );
+
+        let collapsed = text(&render(&tool, 100, &Theme::default()));
+        assert!(collapsed.contains("5 ours · 5 theirs"), "{collapsed}");
+
+        let expanded = text(&render_expanded(&tool, 100, &Theme::default()));
+        assert!(expanded.contains("Ours"), "{expanded}");
+        assert!(expanded.contains("Theirs"), "{expanded}");
+        assert!(expanded.contains("alice:1@v1"), "{expanded}");
+        assert!(expanded.contains("bob:1@v1"), "{expanded}");
+        assert!(expanded.contains("10 candidates"), "{expanded}");
     }
 
     #[test]
@@ -744,19 +832,13 @@ mod tests {
     }
 
     #[test]
-    fn backendless_legacy_results_and_pending_calls_keep_generic_titles() {
-        let legacy = memory(
-            json!({"operation": "scan", "query": "style"}),
-            ToolState::Succeeded,
-            Some(json!({"operation": "scan", "abstained": false, "candidates": []})),
-        );
+    fn pending_calls_keep_generic_titles() {
         let pending = memory(
             json!({"operation": "scan", "query": "style"}),
             ToolState::Running,
             None,
         );
 
-        assert!(text(&render(&legacy, 100, &Theme::default())).contains("Memory scan  style"));
         assert!(text(&render(&pending, 100, &Theme::default())).contains("Memory scan  style"));
     }
 
@@ -824,7 +906,21 @@ mod tests {
             memory(
                 json!({"operation": "scan", "query": "style"}),
                 ToolState::Succeeded,
-                Some(json!({"operation": "scan", "candidates": "invalid"})),
+                Some(json!({
+                    "operation": "scan",
+                    "backend": {"source": "local", "namespace": null, "role": null},
+                    "candidates": []
+                })),
+            ),
+            memory(
+                json!({"operation": "scan", "query": "style"}),
+                ToolState::Succeeded,
+                Some(json!({
+                    "operation": "scan",
+                    "backend": {"source": "local", "namespace": null, "role": null},
+                    "ours": "invalid",
+                    "theirs": []
+                })),
             ),
         ];
 
@@ -864,7 +960,7 @@ mod tests {
     }
 
     #[test]
-    fn expanded_scan_is_bounded_and_whitelists_candidate_fields() {
+    fn expanded_scan_groups_are_bounded_and_whitelist_candidate_fields() {
         let candidates = (0..12)
             .map(|id| {
                 json!({
@@ -878,16 +974,21 @@ mod tests {
         let tool = memory(
             json!({"operation": "scan", "query": "style"}),
             ToolState::Succeeded,
-            Some(json!({"operation": "scan", "abstained": false, "candidates": candidates})),
+            Some(json!({
+                "operation": "scan",
+                "backend": {"source": "remote", "namespace": "alice", "role": "writer"},
+                "ours": candidates,
+                "theirs": []
+            })),
         );
 
         let rendered = text(&render_expanded(&tool, 80, &Theme::default()));
 
         assert!(rendered.contains("0@v3 · score 0.875"));
-        assert!(rendered.contains("7@v3 · score 0.875"));
-        assert!(!rendered.contains("8@v3 · score"));
+        assert!(rendered.contains("4@v3 · score 0.875"));
+        assert!(!rendered.contains("5@v3 · score"));
         assert!(!rendered.contains("must not be shown"));
-        assert!(rendered.contains("8 of 12 candidates"));
+        assert!(rendered.contains("5 of 12 candidates"));
         assert!(!rendered.contains(&"x".repeat(241)));
 
         let source = render_layout(&tool, None, 80, &Theme::default(), true)
@@ -895,7 +996,7 @@ mod tests {
             .expect("scan results should be selectable");
         assert!(source.contains("0@v3 · score 0.875"));
         assert!(source.contains("preview-0"));
-        assert!(!source.contains("8@v3 · score"));
+        assert!(!source.contains("5@v3 · score"));
         assert!(!source.contains("must not be shown"));
         assert!(!source.contains(&"x".repeat(241)));
     }

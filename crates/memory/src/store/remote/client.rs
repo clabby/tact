@@ -1,11 +1,11 @@
 use crate::{
-    MemoryCandidate, MemoryError, MemoryKey, MemoryLimits, MemoryRecord, MemoryScan, MemoryStore,
-    server::protocol,
+    MemoryCandidate, MemoryError, MemoryKey, MemoryLimits, MemoryNamespaceFilter, MemoryRecord,
+    MemoryStore, server::protocol,
 };
 use protocol::{
     DeleteRequest, ErrorResponse, ExportRequest, ExportResponse, ListResponse, PutRequest,
     PutResponse, ReadRequest, ReadResponse, RemoteErrorCode, RemoteRole, ScanRequest, ScanResponse,
-    SessionResponse, SyncReport, SyncRequest,
+    ScanScope, SessionResponse, SyncReport, SyncRequest,
 };
 use reqwest::{Client, Response, StatusCode, Url};
 use serde::{Serialize, de::DeserializeOwned};
@@ -193,6 +193,7 @@ impl RemoteMemoryClient {
     async fn scan(
         &self,
         query: &str,
+        scope: ScanScope,
         limit: usize,
     ) -> Result<Vec<MemoryCandidate>, RemoteClientError> {
         let limit = limit.min(MemoryLimits::PRODUCTION.scan_results);
@@ -204,6 +205,7 @@ impl RemoteMemoryClient {
                 protocol::SCAN_PATH,
                 &ScanRequest {
                     query: query.to_owned(),
+                    scope,
                     limit,
                 },
                 Replay::ConnectOnly,
@@ -212,26 +214,39 @@ impl RemoteMemoryClient {
         if response.candidates.len() > limit {
             return Err(RemoteClientError::InvalidResponse);
         }
+
         let mut seen = HashSet::new();
-        let mut candidates = Vec::new();
+        let mut validated = Vec::new();
         let mut previous_score = None;
         for candidate in response.candidates {
-            if !self.valid_candidate(&candidate) {
-                continue;
+            if !Self::valid_candidate(&candidate) {
+                return Err(RemoteClientError::InvalidResponse);
+            }
+            let Some(namespace) = candidate.key.namespace.clone() else {
+                return Err(RemoteClientError::InvalidResponse);
+            };
+            let owned = namespace == self.namespace();
+            let in_scope = match scope {
+                ScanScope::All => true,
+                ScanScope::Own => owned,
+                ScanScope::Others => !owned,
+            };
+            if !in_scope {
+                return Err(RemoteClientError::InvalidResponse);
             }
             if previous_score.is_some_and(|score| candidate.score > score) {
                 return Err(RemoteClientError::InvalidResponse);
             }
             previous_score = Some(candidate.score);
-            let Some(namespace) = candidate.key.namespace.clone() else {
-                continue;
-            };
             if !seen.insert((namespace, candidate.key.id)) {
                 return Err(RemoteClientError::InvalidResponse);
             }
-            candidates.push(candidate);
+            if crate::secrets::contains_likely_secret(&candidate.preview) {
+                continue;
+            }
+            validated.push(candidate);
         }
-        Ok(candidates)
+        Ok(validated)
     }
 
     async fn read(
@@ -444,13 +459,12 @@ impl RemoteMemoryClient {
             && key.version > 0
     }
 
-    fn valid_candidate(&self, candidate: &MemoryCandidate) -> bool {
+    fn valid_candidate(candidate: &MemoryCandidate) -> bool {
         Self::valid_key(&candidate.key)
             && candidate.key.namespace.is_some()
             && candidate.preview.len() <= 64
             && candidate.score.is_finite()
             && candidate.score >= 0.0
-            && !crate::secrets::contains_likely_secret(&candidate.preview)
     }
 
     fn valid_record(memory: &MemoryRecord) -> bool {
@@ -547,14 +561,23 @@ impl MemoryStore for RemoteMemoryClient {
     fn scan(
         &self,
         query: &str,
+        namespaces: MemoryNamespaceFilter,
         limit: usize,
-    ) -> impl std::future::Future<Output = Result<MemoryScan, MemoryError>> + Send {
+    ) -> impl std::future::Future<Output = Result<Vec<MemoryCandidate>, MemoryError>> + Send {
         async move {
-            let candidates = RemoteMemoryClient::scan(self, query, limit).await?;
-            Ok(MemoryScan {
-                abstained: candidates.is_empty(),
-                candidates,
-            })
+            let scope = match namespaces {
+                MemoryNamespaceFilter::All => ScanScope::All,
+                MemoryNamespaceFilter::Exact(namespace) if namespace == self.namespace() => {
+                    ScanScope::Own
+                }
+                MemoryNamespaceFilter::OtherThan(namespace) if namespace == self.namespace() => {
+                    ScanScope::Others
+                }
+                MemoryNamespaceFilter::Exact(_) | MemoryNamespaceFilter::OtherThan(_) => {
+                    return Err(RemoteClientError::NamespaceMismatch.into());
+                }
+            };
+            Ok(RemoteMemoryClient::scan(self, query, scope, limit).await?)
         }
     }
     fn read(

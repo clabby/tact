@@ -76,26 +76,17 @@ pub struct MemoryCandidate {
     pub score: f64,
 }
 
-/// Result of a semantic memory scan.
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub struct MemoryScan {
-    /// Whether retrieval intentionally returned no candidates.
-    pub abstained: bool,
-    /// Candidates in descending retrieval rank.
-    pub candidates: Vec<MemoryCandidate>,
-}
-
-impl MemoryScan {
+impl MemoryCandidate {
     /// Ranks an in-memory corpus with Tact's deterministic BM25 retrieval.
     ///
     /// Server backends that keep a bounded corpus in memory can use this to match local search
     /// tokenization, scoring, tie-breaking, and preview behavior.
-    pub fn rank(query: &str, memories: &[MemoryRecord], limit: usize) -> Self {
-        let candidates = crate::retrieval::rank(query, memories, limit);
-        Self {
-            abstained: candidates.is_empty(),
-            candidates,
-        }
+    pub fn rank<'a>(
+        query: &str,
+        memories: impl IntoIterator<Item = &'a MemoryRecord>,
+        limit: usize,
+    ) -> Vec<Self> {
+        crate::retrieval::rank(query, memories, limit)
     }
 }
 
@@ -110,7 +101,7 @@ pub struct MemoryLimits {
     pub total_content_bytes: usize,
     /// Maximum local SQLite database size.
     pub database_bytes: usize,
-    /// Maximum candidates returned by one scan.
+    /// Maximum candidates returned by one scan request.
     pub scan_results: usize,
     /// Maximum UTF-8 bytes in one scan query.
     pub query_bytes: usize,

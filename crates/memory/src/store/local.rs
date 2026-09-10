@@ -2,7 +2,8 @@
 
 use super::{MemoryError, MemoryStore, current_time_ms};
 use crate::{
-    MemoryImportReport, MemoryKey, MemoryLimits, MemoryRecord, MemoryScan,
+    MemoryCandidate, MemoryImportReport, MemoryKey, MemoryLimits, MemoryNamespaceFilter,
+    MemoryRecord,
     model::{StoredMemory, normalize_identity},
     secrets::contains_likely_secret,
     server::protocol::{self, ExportCursor, SyncReport},
@@ -71,21 +72,23 @@ impl LocalMemoryStore {
     async fn scan(
         &self,
         query: &str,
+        namespaces: MemoryNamespaceFilter,
         limit: usize,
         now_ms: i64,
-    ) -> Result<MemoryScan, MemoryError> {
+    ) -> Result<Vec<MemoryCandidate>, MemoryError> {
         let store = self.clone();
         let query = query.to_owned();
         let limit = limit.min(self.limits.scan_results);
-        run_local(move || store.scan_local(&query, limit, now_ms)).await
+        run_local(move || store.scan_local(&query, namespaces, limit, now_ms)).await
     }
 
     pub(crate) fn scan_local(
         &self,
         query: &str,
+        namespaces: MemoryNamespaceFilter,
         limit: usize,
         now_ms: i64,
-    ) -> Result<MemoryScan, MemoryError> {
+    ) -> Result<Vec<MemoryCandidate>, MemoryError> {
         if query.len() > self.limits.query_bytes {
             return Err(MemoryError::QueryTooLarge {
                 maximum_bytes: self.limits.query_bytes,
@@ -104,9 +107,15 @@ impl LocalMemoryStore {
             .map(MemoryRecord::from)
             .collect::<Vec<_>>();
         let limit = limit.min(self.limits.scan_results);
-        let scan = MemoryScan::rank(query, &memories, limit);
+        let candidates = MemoryCandidate::rank(
+            query,
+            memories
+                .iter()
+                .filter(|memory| namespaces.includes(&memory.key)),
+            limit,
+        );
 
-        for candidate in &scan.candidates {
+        for candidate in &candidates {
             transaction
                 .execute(
                     "UPDATE memories
@@ -118,7 +127,7 @@ impl LocalMemoryStore {
         }
         transaction.commit().map_err(sqlite_error)?;
 
-        Ok(scan)
+        Ok(candidates)
     }
 
     pub(crate) fn read_local(
@@ -692,9 +701,10 @@ impl MemoryStore for LocalMemoryStore {
     fn scan(
         &self,
         query: &str,
+        namespaces: MemoryNamespaceFilter,
         limit: usize,
-    ) -> impl Future<Output = Result<MemoryScan, MemoryError>> + Send {
-        LocalMemoryStore::scan(self, query, limit, current_time_ms())
+    ) -> impl Future<Output = Result<Vec<MemoryCandidate>, MemoryError>> + Send {
+        LocalMemoryStore::scan(self, query, namespaces, limit, current_time_ms())
     }
     fn read(
         &self,
