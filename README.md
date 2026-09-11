@@ -158,6 +158,11 @@ roots = []
 [memory]
 enabled = false
 
+[memory.local]
+max_records = 512
+max_record_bytes = 1024
+max_total_bytes = 262144
+
 [subagents]
 enabled = true
 allow_luna = true
@@ -286,14 +291,19 @@ Tact's bounded cross-session memory is disabled by default. Opt in explicitly:
 enabled = true
 ```
 
-Local memory is global to the selected Tact configuration, not scoped to a workspace. Tact stores
-it in `memory/v1.sqlite3` beside the selected `config.toml`. Agents access the selected local or
-remote backend only through explicit memory tool calls, and the corpus is never inserted into
-prompts automatically. For later user messages and in-flight steers, Tact adds a fixed,
-content-free checkpoint asking the agent to review the conversation and update memory when it
-finds a durable conclusion. See the
-[global memory design](docs/memory.md) for the tool contract, limits, privacy model, and evaluation
-criteria.
+Local memory is global to the selected Tact configuration, not scoped to a workspace. Tact stores it
+in `memory/v1.sqlite3` beside the selected `config.toml`. Set `memory.local.max_records`,
+`memory.local.max_record_bytes`, and `memory.local.max_total_bytes` to positive integers to
+independently limit the record count, UTF-8 content bytes per record, and total content bytes. The
+defaults are 512 records, 1 KiB per record, and 256 KiB total. These limits also apply to local
+snapshots used by explicit push and pull commands. Remote limits are configured by the service.
+The Cloudflare example applies the same three limits separately to each namespace.
+
+Agents access the selected local or remote backend only through explicit memory tool calls, and the
+corpus is never inserted into prompts automatically. For later user messages and in-flight steers,
+Tact adds a fixed, content-free checkpoint asking the agent to review the conversation and update
+memory when it finds a durable conclusion. See the [global memory design](docs/memory.md) for the
+tool contract, limits, privacy model, and evaluation criteria.
 
 To share memory with a team, configure an authenticated remote backend. Each person uses a distinct
 namespace and may receive either writer or read-only credentials. Tact chooses exactly one backend

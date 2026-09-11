@@ -99,7 +99,7 @@ impl MemoryScan {
     }
 }
 
-/// Resource limits enforced by memory stores and remote-response validation.
+/// Resource limits enforced by memory stores and export collection.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MemoryLimits {
     /// Maximum UTF-8 bytes in one memory.
@@ -108,8 +108,6 @@ pub struct MemoryLimits {
     pub records: usize,
     /// Maximum aggregate content bytes per store or namespace.
     pub total_content_bytes: usize,
-    /// Maximum local SQLite database size.
-    pub database_bytes: usize,
     /// Maximum candidates returned by one scan.
     pub scan_results: usize,
     /// Maximum UTF-8 bytes in one scan query.
@@ -119,12 +117,11 @@ pub struct MemoryLimits {
 }
 
 impl MemoryLimits {
-    /// Limits used by production local and reference remote stores.
+    /// Default limits used when no storage configuration is supplied.
     pub const PRODUCTION: Self = Self {
         content_bytes: 1_024,
         records: 512,
         total_content_bytes: 256 * 1_024,
-        database_bytes: 4 * 1_024 * 1_024,
         scan_results: 5,
         query_bytes: 512,
         probation_duration_ms: PROBATION_DURATION_MS,

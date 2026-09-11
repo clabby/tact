@@ -258,7 +258,7 @@ fn memory_input_schema() -> Value {
                 "type": "object",
                 "properties": {
                     "operation": { "type": "string", "const": "put" },
-                    "content": { "type": "string", "minLength": 1, "maxLength": 1024 },
+                    "content": { "type": "string", "minLength": 1, "description": "Self-contained memory within the store's configured UTF-8 byte limit." },
                     "replace": memory_key_schema()
                 },
                 "required": ["operation", "content"],
@@ -393,7 +393,7 @@ fn memory_record_schema() -> Value {
 #[cfg(test)]
 mod tests {
     use super::{MemoryOperation, MemoryTool, MutationAuthorizer};
-    use crate::{MemoryStore, SelectedMemoryStore};
+    use crate::{MemoryLimits, MemoryStore, SelectedMemoryStore};
     use nanocodex::{
         Tool,
         tools::contract::{DEFAULT_TOOL_OUTPUT_TOKENS, ToolContext, ToolInput, async_trait},
@@ -433,7 +433,10 @@ mod tests {
     #[test]
     fn definition_has_one_closed_tagged_surface() {
         let tool = MemoryTool::new(
-            SelectedMemoryStore::local(tempdir().unwrap().path().join("memory.sqlite3")),
+            SelectedMemoryStore::local(
+                tempdir().unwrap().path().join("memory.sqlite3"),
+                MemoryLimits::PRODUCTION,
+            ),
             TestAuthorizer,
         );
         let definition = tool.definition();
@@ -462,7 +465,10 @@ mod tests {
     #[test]
     fn exact_operations_share_the_memory_key_shape() {
         let tool = MemoryTool::new(
-            SelectedMemoryStore::local(tempdir().unwrap().path().join("memory.sqlite3")),
+            SelectedMemoryStore::local(
+                tempdir().unwrap().path().join("memory.sqlite3"),
+                MemoryLimits::PRODUCTION,
+            ),
             TestAuthorizer,
         );
         let definition = tool.definition();
@@ -520,7 +526,10 @@ mod tests {
     #[tokio::test]
     async fn reads_and_deletes_keys_returned_by_the_store() {
         let directory = tempdir().unwrap();
-        let store = SelectedMemoryStore::local(directory.path().join("memory.sqlite3"));
+        let store = SelectedMemoryStore::local(
+            directory.path().join("memory.sqlite3"),
+            MemoryLimits::PRODUCTION,
+        );
         let tool = MemoryTool::new(store.clone(), TestAuthorizer);
         tool.execute(
             input(json!({"operation": "scan", "query": "key contract"})),
@@ -570,7 +579,10 @@ mod tests {
     #[tokio::test]
     async fn root_put_requires_a_fresh_scan() {
         let directory = tempdir().unwrap();
-        let store = SelectedMemoryStore::local(directory.path().join("memory.sqlite3"));
+        let store = SelectedMemoryStore::local(
+            directory.path().join("memory.sqlite3"),
+            MemoryLimits::PRODUCTION,
+        );
         let tool = MemoryTool::new(store.clone(), TestAuthorizer);
         let put = || {
             input(json!({
@@ -624,7 +636,10 @@ mod tests {
     #[tokio::test]
     async fn selected_store_rejects_secret_content_before_storage() {
         let directory = tempdir().unwrap();
-        let store = SelectedMemoryStore::local(directory.path().join("memory.sqlite3"));
+        let store = SelectedMemoryStore::local(
+            directory.path().join("memory.sqlite3"),
+            MemoryLimits::PRODUCTION,
+        );
         let tool = MemoryTool::new(store.clone(), TestAuthorizer);
         tool.execute(
             input(json!({ "operation": "scan", "query": "credentials" })),
@@ -648,5 +663,46 @@ mod tests {
             "memory content was rejected as a likely secret"
         );
         assert!(store.list().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn tool_accepts_records_above_the_default_size() {
+        let directory = tempdir().unwrap();
+        let limits = MemoryLimits {
+            content_bytes: 2_048,
+            ..MemoryLimits::PRODUCTION
+        };
+        let store = SelectedMemoryStore::local(directory.path().join("memory.sqlite3"), limits);
+        let tool = MemoryTool::new(store.clone(), TestAuthorizer);
+        let content = "é".repeat(limits.content_bytes / 2);
+        let definition = tool.definition();
+        let put_schema = definition.parameters().unwrap().as_value()["oneOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|operation| operation["properties"]["operation"]["const"] == json!("put"))
+            .unwrap();
+        assert!(
+            put_schema["properties"]["content"]
+                .get("maxLength")
+                .is_none()
+        );
+
+        tool.execute(
+            input(json!({ "operation": "scan", "query": "durable preference" })),
+            context("root"),
+        )
+        .await
+        .unwrap();
+        assert!(
+            tool.execute(
+                input(json!({ "operation": "put", "content": content })),
+                context("root"),
+            )
+            .await
+            .unwrap()
+            .success
+        );
+        assert_eq!(store.list().await.unwrap()[0].content, content);
     }
 }

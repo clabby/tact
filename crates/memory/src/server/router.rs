@@ -30,9 +30,6 @@ use tower::limit::ConcurrencyLimitLayer;
 use tracing::info;
 use web_time::Instant;
 
-/// Covers worst-case JSON escaping for a full local corpus while bounding allocation.
-pub(crate) const MAX_JSON_BODY_BYTES: usize = 2 * 1024 * 1024;
-
 #[cfg(feature = "native-server")]
 const MAX_IN_FLIGHT_REQUESTS: usize = 64;
 #[cfg(feature = "native-server")]
@@ -93,9 +90,10 @@ impl<S: MemoryStore> MemoryServer<S> {
 
     /// Constructs an Axum router sharing this server's credentials and namespace factory.
     ///
-    /// Each router enforces a two-MiB JSON body limit. The `native-server` feature additionally
-    /// limits the process to 64 in-flight requests and applies a 30-second store timeout.
-    pub fn router(&self) -> Router {
+    /// `max_request_bytes` bounds each encoded JSON request independently of storage capacity.
+    /// The `native-server` feature additionally limits the process to 64 in-flight requests and
+    /// applies a 30-second store timeout.
+    pub fn router(&self, max_request_bytes: usize) -> Router {
         let router = Router::new()
             .route(&route(protocol::SESSION_PATH), get(session))
             .route(&route(protocol::SCAN_PATH), post(scan))
@@ -105,7 +103,7 @@ impl<S: MemoryStore> MemoryServer<S> {
             .route(&route(protocol::DELETE_PATH), post(delete))
             .route(&route(protocol::SYNC_PATH), post(sync))
             .route(&route(protocol::EXPORT_PATH), post(export))
-            .layer(DefaultBodyLimit::max(MAX_JSON_BODY_BYTES));
+            .layer(DefaultBodyLimit::max(max_request_bytes));
         #[cfg(feature = "native-server")]
         let router = router.layer(ConcurrencyLimitLayer::new(MAX_IN_FLIGHT_REQUESTS));
         router.with_state(self.state.clone())
@@ -155,10 +153,9 @@ async fn scan<S: MemoryStore>(
         || request.limit > MemoryLimits::PRODUCTION.scan_results
     {
         let error = if request.query.len() > MemoryLimits::PRODUCTION.query_bytes {
-            ApiError::new(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                RemoteErrorCode::QueryTooLarge,
-            )
+            ApiError::from(MemoryError::QueryTooLarge {
+                maximum_bytes: MemoryLimits::PRODUCTION.query_bytes,
+            })
         } else {
             ApiError::bad_request()
         };
@@ -196,7 +193,7 @@ async fn read<S: MemoryStore>(
         Err(error) => return operation.error_response(error, OperationCounts::default()),
     };
     let counts = OperationCounts::input(request.ids.len().saturating_add(request.keys.len()));
-    if counts.input_count > MemoryLimits::PRODUCTION.records
+    if counts.input_count > protocol::MAX_READ_SELECTORS
         || request.ids.iter().any(|id| *id <= 0)
         || request.keys.iter().any(|key| !valid_key(key))
     {
@@ -262,15 +259,6 @@ async fn put<S: MemoryStore>(
     let counts = OperationCounts::input(1);
     if request.content.trim().is_empty() {
         return operation.error_response(ApiError::bad_request(), counts);
-    }
-    if request.content.len() > MemoryLimits::PRODUCTION.content_bytes {
-        return operation.error_response(
-            ApiError::new(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                RemoteErrorCode::ContentTooLarge,
-            ),
-            counts,
-        );
     }
     if request.replacement.as_ref().is_some_and(|key| {
         !valid_key(key) || key.namespace.as_deref() != Some(principal.namespace.as_str())
@@ -393,7 +381,7 @@ async fn export<S: MemoryStore>(
         || request.limit > protocol::MAX_EXPORT_PAGE_RECORDS
         || request.namespaces.as_ref().is_some_and(|namespaces| {
             namespaces.is_empty()
-                || namespaces.len() > MemoryLimits::PRODUCTION.records
+                || namespaces.len() > protocol::MAX_EXPORT_NAMESPACES
                 || namespaces
                     .iter()
                     .any(|namespace| !protocol::is_valid_namespace(namespace))
@@ -481,21 +469,14 @@ fn valid_key(key: &MemoryKey) -> bool {
 
 fn valid_snapshot(memories: &[MemoryRecord]) -> bool {
     let mut ids = HashSet::with_capacity(memories.len());
-    memories.len() <= MemoryLimits::PRODUCTION.records
-        && memories.iter().all(|memory| {
-            memory.key.is_local()
-                && valid_key(&memory.key)
-                && ids.insert(memory.key.id)
-                && !memory.content.trim().is_empty()
-                && memory.content.len() <= MemoryLimits::PRODUCTION.content_bytes
-                && memory.created_at_ms >= 0
-                && memory.updated_at_ms >= memory.created_at_ms
-        })
-        && memories
-            .iter()
-            .map(|memory| memory.content.len())
-            .try_fold(0usize, usize::checked_add)
-            .is_some_and(|bytes| bytes <= MemoryLimits::PRODUCTION.total_content_bytes)
+    memories.iter().all(|memory| {
+        memory.key.is_local()
+            && valid_key(&memory.key)
+            && ids.insert(memory.key.id)
+            && !memory.content.trim().is_empty()
+            && memory.created_at_ms >= 0
+            && memory.updated_at_ms >= memory.created_at_ms
+    })
 }
 
 #[derive(Clone, Copy, Default)]
@@ -644,11 +625,21 @@ where
 struct ApiError {
     status: StatusCode,
     code: RemoteErrorCode,
+    maximum: Option<usize>,
 }
 
 impl ApiError {
     const fn new(status: StatusCode, code: RemoteErrorCode) -> Self {
-        Self { status, code }
+        Self {
+            status,
+            code,
+            maximum: None,
+        }
+    }
+
+    const fn with_maximum(mut self, maximum: usize) -> Self {
+        self.maximum = Some(maximum);
+        self
     }
 
     const fn bad_request() -> Self {
@@ -682,19 +673,27 @@ impl From<MemoryError> for ApiError {
         }
         match error {
             MemoryError::EmptyContent => Self::bad_request(),
-            MemoryError::ContentTooLarge { .. } => Self::new(
+            MemoryError::ContentTooLarge { maximum_bytes } => Self::new(
                 StatusCode::PAYLOAD_TOO_LARGE,
                 RemoteErrorCode::ContentTooLarge,
-            ),
-            MemoryError::QueryTooLarge { .. } => Self::new(
+            )
+            .with_maximum(maximum_bytes),
+            MemoryError::QueryTooLarge { maximum_bytes } => Self::new(
                 StatusCode::PAYLOAD_TOO_LARGE,
                 RemoteErrorCode::QueryTooLarge,
-            ),
-            MemoryError::RecordCapacity { .. } => Self::new(
+            )
+            .with_maximum(maximum_bytes),
+            MemoryError::RecordCapacity { maximum } => Self::new(
                 StatusCode::INSUFFICIENT_STORAGE,
                 RemoteErrorCode::RecordCapacity,
-            ),
-            MemoryError::ContentCapacity { .. } | MemoryError::StorageCapacity => Self::new(
+            )
+            .with_maximum(maximum),
+            MemoryError::ContentCapacity { maximum_bytes } => Self::new(
+                StatusCode::INSUFFICIENT_STORAGE,
+                RemoteErrorCode::ContentCapacity,
+            )
+            .with_maximum(maximum_bytes),
+            MemoryError::StorageCapacity => Self::new(
                 StatusCode::INSUFFICIENT_STORAGE,
                 RemoteErrorCode::ContentCapacity,
             ),
@@ -715,6 +714,13 @@ impl From<MemoryError> for ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response<Body> {
-        (self.status, Json(ErrorResponse { code: self.code })).into_response()
+        (
+            self.status,
+            Json(ErrorResponse {
+                code: self.code,
+                maximum: self.maximum,
+            }),
+        )
+            .into_response()
     }
 }

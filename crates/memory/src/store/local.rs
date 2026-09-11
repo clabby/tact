@@ -51,16 +51,8 @@ pub struct LocalMemoryStore {
 }
 
 impl LocalMemoryStore {
-    /// Opens or creates a private local SQLite store at `path` on first use.
-    pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self {
-            path: Arc::new(path.into()),
-            limits: MemoryLimits::PRODUCTION,
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn with_limits(path: impl Into<PathBuf>, limits: MemoryLimits) -> Self {
+    /// Opens or creates a private local SQLite store with explicit resource limits.
+    pub fn new(path: impl Into<PathBuf>, limits: MemoryLimits) -> Self {
         Self {
             path: Arc::new(path.into()),
             limits,
@@ -515,13 +507,6 @@ impl LocalMemoryStore {
         connection
             .pragma_update(None, "page_size", DATABASE_PAGE_SIZE_BYTES as i64)
             .map_err(sqlite_error)?;
-        let page_size = connection
-            .query_row("PRAGMA page_size", [], |row| row.get::<_, i64>(0))
-            .map_err(sqlite_error)? as usize;
-        let maximum_pages = self.limits.database_bytes.div_ceil(page_size).max(1);
-        connection
-            .pragma_update(None, "max_page_count", maximum_pages as i64)
-            .map_err(sqlite_error)?;
         // The allocator table is a backward-compatible schema-v1 extension. Older builds ignore
         // it; current builds retain identity history even when every memory row is deleted.
         let transaction = connection
@@ -949,7 +934,10 @@ mod allocator_tests {
     #[test]
     fn allocation_reconciles_rows_inserted_by_a_legacy_writer() {
         let directory = tempfile::tempdir().unwrap();
-        let store = LocalMemoryStore::new(directory.path().join("memory.sqlite3"));
+        let store = LocalMemoryStore::new(
+            directory.path().join("memory.sqlite3"),
+            MemoryLimits::PRODUCTION,
+        );
         let mut connection = store.open().unwrap();
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -970,7 +958,7 @@ mod allocator_tests {
     fn legacy_writers_cannot_reuse_retired_ids() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("memory.sqlite3");
-        let store = LocalMemoryStore::new(&path);
+        let store = LocalMemoryStore::new(&path, MemoryLimits::PRODUCTION);
         let memory = store.put_local("retired", None, 1).unwrap();
         store.delete_local(memory.key).unwrap();
 
