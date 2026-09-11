@@ -21,6 +21,7 @@ use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
 };
+use tact_subagents::AgentContext;
 use tokio::{
     sync::{mpsc, oneshot},
     task::{JoinError, JoinSet},
@@ -56,6 +57,7 @@ pub(crate) enum WorkerCommand {
     ReplaceAgent {
         pane: PaneId,
         agent: Nanocodex,
+        context: AgentContext,
         memory_review: MemoryReviewState,
     },
     SetThinking {
@@ -370,8 +372,14 @@ struct SteerRequest {
     prompt: Submission,
 }
 
+struct PaneAgent {
+    agent: Nanocodex,
+    context: AgentContext,
+}
+
 pub(crate) fn spawn(
     agent: Nanocodex,
+    context: AgentContext,
     memory_review: MemoryReviewState,
     shutdown: CancellationToken,
 ) -> (
@@ -380,19 +388,27 @@ pub(crate) fn spawn(
 ) {
     let (commands, command_rx) = mpsc::unbounded_channel();
     let (updates, update_rx) = mpsc::unbounded_channel();
-    tokio::spawn(run(agent, memory_review, command_rx, updates, shutdown));
+    tokio::spawn(run(
+        agent,
+        context,
+        memory_review,
+        command_rx,
+        updates,
+        shutdown,
+    ));
     (commands, update_rx)
 }
 
 async fn run(
     agent: Nanocodex,
+    context: AgentContext,
     memory_review: MemoryReviewState,
     mut commands: mpsc::UnboundedReceiver<WorkerCommand>,
     updates: mpsc::UnboundedSender<WorkerEvent>,
     shutdown: CancellationToken,
 ) {
-    let mut main = Some((PaneId::Main, agent));
-    let mut fork = None::<(PaneId, Nanocodex)>;
+    let mut main = Some((PaneId::Main, PaneAgent { agent, context }));
+    let mut fork = None::<(PaneId, PaneAgent)>;
     let mut controls = HashMap::<TurnKey, TurnControl>::new();
     let mut memory_reviews = HashMap::from([(PaneId::Main, memory_review)]);
     let mut cancelled = HashSet::<TurnKey>::new();
@@ -492,15 +508,16 @@ async fn run(
                     WorkerCommand::ReplaceAgent {
                         pane,
                         agent,
+                        context,
                         memory_review,
                     } => {
                         debug_assert!(!controls.keys().any(|key| key.pane == pane));
                         let retired = if main.as_ref().is_some_and(|(id, _)| *id == pane) {
                             memory_reviews.insert(pane, memory_review);
-                            main.replace((pane, agent)).map(|(_, agent)| agent)
+                            main.replace((pane, PaneAgent { agent, context })).map(|(_, agent)| agent.agent)
                         } else if fork.as_ref().is_some_and(|(id, _)| *id == pane) {
                             memory_reviews.insert(pane, memory_review);
-                            fork.replace((pane, agent)).map(|(_, agent)| agent)
+                            fork.replace((pane, PaneAgent { agent, context })).map(|(_, agent)| agent.agent)
                         } else {
                             drop(updates.send(WorkerEvent::ForkFailed {
                                 pane,
@@ -514,8 +531,14 @@ async fn run(
                         continue;
                     }
                     WorkerCommand::SetThinking { pane, effort } => {
-                        let result = match agent_for(pane, main.as_ref(), fork.as_ref()) {
-                            Some(agent) => agent.set_thinking(effort.into()).await,
+                        let result = match main.iter_mut().chain(fork.iter_mut()).find(|(id, _)| *id == pane) {
+                            Some((_, agent)) => {
+                                let result = agent.agent.set_thinking(effort.into()).await;
+                                if result.is_ok() {
+                                    agent.context.thinking = effort.into();
+                                }
+                                result
+                            },
                             None => Err(NanocodexError::AgentStopped),
                         };
                         drop(updates.send(WorkerEvent::ThinkingUpdated {
@@ -527,7 +550,7 @@ async fn run(
                     }
                     WorkerCommand::SetFastMode { pane, enabled } => {
                         let result = match agent_for(pane, main.as_ref(), fork.as_ref()) {
-                            Some(agent) => agent.set_fast_mode(enabled).await,
+                            Some(agent) => agent.agent.set_fast_mode(enabled).await,
                             None => Err(NanocodexError::AgentStopped),
                         };
                         drop(updates.send(WorkerEvent::FastModeUpdated {
@@ -559,14 +582,15 @@ async fn run(
                             }));
                             continue;
                         };
-                        match agent.fork().await {
+                        let context = agent.context;
+                        match agent.agent.fork().await {
                             Ok((agent, events)) => {
                                 let memory_review = *memory_reviews
                                     .get(main_pane)
                                     .expect("the primary pane must have memory-review state");
                                 let memory_review = memory_review.forked();
                                 memory_reviews.insert(pane, memory_review);
-                                fork = Some((pane, agent));
+                                fork = Some((pane, PaneAgent { agent, context }));
                                 drop(updates.send(WorkerEvent::ForkOpened {
                                     pane,
                                     parent: *main_pane,
@@ -583,11 +607,11 @@ async fn run(
                     }
                     WorkerCommand::ClosePane(pane) => {
                         let agent = if main.as_ref().is_some_and(|(id, _)| *id == pane) {
-                            let agent = main.take().map(|(_, agent)| agent);
+                            let agent = main.take().map(|(_, agent)| agent.agent);
                             main = fork.take();
                             agent
                         } else if fork.as_ref().is_some_and(|(id, _)| *id == pane) {
-                            fork.take().map(|(_, agent)| agent)
+                            fork.take().map(|(_, agent)| agent.agent)
                         } else {
                             None
                         };
@@ -628,8 +652,8 @@ async fn run(
 
     drop(cancel_turns(&controls, None).await);
     let (main_shutdown, fork_shutdown) = tokio::join!(
-        shutdown_agent(main.take().map(|(_, agent)| agent)),
-        shutdown_agent(fork.take().map(|(_, agent)| agent)),
+        shutdown_agent(main.take().map(|(_, agent)| agent.agent)),
+        shutdown_agent(fork.take().map(|(_, agent)| agent.agent)),
     );
     let shutdown_error = main_shutdown.err().or_else(|| fork_shutdown.err());
 
@@ -643,7 +667,7 @@ async fn run(
 }
 
 async fn start_turn(
-    agent: &Nanocodex,
+    agent: &PaneAgent,
     request: TurnRequest,
     memory_review: MemoryReviewState,
     controls: &mut HashMap<TurnKey, TurnControl>,
@@ -671,8 +695,8 @@ async fn start_turn(
     let (isolated_agent, event_drain) = if let Some(context) = auxiliary_context {
         let create_agent = async {
             match context {
-                AuxiliaryContext::Clean => agent.spawn().await,
-                AuxiliaryContext::CurrentConversation => agent.fork().await,
+                AuxiliaryContext::Clean => agent.agent.spawn().await,
+                AuxiliaryContext::CurrentConversation => agent.agent.fork().await,
             }
         };
         let spawned = if let Some(scope) = shutdown.clone() {
@@ -718,8 +742,10 @@ async fn start_turn(
     } else {
         (None, None)
     };
-    let turn_agent = isolated_agent.as_ref().unwrap_or(agent);
-    let agent_prompt = prompt_kind.prepare(&prompt, memory_review);
+    let turn_agent = isolated_agent.as_ref().unwrap_or(&agent.agent);
+    let agent_prompt = agent
+        .context
+        .prompt(prompt_kind.prepare(&prompt, memory_review));
     let turn = match turn_agent.prompt(agent_prompt).await {
         Ok(turn) => turn,
         Err(error) => {
@@ -808,7 +834,7 @@ fn reject_cancelled_turn(request: TurnRequest) {
 }
 
 async fn steer_turn(
-    agent: &Nanocodex,
+    agent: &PaneAgent,
     memory_review: MemoryReviewState,
     controls: &mut HashMap<TurnKey, TurnControl>,
     turns: &mut JoinSet<(TurnKey, TurnPurpose, bool, TurnResult)>,
@@ -844,7 +870,11 @@ async fn steer_turn(
         }
     }
 
-    match agent.prompt(memory_review.steer_prompt(&prompt)).await {
+    match agent
+        .agent
+        .prompt(agent.context.prompt(memory_review.steer_prompt(&prompt)))
+        .await
+    {
         Ok(turn) => {
             let control = turn.control();
             let key = TurnKey {
@@ -973,9 +1003,9 @@ fn finish_turn(
 
 fn agent_for<'a>(
     pane: PaneId,
-    main: Option<&'a (PaneId, Nanocodex)>,
-    fork: Option<&'a (PaneId, Nanocodex)>,
-) -> Option<&'a Nanocodex> {
+    main: Option<&'a (PaneId, PaneAgent)>,
+    fork: Option<&'a (PaneId, PaneAgent)>,
+) -> Option<&'a PaneAgent> {
     main.filter(|(main_pane, _)| *main_pane == pane)
         .or_else(|| fork.filter(|(fork_pane, _)| *fork_pane == pane))
         .map(|(_, agent)| agent)
@@ -1035,11 +1065,14 @@ mod tests {
         },
     };
     use nanocodex::{
-        AgentEvents, Nanocodex, NanocodexError, OpenAi,
+        AgentEvents, Model, Nanocodex, NanocodexError, OpenAi, Thinking,
         agent::input::{Prompt, PromptInput, UserInput},
         oai::{
             ResponseError,
-            tower::{ResponsesAttempt, ResponsesServiceError, ResponsesServiceResponse},
+            tower::{
+                ResponsesAttempt, ResponsesAttemptKind, ResponsesServiceError,
+                ResponsesServiceResponse,
+            },
             transport::ResponsesError,
         },
     };
@@ -1055,12 +1088,260 @@ mod tests {
         task::{Context, Poll},
         time::Duration,
     };
+    use tact_subagents::AgentContext;
     use tokio::{
         sync::{Notify, mpsc, oneshot},
         time::timeout,
     };
     use tokio_util::sync::CancellationToken;
     use tower::Service;
+
+    struct CapturedRequest {
+        model: Model,
+        thinking: Thinking,
+        input: String,
+        release: oneshot::Sender<()>,
+    }
+
+    #[derive(Clone)]
+    struct CaptureService(mpsc::UnboundedSender<CapturedRequest>);
+
+    impl Service<ResponsesAttempt> for CaptureService {
+        type Response = ResponsesServiceResponse;
+        type Error = ResponseError;
+        type Future = std::pin::Pin<
+            Box<dyn std::future::Future<Output = StdResult<Self::Response, Self::Error>> + Send>,
+        >;
+
+        fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<StdResult<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, request: ResponsesAttempt) -> Self::Future {
+            let (release, released) = oneshot::channel();
+            if !matches!(request.kind(), ResponsesAttemptKind::Warmup) {
+                self.0
+                    .send(CapturedRequest {
+                        model: request.model(),
+                        thinking: request.thinking(),
+                        input: serde_json::to_string(&request.input_items().collect::<Vec<_>>())
+                            .unwrap(),
+                        release,
+                    })
+                    .unwrap();
+            } else {
+                drop(release);
+            }
+            Box::pin(async move {
+                let _ = released.await;
+                Err(ResponseError::from(ResponsesServiceError::from(
+                    ResponsesError::HttpRejected {
+                        status: 400,
+                        body: "test request completed".to_owned(),
+                        retry_after: None,
+                    },
+                )))
+            })
+        }
+    }
+
+    fn capture_agent(
+        sender: mpsc::UnboundedSender<CapturedRequest>,
+        context: AgentContext,
+    ) -> (Nanocodex, AgentEvents) {
+        let openai = OpenAi::builder("test-key")
+            .service(move || CaptureService(sender.clone()))
+            .build()
+            .unwrap();
+        Nanocodex::builder(openai)
+            .model(context.model)
+            .thinking(context.thinking)
+            .build()
+            .unwrap()
+    }
+
+    async fn captured(
+        receiver: &mut mpsc::UnboundedReceiver<CapturedRequest>,
+        model: Model,
+        thinking: Thinking,
+    ) -> CapturedRequest {
+        let request = timeout(Duration::from_secs(5), receiver.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(request.model, model);
+        assert_eq!(request.thinking, thinking);
+        let context = request
+            .input
+            .rsplit_once("<agent_context>")
+            .expect("request must contain turn context")
+            .1;
+        let model_name = format!("{model:?}").to_ascii_lowercase();
+        assert!(
+            context.contains(&format!(
+                "This turn runs on {model_name} with {thinking} reasoning effort."
+            )),
+            "{context}"
+        );
+        request
+    }
+
+    async fn finished(updates: &mut mpsc::UnboundedReceiver<WorkerEvent>, id: TurnId) {
+        timeout(Duration::from_secs(5), async {
+            loop {
+                if matches!(updates.recv().await, Some(WorkerEvent::TurnFinished { id: actual, .. }) if actual == id) { break; }
+            }
+        }).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn context_matches_queued_turn_effort_and_changed_auxiliary_settings() {
+        let (sender, mut requests) = mpsc::unbounded_channel();
+        let context = TEST_CONTEXT;
+        let (agent, mut events) = capture_agent(sender.clone(), context);
+        let shutdown = CancellationToken::new();
+        let (commands, mut updates) = spawn(
+            agent,
+            context,
+            MemoryReviewState::fresh(false),
+            shutdown.clone(),
+        );
+        let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
+        for id in [1, 2] {
+            commands
+                .send(WorkerCommand::Submit {
+                    pane: PaneId::Main,
+                    id: TurnId::new(id),
+                    prompt: format!("request {id}").into(),
+                })
+                .unwrap();
+        }
+        let first = captured(&mut requests, Model::Astra, Thinking::Low).await;
+        commands
+            .send(WorkerCommand::SetThinking {
+                pane: PaneId::Main,
+                effort: ReasoningEffort::High,
+            })
+            .unwrap();
+        loop {
+            if let Some(WorkerEvent::ThinkingUpdated { result, .. }) = updates.recv().await {
+                result.unwrap();
+                break;
+            }
+        }
+        commands
+            .send(WorkerCommand::Submit {
+                pane: PaneId::Main,
+                id: TurnId::new(3),
+                prompt: "new effort".to_owned().into(),
+            })
+            .unwrap();
+        first.release.send(()).unwrap();
+        captured(&mut requests, Model::Astra, Thinking::Low)
+            .await
+            .release
+            .send(())
+            .unwrap();
+        captured(&mut requests, Model::Astra, Thinking::High)
+            .await
+            .release
+            .send(())
+            .unwrap();
+        finished(&mut updates, TurnId::new(3)).await;
+
+        for context in [
+            super::AuxiliaryContext::Clean,
+            super::AuxiliaryContext::CurrentConversation,
+        ] {
+            let (completion, result) = oneshot::channel();
+            commands
+                .send(WorkerCommand::Auxiliary {
+                    pane: PaneId::Main,
+                    id: TurnId::new(4),
+                    prompt: "auxiliary".to_owned().into(),
+                    context,
+                    shutdown: CancellationToken::new(),
+                    completion,
+                })
+                .unwrap();
+            captured(&mut requests, Model::Astra, Thinking::High)
+                .await
+                .release
+                .send(())
+                .unwrap();
+            assert!(
+                timeout(Duration::from_secs(5), result)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .is_err()
+            );
+        }
+        commands
+            .send(WorkerCommand::OpenFork {
+                pane: PaneId::Fork(1),
+                parent_sequence: 0,
+            })
+            .unwrap();
+        let mut fork_events = loop {
+            match updates.recv().await.unwrap() {
+                WorkerEvent::ForkOpened { events, .. } => break events,
+                WorkerEvent::ForkFailed { error, .. } => panic!("{error}"),
+                _ => {}
+            }
+        };
+        let fork_drain = tokio::spawn(async move { while fork_events.recv().await.is_some() {} });
+        commands
+            .send(WorkerCommand::Submit {
+                pane: PaneId::Fork(1),
+                id: TurnId::new(5),
+                prompt: "fork".to_owned().into(),
+            })
+            .unwrap();
+        captured(&mut requests, Model::Astra, Thinking::High)
+            .await
+            .release
+            .send(())
+            .unwrap();
+        finished(&mut updates, TurnId::new(5)).await;
+
+        let replacement_context = AgentContext {
+            model: Model::Sol,
+            thinking: Thinking::Medium,
+        };
+        let (replacement, mut replacement_events) = capture_agent(sender, replacement_context);
+        let replacement_drain =
+            tokio::spawn(async move { while replacement_events.recv().await.is_some() {} });
+        commands
+            .send(WorkerCommand::ReplaceAgent {
+                pane: PaneId::Main,
+                agent: replacement,
+                context: replacement_context,
+                memory_review: MemoryReviewState::restored(false),
+            })
+            .unwrap();
+        commands
+            .send(WorkerCommand::Steer {
+                pane: PaneId::Main,
+                queue_id: QueueId::new(1),
+                fallback_id: TurnId::new(6),
+                prompt: "replacement fallback".to_owned().into(),
+            })
+            .unwrap();
+        captured(&mut requests, Model::Sol, Thinking::Medium)
+            .await
+            .release
+            .send(())
+            .unwrap();
+        finished(&mut updates, TurnId::new(6)).await;
+        shutdown.cancel();
+        for task in [drain, fork_drain, replacement_drain] {
+            timeout(Duration::from_secs(5), task)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+    }
 
     #[test]
     fn terminal_stop_classification_uses_the_typed_provider_code() {
@@ -1148,6 +1429,11 @@ mod tests {
             pending()
         }
     }
+
+    const TEST_CONTEXT: AgentContext = AgentContext {
+        model: Model::Astra,
+        thinking: Thinking::Low,
+    };
 
     fn pending_agent(called: Arc<Notify>, calls: Arc<AtomicUsize>) -> (Nanocodex, AgentEvents) {
         let openai = OpenAi::builder("test-key")
@@ -1256,8 +1542,12 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let (agent, mut events) = pending_agent(Arc::clone(&called), calls);
         let shutdown = CancellationToken::new();
-        let (commands, mut updates) =
-            spawn(agent, MemoryReviewState::fresh(false), shutdown.clone());
+        let (commands, mut updates) = spawn(
+            agent,
+            TEST_CONTEXT,
+            MemoryReviewState::fresh(false),
+            shutdown.clone(),
+        );
         let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
 
         commands
@@ -1308,8 +1598,12 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let (agent, mut events) = pending_agent(Arc::clone(&called), calls);
         let shutdown = CancellationToken::new();
-        let (commands, mut updates) =
-            spawn(agent, MemoryReviewState::fresh(false), shutdown.clone());
+        let (commands, mut updates) = spawn(
+            agent,
+            TEST_CONTEXT,
+            MemoryReviewState::fresh(false),
+            shutdown.clone(),
+        );
         let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
 
         commands
@@ -1360,8 +1654,12 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let (agent, mut events) = pending_agent(Arc::clone(&called), calls);
         let shutdown = CancellationToken::new();
-        let (commands, mut updates) =
-            spawn(agent, MemoryReviewState::fresh(false), shutdown.clone());
+        let (commands, mut updates) = spawn(
+            agent,
+            TEST_CONTEXT,
+            MemoryReviewState::fresh(false),
+            shutdown.clone(),
+        );
         let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
 
         commands
@@ -1418,8 +1716,12 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let (agent, mut events) = pending_agent(Arc::clone(&called), calls);
         let shutdown = CancellationToken::new();
-        let (commands, mut updates) =
-            spawn(agent, MemoryReviewState::fresh(false), shutdown.clone());
+        let (commands, mut updates) = spawn(
+            agent,
+            TEST_CONTEXT,
+            MemoryReviewState::fresh(false),
+            shutdown.clone(),
+        );
         let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
 
         commands
@@ -1469,8 +1771,12 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let (agent, mut events) = pending_agent(Arc::clone(&called), calls);
         let shutdown = CancellationToken::new();
-        let (commands, mut updates) =
-            spawn(agent, MemoryReviewState::fresh(false), shutdown.clone());
+        let (commands, mut updates) = spawn(
+            agent,
+            TEST_CONTEXT,
+            MemoryReviewState::fresh(false),
+            shutdown.clone(),
+        );
         let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
 
         commands
@@ -1519,8 +1825,12 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let (agent, mut events) = pending_agent(Arc::clone(&called), calls);
         let shutdown = CancellationToken::new();
-        let (commands, mut updates) =
-            spawn(agent, MemoryReviewState::fresh(false), shutdown.clone());
+        let (commands, mut updates) = spawn(
+            agent,
+            TEST_CONTEXT,
+            MemoryReviewState::fresh(false),
+            shutdown.clone(),
+        );
         let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
 
         commands
@@ -1596,6 +1906,7 @@ mod tests {
         let overview_shutdown = CancellationToken::new();
         let (commands, mut updates) = spawn(
             agent,
+            TEST_CONTEXT,
             MemoryReviewState::fresh(false),
             worker_shutdown.clone(),
         );
@@ -1661,6 +1972,7 @@ mod tests {
         job_shutdown.cancel();
         let (commands, mut updates) = spawn(
             agent,
+            TEST_CONTEXT,
             MemoryReviewState::fresh(false),
             worker_shutdown.clone(),
         );
@@ -1710,8 +2022,12 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let (agent, mut events) = pending_agent(Arc::clone(&called), calls);
         let shutdown = CancellationToken::new();
-        let (commands, mut updates) =
-            spawn(agent, MemoryReviewState::fresh(false), shutdown.clone());
+        let (commands, mut updates) = spawn(
+            agent,
+            TEST_CONTEXT,
+            MemoryReviewState::fresh(false),
+            shutdown.clone(),
+        );
         let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
 
         commands
@@ -1780,6 +2096,7 @@ mod tests {
         let shutdown = CancellationToken::new();
         let (commands, mut updates) = spawn(
             first_agent,
+            TEST_CONTEXT,
             MemoryReviewState::fresh(false),
             shutdown.clone(),
         );
@@ -1788,6 +2105,7 @@ mod tests {
             .send(WorkerCommand::ReplaceAgent {
                 pane: PaneId::Main,
                 agent: second_agent,
+                context: TEST_CONTEXT,
                 memory_review: MemoryReviewState::fresh(false),
             })
             .unwrap();

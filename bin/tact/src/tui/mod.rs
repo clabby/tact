@@ -510,6 +510,7 @@ pub(crate) async fn run(
         .map_err(RuntimeError::Terminal)?;
     let ConfiguredAgent {
         agent,
+        context,
         events,
         instructions,
         skills,
@@ -545,7 +546,8 @@ pub(crate) async fn run(
     } else {
         worker::MemoryReviewState::fresh(memory_enabled)
     };
-    let (commands, mut worker_updates) = worker::spawn(agent, memory_review, shutdown.clone());
+    let (commands, mut worker_updates) =
+        worker::spawn(agent, context, memory_review, shutdown.clone());
     let (agent_event_sender, mut agent_events) = mpsc::unbounded_channel();
     agent_events::forward(PaneId::Main, 0, events, agent_event_sender.clone());
     let (subagent_sender, mut subagent_events) = mpsc::unbounded_channel();
@@ -1459,6 +1461,7 @@ pub(crate) async fn run(
                     }) => {
                         let ConfiguredAgent {
                             agent,
+                            context,
                             events,
                             instructions,
                             skills,
@@ -1513,6 +1516,7 @@ pub(crate) async fn run(
                             .send(WorkerCommand::ReplaceAgent {
                                 pane,
                                 agent,
+                                context,
                                 memory_review: worker::MemoryReviewState::restored(memory_enabled),
                             })
                             .map_err(|_| RuntimeError::AgentWorkerStopped)?;
@@ -1601,6 +1605,7 @@ fn install_configured_agent(
 ) -> Result<Arc<[Skill]>> {
     let ConfiguredAgent {
         agent,
+        context,
         events,
         instructions,
         skills,
@@ -1646,6 +1651,7 @@ fn install_configured_agent(
         .send(WorkerCommand::ReplaceAgent {
             pane,
             agent,
+            context,
             memory_review: worker::MemoryReviewState::fresh(memory_enabled),
         })
         .map_err(|_| RuntimeError::AgentWorkerStopped)?;

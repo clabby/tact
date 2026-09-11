@@ -5,9 +5,10 @@ use super::{
     harness::{self, HarnessHandle},
     message::MessageThreads,
     model::{
-        AgentDescriptor, AgentId, AgentMessage, AgentMessageUpdate, AgentStatus, AgentThread,
-        AgentUpdate, MessageDeliveryState, MessageDisposition, MessageId, MessagePriority,
-        MessagePurpose, MessageSender, ScopedAgentUpdate, SubagentRuntimeId, ThreadId,
+        AgentContext, AgentDescriptor, AgentId, AgentMessage, AgentMessageUpdate, AgentStatus,
+        AgentThread, AgentUpdate, MessageDeliveryState, MessageDisposition, MessageId,
+        MessagePriority, MessagePurpose, MessageSender, ScopedAgentUpdate, SubagentRuntimeId,
+        ThreadId,
     },
     task_tree::TaskTree,
 };
@@ -146,6 +147,49 @@ pub(super) struct AgentReservation {
     pub(super) root_session_id: String,
     pub(super) id: AgentId,
     pub(super) parent: Option<AgentId>,
+    parent_context: Option<AgentContext>,
+}
+
+impl AgentReservation {
+    pub(super) fn validate_child(
+        &self,
+        caller_model: &str,
+        model: Model,
+        thinking: Thinking,
+    ) -> Result<(), NanocodexError> {
+        let parent_model = match self.parent_context {
+            Some(parent) => {
+                if thinking_rank(thinking)? > thinking_rank(parent.thinking)? {
+                    return Err(NanocodexError::InvalidRequest(format!(
+                        "subagent thinking {thinking} exceeds parent effort {}",
+                        parent.thinking
+                    )));
+                }
+                parent.model
+            }
+            None => caller_model
+                .parse::<Model>()
+                .map_err(NanocodexError::InvalidRequest)?,
+        };
+        if model_rank(model)? > model_rank(parent_model)? {
+            return Err(NanocodexError::InvalidRequest(format!(
+                "subagent model {model} exceeds parent model {parent_model}"
+            )));
+        }
+        Ok(())
+    }
+}
+
+fn model_rank(model: Model) -> Result<u8, NanocodexError> {
+    match model {
+        Model::Luna => Ok(0),
+        Model::Terra => Ok(1),
+        Model::Sol => Ok(2),
+        Model::Astra => Ok(3),
+        _ => Err(NanocodexError::InvalidRequest(
+            "unsupported subagent model".to_owned(),
+        )),
+    }
 }
 
 pub(super) struct CloseRequest {
@@ -317,7 +361,7 @@ impl RegistryState {
             .scopes
             .get(&root_session_id)
             .and_then(|scope| scope.topology.agent_for_session(session_id));
-        if let Some(parent) = parent {
+        let parent_context = if let Some(parent) = parent {
             let parent_session = self
                 .scopes
                 .get(&root_session_id)
@@ -331,8 +375,16 @@ impl RegistryState {
                     "agent {parent} is closing and cannot spawn children"
                 )));
             }
-        }
-        self.reserve(&root_session_id, parent)
+            Some(AgentContext {
+                model: parent_session.descriptor.model,
+                thinking: parent_session.descriptor.thinking,
+            })
+        } else {
+            None
+        };
+        let mut reservation = self.reserve(&root_session_id, parent)?;
+        reservation.parent_context = parent_context;
+        Ok(reservation)
     }
 
     fn reserve(
@@ -346,6 +398,7 @@ impl RegistryState {
             root_session_id,
             id,
             parent,
+            parent_context: None,
         })
     }
 
@@ -973,7 +1026,7 @@ impl Registry {
         &self,
         root_session_id: &str,
         id: AgentId,
-    ) -> Option<u64> {
+    ) -> Option<(u64, AgentContext)> {
         let token = {
             let mut state = self.state.lock().await;
             let session = state
@@ -990,7 +1043,13 @@ impl Registry {
                 session.steering = false;
                 session.submitted_output = None;
                 session.status = AgentStatus::Running;
-                Some(token)
+                Some((
+                    token,
+                    AgentContext {
+                        model: session.descriptor.model,
+                        thinking: session.descriptor.thinking,
+                    },
+                ))
             }
         };
         if token.is_some() {
@@ -1788,16 +1847,19 @@ mod tests {
     use crate::{
         AgentUpdate, MessageDeliveryState, MessageDisposition, MessagePriority, MessagePurpose,
     };
+    use futures_util::future::Either;
     use nanocodex::{
         Model, Nanocodex, NanocodexError, OpenAi, Thinking,
         oai::{
             ResponseError,
-            tower::{ResponsesAttempt, ResponsesServiceResponse},
+            tower::{
+                ResponsesAttempt, ResponsesAttemptKind, ResponsesOutput, ResponsesServiceResponse,
+            },
         },
     };
     use serde_json::json;
     use std::{
-        future::{Pending, pending},
+        future::{Pending, Ready, pending, ready},
         result::Result as StdResult,
         sync::{Arc, Mutex},
         task::{Context, Poll},
@@ -1856,23 +1918,131 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn registered_parent_caps_and_turn_context_follow_its_descriptor() {
+        let (updates, _receiver) = mpsc::unbounded_channel();
+        let registry = Registry::new(updates, 1);
+        let (captured, mut arguments) = mpsc::unbounded_channel();
+        registry
+            .set_agent_factory(Thinking::High, false, move |model, thinking, fast_mode| {
+                captured.send((model, thinking, fast_mode)).unwrap();
+                Err(NanocodexError::InvalidRequest(
+                    "stop after capture".to_owned(),
+                ))
+            })
+            .unwrap();
+        let parent = registry.reserve("root").await.unwrap();
+        parent
+            .validate_child(Model::Astra.as_str(), Model::Sol, Thinking::Medium)
+            .unwrap();
+        {
+            let mut state = registry.state.lock().await;
+            insert_session(&mut state, "root", parent.id, "sol-child", None);
+        }
+        let reservation = registry.reserve("sol-child").await.unwrap();
+        assert_eq!(reservation.parent, Some(parent.id));
+        for (model, thinking, allowed) in [
+            (Model::Astra, Thinking::Medium, false),
+            (Model::Sol, Thinking::High, false),
+            (Model::Sol, Thinking::Medium, true),
+            (Model::Luna, Thinking::Low, true),
+        ] {
+            let result = reservation
+                .validate_child(Model::Astra.as_str(), model, thinking)
+                .and_then(|()| registry.spawn_agent(model, thinking));
+            let error = result.err().unwrap();
+            if allowed {
+                assert!(error.to_string().contains("stop after capture"));
+                assert_eq!(arguments.try_recv().unwrap(), (model, thinking, false));
+            } else {
+                assert!(arguments.try_recv().is_err());
+                assert!(error.to_string().contains("exceeds parent"));
+            }
+        }
+        for (cap, allowed) in [(Thinking::Low, false), (Thinking::High, true)] {
+            registry.set_agent_max_thinking(cap);
+            reservation
+                .validate_child(
+                    "ignored for registered children",
+                    Model::Sol,
+                    Thinking::Medium,
+                )
+                .unwrap();
+            let error = registry
+                .spawn_agent(Model::Sol, Thinking::Medium)
+                .err()
+                .unwrap();
+            if allowed {
+                assert!(error.to_string().contains("stop after capture"));
+                assert_eq!(
+                    arguments.try_recv().unwrap(),
+                    (Model::Sol, Thinking::Medium, false)
+                );
+            } else {
+                assert!(error.to_string().contains("exceeds configured maximum"));
+                assert!(arguments.try_recv().is_err());
+            }
+        }
+        for expected_token in [1, 2] {
+            let (token, context) = registry
+                .harness_turn_started("root", parent.id)
+                .await
+                .unwrap();
+            assert_eq!(token, expected_token);
+            assert_eq!(context.model, Model::Sol);
+            assert_eq!(context.thinking, Thinking::Medium);
+            let mut state = registry.state.lock().await;
+            let session = state
+                .scopes
+                .get_mut("root")
+                .unwrap()
+                .sessions
+                .get_mut(&parent.id)
+                .unwrap();
+            session.active = false;
+            session.status = AgentStatus::Completed { output: json!({}) };
+        }
+    }
+
     #[derive(Clone)]
     struct PendingService {
         called: Arc<Notify>,
+        prompts: Option<mpsc::UnboundedSender<(Model, Thinking, String)>>,
     }
 
     impl Service<ResponsesAttempt> for PendingService {
         type Response = ResponsesServiceResponse;
         type Error = ResponseError;
-        type Future = Pending<StdResult<Self::Response, Self::Error>>;
+        type Future = Either<
+            Ready<StdResult<Self::Response, Self::Error>>,
+            Pending<StdResult<Self::Response, Self::Error>>,
+        >;
 
         fn poll_ready(&mut self, _context: &mut Context<'_>) -> Poll<StdResult<(), Self::Error>> {
             Poll::Ready(Ok(()))
         }
 
-        fn call(&mut self, _request: ResponsesAttempt) -> Self::Future {
+        fn call(&mut self, request: ResponsesAttempt) -> Self::Future {
+            if self.prompts.is_some() && matches!(request.kind(), ResponsesAttemptKind::Warmup) {
+                return Either::Left(ready(Ok(ResponsesServiceResponse::new(
+                    ResponsesOutput::Warmup(
+                        serde_json::from_value(json!({ "id": "warmup" })).unwrap(),
+                    ),
+                ))));
+            }
+            if let Some(prompts) = &self.prompts
+                && let Some(prompt) = request
+                    .input_items()
+                    .map(|item| serde_json::to_value(item).unwrap())
+                    .filter(|item| item["role"] == "user")
+                    .last()
+            {
+                prompts
+                    .send((request.model(), request.thinking(), prompt.to_string()))
+                    .unwrap();
+            }
             self.called.notify_one();
-            pending()
+            Either::Right(pending())
         }
     }
 
@@ -1880,10 +2050,55 @@ mod tests {
         let openai = OpenAi::builder("test-key")
             .service(move || PendingService {
                 called: Arc::clone(&called),
+                prompts: None,
             })
             .build()
             .unwrap();
         Nanocodex::builder(openai).build().unwrap()
+    }
+
+    #[tokio::test]
+    async fn harness_injects_descriptor_context_on_initial_and_reused_turns() {
+        let (updates, _receiver) = mpsc::unbounded_channel();
+        let registry = Arc::new(Registry::new(updates, 1));
+        let (prompts, mut received) = mpsc::unbounded_channel();
+        let openai = OpenAi::builder("test-key")
+            .service(move || PendingService {
+                called: Arc::new(Notify::new()),
+                prompts: Some(prompts.clone()),
+            })
+            .build()
+            .unwrap();
+        let (agent, events) = Nanocodex::builder(openai)
+            .model(Model::Sol)
+            .thinking(Thinking::Medium)
+            .build()
+            .unwrap();
+        let reservation = registry.reserve("root").await.unwrap();
+        insert_runtime_session(&registry, &reservation, None, agent, events).await;
+        for token in [1, 2] {
+            registry
+                .launch_initial_turn(
+                    "root",
+                    reservation.id,
+                    format!("task {token}"),
+                    registry.reserve_turn().unwrap(),
+                )
+                .await
+                .unwrap();
+            let (model, thinking, prompt) = timeout(Duration::from_secs(5), received.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(model, Model::Sol);
+            assert_eq!(thinking, Thinking::Medium);
+            assert!(prompt.contains(&format!("task {token}")), "{prompt}");
+            assert!(prompt.contains(&format!("turn_token: {token}")));
+            assert!(prompt.contains("<agent_context>"));
+            assert!(prompt.contains("This turn runs on sol with medium reasoning effort."));
+            registry.interrupt("root", reservation.id).await.unwrap();
+        }
+        registry.close("root", reservation.id).await.unwrap();
     }
 
     fn test_contract() -> OutputContract {

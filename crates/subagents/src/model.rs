@@ -1,4 +1,8 @@
-use nanocodex::{Model, Thinking, agent::events::AgentEvent};
+use nanocodex::{
+    Model, Thinking,
+    agent::events::AgentEvent,
+    oai::{Prompt, PromptInput, UserInput},
+};
 use serde::{Deserialize, Serialize};
 use std::{
     fmt,
@@ -6,6 +10,38 @@ use std::{
 };
 
 static NEXT_RUNTIME_ID: AtomicU64 = AtomicU64::new(0);
+
+/// The model and reasoning effort executing an agent turn.
+#[derive(Clone, Copy, Debug)]
+pub struct AgentContext {
+    /// The model executing the turn.
+    pub model: Model,
+    /// The reasoning effort executing the turn.
+    pub thinking: Thinking,
+}
+
+impl AgentContext {
+    /// Appends the turn's model and reasoning effort without discarding prompt content.
+    pub fn prompt(&self, prompt: impl Into<Prompt>) -> Prompt {
+        let mut prompt = prompt.into();
+        let model = match self.model {
+            Model::Luna => "luna",
+            Model::Terra => "terra",
+            Model::Sol => "sol",
+            Model::Astra => "astra",
+            _ => self.model.as_str(),
+        };
+        let context = format!(
+            "\n\n<agent_context>\nThis turn runs on {model} with {} reasoning effort.\n</agent_context>",
+            self.thinking
+        );
+        match &mut prompt.instruction {
+            PromptInput::Text(text) => text.push_str(&context),
+            PromptInput::Content(items) => items.push(UserInput::Text { text: context }),
+        }
+        prompt
+    }
+}
 
 /// Identifies a child within one root session's task tree.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
@@ -393,7 +429,43 @@ impl SubagentRuntimeId {
 
 #[cfg(test)]
 mod tests {
-    use super::{AgentId, AgentStatus, MessagePriority, agent_prompt};
+    use super::{AgentContext, AgentId, AgentStatus, MessagePriority, agent_prompt};
+    use nanocodex::{
+        Model, Thinking,
+        oai::{Prompt, PromptInput, PromptMessage, UserInput},
+    };
+
+    #[test]
+    fn agent_context_preserves_text_media_and_transcript() {
+        let context = AgentContext {
+            model: Model::Sol,
+            thinking: Thinking::Medium,
+        };
+        let expected = "\n\n<agent_context>\nThis turn runs on sol with medium reasoning effort.\n</agent_context>";
+        let prompt = context.prompt("task");
+        assert!(
+            matches!(prompt.instruction, PromptInput::Text(text) if text == format!("task{expected}"))
+        );
+        let original = Prompt::content([
+            UserInput::Text {
+                text: "task".to_owned(),
+            },
+            UserInput::Image {
+                image_url: "data:image/png;base64,AA==".to_owned(),
+                detail: None,
+            },
+        ])
+        .with_transcript([
+            PromptMessage::user("earlier"),
+            PromptMessage::assistant("answer"),
+        ]);
+        let before = serde_json::to_value(&original).unwrap();
+        let after = serde_json::to_value(context.prompt(original)).unwrap();
+        assert_eq!(after["transcript"], before["transcript"]);
+        assert_eq!(after["instruction"][0], before["instruction"][0]);
+        assert_eq!(after["instruction"][1], before["instruction"][1]);
+        assert_eq!(after["instruction"][2]["text"], expected);
+    }
 
     #[test]
     fn deferred_is_the_default_serialized_message_priority() {
