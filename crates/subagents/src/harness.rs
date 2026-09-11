@@ -530,7 +530,7 @@ impl Harness {
             .agent
             .as_ref()
             .ok_or_else(|| std::io::Error::other(format!("agent {} is closed", self.id)))?;
-        let Some(turn_token) = registry
+        let Some((turn_token, context)) = registry
             .harness_turn_started(&self.root_session_id, self.id)
             .await
         else {
@@ -543,7 +543,7 @@ impl Harness {
             "{prompt}\n\n{}",
             completion_instructions(&self.output_schema, turn_token)
         );
-        let turn = match agent.prompt(prompt).await {
+        let turn = match agent.prompt(context.prompt(prompt)).await {
             Ok(turn) => turn,
             Err(error) => {
                 let error = format!("could not start agent {}: {error}", self.id);
