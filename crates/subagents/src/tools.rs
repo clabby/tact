@@ -7,7 +7,7 @@ use super::{
     runtime::{AgentDirectoryEntry, AgentSummary, OutputContract, Registry, forward_events},
 };
 use nanocodex::{
-    Model, Tool,
+    Model, Thinking, Tool,
     tools::{
         ToolsBuilder,
         contract::{ToolContext, ToolDefinition, ToolInput, ToolOutput, ToolResult, async_trait},
@@ -16,7 +16,6 @@ use nanocodex::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    io,
     sync::{Arc, Weak},
     time::Duration,
 };
@@ -35,28 +34,9 @@ const WAIT_AGENT_TOOL: &str = "wait_agent";
 struct AgentTask {
     role: String,
     task: String,
-    model: SubagentModel,
+    model: Model,
+    thinking: Thinking,
     output_schema: Value,
-}
-
-#[derive(Clone, Copy, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum SubagentModel {
-    Selected,
-    Luna,
-}
-
-impl SubagentModel {
-    fn resolve(self, selected: Model, allow_luna: bool) -> Result<Model, io::Error> {
-        match self {
-            Self::Selected => Ok(selected),
-            Self::Luna if allow_luna => Ok(Model::Luna),
-            Self::Luna => Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "Luna subagents are disabled by `subagents.allow_luna`",
-            )),
-        }
-    }
 }
 
 #[derive(Serialize)]
@@ -125,24 +105,11 @@ fn json_output(value: &impl Serialize) -> ToolResult {
 
 struct SpawnAgent {
     registry: Weak<Registry>,
-    selected_model: Model,
-    allow_luna: bool,
 }
 
 #[async_trait]
 impl Tool for SpawnAgent {
     fn definition(&self) -> ToolDefinition {
-        let (models, model_description) = if self.allow_luna {
-            (
-                json!(["selected", "luna"]),
-                "Use `selected` for the session's selected model or `luna` when low latency matters more than reasoning capability.",
-            )
-        } else {
-            (
-                json!(["selected"]),
-                "Use `selected` for the session's selected model.",
-            )
-        };
         ToolDefinition::function(
             SPAWN_AGENT_TOOL,
             "Starts a reusable clean-room subagent without inherited conversation history and immediately returns its ID.",
@@ -159,14 +126,19 @@ impl Tool for SpawnAgent {
                     },
                     "model": {
                         "type": "string",
-                        "enum": models,
-                        "description": model_description
+                        "enum": ["luna", "terra", "sol", "astra"],
+                        "description": "Choose a model at or below the spawning parent: luna < terra < sol < astra. Consider capability and expected total completion cost and time, including rework."
+                    },
+                    "thinking": {
+                        "type": "string",
+                        "enum": ["low", "medium", "high", "xhigh", "max"],
+                        "description": "Reasoning effort for this child, bounded by the live configured agent.thinking cap. Root agents follow that cap even after an update during an active turn; registered subagents are additionally bounded by their own assigned effort. Use low for mechanical work, medium for bounded coding or ordinary review, high for a bounded difficult proof, xhigh for interacting contracts or competing designs, and max for the hardest integrated architecture or proof. Higher effort upfront can avoid repeated weaker runs."
                     },
                     "output_schema": {
                         "description": "The JSON Schema that every successful result from this agent must satisfy. Use an object with one string field for a free-form report."
                     }
                 },
-                "required": ["role", "task", "model", "output_schema"],
+                "required": ["role", "task", "model", "thinking", "output_schema"],
                 "additionalProperties": false
             }),
         )
@@ -178,9 +150,9 @@ impl Tool for SpawnAgent {
             role,
             task,
             model,
+            thinking,
             output_schema,
         } = input.decode_json()?;
-        let model = model.resolve(self.selected_model, self.allow_luna)?;
         let contract = OutputContract::compile(&output_schema)?;
         let registry = self
             .registry
@@ -188,13 +160,15 @@ impl Tool for SpawnAgent {
             .ok_or_else(|| std::io::Error::other("subagent runtime is closed"))?;
         let capacity = registry.reserve_turn()?;
         let reservation = registry.reserve(context.session_id()).await?;
+        reservation.validate_child(context.model(), model, thinking)?;
         let id = reservation.id;
-        let (child, events) = registry.spawn_agent(model)?;
+        let (child, events) = registry.spawn_agent(model, thinking)?;
         let session_id = child.session_id().to_string();
         let descriptor = AgentDescriptor {
             id,
             session_id,
             model,
+            thinking,
             role: role.clone(),
             task: task.clone(),
             parent: reservation.parent,
@@ -536,18 +510,11 @@ impl super::runtime::WeakSubagents {
     ///
     /// The returned builder is not finalized, so applications can compose their own tools and
     /// perform duplicate-name validation once with [`ToolsBuilder::build`].
-    pub fn install_tools(
-        &self,
-        tools: ToolsBuilder,
-        selected_model: Model,
-        allow_luna: bool,
-    ) -> ToolsBuilder {
+    pub fn install_tools(&self, tools: ToolsBuilder) -> ToolsBuilder {
         let registry = self.registry.clone();
         tools
             .tool(SpawnAgent {
                 registry: registry.clone(),
-                selected_model,
-                allow_luna,
             })
             .tool(SubmitResult {
                 registry: registry.clone(),
@@ -652,70 +619,141 @@ fn agent_status_schema() -> Value {
 
 #[cfg(test)]
 mod tests {
-    use super::{SendAgentMessage, SpawnAgent, SubagentModel, SubmitResult, WaitAgent};
+    use super::{SendAgentMessage, SpawnAgent, SubmitResult, WaitAgent};
     use crate::runtime::Registry;
-    use nanocodex::{Model, Tool};
-    use serde_json::json;
-    use std::sync::Weak;
+    use nanocodex::{
+        Model, NanocodexError, Thinking, Tool,
+        tools::contract::{ToolContext, ToolInput},
+    };
+    use serde_json::{json, value::to_raw_value};
+    use std::sync::{Arc, Weak};
+    use tokio::sync::mpsc;
 
-    #[test]
-    fn spawn_agent_requires_an_explicit_bounded_model_choice() {
-        let definition = SpawnAgent {
-            registry: Weak::<Registry>::new(),
-            selected_model: Model::Terra,
-            allow_luna: true,
-        }
-        .definition();
-        let parameters = definition.parameters().unwrap().as_value();
-        let output = definition.output_schema().unwrap();
-
-        assert_eq!(
-            parameters["properties"]["model"]["enum"],
-            json!(["selected", "luna"])
-        );
+    #[tokio::test]
+    async fn spawn_agent_enforces_root_model_order_and_accepts_supported_efforts() {
+        let (updates, _receiver) = mpsc::unbounded_channel();
+        let registry = Arc::new(Registry::new(updates, 1));
+        let (captured, mut arguments) = mpsc::unbounded_channel();
+        registry
+            .set_agent_factory(Thinking::Max, false, move |model, thinking, fast_mode| {
+                captured.send((model, thinking, fast_mode)).unwrap();
+                Err(NanocodexError::InvalidRequest(
+                    "stop after capture".to_owned(),
+                ))
+            })
+            .unwrap();
+        let tool = SpawnAgent {
+            registry: Arc::downgrade(&registry),
+        };
+        let definition = tool.definition();
         assert!(
-            parameters["required"]
+            definition.output_schema().unwrap().as_value()["required"]
                 .as_array()
                 .unwrap()
                 .contains(&json!("model"))
         );
-        assert_eq!(
-            SubagentModel::Selected.resolve(Model::Terra, true).unwrap(),
-            Model::Terra
-        );
-        assert_eq!(
-            SubagentModel::Luna.resolve(Model::Terra, true).unwrap(),
-            Model::Luna
-        );
-        assert!(
-            output.as_value()["required"]
-                .as_array()
-                .unwrap()
-                .contains(&json!("model"))
-        );
-    }
+        let validator =
+            jsonschema::validator_for(definition.parameters().unwrap().as_value()).unwrap();
 
-    #[test]
-    fn spawn_agent_excludes_and_rejects_luna_when_disabled() {
-        let definition = SpawnAgent {
-            registry: Weak::<Registry>::new(),
-            selected_model: Model::Terra,
-            allow_luna: false,
+        let models = [
+            ("luna", Model::Luna),
+            ("terra", Model::Terra),
+            ("sol", Model::Sol),
+            ("astra", Model::Astra),
+        ];
+        for (parent_rank, (_, parent_model)) in models.iter().enumerate() {
+            for (child_rank, (model, expected_model)) in models.iter().copied().enumerate() {
+                for (thinking, expected) in [
+                    ("low", Thinking::Low),
+                    ("medium", Thinking::Medium),
+                    ("high", Thinking::High),
+                    ("xhigh", Thinking::Xhigh),
+                    ("max", Thinking::Max),
+                ] {
+                    let input = json!({
+                        "role": "reviewer",
+                        "task": "Review a focused change.",
+                        "model": model,
+                        "thinking": thinking,
+                        "output_schema": { "type": "object" }
+                    });
+                    assert!(validator.is_valid(&input));
+                    let error = tool
+                        .execute(
+                            ToolInput::Function(to_raw_value(&input).unwrap()),
+                            ToolContext::new(parent_model.as_str(), "root", "spawn", &[], 128),
+                        )
+                        .await
+                        .err()
+                        .expect("factory should stop after capture");
+                    if child_rank > parent_rank {
+                        assert!(error.to_string().contains("exceeds parent model"));
+                        assert!(arguments.try_recv().is_err());
+                        continue;
+                    }
+                    assert!(error.to_string().contains("stop after capture"));
+                    assert_eq!(
+                        arguments.try_recv().unwrap(),
+                        (expected_model, expected, false)
+                    );
+                }
+            }
         }
-        .definition();
-        let parameters = definition.parameters().unwrap().as_value();
 
-        assert_eq!(
-            parameters["properties"]["model"]["enum"],
-            json!(["selected"])
-        );
-        assert!(
-            SubagentModel::Luna
-                .resolve(Model::Terra, false)
-                .unwrap_err()
-                .to_string()
-                .contains("subagents.allow_luna")
-        );
+        for model in [
+            None,
+            Some(json!(null)),
+            Some(json!("selected")),
+            Some(json!("unknown")),
+            Some(json!("gpt-6-astra")),
+            Some(json!("Astra")),
+            Some(json!(1)),
+        ] {
+            let mut input = json!({
+                "role": "reviewer", "task": "Review a focused change.",
+                "thinking": "medium", "output_schema": { "type": "object" }
+            });
+            if let Some(model) = model {
+                input["model"] = model;
+            }
+            assert!(!validator.is_valid(&input));
+            assert!(
+                tool.execute(
+                    ToolInput::Function(to_raw_value(&input).unwrap()),
+                    ToolContext::new("gpt-6-astra", "root", "spawn", &[], 128),
+                )
+                .await
+                .is_err()
+            );
+            assert!(arguments.try_recv().is_err());
+        }
+
+        for thinking in [
+            None,
+            Some(json!(null)),
+            Some(json!("none")),
+            Some(json!("ultra")),
+        ] {
+            let mut input = json!({
+                "role": "reviewer",
+                "task": "Review a focused change.",
+                "model": "astra",
+                "output_schema": { "type": "object" }
+            });
+            if let Some(thinking) = thinking {
+                input["thinking"] = thinking;
+            }
+            assert!(!validator.is_valid(&input));
+            assert!(
+                tool.execute(
+                    ToolInput::Function(to_raw_value(&input).unwrap()),
+                    ToolContext::new("gpt-6-astra", "root", "spawn", &[], 128),
+                )
+                .await
+                .is_err()
+            );
+            assert!(arguments.try_recv().is_err());
+        }
     }
 
     #[test]

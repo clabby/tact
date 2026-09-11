@@ -22,6 +22,12 @@ configure a factory that creates a fresh Nanocodex session for each child, and c
 `WeakSubagents::install_tools` there. The same tool factory is inherited by child sessions, which
 permits nested delegation while the runtime enforces task-tree authority.
 
+Each spawn explicitly names its model and reasoning effort. The runtime bounds new spawns by the
+immediate parent's model and the live configured effort cap. Registered children also cannot spawn
+above their own assigned effort. Applications can use `AgentContext::prompt` to include the
+executing turn's model and effort in a root prompt; the runtime supplies that context on every
+child turn.
+
 The runtime is process-local. It does not persist live child sessions, isolate filesystem access,
 or provide a distributed job queue. Root and child sessions use the process and tool authority
 granted by the embedding application.
