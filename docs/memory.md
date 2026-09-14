@@ -351,6 +351,11 @@ only one matching namespace retain their original BM25 scores and order. Namespa
 and the relative order within each author remain intact; duplicate content across namespaces
 retains each author's key. Scan telemetry covers only the final returned candidates.
 
+The bonus promotes author representation; it does not measure distinct information or trust.
+Duplicate advice can occupy multiple slots, and distributing content across more namespaces can
+increase its representation. Identical text may refer to different authors' preferences or
+contexts, so content equality does not make their provenance interchangeable.
+
 The agent's scan defaults to ten cards and accepts limits from one through ten. Remote services
 must support that limit before clients use the ten-result default. Scans do not transfer the corpus
 to the caller. A short record is its own preview; a longer preview is a UTF-8-safe prefix of at most
