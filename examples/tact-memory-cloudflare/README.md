@@ -79,7 +79,9 @@ to 8 MiB.
 
 ## Retrieval limits
 
-Tact performs exact BM25 ranking over a bounded shared corpus inside the Worker.
+Tact uses the shared memory ranker inside the Worker: corpus-wide BM25 scoring followed by
+namespace reranking before the result limit is applied. See the
+[retrieval contract](../../docs/memory.md#record-and-retrieval-contract) for scoring and tie-breaking.
 `TACT_MEMORY_SCAN_MAX_RECORDS` and `TACT_MEMORY_SCAN_MAX_CONTENT_BYTES` bound the records and
 authored content loaded from D1 for one scan. The defaults permit 10,240 records and 5 MiB of
 content.

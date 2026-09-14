@@ -5,6 +5,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 const BM25_K1: f64 = 1.2;
 const BM25_B: f64 = 0.75;
+const MAX_NAMESPACE_BONUS: f64 = 0.25;
 const PREVIEW_MAX_BYTES: usize = 64;
 
 pub(super) fn rank(query: &str, memories: &[MemoryRecord], limit: usize) -> Vec<MemoryCandidate> {
@@ -55,6 +56,26 @@ pub(super) fn rank(query: &str, memories: &[MemoryRecord], limit: usize) -> Vec<
             .then_with(|| left.key.namespace.cmp(&right.key.namespace))
             .then_with(|| left.key.id.cmp(&right.key.id))
     });
+
+    // Namespace preference can overcome only comparable BM25 scores. A single matching
+    // namespace retains its original scores, including local memory's unnamed namespace.
+    if let Some(first) = candidates.first()
+        && candidates
+            .iter()
+            .any(|candidate| candidate.key.namespace != first.key.namespace)
+    {
+        let mut namespace_ranks = HashMap::<_, usize>::new();
+        for candidate in &mut candidates {
+            let namespace_rank = namespace_ranks
+                .entry(candidate.key.namespace.as_deref())
+                .or_default();
+            *namespace_rank += 1;
+            candidate.score *= 1.0 + MAX_NAMESPACE_BONUS / *namespace_rank as f64;
+        }
+
+        // The global BM25 order breaks ties between equal adjusted scores.
+        candidates.sort_by(|left, right| right.score.total_cmp(&left.score));
+    }
     candidates.truncate(limit);
     candidates
 }
@@ -192,7 +213,7 @@ fn preview(content: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{preview, rank, tokenize};
-    use crate::{MemoryKey, MemoryRecord};
+    use crate::{MemoryKey, MemoryRecord, MemoryScan};
 
     fn memory(id: i64, content: &str) -> MemoryRecord {
         MemoryRecord {
@@ -330,6 +351,209 @@ mod tests {
                 .collect::<Vec<_>>(),
             [1, 2]
         );
+    }
+
+    #[test]
+    fn namespace_reranking_promotes_comparable_matches_before_truncation() {
+        let mut memories = (1..=11)
+            .map(|id| {
+                memory(
+                    id,
+                    &format!("needle {}", "padding ".repeat(19 + id as usize)),
+                )
+            })
+            .collect::<Vec<_>>();
+        memories[10].key.version = 3;
+        let baseline = MemoryScan::rank("needle", &memories, usize::MAX);
+        assert_eq!(baseline.candidates[10].key.id, 11);
+
+        for record in &mut memories {
+            record.key.namespace =
+                Some(if record.key.id == 11 { "bob" } else { "alice" }.to_owned());
+        }
+        let ranked = MemoryScan::rank("needle", &memories, usize::MAX);
+        assert_eq!(ranked.candidates[0].key.id, baseline.candidates[0].key.id);
+        assert_eq!(ranked.candidates[2].key, memories[10].key);
+        assert_eq!(
+            ranked
+                .candidates
+                .iter()
+                .filter(|candidate| candidate.key.namespace.as_deref() == Some("alice"))
+                .map(|candidate| candidate.key.id)
+                .collect::<Vec<_>>(),
+            (1..=10).collect::<Vec<_>>()
+        );
+        assert!(
+            ranked
+                .candidates
+                .windows(2)
+                .all(|pair| pair[0].score >= pair[1].score)
+        );
+        for candidate in &ranked.candidates {
+            let original = baseline
+                .candidates
+                .iter()
+                .find(|original| original.key.id == candidate.key.id)
+                .unwrap();
+            assert!(candidate.score.is_finite());
+            assert!(candidate.score >= original.score);
+            assert!(candidate.score <= 1.25 * original.score);
+            assert_eq!(candidate.preview, original.preview);
+        }
+
+        for limit in [0, 1, 5, 10, usize::MAX] {
+            let scan = MemoryScan::rank("needle", &memories, limit);
+            assert_eq!(
+                scan.candidates,
+                ranked.candidates[..limit.min(memories.len())]
+            );
+            assert_eq!(scan.abstained, limit == 0);
+        }
+        memories.reverse();
+        assert_eq!(MemoryScan::rank("needle", &memories, usize::MAX), ranked);
+    }
+
+    #[test]
+    fn namespace_bonus_keeps_weak_positive_matches_below_strong_matches() {
+        let mut memories = (1..=10)
+            .map(|id| memory(id, "rare exact needle match"))
+            .collect::<Vec<_>>();
+        memories.push(memory(11, &format!("match {}", "padding ".repeat(120))));
+        let baseline = MemoryScan::rank("rare exact needle match", &memories, 11);
+        assert_eq!(baseline.candidates[10].key.id, 11);
+        assert!(baseline.candidates[10].score > 0.0);
+        assert!(baseline.candidates[9].score > 50.0 * baseline.candidates[10].score);
+
+        for record in &mut memories {
+            record.key.namespace =
+                Some(if record.key.id == 11 { "bob" } else { "alice" }.to_owned());
+        }
+        let scan = MemoryScan::rank("rare exact needle match", &memories, 10);
+        assert_eq!(scan.candidates.len(), 10);
+        assert!(
+            scan.candidates
+                .iter()
+                .all(|candidate| candidate.key.namespace.as_deref() == Some("alice"))
+        );
+    }
+
+    #[test]
+    fn namespace_bonus_respects_the_relevance_budget_at_the_cutoff() {
+        for (padding, promoted) in [(31, true), (32, false)] {
+            let mut memories = (1..=10)
+                .map(|id| memory(id, &format!("needle {}", "padding ".repeat(20))))
+                .collect::<Vec<_>>();
+            memories.push(memory(
+                11,
+                &format!("needle {}", "padding ".repeat(padding)),
+            ));
+
+            // A first match competes with the tenth match's 2.5% bonus at a raw-score ratio of 0.82.
+            let baseline = MemoryScan::rank("needle", &memories, 11);
+            let ratio = baseline.candidates[10].score / baseline.candidates[9].score;
+            assert_eq!(ratio > 0.82, promoted);
+
+            for record in &mut memories {
+                record.key.namespace =
+                    Some(if record.key.id == 11 { "bob" } else { "alice" }.to_owned());
+            }
+            let scan = MemoryScan::rank("needle", &memories, 10);
+            assert_eq!(
+                scan.candidates
+                    .iter()
+                    .any(|candidate| candidate.key.id == 11),
+                promoted
+            );
+        }
+    }
+
+    #[test]
+    fn equal_scores_preserve_namespace_keys_and_deterministic_ties() {
+        let memories = [None, Some("alice"), Some("bob")]
+            .into_iter()
+            .flat_map(|namespace| {
+                (1..=3).map(move |id| {
+                    let mut record = memory(id, "needle");
+                    record.key.namespace = namespace.map(str::to_owned);
+                    record
+                })
+            })
+            .collect::<Vec<_>>();
+        let ranked = MemoryScan::rank("needle", &memories, 10);
+        let expected = (1..=3)
+            .flat_map(|id| [None, Some("alice"), Some("bob")].map(|namespace| (namespace, id)))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ranked
+                .candidates
+                .iter()
+                .map(|candidate| (candidate.key.namespace.as_deref(), candidate.key.id))
+                .collect::<Vec<_>>(),
+            expected
+        );
+
+        let mut shuffled = memories;
+        shuffled.reverse();
+        for _ in 0..shuffled.len() {
+            assert_eq!(MemoryScan::rank("needle", &shuffled, 10), ranked);
+            shuffled.rotate_left(1);
+        }
+    }
+
+    #[test]
+    fn a_single_matching_namespace_preserves_local_scores_and_order() {
+        let singleton = MemoryScan::rank("needle", &[memory(1, "needle")], 10);
+        assert!((singleton.candidates[0].score - (4.0_f64 / 3.0).ln()).abs() < f64::EPSILON);
+
+        let local = [
+            memory(1, "rust sqlite"),
+            memory(2, "rust rust sqlite"),
+            memory(3, "python network"),
+        ];
+        let expected = MemoryScan::rank("rust sqlite", &local, 10);
+
+        for unrelated_namespace in ["alice", "bob"] {
+            let mut remote = local.clone();
+            for record in &mut remote {
+                let namespace = if record.key.id == 3 {
+                    unrelated_namespace
+                } else {
+                    "alice"
+                };
+                record.key.namespace = Some(namespace.to_owned());
+            }
+            let mut scan = MemoryScan::rank("rust sqlite", &remote, 10);
+            for candidate in &mut scan.candidates {
+                assert_eq!(candidate.key.namespace.as_deref(), Some("alice"));
+                candidate.key.namespace = None;
+            }
+            assert_eq!(
+                scan.candidates
+                    .iter()
+                    .map(|candidate| candidate.score.to_bits())
+                    .collect::<Vec<_>>(),
+                expected
+                    .candidates
+                    .iter()
+                    .map(|candidate| candidate.score.to_bits())
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(scan, expected);
+        }
+    }
+
+    #[test]
+    fn namespaces_cannot_create_matches_without_lexical_evidence() {
+        let mut memories = [memory(1, "rust"), memory(2, "sqlite")];
+        memories[1].key.namespace = Some("alice".to_owned());
+
+        for query in ["", "---", "unrelated"] {
+            let scan = MemoryScan::rank(query, &memories, 10);
+            assert!(scan.abstained);
+            assert!(scan.candidates.is_empty());
+        }
+        assert!(MemoryScan::rank("rust", &memories, 0).abstained);
+        assert!(MemoryScan::rank("rust", &[], 10).abstained);
     }
 
     #[test]

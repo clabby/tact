@@ -29,7 +29,7 @@ const VISIBLE_RECORD_SQL: &str = "(memories.probation_until_ms IS NULL OR memori
 const INSERT_SQL: &str = "INSERT INTO memories (namespace, id, version, content, identity, created_at_ms, updated_at_ms, probation_until_ms) SELECT namespace, next_id, 1, ?, ?, CAST(? AS INTEGER), CAST(? AS INTEGER), CAST(? AS INTEGER) FROM memory_namespaces WHERE namespace = ? AND (SELECT COUNT(*) FROM memories WHERE namespace = ?) < CAST(? AS INTEGER) AND (SELECT COALESCE(SUM(length(CAST(content AS BLOB))), 0) FROM memories WHERE namespace = ?) + CAST(? AS INTEGER) <= CAST(? AS INTEGER) AND NOT EXISTS (SELECT 1 FROM memories WHERE namespace = ? AND identity = ?)";
 const REPLACE_SQL: &str = "UPDATE memories SET version = CAST(? AS INTEGER), content = ?, identity = ?, updated_at_ms = CAST(? AS INTEGER), last_scanned_at_ms = NULL, scan_count = 0, last_used_at_ms = NULL, use_count = 0, probation_until_ms = CAST(? AS INTEGER) WHERE namespace = ? AND id = CAST(? AS INTEGER) AND version = CAST(? AS INTEGER) AND NOT EXISTS (SELECT 1 FROM memories other WHERE other.namespace = ? AND other.identity = ? AND other.id != CAST(? AS INTEGER)) AND (SELECT COALESCE(SUM(length(CAST(content AS BLOB))), 0) FROM memories WHERE namespace = ?) - length(CAST(memories.content AS BLOB)) + CAST(? AS INTEGER) <= CAST(? AS INTEGER)";
 
-/// Deployment-selected bound for exact Worker-side BM25 retrieval.
+/// Deployment-selected bound for Worker-side memory retrieval.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ScanBudget {
     pub(crate) records: usize,
