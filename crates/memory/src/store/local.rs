@@ -96,7 +96,7 @@ impl LocalMemoryStore {
             .map(MemoryRecord::from)
             .collect::<Vec<_>>();
         let limit = limit.min(self.limits.scan_results);
-        let scan = MemoryScan::rank(query, &memories, limit);
+        let scan = MemoryScan::rank(query, &memories, None, limit);
 
         for candidate in &scan.candidates {
             transaction

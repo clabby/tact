@@ -333,28 +333,24 @@ Records carry a stable ID, monotonically increasing version, timestamps, and sep
 telemetry. A replacement and delete check the expected version so concurrent work cannot be
 silently overwritten. Remote keys add the server-authenticated author namespace; local keys do not.
 
-Retrieval scores the entire visible corpus with lexical BM25 (`k1 = 1.2`, `b = 0.75`). Positive
-matches are ordered by descending score, then namespace and ID. A scan abstains when its query has
-no searchable terms or no active record shares a term.
+Retrieval scores the entire visible corpus with lexical BM25 (`k1 = 1.2`, `b = 0.75`). When a scan
+has an explicit authenticated own namespace, every positive match from that namespace receives an
+adjusted score of `raw_bm25 * 1.25`; every other match keeps its raw BM25 score. Local scans have no
+own namespace and therefore keep raw BM25 scores unchanged. A scan abstains when its query has no
+searchable terms or no active record shares a term.
 
-When matches span multiple namespaces, each score is multiplied by
-`1 + 0.25 / namespace_rank`. Namespace rank is the one-based position among that author's matches
-in the global BM25 order; corpus statistics are shared across authors. This gives each author's
-strongest matches a bounded opportunity to compete: bonuses range from 25% for the first match to
-12.5% for the second and decrease thereafter. A result at or below 80% of another result's raw
-BM25 score cannot overtake it. The 25% ceiling is a relevance tradeoff, not a calibrated probability
-or a guarantee of semantic quality. Author namespaces do not receive reserved result slots.
+Results are ordered by descending adjusted score. Raw BM25 score, then namespace and ID, breaks an
+adjusted-score tie. Weighting happens before truncation to the requested limit, and candidate
+scores report the adjusted values. A caller-owned match whose raw score is at or below 80% of
+another match's raw score cannot overtake it: equality produces an adjusted-score tie that the
+higher raw score wins. The 25% boost is a chosen relevance tradeoff, not a calibrated probability
+or measure of trust. Every caller-owned match receives the same weight and competes in the shared
+result window.
 
-Results are sorted by the adjusted score, retaining the original BM25 order on ties, and then
-truncated to the requested limit. Candidate scores include the bonus. Local scans and queries with
-only one matching namespace retain their original BM25 scores and order. Namespace keys, previews,
-and the relative order within each author remain intact; duplicate content across namespaces
-retains each author's key. Scan telemetry covers only the final returned candidates.
-
-The bonus promotes author representation; it does not measure distinct information or trust.
-Duplicate advice can occupy multiple slots, and distributing content across more namespaces can
-increase its representation. Identical text may refer to different authors' preferences or
-contexts, so content equality does not make their provenance interchangeable.
+Weighting does not change candidate keys or previews. Duplicate content across namespaces retains
+each author's key, and scan telemetry covers only the final returned candidates. Identical text may
+refer to different authors' preferences or contexts, so content equality does not make their
+provenance interchangeable.
 
 The agent's scan defaults to ten cards and accepts limits from one through ten. Remote services
 must support that limit before clients use the ten-result default. Scans do not transfer the corpus

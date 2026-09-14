@@ -118,6 +118,7 @@ impl MemoryStore for TestMemoryStore {
         let scan = MemoryScan::rank(
             query,
             &visible_records(&state),
+            Some(&self.namespace),
             limit.min(MemoryLimits::PRODUCTION.scan_results),
         );
         for candidate in &scan.candidates {
@@ -699,6 +700,41 @@ async fn remote_scans_support_ten_candidates_and_reject_excess_limits() {
 }
 
 #[tokio::test]
+async fn remote_weighting_prefers_the_authenticated_callers_matches() {
+    let app = memory_app(vec![
+        credential("alice", RemoteRole::Writer, ALICE_TOKEN),
+        credential("bob", RemoteRole::Writer, BOB_TOKEN),
+    ]);
+    for (namespace, token) in [("alice", ALICE_TOKEN), ("bob", BOB_TOKEN)] {
+        for content in ["needle first", "needle second"] {
+            put(&app, namespace, token, content).await;
+        }
+    }
+    let (endpoint, task) = live_server(app).await;
+    for (namespace, token) in [("alice", ALICE_TOKEN), ("bob", BOB_TOKEN)] {
+        let client = RemoteMemoryClient::new(
+            &endpoint,
+            namespace.to_owned(),
+            RemoteToken::new(token.to_owned()).unwrap(),
+        )
+        .unwrap();
+        let scan = client.scan("needle", 2).await.unwrap();
+        assert_eq!(
+            scan.candidates
+                .iter()
+                .map(|candidate| &candidate.key)
+                .collect::<Vec<_>>(),
+            [
+                &MemoryKey::remote(namespace.to_owned(), 1, 1),
+                &MemoryKey::remote(namespace.to_owned(), 2, 1),
+            ]
+        );
+        assert_eq!(scan.candidates[0].score, scan.candidates[1].score);
+    }
+    task.abort();
+}
+
+#[tokio::test]
 async fn remote_reranking_updates_only_final_candidates() {
     let app = memory_app(vec![
         credential("alice", RemoteRole::Writer, ALICE_TOKEN),
@@ -723,14 +759,14 @@ async fn remote_reranking_updates_only_final_candidates() {
     let (endpoint, task) = live_server(app).await;
     let client = RemoteMemoryClient::new(
         &endpoint,
-        "alice".to_owned(),
-        RemoteToken::new(ALICE_TOKEN.to_owned()).unwrap(),
+        "bob".to_owned(),
+        RemoteToken::new(BOB_TOKEN.to_owned()).unwrap(),
     )
     .unwrap();
 
     let scan = client.scan("needle", 10).await.unwrap();
     assert_eq!(scan.candidates.len(), 10);
-    assert_eq!(scan.candidates[2].key, bob.key);
+    assert_eq!(scan.candidates[0].key, bob.key);
     assert!(
         scan.candidates
             .windows(2)

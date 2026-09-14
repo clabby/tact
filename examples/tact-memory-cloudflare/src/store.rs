@@ -132,7 +132,12 @@ impl MemoryStore for CloudflareMemoryStore {
                 return Err(MemoryError::StorageCapacity);
             }
             let records = results[1].records()?;
-            let scan = MemoryScan::rank(&query, &records, limit.min(limits.scan_results));
+            let scan = MemoryScan::rank(
+                &query,
+                &records,
+                Some(&store.namespace),
+                limit.min(limits.scan_results),
+            );
             let mut updates = Vec::with_capacity(scan.candidates.len() + 1);
             updates.push(store.statement(PRUNE_SQL, &[D1Type::Text(&now)])?);
             for candidate in &scan.candidates {
