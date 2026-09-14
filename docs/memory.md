@@ -151,8 +151,10 @@ send local record metadata through ordinary put. Read omits missing or stale key
 telemetry. Scan ranks at the store, returns no more than the requested limit or ten candidates,
 and updates telemetry only for returned records. Ordinary requests do not transfer the remote
 corpus. List returns a deterministic inspection window of at most 512 visible records; production
-backends should enforce that bound in their storage query. Export preserves every namespaced record
-and uses stable bounded pages with an opaque continuation position; it does not deduplicate
+backends should enforce that bound in their storage query. The Cloudflare backend selects the
+authenticated namespace first, then fills remaining slots from other namespaces. A namespace with
+more than 512 visible records is still only partially listed. Export preserves every namespaced
+record and uses stable bounded pages with an opaque continuation position; it does not deduplicate
 equivalent content.
 Stable exports must neither omit nor repeat records. A backend must define transaction or snapshot
 behavior that makes concurrent changes predictable.
