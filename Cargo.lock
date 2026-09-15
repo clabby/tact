@@ -2541,8 +2541,8 @@ dependencies = [
 
 [[package]]
 name = "nanocodex"
-version = "0.5.0"
-source = "git+https://github.com/gakonst/nanocodex?rev=4be96acd90455fb2fad60b11f9a15968d0664274#4be96acd90455fb2fad60b11f9a15968d0664274"
+version = "0.6.1"
+source = "git+https://github.com/gakonst/nanocodex?rev=9c8308ecb11012a4b4f48d071a2947186152296f#9c8308ecb11012a4b4f48d071a2947186152296f"
 dependencies = [
  "nanocodex-agent",
  "nanocodex-durability",
@@ -2553,8 +2553,8 @@ dependencies = [
 
 [[package]]
 name = "nanocodex-agent"
-version = "0.5.0"
-source = "git+https://github.com/gakonst/nanocodex?rev=4be96acd90455fb2fad60b11f9a15968d0664274#4be96acd90455fb2fad60b11f9a15968d0664274"
+version = "0.6.1"
+source = "git+https://github.com/gakonst/nanocodex?rev=9c8308ecb11012a4b4f48d071a2947186152296f#9c8308ecb11012a4b4f48d071a2947186152296f"
 dependencies = [
  "chrono",
  "futures-util",
@@ -2575,8 +2575,8 @@ dependencies = [
 
 [[package]]
 name = "nanocodex-durability"
-version = "0.5.0"
-source = "git+https://github.com/gakonst/nanocodex?rev=4be96acd90455fb2fad60b11f9a15968d0664274#4be96acd90455fb2fad60b11f9a15968d0664274"
+version = "0.6.1"
+source = "git+https://github.com/gakonst/nanocodex?rev=9c8308ecb11012a4b4f48d071a2947186152296f#9c8308ecb11012a4b4f48d071a2947186152296f"
 dependencies = [
  "nanocodex-agent",
  "serde",
@@ -2590,8 +2590,8 @@ dependencies = [
 
 [[package]]
 name = "nanocodex-managed"
-version = "0.5.0"
-source = "git+https://github.com/gakonst/nanocodex?rev=4be96acd90455fb2fad60b11f9a15968d0664274#4be96acd90455fb2fad60b11f9a15968d0664274"
+version = "0.6.1"
+source = "git+https://github.com/gakonst/nanocodex?rev=9c8308ecb11012a4b4f48d071a2947186152296f#9c8308ecb11012a4b4f48d071a2947186152296f"
 dependencies = [
  "futures-util",
  "nanocodex-agent",
@@ -2612,8 +2612,8 @@ dependencies = [
 
 [[package]]
 name = "nanocodex-oai-api"
-version = "0.5.0"
-source = "git+https://github.com/gakonst/nanocodex?rev=4be96acd90455fb2fad60b11f9a15968d0664274#4be96acd90455fb2fad60b11f9a15968d0664274"
+version = "0.6.1"
+source = "git+https://github.com/gakonst/nanocodex?rev=9c8308ecb11012a4b4f48d071a2947186152296f#9c8308ecb11012a4b4f48d071a2947186152296f"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -2638,8 +2638,8 @@ dependencies = [
 
 [[package]]
 name = "nanocodex-tools"
-version = "0.5.0"
-source = "git+https://github.com/gakonst/nanocodex?rev=4be96acd90455fb2fad60b11f9a15968d0664274#4be96acd90455fb2fad60b11f9a15968d0664274"
+version = "0.6.1"
+source = "git+https://github.com/gakonst/nanocodex?rev=9c8308ecb11012a4b4f48d071a2947186152296f#9c8308ecb11012a4b4f48d071a2947186152296f"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -2672,8 +2672,8 @@ dependencies = [
 
 [[package]]
 name = "nanocodex-tools-macros"
-version = "0.5.0"
-source = "git+https://github.com/gakonst/nanocodex?rev=4be96acd90455fb2fad60b11f9a15968d0664274#4be96acd90455fb2fad60b11f9a15968d0664274"
+version = "0.6.1"
+source = "git+https://github.com/gakonst/nanocodex?rev=9c8308ecb11012a4b4f48d071a2947186152296f#9c8308ecb11012a4b4f48d071a2947186152296f"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -3951,9 +3951,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.42"
+version = "0.23.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3c54fcab019b409d04215d3a17cb438fd7fbf192ee61461f20f4fe18704bc138"
+checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
 dependencies = [
  "once_cell",
  "ring",
@@ -4013,9 +4013,9 @@ checksum = "f87165f0995f63a9fbeea62b64d10b4d9d8e78ec6d7d51fb2125fda7bb36788f"
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.13"
+version = "0.103.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "61c429a8649f110dddef65e2a5ad240f747e85f7758a6bccc7e5777bd33f756e"
+checksum = "f3c3cf1d8b1e7d4927e2d154c3fcb02979afb9939629c62cd9048d4f07b60ac2"
 dependencies = [
  "ring",
  "rustls-pki-types",
