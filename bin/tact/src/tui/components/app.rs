@@ -274,11 +274,12 @@ impl AppNode {
                     let Some(root) = self.pane_mut(pane) else {
                         return ComponentUpdate::none();
                     };
+                    let preferred_reasoning_mode = root.component().preferred_reasoning_mode();
                     root.component_mut().reset_session(
                         &workspace,
                         effort,
                         reasoning_mode,
-                        reasoning_mode,
+                        preferred_reasoning_mode,
                         DraftReset::Clear,
                     );
                     root.component_mut().set_fast_mode(fast_mode);
@@ -333,11 +334,12 @@ impl AppNode {
                 let Some(root) = self.pane_mut(pane) else {
                     return ComponentUpdate::none();
                 };
+                let preferred_reasoning_mode = root.component().preferred_reasoning_mode();
                 root.component_mut().reset_session(
                     &workspace,
                     effort,
                     reasoning_mode,
-                    reasoning_mode,
+                    preferred_reasoning_mode,
                     draft_reset,
                 );
                 root.component_mut().set_fast_mode(fast_mode);
@@ -866,6 +868,26 @@ mod tests {
         let root = app.root(PaneId::Main).unwrap();
         assert_eq!(root.composer().draft(), "send with luna");
         assert_eq!(root.composer().model(), Model::Luna);
+    }
+
+    #[test]
+    fn model_session_replacement_preserves_the_preferred_reasoning_mode() {
+        let mut app = app();
+        app.set_preferred_reasoning_mode(ReasoningMode::Pro);
+
+        app.update(AppEvent::NewSessionReady {
+            pane: PaneId::Main,
+            effort: ReasoningEffort::High,
+            reasoning_mode: ReasoningMode::Standard,
+            fast_mode: false,
+            model: Model::Astra,
+            draft_reset: DraftReset::Preserve,
+            skills: Arc::from([]),
+        });
+
+        let root = app.root(PaneId::Main).unwrap();
+        assert_eq!(root.composer().reasoning_mode(), ReasoningMode::Standard);
+        assert_eq!(root.preferred_reasoning_mode(), ReasoningMode::Pro);
     }
 
     fn memory_record(id: i64, content: &str) -> MemoryRecord {

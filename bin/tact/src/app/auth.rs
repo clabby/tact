@@ -6,8 +6,8 @@ use crate::app::{
     secret::SecretString,
 };
 use nanocodex::oai::auth::{
-    ChatGptAuthStatus, ChatGptLogin, OpenAiAuth, chatgpt_auth_status, load_chatgpt_auth,
-    logout_chatgpt,
+    ChatGptAuthStatus, ChatGptLogin, OpenAiAuth, load_chatgpt_auth, logout_chatgpt,
+    resolve_chatgpt_auth_status,
 };
 use std::{path::Path, result::Result as StdResult};
 
@@ -43,9 +43,9 @@ impl AuthConfig {
         selected.into_openai_auth(self.file())
     }
 
-    pub(crate) fn status(&self) -> AuthResult<()> {
+    pub(crate) async fn status(&self) -> AuthResult<()> {
         match self.select_auth(|| SecretString::from_environment(OPENAI_API_KEY))? {
-            SelectedAuth::ChatGpt => self.print_chatgpt_status()?,
+            SelectedAuth::ChatGpt => self.print_chatgpt_status().await?,
             SelectedAuth::ApiKey(_api_key) => {
                 println!("Authentication: OpenAI API key");
                 println!("Source: {OPENAI_API_KEY}");
@@ -101,8 +101,8 @@ impl AuthConfig {
         }
     }
 
-    fn print_chatgpt_status(&self) -> AuthResult<()> {
-        let account = chatgpt_auth_status(self.file())?;
+    async fn print_chatgpt_status(&self) -> AuthResult<()> {
+        let account = resolve_chatgpt_auth_status(self.file()).await?;
         println!("Authentication: ChatGPT");
         if let Some(email) = account.email {
             println!("Email: {email}");

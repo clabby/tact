@@ -477,7 +477,6 @@ impl RootNode {
         self.preferred_reasoning_mode = mode;
     }
 
-    #[cfg(test)]
     pub(crate) const fn preferred_reasoning_mode(&self) -> ReasoningMode {
         self.preferred_reasoning_mode
     }
@@ -2958,7 +2957,8 @@ fn model_name(model: Model) -> &'static str {
         Model::Luna => "Luna",
         Model::Terra => "Terra",
         Model::Sol => "Sol",
-        _ => "Sol",
+        Model::Astra => "Astra",
+        _ => model.as_str(),
     }
 }
 

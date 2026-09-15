@@ -95,7 +95,7 @@ enum HarnessEvent {
     Deferred(Option<DeliveryCommand>),
     Urgent(Option<DeliveryCommand>),
     CapacityChanged,
-    TurnFinished(Result<nanocodex::agent::Result<nanocodex::TurnResult>, JoinError>),
+    TurnFinished(Box<Result<nanocodex::agent::Result<nanocodex::TurnResult>, JoinError>>),
 }
 
 impl HarnessHandle {
@@ -228,7 +228,7 @@ impl Harness {
                 }
                 HarnessEvent::Deferred(None) | HarnessEvent::Urgent(None) => {}
                 HarnessEvent::CapacityChanged => self.start_pending().await,
-                HarnessEvent::TurnFinished(result) => self.turn_finished(result).await,
+                HarnessEvent::TurnFinished(result) => self.turn_finished(*result).await,
             }
         }
     }
@@ -256,7 +256,7 @@ impl Harness {
             command = self.commands.recv() => HarnessEvent::Command(command),
             urgent = self.urgent.recv() => HarnessEvent::Urgent(urgent),
             deferred = self.deferred.recv() => HarnessEvent::Deferred(deferred),
-            result = &mut active.result => HarnessEvent::TurnFinished(result),
+            result = &mut active.result => HarnessEvent::TurnFinished(Box::new(result)),
         }
     }
 
