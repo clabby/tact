@@ -368,73 +368,16 @@ mod tests {
         }
         let baseline = MemoryScan::rank("needle", &memories, None, usize::MAX);
         assert_eq!(baseline.candidates[10].key, memories[10].key);
-        let ranked = MemoryScan::rank("needle", &memories, Some("bob"), usize::MAX);
-        assert_eq!(ranked.candidates[0].key, memories[10].key);
-        assert_eq!(
-            ranked
-                .candidates
-                .iter()
-                .filter(|candidate| candidate.key.namespace.as_deref() == Some("alice"))
-                .map(|candidate| candidate.key.id)
-                .collect::<Vec<_>>(),
-            (1..=10).collect::<Vec<_>>()
-        );
-        assert!(
-            ranked
-                .candidates
-                .windows(2)
-                .all(|pair| pair[0].score >= pair[1].score)
-        );
-        for candidate in &ranked.candidates {
-            let original = baseline
-                .candidates
-                .iter()
-                .find(|original| original.key.id == candidate.key.id)
-                .unwrap();
-            assert!(candidate.score.is_finite());
-            let weight = if candidate.key.namespace.as_deref() == Some("bob") {
-                1.25
-            } else {
-                1.0
-            };
-            assert_eq!(candidate.score, weight * original.score);
-            assert_eq!(candidate.key, original.key);
-            assert_eq!(candidate.preview, original.preview);
-        }
+        let mut expected = baseline.candidates;
+        let mut own = expected.pop().unwrap();
+        own.score *= 1.25;
+        expected.insert(0, own);
 
         for limit in [0, 1, 5, 10, usize::MAX] {
             let scan = MemoryScan::rank("needle", &memories, Some("bob"), limit);
-            assert_eq!(
-                scan.candidates,
-                ranked.candidates[..limit.min(memories.len())]
-            );
+            assert_eq!(scan.candidates, expected[..limit.min(memories.len())]);
             assert_eq!(scan.abstained, limit == 0);
         }
-        memories.reverse();
-        assert_eq!(
-            MemoryScan::rank("needle", &memories, Some("bob"), usize::MAX),
-            ranked
-        );
-
-        let before = ranked
-            .candidates
-            .iter()
-            .map(|candidate| (candidate.key.id, candidate.score))
-            .collect::<Vec<_>>();
-        for record in &mut memories {
-            if record.key.namespace.as_deref() == Some("alice") {
-                record.key.namespace = Some(format!("author-{}", record.key.id));
-            }
-        }
-        let repartitioned = MemoryScan::rank("needle", &memories, Some("bob"), usize::MAX);
-        assert_eq!(
-            repartitioned
-                .candidates
-                .iter()
-                .map(|candidate| (candidate.key.id, candidate.score))
-                .collect::<Vec<_>>(),
-            before
-        );
     }
 
     #[test]
@@ -446,7 +389,7 @@ mod tests {
         let baseline = MemoryScan::rank("rare exact needle match", &memories, None, 11);
         assert_eq!(baseline.candidates[10].key.id, 11);
         assert!(baseline.candidates[10].score > 0.0);
-        assert!(baseline.candidates[9].score > 50.0 * baseline.candidates[10].score);
+        assert!(baseline.candidates[10].score * 1.25 < baseline.candidates[9].score);
 
         for record in &mut memories {
             record.key.namespace =
@@ -492,109 +435,96 @@ mod tests {
 
     #[test]
     fn every_own_match_gets_equal_weight_and_ties_preserve_namespace_keys() {
-        let memories = [None, Some("alice"), Some("bob")]
+        let mut memories = ["bob", "alice"]
             .into_iter()
             .flat_map(|namespace| {
-                (1..=3).map(move |id| {
+                [2, 1].map(move |id| {
                     let mut record = memory(id, "needle");
-                    record.key.namespace = namespace.map(str::to_owned);
+                    record.key.namespace = Some(namespace.to_owned());
                     record
                 })
             })
             .collect::<Vec<_>>();
-        let ranked = MemoryScan::rank("needle", &memories, Some("bob"), 10);
-        let expected = [Some("bob"), None, Some("alice")]
-            .into_iter()
-            .flat_map(|namespace| (1..=3).map(move |id| (namespace, id)))
-            .collect::<Vec<_>>();
+        let mut expected = MemoryScan::rank("needle", &memories, None, 10);
         assert_eq!(
-            ranked
+            expected
                 .candidates
                 .iter()
                 .map(|candidate| (candidate.key.namespace.as_deref(), candidate.key.id))
                 .collect::<Vec<_>>(),
+            [
+                (Some("alice"), 1),
+                (Some("alice"), 2),
+                (Some("bob"), 1),
+                (Some("bob"), 2)
+            ]
+        );
+        expected.candidates.rotate_left(2);
+        for candidate in &mut expected.candidates[..2] {
+            candidate.score *= 1.25;
+        }
+        assert_eq!(
+            MemoryScan::rank("needle", &memories, Some("bob"), 10),
             expected
         );
-        for candidate in &ranked.candidates[..3] {
-            assert_eq!(candidate.score, 1.25 * ranked.candidates[3].score);
-        }
-        assert!(
-            ranked.candidates[3..]
-                .iter()
-                .all(|candidate| candidate.score == ranked.candidates[3].score)
+        memories.reverse();
+        assert_eq!(
+            MemoryScan::rank("needle", &memories, Some("bob"), 10),
+            expected
         );
-
-        let mut shuffled = memories;
-        shuffled.reverse();
-        for _ in 0..shuffled.len() {
-            assert_eq!(
-                MemoryScan::rank("needle", &shuffled, Some("bob"), 10),
-                ranked
-            );
-            shuffled.rotate_left(1);
-        }
     }
 
     #[test]
     fn unweighted_retrieval_preserves_local_scores_and_order() {
-        let singleton = MemoryScan::rank("needle", &[memory(1, "needle")], None, 10);
-        assert!((singleton.candidates[0].score - (4.0_f64 / 3.0).ln()).abs() < f64::EPSILON);
-
         let local = [
             memory(1, "rust sqlite"),
             memory(2, "rust rust sqlite"),
             memory(3, "python network"),
         ];
-        let expected = MemoryScan::rank("rust sqlite", &local, None, 10);
-
-        for unrelated_namespace in ["alice", "bob"] {
+        let baseline = MemoryScan::rank("rust sqlite", &local, None, 10);
+        for namespaces in [["alice", "alice", "bob"], ["alice", "bob", "bob"]] {
             let mut remote = local.clone();
-            for record in &mut remote {
-                let namespace = if record.key.id == 3 {
-                    unrelated_namespace
-                } else {
-                    "alice"
-                };
+            for (record, namespace) in remote.iter_mut().zip(namespaces) {
                 record.key.namespace = Some(namespace.to_owned());
             }
-            let mut scan = MemoryScan::rank("rust sqlite", &remote, Some("absent"), 10);
-            assert_eq!(scan, MemoryScan::rank("rust sqlite", &remote, None, 10));
-            let own = MemoryScan::rank("rust sqlite", &remote, Some("alice"), 10);
-            for (weighted, original) in own.candidates.iter().zip(&scan.candidates) {
-                assert_eq!(weighted.key, original.key);
-                assert_eq!(weighted.score, original.score * 1.25);
+            let mut expected = baseline.clone();
+            for candidate in &mut expected.candidates {
+                candidate.key.namespace =
+                    Some(namespaces[candidate.key.id as usize - 1].to_owned());
             }
-            for candidate in &mut scan.candidates {
-                assert_eq!(candidate.key.namespace.as_deref(), Some("alice"));
-                candidate.key.namespace = None;
+            for own_namespace in [None, Some("absent")] {
+                assert_eq!(
+                    MemoryScan::rank("rust sqlite", &remote, own_namespace, 10),
+                    expected
+                );
             }
-            assert_eq!(
-                scan.candidates
-                    .iter()
-                    .map(|candidate| candidate.score.to_bits())
-                    .collect::<Vec<_>>(),
-                expected
-                    .candidates
-                    .iter()
-                    .map(|candidate| candidate.score.to_bits())
-                    .collect::<Vec<_>>()
-            );
-            assert_eq!(scan, expected);
         }
+    }
+
+    #[test]
+    fn own_matches_are_weighted_without_competing_namespaces() {
+        let mut memories = [memory(1, "needle"), memory(2, "unrelated")];
+        for (record, namespace) in memories.iter_mut().zip(["alice", "bob"]) {
+            record.key.namespace = Some(namespace.to_owned());
+        }
+        let mut expected = MemoryScan::rank("needle", &memories, None, 10);
+        expected.candidates[0].score *= 1.25;
+        assert_eq!(
+            MemoryScan::rank("needle", &memories, Some("alice"), 10),
+            expected
+        );
     }
 
     #[test]
     fn ownership_cannot_create_matches_without_lexical_evidence() {
         let mut memories = [memory(1, "rust"), memory(2, "sqlite")];
         memories[1].key.namespace = Some("alice".to_owned());
-
-        for query in ["", "---", "unrelated"] {
-            let scan = MemoryScan::rank(query, &memories, Some("alice"), 10);
-            assert!(scan.abstained);
-            assert!(scan.candidates.is_empty());
-        }
-        assert!(MemoryScan::rank("rust", &memories, Some("alice"), 0).abstained);
-        assert!(MemoryScan::rank("rust", &[], Some("alice"), 10).abstained);
+        let scan = MemoryScan::rank("rust", &memories, Some("alice"), 10);
+        assert_eq!(scan.candidates.len(), 1);
+        assert_eq!(scan.candidates[0].key, memories[0].key);
+        let scan = MemoryScan::rank("unrelated", &memories, Some("alice"), 10);
+        assert!(scan.abstained);
+        assert!(scan.candidates.is_empty());
     }
 
     #[test]

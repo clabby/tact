@@ -68,7 +68,6 @@ impl LocalMemoryStore {
     ) -> Result<MemoryScan, MemoryError> {
         let store = self.clone();
         let query = query.to_owned();
-        let limit = limit.min(self.limits.scan_results);
         run_local(move || store.scan_local(&query, limit, now_ms)).await
     }
 

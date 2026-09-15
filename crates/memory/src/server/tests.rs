@@ -710,15 +710,21 @@ async fn remote_weighting_prefers_the_authenticated_callers_matches() {
             put(&app, namespace, token, content).await;
         }
     }
-    let (endpoint, task) = live_server(app).await;
     for (namespace, token) in [("alice", ALICE_TOKEN), ("bob", BOB_TOKEN)] {
-        let client = RemoteMemoryClient::new(
-            &endpoint,
-            namespace.to_owned(),
-            RemoteToken::new(token.to_owned()).unwrap(),
+        let scan = json::<ScanResponse>(
+            send(
+                &app,
+                protocol::SCAN_PATH,
+                token,
+                namespace,
+                &ScanRequest {
+                    query: "needle".to_owned(),
+                    limit: 2,
+                },
+            )
+            .await,
         )
-        .unwrap();
-        let scan = client.scan("needle", 2).await.unwrap();
+        .await;
         assert_eq!(
             scan.candidates
                 .iter()
@@ -731,7 +737,6 @@ async fn remote_weighting_prefers_the_authenticated_callers_matches() {
         );
         assert_eq!(scan.candidates[0].score, scan.candidates[1].score);
     }
-    task.abort();
 }
 
 #[tokio::test]
@@ -756,15 +761,20 @@ async fn remote_reranking_updates_only_final_candidates() {
         &format!("needle {}", "padding ".repeat(30)),
     )
     .await;
-    let (endpoint, task) = live_server(app).await;
-    let client = RemoteMemoryClient::new(
-        &endpoint,
-        "bob".to_owned(),
-        RemoteToken::new(BOB_TOKEN.to_owned()).unwrap(),
+    let scan = json::<ScanResponse>(
+        send(
+            &app,
+            protocol::SCAN_PATH,
+            BOB_TOKEN,
+            "bob",
+            &ScanRequest {
+                query: "needle".to_owned(),
+                limit: 10,
+            },
+        )
+        .await,
     )
-    .unwrap();
-
-    let scan = client.scan("needle", 10).await.unwrap();
+    .await;
     assert_eq!(scan.candidates.len(), 10);
     assert_eq!(scan.candidates[0].key, bob.key);
     assert!(
@@ -777,7 +787,10 @@ async fn remote_reranking_updates_only_final_candidates() {
         .iter()
         .map(|candidate| &candidate.key)
         .collect::<HashSet<_>>();
-    let records = client.list().await.unwrap();
+    let records =
+        json::<ListResponse>(send(&app, protocol::LIST_PATH, BOB_TOKEN, "bob", &()).await)
+            .await
+            .memories;
     assert_eq!(records.len(), 11);
     for record in records {
         let returned = selected.contains(&record.key);
@@ -787,7 +800,6 @@ async fn remote_reranking_updates_only_final_candidates() {
         assert_eq!(record.last_used_at_ms, None);
         assert!(record.probation_until_ms.is_some());
     }
-    task.abort();
 }
 
 #[tokio::test]
