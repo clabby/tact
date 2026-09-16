@@ -22,8 +22,10 @@ serde_json.workspace = true
 tact-memory = { workspace = true, features = ["server"] }
 thiserror.workspace = true
 tower = { workspace = true, features = ["util"] }
+tracing.workspace = true
 tracing-subscriber.workspace = true
 tracing-web.workspace = true
+unicode-general-category.workspace = true
 worker.workspace = true
 zeroize.workspace = true
 

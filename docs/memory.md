@@ -335,11 +335,34 @@ Records carry a stable ID, monotonically increasing version, timestamps, and sep
 telemetry. A replacement and delete check the expected version so concurrent work cannot be
 silently overwritten. Remote keys add the server-authenticated author namespace; local keys do not.
 
-Retrieval scores the entire visible corpus with lexical BM25 (`k1 = 1.2`, `b = 0.75`). When a scan
-has an explicit authenticated own namespace, every positive match from that namespace receives an
+Local retrieval scores the visible corpus with lexical BM25 (`k1 = 1.2`, `b = 0.75`). The Cloudflare
+backend uses D1's FTS5 index and negates its BM25 score to expose positive, larger-is-better values.
+These backends share the matching and ownership policy below, but their scores are not numerically
+interchangeable. When a scan has an explicit authenticated own namespace, every positive match from that namespace receives an
 adjusted score of `raw_bm25 * 1.25`; every other match keeps its raw BM25 score. Local scans have no
 own namespace and therefore keep raw BM25 scores unchanged. A scan abstains when its query has no
 searchable terms or no active record shares a term.
+
+Queries are literal match-any terms, not search expressions. Cloudflare quotes and deduplicates
+lowercased runs of Unicode letters, numbers, and private-use characters, retaining SQLite's removable
+combining diacritics and splitting at other marks. D1 indexes and matches them with FTS5's `unicode61` tokenizer: punctuation and
+underscores separate terms, case and Latin accents fold, and one-character terms remain searchable.
+Quotation marks, `OR`, `NOT`, and other query operators have no special
+meaning in user input. Camel-case identifiers remain whole tokens in D1; local retrieval also indexes
+their components. For example, `request` matches `parse_request` in both backends, while `server`
+matches `httpServer` only in local retrieval. Native FTS5 uses a different IDF formula with a floor
+for very common terms. See the [FTS5 tokenizer and scoring contract](https://www.sqlite.org/fts5.html).
+Rust's Unicode character classes can differ from SQLite's Unicode 6.1 classes for newer characters.
+Distinct query literals that FTS5 folds to the same token, such as `cafe` and `café`, retain their
+separate contributions to native scoring.
+
+D1 filters unread expired records before selection, but they remain part of index statistics until
+pruned. A scan's initial read can use a replica and does not prune first. Its later maintenance batch
+prunes expired rows, which can change scores on subsequent scans, and checks each finalist's exact
+namespace, ID, and version before updating telemetry on the primary; a concurrent
+replacement can make a returned candidate stale without crediting the replacement. Scans do not
+extend or graduate probation. D1 computes the weighted ordering and final limit before returning
+candidate keys, scores, and bounded preview data to the Worker.
 
 Results are ordered by descending adjusted score. Raw BM25 score, then namespace and ID, breaks an
 adjusted-score tie. Weighting happens before truncation to the requested limit, and candidate

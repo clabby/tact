@@ -127,6 +127,8 @@ jobs:
         run: npm test --prefix examples/tact-memory-cloudflare
       - name: Bundle Cloudflare Worker
         run: npm run deploy:check --prefix examples/tact-memory-cloudflare
+      - name: Exercise indexed retrieval through local D1
+        run: npm run test:indexed --prefix examples/tact-memory-cloudflare -- "$RUNNER_TEMP/tact-indexed-d1"
 
   cargo-lint:
     needs: cache

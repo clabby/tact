@@ -1,6 +1,5 @@
 //! Non-secret deployment configuration loaded from Worker bindings.
 
-use crate::store::ScanBudget;
 use tact_memory::MemoryLimits;
 use thiserror::Error;
 use worker::Env;
@@ -9,8 +8,6 @@ const MAX_RECORDS_VARIABLE: &str = "TACT_MEMORY_MAX_RECORDS";
 const MAX_RECORD_BYTES_VARIABLE: &str = "TACT_MEMORY_MAX_RECORD_BYTES";
 const MAX_TOTAL_BYTES_VARIABLE: &str = "TACT_MEMORY_MAX_TOTAL_BYTES";
 const MAX_REQUEST_BYTES_VARIABLE: &str = "TACT_MEMORY_MAX_REQUEST_BYTES";
-const SCAN_RECORDS_VARIABLE: &str = "TACT_MEMORY_SCAN_MAX_RECORDS";
-const SCAN_CONTENT_BYTES_VARIABLE: &str = "TACT_MEMORY_SCAN_MAX_CONTENT_BYTES";
 
 /// Failure to load a positive deployment limit.
 #[derive(Debug, Error)]
@@ -36,14 +33,6 @@ pub(super) fn max_request_bytes(environment: &Env) -> Result<usize, ConfigError>
     positive_usize(environment, MAX_REQUEST_BYTES_VARIABLE)
 }
 
-/// Loads the deployment's maximum Worker-side BM25 corpus.
-pub(super) fn scan_budget(environment: &Env) -> Result<ScanBudget, ConfigError> {
-    Ok(ScanBudget {
-        records: positive_usize(environment, SCAN_RECORDS_VARIABLE)?,
-        content_bytes: positive_usize(environment, SCAN_CONTENT_BYTES_VARIABLE)?,
-    })
-}
-
 fn positive_usize(environment: &Env, name: &'static str) -> Result<usize, ConfigError> {
     let value = environment
         .var(name)
@@ -64,8 +53,7 @@ fn parse_positive_usize(value: &str, name: &'static str) -> Result<usize, Config
 mod tests {
     use super::{
         ConfigError, MAX_RECORD_BYTES_VARIABLE, MAX_RECORDS_VARIABLE, MAX_REQUEST_BYTES_VARIABLE,
-        MAX_TOTAL_BYTES_VARIABLE, SCAN_CONTENT_BYTES_VARIABLE, SCAN_RECORDS_VARIABLE,
-        parse_positive_usize,
+        MAX_TOTAL_BYTES_VARIABLE, parse_positive_usize,
     };
 
     #[test]
@@ -75,8 +63,6 @@ mod tests {
             MAX_RECORD_BYTES_VARIABLE,
             MAX_TOTAL_BYTES_VARIABLE,
             MAX_REQUEST_BYTES_VARIABLE,
-            SCAN_RECORDS_VARIABLE,
-            SCAN_CONTENT_BYTES_VARIABLE,
         ] {
             assert_eq!(parse_positive_usize("1024", name).unwrap(), 1_024);
             for value in ["", "0", "-1", "many", "18446744073709551616"] {

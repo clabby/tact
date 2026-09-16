@@ -4708,8 +4708,10 @@ dependencies = [
  "tact-memory",
  "thiserror 2.0.19",
  "tower",
+ "tracing",
  "tracing-subscriber",
  "tracing-web",
+ "unicode-general-category",
  "worker",
  "zeroize",
 ]

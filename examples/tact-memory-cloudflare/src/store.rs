@@ -6,16 +6,24 @@
 //! their exact values.
 
 mod row;
+#[cfg(test)]
+mod search_tests;
 
-use row::{CapacityRow, CorpusRow, DecodeResult, ReplaceRow, SyncRow, VersionRow};
+use row::{CandidateRow, CapacityRow, DecodeResult, ReplaceRow, SyncRow, VersionRow};
 use serde::Serialize;
-use std::{collections::HashSet, fmt::Display, future::Future, sync::Arc};
+use std::{
+    collections::{BTreeSet, HashSet},
+    fmt::Display,
+    future::Future,
+    sync::Arc,
+};
 use tact_memory::{
     MemoryError, MemoryKey, MemoryLimits, MemoryRecord, MemoryScan, MemoryStore,
     normalize_identity,
     server::protocol::{self, ExportCursor, SyncReport},
 };
 use thiserror::Error;
+use unicode_general_category::{GeneralCategory, get_general_category};
 use worker::{
     D1DatabaseSession, Date,
     d1::{D1PreparedStatement, D1Result, D1Type},
@@ -23,11 +31,74 @@ use worker::{
 };
 
 const RECORD_COLUMNS: &str = "memories.namespace AS namespace, CAST(memories.id AS TEXT) AS id, CAST(memories.version AS TEXT) AS version, memories.content AS content, CAST(memories.created_at_ms AS TEXT) AS created_at_ms, CAST(memories.updated_at_ms AS TEXT) AS updated_at_ms, CAST(memories.last_scanned_at_ms AS TEXT) AS last_scanned_at_ms, CAST(memories.scan_count AS TEXT) AS scan_count, CAST(memories.last_used_at_ms AS TEXT) AS last_used_at_ms, CAST(memories.use_count AS TEXT) AS use_count, CAST(memories.probation_until_ms AS TEXT) AS probation_until_ms";
+const SCAN_UPDATE_SQL: &str = "UPDATE memories SET last_scanned_at_ms = CAST(? AS INTEGER), scan_count = CASE WHEN scan_count < 9223372036854775807 THEN scan_count + 1 ELSE scan_count END WHERE namespace = ? AND id = CAST(? AS INTEGER) AND version = CAST(? AS INTEGER)";
 const PRUNE_SQL: &str =
     "DELETE FROM memories WHERE probation_until_ms <= CAST(? AS INTEGER) AND use_count = 0";
 const VISIBLE_RECORD_SQL: &str = "(memories.probation_until_ms IS NULL OR memories.probation_until_ms > CAST(? AS INTEGER) OR memories.use_count != 0)";
 const INSERT_SQL: &str = "INSERT INTO memories (namespace, id, version, content, identity, created_at_ms, updated_at_ms, probation_until_ms) SELECT namespace, next_id, 1, ?, ?, CAST(? AS INTEGER), CAST(? AS INTEGER), CAST(? AS INTEGER) FROM memory_namespaces WHERE namespace = ? AND (SELECT COUNT(*) FROM memories WHERE namespace = ?) < CAST(? AS INTEGER) AND (SELECT COALESCE(SUM(length(CAST(content AS BLOB))), 0) FROM memories WHERE namespace = ?) + CAST(? AS INTEGER) <= CAST(? AS INTEGER) AND NOT EXISTS (SELECT 1 FROM memories WHERE namespace = ? AND identity = ?)";
 const REPLACE_SQL: &str = "UPDATE memories SET version = CAST(? AS INTEGER), content = ?, identity = ?, updated_at_ms = CAST(? AS INTEGER), last_scanned_at_ms = NULL, scan_count = 0, last_used_at_ms = NULL, use_count = 0, probation_until_ms = CAST(? AS INTEGER) WHERE namespace = ? AND id = CAST(? AS INTEGER) AND version = CAST(? AS INTEGER) AND NOT EXISTS (SELECT 1 FROM memories other WHERE other.namespace = ? AND other.identity = ? AND other.id != CAST(? AS INTEGER)) AND (SELECT COALESCE(SUM(length(CAST(content AS BLOB))), 0) FROM memories WHERE namespace = ?) - length(CAST(memories.content AS BLOB)) + CAST(? AS INTEGER) <= CAST(? AS INTEGER)";
+
+// FTS5 statistics include every indexed document, including expired probation, until pruning.
+// MATERIALIZED evaluates BM25 in its MATCH context before weighting the complete match set.
+const SCAN_SQL: &str = "WITH matched AS MATERIALIZED (
+    SELECT memories.namespace, memories.id, memories.version,
+           substr(memories.content, 1, 64) AS preview, -bm25(memory_search) AS raw_score
+    FROM memory_search
+    JOIN memory_search_documents ON memory_search_documents.search_id = memory_search.rowid
+    JOIN memories USING (namespace, id)
+    WHERE memory_search MATCH ?1
+      AND (memories.probation_until_ms IS NULL OR memories.probation_until_ms > CAST(?2 AS INTEGER) OR memories.use_count != 0)
+), ranked AS (
+    SELECT *, raw_score * CASE WHEN namespace = ?3 THEN 1.25 ELSE 1.0 END AS score
+    FROM matched
+)
+SELECT namespace, CAST(id AS TEXT) AS id, CAST(version AS TEXT) AS version, preview, score
+FROM ranked
+ORDER BY score DESC, raw_score DESC, namespace COLLATE BINARY, ranked.id
+LIMIT min(max(CAST(?4 AS INTEGER), 0), 10)";
+
+// unicode61 starts tokens at letters, numbers, or private-use characters and retains its fixed
+// set of removable diacritics within them. Quoted slices delegate folding and leading-diacritic
+// handling to FTS5. Other marks separate terms, even if Unicode classifies them as alphabetic.
+fn literal_match_query(query: &str) -> String {
+    let expression = query
+        .split(|character| {
+            let category = get_general_category(character);
+            let token = matches!(
+                category,
+                GeneralCategory::UppercaseLetter
+                    | GeneralCategory::LowercaseLetter
+                    | GeneralCategory::TitlecaseLetter
+                    | GeneralCategory::ModifierLetter
+                    | GeneralCategory::OtherLetter
+                    | GeneralCategory::DecimalNumber
+                    | GeneralCategory::LetterNumber
+                    | GeneralCategory::OtherNumber
+                    | GeneralCategory::PrivateUse
+            );
+            // These masks are SQLite's sqlite3Fts5UnicodeIsdiacritic contract:
+            // https://github.com/sqlite/sqlite/blob/master/ext/fts5/fts5_unicode2.c
+            let code = character as u32;
+            let diacritic = match code {
+                0x0300..=0x031f => 0x0802_9fdf_u32 & (1 << (code - 0x0300)) != 0,
+                0x0320..=0x0331 => 0x0003_61f8_u32 & (1 << (code - 0x0320)) != 0,
+                _ => false,
+            };
+            !token && !diacritic
+        })
+        .filter(|term| !term.is_empty())
+        .map(str::to_lowercase)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .map(|term| format!("\"{term}\""))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    if expression.is_empty() {
+        "\"\"".to_owned()
+    } else {
+        expression
+    }
+}
 
 fn list_sql() -> String {
     format!(
@@ -36,20 +107,12 @@ fn list_sql() -> String {
     )
 }
 
-/// Deployment-selected bound for Worker-side memory retrieval.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct ScanBudget {
-    pub(crate) records: usize,
-    pub(crate) content_bytes: usize,
-}
-
 /// Namespace-bound shared memory backed by Cloudflare D1.
 #[derive(Clone, Debug)]
 pub(crate) struct CloudflareMemoryStore {
     session: Arc<D1DatabaseSession>,
     namespace: Arc<str>,
     limits: MemoryLimits,
-    scan_budget: ScanBudget,
 }
 
 impl CloudflareMemoryStore {
@@ -58,13 +121,11 @@ impl CloudflareMemoryStore {
         session: Arc<D1DatabaseSession>,
         namespace: String,
         limits: MemoryLimits,
-        scan_budget: ScanBudget,
     ) -> Self {
         Self {
             session,
             namespace: Arc::from(namespace),
             limits,
-            scan_budget,
         }
     }
 
@@ -116,41 +177,46 @@ impl MemoryStore for CloudflareMemoryStore {
                 });
             }
             let now = current_time_ms().to_string();
-            let scan_budget = store.scan_budget;
-            let corpus_size_sql = format!(
-                "SELECT COUNT(*) AS record_count, COALESCE(SUM(length(CAST(content AS BLOB))), 0) AS content_bytes FROM memories WHERE {VISIBLE_RECORD_SQL}"
+            let expression = literal_match_query(&query);
+            let limit = limit.min(limits.scan_results).to_string();
+            let results = store
+                .batch(vec![store.statement(
+                    SCAN_SQL,
+                    &[
+                        D1Type::Text(&expression),
+                        D1Type::Text(&now),
+                        D1Type::Text(&store.namespace),
+                        D1Type::Text(&limit),
+                    ],
+                )?])
+                .await?;
+            let rows = results[0]
+                .results::<CandidateRow>()
+                .map_err(MessageError::backend)?;
+            let metadata = results[0].meta().ok().flatten();
+            let returned_bytes = serde_json::to_vec(&rows).ok().map(|encoded| encoded.len());
+            tracing::info!(
+                event = "indexed_scan",
+                returned_rows = rows.len(),
+                returned_bytes = ?returned_bytes,
+                d1_rows_read = ?metadata.as_ref().and_then(|meta| meta.rows_read),
+                d1_rows_written = ?metadata.as_ref().and_then(|meta| meta.rows_written),
+                d1_duration_ms = ?metadata.as_ref().and_then(|meta| meta.duration),
             );
-            let corpus_sql = format!(
-                "SELECT {RECORD_COLUMNS} FROM memories WHERE {VISIBLE_RECORD_SQL} AND (SELECT COUNT(*) FROM memories WHERE {VISIBLE_RECORD_SQL}) <= {} AND (SELECT COALESCE(SUM(length(CAST(content AS BLOB))), 0) FROM memories WHERE {VISIBLE_RECORD_SQL}) <= {} ORDER BY namespace, id",
-                scan_budget.records, scan_budget.content_bytes
-            );
-            let statements = vec![
-                store.statement(corpus_size_sql, &[D1Type::Text(&now)])?,
-                store.statement(
-                    corpus_sql,
-                    &[D1Type::Text(&now), D1Type::Text(&now), D1Type::Text(&now)],
-                )?,
-            ];
-            let results = store.batch(statements).await?;
-            let corpus = results[0].one::<CorpusRow>()?;
-            if corpus.record_count > scan_budget.records
-                || corpus.content_bytes > scan_budget.content_bytes
-            {
-                return Err(MemoryError::StorageCapacity);
-            }
-            let records = results[1].records()?;
-            let scan = MemoryScan::rank(
-                &query,
-                &records,
-                Some(&store.namespace),
-                limit.min(limits.scan_results),
-            );
+            let candidates = rows
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<Vec<_>, MemoryError>>()?;
+            let scan = MemoryScan {
+                abstained: candidates.is_empty(),
+                candidates,
+            };
             let mut updates = Vec::with_capacity(scan.candidates.len() + 1);
             updates.push(store.statement(PRUNE_SQL, &[D1Type::Text(&now)])?);
             for candidate in &scan.candidates {
                 let namespace = candidate.key.namespace.as_deref().unwrap_or_default();
                 updates.push(store.statement(
-                    "UPDATE memories SET last_scanned_at_ms = CAST(? AS INTEGER), scan_count = CASE WHEN scan_count < 9223372036854775807 THEN scan_count + 1 ELSE scan_count END WHERE namespace = ? AND id = CAST(? AS INTEGER) AND version = CAST(? AS INTEGER)",
+                    SCAN_UPDATE_SQL,
                     &[
                         D1Type::Text(&now),
                         D1Type::Text(namespace),
@@ -159,7 +225,18 @@ impl MemoryStore for CloudflareMemoryStore {
                     ],
                 )?);
             }
-            store.batch(updates).await?;
+            let results = store.batch(updates).await?;
+            let metadata = results
+                .iter()
+                .map(|result| result.meta().ok().flatten())
+                .collect::<Option<Vec<_>>>();
+            tracing::info!(
+                event = "indexed_scan_maintenance",
+                statements = results.len(),
+                d1_rows_read = ?metadata.as_ref().and_then(|metas| metas.iter().map(|meta| meta.rows_read).sum::<Option<usize>>()),
+                d1_rows_written = ?metadata.as_ref().and_then(|metas| metas.iter().map(|meta| meta.rows_written).sum::<Option<usize>>()),
+                d1_duration_ms = ?metadata.as_ref().and_then(|metas| metas.iter().map(|meta| meta.duration).sum::<Option<f64>>()),
+            );
             Ok(scan)
         })
     }
@@ -659,6 +736,9 @@ mod tests {
             let database = Connection::open_in_memory().unwrap();
             database
                 .execute_batch(include_str!("../migrations/0001_initial.sql"))
+                .unwrap();
+            database
+                .execute_batch(include_str!("../migrations/0002_search.sql"))
                 .unwrap();
             Self(database)
         }
