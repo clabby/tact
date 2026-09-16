@@ -27,17 +27,9 @@ The setting applies when an agent runtime is created. Reloading configuration do
 tool surface or instructions of an existing runtime. A later new or restored session uses the
 reloaded setting.
 
-Subagents may use Luna instead of the session's selected model by default. This lets the parent
-favor latency for straightforward delegated work. Disable that choice independently of the tool
-surface:
-
-```toml
-[subagents]
-allow_luna = false
-```
-
-When disabled, `spawn_agent` accepts only `selected` and the built-in delegation instructions no
-longer recommend Luna. If the session itself selected Luna, `selected` still resolves to Luna.
+Subagents explicitly choose `luna`, `terra`, `sol`, or `astra` for each task. There is no `selected`
+alias or per-model configuration switch. Consider Luna for simple tasks, Terra for a balance of
+capability and cost, Sol for bounded coding and analysis, and Astra for the hardest reasoning.
 
 `agent.max_subagents` is independent of the enable switch:
 
@@ -57,7 +49,7 @@ An enabled runtime installs seven tools:
 
 | Tool | Contract |
 | --- | --- |
-| `spawn_agent` | Create a clean child session with a role, focused task, model choice, and required output schema. |
+| `spawn_agent` | Create a clean child session with a required role, focused task, model choice, thinking effort, and output schema. |
 | `submit_result` | Submit the current subagent turn's final JSON value. The value must satisfy its output schema and use the current turn token. |
 | `send_agent_message` | Send a bounded directed message within the current task tree. |
 | `list_agents` | List visible agents, their status, topology, and the caller's messaging and management authority. |
@@ -80,12 +72,76 @@ therefore installed independently of the subagent tool group.
 does not inherit the caller's conversation. Each child model's instructions are composed from the
 configuration and skill catalog when the root runtime starts. This includes configured replacement
 and appended instructions. A resumed parent keeps its saved instructions; its new children use
-these freshly composed instructions. Their initial prompt contains:
+these freshly composed instructions. Children inherit the configured reasoning mode and fast-mode
+setting. Their initial prompt contains:
 
 - the assigned role and task;
 - its agent ID and place in the task tree;
+- its own model and reasoning effort;
 - coordination rules for peers and descendants; and
 - the required structured-output contract.
+
+The required `model` and `thinking` fields choose the child's capabilities at creation. A child
+cannot exceed the spawning parent's model. Model order is Luna < Terra < Sol < Astra; effort order
+is low < medium < high < xhigh < max. Root agents use the live configured `agent.thinking` cap for
+spawning effort. Registered subagents are additionally bounded by their own assigned effort. For
+example, an Astra root with a high cap can spawn a Sol/medium child, but that child cannot spawn
+Astra or request high effort. The root can launch a stronger verifier after receiving the child's
+result.
+
+The live configured `agent.thinking` cap also bounds every new spawn. User changes to this cap
+take effect for subsequent spawns, including those requested by an already active root turn.
+Existing children retain their model and effort and cannot exceed either when spawning descendants.
+Requests above either applicable cap fail before the child factory runs.
+
+Every new turn receives an `<agent_context>` block identifying its own model and effort. Root,
+restored, forked, auxiliary, and child sessions receive this context. Effort changes update it for
+subsequently accepted turns; already accepted turns and active steering retain their original effort.
+
+Choose model and effort for the full delegated reasoning obligation. Optimize expected total cost
+and time to a correct completed result, including rework. Higher effort or a stronger model upfront
+can avoid repeated weaker runs; a cheaper or lower-effort attempt is not a prerequisite.
+
+| Effort | Typical delegated work |
+| --- | --- |
+| `low` | Lookups, extraction, mechanical edits, prescribed checks. |
+| `medium` | Localized implementation, editorial/design work, or focused review with an established contract. |
+| `high` | Difficult but bounded correctness investigation with identifiable invariant owners and failure cases, such as tracing cancelled I/O through completion and successor reopen. |
+| `xhigh` | Derive a missing contract or reconcile interacting owners and competing designs, such as placing a durability barrier while accounting for crash safety and namespace-lock contention. Also consider it after a completed high result misses the same invariant. |
+| `max` | Own an integrated architecture or proof with several coupled invariants and potentially misleading local success: runtime-to-journal durability across pruning, publication, and repeated crashes, or a protocol redesign spanning authentication, proof retention, recovery, and replay. |
+
+Choose `xhigh` or `max` immediately when these challenges are apparent. Assign the complete proof
+and attempts to falsify it to the agent responsible for the integrated result. Repeated weaker
+local reviews do not discharge a global proof obligation. A review label, file count, difficult
+parent project, or changed requirements alone does not justify high effort for every child.
+Identify the concrete reasoning challenge in briefs for `high` or above. Higher effort still
+requires causal tests and evidence.
+
+If a completed answer is unsatisfactory, supply missing context or request focused follow-up when
+that can resolve the gap. When stronger reasoning is needed, start a child at higher effort within
+the caps, using a more capable model when appropriate. Pass the original request and constraints,
+the prior result, evidence and counterexamples, and unresolved questions or failed checks. The
+child should challenge the earlier conclusion and verify its resolution. A child that needs a
+model or effort above its own cap returns that package to a capable ancestor. Still-running work
+should be allowed to finish. If permitted escalation cannot settle the question, report what
+remains unresolved.
+
+Every `spawn_agent` call must provide `role`, `task`, `model`, `thinking`, and `output_schema`:
+
+```json
+{
+  "role": "reviewer",
+  "task": "Review the configuration parser diff against the documented keys and report supported findings.",
+  "model": "sol",
+  "thinking": "medium",
+  "output_schema": {
+    "type": "object",
+    "properties": { "findings": { "type": "string" } },
+    "required": ["findings"],
+    "additionalProperties": false
+  }
+}
+```
 
 The caller supplies a JSON Schema for the result. Tact compiles that schema before creating the
 child. A successful turn must call `submit_result` exactly once with a value that validates against
@@ -220,7 +276,9 @@ checked in code.
 The implementation preserves these invariants:
 
 - disabling subagents removes their tools and omits their fixed instructions from fresh sessions;
-- disabling `subagents.allow_luna` removes the explicit Luna choice from the tool and fresh instructions;
+- model cannot exceed the spawning parent's model, and the live configured effort cap bounds every
+  new spawn; registered subagents also cannot delegate above their own assigned effort;
+- each new turn receives its own effective model and effort in context;
 - memory remains independent from the subagent enable switch;
 - every child starts with clean conversation context and a caller-supplied output contract;
 - task-tree scope prevents cross-root access;

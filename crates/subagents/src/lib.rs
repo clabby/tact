@@ -9,8 +9,8 @@ mod task_tree;
 mod tools;
 
 pub use model::{
-    AgentDescriptor, AgentId, AgentMessage, AgentMessageUpdate, AgentStatus, AgentThread,
-    AgentUpdate, MessageDeliveryState, MessageDisposition, MessageId, MessagePriority,
+    AgentContext, AgentDescriptor, AgentId, AgentMessage, AgentMessageUpdate, AgentStatus,
+    AgentThread, AgentUpdate, MessageDeliveryState, MessageDisposition, MessageId, MessagePriority,
     MessagePurpose, MessageSender, ScopedAgentUpdate, SubagentRuntimeId, ThreadId,
 };
 pub use runtime::{AuthorityError, RootAgentAuthority, Subagents, WeakSubagents};

@@ -32,7 +32,9 @@ use std::{
 use tact_memory::{
     MemoryTool, MutationAuthorizer, RemoteMemoryClient, RemoteToken, SelectedMemoryStore,
 };
-use tact_subagents::{RootAgentAuthority, ScopedAgentUpdate, Subagents, WeakSubagents};
+use tact_subagents::{
+    AgentContext, RootAgentAuthority, ScopedAgentUpdate, Subagents, WeakSubagents,
+};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -44,19 +46,52 @@ const SUBAGENT_INSTRUCTIONS: &str = concat!(
     "across agents in parallel, await and reduce their results, then dispatch dependent stages. Do ",
     "not repeat delegated work yourself; wait for delegated work to finish, then use its results for ",
     "the next step. Double-check their results against the relevant evidence before relying on them. ",
-    "For each `spawn_agent` call, declare `model`: use `luna` for straightforward tasks that need ",
-    "little reasoning when speed matters more, and use `selected` otherwise. ",
-    "Use schemas that expose the fields downstream stages need, and use loops to iterate until the ",
-    "completion condition is met. Keep concurrent write scopes disjoint. You own final synthesis and ",
-    "verification."
-);
-const SUBAGENT_INSTRUCTIONS_SELECTED_ONLY: &str = concat!(
-    "For larger tasks, delegate meaningful, separable work to subagents; handle trivial or tightly ",
-    "coupled work directly. Use code mode to build multi-agent pipelines: map independent subtasks ",
-    "across agents in parallel, await and reduce their results, then dispatch dependent stages. Do ",
-    "not repeat delegated work yourself; wait for delegated work to finish, then use its results for ",
-    "the next step. Double-check their results against the relevant evidence before relying on them. ",
-    "For each `spawn_agent` call, declare `model` as `selected`. ",
+    "For each `spawn_agent` call, choose `model` and `thinking` separately for the assigned subtask. ",
+    "Optimize expected total cost and time to a correct completed result, including rework. A ",
+    "stronger model or `xhigh`/`max` upfront can be cheaper and faster than repeated weaker runs; ",
+    "do not require a cheaper or lower-effort attempt first. Name `luna`, `terra`, `sol`, or `astra` ",
+    "explicitly. Consider Luna for simple tasks, Terra for a balance of capability and cost, Sol ",
+    "for bounded coding and analysis, and Astra for the hardest reasoning. The current turn's ",
+    "model and effort are supplied in `<agent_context>`. A child's model cannot exceed the ",
+    "spawning parent's model (`luna` < `terra` < `sol` < `astra`). Root agents use the live ",
+    "configured `agent.thinking` as their spawning effort cap: user changes authorize subsequent ",
+    "spawns even during an already active turn. Registered subagents are additionally limited to ",
+    "their own assigned effort, regardless of the root's cap. Existing children retain their ",
+    "model and effort.\n\n",
+    "Choose effort for the full delegated reasoning obligation:\n\n",
+    "- `low`: bounded lookups, extraction, mechanical edits, or prescribed checks.\n",
+    "- `medium`: localized implementation, editorial/design work, or focused review with an ",
+    "established contract.\n",
+    "- `high`: a difficult but bounded investigation or correctness proof with identifiable ",
+    "invariant owners and failure cases; for example, tracing a cancellation bug through pending ",
+    "I/O completion and successor reopen.\n",
+    "- `xhigh`: derive a missing contract, reconcile interacting owners, or compare designs whose ",
+    "cancellation, recovery, security, and performance guarantees differ. For example, determine ",
+    "where a durability barrier belongs while accounting for crash safety and namespace-lock ",
+    "contention. Also consider it when a completed `high` result misses the same invariant.\n",
+    "- `max`: own the hardest integrated architecture or correctness problem, where several ",
+    "coupled invariants must be solved together and locally passing components can hide a composed ",
+    "failure. Examples include proving runtime-to-journal durability through pruning, publication, ",
+    "and repeated crashes, or redesigning a protocol across authentication, proof retention, ",
+    "recovery, and replay. Assign the complete proof and attempts to falsify it to this agent.\n\n",
+    "Choose `xhigh` or `max` immediately when those challenges are apparent. Do not scatter a ",
+    "global proof across repeated weaker local reviews. A review label, file count, difficult ",
+    "parent project, or changed user requirements alone does not justify high effort for every ",
+    "child. For `high` or above, identify the concrete reasoning challenge in the task brief. ",
+    "Higher effort still requires causal tests and evidence.\n\n",
+    "If a completed answer is unsatisfactory, supply missing context or request a focused follow-up ",
+    "when that can resolve the gap. When stronger reasoning is needed, start a higher-effort child ",
+    "within your caps, using a more capable model when appropriate. Give it the original request ",
+    "and constraints, the prior result, relevant evidence and counterexamples, and the unresolved ",
+    "questions or failed checks. Ask it to challenge the prior result and reach a verified ",
+    "conclusion. If the required model or effort exceeds your cap, return that package to an ",
+    "ancestor able to launch the stronger run. Let still-running work finish. If permitted ",
+    "escalation cannot settle the question, report what remains unresolved.\n\n",
+    "Example `spawn_agent` arguments:\n```json\n",
+    r#"{"role":"config mapper","task":"List configuration keys and their parsing locations.","model":"luna","#,
+    r#""thinking":"low","output_schema":{"type":"object","properties":{"locations":{"type":"string"}},"#,
+    r#""required":["locations"],"additionalProperties":false}}"#,
+    "\n```\n",
     "Use schemas that expose the fields downstream stages need, and use loops to iterate until the ",
     "completion condition is met. Keep concurrent write scopes disjoint. You own final synthesis and ",
     "verification."
@@ -144,6 +179,7 @@ pub(crate) const MEMORY_REVIEW_CHECKPOINT: &str = concat!(
 
 pub(crate) struct ConfiguredAgent {
     pub(crate) agent: Nanocodex,
+    pub(crate) context: AgentContext,
     pub(crate) events: AgentEvents,
     pub(crate) instructions: Arc<str>,
     pub(crate) skills: Arc<[Skill]>,
@@ -159,8 +195,10 @@ struct SessionInstructions {
 
 struct AgentInstructions {
     session: SessionInstructions,
-    selected: Arc<str>,
     luna: Arc<str>,
+    terra: Arc<str>,
+    sol: Arc<str>,
+    astra: Arc<str>,
 }
 
 impl AgentInstructions {
@@ -170,19 +208,14 @@ impl AgentInstructions {
         restored: Option<(String, Option<bool>)>,
         memory_enabled: bool,
     ) -> Self {
-        let selected = SessionInstructions::from_config(config, model, None, memory_enabled);
-        let luna = SessionInstructions::from_config(config, Model::Luna, None, memory_enabled).text;
-        let selected_text = Arc::clone(&selected.text);
-        let session = match restored {
-            Some(restored) => {
-                SessionInstructions::from_config(config, model, Some(restored), memory_enabled)
-            }
-            None => selected,
-        };
         Self {
-            session,
-            selected: selected_text,
-            luna,
+            session: SessionInstructions::from_config(config, model, restored, memory_enabled),
+            luna: SessionInstructions::from_config(config, Model::Luna, None, memory_enabled).text,
+            terra: SessionInstructions::from_config(config, Model::Terra, None, memory_enabled)
+                .text,
+            sol: SessionInstructions::from_config(config, Model::Sol, None, memory_enabled).text,
+            astra: SessionInstructions::from_config(config, Model::Astra, None, memory_enabled)
+                .text,
         }
     }
 }
@@ -199,13 +232,12 @@ impl SessionInstructions {
             model,
             ..ResponsesServiceConfig::default()
         };
-        session_instructions_with_luna(
+        session_instructions(
             Some(agent.instructions().unwrap_or(&defaults.system_prompt())),
             agent.append_instructions(),
             config.skills(),
             restored,
             config.subagents().enabled(),
-            config.subagents().allow_luna(),
             memory_enabled,
         )
     }
@@ -316,7 +348,6 @@ impl ConfiguredAgent {
         let memory = configured_memory_store(config, &workspace)?;
         let memory_enabled = memory.is_some();
         let subagents_enabled = config.subagents().enabled();
-        let allow_luna_subagents = config.subagents().allow_luna();
         let session_config_path = config.path().to_path_buf();
         let (subagent_control, subagent_updates) = Subagents::new(agent_config.max_subagents());
         let subagents = subagent_control.downgrade();
@@ -330,8 +361,6 @@ impl ConfiguredAgent {
                 install_agent_tools(
                     tools.clone(),
                     &subagents,
-                    model,
-                    allow_luna_subagents,
                     memory.clone(),
                     subagents_enabled,
                     session_config_path.clone(),
@@ -352,8 +381,10 @@ impl ConfiguredAgent {
                     text: instructions,
                     skills,
                 },
-            selected: selected_instructions,
             luna: luna_instructions,
+            terra: terra_instructions,
+            sol: sol_instructions,
+            astra: astra_instructions,
         } = AgentInstructions::from_config(config, model, restored_instructions, memory_enabled);
         builder = builder.instructions(Arc::clone(&instructions));
         let subagent_builder = builder.clone();
@@ -364,10 +395,16 @@ impl ConfiguredAgent {
                 subagent_builder
                     .clone()
                     .model(model)
-                    .instructions(Arc::clone(if model == Model::Luna {
-                        &luna_instructions
-                    } else {
-                        &selected_instructions
+                    .instructions(Arc::clone(match model {
+                        Model::Luna => &luna_instructions,
+                        Model::Terra => &terra_instructions,
+                        Model::Sol => &sol_instructions,
+                        Model::Astra => &astra_instructions,
+                        _ => {
+                            return Err(NanocodexError::InvalidRequest(format!(
+                                "unsupported subagent model {model}"
+                            )));
+                        }
                     }))
                     .thinking(thinking)
                     .fast_mode(fast_mode)
@@ -387,6 +424,10 @@ impl ConfiguredAgent {
         let (agent, events) = builder.build()?;
         Ok(Self {
             agent,
+            context: AgentContext {
+                model,
+                thinking: thinking.into(),
+            },
             events,
             instructions,
             skills,
@@ -425,7 +466,7 @@ impl ConfiguredAgent {
             return Ok(());
         }
 
-        let turn = match self.agent.prompt(prompt).await {
+        let turn = match self.agent.prompt(self.context.prompt(prompt)).await {
             Ok(turn) => turn,
             Err(error) => {
                 let shutdown_result = self.shutdown().await;
@@ -528,8 +569,6 @@ impl MutationAuthorizer for RootMemoryAuthorizer {
 fn install_agent_tools(
     tools: Tools,
     subagents: &WeakSubagents,
-    selected_model: Model,
-    allow_luna: bool,
     memory: Option<SelectedMemoryStore>,
     subagents_enabled: bool,
     session_config_path: PathBuf,
@@ -546,7 +585,7 @@ fn install_agent_tools(
         ));
     }
     let tools = if subagents_enabled {
-        subagents.install_tools(tools, selected_model, allow_luna)
+        subagents.install_tools(tools)
     } else {
         tools
     };
@@ -584,33 +623,12 @@ pub(crate) fn configured_memory_store(
     Ok(Some(SelectedMemoryStore::remote(client)))
 }
 
-#[cfg(test)]
 fn session_instructions(
     custom: Option<&str>,
     appended: Option<&str>,
     skills: &SkillsConfig,
     restored: Option<(String, Option<bool>)>,
     subagents_enabled: bool,
-    memory_enabled: bool,
-) -> SessionInstructions {
-    session_instructions_with_luna(
-        custom,
-        appended,
-        skills,
-        restored,
-        subagents_enabled,
-        true,
-        memory_enabled,
-    )
-}
-
-fn session_instructions_with_luna(
-    custom: Option<&str>,
-    appended: Option<&str>,
-    skills: &SkillsConfig,
-    restored: Option<(String, Option<bool>)>,
-    subagents_enabled: bool,
-    allow_luna: bool,
     memory_enabled: bool,
 ) -> SessionInstructions {
     restored.map_or_else(
@@ -621,13 +639,8 @@ fn session_instructions_with_luna(
                 .map(SkillCatalog::available_in)
                 .unwrap_or_default()
                 .into();
-            let mut instructions = fresh_instructions_with_catalog(
-                custom,
-                appended,
-                &catalog,
-                subagents_enabled,
-                allow_luna,
-            );
+            let mut instructions =
+                fresh_instructions_with_catalog(custom, appended, &catalog, subagents_enabled);
             if memory_enabled {
                 instructions.push_str("\n\n");
                 instructions.push_str(MEMORY_INSTRUCTIONS);
@@ -658,7 +671,7 @@ fn fresh_instructions(
     skills: &SkillsConfig,
 ) -> String {
     let catalog = SkillCatalog::load(skills);
-    fresh_instructions_with_catalog(custom, appended, &catalog, true, true)
+    fresh_instructions_with_catalog(custom, appended, &catalog, true)
 }
 
 fn fresh_instructions_with_catalog(
@@ -666,7 +679,6 @@ fn fresh_instructions_with_catalog(
     appended: Option<&str>,
     catalog: &SkillCatalog,
     subagents_enabled: bool,
-    allow_luna: bool,
 ) -> String {
     let mut instructions = custom.map(str::to_owned).unwrap_or_else(|| {
         ResponsesServiceConfig::default()
@@ -679,7 +691,7 @@ fn fresh_instructions_with_catalog(
     instructions = reconcile_scratchpad_instructions(instructions);
     if subagents_enabled {
         instructions.push_str("\n\n");
-        instructions.push_str(subagent_instructions(allow_luna));
+        instructions.push_str(SUBAGENT_INSTRUCTIONS);
     }
     if let Some(appended) = appended {
         instructions.push_str("\n\n");
@@ -754,14 +766,6 @@ fn reconcile_scratchpad_instructions(mut instructions: String) -> String {
     instructions
 }
 
-fn subagent_instructions(allow_luna: bool) -> &'static str {
-    if allow_luna {
-        SUBAGENT_INSTRUCTIONS
-    } else {
-        SUBAGENT_INSTRUCTIONS_SELECTED_ONLY
-    }
-}
-
 impl Cancellation {
     async fn request(control: &TurnControl) -> Self {
         match control.cancel().await {
@@ -777,9 +781,9 @@ mod tests {
     use super::{
         AgentInstructions, ConfiguredAgent, MEMORY_INSTRUCTIONS, MEMORY_REVIEW_CHECKPOINT,
         SCRATCHPAD_INSTRUCTIONS, SESSION_REFERENCE_INSTRUCTIONS, SUBAGENT_INSTRUCTIONS,
-        SUBAGENT_INSTRUCTIONS_SELECTED_ONLY, SessionInstructions, TACT_INSTRUCTIONS,
-        TOOL_ORCHESTRATION_INSTRUCTIONS, configured_memory_store, fresh_instructions,
-        reconcile_tact_instructions, session_instructions, session_instructions_with_luna,
+        SessionInstructions, TACT_INSTRUCTIONS, TOOL_ORCHESTRATION_INSTRUCTIONS,
+        configured_memory_store, fresh_instructions, reconcile_tact_instructions,
+        session_instructions,
     };
     use crate::{
         app::{
@@ -1029,7 +1033,9 @@ mod tests {
             assert_eq!(instructions.session.text.as_ref(), stored);
             for (model, actual) in [
                 (Model::Luna, &instructions.luna),
-                (Model::Astra, &instructions.selected),
+                (Model::Terra, &instructions.terra),
+                (Model::Sol, &instructions.sol),
+                (Model::Astra, &instructions.astra),
             ] {
                 let expected = SessionInstructions::from_config(&config, model, None, true);
                 assert!(
@@ -1377,8 +1383,6 @@ mod tests {
         assert!(SUBAGENT_INSTRUCTIONS.contains("wait for delegated work to finish"));
         assert!(SUBAGENT_INSTRUCTIONS.contains("Do not repeat delegated work yourself"));
         assert!(SUBAGENT_INSTRUCTIONS.contains("Double-check their results"));
-        assert!(SUBAGENT_INSTRUCTIONS.contains("use `luna` for straightforward tasks"));
-        assert!(SUBAGENT_INSTRUCTIONS.contains("use `selected` otherwise"));
     }
 
     #[test]
@@ -1389,28 +1393,6 @@ mod tests {
 
         assert!(enabled.text.contains(SUBAGENT_INSTRUCTIONS));
         assert!(!disabled.text.contains(SUBAGENT_INSTRUCTIONS));
-    }
-
-    #[test]
-    fn luna_delegation_instructions_follow_the_config() {
-        let skills = SkillsConfig::from_roots(false, Vec::new());
-        let luna_enabled =
-            session_instructions_with_luna(None, None, &skills, None, true, true, false);
-        let luna_disabled =
-            session_instructions_with_luna(None, None, &skills, None, true, false, false);
-
-        assert!(luna_enabled.text.contains(SUBAGENT_INSTRUCTIONS));
-        assert!(
-            !luna_enabled
-                .text
-                .contains(SUBAGENT_INSTRUCTIONS_SELECTED_ONLY)
-        );
-        assert!(
-            luna_disabled
-                .text
-                .contains(SUBAGENT_INSTRUCTIONS_SELECTED_ONLY)
-        );
-        assert!(!luna_disabled.text.contains("use `luna`"));
     }
 
     #[test]
@@ -1459,6 +1441,10 @@ mod tests {
         let (subagent_control, subagent_updates) = tact_subagents::Subagents::new(32);
         let configured = ConfiguredAgent {
             agent,
+            context: tact_subagents::AgentContext {
+                model: Model::Astra,
+                thinking: nanocodex::Thinking::Low,
+            },
             events,
             instructions: ResponsesServiceConfig::default().system_prompt().into(),
             skills: Arc::from([]),

@@ -165,7 +165,6 @@ max_total_bytes = 262144
 
 [subagents]
 enabled = true
-allow_luna = true
 
 [theme]
 mode = "auto" # auto, light, or dark
@@ -274,13 +273,21 @@ change the tool surface of an already-running session. `agent.max_subagents` con
 when the feature is enabled; setting it does not enable or disable subagents. See the
 [subagent design](docs/subagents.md) for the tool, lifecycle, messaging, and authority contracts.
 
-By default, agents may choose Luna for straightforward delegated work where latency matters more
-than reasoning capability. Require every subagent to use the session's selected model with:
+Agents explicitly choose `luna`, `terra`, `sol`, or `astra` and `thinking` for each delegated task.
+Each turn receives its own model and effort in context. Children cannot exceed their parent's
+model: the model order is Luna, Terra, Sol, Astra. Root agents use the live `agent.thinking` cap
+for new spawns, including after an update during an active turn. Registered subagents are also
+bounded by their own assigned effort. Changing the cap leaves existing children unchanged. Model
+selection has no per-model configuration switches or `selected` alias.
 
-```toml
-[subagents]
-allow_luna = false
-```
+Optimize total cost and time to a correct result, including rework. Use `low` for mechanical work,
+`medium` for localized implementation, `high` for bounded difficult correctness proofs, `xhigh`
+for interacting contracts or competing designs, and `max` for the hardest integrated proofs or
+architecture. Choose higher effort upfront when it is likely to avoid repeated weaker runs.
+
+When a completed answer needs stronger reasoning, pass the original request, constraints, result,
+evidence, and unresolved questions to a stronger child within the caps. A child that needs more
+capability than its own cap must return that package to a capable ancestor.
 
 ### Memory
 
