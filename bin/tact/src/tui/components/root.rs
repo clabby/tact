@@ -1136,7 +1136,10 @@ impl RootNode {
         match surface {
             Surface::Transcript => {
                 let position = clamp_to(position, self.transcript_area);
-                self.transcript.component().selection_span_nearest(position)
+                let anchor = self.selection.anchor()?;
+                self.transcript
+                    .component()
+                    .selection_span_nearest_from(position, anchor)
             }
             Surface::Composer => {
                 let position = clamp_to(position, self.composer_content_area);
@@ -5223,6 +5226,120 @@ mod tests {
                 "**bold** and [site](https://example.com)".to_owned()
             )]
         );
+    }
+
+    #[test]
+    fn transcript_selection_crosses_table_cell_boundaries() {
+        let mut terminal = Terminal::new(TestBackend::new(40, 14)).unwrap();
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        let markdown = "| Left | Right |\n|---|---|\n| alpha | omega |";
+        root.update(super::RootEvent::Transcript(agent_record(
+            1,
+            AgentEventKind::AssistantMessage,
+            json!({
+                "model_call_index": 1,
+                "item_id": "answer",
+                "phase": "final_answer",
+                "text": markdown,
+            }),
+        )));
+        terminal
+            .draw(|frame| root.render(frame, frame.area(), &Theme::default()))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let header_row = (0..buffer.area.height)
+            .find(|&row| {
+                (0..buffer.area.width)
+                    .map(|column| buffer[(column, row)].symbol())
+                    .collect::<String>()
+                    .contains("Left")
+            })
+            .expect("table header should be visible");
+        let data_row = header_row + 2;
+        let start = text_column(buffer, header_row, "Left");
+        let end = text_column(buffer, data_row, "omega") + 5;
+        let separator_row = header_row + 1;
+
+        root.update(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            start,
+            header_row,
+        ));
+        root.update(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            end,
+            separator_row,
+        ));
+        terminal
+            .draw(|frame| root.render(frame, frame.area(), &Theme::default()))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        for text in ["Left", "Right", "alpha", "omega"] {
+            let row = if matches!(text, "Left" | "Right") {
+                header_row
+            } else {
+                data_row
+            };
+            let column = text_column(buffer, row, text);
+            assert_eq!(
+                buffer[(column, row)].bg,
+                Color::Yellow,
+                "{text} should be included in the table selection"
+            );
+        }
+
+        let update = root.update(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            end,
+            separator_row,
+        ));
+        assert_eq!(update.effects, [RootEffect::Copy(markdown.to_owned())]);
+
+        let alpha = text_column(terminal.backend().buffer(), data_row, "alpha");
+        let omega_start = text_column(terminal.backend().buffer(), data_row, "omega");
+        let cell_divider = omega_start - 1;
+        root.update(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            alpha,
+            data_row,
+        ));
+        root.update(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            cell_divider,
+            data_row,
+        ));
+        terminal
+            .draw(|frame| root.render(frame, frame.area(), &Theme::default()))
+            .unwrap();
+        assert_eq!(
+            terminal.backend().buffer()[(omega_start, data_row)].bg,
+            Color::Yellow
+        );
+        let update = root.update(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            cell_divider,
+            data_row,
+        ));
+        assert_eq!(update.effects, [RootEffect::Copy(" alpha | o".to_owned())]);
+
+        let omega = text_column(terminal.backend().buffer(), data_row, "omega") + 4;
+        root.update(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            omega,
+            data_row,
+        ));
+        root.update(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            start,
+            separator_row,
+        ));
+        let update = root.update(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            start,
+            separator_row,
+        ));
+        assert_eq!(update.effects, [RootEffect::Copy(markdown.to_owned())]);
     }
 
     #[test]
