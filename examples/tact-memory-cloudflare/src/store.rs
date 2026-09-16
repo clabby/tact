@@ -29,6 +29,13 @@ const VISIBLE_RECORD_SQL: &str = "(memories.probation_until_ms IS NULL OR memori
 const INSERT_SQL: &str = "INSERT INTO memories (namespace, id, version, content, identity, created_at_ms, updated_at_ms, probation_until_ms) SELECT namespace, next_id, 1, ?, ?, CAST(? AS INTEGER), CAST(? AS INTEGER), CAST(? AS INTEGER) FROM memory_namespaces WHERE namespace = ? AND (SELECT COUNT(*) FROM memories WHERE namespace = ?) < CAST(? AS INTEGER) AND (SELECT COALESCE(SUM(length(CAST(content AS BLOB))), 0) FROM memories WHERE namespace = ?) + CAST(? AS INTEGER) <= CAST(? AS INTEGER) AND NOT EXISTS (SELECT 1 FROM memories WHERE namespace = ? AND identity = ?)";
 const REPLACE_SQL: &str = "UPDATE memories SET version = CAST(? AS INTEGER), content = ?, identity = ?, updated_at_ms = CAST(? AS INTEGER), last_scanned_at_ms = NULL, scan_count = 0, last_used_at_ms = NULL, use_count = 0, probation_until_ms = CAST(? AS INTEGER) WHERE namespace = ? AND id = CAST(? AS INTEGER) AND version = CAST(? AS INTEGER) AND NOT EXISTS (SELECT 1 FROM memories other WHERE other.namespace = ? AND other.identity = ? AND other.id != CAST(? AS INTEGER)) AND (SELECT COALESCE(SUM(length(CAST(content AS BLOB))), 0) FROM memories WHERE namespace = ?) - length(CAST(memories.content AS BLOB)) + CAST(? AS INTEGER) <= CAST(? AS INTEGER)";
 
+fn list_sql() -> String {
+    format!(
+        "SELECT {RECORD_COLUMNS} FROM memories WHERE {VISIBLE_RECORD_SQL} ORDER BY CASE WHEN memories.namespace = ? THEN 0 ELSE 1 END, memories.namespace, memories.id LIMIT {}",
+        protocol::MAX_LIST_RECORDS
+    )
+}
+
 /// Deployment-selected bound for Worker-side memory retrieval.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ScanBudget {
@@ -191,12 +198,12 @@ impl MemoryStore for CloudflareMemoryStore {
         let store = self.clone();
         SendFuture::new(async move {
             let now = current_time_ms().to_string();
-            let sql = format!(
-                "SELECT {RECORD_COLUMNS} FROM memories WHERE {VISIBLE_RECORD_SQL} ORDER BY namespace, id LIMIT {}",
-                protocol::MAX_LIST_RECORDS
-            );
+            let sql = list_sql();
             let results = store
-                .batch(vec![store.statement(sql, &[D1Type::Text(&now)])?])
+                .batch(vec![store.statement(
+                    sql,
+                    &[D1Type::Text(&now), D1Type::Text(&store.namespace)],
+                )?])
                 .await?;
             results[0].records()
         })
@@ -641,7 +648,7 @@ fn current_time_ms() -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{INSERT_SQL, RECORD_COLUMNS, REPLACE_SQL, validate_snapshot};
+    use super::{INSERT_SQL, RECORD_COLUMNS, REPLACE_SQL, list_sql, validate_snapshot};
     use rusqlite::{Connection, params};
     use tact_memory::{MemoryError, MemoryKey, MemoryLimits, MemoryRecord};
 
@@ -726,6 +733,47 @@ mod tests {
                 .collect::<Result<_, _>>()
                 .unwrap()
         }
+
+        fn list(&self, now: &str, namespace: &str) -> Vec<(String, i64)> {
+            self.0
+                .prepare(&list_sql())
+                .unwrap()
+                .query_map(params![now, namespace], |row| {
+                    Ok((
+                        row.get::<_, String>("namespace")?,
+                        row.get::<_, String>("id")?.parse::<i64>().unwrap(),
+                    ))
+                })
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        }
+
+        fn insert_range(&self, namespace: &str, first: i64, last: i64) {
+            self.0
+                .execute(
+                    "INSERT INTO memory_namespaces(namespace) VALUES (?) ON CONFLICT DO NOTHING",
+                    [namespace],
+                )
+                .unwrap();
+            for id in first..=last {
+                self.0
+                    .execute(
+                        "INSERT INTO memories (namespace, id, version, content, identity, created_at_ms, updated_at_ms) VALUES (?, ?, 1, ?, ?, 1, 1)",
+                        params![namespace, id, format!("{namespace}-{id}"), format!("{namespace}-{id}")],
+                    )
+                    .unwrap();
+            }
+        }
+
+        fn insert_expired(&self, namespace: &str, id: i64) {
+            self.0
+                .execute(
+                    "INSERT INTO memories (namespace, id, version, content, identity, created_at_ms, updated_at_ms, probation_until_ms) VALUES (?, ?, 1, ?, ?, 1, 1, 1)",
+                    params![namespace, id, format!("{namespace}-{id}"), format!("{namespace}-{id}")],
+                )
+                .unwrap();
+        }
     }
 
     #[test]
@@ -740,6 +788,56 @@ mod tests {
         assert_eq!(database.insert("bob", "first", limits), 1);
         assert_eq!(database.content("alice"), ["first"]);
         assert_eq!(database.content("bob"), ["first"]);
+    }
+
+    #[test]
+    fn list_prioritizes_own_namespace_before_the_global_limit() {
+        let database = Database::new();
+        database.insert_range("alpha", 1, 513);
+        database.insert_range("zulu", 513, 513);
+        database.insert_expired("zulu", 514);
+
+        let records = database.list("2", "zulu");
+        assert_eq!(records.len(), 512);
+        assert_eq!(records[0], ("zulu".to_owned(), 513));
+        assert!(!records.contains(&("zulu".to_owned(), 514)));
+        assert_eq!(records[1], ("alpha".to_owned(), 1));
+        assert_eq!(records.last(), Some(&("alpha".to_owned(), 511)));
+    }
+
+    #[test]
+    fn list_bounds_an_oversized_owned_namespace_in_numeric_id_order() {
+        let database = Database::new();
+        database.insert_range("alpha", 1, 1);
+        database.insert_range("zulu", 1, 513);
+
+        let records = database.list("2", "zulu");
+        let expected = (1..=512)
+            .map(|id| ("zulu".to_owned(), id))
+            .collect::<Vec<_>>();
+        assert_eq!(records, expected);
+    }
+
+    #[test]
+    fn list_fills_the_window_when_owned_records_are_absent_or_expired() {
+        let database = Database::new();
+        database.insert_range("alpha", 1, 12);
+        database.insert_range("zulu", 1, 1);
+        database
+            .0
+            .execute(
+                "UPDATE memories SET probation_until_ms = 1 WHERE namespace = 'zulu'",
+                [],
+            )
+            .unwrap();
+
+        let expected = (1..=12)
+            .map(|id| ("alpha".to_owned(), id))
+            .collect::<Vec<_>>();
+        for namespace in ["zulu", "missing"] {
+            assert_eq!(database.list("2", namespace), expected);
+        }
+        assert_eq!(database.content("zulu"), ["zulu-1"]);
     }
 
     #[test]

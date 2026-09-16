@@ -79,6 +79,11 @@ to 8 MiB.
 
 ## Retrieval limits
 
+The memory browser lists at most 512 visible records. The Worker selects the authenticated
+namespace first in numeric ID order, then fills remaining slots from other namespaces in namespace
+and numeric ID order. This prevents a large shared corpus from hiding the user's namespace. The
+list remains a bounded window; use export to retrieve every record.
+
 The Worker loads one visible corpus and passes the authenticated namespace to the shared ranker.
 The ranker applies the caller-aware 1.25 weighting before the ten-result limit, as described in the
 [retrieval contract](../../docs/memory.md#record-and-retrieval-contract). Indexed D1 retrieval,
