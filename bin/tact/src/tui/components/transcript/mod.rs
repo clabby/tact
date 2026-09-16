@@ -38,6 +38,7 @@ use ratatui::{
 use ratatui_image::sliced::{SignedPosition, SlicedImage};
 use std::{
     collections::{HashMap, hash_map::Entry},
+    num::NonZeroU16,
     ops::Range,
     path::Path,
     sync::Arc,
@@ -521,7 +522,11 @@ impl Transcript {
         self.model.entries().iter().all(|entry| entry.hidden)
     }
 
-    pub(super) fn scroll_command(&self, event: &Event) -> Option<ScrollCommand> {
+    pub(super) fn scroll_command(
+        &self,
+        event: &Event,
+        mouse_scroll_lines: NonZeroU16,
+    ) -> Option<ScrollCommand> {
         let command = match event {
             Event::Key(key) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
                 match (key.code, key.modifiers) {
@@ -551,8 +556,12 @@ impl Transcript {
                     }
                 }
                 match mouse.kind {
-                    MouseEventKind::ScrollUp => ScrollCommand::Rows(-3),
-                    MouseEventKind::ScrollDown => ScrollCommand::Rows(3),
+                    MouseEventKind::ScrollUp => {
+                        ScrollCommand::Rows(-i32::from(mouse_scroll_lines.get()))
+                    }
+                    MouseEventKind::ScrollDown => {
+                        ScrollCommand::Rows(i32::from(mouse_scroll_lines.get()))
+                    }
                     _ => return None,
                 }
             }
@@ -2035,7 +2044,7 @@ mod tests {
         Transcript, TranscriptEvent, render_user, unix_milliseconds,
     };
     use crate::{
-        app::config::{ReasoningEffort, ReasoningMode},
+        app::config::{ReasoningEffort, ReasoningMode, TuiConfig},
         tui::{
             theme::Theme,
             transcript::{EntryKind, LocalEvent, SessionStarted, TranscriptRecord, TurnId},
@@ -2052,6 +2061,7 @@ mod tests {
     use serde_json::{json, value::to_raw_value};
     use std::{
         fs::File,
+        num::NonZeroU16,
         path::Path,
         sync::Arc,
         time::{Duration, Instant},
@@ -2264,7 +2274,7 @@ mod tests {
 
     fn scroll(transcript: &mut Transcript, event: Event) {
         let command = transcript
-            .scroll_command(&event)
+            .scroll_command(&event, TuiConfig::default().mouse_scroll_lines)
             .expect("test event should be a transcript scroll command");
         transcript.update(TranscriptEvent::Scroll(command));
     }
@@ -2724,14 +2734,14 @@ mod tests {
         drop(render(&mut transcript, 30, 6));
         assert_eq!(transcript.pinned_prompt.unwrap().area.height, 3);
 
-        let page_up = transcript.scroll_command(&Event::Key(KeyEvent::new(
-            KeyCode::PageUp,
-            KeyModifiers::NONE,
-        )));
-        let page_down = transcript.scroll_command(&Event::Key(KeyEvent::new(
-            KeyCode::PageDown,
-            KeyModifiers::NONE,
-        )));
+        let page_up = transcript.scroll_command(
+            &Event::Key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE)),
+            TuiConfig::default().mouse_scroll_lines,
+        );
+        let page_down = transcript.scroll_command(
+            &Event::Key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE)),
+            TuiConfig::default().mouse_scroll_lines,
+        );
 
         assert!(matches!(page_up, Some(ScrollCommand::Rows(-1))));
         assert!(matches!(page_down, Some(ScrollCommand::Rows(1))));
@@ -3377,6 +3387,28 @@ mod tests {
         drop(render(&mut transcript, 60, 10));
 
         assert_eq!(transcript.expandable_hits[0].row, before);
+    }
+
+    #[test]
+    fn mouse_scroll_uses_configured_rows_in_both_directions() {
+        let transcript = Transcript::new();
+        for lines in [1, 3, 8, u16::MAX] {
+            for (kind, direction) in [
+                (MouseEventKind::ScrollUp, -1),
+                (MouseEventKind::ScrollDown, 1),
+            ] {
+                let event = Event::Mouse(MouseEvent {
+                    kind,
+                    column: 0,
+                    row: 0,
+                    modifiers: KeyModifiers::NONE,
+                });
+                let command = transcript.scroll_command(&event, NonZeroU16::new(lines).unwrap());
+                assert!(
+                    matches!(command, Some(ScrollCommand::Rows(rows)) if rows == direction * i32::from(lines))
+                );
+            }
+        }
     }
 
     #[test]

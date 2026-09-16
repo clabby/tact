@@ -166,6 +166,9 @@ max_total_bytes = 262144
 [subagents]
 enabled = true
 
+[tui]
+mouse_scroll_lines = 3
+
 [theme]
 mode = "auto" # auto, light, or dark
 
@@ -224,6 +227,11 @@ The `/subagents` panel shows the current concurrency limit. Use `-` and `+` ther
 Use **Reload config** in the Actions menu after editing the file. Theme and UI changes apply immediately.
 Most agent settings apply when a session starts or is restored, while effort and fast mode can also
 be changed during a session. Workspace changes require restarting tact.
+
+Set `mouse_scroll_lines = 1` under `[tui]` for touch terminals. The default is `3`; valid values
+are `1` through `65535`. Each mouse-wheel tick scrolls that many rows in the main, fork, and
+subagent transcripts. Pinned prompts still scroll one row per tick, and keyboard scrolling is
+unchanged. Use **Reload config** to apply a new value.
 
 ### Themes
 

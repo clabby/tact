@@ -23,6 +23,7 @@ use ratatui::{
 };
 use std::{
     collections::HashMap,
+    num::NonZeroU16,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -352,6 +353,7 @@ impl SubagentTree {
         &mut self,
         id: AgentId,
         event: Event,
+        mouse_scroll_lines: NonZeroU16,
     ) -> Option<SubagentEffect> {
         if matches!(
             &event,
@@ -374,7 +376,11 @@ impl SubagentTree {
         if let Some(destination) = node.transcript.component().link_destination(&event) {
             return Some(SubagentEffect::OpenLink(destination.to_string()));
         }
-        if let Some(command) = node.transcript.component().scroll_command(&event) {
+        if let Some(command) = node
+            .transcript
+            .component()
+            .scroll_command(&event, mouse_scroll_lines)
+        {
             node.transcript.update(TranscriptEvent::Scroll(command));
         } else if let Some(command) = node.transcript.component().expandable_command(&event) {
             node.transcript.update(TranscriptEvent::Expandable(command));
@@ -1119,6 +1125,7 @@ mod tests {
     use ratatui::{Terminal, backend::TestBackend, style::Color};
     use serde_json::{json, value::to_raw_value};
     use std::{
+        num::NonZeroU16,
         sync::Arc,
         time::{Duration, Instant},
     };
@@ -1257,6 +1264,7 @@ mod tests {
                 row: u16::try_from(row).unwrap(),
                 modifiers: KeyModifiers::NONE,
             }),
+            NonZeroU16::new(3).unwrap(),
         );
         assert!(tree.nodes[0].transcript.component().expandables_focused());
     }
@@ -1359,6 +1367,7 @@ mod tests {
                 row: u16::try_from(row).unwrap(),
                 modifiers: KeyModifiers::NONE,
             }),
+            NonZeroU16::new(3).unwrap(),
         );
 
         let expanded = rendered_text(&render_agent_transcript(&mut tree, AgentId::new(1)));
@@ -1911,10 +1920,13 @@ mod tests {
         focus_tool(&mut tree);
         let escape = || Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
 
-        assert!(tree.update_transcript(AgentId::new(1), escape()).is_none());
+        assert!(
+            tree.update_transcript(AgentId::new(1), escape(), NonZeroU16::new(3).unwrap())
+                .is_none()
+        );
         assert!(!tree.nodes[0].transcript.component().expandables_focused());
         assert!(matches!(
-            tree.update_transcript(AgentId::new(1), escape()),
+            tree.update_transcript(AgentId::new(1), escape(), NonZeroU16::new(3).unwrap()),
             Some(SubagentEffect::Back)
         ));
     }

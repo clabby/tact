@@ -26,7 +26,7 @@ use super::{
     transcript::{ScrollCommand, Transcript, TranscriptEvent},
 };
 use crate::{
-    app::config::{ReasoningEffort, ReasoningMode},
+    app::config::{ReasoningEffort, ReasoningMode, TuiConfig},
     core::extensions::Skill,
     tui::{
         context::ContextDiagnostics,
@@ -342,6 +342,7 @@ pub(crate) struct RootNode {
     memory_enabled: bool,
     interactive: bool,
     theme_mode: ThemeMode,
+    tui: TuiConfig,
     preferred_reasoning_mode: ReasoningMode,
     subagents: SubagentTree,
     context_diagnostics: ContextDiagnostics,
@@ -384,6 +385,7 @@ impl RootNode {
             memory_enabled: false,
             interactive: true,
             theme_mode: ThemeMode::Auto,
+            tui: TuiConfig::default(),
             preferred_reasoning_mode: ReasoningMode::Standard,
             subagents,
             context_diagnostics: ContextDiagnostics::default(),
@@ -413,6 +415,7 @@ impl RootNode {
         root.set_skills(Arc::clone(&self.skills));
         root.memory_enabled = self.memory_enabled;
         root.theme_mode = self.theme_mode;
+        root.tui = self.tui;
         root.context_diagnostics = self.context_diagnostics.clone();
         root.interactive = false;
         root.composer
@@ -445,6 +448,10 @@ impl RootNode {
         if !enabled && matches!(&self.overlay, Some(Overlay::Memory(_))) {
             self.overlay = None;
         }
+    }
+
+    pub(crate) fn set_tui_config(&mut self, tui: TuiConfig) {
+        self.tui = tui;
     }
 
     pub(crate) fn set_theme_mode(&mut self, mode: ThemeMode) {
@@ -503,6 +510,7 @@ impl RootNode {
         let fork_available = self.fork_available;
         let memory_enabled = self.memory_enabled;
         let theme_mode = self.theme_mode;
+        let tui = self.tui;
         let max_subagents = self.subagents.max_subagents();
         *self = Self::new(workspace, thinking);
         self.set_reasoning_modes(reasoning_mode, preferred_reasoning_mode);
@@ -510,6 +518,7 @@ impl RootNode {
         self.fork_available = fork_available;
         self.memory_enabled = memory_enabled;
         self.theme_mode = theme_mode;
+        self.tui = tui;
         self.set_max_subagents(max_subagents);
         if let Some(draft) = preserved_draft {
             self.composer.component_mut().restore_draft(draft);
@@ -977,7 +986,11 @@ impl RootNode {
             ))));
             return ComponentUpdate::render(RenderRequest::Immediate);
         }
-        if let Some(command) = self.transcript.component().scroll_command(&event) {
+        if let Some(command) = self
+            .transcript
+            .component()
+            .scroll_command(&event, self.tui.mouse_scroll_lines)
+        {
             let transcript = self.transcript.update(TranscriptEvent::Scroll(command));
             return ComponentUpdate {
                 effects: Vec::new(),
@@ -1235,7 +1248,9 @@ impl RootNode {
                 self.apply_subagent_effect(effect)
             }
             Some(Overlay::Subagents(SubagentOverlay::Transcript(id))) => {
-                let effect = self.subagents.update_transcript(*id, event);
+                let effect =
+                    self.subagents
+                        .update_transcript(*id, event, self.tui.mouse_scroll_lines);
                 self.apply_subagent_effect(effect)
             }
             None => ComponentUpdate::none(),
@@ -3056,7 +3071,7 @@ mod tests {
         TranscriptEvent,
     };
     use crate::{
-        app::config::{ReasoningEffort, ReasoningMode},
+        app::config::{ReasoningEffort, ReasoningMode, TuiConfig},
         core::extensions::Skill,
         tui::{
             session::{RecentPrompt, SessionSummary},
@@ -3085,6 +3100,7 @@ mod tests {
     use serde_json::{json, value::to_raw_value};
     use std::{
         fs,
+        num::NonZeroU16,
         path::Path,
         sync::Arc,
         time::{Duration, Instant},
@@ -3202,6 +3218,36 @@ mod tests {
                 payload: to_raw_value(&payload).unwrap().into(),
             },
         ))
+    }
+
+    #[test]
+    fn tui_config_survives_fork_reset_and_session_restore() {
+        let workspace = Path::new("/work");
+        let mut root = RootNode::new(workspace, ReasoningEffort::Medium);
+        let tui = TuiConfig {
+            mouse_scroll_lines: NonZeroU16::new(1).unwrap(),
+        };
+        root.set_tui_config(tui);
+        let fork = root.fork(workspace, ReasoningEffort::Medium);
+        assert_eq!(fork.tui.mouse_scroll_lines.get(), 1);
+        root.reset_session(
+            workspace,
+            ReasoningEffort::Medium,
+            ReasoningMode::Standard,
+            ReasoningMode::Standard,
+            DraftReset::Clear,
+        );
+        assert_eq!(root.tui.mouse_scroll_lines.get(), 1);
+        let projection = RootNode::project_session(ReasoningEffort::Medium, Vec::new());
+        root.install_session_projection(
+            workspace,
+            ReasoningEffort::Medium,
+            ReasoningMode::Standard,
+            ReasoningMode::Standard,
+            false,
+            projection,
+        );
+        assert_eq!(root.tui.mouse_scroll_lines.get(), 1);
     }
 
     #[test]

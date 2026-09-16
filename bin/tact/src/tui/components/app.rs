@@ -6,7 +6,7 @@ use super::{
     root::{DraftReset, RestoredSessionProjection, RootEffect, RootEvent, RootNode},
 };
 use crate::{
-    app::config::{ReasoningEffort, ReasoningMode},
+    app::config::{ReasoningEffort, ReasoningMode, TuiConfig},
     core::extensions::Skill,
     tui::{
         pane::PaneId,
@@ -176,6 +176,7 @@ pub(crate) enum AppEvent {
     ConfigReloaded {
         pane: PaneId,
         theme: Theme,
+        tui: TuiConfig,
         preferred_reasoning_mode: ReasoningMode,
         memory_enabled: bool,
         message: String,
@@ -433,6 +434,7 @@ impl AppNode {
             AppEvent::ConfigReloaded {
                 pane,
                 theme,
+                tui,
                 preferred_reasoning_mode,
                 memory_enabled,
                 message,
@@ -441,9 +443,11 @@ impl AppNode {
                 let mode = self.theme.mode();
                 if let Some((_, main)) = &mut self.main {
                     main.component_mut().set_theme_mode(mode);
+                    main.component_mut().set_tui_config(tui);
                 }
                 if let Some((_, fork)) = &mut self.fork {
                     fork.component_mut().set_theme_mode(mode);
+                    fork.component_mut().set_tui_config(tui);
                 }
                 self.set_preferred_reasoning_mode(preferred_reasoning_mode);
                 self.set_memory_enabled(false);
@@ -810,7 +814,7 @@ mod tests {
         RootNode, SPLIT_HINT,
     };
     use crate::{
-        app::config::{ReasoningEffort, ReasoningMode},
+        app::config::{ReasoningEffort, ReasoningMode, TuiConfig},
         tui::{
             pane::PaneId,
             theme::{ColorScheme, Theme, ThemeMode},
@@ -823,7 +827,7 @@ mod tests {
     use nanocodex::Model;
     use ratatui::{Terminal, backend::TestBackend};
     use semver::Version;
-    use std::{path::PathBuf, sync::Arc};
+    use std::{num::NonZeroU16, path::PathBuf, sync::Arc};
     use tact_memory::{MemoryAccess, MemoryKey, MemoryRecord, MemorySource};
 
     fn local_memory_access() -> MemoryAccess {
@@ -1427,6 +1431,55 @@ mod tests {
     }
 
     #[test]
+    fn config_reload_changes_mouse_scrolling_in_main_and_fork() {
+        let mut app = app();
+        for sequence in 1..=40 {
+            let record = TranscriptRecord::from_local(
+                sequence,
+                sequence,
+                LocalEvent::UserSubmitted {
+                    id: TurnId::new(sequence),
+                    text: format!("scroll line {sequence:02}"),
+                },
+            )
+            .unwrap();
+            app.update(AppEvent::Transcript {
+                pane: PaneId::Main,
+                record: Arc::new(record),
+            });
+        }
+        app.update(control('t'));
+        app.update(AppEvent::ForkReady {
+            pane: PaneId::Fork(1),
+        });
+        app.update(AppEvent::ConfigReloaded {
+            pane: PaneId::Main,
+            theme: Theme::default(),
+            tui: TuiConfig {
+                mouse_scroll_lines: NonZeroU16::new(1).unwrap(),
+            },
+            preferred_reasoning_mode: ReasoningMode::Standard,
+            memory_enabled: false,
+            message: "updated scroll speed".to_owned(),
+        });
+        drop(rendered(&mut app, 100, 20));
+        for pane in [PaneId::Main, PaneId::Fork(1)] {
+            app.update_root(
+                pane,
+                RootEvent::Terminal(Event::Mouse(MouseEvent {
+                    kind: MouseEventKind::ScrollUp,
+                    column: 1,
+                    row: 1,
+                    modifiers: KeyModifiers::NONE,
+                })),
+            );
+        }
+        let text = rendered(&mut app, 100, 20);
+        // One row up keeps the last message visible in both panes; three rows hides it.
+        assert_eq!(text.matches("scroll line 40").count(), 2, "{text}");
+    }
+
+    #[test]
     fn config_reload_updates_memory_action_availability_for_every_root() {
         let mut app = app();
         app.update(control('t'));
@@ -1437,6 +1490,7 @@ mod tests {
         app.update(AppEvent::ConfigReloaded {
             pane: PaneId::Main,
             theme: Theme::default(),
+            tui: TuiConfig::default(),
             preferred_reasoning_mode: ReasoningMode::Standard,
             memory_enabled: true,
             message: "enabled memory".to_owned(),
@@ -1454,6 +1508,7 @@ mod tests {
         app.update(AppEvent::ConfigReloaded {
             pane: PaneId::Main,
             theme: Theme::default(),
+            tui: TuiConfig::default(),
             preferred_reasoning_mode: ReasoningMode::Standard,
             memory_enabled: false,
             message: "disabled memory".to_owned(),
