@@ -26,6 +26,8 @@ const RECORD_COLUMNS: &str = "memories.namespace AS namespace, CAST(memories.id 
 const PRUNE_SQL: &str =
     "DELETE FROM memories WHERE probation_until_ms <= CAST(? AS INTEGER) AND use_count = 0";
 const VISIBLE_RECORD_SQL: &str = "(memories.probation_until_ms IS NULL OR memories.probation_until_ms > CAST(? AS INTEGER) OR memories.use_count != 0)";
+const INSERT_SQL: &str = "INSERT INTO memories (namespace, id, version, content, identity, created_at_ms, updated_at_ms, probation_until_ms) SELECT namespace, next_id, 1, ?, ?, CAST(? AS INTEGER), CAST(? AS INTEGER), CAST(? AS INTEGER) FROM memory_namespaces WHERE namespace = ? AND (SELECT COUNT(*) FROM memories WHERE namespace = ?) < CAST(? AS INTEGER) AND (SELECT COALESCE(SUM(length(CAST(content AS BLOB))), 0) FROM memories WHERE namespace = ?) + CAST(? AS INTEGER) <= CAST(? AS INTEGER) AND NOT EXISTS (SELECT 1 FROM memories WHERE namespace = ? AND identity = ?)";
+const REPLACE_SQL: &str = "UPDATE memories SET version = CAST(? AS INTEGER), content = ?, identity = ?, updated_at_ms = CAST(? AS INTEGER), last_scanned_at_ms = NULL, scan_count = 0, last_used_at_ms = NULL, use_count = 0, probation_until_ms = CAST(? AS INTEGER) WHERE namespace = ? AND id = CAST(? AS INTEGER) AND version = CAST(? AS INTEGER) AND NOT EXISTS (SELECT 1 FROM memories other WHERE other.namespace = ? AND other.identity = ? AND other.id != CAST(? AS INTEGER)) AND (SELECT COALESCE(SUM(length(CAST(content AS BLOB))), 0) FROM memories WHERE namespace = ?) - length(CAST(memories.content AS BLOB)) + CAST(? AS INTEGER) <= CAST(? AS INTEGER)";
 
 /// Deployment-selected bound for exact Worker-side BM25 retrieval.
 #[derive(Clone, Copy, Debug)]
@@ -39,6 +41,7 @@ pub(crate) struct ScanBudget {
 pub(crate) struct CloudflareMemoryStore {
     session: Arc<D1DatabaseSession>,
     namespace: Arc<str>,
+    limits: MemoryLimits,
     scan_budget: ScanBudget,
 }
 
@@ -47,11 +50,13 @@ impl CloudflareMemoryStore {
     pub(crate) fn new(
         session: Arc<D1DatabaseSession>,
         namespace: String,
+        limits: MemoryLimits,
         scan_budget: ScanBudget,
     ) -> Self {
         Self {
             session,
             namespace: Arc::from(namespace),
+            limits,
             scan_budget,
         }
     }
@@ -183,7 +188,7 @@ impl MemoryStore for CloudflareMemoryStore {
             let now = current_time_ms().to_string();
             let sql = format!(
                 "SELECT {RECORD_COLUMNS} FROM memories WHERE {VISIBLE_RECORD_SQL} ORDER BY namespace, id LIMIT {}",
-                MemoryLimits::PRODUCTION.records
+                protocol::MAX_LIST_RECORDS
             );
             let results = store
                 .batch(vec![store.statement(sql, &[D1Type::Text(&now)])?])
@@ -200,7 +205,7 @@ impl MemoryStore for CloudflareMemoryStore {
         let store = self.clone();
         let content = content.to_owned();
         SendFuture::new(async move {
-            validate_content(&content)?;
+            validate_content(&content, store.limits)?;
             if replacement
                 .as_ref()
                 .is_some_and(|key| key.namespace.as_deref() != Some(store.namespace.as_ref()))
@@ -245,7 +250,7 @@ impl MemoryStore for CloudflareMemoryStore {
         let store = self.clone();
         let memories = memories.to_vec();
         SendFuture::new(async move {
-            validate_snapshot(&memories)?;
+            validate_snapshot(&memories, store.limits)?;
             let payload = memories.iter().map(SyncRow::from).collect::<Vec<_>>();
             let json = serde_json::to_string(&payload).map_err(MessageError::backend)?;
             let now = current_time_ms().to_string();
@@ -327,13 +332,12 @@ impl MemoryStore for CloudflareMemoryStore {
 impl CloudflareMemoryStore {
     /// Inserts one record while atomically enforcing namespace capacity and deduplication.
     async fn insert(&self, content: String) -> Result<MemoryRecord, MemoryError> {
-        let limits = MemoryLimits::PRODUCTION;
+        let limits = self.limits;
         let now_ms = current_time_ms();
         let now = now_ms.to_string();
         let identity = normalize_identity(&content);
         let namespace = self.namespace.as_ref();
         let diagnostics = "SELECT EXISTS(SELECT 1 FROM memories WHERE namespace = ? AND identity = ?) AS duplicate, (SELECT COUNT(*) FROM memories WHERE namespace = ?) AS record_count, (SELECT COALESCE(SUM(length(CAST(content AS BLOB))), 0) FROM memories WHERE namespace = ?) AS content_bytes";
-        let insert_sql = "INSERT INTO memories (namespace, id, version, content, identity, created_at_ms, updated_at_ms, probation_until_ms) SELECT namespace, next_id, 1, ?, ?, CAST(? AS INTEGER), CAST(? AS INTEGER), CAST(? AS INTEGER) FROM memory_namespaces WHERE namespace = ? AND (SELECT COUNT(*) FROM memories WHERE namespace = ?) < ? AND (SELECT COALESCE(SUM(length(CAST(content AS BLOB))), 0) FROM memories WHERE namespace = ?) + ? <= ? AND NOT EXISTS (SELECT 1 FROM memories WHERE namespace = ? AND identity = ?)";
         let probation = now_ms
             .saturating_add(limits.probation_duration_ms)
             .to_string();
@@ -358,7 +362,7 @@ impl CloudflareMemoryStore {
                 ],
             )?,
             self.statement(
-                insert_sql,
+                INSERT_SQL,
                 &[
                     D1Type::Text(&content),
                     D1Type::Text(&identity),
@@ -404,7 +408,7 @@ impl CloudflareMemoryStore {
 
     /// Replaces one record with optimistic concurrency and namespace capacity checks.
     async fn replace(&self, content: String, key: MemoryKey) -> Result<MemoryRecord, MemoryError> {
-        let limits = MemoryLimits::PRODUCTION;
+        let limits = self.limits;
         if key.version >= i64::MAX as u64 {
             return Err(MemoryError::Conflict);
         }
@@ -423,7 +427,6 @@ impl CloudflareMemoryStore {
             .ok_or(MemoryError::Conflict)?
             .to_string();
         let diagnostics = "SELECT EXISTS(SELECT 1 FROM memories WHERE namespace = ? AND identity = ? AND id != CAST(? AS INTEGER)) AS duplicate, CAST((SELECT version FROM memories WHERE namespace = ? AND id = CAST(? AS INTEGER)) AS TEXT) AS version, (SELECT COALESCE(SUM(length(CAST(content AS BLOB))), 0) FROM memories WHERE namespace = ?) AS content_bytes, (SELECT length(CAST(content AS BLOB)) FROM memories WHERE namespace = ? AND id = CAST(? AS INTEGER)) AS replaced_bytes";
-        let update = "UPDATE memories SET version = CAST(? AS INTEGER), content = ?, identity = ?, updated_at_ms = CAST(? AS INTEGER), last_scanned_at_ms = NULL, scan_count = 0, last_used_at_ms = NULL, use_count = 0, probation_until_ms = CAST(? AS INTEGER) WHERE namespace = ? AND id = CAST(? AS INTEGER) AND version = CAST(? AS INTEGER) AND NOT EXISTS (SELECT 1 FROM memories other WHERE other.namespace = ? AND other.identity = ? AND other.id != CAST(? AS INTEGER)) AND (SELECT COALESCE(SUM(length(CAST(content AS BLOB))), 0) FROM memories WHERE namespace = ?) - length(CAST(memories.content AS BLOB)) + ? <= ?";
         let content_len = content.len().to_string();
         let byte_limit = limits.total_content_bytes.to_string();
         let select_sql = format!(
@@ -446,7 +449,7 @@ impl CloudflareMemoryStore {
                     ],
                 )?,
                 self.statement(
-                    update,
+                    REPLACE_SQL,
                     &[
                         D1Type::Text(&new_version),
                         D1Type::Text(&content),
@@ -575,8 +578,7 @@ fn sync_report(
     report
 }
 
-fn validate_content(content: &str) -> Result<(), MemoryError> {
-    let limits = MemoryLimits::PRODUCTION;
+fn validate_content(content: &str, limits: MemoryLimits) -> Result<(), MemoryError> {
     if content.trim().is_empty() {
         return Err(MemoryError::EmptyContent);
     }
@@ -588,8 +590,7 @@ fn validate_content(content: &str) -> Result<(), MemoryError> {
     Ok(())
 }
 
-fn validate_snapshot(memories: &[MemoryRecord]) -> Result<(), MemoryError> {
-    let limits = MemoryLimits::PRODUCTION;
+fn validate_snapshot(memories: &[MemoryRecord], limits: MemoryLimits) -> Result<(), MemoryError> {
     if memories.len() > limits.records {
         return Err(MemoryError::RecordCapacity {
             maximum: limits.records,
@@ -611,7 +612,7 @@ fn validate_snapshot(memories: &[MemoryRecord]) -> Result<(), MemoryError> {
         {
             return Err(MemoryError::Conflict);
         }
-        validate_content(&memory.content)?;
+        validate_content(&memory.content, limits)?;
         if !identities.insert(normalize_identity(&memory.content)) {
             return Err(MemoryError::Duplicate);
         }
@@ -635,8 +636,204 @@ fn current_time_ms() -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::RECORD_COLUMNS;
+    use super::{INSERT_SQL, RECORD_COLUMNS, REPLACE_SQL, validate_snapshot};
     use rusqlite::{Connection, params};
+    use tact_memory::{MemoryError, MemoryKey, MemoryLimits, MemoryRecord};
+
+    struct Database(Connection);
+
+    impl Database {
+        fn new() -> Self {
+            let database = Connection::open_in_memory().unwrap();
+            database
+                .execute_batch(include_str!("../migrations/0001_initial.sql"))
+                .unwrap();
+            Self(database)
+        }
+
+        fn insert(&self, namespace: &str, content: &str, limits: MemoryLimits) -> usize {
+            self.0
+                .execute(
+                    "INSERT INTO memory_namespaces(namespace) VALUES (?) ON CONFLICT DO NOTHING",
+                    [namespace],
+                )
+                .unwrap();
+            let changed = self
+                .0
+                .execute(
+                    INSERT_SQL,
+                    params![
+                        content,
+                        content,
+                        "1",
+                        "1",
+                        "1000",
+                        namespace,
+                        namespace,
+                        limits.records.to_string(),
+                        namespace,
+                        content.len().to_string(),
+                        limits.total_content_bytes.to_string(),
+                        namespace,
+                        content,
+                    ],
+                )
+                .unwrap();
+            self.0
+                .execute(
+                    "UPDATE memory_namespaces SET next_id = next_id + 1 WHERE namespace = ? AND changes() = 1",
+                    [namespace],
+                )
+                .unwrap();
+            changed
+        }
+
+        fn replace(&self, namespace: &str, content: &str, limits: MemoryLimits) -> usize {
+            self.0
+                .execute(
+                    REPLACE_SQL,
+                    params![
+                        "2",
+                        content,
+                        content,
+                        "2",
+                        "1000",
+                        namespace,
+                        "1",
+                        "1",
+                        namespace,
+                        content,
+                        "1",
+                        namespace,
+                        content.len().to_string(),
+                        limits.total_content_bytes.to_string(),
+                    ],
+                )
+                .unwrap()
+        }
+
+        fn content(&self, namespace: &str) -> Vec<String> {
+            self.0
+                .prepare("SELECT content FROM memories WHERE namespace = ? ORDER BY id")
+                .unwrap()
+                .query_map([namespace], |row| row.get(0))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        }
+    }
+
+    #[test]
+    fn insert_enforces_record_capacity_per_namespace() {
+        let database = Database::new();
+        let limits = MemoryLimits {
+            records: 1,
+            ..MemoryLimits::PRODUCTION
+        };
+        assert_eq!(database.insert("alice", "first", limits), 1);
+        assert_eq!(database.insert("alice", "second", limits), 0);
+        assert_eq!(database.insert("bob", "first", limits), 1);
+        assert_eq!(database.content("alice"), ["first"]);
+        assert_eq!(database.content("bob"), ["first"]);
+    }
+
+    #[test]
+    fn insert_enforces_content_capacity_per_namespace_in_utf8_bytes() {
+        let database = Database::new();
+        let limits = MemoryLimits {
+            total_content_bytes: 4,
+            ..MemoryLimits::PRODUCTION
+        };
+        assert_eq!(database.insert("alice", "é", limits), 1);
+        assert_eq!(database.insert("alice", "ab", limits), 1);
+        assert_eq!(database.insert("alice", "c", limits), 0);
+        assert_eq!(database.insert("bob", "full", limits), 1);
+        assert_eq!(database.content("alice"), ["é", "ab"]);
+        assert_eq!(database.content("bob"), ["full"]);
+    }
+
+    #[test]
+    fn replacement_enforces_resulting_namespace_content_capacity() {
+        let database = Database::new();
+        let limits = MemoryLimits {
+            total_content_bytes: 4,
+            ..MemoryLimits::PRODUCTION
+        };
+        assert_eq!(database.insert("alice", "a", limits), 1);
+        assert_eq!(database.insert("alice", "b", limits), 1);
+        assert_eq!(database.insert("bob", "full", limits), 1);
+        assert_eq!(database.replace("alice", "wide", limits), 0);
+        assert_eq!(database.content("alice"), ["a", "b"]);
+        assert_eq!(database.replace("alice", "éx", limits), 1);
+        assert_eq!(database.content("alice"), ["éx", "b"]);
+        assert_eq!(database.content("bob"), ["full"]);
+    }
+
+    fn record(id: i64, content: String) -> MemoryRecord {
+        MemoryRecord {
+            key: MemoryKey::local(id, 1),
+            content,
+            created_at_ms: 1,
+            updated_at_ms: 1,
+            last_scanned_at_ms: None,
+            scan_count: 0,
+            last_used_at_ms: None,
+            use_count: 0,
+            probation_until_ms: None,
+        }
+    }
+
+    #[test]
+    fn sync_enforces_independent_record_and_content_limits() {
+        let limits = MemoryLimits {
+            records: 2,
+            content_bytes: 4,
+            total_content_bytes: 6,
+            ..MemoryLimits::PRODUCTION
+        };
+        let records = [record(1, "éé".into()), record(2, "ab".into())];
+        validate_snapshot(&records, limits).unwrap();
+        assert!(matches!(
+            validate_snapshot(
+                &records,
+                MemoryLimits {
+                    records: 1,
+                    ..limits
+                }
+            ),
+            Err(MemoryError::RecordCapacity { maximum: 1 })
+        ));
+        assert!(matches!(
+            validate_snapshot(
+                &records,
+                MemoryLimits {
+                    content_bytes: 3,
+                    ..limits
+                }
+            ),
+            Err(MemoryError::ContentTooLarge { maximum_bytes: 3 })
+        ));
+        assert!(matches!(
+            validate_snapshot(
+                &records,
+                MemoryLimits {
+                    total_content_bytes: 5,
+                    ..limits
+                }
+            ),
+            Err(MemoryError::ContentCapacity { maximum_bytes: 5 })
+        ));
+
+        let larger_limit = MemoryLimits {
+            content_bytes: MemoryLimits::PRODUCTION.content_bytes + 1,
+            ..MemoryLimits::PRODUCTION
+        };
+        validate_snapshot(
+            &[record(1, "a".repeat(larger_limit.content_bytes))],
+            larger_limit,
+        )
+        .unwrap();
+    }
 
     #[test]
     fn read_projection_is_unambiguous() {

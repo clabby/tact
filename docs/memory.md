@@ -12,6 +12,11 @@ Memory is disabled by default:
 ```toml
 [memory]
 enabled = true
+
+[memory.local]
+max_records = 512
+max_record_bytes = 1024
+max_total_bytes = 262144
 ```
 
 When enabled, every runtime selects exactly one backend:
@@ -44,6 +49,20 @@ The local store is:
 `TACT_CONFIG`, or `TACT_HOME`. There is one global local corpus per configuration directory. It has
 no workspace, repository, branch, session, agent, or author namespace. Workspace-specific records
 must state their scope in their content.
+
+The `[memory.local]` section accepts three independent positive integer limits for this global
+corpus:
+
+- `max_records`: record count, defaulting to 512.
+- `max_record_bytes`: UTF-8 content bytes per record, defaulting to 1,024.
+- `max_total_bytes`: total UTF-8 content bytes across all records, defaulting to 262,144.
+
+Changing one limit leaves the others unchanged. Byte limits cover authored content; the SQLite file
+also contains indexes and metadata, so its disk usage can exceed `max_total_bytes`. Lowering limits
+does not delete existing records. Mutations and snapshot transfers must satisfy the applicable
+limits. Explicit push and pull commands use the same configured limits while collecting or merging
+the local snapshot. Remote namespace limits are configured by the service and are not changed by
+these local settings.
 
 The SQLite schema remains v1, and the existing `memories` record format is unchanged. Tact lazily
 adds backward-compatible allocator metadata so IDs are not reused after deletion or snapshot sync;
@@ -163,12 +182,13 @@ per-namespace uniqueness, capacity checks, and a deterministic export cursor. Cl
 Durable Objects need a transactional or single-writer boundary. Database-native search is valid
 only when it reproduces visible scan behavior and the five-result bound.
 
-Remote errors are JSON objects containing only a stable code. Responses and traces must not echo
-request content, bearer tokens, database diagnostics, or credential details. Authentication,
-authorization, stale keys, invalid or oversized requests, capacity, and transient storage failures
-remain distinguishable through the defined status and error mapping. The client surfaces all
-in-scope remote failures and never switches to local memory after one. Production deployments need
-HTTPS, private credentials, and storage encryption appropriate to the deployment.
+Remote errors are JSON objects containing a stable code and an optional configured maximum.
+Responses and traces must not echo request content, bearer tokens, database diagnostics, or
+credential details. Authentication, authorization, stale keys, invalid or oversized requests,
+capacity, and transient storage failures remain distinguishable through the defined status and
+error mapping. The client surfaces all in-scope remote failures and never switches to local memory
+after one. Production deployments need HTTPS, private credentials, and storage encryption
+appropriate to the deployment.
 
 Runtime operations never push local records, write through to another backend, combine backend
 results, or schedule background synchronization.
@@ -315,19 +335,28 @@ server time and server-owned telemetry.
 
 ## Bounds and transactions
 
-| Limit | v1 value |
+| Limit | Default v1 value |
 | --- | ---: |
 | Record content | 1 KiB |
 | Rows | 512 |
-| Total content | 256 KiB |
-| Local main database file | 4 MiB |
+| Total record content | 256 KiB |
 | Scan results | 5 |
 
-Bounds apply to the global local corpus and independently to each remote writer namespace. A store
-may prune expired unread probation records before rejecting a capacity-increasing mutation, but it
-does not evict active graduated records to make room. Mutations, telemetry updates, bound checks,
-authoritative push reconciliation, and local pull merge are transactional at their documented
-scope.
+The local count and content limits are independently configurable with `memory.local.max_records`,
+`memory.local.max_record_bytes`, and `memory.local.max_total_bytes`. Remote limits remain
+deployment-owned. The Cloudflare example accepts `TACT_MEMORY_MAX_RECORDS`,
+`TACT_MEMORY_MAX_RECORD_BYTES`, and `TACT_MEMORY_MAX_TOTAL_BYTES`, applying each configured limit
+separately to every namespace. The scan-result limit remains fixed.
+
+Remote transport limits are separate. The Cloudflare example configures the encoded JSON request
+bound with `TACT_MEMORY_MAX_REQUEST_BYTES`, defaulting to 2 MiB. Set it high enough for a complete
+push snapshot, including JSON encoding overhead. Other backends pass their bound to
+`MemoryServer::router(max_request_bytes)`. The client accepts at most 8 MiB per response.
+
+A store may prune expired unread probation records before rejecting a capacity-increasing mutation,
+but it does not evict active graduated records to make room. Mutations, telemetry updates, bound
+checks, authoritative push reconciliation, and local pull merge are transactional at their
+documented scope.
 
 The local database is unencrypted. Anyone who can read the configuration directory may be able to
 inspect it. Production remote storage encryption and HTTPS termination belong to its deployment.
