@@ -398,13 +398,13 @@ fn scan_updates_only_returned_rows() {
 #[test]
 fn scan_clamps_results_to_the_production_limit() {
     let (_directory, store) = store();
-    for index in 0..6 {
+    for index in 0..=MemoryLimits::PRODUCTION.scan_results {
         store.put(&format!("shared term {index}"), None, 0).unwrap();
     }
 
     let scan = store.scan("shared", usize::MAX, 1).unwrap();
 
-    assert_eq!(scan.candidates.len(), 5);
+    assert_eq!(scan.candidates.len(), MemoryLimits::PRODUCTION.scan_results);
 }
 
 #[test]

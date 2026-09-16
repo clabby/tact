@@ -68,7 +68,6 @@ impl LocalMemoryStore {
     ) -> Result<MemoryScan, MemoryError> {
         let store = self.clone();
         let query = query.to_owned();
-        let limit = limit.min(self.limits.scan_results);
         run_local(move || store.scan_local(&query, limit, now_ms)).await
     }
 
@@ -96,7 +95,7 @@ impl LocalMemoryStore {
             .map(MemoryRecord::from)
             .collect::<Vec<_>>();
         let limit = limit.min(self.limits.scan_results);
-        let scan = MemoryScan::rank(query, &memories, limit);
+        let scan = MemoryScan::rank(query, &memories, None, limit);
 
         for candidate in &scan.candidates {
             transaction

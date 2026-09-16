@@ -72,7 +72,7 @@ pub struct MemoryCandidate {
     pub key: MemoryKey,
     /// Bounded excerpt suitable for choosing whether to read the record.
     pub preview: String,
-    /// Retrieval score; larger values rank ahead of smaller values.
+    /// BM25 score including any caller-owned weighting; larger values rank ahead of smaller values.
     pub score: f64,
 }
 
@@ -86,12 +86,19 @@ pub struct MemoryScan {
 }
 
 impl MemoryScan {
-    /// Ranks an in-memory corpus with Tact's deterministic BM25 retrieval.
+    /// Ranks an in-memory corpus with global BM25 and a 25% boost for caller-owned memories.
     ///
-    /// Server backends that keep a bounded corpus in memory can use this to match local search
-    /// tokenization, scoring, tie-breaking, and preview behavior.
-    pub fn rank(query: &str, memories: &[MemoryRecord], limit: usize) -> Self {
-        let candidates = crate::retrieval::rank(query, memories, limit);
+    /// Remote backends pass their server-authenticated namespace; every positive match in that
+    /// namespace receives the same weight before truncation. Other matches keep their raw scores.
+    /// Local backends pass `None` for unweighted retrieval. Equal weighted scores retain the
+    /// original BM25 order.
+    pub fn rank(
+        query: &str,
+        memories: &[MemoryRecord],
+        own_namespace: Option<&str>,
+        limit: usize,
+    ) -> Self {
+        let candidates = crate::retrieval::rank(query, memories, own_namespace, limit);
         Self {
             abstained: candidates.is_empty(),
             candidates,
@@ -122,7 +129,7 @@ impl MemoryLimits {
         content_bytes: 1_024,
         records: 512,
         total_content_bytes: 256 * 1_024,
-        scan_results: 5,
+        scan_results: 10,
         query_bytes: 512,
         probation_duration_ms: PROBATION_DURATION_MS,
     };

@@ -113,32 +113,15 @@ fn visible_records(state: &TestMemoryState) -> Vec<MemoryRecord> {
 impl MemoryStore for TestMemoryStore {
     async fn scan(&self, query: &str, limit: usize) -> Result<MemoryScan, MemoryError> {
         let now = now_ms();
-        let query = normalize_identity(query);
-        let terms = query.split_whitespace().collect::<Vec<_>>();
         let mut state = self.database.state.lock().unwrap();
         prune_expired(&mut state, now);
-        let mut seen = HashSet::new();
-        let mut candidates = visible_records(&state)
-            .into_iter()
-            .filter(|record| {
-                let content = normalize_identity(&record.content);
-                terms.iter().all(|term| content.contains(term))
-                    && seen.insert(normalize_identity(&record.content))
-            })
-            .map(|record| MemoryCandidate {
-                key: record.key,
-                preview: record.content,
-                score: 1.0,
-            })
-            .take(limit.min(MemoryLimits::PRODUCTION.scan_results))
-            .collect::<Vec<_>>();
-        candidates.sort_by(|left, right| {
-            left.key
-                .namespace
-                .cmp(&right.key.namespace)
-                .then_with(|| left.key.id.cmp(&right.key.id))
-        });
-        for candidate in &candidates {
+        let scan = MemoryScan::rank(
+            query,
+            &visible_records(&state),
+            Some(&self.namespace),
+            limit.min(MemoryLimits::PRODUCTION.scan_results),
+        );
+        for candidate in &scan.candidates {
             if let Some(record) = state
                 .records
                 .get_mut(&(candidate.key.namespace.clone().unwrap(), candidate.key.id))
@@ -147,10 +130,7 @@ impl MemoryStore for TestMemoryStore {
                 record.scan_count = record.scan_count.saturating_add(1);
             }
         }
-        Ok(MemoryScan {
-            abstained: candidates.is_empty(),
-            candidates,
-        })
+        Ok(scan)
     }
 
     async fn read(
@@ -654,6 +634,172 @@ async fn scan_read_and_list_return_only_caller_visible_records() {
     assert_eq!(read.len(), 2);
     assert!(read.iter().any(|memory| memory.key == alice.key));
     assert!(read.iter().any(|memory| memory.key == bob.key));
+}
+
+#[tokio::test]
+async fn remote_scans_support_ten_candidates_and_reject_excess_limits() {
+    let app = memory_app(vec![credential("alice", RemoteRole::Writer, ALICE_TOKEN)]);
+    for index in 0..=10 {
+        put(
+            &app,
+            "alice",
+            ALICE_TOKEN,
+            &format!("shared remote candidate {index}"),
+        )
+        .await;
+    }
+
+    let response = send(
+        &app,
+        protocol::SCAN_PATH,
+        ALICE_TOKEN,
+        "alice",
+        &ScanRequest {
+            query: "shared remote candidate".to_owned(),
+            limit: 10,
+        },
+    )
+    .await;
+    assert_eq!(json::<ScanResponse>(response).await.candidates.len(), 10);
+
+    let response = send(
+        &app,
+        protocol::SCAN_PATH,
+        ALICE_TOKEN,
+        "alice",
+        &ScanRequest {
+            query: "shared remote candidate".to_owned(),
+            limit: 11,
+        },
+    )
+    .await;
+    assert_error(
+        response,
+        StatusCode::BAD_REQUEST,
+        RemoteErrorCode::BadRequest,
+    )
+    .await;
+
+    let (endpoint, task) = live_server(app).await;
+    let client = RemoteMemoryClient::new(
+        &endpoint,
+        "alice".to_owned(),
+        RemoteToken::new(ALICE_TOKEN.to_owned()).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        client
+            .scan("shared remote candidate", 10)
+            .await
+            .unwrap()
+            .candidates
+            .len(),
+        10
+    );
+    task.abort();
+}
+
+#[tokio::test]
+async fn remote_weighting_prefers_the_authenticated_callers_matches() {
+    let app = memory_app(vec![
+        credential("alice", RemoteRole::Writer, ALICE_TOKEN),
+        credential("bob", RemoteRole::Writer, BOB_TOKEN),
+    ]);
+    for (namespace, token) in [("alice", ALICE_TOKEN), ("bob", BOB_TOKEN)] {
+        for content in ["needle first", "needle second"] {
+            put(&app, namespace, token, content).await;
+        }
+    }
+    for (namespace, token) in [("alice", ALICE_TOKEN), ("bob", BOB_TOKEN)] {
+        let scan = json::<ScanResponse>(
+            send(
+                &app,
+                protocol::SCAN_PATH,
+                token,
+                namespace,
+                &ScanRequest {
+                    query: "needle".to_owned(),
+                    limit: 2,
+                },
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(
+            scan.candidates
+                .iter()
+                .map(|candidate| &candidate.key)
+                .collect::<Vec<_>>(),
+            [
+                &MemoryKey::remote(namespace.to_owned(), 1, 1),
+                &MemoryKey::remote(namespace.to_owned(), 2, 1),
+            ]
+        );
+        assert_eq!(scan.candidates[0].score, scan.candidates[1].score);
+    }
+}
+
+#[tokio::test]
+async fn remote_reranking_updates_only_final_candidates() {
+    let app = memory_app(vec![
+        credential("alice", RemoteRole::Writer, ALICE_TOKEN),
+        credential("bob", RemoteRole::Writer, BOB_TOKEN),
+    ]);
+    for index in 1..=10 {
+        put(
+            &app,
+            "alice",
+            ALICE_TOKEN,
+            &format!("needle {}", "padding ".repeat(19 + index)),
+        )
+        .await;
+    }
+    let bob = put(
+        &app,
+        "bob",
+        BOB_TOKEN,
+        &format!("needle {}", "padding ".repeat(30)),
+    )
+    .await;
+    let scan = json::<ScanResponse>(
+        send(
+            &app,
+            protocol::SCAN_PATH,
+            BOB_TOKEN,
+            "bob",
+            &ScanRequest {
+                query: "needle".to_owned(),
+                limit: 10,
+            },
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(scan.candidates.len(), 10);
+    assert_eq!(scan.candidates[0].key, bob.key);
+    assert!(
+        scan.candidates
+            .windows(2)
+            .all(|pair| pair[0].score >= pair[1].score)
+    );
+    let selected = scan
+        .candidates
+        .iter()
+        .map(|candidate| &candidate.key)
+        .collect::<HashSet<_>>();
+    let records =
+        json::<ListResponse>(send(&app, protocol::LIST_PATH, BOB_TOKEN, "bob", &()).await)
+            .await
+            .memories;
+    assert_eq!(records.len(), 11);
+    for record in records {
+        let returned = selected.contains(&record.key);
+        assert_eq!(record.scan_count, u64::from(returned), "{:?}", record.key);
+        assert_eq!(record.last_scanned_at_ms.is_some(), returned);
+        assert_eq!(record.use_count, 0);
+        assert_eq!(record.last_used_at_ms, None);
+        assert!(record.probation_until_ms.is_some());
+    }
 }
 
 #[tokio::test]

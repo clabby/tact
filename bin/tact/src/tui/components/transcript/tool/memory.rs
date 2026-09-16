@@ -2,8 +2,9 @@ use super::{Presentation, generic};
 use crate::tui::{theme::Theme, transcript::ToolEntry};
 use ratatui::{style::Style, text::Line};
 use serde_json::{Map, Value};
+use tact_memory::MemoryLimits;
 
-const MAX_SCAN_CANDIDATES: usize = 8;
+const MAX_SCAN_CANDIDATES: usize = MemoryLimits::PRODUCTION.scan_results;
 const MAX_PREVIEW_WIDTH: u16 = 240;
 
 pub(super) fn present(tool: &ToolEntry, width: u16, theme: &Theme, expanded: bool) -> Presentation {
@@ -884,10 +885,10 @@ mod tests {
         let rendered = text(&render_expanded(&tool, 80, &Theme::default()));
 
         assert!(rendered.contains("0@v3 · score 0.875"));
-        assert!(rendered.contains("7@v3 · score 0.875"));
-        assert!(!rendered.contains("8@v3 · score"));
+        assert!(rendered.contains("9@v3 · score 0.875"));
+        assert!(!rendered.contains("10@v3 · score"));
         assert!(!rendered.contains("must not be shown"));
-        assert!(rendered.contains("8 of 12 candidates"));
+        assert!(rendered.contains("10 of 12 candidates"));
         assert!(!rendered.contains(&"x".repeat(241)));
 
         let source = render_layout(&tool, None, 80, &Theme::default(), true)
@@ -895,7 +896,7 @@ mod tests {
             .expect("scan results should be selectable");
         assert!(source.contains("0@v3 · score 0.875"));
         assert!(source.contains("preview-0"));
-        assert!(!source.contains("8@v3 · score"));
+        assert!(!source.contains("10@v3 · score"));
         assert!(!source.contains("must not be shown"));
         assert!(!source.contains(&"x".repeat(241)));
     }
