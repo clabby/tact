@@ -228,10 +228,9 @@ Use **Reload config** in the Actions menu after editing the file. Theme and UI c
 Most agent settings apply when a session starts or is restored, while effort and fast mode can also
 be changed during a session. Workspace changes require restarting tact.
 
-Set `mouse_scroll_lines = 1` under `[tui]` for touch terminals. The default is `3`; valid values
-are `1` through `65535`. Each mouse-wheel tick scrolls that many rows in the main, fork, and
-subagent transcripts. Pinned prompts still scroll one row per tick, and keyboard scrolling is
-unchanged. Use **Reload config** to apply a new value.
+Set `[tui].mouse_scroll_lines` to control transcript rows scrolled per mouse-wheel event.
+The default is `3`; valid values are `1` through `65535`. Use `1` for finer scrolling. The setting
+applies to main, fork, and subagent transcripts. Use **Reload config** to apply a new value.
 
 ### Themes
 
