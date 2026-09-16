@@ -84,24 +84,23 @@ namespace first in numeric ID order, then fills remaining slots from other names
 and numeric ID order. This prevents a large shared corpus from hiding the user's namespace. The
 list remains a bounded window; use export to retrieve every record.
 
-The Worker loads one visible corpus and passes the authenticated namespace to the shared ranker.
-The ranker applies the caller-aware 1.25 weighting before the ten-result limit, as described in the
-[retrieval contract](../../docs/memory.md#record-and-retrieval-contract). Indexed D1 retrieval,
-scoring, selection, and activation are tracked in
-[issue #201](https://github.com/clabby/tact/issues/201).
-`TACT_MEMORY_SCAN_MAX_RECORDS` and `TACT_MEMORY_SCAN_MAX_CONTENT_BYTES` bound the records and
-authored content loaded from D1 for one scan. The defaults permit 10,240 records and 5 MiB of
-content.
+D1 selects scan results through a maintained FTS5 index. Prepared SQL performs literal matching,
+visibility filtering, BM25 scoring, the authenticated caller's 1.25 weight, and the final limit.
+Only the requested candidates, at most ten, reach the Worker. Queries remain bounded to 512 UTF-8
+bytes and previews to 64 bytes. Scans no longer load the shared corpus or impose a shared record or
+content budget. Per-namespace storage and request limits still apply.
 
-These scan budgets are independent of per-namespace storage capacity. Choose them from observed
-shared-corpus size and Worker CPU usage. When the corpus exceeds either bound, scans return a
-storage-capacity error. Export and mutation operations remain available so operators can reduce or
-migrate the corpus without editing D1 directly.
+The [retrieval contract](../../docs/memory.md#record-and-retrieval-contract) defines score direction,
+ties, tokenization, and the effect of expired records on index statistics. SQL orders all matching
+visible records by adjusted score, raw score, namespace, and numeric ID. This has no arbitrary
+candidate prelimit: a caller-owned result can enter the final window even when it lies outside the
+global unweighted top ten. Broad queries can still visit many database rows. Monitor D1 work and
+latency as the corpus grows; bounded Worker results do not imply constant database work.
 
 ## Read replication
 
 The Worker opens a first-unconstrained D1 session for a request without a bookmark. After read
-replication is enabled on the database, scan corpus queries, list, and export may be served by a
+replication is enabled on the database, indexed scan queries, list, and export may be served by a
 replica. A D1-backed request without a bookmark can observe a stale snapshot, including temporarily
 missing a recent write or returning a recently deleted record. Full record reads and mutations
 update durable state and remain primary-bound. The remote client carries each returned bookmark
@@ -116,12 +115,11 @@ Create the D1 database:
 bun x wrangler d1 create tact-memory
 ```
 
-Replace `REPLACE_WITH_D1_DATABASE_ID` in `wrangler.jsonc` with the returned database ID. Apply the
-migration, validate the bundle, deploy the Worker, and then upload the validated TOML as its
+Replace `REPLACE_WITH_D1_DATABASE_ID` in `wrangler.jsonc` with the returned database ID. Validate the
+bundle, deploy the Worker, and then upload the validated TOML as its
 encrypted secret:
 
 ```sh
-bun run migrate:remote
 bun run deploy:check
 bun run deploy
 bun run credentials:push
@@ -129,6 +127,62 @@ bun run credentials:push
 
 The uploader sends the secret directly to Wrangler over standard input. It does not create an
 intermediate plaintext deployment file.
+
+`bun run deploy` applies outstanding D1 migrations and verifies the index before deploying the
+Worker. A migration or verification failure stops deployment. Use this entry point rather than
+invoking `wrangler deploy` directly. `deploy:check` only builds the bundle; it does not change a
+database or activate the Worker.
+
+Migration `0002_search.sql` backfills existing records and installs insert, update, and delete
+triggers in the same migration transaction. The index uses a separate `INTEGER PRIMARY KEY` as its
+internal document identity; public keys remain `(namespace, id, version)`. Canonical writes maintain
+the index in their transaction, including namespace snapshot replacement and cascading deletion.
+The triggers also cover Workers running the preceding version during rollout. A failed migration
+leaves the old schema and Worker usable; investigate the failure before retrying activation.
+
+Roll back the Worker version without reverting this additive migration. The preceding Worker can
+still read and write the canonical tables, and its writes keep the index current. Restore its
+`TACT_MEMORY_SCAN_MAX_RECORDS` and `TACT_MEMORY_SCAN_MAX_CONTENT_BYTES` variables with its previous
+configuration if rolling back to the corpus-loading version. Its old corpus limits still apply, so
+a database that has grown beyond those limits may support mutations but fail scans on that version.
+Keep backups for recovery from data loss; Worker rollback does not undo database mutations.
+
+## Indexed retrieval validation
+
+Build the production Worker and run the local D1 acceptance harness with an empty scratch directory:
+
+```sh
+bun run build
+bun run test:indexed /absolute/path/to/empty-scratch-directory
+```
+
+The harness uses synthetic credentials and isolated local Wrangler state. It migrates a populated
+pre-index database, injects a failed migration, and exercises production HTTP scans and mutations,
+old canonical writers, snapshot sync, pruning, cascading deletion, and transaction rollback. It also
+checks caller weighting, final-only telemetry, literal queries, bounds, and exact large integer keys.
+It writes `measurements.json` and `worker.log` in the supplied directory. Measurements include D1
+rows read/written and query duration, response bytes, request latency, and local inspector CPU/heap
+observations. Local measurements are acceptance evidence, not Cloudflare production CPU billing or
+replica-lag measurements.
+
+A local run on September 16, 2026 with Wrangler 4.123.0 used 12,001 records containing 6,084,507
+UTF-8 bytes. Every record matched the broad query, including a caller-owned record outside the
+unweighted global result window. The run returned ten candidates and passed the acceptance checks.
+
+| Measurement | Observed value |
+| --- | ---: |
+| D1 selection rows read / written | 60,005 / 0 |
+| D1 maintenance rows read / written | 11 / 10 |
+| D1 selection / maintenance duration | 11 ms / 1 ms |
+| Finalist projection returned to Worker | 1,366 bytes |
+| HTTP candidate response | 1,460 bytes |
+| Local request wall time | 19.2 ms |
+| Inspector sampled active CPU | 3.4 ms |
+| Inspector used heap before / after request | 1,402,960 / 1,555,380 bytes |
+
+These are single-run observations after warm-up, not latency percentiles. The inspector's used heap
+is a JavaScript heap observation, not a process RSS or total WASM-memory measurement. Selection work
+still scales with the matching set; the Worker result bound is independent of corpus size.
 
 The Workers Free plan has daily request and CPU limits, while the Paid plan removes the daily
 request cap and raises execution limits. D1 Time Travel retains 7 days on Free and 30 days on

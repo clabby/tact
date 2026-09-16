@@ -3,7 +3,7 @@
 use super::MessageError;
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
-use tact_memory::{MemoryError, MemoryKey, MemoryRecord, normalize_identity};
+use tact_memory::{MemoryCandidate, MemoryError, MemoryKey, MemoryRecord, normalize_identity};
 use worker::d1::D1Result;
 
 /// Typed decoding for D1 result objects returned by this backend's query contracts.
@@ -97,11 +97,31 @@ pub(super) struct VersionRow {
     pub(super) version: String,
 }
 
-/// Shared corpus size measured before records enter the Worker isolate.
-#[derive(Deserialize)]
-pub(super) struct CorpusRow {
-    pub(super) record_count: usize,
-    pub(super) content_bytes: usize,
+/// Final SQL-selected candidate; integer identities cross JavaScript as decimal strings.
+#[derive(Deserialize, Serialize)]
+pub(super) struct CandidateRow {
+    namespace: String,
+    id: String,
+    version: String,
+    preview: String,
+    score: f64,
+}
+
+impl TryFrom<CandidateRow> for MemoryCandidate {
+    type Error = MemoryError;
+
+    fn try_from(mut row: CandidateRow) -> Result<Self, Self::Error> {
+        let mut end = row.preview.len().min(64);
+        while !row.preview.is_char_boundary(end) {
+            end -= 1;
+        }
+        row.preview.truncate(end);
+        Ok(Self {
+            key: MemoryKey::remote(row.namespace, parse(&row.id)?, parse(&row.version)?),
+            preview: row.preview,
+            score: row.score,
+        })
+    }
 }
 
 /// Namespace capacity and duplicate state measured before insertion.
