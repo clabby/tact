@@ -107,6 +107,13 @@ fn list_sql() -> String {
     )
 }
 
+fn export_sql(limit: usize) -> String {
+    format!(
+        "SELECT {RECORD_COLUMNS} FROM memories WHERE {VISIBLE_RECORD_SQL} AND (? = 'null' OR namespace IN (SELECT value FROM json_each(?))) AND (? = '0' OR namespace > ? OR (namespace = ? AND id > CAST(? AS INTEGER))) ORDER BY memories.namespace, memories.id LIMIT {}",
+        limit + 1
+    )
+}
+
 /// Namespace-bound shared memory backed by Cloudflare D1.
 #[derive(Clone, Debug)]
 pub(crate) struct CloudflareMemoryStore {
@@ -344,8 +351,9 @@ impl MemoryStore for CloudflareMemoryStore {
             let json = serde_json::to_string(&payload).map_err(MessageError::backend)?;
             let now = current_time_ms().to_string();
             let namespace = store.namespace.as_ref();
-            let select_sql =
-                format!("SELECT {RECORD_COLUMNS} FROM memories WHERE namespace = ? ORDER BY id");
+            let select_sql = format!(
+                "SELECT {RECORD_COLUMNS} FROM memories WHERE namespace = ? ORDER BY memories.id"
+            );
             // Replacing the namespace as a set permits identities to move between stable IDs.
             let delete_sql = "DELETE FROM memories WHERE namespace = ?";
             let insert_sql = "INSERT INTO memories (namespace, id, version, content, identity, created_at_ms, updated_at_ms, last_scanned_at_ms, scan_count, last_used_at_ms, use_count, probation_until_ms) SELECT ?, CAST(value ->> '$.id' AS INTEGER), CAST(value ->> '$.version' AS INTEGER), value ->> '$.content', value ->> '$.identity', CAST(value ->> '$.created_at_ms' AS INTEGER), CAST(value ->> '$.updated_at_ms' AS INTEGER), CAST(value ->> '$.last_scanned_at_ms' AS INTEGER), CAST(value ->> '$.scan_count' AS INTEGER), CAST(value ->> '$.last_used_at_ms' AS INTEGER), CAST(value ->> '$.use_count' AS INTEGER), CAST(value ->> '$.probation_until_ms' AS INTEGER) FROM json_each(?)";
@@ -382,10 +390,7 @@ impl MemoryStore for CloudflareMemoryStore {
                 .as_ref()
                 .map_or("0".to_owned(), |value| value.id.to_string());
             let bounded = limit.clamp(1, protocol::MAX_EXPORT_PAGE_RECORDS);
-            let sql = format!(
-                "SELECT {RECORD_COLUMNS} FROM memories WHERE {VISIBLE_RECORD_SQL} AND (? = 'null' OR namespace IN (SELECT value FROM json_each(?))) AND (? = '0' OR namespace > ? OR (namespace = ? AND id > CAST(? AS INTEGER))) ORDER BY namespace, id LIMIT {}",
-                bounded + 1
-            );
+            let sql = export_sql(bounded);
             let results = store
                 .batch(vec![store.statement(
                     sql,
@@ -725,7 +730,7 @@ fn current_time_ms() -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{INSERT_SQL, RECORD_COLUMNS, REPLACE_SQL, list_sql, validate_snapshot};
+    use super::{INSERT_SQL, RECORD_COLUMNS, REPLACE_SQL, export_sql, list_sql, validate_snapshot};
     use rusqlite::{Connection, params};
     use tact_memory::{MemoryError, MemoryKey, MemoryLimits, MemoryRecord};
 
@@ -846,6 +851,64 @@ mod tests {
             }
         }
 
+        fn insert_ids(&self, namespace: &str, ids: &[i64]) {
+            self.0
+                .execute(
+                    "INSERT INTO memory_namespaces(namespace) VALUES (?) ON CONFLICT DO NOTHING",
+                    [namespace],
+                )
+                .unwrap();
+            for id in ids {
+                self.0
+                    .execute(
+                        "INSERT INTO memories (namespace, id, version, content, identity, created_at_ms, updated_at_ms) VALUES (?, ?, 1, ?, ?, 1, 1)",
+                        params![namespace, id, format!("{namespace}-{id}"), format!("{namespace}-{id}")],
+                    )
+                    .unwrap();
+            }
+        }
+
+        fn export(&self, page_size: usize) -> Vec<(String, i64)> {
+            let mut exported = Vec::new();
+            let mut cursor: Option<(String, i64)> = None;
+            loop {
+                let has_cursor = if cursor.is_some() { "1" } else { "0" };
+                let cursor_namespace = cursor.as_ref().map_or("", |(namespace, _)| namespace);
+                let cursor_id = cursor.as_ref().map_or(0, |(_, id)| *id).to_string();
+                let mut page = self
+                    .0
+                    .prepare(&export_sql(page_size))
+                    .unwrap()
+                    .query_map(
+                        params![
+                            "2",
+                            "null",
+                            "null",
+                            has_cursor,
+                            cursor_namespace,
+                            cursor_namespace,
+                            cursor_id,
+                        ],
+                        |row| {
+                            Ok((
+                                row.get::<_, String>("namespace")?,
+                                row.get::<_, String>("id")?.parse::<i64>().unwrap(),
+                            ))
+                        },
+                    )
+                    .unwrap()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap();
+                let has_more = page.len() > page_size;
+                page.truncate(page_size);
+                cursor = page.last().cloned();
+                exported.extend(page);
+                if !has_more {
+                    return exported;
+                }
+            }
+        }
+
         fn insert_expired(&self, namespace: &str, id: i64) {
             self.0
                 .execute(
@@ -883,6 +946,30 @@ mod tests {
         assert!(!records.contains(&("zulu".to_owned(), 514)));
         assert_eq!(records[1], ("alpha".to_owned(), 1));
         assert_eq!(records.last(), Some(&("alpha".to_owned(), 511)));
+    }
+
+    #[test]
+    fn export_paginates_ids_in_numeric_order_across_namespaces() {
+        let database = Database::new();
+        let ids = [1, 2, 10, 11, 100];
+        database.insert_ids("alpha", &ids);
+        database.insert_ids("beta", &ids);
+
+        assert_eq!(
+            database.export(2),
+            [
+                ("alpha".to_owned(), 1),
+                ("alpha".to_owned(), 2),
+                ("alpha".to_owned(), 10),
+                ("alpha".to_owned(), 11),
+                ("alpha".to_owned(), 100),
+                ("beta".to_owned(), 1),
+                ("beta".to_owned(), 2),
+                ("beta".to_owned(), 10),
+                ("beta".to_owned(), 11),
+                ("beta".to_owned(), 100),
+            ]
+        );
     }
 
     #[test]
