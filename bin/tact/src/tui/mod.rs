@@ -557,6 +557,7 @@ pub(crate) async fn run(
         subagent_sender.clone(),
     );
     let mut root = RootNode::new(&workspace, initial_effort);
+    root.set_tui_config(*config.tui());
     root.set_reasoning_modes(reasoning_mode, preferred_reasoning_mode);
     root.set_fast_mode(initial_fast_mode);
     root.set_max_subagents(initial_max_subagents);
@@ -2173,6 +2174,7 @@ fn apply_pane_effect(
             Ok(reload) => {
                 let (config, workspace_changed) = reload.into_parts();
                 let theme = config.theme().clone();
+                let tui = *config.tui();
                 let max_subagents = config.agent().max_subagents();
                 let preferred_reasoning_mode = config.agent().reasoning_mode();
                 let memory_enabled = config.memory().enabled();
@@ -2206,6 +2208,7 @@ fn apply_pane_effect(
                     context.app.update(AppEvent::ConfigReloaded {
                         pane,
                         theme,
+                        tui,
                         preferred_reasoning_mode,
                         memory_enabled,
                         message: message.to_owned(),

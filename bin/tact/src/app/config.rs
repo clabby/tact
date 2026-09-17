@@ -13,7 +13,7 @@ use std::{
     ffi::OsString,
     fmt, fs,
     io::{ErrorKind, Write},
-    num::NonZeroUsize,
+    num::{NonZeroU16, NonZeroUsize},
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -91,6 +91,7 @@ pub(crate) struct Config {
     skills: SkillsConfig,
     memory: MemoryConfig,
     subagents: SubagentsConfig,
+    tui: TuiConfig,
     theme: Theme,
     #[serde(skip)]
     reload: ReloadSource,
@@ -203,6 +204,12 @@ pub(crate) struct SubagentsConfig {
     enabled: bool,
 }
 
+/// Effective terminal interface configuration.
+#[derive(Clone, Copy, Debug, Serialize)]
+pub(crate) struct TuiConfig {
+    pub(crate) mouse_scroll_lines: NonZeroU16,
+}
+
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ConfigOverrides {
     pub(crate) path: Option<PathBuf>,
@@ -243,6 +250,7 @@ struct ConfigFile {
     skills: SkillsConfigFile,
     memory: MemoryConfigFile,
     subagents: SubagentsConfigFile,
+    tui: TuiConfigFile,
     theme: Theme,
 }
 
@@ -298,6 +306,12 @@ impl fmt::Debug for RemoteMemoryTokenFile {
 #[serde(default, deny_unknown_fields)]
 struct SubagentsConfigFile {
     enabled: Option<bool>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct TuiConfigFile {
+    mouse_scroll_lines: Option<NonZeroU16>,
 }
 
 #[derive(Deserialize)]
@@ -472,6 +486,7 @@ impl Config {
             subagents: SubagentsConfig {
                 enabled: file.subagents.enabled.unwrap_or(true),
             },
+            tui: TuiConfig::new(file.tui),
             theme: file.theme,
             reload,
         })
@@ -538,6 +553,10 @@ impl Config {
 
     pub(crate) const fn subagents(&self) -> &SubagentsConfig {
         &self.subagents
+    }
+
+    pub(crate) const fn tui(&self) -> &TuiConfig {
+        &self.tui
     }
 
     pub(crate) fn memory_path(&self) -> PathBuf {
@@ -1271,6 +1290,24 @@ impl SubagentsConfig {
     }
 }
 
+impl TuiConfig {
+    fn new(file: TuiConfigFile) -> Self {
+        Self {
+            mouse_scroll_lines: file
+                .mouse_scroll_lines
+                .unwrap_or_else(|| Self::default().mouse_scroll_lines),
+        }
+    }
+}
+
+impl Default for TuiConfig {
+    fn default() -> Self {
+        Self {
+            mouse_scroll_lines: NonZeroU16::new(3).expect("3 is non-zero"),
+        }
+    }
+}
+
 impl ReasoningEffort {
     pub(crate) const ALL: [Self; 5] = [Self::Low, Self::Medium, Self::High, Self::Xhigh, Self::Max];
 
@@ -1574,6 +1611,7 @@ mod tests {
         assert_eq!(config.agent.max_subagents, 32);
         assert!(config.agent.web_search);
         assert!(config.agent.image_generation);
+        assert_eq!(config.tui().mouse_scroll_lines.get(), 3);
         assert_eq!(config.theme.border(), Color::DarkGray);
 
         let rendered_toml = config.to_toml().unwrap();
@@ -1588,6 +1626,7 @@ mod tests {
                 "skills",
                 "memory",
                 "subagents",
+                "tui",
                 "theme",
             ],
         );
@@ -1622,6 +1661,7 @@ mod tests {
             &["endpoint", "namespace", "bearer_token", "workspace_roots"],
         );
         assert_table_fields(&rendered["subagents"], &["enabled"]);
+        assert_table_fields(&rendered["tui"], &["mouse_scroll_lines"]);
         assert_table_fields(&rendered["theme"], &["mode", "light", "dark"]);
         let palette_fields = [
             "text",
@@ -1690,6 +1730,7 @@ mod tests {
                 .map(Vec::len),
             Some(0)
         );
+        assert_eq!(rendered["tui"]["mouse_scroll_lines"].as_integer(), Some(3));
 
         let reloaded = load_config(&rendered_toml).unwrap();
         assert!(reloaded.agent.completion_hook.is_none());
@@ -1698,6 +1739,37 @@ mod tests {
         assert!(reloaded.agent.websocket_url.is_none());
         assert!(reloaded.agent.api_base_url.is_none());
         assert!(reloaded.memory().remote().is_none());
+    }
+
+    #[test]
+    fn tui_mouse_scroll_lines_can_be_configured_and_rendered() {
+        let config = load_config("[tui]\nmouse_scroll_lines = 5\n").unwrap();
+
+        assert_eq!(config.tui().mouse_scroll_lines.get(), 5);
+        let rendered_toml = config.to_toml().unwrap();
+        let rendered: toml::Value = toml::from_str(&rendered_toml).unwrap();
+        assert_eq!(rendered["tui"]["mouse_scroll_lines"].as_integer(), Some(5));
+        assert_eq!(
+            load_config(&rendered_toml)
+                .unwrap()
+                .tui()
+                .mouse_scroll_lines
+                .get(),
+            5
+        );
+    }
+
+    #[test]
+    fn invalid_tui_mouse_scroll_lines_are_rejected() {
+        for contents in [
+            "[tui]\nmouse_scroll_lines = 0\n",
+            "[tui]\nmouse_scroll_lines = -1\n",
+            "[tui]\nmouse_scroll_lines = 65536\n",
+            "[tui]\nunknown = true\n",
+        ] {
+            let error = load_config(contents).unwrap_err();
+            assert!(matches!(error, Error::Config(ConfigError::Parse { .. })));
+        }
     }
 
     #[test]

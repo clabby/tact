@@ -166,6 +166,9 @@ max_total_bytes = 262144
 [subagents]
 enabled = true
 
+[tui]
+mouse_scroll_lines = 3
+
 [theme]
 mode = "auto" # auto, light, or dark
 
@@ -224,6 +227,10 @@ The `/subagents` panel shows the current concurrency limit. Use `-` and `+` ther
 Use **Reload config** in the Actions menu after editing the file. Theme and UI changes apply immediately.
 Most agent settings apply when a session starts or is restored, while effort and fast mode can also
 be changed during a session. Workspace changes require restarting tact.
+
+Set `[tui].mouse_scroll_lines` to control transcript rows scrolled per mouse-wheel event.
+The default is `3`; valid values are `1` through `65535`. Use `1` for finer scrolling. The setting
+applies to main, fork, and subagent transcripts. Use **Reload config** to apply a new value.
 
 ### Themes
 
