@@ -2412,7 +2412,7 @@ fn apply_pane_effect(
             Ok(()) => schedule(
                 context.app.update(AppEvent::NotifySuccess {
                     pane,
-                    message: "Copied selection to clipboard.".to_owned(),
+                    message: "Copied to clipboard.".to_owned(),
                 }),
                 context.scheduler,
             ),
