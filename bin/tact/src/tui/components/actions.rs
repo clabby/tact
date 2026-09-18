@@ -206,18 +206,12 @@ impl ActionsMenu {
     }
 
     fn copy_argument(&self) -> String {
-        if contains_ignore_ascii_case(Action::Copy.label(), &self.query) {
+        if contains_ignore_ascii_case(Action::Copy.label(), self.query.trim()) {
             return String::new();
         }
-        let Some(index) = self.query.find(char::is_whitespace) else {
-            return String::new();
-        };
-        let command = &self.query[..index];
-        if command.eq_ignore_ascii_case("copy") {
-            self.query[index..].trim_start().to_owned()
-        } else {
-            String::new()
-        }
+        copy_command_argument(&self.query)
+            .unwrap_or_default()
+            .to_owned()
     }
 
     fn render_search(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
@@ -379,7 +373,7 @@ impl Action {
     }
 
     fn matches(self, query: &str) -> bool {
-        (self == Self::Copy && copy_command_with_arguments(query))
+        (self == Self::Copy && copy_command_argument(query).is_some())
             || contains_ignore_ascii_case(self.label(), query)
             || self
                 .alias()
@@ -435,12 +429,12 @@ fn contains_ignore_ascii_case(value: &str, query: &str) -> bool {
         .any(|window| window.eq_ignore_ascii_case(query.as_bytes()))
 }
 
-fn copy_command_with_arguments(query: &str) -> bool {
-    let mut tokens = query.split_whitespace();
-    tokens
-        .next()
-        .is_some_and(|command| command.eq_ignore_ascii_case("copy"))
-        && tokens.next().is_some()
+fn copy_command_argument(query: &str) -> Option<&str> {
+    let query = query.trim();
+    let (command, argument) = query.split_once(char::is_whitespace).unwrap_or((query, ""));
+    command
+        .eq_ignore_ascii_case("copy")
+        .then_some(argument.trim())
 }
 
 fn visible_query_tail(query: &str, width: usize) -> &str {
@@ -686,16 +680,18 @@ mod tests {
 
     #[test]
     fn copy_command_passes_a_numeric_argument() {
-        let mut menu = ActionsMenu::new(available());
-        for character in "copy 2".chars() {
-            menu.update(key(KeyCode::Char(character)));
-        }
+        for query in ["copy 2", " copy 2", "  COPY   2  "] {
+            let mut menu = ActionsMenu::new(available());
+            for character in query.chars() {
+                menu.update(key(KeyCode::Char(character)));
+            }
 
-        assert_eq!(menu.matches, [12]);
-        assert_eq!(
-            menu.update(key(KeyCode::Enter)).effects,
-            [ActionsEffect::Copy("2".to_owned())]
-        );
+            assert_eq!(
+                menu.update(key(KeyCode::Enter)).effects,
+                [ActionsEffect::Copy("2".to_owned())],
+                "{query:?}",
+            );
+        }
     }
 
     #[test]
