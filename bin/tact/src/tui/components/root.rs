@@ -1446,6 +1446,14 @@ impl RootNode {
         let update = actions.update(ActionsEvent::Terminal(event));
         match update.effects.into_iter().next() {
             Some(ActionsEffect::Dismiss) => self.overlay = None,
+            Some(ActionsEffect::Copy(argument)) => {
+                self.overlay = None;
+                return self.copy_response(&argument);
+            }
+            Some(ActionsEffect::Trigger(Action::Copy)) => {
+                self.overlay = None;
+                return self.copy_response("");
+            }
             Some(ActionsEffect::Trigger(Action::Subagents)) => {
                 self.subagents.open_tree();
                 self.overlay = Some(Overlay::Subagents(SubagentOverlay::Tree));
@@ -2121,12 +2129,49 @@ impl RootNode {
         self.submit_next_queued()
     }
 
+    fn copy_response(&mut self, argument: &str) -> ComponentUpdate<RootEffect> {
+        let argument = argument.trim();
+        let index = if argument.is_empty() {
+            Some(1)
+        } else if argument.bytes().all(|byte| byte.is_ascii_digit()) {
+            argument.parse::<usize>().ok().filter(|index| *index > 0)
+        } else {
+            None
+        };
+        let result = match index {
+            Some(index) => self
+                .transcript
+                .component()
+                .assistant_response(index)
+                .map(|text| RootEffect::Copy(text.to_owned()))
+                .ok_or_else(|| format!("No completed assistant response at position {index}.")),
+            None => Err("Usage: /copy [N], where N is a positive integer (1 = latest).".to_owned()),
+        };
+        match result {
+            Ok(effect) => ComponentUpdate {
+                effects: vec![effect],
+                render: RenderRequest::Immediate,
+            },
+            Err(message) => {
+                self.notification = Some(Notification::plain(message, Color::Red));
+                ComponentUpdate::render(RenderRequest::Immediate)
+            }
+        }
+    }
+
     fn update_composer(
         &mut self,
         event: ComposerEvent,
         priority: RenderRequest,
     ) -> ComponentUpdate<RootEffect> {
         let update = self.composer.component_mut().update(event);
+        if let Some(ComposerEffect::Submit(prompt)) = &update.effect {
+            let text = prompt.display_text().trim();
+            let (command, argument) = text.split_once(char::is_whitespace).unwrap_or((text, ""));
+            if command.eq_ignore_ascii_case("/copy") {
+                return self.copy_response(argument);
+            }
+        }
         let submitted = matches!(&update.effect, Some(ComposerEffect::Submit(_)));
         if submitted {
             self.thread = ThreadState::Started;
@@ -3877,6 +3922,93 @@ mod tests {
             [RootEffect::OpenLink("https://example.com".to_owned())]
         );
         assert!(!root.queue.component().focused());
+    }
+
+    fn copy_test_root() -> RootNode {
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        for (sequence, text) in [
+            (1, "first **reply**"),
+            (2, "second\n```rust\ncode\n```"),
+            (3, "  "),
+        ] {
+            root.update(super::RootEvent::Transcript(agent_record(
+                sequence,
+                AgentEventKind::AssistantMessage,
+                json!({"model_call_index": sequence, "item_id": format!("answer-{sequence}"), "text": text}),
+            )));
+        }
+        root.update(super::RootEvent::Transcript(agent_record(
+            4,
+            AgentEventKind::AssistantDelta,
+            json!({"model_call_index": 4, "item_id": "streaming", "text": "partial"}),
+        )));
+        root
+    }
+
+    #[test]
+    fn slash_copy_selects_completed_messages_without_submitting_a_turn() {
+        for (command, expected) in [
+            ("/copy", "second\n```rust\ncode\n```"),
+            ("/copy 1", "second\n```rust\ncode\n```"),
+            ("/copy 2", "first **reply**"),
+            ("/COPY 2", "first **reply**"),
+        ] {
+            for paste in [false, true] {
+                let mut root = copy_test_root();
+                root.in_flight_turns = 1;
+                if paste {
+                    root.update(super::RootEvent::Terminal(Event::Paste(command.to_owned())));
+                } else {
+                    for character in command.chars() {
+                        root.update(key(KeyCode::Char(character), KeyModifiers::NONE));
+                    }
+                }
+                let update = root.update(key(KeyCode::Enter, KeyModifiers::NONE));
+                assert_eq!(
+                    update.effects,
+                    [RootEffect::Copy(expected.to_owned())],
+                    "{command}, paste={paste}"
+                );
+                assert_eq!(root.in_flight_turns, 1);
+                assert!(!root.queue.component().has_pending_steer());
+            }
+        }
+    }
+
+    #[test]
+    fn slash_copy_reports_invalid_or_unavailable_positions_locally() {
+        for command in [
+            "/copy 0",
+            "/copy -1",
+            "/copy nope",
+            "/copy 1 2",
+            "/copy 999999999999999999999999999999",
+            "/copy 4",
+        ] {
+            let mut root = copy_test_root();
+            root.update(super::RootEvent::Terminal(Event::Paste(command.to_owned())));
+            let update = root.update(key(KeyCode::Enter, KeyModifiers::NONE));
+            assert!(update.effects.is_empty(), "{command}");
+            assert!(root.notification.is_some(), "{command}");
+            assert_eq!(root.in_flight_turns, 0);
+        }
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        let update = root.copy_response("");
+        assert!(update.effects.is_empty());
+        assert!(root.notification.is_some());
+    }
+
+    #[test]
+    fn slash_copy_prefix_in_a_prompt_is_not_a_command() {
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        root.update(super::RootEvent::Terminal(Event::Paste(
+            "/copyright".to_owned(),
+        )));
+        let update = root.update(key(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            update.effects,
+            [RootEffect::Submit("/copyright".to_owned().into())]
+        );
     }
 
     #[test]

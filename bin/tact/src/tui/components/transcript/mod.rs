@@ -249,6 +249,21 @@ pub(super) enum ScrollCommand {
 }
 
 impl Transcript {
+    pub(super) fn assistant_response(&self, index: usize) -> Option<&str> {
+        self.model
+            .entries()
+            .iter()
+            .rev()
+            .filter_map(|entry| match &entry.kind {
+                EntryKind::Assistant {
+                    text,
+                    complete: true,
+                } if !entry.hidden && !text.trim().is_empty() => Some(text.as_str()),
+                _ => None,
+            })
+            .nth(index.checked_sub(1)?)
+    }
+
     #[cfg(test)]
     pub(crate) fn new() -> Self {
         Self::with_effort(ReasoningEffort::default())
