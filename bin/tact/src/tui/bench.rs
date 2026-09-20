@@ -8,10 +8,12 @@ pub(crate) mod config;
 pub(crate) mod error;
 #[path = "../app/installation.rs"]
 pub(crate) mod installation;
+#[path = "../app/model.rs"]
+pub(crate) mod model;
 #[path = "../app/secret.rs"]
 pub(crate) mod secret;
 mod app {
-    pub(crate) use crate::{config, error, installation, secret};
+    pub(crate) use crate::{config, error, installation, model, secret};
 }
 
 mod core {

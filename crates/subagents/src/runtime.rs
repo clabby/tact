@@ -183,9 +183,8 @@ impl AgentReservation {
 fn model_rank(model: Model) -> Result<u8, NanocodexError> {
     match model {
         Model::Luna => Ok(0),
-        Model::Terra => Ok(1),
-        Model::Sol => Ok(2),
-        Model::Astra => Ok(3),
+        Model::Sol => Ok(1),
+        Model::Astra => Ok(2),
         _ => Err(NanocodexError::InvalidRequest(
             "unsupported subagent model".to_owned(),
         )),

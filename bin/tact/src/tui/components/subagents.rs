@@ -9,11 +9,10 @@ use super::{
     transcript::{Transcript, TranscriptEvent},
 };
 use crate::{
-    app::config::DEFAULT_MAX_SUBAGENTS,
+    app::{config::DEFAULT_MAX_SUBAGENTS, model},
     tui::{format::sanitize_terminal_text_inline, theme::Theme, transcript::TranscriptRecord},
 };
 use crossterm::event::{Event, KeyCode, KeyEventKind};
-use nanocodex::Model;
 use ratatui::{
     Frame,
     layout::Rect,
@@ -474,7 +473,7 @@ impl SubagentTree {
         let title = format!(
             "{} · {} ({}) · #{}",
             node.descriptor.role,
-            model_name(node.descriptor.model),
+            model::name(node.descriptor.model),
             node.descriptor.thinking,
             node.descriptor.id
         );
@@ -719,7 +718,7 @@ impl SubagentTree {
                 Span::styled(
                     format!(
                         "{} ({})",
-                        model_name(node.descriptor.model),
+                        model::name(node.descriptor.model),
                         node.descriptor.thinking
                     ),
                     Style::default()
@@ -1099,16 +1098,6 @@ fn unix_time_ms() -> u64 {
         .map_or(0, |duration| {
             u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
         })
-}
-
-fn model_name(model: Model) -> &'static str {
-    match model {
-        Model::Luna => "Luna",
-        Model::Terra => "Terra",
-        Model::Sol => "Sol",
-        Model::Astra => "Astra",
-        _ => model.as_str(),
-    }
 }
 
 #[cfg(test)]

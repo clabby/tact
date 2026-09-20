@@ -1,7 +1,10 @@
 //! Configuration loading, precedence, and effective runtime settings.
 
 use crate::{
-    app::error::{ConfigError, McpUrlError, RemoteMemoryConfigError, Result},
+    app::{
+        error::{ConfigError, McpUrlError, RemoteMemoryConfigError, Result},
+        model,
+    },
     tui::theme::{Theme, ThemeMode},
 };
 use clap::ValueEnum;
@@ -352,6 +355,7 @@ struct AuthConfigFile {
 #[serde(default, deny_unknown_fields)]
 struct AgentConfigFile {
     workspace: Option<PathBuf>,
+    #[serde(default, deserialize_with = "model::deserialize_optional")]
     model: Option<Model>,
     thinking: Option<ReasoningEffort>,
     reasoning_mode: Option<ReasoningMode>,
@@ -1739,6 +1743,14 @@ mod tests {
         assert!(reloaded.agent.websocket_url.is_none());
         assert!(reloaded.agent.api_base_url.is_none());
         assert!(reloaded.memory().remote().is_none());
+    }
+
+    #[test]
+    fn terra_is_not_accepted_from_configuration() {
+        let error = load_config("[agent]\nmodel = \"terra\"\n").unwrap_err();
+
+        assert!(matches!(error, Error::Config(ConfigError::Parse { .. })));
+        assert!(!error.to_string().contains("gpt-5.6-terra"));
     }
 
     #[test]

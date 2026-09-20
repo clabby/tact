@@ -1,7 +1,10 @@
 //! V2 resumable session storage and indexed session discovery.
 
 use crate::{
-    app::config::{ReasoningEffort, ReasoningMode},
+    app::{
+        config::{ReasoningEffort, ReasoningMode},
+        model,
+    },
     tui::{
         storage::{SessionStorage, StorageError},
         transcript::{SessionStarted, TerminalStopReason, TranscriptRecord},
@@ -337,7 +340,7 @@ pub(crate) fn model(records: &[Arc<TranscriptRecord>]) -> Model {
         .rev()
         .find(|record| record.source() == "tact" && record.kind() == "session.started")
         .and_then(|record| record.decode_payload::<SessionStarted>().ok())
-        .and_then(|started| started.model.parse().ok())
+        .and_then(|started| model::parse(&started.model).ok())
         .unwrap_or(Model::Sol)
 }
 

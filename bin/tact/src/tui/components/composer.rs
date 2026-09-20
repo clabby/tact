@@ -1668,7 +1668,6 @@ mod tests {
     fn composer_chrome_uses_the_model_palette() {
         for (model, color) in [
             (Model::Luna, Color::White),
-            (Model::Terra, Color::Green),
             (Model::Sol, Color::Yellow),
             (Model::Astra, Color::LightMagenta),
         ] {

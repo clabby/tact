@@ -27,9 +27,9 @@ The setting applies when an agent runtime is created. Reloading configuration do
 tool surface or instructions of an existing runtime. A later new or restored session uses the
 reloaded setting.
 
-Subagents explicitly choose `luna`, `terra`, `sol`, or `astra` for each task. There is no `selected`
-alias or per-model configuration switch. Consider Luna for simple tasks, Terra for a balance of
-capability and cost, Sol for bounded coding and analysis, and Astra for the hardest reasoning.
+Subagents explicitly choose `luna`, `sol`, or `astra` for each task. There is no `selected` alias or
+per-model configuration switch. Consider Luna for simple tasks, Sol for bounded coding and
+analysis, and Astra for the hardest reasoning.
 
 `agent.max_subagents` is independent of the enable switch:
 
@@ -82,7 +82,7 @@ setting. Their initial prompt contains:
 - the required structured-output contract.
 
 The required `model` and `thinking` fields choose the child's capabilities at creation. A child
-cannot exceed the spawning parent's model. Model order is Luna < Terra < Sol < Astra; effort order
+cannot exceed the spawning parent's model. Model order is Luna < Sol < Astra; effort order
 is low < medium < high < xhigh < max. Root agents use the live configured `agent.thinking` cap for
 spawning effort. Registered subagents are additionally bounded by their own assigned effort. For
 example, an Astra root with a high cap can spawn a Sol/medium child, but that child cannot spawn

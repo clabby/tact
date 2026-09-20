@@ -49,11 +49,11 @@ const SUBAGENT_INSTRUCTIONS: &str = concat!(
     "For each `spawn_agent` call, choose `model` and `thinking` separately for the assigned subtask. ",
     "Optimize expected total cost and time to a correct completed result, including rework. A ",
     "stronger model or `xhigh`/`max` upfront can be cheaper and faster than repeated weaker runs; ",
-    "do not require a cheaper or lower-effort attempt first. Name `luna`, `terra`, `sol`, or `astra` ",
-    "explicitly. Consider Luna for simple tasks, Terra for a balance of capability and cost, Sol ",
-    "for bounded coding and analysis, and Astra for the hardest reasoning. The current turn's ",
+    "do not require a cheaper or lower-effort attempt first. Name `luna`, `sol`, or `astra` ",
+    "explicitly. Consider Luna for simple tasks, Sol for bounded coding and analysis, and Astra ",
+    "for the hardest reasoning. The current turn's ",
     "model and effort are supplied in `<agent_context>`. A child's model cannot exceed the ",
-    "spawning parent's model (`luna` < `terra` < `sol` < `astra`). Root agents use the live ",
+    "spawning parent's model (`luna` < `sol` < `astra`). Root agents use the live ",
     "configured `agent.thinking` as their spawning effort cap: user changes authorize subsequent ",
     "spawns even during an already active turn. Registered subagents are additionally limited to ",
     "their own assigned effort, regardless of the root's cap. Existing children retain their ",
@@ -207,7 +207,6 @@ struct SessionInstructions {
 struct AgentInstructions {
     session: SessionInstructions,
     luna: Arc<str>,
-    terra: Arc<str>,
     sol: Arc<str>,
     astra: Arc<str>,
 }
@@ -222,8 +221,6 @@ impl AgentInstructions {
         Self {
             session: SessionInstructions::from_config(config, model, restored, memory_enabled),
             luna: SessionInstructions::from_config(config, Model::Luna, None, memory_enabled).text,
-            terra: SessionInstructions::from_config(config, Model::Terra, None, memory_enabled)
-                .text,
             sol: SessionInstructions::from_config(config, Model::Sol, None, memory_enabled).text,
             astra: SessionInstructions::from_config(config, Model::Astra, None, memory_enabled)
                 .text,
@@ -393,7 +390,6 @@ impl ConfiguredAgent {
                     skills,
                 },
             luna: luna_instructions,
-            terra: terra_instructions,
             sol: sol_instructions,
             astra: astra_instructions,
         } = AgentInstructions::from_config(config, model, restored_instructions, memory_enabled);
@@ -408,7 +404,6 @@ impl ConfiguredAgent {
                     .model(model)
                     .instructions(Arc::clone(match model {
                         Model::Luna => &luna_instructions,
-                        Model::Terra => &terra_instructions,
                         Model::Sol => &sol_instructions,
                         Model::Astra => &astra_instructions,
                         _ => {
@@ -981,7 +976,7 @@ mod tests {
                 ..ConfigOverrides::default()
             })
             .unwrap();
-            for model in [Model::Sol, Model::Terra, Model::Luna, Model::Astra] {
+            for model in [Model::Sol, Model::Luna, Model::Astra] {
                 let session = SessionInstructions::from_config(&config, model, None, true);
                 let defaults = ResponsesServiceConfig {
                     model,
@@ -1044,7 +1039,6 @@ mod tests {
             assert_eq!(instructions.session.text.as_ref(), stored);
             for (model, actual) in [
                 (Model::Luna, &instructions.luna),
-                (Model::Terra, &instructions.terra),
                 (Model::Sol, &instructions.sol),
                 (Model::Astra, &instructions.astra),
             ] {
