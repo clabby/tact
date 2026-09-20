@@ -405,6 +405,14 @@ just dev
 `TACT_REVIEW_ASSETS=/absolute/path/to/web/review/dist` remains available as a manual override. The
 development server watches browser sources, rebuilds them, and reloads connected pages.
 
+### Copying Responses
+
+Type `/copy` and press Enter to copy the latest completed assistant message as raw Markdown.
+Use `/copy N` to copy the Nth most recent completed assistant message (`/copy 1` is the latest).
+Empty messages, reasoning, tool output, and messages still streaming are skipped. Copying uses
+only the current pane's transcript, including restored history, and works while a turn is running.
+You can also choose **Copy response** from the `/` Actions menu.
+
 ### Session Forking
 
 Press `Ctrl+T` or choose **Fork session** from the Actions menu to open an independent session next

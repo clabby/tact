@@ -16,7 +16,7 @@ use ratatui::{
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-const ACTIONS: [Action; 16] = [
+const ACTIONS: [Action; 17] = [
     Action::Effort,
     Action::FastMode,
     Action::Theme,
@@ -29,6 +29,7 @@ const ACTIONS: [Action; 16] = [
     Action::Memory,
     Action::Subagents,
     Action::DebugContext,
+    Action::Copy,
     Action::Reflection,
     Action::Handoff,
     Action::Review,
@@ -67,12 +68,14 @@ pub(super) enum Action {
     EditConfig,
     Memory,
     DebugContext,
+    Copy,
     Reflection,
 }
 
 #[derive(Debug, Eq, PartialEq)]
 pub(super) enum ActionsEffect {
     Dismiss,
+    Copy(String),
     Trigger(Action),
 }
 
@@ -190,10 +193,25 @@ impl ActionsMenu {
         if !self.is_enabled(action) {
             return ComponentUpdate::none();
         }
+        if action == Action::Copy {
+            return ComponentUpdate {
+                effects: vec![ActionsEffect::Copy(self.copy_argument())],
+                render: RenderRequest::Immediate,
+            };
+        }
         ComponentUpdate {
             effects: vec![ActionsEffect::Trigger(action)],
             render: RenderRequest::Immediate,
         }
+    }
+
+    fn copy_argument(&self) -> String {
+        if contains_ignore_ascii_case(Action::Copy.label(), self.query.trim()) {
+            return String::new();
+        }
+        copy_command_argument(&self.query)
+            .unwrap_or_default()
+            .to_owned()
     }
 
     fn render_search(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
@@ -279,6 +297,7 @@ impl ActionsMenu {
             Action::EditConfig => true,
             Action::Memory => self.availability.memory,
             Action::DebugContext => true,
+            Action::Copy => true,
         }
     }
 
@@ -328,6 +347,7 @@ impl Action {
             Self::EditConfig => "Edit config",
             Self::Memory => "Memory",
             Self::DebugContext => "Debug context",
+            Self::Copy => "Copy response",
             Self::Reflection => "Reflect on session",
         }
     }
@@ -346,13 +366,15 @@ impl Action {
             Self::Fork => Some("btw"),
             Self::ReloadConfig => Some("refresh"),
             Self::Memory => Some("remember/forget"),
+            Self::Copy => Some("copy"),
             Self::Reflection => Some("reflection"),
             Self::Keybindings | Self::EditConfig | Self::DebugContext => None,
         }
     }
 
     fn matches(self, query: &str) -> bool {
-        contains_ignore_ascii_case(self.label(), query)
+        (self == Self::Copy && copy_command_argument(query).is_some())
+            || contains_ignore_ascii_case(self.label(), query)
             || self
                 .alias()
                 .is_some_and(|alias| contains_ignore_ascii_case(alias, query))
@@ -376,7 +398,7 @@ impl Component for ActionsMenu {
             return;
         }
 
-        let layout = Floating::new("Actions", 58, 19, &KEY_BINDINGS).render(frame, area, theme);
+        let layout = Floating::new("Actions", 58, 21, &KEY_BINDINGS).render(frame, area, theme);
         if layout.body.is_empty() {
             return;
         }
@@ -407,6 +429,14 @@ fn contains_ignore_ascii_case(value: &str, query: &str) -> bool {
         .any(|window| window.eq_ignore_ascii_case(query.as_bytes()))
 }
 
+fn copy_command_argument(query: &str) -> Option<&str> {
+    let query = query.trim();
+    let (command, argument) = query.split_once(char::is_whitespace).unwrap_or((query, ""));
+    command
+        .eq_ignore_ascii_case("copy")
+        .then_some(argument.trim())
+}
+
 fn visible_query_tail(query: &str, width: usize) -> &str {
     let mut used = 0;
     for (index, grapheme) in query.grapheme_indices(true).rev() {
@@ -420,7 +450,9 @@ fn visible_query_tail(query: &str, width: usize) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::{Action, ActionAvailability, ActionsEffect, ActionsEvent, ActionsMenu, Component};
+    use super::{
+        ACTIONS, Action, ActionAvailability, ActionsEffect, ActionsEvent, ActionsMenu, Component,
+    };
     use crate::tui::theme::Theme;
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use ratatui::{Terminal, backend::TestBackend, style::Color};
@@ -440,7 +472,7 @@ mod tests {
     }
 
     fn render(menu: &mut ActionsMenu) -> Terminal<TestBackend> {
-        let mut terminal = Terminal::new(TestBackend::new(60, 20)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(60, 21)).unwrap();
         terminal
             .draw(|frame| menu.render(frame, frame.area(), &Theme::default()))
             .unwrap();
@@ -517,31 +549,39 @@ mod tests {
         );
         assert_eq!(
             row_segment(&terminal, 14, 1, 58),
-            "│  Reflect on session (alias: reflection)                │"
+            "│  Copy response (alias: copy)                           │"
         );
         assert_eq!(
             row_segment(&terminal, 15, 1, 58),
-            "│  Prepare handoff (alias: handoff)                      │"
+            "│  Reflect on session (alias: reflection)                │"
         );
         assert_eq!(
             row_segment(&terminal, 16, 1, 58),
-            "│  Review changes (alias: review)                        │"
+            "│  Prepare handoff (alias: handoff)                      │"
         );
         assert_eq!(
             row_segment(&terminal, 17, 1, 58),
-            "│          ↑↓ move · enter/tab open · esc close          │"
+            "│  Review changes (alias: review)                        │"
         );
         assert_eq!(
             row_segment(&terminal, 18, 1, 58),
+            "│  Select model (alias: intelligence)                    │"
+        );
+        assert_eq!(
+            row_segment(&terminal, 19, 1, 58),
+            "│          ↑↓ move · enter/tab open · esc close          │"
+        );
+        assert_eq!(
+            row_segment(&terminal, 20, 1, 58),
             "╰────────────────────────────────────────────────────────╯"
         );
         assert_eq!(
             terminal.backend().buffer()[(18, 2)].fg,
             Theme::default().muted()
         );
-        assert_eq!(terminal.backend().buffer()[(12, 17)].fg, Color::Reset);
+        assert_eq!(terminal.backend().buffer()[(12, 19)].fg, Color::Reset);
         assert_eq!(
-            terminal.backend().buffer()[(15, 17)].fg,
+            terminal.backend().buffer()[(15, 19)].fg,
             Theme::default().muted()
         );
     }
@@ -603,6 +643,68 @@ mod tests {
         assert_eq!(
             menu.update(key(KeyCode::Enter)).effects,
             [ActionsEffect::Trigger(Action::Handoff)]
+        );
+    }
+
+    #[test]
+    fn copy_action_is_in_the_default_menu_and_selecting_it_uses_the_default_argument() {
+        let mut menu = ActionsMenu::new(available());
+        assert!(
+            menu.matches
+                .iter()
+                .any(|&index| ACTIONS[index] == Action::Copy)
+        );
+
+        for _ in 0..12 {
+            menu.update(key(KeyCode::Down));
+        }
+        assert_eq!(
+            menu.update(key(KeyCode::Enter)).effects,
+            [ActionsEffect::Copy(String::new())]
+        );
+    }
+
+    #[test]
+    fn searching_the_copy_label_uses_the_default_argument() {
+        for query in ["copy response", "copy r", "COPY RESPONSE"] {
+            let mut menu = ActionsMenu::new(available());
+            for character in query.chars() {
+                menu.update(key(KeyCode::Char(character)));
+            }
+            assert_eq!(
+                menu.update(key(KeyCode::Enter)).effects,
+                [ActionsEffect::Copy(String::new())]
+            );
+        }
+    }
+
+    #[test]
+    fn copy_command_passes_a_numeric_argument() {
+        for query in ["copy 2", " copy 2", "  COPY   2  "] {
+            let mut menu = ActionsMenu::new(available());
+            for character in query.chars() {
+                menu.update(key(KeyCode::Char(character)));
+            }
+
+            assert_eq!(
+                menu.update(key(KeyCode::Enter)).effects,
+                [ActionsEffect::Copy("2".to_owned())],
+                "{query:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn copy_command_passes_invalid_arguments_to_the_handler() {
+        let mut menu = ActionsMenu::new(available());
+        for character in "copy nope".chars() {
+            menu.update(key(KeyCode::Char(character)));
+        }
+
+        assert_eq!(menu.matches, [12]);
+        assert_eq!(
+            menu.update(key(KeyCode::Enter)).effects,
+            [ActionsEffect::Copy("nope".to_owned())]
         );
     }
 
