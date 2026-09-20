@@ -4629,7 +4629,7 @@ dependencies = [
 
 [[package]]
 name = "tact"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "arboard",
  "axum",
@@ -4683,7 +4683,7 @@ dependencies = [
 
 [[package]]
 name = "tact-memory"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "axum",
  "const_format",
@@ -4706,7 +4706,7 @@ dependencies = [
 
 [[package]]
 name = "tact-memory-cloudflare"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "axum",
  "rusqlite",
@@ -4725,7 +4725,7 @@ dependencies = [
 
 [[package]]
 name = "tact-subagents"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "futures-util",
  "jsonschema",
