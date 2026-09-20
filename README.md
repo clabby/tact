@@ -105,13 +105,14 @@ tact run "inspect the workspace"
 Override the configured model for a newly started agent:
 
 ```sh
-tact --model terra
+tact --model sol
 tact --model luna run "inspect the workspace"
 ```
 
-`--model` accepts `sol`, `terra`, `luna`, or `astra`; `TACT_MODEL` provides the same per-launch
+`--model` accepts `luna`, `sol`, or `astra`; `TACT_MODEL` provides the same per-launch
 override.
-Resumed sessions continue with the model recorded when they were created.
+Resumed sessions continue with a supported model recorded when they were created. Sessions that
+record an unsupported historical model fall back to Sol.
 
 ## Configuration
 
@@ -136,7 +137,7 @@ file = "/path/to/.codex/auth.json"
 
 [agent]
 workspace = "/path/to/workspace"
-model = "astra" # sol, terra, luna, or astra
+model = "astra" # luna, sol, or astra
 thinking = "low" # low, medium, high, xhigh, or max
 reasoning_mode = "standard" # standard or pro
 fast_mode = false
@@ -280,9 +281,9 @@ change the tool surface of an already-running session. `agent.max_subagents` con
 when the feature is enabled; setting it does not enable or disable subagents. See the
 [subagent design](docs/subagents.md) for the tool, lifecycle, messaging, and authority contracts.
 
-Agents explicitly choose `luna`, `terra`, `sol`, or `astra` and `thinking` for each delegated task.
+Agents explicitly choose `luna`, `sol`, or `astra` and `thinking` for each delegated task.
 Each turn receives its own model and effort in context. Children cannot exceed their parent's
-model: the model order is Luna, Terra, Sol, Astra. Root agents use the live `agent.thinking` cap
+model: the model order is Luna, Sol, Astra. Root agents use the live `agent.thinking` cap
 for new spawns, including after an update during an active turn. Registered subagents are also
 bounded by their own assigned effort. Changing the cap leaves existing children unchanged. Model
 selection has no per-model configuration switches or `selected` alias.

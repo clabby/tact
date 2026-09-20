@@ -126,8 +126,8 @@ impl Tool for SpawnAgent {
                     },
                     "model": {
                         "type": "string",
-                        "enum": ["luna", "terra", "sol", "astra"],
-                        "description": "Choose a model at or below the spawning parent: luna < terra < sol < astra. Consider capability and expected total completion cost and time, including rework."
+                        "enum": ["luna", "sol", "astra"],
+                        "description": "Choose a model at or below the spawning parent: luna < sol < astra. Consider capability and expected total completion cost and time, including rework."
                     },
                     "thinking": {
                         "type": "string",
@@ -657,7 +657,6 @@ mod tests {
 
         let models = [
             ("luna", Model::Luna),
-            ("terra", Model::Terra),
             ("sol", Model::Sol),
             ("astra", Model::Astra),
         ];
@@ -704,6 +703,7 @@ mod tests {
             None,
             Some(json!(null)),
             Some(json!("selected")),
+            Some(json!("terra")),
             Some(json!("unknown")),
             Some(json!("gpt-6-astra")),
             Some(json!("Astra")),

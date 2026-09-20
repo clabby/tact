@@ -26,7 +26,6 @@ impl AgentContext {
         let mut prompt = prompt.into();
         let model = match self.model {
             Model::Luna => "luna",
-            Model::Terra => "terra",
             Model::Sol => "sol",
             Model::Astra => "astra",
             _ => self.model.as_str(),

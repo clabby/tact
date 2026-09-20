@@ -4,7 +4,7 @@ use crate::{
     app::{
         config::{AuthMode, Config, ConfigOverrides, ReasoningEffort, ReasoningMode},
         error::{AuthResult, Error, Result, RuntimeError},
-        shutdown, update,
+        model, shutdown, update,
     },
     core::ConfiguredAgent,
     tui,
@@ -88,7 +88,13 @@ pub(crate) struct Cli {
     reasoning_mode: Option<ReasoningMode>,
 
     /// Model used when starting a new agent.
-    #[arg(long, global = true, env = "TACT_MODEL", value_name = "MODEL")]
+    #[arg(
+        long,
+        global = true,
+        env = "TACT_MODEL",
+        value_name = "MODEL",
+        value_parser = model::parse
+    )]
     model: Option<Model>,
 
     /// Maximum number of sub-agents that may run concurrently.
@@ -820,9 +826,17 @@ mod tests {
 
     #[test]
     fn model_selects_the_initial_agent() {
-        let cli = Cli::try_parse_from(["tact", "--model", "terra"]).unwrap();
+        let cli = Cli::try_parse_from(["tact", "--model", "sol"]).unwrap();
 
-        assert_eq!(cli.model, Some(Model::Terra));
+        assert_eq!(cli.model, Some(Model::Sol));
+    }
+
+    #[test]
+    fn terra_is_not_a_supported_model() {
+        let error = Cli::try_parse_from(["tact", "--model", "terra"]).unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::ValueValidation);
+        assert!(!error.to_string().contains("gpt-5.6-terra"));
     }
 
     #[test]

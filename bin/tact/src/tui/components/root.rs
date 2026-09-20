@@ -26,7 +26,10 @@ use super::{
     transcript::{ScrollCommand, Transcript, TranscriptEvent},
 };
 use crate::{
-    app::config::{ReasoningEffort, ReasoningMode, TuiConfig},
+    app::{
+        config::{ReasoningEffort, ReasoningMode, TuiConfig},
+        model,
+    },
     core::extensions::Skill,
     tui::{
         context::ContextDiagnostics,
@@ -2015,7 +2018,7 @@ impl RootNode {
                     .component_mut()
                     .update(ComposerEvent::Activity {
                         active: true,
-                        status: Some(format!("Starting {} session…", model_name(model))),
+                        status: Some(format!("Starting {} session…", model::name(model))),
                         now: Instant::now(),
                     });
                 ComponentUpdate {
@@ -2968,16 +2971,6 @@ fn mention_edit_continues_query(event: &Event, valid: fn(char) -> bool) -> bool 
 
 fn is_file_query_character(character: char) -> bool {
     character.is_alphanumeric() || matches!(character, '_' | '-' | '.' | '/')
-}
-
-fn model_name(model: Model) -> &'static str {
-    match model {
-        Model::Luna => "Luna",
-        Model::Terra => "Terra",
-        Model::Sol => "Sol",
-        Model::Astra => "Astra",
-        _ => model.as_str(),
-    }
 }
 
 fn is_skill_query_character(character: char) -> bool {
@@ -5935,7 +5928,7 @@ mod tests {
 
         root.update(key(KeyCode::Left, KeyModifiers::NONE));
         let selected = root.update(key(KeyCode::Enter, KeyModifiers::NONE));
-        assert_eq!(selected.effects, [RootEffect::SetModel(Model::Terra)]);
+        assert_eq!(selected.effects, [RootEffect::SetModel(Model::Luna)]);
 
         root.interactive = true;
         root.thread = super::ThreadState::Started;
