@@ -2,7 +2,7 @@
 
 use crate::{
     app::{
-        config::{AuthMode, Config, ConfigOverrides, ReasoningEffort, ReasoningMode},
+        config::{AuthMode, Config, ConfigOverrides, ReasoningEffort, ReasoningMode, Transport},
         error::{AuthResult, Error, Result, RuntimeError},
         model, shutdown, update,
     },
@@ -149,6 +149,16 @@ pub(crate) struct Cli {
         value_parser = NonEmptyStringValueParser::new()
     )]
     api_base_url: Option<String>,
+
+    /// Responses API transport: WebSocket with HTTPS fallback, or HTTPS only.
+    #[arg(
+        long = "transport",
+        global = true,
+        env = "TACT_TRANSPORT",
+        value_enum,
+        value_name = "TRANSPORT"
+    )]
+    responses_transport: Option<Transport>,
 
     /// Resume a persisted interactive session.
     #[arg(long, global = true, env = "TACT_RESUME", value_name = "SESSION_ID")]
@@ -365,6 +375,7 @@ impl Cli {
             image_generation: self.image_generation,
             websocket_url: self.websocket_url,
             api_base_url: self.api_base_url,
+            transport: self.responses_transport,
         };
         let config = if matches!(&self.command, Some(Command::Mcp { .. })) {
             Config::load_for_update(overrides)?
@@ -1365,6 +1376,7 @@ mod tests {
             ("image_generation", "TACT_IMAGE_GENERATION"),
             ("websocket_url", "TACT_WEBSOCKET_URL"),
             ("api_base_url", "TACT_API_BASE_URL"),
+            ("responses_transport", "TACT_TRANSPORT"),
             ("resume", "TACT_RESUME"),
         ];
         let arguments = command

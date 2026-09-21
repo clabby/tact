@@ -148,6 +148,7 @@ web_search = true
 image_generation = true
 websocket_url = ""
 api_base_url = ""
+transport = "websocket" # websocket or https
 completion_hook = ""
 
 [mcp_servers]
@@ -261,7 +262,8 @@ follows the operating-system theme while tact is running.
 
 Advanced deployments can set `agent.websocket_url` and `agent.api_base_url`, or use the
 `--websocket-url` and `--api-base-url` options. Leave them unset to use Nanocodex's defaults for the
-selected authentication method.
+selected authentication method. Set `agent.transport = "https"` (or `--transport https`) for proxies
+that do not accept Responses WebSocket connections; tact then streams over HTTPS only.
 
 ## Features
 
