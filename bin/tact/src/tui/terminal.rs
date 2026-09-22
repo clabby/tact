@@ -294,9 +294,13 @@ fn copy_to_clipboard(output: &mut impl Write, text: &str) -> io::Result<()> {
 }
 
 fn write_osc7_working_directory(output: &mut impl Write, path: &Path) -> io::Result<()> {
-    let uri = url::Url::from_directory_path(path).map_err(|()| {
+    let mut uri = url::Url::from_directory_path(path).map_err(|()| {
         io::Error::new(io::ErrorKind::InvalidInput, "working directory is relative")
     })?;
+    // Ghostty requires an explicit local host, including for paths shared with containers.
+    if !uri.has_host() {
+        uri.set_host(Some("localhost")).map_err(io::Error::other)?;
+    }
     write!(output, "\x1b]7;{uri}\x1b\\")?;
     output.flush()
 }
@@ -439,12 +443,33 @@ mod tests {
     }
 
     #[test]
-    fn osc7_working_directory_uses_an_encoded_file_uri() {
+    fn osc7_working_directory_reports_an_explicit_local_host() {
+        for (path, encoded_path) in [
+            ("/", "/"),
+            ("/work/with space", "/work/with%20space/"),
+            ("/work/café#100%?", "/work/caf%C3%A9%23100%25%3F/"),
+            ("/work/line\n\u{1b}break", "/work/line%0A%1Bbreak/"),
+        ] {
+            let mut output = Vec::new();
+
+            write_osc7_working_directory(&mut output, Path::new(path)).unwrap();
+
+            assert_eq!(
+                output,
+                format!("\x1b]7;file://localhost{encoded_path}\x1b\\").as_bytes(),
+                "path: {path:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn osc7_working_directory_rejects_relative_paths_without_output() {
         let mut output = Vec::new();
 
-        write_osc7_working_directory(&mut output, Path::new("/work/with space")).unwrap();
+        let error = write_osc7_working_directory(&mut output, Path::new("relative")).unwrap_err();
 
-        assert_eq!(output, b"\x1b]7;file:///work/with%20space/\x1b\\");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(output.is_empty());
     }
 
     #[test]
