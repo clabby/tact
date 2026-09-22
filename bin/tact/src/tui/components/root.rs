@@ -3321,7 +3321,7 @@ mod tests {
             AgentEventKind::ModelCallCompleted,
             json!({
                 "call_index": 1,
-                "model": "gpt-5.6-sol",
+                "model": "gpt-6-sol",
                 "attempt": 1,
                 "connection_generation": 1,
                 "status": "completed",
@@ -3424,7 +3424,7 @@ mod tests {
             .draw(|frame| root.render(frame, frame.area(), &Theme::default()))
             .unwrap();
         let top = root.composer_area.y;
-        let model_x = text_column(terminal.backend().buffer(), top, "gpt-5.6-sol");
+        let model_x = text_column(terminal.backend().buffer(), top, "gpt-6-sol");
         let effort_x = text_column(terminal.backend().buffer(), top, "medium");
         assert_eq!(
             root.composer

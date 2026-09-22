@@ -393,6 +393,7 @@ const fn agent_kind(kind: AgentEventKind) -> &'static str {
         AgentEventKind::AssistantDelta => "assistant.delta",
         AgentEventKind::AssistantMessage => "assistant.message",
         AgentEventKind::ReasoningSummaryDelta => "reasoning.summary.delta",
+        AgentEventKind::InputAccepted => "input.accepted",
         AgentEventKind::RunStarted => "run.started",
         AgentEventKind::RunSteered => "run.steered",
         AgentEventKind::RunError => "run.error",

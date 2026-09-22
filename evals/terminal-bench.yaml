@@ -3,7 +3,7 @@ jobs_dir: .tact/harbor/jobs
 
 agents:
   - import_path: harbor_adapter.agent:TactAgent
-    model_name: openai/gpt-5.6-sol
+    model_name: openai/gpt-6-sol
     kwargs:
       binary_path: .tact/installed/tact
       effort: low

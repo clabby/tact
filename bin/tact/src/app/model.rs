@@ -7,11 +7,11 @@ pub(crate) const SUPPORTED_MODELS: [Model; 3] = [Model::Luna, Model::Sol, Model:
 
 pub(crate) fn parse(value: &str) -> Result<Model, String> {
     match value {
-        "gpt-5.6-luna" | "luna" => Ok(Model::Luna),
-        "gpt-5.6-sol" | "sol" => Ok(Model::Sol),
+        "gpt-6-luna" | "luna" => Ok(Model::Luna),
+        "gpt-6-sol" | "sol" => Ok(Model::Sol),
         "gpt-6-astra" | "astra" => Ok(Model::Astra),
         _ => Err(format!(
-            "invalid model {value:?}; expected gpt-5.6-luna, gpt-5.6-sol, or gpt-6-astra"
+            "invalid model {value:?}; expected gpt-6-luna, gpt-6-sol, or gpt-6-astra"
         )),
     }
 }
@@ -31,5 +31,32 @@ pub(crate) const fn name(model: Model) -> &'static str {
         Model::Sol => "Sol",
         Model::Astra => "Astra",
         _ => model.as_str(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse;
+    use nanocodex::Model;
+
+    #[test]
+    fn accepts_current_model_ids_and_short_names() {
+        for (value, expected) in [
+            ("gpt-6-luna", Model::Luna),
+            ("luna", Model::Luna),
+            ("gpt-6-sol", Model::Sol),
+            ("sol", Model::Sol),
+            ("gpt-6-astra", Model::Astra),
+            ("astra", Model::Astra),
+        ] {
+            assert_eq!(parse(value), Ok(expected));
+        }
+    }
+
+    #[test]
+    fn rejects_retired_model_ids() {
+        for value in ["gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "terra"] {
+            assert!(parse(value).is_err(), "retired model {value} was accepted");
+        }
     }
 }

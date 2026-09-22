@@ -71,7 +71,7 @@ that a single stochastic success or failure does not dominate the result. Increa
 carefully: each concurrent trial starts its own task and proxy containers and makes independent
 model requests.
 
-The configured model is `openai/gpt-5.6-sol`, matching Tact's pinned Nanocodex build. Changing only
+The configured model is `openai/gpt-6-sol`, matching Tact's pinned Nanocodex build. Changing only
 Harbor's model label does not change Tact's model and is rejected.
 
 ### Test orchestration behavior
