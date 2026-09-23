@@ -26,7 +26,7 @@ impl AuthConfig {
             "Open this URL to sign in with ChatGPT:\n\n{}\n",
             login.authorization_url()
         );
-        if let Err(error) = crate::app::browser::open(login.authorization_url()) {
+        if let Err(error) = crate::app::browser::open(login.authorization_url()).await {
             eprintln!(
                 "Could not open a browser automatically ({error}). Open the URL above manually."
             );

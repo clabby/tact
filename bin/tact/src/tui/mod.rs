@@ -114,6 +114,12 @@ type ResumeSessionTask = JoinHandle<(
 type UpdateCheckTask =
     JoinHandle<std::result::Result<Option<semver::Version>, crate::app::update::UpdateError>>;
 
+struct BrowserOpenCompletion {
+    pane: PaneId,
+    review: Option<ReviewIdentity>,
+    result: io::Result<()>,
+}
+
 struct AuxiliaryJobRequest {
     review: ReviewIdentity,
     prompt: String,
@@ -610,6 +616,7 @@ pub(crate) async fn run(
     let mut writer_error = None::<TranscriptError>;
     let mut writers_open = 1_usize;
     let mut shell_tasks = JoinSet::<(PaneId, ShellExecution)>::new();
+    let mut browser_open_tasks = JoinSet::<BrowserOpenCompletion>::new();
     let mut memory_tasks = JoinSet::<MemoryCompletion>::new();
     let mut memory_generations = HashMap::<PaneId, u64>::new();
     let mut subagent_shutdowns = JoinSet::<()>::new();
@@ -643,6 +650,7 @@ pub(crate) async fn run(
                     scheduler: &mut scheduler,
                     panes: &mut panes,
                     shell_tasks: &mut shell_tasks,
+                    browser_open_tasks: &mut browser_open_tasks,
                     memory_store: &mut memory_store,
                     memory_tasks: &mut memory_tasks,
                     memory_generations: &mut memory_generations,
@@ -830,18 +838,13 @@ pub(crate) async fn run(
                     }),
                     &mut scheduler,
                 );
-                if let Err(error) = crate::app::browser::open(&url) {
-                    schedule(
-                        app.update(AppEvent::NotifyError {
-                            pane: ready.identity.pane,
-                            error: format!(
-                                "Could not open the browser. Press O to retry or open {} manually: {error}",
-                                url,
-                            ),
-                        }),
-                        &mut scheduler,
-                    );
-                }
+                browser_open_tasks.spawn(async move {
+                    BrowserOpenCompletion {
+                        pane: ready.identity.pane,
+                        review: Some(ready.identity),
+                        result: crate::app::browser::open(&url).await,
+                    }
+                });
             }
             Some(request) = auxiliary_jobs.recv(), if !stopping => {
                 let AuxiliaryJobRequest {
@@ -1169,6 +1172,30 @@ pub(crate) async fn run(
                         &mut runtime.pending_shell_context,
                         submission,
                     )?;
+                }
+            }
+            result = browser_open_tasks.join_next(), if !browser_open_tasks.is_empty() => {
+                let Some(Ok(completion)) = result else {
+                    continue;
+                };
+                if let Some(identity) = completion.review
+                    && review_controller.identity() != Some(identity)
+                {
+                    continue;
+                }
+                if let Err(error) = completion.result {
+                    let message = if completion.review.is_some() {
+                        format!("Could not open the browser: {error}. Press C to copy the review link.")
+                    } else {
+                        format!("Could not open link: {error}")
+                    };
+                    schedule(
+                        app.update(AppEvent::NotifyError {
+                            pane: completion.pane,
+                            error: message,
+                        }),
+                        &mut scheduler,
+                    );
                 }
             }
             result = memory_tasks.join_next(), if !memory_tasks.is_empty() && !stopping => {
@@ -1857,6 +1884,7 @@ struct EffectContext<'a> {
     scheduler: &'a mut RenderScheduler,
     panes: &'a mut HashMap<PaneId, PaneRuntime>,
     shell_tasks: &'a mut JoinSet<(PaneId, ShellExecution)>,
+    browser_open_tasks: &'a mut JoinSet<BrowserOpenCompletion>,
     memory_store: &'a mut Option<SelectedMemoryStore>,
     memory_tasks: &'a mut JoinSet<MemoryCompletion>,
     memory_generations: &'a mut HashMap<PaneId, u64>,
@@ -2022,15 +2050,16 @@ fn apply_pane_effect(
                 .spawn(async move { (pane, shell::execute(id, command, workspace).await) });
         }
         components::RootEffect::OpenLink(destination) if is_web_link(&destination) => {
-            if let Err(error) = crate::app::browser::open(&destination) {
-                schedule(
-                    context.app.update(AppEvent::NotifyError {
-                        pane,
-                        error: format!("Could not open link: {error}"),
-                    }),
-                    context.scheduler,
-                );
-            }
+            let review = context.review_controller.identity().filter(|identity| {
+                identity.pane == pane && context.review_controller.url(pane) == Some(&destination)
+            });
+            context.browser_open_tasks.spawn(async move {
+                BrowserOpenCompletion {
+                    pane,
+                    review,
+                    result: crate::app::browser::open(&destination).await,
+                }
+            });
         }
         editor_effect @ (components::RootEffect::OpenDraftEditor
         | components::RootEffect::OpenConfigEditor
