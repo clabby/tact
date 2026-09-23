@@ -71,14 +71,17 @@ test("the overview tab shows when its agent is working", async () => {
   const app = await Bun.file(new URL("app.ts", import.meta.url)).text();
   const styles = await Bun.file(new URL("styles.css", import.meta.url)).text();
 
-  expect(app).toContain('class="overview-tab-activity" aria-hidden="true"');
+  expect(app).toContain('class="activity-spinner overview-tab-activity" aria-hidden="true"');
   expect(app).toContain('tab.classList.toggle("loading", loading)');
   expect(app).toContain('tab.setAttribute("aria-busy", "true")');
   expect(app).toContain("this.setOverviewLoading(true)");
   expect(app).toContain("this.setOverviewLoading(false)");
+  expect(app).toContain('class="activity-spinner" aria-hidden="true"></span>Reviewing…');
   expect(styles).toMatch(/\.tab\.loading\s+\.overview-tab-activity\s*{/s);
-  expect(styles).toMatch(/\.overview-tab-activity\s+i\s*{[^}]*animation:\s*tact-shimmer/s);
+  expect(styles).toMatch(/\.activity-spinner\s*{[^}]*animation:\s*tact-spin/s);
   expect(styles).toMatch(/\.overview-spinner::before\s*{[^}]*animation:\s*tact-spin/s);
+  expect(styles).toMatch(/\.overview-instructions-actions\s*{[^}]*justify-content:\s*center/s);
+  expect(app).not.toContain('this.showTerminalBusy("Tact is reviewing the selected diff…")');
 });
 
 test("the inline answer spinner can visibly rotate", async () => {

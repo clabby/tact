@@ -356,7 +356,7 @@ export class ReviewApp {
         </header>
         <nav class="tabs" role="tablist" aria-label="Review sections">
           <button class="tab active" id="changes-tab" role="tab" aria-selected="true" aria-controls="changes-panel" data-tab="changes">Changes <span id="file-count">0</span></button>
-          <button class="tab" id="overview-tab" role="tab" aria-selected="false" aria-controls="overview-panel" tabindex="-1" data-tab="overview">Overview<span class="overview-tab-activity" aria-hidden="true"><i></i><i></i><i></i></span></button>
+          <button class="tab" id="overview-tab" role="tab" aria-selected="false" aria-controls="overview-panel" tabindex="-1" data-tab="overview">Overview<span class="activity-spinner overview-tab-activity" aria-hidden="true"></span></button>
         </nav>
         <section class="panel overview-panel" id="overview-panel" role="tabpanel" aria-labelledby="overview-tab" data-panel="overview" hidden>
           <div class="overview-state" id="overview-state"></div>
@@ -856,9 +856,12 @@ export class ReviewApp {
     const request = ++this.aiReviewRequest;
     this.agentOperation = { kind: "ai-review", request };
     const button = this.root.querySelector<HTMLButtonElement>("#ai-review");
-    if (button) button.textContent = "Reviewing…";
+    if (button) {
+      button.innerHTML = '<span class="activity-spinner" aria-hidden="true"></span>Reviewing…';
+      button.setAttribute("aria-busy", "true");
+    }
     this.announceAgent("Tact is reviewing the selected diff.");
-    this.showTerminalBusy("Tact is reviewing the selected diff…");
+    this.clearInlineError();
     this.syncAgentControls();
     try {
       const result = await this.api.aiReview(page);
@@ -896,7 +899,10 @@ export class ReviewApp {
     } finally {
       if (request === this.aiReviewRequest) {
         this.agentOperation = undefined;
-        if (button) button.textContent = "AI review";
+        if (button) {
+          button.textContent = "AI review";
+          button.removeAttribute("aria-busy");
+        }
         this.syncAgentControls();
       }
     }
