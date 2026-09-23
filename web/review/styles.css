@@ -214,6 +214,9 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .diff-comment { border: 1px solid var(--line-strong); border-radius: 9px; background: var(--surface-raised); }
 .diff-comment header { display: flex; align-items: center; justify-content: space-between; min-height: 34px; padding: 4px 8px 4px 12px; border-bottom: 1px solid var(--line); }
 .diff-comment header > span { color: var(--muted); font-size: 11px; }
+.severity-badge { display: inline-block; margin-right: 5px; padding: 1px 5px; border-radius: 4px; background: color-mix(in srgb, var(--blue) 15%, var(--surface)); color: var(--blue); font: 700 10px/1.4 ui-monospace, monospace; }
+.severity-p0, .severity-p1 { background: color-mix(in srgb, var(--danger) 15%, var(--surface)); color: var(--danger); }
+.severity-p2 { background: color-mix(in srgb, #a77920 17%, var(--surface)); color: light-dark(#80580e, #deb35b); }
 .diff-comment header > div { display: flex; }
 .small-icon-button { width: 26px; height: 26px; border-radius: 6px; }
 .small-icon-button svg { width: 14px; height: 14px; }

@@ -40,7 +40,7 @@ index 82a06c1..90c03be 100644
 `;
 
 const reviewBootstrapBase = {
-  protocol_version: 4,
+  protocol_version: 5,
   generation: 1,
   title: "Review feature/review-workflow",
   repository: "tact",
@@ -57,20 +57,25 @@ const reviewBootstrapBase = {
 };
 
 const overview = `
-  <h1>Native review workflow</h1>
-  <p>This change introduces a browser-based review surface launched from Tact. The diff is snapshotted before the overview is generated, so comments always refer to the exact code shown.</p>
-  <h2>How it fits together</h2>
-  <ol>
-    <li>The browser chooses uncommitted changes or the full branch.</li>
-    <li>A private agent prepares this overview from the immutable patch.</li>
-    <li>The loopback service serves the review and returns structured feedback.</li>
-  </ol>
-  <h2>Review focus</h2>
-  <ul>
-    <li>Asset download and validation behavior across release and development builds.</li>
-    <li>Diff scope semantics for tracked and untracked files.</li>
-    <li>Whether submitted comments retain the correct file and line side.</li>
-  </ul>`;
+# Native review workflow
+
+This change introduces a browser-based review surface launched from Tact. The diff is snapshotted before the overview is generated, so comments refer to the exact code shown.
+
+<Callout tone="idea" title="Follow the data">Trace the selected range from the browser to the snapshot and back to a diff comment.</Callout>
+
+## How it fits together
+
+<Process>
+  <ProcessStep title="Choose">The browser chooses a range of changes.</ProcessStep>
+  <ProcessStep title="Explain">Tact prepares a brief overview of the patch.</ProcessStep>
+  <ProcessStep title="Review">The loopback service returns structured feedback.</ProcessStep>
+</Process>
+
+## Review focus
+
+- Asset download and validation behavior across release and development builds.
+- Diff scope semantics for tracked and untracked files.
+- Whether submitted comments retain the correct file and line side.`;
 
 export const reviewFixtures = {
   "2:3": {
@@ -112,8 +117,8 @@ export const reviewBootstrap = {
 
 export const overviewFixtures = {
   "2:3": overview,
-  "0:3": `${overview}<h2>Branch-only release work</h2><p>The full branch also packages the browser bundle in the release workflow.</p>`,
-  "1:2": `${overview}<h2>Selected commits</h2><p>This overview covers only the selected commit interval.</p>`,
+  "0:3": `${overview}\n## Branch-only release work\n\nThe full branch also packages the browser bundle in the release workflow.`,
+  "1:2": `${overview}\n## Selected commits\n\nThis overview covers only the selected commit interval.`,
 };
 
 export const reviewFixture = reviewFixtures["2:3"];

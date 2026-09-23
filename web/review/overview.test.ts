@@ -100,7 +100,7 @@ export const value = 1
     expect(malformed).toContain("&lt;style&gt;");
     const unclosed = overviewDocument("# Review\n\n<Callout title=\"Open\">\nAgent text", "dark");
     expect(unclosed).toContain('<article class="prose"><pre># Review');
-    expect(unclosed).toContain('&lt;Callout title="Open">');
+    expect(unclosed).toContain('&lt;Callout title="Open"&gt;');
     expect(unclosed).not.toContain('<aside class="callout');
   });
 });

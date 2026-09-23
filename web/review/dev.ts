@@ -83,9 +83,17 @@ const server = Bun.serve({
       devOverview = {
         selected_range: body.range!,
         status: "ready",
-        overview_html: overview,
+        overview_mdx: overview,
       };
-      return Response.json({ generation: body.generation, selected_range: body.range, overview_html: overview });
+      return Response.json({ generation: body.generation, selected_range: body.range, overview_mdx: overview });
+    }
+    if (request.method === "POST" && url.pathname === "/api/ai-review") {
+      const body = await request.json() as { generation: number; range: ReviewRange };
+      await Bun.sleep(900);
+      return Response.json({ generation: body.generation, selected_range: body.range, comments: [
+        { path: "src/review/mod.rs", side: "additions", start_line: 3, end_line: 3,
+          body: "[P2] Confirm the snapshot remains valid if the workspace changes while the review is open." },
+      ] });
     }
     if (request.method === "POST" && url.pathname === "/api/question") {
       const body = await request.json() as QuestionRequest;

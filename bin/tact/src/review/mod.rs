@@ -22,6 +22,7 @@ use tokio_util::sync::CancellationToken;
 
 const MAX_OVERVIEW_BYTES: usize = 1024 * 1024;
 const MAX_QUESTION_ANSWER_BYTES: usize = 256 * 1024;
+const MAX_AI_REVIEW_BYTES: usize = 1024 * 1024;
 const MAX_PREPARATION_ATTEMPTS: usize = 3;
 
 pub(crate) type ReviewAgent = Arc<
@@ -187,6 +188,38 @@ impl ReviewBackend {
             .map_err(scope_load_error)
     }
 
+    async fn ai_review(
+        &self,
+        label: &str,
+        context: &diff::OverviewContext,
+        shutdown: CancellationToken,
+    ) -> Result<Vec<server::AiReviewComment>, ScopeLoadError> {
+        let repository = repository_scope(context);
+        let prompt = format!(
+            "Delegate a comprehensive code review of `{label}` to a sub-agent and wait for its result. {repository} Inspect the actual diff, source, surrounding callers, tests, and relevant history without modifying the workspace. Find actionable bugs, regressions, and security or correctness failures introduced by this change. Verify each finding against the code and cite only lines present in the selected diff. Return only a JSON object with a `comments` array. Each comment must have `path` (repository-relative path), `side` (`additions` or `deletions`), `start_line` and `end_line` (positive line numbers on that side of the diff), `body` (beginning with a severity label `[P0]` for critical, `[P1]` for high, `[P2]` for medium, or `[P3]` for low, then a concise explanation of the failure, triggering condition, and consequence). Prefer the smallest relevant changed line range. If no actionable defects are found, return {{\"comments\":[]}}. Do not include speculative suggestions, a summary, Markdown fences, or prose outside the JSON object."
+        );
+        let result = match (self.review_agent)(prompt, shutdown).await {
+            Ok(result) => result,
+            Err(ReviewAgentError::Cancelled) => return Err(ScopeLoadError::Cancelled),
+            Err(ReviewAgentError::Failed(error)) => return Err(ScopeLoadError::Failed(error)),
+        };
+        if result.len() > MAX_AI_REVIEW_BYTES {
+            return Err(ScopeLoadError::Failed(
+                "the agent returned a review larger than 1 MiB".into(),
+            ));
+        }
+        let result = result.trim();
+        let result = result
+            .strip_prefix("```json")
+            .and_then(|value| value.strip_suffix("```"))
+            .map(str::trim)
+            .unwrap_or(result);
+        let review: server::AiReviewResult = serde_json::from_str(result).map_err(|error| {
+            ScopeLoadError::Failed(format!("the agent returned invalid review JSON: {error}"))
+        })?;
+        Ok(review.comments)
+    }
+
     async fn answer_question(
         &self,
         label: &str,
@@ -238,14 +271,14 @@ async fn generate_overview(
 ) -> Result<String, ReviewError> {
     let repository = repository_scope(context);
     let prompt = format!(
-        "Delegate this task to a sub-agent so the host agent does not absorb the investigation context. Ask the sub-agent to create a self-contained HTML overview of the features in `{label}` for a human reviewer. {repository} It must use repository tools to examine the diff, history, actual source files, and surrounding code needed to understand the change without modifying the workspace. Scale the depth and presentation to the change: a small change can be restrained and compact, while a large or architectural change warrants a substantial walkthrough. Explain the purpose, user-visible behavior, architecture and data flow, important files, and areas that deserve reviewer attention. Whenever directing the reviewer's attention to code, cite direct `path:line` or `path:start-end` locations. Give the overview a visual identity appropriate to this particular change instead of making it look like rendered Markdown. It may include a `<style>` element, classes, responsive layouts, and inline SVG. Use diagrams or other visualizations when they materially improve understanding, but do not force them into every overview. The iframe document exposes `data-theme=\"light\"`, `data-theme=\"dark\"`, or `data-theme=\"system\"` on its root; define an intentional palette for both light and dark appearances, including a `prefers-color-scheme` fallback for system mode. Return the sub-agent's result as only the HTML fragment, not a full code review or a Markdown fence. Keep it accessible and responsive. Do not include scripts, event handlers, external resources, or raster images.",
+        r#"Delegate this task to a sub-agent so the host agent does not absorb the investigation context. Ask the sub-agent to quickly write a concise MDX explainer of `{label}` for a human reviewer. {repository} Inspect the diff, actual source files, relevant history, and surrounding code needed to understand the change without modifying the workspace. Explain what changed, why it matters, how the pieces fit together, and where a human reviewer should direct attention. Keep it brief and proportionate to the change. This is guidance for a human reviewer; do not perform a comprehensive defect audit or generate inline review findings. Whenever directing the reviewer's attention to code, cite direct `path:line` or `path:start-end` locations. Return only the MDX source with Markdown headings, paragraphs, lists, tables, and fenced code where useful. For visual structure when it helps, the renderer supports `<Callout title="..." tone="...">`, `<CardGrid>` with `<Card title="..." label="...">`, `<MetricGrid>` with `<Metric value="..." label="..." detail="..." />`, `<Process>` with `<ProcessStep title="...">`, and `<Figure caption="...">`. Use only literal string props and close all component tags. Do not include imports, JavaScript expressions, raw HTML, external resources, or a surrounding Markdown fence."#,
     );
     let result = match review_agent(prompt, shutdown).await {
         Ok(result) => result,
         Err(ReviewAgentError::Cancelled) => return Err(ReviewError::Cancelled),
         Err(ReviewAgentError::Failed(error)) => return Err(ReviewError::Overview(error)),
     };
-    let overview = strip_html_fence(result.trim());
+    let overview = strip_mdx_fence(result.trim());
     if overview.is_empty() {
         return Err(ReviewError::EmptyOverview);
     }
@@ -267,10 +300,10 @@ fn repository_scope(context: &diff::OverviewContext) -> String {
     }
 }
 
-fn strip_html_fence(value: &str) -> &str {
+fn strip_mdx_fence(value: &str) -> &str {
     value
-        .strip_prefix("```html")
-        .or_else(|| value.strip_prefix("```HTML"))
+        .strip_prefix("```mdx")
+        .or_else(|| value.strip_prefix("```markdown"))
         .and_then(|value| value.strip_suffix("```"))
         .map(str::trim)
         .unwrap_or(value)
@@ -431,7 +464,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn review_agent_receives_repository_context_and_returns_html() {
+    async fn review_agent_receives_repository_context_and_returns_mdx() {
         let observed_prompt = Arc::new(Mutex::new(String::new()));
         let generator: ReviewAgent = Arc::new({
             let observed_prompt = Arc::clone(&observed_prompt);
@@ -439,7 +472,7 @@ mod tests {
                 let observed_prompt = Arc::clone(&observed_prompt);
                 Box::pin(async move {
                     *observed_prompt.lock().unwrap() = prompt;
-                    Ok("```html\n<section>Overview</section>\n```".to_owned())
+                    Ok("```mdx\n## Overview\n```".to_owned())
                 })
             }
         });
@@ -459,19 +492,14 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(overview, "<section>Overview</section>");
+        assert_eq!(overview, "## Overview");
         let prompt = observed_prompt.lock().unwrap();
         assert!(prompt.contains("Delegate this task to a sub-agent"));
-        assert!(prompt.contains("self-contained HTML overview"));
+        assert!(prompt.contains("concise MDX explainer"));
         assert!(prompt.contains("/workspace/repo"));
         assert!(prompt.contains("0123456789abcdef..fedcba9876543210"));
         assert!(prompt.contains("actual source files"));
         assert!(prompt.contains("`path:line` or `path:start-end`"));
-        assert!(prompt.contains("Scale the depth and presentation"));
-        assert!(prompt.contains("inline SVG"));
-        assert!(prompt.contains("visual identity appropriate to this particular change"));
-        assert!(prompt.contains("both light and dark appearances"));
-        assert!(prompt.contains("do not force them into every overview"));
     }
 
     #[test]

@@ -27,7 +27,7 @@ const MAX_OPERATION_ID_BYTES: usize = 128;
 const MAX_THREAD_MESSAGES: usize = 64;
 const MAX_THREAD_BYTES: usize = 256 * 1024;
 const MAX_QUESTION_THREADS: usize = 256;
-pub(super) const PROTOCOL_VERSION: u32 = 4;
+pub(super) const PROTOCOL_VERSION: u32 = 5;
 const MAX_CACHED_PAGES: usize = 8;
 const MAX_CACHED_PAGE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_CACHED_OVERVIEWS: usize = 8;
@@ -95,7 +95,30 @@ struct GenerationRequest {
 struct OverviewResponse {
     generation: u64,
     selected_range: super::diff::ReviewRange,
-    overview_html: String,
+    overview_mdx: String,
+}
+
+#[derive(Serialize)]
+struct AiReviewResponse {
+    generation: u64,
+    selected_range: super::diff::ReviewRange,
+    comments: Vec<AiReviewComment>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct AiReviewResult {
+    pub(super) comments: Vec<AiReviewComment>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct AiReviewComment {
+    path: String,
+    side: CommentSide,
+    start_line: u32,
+    end_line: u32,
+    body: String,
 }
 
 #[derive(Clone, Serialize)]
@@ -103,7 +126,7 @@ struct StoredOverview {
     selected_range: super::diff::ReviewRange,
     status: OverviewStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
-    overview_html: Option<String>,
+    overview_mdx: Option<String>,
 }
 
 #[derive(Clone, Copy, Serialize)]
@@ -219,6 +242,7 @@ enum ErrorCode {
     InvalidRange,
     WorkspaceChanged,
     OverviewFailed,
+    AiReviewFailed,
     QuestionFailed,
     InvalidThread,
     AgentBusy,
@@ -426,15 +450,15 @@ impl ReviewSession {
             return Some(StoredOverview {
                 selected_range: range,
                 status: OverviewStatus::Generating,
-                overview_html: None,
+                overview_mdx: None,
             });
         }
         self.overviews
             .get(&range)
-            .map(|overview_html| StoredOverview {
+            .map(|overview_mdx| StoredOverview {
                 selected_range: range,
                 status: OverviewStatus::Ready,
-                overview_html: Some(overview_html.clone()),
+                overview_mdx: Some(overview_mdx.clone()),
             })
     }
 }
@@ -544,6 +568,7 @@ fn router(state: Arc<ServerState>) -> Router {
         .route("/api/refresh", post(refresh_review))
         .route("/api/range", post(load_range))
         .route("/api/overview", post(load_overview))
+        .route("/api/ai-review", post(run_ai_review))
         .route("/api/question", post(ask_question))
         .route("/api/questions", post(list_questions))
         .route("/api/question/cancel", post(cancel_question))
@@ -804,13 +829,13 @@ async fn load_overview(
         let Some(page) = matching_page(&session, request.generation, &request.range) else {
             return stale_snapshot("the requested review snapshot is stale");
         };
-        if let Some(overview_html) = session.overviews.get(&request.range).cloned() {
+        if let Some(overview_mdx) = session.overviews.get(&request.range).cloned() {
             return secure_json(
                 StatusCode::OK,
                 OverviewResponse {
                     generation: request.generation,
                     selected_range: request.range,
-                    overview_html,
+                    overview_mdx,
                 },
             );
         }
@@ -884,7 +909,7 @@ async fn run_overview(
     if current != version {
         return OverviewRunResult::Stale("the workspace changed before its overview was generated");
     }
-    let overview_html = match state
+    let overview_mdx = match state
         .backend
         .overview(&page.diff.scope, &page.diff.overview, shutdown.clone())
         .await
@@ -905,7 +930,7 @@ async fn run_overview(
     if current != version {
         return OverviewRunResult::Stale("the workspace changed while its overview was generated");
     }
-    OverviewRunResult::Ready(overview_html)
+    OverviewRunResult::Ready(overview_mdx)
 }
 
 async fn store_overview_result(
@@ -920,10 +945,10 @@ async fn store_overview_result(
     if matching_page(&session, overview_key.0, &overview_key.1).is_none() {
         return OverviewRunResult::Stale("the review changed while its overview was loading");
     }
-    if let OverviewRunResult::Ready(overview_html) = &result {
+    if let OverviewRunResult::Ready(overview_mdx) = &result {
         session
             .overviews
-            .insert(overview_key.1, overview_html.clone(), overview_html.len());
+            .insert(overview_key.1, overview_mdx.clone(), overview_mdx.len());
     }
     result
 }
@@ -933,12 +958,12 @@ fn overview_response(
     result: OverviewRunResult,
 ) -> Response<Body> {
     match result {
-        OverviewRunResult::Ready(overview_html) => secure_json(
+        OverviewRunResult::Ready(overview_mdx) => secure_json(
             StatusCode::OK,
             OverviewResponse {
                 generation: overview_key.0,
                 selected_range: overview_key.1,
-                overview_html,
+                overview_mdx,
             },
         ),
         OverviewRunResult::Cancelled => error_response(
@@ -964,6 +989,118 @@ fn overview_response(
             true,
         ),
     }
+}
+
+async fn run_ai_review(
+    State(state): State<Arc<ServerState>>,
+    Json(request): Json<RangeRequest>,
+) -> Response<Body> {
+    let (page, version, shutdown) = {
+        let session = state.session.lock().await;
+        let Some(page) = matching_page(&session, request.generation, &request.range) else {
+            return stale_snapshot("the requested review snapshot is stale");
+        };
+        (
+            page.clone(),
+            session.version.clone(),
+            session.generation_shutdown.clone(),
+        )
+    };
+    let Ok(_agent_operation) = Arc::clone(&state.agent_operation).try_lock_owned() else {
+        return agent_busy();
+    };
+    let current = match state.backend.current_version(shutdown.clone()).await {
+        Ok(current) => current,
+        Err(ScopeLoadError::Cancelled) => {
+            return stale_snapshot("the review changed before AI review started");
+        }
+        Err(ScopeLoadError::Failed(error)) => return workspace_error(error),
+    };
+    if current != version {
+        return stale_snapshot("the workspace changed before AI review started");
+    }
+
+    let comments = match state
+        .backend
+        .ai_review(&page.diff.scope, &page.diff.overview, shutdown.clone())
+        .await
+    {
+        Ok(comments) => comments,
+        Err(ScopeLoadError::Cancelled) => return operation_cancelled("AI review was cancelled"),
+        Err(ScopeLoadError::Failed(error)) => {
+            return error_response(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                ErrorCode::AiReviewFailed,
+                error,
+                true,
+                true,
+            );
+        }
+    };
+    let current = match state.backend.current_version(shutdown).await {
+        Ok(current) => current,
+        Err(ScopeLoadError::Cancelled) => {
+            return stale_snapshot("the review changed during AI review");
+        }
+        Err(ScopeLoadError::Failed(error)) => return workspace_error(error),
+    };
+    if current != version {
+        return stale_snapshot("the workspace changed during AI review");
+    }
+    let session = state.session.lock().await;
+    if matching_page(&session, request.generation, &request.range).is_none() {
+        return stale_snapshot("the review changed during AI review");
+    }
+    if comments.len() > MAX_COMMENTS
+        || comments.iter().any(|comment| {
+            invalid_ai_comment(comment)
+                || !valid_anchor(
+                    &page.diff,
+                    &comment.path,
+                    comment.side,
+                    comment.start_line,
+                    comment.end_line,
+                )
+        })
+    {
+        return error_response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            ErrorCode::AiReviewFailed,
+            "the agent returned invalid or unanchored review comments",
+            true,
+            true,
+        );
+    }
+    secure_json(
+        StatusCode::OK,
+        AiReviewResponse {
+            generation: request.generation,
+            selected_range: request.range,
+            comments,
+        },
+    )
+}
+
+fn invalid_ai_comment(comment: &AiReviewComment) -> bool {
+    comment.path.trim().is_empty()
+        || comment.path.len() > MAX_PATH_BYTES
+        || comment.body.trim().is_empty()
+        || comment.body.len() > MAX_COMMENT_BYTES
+        || !["[P0] ", "[P1] ", "[P2] ", "[P3] "]
+            .iter()
+            .any(|prefix| comment.body.starts_with(prefix) && comment.body.len() > prefix.len())
+        || comment.start_line == 0
+        || comment.end_line < comment.start_line
+}
+
+fn workspace_error(error: String) -> Response<Body> {
+    error_response(
+        StatusCode::SERVICE_UNAVAILABLE,
+        ErrorCode::WorkspaceChanged,
+        error,
+        true,
+        false,
+    )
 }
 
 async fn ask_question(
@@ -1905,7 +2042,7 @@ mod tests {
                 .unwrap();
             assert_eq!(response.status(), reqwest::StatusCode::OK);
             assert_eq!(
-                response.json::<serde_json::Value>().await.unwrap()["overview_html"],
+                response.json::<serde_json::Value>().await.unwrap()["overview_mdx"],
                 "<p>Overview</p>"
             );
         }
@@ -2040,7 +2177,7 @@ mod tests {
                 Box::pin(async move {
                     started.notify_one();
                     release.notified().await;
-                    if prompt.contains("self-contained HTML") {
+                    if prompt.contains("concise MDX explainer") {
                         Ok("<p>Overview</p>".to_owned())
                     } else {
                         Ok("Answer".to_owned())
@@ -2326,7 +2463,7 @@ mod tests {
         .await
         .expect("the detached overview should finish");
         assert_eq!(
-            completed["overview"]["overview_html"],
+            completed["overview"]["overview_mdx"],
             "<p>Persistent overview</p>"
         );
     }
@@ -2777,6 +2914,71 @@ mod tests {
             server.wait().await.unwrap(),
             ReviewOutcome::Cancelled
         ));
+    }
+
+    #[tokio::test]
+    async fn ai_review_returns_severity_labeled_comments_on_the_selected_patch() {
+        let assets = tempfile::tempdir().unwrap();
+        for name in ["index.html", "app.js", "app.css"] {
+            std::fs::write(assets.path().join(name), "").unwrap();
+        }
+        let prompts = Arc::new(Mutex::new(Vec::new()));
+        let agent: ReviewAgent = Arc::new({
+            let prompts = Arc::clone(&prompts);
+            move |prompt, _| {
+                prompts.lock().unwrap().push(prompt);
+                Box::pin(async {
+                    Ok(r#"{"comments":[{"path":"tracked.txt","side":"additions","start_line":1,"end_line":1,"body":"[P1] This line causes a regression under this condition."}]}"#.into())
+                })
+            }
+        });
+        let server = start_server_with_generator(&assets, agent).await;
+        let response = reqwest::Client::new()
+            .post(server.endpoint_url("api/ai-review"))
+            .json(&snapshot_request(uncommitted_range()))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let response: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(
+            response["comments"][0]["body"],
+            "[P1] This line causes a regression under this condition."
+        );
+        assert_eq!(
+            response["selected_range"],
+            serde_json::to_value(uncommitted_range()).unwrap()
+        );
+        let prompts = prompts.lock().unwrap();
+        assert!(prompts[0].contains("comprehensive code review"));
+        assert!(prompts[0].contains("through the working tree"));
+        server.cancel().await;
+    }
+
+    #[tokio::test]
+    async fn ai_review_rejects_unanchored_findings() {
+        let assets = tempfile::tempdir().unwrap();
+        for name in ["index.html", "app.js", "app.css"] {
+            std::fs::write(assets.path().join(name), "").unwrap();
+        }
+        let agent: ReviewAgent = Arc::new(|_, _| {
+            Box::pin(async {
+                Ok(r#"{"comments":[{"path":"unrelated.rs","side":"additions","start_line":1,"end_line":1,"body":"[P1] This cannot be anchored."}]}"#.into())
+            })
+        });
+        let server = start_server_with_generator(&assets, agent).await;
+        let response = reqwest::Client::new()
+            .post(server.endpoint_url("api/ai-review"))
+            .json(&snapshot_request(uncommitted_range()))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            response.json::<serde_json::Value>().await.unwrap()["code"],
+            "ai_review_failed"
+        );
+        server.cancel().await;
     }
 
     async fn start_server(assets: &tempfile::TempDir) -> ReviewServer {

@@ -152,6 +152,7 @@ type AnnotationMetadata =
 
 type AgentOperation =
   | { kind: "overview"; request: number }
+  | { kind: "ai-review"; request: number }
   | { kind: "question"; threadId: string; request: number; operationId: string };
 
 const root = document.querySelector<HTMLElement>("#app");
@@ -198,6 +199,7 @@ export class ReviewApp {
   private loadingOverview?: ReviewRange;
   private rangeRequest = 0;
   private overviewRequest = 0;
+  private aiReviewRequest = 0;
   private questionRequest = 0;
   private questionPollTimer?: number;
   private pollingQuestions = false;
@@ -272,8 +274,8 @@ export class ReviewApp {
   }
 
   private restoreStoredOverview(overview: StoredOverview | null) {
-    if (overview?.status !== "ready" || !overview.overview_html?.trim()) return;
-    this.overviews.set(rangeKey(overview.selected_range), overview.overview_html);
+    if (overview?.status !== "ready" || !overview.overview_mdx?.trim()) return;
+    this.overviews.set(rangeKey(overview.selected_range), overview.overview_mdx);
   }
 
   private restoreAgentOperation() {
@@ -385,6 +387,7 @@ export class ReviewApp {
           <textarea id="review-summary" rows="1" placeholder="Leave an overall comment (optional)" aria-describedby="terminal-status"></textarea>
           <div class="review-actions">
             <button class="button quiet" id="cancel-review">Cancel</button>
+            <button class="button secondary" id="ai-review" data-agent-action>AI review</button>
             <button class="button secondary" data-decision="request_changes">Request changes</button>
             <button class="button primary" data-decision="approve">Approve</button>
           </div>
@@ -686,7 +689,7 @@ export class ReviewApp {
     state.innerHTML = `
       <div class="overview-orbit">${icon("sparkles")}</div>
       <strong>Overview available on request</strong>
-      <span>Ask Tact’s root agent to explain and visualize the change when you need it.</span>
+      <span>Get an explainer and a guide to the areas worth checking yourself.</span>
       <button type="button" class="button primary" data-agent-action data-generate-overview ${this.agentOperation ? "disabled" : ""}>Generate overview</button>`;
     state.querySelector("[data-generate-overview]")?.addEventListener("click", () => void this.loadOverview());
   }
@@ -726,7 +729,7 @@ export class ReviewApp {
       state.innerHTML = `
         <div class="overview-spinner" aria-hidden="true"><span>${icon("sparkles")}</span></div>
         <strong>Preparing the overview</strong>
-        <span>Tact’s root agent is inspecting the selected range and surrounding code.</span>`;
+        <span>Tact is mapping the change and preparing human review guidance.</span>`;
     }
 
     try {
@@ -737,7 +740,7 @@ export class ReviewApp {
         this.showOverviewError("Tact returned an overview for a different review range.");
         return;
       }
-      this.overviews.set(key, payload.overview_html);
+      this.overviews.set(key, payload.overview_mdx);
       if (rangesEqual(this.page?.selected_range, range)) this.renderOverviewState();
     } catch (error) {
       if (request === this.overviewRequest) this.showOverviewError(errorMessage(error));
@@ -772,10 +775,62 @@ export class ReviewApp {
   private renderOverview() {
     const frame = this.root.querySelector<HTMLIFrameElement>(".overview");
     if (!frame || !this.page) return;
-    const html = this.overviews.get(rangeKey(this.page.selected_range));
-    if (!html) return;
-    frame.srcdoc = overviewDocument(html, appearance(this.settings));
+    const mdx = this.overviews.get(rangeKey(this.page.selected_range));
+    if (!mdx) return;
+    frame.srcdoc = overviewDocument(mdx, appearance(this.settings));
     frame.hidden = false;
+  }
+
+  private async runAiReview() {
+    const page = this.page;
+    if (!page || this.agentOperation || this.loadingRange || this.snapshotStale) return;
+    const request = ++this.aiReviewRequest;
+    this.agentOperation = { kind: "ai-review", request };
+    const button = this.root.querySelector<HTMLButtonElement>("#ai-review");
+    if (button) button.textContent = "Reviewing…";
+    this.announceAgent("Tact is reviewing the selected diff.");
+    this.showTerminalBusy("Tact is reviewing the selected diff…");
+    this.syncAgentControls();
+    try {
+      const result = await this.api.aiReview(page);
+      if (request !== this.aiReviewRequest) return;
+      if (result.generation !== page.generation
+        || !rangesEqual(result.selected_range, page.selected_range)
+        || this.page !== page) throw new Error("Tact returned findings for a different review range.");
+      let added = 0;
+      for (const finding of result.comments) {
+        const item = this.items.find((candidate) =>
+          annotationPath(candidate.fileDiff, finding.side) === finding.path);
+        if (!item || !finding.body.trim()
+          || this.comments.some((comment) => comment.path === finding.path
+            && comment.side === finding.side && comment.start_line === finding.start_line
+            && comment.end_line === finding.end_line && comment.body === finding.body)) continue;
+        this.comments.push({ ...finding, id: this.nextCommentId++, itemId: item.id });
+        this.refreshItem(item.id);
+        added++;
+      }
+      this.refreshTreeDecorations();
+      this.renderCommentList();
+      this.selectTab("changes");
+      this.announceAgent(added ? `Tact added ${added} inline review comments.` : "Tact found no actionable issues.");
+      const status = this.root.querySelector<HTMLElement>("#terminal-status");
+      if (status) {
+        status.className = "terminal-status";
+        status.textContent = added ? `Added ${added} AI review comments. Review and edit them before submitting.` : "AI review found no actionable issues.";
+      }
+    } catch (error) {
+      if (error instanceof ApiError && ["stale_snapshot", "workspace_changed"].includes(error.code)) {
+        this.snapshotStale = true;
+        this.setRefreshNotice(true);
+      }
+      this.showInlineError(errorMessage(error), this.snapshotStale ? undefined : () => void this.runAiReview());
+    } finally {
+      if (request === this.aiReviewRequest) {
+        this.agentOperation = undefined;
+        if (button) button.textContent = "AI review";
+        this.syncAgentControls();
+      }
+    }
   }
 
   private renderDiff(resetScroll = false) {
@@ -1163,6 +1218,7 @@ export class ReviewApp {
       if (event.target === rangeDialog) this.closeRangeDialog();
     });
     this.root.querySelector("#cancel-review")?.addEventListener("click", () => void this.cancel());
+    this.root.querySelector("#ai-review")?.addEventListener("click", () => void this.runAiReview());
     for (const button of this.root.querySelectorAll<HTMLButtonElement>("[data-decision]")) {
       button.addEventListener("click", () => void this.submit(button.dataset.decision as ReviewDecision["decision"]));
     }
@@ -2049,7 +2105,7 @@ export class ReviewApp {
     element.className = "diff-comment";
     element.innerHTML = `
       <header>
-        <span>Lines ${formatRange(comment.start_line, comment.end_line)}</span>
+        <span>${severityBadge(comment.body)} Lines ${formatRange(comment.start_line, comment.end_line)}</span>
         <div>
           <button class="small-icon-button" data-comment-edit aria-label="Edit comment">${icon("edit")}</button>
           <button class="small-icon-button danger" data-comment-delete aria-label="Delete comment">${icon("trash")}</button>
@@ -2125,7 +2181,7 @@ export class ReviewApp {
       item.innerHTML = `
         <button class="comment-jump">
           <strong>${escapeHtml(comment.path)}</strong>
-          <span>${formatRange(comment.start_line, comment.end_line)} · ${comment.side === "additions" ? "new" : "old"}</span>
+          <span>${severityBadge(comment.body)} ${formatRange(comment.start_line, comment.end_line)} · ${comment.side === "additions" ? "new" : "old"}</span>
           <p>${escapeHtml(comment.body)}</p>
         </button>
         <div class="comment-link-actions">
@@ -2206,7 +2262,8 @@ export class ReviewApp {
       const needsQuestion = button.matches("[data-comment-action=ask], [data-thread-ask]");
       const editor = button.closest<HTMLElement>(".inline-comment-editor, .agent-thread-turn");
       const input = editor?.querySelector<HTMLTextAreaElement>("textarea");
-      button.disabled = busy || (needsQuestion && !input?.value.trim());
+      button.disabled = busy || (button.id === "ai-review" && this.snapshotStale)
+        || (needsQuestion && !input?.value.trim());
     }
     this.syncSelectedRange(this.page?.selected_range ?? this.bootstrap.default_range);
     this.setReviewControlsDisabled(busy);
@@ -2325,6 +2382,11 @@ function deepActiveElement(root: Document | ShadowRoot): HTMLElement | undefined
   const active = root.activeElement;
   if (!(active instanceof HTMLElement)) return;
   return active.shadowRoot ? deepActiveElement(active.shadowRoot) ?? active : active;
+}
+
+function severityBadge(body: string) {
+  const severity = /^\[(P[0-3])\]/.exec(body)?.[1];
+  return severity ? `<b class="severity-badge severity-${severity.toLowerCase()}">${severity}</b>` : "";
 }
 
 function textRange(root: HTMLElement, start: number, length: number): Range | undefined {
