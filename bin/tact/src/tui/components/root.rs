@@ -439,6 +439,10 @@ impl RootNode {
         }
     }
 
+    pub(crate) fn has_in_flight_turn(&self) -> bool {
+        self.in_flight_turns > 0
+    }
+
     pub(crate) fn set_skills(&mut self, skills: Arc<[Skill]>) {
         self.skills = skills;
         if self.skills.is_empty() && matches!(&self.overlay, Some(Overlay::Skills(_))) {
@@ -981,6 +985,7 @@ impl RootNode {
             self.overlay = Some(Overlay::Actions(Node::new(ActionsMenu::new(
                 ActionAvailability {
                     new_session: new_session_enabled,
+                    review: self.blocking_task.is_none(),
                     fork: self.can_fork(),
                     fast_mode: self.composer.component().fast_mode(),
                     memory: self.memory_enabled,
@@ -6595,6 +6600,52 @@ mod tests {
         assert!(quit.effects.is_empty());
         assert!(pasted.effects.is_empty());
         assert_eq!(root.composer().draft(), "keep this draft");
+    }
+
+    #[test]
+    fn review_opens_during_a_turn_and_keeps_its_shortcuts() {
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        for character in "active prompt".chars() {
+            root.update(key(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+        assert_eq!(
+            root.update(key(KeyCode::Enter, KeyModifiers::NONE))
+                .effects
+                .len(),
+            1
+        );
+        assert!(root.has_in_flight_turn());
+
+        root.update(key(KeyCode::Char('/'), KeyModifiers::NONE));
+        for character in "review".chars() {
+            root.update(key(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+        assert_eq!(
+            root.update(key(KeyCode::Enter, KeyModifiers::NONE)).effects,
+            [RootEffect::Review {
+                download_assets: false
+            }]
+        );
+        root.update(RootEvent::ReviewStarted);
+        root.update(RootEvent::ReviewReady(
+            "http://127.0.0.1:4321/review".to_owned(),
+        ));
+        assert_eq!(
+            root.update(key(KeyCode::Char('o'), KeyModifiers::NONE))
+                .effects,
+            [RootEffect::OpenLink(
+                "http://127.0.0.1:4321/review".to_owned()
+            )]
+        );
+        assert_eq!(
+            root.update(key(KeyCode::Char('c'), KeyModifiers::NONE))
+                .effects,
+            [RootEffect::Copy("http://127.0.0.1:4321/review".to_owned())]
+        );
+        assert!(root.has_in_flight_turn());
+        root.update(RootEvent::ReviewFinished("review feedback".to_owned()));
+        assert!(root.has_in_flight_turn());
+        assert_eq!(root.composer().draft(), "review feedback");
     }
 
     #[test]

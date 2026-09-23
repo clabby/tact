@@ -58,7 +58,7 @@ const server = Bun.serve({
       });
     }
     if (request.method === "GET" && url.pathname === "/api/status") {
-      return Response.json({ generation: 1, changed: workspaceChanged });
+      return Response.json({ generation: 1, changed: workspaceChanged, turn_running: false });
     }
     if (request.method === "POST" && url.pathname === "/api/refresh") {
       workspaceChanged = false;

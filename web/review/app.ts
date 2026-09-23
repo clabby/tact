@@ -35,7 +35,6 @@ import {
   feedbackDescription,
   finishTerminal,
   installSession,
-  synchronizeQuestions,
   type CommentDraft,
   type CommentMetadata,
   type ReviewState,
@@ -151,10 +150,7 @@ type AnnotationMetadata =
   | { kind: "question"; thread: QuestionThread }
   | { kind: "composer"; draft: CommentDraft };
 
-type AgentOperation =
-  | { kind: "overview"; request: number }
-  | { kind: "ai-review"; request: number }
-  | { kind: "question"; threadId: string; request: number; operationId: string };
+type QuestionOperation = { threadId: string; request: number; operationId: string };
 
 const root = document.querySelector<HTMLElement>("#app");
 if (!root) throw new Error("review root is missing");
@@ -206,7 +202,10 @@ export class ReviewApp {
   private questionRequest = 0;
   private questionPollTimer?: number;
   private pollingQuestions = false;
-  private agentOperation?: AgentOperation;
+  private aiReviewPending = false;
+  private readonly questionOperations = new Map<string, QuestionOperation>();
+  private readonly questionsToPoll = new Set<string>();
+  private turnRunning: boolean;
   private statusTimer?: number;
   private checkingStatus = false;
   private refreshing = false;
@@ -253,6 +252,7 @@ export class ReviewApp {
     private bootstrap: ReviewSession,
   ) {
     this.state = createReviewState(bootstrap);
+    this.turnRunning = bootstrap.turn_running;
     this.workerPool = new WorkerPoolManager(
       {
         workerFactory: () => new Worker(
@@ -269,6 +269,13 @@ export class ReviewApp {
   private get questions() { return currentQuestions(this.state); }
   private get draft() { return this.feedback.draft; }
   private set draft(value: CommentDraft | undefined) { this.feedback.draft = value; }
+  private get agentBusy() {
+    return this.loadingOverview !== undefined || this.aiReviewPending || this.questionOperations.size > 0;
+  }
+  private get actionUnavailable() {
+    return this.turnRunning || this.loadingRange !== undefined || this.refreshing
+      || this.state.terminal.kind === "busy" || this.state.terminal.kind === "finished";
+  }
 
   installInitialPage() {
     this.restoreStoredOverview(this.bootstrap.overview);
@@ -291,18 +298,15 @@ export class ReviewApp {
     if (overview?.status === "generating"
       && rangesEqual(overview.selected_range, this.page?.selected_range)) {
       void this.loadOverview(true);
-      return;
     }
-    void this.restoreActiveQuestion();
+    void this.restoreActiveQuestions();
   }
 
-  private async restoreActiveQuestion() {
-    const active = allQuestions(this.state).find((thread) => thread.turn.kind === "asking");
-    if (!active) return;
-    this.resumeQuestionOperation();
-    if (!rangesEqual(active.range, this.page?.selected_range)) {
-      await this.selectRange(active.range, false, true);
-    }
+  private async restoreActiveQuestions() {
+    const active = allQuestions(this.state).filter((thread) => thread.turn.kind === "asking");
+    for (const thread of active) this.resumeQuestionOperation(thread);
+    const current = active.find((thread) => rangesEqual(thread.range, this.page?.selected_range));
+    if (!current && active[0]) await this.selectRange(active[0].range, false, true);
   }
 
   render() {
@@ -321,6 +325,9 @@ export class ReviewApp {
             <button class="refresh-notice" id="refresh-notice" hidden>
               <i aria-hidden="true"></i><span>New changes available</span><strong>Refresh</strong>
             </button>
+            <div class="turn-running-notice" id="turn-running-notice" role="status" ${this.turnRunning ? "" : "hidden"} title="The active agent turn is still changing the workspace. Review actions become available when it finishes.">
+              <i aria-hidden="true"></i><span>Agent working · Review paused</span>
+            </div>
             <button class="range-button" id="range-button" aria-haspopup="dialog" aria-controls="range-dialog" aria-expanded="false">
               <span class="range-button-icon">${icon("git-branch")}</span>
               <span><small>Change range</small><strong id="range-label">Full branch</strong></span>
@@ -474,7 +481,9 @@ export class ReviewApp {
     discardCurrentFeedback = false,
     restoringActiveQuestion = false,
   ) {
-    if (this.loadingRange || (this.agentOperation && !restoringActiveQuestion)) return;
+    if (this.loadingRange || this.state.terminal.kind === "busy"
+      || this.state.terminal.kind === "finished"
+      || (this.agentBusy && !restoringActiveQuestion)) return;
     if (rangesEqual(this.page?.selected_range, range)) {
       const state = this.root.querySelector<HTMLElement>("#scope-state");
       if (state?.classList.contains("error")) state.hidden = true;
@@ -542,6 +551,7 @@ export class ReviewApp {
     const summary = this.root.querySelector<HTMLTextAreaElement>("#review-summary");
     if (summary) summary.value = this.feedback.summary;
     this.syncSelectedRange(page.selected_range);
+    this.syncAgentControls();
     this.selectTab("changes");
   }
 
@@ -554,17 +564,14 @@ export class ReviewApp {
     }
   }
 
-  private resumeQuestionOperation() {
-    const thread = allQuestions(this.state).find(
-      (candidate) => candidate.turn.kind === "asking",
-    );
-    if (!thread || thread.turn.kind !== "asking") return;
-    this.agentOperation = {
-      kind: "question",
+  private resumeQuestionOperation(thread: QuestionThread) {
+    if (thread.turn.kind !== "asking" || this.questionOperations.has(thread.id)) return;
+    this.questionOperations.set(thread.id, {
       threadId: thread.id,
       request: thread.turn.request,
       operationId: thread.turn.operationId,
-    };
+    });
+    this.questionsToPoll.add(thread.id);
     if (thread.itemId) this.refreshItem(thread.itemId);
     this.syncAgentControls();
     this.scheduleQuestionPoll();
@@ -579,63 +586,53 @@ export class ReviewApp {
   }
 
   private async pollQuestions() {
-    const operation = this.agentOperation;
-    if (this.pollingQuestions || operation?.kind !== "question") return;
+    if (this.pollingQuestions || this.questionsToPoll.size === 0) return;
     this.pollingQuestions = true;
     try {
       const payload = await this.api.questions(this.bootstrap.generation);
       if (payload.generation !== this.bootstrap.generation) {
-        this.agentOperation = undefined;
+        this.questionOperations.clear();
+        this.questionsToPoll.clear();
         this.generationStale = true;
         this.snapshotStale = true;
         this.setRefreshNotice(true, "This browser page belongs to an older review generation.");
         this.syncAgentControls();
         return;
       }
-      const stored = payload.questions.find(
-        (thread) => thread.thread_id === operation.threadId,
-      );
-      if (!stored) {
-        const thread = allQuestions(this.state).find(
-          (candidate) => candidate.id === operation.threadId,
-        );
-        if (thread) {
-          failQuestion(thread, operation.request, "Tact did not retain this question. Ask again to retry.");
-          if (thread.itemId) this.refreshItem(thread.itemId);
+      for (const threadId of [...this.questionsToPoll]) {
+        const operation = this.questionOperations.get(threadId);
+        if (!operation) {
+          this.questionsToPoll.delete(threadId);
+          continue;
         }
-        this.agentOperation = undefined;
-        this.syncAgentControls();
-        return;
+        const thread = allQuestions(this.state).find((candidate) => candidate.id === threadId);
+        const stored = payload.questions.find((candidate) => candidate.thread_id === threadId);
+        if (!thread) continue;
+        if (!stored) {
+          failQuestion(thread, operation.request, "Tact did not retain this question. Ask again to retry.");
+        } else if (stored.operation_id !== operation.operationId) {
+          continue;
+        } else if (stored.status === "asking") {
+          continue;
+        } else if (stored.status === "idle") {
+          finishQuestion(thread, operation.request, stored.messages.at(-1)?.body ?? "");
+          this.announceAgent("Tact answered the question.");
+        } else if (stored.status === "cancelled") {
+          cancelQuestion(thread, operation.request);
+          this.announceAgent("Question cancelled.");
+        } else {
+          failQuestion(thread, operation.request, stored.error ?? "Unknown error");
+          this.announceAgent(`Tact could not answer the question: ${stored.error ?? "Unknown error"}`);
+        }
+        this.questionOperations.delete(threadId);
+        this.questionsToPoll.delete(threadId);
+        if (thread.itemId) this.refreshItem(thread.itemId);
       }
-      if (stored?.status === "asking"
-        && stored.operation_id === operation.operationId) return;
-
-      this.state = synchronizeQuestions(this.state, payload.questions);
-      this.attachQuestionItems();
-      for (const item of this.items) this.refreshItem(item.id);
-      const synchronized = allQuestions(this.state).find(
-        (thread) => thread.id === operation.threadId,
-      );
-      if (synchronized?.turn.kind === "asking") {
-        this.agentOperation = {
-          kind: "question",
-          threadId: synchronized.id,
-          request: synchronized.turn.request,
-          operationId: synchronized.turn.operationId,
-        };
-        this.syncAgentControls();
-        return;
-      }
-      this.agentOperation = undefined;
       this.syncAgentControls();
-      if (stored?.status === "idle") this.announceAgent("Tact answered the question.");
-      else if (stored?.status === "cancelled") this.announceAgent("Question cancelled.");
-      else if (stored?.status === "error") {
-        this.announceAgent(`Tact could not answer the question: ${stored.error ?? "Unknown error"}`);
-      }
     } catch (error) {
       if (error instanceof ApiError && error.code === "stale_snapshot") {
-        this.agentOperation = undefined;
+        this.questionOperations.clear();
+        this.questionsToPoll.clear();
         this.generationStale = true;
         this.snapshotStale = true;
         this.setRefreshNotice(true, "This browser page belongs to an older review generation.");
@@ -644,7 +641,7 @@ export class ReviewApp {
       // Other polling failures are transient; the stored operation remains authoritative.
     } finally {
       this.pollingQuestions = false;
-      if (this.agentOperation?.kind === "question") this.scheduleQuestionPoll();
+      if (this.questionsToPoll.size > 0) this.scheduleQuestionPoll();
     }
   }
 
@@ -694,8 +691,9 @@ export class ReviewApp {
     if (ready && !this.editingOverview) {
       state.hidden = false;
       state.classList.add("overview-state-ready");
-      state.innerHTML = `<button type="button" class="button" data-agent-action data-edit-overview ${this.agentOperation ? "disabled" : ""}>Edit instructions</button>`;
+      state.innerHTML = `<button type="button" class="button" data-agent-action data-edit-overview ${this.turnRunning || this.loadingOverview ? "disabled" : ""}>Edit instructions</button>`;
       state.querySelector("[data-edit-overview]")?.addEventListener("click", () => {
+        if (this.actionUnavailable) return;
         this.editingOverview = true;
         this.renderOverviewState();
         state.querySelector<HTMLTextAreaElement>("[data-overview-instructions]")?.focus();
@@ -722,7 +720,7 @@ export class ReviewApp {
         <small id="overview-instructions-help" class="overview-instructions-help" aria-live="polite">${validationError ?? "Up to 8 KiB of text."}</small>
         <div class="overview-instructions-actions">
           ${ready ? `<button type="button" class="button" data-cancel-overview-edit>Cancel</button>` : ""}
-          <button type="button" class="button primary" data-agent-action data-generate-overview ${this.agentOperation || validationError || (ready && this.overviews.get(key)?.instructions === draft.trim()) ? "disabled" : ""}>${ready ? "Regenerate overview" : "Generate overview"}</button>
+          <button type="button" class="button primary" data-agent-action data-generate-overview ${this.turnRunning || this.loadingOverview || validationError || (ready && this.overviews.get(key)?.instructions === draft.trim()) ? "disabled" : ""}>${ready ? "Regenerate overview" : "Generate overview"}</button>
         </div>
       </div>`;
     const input = state.querySelector<HTMLTextAreaElement>("[data-overview-instructions]");
@@ -734,7 +732,7 @@ export class ReviewApp {
         const help = state.querySelector<HTMLElement>("#overview-instructions-help");
         if (help) help.textContent = error ?? "Up to 8 KiB of text.";
         const generate = state.querySelector<HTMLButtonElement>("[data-generate-overview]");
-        if (generate) generate.disabled = !!error || this.agentOperation !== undefined
+        if (generate) generate.disabled = !!error || this.turnRunning || this.loadingOverview !== undefined
           || (ready && this.overviews.get(key)?.instructions === input.value.trim());
       });
     }
@@ -760,7 +758,7 @@ export class ReviewApp {
   private async loadOverview(restoring = false) {
     const page = this.page;
     if (!page
-      || (this.agentOperation && !restoring)
+      || (this.actionUnavailable && !restoring)
       || rangesEqual(this.loadingOverview, page.selected_range)) return;
     const key = rangeKey(page.selected_range);
     const instructions = restoring
@@ -775,7 +773,6 @@ export class ReviewApp {
 
     const range = page.selected_range;
     const request = ++this.overviewRequest;
-    this.agentOperation = { kind: "overview", request };
     this.loadingOverview = range;
     this.editingOverview = false;
     this.setOverviewLoading(true);
@@ -801,14 +798,11 @@ export class ReviewApp {
       this.overviews.set(key, { mdx: payload.overview_mdx, instructions });
       if (rangesEqual(this.page?.selected_range, range)) this.renderOverviewState();
     } catch (error) {
+      this.recordActionError(error);
       if (request === this.overviewRequest) this.showOverviewError(errorMessage(error));
     } finally {
       if (request === this.overviewRequest) {
         this.loadingOverview = undefined;
-        if (this.agentOperation?.kind === "overview"
-          && this.agentOperation.request === request) {
-          this.agentOperation = undefined;
-        }
         this.setOverviewLoading(false);
         state?.removeAttribute("aria-busy");
         this.syncAgentControls();
@@ -827,10 +821,11 @@ export class ReviewApp {
       <strong>Could not prepare the overview</strong>
       <span>${escapeHtml(message)}</span>
       <div class="overview-instructions-actions">
-        <button class="button" data-edit-overview-error>Edit instructions</button>
-        <button class="button primary" data-agent-action data-retry-overview ${this.agentOperation ? "disabled" : ""}>Try again</button>
+        <button class="button" data-agent-action data-edit-overview-error ${this.actionUnavailable ? "disabled" : ""}>Edit instructions</button>
+        <button class="button primary" data-agent-action data-retry-overview ${this.turnRunning || this.loadingOverview ? "disabled" : ""}>Try again</button>
       </div>`;
     state.querySelector("[data-edit-overview-error]")?.addEventListener("click", () => {
+      if (this.actionUnavailable) return;
       this.editingOverview = true;
       this.renderOverviewState();
       state.querySelector<HTMLTextAreaElement>("[data-overview-instructions]")?.focus();
@@ -852,9 +847,9 @@ export class ReviewApp {
 
   private async runAiReview() {
     const page = this.page;
-    if (!page || this.agentOperation || this.loadingRange || this.snapshotStale) return;
+    if (!page || this.aiReviewPending || this.actionUnavailable || this.snapshotStale) return;
     const request = ++this.aiReviewRequest;
-    this.agentOperation = { kind: "ai-review", request };
+    this.aiReviewPending = true;
     const button = this.root.querySelector<HTMLButtonElement>("#ai-review");
     if (button) {
       button.innerHTML = '<span class="activity-spinner" aria-hidden="true"></span>Reviewing…';
@@ -891,6 +886,7 @@ export class ReviewApp {
         status.textContent = added ? `Added ${added} AI review comments. Review and edit them before submitting.` : "AI review found no actionable issues.";
       }
     } catch (error) {
+      this.recordActionError(error);
       if (error instanceof ApiError && ["stale_snapshot", "workspace_changed"].includes(error.code)) {
         this.snapshotStale = true;
         this.setRefreshNotice(true);
@@ -898,7 +894,7 @@ export class ReviewApp {
       this.showInlineError(errorMessage(error), this.snapshotStale ? undefined : () => void this.runAiReview());
     } finally {
       if (request === this.aiReviewRequest) {
-        this.agentOperation = undefined;
+        this.aiReviewPending = false;
         if (button) {
           button.textContent = "AI review";
           button.removeAttribute("aria-busy");
@@ -1370,17 +1366,18 @@ export class ReviewApp {
     try {
       const status = await this.api.status();
       if (requestedGeneration !== this.bootstrap.generation) return;
+      this.setTurnRunning(status.turn_running);
       if (status.generation !== this.bootstrap.generation) {
         this.generationStale = true;
         this.snapshotStale = true;
         this.setRefreshNotice(true, "This browser page belongs to an older review generation.");
-        this.setReviewControlsDisabled(false);
+        this.syncAgentControls();
         return;
       }
       this.generationStale = false;
       this.snapshotStale = status.changed;
       this.setRefreshNotice(status.changed);
-      this.setReviewControlsDisabled(false);
+      this.syncAgentControls();
     } catch {
       // Polling is advisory; transient failures should not interrupt the review.
     } finally {
@@ -1400,8 +1397,24 @@ export class ReviewApp {
     if (action) action.textContent = error ? "Retry" : "Refresh";
   }
 
+  private setTurnRunning(running: boolean) {
+    if (this.turnRunning === running) return;
+    this.turnRunning = running;
+    const notice = this.root.querySelector<HTMLElement>("#turn-running-notice");
+    if (notice) notice.hidden = !running;
+    if (!this.loadingOverview) this.renderOverviewState();
+    for (const item of this.items) this.refreshItem(item.id);
+    this.renderCommentList();
+    this.syncAgentControls();
+  }
+
+  private recordActionError(error: unknown) {
+    if (error instanceof ApiError && error.code === "turn_running") this.setTurnRunning(true);
+  }
+
   private async refreshReview() {
-    if (this.refreshing || this.loadingRange || this.agentOperation) return;
+    if (this.refreshing || this.loadingRange || this.agentBusy
+      || this.state.terminal.kind === "busy" || this.state.terminal.kind === "finished") return;
     const pendingFeedback = feedbackDescription(this.feedback);
     if (pendingFeedback && !window.confirm(
       `Refreshing will discard ${pendingFeedback}. Continue?`,
@@ -1421,6 +1434,7 @@ export class ReviewApp {
         ? await this.api.review()
         : await this.api.refresh(this.bootstrap.generation);
       this.bootstrap = payload;
+      this.setTurnRunning(payload.turn_running);
       this.state = installSession(this.state, payload);
       this.overviews.clear();
       this.restoreStoredOverview(payload.overview);
@@ -1526,7 +1540,7 @@ export class ReviewApp {
   }
 
   private openRangeDialog() {
-    if (this.loadingRange || this.agentOperation) return;
+    if (this.loadingRange || this.agentBusy) return;
     this.closeBoundaryActions();
     this.pendingRange = { ...(this.page?.selected_range ?? this.bootstrap.default_range) };
     this.previewRange = undefined;
@@ -1675,7 +1689,7 @@ export class ReviewApp {
   }
 
   private openCommentComposer(selection: CodeViewLineSelection | null) {
-    if (!selection || this.loadingRange) return;
+    if (!selection || this.actionUnavailable) return;
     const side = selection.range.side ?? "additions";
     const endSide = selection.range.endSide ?? side;
     if (side !== endSide) return;
@@ -1703,6 +1717,7 @@ export class ReviewApp {
   }
 
   private editComment(comment: CommentMetadata) {
+    if (this.actionUnavailable) return;
     if (this.draft) {
       if (this.draft.editingId === comment.id) {
         this.focusDraft();
@@ -1751,7 +1766,7 @@ export class ReviewApp {
 
   private saveComment() {
     const draft = this.draft;
-    if (!draft) return;
+    if (!draft || this.actionUnavailable) return;
     const body = draft.body.trim();
     if (!body) {
       this.focusDraft();
@@ -1782,6 +1797,7 @@ export class ReviewApp {
   }
 
   private removeComment(id: number) {
+    if (this.actionUnavailable) return;
     const index = this.comments.findIndex((comment) => comment.id === id);
     if (index < 0) return;
     const [comment] = this.comments.splice(index, 1);
@@ -1871,8 +1887,8 @@ export class ReviewApp {
         <span class="editor-shortcut"><kbd>⌘</kbd><kbd>Enter</kbd> to save</span>
         <div class="composer-actions">
           <button class="button quiet" data-comment-action="cancel">Cancel</button>
-          ${draft.editingId === undefined ? `<button class="button" data-agent-action data-comment-action="ask" ${draft.body.trim() && !this.agentOperation ? "" : "disabled"}>Ask <span aria-hidden="true">✨</span></button>` : ""}
-          <button class="button primary" data-comment-action="save" ${draft.body.trim() ? "" : "disabled"}>${draft.editingId === undefined ? "Add comment" : "Save changes"}</button>
+          ${draft.editingId === undefined ? `<button class="button" data-agent-action data-comment-action="ask" ${draft.body.trim() && !this.actionUnavailable ? "" : "disabled"}>Ask <span aria-hidden="true">✨</span></button>` : ""}
+          <button class="button primary" data-comment-action="save" ${draft.body.trim() && !this.actionUnavailable ? "" : "disabled"}>${draft.editingId === undefined ? "Add comment" : "Save changes"}</button>
         </div>
       </div>`;
 
@@ -1883,8 +1899,8 @@ export class ReviewApp {
       textarea.value = draft.body;
       textarea.addEventListener("input", () => {
         if (this.draft === draft) draft.body = textarea.value;
-        if (saveButton) saveButton.disabled = textarea.value.trim().length === 0;
-        if (askButton) askButton.disabled = textarea.value.trim().length === 0 || this.agentOperation !== undefined;
+        if (saveButton) saveButton.disabled = textarea.value.trim().length === 0 || this.actionUnavailable;
+        if (askButton) askButton.disabled = textarea.value.trim().length === 0 || this.actionUnavailable;
       });
       textarea.addEventListener("keydown", (event) => {
         if ((event.metaKey || event.ctrlKey) && event.key === "Enter") this.saveComment();
@@ -1917,7 +1933,7 @@ export class ReviewApp {
   private askDraftQuestion() {
     const draft = this.draft;
     const page = this.page;
-    if (!draft || draft.editingId !== undefined || !page || this.agentOperation) return;
+    if (!draft || draft.editingId !== undefined || !page || this.actionUnavailable) return;
     if (!draft.body.trim()) {
       this.focusDraft();
       return;
@@ -1948,7 +1964,7 @@ export class ReviewApp {
 
   private askFollowUp(thread: QuestionThread) {
     const page = this.page;
-    if (!page || this.agentOperation) return;
+    if (!page || this.actionUnavailable || thread.turn.kind !== "idle") return;
     const validationError = questionValidationError(thread.messages, thread.draft);
     if (validationError) {
       thread.validationError = validationError;
@@ -1964,7 +1980,7 @@ export class ReviewApp {
 
   private retryThreadQuestion(thread: QuestionThread) {
     const page = this.page;
-    if (!page || this.agentOperation) return;
+    if (!page || this.actionUnavailable || this.questionOperations.has(thread.id)) return;
     const request = ++this.questionRequest;
     const operationId = crypto.randomUUID();
     if (!retryQuestion(thread, request, operationId)) return;
@@ -1977,12 +1993,11 @@ export class ReviewApp {
     operationId: string,
     page: ReviewPage,
   ) {
-    this.agentOperation = {
-      kind: "question",
+    this.questionOperations.set(thread.id, {
       threadId: thread.id,
       request,
       operationId,
-    };
+    });
     this.announceAgent(`Tact is answering a question about ${thread.path}, ${formatRange(thread.startLine, thread.endLine)}.`);
     this.refreshItem(thread.itemId);
     this.syncAgentControls();
@@ -2019,9 +2034,11 @@ export class ReviewApp {
       finishQuestion(thread, request, payload.answer);
       this.announceAgent(`Tact answered the question about ${thread.path}, ${formatRange(thread.startLine, thread.endLine)}.`);
     } catch (error) {
+      this.recordActionError(error);
       if (error instanceof ApiError && error.code === "network_error") {
         reconcileWithServer = true;
         this.announceAgent("Reconnecting to the question…");
+        this.questionsToPoll.add(thread.id);
         this.scheduleQuestionPoll();
         return;
       }
@@ -2040,11 +2057,11 @@ export class ReviewApp {
       }
     } finally {
       if (reconcileWithServer) return;
-      const operation = this.agentOperation;
-      if (operation?.kind === "question"
-        && operation.threadId === thread.id
+      const operation = this.questionOperations.get(thread.id);
+      if (operation
         && operation.request === request) {
-        this.agentOperation = undefined;
+        this.questionOperations.delete(thread.id);
+        this.questionsToPoll.delete(thread.id);
       }
       this.refreshItem(thread.itemId);
       this.syncAgentControls();
@@ -2052,9 +2069,9 @@ export class ReviewApp {
   }
 
   private async stopQuestion(thread: QuestionThread) {
-    const operation = this.agentOperation;
+    const operation = this.questionOperations.get(thread.id);
     const page = this.page;
-    if (!page || operation?.kind !== "question" || operation.threadId !== thread.id) return;
+    if (!page || !operation || operation.threadId !== thread.id) return;
     if (!beginStopping(thread, operation.request)) return;
     this.announceAgent("Stopping the question…");
     this.refreshItem(thread.itemId);
@@ -2114,14 +2131,14 @@ export class ReviewApp {
     if (thread.turn.kind === "error") {
       turn.className = "agent-thread-turn error";
       turn.setAttribute("role", "alert");
-      turn.innerHTML = `<span>${escapeHtml(thread.turn.message)}</span><button class="button" data-agent-action data-thread-retry ${this.agentOperation ? "disabled" : ""}>Try again</button>`;
+      turn.innerHTML = `<span>${escapeHtml(thread.turn.message)}</span><button class="button" data-agent-action data-thread-retry ${this.actionUnavailable ? "disabled" : ""}>Try again</button>`;
       turn.querySelector("[data-thread-retry]")?.addEventListener("click", () => this.retryThreadQuestion(thread));
       return element;
     }
     if (thread.turn.kind === "cancelled") {
       turn.className = "agent-thread-turn cancelled";
       turn.setAttribute("role", "status");
-      turn.innerHTML = `<span>Question cancelled.</span><button class="button" data-agent-action data-thread-retry ${this.agentOperation ? "disabled" : ""}>Ask again</button>`;
+      turn.innerHTML = `<span>Question cancelled.</span><button class="button" data-agent-action data-thread-retry ${this.actionUnavailable ? "disabled" : ""}>Ask again</button>`;
       turn.querySelector("[data-thread-retry]")?.addEventListener("click", () => this.retryThreadQuestion(thread));
       return element;
     }
@@ -2133,7 +2150,7 @@ export class ReviewApp {
     }
     turn.innerHTML = `
       <label for="${inputId}">Ask a follow-up</label>
-      <textarea id="${inputId}" data-thread-input aria-describedby="${contextId} ${linesId} thread-${thread.id}-validation" rows="3" placeholder="Ask about this code" ${this.agentOperation ? "disabled" : ""}></textarea>
+      <textarea id="${inputId}" data-thread-input aria-describedby="${contextId} ${linesId} thread-${thread.id}-validation" rows="3" placeholder="Ask about this code" ${this.actionUnavailable ? "disabled" : ""}></textarea>
       <span id="thread-${thread.id}-validation" class="agent-thread-validation" role="alert" ${thread.validationError ? "" : "hidden"}>${escapeHtml(thread.validationError ?? "")}</span>
       <div><button class="button" data-agent-action data-thread-ask disabled>Ask <span aria-hidden="true">✨</span></button></div>`;
     const textarea = turn.querySelector<HTMLTextAreaElement>("textarea");
@@ -2148,7 +2165,7 @@ export class ReviewApp {
           validation.hidden = true;
           validation.textContent = "";
         }
-        if (ask) ask.disabled = !textarea.value.trim() || this.agentOperation !== undefined;
+        if (ask) ask.disabled = !textarea.value.trim() || this.actionUnavailable;
       });
       textarea.addEventListener("keydown", (event) => {
         if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
@@ -2182,8 +2199,8 @@ export class ReviewApp {
       <header>
         <span>${severityBadge(comment.body)} Lines ${formatRange(comment.start_line, comment.end_line)}</span>
         <div>
-          <button class="small-icon-button" data-comment-edit aria-label="Edit comment">${icon("edit")}</button>
-          <button class="small-icon-button danger" data-comment-delete aria-label="Delete comment">${icon("trash")}</button>
+          <button class="small-icon-button" data-comment-edit aria-label="Edit comment" ${this.actionUnavailable ? "disabled" : ""}>${icon("edit")}</button>
+          <button class="small-icon-button danger" data-comment-delete aria-label="Delete comment" ${this.actionUnavailable ? "disabled" : ""}>${icon("trash")}</button>
         </div>
       </header>
       <div class="comment-markdown"></div>`;
@@ -2260,8 +2277,8 @@ export class ReviewApp {
           <p>${escapeHtml(comment.body)}</p>
         </button>
         <div class="comment-link-actions">
-          <button aria-label="Edit comment" data-edit>${icon("edit")}</button>
-          <button aria-label="Delete comment" data-delete>${icon("trash")}</button>
+          <button aria-label="Edit comment" data-edit ${this.actionUnavailable ? "disabled" : ""}>${icon("edit")}</button>
+          <button aria-label="Delete comment" data-delete ${this.actionUnavailable ? "disabled" : ""}>${icon("trash")}</button>
         </div>`;
       item.querySelector(".comment-jump")?.addEventListener("click", () => {
         this.selectTab("changes");
@@ -2323,13 +2340,19 @@ export class ReviewApp {
     const label = this.root.querySelector<HTMLElement>("#range-label");
     const button = this.root.querySelector<HTMLButtonElement>("#range-button");
     if (label) label.textContent = rangeLabel(this.bootstrap.range_targets, range);
-    if (button) button.disabled = this.loadingRange !== undefined || this.agentOperation !== undefined;
+    if (button) button.disabled = this.loadingRange !== undefined || this.agentBusy;
     const refresh = this.root.querySelector<HTMLButtonElement>("#refresh-notice");
-    if (refresh) refresh.disabled = this.loadingRange !== undefined || this.agentOperation !== undefined || this.refreshing;
+    if (refresh) refresh.disabled = this.loadingRange !== undefined || this.agentBusy || this.refreshing;
   }
 
   private syncAgentControls() {
-    const busy = this.agentOperation !== undefined || this.loadingRange !== undefined || this.refreshing;
+    const busy = this.actionUnavailable;
+    for (const textarea of this.root.querySelectorAll<HTMLTextAreaElement>(".comment-input, [data-overview-instructions]")) {
+      textarea.disabled = busy;
+    }
+    for (const button of this.root.querySelectorAll<HTMLButtonElement>(".inline-comment-editor [data-format], [data-edit], [data-delete]")) {
+      button.disabled = busy;
+    }
     for (const textarea of this.root.querySelectorAll<HTMLTextAreaElement>("[data-thread-input]")) {
       textarea.disabled = busy;
     }
@@ -2341,28 +2364,37 @@ export class ReviewApp {
       const overviewUnchanged = overviewDraft !== undefined
         && this.overviews.get(rangeKey(this.page?.selected_range ?? this.bootstrap.default_range))?.instructions
           === overviewDraft.trim();
-      button.disabled = busy || (button.id === "ai-review" && this.snapshotStale)
+      button.disabled = busy || (button.id === "ai-review" && (this.aiReviewPending || this.snapshotStale))
+        || (button.matches("[data-edit-overview], [data-generate-overview], [data-retry-overview]")
+          && this.loadingOverview !== undefined)
         || (button.matches("[data-generate-overview]")
           && (overviewUnchanged || overviewInstructionError(overviewDraft ?? "") !== undefined))
         || (needsQuestion && !input?.value.trim());
+      button.title = this.turnRunning ? "The agent turn is still running. Review actions become available when it finishes." : "";
     }
+    for (const button of this.root.querySelectorAll<HTMLButtonElement>("[data-comment-action=save], [data-comment-edit], [data-comment-delete]")) {
+      button.disabled = busy || (button.matches("[data-comment-action=save]")
+        && !this.draft?.body.trim());
+    }
+    const summary = this.root.querySelector<HTMLTextAreaElement>("#review-summary");
+    if (summary) summary.disabled = busy;
     this.syncSelectedRange(this.page?.selected_range ?? this.bootstrap.default_range);
-    this.setReviewControlsDisabled(busy);
+    this.setReviewControlsDisabled(busy || this.agentBusy);
   }
 
   private setReviewControlsDisabled(disabled: boolean) {
     const terminalBusy = this.state.terminal.kind === "busy";
-    const agentBusy = this.agentOperation !== undefined;
     for (const button of this.root.querySelectorAll<HTMLButtonElement>("[data-decision]")) {
-      button.disabled = disabled || agentBusy || !this.page || terminalBusy || this.snapshotStale;
-      button.title = this.snapshotStale ? "Refresh before submitting this stale snapshot." : "";
+      button.disabled = disabled || this.agentBusy || !this.page || terminalBusy || this.snapshotStale || this.turnRunning;
+      button.title = this.turnRunning ? "The agent turn is still running. Review actions become available when it finishes."
+        : this.snapshotStale ? "Refresh before submitting this stale snapshot." : "";
     }
     const cancel = this.root.querySelector<HTMLButtonElement>("#cancel-review");
     if (cancel) cancel.disabled = terminalBusy;
   }
 
   private async submit(decision: ReviewDecision["decision"]) {
-    if (!this.page || this.loadingRange || this.agentOperation) return;
+    if (!this.page || this.agentBusy || this.actionUnavailable) return;
     if (this.draft) {
       this.showInlineError("Save or discard the open comment draft before submitting the review.");
       this.focusDraft();
@@ -2375,7 +2407,7 @@ export class ReviewApp {
     const previous = this.state;
     this.state = beginTerminal(previous, "submit");
     if (this.state === previous) return;
-    this.setReviewControlsDisabled(false);
+    this.syncAgentControls();
     this.showTerminalBusy(decision === "approve" ? "Submitting approval…" : "Submitting requested changes…");
     const page = this.page;
     const payload: ReviewDecision = {
@@ -2395,10 +2427,11 @@ export class ReviewApp {
       await this.api.submit(payload);
     } catch (error) {
       const code = error instanceof ApiError ? error.code : "unknown";
+      this.recordActionError(error);
       if (["stale_snapshot", "workspace_changed"].includes(code)) this.snapshotStale = true;
       this.state = failTerminal(this.state, "submit", code, errorMessage(error));
       this.showInlineError(errorMessage(error), () => void this.submit(decision));
-      this.setReviewControlsDisabled(false);
+      this.syncAgentControls();
       return;
     }
     this.state = finishTerminal(this.state, "submit");
@@ -2416,7 +2449,7 @@ export class ReviewApp {
     const previous = this.state;
     this.state = beginTerminal(previous, "cancel");
     if (this.state === previous) return;
-    this.setReviewControlsDisabled(false);
+    this.syncAgentControls();
     this.showTerminalBusy("Cancelling review…");
     try {
       await this.api.cancel(this.bootstrap.generation);
@@ -2424,7 +2457,7 @@ export class ReviewApp {
       const code = error instanceof ApiError ? error.code : "unknown";
       this.state = failTerminal(this.state, "cancel", code, errorMessage(error));
       this.showInlineError(errorMessage(error), () => void this.cancel());
-      this.setReviewControlsDisabled(false);
+      this.syncAgentControls();
       return;
     }
     this.state = finishTerminal(this.state, "cancel");

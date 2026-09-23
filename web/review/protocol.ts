@@ -1,6 +1,6 @@
 import type { ReviewRange, ReviewTarget } from "./range-selection";
 
-export const REVIEW_PROTOCOL_VERSION = 6;
+export const REVIEW_PROTOCOL_VERSION = 7;
 
 export type ReviewComment = {
   id: number;
@@ -32,11 +32,13 @@ export type ReviewSession = {
   page: ReviewPage;
   overview: StoredOverview | null;
   questions: StoredQuestionThread[];
+  turn_running: boolean;
 };
 
 export type ReviewStatus = {
   generation: number;
   changed: boolean;
+  turn_running: boolean;
 };
 
 export type OverviewResponse = {
@@ -124,6 +126,7 @@ export type ReviewErrorCode =
   | "question_failed"
   | "invalid_thread"
   | "agent_busy"
+  | "turn_running"
   | "operation_cancelled"
   | "session_cancelled"
   | "invalid_comment_anchor"

@@ -45,6 +45,7 @@ pub(super) enum ActionsEvent {
 
 pub(super) struct ActionAvailability {
     pub(super) new_session: bool,
+    pub(super) review: bool,
     pub(super) fork: bool,
     pub(super) fast_mode: bool,
     pub(super) memory: bool,
@@ -283,7 +284,8 @@ impl ActionsMenu {
 
     const fn is_enabled(&self, action: Action) -> bool {
         match action {
-            Action::Handoff | Action::Review | Action::Reflection => self.availability.new_session,
+            Action::Handoff | Action::Reflection => self.availability.new_session,
+            Action::Review => self.availability.review,
             Action::Subagents => true,
             Action::Effort => true,
             Action::Model => self.availability.model,
@@ -310,9 +312,7 @@ impl ActionsMenu {
                 "Resume session · finish active work first"
             }
             Action::Fork if !self.availability.fork => "Fork session · one fork at a time",
-            Action::Review if !self.availability.new_session => {
-                "Review changes · finish active work first"
-            }
+            Action::Review if !self.availability.review => "Review changes · close the open review",
             Action::Handoff if !self.availability.new_session => {
                 "Prepare handoff · finish active work first"
             }
@@ -464,6 +464,7 @@ mod tests {
     fn available() -> ActionAvailability {
         ActionAvailability {
             new_session: true,
+            review: true,
             fork: true,
             fast_mode: false,
             memory: true,
@@ -484,6 +485,21 @@ mod tests {
         (x..x + width)
             .map(|column| buffer[(column, y)].symbol())
             .collect()
+    }
+
+    #[test]
+    fn review_remains_enabled_while_a_turn_runs() {
+        let mut availability = available();
+        availability.new_session = false;
+        let mut menu = ActionsMenu::new(availability);
+        assert_eq!(menu.display_label(Action::Review), "Review changes");
+        for character in "review".chars() {
+            menu.update(key(KeyCode::Char(character)));
+        }
+        assert_eq!(
+            menu.update(key(KeyCode::Enter)).effects,
+            [ActionsEffect::Trigger(Action::Review)]
+        );
     }
 
     #[test]

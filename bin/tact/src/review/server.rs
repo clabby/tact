@@ -10,7 +10,10 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, VecDeque},
     net::SocketAddr,
-    sync::{Arc, Mutex as StdMutex},
+    sync::{
+        Arc, Mutex as StdMutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 use tokio::{
     net::TcpListener,
@@ -27,7 +30,7 @@ const MAX_OPERATION_ID_BYTES: usize = 128;
 const MAX_THREAD_MESSAGES: usize = 64;
 const MAX_THREAD_BYTES: usize = 256 * 1024;
 const MAX_QUESTION_THREADS: usize = 256;
-pub(super) const PROTOCOL_VERSION: u32 = 6;
+pub(super) const PROTOCOL_VERSION: u32 = 7;
 const MAX_CACHED_PAGES: usize = 8;
 const MAX_CACHED_PAGE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_CACHED_OVERVIEWS: usize = 8;
@@ -226,6 +229,7 @@ struct QuestionListResponse {
 struct ReviewStatus {
     generation: u64,
     changed: bool,
+    turn_running: bool,
 }
 
 #[derive(Serialize)]
@@ -235,6 +239,7 @@ struct RefreshResponse {
     page: ReviewPage,
     overview: Option<StoredOverview>,
     questions: Vec<StoredQuestion>,
+    turn_running: bool,
 }
 
 #[derive(Serialize)]
@@ -258,7 +263,7 @@ enum ErrorCode {
     AiReviewFailed,
     QuestionFailed,
     InvalidThread,
-    AgentBusy,
+    TurnRunning,
     OperationCancelled,
     SessionCancelled,
     InvalidCommentAnchor,
@@ -311,16 +316,15 @@ struct ServerState {
     assets: super::ReviewAssets,
     session: Mutex<ReviewSession>,
     backend: Arc<super::ReviewBackend>,
+    turn_active: Arc<AtomicBool>,
     overview_operations: OverviewOperations,
-    agent_operation: Arc<Mutex<()>>,
-    active_question: StdMutex<Option<ActiveQuestion>>,
+    active_questions: StdMutex<HashMap<String, ActiveQuestion>>,
     refresh_generation: Mutex<()>,
     session_shutdown: CancellationToken,
     outcome: Mutex<Option<oneshot::Sender<ReviewOutcome>>>,
 }
 
 struct ActiveQuestion {
-    operation_id: String,
     generation: u64,
     range: super::diff::ReviewRange,
     cancellation: CancellationToken,
@@ -335,15 +339,10 @@ struct ActiveQuestionRegistration {
 impl Drop for ActiveQuestionRegistration {
     fn drop(&mut self) {
         self.cancellation.cancel();
-        let Ok(mut active) = self.state.active_question.lock() else {
+        let Ok(mut active) = self.state.active_questions.lock() else {
             return;
         };
-        if active
-            .as_ref()
-            .is_some_and(|question| question.operation_id == self.operation_id)
-        {
-            *active = None;
-        }
+        active.remove(&self.operation_id);
     }
 }
 
@@ -516,6 +515,7 @@ impl ReviewServer {
         backend: Arc<super::ReviewBackend>,
         token: String,
         assets: super::ReviewAssets,
+        turn_active: Arc<AtomicBool>,
     ) -> Result<Self, std::io::Error> {
         crate::install_tls_provider();
         let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
@@ -526,9 +526,9 @@ impl ReviewServer {
             assets,
             session: Mutex::new(ReviewSession::new(review, session_shutdown.clone())),
             backend,
+            turn_active,
             overview_operations: Mutex::new(HashMap::new()),
-            agent_operation: Arc::new(Mutex::new(())),
-            active_question: StdMutex::new(None),
+            active_questions: StdMutex::new(HashMap::new()),
             refresh_generation: Mutex::new(()),
             session_shutdown: session_shutdown.clone(),
             outcome: Mutex::new(Some(outcome_tx)),
@@ -631,6 +631,7 @@ async fn review(State(state): State<Arc<ServerState>>) -> impl IntoResponse {
             page: session.selected_page.clone(),
             overview: session.selected_overview(),
             questions: session.questions.clone(),
+            turn_running: state.turn_active.load(Ordering::Acquire),
         },
     )
 }
@@ -674,6 +675,7 @@ async fn review_status(State(state): State<Arc<ServerState>>) -> Response<Body> 
         ReviewStatus {
             generation,
             changed: current != version,
+            turn_running: state.turn_active.load(Ordering::Acquire),
         },
     )
 }
@@ -692,7 +694,7 @@ async fn refresh_review(
     };
     let review = match state
         .backend
-        .prepare(shutdown)
+        .prepare_while_active(shutdown, &state.turn_active)
         .await
         .map_err(super::scope_load_error)
     {
@@ -733,6 +735,7 @@ async fn refresh_review(
             page,
             overview: session.selected_overview(),
             questions: session.questions.clone(),
+            turn_running: state.turn_active.load(Ordering::Acquire),
         },
     )
 }
@@ -842,6 +845,9 @@ async fn load_overview(
     State(state): State<Arc<ServerState>>,
     Json(mut request): Json<OverviewRequest>,
 ) -> Response<Body> {
+    if state.turn_active.load(Ordering::Acquire) {
+        return turn_running();
+    }
     request.instructions = request
         .instructions
         .map(|value| value.trim().to_owned())
@@ -865,21 +871,44 @@ async fn load_overview(
         request.range,
         request.instructions.clone(),
     );
-    let operation = {
+    let (operation, joined) = {
         let mut operations = state.overview_operations.lock().await;
-        Arc::clone(
-            operations
-                .entry(overview_key.clone())
-                .or_insert_with(|| Arc::new(OverviewOperation::new())),
-        )
+        match operations.entry(overview_key.clone()) {
+            std::collections::hash_map::Entry::Occupied(entry) => (Arc::clone(entry.get()), true),
+            std::collections::hash_map::Entry::Vacant(entry) => (
+                Arc::clone(entry.insert(Arc::new(OverviewOperation::new()))),
+                false,
+            ),
+        }
     };
+    if joined {
+        let mut session = state.session.lock().await;
+        if state.turn_active.load(Ordering::Acquire) {
+            return turn_running();
+        }
+        if matching_page(&session, request.generation, &request.range).is_none() {
+            return stale_snapshot("the requested review snapshot is stale");
+        }
+        session.selected_overview_key = Some(cache_key.clone());
+        session.active_overview = Some(overview_key.clone());
+    }
     let operation_gate = Arc::clone(&operation.gate).lock_owned().await;
     if let Some(result) = operation.result.lock().await.clone() {
+        let mut session = state.session.lock().await;
+        if session.active_overview.as_ref() == Some(&overview_key) {
+            session.active_overview = None;
+        }
+        drop(session);
         state.overview_operations.lock().await.remove(&overview_key);
         return overview_response(overview_key, result);
     }
     let (page, version, shutdown) = {
         let mut session = state.session.lock().await;
+        if state.turn_active.load(Ordering::Acquire) {
+            drop(session);
+            discard_idle_overview_operation(&state, &overview_key, &operation).await;
+            return turn_running();
+        }
         let Some(page) = matching_page(&session, request.generation, &request.range).cloned()
         else {
             drop(session);
@@ -906,10 +935,6 @@ async fn load_overview(
             session.generation_shutdown.clone(),
         )
     };
-    let Ok(agent_operation) = Arc::clone(&state.agent_operation).try_lock_owned() else {
-        discard_idle_overview_operation(&state, &overview_key, &operation).await;
-        return agent_busy();
-    };
     {
         let mut session = state.session.lock().await;
         if matching_page(&session, request.generation, &request.range).is_none() {
@@ -925,7 +950,6 @@ async fn load_overview(
     let task_state = Arc::clone(&state);
     tokio::spawn(async move {
         let _operation_gate = operation_gate;
-        let _agent_operation = agent_operation;
         let result = run_overview(
             &task_state,
             &page,
@@ -1035,6 +1059,11 @@ async fn store_overview_result(
     if session.active_overview.as_ref() == Some(overview_key) {
         session.active_overview = None;
     }
+    if state.turn_active.load(Ordering::Acquire) {
+        return OverviewRunResult::Stale(
+            "the agent started another turn during overview generation",
+        );
+    }
     if matching_page(&session, overview_key.0, &overview_key.1).is_none() {
         return OverviewRunResult::Stale("the review changed while its overview was loading");
     }
@@ -1091,6 +1120,9 @@ async fn run_ai_review(
     State(state): State<Arc<ServerState>>,
     Json(request): Json<RangeRequest>,
 ) -> Response<Body> {
+    if state.turn_active.load(Ordering::Acquire) {
+        return turn_running();
+    }
     let (page, version, shutdown) = {
         let session = state.session.lock().await;
         let Some(page) = matching_page(&session, request.generation, &request.range) else {
@@ -1101,9 +1133,6 @@ async fn run_ai_review(
             session.version.clone(),
             session.generation_shutdown.clone(),
         )
-    };
-    let Ok(_agent_operation) = Arc::clone(&state.agent_operation).try_lock_owned() else {
-        return agent_busy();
     };
     let current = match state.backend.current_version(shutdown.clone()).await {
         Ok(current) => current,
@@ -1144,6 +1173,9 @@ async fn run_ai_review(
         return stale_snapshot("the workspace changed during AI review");
     }
     let session = state.session.lock().await;
+    if state.turn_active.load(Ordering::Acquire) {
+        return turn_running();
+    }
     if matching_page(&session, request.generation, &request.range).is_none() {
         return stale_snapshot("the review changed during AI review");
     }
@@ -1203,6 +1235,9 @@ async fn ask_question(
     State(state): State<Arc<ServerState>>,
     Json(request): Json<QuestionRequest>,
 ) -> Response<Body> {
+    if state.turn_active.load(Ordering::Acquire) {
+        return turn_running();
+    }
     if invalid_question(&request) {
         return invalid_thread("the question thread is invalid");
     }
@@ -1226,32 +1261,34 @@ async fn ask_question(
             session.generation_shutdown.clone(),
         )
     };
-    let Ok(agent_operation) = Arc::clone(&state.agent_operation).try_lock_owned() else {
-        return agent_busy();
-    };
-    {
+    let operation_shutdown = {
         let mut session = state.session.lock().await;
+        if state.turn_active.load(Ordering::Acquire) {
+            return turn_running();
+        }
+        let Ok(mut active) = state.active_questions.lock() else {
+            return internal_error("the active question state is unavailable");
+        };
+        if active.contains_key(&request.operation_id) {
+            return invalid_thread("the question operation identifier is already in use");
+        }
         if !begin_stored_question(&mut session, &request) {
             return invalid_thread("the question does not continue its stored thread");
         }
-    }
-
-    let operation_shutdown = shutdown.child_token();
-    {
-        let Ok(mut active) = state.active_question.lock() else {
-            return internal_error("the active question state is unavailable");
-        };
-        *active = Some(ActiveQuestion {
-            operation_id: request.operation_id.clone(),
-            generation: request.generation,
-            range: request.range,
-            cancellation: operation_shutdown.clone(),
-        });
-    }
+        let cancellation = shutdown.child_token();
+        active.insert(
+            request.operation_id.clone(),
+            ActiveQuestion {
+                generation: request.generation,
+                range: request.range,
+                cancellation: cancellation.clone(),
+            },
+        );
+        cancellation
+    };
     let (completion, response) = oneshot::channel();
     let task_state = Arc::clone(&state);
     tokio::spawn(async move {
-        let _agent_operation = agent_operation;
         let completion_shutdown = operation_shutdown.clone();
         let _registration = ActiveQuestionRegistration {
             state: Arc::clone(&task_state),
@@ -1260,10 +1297,10 @@ async fn ask_question(
         };
         let mut result =
             run_question(&task_state, &request, &page, version, operation_shutdown).await;
-        if completion_shutdown.is_cancelled() {
+        if completion_shutdown.is_cancelled() || task_state.turn_active.load(Ordering::Acquire) {
             result = QuestionRunResult::Cancelled;
         }
-        store_question_result(&task_state, &request, &result).await;
+        store_question_result(&task_state, &request, &mut result).await;
         let _ = completion.send(question_response(&request, result));
     });
 
@@ -1344,9 +1381,12 @@ async fn run_question(
 async fn store_question_result(
     state: &ServerState,
     request: &QuestionRequest,
-    result: &QuestionRunResult,
+    result: &mut QuestionRunResult,
 ) {
     let mut session = state.session.lock().await;
+    if state.turn_active.load(Ordering::Acquire) {
+        *result = QuestionRunResult::Cancelled;
+    }
     let Some(thread) = session.questions.iter_mut().find(|thread| {
         thread.thread_id == request.thread_id
             && thread.operation_id == request.operation_id
@@ -1421,11 +1461,10 @@ async fn cancel_question(
             true,
         );
     }
-    let Ok(active) = state.active_question.lock() else {
+    let Ok(active) = state.active_questions.lock() else {
         return internal_error("the active question state is unavailable");
     };
-    if let Some(question) = active.as_ref()
-        && question.operation_id == request.operation_id
+    if let Some(question) = active.get(&request.operation_id)
         && question.generation == request.generation
         && question.range == request.range
     {
@@ -1438,6 +1477,9 @@ async fn submit(
     State(state): State<Arc<ServerState>>,
     Json(mut decision): Json<ReviewDecision>,
 ) -> impl IntoResponse {
+    if state.turn_active.load(Ordering::Acquire) {
+        return turn_running();
+    }
     if invalid_decision(&decision) {
         return error_response(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -1497,6 +1539,9 @@ async fn submit(
         return stale_snapshot("the workspace changed after this snapshot was captured");
     }
     let session = state.session.lock().await;
+    if state.turn_active.load(Ordering::Acquire) {
+        return turn_running();
+    }
     if matching_page(&session, decision.generation, &decision.range).is_none() {
         return stale_snapshot("the review changed while submission was validated");
     }
@@ -1675,11 +1720,11 @@ fn invalid_operation_id(operation_id: &str) -> bool {
         || !operation_id.is_ascii()
 }
 
-fn agent_busy() -> Response<Body> {
+fn turn_running() -> Response<Body> {
     error_response(
         StatusCode::CONFLICT,
-        ErrorCode::AgentBusy,
-        "another review agent operation is already running",
+        ErrorCode::TurnRunning,
+        "The agent turn is still running. Review actions are available when it finishes.",
         true,
         true,
     )
@@ -2281,7 +2326,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn busy_overview_requests_with_distinct_instructions_leave_no_operations() {
+    async fn overviews_with_distinct_instructions_complete_concurrently() {
         let assets = tempfile::tempdir().unwrap();
         for name in ["index.html", "app.js", "app.css"] {
             std::fs::write(assets.path().join(name), "").unwrap();
@@ -2305,21 +2350,119 @@ mod tests {
         let url = server.endpoint_url("api/overview");
         let first = tokio::spawn(request_overview(url.clone(), uncommitted_range()));
         started.notified().await;
-        for index in 0..12 {
-            let response = reqwest::Client::new()
-                .post(&url)
+        let second = tokio::spawn(async move {
+            reqwest::Client::new()
+                .post(url)
                 .json(
                     &serde_json::json!({"generation": 0, "range": uncommitted_range(),
-                    "instructions": format!("Focus {index}")}),
+                    "instructions": "Focus on safety"}),
                 )
                 .send()
                 .await
-                .unwrap();
-            assert_eq!(response.status(), reqwest::StatusCode::CONFLICT);
-            assert_eq!(server.state.overview_operations.lock().await.len(), 1);
-        }
-        release.notify_one();
+                .unwrap()
+                .status()
+        });
+        tokio::time::timeout(Duration::from_secs(5), started.notified())
+            .await
+            .expect("second overview should start while the first is running");
+        assert_eq!(server.state.overview_operations.lock().await.len(), 2);
+        release.notify_waiters();
+        assert_eq!(second.await.unwrap(), reqwest::StatusCode::OK);
         assert_eq!(first.await.unwrap(), reqwest::StatusCode::OK);
+        assert!(server.state.overview_operations.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn joining_an_overview_selects_it_while_another_overview_is_running() {
+        let assets = tempfile::tempdir().unwrap();
+        for name in ["index.html", "app.js", "app.css"] {
+            std::fs::write(assets.path().join(name), "").unwrap();
+        }
+        let started_a = Arc::new(Notify::new());
+        let started_b = Arc::new(Notify::new());
+        let release_a = Arc::new(Notify::new());
+        let release_b = Arc::new(Notify::new());
+        let generator: ReviewAgent = Arc::new({
+            let started_a = Arc::clone(&started_a);
+            let started_b = Arc::clone(&started_b);
+            let release_a = Arc::clone(&release_a);
+            let release_b = Arc::clone(&release_b);
+            move |prompt, _| {
+                let started_a = Arc::clone(&started_a);
+                let started_b = Arc::clone(&started_b);
+                let release_a = Arc::clone(&release_a);
+                let release_b = Arc::clone(&release_b);
+                Box::pin(async move {
+                    if prompt.contains("Focus on B") {
+                        started_b.notify_one();
+                        release_b.notified().await;
+                        Ok("<p>B</p>".to_owned())
+                    } else {
+                        started_a.notify_one();
+                        release_a.notified().await;
+                        Ok("<p>A</p>".to_owned())
+                    }
+                })
+            }
+        });
+        let server = start_server_with_generator(&assets, generator).await;
+        let url = server.endpoint_url("api/overview");
+        let a = tokio::spawn(request_overview(url.clone(), uncommitted_range()));
+        started_a.notified().await;
+        let b = tokio::spawn({
+            let url = url.clone();
+            async move {
+                reqwest::Client::new()
+                    .post(url)
+                    .json(
+                        &serde_json::json!({"generation": 0, "range": uncommitted_range(),
+                    "instructions": "Focus on B"}),
+                    )
+                    .send()
+                    .await
+                    .unwrap()
+                    .status()
+            }
+        });
+        started_b.notified().await;
+        let joined_a = tokio::spawn(request_overview(url, uncommitted_range()));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let review = reqwest::get(server.endpoint_url("api/review"))
+                    .await
+                    .unwrap()
+                    .json::<serde_json::Value>()
+                    .await
+                    .unwrap();
+                if review["overview"]["status"] == "generating"
+                    && review["overview"]["instructions"].is_null()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("joining A should select its generating overview");
+        release_a.notify_one();
+        assert_eq!(a.await.unwrap(), reqwest::StatusCode::OK);
+        assert_eq!(joined_a.await.unwrap(), reqwest::StatusCode::OK);
+        let review = reqwest::get(server.endpoint_url("api/review"))
+            .await
+            .unwrap()
+            .json::<serde_json::Value>()
+            .await
+            .unwrap();
+        assert_eq!(review["overview"]["overview_mdx"], "<p>A</p>");
+        release_b.notify_one();
+        assert_eq!(b.await.unwrap(), reqwest::StatusCode::OK);
+        let review = reqwest::get(server.endpoint_url("api/review"))
+            .await
+            .unwrap()
+            .json::<serde_json::Value>()
+            .await
+            .unwrap();
+        assert_eq!(review["overview"]["overview_mdx"], "<p>A</p>");
     }
 
     #[tokio::test]
@@ -2434,7 +2577,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn overview_and_question_agent_operations_are_mutually_exclusive() {
+    async fn overview_and_question_agent_operations_complete_concurrently() {
         let assets = tempfile::tempdir().unwrap();
         for name in ["index.html", "app.js", "app.css"] {
             std::fs::write(assets.path().join(name), "").unwrap();
@@ -2452,6 +2595,8 @@ mod tests {
                     release.notified().await;
                     if prompt.contains("concise MDX explainer") {
                         Ok("<p>Overview</p>".to_owned())
+                    } else if prompt.contains("Return only a JSON object") {
+                        Ok("{\"comments\":[]}".to_owned())
                     } else {
                         Ok("Answer".to_owned())
                     }
@@ -2466,30 +2611,69 @@ mod tests {
         });
         started.notified().await;
 
-        let busy = client
-            .post(server.endpoint_url("api/question"))
-            .json(&question_request())
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(busy.status(), reqwest::StatusCode::CONFLICT);
-        assert_eq!(
-            busy.json::<serde_json::Value>().await.unwrap()["code"],
-            "agent_busy"
-        );
-        release.notify_one();
-        assert_eq!(overview.await.unwrap(), reqwest::StatusCode::OK);
-
-        let range = working_tree_range();
-        let loaded = client
-            .post(server.endpoint_url("api/range"))
-            .json(&range_request(range))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(loaded.status(), reqwest::StatusCode::OK);
         let question = tokio::spawn({
             let url = server.endpoint_url("api/question");
+            async move {
+                client
+                    .post(url)
+                    .json(&question_request())
+                    .send()
+                    .await
+                    .unwrap()
+                    .status()
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(5), started.notified())
+            .await
+            .expect("question should start during overview generation");
+        let ai_review = tokio::spawn({
+            let url = server.endpoint_url("api/ai-review");
+            async move {
+                reqwest::Client::new()
+                    .post(url)
+                    .json(&snapshot_request(uncommitted_range()))
+                    .send()
+                    .await
+                    .unwrap()
+                    .status()
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(5), started.notified())
+            .await
+            .expect("AI review should start during overview and question generation");
+        release.notify_waiters();
+        assert_eq!(ai_review.await.unwrap(), reqwest::StatusCode::OK);
+        assert_eq!(question.await.unwrap(), reqwest::StatusCode::OK);
+        assert_eq!(overview.await.unwrap(), reqwest::StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn independent_questions_cancel_by_operation_id() {
+        let assets = tempfile::tempdir().unwrap();
+        for name in ["index.html", "app.js", "app.css"] {
+            std::fs::write(assets.path().join(name), "").unwrap();
+        }
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let generator: ReviewAgent = Arc::new({
+            let started = Arc::clone(&started);
+            let release = Arc::clone(&release);
+            move |_prompt, shutdown| {
+                let started = Arc::clone(&started);
+                let release = Arc::clone(&release);
+                Box::pin(async move {
+                    started.notify_one();
+                    tokio::select! {
+                        () = shutdown.cancelled() => Err(ReviewAgentError::Cancelled),
+                        () = release.notified() => Ok("Answer".to_owned()),
+                    }
+                })
+            }
+        });
+        let server = start_server_with_generator(&assets, generator).await;
+        let url = server.endpoint_url("api/question");
+        let first = tokio::spawn({
+            let url = url.clone();
             async move {
                 reqwest::Client::new()
                     .post(url)
@@ -2501,17 +2685,149 @@ mod tests {
             }
         });
         started.notified().await;
-
+        let mut second_request = question_request();
+        second_request["thread_id"] = "thread-2".into();
+        second_request["operation_id"] = "question-2".into();
+        let second = tokio::spawn({
+            let url = url.clone();
+            let request = second_request.clone();
+            async move {
+                reqwest::Client::new()
+                    .post(url)
+                    .json(&request)
+                    .send()
+                    .await
+                    .unwrap()
+                    .status()
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(5), started.notified())
+            .await
+            .expect("second question should run concurrently");
+        let duplicate = reqwest::Client::new()
+            .post(url)
+            .json(&second_request)
+            .send()
+            .await
+            .unwrap();
         assert_eq!(
-            request_overview(server.endpoint_url("api/overview"), range).await,
-            reqwest::StatusCode::CONFLICT
+            duplicate.status(),
+            reqwest::StatusCode::UNPROCESSABLE_ENTITY
         );
+        let cancelled = reqwest::Client::new().post(server.endpoint_url("api/question/cancel"))
+            .json(&serde_json::json!({"operation_id": "question-1", "generation": 0, "range": uncommitted_range()}))
+            .send().await.unwrap();
+        assert_eq!(cancelled.status(), reqwest::StatusCode::NO_CONTENT);
+        assert_eq!(first.await.unwrap(), reqwest::StatusCode::CONFLICT);
         release.notify_one();
-        assert_eq!(question.await.unwrap(), reqwest::StatusCode::OK);
+        assert_eq!(second.await.unwrap(), reqwest::StatusCode::OK);
     }
 
     #[tokio::test]
-    async fn cancelling_a_question_releases_the_agent_operation() {
+    async fn active_turn_blocks_review_actions_and_is_exposed_in_status() {
+        let assets = tempfile::tempdir().unwrap();
+        for name in ["index.html", "app.js", "app.css"] {
+            std::fs::write(assets.path().join(name), "").unwrap();
+        }
+        let server = start_server(&assets).await;
+        server.state.turn_active.store(true, Ordering::Release);
+        let client = reqwest::Client::new();
+        let review = client
+            .get(server.endpoint_url("api/review"))
+            .send()
+            .await
+            .unwrap()
+            .json::<serde_json::Value>()
+            .await
+            .unwrap();
+        assert_eq!(review["turn_running"], true);
+        let status = client
+            .get(server.endpoint_url("api/status"))
+            .send()
+            .await
+            .unwrap()
+            .json::<serde_json::Value>()
+            .await
+            .unwrap();
+        assert_eq!(status["turn_running"], true);
+        for (route, request) in [
+            ("api/overview", snapshot_request(uncommitted_range())),
+            ("api/ai-review", snapshot_request(uncommitted_range())),
+            ("api/question", question_request()),
+            ("api/decision", decision_request(0, vec![])),
+        ] {
+            let response = client
+                .post(server.endpoint_url(route))
+                .json(&request)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), reqwest::StatusCode::CONFLICT, "{route}");
+            assert_eq!(
+                response.json::<serde_json::Value>().await.unwrap()["code"],
+                "turn_running"
+            );
+        }
+        server.state.turn_active.store(false, Ordering::Release);
+        assert_eq!(
+            request_overview(server.endpoint_url("api/overview"), uncommitted_range()).await,
+            reqwest::StatusCode::OK
+        );
+        server.state.turn_active.store(true, Ordering::Release);
+        let refresh = client
+            .post(server.endpoint_url("api/refresh"))
+            .json(&serde_json::json!({"generation": 0}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(refresh.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            refresh.json::<serde_json::Value>().await.unwrap()["turn_running"],
+            true
+        );
+    }
+
+    #[tokio::test]
+    async fn turn_start_discards_an_overview_that_was_already_generating() {
+        let assets = tempfile::tempdir().unwrap();
+        for name in ["index.html", "app.js", "app.css"] {
+            std::fs::write(assets.path().join(name), "").unwrap();
+        }
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let generator: ReviewAgent = Arc::new({
+            let started = Arc::clone(&started);
+            let release = Arc::clone(&release);
+            move |_, _| {
+                let started = Arc::clone(&started);
+                let release = Arc::clone(&release);
+                Box::pin(async move {
+                    started.notify_one();
+                    release.notified().await;
+                    Ok("<p>outdated</p>".to_owned())
+                })
+            }
+        });
+        let server = start_server_with_generator(&assets, generator).await;
+        let overview = tokio::spawn(request_overview(
+            server.endpoint_url("api/overview"),
+            uncommitted_range(),
+        ));
+        started.notified().await;
+        server.state.turn_active.store(true, Ordering::Release);
+        release.notify_one();
+        assert_eq!(overview.await.unwrap(), reqwest::StatusCode::CONFLICT);
+        let review = reqwest::get(server.endpoint_url("api/review"))
+            .await
+            .unwrap()
+            .json::<serde_json::Value>()
+            .await
+            .unwrap();
+        assert!(review["overview"].is_null());
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_question_allows_an_overview_to_start() {
         let assets = tempfile::tempdir().unwrap();
         for name in ["index.html", "app.js", "app.css"] {
             std::fs::write(assets.path().join(name), "").unwrap();
@@ -2624,12 +2940,15 @@ mod tests {
         request.abort();
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(!cancelled.load(Ordering::SeqCst));
-        assert_eq!(
-            request_overview(server.endpoint_url("api/overview"), uncommitted_range()).await,
-            reqwest::StatusCode::CONFLICT
-        );
-
-        release.notify_one();
+        let overview = tokio::spawn(request_overview(
+            server.endpoint_url("api/overview"),
+            uncommitted_range(),
+        ));
+        tokio::time::timeout(Duration::from_secs(5), started.notified())
+            .await
+            .expect("overview should run while the question is in progress");
+        release.notify_waiters();
+        assert_eq!(overview.await.unwrap(), reqwest::StatusCode::OK);
         let completed = tokio::time::timeout(Duration::from_secs(2), async {
             loop {
                 let review = reqwest::get(server.endpoint_url("api/review"))
@@ -3305,6 +3624,7 @@ mod tests {
             backend,
             "test-token".to_owned(),
             crate::review::ReviewAssets::for_test(assets.path().to_owned()),
+            Arc::new(AtomicBool::new(false)),
         )
         .await
         .unwrap()

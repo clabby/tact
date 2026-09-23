@@ -148,7 +148,7 @@ async function responseError(response: Response): Promise<ApiError> {
 function isErrorCode(value: string | undefined): value is ReviewErrorCode {
   return [
     "stale_snapshot", "invalid_range", "workspace_changed", "overview_failed", "invalid_overview_instructions", "ai_review_failed",
-    "question_failed", "invalid_thread", "agent_busy", "operation_cancelled",
+    "question_failed", "invalid_thread", "agent_busy", "turn_running", "operation_cancelled",
     "session_cancelled", "invalid_comment_anchor",
   ].includes(value ?? "");
 }

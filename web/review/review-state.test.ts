@@ -14,7 +14,8 @@ import {
 
 const firstPage = page(3, { from: 0, to: 2 });
 const session: ReviewSession = {
-  protocol_version: 6,
+  protocol_version: 7,
+  turn_running: false,
   generation: 3,
   title: "Review",
   repository: "tact",

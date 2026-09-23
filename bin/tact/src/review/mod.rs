@@ -15,7 +15,7 @@ use server::{
 use sha2::{Digest, Sha256};
 use std::{
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, atomic::AtomicBool},
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio_util::sync::CancellationToken;
@@ -55,6 +55,7 @@ impl ReviewService {
         review_agent: ReviewAgent,
         workspace: &Path,
         assets: ReviewAssets,
+        turn_active: Arc<AtomicBool>,
     ) -> Result<ReviewHandle, ReviewError> {
         let preparation_shutdown = CancellationToken::new();
         let _cancel_preparation_on_drop = CancelOnDrop(preparation_shutdown.clone());
@@ -64,10 +65,12 @@ impl ReviewService {
             #[cfg(test)]
             current_version_error: None,
         });
-        let prepared = backend.prepare(preparation_shutdown).await?;
+        let prepared = backend
+            .prepare_while_active(preparation_shutdown, &turn_active)
+            .await?;
         let repository = prepared.bootstrap.repository.clone();
         let token = review_token(&repository, SystemTime::now());
-        let server = ReviewServer::start(prepared, backend, token, assets).await?;
+        let server = ReviewServer::start(prepared, backend, token, assets, turn_active).await?;
         Ok(ReviewHandle { server })
     }
 }
@@ -101,7 +104,24 @@ impl Drop for CancelOnDrop {
 }
 
 impl ReviewBackend {
+    #[cfg(test)]
     async fn prepare(&self, shutdown: CancellationToken) -> Result<PreparedReview, ReviewError> {
+        self.prepare_with_turn(shutdown, None).await
+    }
+
+    async fn prepare_while_active(
+        &self,
+        shutdown: CancellationToken,
+        turn_active: &AtomicBool,
+    ) -> Result<PreparedReview, ReviewError> {
+        self.prepare_with_turn(shutdown, Some(turn_active)).await
+    }
+
+    async fn prepare_with_turn(
+        &self,
+        shutdown: CancellationToken,
+        turn_active: Option<&AtomicBool>,
+    ) -> Result<PreparedReview, ReviewError> {
         for _ in 0..MAX_PREPARATION_ATTEMPTS {
             let context = tokio::select! {
                 result = diff::load(&self.workspace) => result?,
@@ -112,6 +132,8 @@ impl ReviewBackend {
                 .prepare_page(context.clone(), default_range, shutdown.clone())
                 .await?;
             let version = context.version();
+            // A live turn may change the workspace between a stable patch read and validation.
+            // The server detects later changes and offers a fresh snapshot.
             if self
                 .current_version(shutdown.clone())
                 .await
@@ -120,6 +142,8 @@ impl ReviewBackend {
                     ScopeLoadError::Failed(error) => ReviewError::WorkspaceValidation(error),
                 })?
                 != version
+                && !turn_active
+                    .is_some_and(|active| active.load(std::sync::atomic::Ordering::Acquire))
             {
                 continue;
             }

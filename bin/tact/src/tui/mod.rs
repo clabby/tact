@@ -605,6 +605,7 @@ pub(crate) async fn run(
     let mut session_list_task = None::<SessionListTask>;
     let mut handoff_controller = HandoffController::new();
     let mut review_controller = ReviewController::new();
+    let review_turn_active = Arc::new(AtomicBool::new(false));
     let (auxiliary_sender, mut auxiliary_jobs) = mpsc::unbounded_channel();
     let (review_ready_sender, mut review_ready_updates) = mpsc::unbounded_channel();
     let mut resume_session_task = None::<ResumeSessionTask>;
@@ -643,6 +644,7 @@ pub(crate) async fn run(
                     recent_prompt_request: &mut recent_prompt_request,
                     handoff_controller: &mut handoff_controller,
                     review_controller: &mut review_controller,
+                    review_turn_active: &review_turn_active,
                     auxiliary_sender: &auxiliary_sender,
                     review_ready_sender: &review_ready_sender,
                     resume_session_task: &mut resume_session_task,
@@ -658,6 +660,12 @@ pub(crate) async fn run(
                 },
             )
             .await?;
+            review_turn_active.store(
+                panes
+                    .keys()
+                    .any(|pane| app.root(*pane).is_some_and(RootNode::has_in_flight_turn)),
+                Ordering::Release,
+            );
         };
     }
 
@@ -905,6 +913,7 @@ pub(crate) async fn run(
                         worker_error = error;
                     }
                     WorkerEvent::TurnAccepted { pane, id } => {
+                        review_turn_active.store(true, Ordering::Release);
                         if herdr_turns.insert((pane, id)) && herdr_turns.len() == 1 {
                             let session_id = app
                                 .main_pane()
@@ -1877,6 +1886,7 @@ struct EffectContext<'a> {
     recent_prompt_request: &'a mut Option<RecentPromptRequest>,
     handoff_controller: &'a mut HandoffController,
     review_controller: &'a mut ReviewController,
+    review_turn_active: &'a Arc<AtomicBool>,
     auxiliary_sender: &'a mpsc::UnboundedSender<AuxiliaryJobRequest>,
     review_ready_sender: &'a mpsc::UnboundedSender<ReviewReady>,
     resume_session_task: &'a mut Option<ResumeSessionTask>,
@@ -2708,6 +2718,7 @@ fn start_review(
     let auxiliary_jobs = context.auxiliary_sender.clone();
     let ready_updates = context.review_ready_sender.clone();
     let workspace = context.workspace.to_path_buf();
+    let turn_active = context.review_turn_active.clone();
     context
         .review_controller
         .start(pane, pane_generation, move |identity, cancellation| {
@@ -2718,6 +2729,7 @@ fn start_review(
                 ready_updates,
                 workspace,
                 assets,
+                turn_active,
             )
         });
 }
@@ -2729,6 +2741,7 @@ fn spawn_review(
     ready_updates: mpsc::UnboundedSender<ReviewReady>,
     workspace: PathBuf,
     assets: Option<crate::review::ReviewAssets>,
+    turn_active: Arc<AtomicBool>,
 ) -> ReviewTask {
     tokio::spawn(async move {
         let result = async {
@@ -2772,7 +2785,8 @@ fn spawn_review(
                 })
             });
             let handle =
-                crate::review::ReviewService::start(review_agent, &workspace, assets).await?;
+                crate::review::ReviewService::start(review_agent, &workspace, assets, turn_active)
+                    .await?;
             drop(ready_updates.send(ReviewReady {
                 identity,
                 url: handle.url(),
