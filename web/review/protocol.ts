@@ -1,6 +1,6 @@
 import type { ReviewRange, ReviewTarget } from "./range-selection";
 
-export const REVIEW_PROTOCOL_VERSION = 5;
+export const REVIEW_PROTOCOL_VERSION = 6;
 
 export type ReviewComment = {
   id: number;
@@ -43,12 +43,14 @@ export type OverviewResponse = {
   generation: number;
   selected_range: ReviewRange;
   overview_mdx: string;
+  instructions?: string | null;
 };
 
 export type StoredOverview = {
   selected_range: ReviewRange;
   status: "generating" | "ready";
   overview_mdx?: string;
+  instructions?: string | null;
 };
 
 export type AiReviewResponse = {
@@ -117,6 +119,7 @@ export type ReviewErrorCode =
   | "invalid_range"
   | "workspace_changed"
   | "overview_failed"
+  | "invalid_overview_instructions"
   | "ai_review_failed"
   | "question_failed"
   | "invalid_thread"

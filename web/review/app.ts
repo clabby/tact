@@ -69,6 +69,7 @@ import {
   type SyntaxTheme,
 } from "./review-settings";
 import { overviewProgram } from "./overview";
+import { overviewInstructionError } from "./overview-instructions";
 import { parseReviewPatch } from "./review-diff";
 import { moveSearchTarget, searchReview, type ReviewSearchMatch } from "./review-search";
 import {
@@ -191,7 +192,9 @@ export class ReviewApp {
   private files: FileDiffMetadata[] = [];
   private items: CodeViewDiffItem<AnnotationMetadata>[] = [];
   private readonly pathToItem = new Map<string, string>();
-  private readonly overviews = new Map<string, string>();
+  private readonly overviews = new Map<string, { mdx: string; instructions: string }>();
+  private readonly overviewInstructions = new Map<string, string>();
+  private editingOverview = false;
   private pendingRange?: ReviewRange;
   private previewRange?: ReviewRange;
   private nextCommentId = 1;
@@ -274,8 +277,13 @@ export class ReviewApp {
   }
 
   private restoreStoredOverview(overview: StoredOverview | null) {
-    if (overview?.status !== "ready" || !overview.overview_mdx?.trim()) return;
-    this.overviews.set(rangeKey(overview.selected_range), overview.overview_mdx);
+    if (!overview) return;
+    const key = rangeKey(overview.selected_range);
+    const instructions = overview.instructions?.trim() ?? "";
+    if (!this.overviewInstructions.has(key)) this.overviewInstructions.set(key, instructions);
+    if (overview.status === "ready" && overview.overview_mdx?.trim()) {
+      this.overviews.set(key, { mdx: overview.overview_mdx, instructions });
+    }
   }
 
   private restoreAgentOperation() {
@@ -498,6 +506,7 @@ export class ReviewApp {
 
   private installPage(page: ReviewPage) {
     this.resetSearch();
+    this.editingOverview = false;
     this.page = page;
     this.state = activatePage(this.state, page);
     const seenFiles = this.seenFiles();
@@ -678,21 +687,63 @@ export class ReviewApp {
     const state = this.root.querySelector<HTMLElement>("#overview-state");
     const frame = this.root.querySelector<HTMLIFrameElement>(".overview");
     if (!state || !frame || !this.page) return;
-    if (this.overviews.has(rangeKey(this.page.selected_range))) {
-      state.hidden = true;
+    state.removeAttribute("role");
+    state.removeAttribute("aria-live");
+    const key = rangeKey(this.page.selected_range);
+    const ready = this.overviews.has(key);
+    if (ready && !this.editingOverview) {
+      state.hidden = false;
+      state.classList.add("overview-state-ready");
+      state.innerHTML = `<button type="button" class="button" data-agent-action data-edit-overview ${this.agentOperation ? "disabled" : ""}>Edit instructions</button>`;
+      state.querySelector("[data-edit-overview]")?.addEventListener("click", () => {
+        this.editingOverview = true;
+        this.renderOverviewState();
+        state.querySelector<HTMLTextAreaElement>("[data-overview-instructions]")?.focus();
+      });
       this.renderOverview();
       return;
     }
-    frame.hidden = true;
-    frame.onload = null;
-    frame.removeAttribute("src");
+    if (!ready) {
+      frame.hidden = true;
+      frame.onload = null;
+      frame.removeAttribute("src");
+    }
     state.hidden = false;
+    state.classList.remove("overview-state-ready");
+    const draft = this.overviewInstructions.get(key) ?? "";
+    const validationError = overviewInstructionError(draft);
     state.innerHTML = `
-      <div class="overview-orbit">${icon("sparkles")}</div>
+      ${ready ? "" : `<div class="overview-orbit">${icon("sparkles")}</div>
       <strong>Overview available on request</strong>
-      <span>Get an explainer and a guide to the areas worth checking yourself.</span>
-      <button type="button" class="button primary" data-agent-action data-generate-overview ${this.agentOperation ? "disabled" : ""}>Generate overview</button>`;
+      <span>Get an explainer and a guide to the areas worth checking yourself.</span>`}
+      <div class="overview-instructions">
+        <label for="overview-instructions">Instructions for the overview <small>(optional)</small></label>
+        <textarea id="overview-instructions" data-overview-instructions rows="4" aria-describedby="overview-instructions-help" placeholder="e.g. Focus on the migration and its rollback path"></textarea>
+        <small id="overview-instructions-help" class="overview-instructions-help" aria-live="polite">${validationError ?? "Up to 8 KiB of text."}</small>
+        <div class="overview-instructions-actions">
+          ${ready ? `<button type="button" class="button" data-cancel-overview-edit>Cancel</button>` : ""}
+          <button type="button" class="button primary" data-agent-action data-generate-overview ${this.agentOperation || validationError || (ready && this.overviews.get(key)?.instructions === draft.trim()) ? "disabled" : ""}>${ready ? "Regenerate overview" : "Generate overview"}</button>
+        </div>
+      </div>`;
+    const input = state.querySelector<HTMLTextAreaElement>("[data-overview-instructions]");
+    if (input) {
+      input.value = draft;
+      input.addEventListener("input", () => {
+        this.overviewInstructions.set(key, input.value);
+        const error = overviewInstructionError(input.value);
+        const help = state.querySelector<HTMLElement>("#overview-instructions-help");
+        if (help) help.textContent = error ?? "Up to 8 KiB of text.";
+        const generate = state.querySelector<HTMLButtonElement>("[data-generate-overview]");
+        if (generate) generate.disabled = !!error || this.agentOperation !== undefined
+          || (ready && this.overviews.get(key)?.instructions === input.value.trim());
+      });
+    }
+    state.querySelector("[data-cancel-overview-edit]")?.addEventListener("click", () => {
+      this.editingOverview = false;
+      this.renderOverviewState();
+    });
     state.querySelector("[data-generate-overview]")?.addEventListener("click", () => void this.loadOverview());
+    if (ready) this.renderOverview();
   }
 
   private setOverviewLoading(loading: boolean) {
@@ -712,7 +763,12 @@ export class ReviewApp {
       || (this.agentOperation && !restoring)
       || rangesEqual(this.loadingOverview, page.selected_range)) return;
     const key = rangeKey(page.selected_range);
-    if (this.overviews.has(key)) {
+    const instructions = restoring
+      ? this.bootstrap.overview?.instructions?.trim() ?? ""
+      : this.overviewInstructions.get(key)?.trim() ?? "";
+    if (overviewInstructionError(instructions)) return;
+    if (restoring) this.overviewInstructions.set(key, instructions);
+    if (this.overviews.get(key)?.instructions === instructions) {
       this.renderOverviewState();
       return;
     }
@@ -721,6 +777,7 @@ export class ReviewApp {
     const request = ++this.overviewRequest;
     this.agentOperation = { kind: "overview", request };
     this.loadingOverview = range;
+    this.editingOverview = false;
     this.setOverviewLoading(true);
     this.syncAgentControls();
     const state = this.root.querySelector<HTMLElement>("#overview-state");
@@ -734,14 +791,14 @@ export class ReviewApp {
     }
 
     try {
-      const payload = await this.api.overview(page);
+      const payload = await this.api.overview(page, instructions);
       if (request !== this.overviewRequest) return;
       if (payload.generation !== page.generation
         || !rangesEqual(payload.selected_range, range)) {
         this.showOverviewError("Tact returned an overview for a different review range.");
         return;
       }
-      this.overviews.set(key, payload.overview_mdx);
+      this.overviews.set(key, { mdx: payload.overview_mdx, instructions });
       if (rangesEqual(this.page?.selected_range, range)) this.renderOverviewState();
     } catch (error) {
       if (request === this.overviewRequest) this.showOverviewError(errorMessage(error));
@@ -769,14 +826,22 @@ export class ReviewApp {
       <div class="overview-error">!</div>
       <strong>Could not prepare the overview</strong>
       <span>${escapeHtml(message)}</span>
-      <button class="button" data-agent-action data-retry-overview ${this.agentOperation ? "disabled" : ""}>Try again</button>`;
+      <div class="overview-instructions-actions">
+        <button class="button" data-edit-overview-error>Edit instructions</button>
+        <button class="button primary" data-agent-action data-retry-overview ${this.agentOperation ? "disabled" : ""}>Try again</button>
+      </div>`;
+    state.querySelector("[data-edit-overview-error]")?.addEventListener("click", () => {
+      this.editingOverview = true;
+      this.renderOverviewState();
+      state.querySelector<HTMLTextAreaElement>("[data-overview-instructions]")?.focus();
+    });
     state.querySelector("[data-retry-overview]")?.addEventListener("click", () => void this.loadOverview());
   }
 
   private renderOverview() {
     const frame = this.root.querySelector<HTMLIFrameElement>(".overview");
     if (!frame || !this.page) return;
-    const mdx = this.overviews.get(rangeKey(this.page.selected_range));
+    const mdx = this.overviews.get(rangeKey(this.page.selected_range))?.mdx;
     if (!mdx) return;
     frame.onload = () => frame.contentWindow?.postMessage(
       { type: "tact-overview", code: overviewProgram(mdx), appearance: appearance(this.settings) }, "*",
@@ -2266,7 +2331,13 @@ export class ReviewApp {
       const needsQuestion = button.matches("[data-comment-action=ask], [data-thread-ask]");
       const editor = button.closest<HTMLElement>(".inline-comment-editor, .agent-thread-turn");
       const input = editor?.querySelector<HTMLTextAreaElement>("textarea");
+      const overviewDraft = this.root.querySelector<HTMLTextAreaElement>("[data-overview-instructions]")?.value;
+      const overviewUnchanged = overviewDraft !== undefined
+        && this.overviews.get(rangeKey(this.page?.selected_range ?? this.bootstrap.default_range))?.instructions
+          === overviewDraft.trim();
       button.disabled = busy || (button.id === "ai-review" && this.snapshotStale)
+        || (button.matches("[data-generate-overview]")
+          && (overviewUnchanged || overviewInstructionError(overviewDraft ?? "") !== undefined))
         || (needsQuestion && !input?.value.trim());
     }
     this.syncSelectedRange(this.page?.selected_range ?? this.bootstrap.default_range);

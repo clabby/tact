@@ -156,13 +156,23 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .panel { display: none; min-height: 0; }
 .panel.active { display: block; }
 .overview-panel { position: relative; background: var(--surface); }
-.overview { width: 100%; height: 100%; border: 0; background: var(--surface); }
+.overview-panel.active { display: flex; flex-direction: column; }
+.overview { width: 100%; min-height: 0; flex: 1; border: 0; background: var(--surface); }
 .overview[hidden] { display: none; }
-.overview-state { display: grid; place-content: center; justify-items: center; height: 100%; padding: 40px; text-align: center; }
+.overview-state { display: grid; place-content: center; justify-items: center; flex: 1; padding: 40px; text-align: center; }
 .overview-state[hidden] { display: none; }
+.overview-state:has(+ .overview:not([hidden])) { flex: none; padding: 16px 24px; }
+.overview-state-ready { display: flex; justify-content: flex-end; border-bottom: 1px solid var(--line); }
 .overview-state strong { margin-top: 18px; font-size: 16px; letter-spacing: -.01em; }
 .overview-state > span { max-width: 430px; margin-top: 6px; color: var(--muted); font-size: 12px; }
 .overview-state .button { margin-top: 18px; }
+.overview-state-ready .button { margin-top: 0; }
+.overview-instructions { width: min(480px, 100%); margin-top: 22px; text-align: left; }
+.overview-instructions label { display: block; margin-bottom: 8px; font-size: 13px; font-weight: 600; }
+.overview-instructions label small { color: var(--muted); font-weight: 400; }
+.overview-instructions textarea { width: 100%; min-height: 90px; resize: vertical; padding: 10px 12px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--bg); color: var(--text); font: 13px/1.45 ui-sans-serif, system-ui, sans-serif; }
+.overview-instructions-help { display: block; margin-top: 5px; color: var(--muted); font-size: 11px; }
+.overview-instructions-actions { display: flex; justify-content: flex-end; gap: 8px; width: 100%; }
 .overview-orbit { display: grid; place-items: center; width: 50px; height: 50px; border: 1px solid var(--line); border-radius: 15px; background: linear-gradient(145deg, color-mix(in srgb, var(--accent-solid) 13%, var(--surface)), var(--surface)); color: var(--accent); box-shadow: 0 16px 36px color-mix(in srgb, #000 8%, transparent); }
 .overview-orbit svg { width: 24px; height: 24px; }
 .overview-spinner { position: relative; display: grid; place-items: center; width: 58px; height: 58px; }

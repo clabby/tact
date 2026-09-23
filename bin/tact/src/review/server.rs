@@ -27,13 +27,15 @@ const MAX_OPERATION_ID_BYTES: usize = 128;
 const MAX_THREAD_MESSAGES: usize = 64;
 const MAX_THREAD_BYTES: usize = 256 * 1024;
 const MAX_QUESTION_THREADS: usize = 256;
-pub(super) const PROTOCOL_VERSION: u32 = 5;
+pub(super) const PROTOCOL_VERSION: u32 = 6;
 const MAX_CACHED_PAGES: usize = 8;
 const MAX_CACHED_PAGE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_CACHED_OVERVIEWS: usize = 8;
 const MAX_CACHED_OVERVIEW_BYTES: usize = 8 * 1024 * 1024;
+const MAX_OVERVIEW_INSTRUCTIONS_BYTES: usize = 8 * 1024;
 
-type OverviewOperationKey = (u64, super::diff::ReviewRange);
+type OverviewCacheKey = (super::diff::ReviewRange, Option<String>);
+type OverviewOperationKey = (u64, super::diff::ReviewRange, Option<String>);
 type OverviewOperations = Mutex<HashMap<OverviewOperationKey, Arc<OverviewOperation>>>;
 
 struct OverviewOperation {
@@ -87,6 +89,14 @@ struct RangeRequest {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct OverviewRequest {
+    generation: u64,
+    range: super::diff::ReviewRange,
+    instructions: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct GenerationRequest {
     generation: u64,
 }
@@ -96,6 +106,7 @@ struct OverviewResponse {
     generation: u64,
     selected_range: super::diff::ReviewRange,
     overview_mdx: String,
+    instructions: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -127,6 +138,7 @@ struct StoredOverview {
     status: OverviewStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     overview_mdx: Option<String>,
+    instructions: Option<String>,
 }
 
 #[derive(Clone, Copy, Serialize)]
@@ -240,6 +252,7 @@ struct ScopeError {
 enum ErrorCode {
     StaleSnapshot,
     InvalidRange,
+    InvalidOverviewInstructions,
     WorkspaceChanged,
     OverviewFailed,
     AiReviewFailed,
@@ -341,8 +354,9 @@ struct ReviewSession {
     selected_page: ReviewPage,
     context: super::diff::ReviewContext,
     range_pages: BoundedCache<super::diff::ReviewRange, ReviewPage>,
-    overviews: BoundedCache<super::diff::ReviewRange, String>,
+    overviews: BoundedCache<OverviewCacheKey, String>,
     active_overview: Option<OverviewOperationKey>,
+    selected_overview_key: Option<OverviewCacheKey>,
     questions: Vec<StoredQuestion>,
     version: super::diff::WorkspaceVersion,
     generation_shutdown: CancellationToken,
@@ -373,6 +387,15 @@ where
 
     fn get(&self, key: &K) -> Option<&V> {
         self.values.get(key).map(|(value, _)| value)
+    }
+
+    fn touch(&mut self, key: &K) -> Option<&V> {
+        if !self.values.contains_key(key) {
+            return None;
+        }
+        self.order.retain(|existing| existing != key);
+        self.order.push_back(key.clone());
+        self.get(key)
     }
 
     fn insert(&mut self, key: K, value: V, bytes: usize) {
@@ -411,6 +434,7 @@ impl ReviewSession {
             range_pages: BoundedCache::new(MAX_CACHED_PAGES, MAX_CACHED_PAGE_BYTES),
             overviews: BoundedCache::new(MAX_CACHED_OVERVIEWS, MAX_CACHED_OVERVIEW_BYTES),
             active_overview: None,
+            selected_overview_key: None,
             questions: Vec::new(),
             version: review.version,
             generation_shutdown: session_shutdown.child_token(),
@@ -446,20 +470,28 @@ impl ReviewSession {
 
     fn selected_overview(&self) -> Option<StoredOverview> {
         let range = self.selected_page.selected_range;
-        if self.active_overview == Some((self.generation, range)) {
+        if let Some((_, active_range, instructions)) = &self.active_overview
+            && *active_range == range
+            && self.selected_overview_key.as_ref() == Some(&(*active_range, instructions.clone()))
+        {
             return Some(StoredOverview {
                 selected_range: range,
                 status: OverviewStatus::Generating,
                 overview_mdx: None,
+                instructions: instructions.clone(),
             });
         }
-        self.overviews
-            .get(&range)
-            .map(|overview_mdx| StoredOverview {
-                selected_range: range,
-                status: OverviewStatus::Ready,
-                overview_mdx: Some(overview_mdx.clone()),
-            })
+        let key = self
+            .selected_overview_key
+            .as_ref()
+            .filter(|key| key.0 == range && self.overviews.get(key).is_some())
+            .or_else(|| self.overviews.order.iter().rev().find(|key| key.0 == range))?;
+        self.overviews.get(key).map(|overview_mdx| StoredOverview {
+            selected_range: range,
+            status: OverviewStatus::Ready,
+            overview_mdx: Some(overview_mdx.clone()),
+            instructions: key.1.clone(),
+        })
     }
 }
 
@@ -808,14 +840,36 @@ async fn load_range(
 
 async fn load_overview(
     State(state): State<Arc<ServerState>>,
-    Json(request): Json<RangeRequest>,
+    Json(mut request): Json<OverviewRequest>,
 ) -> Response<Body> {
-    let overview_key = (request.generation, request.range);
+    request.instructions = request
+        .instructions
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
+    if request
+        .instructions
+        .as_ref()
+        .is_some_and(|value| value.len() > MAX_OVERVIEW_INSTRUCTIONS_BYTES)
+    {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            ErrorCode::InvalidOverviewInstructions,
+            "overview instructions exceed 8 KiB",
+            true,
+            true,
+        );
+    }
+    let cache_key = (request.range, request.instructions.clone());
+    let overview_key = (
+        request.generation,
+        request.range,
+        request.instructions.clone(),
+    );
     let operation = {
         let mut operations = state.overview_operations.lock().await;
         Arc::clone(
             operations
-                .entry(overview_key)
+                .entry(overview_key.clone())
                 .or_insert_with(|| Arc::new(OverviewOperation::new())),
         )
     };
@@ -825,35 +879,46 @@ async fn load_overview(
         return overview_response(overview_key, result);
     }
     let (page, version, shutdown) = {
-        let session = state.session.lock().await;
-        let Some(page) = matching_page(&session, request.generation, &request.range) else {
+        let mut session = state.session.lock().await;
+        let Some(page) = matching_page(&session, request.generation, &request.range).cloned()
+        else {
+            drop(session);
+            discard_idle_overview_operation(&state, &overview_key, &operation).await;
             return stale_snapshot("the requested review snapshot is stale");
         };
-        if let Some(overview_mdx) = session.overviews.get(&request.range).cloned() {
+        if let Some(overview_mdx) = session.overviews.touch(&cache_key).cloned() {
+            session.selected_overview_key = Some(cache_key.clone());
+            drop(session);
+            discard_idle_overview_operation(&state, &overview_key, &operation).await;
             return secure_json(
                 StatusCode::OK,
                 OverviewResponse {
                     generation: request.generation,
                     selected_range: request.range,
                     overview_mdx,
+                    instructions: request.instructions,
                 },
             );
         }
         (
-            page.clone(),
+            page,
             session.version.clone(),
             session.generation_shutdown.clone(),
         )
     };
     let Ok(agent_operation) = Arc::clone(&state.agent_operation).try_lock_owned() else {
+        discard_idle_overview_operation(&state, &overview_key, &operation).await;
         return agent_busy();
     };
     {
         let mut session = state.session.lock().await;
         if matching_page(&session, request.generation, &request.range).is_none() {
+            drop(session);
+            discard_idle_overview_operation(&state, &overview_key, &operation).await;
             return stale_snapshot("the requested review snapshot is stale");
         }
-        session.active_overview = Some(overview_key);
+        session.active_overview = Some(overview_key.clone());
+        session.selected_overview_key = Some(cache_key);
     }
 
     let (completion, response) = oneshot::channel();
@@ -861,11 +926,18 @@ async fn load_overview(
     tokio::spawn(async move {
         let _operation_gate = operation_gate;
         let _agent_operation = agent_operation;
-        let result = run_overview(&task_state, &page, version, shutdown).await;
-        let result = store_overview_result(&task_state, overview_key, result).await;
+        let result = run_overview(
+            &task_state,
+            &page,
+            version,
+            overview_key.2.as_deref(),
+            shutdown,
+        )
+        .await;
+        let result = store_overview_result(&task_state, &overview_key, result).await;
         *operation.result.lock().await = Some(result.clone());
         let initiating_browser_is_connected = completion
-            .send(overview_response(overview_key, result))
+            .send(overview_response(overview_key.clone(), result))
             .is_ok();
         let reloaded_browser_is_waiting = Arc::strong_count(&operation) > 2;
         if initiating_browser_is_connected || !reloaded_browser_is_waiting {
@@ -882,6 +954,21 @@ async fn load_overview(
         .unwrap_or_else(|_| internal_error("the overview operation stopped unexpectedly"))
 }
 
+async fn discard_idle_overview_operation(
+    state: &ServerState,
+    key: &OverviewOperationKey,
+    operation: &Arc<OverviewOperation>,
+) {
+    let mut operations = state.overview_operations.lock().await;
+    if Arc::strong_count(operation) == 2
+        && operations
+            .get(key)
+            .is_some_and(|current| Arc::ptr_eq(current, operation))
+    {
+        operations.remove(key);
+    }
+}
+
 #[derive(Clone)]
 enum OverviewRunResult {
     Ready(String),
@@ -895,6 +982,7 @@ async fn run_overview(
     state: &ServerState,
     page: &ReviewPage,
     version: super::diff::WorkspaceVersion,
+    instructions: Option<&str>,
     shutdown: CancellationToken,
 ) -> OverviewRunResult {
     let current = match state.backend.current_version(shutdown.clone()).await {
@@ -911,7 +999,12 @@ async fn run_overview(
     }
     let overview_mdx = match state
         .backend
-        .overview(&page.diff.scope, &page.diff.overview, shutdown.clone())
+        .overview(
+            &page.diff.scope,
+            &page.diff.overview,
+            instructions,
+            shutdown.clone(),
+        )
         .await
     {
         Ok(overview) => overview,
@@ -935,20 +1028,22 @@ async fn run_overview(
 
 async fn store_overview_result(
     state: &ServerState,
-    overview_key: OverviewOperationKey,
+    overview_key: &OverviewOperationKey,
     result: OverviewRunResult,
 ) -> OverviewRunResult {
     let mut session = state.session.lock().await;
-    if session.active_overview == Some(overview_key) {
+    if session.active_overview.as_ref() == Some(overview_key) {
         session.active_overview = None;
     }
     if matching_page(&session, overview_key.0, &overview_key.1).is_none() {
         return OverviewRunResult::Stale("the review changed while its overview was loading");
     }
     if let OverviewRunResult::Ready(overview_mdx) = &result {
-        session
-            .overviews
-            .insert(overview_key.1, overview_mdx.clone(), overview_mdx.len());
+        session.overviews.insert(
+            (overview_key.1, overview_key.2.clone()),
+            overview_mdx.clone(),
+            overview_mdx.len(),
+        );
     }
     result
 }
@@ -964,6 +1059,7 @@ fn overview_response(
                 generation: overview_key.0,
                 selected_range: overview_key.1,
                 overview_mdx,
+                instructions: overview_key.2,
             },
         ),
         OverviewRunResult::Cancelled => error_response(
@@ -2060,6 +2156,173 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn overview_instructions_select_distinct_cached_results_and_survive_reload() {
+        let assets = tempfile::tempdir().unwrap();
+        for name in ["index.html", "app.js", "app.css"] {
+            std::fs::write(assets.path().join(name), "").unwrap();
+        }
+        let loads = Arc::new(AtomicUsize::new(0));
+        let generator: ReviewAgent = Arc::new({
+            let loads = Arc::clone(&loads);
+            move |prompt, _shutdown| {
+                loads.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async move {
+                    Ok(if prompt.contains("Focus on safety") {
+                        "<p>Safety</p>"
+                    } else if prompt.contains("Focus on performance") {
+                        "<p>Performance</p>"
+                    } else {
+                        "<p>Default</p>"
+                    }
+                    .to_owned())
+                })
+            }
+        });
+        let server = start_server_with_generator(&assets, generator).await;
+        let client = reqwest::Client::new();
+        for (instructions, expected) in [
+            (None, "<p>Default</p>"),
+            (Some("  Focus on safety  "), "<p>Safety</p>"),
+            (Some("Focus on performance"), "<p>Performance</p>"),
+            (Some("Focus on safety"), "<p>Safety</p>"),
+            (None, "<p>Default</p>"),
+        ] {
+            let response = client.post(server.endpoint_url("api/overview"))
+                .json(&serde_json::json!({"generation": 0, "range": uncommitted_range(), "instructions": instructions}))
+                .send().await.unwrap();
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            let result = response.json::<serde_json::Value>().await.unwrap();
+            assert_eq!(result["overview_mdx"], expected);
+            assert_eq!(
+                result["instructions"],
+                serde_json::json!(instructions.map(str::trim))
+            );
+            let restored = client
+                .get(server.endpoint_url("api/review"))
+                .send()
+                .await
+                .unwrap()
+                .json::<serde_json::Value>()
+                .await
+                .unwrap();
+            assert_eq!(restored["overview"]["overview_mdx"], expected);
+            assert_eq!(
+                restored["overview"]["instructions"],
+                serde_json::json!(instructions.map(str::trim))
+            );
+        }
+        assert_eq!(loads.load(Ordering::SeqCst), 3);
+
+        let other_range = ReviewRange { from: 0, to: 1 };
+        assert_eq!(
+            client
+                .post(server.endpoint_url("api/range"))
+                .json(&range_request(other_range))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            reqwest::StatusCode::OK
+        );
+        assert_eq!(
+            client
+                .post(server.endpoint_url("api/overview"))
+                .json(&serde_json::json!({"generation": 0, "range": other_range,
+                    "instructions": "Explain the trunk delta"}))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            reqwest::StatusCode::OK
+        );
+        assert_eq!(
+            client
+                .post(server.endpoint_url("api/range"))
+                .json(&range_request(uncommitted_range()))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            reqwest::StatusCode::OK
+        );
+        let restored = client
+            .get(server.endpoint_url("api/review"))
+            .send()
+            .await
+            .unwrap()
+            .json::<serde_json::Value>()
+            .await
+            .unwrap();
+        assert_eq!(restored["overview"]["overview_mdx"], "<p>Default</p>");
+        assert_eq!(
+            restored["overview"]["instructions"],
+            serde_json::Value::Null
+        );
+    }
+
+    #[tokio::test]
+    async fn oversized_overview_instructions_are_rejected_before_generation() {
+        let assets = tempfile::tempdir().unwrap();
+        for name in ["index.html", "app.js", "app.css"] {
+            std::fs::write(assets.path().join(name), "").unwrap();
+        }
+        let server = start_server(&assets).await;
+        let response = reqwest::Client::new()
+            .post(server.endpoint_url("api/overview"))
+            .json(
+                &serde_json::json!({"generation": 0, "range": uncommitted_range(),
+                "instructions": "x".repeat(super::MAX_OVERVIEW_INSTRUCTIONS_BYTES + 1)}),
+            )
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+        assert!(server.state.overview_operations.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn busy_overview_requests_with_distinct_instructions_leave_no_operations() {
+        let assets = tempfile::tempdir().unwrap();
+        for name in ["index.html", "app.js", "app.css"] {
+            std::fs::write(assets.path().join(name), "").unwrap();
+        }
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let generator: ReviewAgent = Arc::new({
+            let started = Arc::clone(&started);
+            let release = Arc::clone(&release);
+            move |_prompt, _shutdown| {
+                let started = Arc::clone(&started);
+                let release = Arc::clone(&release);
+                Box::pin(async move {
+                    started.notify_one();
+                    release.notified().await;
+                    Ok("<p>Overview</p>".to_owned())
+                })
+            }
+        });
+        let server = start_server_with_generator(&assets, generator).await;
+        let url = server.endpoint_url("api/overview");
+        let first = tokio::spawn(request_overview(url.clone(), uncommitted_range()));
+        started.notified().await;
+        for index in 0..12 {
+            let response = reqwest::Client::new()
+                .post(&url)
+                .json(
+                    &serde_json::json!({"generation": 0, "range": uncommitted_range(),
+                    "instructions": format!("Focus {index}")}),
+                )
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), reqwest::StatusCode::CONFLICT);
+            assert_eq!(server.state.overview_operations.lock().await.len(), 1);
+        }
+        release.notify_one();
+        assert_eq!(first.await.unwrap(), reqwest::StatusCode::OK);
+    }
+
+    #[tokio::test]
     async fn overview_agent_receives_repository_ranges() {
         let assets = tempfile::tempdir().unwrap();
         for name in ["index.html", "app.js", "app.css"] {
@@ -2517,7 +2780,7 @@ mod tests {
             loop {
                 let operations = server.state.overview_operations.lock().await;
                 let reloaded_browser_is_waiting = operations
-                    .get(&(0, uncommitted_range()))
+                    .get(&(0, uncommitted_range(), None))
                     .is_some_and(|operation| Arc::strong_count(operation) > 2);
                 drop(operations);
 

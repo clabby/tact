@@ -181,11 +181,18 @@ impl ReviewBackend {
         &self,
         label: &str,
         context: &diff::OverviewContext,
+        instructions: Option<&str>,
         shutdown: CancellationToken,
     ) -> Result<String, ScopeLoadError> {
-        generate_overview(self.review_agent.clone(), label, context, shutdown)
-            .await
-            .map_err(scope_load_error)
+        generate_overview(
+            self.review_agent.clone(),
+            label,
+            context,
+            instructions,
+            shutdown,
+        )
+        .await
+        .map_err(scope_load_error)
     }
 
     async fn ai_review(
@@ -267,12 +274,17 @@ async fn generate_overview(
     review_agent: ReviewAgent,
     label: &str,
     context: &diff::OverviewContext,
+    instructions: Option<&str>,
     shutdown: CancellationToken,
 ) -> Result<String, ReviewError> {
     let repository = repository_scope(context);
-    let prompt = format!(
+    let mut prompt = format!(
         r#"Delegate this task to a sub-agent so the host agent does not absorb the investigation context. Ask the sub-agent to quickly write a concise MDX explainer of `{label}` for a human reviewer. {repository} Inspect the diff, actual source files, relevant history, and surrounding code needed to understand the change without modifying the workspace. Explain what changed, why it matters, how the pieces fit together, and where a human reviewer should direct attention. Keep it brief and proportionate to the change. This is guidance for a human reviewer; do not perform a comprehensive defect audit or generate inline review findings. Whenever directing the reviewer's attention to code, cite direct `path:line` or `path:start-end` locations. Return only MDX source with Markdown headings, paragraphs, lists, tables, and fenced code where useful. Prefer the concise built-in components `<Callout title="..." tone="...">`, `<CardGrid>` with `<Card title="..." label="...">`, `<MetricGrid>` with `<Metric value="..." label="..." detail="..." />`, `<Process>` with `<ProcessStep title="...">`, and `<Figure caption="...">` for familiar layouts. You may define your own MDX components with `export function Name() {{ return <svg viewBox="0 0 400 120">...</svg> }}` and use `<Name />` for custom charts, diagrams, SVGs, and visual explanations when they clarify a change. Write self-contained JSX and calculations; do not import packages, fetch external resources, or use Markdown fences around the document. Charts must reflect actual repository facts, not invented measurements. The overview runs in an isolated frame with no network access. Keep all visualizations accessible and responsive."#,
     );
+    if let Some(instructions) = instructions {
+        prompt.push_str("\n\nApply the reviewer's additional instructions to the emphasis and presentation of this overview. Keep it a concise explanation for a human reviewer, without turning it into a comprehensive defect audit:\n");
+        prompt.push_str(instructions);
+    }
     let result = match review_agent(prompt, shutdown).await {
         Ok(result) => result,
         Err(ReviewAgentError::Cancelled) => return Err(ReviewError::Cancelled),
@@ -487,6 +499,7 @@ mod tests {
                     head: "fedcba9876543210".to_owned(),
                 },
             },
+            None,
             CancellationToken::new(),
         )
         .await
@@ -502,6 +515,36 @@ mod tests {
         assert!(prompt.contains("`path:line` or `path:start-end`"));
         assert!(prompt.contains("export function Name()"));
         assert!(prompt.contains("custom charts, diagrams, SVGs"));
+    }
+
+    #[tokio::test]
+    async fn overview_prompt_includes_custom_instructions() {
+        let observed_prompt = Arc::new(Mutex::new(String::new()));
+        let generator: ReviewAgent = Arc::new({
+            let observed_prompt = Arc::clone(&observed_prompt);
+            move |prompt, _shutdown| {
+                *observed_prompt.lock().unwrap() = prompt;
+                Box::pin(async { Ok("## Overview".to_owned()) })
+            }
+        });
+        generate_overview(
+            generator,
+            "Full branch",
+            &OverviewContext {
+                repository: "/workspace/repo".into(),
+                range: OverviewRange::WorkingTree {
+                    base: "abcdef".to_owned(),
+                },
+            },
+            Some("Focus on the migration sequence."),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let prompt = observed_prompt.lock().unwrap();
+        assert!(prompt.contains("reviewer's additional instructions"));
+        assert!(prompt.contains("Focus on the migration sequence."));
+        assert!(prompt.contains("concise explanation for a human reviewer"));
     }
 
     #[test]
