@@ -68,7 +68,7 @@ import {
   type ReviewSettings,
   type SyntaxTheme,
 } from "./review-settings";
-import { overviewDocument } from "./overview";
+import { overviewProgram } from "./overview";
 import { parseReviewPatch } from "./review-diff";
 import { moveSearchTarget, searchReview, type ReviewSearchMatch } from "./review-search";
 import {
@@ -352,7 +352,7 @@ export class ReviewApp {
         </nav>
         <section class="panel overview-panel" id="overview-panel" role="tabpanel" aria-labelledby="overview-tab" data-panel="overview" hidden>
           <div class="overview-state" id="overview-state"></div>
-          <iframe class="overview" title="Agent overview" sandbox="" hidden></iframe>
+          <iframe class="overview" title="Agent overview" sandbox="allow-scripts" hidden></iframe>
         </section>
         <section class="panel changes-panel active" id="changes-panel" role="tabpanel" aria-labelledby="changes-tab" data-panel="changes">
           <div class="review-search" id="review-search" role="search" hidden>
@@ -684,7 +684,8 @@ export class ReviewApp {
       return;
     }
     frame.hidden = true;
-    frame.removeAttribute("srcdoc");
+    frame.onload = null;
+    frame.removeAttribute("src");
     state.hidden = false;
     state.innerHTML = `
       <div class="overview-orbit">${icon("sparkles")}</div>
@@ -777,7 +778,10 @@ export class ReviewApp {
     if (!frame || !this.page) return;
     const mdx = this.overviews.get(rangeKey(this.page.selected_range));
     if (!mdx) return;
-    frame.srcdoc = overviewDocument(mdx, appearance(this.settings));
+    frame.onload = () => frame.contentWindow?.postMessage(
+      { type: "tact-overview", code: overviewProgram(mdx), appearance: appearance(this.settings) }, "*",
+    );
+    frame.src = "./overview-frame.html";
     frame.hidden = false;
   }
 

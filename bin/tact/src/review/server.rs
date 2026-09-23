@@ -1669,6 +1669,16 @@ async fn asset(assets: &super::ReviewAssets, request_path: &str) -> Response<Bod
         .headers_mut()
         .insert(header::CONTENT_TYPE, content_type);
     secure(&mut response);
+    if request_path == "overview-frame.html" {
+        // The overview executes agent-authored MDX in an opaque-origin sandbox.
+        // Its policy applies only to this frame; the review application's policy stays strict.
+        response.headers_mut().insert(
+            header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static(
+                "default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval'; style-src 'unsafe-inline'; img-src data:; connect-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'",
+            ),
+        );
+    }
     response
 }
 
@@ -2978,6 +2988,38 @@ mod tests {
             response.json::<serde_json::Value>().await.unwrap()["code"],
             "ai_review_failed"
         );
+        server.cancel().await;
+    }
+
+    #[tokio::test]
+    async fn overview_frame_has_isolated_script_policy() {
+        let assets = tempfile::tempdir().unwrap();
+        for name in ["index.html", "app.js", "app.css", "overview-frame.html"] {
+            std::fs::write(assets.path().join(name), "").unwrap();
+        }
+        let server = start_server(&assets).await;
+        let client = reqwest::Client::new();
+        let review = client
+            .get(server.endpoint_url("index.html"))
+            .send()
+            .await
+            .unwrap();
+        let frame = client
+            .get(server.endpoint_url("overview-frame.html"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(frame.status(), reqwest::StatusCode::OK);
+        assert!(
+            review.headers()["content-security-policy"]
+                .to_str()
+                .unwrap()
+                .contains("script-src 'self'")
+        );
+        let policy = frame.headers()["content-security-policy"].to_str().unwrap();
+        assert!(policy.contains("script-src 'unsafe-inline' 'unsafe-eval'"));
+        assert!(policy.contains("connect-src 'none'"));
+        assert!(policy.contains("frame-ancestors 'self'"));
         server.cancel().await;
     }
 

@@ -1,141 +1,114 @@
-import rehypeStringify from "rehype-stringify";
+import { compileSync } from "@mdx-js/mdx";
 import remarkGfm from "remark-gfm";
-import remarkMdx from "remark-mdx";
-import remarkParse from "remark-parse";
-import remarkRehype from "remark-rehype";
-import { unified } from "unified";
 
 export type OverviewAppearance = "light" | "dark" | "system";
 
-type Node = {
-  type: string;
-  name?: string | null;
-  value?: string;
-  url?: string;
-  children?: Node[];
-  attributes?: { type: string; name?: string; value?: unknown }[];
-  data?: { hName?: string; hProperties?: { className: string } };
-  [key: string]: unknown;
-};
-
-const markdown = new Set([
-  "root", "paragraph", "heading", "text", "emphasis", "strong", "delete",
-  "inlineCode", "code", "blockquote", "list", "listItem", "table",
-  "tableRow", "tableCell", "thematicBreak", "break", "link",
-]);
-
-const components: Record<string, { tag: string; props: string[] }> = {
-  Callout: { tag: "aside", props: ["title", "tone"] },
-  Card: { tag: "section", props: ["title", "label"] },
-  CardGrid: { tag: "div", props: [] },
-  Metric: { tag: "div", props: ["value", "label", "detail"] },
-  MetricGrid: { tag: "div", props: [] },
-  Process: { tag: "ol", props: [] },
-  ProcessStep: { tag: "li", props: ["title"] },
-  Figure: { tag: "figure", props: ["caption"] },
-};
-
-function element(tag: string, children: Node[], className?: string): Node {
-  return {
-    type: "paragraph",
-    data: { hName: tag, ...(className ? { hProperties: { className } } : {}) },
-    children,
+// This function is serialized into the frame asset. It must remain self-contained: all
+// authored JavaScript runs in the opaque-origin sandbox, never in the review app.
+function iframeRuntime() {
+  type ElementType = string | ((props: Record<string, unknown>) => unknown);
+  type VNode = { type: ElementType; props: Record<string, unknown> };
+  const jsx = (type: ElementType, props: Record<string, unknown> = {}): VNode => ({ type, props });
+  const Fragment = ({ children }: { children?: unknown }) => children;
+  const components = {
+    Callout: ({ tone = "note", title, children }: Record<string, unknown>) => jsx("aside", {
+      className: `callout callout--${["note", "idea", "caution", "critical"].includes(String(tone)) ? tone : "note"}`,
+      children: [jsx("strong", { children: title || String(tone).replace(/^./, (c) => c.toUpperCase()) }), children],
+    }),
+    Card: ({ title, label, children }: Record<string, unknown>) => jsx("section", {
+      className: "card", children: [title && jsx("h3", { children: title }), label && jsx("span", { children: label }), children],
+    }),
+    CardGrid: ({ children }: Record<string, unknown>) => jsx("div", { className: "card-grid", children }),
+    Metric: ({ value, label, detail, children }: Record<string, unknown>) => jsx("div", {
+      className: "metric", children: [jsx("strong", { children: value }), jsx("span", { children: label }), children,
+        detail && jsx("small", { children: detail })],
+    }),
+    MetricGrid: ({ children }: Record<string, unknown>) => jsx("div", { className: "metric-grid", children }),
+    Process: ({ children }: Record<string, unknown>) => jsx("ol", { className: "process", children }),
+    ProcessStep: ({ title, children }: Record<string, unknown>) => jsx("li", {
+      className: "process-step", children: [title && jsx("h3", { children: title }), children],
+    }),
+    Figure: ({ caption, children }: Record<string, unknown>) => jsx("figure", {
+      className: "figure", children: [children, caption && jsx("figcaption", { children: caption })],
+    }),
   };
-}
-
-function label(tag: string, value: string): Node {
-  return element(tag, [{ type: "text", value }]);
-}
-
-function component(node: Node): Node | null {
-  const spec = node.name && components[node.name];
-  if (!spec) return null;
-  const props: Record<string, string> = {};
-  for (const attribute of node.attributes ?? []) {
-    if (attribute.type === "mdxJsxAttribute" && attribute.name &&
-      spec.props.includes(attribute.name) && typeof attribute.value === "string") {
-      props[attribute.name] = attribute.value;
+  const root = document.getElementById("overview-root")!;
+  function render(value: unknown, parent: Node, depth = 0) {
+    if (depth > 100) throw new Error("Overview component nesting is too deep");
+    if (value === null || value === undefined || typeof value === "boolean") return;
+    if (Array.isArray(value)) {
+      for (const child of value) render(child, parent, depth + 1);
+      return;
     }
-  }
-  const children = sanitize(node.children ?? []);
-  switch (node.name) {
-    case "Callout": {
-      const tone = ["note", "idea", "caution", "critical"].includes(props.tone) ? props.tone : "note";
-      children.unshift(label("strong", props.title || tone[0].toUpperCase() + tone.slice(1)));
-      return element(spec.tag, children, `callout callout--${tone}`);
+    if (typeof value !== "object") {
+      parent.appendChild(document.createTextNode(String(value)));
+      return;
     }
-    case "Card":
-      if (props.title) children.unshift(label("h3", props.title));
-      if (props.label) children.unshift(label("span", props.label));
-      break;
-    case "Metric":
-      children.unshift(label("strong", props.value ?? ""), label("span", props.label ?? ""));
-      if (props.detail) children.push(label("small", props.detail));
-      break;
-    case "ProcessStep":
-      if (props.title) children.unshift(label("h3", props.title));
-      break;
-    case "Figure":
-      if (props.caption) children.push(label("figcaption", props.caption));
-      break;
-  }
-  const className = node.name === "ProcessStep" ? "process-step" :
-    node.name.replace(/[A-Z]/g, (letter, index) => `${index ? "-" : ""}${letter.toLowerCase()}`);
-  return element(spec.tag, children, className);
-}
-
-function safeUrl(url: string): boolean {
-  return url.startsWith("#") || /^(https?:\/\/|mailto:)/i.test(url);
-}
-
-// Rebuild the tree from known Markdown nodes and literal component props.
-// Expressions, imports, raw HTML, and unknown JSX never reach HTML serialization.
-function sanitize(nodes: Node[]): Node[] {
-  const result: Node[] = [];
-  for (const node of nodes) {
-    if (node.type === "paragraph" && node.children?.length === 1 &&
-      node.children[0].type === "mdxJsxTextElement") {
-      const safe = component(node.children[0]);
-      if (safe) result.push(safe);
-    } else if (node.type === "mdxJsxFlowElement" || node.type === "mdxJsxTextElement") {
-      const safe = component(node);
-      if (safe) result.push(safe);
-    } else if (markdown.has(node.type) &&
-      (node.type !== "link" || (node.url && safeUrl(node.url)))) {
-      const { type, value, url, children, depth, ordered, start, lang, align } = node;
-      result.push({ type, ...(value === undefined ? {} : { value }),
-        ...(url === undefined ? {} : { url }),
-        ...(children ? { children: sanitize(children) } : {}),
-        ...(type === "heading" ? { depth } : {}),
-        ...(type === "list" ? { ordered, start } : {}),
-        ...(type === "code" ? { lang } : {}),
-        ...(type === "table" ? { align } : {}),
-      });
+    const { type, props } = value as VNode;
+    if (typeof type === "function") {
+      render(type(props), parent, depth + 1);
+      return;
     }
+    if (typeof type !== "string") throw new Error("Invalid MDX component");
+    const svg = parent instanceof SVGElement && type !== "foreignObject" || type === "svg";
+    const element = svg ? document.createElementNS("http://www.w3.org/2000/svg", type) : document.createElement(type);
+    for (const [name, prop] of Object.entries(props || {})) {
+      if (name === "children" || name === "key" || name === "ref" || prop == null) continue;
+      if (name === "dangerouslySetInnerHTML" && typeof prop === "object" && "__html" in prop) {
+        element.innerHTML = String(prop.__html);
+      } else if (/^on[A-Z]/.test(name) && typeof prop === "function") {
+        element.addEventListener(name.slice(2).toLowerCase(), prop as EventListener);
+      } else if (name === "style" && typeof prop === "object") {
+        for (const [property, val] of Object.entries(prop)) {
+          const cssName = property.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`);
+          (element as HTMLElement).style.setProperty(cssName, String(val));
+        }
+      } else if (typeof prop === "string" || typeof prop === "number" || prop === true) {
+        const attribute = name === "className" ? "class" : name === "htmlFor" ? "for" :
+          svg && /^(?:marker(?:Start|Mid|End)|text(?:Anchor|Decoration|Rendering)|(?:alignment|baseline|clip|color|dominant|fill|flood|font|image|letter|lighting|paint|pointer|shape|stop|stroke|unicode|vector|word|writing)[A-Z])/.test(name) ?
+            name.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`) : name;
+        element.setAttribute(attribute, prop === true ? "" : String(prop));
+      }
+    }
+    if (!(props && "dangerouslySetInnerHTML" in props)) render(props?.children, element, depth + 1);
+    parent.appendChild(element);
   }
-  return result;
+  window.addEventListener("message", (event: MessageEvent) => {
+    if (event.source !== window.parent || !event.data || event.data.type !== "tact-overview") return;
+    const { code, appearance } = event.data;
+    if (typeof code !== "string" || !["light", "dark", "system"].includes(appearance)) return;
+    document.documentElement.dataset.theme = appearance;
+    root.replaceChildren();
+    try {
+      // Evaluation is confined to this opaque-origin sandbox.
+      const exported = new Function(code)({ jsx, jsxs: jsx, Fragment, baseUrl: "about:blank" }) as
+        { default: (props: Record<string, unknown>) => unknown } | Promise<{ default: (props: Record<string, unknown>) => unknown }>;
+      Promise.resolve(exported).then((module) => render(jsx(module.default, { components }), root))
+        .catch((error) => { root.textContent = `Overview error: ${String(error)}`; });
+    } catch (error) {
+      root.textContent = `Overview error: ${String(error)}`;
+    }
+  });
 }
 
-const renderer = unified().use(remarkParse).use(remarkMdx).use(remarkGfm)
-  .use(() => (tree) => { tree.children = sanitize(tree.children as Node[]) as typeof tree.children; })
-  .use(remarkRehype).use(rehypeStringify);
-
-export function overviewDocument(mdx: string, appearance: OverviewAppearance) {
-  let html: string;
+export function overviewProgram(mdx: string): string {
   try {
-    html = String(renderer.processSync(mdx));
-  } catch {
-    // Malformed MDX is still untrusted text; present it without interpreting markup.
-    html = `<pre>${mdx.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}</pre>`;
+    return String(compileSync(mdx, { outputFormat: "function-body", remarkPlugins: [remarkGfm] }));
+  } catch (error) {
+    return `return {default: () => ({type: "pre", props: {children: ${JSON.stringify(String(error))}}})};`;
   }
+}
+
+// This static asset has its own CSP and runs only in an iframe with sandbox="allow-scripts".
+export function overviewFrameDocument(): string {
   return `<!doctype html>
-<html data-theme="${appearance}">
+<html data-theme="system">
   <head>
     <meta charset="utf-8">
-    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
-    <style>${overviewStyles(appearance)}</style>
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval'; style-src 'unsafe-inline'; img-src data:; connect-src 'none'; base-uri 'none'; form-action 'none'">
+    <style>${overviewStyles("system")}</style>
   </head>
-  <body><article class="prose">${html}</article></body>
+  <body><article class="prose" id="overview-root"></article><script>(${iframeRuntime.toString()})()</script></body>
 </html>`;
 }
 
@@ -168,6 +141,7 @@ function overviewStyles(appearance: OverviewAppearance) {
     .process-step::before { content: counter(steps, decimal-leading-zero); position: absolute; left: -1.1em; top: 0; width: 2.2em; height: 2.2em; border: 1px solid var(--rule); border-radius: 50%; background: var(--paper); text-align: center; line-height: 2.2em; color: var(--accent); }
     .process-step h3 { margin-top: 0; } .figure { margin: 2em 0; padding: 1em; border: 1px solid var(--rule); border-radius: .5em; }
     .figure figcaption { color: var(--muted); font-size: .8rem; }
+    .prose svg { max-width: 100%; height: auto; }
     @media (max-width: 560px) { .card-grid, .metric-grid { grid-template-columns: 1fr; } }
   `;
 }

@@ -1,6 +1,7 @@
 import { watch } from "node:fs";
 import { mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
+import { overviewFrameDocument } from "./overview";
 import { reviewEntrypoints, reviewScriptAssets } from "./build-config";
 import { overviewFixtures, reviewBootstrap, reviewFixtures } from "./dev-fixture";
 import { rangeKey, type ReviewRange } from "./range-selection";
@@ -27,6 +28,7 @@ async function buildAssets() {
     for (const message of build.logs) console.error(message);
     return false;
   }
+  await Bun.write(join(outputDirectory, "overview-frame.html"), overviewFrameDocument());
   const html = await Bun.file(join(import.meta.dir, "index.html")).text();
   await Bun.write(join(outputDirectory, "index.html"), html.replace(
     "</body>",
@@ -156,7 +158,7 @@ const server = Bun.serve({
     if (url.pathname === "/__reload" && server.upgrade(request)) return;
 
     const name = url.pathname === "/" ? "index.html" : url.pathname.slice(1);
-    if (!["index.html", "app.css", ...reviewScriptAssets].includes(name)) {
+    if (!["index.html", "overview-frame.html", "app.css", ...reviewScriptAssets].includes(name)) {
       return new Response("Not found", { status: 404 });
     }
     return new Response(Bun.file(join(outputDirectory, name)));
