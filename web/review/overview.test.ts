@@ -16,7 +16,7 @@ class Element {
 }
 class SvgElement extends Element {}
 
-function renderOverview(mdx: string) {
+function renderOverview(mdx: string, appearance: "light" | "dark" | "system" = "dark") {
   const html = overviewFrameDocument();
   const script = html.match(/<script>([\s\S]*?)<\/script>/)?.[1];
   expect(script).toBeDefined();
@@ -34,8 +34,8 @@ function renderOverview(mdx: string) {
     document, SVGElement: SvgElement,
     window: { parent, addEventListener: (_type: string, handler: typeof onMessage) => { onMessage = handler; } },
   });
-  onMessage({ source: parent, data: { type: "tact-overview", code: overviewProgram(mdx), appearance: "dark" } });
-  return { root, document, html };
+  onMessage({ source: parent, data: { type: "tact-overview", code: overviewProgram(mdx), appearance } });
+  return { root, document, html, onMessage, parent };
 }
 
 function nodes(root: Element): Element[] {
@@ -83,6 +83,47 @@ describe("agent overview MDX", () => {
     expect(program).toContain('"circle"');
   });
 
+  test("renders editorial components with content, labels and chart markup intact", async () => {
+    const { root } = renderOverview(`# Overview
+
+<Callout tone="caution" title="Check">Pay attention.</Callout>
+<CardGrid><Card title="Scope" label="Review">Two files.</Card></CardGrid>
+<MetricGrid><Metric value="42" label="Lines" detail="Changed" /></MetricGrid>
+<Process><ProcessStep title="Inspect">Read the code.</ProcessStep></Process>
+<Figure caption="Shape"><svg viewBox="0 0 40 40" style={{width: 40, height: 40}}><circle cx="20" cy="20" r="8" fill="#123456" /></svg></Figure>`);
+    await Bun.sleep(0);
+    const rendered = nodes(root);
+    expect(rendered.find((node) => node.tag === "aside")?.attributes.class).toBe("callout callout--caution");
+    expect(rendered.find((node) => node.attributes.class === "callout-body")?.children).toContain("Pay attention.");
+    expect(rendered.find((node) => node.attributes.class === "card-label")?.children).toEqual(["Review"]);
+    expect(rendered.find((node) => node.attributes.class === "card-body")?.children).toContain("Two files.");
+    expect(rendered.find((node) => node.attributes.class === "process-marker")?.attributes["aria-hidden"]).toBe("true");
+    expect(rendered.find((node) => node.tag === "figcaption")?.children).toEqual(["Shape"]);
+    expect(rendered.find((node) => node.tag === "svg")?.attributes).toMatchObject({ viewBox: "0 0 40 40", "style:width": "40", "style:height": "40" });
+    expect(rendered.find((node) => node.tag === "circle")?.attributes.fill).toBe("#123456");
+  });
+
+  test("applies explicit and system appearances to readable prose and syntax colors", async () => {
+    const { document, html, onMessage, parent } = renderOverview("# Readable", "light");
+    await Bun.sleep(0);
+    expect(document.documentElement.dataset.theme).toBe("light");
+    onMessage({ source: {}, data: { type: "tact-overview", code: "", appearance: "dark" } });
+    expect(document.documentElement.dataset.theme).toBe("light");
+    onMessage({ source: parent, data: { type: "tact-overview", code: overviewProgram("# Night"), appearance: "dark" } });
+    expect(document.documentElement.dataset.theme).toBe("dark");
+    onMessage({ source: parent, data: { type: "tact-overview", code: overviewProgram("# Automatic"), appearance: "system" } });
+    expect(document.documentElement.dataset.theme).toBe("system");
+    expect(html).toContain(":root { color-scheme: light;");
+    expect(html).toContain(':root[data-theme="dark"] { color-scheme: dark;');
+    expect(html).toContain(':root[data-theme="system"] { color-scheme: dark;');
+    expect(html).toContain(".prose { max-width: 880px;");
+    expect(html).toContain(".prose pre code { background: transparent; color: inherit;");
+    expect(html).toContain("var(--shiki-dark, var(--ink))");
+    expect(html).toContain("var(--shiki-light, var(--ink))");
+    expect(html).toContain(".prose :where(svg text:not([fill])) { fill: currentColor; }");
+    expect(html).not.toContain(".prose svg {");
+  });
+
   test("compilation never evaluates authored JavaScript in the review app", async () => {
     const source = `{globalThis.__tactOverviewIsolated = 42}`;
     const program = overviewProgram(source);
@@ -100,7 +141,7 @@ describe("agent overview MDX", () => {
     expect(html).toContain("connect-src 'none'");
     expect(html).toContain("script-src 'unsafe-inline' 'unsafe-eval'");
     expect(html).toContain("--accent: #315f36");
-    expect(html).toContain("--accent: #9bc59e");
+    expect(html).toContain("--accent: #a3d1a6");
     expect(html).not.toContain("allow-same-origin");
     expect(html).not.toContain("<script src=");
   });
