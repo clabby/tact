@@ -674,7 +674,7 @@ impl Composer {
         }
 
         if key.modifiers == KeyModifiers::CONTROL {
-            if matches!(key.code, KeyCode::Char('a' | 'b' | 'e' | 'f')) {
+            if matches!(key.code, KeyCode::Char('a' | 'b' | 'e' | 'f' | 'k')) {
                 self.history.detach();
             }
             return match key.code {
@@ -689,6 +689,9 @@ impl Composer {
                     self.history.detach();
                     self.insert("\n");
                     ComposerUpdate::changed()
+                }
+                KeyCode::Char('k') => {
+                    ComposerUpdate::from_change(self.delete_to_logical_line_end())
                 }
                 KeyCode::Char('n') => ComposerUpdate::from_change(self.move_down()),
                 KeyCode::Char('p') => ComposerUpdate::from_change(self.move_up()),
@@ -955,6 +958,25 @@ impl Composer {
             return false;
         };
         self.remove_range(self.cursor..self.cursor + next.len());
+        true
+    }
+
+    fn delete_to_logical_line_end(&mut self) -> bool {
+        let end = self.draft[self.cursor..]
+            .find('\n')
+            .map_or(self.draft.len(), |offset| self.cursor + offset);
+        let end = if end == self.cursor && end < self.draft.len() {
+            end + '\n'.len_utf8()
+        } else {
+            end
+        };
+        if end == self.cursor {
+            return false;
+        }
+
+        self.images
+            .retain(|image| image.range.end <= self.cursor || image.range.start >= end);
+        self.remove_range(self.cursor..end);
         true
     }
 
@@ -2102,6 +2124,67 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_k_deletes_to_logical_line_end_then_removes_the_newline() {
+        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        composer.replace_draft("one\ntwo three\nfour".to_owned());
+        composer.cursor = "one\ntwo".len();
+
+        let update = composer.update(key(KeyCode::Char('k'), KeyModifiers::CONTROL));
+        assert!(update.changed);
+        assert_eq!(composer.draft(), "one\ntwo\nfour");
+        assert_eq!(composer.cursor(), "one\ntwo".len());
+
+        composer.update(key(KeyCode::Char('k'), KeyModifiers::CONTROL));
+        assert_eq!(composer.draft(), "one\ntwofour");
+
+        composer.cursor = composer.draft().len();
+        let update = composer.update(key(KeyCode::Char('k'), KeyModifiers::CONTROL));
+        assert!(!update.changed);
+        assert_eq!(composer.draft(), "one\ntwofour");
+    }
+
+    #[test]
+    fn ctrl_k_uses_logical_lines_in_wrapped_unicode_text() {
+        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        composer.replace_draft("界 alpha beta gamma\nnext".to_owned());
+        composer.cursor = "界 alpha".len();
+        render(&mut composer, 8, 6);
+
+        composer.update(key(KeyCode::Char('k'), KeyModifiers::CONTROL));
+
+        assert_eq!(composer.draft(), "界 alpha\nnext");
+        assert_eq!(composer.cursor(), "界 alpha".len());
+        assert!(composer.layout.is_none());
+    }
+
+    #[test]
+    fn ctrl_k_removes_images_and_shifts_later_attachments() {
+        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        composer.update(ComposerEvent::Terminal(Event::Paste("é ".to_owned())));
+        let cursor = composer.cursor();
+        composer.update(ComposerEvent::PasteImage(
+            "data:image/png;base64,removed".to_owned(),
+        ));
+        composer.update(ComposerEvent::Terminal(Event::Paste(
+            " tail\nkeep ".to_owned(),
+        )));
+        composer.update(ComposerEvent::PasteImage(
+            "data:image/png;base64,kept".to_owned(),
+        ));
+        composer.cursor = cursor;
+
+        composer.update(key(KeyCode::Char('k'), KeyModifiers::CONTROL));
+
+        assert_eq!(composer.draft(), "é \nkeep [Image #2]");
+        assert_eq!(composer.images.len(), 1);
+        assert_eq!(
+            composer.images[0].range,
+            "é \nkeep ".len()..composer.draft().len()
+        );
+        assert!(composer.images[0].data_url.ends_with("kept"));
+    }
+
+    #[test]
     fn readline_shortcuts_require_exact_modifiers() {
         let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
         composer.replace_draft("abcd".to_owned());
@@ -2243,6 +2326,7 @@ mod tests {
         for (code, modifiers) in [
             (KeyCode::Char('a'), KeyModifiers::CONTROL),
             (KeyCode::Char('b'), KeyModifiers::CONTROL),
+            (KeyCode::Char('k'), KeyModifiers::CONTROL),
             (KeyCode::Char('b'), KeyModifiers::ALT),
         ] {
             let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
