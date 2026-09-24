@@ -8,6 +8,7 @@ const RELEASE_INSTRUCTIONS: &str = include_str!("../../../RELEASES.md");
 const PACKAGE_MANIFEST: &str = include_str!("../Cargo.toml");
 const REVIEW_BUILD: &str = include_str!("../../../web/review/build.ts");
 const REVIEW_ASSETS: &str = include_str!("../src/review/assets.rs");
+const REVIEW_SERVER: &str = include_str!("../src/review/server.rs");
 const JUSTFILE: &str = include_str!("../../../justfile");
 
 fn assert_contains(document: &str, expected: &str) {
@@ -135,7 +136,11 @@ fn ci_tests_builds_and_typechecks_review_assets_with_locked_dependencies() {
 
 #[test]
 fn review_bundle_api_matches_the_rust_asset_validator() {
-    let rust_api = number_after(REVIEW_ASSETS, "const REVIEW_API_VERSION: u32 = ");
+    assert_contains(
+        REVIEW_ASSETS,
+        "const REVIEW_API_VERSION: u32 = super::server::PROTOCOL_VERSION;",
+    );
+    let rust_api = number_after(REVIEW_SERVER, "const PROTOCOL_VERSION: u32 = ");
     let bundle_min = number_after(REVIEW_BUILD, "review_api: { min: ");
     let bundle_max = number_after(REVIEW_BUILD, "max: ");
 
