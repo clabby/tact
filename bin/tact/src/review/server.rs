@@ -3541,9 +3541,11 @@ mod tests {
             response["selected_range"],
             serde_json::to_value(uncommitted_range()).unwrap()
         );
-        let prompts = prompts.lock().unwrap();
-        assert!(prompts[0].contains("comprehensive code review"));
-        assert!(prompts[0].contains("through the working tree"));
+        {
+            let prompts = prompts.lock().unwrap();
+            assert!(prompts[0].contains("comprehensive code review"));
+            assert!(prompts[0].contains("through the working tree"));
+        }
         server.cancel().await;
     }
 
