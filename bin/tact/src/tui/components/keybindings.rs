@@ -16,7 +16,7 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr;
 
 const FOOTER: [(&str, &str); 2] = [("↑↓", "scroll"), ("esc", "close")];
-const BINDINGS: [(&str, &str); 27] = [
+const BINDINGS: [(&str, &str); 28] = [
     ("ctrl+s", "change reasoning effort"),
     ("ctrl+d", "select model · before first prompt"),
     ("ctrl+t", "fork session · when available"),
@@ -36,6 +36,7 @@ const BINDINGS: [(&str, &str); 27] = [
     ("shift+enter/ctrl+j", "insert newline"),
     ("ctrl+a/e", "move to line start · end"),
     ("ctrl+b/f", "move to previous · next character"),
+    ("ctrl+k", "delete to end of line"),
     ("alt/option+b/f", "move to previous · next word"),
     ("alt/option+backspace", "delete previous word"),
     ("↑/↓ · ctrl+p/n", "move lines · prompt history at edge"),
@@ -181,7 +182,7 @@ mod tests {
     #[test]
     fn popup_documents_context_sensitive_composer_shortcuts() {
         let mut help = KeybindingsHelp::default();
-        let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(80, 31)).unwrap();
 
         terminal
             .draw(|frame| help.render(frame, frame.area(), &Theme::default()))
@@ -210,6 +211,8 @@ mod tests {
             "move to line start · end",
             "ctrl+b/f",
             "move to previous · next character",
+            "ctrl+k",
+            "delete to end of line",
             "alt/option+b/f",
             "move to previous · next word",
             "alt/option+backspace",
