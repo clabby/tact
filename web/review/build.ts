@@ -1,5 +1,6 @@
 import { mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
+import { overviewFrameDocument } from "./overview";
 import { reviewEntrypoints, reviewScriptAssets } from "./build-config";
 
 const outputDirectory = join(import.meta.dir, "dist");
@@ -18,6 +19,7 @@ if (!result.success) {
   process.exit(1);
 }
 
+await Bun.write(join(outputDirectory, "overview-frame.html"), overviewFrameDocument());
 await Bun.write(
   join(outputDirectory, "index.html"),
   Bun.file(join(import.meta.dir, "index.html")),
@@ -43,6 +45,7 @@ await Bun.write(
 
 const contentTypes: Record<string, string> = {
   "index.html": "text/html; charset=utf-8",
+  "overview-frame.html": "text/html; charset=utf-8",
   "app.css": "text/css; charset=utf-8",
   "favicon.svg": "image/svg+xml",
   "FONT-AWESOME-LICENSE.txt": "text/plain; charset=utf-8",
@@ -67,7 +70,7 @@ await Bun.write(
   join(outputDirectory, "manifest.json"),
   `${JSON.stringify({
     schema_version: 2,
-    review_api: { min: 4, max: 4 },
+    review_api: { min: 7, max: 7 },
     tact: { version: process.env.TACT_VERSION ?? "development" },
     entrypoint: "index.html",
     files,

@@ -1,6 +1,7 @@
 import { watch } from "node:fs";
 import { mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
+import { overviewFrameDocument } from "./overview";
 import { reviewEntrypoints, reviewScriptAssets } from "./build-config";
 import { overviewFixtures, reviewBootstrap, reviewFixtures } from "./dev-fixture";
 import { rangeKey, type ReviewRange } from "./range-selection";
@@ -27,6 +28,7 @@ async function buildAssets() {
     for (const message of build.logs) console.error(message);
     return false;
   }
+  await Bun.write(join(outputDirectory, "overview-frame.html"), overviewFrameDocument());
   const html = await Bun.file(join(import.meta.dir, "index.html")).text();
   await Bun.write(join(outputDirectory, "index.html"), html.replace(
     "</body>",
@@ -56,7 +58,7 @@ const server = Bun.serve({
       });
     }
     if (request.method === "GET" && url.pathname === "/api/status") {
-      return Response.json({ generation: 1, changed: workspaceChanged });
+      return Response.json({ generation: 1, changed: workspaceChanged, turn_running: false });
     }
     if (request.method === "POST" && url.pathname === "/api/refresh") {
       workspaceChanged = false;
@@ -83,9 +85,17 @@ const server = Bun.serve({
       devOverview = {
         selected_range: body.range!,
         status: "ready",
-        overview_html: overview,
+        overview_mdx: overview,
       };
-      return Response.json({ generation: body.generation, selected_range: body.range, overview_html: overview });
+      return Response.json({ generation: body.generation, selected_range: body.range, overview_mdx: overview });
+    }
+    if (request.method === "POST" && url.pathname === "/api/ai-review") {
+      const body = await request.json() as { generation: number; range: ReviewRange };
+      await Bun.sleep(900);
+      return Response.json({ generation: body.generation, selected_range: body.range, comments: [
+        { path: "src/review/mod.rs", side: "additions", start_line: 3, end_line: 3,
+          body: "[P2] Confirm the snapshot remains valid if the workspace changes while the review is open." },
+      ] });
     }
     if (request.method === "POST" && url.pathname === "/api/question") {
       const body = await request.json() as QuestionRequest;
@@ -148,7 +158,7 @@ const server = Bun.serve({
     if (url.pathname === "/__reload" && server.upgrade(request)) return;
 
     const name = url.pathname === "/" ? "index.html" : url.pathname.slice(1);
-    if (!["index.html", "app.css", ...reviewScriptAssets].includes(name)) {
+    if (!["index.html", "overview-frame.html", "app.css", ...reviewScriptAssets].includes(name)) {
       return new Response("Not found", { status: 404 });
     }
     return new Response(Bun.file(join(outputDirectory, name)));

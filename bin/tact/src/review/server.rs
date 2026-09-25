@@ -10,7 +10,10 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, VecDeque},
     net::SocketAddr,
-    sync::{Arc, Mutex as StdMutex},
+    sync::{
+        Arc, Mutex as StdMutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 use tokio::{
     net::TcpListener,
@@ -27,13 +30,15 @@ const MAX_OPERATION_ID_BYTES: usize = 128;
 const MAX_THREAD_MESSAGES: usize = 64;
 const MAX_THREAD_BYTES: usize = 256 * 1024;
 const MAX_QUESTION_THREADS: usize = 256;
-pub(super) const PROTOCOL_VERSION: u32 = 4;
+pub(super) const PROTOCOL_VERSION: u32 = 7;
 const MAX_CACHED_PAGES: usize = 8;
 const MAX_CACHED_PAGE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_CACHED_OVERVIEWS: usize = 8;
 const MAX_CACHED_OVERVIEW_BYTES: usize = 8 * 1024 * 1024;
+const MAX_OVERVIEW_INSTRUCTIONS_BYTES: usize = 8 * 1024;
 
-type OverviewOperationKey = (u64, super::diff::ReviewRange);
+type OverviewCacheKey = (super::diff::ReviewRange, Option<String>);
+type OverviewOperationKey = (u64, super::diff::ReviewRange, Option<String>);
 type OverviewOperations = Mutex<HashMap<OverviewOperationKey, Arc<OverviewOperation>>>;
 
 struct OverviewOperation {
@@ -87,6 +92,14 @@ struct RangeRequest {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct OverviewRequest {
+    generation: u64,
+    range: super::diff::ReviewRange,
+    instructions: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct GenerationRequest {
     generation: u64,
 }
@@ -95,7 +108,31 @@ struct GenerationRequest {
 struct OverviewResponse {
     generation: u64,
     selected_range: super::diff::ReviewRange,
-    overview_html: String,
+    overview_mdx: String,
+    instructions: Option<String>,
+}
+
+#[derive(Serialize)]
+struct AiReviewResponse {
+    generation: u64,
+    selected_range: super::diff::ReviewRange,
+    comments: Vec<AiReviewComment>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct AiReviewResult {
+    pub(super) comments: Vec<AiReviewComment>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct AiReviewComment {
+    path: String,
+    side: CommentSide,
+    start_line: u32,
+    end_line: u32,
+    body: String,
 }
 
 #[derive(Clone, Serialize)]
@@ -103,7 +140,8 @@ struct StoredOverview {
     selected_range: super::diff::ReviewRange,
     status: OverviewStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
-    overview_html: Option<String>,
+    overview_mdx: Option<String>,
+    instructions: Option<String>,
 }
 
 #[derive(Clone, Copy, Serialize)]
@@ -191,6 +229,7 @@ struct QuestionListResponse {
 struct ReviewStatus {
     generation: u64,
     changed: bool,
+    turn_running: bool,
 }
 
 #[derive(Serialize)]
@@ -200,6 +239,7 @@ struct RefreshResponse {
     page: ReviewPage,
     overview: Option<StoredOverview>,
     questions: Vec<StoredQuestion>,
+    turn_running: bool,
 }
 
 #[derive(Serialize)]
@@ -217,11 +257,13 @@ struct ScopeError {
 enum ErrorCode {
     StaleSnapshot,
     InvalidRange,
+    InvalidOverviewInstructions,
     WorkspaceChanged,
     OverviewFailed,
+    AiReviewFailed,
     QuestionFailed,
     InvalidThread,
-    AgentBusy,
+    TurnRunning,
     OperationCancelled,
     SessionCancelled,
     InvalidCommentAnchor,
@@ -274,16 +316,15 @@ struct ServerState {
     assets: super::ReviewAssets,
     session: Mutex<ReviewSession>,
     backend: Arc<super::ReviewBackend>,
+    turn_active: Arc<AtomicBool>,
     overview_operations: OverviewOperations,
-    agent_operation: Arc<Mutex<()>>,
-    active_question: StdMutex<Option<ActiveQuestion>>,
+    active_questions: StdMutex<HashMap<String, ActiveQuestion>>,
     refresh_generation: Mutex<()>,
     session_shutdown: CancellationToken,
     outcome: Mutex<Option<oneshot::Sender<ReviewOutcome>>>,
 }
 
 struct ActiveQuestion {
-    operation_id: String,
     generation: u64,
     range: super::diff::ReviewRange,
     cancellation: CancellationToken,
@@ -298,15 +339,10 @@ struct ActiveQuestionRegistration {
 impl Drop for ActiveQuestionRegistration {
     fn drop(&mut self) {
         self.cancellation.cancel();
-        let Ok(mut active) = self.state.active_question.lock() else {
+        let Ok(mut active) = self.state.active_questions.lock() else {
             return;
         };
-        if active
-            .as_ref()
-            .is_some_and(|question| question.operation_id == self.operation_id)
-        {
-            *active = None;
-        }
+        active.remove(&self.operation_id);
     }
 }
 
@@ -317,8 +353,9 @@ struct ReviewSession {
     selected_page: ReviewPage,
     context: super::diff::ReviewContext,
     range_pages: BoundedCache<super::diff::ReviewRange, ReviewPage>,
-    overviews: BoundedCache<super::diff::ReviewRange, String>,
+    overviews: BoundedCache<OverviewCacheKey, String>,
     active_overview: Option<OverviewOperationKey>,
+    selected_overview_key: Option<OverviewCacheKey>,
     questions: Vec<StoredQuestion>,
     version: super::diff::WorkspaceVersion,
     generation_shutdown: CancellationToken,
@@ -349,6 +386,15 @@ where
 
     fn get(&self, key: &K) -> Option<&V> {
         self.values.get(key).map(|(value, _)| value)
+    }
+
+    fn touch(&mut self, key: &K) -> Option<&V> {
+        if !self.values.contains_key(key) {
+            return None;
+        }
+        self.order.retain(|existing| existing != key);
+        self.order.push_back(key.clone());
+        self.get(key)
     }
 
     fn insert(&mut self, key: K, value: V, bytes: usize) {
@@ -387,6 +433,7 @@ impl ReviewSession {
             range_pages: BoundedCache::new(MAX_CACHED_PAGES, MAX_CACHED_PAGE_BYTES),
             overviews: BoundedCache::new(MAX_CACHED_OVERVIEWS, MAX_CACHED_OVERVIEW_BYTES),
             active_overview: None,
+            selected_overview_key: None,
             questions: Vec::new(),
             version: review.version,
             generation_shutdown: session_shutdown.child_token(),
@@ -422,20 +469,28 @@ impl ReviewSession {
 
     fn selected_overview(&self) -> Option<StoredOverview> {
         let range = self.selected_page.selected_range;
-        if self.active_overview == Some((self.generation, range)) {
+        if let Some((_, active_range, instructions)) = &self.active_overview
+            && *active_range == range
+            && self.selected_overview_key.as_ref() == Some(&(*active_range, instructions.clone()))
+        {
             return Some(StoredOverview {
                 selected_range: range,
                 status: OverviewStatus::Generating,
-                overview_html: None,
+                overview_mdx: None,
+                instructions: instructions.clone(),
             });
         }
-        self.overviews
-            .get(&range)
-            .map(|overview_html| StoredOverview {
-                selected_range: range,
-                status: OverviewStatus::Ready,
-                overview_html: Some(overview_html.clone()),
-            })
+        let key = self
+            .selected_overview_key
+            .as_ref()
+            .filter(|key| key.0 == range && self.overviews.get(key).is_some())
+            .or_else(|| self.overviews.order.iter().rev().find(|key| key.0 == range))?;
+        self.overviews.get(key).map(|overview_mdx| StoredOverview {
+            selected_range: range,
+            status: OverviewStatus::Ready,
+            overview_mdx: Some(overview_mdx.clone()),
+            instructions: key.1.clone(),
+        })
     }
 }
 
@@ -460,6 +515,7 @@ impl ReviewServer {
         backend: Arc<super::ReviewBackend>,
         token: String,
         assets: super::ReviewAssets,
+        turn_active: Arc<AtomicBool>,
     ) -> Result<Self, std::io::Error> {
         crate::install_tls_provider();
         let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
@@ -470,9 +526,9 @@ impl ReviewServer {
             assets,
             session: Mutex::new(ReviewSession::new(review, session_shutdown.clone())),
             backend,
+            turn_active,
             overview_operations: Mutex::new(HashMap::new()),
-            agent_operation: Arc::new(Mutex::new(())),
-            active_question: StdMutex::new(None),
+            active_questions: StdMutex::new(HashMap::new()),
             refresh_generation: Mutex::new(()),
             session_shutdown: session_shutdown.clone(),
             outcome: Mutex::new(Some(outcome_tx)),
@@ -544,6 +600,7 @@ fn router(state: Arc<ServerState>) -> Router {
         .route("/api/refresh", post(refresh_review))
         .route("/api/range", post(load_range))
         .route("/api/overview", post(load_overview))
+        .route("/api/ai-review", post(run_ai_review))
         .route("/api/question", post(ask_question))
         .route("/api/questions", post(list_questions))
         .route("/api/question/cancel", post(cancel_question))
@@ -574,6 +631,7 @@ async fn review(State(state): State<Arc<ServerState>>) -> impl IntoResponse {
             page: session.selected_page.clone(),
             overview: session.selected_overview(),
             questions: session.questions.clone(),
+            turn_running: state.turn_active.load(Ordering::Acquire),
         },
     )
 }
@@ -617,6 +675,7 @@ async fn review_status(State(state): State<Arc<ServerState>>) -> Response<Body> 
         ReviewStatus {
             generation,
             changed: current != version,
+            turn_running: state.turn_active.load(Ordering::Acquire),
         },
     )
 }
@@ -635,7 +694,7 @@ async fn refresh_review(
     };
     let review = match state
         .backend
-        .prepare(shutdown)
+        .prepare_while_active(shutdown, &state.turn_active)
         .await
         .map_err(super::scope_load_error)
     {
@@ -676,6 +735,7 @@ async fn refresh_review(
             page,
             overview: session.selected_overview(),
             questions: session.questions.clone(),
+            turn_running: state.turn_active.load(Ordering::Acquire),
         },
     )
 }
@@ -783,64 +843,125 @@ async fn load_range(
 
 async fn load_overview(
     State(state): State<Arc<ServerState>>,
-    Json(request): Json<RangeRequest>,
+    Json(mut request): Json<OverviewRequest>,
 ) -> Response<Body> {
-    let overview_key = (request.generation, request.range);
-    let operation = {
+    if state.turn_active.load(Ordering::Acquire) {
+        return turn_running();
+    }
+    request.instructions = request
+        .instructions
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
+    if request
+        .instructions
+        .as_ref()
+        .is_some_and(|value| value.len() > MAX_OVERVIEW_INSTRUCTIONS_BYTES)
+    {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            ErrorCode::InvalidOverviewInstructions,
+            "overview instructions exceed 8 KiB",
+            true,
+            true,
+        );
+    }
+    let cache_key = (request.range, request.instructions.clone());
+    let overview_key = (
+        request.generation,
+        request.range,
+        request.instructions.clone(),
+    );
+    let (operation, joined) = {
         let mut operations = state.overview_operations.lock().await;
-        Arc::clone(
-            operations
-                .entry(overview_key)
-                .or_insert_with(|| Arc::new(OverviewOperation::new())),
-        )
+        match operations.entry(overview_key.clone()) {
+            std::collections::hash_map::Entry::Occupied(entry) => (Arc::clone(entry.get()), true),
+            std::collections::hash_map::Entry::Vacant(entry) => (
+                Arc::clone(entry.insert(Arc::new(OverviewOperation::new()))),
+                false,
+            ),
+        }
     };
+    if joined {
+        let mut session = state.session.lock().await;
+        if state.turn_active.load(Ordering::Acquire) {
+            return turn_running();
+        }
+        if matching_page(&session, request.generation, &request.range).is_none() {
+            return stale_snapshot("the requested review snapshot is stale");
+        }
+        session.selected_overview_key = Some(cache_key.clone());
+        session.active_overview = Some(overview_key.clone());
+    }
     let operation_gate = Arc::clone(&operation.gate).lock_owned().await;
     if let Some(result) = operation.result.lock().await.clone() {
+        let mut session = state.session.lock().await;
+        if session.active_overview.as_ref() == Some(&overview_key) {
+            session.active_overview = None;
+        }
+        drop(session);
         state.overview_operations.lock().await.remove(&overview_key);
         return overview_response(overview_key, result);
     }
     let (page, version, shutdown) = {
-        let session = state.session.lock().await;
-        let Some(page) = matching_page(&session, request.generation, &request.range) else {
+        let mut session = state.session.lock().await;
+        if state.turn_active.load(Ordering::Acquire) {
+            drop(session);
+            discard_idle_overview_operation(&state, &overview_key, &operation).await;
+            return turn_running();
+        }
+        let Some(page) = matching_page(&session, request.generation, &request.range).cloned()
+        else {
+            drop(session);
+            discard_idle_overview_operation(&state, &overview_key, &operation).await;
             return stale_snapshot("the requested review snapshot is stale");
         };
-        if let Some(overview_html) = session.overviews.get(&request.range).cloned() {
+        if let Some(overview_mdx) = session.overviews.touch(&cache_key).cloned() {
+            session.selected_overview_key = Some(cache_key.clone());
+            drop(session);
+            discard_idle_overview_operation(&state, &overview_key, &operation).await;
             return secure_json(
                 StatusCode::OK,
                 OverviewResponse {
                     generation: request.generation,
                     selected_range: request.range,
-                    overview_html,
+                    overview_mdx,
+                    instructions: request.instructions,
                 },
             );
         }
         (
-            page.clone(),
+            page,
             session.version.clone(),
             session.generation_shutdown.clone(),
         )
     };
-    let Ok(agent_operation) = Arc::clone(&state.agent_operation).try_lock_owned() else {
-        return agent_busy();
-    };
     {
         let mut session = state.session.lock().await;
         if matching_page(&session, request.generation, &request.range).is_none() {
+            drop(session);
+            discard_idle_overview_operation(&state, &overview_key, &operation).await;
             return stale_snapshot("the requested review snapshot is stale");
         }
-        session.active_overview = Some(overview_key);
+        session.active_overview = Some(overview_key.clone());
+        session.selected_overview_key = Some(cache_key);
     }
 
     let (completion, response) = oneshot::channel();
     let task_state = Arc::clone(&state);
     tokio::spawn(async move {
         let _operation_gate = operation_gate;
-        let _agent_operation = agent_operation;
-        let result = run_overview(&task_state, &page, version, shutdown).await;
-        let result = store_overview_result(&task_state, overview_key, result).await;
+        let result = run_overview(
+            &task_state,
+            &page,
+            version,
+            overview_key.2.as_deref(),
+            shutdown,
+        )
+        .await;
+        let result = store_overview_result(&task_state, &overview_key, result).await;
         *operation.result.lock().await = Some(result.clone());
         let initiating_browser_is_connected = completion
-            .send(overview_response(overview_key, result))
+            .send(overview_response(overview_key.clone(), result))
             .is_ok();
         let reloaded_browser_is_waiting = Arc::strong_count(&operation) > 2;
         if initiating_browser_is_connected || !reloaded_browser_is_waiting {
@@ -857,6 +978,21 @@ async fn load_overview(
         .unwrap_or_else(|_| internal_error("the overview operation stopped unexpectedly"))
 }
 
+async fn discard_idle_overview_operation(
+    state: &ServerState,
+    key: &OverviewOperationKey,
+    operation: &Arc<OverviewOperation>,
+) {
+    let mut operations = state.overview_operations.lock().await;
+    if Arc::strong_count(operation) == 2
+        && operations
+            .get(key)
+            .is_some_and(|current| Arc::ptr_eq(current, operation))
+    {
+        operations.remove(key);
+    }
+}
+
 #[derive(Clone)]
 enum OverviewRunResult {
     Ready(String),
@@ -870,6 +1006,7 @@ async fn run_overview(
     state: &ServerState,
     page: &ReviewPage,
     version: super::diff::WorkspaceVersion,
+    instructions: Option<&str>,
     shutdown: CancellationToken,
 ) -> OverviewRunResult {
     let current = match state.backend.current_version(shutdown.clone()).await {
@@ -884,9 +1021,14 @@ async fn run_overview(
     if current != version {
         return OverviewRunResult::Stale("the workspace changed before its overview was generated");
     }
-    let overview_html = match state
+    let overview_mdx = match state
         .backend
-        .overview(&page.diff.scope, &page.diff.overview, shutdown.clone())
+        .overview(
+            &page.diff.scope,
+            &page.diff.overview,
+            instructions,
+            shutdown.clone(),
+        )
         .await
     {
         Ok(overview) => overview,
@@ -905,25 +1047,32 @@ async fn run_overview(
     if current != version {
         return OverviewRunResult::Stale("the workspace changed while its overview was generated");
     }
-    OverviewRunResult::Ready(overview_html)
+    OverviewRunResult::Ready(overview_mdx)
 }
 
 async fn store_overview_result(
     state: &ServerState,
-    overview_key: OverviewOperationKey,
+    overview_key: &OverviewOperationKey,
     result: OverviewRunResult,
 ) -> OverviewRunResult {
     let mut session = state.session.lock().await;
-    if session.active_overview == Some(overview_key) {
+    if session.active_overview.as_ref() == Some(overview_key) {
         session.active_overview = None;
+    }
+    if state.turn_active.load(Ordering::Acquire) {
+        return OverviewRunResult::Stale(
+            "the agent started another turn during overview generation",
+        );
     }
     if matching_page(&session, overview_key.0, &overview_key.1).is_none() {
         return OverviewRunResult::Stale("the review changed while its overview was loading");
     }
-    if let OverviewRunResult::Ready(overview_html) = &result {
-        session
-            .overviews
-            .insert(overview_key.1, overview_html.clone(), overview_html.len());
+    if let OverviewRunResult::Ready(overview_mdx) = &result {
+        session.overviews.insert(
+            (overview_key.1, overview_key.2.clone()),
+            overview_mdx.clone(),
+            overview_mdx.len(),
+        );
     }
     result
 }
@@ -933,12 +1082,13 @@ fn overview_response(
     result: OverviewRunResult,
 ) -> Response<Body> {
     match result {
-        OverviewRunResult::Ready(overview_html) => secure_json(
+        OverviewRunResult::Ready(overview_mdx) => secure_json(
             StatusCode::OK,
             OverviewResponse {
                 generation: overview_key.0,
                 selected_range: overview_key.1,
-                overview_html,
+                overview_mdx,
+                instructions: overview_key.2,
             },
         ),
         OverviewRunResult::Cancelled => error_response(
@@ -966,10 +1116,128 @@ fn overview_response(
     }
 }
 
+async fn run_ai_review(
+    State(state): State<Arc<ServerState>>,
+    Json(request): Json<RangeRequest>,
+) -> Response<Body> {
+    if state.turn_active.load(Ordering::Acquire) {
+        return turn_running();
+    }
+    let (page, version, shutdown) = {
+        let session = state.session.lock().await;
+        let Some(page) = matching_page(&session, request.generation, &request.range) else {
+            return stale_snapshot("the requested review snapshot is stale");
+        };
+        (
+            page.clone(),
+            session.version.clone(),
+            session.generation_shutdown.clone(),
+        )
+    };
+    let current = match state.backend.current_version(shutdown.clone()).await {
+        Ok(current) => current,
+        Err(ScopeLoadError::Cancelled) => {
+            return stale_snapshot("the review changed before AI review started");
+        }
+        Err(ScopeLoadError::Failed(error)) => return workspace_error(error),
+    };
+    if current != version {
+        return stale_snapshot("the workspace changed before AI review started");
+    }
+
+    let comments = match state
+        .backend
+        .ai_review(&page.diff.scope, &page.diff.overview, shutdown.clone())
+        .await
+    {
+        Ok(comments) => comments,
+        Err(ScopeLoadError::Cancelled) => return operation_cancelled("AI review was cancelled"),
+        Err(ScopeLoadError::Failed(error)) => {
+            return error_response(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                ErrorCode::AiReviewFailed,
+                error,
+                true,
+                true,
+            );
+        }
+    };
+    let current = match state.backend.current_version(shutdown).await {
+        Ok(current) => current,
+        Err(ScopeLoadError::Cancelled) => {
+            return stale_snapshot("the review changed during AI review");
+        }
+        Err(ScopeLoadError::Failed(error)) => return workspace_error(error),
+    };
+    if current != version {
+        return stale_snapshot("the workspace changed during AI review");
+    }
+    let session = state.session.lock().await;
+    if state.turn_active.load(Ordering::Acquire) {
+        return turn_running();
+    }
+    if matching_page(&session, request.generation, &request.range).is_none() {
+        return stale_snapshot("the review changed during AI review");
+    }
+    if comments.len() > MAX_COMMENTS
+        || comments.iter().any(|comment| {
+            invalid_ai_comment(comment)
+                || !valid_anchor(
+                    &page.diff,
+                    &comment.path,
+                    comment.side,
+                    comment.start_line,
+                    comment.end_line,
+                )
+        })
+    {
+        return error_response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            ErrorCode::AiReviewFailed,
+            "the agent returned invalid or unanchored review comments",
+            true,
+            true,
+        );
+    }
+    secure_json(
+        StatusCode::OK,
+        AiReviewResponse {
+            generation: request.generation,
+            selected_range: request.range,
+            comments,
+        },
+    )
+}
+
+fn invalid_ai_comment(comment: &AiReviewComment) -> bool {
+    comment.path.trim().is_empty()
+        || comment.path.len() > MAX_PATH_BYTES
+        || comment.body.trim().is_empty()
+        || comment.body.len() > MAX_COMMENT_BYTES
+        || !["[P0] ", "[P1] ", "[P2] ", "[P3] "]
+            .iter()
+            .any(|prefix| comment.body.starts_with(prefix) && comment.body.len() > prefix.len())
+        || comment.start_line == 0
+        || comment.end_line < comment.start_line
+}
+
+fn workspace_error(error: String) -> Response<Body> {
+    error_response(
+        StatusCode::SERVICE_UNAVAILABLE,
+        ErrorCode::WorkspaceChanged,
+        error,
+        true,
+        false,
+    )
+}
+
 async fn ask_question(
     State(state): State<Arc<ServerState>>,
     Json(request): Json<QuestionRequest>,
 ) -> Response<Body> {
+    if state.turn_active.load(Ordering::Acquire) {
+        return turn_running();
+    }
     if invalid_question(&request) {
         return invalid_thread("the question thread is invalid");
     }
@@ -993,32 +1261,34 @@ async fn ask_question(
             session.generation_shutdown.clone(),
         )
     };
-    let Ok(agent_operation) = Arc::clone(&state.agent_operation).try_lock_owned() else {
-        return agent_busy();
-    };
-    {
+    let operation_shutdown = {
         let mut session = state.session.lock().await;
+        if state.turn_active.load(Ordering::Acquire) {
+            return turn_running();
+        }
+        let Ok(mut active) = state.active_questions.lock() else {
+            return internal_error("the active question state is unavailable");
+        };
+        if active.contains_key(&request.operation_id) {
+            return invalid_thread("the question operation identifier is already in use");
+        }
         if !begin_stored_question(&mut session, &request) {
             return invalid_thread("the question does not continue its stored thread");
         }
-    }
-
-    let operation_shutdown = shutdown.child_token();
-    {
-        let Ok(mut active) = state.active_question.lock() else {
-            return internal_error("the active question state is unavailable");
-        };
-        *active = Some(ActiveQuestion {
-            operation_id: request.operation_id.clone(),
-            generation: request.generation,
-            range: request.range,
-            cancellation: operation_shutdown.clone(),
-        });
-    }
+        let cancellation = shutdown.child_token();
+        active.insert(
+            request.operation_id.clone(),
+            ActiveQuestion {
+                generation: request.generation,
+                range: request.range,
+                cancellation: cancellation.clone(),
+            },
+        );
+        cancellation
+    };
     let (completion, response) = oneshot::channel();
     let task_state = Arc::clone(&state);
     tokio::spawn(async move {
-        let _agent_operation = agent_operation;
         let completion_shutdown = operation_shutdown.clone();
         let _registration = ActiveQuestionRegistration {
             state: Arc::clone(&task_state),
@@ -1027,10 +1297,10 @@ async fn ask_question(
         };
         let mut result =
             run_question(&task_state, &request, &page, version, operation_shutdown).await;
-        if completion_shutdown.is_cancelled() {
+        if completion_shutdown.is_cancelled() || task_state.turn_active.load(Ordering::Acquire) {
             result = QuestionRunResult::Cancelled;
         }
-        store_question_result(&task_state, &request, &result).await;
+        store_question_result(&task_state, &request, &mut result).await;
         let _ = completion.send(question_response(&request, result));
     });
 
@@ -1111,9 +1381,12 @@ async fn run_question(
 async fn store_question_result(
     state: &ServerState,
     request: &QuestionRequest,
-    result: &QuestionRunResult,
+    result: &mut QuestionRunResult,
 ) {
     let mut session = state.session.lock().await;
+    if state.turn_active.load(Ordering::Acquire) {
+        *result = QuestionRunResult::Cancelled;
+    }
     let Some(thread) = session.questions.iter_mut().find(|thread| {
         thread.thread_id == request.thread_id
             && thread.operation_id == request.operation_id
@@ -1188,11 +1461,10 @@ async fn cancel_question(
             true,
         );
     }
-    let Ok(active) = state.active_question.lock() else {
+    let Ok(active) = state.active_questions.lock() else {
         return internal_error("the active question state is unavailable");
     };
-    if let Some(question) = active.as_ref()
-        && question.operation_id == request.operation_id
+    if let Some(question) = active.get(&request.operation_id)
         && question.generation == request.generation
         && question.range == request.range
     {
@@ -1205,6 +1477,9 @@ async fn submit(
     State(state): State<Arc<ServerState>>,
     Json(mut decision): Json<ReviewDecision>,
 ) -> impl IntoResponse {
+    if state.turn_active.load(Ordering::Acquire) {
+        return turn_running();
+    }
     if invalid_decision(&decision) {
         return error_response(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -1264,6 +1539,9 @@ async fn submit(
         return stale_snapshot("the workspace changed after this snapshot was captured");
     }
     let session = state.session.lock().await;
+    if state.turn_active.load(Ordering::Acquire) {
+        return turn_running();
+    }
     if matching_page(&session, decision.generation, &decision.range).is_none() {
         return stale_snapshot("the review changed while submission was validated");
     }
@@ -1442,11 +1720,11 @@ fn invalid_operation_id(operation_id: &str) -> bool {
         || !operation_id.is_ascii()
 }
 
-fn agent_busy() -> Response<Body> {
+fn turn_running() -> Response<Body> {
     error_response(
         StatusCode::CONFLICT,
-        ErrorCode::AgentBusy,
-        "another review agent operation is already running",
+        ErrorCode::TurnRunning,
+        "The agent turn is still running. Review actions are available when it finishes.",
         true,
         true,
     )
@@ -1532,6 +1810,16 @@ async fn asset(assets: &super::ReviewAssets, request_path: &str) -> Response<Bod
         .headers_mut()
         .insert(header::CONTENT_TYPE, content_type);
     secure(&mut response);
+    if request_path == "overview-frame.html" {
+        // The overview executes agent-authored MDX in an opaque-origin sandbox.
+        // Its policy applies only to this frame; the review application's policy stays strict.
+        response.headers_mut().insert(
+            header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static(
+                "default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval'; style-src 'unsafe-inline'; img-src data:; connect-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'",
+            ),
+        );
+    }
     response
 }
 
@@ -1905,11 +2193,276 @@ mod tests {
                 .unwrap();
             assert_eq!(response.status(), reqwest::StatusCode::OK);
             assert_eq!(
-                response.json::<serde_json::Value>().await.unwrap()["overview_html"],
+                response.json::<serde_json::Value>().await.unwrap()["overview_mdx"],
                 "<p>Overview</p>"
             );
         }
         assert_eq!(loads.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn overview_instructions_select_distinct_cached_results_and_survive_reload() {
+        let assets = tempfile::tempdir().unwrap();
+        for name in ["index.html", "app.js", "app.css"] {
+            std::fs::write(assets.path().join(name), "").unwrap();
+        }
+        let loads = Arc::new(AtomicUsize::new(0));
+        let generator: ReviewAgent = Arc::new({
+            let loads = Arc::clone(&loads);
+            move |prompt, _shutdown| {
+                loads.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async move {
+                    Ok(if prompt.contains("Focus on safety") {
+                        "<p>Safety</p>"
+                    } else if prompt.contains("Focus on performance") {
+                        "<p>Performance</p>"
+                    } else {
+                        "<p>Default</p>"
+                    }
+                    .to_owned())
+                })
+            }
+        });
+        let server = start_server_with_generator(&assets, generator).await;
+        let client = reqwest::Client::new();
+        for (instructions, expected) in [
+            (None, "<p>Default</p>"),
+            (Some("  Focus on safety  "), "<p>Safety</p>"),
+            (Some("Focus on performance"), "<p>Performance</p>"),
+            (Some("Focus on safety"), "<p>Safety</p>"),
+            (None, "<p>Default</p>"),
+        ] {
+            let response = client.post(server.endpoint_url("api/overview"))
+                .json(&serde_json::json!({"generation": 0, "range": uncommitted_range(), "instructions": instructions}))
+                .send().await.unwrap();
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            let result = response.json::<serde_json::Value>().await.unwrap();
+            assert_eq!(result["overview_mdx"], expected);
+            assert_eq!(
+                result["instructions"],
+                serde_json::json!(instructions.map(str::trim))
+            );
+            let restored = client
+                .get(server.endpoint_url("api/review"))
+                .send()
+                .await
+                .unwrap()
+                .json::<serde_json::Value>()
+                .await
+                .unwrap();
+            assert_eq!(restored["overview"]["overview_mdx"], expected);
+            assert_eq!(
+                restored["overview"]["instructions"],
+                serde_json::json!(instructions.map(str::trim))
+            );
+        }
+        assert_eq!(loads.load(Ordering::SeqCst), 3);
+
+        let other_range = ReviewRange { from: 0, to: 1 };
+        assert_eq!(
+            client
+                .post(server.endpoint_url("api/range"))
+                .json(&range_request(other_range))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            reqwest::StatusCode::OK
+        );
+        assert_eq!(
+            client
+                .post(server.endpoint_url("api/overview"))
+                .json(&serde_json::json!({"generation": 0, "range": other_range,
+                    "instructions": "Explain the trunk delta"}))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            reqwest::StatusCode::OK
+        );
+        assert_eq!(
+            client
+                .post(server.endpoint_url("api/range"))
+                .json(&range_request(uncommitted_range()))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            reqwest::StatusCode::OK
+        );
+        let restored = client
+            .get(server.endpoint_url("api/review"))
+            .send()
+            .await
+            .unwrap()
+            .json::<serde_json::Value>()
+            .await
+            .unwrap();
+        assert_eq!(restored["overview"]["overview_mdx"], "<p>Default</p>");
+        assert_eq!(
+            restored["overview"]["instructions"],
+            serde_json::Value::Null
+        );
+    }
+
+    #[tokio::test]
+    async fn oversized_overview_instructions_are_rejected_before_generation() {
+        let assets = tempfile::tempdir().unwrap();
+        for name in ["index.html", "app.js", "app.css"] {
+            std::fs::write(assets.path().join(name), "").unwrap();
+        }
+        let server = start_server(&assets).await;
+        let response = reqwest::Client::new()
+            .post(server.endpoint_url("api/overview"))
+            .json(
+                &serde_json::json!({"generation": 0, "range": uncommitted_range(),
+                "instructions": "x".repeat(super::MAX_OVERVIEW_INSTRUCTIONS_BYTES + 1)}),
+            )
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+        assert!(server.state.overview_operations.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn overviews_with_distinct_instructions_complete_concurrently() {
+        let assets = tempfile::tempdir().unwrap();
+        for name in ["index.html", "app.js", "app.css"] {
+            std::fs::write(assets.path().join(name), "").unwrap();
+        }
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let generator: ReviewAgent = Arc::new({
+            let started = Arc::clone(&started);
+            let release = Arc::clone(&release);
+            move |_prompt, _shutdown| {
+                let started = Arc::clone(&started);
+                let release = Arc::clone(&release);
+                Box::pin(async move {
+                    started.notify_one();
+                    release.notified().await;
+                    Ok("<p>Overview</p>".to_owned())
+                })
+            }
+        });
+        let server = start_server_with_generator(&assets, generator).await;
+        let url = server.endpoint_url("api/overview");
+        let first = tokio::spawn(request_overview(url.clone(), uncommitted_range()));
+        started.notified().await;
+        let second = tokio::spawn(async move {
+            reqwest::Client::new()
+                .post(url)
+                .json(
+                    &serde_json::json!({"generation": 0, "range": uncommitted_range(),
+                    "instructions": "Focus on safety"}),
+                )
+                .send()
+                .await
+                .unwrap()
+                .status()
+        });
+        tokio::time::timeout(Duration::from_secs(5), started.notified())
+            .await
+            .expect("second overview should start while the first is running");
+        assert_eq!(server.state.overview_operations.lock().await.len(), 2);
+        release.notify_waiters();
+        assert_eq!(second.await.unwrap(), reqwest::StatusCode::OK);
+        assert_eq!(first.await.unwrap(), reqwest::StatusCode::OK);
+        assert!(server.state.overview_operations.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn joining_an_overview_selects_it_while_another_overview_is_running() {
+        let assets = tempfile::tempdir().unwrap();
+        for name in ["index.html", "app.js", "app.css"] {
+            std::fs::write(assets.path().join(name), "").unwrap();
+        }
+        let started_a = Arc::new(Notify::new());
+        let started_b = Arc::new(Notify::new());
+        let release_a = Arc::new(Notify::new());
+        let release_b = Arc::new(Notify::new());
+        let generator: ReviewAgent = Arc::new({
+            let started_a = Arc::clone(&started_a);
+            let started_b = Arc::clone(&started_b);
+            let release_a = Arc::clone(&release_a);
+            let release_b = Arc::clone(&release_b);
+            move |prompt, _| {
+                let started_a = Arc::clone(&started_a);
+                let started_b = Arc::clone(&started_b);
+                let release_a = Arc::clone(&release_a);
+                let release_b = Arc::clone(&release_b);
+                Box::pin(async move {
+                    if prompt.contains("Focus on B") {
+                        started_b.notify_one();
+                        release_b.notified().await;
+                        Ok("<p>B</p>".to_owned())
+                    } else {
+                        started_a.notify_one();
+                        release_a.notified().await;
+                        Ok("<p>A</p>".to_owned())
+                    }
+                })
+            }
+        });
+        let server = start_server_with_generator(&assets, generator).await;
+        let url = server.endpoint_url("api/overview");
+        let a = tokio::spawn(request_overview(url.clone(), uncommitted_range()));
+        started_a.notified().await;
+        let b = tokio::spawn({
+            let url = url.clone();
+            async move {
+                reqwest::Client::new()
+                    .post(url)
+                    .json(
+                        &serde_json::json!({"generation": 0, "range": uncommitted_range(),
+                    "instructions": "Focus on B"}),
+                    )
+                    .send()
+                    .await
+                    .unwrap()
+                    .status()
+            }
+        });
+        started_b.notified().await;
+        let joined_a = tokio::spawn(request_overview(url, uncommitted_range()));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let review = reqwest::get(server.endpoint_url("api/review"))
+                    .await
+                    .unwrap()
+                    .json::<serde_json::Value>()
+                    .await
+                    .unwrap();
+                if review["overview"]["status"] == "generating"
+                    && review["overview"]["instructions"].is_null()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("joining A should select its generating overview");
+        release_a.notify_one();
+        assert_eq!(a.await.unwrap(), reqwest::StatusCode::OK);
+        assert_eq!(joined_a.await.unwrap(), reqwest::StatusCode::OK);
+        let review = reqwest::get(server.endpoint_url("api/review"))
+            .await
+            .unwrap()
+            .json::<serde_json::Value>()
+            .await
+            .unwrap();
+        assert_eq!(review["overview"]["overview_mdx"], "<p>A</p>");
+        release_b.notify_one();
+        assert_eq!(b.await.unwrap(), reqwest::StatusCode::OK);
+        let review = reqwest::get(server.endpoint_url("api/review"))
+            .await
+            .unwrap()
+            .json::<serde_json::Value>()
+            .await
+            .unwrap();
+        assert_eq!(review["overview"]["overview_mdx"], "<p>A</p>");
     }
 
     #[tokio::test]
@@ -2024,7 +2577,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn overview_and_question_agent_operations_are_mutually_exclusive() {
+    async fn overview_and_question_agent_operations_complete_concurrently() {
         let assets = tempfile::tempdir().unwrap();
         for name in ["index.html", "app.js", "app.css"] {
             std::fs::write(assets.path().join(name), "").unwrap();
@@ -2040,8 +2593,10 @@ mod tests {
                 Box::pin(async move {
                     started.notify_one();
                     release.notified().await;
-                    if prompt.contains("self-contained HTML") {
+                    if prompt.contains("concise MDX explainer") {
                         Ok("<p>Overview</p>".to_owned())
+                    } else if prompt.contains("Return only a JSON object") {
+                        Ok("{\"comments\":[]}".to_owned())
                     } else {
                         Ok("Answer".to_owned())
                     }
@@ -2056,30 +2611,69 @@ mod tests {
         });
         started.notified().await;
 
-        let busy = client
-            .post(server.endpoint_url("api/question"))
-            .json(&question_request())
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(busy.status(), reqwest::StatusCode::CONFLICT);
-        assert_eq!(
-            busy.json::<serde_json::Value>().await.unwrap()["code"],
-            "agent_busy"
-        );
-        release.notify_one();
-        assert_eq!(overview.await.unwrap(), reqwest::StatusCode::OK);
-
-        let range = working_tree_range();
-        let loaded = client
-            .post(server.endpoint_url("api/range"))
-            .json(&range_request(range))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(loaded.status(), reqwest::StatusCode::OK);
         let question = tokio::spawn({
             let url = server.endpoint_url("api/question");
+            async move {
+                client
+                    .post(url)
+                    .json(&question_request())
+                    .send()
+                    .await
+                    .unwrap()
+                    .status()
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(5), started.notified())
+            .await
+            .expect("question should start during overview generation");
+        let ai_review = tokio::spawn({
+            let url = server.endpoint_url("api/ai-review");
+            async move {
+                reqwest::Client::new()
+                    .post(url)
+                    .json(&snapshot_request(uncommitted_range()))
+                    .send()
+                    .await
+                    .unwrap()
+                    .status()
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(5), started.notified())
+            .await
+            .expect("AI review should start during overview and question generation");
+        release.notify_waiters();
+        assert_eq!(ai_review.await.unwrap(), reqwest::StatusCode::OK);
+        assert_eq!(question.await.unwrap(), reqwest::StatusCode::OK);
+        assert_eq!(overview.await.unwrap(), reqwest::StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn independent_questions_cancel_by_operation_id() {
+        let assets = tempfile::tempdir().unwrap();
+        for name in ["index.html", "app.js", "app.css"] {
+            std::fs::write(assets.path().join(name), "").unwrap();
+        }
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let generator: ReviewAgent = Arc::new({
+            let started = Arc::clone(&started);
+            let release = Arc::clone(&release);
+            move |_prompt, shutdown| {
+                let started = Arc::clone(&started);
+                let release = Arc::clone(&release);
+                Box::pin(async move {
+                    started.notify_one();
+                    tokio::select! {
+                        () = shutdown.cancelled() => Err(ReviewAgentError::Cancelled),
+                        () = release.notified() => Ok("Answer".to_owned()),
+                    }
+                })
+            }
+        });
+        let server = start_server_with_generator(&assets, generator).await;
+        let url = server.endpoint_url("api/question");
+        let first = tokio::spawn({
+            let url = url.clone();
             async move {
                 reqwest::Client::new()
                     .post(url)
@@ -2091,17 +2685,149 @@ mod tests {
             }
         });
         started.notified().await;
-
+        let mut second_request = question_request();
+        second_request["thread_id"] = "thread-2".into();
+        second_request["operation_id"] = "question-2".into();
+        let second = tokio::spawn({
+            let url = url.clone();
+            let request = second_request.clone();
+            async move {
+                reqwest::Client::new()
+                    .post(url)
+                    .json(&request)
+                    .send()
+                    .await
+                    .unwrap()
+                    .status()
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(5), started.notified())
+            .await
+            .expect("second question should run concurrently");
+        let duplicate = reqwest::Client::new()
+            .post(url)
+            .json(&second_request)
+            .send()
+            .await
+            .unwrap();
         assert_eq!(
-            request_overview(server.endpoint_url("api/overview"), range).await,
-            reqwest::StatusCode::CONFLICT
+            duplicate.status(),
+            reqwest::StatusCode::UNPROCESSABLE_ENTITY
         );
+        let cancelled = reqwest::Client::new().post(server.endpoint_url("api/question/cancel"))
+            .json(&serde_json::json!({"operation_id": "question-1", "generation": 0, "range": uncommitted_range()}))
+            .send().await.unwrap();
+        assert_eq!(cancelled.status(), reqwest::StatusCode::NO_CONTENT);
+        assert_eq!(first.await.unwrap(), reqwest::StatusCode::CONFLICT);
         release.notify_one();
-        assert_eq!(question.await.unwrap(), reqwest::StatusCode::OK);
+        assert_eq!(second.await.unwrap(), reqwest::StatusCode::OK);
     }
 
     #[tokio::test]
-    async fn cancelling_a_question_releases_the_agent_operation() {
+    async fn active_turn_blocks_review_actions_and_is_exposed_in_status() {
+        let assets = tempfile::tempdir().unwrap();
+        for name in ["index.html", "app.js", "app.css"] {
+            std::fs::write(assets.path().join(name), "").unwrap();
+        }
+        let server = start_server(&assets).await;
+        server.state.turn_active.store(true, Ordering::Release);
+        let client = reqwest::Client::new();
+        let review = client
+            .get(server.endpoint_url("api/review"))
+            .send()
+            .await
+            .unwrap()
+            .json::<serde_json::Value>()
+            .await
+            .unwrap();
+        assert_eq!(review["turn_running"], true);
+        let status = client
+            .get(server.endpoint_url("api/status"))
+            .send()
+            .await
+            .unwrap()
+            .json::<serde_json::Value>()
+            .await
+            .unwrap();
+        assert_eq!(status["turn_running"], true);
+        for (route, request) in [
+            ("api/overview", snapshot_request(uncommitted_range())),
+            ("api/ai-review", snapshot_request(uncommitted_range())),
+            ("api/question", question_request()),
+            ("api/decision", decision_request(0, vec![])),
+        ] {
+            let response = client
+                .post(server.endpoint_url(route))
+                .json(&request)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), reqwest::StatusCode::CONFLICT, "{route}");
+            assert_eq!(
+                response.json::<serde_json::Value>().await.unwrap()["code"],
+                "turn_running"
+            );
+        }
+        server.state.turn_active.store(false, Ordering::Release);
+        assert_eq!(
+            request_overview(server.endpoint_url("api/overview"), uncommitted_range()).await,
+            reqwest::StatusCode::OK
+        );
+        server.state.turn_active.store(true, Ordering::Release);
+        let refresh = client
+            .post(server.endpoint_url("api/refresh"))
+            .json(&serde_json::json!({"generation": 0}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(refresh.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            refresh.json::<serde_json::Value>().await.unwrap()["turn_running"],
+            true
+        );
+    }
+
+    #[tokio::test]
+    async fn turn_start_discards_an_overview_that_was_already_generating() {
+        let assets = tempfile::tempdir().unwrap();
+        for name in ["index.html", "app.js", "app.css"] {
+            std::fs::write(assets.path().join(name), "").unwrap();
+        }
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let generator: ReviewAgent = Arc::new({
+            let started = Arc::clone(&started);
+            let release = Arc::clone(&release);
+            move |_, _| {
+                let started = Arc::clone(&started);
+                let release = Arc::clone(&release);
+                Box::pin(async move {
+                    started.notify_one();
+                    release.notified().await;
+                    Ok("<p>outdated</p>".to_owned())
+                })
+            }
+        });
+        let server = start_server_with_generator(&assets, generator).await;
+        let overview = tokio::spawn(request_overview(
+            server.endpoint_url("api/overview"),
+            uncommitted_range(),
+        ));
+        started.notified().await;
+        server.state.turn_active.store(true, Ordering::Release);
+        release.notify_one();
+        assert_eq!(overview.await.unwrap(), reqwest::StatusCode::CONFLICT);
+        let review = reqwest::get(server.endpoint_url("api/review"))
+            .await
+            .unwrap()
+            .json::<serde_json::Value>()
+            .await
+            .unwrap();
+        assert!(review["overview"].is_null());
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_question_allows_an_overview_to_start() {
         let assets = tempfile::tempdir().unwrap();
         for name in ["index.html", "app.js", "app.css"] {
             std::fs::write(assets.path().join(name), "").unwrap();
@@ -2214,12 +2940,15 @@ mod tests {
         request.abort();
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(!cancelled.load(Ordering::SeqCst));
-        assert_eq!(
-            request_overview(server.endpoint_url("api/overview"), uncommitted_range()).await,
-            reqwest::StatusCode::CONFLICT
-        );
-
-        release.notify_one();
+        let overview = tokio::spawn(request_overview(
+            server.endpoint_url("api/overview"),
+            uncommitted_range(),
+        ));
+        tokio::time::timeout(Duration::from_secs(5), started.notified())
+            .await
+            .expect("overview should run while the question is in progress");
+        release.notify_waiters();
+        assert_eq!(overview.await.unwrap(), reqwest::StatusCode::OK);
         let completed = tokio::time::timeout(Duration::from_secs(2), async {
             loop {
                 let review = reqwest::get(server.endpoint_url("api/review"))
@@ -2326,7 +3055,7 @@ mod tests {
         .await
         .expect("the detached overview should finish");
         assert_eq!(
-            completed["overview"]["overview_html"],
+            completed["overview"]["overview_mdx"],
             "<p>Persistent overview</p>"
         );
     }
@@ -2370,7 +3099,7 @@ mod tests {
             loop {
                 let operations = server.state.overview_operations.lock().await;
                 let reloaded_browser_is_waiting = operations
-                    .get(&(0, uncommitted_range()))
+                    .get(&(0, uncommitted_range(), None))
                     .is_some_and(|operation| Arc::strong_count(operation) > 2);
                 drop(operations);
 
@@ -2779,6 +3508,105 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn ai_review_returns_severity_labeled_comments_on_the_selected_patch() {
+        let assets = tempfile::tempdir().unwrap();
+        for name in ["index.html", "app.js", "app.css"] {
+            std::fs::write(assets.path().join(name), "").unwrap();
+        }
+        let prompts = Arc::new(Mutex::new(Vec::new()));
+        let agent: ReviewAgent = Arc::new({
+            let prompts = Arc::clone(&prompts);
+            move |prompt, _| {
+                prompts.lock().unwrap().push(prompt);
+                Box::pin(async {
+                    Ok(r#"{"comments":[{"path":"tracked.txt","side":"additions","start_line":1,"end_line":1,"body":"[P1] This line causes a regression under this condition."}]}"#.into())
+                })
+            }
+        });
+        let server = start_server_with_generator(&assets, agent).await;
+        let response = reqwest::Client::new()
+            .post(server.endpoint_url("api/ai-review"))
+            .json(&snapshot_request(uncommitted_range()))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let response: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(
+            response["comments"][0]["body"],
+            "[P1] This line causes a regression under this condition."
+        );
+        assert_eq!(
+            response["selected_range"],
+            serde_json::to_value(uncommitted_range()).unwrap()
+        );
+        {
+            let prompts = prompts.lock().unwrap();
+            assert!(prompts[0].contains("comprehensive code review"));
+            assert!(prompts[0].contains("through the working tree"));
+        }
+        server.cancel().await;
+    }
+
+    #[tokio::test]
+    async fn ai_review_rejects_unanchored_findings() {
+        let assets = tempfile::tempdir().unwrap();
+        for name in ["index.html", "app.js", "app.css"] {
+            std::fs::write(assets.path().join(name), "").unwrap();
+        }
+        let agent: ReviewAgent = Arc::new(|_, _| {
+            Box::pin(async {
+                Ok(r#"{"comments":[{"path":"unrelated.rs","side":"additions","start_line":1,"end_line":1,"body":"[P1] This cannot be anchored."}]}"#.into())
+            })
+        });
+        let server = start_server_with_generator(&assets, agent).await;
+        let response = reqwest::Client::new()
+            .post(server.endpoint_url("api/ai-review"))
+            .json(&snapshot_request(uncommitted_range()))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            response.json::<serde_json::Value>().await.unwrap()["code"],
+            "ai_review_failed"
+        );
+        server.cancel().await;
+    }
+
+    #[tokio::test]
+    async fn overview_frame_has_isolated_script_policy() {
+        let assets = tempfile::tempdir().unwrap();
+        for name in ["index.html", "app.js", "app.css", "overview-frame.html"] {
+            std::fs::write(assets.path().join(name), "").unwrap();
+        }
+        let server = start_server(&assets).await;
+        let client = reqwest::Client::new();
+        let review = client
+            .get(server.endpoint_url("index.html"))
+            .send()
+            .await
+            .unwrap();
+        let frame = client
+            .get(server.endpoint_url("overview-frame.html"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(frame.status(), reqwest::StatusCode::OK);
+        assert!(
+            review.headers()["content-security-policy"]
+                .to_str()
+                .unwrap()
+                .contains("script-src 'self'")
+        );
+        let policy = frame.headers()["content-security-policy"].to_str().unwrap();
+        assert!(policy.contains("script-src 'unsafe-inline' 'unsafe-eval'"));
+        assert!(policy.contains("connect-src 'none'"));
+        assert!(policy.contains("frame-ancestors 'self'"));
+        server.cancel().await;
+    }
+
     async fn start_server(assets: &tempfile::TempDir) -> ReviewServer {
         start_server_with_generator(assets, review_agent()).await
     }
@@ -2798,6 +3626,7 @@ mod tests {
             backend,
             "test-token".to_owned(),
             crate::review::ReviewAssets::for_test(assets.path().to_owned()),
+            Arc::new(AtomicBool::new(false)),
         )
         .await
         .unwrap()

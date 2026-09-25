@@ -1,6 +1,6 @@
 import type { ReviewRange, ReviewTarget } from "./range-selection";
 
-export const REVIEW_PROTOCOL_VERSION = 4;
+export const REVIEW_PROTOCOL_VERSION = 7;
 
 export type ReviewComment = {
   id: number;
@@ -32,23 +32,33 @@ export type ReviewSession = {
   page: ReviewPage;
   overview: StoredOverview | null;
   questions: StoredQuestionThread[];
+  turn_running: boolean;
 };
 
 export type ReviewStatus = {
   generation: number;
   changed: boolean;
+  turn_running: boolean;
 };
 
 export type OverviewResponse = {
   generation: number;
   selected_range: ReviewRange;
-  overview_html: string;
+  overview_mdx: string;
+  instructions?: string | null;
 };
 
 export type StoredOverview = {
   selected_range: ReviewRange;
   status: "generating" | "ready";
-  overview_html?: string;
+  overview_mdx?: string;
+  instructions?: string | null;
+};
+
+export type AiReviewResponse = {
+  generation: number;
+  selected_range: ReviewRange;
+  comments: Omit<ReviewComment, "id">[];
 };
 
 export type ThreadMessage = {
@@ -111,9 +121,12 @@ export type ReviewErrorCode =
   | "invalid_range"
   | "workspace_changed"
   | "overview_failed"
+  | "invalid_overview_instructions"
+  | "ai_review_failed"
   | "question_failed"
   | "invalid_thread"
   | "agent_busy"
+  | "turn_running"
   | "operation_cancelled"
   | "session_cancelled"
   | "invalid_comment_anchor"

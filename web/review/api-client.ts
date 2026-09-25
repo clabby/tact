@@ -1,5 +1,6 @@
 import {
   REVIEW_PROTOCOL_VERSION,
+  type AiReviewResponse,
   type OverviewResponse,
   type QuestionCancelRequest,
   type QuestionListResponse,
@@ -28,6 +29,7 @@ export class ApiError extends Error {
   get retryable() {
     return this.code === "network_error"
       || this.code === "overview_failed"
+      || this.code === "ai_review_failed"
       || this.code === "question_failed"
       || this.code === "agent_busy"
       || this.code === "operation_cancelled"
@@ -61,8 +63,16 @@ export class ApiClient {
     return this.post("refresh", { generation }, signal);
   }
 
-  overview(page: ReviewPage, signal?: AbortSignal): Promise<OverviewResponse> {
+  overview(page: ReviewPage, instructions?: string, signal?: AbortSignal): Promise<OverviewResponse> {
     return this.post("overview", {
+      generation: page.generation,
+      range: page.selected_range,
+      ...(instructions?.trim() ? { instructions: instructions.trim() } : {}),
+    }, signal);
+  }
+
+  aiReview(page: ReviewPage, signal?: AbortSignal): Promise<AiReviewResponse> {
+    return this.post("ai-review", {
       generation: page.generation,
       range: page.selected_range,
     }, signal);
@@ -137,8 +147,8 @@ async function responseError(response: Response): Promise<ApiError> {
 
 function isErrorCode(value: string | undefined): value is ReviewErrorCode {
   return [
-    "stale_snapshot", "invalid_range", "workspace_changed", "overview_failed",
-    "question_failed", "invalid_thread", "agent_busy", "operation_cancelled",
+    "stale_snapshot", "invalid_range", "workspace_changed", "overview_failed", "invalid_overview_instructions", "ai_review_failed",
+    "question_failed", "invalid_thread", "agent_busy", "turn_running", "operation_cancelled",
     "session_cancelled", "invalid_comment_anchor",
   ].includes(value ?? "");
 }

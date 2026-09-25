@@ -9,7 +9,7 @@ test("standalone review fixtures contain valid patches", () => {
   }
   expect(reviewFixtures[rangeKey(reviewBootstrap.default_range) as keyof typeof reviewFixtures].selected_range)
     .toEqual({ from: 0, to: 3 });
-  expect(reviewFixtures["2:3"]).not.toHaveProperty("overview_html");
+  expect(reviewFixtures["2:3"]).not.toHaveProperty("overview_mdx");
 });
 
 test("review bootstrap exposes every selectable commit-range endpoint", () => {

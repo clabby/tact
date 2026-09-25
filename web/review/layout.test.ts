@@ -71,14 +71,17 @@ test("the overview tab shows when its agent is working", async () => {
   const app = await Bun.file(new URL("app.ts", import.meta.url)).text();
   const styles = await Bun.file(new URL("styles.css", import.meta.url)).text();
 
-  expect(app).toContain('class="overview-tab-activity" aria-hidden="true"');
+  expect(app).toContain('class="activity-spinner overview-tab-activity" aria-hidden="true"');
   expect(app).toContain('tab.classList.toggle("loading", loading)');
   expect(app).toContain('tab.setAttribute("aria-busy", "true")');
   expect(app).toContain("this.setOverviewLoading(true)");
   expect(app).toContain("this.setOverviewLoading(false)");
+  expect(app).toContain('class="activity-spinner" aria-hidden="true"></span>Reviewing…');
   expect(styles).toMatch(/\.tab\.loading\s+\.overview-tab-activity\s*{/s);
-  expect(styles).toMatch(/\.overview-tab-activity\s+i\s*{[^}]*animation:\s*tact-shimmer/s);
+  expect(styles).toMatch(/\.activity-spinner\s*{[^}]*animation:\s*tact-spin/s);
   expect(styles).toMatch(/\.overview-spinner::before\s*{[^}]*animation:\s*tact-spin/s);
+  expect(styles).toMatch(/\.overview-instructions-actions\s*{[^}]*justify-content:\s*center/s);
+  expect(app).not.toContain('this.showTerminalBusy("Tact is reviewing the selected diff…")');
 });
 
 test("the inline answer spinner can visibly rotate", async () => {
@@ -138,7 +141,7 @@ test("new inline drafts can become agent questions", async () => {
   expect(editor).toContain('draft.editingId === undefined');
 });
 
-test("overview generation and question threads share one agent-operation gate", async () => {
+test("independent requests retain their own pending state and terminal actions wait for all", async () => {
   const app = await Bun.file(new URL("app.ts", import.meta.url)).text();
   const overview = app.slice(
     app.indexOf("private async loadOverview"),
@@ -149,12 +152,34 @@ test("overview generation and question threads share one agent-operation gate", 
     app.indexOf("private pendingCommentElement"),
   );
 
-  expect(overview).toContain("(this.agentOperation && !restoring)");
-  expect(overview).toContain('this.agentOperation = { kind: "overview", request }');
-  expect(question).toContain("if (!draft || draft.editingId !== undefined || !page || this.agentOperation) return");
-  expect(question).toContain('kind: "question"');
-  expect(question).toContain("operationId");
+  expect(overview).toContain("rangesEqual(this.loadingOverview, page.selected_range)");
+  expect(overview).not.toContain("this.aiReviewPending");
+  expect(question).toContain("this.questionOperations.set(thread.id");
+  expect(question).toContain("this.questionOperations.get(thread.id)");
+  expect(question).toContain("this.questionsToPoll.add(thread.id)");
+  expect(app).toContain("this.loadingOverview !== undefined || this.aiReviewPending || this.questionOperations.size > 0");
+  expect(app).toContain("if (!this.page || this.agentBusy || this.actionUnavailable) return;");
   expect(app).toContain('querySelectorAll<HTMLTextAreaElement>("[data-thread-input]")');
+});
+
+test("active-turn banner permits browsing and refresh while blocking review actions", async () => {
+  const app = await Bun.file(new URL("app.ts", import.meta.url)).text();
+  const controls = app.slice(app.indexOf("private syncAgentControls"), app.indexOf("private async submit"));
+  const refresh = app.slice(app.indexOf("private async refreshReview"), app.indexOf("private bindSettings"));
+  const protocol = await Bun.file(new URL("protocol.ts", import.meta.url)).text();
+
+  expect(app).toContain('id="turn-running-notice"');
+  expect(app).toContain("this.setTurnRunning(status.turn_running)");
+  expect(app).toContain("this.setRefreshNotice(status.changed)");
+  expect(refresh).toContain("this.setTurnRunning(payload.turn_running)");
+  expect(refresh).not.toContain("this.turnRunning) return");
+  expect(controls).toContain("const busy = this.actionUnavailable");
+  expect(controls).toContain("button.disabled = disabled || this.agentBusy");
+  expect(protocol).toContain("turn_running: boolean");
+  const comments = app.slice(app.indexOf("private openCommentComposer"), app.indexOf("private refreshTreeDecorations"));
+  expect(comments).toContain("if (!selection || this.actionUnavailable) return");
+  expect(comments).toContain("if (!draft || this.actionUnavailable) return");
+  expect(comments).toContain("if (this.actionUnavailable) return");
 });
 
 test("the review can be cancelled while the agent is working", async () => {
