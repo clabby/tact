@@ -466,7 +466,7 @@ pub(crate) async fn run(
             let records = records?;
             tokio::task::spawn_blocking(move || -> Result<_> {
                 let reasoning_mode = session::reasoning_mode(&records);
-                let model = session::model(&records);
+                let model = session::model(&records)?;
                 let next_sequence = session::next_sequence(&records);
                 let projection = RootNode::project_session(initial_effort, records);
                 let configured = ConfiguredAgent::from_config_with_session(
@@ -2382,7 +2382,7 @@ fn apply_pane_effect(
                     let records = records?;
                     tokio::task::spawn_blocking(move || -> Result<_> {
                         let reasoning_mode = session::reasoning_mode(&records);
-                        let model = session::model(&records);
+                        let model = session::model(&records)?;
                         let next_sequence = session::next_sequence(&records);
                         let projection = RootNode::project_session(effort, records);
                         let configured = ConfiguredAgent::from_config_with_session(

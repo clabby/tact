@@ -1352,6 +1352,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "extended"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "af9673d8203fcb076b19dfd17e38b3d4ae9f44959416ea532ce72415a6020365"
+
+[[package]]
 name = "fallible-iterator"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2541,9 +2547,9 @@ dependencies = [
 
 [[package]]
 name = "nanocodex"
-version = "0.6.1"
+version = "0.6.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c20e43b99ca4b4c78b9402def1abed37d10417447759e79a7f835e4d591c8ad8"
+checksum = "fca771a059fab908642e5dd1b3ed768aab397b71bd0deedf17d7d55fa8a93f60"
 dependencies = [
  "nanocodex-agent",
  "nanocodex-durability",
@@ -2554,9 +2560,9 @@ dependencies = [
 
 [[package]]
 name = "nanocodex-agent"
-version = "0.6.1"
+version = "0.6.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "47f66615f0ae7f837b042d95445a7b315718445cd019c338b912533db907df4b"
+checksum = "7ee59536f7300ee95d600bbd00332fae25f1e92a02887da62c9be13f3b94b1bd"
 dependencies = [
  "chrono",
  "futures-util",
@@ -2577,9 +2583,9 @@ dependencies = [
 
 [[package]]
 name = "nanocodex-durability"
-version = "0.6.1"
+version = "0.6.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "335c907647b247fe7447bd0072d3f88b5eef02d537fe5185ada5a5baba0b82b7"
+checksum = "9d4b2c9d1fb6de428d2482f89abac4ae4945a8254d9b33e223a473acba7d5729"
 dependencies = [
  "nanocodex-agent",
  "serde",
@@ -2593,9 +2599,9 @@ dependencies = [
 
 [[package]]
 name = "nanocodex-managed"
-version = "0.6.1"
+version = "0.6.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eccf6f987dbdf24f6d2a0d80b0cf870ced474b5d5a5d60eba52cf01623fc8c50"
+checksum = "6e5b312b5fe241d65914ec4a33aaedb211d4e602a173a39172d2afe3d07496fa"
 dependencies = [
  "futures-util",
  "nanocodex-agent",
@@ -2605,6 +2611,8 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
  "thiserror 2.0.19",
  "tokio",
  "tokio-tungstenite",
@@ -2616,21 +2624,25 @@ dependencies = [
 
 [[package]]
 name = "nanocodex-oai-api"
-version = "0.6.1"
+version = "0.6.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2b614e633dd954a523cf69a97b045d3322f97e6286073677111f75f475a01bff"
+checksum = "ce819b4d5ea40e27238a9102cbec11347955abb8fab3afcf4b5c2de1c78fb0a2"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
  "futures-util",
  "getrandom 0.4.3",
  "http",
+ "image",
  "reqwest",
  "rustls",
+ "rustls-native-certs",
+ "rustls-platform-verifier",
  "serde",
  "serde_json",
  "sha2 0.11.0",
  "smallvec",
+ "symphonia",
  "thiserror 2.0.19",
  "tokio",
  "tokio-tungstenite",
@@ -2643,9 +2655,9 @@ dependencies = [
 
 [[package]]
 name = "nanocodex-tools"
-version = "0.6.1"
+version = "0.6.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e59b51f089c3397635e5f807f015be80c8c3e3339cbd503d226235f5fd2a226a"
+checksum = "584fd5f6de0ff621b2b8ea5079bb7b71c945873c61caf70fa518ed20c6c339ce"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -2662,11 +2674,13 @@ dependencies = [
  "reqwest",
  "rmcp",
  "rquickjs",
+ "rustix 1.1.4",
  "rustls",
  "schemars",
  "serde",
  "serde_json",
  "sha1",
+ "symphonia",
  "thiserror 2.0.19",
  "tokio",
  "tokio-tungstenite",
@@ -2678,9 +2692,9 @@ dependencies = [
 
 [[package]]
 name = "nanocodex-tools-macros"
-version = "0.6.1"
+version = "0.6.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "09c37fe5ef8f9516b15b8dbb7a9731ab15e6a116adbc27e9d748d784d10a9a78"
+checksum = "793f0784175736bd2899ec2b120906aa3e1515e9ceb9a313fcc539688a8acd58"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -3733,6 +3747,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "regex-lite"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cab834c73d247e67f4fae452806d17d3c7501756d98c8808d7c9c7aa7d18f973"
+
+[[package]]
 name = "regex-syntax"
 version = "0.8.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4557,6 +4577,119 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b7401a30af6cb5818bb64852270bb722533397edcfc7344954a38f420819ece2"
 
 [[package]]
+name = "symphonia"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7edef6a96b696d4e0cab5ee9ebb7ca155ed95f30a6b45bbb8b97d2727f02424"
+dependencies = [
+ "lazy_static",
+ "symphonia-bundle-mp3",
+ "symphonia-core",
+ "symphonia-format-isomp4",
+ "symphonia-format-mkv",
+ "symphonia-format-ogg",
+ "symphonia-format-riff",
+ "symphonia-metadata",
+]
+
+[[package]]
+name = "symphonia-bundle-mp3"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "98ea5ffc8716bff677dfb3b01b420c7b758de901a72b8c330bf2040ab74b4add"
+dependencies = [
+ "lazy_static",
+ "log",
+ "symphonia-core",
+]
+
+[[package]]
+name = "symphonia-common"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2acc3fcc18ec9b8cdd48614e259c4cf0d27b71d41e5d9b120b42c5adab12d7c4"
+dependencies = [
+ "log",
+ "symphonia-core",
+ "symphonia-metadata",
+]
+
+[[package]]
+name = "symphonia-core"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "01c412864d599d4750d0c3d684d7e093ec05e5309681ef5252cc1096a437f6e0"
+dependencies = [
+ "bitflags 2.13.1",
+ "bytemuck",
+ "lazy_static",
+ "log",
+ "num-complex",
+ "smallvec",
+]
+
+[[package]]
+name = "symphonia-format-isomp4"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0e681a70e1870d34e02abf1dbc51e4267c3f1827801474e8870be8c689fc4dc3"
+dependencies = [
+ "log",
+ "symphonia-common",
+ "symphonia-core",
+ "symphonia-metadata",
+]
+
+[[package]]
+name = "symphonia-format-mkv"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d015c5c0558864665894b3f4cbd95e10abb01b9c868e751c72670f326a56360e"
+dependencies = [
+ "lazy_static",
+ "log",
+ "symphonia-common",
+ "symphonia-core",
+]
+
+[[package]]
+name = "symphonia-format-ogg"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0b5495e7f7e3c7035328d82b6d6e377eef289bb0c4105bdeb557fc93a833f994"
+dependencies = [
+ "log",
+ "symphonia-common",
+ "symphonia-core",
+ "symphonia-metadata",
+]
+
+[[package]]
+name = "symphonia-format-riff"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1ff70929083a8c1a5f6cd7c904b6071c7914ad04739b510c2f7239dfc9b7dabe"
+dependencies = [
+ "extended",
+ "log",
+ "symphonia-core",
+ "symphonia-metadata",
+]
+
+[[package]]
+name = "symphonia-metadata"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "83713a97705d77bdef7cdbc0768fd6e5a54e4cd7e48d60a806ae85639e2c87c6"
+dependencies = [
+ "lazy_static",
+ "log",
+ "regex-lite",
+ "smallvec",
+ "symphonia-core",
+]
+
+[[package]]
 name = "syn"
 version = "1.0.109"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4761,7 +4894,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.4",
  "windows-sys 0.61.2",

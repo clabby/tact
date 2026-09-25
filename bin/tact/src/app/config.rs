@@ -441,6 +441,17 @@ impl Config {
             .clone()
             .or_else(|| environment.home.as_ref().map(|home| home.join(".codex")));
 
+        let model = overrides.model.or(file.agent.model).unwrap_or_default();
+        let thinking = overrides
+            .thinking
+            .or(file.agent.thinking)
+            .unwrap_or_else(|| {
+                ReasoningEffort::ALL
+                    .into_iter()
+                    .find(|effort| Thinking::from(*effort) == model.default_thinking())
+                    .expect("model default effort must be supported by Tact")
+            });
+
         Ok(Self {
             path,
             codex_home,
@@ -450,11 +461,8 @@ impl Config {
             ),
             agent: AgentConfig {
                 workspace,
-                model: overrides.model.or(file.agent.model).unwrap_or_default(),
-                thinking: overrides
-                    .thinking
-                    .or(file.agent.thinking)
-                    .unwrap_or_default(),
+                model,
+                thinking,
                 reasoning_mode: overrides
                     .reasoning_mode
                     .or(file.agent.reasoning_mode)
@@ -1751,6 +1759,18 @@ mod tests {
 
         assert!(matches!(error, Error::Config(ConfigError::Parse { .. })));
         assert!(!error.to_string().contains("gpt-5.6-terra"));
+    }
+
+    #[test]
+    fn model_defaults_choose_the_catalog_effort() {
+        for (model, expected) in [
+            ("sol", ReasoningEffort::Medium),
+            ("luna", ReasoningEffort::Medium),
+            ("astra", ReasoningEffort::Low),
+        ] {
+            let config = load_config(&format!("[agent]\nmodel = \"{model}\"\n")).unwrap();
+            assert_eq!(config.agent.thinking, expected, "model {model}");
+        }
     }
 
     #[test]

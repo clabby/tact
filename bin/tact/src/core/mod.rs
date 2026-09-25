@@ -996,9 +996,6 @@ mod tests {
                 ] {
                     assert_eq!(session.text.matches(section).count(), 1, "{model:?}");
                 }
-                if custom.is_none() {
-                    assert_eq!(session.text.contains("GPT-6 Astra"), model == Model::Astra);
-                }
 
                 let stored = "You are Codex.\n\nStored instructions.\n";
                 let resumed = SessionInstructions::from_config(
@@ -1050,9 +1047,6 @@ mod tests {
                 assert!(!actual.contains("Saved project instructions."));
                 assert!(actual.contains("Current project instructions."));
                 assert_eq!(actual.matches(MEMORY_INSTRUCTIONS).count(), 1);
-                if custom.is_none() {
-                    assert_eq!(actual.contains("GPT-6 Astra"), model == Model::Astra);
-                }
             }
         }
     }

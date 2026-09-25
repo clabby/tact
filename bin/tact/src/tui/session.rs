@@ -99,6 +99,8 @@ pub(crate) enum SessionError {
     InvalidLineageBoundary { session_id: String, sequence: u64 },
     #[error("the session storage task stopped unexpectedly: {0}")]
     StorageTask(#[source] tokio::task::JoinError),
+    #[error("stored session uses unsupported model {model:?}")]
+    UnsupportedModel { model: String },
 }
 
 #[cfg(test)]
@@ -334,14 +336,14 @@ pub(crate) fn reasoning_mode(records: &[Arc<TranscriptRecord>]) -> ReasoningMode
         .map_or(ReasoningMode::Standard, |started| started.reasoning_mode)
 }
 
-pub(crate) fn model(records: &[Arc<TranscriptRecord>]) -> Model {
-    records
+pub(crate) fn model(records: &[Arc<TranscriptRecord>]) -> Result<Model, SessionError> {
+    let stored = records
         .iter()
         .rev()
         .find(|record| record.source() == "tact" && record.kind() == "session.started")
         .and_then(|record| record.decode_payload::<SessionStarted>().ok())
-        .and_then(|started| model::parse(&started.model).ok())
-        .unwrap_or(Model::Sol)
+        .map_or_else(|| Model::Sol.to_string(), |started| started.model);
+    model::parse(&stored).map_err(|_| SessionError::UnsupportedModel { model: stored })
 }
 
 pub(crate) fn next_sequence(records: &[Arc<TranscriptRecord>]) -> u64 {
@@ -495,8 +497,33 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(model(&[Arc::new(record)]), Model::Luna);
-        assert_eq!(model(&[]), Model::Sol);
+        assert_eq!(model(&[Arc::new(record)]).unwrap(), Model::Luna);
+        assert_eq!(model(&[]).unwrap(), Model::Sol);
+    }
+
+    #[test]
+    fn retired_model_identity_is_not_remapped_on_resume() {
+        let record = TranscriptRecord::from_local(
+            1,
+            1,
+            LocalEvent::SessionStarted(SessionStarted {
+                session_id: "session".to_owned(),
+                parent_session_id: None,
+                parent_sequence: None,
+                model: "gpt-5.6-sol".to_owned(),
+                effort: ReasoningEffort::Medium,
+                reasoning_mode: ReasoningMode::Standard,
+                fast_mode: false,
+                workspace: "/work".into(),
+                application_version: "test".to_owned(),
+            }),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            model(&[Arc::new(record)]),
+            Err(SessionError::UnsupportedModel { model }) if model == "gpt-5.6-sol"
+        ));
     }
 
     #[test]

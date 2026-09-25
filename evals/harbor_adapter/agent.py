@@ -17,7 +17,7 @@ from harbor_adapter.installation import cli_tools_install_command
 from harbor_adapter.iron_proxy import REMOTE_AUTH_FILE, LocalCodexAuthProxy
 
 
-MODEL = "gpt-5.6-sol"
+MODEL = "gpt-6-sol"
 
 
 class TactAgent(BaseInstalledAgent):

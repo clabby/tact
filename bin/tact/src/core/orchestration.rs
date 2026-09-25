@@ -413,7 +413,7 @@ mod tests {
     fn run_terminal(model_calls: u32, cost_usd: Option<f64>) -> Value {
         json!({
             "status": "completed",
-            "model": "gpt-5.6-sol",
+            "model": "gpt-6-sol",
             "reasoning_mode": "summary",
             "effort": "high",
             "transport": "responses_websocket_v2",
