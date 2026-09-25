@@ -8,7 +8,7 @@ use crate::{
     tui::theme::{Theme, ThemeMode},
 };
 use clap::ValueEnum;
-use nanocodex::{Model, Thinking};
+use nanocodex::{Model, Thinking, oai::transport::ResponsesTransport};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -77,6 +77,24 @@ impl From<ReasoningMode> for nanocodex::ReasoningMode {
         match mode {
             ReasoningMode::Standard => Self::Standard,
             ReasoningMode::Pro => Self::Pro,
+        }
+    }
+}
+
+/// Responses API transport policy.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum Transport {
+    #[default]
+    Websocket,
+    Https,
+}
+
+impl From<Transport> for ResponsesTransport {
+    fn from(transport: Transport) -> Self {
+        match transport {
+            Transport::Websocket => Self::WebSocket,
+            Transport::Https => Self::Https,
         }
     }
 }
@@ -160,6 +178,7 @@ pub(crate) struct AgentConfig {
     websocket_url: Option<String>,
     #[serde(serialize_with = "serialize_optional_string")]
     api_base_url: Option<String>,
+    transport: Transport,
     #[serde(serialize_with = "serialize_optional_string")]
     completion_hook: Option<String>,
 }
@@ -229,6 +248,7 @@ pub(crate) struct ConfigOverrides {
     pub(crate) image_generation: Option<bool>,
     pub(crate) websocket_url: Option<String>,
     pub(crate) api_base_url: Option<String>,
+    pub(crate) transport: Option<Transport>,
 }
 
 #[derive(Clone, Debug)]
@@ -367,6 +387,7 @@ struct AgentConfigFile {
     image_generation: Option<bool>,
     websocket_url: Option<String>,
     api_base_url: Option<String>,
+    transport: Option<Transport>,
     completion_hook: Option<String>,
 }
 
@@ -490,6 +511,10 @@ impl Config {
                     overrides.websocket_url.or(file.agent.websocket_url),
                 ),
                 api_base_url: optional_string(overrides.api_base_url.or(file.agent.api_base_url)),
+                transport: overrides
+                    .transport
+                    .or(file.agent.transport)
+                    .unwrap_or_default(),
                 completion_hook: optional_string(file.agent.completion_hook),
             },
             mcp_servers,
@@ -1059,6 +1084,10 @@ impl AgentConfig {
         self.api_base_url.as_deref()
     }
 
+    pub(crate) const fn transport(&self) -> Transport {
+        self.transport
+    }
+
     pub(crate) fn completion_hook(&self) -> Option<&str> {
         self.completion_hook.as_deref()
     }
@@ -1516,7 +1545,7 @@ mod tests {
     use super::{
         AuthMode, Config, ConfigOverrides, Environment, McpEnvironment, McpSecretString,
         McpServerConfig, ReasoningEffort, ReasoningMode, RemoteMemoryConfigFile,
-        RemoteMemoryTokenFile, ThemeMode, validate_mcp_url,
+        RemoteMemoryTokenFile, ThemeMode, Transport, validate_mcp_url,
     };
     use crate::app::error::{ConfigError, Error, McpUrlError, RemoteMemoryConfigError};
     use nanocodex::Model;
@@ -1658,6 +1687,7 @@ mod tests {
                 "image_generation",
                 "websocket_url",
                 "api_base_url",
+                "transport",
                 "completion_hook",
             ],
         );
@@ -1696,6 +1726,7 @@ mod tests {
             home.join(".codex/auth.json").to_str()
         );
         assert_eq!(rendered["agent"]["model"].as_str(), Some("astra"));
+        assert_eq!(rendered["agent"]["transport"].as_str(), Some("websocket"));
         assert_eq!(
             rendered["agent"]["workspace"].as_str(),
             directory.path().to_str()
@@ -1750,6 +1781,7 @@ mod tests {
         assert!(reloaded.agent.append_instructions.is_none());
         assert!(reloaded.agent.websocket_url.is_none());
         assert!(reloaded.agent.api_base_url.is_none());
+        assert_eq!(reloaded.agent.transport, Transport::Websocket);
         assert!(reloaded.memory().remote().is_none());
     }
 
@@ -2705,7 +2737,8 @@ mod tests {
              instructions = \"Be concise.\"\nappend_instructions = \"Use project conventions.\"\n\
              web_search = false\nimage_generation = false\n\
              websocket_url = \"wss://example.com/responses\"\n\
-             api_base_url = \"https://example.com/v1\"\n",
+             api_base_url = \"https://example.com/v1\"\n\
+             transport = \"https\"\n",
         )
         .unwrap();
 
@@ -2743,6 +2776,7 @@ mod tests {
             config.agent.api_base_url.as_deref(),
             Some("https://example.com/v1")
         );
+        assert_eq!(config.agent.transport, Transport::Https);
     }
 
     #[test]

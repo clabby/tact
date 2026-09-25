@@ -337,7 +337,9 @@ impl ConfiguredAgent {
         let mcp = mcp_provider(config)?;
         let auth = config.auth().load()?;
 
-        let mut openai = OpenAi::builder(auth).max_attempts(RESPONSE_MAX_ATTEMPTS);
+        let mut openai = OpenAi::builder(auth)
+            .max_attempts(RESPONSE_MAX_ATTEMPTS)
+            .transport(agent_config.transport().into());
         if let Some(url) = agent_config.websocket_url() {
             openai = openai.websocket_url(url);
         }
