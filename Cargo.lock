@@ -2547,8 +2547,9 @@ dependencies = [
 
 [[package]]
 name = "nanocodex"
-version = "0.6.4"
-source = "git+https://github.com/clabby/nanocodex?branch=cl%2Fgpt-6#9b980bce01e783f09f141be583a748fe6463fdbb"
+version = "0.6.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fca771a059fab908642e5dd1b3ed768aab397b71bd0deedf17d7d55fa8a93f60"
 dependencies = [
  "nanocodex-agent",
  "nanocodex-durability",
@@ -2559,8 +2560,9 @@ dependencies = [
 
 [[package]]
 name = "nanocodex-agent"
-version = "0.6.4"
-source = "git+https://github.com/clabby/nanocodex?branch=cl%2Fgpt-6#9b980bce01e783f09f141be583a748fe6463fdbb"
+version = "0.6.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7ee59536f7300ee95d600bbd00332fae25f1e92a02887da62c9be13f3b94b1bd"
 dependencies = [
  "chrono",
  "futures-util",
@@ -2581,8 +2583,9 @@ dependencies = [
 
 [[package]]
 name = "nanocodex-durability"
-version = "0.6.4"
-source = "git+https://github.com/clabby/nanocodex?branch=cl%2Fgpt-6#9b980bce01e783f09f141be583a748fe6463fdbb"
+version = "0.6.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9d4b2c9d1fb6de428d2482f89abac4ae4945a8254d9b33e223a473acba7d5729"
 dependencies = [
  "nanocodex-agent",
  "serde",
@@ -2596,8 +2599,9 @@ dependencies = [
 
 [[package]]
 name = "nanocodex-managed"
-version = "0.6.4"
-source = "git+https://github.com/clabby/nanocodex?branch=cl%2Fgpt-6#9b980bce01e783f09f141be583a748fe6463fdbb"
+version = "0.6.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6e5b312b5fe241d65914ec4a33aaedb211d4e602a173a39172d2afe3d07496fa"
 dependencies = [
  "futures-util",
  "nanocodex-agent",
@@ -2620,8 +2624,9 @@ dependencies = [
 
 [[package]]
 name = "nanocodex-oai-api"
-version = "0.6.4"
-source = "git+https://github.com/clabby/nanocodex?branch=cl%2Fgpt-6#9b980bce01e783f09f141be583a748fe6463fdbb"
+version = "0.6.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ce819b4d5ea40e27238a9102cbec11347955abb8fab3afcf4b5c2de1c78fb0a2"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -2632,6 +2637,7 @@ dependencies = [
  "reqwest",
  "rustls",
  "rustls-native-certs",
+ "rustls-platform-verifier",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -2649,8 +2655,9 @@ dependencies = [
 
 [[package]]
 name = "nanocodex-tools"
-version = "0.6.4"
-source = "git+https://github.com/clabby/nanocodex?branch=cl%2Fgpt-6#9b980bce01e783f09f141be583a748fe6463fdbb"
+version = "0.6.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "584fd5f6de0ff621b2b8ea5079bb7b71c945873c61caf70fa518ed20c6c339ce"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -2685,8 +2692,9 @@ dependencies = [
 
 [[package]]
 name = "nanocodex-tools-macros"
-version = "0.6.4"
-source = "git+https://github.com/clabby/nanocodex?branch=cl%2Fgpt-6#9b980bce01e783f09f141be583a748fe6463fdbb"
+version = "0.6.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "793f0784175736bd2899ec2b120906aa3e1515e9ceb9a313fcc539688a8acd58"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -4886,7 +4894,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.4",
  "windows-sys 0.61.2",
