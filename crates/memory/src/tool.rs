@@ -83,6 +83,7 @@ struct PutOutput {
     backend: MemoryAccess,
     memory: MemoryRecord,
     replaced: bool,
+    previous_content: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -178,12 +179,23 @@ where
         }
         let backend = self.store.access().await?;
         let replaced = replace.is_some();
+        let previous_content = if let Some(key) = replace.as_ref() {
+            self.store
+                .read(&[], std::slice::from_ref(key))
+                .await?
+                .into_iter()
+                .find(|record| record.key == *key)
+                .map(|record| record.content)
+        } else {
+            None
+        };
         let memory = self.store.put(content.as_str(), replace).await?;
         json_output(&PutOutput {
             operation: "put",
             backend,
             memory,
             replaced,
+            previous_content,
         })
     }
 
@@ -341,9 +353,10 @@ fn memory_output_schema() -> Value {
                     "operation": { "type": "string", "const": "put" },
                     "backend": backend.clone(),
                     "memory": record,
-                    "replaced": { "type": "boolean" }
+                    "replaced": { "type": "boolean" },
+                    "previous_content": { "type": ["string", "null"] }
                 },
-                "required": ["operation", "backend", "memory", "replaced"],
+                "required": ["operation", "backend", "memory", "replaced", "previous_content"],
                 "additionalProperties": false
             },
             {
@@ -732,6 +745,33 @@ mod tests {
             panic!("put reused an earlier scan");
         };
         assert_eq!(error.to_string(), "scan memory before storing a conclusion");
+    }
+
+    #[tokio::test]
+    async fn successful_replacement_returns_the_previous_content() {
+        let directory = tempdir().unwrap();
+        let store = SelectedMemoryStore::local(
+            directory.path().join("memory.sqlite3"),
+            MemoryLimits::PRODUCTION,
+        );
+        let original = store.put("Use early returns.", None).await.unwrap();
+        let tool = MemoryTool::new(store.clone(), TestAuthorizer);
+        tool.execute(
+            input(json!({"operation": "scan", "query": "early returns"})),
+            context("root"),
+        )
+        .await
+        .unwrap();
+
+        let output = tool.execute(
+            input(json!({"operation": "put", "content": "Use explicit flow.", "replace": original.key})),
+            context("root"),
+        ).await.unwrap().structured_result();
+
+        assert_eq!(output["replaced"], true);
+        assert_eq!(output["previous_content"], "Use early returns.");
+        assert_eq!(output["memory"]["content"], "Use explicit flow.");
+        assert_eq!(output["memory"]["key"]["version"], 2);
     }
 
     #[tokio::test]

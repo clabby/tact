@@ -1,6 +1,9 @@
 use super::{Presentation, generic};
 use crate::tui::{theme::Theme, transcript::ToolEntry};
-use ratatui::{style::Style, text::Line};
+use ratatui::{
+    style::{Color, Style},
+    text::Line,
+};
 use serde_json::{Map, Value};
 use tact_memory::MemoryLimits;
 
@@ -91,6 +94,7 @@ enum ResultValue<'a> {
         backend: Option<Backend>,
         memory: Memory<'a>,
         replaced: bool,
+        previous_content: Option<&'a str>,
     },
     Delete {
         backend: Option<Backend>,
@@ -136,6 +140,7 @@ impl<'a> ResultValue<'a> {
                 backend: Backend::parse(result.get("backend")),
                 memory: Memory::parse(result.get("memory")?)?,
                 replaced: was_replaced(result.get("replaced")?),
+                previous_content: result.get("previous_content").and_then(Value::as_str),
             }),
             "delete" => Some(Self::Delete {
                 backend: Backend::parse(result.get("backend")),
@@ -364,6 +369,7 @@ fn put(
         backend,
         memory,
         replaced,
+        previous_content,
     } = result
     else {
         let title = if replace.is_some() {
@@ -388,9 +394,59 @@ fn put(
     } else {
         "Memory stored"
     };
+    let operation = if replaced { "replace" } else { "store" };
     let presentation =
-        completed_presentation(backend.as_ref(), "store", legacy, memory.key.display());
+        completed_presentation(backend.as_ref(), operation, legacy, memory.key.display());
     if !expanded {
+        return presentation;
+    }
+    if let Some(previous_content) = previous_content.filter(|_| replaced) {
+        let mut presentation = presentation.selectable_plain(
+            memory.key.display(),
+            width,
+            Style::default().fg(theme.accent()),
+        );
+        let before: Vec<_> = previous_content.split('\n').collect();
+        let after: Vec<_> = memory.content.split('\n').collect();
+        let prefix = before
+            .iter()
+            .zip(&after)
+            .take_while(|(a, b)| a == b)
+            .count();
+        let suffix = before[prefix..]
+            .iter()
+            .rev()
+            .zip(after[prefix..].iter().rev())
+            .take_while(|(a, b)| a == b)
+            .count();
+        for line in &before[..prefix] {
+            presentation = presentation.selectable_plain(
+                format!("  {line}"),
+                width,
+                Style::default().fg(theme.text()),
+            );
+        }
+        for line in &before[prefix..before.len() - suffix] {
+            presentation = presentation.selectable_plain(
+                format!("- {line}"),
+                width,
+                Style::default().fg(Color::Red),
+            );
+        }
+        for line in &after[prefix..after.len() - suffix] {
+            presentation = presentation.selectable_plain(
+                format!("+ {line}"),
+                width,
+                Style::default().fg(Color::Green),
+            );
+        }
+        for line in &before[before.len() - suffix..] {
+            presentation = presentation.selectable_plain(
+                format!("  {line}"),
+                width,
+                Style::default().fg(theme.text()),
+            );
+        }
         return presentation;
     }
     selectable_memory_details(presentation, &memory, width, theme).footer("memory record")
@@ -932,6 +988,61 @@ mod tests {
                 .expect("memory records should be selectable");
             assert!(source.contains("Use explicit data flow."));
             assert!(source.contains("created 10 · updated 20"));
+        }
+    }
+
+    #[test]
+    fn overwrite_shows_a_selectable_colored_diff_only_when_expanded() {
+        let tool = memory(
+            json!({"operation": "put", "content": "Use explicit flow.\nKeep context.", "replace": {"id": 7, "version": 1}}),
+            ToolState::Succeeded,
+            Some(json!({
+                "operation": "put",
+                "backend": {"source": "local", "namespace": null, "role": null},
+                "memory": record(7, 2, "Use explicit flow.\nKeep context."),
+                "replaced": true,
+                "previous_content": "Use early returns.\nKeep context."
+            })),
+        );
+        let collapsed = text(&render(&tool, 80, &Theme::default()));
+        assert!(
+            collapsed.contains("Memory replace · local · 7@v2"),
+            "{collapsed}"
+        );
+        assert!(!collapsed.contains("Use early returns."));
+        assert!(!collapsed.contains("Use explicit flow."));
+
+        let layout = render_layout(&tool, None, 80, &Theme::default(), true);
+        let expanded = text(&layout.lines);
+        assert!(expanded.contains("- Use early returns."), "{expanded}");
+        assert!(expanded.contains("+ Use explicit flow."), "{expanded}");
+        assert_eq!(expanded.matches("Keep context.").count(), 1, "{expanded}");
+        let source = layout.selection_source.unwrap();
+        assert!(source.contains("- Use early returns."));
+        assert!(source.contains("+ Use explicit flow."));
+        assert_eq!(source.matches("  Keep context.").count(), 1);
+        assert!(
+            layout
+                .lines
+                .iter()
+                .flat_map(|line| &line.spans)
+                .any(|span| span.content.contains("- Use early returns.")
+                    && span.style.fg == Some(ratatui::style::Color::Red))
+        );
+        assert!(
+            layout
+                .lines
+                .iter()
+                .flat_map(|line| &line.spans)
+                .any(|span| span.content.contains("+ Use explicit flow.")
+                    && span.style.fg == Some(ratatui::style::Color::Green))
+        );
+        for width in 1..=12 {
+            assert!(
+                render_expanded(&tool, width, &Theme::default())
+                    .iter()
+                    .all(|line| line.width() <= usize::from(width))
+            );
         }
     }
 
