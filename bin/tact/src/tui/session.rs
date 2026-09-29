@@ -503,27 +503,29 @@ mod tests {
 
     #[test]
     fn retired_model_identity_is_not_remapped_on_resume() {
-        let record = TranscriptRecord::from_local(
-            1,
-            1,
-            LocalEvent::SessionStarted(SessionStarted {
-                session_id: "session".to_owned(),
-                parent_session_id: None,
-                parent_sequence: None,
-                model: "gpt-5.6-sol".to_owned(),
-                effort: ReasoningEffort::Medium,
-                reasoning_mode: ReasoningMode::Standard,
-                fast_mode: false,
-                workspace: "/work".into(),
-                application_version: "test".to_owned(),
-            }),
-        )
-        .unwrap();
+        for old_id in ["gpt-6-sol", "gpt-5.6-sol"] {
+            let record = TranscriptRecord::from_local(
+                1,
+                1,
+                LocalEvent::SessionStarted(SessionStarted {
+                    session_id: "session".to_owned(),
+                    parent_session_id: None,
+                    parent_sequence: None,
+                    model: old_id.to_owned(),
+                    effort: ReasoningEffort::Medium,
+                    reasoning_mode: ReasoningMode::Standard,
+                    fast_mode: false,
+                    workspace: "/work".into(),
+                    application_version: "test".to_owned(),
+                }),
+            )
+            .unwrap();
 
-        assert!(matches!(
-            model(&[Arc::new(record)]),
-            Err(SessionError::UnsupportedModel { model }) if model == "gpt-5.6-sol"
-        ));
+            assert!(matches!(
+                model(&[Arc::new(record)]),
+                Err(SessionError::UnsupportedModel { model }) if model == old_id
+            ));
+        }
     }
 
     #[test]

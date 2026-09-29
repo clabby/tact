@@ -109,13 +109,14 @@ tact --model sol
 tact --model luna run "inspect the workspace"
 ```
 
-`--model` accepts `luna`, `sol`, or `astra`, and their full IDs: `gpt-6-luna`, `gpt-6-sol`,
+New sessions use Sol unless a model is configured. `--model` accepts `luna`, `sol`, or `astra`, and their full IDs: `gpt-6-luna`, `gpt-6.1-sol`,
 and `gpt-6-astra`. `TACT_MODEL` provides the same per-launch override.
 Resumed sessions retain the model recorded when they were created. Sessions using retired
-GPT-5.6 models cannot resume; start a new session with a supported model.
+model IDs cannot resume; start a new session with a supported model.
 
-When no effort is configured, Sol and Luna use medium effort and Astra uses low. Tact supports
-low through max effort. Sol and Luna support Pro mode; Astra uses standard mode.
+When no effort is configured, Sol and Astra use low effort and Luna uses medium. A configured
+effort takes precedence. Tact supports low through max effort. Sol and Luna support Pro mode;
+Astra uses standard mode.
 
 ## Configuration
 
@@ -140,7 +141,7 @@ file = "/path/to/.codex/auth.json"
 
 [agent]
 workspace = "/path/to/workspace"
-model = "astra" # luna, sol, or astra
+model = "sol" # luna, sol, or astra
 thinking = "low" # low, medium, high, xhigh, or max
 reasoning_mode = "standard" # standard or pro
 fast_mode = false

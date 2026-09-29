@@ -837,14 +837,14 @@ mod tests {
 
     #[test]
     fn model_selects_the_initial_agent() {
-        let cli = Cli::try_parse_from(["tact", "--model", "gpt-6-sol"]).unwrap();
+        let cli = Cli::try_parse_from(["tact", "--model", "gpt-6.1-sol"]).unwrap();
 
         assert_eq!(cli.model, Some(Model::Sol));
     }
 
     #[test]
     fn retired_model_ids_are_rejected() {
-        for model in ["gpt-5.6-sol", "gpt-5.6-luna", "gpt-5.6-terra"] {
+        for model in ["gpt-6-sol", "gpt-5.6-sol", "gpt-5.6-luna", "gpt-5.6-terra"] {
             let error = Cli::try_parse_from(["tact", "--model", model]).unwrap_err();
             assert_eq!(error.kind(), ErrorKind::ValueValidation);
         }
