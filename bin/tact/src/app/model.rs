@@ -8,10 +8,10 @@ pub(crate) const SUPPORTED_MODELS: [Model; 3] = [Model::Luna, Model::Sol, Model:
 pub(crate) fn parse(value: &str) -> Result<Model, String> {
     match value {
         "gpt-6-luna" | "luna" => Ok(Model::Luna),
-        "gpt-6-sol" | "sol" => Ok(Model::Sol),
+        "gpt-6.1-sol" | "sol" => Ok(Model::Sol),
         "gpt-6-astra" | "astra" => Ok(Model::Astra),
         _ => Err(format!(
-            "invalid model {value:?}; expected gpt-6-luna, gpt-6-sol, or gpt-6-astra"
+            "invalid model {value:?}; expected gpt-6-luna, gpt-6.1-sol, or gpt-6-astra"
         )),
     }
 }
@@ -44,7 +44,7 @@ mod tests {
         for (value, expected) in [
             ("gpt-6-luna", Model::Luna),
             ("luna", Model::Luna),
-            ("gpt-6-sol", Model::Sol),
+            ("gpt-6.1-sol", Model::Sol),
             ("sol", Model::Sol),
             ("gpt-6-astra", Model::Astra),
             ("astra", Model::Astra),
@@ -55,7 +55,13 @@ mod tests {
 
     #[test]
     fn rejects_retired_model_ids() {
-        for value in ["gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "terra"] {
+        for value in [
+            "gpt-6-sol",
+            "gpt-5.6-luna",
+            "gpt-5.6-sol",
+            "gpt-5.6-terra",
+            "terra",
+        ] {
             assert!(parse(value).is_err(), "retired model {value} was accepted");
         }
     }

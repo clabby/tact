@@ -462,7 +462,7 @@ impl Config {
             .clone()
             .or_else(|| environment.home.as_ref().map(|home| home.join(".codex")));
 
-        let model = overrides.model.or(file.agent.model).unwrap_or_default();
+        let model = overrides.model.or(file.agent.model).unwrap_or(Model::Sol);
         let thinking = overrides
             .thinking
             .or(file.agent.thinking)
@@ -1645,7 +1645,7 @@ mod tests {
         assert_eq!(config.auth.mode, AuthMode::Auto);
         assert_eq!(config.auth.file, home.join(".codex/auth.json"));
         assert_eq!(config.agent.workspace, directory.path());
-        assert_eq!(config.agent.model, Model::Astra);
+        assert_eq!(config.agent.model, Model::Sol);
         assert_eq!(config.agent.thinking, ReasoningEffort::Low);
         assert_eq!(config.agent.reasoning_mode, ReasoningMode::Standard);
         assert!(!config.agent.fast_mode);
@@ -1725,7 +1725,7 @@ mod tests {
             rendered["auth"]["file"].as_str(),
             home.join(".codex/auth.json").to_str()
         );
-        assert_eq!(rendered["agent"]["model"].as_str(), Some("astra"));
+        assert_eq!(rendered["agent"]["model"].as_str(), Some("sol"));
         assert_eq!(rendered["agent"]["transport"].as_str(), Some("websocket"));
         assert_eq!(
             rendered["agent"]["workspace"].as_str(),
@@ -1796,13 +1796,16 @@ mod tests {
     #[test]
     fn model_defaults_choose_the_catalog_effort() {
         for (model, expected) in [
-            ("sol", ReasoningEffort::Medium),
+            ("sol", ReasoningEffort::Low),
             ("luna", ReasoningEffort::Medium),
             ("astra", ReasoningEffort::Low),
         ] {
             let config = load_config(&format!("[agent]\nmodel = \"{model}\"\n")).unwrap();
             assert_eq!(config.agent.thinking, expected, "model {model}");
         }
+
+        let configured = load_config("[agent]\nmodel = \"sol\"\nthinking = \"medium\"\n").unwrap();
+        assert_eq!(configured.agent.thinking, ReasoningEffort::Medium);
     }
 
     #[test]

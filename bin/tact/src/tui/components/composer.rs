@@ -1669,7 +1669,7 @@ mod tests {
         assert_eq!(
             rows(&terminal),
             [
-                "╭─ 0%/272k ──────────────────────────── gpt-6-sol  medium ─╮",
+                "╭─ 0%/272k ────────────────────────── gpt-6.1-sol  medium ─╮",
                 "│                                                          │",
                 "│                                                          │",
                 "│                                                          │",
@@ -1735,14 +1735,14 @@ mod tests {
         });
 
         let terminal = render(&mut composer, 72, 5);
-        assert!(rows(&terminal)[0].contains(" 1m 5s  gpt-6-sol "));
+        assert!(rows(&terminal)[0].contains(" 1m 5s  gpt-6.1-sol "));
 
         let update = composer.update(ComposerEvent::AnimationFrame(
             started_at + Duration::from_secs(2),
         ));
         assert!(update.changed);
         let terminal = render(&mut composer, 72, 5);
-        assert!(rows(&terminal)[0].contains(" 1m 7s  gpt-6-sol "));
+        assert!(rows(&terminal)[0].contains(" 1m 7s  gpt-6.1-sol "));
 
         composer.update(ComposerEvent::TurnFinished);
         let terminal = render(&mut composer, 72, 5);
@@ -1766,7 +1766,7 @@ mod tests {
         composer.update(ComposerEvent::TurnFinished);
 
         let terminal = render(&mut composer, 72, 5);
-        assert!(rows(&terminal)[0].contains(" 7s  gpt-6-sol "));
+        assert!(rows(&terminal)[0].contains(" 7s  gpt-6.1-sol "));
         assert!(composer.animation_deadline().is_some());
     }
 
