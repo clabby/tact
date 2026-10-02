@@ -145,7 +145,7 @@ async fn read_bounded(
             return Ok(());
         }
         let allowed = remaining
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |left| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |left| {
                 Some(left.saturating_sub(read))
             })
             .unwrap_or(0)
