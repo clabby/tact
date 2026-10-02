@@ -107,6 +107,8 @@ const CLAUDE_CODE_MODE_INSTRUCTIONS: &str = concat!(
     "\n\nUse Code Mode through the exec and wait tools. Call exec with a JSON object whose ",
     "code field contains JavaScript, for example {\"code\":\"text(await tools.current_session({}));\"}. ",
     "The exec tool description lists the nested tools and available JavaScript helpers. ",
+    "Batch related tool calls in one exec cell; use Promise.all for independent calls and loops ",
+    "for dependent steps, including polling shell processes to completion. ",
     "Use text() or the supported media helpers to return tool output. When exec returns a ",
     "running cell_id, continue that cell with wait using its cell_id; do not restart its work. ",
     "Complete or terminate yielded cells before finishing your turn. Tools, memory, MCP, and ",
