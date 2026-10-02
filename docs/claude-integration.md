@@ -2,8 +2,8 @@
 
 Claude is opt-in through `[claude] enabled = true`. Tact uses Nanocodex's native Claude client,
 model and effort types, and Code Mode tool runtime.
-The temporary dependency uses the fork branch `cl/fix-code-mode-cancellation`;
-`Cargo.lock` pins [the cancellation fix](https://github.com/clabby/nanocodex/commit/f7d0e042371a3a8453d439abb6233c1726db64e9).
+The temporary dependency uses the fork branch `cl/claude-integration`;
+`Cargo.lock` pins [the combined runtime fixes](https://github.com/clabby/nanocodex/commit/5994a860ef9e229ac67a2a939406b3ce48b799ad).
 
 ## Authentication
 
@@ -38,6 +38,17 @@ Tact does not infer a tool's result from cancellation or reconstruct its structu
 Interruption and shutdown stop producers before draining shell processes. Ordinary successful
 turns retain session-owned shells, following the existing runtime's ownership rules. Shutdown can
 cancel a stalled compaction request without waiting for its admission lock.
+
+## Context recovery
+
+If Claude fills its context window during generation, Nanocodex retains the completed response,
+summarizes the earlier history, and continues the turn once. Compaction preserves the latest
+signed assistant/server-tool boundary and completed receipts. The recovery budget survives
+reopening a durable session. Failed or cancelled summaries keep the received content intact.
+
+Repeated exhaustion, incomplete tool calls, unresolved server effects, or context that cannot
+be reduced enough still return an error. Recovery does not discard effect evidence to force a
+request to fit. Proactive compaction continues to run between model requests.
 
 ## Validation and limits
 
