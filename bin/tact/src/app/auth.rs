@@ -13,6 +13,14 @@ use std::{path::Path, result::Result as StdResult};
 
 const OPENAI_API_KEY: &str = "OPENAI_API_KEY";
 
+pub(crate) fn validate_claude_api_key(key: &SecretString) -> AuthResult<()> {
+    let value = key.expose_secret();
+    if !value.starts_with("sk-ant-api") || value.bytes().any(|byte| byte.is_ascii_whitespace()) {
+        return Err(AuthError::InvalidClaudeApiKey);
+    }
+    Ok(())
+}
+
 enum SelectedAuth {
     ChatGpt,
     ApiKey(SecretString),
@@ -146,6 +154,28 @@ impl SelectedAuth {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn claude_api_key_validation_rejects_other_credentials_without_disclosing_them() {
+        for value in [
+            "sk-ant-oat01-access-sentinel",
+            "sk-ant-ort01-refresh-sentinel",
+            "Bearer sk-ant-oat01-access-sentinel",
+            "session-sentinel",
+            "",
+            " sk-ant-api03-sentinel",
+            "sk-ant-api03-sentinel\n",
+        ] {
+            let error = super::validate_claude_api_key(&SecretString::new(value.into()))
+                .expect_err("only API keys are accepted");
+            assert!(matches!(error, AuthError::InvalidClaudeApiKey));
+            assert!(!error.to_string().contains("sentinel"));
+        }
+        assert!(
+            super::validate_claude_api_key(&SecretString::new("sk-ant-api03-sentinel".into()))
+                .is_ok()
+        );
+    }
+
     use super::SelectedAuth;
     use crate::app::{
         config::{AuthConfig, AuthMode},

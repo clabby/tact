@@ -756,6 +756,8 @@ impl AgentRecipe {
                     "Claude API-key authentication requires ANTHROPIC_API_KEY".into(),
                 )
             })?;
+        crate::app::auth::validate_claude_api_key(&key)
+            .map_err(|error| NanocodexError::InvalidRequest(error.to_string()))?;
         let http = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .retry(reqwest::retry::never())
@@ -1073,6 +1075,14 @@ mod tests {
             assert_eq!(reads.get(), usize::from(enabled));
             assert!(result.is_err());
             if enabled {
+                let token = "sk-ant-oat01-subscription-sentinel";
+                let rejected = recipe
+                    .claude_client(|| Ok(Some(SecretString::new(token.into()))))
+                    .err()
+                    .expect(
+                        "subscription credentials must be rejected before constructing a client",
+                    );
+                assert!(!rejected.to_string().contains(token));
                 assert!(
                     result
                         .err()
@@ -1082,7 +1092,9 @@ mod tests {
                 );
                 assert!(
                     recipe
-                        .claude_client(|| Ok(Some(SecretString::new("synthetic-api-key".into()))))
+                        .claude_client(|| Ok(Some(SecretString::new(
+                            "sk-ant-api03-synthetic-api-key".into()
+                        ))))
                         .is_ok()
                 );
             }

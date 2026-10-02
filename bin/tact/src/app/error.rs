@@ -105,6 +105,10 @@ pub(crate) enum AuthError {
     #[error("OPENAI_API_KEY is not set; set it or select ChatGPT authentication")]
     ApiKeyUnavailable,
     #[error(
+        "ANTHROPIC_API_KEY must contain an Anthropic API key (sk-ant-api...); Claude subscription and OAuth tokens are not supported"
+    )]
+    InvalidClaudeApiKey,
+    #[error(
         "no ChatGPT credentials found at {path} and OPENAI_API_KEY is not set; run `tact auth login` or set OPENAI_API_KEY"
     )]
     CredentialsUnavailable { path: PathBuf },

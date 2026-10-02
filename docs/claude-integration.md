@@ -11,6 +11,8 @@ Claude requires `ANTHROPIC_API_KEY`. `tact auth --provider claude status` report
 that environment variable is configured without displaying its value. Claude login and logout
 commands explain how to configure or unset the key; they do not perform authentication.
 Tact does not read or store Claude subscription credentials.
+Both status and client construction reject credentials outside Anthropic's `sk-ant-api`
+format, including OAuth access and refresh tokens placed in `ANTHROPIC_API_KEY`.
 
 Codex authentication is independent. A Codex root or child can use its ChatGPT subscription
 while Claude agents use API keys. Secrets and authentication details are not added to model

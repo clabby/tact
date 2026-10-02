@@ -679,9 +679,12 @@ impl AuthCommand {
                 );
             }
             Self::Status => {
-                let configured = SecretString::from_environment("ANTHROPIC_API_KEY")
-                    .map_err(AuthError::from)?
-                    .is_some();
+                let key =
+                    SecretString::from_environment("ANTHROPIC_API_KEY").map_err(AuthError::from)?;
+                if let Some(key) = &key {
+                    crate::app::auth::validate_claude_api_key(key)?;
+                }
+                let configured = key.is_some();
                 println!("Authentication: Claude API key");
                 println!("Source: ANTHROPIC_API_KEY");
                 println!("Configured: {}", if configured { "yes" } else { "no" });

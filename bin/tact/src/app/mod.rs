@@ -1,6 +1,6 @@
 //! Application boundaries for configuration, authentication, and command dispatch.
 
-mod auth;
+pub(crate) mod auth;
 pub(crate) mod browser;
 mod cli;
 pub(crate) mod config;
