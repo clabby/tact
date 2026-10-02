@@ -1640,7 +1640,7 @@ mod tests {
     #[tokio::test]
     async fn interrupt_and_shutdown_drain_yielded_cells_and_shells() {
         for shutdown in [false, true] {
-            let mut server = server(vec![tool("blocked-exec", "exec", json!({"code":"// @exec: {\"yield_time_ms\": 1}\nconst process = await tools.exec_command({cmd: \"echo $$ > fixture.pid; exec sleep 60\", yield_time_ms: 1}); text(process); await tools.block({});"}))]).await;
+            let mut server = server(vec![tool("blocked-exec", "exec", json!({"code":"// @exec: {\"yield_time_ms\": 1}\nconst process = await tools.exec_command({cmd: \"sleep 1; echo $$ > fixture.pid; exec sleep 60\", yield_time_ms: 1}); text(process); await tools.block({});"}))]).await;
             let workspace = tempfile::tempdir().unwrap();
             let (entered, mut entered_rx) = mpsc::unbounded_channel();
             let dropped = Arc::new(AtomicBool::new(false));
@@ -1662,7 +1662,27 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap();
-            let pid = std::fs::read_to_string(workspace.path().join("fixture.pid")).unwrap();
+            let pid = timeout(Duration::from_secs(20), async {
+                loop {
+                    match tokio::fs::read_to_string(workspace.path().join("fixture.pid")).await {
+                        Ok(pid) if pid.ends_with('\n') => break pid,
+                        Ok(_) => {}
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => panic!("could not read shell readiness marker: {error}"),
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("shell did not publish its PID");
+            let mut probe = std::process::Command::new("kill");
+            probe
+                .args(["-0", pid.trim()])
+                .stderr(std::process::Stdio::null());
+            assert!(
+                probe.status().unwrap().success(),
+                "fixture shell exited early"
+            );
             let _ = server.requests.recv().await.unwrap();
             timeout(Duration::from_secs(20), server.requests.recv())
                 .await
@@ -1684,12 +1704,7 @@ mod tests {
                 "cancel acknowledged before nested tool dropped"
             );
             assert!(
-                !std::process::Command::new("kill")
-                    .args(["-0", pid.trim()])
-                    .stderr(std::process::Stdio::null())
-                    .status()
-                    .unwrap()
-                    .success(),
+                !probe.status().unwrap().success(),
                 "cancel acknowledged with shell still alive"
             );
             assert!(
