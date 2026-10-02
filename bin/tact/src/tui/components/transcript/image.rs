@@ -460,7 +460,7 @@ impl Cache {
 
     fn reserve_job(&self) -> Option<JobPermit> {
         self.active_jobs
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |active| {
                 (active < JOB_QUEUE_CAPACITY).then_some(active + 1)
             })
             .ok()

@@ -294,7 +294,8 @@ fn copy_to_clipboard(output: &mut impl Write, text: &str) -> io::Result<()> {
 }
 
 fn write_osc7_working_directory(output: &mut impl Write, path: &Path) -> io::Result<()> {
-    let mut uri = url::Url::from_directory_path(path).map_err(|()| {
+    // Directory URLs append a slash that terminals can pass to Nushell as an invalid PWD.
+    let mut uri = url::Url::from_file_path(path.components().as_path()).map_err(|()| {
         io::Error::new(io::ErrorKind::InvalidInput, "working directory is relative")
     })?;
     // Ghostty requires an explicit local host, including for paths shared with containers.
@@ -446,9 +447,11 @@ mod tests {
     fn osc7_working_directory_reports_an_explicit_local_host() {
         for (path, encoded_path) in [
             ("/", "/"),
-            ("/work/with space", "/work/with%20space/"),
-            ("/work/café#100%?", "/work/caf%C3%A9%23100%25%3F/"),
-            ("/work/line\n\u{1b}break", "/work/line%0A%1Bbreak/"),
+            ("/work/with space", "/work/with%20space"),
+            ("/work/with space/", "/work/with%20space"),
+            ("/work/with space///", "/work/with%20space"),
+            ("/work/café#100%?", "/work/caf%C3%A9%23100%25%3F"),
+            ("/work/line\n\u{1b}break", "/work/line%0A%1Bbreak"),
         ] {
             let mut output = Vec::new();
 

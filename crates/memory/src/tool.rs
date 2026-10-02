@@ -97,6 +97,10 @@ struct DeleteOutput {
 #[async_trait]
 pub trait MutationAuthorizer: Send + Sync {
     /// Returns success only when `session_id` may mutate memory.
+    #[allow(
+        clippy::double_must_use,
+        reason = "async_trait adds must_use to the boxed future"
+    )]
     async fn authorize_memory_mutation(&self, session_id: &str) -> io::Result<()>;
 }
 
