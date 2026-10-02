@@ -892,6 +892,7 @@ mod tests {
     }
 
     struct BufferedReceipt(Arc<Notify>);
+
     #[async_trait]
     impl Tool for BufferedReceipt {
         fn definition(&self) -> ToolDefinition {
@@ -905,6 +906,226 @@ mod tests {
             self.0.notified().await;
             Ok(ToolOutput::text("known completion").with_structured_result(json!({"exact":7})))
         }
+    }
+
+    #[tokio::test]
+    async fn context_usage_updates_before_code_mode_turn_finishes() {
+        use crate::tui::transcript::TranscriptRecord;
+        use nanocodex::oai::events::ModelCallCompleted;
+
+        let server = server(vec![
+            tool(
+                "context-round",
+                "exec",
+                json!({"code":"text(await tools.receipt({}));"}),
+            ),
+            final_text(),
+        ])
+        .await;
+        let workspace = tempfile::tempdir().unwrap();
+        let release = Arc::new(Notify::new());
+        let (agent, mut events) = agent(
+            &server,
+            workspace.path(),
+            tools()
+                .tool(BufferedReceipt(release.clone()))
+                .build()
+                .unwrap(),
+        );
+        let turn = agent.prompt("update usage while tools run").await.unwrap();
+        let first_usage = timeout(Duration::from_secs(5), async {
+            while let Some(event) = events.recv().await {
+                assert!(!event.kind.is_terminal());
+                if event.kind == AgentEventKind::ModelCallCompleted {
+                    let record = TranscriptRecord::from_agent(event.seq, 0, event);
+                    return record
+                        .decode_payload::<ModelCallCompleted>()
+                        .unwrap()
+                        .usage
+                        .unwrap();
+                }
+            }
+            panic!("event stream closed before context update");
+        })
+        .await;
+        release.notify_one();
+        let result = timeout(Duration::from_secs(20), turn)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut usage = first_usage.expect("context must update before the tool completes");
+        assert_eq!(
+            (usage.input_tokens, usage.output_tokens, usage.total_tokens),
+            (60, 2, 62)
+        );
+        assert_eq!(
+            usage.input_tokens_details.as_ref().unwrap().cached_tokens,
+            20
+        );
+        while let Some(event) = events.recv().await {
+            let terminal = event.kind.is_terminal();
+            if event.kind == AgentEventKind::ModelCallCompleted {
+                let record = TranscriptRecord::from_agent(event.seq, 0, event);
+                usage = record
+                    .decode_payload::<ModelCallCompleted>()
+                    .unwrap()
+                    .usage
+                    .unwrap();
+            }
+            if terminal {
+                break;
+            }
+        }
+        assert_eq!(usage.total_tokens, 78);
+        assert_eq!(result.usage().unwrap().total_tokens(), 62 + 78);
+        agent.shutdown().await.unwrap();
+    }
+
+    async fn steering_acknowledgments(terminal_response: bool) {
+        let release = Arc::new(Notify::new());
+        let first_response: ResponseFactory = if terminal_response {
+            let release = release.clone();
+            Box::new(move |_| {
+                let release = release.clone();
+                Box::pin(async move {
+                    release.notified().await;
+                    json!({"type":"text","text":"initial answer"})
+                })
+            })
+        } else {
+            tool(
+                "steering-exec",
+                "exec",
+                json!({"code":"text(await tools.receipt({}));"}),
+            )
+        };
+        let mut server = server(vec![first_response, final_text()]).await;
+        let workspace = tempfile::tempdir().unwrap();
+        let (agent, mut events) = agent(
+            &server,
+            workspace.path(),
+            tools()
+                .tool(BufferedReceipt(release.clone()))
+                .build()
+                .unwrap(),
+        );
+        let turn = agent.prompt("start the steering fixture").await.unwrap();
+        timeout(Duration::from_secs(10), server.requests.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let mut observed = Vec::new();
+        if !terminal_response {
+            timeout(Duration::from_secs(10), async {
+                loop {
+                    let event = events.recv().await.unwrap();
+                    let payload: Value = serde_json::from_str(event.payload.get()).unwrap();
+                    let entered =
+                        event.kind == AgentEventKind::ToolCall && payload["tool"] == "receipt";
+                    observed.push(event);
+                    if entered {
+                        break;
+                    }
+                }
+            })
+            .await
+            .unwrap();
+        }
+        let instructions = if terminal_response {
+            vec!["correction during terminal response"]
+        } else {
+            vec![
+                "first correction during nested tool",
+                "second correction during nested tool",
+            ]
+        };
+        for instruction in &instructions {
+            turn.control().steer(*instruction).await.unwrap();
+        }
+        release.notify_one();
+        timeout(Duration::from_secs(20), turn)
+            .await
+            .unwrap()
+            .unwrap();
+        let continued = timeout(Duration::from_secs(10), server.requests.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        timeout(Duration::from_secs(10), async {
+            while let Some(event) = events.recv().await {
+                let terminal = event.kind.is_terminal();
+                observed.push(event);
+                if terminal {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        agent.shutdown().await.unwrap();
+
+        let delivered = continued["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|message| message["role"] == "user")
+            .flat_map(|message| message["content"].as_array().unwrap())
+            .filter_map(|block| block["text"].as_str())
+            .filter(|text| instructions.contains(text))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            delivered, instructions,
+            "every steer must reach the next request once, in order"
+        );
+        let acknowledgments = observed
+            .iter()
+            .enumerate()
+            .filter(|(_, event)| event.kind == AgentEventKind::RunSteered)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            acknowledgments.len(),
+            instructions.len(),
+            "delivered steers must acknowledge the UI queue"
+        );
+        let next_response = observed
+            .iter()
+            .enumerate()
+            .filter(|(_, event)| event.kind == AgentEventKind::ModelCallCompleted)
+            .nth(1)
+            .unwrap()
+            .0;
+        for (index, ((position, event), instruction)) in
+            acknowledgments.iter().zip(&instructions).enumerate()
+        {
+            let payload: Value = serde_json::from_str(event.payload.get()).unwrap();
+            assert_eq!(payload["steer_index"], index + 1);
+            assert_eq!(payload["instruction_bytes"], instruction.len());
+            assert!(*position < next_response);
+            if !terminal_response {
+                let callback_completed = observed
+                    .iter()
+                    .position(|event| {
+                        let payload: Value = serde_json::from_str(event.payload.get()).unwrap();
+                        event.kind == AgentEventKind::ToolResult
+                            && payload["call_id"] == "steering-exec"
+                    })
+                    .unwrap();
+                assert!(
+                    *position > callback_completed,
+                    "nested tools are not model boundaries"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn steering_acknowledges_each_prompt_after_code_mode_callback() {
+        steering_acknowledgments(false).await;
+    }
+
+    #[tokio::test]
+    async fn steering_acknowledges_prompt_admitted_during_terminal_response() {
+        steering_acknowledgments(true).await;
     }
 
     async fn buffered_completion_receipt(cancel: bool) {
