@@ -596,6 +596,65 @@ mod tests {
         Tools::builder().web_search(false).image_generation(false)
     }
 
+    #[tokio::test]
+    async fn consecutive_claude_turns_preserve_transcript_replies() {
+        use crate::tui::transcript::{EntryKind, TranscriptModel, TranscriptRecord};
+
+        let responses = ["first reply", "second reply"]
+            .into_iter()
+            .map(|text| {
+                let response: ResponseFactory =
+                    Box::new(move |_| Box::pin(async move { json!({"type":"text","text":text}) }));
+                response
+            })
+            .collect();
+        let server = server(responses).await;
+        let workspace = tempfile::tempdir().unwrap();
+        let (agent, mut events) = agent(&server, workspace.path(), tools().build().unwrap());
+        let mut live = TranscriptModel::default();
+        let mut replay = TranscriptModel::default();
+        let mut sequence = 0;
+        for _ in 0..2 {
+            timeout(Duration::from_secs(10), agent.prompt("test").await.unwrap())
+                .await
+                .unwrap()
+                .unwrap();
+            loop {
+                let event = timeout(Duration::from_secs(10), events.next())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let terminal = event.kind == AgentEventKind::RunCompleted;
+                let delta = event.kind == AgentEventKind::AssistantDelta;
+                sequence += 1;
+                let record = TranscriptRecord::from_agent(sequence, sequence, event);
+                live.apply(&record);
+                if !delta {
+                    let encoded = serde_json::to_string(&record).unwrap();
+                    replay.apply(&serde_json::from_str(&encoded).unwrap());
+                }
+                if terminal {
+                    break;
+                }
+            }
+        }
+        agent.shutdown().await.unwrap();
+        for model in [&live, &replay] {
+            let replies = model
+                .entries()
+                .iter()
+                .filter_map(|entry| match &entry.kind {
+                    EntryKind::Assistant {
+                        text,
+                        complete: true,
+                    } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(replies, ["first reply", "second reply"]);
+        }
+    }
+
     fn fast_agent(
         endpoint: &str,
         workspace: &Path,

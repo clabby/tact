@@ -49,8 +49,8 @@ pub(crate) struct TranscriptModel {
     entry_indices: HashMap<EntryId, usize>,
     next_entry_id: usize,
     assistants: HashMap<AssistantKey, EntryId>,
-    active_assistants: HashMap<(u32, MessagePhase), EntryId>,
-    reasoning: HashMap<ReasoningKey, EntryId>,
+    active_assistants: HashMap<(ModelCallKey, MessagePhase), EntryId>,
+    reasoning: HashMap<ModelCallKey, EntryId>,
     tools: HashMap<String, EntryId>,
     shell_sessions: HashMap<i64, EntryId>,
     shell_followups: HashMap<String, EntryId>,
@@ -69,15 +69,23 @@ pub(crate) struct TranscriptModel {
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct AssistantKey {
-    call: u32,
+    call: ModelCallKey,
     item: Option<String>,
     phase: MessagePhase,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-struct ReasoningKey {
+struct ModelCallKey {
     request: Option<Arc<str>>,
+    turn: Option<Arc<str>>,
     call: u32,
+}
+
+#[derive(Deserialize)]
+struct TurnPayload<P> {
+    turn_id: Option<Arc<str>>,
+    #[serde(flatten)]
+    payload: P,
 }
 
 impl TranscriptModel {
@@ -472,10 +480,15 @@ impl TranscriptModel {
     }
 
     fn assistant_delta(&mut self, record: &TranscriptRecord) -> Result<bool, serde_json::Error> {
-        let payload = record.decode_payload::<AssistantDelta>()?;
+        let TurnPayload { turn_id, payload } =
+            record.decode_payload::<TurnPayload<AssistantDelta>>()?;
         let phase = message_phase(payload.phase);
         let key = AssistantKey {
-            call: payload.model_call_index,
+            call: ModelCallKey {
+                request: record.agent_request_id(),
+                turn: turn_id,
+                call: payload.model_call_index,
+            },
             item: payload.item_id,
             phase,
         };
@@ -486,9 +499,8 @@ impl TranscriptModel {
                 text: String::new(),
                 complete: false,
             });
+            self.active_assistants.insert((key.call.clone(), phase), id);
             self.assistants.insert(key, id);
-            self.active_assistants
-                .insert((payload.model_call_index, phase), id);
             id
         };
         self.update(id, |kind| {
@@ -501,10 +513,15 @@ impl TranscriptModel {
     }
 
     fn assistant_message(&mut self, record: &TranscriptRecord) -> Result<bool, serde_json::Error> {
-        let payload = record.decode_payload::<AssistantMessage>()?;
+        let TurnPayload { turn_id, payload } =
+            record.decode_payload::<TurnPayload<AssistantMessage>>()?;
         let phase = message_phase(payload.phase);
         let key = AssistantKey {
-            call: payload.model_call_index,
+            call: ModelCallKey {
+                request: record.agent_request_id(),
+                turn: turn_id,
+                call: payload.model_call_index,
+            },
             item: payload.item_id,
             phase,
         };
@@ -514,7 +531,7 @@ impl TranscriptModel {
             .copied()
             .or_else(|| {
                 self.active_assistants
-                    .get(&(payload.model_call_index, phase))
+                    .get(&(key.call.clone(), phase))
                     .copied()
             })
             .unwrap_or_else(|| {
@@ -536,9 +553,11 @@ impl TranscriptModel {
     }
 
     fn reasoning_delta(&mut self, record: &TranscriptRecord) -> Result<bool, serde_json::Error> {
-        let payload = record.decode_payload::<ReasoningSummaryDelta>()?;
-        let key = ReasoningKey {
+        let TurnPayload { turn_id, payload } =
+            record.decode_payload::<TurnPayload<ReasoningSummaryDelta>>()?;
+        let key = ModelCallKey {
             request: record.agent_request_id(),
+            turn: turn_id,
             call: payload.model_call_index,
         };
         let id = self
@@ -1388,26 +1407,38 @@ mod tests {
         kind: AgentEventKind,
         payload: impl Serialize,
     ) -> TranscriptRecord {
-        agent_for_at("session", recorded_at_unix_ms, kind, payload)
-    }
-
-    fn agent_for_at(
-        request_id: &str,
-        recorded_at_unix_ms: u64,
-        kind: AgentEventKind,
-        payload: impl Serialize,
-    ) -> TranscriptRecord {
         TranscriptRecord::from_agent(
             1,
             recorded_at_unix_ms,
             AgentEvent {
                 protocol_version: 1,
-                request_id: Arc::from(request_id),
+                request_id: Arc::from("session"),
                 seq: 1,
                 kind,
                 payload: to_raw_value(&payload).unwrap().into(),
             },
         )
+    }
+
+    fn agent_turn_at(
+        turn_id: &str,
+        recorded_at_unix_ms: u64,
+        kind: AgentEventKind,
+        mut payload: serde_json::Value,
+    ) -> TranscriptRecord {
+        payload["turn_id"] = json!(turn_id);
+        agent_at(recorded_at_unix_ms, kind, payload)
+    }
+
+    fn assistant_replies(model: &TranscriptModel) -> Vec<(&str, bool)> {
+        model
+            .entries()
+            .iter()
+            .filter_map(|entry| match &entry.kind {
+                EntryKind::Assistant { text, complete } => Some((text.as_str(), *complete)),
+                _ => None,
+            })
+            .collect()
     }
 
     fn message_update(state: &str) -> AgentMessageUpdate {
@@ -1679,15 +1710,220 @@ mod tests {
     }
 
     #[test]
+    fn assistant_replies_with_restarted_call_indexes_survive_new_turns_and_replay() {
+        for (stream_second, item_id) in [
+            (false, Some("message")),
+            (true, None),
+            (true, Some("message")),
+        ] {
+            let mut model = TranscriptModel::default();
+            let mut records = Vec::new();
+            for (turn, request) in [(1, "first"), (2, "second")] {
+                records.push(
+                    TranscriptRecord::from_local(
+                        1,
+                        turn,
+                        LocalEvent::UserSubmitted {
+                            id: TurnId::new(turn),
+                            text: request.to_owned(),
+                        },
+                    )
+                    .unwrap(),
+                );
+                records.push(agent_turn_at(
+                    request,
+                    turn,
+                    AgentEventKind::RunStarted,
+                    json!({}),
+                ));
+                for phase in ["commentary", "final_answer"] {
+                    if turn == 1 || stream_second {
+                        for text in [request, " partial"] {
+                            records.push(agent_turn_at(
+                                request,
+                                turn,
+                                AgentEventKind::AssistantDelta,
+                                json!({
+                                    "model_call_index": 1,
+                                    "item_id": item_id,
+                                    "phase": phase,
+                                    "text": text,
+                                }),
+                            ));
+                        }
+                    }
+                    records.push(agent_turn_at(
+                        request,
+                        turn,
+                        AgentEventKind::AssistantMessage,
+                        json!({
+                            "model_call_index": 1,
+                            "item_id": null,
+                            "phase": phase,
+                            "text": format!("{request} {phase}"),
+                        }),
+                    ));
+                }
+                records.push(agent_turn_at(
+                    request,
+                    turn,
+                    AgentEventKind::RunCompleted,
+                    json!({}),
+                ));
+            }
+            let mut replay = TranscriptModel::default();
+            for record in records {
+                model.apply(&record);
+                if record.kind() != "assistant.delta" {
+                    let persisted = serde_json::to_string(&record).unwrap();
+                    replay.apply(&serde_json::from_str(&persisted).unwrap());
+                }
+            }
+            for transcript in [&model, &replay] {
+                assert_eq!(
+                    assistant_replies(transcript),
+                    [
+                        ("first commentary", true),
+                        ("first final_answer", true),
+                        ("second commentary", true),
+                        ("second final_answer", true),
+                    ],
+                    "stream_second={stream_second}, item_id={item_id:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn claude_replies_with_null_stream_identity_remain_separate_across_turns() {
+        let mut model = TranscriptModel::default();
+        for request in ["first", "second"] {
+            model.apply(&agent_turn_at(
+                request,
+                1,
+                AgentEventKind::RunStarted,
+                json!({}),
+            ));
+            model.apply(&agent_turn_at(
+                request,
+                1,
+                AgentEventKind::AssistantDelta,
+                json!({"model_call_index": 1, "item_id": null, "phase": null, "text": "partial"}),
+            ));
+            model.apply(&agent_turn_at(
+                request,
+                1,
+                AgentEventKind::AssistantMessage,
+                json!({
+                    "model_call_index": 1,
+                    "item_id": format!("{request}-message"),
+                    "phase": null,
+                    "text": request,
+                }),
+            ));
+            model.apply(&agent_turn_at(
+                request,
+                1,
+                AgentEventKind::RunCompleted,
+                json!({}),
+            ));
+        }
+        assert_eq!(
+            assistant_replies(&model),
+            [("first", true), ("second", true)]
+        );
+    }
+
+    #[test]
+    fn concurrent_runs_keep_assistant_streams_and_final_messages_separate() {
+        let mut model = TranscriptModel::default();
+        for request in ["first", "second"] {
+            model.apply(&agent_turn_at(
+                request,
+                1,
+                AgentEventKind::RunStarted,
+                json!({}),
+            ));
+            model.apply(&agent_turn_at(
+                request,
+                1,
+                AgentEventKind::AssistantDelta,
+                json!({"model_call_index": 1, "item_id": "message", "text": request}),
+            ));
+        }
+        for request in ["first", "second"] {
+            model.apply(&agent_turn_at(
+                request,
+                1,
+                AgentEventKind::AssistantMessage,
+                json!({"model_call_index": 1, "item_id": null, "text": request}),
+            ));
+            model.apply(&agent_turn_at(
+                request,
+                1,
+                AgentEventKind::RunCompleted,
+                json!({}),
+            ));
+        }
+        assert_eq!(
+            assistant_replies(&model),
+            [("first", true), ("second", true)]
+        );
+    }
+
+    #[test]
+    fn assistant_item_ids_coalesce_streams_across_phases_and_calls() {
+        for stream_item in [None, Some("item")] {
+            let mut model = TranscriptModel::default();
+            model.apply(&agent(AgentEventKind::RunStarted, json!({})));
+            for call in 1..=2 {
+                for phase in ["commentary", "final_answer"] {
+                    let item = format!("item-{call}-{phase}");
+                    for text in ["partial", " reply"] {
+                        model.apply(&agent(
+                            AgentEventKind::AssistantDelta,
+                            json!({
+                                "model_call_index": call,
+                                "item_id": stream_item.map(|_| &item),
+                                "phase": phase,
+                                "text": text,
+                            }),
+                        ));
+                    }
+                    model.apply(&agent(
+                        AgentEventKind::AssistantMessage,
+                        json!({
+                            "model_call_index": call,
+                            "item_id": item,
+                            "phase": phase,
+                            "text": format!("{call} {phase}"),
+                        }),
+                    ));
+                }
+            }
+            assert_eq!(
+                assistant_replies(&model),
+                [
+                    ("1 commentary", true),
+                    ("1 final_answer", true),
+                    ("2 commentary", true),
+                    ("2 final_answer", true),
+                ],
+                "stream_item={stream_item:?}"
+            );
+        }
+    }
+
+    #[test]
     fn concurrent_runs_do_not_share_reasoning_blocks() {
         let mut model = TranscriptModel::default();
-        model.apply(&agent_for_at(
+        model.apply(&agent_turn_at(
             "run-a",
             1,
             AgentEventKind::ReasoningSummaryDelta,
             json!({"model_call_index": 1, "text": "run a"}),
         ));
-        model.apply(&agent_for_at(
+        model.apply(&agent_turn_at(
             "run-b",
             2,
             AgentEventKind::ReasoningSummaryDelta,
