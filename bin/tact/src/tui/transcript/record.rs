@@ -102,6 +102,12 @@ pub(crate) enum LocalEvent {
         from: bool,
         to: bool,
     },
+    CompactionStarted,
+    CompactionFinished {
+        terminal_stop: Option<TerminalStopReason>,
+        error: Option<String>,
+        duration_ns: u64,
+    },
     ContextBudget(ContextBudget),
     ContextObserved {
         prompt_cache: bool,
@@ -228,6 +234,19 @@ impl TranscriptRecord {
                 to_raw_value(&ContextObserved {
                     prompt_cache,
                     previous_response,
+                })?,
+            ),
+            LocalEvent::CompactionStarted => ("compaction.started", to_raw_value(&())?),
+            LocalEvent::CompactionFinished {
+                error,
+                duration_ns,
+                terminal_stop,
+            } => (
+                "compaction.finished",
+                to_raw_value(&CompactionFinished {
+                    error,
+                    duration_ns,
+                    terminal_stop,
                 })?,
             ),
             LocalEvent::WorkerTurnAccepted { id } => {
@@ -358,6 +377,14 @@ struct FastModeChanged {
 struct ContextObserved {
     prompt_cache: bool,
     previous_response: bool,
+}
+
+#[derive(Serialize)]
+struct CompactionFinished {
+    error: Option<String>,
+    duration_ns: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    terminal_stop: Option<TerminalStopReason>,
 }
 
 #[derive(Serialize)]

@@ -81,6 +81,7 @@ pub(crate) enum AppEvent {
         pane: PaneId,
         error: String,
     },
+    CompactionFinished(PaneId),
     WorkerTurnFinished {
         pane: PaneId,
         terminal_expected: bool,
@@ -305,6 +306,9 @@ impl AppNode {
             AppEvent::HandoffCancelled(pane) => self.update_root(pane, RootEvent::HandoffCancelled),
             AppEvent::HandoffFailed { pane, error } => {
                 self.update_root(pane, RootEvent::HandoffFailed(error))
+            }
+            AppEvent::CompactionFinished(pane) => {
+                self.update_root(pane, RootEvent::CompactionFinished)
             }
             AppEvent::WorkerTurnFinished {
                 pane,

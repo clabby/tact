@@ -419,6 +419,13 @@ Config reload applies memory-browser availability immediately. Like other agent 
 settings, the agent-facing memory setting applies when a new session starts or is restored; an
 already-running agent retains the tool surface and instructions with which it was created.
 
+### Manual compaction
+
+Enter `/compact` or choose **Compact context** from the Actions menu while the session is idle.
+Tact uses the selected provider's native compaction and shows **Compacting context…** in the composer.
+Successful compaction updates the saved session, so resume uses the compacted context. Failed compaction
+does not replace the previous saved state.
+
 ### Reflection
 
 Choose **Reflect on session** from the Actions menu while the session is idle. The composer accepts

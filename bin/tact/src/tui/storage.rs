@@ -434,7 +434,7 @@ impl SessionStorage {
             "SELECT json_quote(json_extract(CAST(record_json AS TEXT), '$.payload.terminal_stop'))
              FROM events WHERE session_id = ?1
              AND json_extract(CAST(record_json AS TEXT), '$.source') = 'tact'
-             AND json_extract(CAST(record_json AS TEXT), '$.type') = 'worker.turn_finished'
+             AND json_extract(CAST(record_json AS TEXT), '$.type') IN ('worker.turn_finished', 'compaction.finished')
              AND json_type(CAST(record_json AS TEXT), '$.payload.terminal_stop') != 'null'
              ORDER BY event_id LIMIT 1",
             [session_id],

@@ -278,6 +278,7 @@ fn format_count(value: u64) -> String {
 fn format_compaction_time(compaction: CompactionDiagnostics) -> String {
     let trigger = match compaction.trigger {
         CompactionTrigger::Automatic => "automatic",
+        CompactionTrigger::Manual => "manual",
     };
     let timestamp = i64::try_from(compaction.started_at_unix_ms)
         .ok()

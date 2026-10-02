@@ -61,10 +61,25 @@ pub(crate) struct TranscriptModel {
     message_order: VecDeque<ThreadId>,
     running_tools: HashSet<EntryId>,
     active_runs: usize,
+    // Native telemetry can arrive after the worker receipt on its separate channel.
+    // The next run starts a new telemetry scope for automatic compaction.
+    manual_compaction: Option<ManualCompaction>,
     run_started_at_unix_ms: VecDeque<u64>,
     transient: Option<TransientStatus>,
     pending_error: Option<String>,
     pending_compaction_error: Option<String>,
+}
+
+#[derive(Clone, Copy)]
+enum ManualCompaction {
+    Running,
+    Finished,
+}
+
+#[derive(Deserialize)]
+struct ManualCompactionFinished {
+    error: Option<String>,
+    duration_ns: u64,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -154,7 +169,7 @@ impl TranscriptModel {
     }
 
     pub(crate) const fn is_active(&self) -> bool {
-        self.active_runs > 0
+        self.active_runs > 0 || matches!(self.manual_compaction, Some(ManualCompaction::Running))
     }
 
     pub(crate) fn has_running_tools(&self) -> bool {
@@ -262,6 +277,30 @@ impl TranscriptModel {
             "user.steered" => self.decode_local::<UserSteered>(record).map(|payload| {
                 self.push(EntryKind::User { text: payload.text });
             }),
+            "compaction.started" => {
+                self.manual_compaction = Some(ManualCompaction::Running);
+                self.transient = Some(TransientStatus::Compacting);
+                Ok(())
+            }
+            "compaction.finished" => {
+                self.decode_local::<ManualCompactionFinished>(record)
+                    .map(|payload| {
+                        self.manual_compaction = Some(ManualCompaction::Finished);
+                        self.transient = None;
+                        self.pending_compaction_error = None;
+                        self.pending_error = None;
+                        match payload.error {
+                            Some(message) => {
+                                self.push(EntryKind::ContextCompactionFailed { message });
+                            }
+                            None => {
+                                self.push(EntryKind::ContextCompacted {
+                                    duration_ns: payload.duration_ns,
+                                });
+                            }
+                        }
+                    })
+            }
             "reflection.started" => self.decode_local::<ReflectionStarted>(record).map(|_| {
                 self.push(EntryKind::ReflectionStarted);
             }),
@@ -407,6 +446,7 @@ impl TranscriptModel {
             "assistant.message" => self.assistant_message(record),
             "reasoning.summary.delta" => self.reasoning_delta(record),
             "run.started" => {
+                self.manual_compaction = None;
                 self.active_runs = self.active_runs.saturating_add(1);
                 self.run_started_at_unix_ms
                     .push_back(record.recorded_at_unix_ms());
@@ -449,6 +489,13 @@ impl TranscriptModel {
             "model.call.completed" => {
                 self.transient = self.is_active().then_some(TransientStatus::Thinking);
                 Ok(true)
+            }
+            "model.compaction.started"
+            | "model.compaction.completed"
+            | "model.compaction.failed"
+                if self.manual_compaction.is_some() =>
+            {
+                Ok(false)
             }
             "model.compaction.started" => {
                 self.transient = Some(TransientStatus::Compacting);
@@ -924,6 +971,7 @@ impl TranscriptModel {
                     .any(|local_shell| local_shell == id)
             });
         self.active_runs = 0;
+        self.manual_compaction = None;
         self.run_started_at_unix_ms.clear();
         self.fail_orphaned_tools();
         self.transient = self.is_active().then_some(TransientStatus::Thinking);
@@ -1149,6 +1197,8 @@ fn visibility(source: &str, kind: &str) -> EventVisibility {
             | "worker.turns_interrupted"
             | "effort.changed"
             | "fast_mode.changed" => EventVisibility::Persistent,
+            "compaction.finished" => EventVisibility::Persistent,
+            "compaction.started" => EventVisibility::Transient,
             "worker.turn_finished" | "worker.stopped" | "session.ended" => {
                 EventVisibility::ErrorFallback
             }

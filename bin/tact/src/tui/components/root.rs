@@ -154,6 +154,7 @@ pub(crate) enum RootEvent {
     ReviewCancelled,
     ReviewFinished(String),
     ReviewFailed(String),
+    CompactionFinished,
     WorkerTurnFinished {
         terminal_expected: bool,
     },
@@ -232,6 +233,7 @@ pub(crate) enum SessionListKind {
 pub(crate) enum RootEffect {
     Submit(Submission),
     Reflect(Submission),
+    Compact,
     RunShell(String),
     ContinueSubagent(Submission),
     OpenDraftEditor,
@@ -287,6 +289,7 @@ enum Overlay {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum BlockingTask {
+    Compaction,
     Handoff,
     Review,
 }
@@ -799,6 +802,7 @@ impl RootNode {
             return self.update_key_confirmation(ConfirmationAction::Exit, Instant::now());
         }
         match self.blocking_task {
+            Some(BlockingTask::Compaction) => return ComponentUpdate::none(),
             Some(BlockingTask::Review) => return self.update_review_input(event),
             Some(BlockingTask::Handoff) => return self.update_handoff_input(event),
             None => {}
@@ -1550,6 +1554,21 @@ impl RootNode {
                 self.overlay = Some(Overlay::ContextDiagnostics(Node::new(
                     ContextDiagnosticsPanel::new(self.context_diagnostics.clone()),
                 )));
+            }
+            Some(ActionsEffect::Trigger(Action::Compact)) => {
+                self.overlay = None;
+                if self.in_flight_turns > 0
+                    || self.in_flight_shells > 0
+                    || self.blocking_task.is_some()
+                    || !self.queue.component().is_empty()
+                {
+                    return ComponentUpdate::none();
+                }
+                self.blocking_task = Some(BlockingTask::Compaction);
+                return ComponentUpdate {
+                    effects: vec![RootEffect::Compact],
+                    render: RenderRequest::Immediate,
+                };
             }
             Some(ActionsEffect::Trigger(Action::Reflection)) => {
                 self.overlay = None;
@@ -2776,6 +2795,10 @@ impl Component for RootNode {
                     },
                     RenderRequest::Immediate,
                 )
+            }
+            RootEvent::CompactionFinished => {
+                self.blocking_task = None;
+                ComponentUpdate::render(RenderRequest::Immediate)
             }
             RootEvent::WorkerTurnFinished { terminal_expected } => {
                 self.worker_turn_finished(terminal_expected)
@@ -6450,6 +6473,103 @@ mod tests {
         assert!(root.overlay.is_none());
         assert_eq!(update.effects, [RootEffect::OpenConfigEditor]);
         assert_eq!(update.render, super::RenderRequest::Immediate);
+    }
+
+    #[test]
+    fn manual_compaction_uses_composer_activity_and_clears_success_and_failure() {
+        for error in [None, Some("synthetic failure".to_owned())] {
+            let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+            root.update(key(KeyCode::Char('/'), KeyModifiers::NONE));
+            for character in "compact".chars() {
+                root.update(key(KeyCode::Char(character), KeyModifiers::NONE));
+            }
+            assert_eq!(
+                root.update(key(KeyCode::Enter, KeyModifiers::NONE)).effects,
+                [RootEffect::Compact]
+            );
+            root.update(super::RootEvent::Transcript(Arc::new(
+                TranscriptRecord::from_local(1, 1, LocalEvent::CompactionStarted).unwrap(),
+            )));
+            assert!(render_root_text(&mut root, 100, 20).contains("Compacting context"));
+            assert!(
+                root.update(key(KeyCode::Char('x'), KeyModifiers::NONE))
+                    .effects
+                    .is_empty()
+            );
+            assert!(root.composer().draft().is_empty());
+            assert!(
+                root.update(key(KeyCode::Esc, KeyModifiers::NONE))
+                    .effects
+                    .is_empty()
+            );
+            root.update(super::RootEvent::Transcript(Arc::new(
+                TranscriptRecord::from_local(
+                    2,
+                    2,
+                    LocalEvent::CompactionFinished {
+                        terminal_stop: None,
+                        error: error.clone(),
+                        duration_ns: 1_000_000,
+                    },
+                )
+                .unwrap(),
+            )));
+            root.update(super::RootEvent::CompactionFinished);
+            assert!(root.blocking_task.is_none());
+            let text = render_root_text(&mut root, 100, 20);
+            assert!(!text.contains("Compacting context"));
+            if let Some(error) = error {
+                assert!(text.contains(&error));
+            }
+            // The provider stream and worker receipts have independent delivery schedules.
+            root.update(super::RootEvent::Transcript(agent_record(
+                3,
+                AgentEventKind::ModelCompactionStarted,
+                json!({}),
+            )));
+            root.update(super::RootEvent::Transcript(agent_record(
+                4,
+                AgentEventKind::ModelCompactionCompleted,
+                json!({"duration_ns": 1}),
+            )));
+            assert!(!render_root_text(&mut root, 100, 20).contains("Compacting context"));
+            assert_eq!(render_root_text(&mut root, 100, 20), text);
+            assert_eq!(root.context_diagnostics.compactions_started, 1);
+            root.update(super::RootEvent::Transcript(agent_record(
+                5,
+                AgentEventKind::RunStarted,
+                json!({}),
+            )));
+            root.update(super::RootEvent::Transcript(agent_record(
+                6,
+                AgentEventKind::ModelCompactionStarted,
+                json!({}),
+            )));
+            assert!(render_root_text(&mut root, 100, 20).contains("Compacting context"));
+            assert_eq!(root.context_diagnostics.compactions_started, 2);
+        }
+    }
+
+    #[test]
+    fn manual_compaction_is_unavailable_during_active_work() {
+        for active_shell in [true, false] {
+            let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+            if active_shell {
+                root.in_flight_shells = 1;
+            } else {
+                root.in_flight_turns = 1;
+            }
+            root.update(key(KeyCode::Char('/'), KeyModifiers::NONE));
+            for character in "compact".chars() {
+                root.update(key(KeyCode::Char(character), KeyModifiers::NONE));
+            }
+            assert!(
+                root.update(key(KeyCode::Enter, KeyModifiers::NONE))
+                    .effects
+                    .is_empty()
+            );
+            assert!(root.blocking_task.is_none());
+        }
     }
 
     #[test]

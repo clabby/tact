@@ -16,7 +16,7 @@ use ratatui::{
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-const ACTIONS: [Action; 17] = [
+const ACTIONS: [Action; 18] = [
     Action::Effort,
     Action::FastMode,
     Action::Theme,
@@ -34,6 +34,7 @@ const ACTIONS: [Action; 17] = [
     Action::Handoff,
     Action::Review,
     Action::Model,
+    Action::Compact,
 ];
 const KEY_BINDINGS: [(&str, &str); 3] = [("↑↓", "move"), ("enter/tab", "open"), ("esc", "close")];
 const SEARCH_LABEL: &str = "Search: ";
@@ -72,6 +73,7 @@ pub(super) enum Action {
     DebugContext,
     Copy,
     Reflection,
+    Compact,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -285,7 +287,7 @@ impl ActionsMenu {
 
     const fn is_enabled(&self, action: Action) -> bool {
         match action {
-            Action::Handoff | Action::Reflection => self.availability.new_session,
+            Action::Handoff | Action::Reflection | Action::Compact => self.availability.new_session,
             Action::Review => self.availability.review,
             Action::Subagents => true,
             Action::Effort => true,
@@ -316,6 +318,9 @@ impl ActionsMenu {
             Action::Review if !self.availability.review => "Review changes · close the open review",
             Action::Handoff if !self.availability.new_session => {
                 "Prepare handoff · finish active work first"
+            }
+            Action::Compact if !self.availability.new_session => {
+                "Compact context · finish active work first"
             }
             Action::Reflection if !self.availability.new_session => {
                 "Reflect on session · finish active work first"
@@ -353,6 +358,7 @@ impl Action {
             Self::DebugContext => "Debug context",
             Self::Copy => "Copy response",
             Self::Reflection => "Reflect on session",
+            Self::Compact => "Compact context",
         }
     }
 
@@ -372,6 +378,7 @@ impl Action {
             Self::Memory => Some("remember/forget"),
             Self::Copy => Some("copy"),
             Self::Reflection => Some("reflection"),
+            Self::Compact => Some("compact"),
             Self::Keybindings | Self::EditConfig | Self::DebugContext => None,
         }
     }

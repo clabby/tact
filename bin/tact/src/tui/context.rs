@@ -45,6 +45,7 @@ pub(crate) struct CompactionDiagnostics {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CompactionTrigger {
     Automatic,
+    Manual,
 }
 
 /// A count-only projection that never retains request content or opaque identifiers.
@@ -60,6 +61,7 @@ pub(crate) struct ContextDiagnostics {
     pub(crate) compactions_completed: u64,
     pub(crate) last_compaction: Option<CompactionDiagnostics>,
     awaiting_post_compaction_usage: bool,
+    manual_compaction: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -80,6 +82,7 @@ impl Default for ContextDiagnostics {
             compactions_completed: 0,
             last_compaction: None,
             awaiting_post_compaction_usage: false,
+            manual_compaction: false,
         }
     }
 }
@@ -98,6 +101,38 @@ impl ContextDiagnostics {
         match (record.source(), record.kind()) {
             ("agent", "api.event") => self.observe_api_event(record),
             ("agent", "model.call.completed") => self.observe_model_call_completed(record),
+            ("agent", "run.started") => {
+                self.manual_compaction = false;
+                ContextObservation::default()
+            }
+            ("tact", "compaction.started") => {
+                self.manual_compaction = true;
+                self.compactions_started = self.compactions_started.saturating_add(1);
+                self.last_compaction = Some(CompactionDiagnostics {
+                    trigger: CompactionTrigger::Manual,
+                    started_at_unix_ms: record.recorded_at_unix_ms(),
+                    completed_at_unix_ms: None,
+                    before_tokens: self.active_tokens,
+                    after_tokens: None,
+                });
+                self.awaiting_post_compaction_usage = false;
+                ContextObservation::default()
+            }
+            ("tact", "compaction.finished") => {
+                #[derive(Deserialize)]
+                struct Finished {
+                    error: Option<String>,
+                }
+                if let Ok(Finished { error: None }) = record.decode_payload::<Finished>() {
+                    self.observe_compaction_completed(record);
+                }
+                ContextObservation::default()
+            }
+            ("agent", "model.compaction.started" | "model.compaction.completed")
+                if self.manual_compaction =>
+            {
+                ContextObservation::default()
+            }
             ("agent", "model.compaction.started") => {
                 self.observe_compaction_started(record);
                 ContextObservation::default()
@@ -130,6 +165,12 @@ impl ContextDiagnostics {
         self.model_window_tokens = budget.window_tokens;
         self.active_tokens = Some(budget.active_tokens);
         self.auto_compact_token_limit = None;
+        if self.awaiting_post_compaction_usage {
+            if let Some(compaction) = &mut self.last_compaction {
+                compaction.after_tokens = Some(budget.active_tokens);
+            }
+            self.awaiting_post_compaction_usage = false;
+        }
     }
 
     fn observe_api_event(&mut self, record: &TranscriptRecord) -> ContextObservation {

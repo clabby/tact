@@ -1284,6 +1284,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn manual_compaction_publishes_resume_state_and_failure_retains_it() {
+        let directory = tempdir().unwrap();
+        let config = directory.path().join("config.toml");
+        let instructions = "exact instructions\r\n  including whitespace\n";
+        save_checkpoint(&config, "session", &snapshot("before"), instructions, true).unwrap();
+        SessionStorage::open(&config)
+            .unwrap()
+            .append_records("session", &[started(1, "session", None, None)])
+            .unwrap();
+        let (mut journal, writer) = TranscriptJournal::open_at(&config, "session", 2).unwrap();
+        journal.append_local(LocalEvent::CompactionStarted).unwrap();
+        let expected = super::AgentSnapshot::Codex(Box::new(snapshot("compacted")));
+        journal
+            .append_local_with_resume_state(
+                LocalEvent::CompactionFinished {
+                    terminal_stop: None,
+                    error: None,
+                    duration_ns: 1,
+                },
+                encode_checkpoint(&expected, instructions, true).unwrap(),
+            )
+            .unwrap();
+        journal.flush().await.unwrap();
+        let (actual, actual_instructions, catalog) =
+            load_checkpoint(&config, "session").unwrap().into_parts();
+        assert_eq!(
+            serde_json::to_value(actual).unwrap(),
+            serde_json::to_value(&expected).unwrap()
+        );
+        assert_eq!(actual_instructions, instructions);
+        assert_eq!(catalog, Some(true));
+        let records = load_transcript(&config, "session").unwrap();
+        assert_eq!(records.last().unwrap().kind(), "compaction.finished");
+        assert!(records.last().unwrap().decode_payload::<Value>().unwrap()["error"].is_null());
+        journal.append_local(LocalEvent::CompactionStarted).unwrap();
+        journal
+            .append_local(LocalEvent::CompactionFinished {
+                terminal_stop: None,
+                error: Some("synthetic failure".to_owned()),
+                duration_ns: 1,
+            })
+            .unwrap();
+        journal.flush().await.unwrap();
+        let (actual, actual_instructions, _) =
+            load_checkpoint(&config, "session").unwrap().into_parts();
+        assert_eq!(
+            serde_json::to_value(actual).unwrap(),
+            serde_json::to_value(expected).unwrap()
+        );
+        assert_eq!(actual_instructions, instructions);
+        drop(journal);
+        writer.into_task().await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
     async fn transient_write_lock_preserves_transcript_for_resume() {
         let directory = tempdir().unwrap();
         let config = directory.path().join("config.toml");

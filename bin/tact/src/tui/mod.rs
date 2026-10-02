@@ -939,6 +939,28 @@ pub(crate) async fn run(
                             .journal_mut()?.append_local(LocalEvent::WorkerTurnAccepted { id })?;
                         schedule(app.update(AppEvent::Transcript { pane, record }), &mut scheduler);
                     }
+                    WorkerEvent::CompactionFinished { pane, result, terminal_stop, duration_ns } => {
+                        let Some(runtime) = panes.get_mut(&pane) else { continue; };
+                        let (snapshot, error) = match result {
+                            Ok(snapshot) => (Some(snapshot), None),
+                            Err(error) => (None, Some(error)),
+                        };
+                        let event = LocalEvent::CompactionFinished { error, duration_ns, terminal_stop };
+                        let record = match snapshot.as_ref() {
+                            Some(snapshot) => {
+                                let state = session::encode_checkpoint(snapshot, &runtime.instructions, runtime.skills_catalog_present)?;
+                                runtime.journal_mut()?.append_local_with_resume_state(event, state)?
+                            }
+                            None => runtime.journal_mut()?.append_local(event)?,
+                        };
+                        runtime.journal_mut()?.flush().await?;
+                        schedule(app.update(AppEvent::Transcript { pane, record }), &mut scheduler);
+                        if let Some(budget) = snapshot.as_ref().and_then(|snapshot| snapshot.context_budget()) {
+                            let record = runtime.journal_mut()?.append_local(LocalEvent::ContextBudget(budget))?;
+                            schedule(app.update(AppEvent::Transcript { pane, record }), &mut scheduler);
+                        }
+                        apply_app_update!(app.update(AppEvent::CompactionFinished(pane)));
+                    }
                     WorkerEvent::TurnFinished {
                         pane,
                         id,
@@ -2032,6 +2054,23 @@ fn apply_pane_effect(
                 debug_assert!(runtime.pending_submission.is_none());
                 runtime.pending_submission = Some(submission);
             }
+        }
+        components::RootEffect::Compact => {
+            let runtime = context
+                .panes
+                .get_mut(&pane)
+                .expect("UI pane must have a runtime");
+            let record = runtime
+                .journal_mut()?
+                .append_local(LocalEvent::CompactionStarted)?;
+            schedule(
+                context.app.update(AppEvent::Transcript { pane, record }),
+                context.scheduler,
+            );
+            context
+                .commands
+                .send(WorkerCommand::Compact(pane))
+                .map_err(|_| RuntimeError::AgentWorkerStopped)?;
         }
         components::RootEffect::Reflect(instructions) => {
             let runtime = context
