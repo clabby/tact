@@ -1,7 +1,7 @@
 //! Configurable terminal colors and light/dark mode selection.
 
 use crate::app::config::ReasoningEffort;
-use nanocodex::Model;
+use nanocodex::{ClaudeModel, HarnessModel as Model, Model as CodexModel};
 use ratatui::style::Color;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use std::{fmt, str::FromStr};
@@ -172,9 +172,11 @@ impl Theme {
 
     pub(crate) const fn model(&self, model: Model) -> Color {
         match model {
-            Model::Luna => Color::White,
-            Model::Sol => Color::Yellow,
-            Model::Astra => Color::LightMagenta,
+            Model::Codex(CodexModel::Luna) => Color::White,
+            Model::Codex(CodexModel::Sol) => Color::Yellow,
+            Model::Codex(CodexModel::Astra) => Color::LightMagenta,
+            Model::Claude(ClaudeModel::Opus55) => Color::LightRed,
+            Model::Claude(ClaudeModel::Fable51) => Color::LightCyan,
             _ => Color::White,
         }
     }
@@ -367,7 +369,7 @@ impl fmt::Display for ColorName {
 #[cfg(test)]
 mod tests {
     use super::{ColorScheme, SYSTEM_SCHEME_POLL_INTERVAL, Theme, ThemeMode};
-    use nanocodex::Model;
+    use nanocodex::{HarnessModel as Model, Model as CodexModel};
     use ratatui::style::Color;
 
     #[test]
@@ -390,9 +392,12 @@ mod tests {
     fn models_have_a_shared_semantic_palette() {
         let theme = Theme::default();
 
-        assert_eq!(theme.model(Model::Luna), Color::White);
-        assert_eq!(theme.model(Model::Sol), Color::Yellow);
-        assert_eq!(theme.model(Model::Astra), Color::LightMagenta);
+        assert_eq!(theme.model(Model::Codex(CodexModel::Luna)), Color::White);
+        assert_eq!(theme.model(Model::Codex(CodexModel::Sol)), Color::Yellow);
+        assert_eq!(
+            theme.model(Model::Codex(CodexModel::Astra)),
+            Color::LightMagenta
+        );
     }
 
     #[test]

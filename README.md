@@ -118,6 +118,69 @@ When no effort is configured, Sol and Astra use low effort and Luna uses medium.
 effort takes precedence. Tact supports low through max effort. Sol and Luna support Pro mode;
 Astra uses standard mode.
 
+Claude support requires an explicit config opt-in. Choose the authentication route in the same
+section:
+
+```toml
+[claude]
+enabled = true
+auth = "subscription" # or "api-key" to use ANTHROPIC_API_KEY
+
+[agent]
+model = "opus-5.5" # or fable-5.1
+thinking = "medium"
+web_search = false
+image_generation = false
+```
+
+With Claude enabled, `--model` and the model picker also accept `opus-5.5` and `fable-5.1`
+(native IDs `claude-opus-5-5` and `claude-fable-5-1`). Both support `low`, `medium`, `high`,
+`xhigh`, and `max`. Their default efforts are medium for Opus and high for Fable.
+Claude uses standard mode without Codex priority processing. The existing web-search and
+image-generation tools use OpenAI credentials, including when called by Claude; disable them as
+above for an Anthropic-only setup. Codex children also need the configured OpenAI credentials.
+
+Both providers use the same authentication commands:
+
+```sh
+tact auth --provider claude login
+tact auth --provider claude status
+tact auth --provider claude logout
+# Use --provider codex for ChatGPT; Codex is the default provider.
+```
+
+Claude subscription login opens a browser and asks for the returned `code#state` through hidden
+terminal input. Nanocodex owns this separate OAuth login; it does not reuse Claude Code's login.
+The subscription manager coordinates refreshes across the root and its descendants, including
+Claude children of a Codex root. Credentials are stored privately outside session history and
+checkpoints. Use logout to clear the saved grant.
+The default store is `$TACT_HOME/claude/private/auth` (or `~/.tact/claude/private/auth`).
+Set `claude.subscription_store` to use a different private store. The credential file is encrypted
+with a local key; Unix directories and files require owner-only access.
+If the store or its key is missing or damaged, Tact refuses to reset its revision: another process
+may still hold an older login. Stop all Tact processes using that store, then restore the matching
+key and credential file from one backup, or choose a fresh `subscription_store` path and log in
+again. Do not delete only one file or reuse a damaged store while older processes are running.
+
+The `claude.auth` setting selects the billing route. Its default, `subscription`, uses the saved
+subscription login and ignores `ANTHROPIC_API_KEY`. Selecting `api-key` requires that environment
+variable. Neither route falls back to the other when authentication fails. Logging in
+does not change this setting. Authentication choices and credentials are not added to model
+prompts.
+
+`claude.api_base_url` optionally selects a Messages API base URL; Tact appends `/messages`.
+Authentication settings are captured when a task tree starts. Start a new session after changing
+the selected route or store.
+
+Claude uses Tact's Code Mode `exec`/`wait` runtime, including nested tools, memory, MCP, and
+mixed-provider subagents. At this pinned upstream version, Claude cannot fork a conversation or
+change effort after its first prompt; start a new session to choose another effort. Claude usage
+has no dollar estimate from upstream. These limits are reported without substituting Codex
+behavior or pricing.
+
+See the [Claude integration](docs/claude-integration.md) for authentication ownership, Code Mode
+cleanup, and validation boundaries.
+
 ## Configuration
 
 The configuration file is optional. Tact reads `$TACT_HOME/config.toml`, or
@@ -287,9 +350,13 @@ change the tool surface of an already-running session. `agent.max_subagents` con
 when the feature is enabled; setting it does not enable or disable subagents. See the
 [subagent design](docs/subagents.md) for the tool, lifecycle, messaging, and authority contracts.
 
-Agents explicitly choose `luna`, `sol`, or `astra` and `thinking` for each delegated task.
-Each turn receives its own model and effort in context. Children cannot exceed their parent's
-model: the model order is Luna, Sol, Astra. Root agents use the live `agent.thinking` cap
+Agents explicitly choose a model and `thinking` for each delegated task. The default choices are
+`luna`, `sol`, and `astra`; enabling Claude adds `opus-5.5` and `fable-5.1` for both root and child
+agents. Agents may mix providers within one task tree. Each turn receives its own model and effort
+in context. When both parent and child use Codex, the child cannot exceed the parent in the order
+Luna < Sol < Astra. Cross-provider selection and delegation between Claude models are allowed.
+Model-selection guidance ranks intelligence as Fable 5.1 > Astra > Opus 5.5 > Sol > Luna.
+Root agents use the live `agent.thinking` cap
 for new spawns, including after an update during an active turn. Registered subagents are also
 bounded by their own assigned effort. Changing the cap leaves existing children unchanged. Model
 selection has no per-model configuration switches or `selected` alias.

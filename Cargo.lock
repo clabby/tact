@@ -1223,6 +1223,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "78c8292055d1c1df0cce5d180393dc8cce0abec0a7102adb6c7b1eef6016d60a"
 dependencies = [
  "generic-array",
+ "rand_core 0.6.4",
  "typenum",
 ]
 
@@ -2812,7 +2813,7 @@ dependencies = [
 [[package]]
 name = "nanocodex"
 version = "0.6.6"
-source = "git+https://github.com/gakonst/nanocodex?rev=dfc7823aaddbc89f52171f9dfa2f90139c5fba49#dfc7823aaddbc89f52171f9dfa2f90139c5fba49"
+source = "git+https://github.com/clabby/nanocodex?branch=cl%2Ffix-code-mode-cancellation#f7d0e042371a3a8453d439abb6233c1726db64e9"
 dependencies = [
  "nanocodex-agent",
  "nanocodex-claude",
@@ -2825,7 +2826,7 @@ dependencies = [
 [[package]]
 name = "nanocodex-agent"
 version = "0.6.6"
-source = "git+https://github.com/gakonst/nanocodex?rev=dfc7823aaddbc89f52171f9dfa2f90139c5fba49#dfc7823aaddbc89f52171f9dfa2f90139c5fba49"
+source = "git+https://github.com/clabby/nanocodex?branch=cl%2Ffix-code-mode-cancellation#f7d0e042371a3a8453d439abb6233c1726db64e9"
 dependencies = [
  "chrono",
  "futures-util",
@@ -2847,7 +2848,7 @@ dependencies = [
 [[package]]
 name = "nanocodex-claude"
 version = "0.6.6"
-source = "git+https://github.com/gakonst/nanocodex?rev=dfc7823aaddbc89f52171f9dfa2f90139c5fba49#dfc7823aaddbc89f52171f9dfa2f90139c5fba49"
+source = "git+https://github.com/clabby/nanocodex?branch=cl%2Ffix-code-mode-cancellation#f7d0e042371a3a8453d439abb6233c1726db64e9"
 dependencies = [
  "base64 0.22.1",
  "futures-util",
@@ -2870,7 +2871,7 @@ dependencies = [
 [[package]]
 name = "nanocodex-durability"
 version = "0.6.6"
-source = "git+https://github.com/gakonst/nanocodex?rev=dfc7823aaddbc89f52171f9dfa2f90139c5fba49#dfc7823aaddbc89f52171f9dfa2f90139c5fba49"
+source = "git+https://github.com/clabby/nanocodex?branch=cl%2Ffix-code-mode-cancellation#f7d0e042371a3a8453d439abb6233c1726db64e9"
 dependencies = [
  "nanocodex-agent",
  "nanocodex-claude",
@@ -2886,7 +2887,7 @@ dependencies = [
 [[package]]
 name = "nanocodex-managed"
 version = "0.6.6"
-source = "git+https://github.com/gakonst/nanocodex?rev=dfc7823aaddbc89f52171f9dfa2f90139c5fba49#dfc7823aaddbc89f52171f9dfa2f90139c5fba49"
+source = "git+https://github.com/clabby/nanocodex?branch=cl%2Ffix-code-mode-cancellation#f7d0e042371a3a8453d439abb6233c1726db64e9"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -2918,7 +2919,7 @@ dependencies = [
 [[package]]
 name = "nanocodex-oai-api"
 version = "0.6.6"
-source = "git+https://github.com/gakonst/nanocodex?rev=dfc7823aaddbc89f52171f9dfa2f90139c5fba49#dfc7823aaddbc89f52171f9dfa2f90139c5fba49"
+source = "git+https://github.com/clabby/nanocodex?branch=cl%2Ffix-code-mode-cancellation#f7d0e042371a3a8453d439abb6233c1726db64e9"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -2949,7 +2950,7 @@ dependencies = [
 [[package]]
 name = "nanocodex-oai-tools"
 version = "0.6.6"
-source = "git+https://github.com/gakonst/nanocodex?rev=dfc7823aaddbc89f52171f9dfa2f90139c5fba49#dfc7823aaddbc89f52171f9dfa2f90139c5fba49"
+source = "git+https://github.com/clabby/nanocodex?branch=cl%2Ffix-code-mode-cancellation#f7d0e042371a3a8453d439abb6233c1726db64e9"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -2985,7 +2986,7 @@ dependencies = [
 [[package]]
 name = "nanocodex-oai-tools-macros"
 version = "0.6.6"
-source = "git+https://github.com/gakonst/nanocodex?rev=dfc7823aaddbc89f52171f9dfa2f90139c5fba49#dfc7823aaddbc89f52171f9dfa2f90139c5fba49"
+source = "git+https://github.com/clabby/nanocodex?branch=cl%2Ffix-code-mode-cancellation#f7d0e042371a3a8453d439abb6233c1726db64e9"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -5158,6 +5159,7 @@ dependencies = [
 name = "tact"
 version = "0.8.3"
 dependencies = [
+ "aes-gcm",
  "arboard",
  "axum",
  "base64 0.22.1",
@@ -5169,11 +5171,14 @@ dependencies = [
  "flate2",
  "fs2",
  "futures-util",
+ "getrandom 0.4.3",
  "image",
  "jsonschema",
  "miette",
  "minisign-verify",
  "nanocodex",
+ "nanocodex-agent",
+ "nix 0.31.3",
  "png",
  "pulldown-cmark",
  "ratatui",

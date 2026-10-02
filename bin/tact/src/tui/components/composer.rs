@@ -23,7 +23,7 @@ use crate::{
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use history::PromptHistory;
 use layout::{VisualLayout, byte_at_column, grapheme_at_column};
-use nanocodex::Model;
+use nanocodex::{HarnessModel as Model, Model as CodexModel};
 use ratatui::{
     Frame,
     buffer::Buffer,
@@ -206,7 +206,7 @@ impl Composer {
             context_tokens: 0,
             workspace: shorten_home(workspace),
             thinking,
-            model: Model::Sol,
+            model: Model::Codex(CodexModel::Sol),
             reasoning_mode: ReasoningMode::Standard,
             fast_mode: false,
             input_mode: None,
@@ -1221,8 +1221,10 @@ impl Composer {
             .map(|timer| format!(" {} ", timer.label()))
             .unwrap_or_default();
         let effort = format!(" {} ", self.thinking.as_str());
-        let fast_mode = self.fast_mode.then_some("⚡ ");
-        let pro_mode = (self.reasoning_mode == ReasoningMode::Pro).then_some("pro ");
+        let fast_mode = (self.fast_mode && self.model.supports_fast_mode()).then_some("⚡ ");
+        let pro_mode = (self.reasoning_mode == ReasoningMode::Pro
+            && matches!(self.model, Model::Codex(_)))
+        .then_some("pro ");
         let right_width = timer.width()
             + model.width()
             + effort.width()
@@ -1597,7 +1599,7 @@ mod tests {
     };
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use nanocodex::{
-        Model,
+        ClaudeModel, HarnessModel as Model, Model as CodexModel,
         agent::input::{PromptInput, UserInput},
     };
     use ratatui::{
@@ -1689,9 +1691,9 @@ mod tests {
     #[test]
     fn composer_chrome_uses_the_model_palette() {
         for (model, color) in [
-            (Model::Luna, Color::White),
-            (Model::Sol, Color::Yellow),
-            (Model::Astra, Color::LightMagenta),
+            (Model::Codex(CodexModel::Luna), Color::White),
+            (Model::Codex(CodexModel::Sol), Color::Yellow),
+            (Model::Codex(CodexModel::Astra), Color::LightMagenta),
         ] {
             let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
             composer.update(ComposerEvent::SetModel(model));
@@ -1786,6 +1788,24 @@ mod tests {
         assert!(rendered.contains("medium ⚡"));
         assert_eq!(top[bolt].fg, Color::Yellow);
         assert!(top[bolt].modifier.contains(ratatui::style::Modifier::BOLD));
+    }
+
+    #[test]
+    fn claude_models_hide_codex_mode_indicators() {
+        for model in [
+            Model::Claude(ClaudeModel::Opus55),
+            Model::Claude(ClaudeModel::Fable51),
+        ] {
+            let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Max);
+            composer.update(ComposerEvent::SetModel(model));
+            composer.update(ComposerEvent::SetFastMode(true));
+            composer.update(ComposerEvent::SetReasoningMode(ReasoningMode::Pro));
+            let terminal = render(&mut composer, 72, 5);
+            let top = &rows(&terminal)[0];
+            assert!(top.contains(model.as_str()));
+            assert!(!top.contains('⚡'));
+            assert!(!top.contains(" pro"));
+        }
     }
 
     #[test]

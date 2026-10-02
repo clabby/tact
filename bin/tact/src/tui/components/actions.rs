@@ -48,6 +48,7 @@ pub(super) struct ActionAvailability {
     pub(super) review: bool,
     pub(super) fork: bool,
     pub(super) fast_mode: bool,
+    pub(super) fast_mode_available: bool,
     pub(super) memory: bool,
     pub(super) model: bool,
 }
@@ -289,7 +290,7 @@ impl ActionsMenu {
             Action::Subagents => true,
             Action::Effort => true,
             Action::Model => self.availability.model,
-            Action::FastMode => true,
+            Action::FastMode => self.availability.fast_mode_available,
             Action::Theme => true,
             Action::NewSession => self.availability.new_session,
             Action::ResumeSession => self.availability.new_session,
@@ -318,6 +319,9 @@ impl ActionsMenu {
             }
             Action::Reflection if !self.availability.new_session => {
                 "Reflect on session · finish active work first"
+            }
+            Action::FastMode if !self.availability.fast_mode_available => {
+                "Fast mode · unavailable for this model"
             }
             Action::FastMode if self.availability.fast_mode => "Disable fast mode",
             Action::Model if !self.availability.model => "Select model · start a new session first",
@@ -467,6 +471,7 @@ mod tests {
             review: true,
             fork: true,
             fast_mode: false,
+            fast_mode_available: true,
             memory: true,
             model: true,
         }

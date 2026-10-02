@@ -5,11 +5,11 @@ use super::{
     node::{Component, ComponentUpdate, RenderRequest},
 };
 use crate::{
-    app::model::{SUPPORTED_MODELS, name},
+    app::model::{available, name},
     tui::theme::Theme,
 };
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind};
-use nanocodex::Model;
+use nanocodex::HarnessModel as Model;
 use ratatui::{
     Frame,
     layout::{Alignment, Rect},
@@ -35,6 +35,7 @@ pub(super) enum ModelSelectorEffect {
 }
 
 pub(super) struct ModelSelector {
+    models: &'static [Model],
     selected: usize,
     displayed_position: f64,
     animation: Option<Animation>,
@@ -48,9 +49,14 @@ struct Animation {
 }
 
 impl ModelSelector {
-    pub(super) fn new(initial: Model) -> Self {
-        let selected = model_index(initial);
+    pub(super) fn new(initial: Model, claude_enabled: bool) -> Self {
+        let models = available(claude_enabled);
+        let selected = models
+            .iter()
+            .position(|model| *model == initial)
+            .unwrap_or(1);
         Self {
+            models,
             selected,
             displayed_position: selected as f64,
             animation: None,
@@ -72,7 +78,7 @@ impl ModelSelector {
             KeyCode::Left | KeyCode::Up => self.select_relative(-1, now),
             KeyCode::Right | KeyCode::Down => self.select_relative(1, now),
             KeyCode::Enter => ComponentUpdate {
-                effects: vec![ModelSelectorEffect::Apply(SUPPORTED_MODELS[self.selected])],
+                effects: vec![ModelSelectorEffect::Apply(self.models[self.selected])],
                 render: RenderRequest::Immediate,
             },
             KeyCode::Esc | KeyCode::Backspace => ComponentUpdate {
@@ -92,7 +98,7 @@ impl ModelSelector {
         let next = self
             .selected
             .saturating_add_signed(direction)
-            .min(SUPPORTED_MODELS.len() - 1);
+            .min(self.models.len() - 1);
         if next == self.selected {
             return ComponentUpdate::none();
         }
@@ -128,13 +134,14 @@ impl ModelSelector {
             return;
         }
         let left = area.x.saturating_add(2);
-        let right = area.right().saturating_sub(3).max(left);
+        let right_padding = if self.models.len() > 3 { 5 } else { 3 };
+        let right = area.right().saturating_sub(right_padding).max(left);
         let width = right.saturating_sub(left);
         let indicator_column = left.saturating_add(
-            (f64::from(width) * self.displayed_position / (SUPPORTED_MODELS.len() - 1) as f64)
-                .round() as u16,
+            (f64::from(width) * self.displayed_position / (self.models.len() - 1) as f64).round()
+                as u16,
         );
-        let selected_color = theme.model(SUPPORTED_MODELS[self.selected]);
+        let selected_color = theme.model(self.models[self.selected]);
         let buffer = frame.buffer_mut();
         for column in left..=right {
             let color = if column <= indicator_column {
@@ -144,8 +151,8 @@ impl ModelSelector {
             };
             buffer.set_string(column, area.y, "━", Style::default().fg(color));
         }
-        for index in 0..SUPPORTED_MODELS.len() {
-            let column = model_column(left, width, index);
+        for index in 0..self.models.len() {
+            let column = model_column(left, width, index, self.models.len());
             let color = if column <= indicator_column {
                 selected_color
             } else {
@@ -162,8 +169,8 @@ impl ModelSelector {
                 .add_modifier(Modifier::BOLD),
         );
 
-        for (index, model) in SUPPORTED_MODELS.into_iter().enumerate() {
-            let column = model_column(left, width, index);
+        for (index, model) in self.models.iter().copied().enumerate() {
+            let column = model_column(left, width, index, self.models.len());
             let label = name(model);
             let label_width = u16::try_from(label.len()).unwrap_or(u16::MAX);
             let start = column.saturating_sub(label_width / 2).max(area.x);
@@ -177,10 +184,8 @@ impl ModelSelector {
     }
 }
 
-fn model_column(left: u16, width: u16, index: usize) -> u16 {
-    left.saturating_add(
-        (f64::from(width) * index as f64 / (SUPPORTED_MODELS.len() - 1) as f64).round() as u16,
-    )
+fn model_column(left: u16, width: u16, index: usize, count: usize) -> u16 {
+    left.saturating_add((f64::from(width) * index as f64 / (count - 1) as f64).round() as u16)
 }
 
 impl Component for ModelSelector {
@@ -205,11 +210,17 @@ impl Component for ModelSelector {
     }
 
     fn render(&mut self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
-        let layout = Floating::new("Select model", 52, 7, &KEY_BINDINGS).render(frame, area, theme);
+        let layout = Floating::new(
+            "Select model",
+            if self.models.len() > 3 { 72 } else { 52 },
+            7,
+            &KEY_BINDINGS,
+        )
+        .render(frame, area, theme);
         if layout.body.is_empty() {
             return;
         }
-        let model = SUPPORTED_MODELS[self.selected];
+        let model = self.models[self.selected];
         let title = Line::from(vec![
             Span::styled("Selected: ", Style::default().fg(theme.border())),
             Span::styled(
@@ -240,17 +251,11 @@ impl Component for ModelSelector {
     }
 }
 
-fn model_index(model: Model) -> usize {
-    SUPPORTED_MODELS
-        .iter()
-        .position(|candidate| *candidate == model)
-        .unwrap_or_else(|| unreachable!("closed Model roster must have a selector entry"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crossterm::event::{KeyEvent, KeyModifiers};
+    use nanocodex::{ClaudeModel, Model as CodexModel};
     use ratatui::{Terminal, backend::TestBackend, style::Color};
 
     fn key(code: KeyCode) -> KeyEvent {
@@ -295,8 +300,41 @@ mod tests {
     }
 
     #[test]
+    fn claude_models_are_available_only_after_opt_in() {
+        let now = Instant::now();
+        let mut disabled = ModelSelector::new(Model::Codex(CodexModel::Astra), false);
+        disabled.update_key(key(KeyCode::Right), now);
+        assert_eq!(
+            disabled.update_key(key(KeyCode::Enter), now).effects,
+            [ModelSelectorEffect::Apply(Model::Codex(CodexModel::Astra))]
+        );
+        let mut enabled = ModelSelector::new(Model::Codex(CodexModel::Astra), true);
+        for model in [
+            Model::Claude(ClaudeModel::Opus55),
+            Model::Claude(ClaudeModel::Fable51),
+        ] {
+            enabled.update_key(key(KeyCode::Right), now);
+            assert_eq!(
+                enabled.update_key(key(KeyCode::Enter), now).effects,
+                [ModelSelectorEffect::Apply(model)]
+            );
+        }
+        assert_eq!(
+            rendered_label_color(&mut enabled, "Opus 5.5"),
+            Color::LightRed
+        );
+        assert_eq!(
+            rendered_label_color(&mut enabled, "Fable 5.1"),
+            Color::LightCyan
+        );
+    }
+
+    #[test]
     fn sol_label_is_centered_under_its_stop() {
-        let terminal = render(&mut ModelSelector::new(Model::Sol));
+        let terminal = render(&mut ModelSelector::new(
+            Model::Codex(CodexModel::Sol),
+            false,
+        ));
         let buffer = terminal.backend().buffer();
         let stop = buffer
             .content
@@ -316,7 +354,7 @@ mod tests {
     #[test]
     fn selection_moves_linearly_and_does_not_wrap() {
         let now = Instant::now();
-        let mut selector = ModelSelector::new(Model::Sol);
+        let mut selector = ModelSelector::new(Model::Codex(CodexModel::Sol), false);
 
         selector.update_key(key(KeyCode::Right), now);
         assert_eq!(selector.selected, 2);
@@ -330,7 +368,7 @@ mod tests {
 
     #[test]
     fn every_supported_model_has_a_colored_stop() {
-        let mut selector = ModelSelector::new(Model::Sol);
+        let mut selector = ModelSelector::new(Model::Codex(CodexModel::Sol), false);
 
         assert_eq!(rendered_label_color(&mut selector, "Luna"), Color::White);
         assert_eq!(rendered_label_color(&mut selector, "Sol"), Color::Yellow);
@@ -342,7 +380,7 @@ mod tests {
 
     #[test]
     fn filled_bar_uses_the_selected_model_color() {
-        let mut selector = ModelSelector::new(Model::Astra);
+        let mut selector = ModelSelector::new(Model::Codex(CodexModel::Astra), false);
         let terminal = render(&mut selector);
         let rail = terminal
             .backend()
@@ -359,22 +397,34 @@ mod tests {
     #[test]
     fn stops_use_the_filled_bar_color_only_when_covered() {
         assert_eq!(
-            rendered_stop_colors(&mut ModelSelector::new(Model::Luna)),
+            rendered_stop_colors(&mut ModelSelector::new(
+                Model::Codex(CodexModel::Luna),
+                false
+            )),
             [Color::DarkGray, Color::DarkGray]
         );
         assert_eq!(
-            rendered_stop_colors(&mut ModelSelector::new(Model::Sol)),
+            rendered_stop_colors(&mut ModelSelector::new(
+                Model::Codex(CodexModel::Sol),
+                false
+            )),
             [Color::Yellow, Color::DarkGray]
         );
         assert_eq!(
-            rendered_stop_colors(&mut ModelSelector::new(Model::Astra)),
+            rendered_stop_colors(&mut ModelSelector::new(
+                Model::Codex(CodexModel::Astra),
+                false
+            )),
             [Color::LightMagenta, Color::LightMagenta]
         );
     }
 
     #[test]
     fn title_does_not_describe_the_model_order() {
-        let terminal = render(&mut ModelSelector::new(Model::Sol));
+        let terminal = render(&mut ModelSelector::new(
+            Model::Codex(CodexModel::Sol),
+            false,
+        ));
         let rendered = terminal
             .backend()
             .buffer()
@@ -391,7 +441,11 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(30, 7)).unwrap();
         terminal
             .draw(|frame| {
-                ModelSelector::new(Model::Sol).render(frame, frame.area(), &Theme::default());
+                ModelSelector::new(Model::Codex(CodexModel::Sol), false).render(
+                    frame,
+                    frame.area(),
+                    &Theme::default(),
+                );
             })
             .unwrap();
 
@@ -414,29 +468,35 @@ mod tests {
     #[test]
     fn applying_returns_the_selected_model() {
         let now = Instant::now();
-        let mut selector = ModelSelector::new(Model::Sol);
+        let mut selector = ModelSelector::new(Model::Codex(CodexModel::Sol), false);
         selector.update_key(key(KeyCode::Left), now);
 
         let update = selector.update_key(key(KeyCode::Enter), now);
 
-        assert_eq!(update.effects, [ModelSelectorEffect::Apply(Model::Luna)]);
+        assert_eq!(
+            update.effects,
+            [ModelSelectorEffect::Apply(Model::Codex(CodexModel::Luna))]
+        );
     }
 
     #[test]
     fn astra_initialization_and_apply_preserve_astra() {
         let now = Instant::now();
-        let mut selector = ModelSelector::new(Model::Astra);
+        let mut selector = ModelSelector::new(Model::Codex(CodexModel::Astra), false);
 
         assert_eq!(selector.selected, 2);
         let update = selector.update_key(key(KeyCode::Enter), now);
 
-        assert_eq!(update.effects, [ModelSelectorEffect::Apply(Model::Astra)]);
+        assert_eq!(
+            update.effects,
+            [ModelSelectorEffect::Apply(Model::Codex(CodexModel::Astra))]
+        );
     }
 
     #[test]
     fn animation_reaches_the_selected_stop() {
         let now = Instant::now();
-        let mut selector = ModelSelector::new(Model::Luna);
+        let mut selector = ModelSelector::new(Model::Codex(CodexModel::Luna), false);
         selector.update_key(key(KeyCode::Right), now);
         assert!(selector.animation_deadline().is_some());
 

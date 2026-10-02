@@ -16,7 +16,7 @@ use crate::{
     },
 };
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
-use nanocodex::Model;
+use nanocodex::HarnessModel as Model;
 use ratatui::{
     Frame,
     layout::{Position, Rect},
@@ -160,6 +160,11 @@ pub(crate) enum AppEvent {
         fast_mode: bool,
         model: Model,
         skills: Arc<[Skill]>,
+    },
+    EffortUpdateFailed {
+        pane: PaneId,
+        effort: ReasoningEffort,
+        error: String,
     },
     NotifyError {
         pane: PaneId,
@@ -418,6 +423,11 @@ impl AppNode {
                     skills,
                 },
             ),
+            AppEvent::EffortUpdateFailed {
+                pane,
+                effort,
+                error,
+            } => self.update_root(pane, RootEvent::EffortUpdateFailed { effort, error }),
             AppEvent::NotifyError { pane, error } => {
                 self.update_root(pane, RootEvent::NotifyError(error))
             }
@@ -685,6 +695,15 @@ impl AppNode {
         }
     }
 
+    pub(crate) fn set_claude_enabled(&mut self, enabled: bool) {
+        if let Some((_, main)) = &mut self.main {
+            main.component_mut().set_claude_enabled(enabled);
+        }
+        if let Some((_, fork)) = &mut self.fork {
+            fork.component_mut().set_claude_enabled(enabled);
+        }
+    }
+
     pub(crate) fn set_max_subagents(&mut self, limit: usize) {
         if let Some((_, main)) = &mut self.main {
             main.component_mut().set_max_subagents(limit);
@@ -824,7 +843,7 @@ mod tests {
     use crossterm::event::{
         Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     };
-    use nanocodex::Model;
+    use nanocodex::{HarnessModel as Model, Model as CodexModel};
     use ratatui::{Terminal, backend::TestBackend};
     use semver::Version;
     use std::{num::NonZeroU16, path::PathBuf, sync::Arc};
@@ -864,14 +883,14 @@ mod tests {
             effort: ReasoningEffort::Low,
             reasoning_mode: ReasoningMode::Standard,
             fast_mode: false,
-            model: Model::Luna,
+            model: Model::Codex(CodexModel::Luna),
             draft_reset: DraftReset::Preserve,
             skills: Arc::from([]),
         });
 
         let root = app.root(PaneId::Main).unwrap();
         assert_eq!(root.composer().draft(), "send with luna");
-        assert_eq!(root.composer().model(), Model::Luna);
+        assert_eq!(root.composer().model(), Model::Codex(CodexModel::Luna));
     }
 
     #[test]
@@ -884,7 +903,7 @@ mod tests {
             effort: ReasoningEffort::High,
             reasoning_mode: ReasoningMode::Standard,
             fast_mode: false,
-            model: Model::Astra,
+            model: Model::Codex(CodexModel::Astra),
             draft_reset: DraftReset::Preserve,
             skills: Arc::from([]),
         });
@@ -1052,7 +1071,7 @@ mod tests {
             effort: ReasoningEffort::High,
             reasoning_mode: ReasoningMode::Standard,
             fast_mode: false,
-            model: Model::Luna,
+            model: Model::Codex(CodexModel::Luna),
             skills: Arc::from([]),
         });
 
@@ -1062,7 +1081,7 @@ mod tests {
             root.composer().draft(),
             "Continue from the validated parser design."
         );
-        assert_eq!(root.composer().model(), Model::Luna);
+        assert_eq!(root.composer().model(), Model::Codex(CodexModel::Luna));
     }
 
     #[test]

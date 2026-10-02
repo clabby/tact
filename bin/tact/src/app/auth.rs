@@ -19,14 +19,16 @@ enum SelectedAuth {
 }
 
 impl AuthConfig {
-    pub(crate) async fn login(&self) -> AuthResult<()> {
+    pub(crate) async fn login(&self, open_automatically: bool) -> AuthResult<()> {
         let login = ChatGptLogin::start(self.file()).await?;
 
         eprintln!(
             "Open this URL to sign in with ChatGPT:\n\n{}\n",
             login.authorization_url()
         );
-        if let Err(error) = crate::app::browser::open(login.authorization_url()).await {
+        if open_automatically
+            && let Err(error) = crate::app::browser::open(login.authorization_url()).await
+        {
             eprintln!(
                 "Could not open a browser automatically ({error}). Open the URL above manually."
             );

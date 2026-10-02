@@ -40,7 +40,7 @@ use crate::{
     },
 };
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind};
-use nanocodex::Model;
+use nanocodex::HarnessModel as Model;
 use ratatui::{
     Frame,
     layout::{Position, Rect},
@@ -194,6 +194,10 @@ pub(crate) enum RootEvent {
         model: Model,
         skills: Arc<[Skill]>,
     },
+    EffortUpdateFailed {
+        effort: ReasoningEffort,
+        error: String,
+    },
     NotifyError(String),
     NotifySuccess(String),
     ConfirmReviewDownload,
@@ -343,6 +347,7 @@ pub(crate) struct RootNode {
     fork_available: bool,
     skills: Arc<[Skill]>,
     memory_enabled: bool,
+    claude_enabled: bool,
     interactive: bool,
     theme_mode: ThemeMode,
     tui: TuiConfig,
@@ -386,6 +391,7 @@ impl RootNode {
             fork_available: true,
             skills: Arc::from([]),
             memory_enabled: false,
+            claude_enabled: false,
             interactive: true,
             theme_mode: ThemeMode::Auto,
             tui: TuiConfig::default(),
@@ -417,6 +423,7 @@ impl RootNode {
         root.fork_available = false;
         root.set_skills(Arc::clone(&self.skills));
         root.memory_enabled = self.memory_enabled;
+        root.claude_enabled = self.claude_enabled;
         root.theme_mode = self.theme_mode;
         root.tui = self.tui;
         root.context_diagnostics = self.context_diagnostics.clone();
@@ -457,6 +464,13 @@ impl RootNode {
         }
     }
 
+    pub(crate) fn set_claude_enabled(&mut self, enabled: bool) {
+        self.claude_enabled = enabled;
+        if matches!(self.overlay, Some(Overlay::Model(_))) {
+            self.open_model();
+        }
+    }
+
     pub(crate) fn set_tui_config(&mut self, tui: TuiConfig) {
         self.tui = tui;
     }
@@ -477,6 +491,9 @@ impl RootNode {
             .composer
             .component_mut()
             .update(ComposerEvent::SetModel(model));
+        if !model.supports_fast_mode() {
+            self.set_fast_mode(false);
+        }
     }
 
     pub(crate) fn set_reasoning_modes(&mut self, actual: ReasoningMode, preferred: ReasoningMode) {
@@ -516,6 +533,7 @@ impl RootNode {
         };
         let fork_available = self.fork_available;
         let memory_enabled = self.memory_enabled;
+        let claude_enabled = self.claude_enabled;
         let theme_mode = self.theme_mode;
         let tui = self.tui;
         let max_subagents = self.subagents.max_subagents();
@@ -524,6 +542,7 @@ impl RootNode {
         self.discarded_draft = discarded_draft;
         self.fork_available = fork_available;
         self.memory_enabled = memory_enabled;
+        self.claude_enabled = claude_enabled;
         self.theme_mode = theme_mode;
         self.tui = tui;
         self.set_max_subagents(max_subagents);
@@ -988,6 +1007,7 @@ impl RootNode {
                     review: self.blocking_task.is_none(),
                     fork: self.can_fork(),
                     fast_mode: self.composer.component().fast_mode(),
+                    fast_mode_available: self.composer.component().model().supports_fast_mode(),
                     memory: self.memory_enabled,
                     model: self.thread == ThreadState::New,
                 },
@@ -1645,9 +1665,21 @@ impl RootNode {
     }
 
     fn open_effort(&mut self) -> ComponentUpdate<RootEffect> {
+        if self.thread == ThreadState::Started
+            && matches!(self.composer.component().model(), Model::Claude(_))
+        {
+            self.overlay = None;
+            self.notification = Some(Notification::plain(
+                "Effort is fixed for this Claude session; start a new session to change it."
+                    .to_owned(),
+                Color::Yellow,
+            ));
+            return ComponentUpdate::render(RenderRequest::Immediate);
+        }
         self.overlay = Some(Overlay::Effort(Node::new(EffortSelector::new(
             self.composer.component().effort(),
             self.preferred_reasoning_mode == ReasoningMode::Pro,
+            matches!(self.composer.component().model(), Model::Codex(_)),
         ))));
         ComponentUpdate::render(RenderRequest::Immediate)
     }
@@ -1658,6 +1690,7 @@ impl RootNode {
         }
         self.overlay = Some(Overlay::Model(Node::new(ModelSelector::new(
             self.composer.component().model(),
+            self.claude_enabled,
         ))));
         ComponentUpdate::render(RenderRequest::Immediate)
     }
@@ -1956,6 +1989,14 @@ impl RootNode {
         ComponentUpdate::render(update.render)
     }
 
+    fn set_effort(&mut self, effort: ReasoningEffort) {
+        self.transcript.component_mut().set_effort(effort);
+        self.subagents.set_effort(effort);
+        self.composer
+            .component_mut()
+            .update(ComposerEvent::SetEffort(effort));
+    }
+
     fn update_effort(&mut self, event: EffortEvent) -> ComponentUpdate<RootEffect> {
         let Some(Overlay::Effort(selector)) = &mut self.overlay else {
             return ComponentUpdate::none();
@@ -1989,12 +2030,7 @@ impl RootNode {
                     let message = format!("Pro {state} for new sessions{suffix}");
                     self.notification = Some(Notification::plain(message, Color::Green));
                 }
-                self.transcript.component_mut().set_effort(effort);
-                self.subagents.set_effort(effort);
-                let _ = self
-                    .composer
-                    .component_mut()
-                    .update(ComposerEvent::SetEffort(effort));
+                self.set_effort(effort);
                 ComponentUpdate {
                     effects: vec![RootEffect::SetEffort {
                         effort,
@@ -2785,6 +2821,11 @@ impl Component for RootNode {
                 self.set_skills(skills);
                 ComponentUpdate::render(RenderRequest::Immediate)
             }
+            RootEvent::EffortUpdateFailed { effort, error } => {
+                self.set_effort(effort);
+                self.notification = Some(Notification::plain(error, Color::Red));
+                ComponentUpdate::render(RenderRequest::Immediate)
+            }
             RootEvent::NotifyError(message) => {
                 self.notification = Some(Notification::plain(message, Color::Red));
                 ComponentUpdate::render(RenderRequest::Immediate)
@@ -3127,7 +3168,7 @@ mod tests {
         MouseEventKind,
     };
     use nanocodex::{
-        Model, Thinking,
+        HarnessModel as Model, Model as CodexModel, Thinking,
         agent::{
             events::{AgentEvent, AgentEventKind},
             input::{PromptInput, UserInput},
@@ -3460,7 +3501,7 @@ mod tests {
             AgentDescriptor {
                 id: AgentId::new(1),
                 session_id: "child".to_owned(),
-                model: Model::Sol,
+                model: Model::Codex(CodexModel::Sol),
                 thinking: Thinking::Medium,
                 role: "worker".to_owned(),
                 task: "work".to_owned(),
@@ -3489,7 +3530,7 @@ mod tests {
         root.update(RootEvent::Subagent(AgentUpdate::Added(AgentDescriptor {
             id: AgentId::new(1),
             session_id: "child".to_owned(),
-            model: Model::Sol,
+            model: Model::Codex(CodexModel::Sol),
             thinking: Thinking::Medium,
             role: "worker".to_owned(),
             task: "verify ordering".to_owned(),
@@ -3577,7 +3618,7 @@ mod tests {
             root.update(RootEvent::Subagent(AgentUpdate::Added(AgentDescriptor {
                 id: AgentId::new(id),
                 session_id: format!("child-{id}"),
-                model: Model::Sol,
+                model: Model::Codex(CodexModel::Sol),
                 thinking: Thinking::Medium,
                 role: role.to_owned(),
                 task: "coordinate with a peer".to_owned(),
@@ -3621,7 +3662,7 @@ mod tests {
             AgentDescriptor {
                 id: AgentId::new(1),
                 session_id: "child".to_owned(),
-                model: Model::Sol,
+                model: Model::Codex(CodexModel::Sol),
                 thinking: Thinking::Medium,
                 role: "worker".to_owned(),
                 task: "work".to_owned(),
@@ -3656,7 +3697,7 @@ mod tests {
             AgentDescriptor {
                 id: AgentId::new(1),
                 session_id: "child".to_owned(),
-                model: Model::Sol,
+                model: Model::Codex(CodexModel::Sol),
                 thinking: Thinking::Medium,
                 role: "worker".to_owned(),
                 task: "inspect the queue".to_owned(),
@@ -3689,7 +3730,7 @@ mod tests {
             AgentDescriptor {
                 id: AgentId::new(1),
                 session_id: "child".to_owned(),
-                model: Model::Sol,
+                model: Model::Codex(CodexModel::Sol),
                 thinking: Thinking::Medium,
                 role: "worker".to_owned(),
                 task: "inspect the queue".to_owned(),
@@ -3715,7 +3756,7 @@ mod tests {
             AgentDescriptor {
                 id: AgentId::new(2),
                 session_id: "grandchild".to_owned(),
-                model: Model::Sol,
+                model: Model::Codex(CodexModel::Sol),
                 thinking: Thinking::Medium,
                 role: "worker".to_owned(),
                 task: "inspect the queue".to_owned(),
@@ -5849,6 +5890,46 @@ mod tests {
     }
 
     #[test]
+    fn rejected_effort_update_restores_display_and_reports_error() {
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::High);
+        let update = root.update(RootEvent::EffortUpdateFailed {
+            effort: ReasoningEffort::Low,
+            error: "Effort update rejected".to_owned(),
+        });
+        assert_eq!(root.composer().effort(), ReasoningEffort::Low);
+        assert!(update.effects.is_empty());
+        assert!(
+            root.notification
+                .as_ref()
+                .unwrap()
+                .message
+                .to_string()
+                .contains("Effort update rejected")
+        );
+    }
+
+    #[test]
+    fn started_claude_session_explains_why_effort_is_fixed() {
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        root.set_model(Model::Claude(nanocodex::ClaudeModel::Opus55));
+        root.open_effort();
+        assert!(matches!(root.overlay, Some(Overlay::Effort(_))));
+        root.thread = ThreadState::Started;
+        let update = root.open_effort();
+        assert!(update.effects.is_empty());
+        assert!(root.overlay.is_none());
+        assert_eq!(root.composer().effort(), ReasoningEffort::Medium);
+        assert!(
+            root.notification
+                .as_ref()
+                .unwrap()
+                .message
+                .to_string()
+                .contains("Effort is fixed for this Claude session")
+        );
+    }
+
+    #[test]
     fn effort_action_opens_the_selector_and_applies_the_selection() {
         let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
         root.update(key(KeyCode::Char('/'), KeyModifiers::NONE));
@@ -6004,7 +6085,7 @@ mod tests {
             root.update(RootEvent::Subagent(AgentUpdate::Added(AgentDescriptor {
                 id: AgentId::new(id),
                 session_id: format!("agent-{id}"),
-                model: Model::Sol,
+                model: Model::Codex(CodexModel::Sol),
                 thinking: Thinking::Medium,
                 role: role.to_owned(),
                 task: role.to_owned(),
@@ -6065,7 +6146,10 @@ mod tests {
 
         root.update(key(KeyCode::Left, KeyModifiers::NONE));
         let selected = root.update(key(KeyCode::Enter, KeyModifiers::NONE));
-        assert_eq!(selected.effects, [RootEffect::SetModel(Model::Luna)]);
+        assert_eq!(
+            selected.effects,
+            [RootEffect::SetModel(Model::Codex(CodexModel::Luna))]
+        );
 
         root.interactive = true;
         root.thread = super::ThreadState::Started;
@@ -6075,13 +6159,35 @@ mod tests {
     }
 
     #[test]
+    fn claude_availability_survives_reset_and_fork() {
+        let workspace = Path::new("/work");
+        let mut root = RootNode::new(workspace, ReasoningEffort::Medium);
+        root.set_claude_enabled(true);
+        assert!(root.fork(workspace, ReasoningEffort::Medium).claude_enabled);
+        root.reset_session(
+            workspace,
+            ReasoningEffort::Medium,
+            ReasoningMode::Standard,
+            ReasoningMode::Standard,
+            DraftReset::Clear,
+        );
+        root.set_model(Model::Codex(CodexModel::Astra));
+        root.open_model();
+        root.set_claude_enabled(false);
+        root.update(key(KeyCode::Right, KeyModifiers::NONE));
+        let result = root.update(key(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(result.effects.is_empty());
+        assert_eq!(root.composer().model(), Model::Codex(CodexModel::Astra));
+    }
+
+    #[test]
     fn fork_inherits_the_model_and_cannot_change_it() {
         let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
-        root.set_model(Model::Luna);
+        root.set_model(Model::Codex(CodexModel::Luna));
 
         let mut fork = root.fork(Path::new("/work"), ReasoningEffort::Medium);
 
-        assert_eq!(fork.composer().model(), Model::Luna);
+        assert_eq!(fork.composer().model(), Model::Codex(CodexModel::Luna));
         let update = fork.update(key(KeyCode::Char('d'), KeyModifiers::CONTROL));
         assert!(update.effects.is_empty());
         assert!(fork.overlay.is_none());
@@ -6447,7 +6553,7 @@ mod tests {
     #[test]
     fn new_session_action_clears_the_completed_thread_after_runtime_replacement() {
         let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
-        root.set_model(Model::Luna);
+        root.set_model(Model::Codex(CodexModel::Luna));
         for character in "old prompt".chars() {
             root.update(key(KeyCode::Char(character), KeyModifiers::NONE));
         }
@@ -6462,7 +6568,10 @@ mod tests {
 
         let requested = root.update(key(KeyCode::Enter, KeyModifiers::NONE));
 
-        assert_eq!(requested.effects, [RootEffect::NewSession(Model::Luna)]);
+        assert_eq!(
+            requested.effects,
+            [RootEffect::NewSession(Model::Codex(CodexModel::Luna))]
+        );
         assert!(root.overlay.is_none());
         assert!(!root.interactive);
 

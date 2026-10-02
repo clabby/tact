@@ -10,7 +10,10 @@ use crate::{
         transcript::{SessionStarted, TerminalStopReason, TranscriptRecord},
     },
 };
-use nanocodex::{Model, agent::session::SessionSnapshot};
+use nanocodex::{
+    HarnessModel, HarnessModel as Model, Model as CodexModel, NanocodexError, Thinking,
+    agent::{ChildSnapshot, session::SessionSnapshot},
+};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashSet,
@@ -42,22 +45,122 @@ pub(crate) struct RecentPrompt {
     pub(crate) workspace: PathBuf,
 }
 
+/// Provider-owned checkpoints retain their native payload without translating conversation items.
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(untagged)]
+pub(crate) enum AgentSnapshot {
+    Claude(ClaudeSnapshot),
+    Codex(Box<SessionSnapshot>),
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ClaudeSnapshot {
+    model: Model,
+    session_id: String,
+    thinking: Thinking,
+    payload: String,
+    has_conversation: bool,
+}
+
+impl AgentSnapshot {
+    pub(crate) fn validate_identity(
+        &self,
+        model: Model,
+        session_id: Option<&str>,
+    ) -> Result<(), NanocodexError> {
+        match self {
+            Self::Claude(snapshot) if snapshot.model != model => {
+                Err(NanocodexError::InvalidSessionSnapshot(
+                    "checkpoint model does not match the selected model".into(),
+                ))
+            }
+            Self::Claude(snapshot)
+                if session_id.is_some_and(|expected| snapshot.session_id != expected) =>
+            {
+                Err(NanocodexError::InvalidSessionSnapshot(
+                    "checkpoint session does not match the selected session".into(),
+                ))
+            }
+            Self::Codex(_) if matches!(model, Model::Claude(_)) => {
+                Err(NanocodexError::InvalidSessionSnapshot(
+                    "cannot restore a Codex checkpoint with Claude".into(),
+                ))
+            }
+            _ => Ok(()),
+        }
+    }
+
+    pub(crate) fn from_claude(snapshot: ChildSnapshot) -> Result<Self, NanocodexError> {
+        let ChildSnapshot::Native {
+            model: HarnessModel::Claude(model),
+            session_id,
+            thinking,
+            payload,
+            has_conversation,
+        } = snapshot
+        else {
+            return Err(NanocodexError::InvalidSessionSnapshot(
+                "expected a Claude native checkpoint".into(),
+            ));
+        };
+        let model = tact_subagents::parse_model(model.as_str())
+            .map_err(NanocodexError::InvalidSessionSnapshot)?;
+        Ok(Self::Claude(ClaudeSnapshot {
+            model,
+            session_id,
+            thinking,
+            payload,
+            has_conversation,
+        }))
+    }
+
+    pub(crate) fn into_codex(self) -> Result<SessionSnapshot, NanocodexError> {
+        match self {
+            Self::Codex(snapshot) => Ok(*snapshot),
+            Self::Claude(_) => Err(NanocodexError::InvalidSessionSnapshot(
+                "cannot restore a Claude checkpoint with Codex".into(),
+            )),
+        }
+    }
+
+    pub(crate) fn into_claude(self) -> Result<ChildSnapshot, NanocodexError> {
+        let Self::Claude(snapshot) = self else {
+            return Err(NanocodexError::InvalidSessionSnapshot(
+                "cannot restore a Codex checkpoint with Claude".into(),
+            ));
+        };
+        let Model::Claude(model) = snapshot.model else {
+            return Err(NanocodexError::InvalidSessionSnapshot(
+                "native checkpoint model is not Claude".into(),
+            ));
+        };
+        Ok(ChildSnapshot::Native {
+            model: HarnessModel::Claude(model),
+            session_id: snapshot.session_id,
+            thinking: snapshot.thinking,
+            payload: snapshot.payload,
+            has_conversation: snapshot.has_conversation,
+        })
+    }
+}
+
 #[derive(Deserialize, Serialize)]
 struct StoredResumeState {
     format_version: u32,
-    snapshot: SessionSnapshot,
+    snapshot: AgentSnapshot,
     instructions: String,
     skills_catalog_present: bool,
 }
 
 pub(crate) struct ResumeState {
-    snapshot: SessionSnapshot,
+    snapshot: AgentSnapshot,
     instructions: String,
     skills_catalog_present: bool,
 }
 
 impl ResumeState {
-    fn new(snapshot: SessionSnapshot, instructions: String, skills_catalog_present: bool) -> Self {
+    fn new(snapshot: AgentSnapshot, instructions: String, skills_catalog_present: bool) -> Self {
         Self {
             snapshot,
             instructions,
@@ -65,7 +168,7 @@ impl ResumeState {
         }
     }
 
-    pub(crate) fn into_parts(self) -> (SessionSnapshot, String, Option<bool>) {
+    pub(crate) fn into_parts(self) -> (AgentSnapshot, String, Option<bool>) {
         (
             self.snapshot,
             self.instructions,
@@ -111,14 +214,18 @@ pub(crate) fn save_checkpoint(
     instructions: &str,
     skills_catalog_present: bool,
 ) -> Result<(), SessionError> {
-    let encoded = encode_checkpoint(snapshot, instructions, skills_catalog_present)?;
+    let encoded = encode_checkpoint(
+        &AgentSnapshot::Codex(Box::new(snapshot.clone())),
+        instructions,
+        skills_catalog_present,
+    )?;
     SessionStorage::open(config_path)?
         .save_resume_state(session_id, &encoded)
         .map_err(Into::into)
 }
 
 pub(crate) fn encode_checkpoint(
-    snapshot: &SessionSnapshot,
+    snapshot: &AgentSnapshot,
     instructions: &str,
     skills_catalog_present: bool,
 ) -> Result<Vec<u8>, SessionError> {
@@ -342,7 +449,10 @@ pub(crate) fn model(records: &[Arc<TranscriptRecord>]) -> Result<Model, SessionE
         .rev()
         .find(|record| record.source() == "tact" && record.kind() == "session.started")
         .and_then(|record| record.decode_payload::<SessionStarted>().ok())
-        .map_or_else(|| Model::Sol.to_string(), |started| started.model);
+        .map_or_else(
+            || Model::Codex(CodexModel::Sol).to_string(),
+            |started| started.model,
+        );
     model::parse(&stored).map_err(|_| SessionError::UnsupportedModel { model: stored })
 }
 
@@ -400,7 +510,9 @@ mod tests {
             transcript::{LocalEvent, SessionStarted, TranscriptJournal, TranscriptRecord, TurnId},
         },
     };
-    use nanocodex::{Model, agent::session::SessionSnapshot};
+    use nanocodex::{
+        ClaudeModel, HarnessModel as Model, Model as CodexModel, agent::session::SessionSnapshot,
+    };
     use rusqlite::Connection;
     use serde_json::{Value, json};
     use std::{sync::Arc, time::Duration};
@@ -443,7 +555,7 @@ mod tests {
                     session_id: session_id.to_owned(),
                     parent_session_id: parent_session_id.map(str::to_owned),
                     parent_sequence,
-                    model: Model::Luna.to_string(),
+                    model: Model::Codex(CodexModel::Luna).to_string(),
                     effort: ReasoningEffort::Medium,
                     reasoning_mode: ReasoningMode::Standard,
                     fast_mode: false,
@@ -480,25 +592,31 @@ mod tests {
 
     #[test]
     fn restored_model_comes_from_the_session_start_record() {
-        let record = TranscriptRecord::from_local(
-            1,
-            1,
-            LocalEvent::SessionStarted(SessionStarted {
-                session_id: "session".to_owned(),
-                parent_session_id: None,
-                parent_sequence: None,
-                model: Model::Luna.to_string(),
-                effort: ReasoningEffort::Medium,
-                reasoning_mode: ReasoningMode::Standard,
-                fast_mode: false,
-                workspace: "/work".into(),
-                application_version: "test".to_owned(),
-            }),
-        )
-        .unwrap();
+        for selected in [
+            Model::Codex(CodexModel::Luna),
+            Model::Claude(ClaudeModel::Opus55),
+            Model::Claude(ClaudeModel::Fable51),
+        ] {
+            let record = TranscriptRecord::from_local(
+                1,
+                1,
+                LocalEvent::SessionStarted(SessionStarted {
+                    session_id: "session".to_owned(),
+                    parent_session_id: None,
+                    parent_sequence: None,
+                    model: selected.to_string(),
+                    effort: ReasoningEffort::Medium,
+                    reasoning_mode: ReasoningMode::Standard,
+                    fast_mode: false,
+                    workspace: "/work".into(),
+                    application_version: "test".to_owned(),
+                }),
+            )
+            .unwrap();
 
-        assert_eq!(model(&[Arc::new(record)]).unwrap(), Model::Luna);
-        assert_eq!(model(&[]).unwrap(), Model::Sol);
+            assert_eq!(model(&[Arc::new(record)]).unwrap(), selected);
+        }
+        assert_eq!(model(&[]).unwrap(), Model::Codex(CodexModel::Sol));
     }
 
     #[test]
@@ -729,6 +847,113 @@ mod tests {
     }
 
     #[test]
+    fn claude_checkpoint_round_trips_native_fields_and_rejects_codex_restore() {
+        let directory = tempdir().unwrap();
+        let config = directory.path().join("config.toml");
+        let expected = super::AgentSnapshot::from_claude(nanocodex::agent::ChildSnapshot::Native {
+            model: nanocodex::HarnessModel::Claude(nanocodex::ClaudeModel::Fable51),
+            session_id: "native-session".to_owned(),
+            thinking: nanocodex::Thinking::Max,
+            payload: "{\"native\":\"opaque state\"}".to_owned(),
+            has_conversation: true,
+        })
+        .unwrap();
+        assert!(expected.clone().into_codex().is_err());
+        assert!(
+            expected
+                .validate_identity(Model::Claude(ClaudeModel::Fable51), Some("native-session"))
+                .is_ok()
+        );
+        assert!(
+            expected
+                .validate_identity(Model::Claude(ClaudeModel::Fable51), None)
+                .is_ok()
+        );
+        assert!(
+            expected
+                .validate_identity(Model::Claude(ClaudeModel::Opus55), Some("native-session"))
+                .is_err()
+        );
+        assert!(
+            expected
+                .validate_identity(Model::Claude(ClaudeModel::Fable51), Some("other-session"))
+                .is_err()
+        );
+        assert!(
+            expected
+                .validate_identity(Model::Codex(CodexModel::Sol), Some("native-session"))
+                .is_err()
+        );
+        let encoded = encode_checkpoint(&expected, "exact Claude instructions", true).unwrap();
+        SessionStorage::open(&config)
+            .unwrap()
+            .save_resume_state("native-session", &encoded)
+            .unwrap();
+        let (actual, instructions, catalog) = load_checkpoint(&config, "native-session")
+            .unwrap()
+            .into_parts();
+        assert_eq!(
+            serde_json::to_value(&actual).unwrap(),
+            serde_json::to_value(&expected).unwrap()
+        );
+        assert_eq!(instructions, "exact Claude instructions");
+        assert_eq!(catalog, Some(true));
+        let nanocodex::agent::ChildSnapshot::Native {
+            model,
+            session_id,
+            thinking,
+            payload,
+            has_conversation,
+        } = actual.into_claude().unwrap()
+        else {
+            panic!("expected native checkpoint")
+        };
+        assert_eq!(
+            model,
+            nanocodex::HarnessModel::Claude(nanocodex::ClaudeModel::Fable51)
+        );
+        assert_eq!(session_id, "native-session");
+        assert_eq!(thinking, nanocodex::Thinking::Max);
+        assert_eq!(payload, "{\"native\":\"opaque state\"}");
+        assert!(has_conversation);
+    }
+
+    #[test]
+    fn legacy_v2_checkpoint_loads_and_rejects_claude_restore() {
+        let directory = tempdir().unwrap();
+        let config = directory.path().join("config.toml");
+        let expected = snapshot("legacy");
+        let encoded = serde_json::to_vec(&serde_json::json!({
+            "format_version": 2,
+            "snapshot": expected,
+            "instructions": "legacy instructions",
+            "skills_catalog_present": false,
+        }))
+        .unwrap();
+        SessionStorage::open(&config)
+            .unwrap()
+            .save_resume_state("legacy", &encoded)
+            .unwrap();
+        let (actual, instructions, _) = load_checkpoint(&config, "legacy").unwrap().into_parts();
+        assert!(actual.clone().into_claude().is_err());
+        assert_eq!(
+            serde_json::to_value(actual.into_codex().unwrap()).unwrap(),
+            serde_json::to_value(expected).unwrap()
+        );
+        assert_eq!(instructions, "legacy instructions");
+    }
+
+    #[test]
+    fn native_checkpoint_rejects_a_codex_model() {
+        let snapshot: super::AgentSnapshot = serde_json::from_value(serde_json::json!({
+            "model": "sol", "session_id": "native-session", "thinking": "low",
+            "payload": "opaque", "has_conversation": true,
+        }))
+        .unwrap();
+        assert!(snapshot.into_claude().is_err());
+    }
+
+    #[test]
     fn resume_state_round_trips_the_opaque_nanocodex_snapshot() {
         let directory = tempdir().unwrap();
         let config = directory.path().join("config.toml");
@@ -938,7 +1163,12 @@ mod tests {
         let directory = tempdir().unwrap();
         let config = directory.path().join("config.toml");
         let expected = snapshot("successful");
-        let resume_state = encode_checkpoint(&expected, "instructions", true).unwrap();
+        let resume_state = encode_checkpoint(
+            &super::AgentSnapshot::Codex(Box::new(expected.clone())),
+            "instructions",
+            true,
+        )
+        .unwrap();
         let (mut journal, writer) = TranscriptJournal::open(&config, "session").unwrap();
         journal.defer_start(SessionStarted {
             session_id: "session".to_owned(),

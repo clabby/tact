@@ -2,6 +2,10 @@
 
 #![allow(dead_code, unused_imports)]
 
+#[path = "../app/browser.rs"]
+pub(crate) mod browser;
+#[path = "../app/claude_auth.rs"]
+pub(crate) mod claude_auth;
 #[path = "../app/config.rs"]
 pub(crate) mod config;
 #[path = "../app/error.rs"]
@@ -13,7 +17,12 @@ pub(crate) mod model;
 #[path = "../app/secret.rs"]
 pub(crate) mod secret;
 mod app {
-    pub(crate) use crate::{config, error, installation, model, secret};
+    pub(crate) use crate::{browser, claude_auth, config, error, installation, model, secret};
+}
+
+#[cfg(test)]
+fn install_tls_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
 mod core {
@@ -494,8 +503,12 @@ fn save_benchmark_checkpoint(config_path: &Path, session_id: &str) {
         }]
     }))
     .unwrap();
-    let resume_state =
-        session::encode_checkpoint(&snapshot, "benchmark instructions", false).unwrap();
+    let resume_state = session::encode_checkpoint(
+        &session::AgentSnapshot::Codex(Box::new(snapshot)),
+        "benchmark instructions",
+        false,
+    )
+    .unwrap();
     storage::SessionStorage::open(config_path)
         .unwrap()
         .append_records_and_resume_state(session_id, &[], Some(&resume_state))

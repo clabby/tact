@@ -22,8 +22,12 @@ configure a factory that creates a fresh Nanocodex session for each child, and c
 `WeakSubagents::install_tools` there. The same tool factory is inherited by child sessions, which
 permits nested delegation while the runtime enforces task-tree authority.
 
-Each spawn explicitly names its model and reasoning effort. The runtime bounds new spawns by the
-immediate parent's model and the live configured effort cap. Registered children also cannot spawn
+Each spawn explicitly names its model and reasoning effort using Nanocodex's `HarnessModel` and
+`Thinking` types. Codex children cannot exceed a Codex parent's model (Luna < Sol < Astra).
+Call `Subagents::set_claude_enabled(true)` to allow Opus 5.5 and Fable 5.1. Cross-provider selection
+and delegation between Claude models are allowed. Model-selection guidance ranks intelligence as
+Fable 5.1 > Astra > Opus 5.5 > Sol > Luna. The runtime bounds new spawns by the live
+configured effort cap. Registered children also cannot spawn
 above their own assigned effort. Applications can use `AgentContext::prompt` to include the
 executing turn's model and effort in a root prompt; the runtime supplies that context on every
 child turn.

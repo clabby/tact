@@ -8,7 +8,9 @@ use crate::{
     tui::theme::{Theme, ThemeMode},
 };
 use clap::ValueEnum;
-use nanocodex::{Model, Thinking, oai::transport::ResponsesTransport};
+use nanocodex::{
+    HarnessModel as Model, Model as CodexModel, Thinking, oai::transport::ResponsesTransport,
+};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -107,6 +109,7 @@ pub(crate) struct Config {
     #[serde(skip)]
     codex_home: Option<PathBuf>,
     auth: AuthConfig,
+    claude: ClaudeConfig,
     agent: AgentConfig,
     mcp_servers: BTreeMap<String, McpServerConfig>,
     skills: SkillsConfig,
@@ -157,6 +160,60 @@ pub(crate) struct McpEnvironment(BTreeMap<String, McpSecretString>);
 pub(crate) struct AuthConfig {
     mode: AuthMode,
     file: PathBuf,
+}
+
+/// The credential source selected for Claude requests.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum ClaudeAuthMode {
+    ApiKey,
+    #[default]
+    Subscription,
+}
+
+/// Availability and endpoint for Claude models.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct ClaudeConfig {
+    enabled: bool,
+    auth: ClaudeAuthMode,
+    subscription_store: PathBuf,
+    #[serde(serialize_with = "serialize_optional_string")]
+    api_base_url: Option<String>,
+}
+
+impl ClaudeConfig {
+    pub(crate) const fn auth(&self) -> ClaudeAuthMode {
+        self.auth
+    }
+
+    pub(crate) fn subscription_store(&self) -> &Path {
+        &self.subscription_store
+    }
+
+    pub(crate) fn ensure_enabled(&self) -> Result<()> {
+        if !self.enabled {
+            return Err(ConfigError::ClaudeDisabled.into());
+        }
+        Ok(())
+    }
+
+    pub(crate) const fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    pub(crate) fn api_base_url(&self) -> Option<&str> {
+        self.api_base_url
+            .as_deref()
+            .filter(|url| !url.trim().is_empty())
+    }
+
+    pub(crate) fn ensure_model_enabled(&self, model: Model) -> Result<()> {
+        if matches!(model, Model::Claude(_)) {
+            self.ensure_enabled()?;
+        }
+        Ok(())
+    }
 }
 
 /// Effective Nanocodex configuration.
@@ -268,6 +325,7 @@ pub(crate) struct ConfigReload {
 #[serde(default, deny_unknown_fields)]
 struct ConfigFile {
     auth: AuthConfigFile,
+    claude: ClaudeConfig,
     agent: AgentConfigFile,
     mcp_servers: BTreeMap<String, McpServerConfigFile>,
     skills: SkillsConfigFile,
@@ -448,6 +506,16 @@ impl Config {
         )
         .unwrap_or_else(|| current_dir.to_path_buf());
         let config_dir = path.parent().unwrap_or(Path::new("."));
+        file.claude.subscription_store = if file.claude.subscription_store.as_os_str().is_empty() {
+            environment
+                .tact_home
+                .clone()
+                .or_else(|| environment.home.as_ref().map(|home| home.join(".tact")))
+                .unwrap_or_else(|| config_dir.to_path_buf())
+                .join("claude/private/auth")
+        } else {
+            Self::resolve_path(file.claude.subscription_store, config_dir)
+        };
         let mcp_servers = file
             .mcp_servers
             .into_iter()
@@ -462,7 +530,11 @@ impl Config {
             .clone()
             .or_else(|| environment.home.as_ref().map(|home| home.join(".codex")));
 
-        let model = overrides.model.or(file.agent.model).unwrap_or(Model::Sol);
+        let model = overrides
+            .model
+            .or(file.agent.model)
+            .unwrap_or(Model::Codex(CodexModel::Sol));
+        file.claude.ensure_model_enabled(model)?;
         let thinking = overrides
             .thinking
             .or(file.agent.thinking)
@@ -480,6 +552,7 @@ impl Config {
                 overrides.auth_mode.or(file.auth.mode).unwrap_or_default(),
                 auth_file,
             ),
+            claude: file.claude,
             agent: AgentConfig {
                 workspace,
                 model,
@@ -570,6 +643,10 @@ impl Config {
 
     pub(crate) fn codex_home(&self) -> Option<&Path> {
         self.codex_home.as_deref()
+    }
+
+    pub(crate) const fn claude(&self) -> &ClaudeConfig {
+        &self.claude
     }
 
     pub(crate) fn agent(&self) -> &AgentConfig {
@@ -1548,7 +1625,7 @@ mod tests {
         RemoteMemoryTokenFile, ThemeMode, Transport, validate_mcp_url,
     };
     use crate::app::error::{ConfigError, Error, McpUrlError, RemoteMemoryConfigError};
-    use nanocodex::Model;
+    use nanocodex::{ClaudeModel, HarnessModel as Model, Model as CodexModel};
     use ratatui::style::Color;
     use std::{
         collections::BTreeMap,
@@ -1628,6 +1705,97 @@ mod tests {
     }
 
     #[test]
+    fn claude_auth_selection_and_store_path_round_trip() {
+        let directory = tempdir().unwrap();
+        let config_path = directory.path().join("config.toml");
+        fs::write(&config_path, "[claude]\nenabled = true\nauth = 'subscription'\nsubscription_store = 'private/auth'\n").unwrap();
+        let config = load_config_at(config_path, directory.path()).unwrap();
+        assert_eq!(config.claude().auth(), super::ClaudeAuthMode::Subscription);
+        assert_eq!(
+            config.claude().subscription_store(),
+            directory.path().join("private/auth")
+        );
+        assert!(!config.claude().subscription_store().exists());
+        let rendered = config.to_toml().unwrap();
+        let restored = load_config(&rendered).unwrap();
+        assert_eq!(
+            restored.claude().auth(),
+            super::ClaudeAuthMode::Subscription
+        );
+        assert_eq!(
+            restored.claude().subscription_store(),
+            config.claude().subscription_store()
+        );
+        assert!(!rendered.contains("ANTHROPIC_API_KEY"));
+        assert!(load_config("[claude]\nauth = 'auto'").is_err());
+    }
+
+    #[test]
+    fn claude_defaults_use_subscription_and_tact_home_store_without_accessing_it() {
+        let directory = tempdir().unwrap();
+        let tact_home = directory.path().join("private-tact-home");
+        let config = Config::load_with(
+            ConfigOverrides::default(),
+            Environment {
+                tact_home: Some(tact_home.clone()),
+                codex_home: Some(directory.path().join("codex")),
+                ..Environment::default()
+            },
+            directory.path(),
+        )
+        .unwrap();
+        assert_eq!(config.claude().auth(), super::ClaudeAuthMode::Subscription);
+        assert_eq!(
+            config.claude().subscription_store(),
+            tact_home.join("claude/private/auth")
+        );
+        assert!(!tact_home.exists());
+        assert_eq!(
+            load_config("[claude]\nauth = 'api-key'")
+                .unwrap()
+                .claude()
+                .auth(),
+            super::ClaudeAuthMode::ApiKey
+        );
+    }
+
+    #[test]
+    fn claude_models_require_explicit_opt_in() {
+        for model in ["opus-5.5", "fable-5.1"] {
+            let agent = format!("[agent]\nmodel = '{model}'\n");
+            assert!(matches!(
+                load_config(&agent),
+                Err(Error::Config(ConfigError::ClaudeDisabled))
+            ));
+            let config = load_config(&format!("{agent}[claude]\nenabled = true\n")).unwrap();
+            assert!(config.claude().enabled());
+            assert!(matches!(config.agent().model(), Model::Claude(_)));
+            assert!(config.claude().api_base_url().is_none());
+            let restored = load_config(&config.to_toml().unwrap()).unwrap();
+            assert_eq!(restored.agent().model(), config.agent().model());
+            assert!(restored.claude().api_base_url().is_none());
+        }
+    }
+
+    #[test]
+    fn startup_model_override_cannot_bypass_claude_opt_in() {
+        let directory = tempdir().unwrap();
+        let error = Config::load_with(
+            ConfigOverrides {
+                model: Some(Model::Claude(ClaudeModel::Opus55)),
+                ..ConfigOverrides::default()
+            },
+            Environment {
+                home: Some(directory.path().to_path_buf()),
+                ..Environment::default()
+            },
+            directory.path(),
+        )
+        .unwrap_err();
+        assert!(matches!(error, Error::Config(ConfigError::ClaudeDisabled)));
+    }
+
+    #[test]
     fn missing_default_file_materializes_all_defaults() {
         let directory = tempdir().unwrap();
         let home = directory.path().join("home");
@@ -1645,7 +1813,7 @@ mod tests {
         assert_eq!(config.auth.mode, AuthMode::Auto);
         assert_eq!(config.auth.file, home.join(".codex/auth.json"));
         assert_eq!(config.agent.workspace, directory.path());
-        assert_eq!(config.agent.model, Model::Sol);
+        assert_eq!(config.agent.model, Model::Codex(CodexModel::Sol));
         assert_eq!(config.agent.thinking, ReasoningEffort::Low);
         assert_eq!(config.agent.reasoning_mode, ReasoningMode::Standard);
         assert!(!config.agent.fast_mode);
@@ -1662,6 +1830,7 @@ mod tests {
             &rendered,
             &[
                 "auth",
+                "claude",
                 "agent",
                 "mcp_servers",
                 "skills",
@@ -1672,6 +1841,12 @@ mod tests {
             ],
         );
         assert_table_fields(&rendered["auth"], &["mode", "file"]);
+        assert_table_fields(
+            &rendered["claude"],
+            &["enabled", "auth", "subscription_store", "api_base_url"],
+        );
+        assert_eq!(rendered["claude"]["enabled"].as_bool(), Some(false));
+        assert_eq!(rendered["claude"]["auth"].as_str(), Some("subscription"));
         assert_table_fields(
             &rendered["agent"],
             &[
@@ -1725,7 +1900,10 @@ mod tests {
             rendered["auth"]["file"].as_str(),
             home.join(".codex/auth.json").to_str()
         );
-        assert_eq!(rendered["agent"]["model"].as_str(), Some("sol"));
+        assert_eq!(
+            rendered["agent"]["model"].as_str(),
+            Some(Model::Codex(CodexModel::Sol).as_str())
+        );
         assert_eq!(rendered["agent"]["transport"].as_str(), Some("websocket"));
         assert_eq!(
             rendered["agent"]["workspace"].as_str(),
@@ -2641,7 +2819,7 @@ mod tests {
                 auth_mode: Some(AuthMode::ChatGpt),
                 auth_file: Some("cli-auth.json".into()),
                 workspace: Some("cli-workspace".into()),
-                model: Some(Model::Luna),
+                model: Some(Model::Codex(CodexModel::Luna)),
                 thinking: Some(ReasoningEffort::High),
                 web_search: Some(false),
                 ..ConfigOverrides::default()
@@ -2657,7 +2835,7 @@ mod tests {
             config.agent.workspace,
             directory.path().join("cli-workspace")
         );
-        assert_eq!(config.agent.model, Model::Luna);
+        assert_eq!(config.agent.model, Model::Codex(CodexModel::Luna));
         assert_eq!(config.agent.thinking, ReasoningEffort::High);
         assert!(!config.agent.web_search);
     }
@@ -2759,7 +2937,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(config.agent.workspace, directory.path().join("workspace"));
-        assert_eq!(config.agent.model, Model::Astra);
+        assert_eq!(config.agent.model, Model::Codex(CodexModel::Astra));
         assert_eq!(config.agent.thinking, ReasoningEffort::Xhigh);
         assert_eq!(config.agent.reasoning_mode, ReasoningMode::Pro);
         assert!(config.agent.fast_mode);

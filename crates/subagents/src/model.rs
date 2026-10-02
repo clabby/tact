@@ -1,5 +1,5 @@
 use nanocodex::{
-    Model, Thinking,
+    HarnessModel as Model, Model as CodexModel, Thinking,
     agent::events::AgentEvent,
     oai::{Prompt, PromptInput, UserInput},
 };
@@ -25,9 +25,9 @@ impl AgentContext {
     pub fn prompt(&self, prompt: impl Into<Prompt>) -> Prompt {
         let mut prompt = prompt.into();
         let model = match self.model {
-            Model::Luna => "luna",
-            Model::Sol => "sol",
-            Model::Astra => "astra",
+            Model::Codex(CodexModel::Luna) => "luna",
+            Model::Codex(CodexModel::Sol) => "sol",
+            Model::Codex(CodexModel::Astra) => "astra",
             _ => self.model.as_str(),
         };
         let context = format!(
@@ -430,14 +430,14 @@ impl SubagentRuntimeId {
 mod tests {
     use super::{AgentContext, AgentId, AgentStatus, MessagePriority, agent_prompt};
     use nanocodex::{
-        Model, Thinking,
+        HarnessModel as Model, Model as CodexModel, Thinking,
         oai::{Prompt, PromptInput, PromptMessage, UserInput},
     };
 
     #[test]
     fn agent_context_preserves_text_media_and_transcript() {
         let context = AgentContext {
-            model: Model::Sol,
+            model: Model::Codex(CodexModel::Sol),
             thinking: Thinking::Medium,
         };
         let expected = "\n\n<agent_context>\nThis turn runs on sol with medium reasoning effort.\n</agent_context>";

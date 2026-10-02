@@ -2069,7 +2069,7 @@ mod tests {
         Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     };
     use nanocodex::{
-        Model,
+        HarnessModel as Model, Model as CodexModel,
         agent::events::{AgentEvent, AgentEventKind},
     };
     use ratatui::{Terminal, backend::TestBackend, layout::Position, style::Color};
@@ -2119,7 +2119,7 @@ mod tests {
                     session_id: "fork".to_owned(),
                     parent_session_id: Some("parent".to_owned()),
                     parent_sequence: Some(parent_sequence),
-                    model: Model::Luna.to_string(),
+                    model: Model::Codex(CodexModel::Luna).to_string(),
                     effort: ReasoningEffort::Medium,
                     reasoning_mode: ReasoningMode::Standard,
                     fast_mode: false,

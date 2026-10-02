@@ -7,15 +7,13 @@ use crate::{
         components::QueueId,
         pane::PaneId,
         prompt::Submission,
+        session::AgentSnapshot,
         transcript::{TerminalStopReason, TurnId},
     },
 };
 use nanocodex::{
-    AgentEvents, Nanocodex, NanocodexError, TurnControl,
-    agent::{
-        input::{Prompt, PromptInput, UserInput},
-        session::SessionSnapshot,
-    },
+    AgentEvents, HarnessModel, Nanocodex, NanocodexError, TurnControl,
+    agent::input::{Prompt, PromptInput, UserInput},
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -120,7 +118,7 @@ pub(crate) enum WorkerEvent {
         id: TurnId,
         error: Option<String>,
         terminal_stop: Option<TerminalStopReason>,
-        snapshot: Option<Box<SessionSnapshot>>,
+        snapshot: Option<Box<AgentSnapshot>>,
         terminal_expected: bool,
     },
     SteerAdmitted {
@@ -172,7 +170,28 @@ type TurnResult = Result<CompletedTurn, NanocodexError>;
 
 struct CompletedTurn {
     final_message: String,
-    snapshot: Option<Box<SessionSnapshot>>,
+    snapshot: Option<Box<AgentSnapshot>>,
+}
+
+async fn complete_turn(
+    agent: &Nanocodex,
+    result: nanocodex::agent::TurnResult,
+    claude: bool,
+    auxiliary: bool,
+) -> TurnResult {
+    let snapshot = if auxiliary {
+        None
+    } else if claude {
+        Some(AgentSnapshot::from_claude(agent.runtime_snapshot().await?)?)
+    } else {
+        result
+            .snapshot()
+            .map(|snapshot| AgentSnapshot::Codex(Box::new(snapshot)))
+    };
+    Ok(CompletedTurn {
+        final_message: result.final_message().to_owned(),
+        snapshot: snapshot.map(Box::new),
+    })
 }
 
 enum TurnPurpose {
@@ -583,6 +602,10 @@ async fn run(
                             continue;
                         };
                         let context = agent.context;
+                        if matches!(context.model, HarnessModel::Claude(_)) {
+                            drop(updates.send(WorkerEvent::ForkFailed { pane, error: "Claude does not support forking the current conversation".to_owned() }));
+                            continue;
+                        }
                         match agent.agent.fork().await {
                             Ok((agent, events)) => {
                                 let memory_review = *memory_reviews
@@ -692,6 +715,36 @@ async fn start_turn(
         prompt_kind,
     } = request;
     let auxiliary = auxiliary_context.is_some();
+    // A native turn owns its control entry through checkpoint capture, so the next
+    // prompt cannot change the committed conversation before it is copied.
+    if matches!(agent.context.model, HarnessModel::Claude(_)) {
+        let reason = if matches!(
+            auxiliary_context,
+            Some(AuxiliaryContext::CurrentConversation)
+        ) {
+            Some("Claude does not support forking the current conversation")
+        } else if !auxiliary && controls.keys().any(|key| key.pane == pane) {
+            Some("Claude is still finishing the current turn and its checkpoint")
+        } else {
+            None
+        };
+        if let Some(reason) = reason {
+            reject_turn(
+                TurnRequest {
+                    pane,
+                    id,
+                    prompt,
+                    purpose,
+                    auxiliary_context,
+                    shutdown,
+                    prompt_kind,
+                },
+                reason.to_owned(),
+                updates,
+            );
+            return false;
+        }
+    }
     let (isolated_agent, event_drain) = if let Some(context) = auxiliary_context {
         let create_agent = async {
             match context {
@@ -775,6 +828,8 @@ async fn start_turn(
     let control = turn.control();
     let task_control = control.clone();
     controls.insert(key, control);
+    let checkpoint_agent = agent.agent.clone();
+    let claude = matches!(agent.context.model, HarnessModel::Claude(_));
     turns.spawn(async move {
         let mut turn = Box::pin(turn);
         let (cancelled_by_scope, result) = match shutdown {
@@ -789,14 +844,10 @@ async fn start_turn(
             }
             None => (false, turn.await),
         };
-        let result = result.map(|result| CompletedTurn {
-            final_message: result.final_message().to_owned(),
-            snapshot: if auxiliary {
-                None
-            } else {
-                result.snapshot().map(Box::new)
-            },
-        });
+        let result = match result {
+            Ok(result) => complete_turn(&checkpoint_agent, result, claude, auxiliary).await,
+            Err(error) => Err(error),
+        };
         if let Some(agent) = isolated_agent {
             drop(agent.shutdown().await);
         }
@@ -870,6 +921,17 @@ async fn steer_turn(
         }
     }
 
+    if matches!(agent.context.model, HarnessModel::Claude(_))
+        && controls.keys().any(|key| key.pane == pane)
+    {
+        drop(updates.send(WorkerEvent::SteerFailed {
+            pane,
+            queue_id,
+            error: "Claude is still finishing the current turn and its checkpoint".to_owned(),
+        }));
+        return false;
+    }
+
     match agent
         .agent
         .prompt(agent.context.prompt(memory_review.steer_prompt(&prompt)))
@@ -881,11 +943,13 @@ async fn steer_turn(
                 pane,
                 id: fallback_id,
             };
+            let checkpoint_agent = agent.agent.clone();
+            let claude = matches!(agent.context.model, HarnessModel::Claude(_));
             turns.spawn(async move {
-                let result = turn.await.map(|result| CompletedTurn {
-                    final_message: result.final_message().to_owned(),
-                    snapshot: result.snapshot().map(Box::new),
-                });
+                let result = match turn.await {
+                    Ok(result) => complete_turn(&checkpoint_agent, result, claude, false).await,
+                    Err(error) => Err(error),
+                };
                 (key, TurnPurpose::Conversation, false, result)
             });
             controls.insert(key, control);
@@ -1065,7 +1129,8 @@ mod tests {
         },
     };
     use nanocodex::{
-        AgentEvents, Model, Nanocodex, NanocodexError, OpenAi, Thinking,
+        AgentEvents, HarnessModel as Model, Model as CodexModel, Nanocodex, NanocodexError, OpenAi,
+        Thinking,
         agent::input::{Prompt, PromptInput, UserInput},
         oai::{
             ResponseError,
@@ -1097,7 +1162,7 @@ mod tests {
     use tower::Service;
 
     struct CapturedRequest {
-        model: Model,
+        model: nanocodex::Model,
         thinking: Thinking,
         input: String,
         release: oneshot::Sender<()>,
@@ -1154,7 +1219,7 @@ mod tests {
             .build()
             .unwrap();
         Nanocodex::builder(openai)
-            .model(context.model)
+            .model(context.model.as_str().parse::<CodexModel>().unwrap())
             .thinking(context.thinking)
             .build()
             .unwrap()
@@ -1169,14 +1234,14 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(request.model, model);
+        assert_eq!(request.model, model.as_str().parse::<CodexModel>().unwrap());
         assert_eq!(request.thinking, thinking);
         let context = request
             .input
             .rsplit_once("<agent_context>")
             .expect("request must contain turn context")
             .1;
-        let model_name = format!("{model:?}").to_ascii_lowercase();
+        let model_name = crate::app::model::name(model).to_ascii_lowercase();
         assert!(
             context.contains(&format!(
                 "This turn runs on {model_name} with {thinking} reasoning effort."
@@ -1192,6 +1257,116 @@ mod tests {
                 if matches!(updates.recv().await, Some(WorkerEvent::TurnFinished { id: actual, .. }) if actual == id) { break; }
             }
         }).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn claude_success_publishes_a_native_checkpoint_and_rejects_fork() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        use axum::{Router, routing::post};
+        use nanocodex::{
+            Claude, ClaudeModel, HarnessModel, agent::ChildSnapshot, claude::ClaudeClient,
+        };
+        use serde_json::json;
+
+        let frames = [
+            json!({"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"claude-opus-5-5","content":[],"stop_reason":null,"usage":{"input_tokens":10,"output_tokens":0}}}),
+            json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":"done"}}),
+            json!({"type":"content_block_stop","index":0}),
+            json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}),
+            json!({"type":"message_stop"}),
+        ].into_iter().map(|frame| format!("event: {}\ndata: {frame}\n\n", frame["type"].as_str().unwrap())).collect::<String>();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let router = Router::new().route(
+            "/v1/messages",
+            post(move || {
+                let frames = frames.clone();
+                async move { ([("content-type", "text/event-stream")], frames) }
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let directory = tempfile::tempdir().unwrap();
+        let client = ClaudeClient::new(
+            reqwest::Client::new(),
+            format!("http://{address}/v1/messages"),
+            "synthetic-key",
+        );
+        let (agent, mut events) = Nanocodex::builder(Claude::new(
+            client,
+            Model::Claude(ClaudeModel::Opus55).as_str(),
+        ))
+        .workspace(directory.path().to_string_lossy())
+        .thinking(Thinking::High)
+        .unwrap()
+        .build()
+        .unwrap();
+        let expected_session = agent.session_id().to_owned();
+        let shutdown = CancellationToken::new();
+        let (commands, mut updates) = spawn(
+            agent,
+            AgentContext {
+                model: Model::Claude(ClaudeModel::Opus55),
+                thinking: Thinking::High,
+            },
+            MemoryReviewState::fresh(false),
+            shutdown.clone(),
+        );
+        let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
+        commands
+            .send(WorkerCommand::Submit {
+                pane: PaneId::Main,
+                id: TurnId::new(1),
+                prompt: "hello".to_owned().into(),
+            })
+            .unwrap();
+        let snapshot = timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(WorkerEvent::TurnFinished {
+                    snapshot, error, ..
+                }) = updates.recv().await
+                {
+                    assert!(error.is_none(), "{error:?}");
+                    break snapshot.expect("successful Claude turn must checkpoint");
+                }
+            }
+        })
+        .await
+        .unwrap();
+        let ChildSnapshot::Native {
+            model,
+            session_id,
+            thinking,
+            has_conversation,
+            payload,
+        } = snapshot.into_claude().unwrap()
+        else {
+            panic!("expected native checkpoint")
+        };
+        assert_eq!(model, HarnessModel::Claude(ClaudeModel::Opus55));
+        assert_eq!(session_id, expected_session);
+        assert_eq!(thinking, Thinking::High);
+        assert!(has_conversation);
+        assert!(payload.contains("hello"));
+        assert!(payload.contains("done"));
+        commands
+            .send(WorkerCommand::OpenFork {
+                pane: PaneId::Fork(1),
+                parent_sequence: 1,
+            })
+            .unwrap();
+        timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(WorkerEvent::ForkFailed { error, .. }) = updates.recv().await {
+                    assert!(error.contains("Claude does not support forking"));
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        shutdown.cancel();
+        drain.await.unwrap();
+        server.abort();
     }
 
     #[tokio::test]
@@ -1216,7 +1391,12 @@ mod tests {
                 })
                 .unwrap();
         }
-        let first = captured(&mut requests, Model::Astra, Thinking::Low).await;
+        let first = captured(
+            &mut requests,
+            Model::Codex(CodexModel::Astra),
+            Thinking::Low,
+        )
+        .await;
         commands
             .send(WorkerCommand::SetThinking {
                 pane: PaneId::Main,
@@ -1237,16 +1417,24 @@ mod tests {
             })
             .unwrap();
         first.release.send(()).unwrap();
-        captured(&mut requests, Model::Astra, Thinking::Low)
-            .await
-            .release
-            .send(())
-            .unwrap();
-        captured(&mut requests, Model::Astra, Thinking::High)
-            .await
-            .release
-            .send(())
-            .unwrap();
+        captured(
+            &mut requests,
+            Model::Codex(CodexModel::Astra),
+            Thinking::Low,
+        )
+        .await
+        .release
+        .send(())
+        .unwrap();
+        captured(
+            &mut requests,
+            Model::Codex(CodexModel::Astra),
+            Thinking::High,
+        )
+        .await
+        .release
+        .send(())
+        .unwrap();
         finished(&mut updates, TurnId::new(3)).await;
 
         for context in [
@@ -1264,11 +1452,15 @@ mod tests {
                     completion,
                 })
                 .unwrap();
-            captured(&mut requests, Model::Astra, Thinking::High)
-                .await
-                .release
-                .send(())
-                .unwrap();
+            captured(
+                &mut requests,
+                Model::Codex(CodexModel::Astra),
+                Thinking::High,
+            )
+            .await
+            .release
+            .send(())
+            .unwrap();
             assert!(
                 timeout(Duration::from_secs(5), result)
                     .await
@@ -1298,15 +1490,19 @@ mod tests {
                 prompt: "fork".to_owned().into(),
             })
             .unwrap();
-        captured(&mut requests, Model::Astra, Thinking::High)
-            .await
-            .release
-            .send(())
-            .unwrap();
+        captured(
+            &mut requests,
+            Model::Codex(CodexModel::Astra),
+            Thinking::High,
+        )
+        .await
+        .release
+        .send(())
+        .unwrap();
         finished(&mut updates, TurnId::new(5)).await;
 
         let replacement_context = AgentContext {
-            model: Model::Sol,
+            model: Model::Codex(CodexModel::Sol),
             thinking: Thinking::Medium,
         };
         let (replacement, mut replacement_events) = capture_agent(sender, replacement_context);
@@ -1328,11 +1524,15 @@ mod tests {
                 prompt: "replacement fallback".to_owned().into(),
             })
             .unwrap();
-        captured(&mut requests, Model::Sol, Thinking::Medium)
-            .await
-            .release
-            .send(())
-            .unwrap();
+        captured(
+            &mut requests,
+            Model::Codex(CodexModel::Sol),
+            Thinking::Medium,
+        )
+        .await
+        .release
+        .send(())
+        .unwrap();
         finished(&mut updates, TurnId::new(6)).await;
         shutdown.cancel();
         for task in [drain, fork_drain, replacement_drain] {
@@ -1431,7 +1631,7 @@ mod tests {
     }
 
     const TEST_CONTEXT: AgentContext = AgentContext {
-        model: Model::Astra,
+        model: Model::Codex(CodexModel::Astra),
         thinking: Thinking::Low,
     };
 

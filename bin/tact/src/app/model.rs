@@ -1,19 +1,19 @@
 //! Tact's supported model roster and input parsing.
 
-use nanocodex::Model;
+use nanocodex::{ClaudeModel, HarnessModel as Model, Model as CodexModel};
 use serde::{Deserialize, Deserializer, de};
+use tact_subagents::SUPPORTED_MODELS;
 
-pub(crate) const SUPPORTED_MODELS: [Model; 3] = [Model::Luna, Model::Sol, Model::Astra];
+pub(crate) fn available(claude_enabled: bool) -> &'static [Model] {
+    if claude_enabled {
+        &SUPPORTED_MODELS
+    } else {
+        &SUPPORTED_MODELS[..3]
+    }
+}
 
 pub(crate) fn parse(value: &str) -> Result<Model, String> {
-    match value {
-        "gpt-6-luna" | "luna" => Ok(Model::Luna),
-        "gpt-6.1-sol" | "sol" => Ok(Model::Sol),
-        "gpt-6-astra" | "astra" => Ok(Model::Astra),
-        _ => Err(format!(
-            "invalid model {value:?}; expected gpt-6-luna, gpt-6.1-sol, or gpt-6-astra"
-        )),
-    }
+    tact_subagents::parse_model(value)
 }
 
 pub(crate) fn deserialize_optional<'de, D>(deserializer: D) -> Result<Option<Model>, D::Error>
@@ -27,9 +27,11 @@ where
 
 pub(crate) const fn name(model: Model) -> &'static str {
     match model {
-        Model::Luna => "Luna",
-        Model::Sol => "Sol",
-        Model::Astra => "Astra",
+        Model::Codex(CodexModel::Luna) => "Luna",
+        Model::Codex(CodexModel::Sol) => "Sol",
+        Model::Codex(CodexModel::Astra) => "Astra",
+        Model::Claude(ClaudeModel::Opus55) => "Opus 5.5",
+        Model::Claude(ClaudeModel::Fable51) => "Fable 5.1",
         _ => model.as_str(),
     }
 }
@@ -37,17 +39,21 @@ pub(crate) const fn name(model: Model) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::parse;
-    use nanocodex::Model;
+    use nanocodex::{ClaudeModel, HarnessModel as Model, Model as CodexModel};
 
     #[test]
     fn accepts_current_model_ids_and_short_names() {
         for (value, expected) in [
-            ("gpt-6-luna", Model::Luna),
-            ("luna", Model::Luna),
-            ("gpt-6.1-sol", Model::Sol),
-            ("sol", Model::Sol),
-            ("gpt-6-astra", Model::Astra),
-            ("astra", Model::Astra),
+            ("gpt-6-luna", Model::Codex(CodexModel::Luna)),
+            ("luna", Model::Codex(CodexModel::Luna)),
+            ("gpt-6.1-sol", Model::Codex(CodexModel::Sol)),
+            ("sol", Model::Codex(CodexModel::Sol)),
+            ("gpt-6-astra", Model::Codex(CodexModel::Astra)),
+            ("astra", Model::Codex(CodexModel::Astra)),
+            ("opus-5.5", Model::Claude(ClaudeModel::Opus55)),
+            ("claude-opus-5-5", Model::Claude(ClaudeModel::Opus55)),
+            ("fable-5.1", Model::Claude(ClaudeModel::Fable51)),
+            ("claude-fable-5-1", Model::Claude(ClaudeModel::Fable51)),
         ] {
             assert_eq!(parse(value), Ok(expected));
         }

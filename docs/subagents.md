@@ -27,8 +27,9 @@ The setting applies when an agent runtime is created. Reloading configuration do
 tool surface or instructions of an existing runtime. A later new or restored session uses the
 reloaded setting.
 
-Subagents explicitly choose `luna`, `sol`, or `astra` for each task. There is no `selected` alias or
-per-model configuration switch. Consider Luna for simple tasks, Sol for bounded coding and
+Subagents explicitly choose `luna`, `sol`, or `astra` for each task. Setting `[claude] enabled = true`
+also exposes `opus-5.5` and `fable-5.1`. Both providers can create children using either provider.
+Claude is rejected at the runtime boundary unless enabled. There is no `selected` alias. Consider Luna for simple tasks, Sol for bounded coding and
 analysis, and Astra for the hardest reasoning.
 
 `agent.max_subagents` is independent of the enable switch:
@@ -72,8 +73,8 @@ therefore installed independently of the subagent tool group.
 does not inherit the caller's conversation. Each child model's instructions are composed from the
 configuration and skill catalog when the root runtime starts. This includes configured replacement
 and appended instructions. A resumed parent keeps its saved instructions; its new children use
-these freshly composed instructions. Children inherit the configured reasoning mode and fast-mode
-setting. Their initial prompt contains:
+these freshly composed instructions. Codex children inherit the configured reasoning mode and fast-mode
+setting where supported. Claude children use standard mode without Codex priority processing. Their initial prompt contains:
 
 - the assigned role and task;
 - its agent ID and place in the task tree;
@@ -82,8 +83,10 @@ setting. Their initial prompt contains:
 - the required structured-output contract.
 
 The required `model` and `thinking` fields choose the child's capabilities at creation. A child
-cannot exceed the spawning parent's model. Model order is Luna < Sol < Astra; effort order
-is low < medium < high < xhigh < max. Root agents use the live configured `agent.thinking` cap for
+cannot exceed the spawning parent's model when both use Codex (Luna < Sol < Astra). Cross-provider
+selection and delegation between Claude models are allowed. Capability guidance ranks intelligence
+as Fable 5.1 > Astra > Opus 5.5 > Sol > Luna. Effort order is
+low < medium < high < xhigh < max for every provider. Root agents use the live configured `agent.thinking` cap for
 spawning effort. Registered subagents are additionally bounded by their own assigned effort. For
 example, an Astra root with a high cap can spawn a Sol/medium child, but that child cannot spawn
 Astra or request high effort. The root can launch a stronger verifier after receiving the child's
@@ -91,7 +94,8 @@ result.
 
 The live configured `agent.thinking` cap also bounds every new spawn. User changes to this cap
 take effect for subsequent spawns, including those requested by an already active root turn.
-Existing children retain their model and effort and cannot exceed either when spawning descendants.
+Existing children retain their model and effort. The same provider and effort rules apply when
+they spawn descendants.
 Requests above either applicable cap fail before the child factory runs.
 
 Every new turn receives an `<agent_context>` block identifying its own model and effort. Root,
@@ -257,8 +261,8 @@ started again by a later deferred message. A closed agent does not.
 
 ## Security and trust boundaries
 
-Subagents run with the same configured model provider, workspace, base tool selection, and process
-authority as the root runtime. They are an execution and coordination boundary, not a security
+Subagents use an explicitly enabled provider and share the root runtime's workspace and process
+authority. They are an execution and coordination boundary, not a security
 sandbox. A clean conversation reduces accidental context sharing but does not restrict filesystem
 or network access granted to their tools.
 
@@ -276,8 +280,8 @@ checked in code.
 The implementation preserves these invariants:
 
 - disabling subagents removes their tools and omits their fixed instructions from fresh sessions;
-- model cannot exceed the spawning parent's model, and the live configured effort cap bounds every
-  new spawn; registered subagents also cannot delegate above their own assigned effort;
+- Codex children cannot exceed a Codex parent's model; Claude requires explicit opt-in;
+- the live configured effort cap bounds every new spawn; registered subagents also cannot delegate above their own assigned effort;
 - each new turn receives its own effective model and effort in context;
 - memory remains independent from the subagent enable switch;
 - every child starts with clean conversation context and a caller-supplied output contract;

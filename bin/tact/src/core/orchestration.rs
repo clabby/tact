@@ -2,7 +2,7 @@
 
 use crate::app::error::RuntimeError;
 use nanocodex::{
-    Model,
+    HarnessModel as Model,
     agent::events::{
         AgentEvent, AgentEventData, AgentEventKind, EventUsage, RunEvent, RunTerminal,
     },
@@ -401,7 +401,7 @@ impl<'a> From<&'a AgentDescriptor> for AgentRecord<'a> {
 mod tests {
     use super::{OrchestrationRecorder, RunOutcome};
     use nanocodex::{
-        Model, Thinking,
+        HarnessModel as Model, Model as CodexModel, Thinking,
         agent::events::{AgentEvent, AgentEventKind},
     };
     use serde_json::{Value, json, value::to_raw_value};
@@ -469,7 +469,7 @@ mod tests {
                 update: AgentUpdate::Added(AgentDescriptor {
                     id,
                     session_id: "child".to_owned(),
-                    model: Model::Sol,
+                    model: Model::Codex(CodexModel::Sol),
                     thinking: Thinking::Medium,
                     role: "researcher".to_owned(),
                     task: "inspect the task".to_owned(),

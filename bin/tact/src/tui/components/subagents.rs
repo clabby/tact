@@ -1108,7 +1108,7 @@ mod tests {
         Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     };
     use nanocodex::{
-        Model, Thinking,
+        HarnessModel as Model, Model as CodexModel, Thinking,
         agent::events::{AgentEvent, AgentEventKind},
     };
     use ratatui::{Terminal, backend::TestBackend, style::Color};
@@ -1124,7 +1124,7 @@ mod tests {
         AgentDescriptor {
             id: AgentId::new(1),
             session_id: "child-session".to_owned(),
-            model: Model::Luna,
+            model: Model::Codex(CodexModel::Luna),
             thinking: Thinking::Low,
             role: "researcher".to_owned(),
             task: "Trace the event lifecycle".to_owned(),
@@ -1262,7 +1262,7 @@ mod tests {
         AgentDescriptor {
             id: AgentId::new(2),
             session_id: "second-session".to_owned(),
-            model: Model::Sol,
+            model: Model::Codex(CodexModel::Sol),
             thinking: Thinking::High,
             role: "reviewer".to_owned(),
             task: "Verify the event ordering".to_owned(),
@@ -1274,7 +1274,7 @@ mod tests {
         AgentDescriptor {
             id: AgentId::new(id),
             session_id: format!("agent-{id}"),
-            model: Model::Sol,
+            model: Model::Codex(CodexModel::Sol),
             thinking: Thinking::Medium,
             role: role.to_owned(),
             task: format!("Task for {role}"),
