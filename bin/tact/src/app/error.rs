@@ -23,8 +23,6 @@ pub(crate) enum Error {
     #[error(transparent)]
     Auth(#[from] AuthError),
     #[error(transparent)]
-    ClaudeAuth(#[from] crate::app::claude_auth::ClaudeAuthError),
-    #[error(transparent)]
     Config(#[from] ConfigError),
     #[error("failed to process the Nanocodex event stream: {0}")]
     Event(#[from] EventError),

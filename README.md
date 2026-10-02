@@ -118,59 +118,42 @@ When no effort is configured, Sol and Astra use low effort and Luna uses medium.
 effort takes precedence. Tact supports low through max effort. Sol and Luna support Pro mode;
 Astra uses standard mode.
 
-Claude support requires an explicit config opt-in. Choose the authentication route in the same
-section:
+Claude support requires an explicit config opt-in and an Anthropic API key in
+`ANTHROPIC_API_KEY`:
 
 ```toml
 [claude]
 enabled = true
-auth = "subscription" # or "api-key" to use ANTHROPIC_API_KEY
 
 [agent]
 model = "opus-5.5" # or fable-5.1
 thinking = "medium"
-web_search = false
-image_generation = false
 ```
 
 With Claude enabled, `--model` and the model picker also accept `opus-5.5` and `fable-5.1`
 (native IDs `claude-opus-5-5` and `claude-fable-5-1`). Both support `low`, `medium`, `high`,
 `xhigh`, and `max`. Their default efforts are medium for Opus and high for Fable.
-Claude uses standard mode without Codex priority processing. The existing web-search and
-image-generation tools use OpenAI credentials, including when called by Claude; disable them as
-above for an Anthropic-only setup. Codex children also need the configured OpenAI credentials.
+Claude uses standard mode without Codex priority processing. Web search and image generation
+remain available to Claude and use OpenAI credentials. For an Anthropic-only setup, set
+`agent.web_search = false` and `agent.image_generation = false`. Codex children need the
+configured OpenAI credentials.
 
-Both providers use the same authentication commands:
+Check whether the Claude API key is configured:
 
 ```sh
-tact auth --provider claude login
 tact auth --provider claude status
-tact auth --provider claude logout
-# Use --provider codex for ChatGPT; Codex is the default provider.
 ```
 
-Claude subscription login opens a browser and asks for the returned `code#state` through hidden
-terminal input. Nanocodex owns this separate OAuth login; it does not reuse Claude Code's login.
-The subscription manager coordinates refreshes across the root and its descendants, including
-Claude children of a Codex root. Credentials are stored privately outside session history and
-checkpoints. Use logout to clear the saved grant.
-The default store is `$TACT_HOME/claude/private/auth` (or `~/.tact/claude/private/auth`).
-Set `claude.subscription_store` to use a different private store. The credential file is encrypted
-with a local key; Unix directories and files require owner-only access.
-If the store or its key is missing or damaged, Tact refuses to reset its revision: another process
-may still hold an older login. Stop all Tact processes using that store, then restore the matching
-key and credential file from one backup, or choose a fresh `subscription_store` path and log in
-again. Do not delete only one file or reuse a damaged store while older processes are running.
+Claude supports API-key authentication only. Tact does not log into Claude subscriptions or
+read subscription credentials. The key stays in the environment and is not written to config,
+model prompts, or session checkpoints. Codex can independently use a ChatGPT subscription
+through `tact auth --provider codex login`, including in mixed-provider task trees.
 
-The `claude.auth` setting selects the billing route. Its default, `subscription`, uses the saved
-subscription login and ignores `ANTHROPIC_API_KEY`. Selecting `api-key` requires that environment
-variable. Neither route falls back to the other when authentication fails. Logging in
-does not change this setting. Authentication choices and credentials are not added to model
-prompts.
+The `[claude]` section accepts `enabled` and the optional `api_base_url`. Unknown fields,
+including the retired `auth` and `subscription_store` settings, are rejected. Remove those
+fields and explicitly supply `ANTHROPIC_API_KEY` to use Claude.
 
-`claude.api_base_url` optionally selects a Messages API base URL; Tact appends `/messages`.
-Authentication settings are captured when a task tree starts. Start a new session after changing
-the selected route or store.
+`claude.api_base_url` selects a Messages API base URL; Tact appends `/messages`.
 
 Claude uses Tact's Code Mode `exec`/`wait` runtime, including nested tools, memory, MCP, and
 mixed-provider subagents. At this pinned upstream version, Claude cannot fork a conversation or

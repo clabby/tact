@@ -10,8 +10,7 @@ mod orchestration;
 
 use crate::{
     app::{
-        claude_auth::ClaudeAuth,
-        config::{ClaudeAuthMode, Config, ReasoningEffort, ReasoningMode, SkillsConfig},
+        config::{Config, ReasoningEffort, ReasoningMode, SkillsConfig},
         error::{ConfigError, Result, RuntimeError, SecretError},
         hook,
         secret::SecretString,
@@ -455,15 +454,6 @@ impl ConfiguredAgent {
         let (subagent_control, subagent_updates) = Subagents::new(agent_config.max_subagents());
         subagent_control.set_claude_enabled(config.claude().enabled());
         let recipe = Arc::new(AgentRecipe {
-            claude_subscription: if config.claude().enabled()
-                && config.claude().auth() == ClaudeAuthMode::Subscription
-            {
-                Some(Arc::new(ClaudeAuth::open(
-                    config.claude().subscription_store().to_path_buf(),
-                )?))
-            } else {
-                None
-            },
             config: config.clone(),
             workspace,
             tools,
@@ -638,7 +628,6 @@ impl ConfiguredAgent {
 
 struct AgentRecipe {
     config: Config,
-    claude_subscription: Option<Arc<ClaudeAuth>>,
     workspace: PathBuf,
     tools: Tools,
     memory: Option<SelectedMemoryStore>,
@@ -760,37 +749,23 @@ impl AgentRecipe {
         let endpoint = config
             .api_base_url()
             .map(|base| format!("{}/messages", base.trim_end_matches('/')));
-        match config.auth() {
-            ClaudeAuthMode::Subscription => self
-                .claude_subscription
-                .as_ref()
-                .ok_or_else(|| {
-                    NanocodexError::InvalidRequest(
-                        "Claude subscription manager is unavailable".into(),
-                    )
-                })?
-                .client(endpoint.as_deref())
-                .map_err(|error| NanocodexError::InvalidRequest(error.to_string())),
-            ClaudeAuthMode::ApiKey => {
-                let key = read_key()
-                    .map_err(|error| NanocodexError::InvalidRequest(error.to_string()))?
-                    .ok_or_else(|| {
-                        NanocodexError::InvalidRequest(
-                            "Claude API-key authentication requires ANTHROPIC_API_KEY".into(),
-                        )
-                    })?;
-                let http = reqwest::Client::builder()
-                    .redirect(reqwest::redirect::Policy::none())
-                    .retry(reqwest::retry::never())
-                    .build()
-                    .map_err(|error| NanocodexError::InvalidRequest(error.to_string()))?;
-                // The native client owns a non-zeroizing copy after this boundary.
-                Ok(match endpoint {
-                    Some(endpoint) => ClaudeClient::new(http, endpoint, key.expose_secret()),
-                    None => ClaudeClient::official(http, key.expose_secret()),
-                })
-            }
-        }
+        let key = read_key()
+            .map_err(|error| NanocodexError::InvalidRequest(error.to_string()))?
+            .ok_or_else(|| {
+                NanocodexError::InvalidRequest(
+                    "Claude API-key authentication requires ANTHROPIC_API_KEY".into(),
+                )
+            })?;
+        let http = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .retry(reqwest::retry::never())
+            .build()
+            .map_err(|error| NanocodexError::InvalidRequest(error.to_string()))?;
+        // The native client owns a non-zeroizing copy after this boundary.
+        Ok(match endpoint {
+            Some(endpoint) => ClaudeClient::new(http, endpoint, key.expose_secret()),
+            None => ClaudeClient::official(http, key.expose_secret()),
+        })
     }
 }
 
@@ -1060,36 +1035,27 @@ mod tests {
     }
 
     #[test]
-    fn claude_authentication_selection_never_falls_back() {
+    fn claude_requires_opt_in_and_api_key() {
         let _ = rustls::crypto::ring::default_provider().install_default();
         use super::AgentRecipe;
-        use crate::app::{claude_auth::ClaudeAuth, secret::SecretString};
+        use crate::app::secret::SecretString;
         use nanocodex::Tools;
         use std::cell::Cell;
         use tact_subagents::Subagents;
 
-        for (enabled, mode) in [
-            (false, "api-key"),
-            (true, "api-key"),
-            (true, "subscription"),
-        ] {
+        for enabled in [false, true] {
             let directory = tempdir().unwrap();
             let config_path = directory.path().join("config.toml");
-            fs::write(&config_path, format!("[claude]\nenabled = {enabled}\nauth = {mode:?}\nsubscription_store = 'private/auth'\n")).unwrap();
+            fs::write(&config_path, format!("[claude]\nenabled = {enabled}\n")).unwrap();
             let config = Config::load(ConfigOverrides {
                 path: Some(config_path),
                 model: Some(Model::Codex(CodexModel::Sol)),
                 ..Default::default()
             })
             .unwrap();
-            let subscription = Arc::new(
-                ClaudeAuth::open(config.claude().subscription_store().to_path_buf()).unwrap(),
-            );
             let (subagents, _) = Subagents::new(1);
             let recipe = AgentRecipe {
                 config,
-                // A stored subscription must not rescue a missing API key.
-                claude_subscription: Some(subscription),
                 workspace: directory.path().to_path_buf(),
                 tools: Tools::builder()
                     .web_search(false)
@@ -1104,9 +1070,9 @@ mod tests {
                 reads.set(reads.get() + 1);
                 Ok(None)
             });
-            assert_eq!(reads.get(), usize::from(enabled && mode == "api-key"));
-            assert_eq!(result.is_ok(), enabled && mode == "subscription");
-            if enabled && mode == "api-key" {
+            assert_eq!(reads.get(), usize::from(enabled));
+            assert!(result.is_err());
+            if enabled {
                 assert!(
                     result
                         .err()

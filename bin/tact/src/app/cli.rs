@@ -2,11 +2,7 @@
 
 use crate::{
     app::{
-        claude_auth::ClaudeAuth,
-        config::{
-            AuthMode, ClaudeAuthMode, Config, ConfigOverrides, ReasoningEffort, ReasoningMode,
-            Transport,
-        },
+        config::{AuthMode, Config, ConfigOverrides, ReasoningEffort, ReasoningMode, Transport},
         error::{AuthError, Error, Result, RuntimeError},
         model,
         secret::SecretString,
@@ -17,9 +13,7 @@ use crate::{
 };
 use clap::{ArgAction, Parser, Subcommand, builder::NonEmptyStringValueParser};
 use crossterm::style::{Color, Stylize};
-use nanocodex::{
-    HarnessFamily, HarnessModel as Model, claude::subscription::ClaudeSubscriptionStatus,
-};
+use nanocodex::{HarnessFamily, HarnessModel as Model};
 use std::{env, env::VarError, fmt, path::PathBuf};
 use tokio_util::sync::CancellationToken;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
@@ -245,7 +239,7 @@ enum MemoryCommand {
 
 #[derive(Debug, Subcommand)]
 enum AuthCommand {
-    /// Sign in with the selected provider's subscription (the default authentication route).
+    /// Sign in to Codex, or show API-key setup instructions for Claude.
     Login {
         /// Print the sign-in URL without opening a browser.
         #[arg(long)]
@@ -253,7 +247,7 @@ enum AuthCommand {
     },
     /// Show the effective authentication source.
     Status,
-    /// Remove the selected provider's subscription credentials.
+    /// Remove Codex credentials, or show API-key removal instructions for Claude.
     Logout,
 }
 
@@ -678,51 +672,28 @@ impl AuthCommand {
             return Ok(());
         }
         config.claude().ensure_enabled()?;
-        if matches!(self, Self::Status) && config.claude().auth() == ClaudeAuthMode::ApiKey {
-            let configured = SecretString::from_environment("ANTHROPIC_API_KEY")
-                .map_err(AuthError::from)?
-                .is_some();
-            println!("Authentication: Claude API key");
-            println!("Source: ANTHROPIC_API_KEY");
-            println!("Configured: {}", if configured { "yes" } else { "no" });
-            return Ok(());
-        }
-        let auth = ClaudeAuth::open(config.claude().subscription_store().to_path_buf())?;
         match self {
-            Self::Login { no_open } => {
-                let status = auth.login(!no_open).await?;
-                print_claude_subscription_status(&status);
-                if config.claude().auth() != ClaudeAuthMode::Subscription {
-                    eprintln!(
-                        "To use this subscription, set [claude] auth = \"subscription\" in the configuration."
-                    );
-                }
+            Self::Login { .. } => {
+                println!(
+                    "Claude uses API keys only. Set ANTHROPIC_API_KEY to your Anthropic API key."
+                );
             }
-            Self::Status => print_claude_subscription_status(&auth.status().await?),
+            Self::Status => {
+                let configured = SecretString::from_environment("ANTHROPIC_API_KEY")
+                    .map_err(AuthError::from)?
+                    .is_some();
+                println!("Authentication: Claude API key");
+                println!("Source: ANTHROPIC_API_KEY");
+                println!("Configured: {}", if configured { "yes" } else { "no" });
+            }
             Self::Logout => {
-                auth.logout().await?;
-                eprintln!(
-                    "Removed Claude subscription credentials from {}.",
-                    config.claude().subscription_store().display()
+                println!(
+                    "Claude uses API keys only. Unset ANTHROPIC_API_KEY to remove it from your environment."
                 );
             }
         }
         Ok(())
     }
-}
-
-fn print_claude_subscription_status(status: &ClaudeSubscriptionStatus) {
-    let state = match status {
-        ClaudeSubscriptionStatus::SignedOut => "signed out",
-        ClaudeSubscriptionStatus::AccountOnHold => "account on hold",
-        ClaudeSubscriptionStatus::Pending { .. } => "login pending",
-        ClaudeSubscriptionStatus::Expired => "login expired",
-        ClaudeSubscriptionStatus::ExchangeUncertain => "login exchange uncertain",
-        ClaudeSubscriptionStatus::Validating => "validating subscription",
-        ClaudeSubscriptionStatus::Authenticated { .. } => "authenticated",
-    };
-    println!("Authentication: Claude subscription");
-    println!("Status: {state}");
 }
 
 impl ConfigCommand {
@@ -1007,10 +978,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn disabled_claude_auth_commands_never_open_the_credential_store() {
+    async fn claude_auth_commands_require_explicit_opt_in() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("config.toml");
-        std::fs::write(&path, "[claude]\nsubscription_store = 'private/auth'\n").unwrap();
+        std::fs::write(&path, "[claude]\n").unwrap();
         let config = Config::load(ConfigOverrides {
             path: Some(path),
             auth_file: Some(directory.path().join("codex-auth")),
@@ -1031,7 +1002,33 @@ mod tests {
                 crate::app::error::Error::Config(crate::app::error::ConfigError::ClaudeDisabled)
             ));
         }
-        assert!(!directory.path().join("private").exists());
+        assert!(!directory.path().join("codex-auth").exists());
+    }
+
+    #[tokio::test]
+    async fn claude_login_and_logout_do_not_create_credentials() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let contents = "[claude]\nenabled = true\n";
+        std::fs::write(&path, contents).unwrap();
+        let config = Config::load(ConfigOverrides {
+            path: Some(path.clone()),
+            auth_file: Some(directory.path().join("codex-auth")),
+            ..ConfigOverrides::default()
+        })
+        .unwrap();
+        for command in [
+            super::AuthCommand::Login { no_open: false },
+            super::AuthCommand::Login { no_open: true },
+            super::AuthCommand::Logout,
+        ] {
+            command
+                .run(&config, nanocodex::HarnessFamily::Claude)
+                .await
+                .unwrap();
+        }
+        assert_eq!(std::fs::read_to_string(path).unwrap(), contents);
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
     }
 
     #[test]

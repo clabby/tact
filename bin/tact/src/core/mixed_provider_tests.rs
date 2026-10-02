@@ -1,7 +1,6 @@
 use super::{AgentRecipe, claude, install_agent_tools};
 use crate::app::{
-    claude_auth::ClaudeAuth,
-    config::{ClaudeAuthMode, Config, ConfigOverrides, ReasoningMode},
+    config::{Config, ConfigOverrides},
     secret::SecretString,
 };
 use axum::{
@@ -9,13 +8,12 @@ use axum::{
     extract::State,
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
-    routing::{any, get, post},
+    routing::{any, post},
 };
 use nanocodex::{
     AgentEvents, ClaudeModel, HarnessModel, Model as CodexModel, Nanocodex, NanocodexError, OpenAi,
     Thinking, Tools,
     agent::{ChildSnapshot, SpawnOptions},
-    claude::subscription::{ClaudeLoginMode, ClaudeSubscriptionConfig},
     oai::{
         ResponseError,
         events::AgentEventKind,
@@ -39,11 +37,7 @@ use std::{
 };
 use tact_subagents::{AgentContext, AgentStatus, AgentUpdate, Subagents};
 use tempfile::tempdir;
-use tokio::{
-    net::TcpListener,
-    sync::{Barrier, Notify},
-    time::timeout,
-};
+use tokio::{net::TcpListener, sync::Notify, time::timeout};
 use tower::Service;
 
 #[derive(Clone)]
@@ -87,39 +81,8 @@ fn contains_tool_result(value: &Value) -> bool {
 #[derive(Clone)]
 struct Provider {
     script: Script,
-    subscription: bool,
-    rejected: Arc<AtomicUsize>,
-    exchanges: Arc<AtomicUsize>,
-    rejection_barrier: Arc<Barrier>,
     parent_entered: Arc<Notify>,
     parent_release: Arc<Notify>,
-}
-
-async fn token(State(provider): State<Provider>, Json(request): Json<Value>) -> Json<Value> {
-    let exchange = provider.exchanges.fetch_add(1, Ordering::SeqCst);
-    assert!(exchange < 2, "one login and one coordinated refresh only");
-    assert_eq!(
-        request["grant_type"],
-        if exchange == 0 {
-            "authorization_code"
-        } else {
-            "refresh_token"
-        }
-    );
-    if exchange == 1 {
-        assert_eq!(request["refresh_token"], "synthetic-refresh-1");
-    }
-    Json(
-        json!({"access_token":format!("synthetic-access-{}", exchange + 1),
-        "refresh_token":format!("synthetic-refresh-{}", exchange + 1), "expires_in":3600,
-        "scope":"user:profile user:inference user:sessions:claude_code", "token_type":"Bearer"}),
-    )
-}
-
-async fn profile() -> Json<Value> {
-    Json(
-        json!({"account":{"uuid":"synthetic-account"}, "organization":{"uuid":"synthetic-organization"}}),
-    )
 }
 
 impl Service<ResponsesAttempt> for Script {
@@ -192,21 +155,8 @@ async fn messages(
     headers: HeaderMap,
     Json(request): Json<Value>,
 ) -> Response {
-    if provider.subscription {
-        assert!(!headers.contains_key("x-api-key"));
-        if headers[header::AUTHORIZATION] == "Bearer synthetic-access-1" {
-            provider.rejected.fetch_add(1, Ordering::SeqCst);
-            provider.rejection_barrier.wait().await;
-            return StatusCode::UNAUTHORIZED.into_response();
-        }
-        assert_eq!(headers[header::AUTHORIZATION], "Bearer synthetic-access-2");
-        assert!(
-            headers["anthropic-beta"]
-                .to_str()
-                .unwrap()
-                .contains("oauth-2025-04-20")
-        );
-    }
+    assert_eq!(headers["x-api-key"], "fixture-token");
+    assert!(!headers.contains_key(header::AUTHORIZATION));
     if request["messages"]
         .as_array()
         .unwrap()
@@ -270,26 +220,11 @@ async fn messages(
 }
 
 fn build_agent(
-    model: HarnessModel,
+    context: AgentContext,
     recipe: &Arc<AgentRecipe>,
     codex: Script,
 ) -> Result<(Nanocodex, AgentEvents), NanocodexError> {
-    let context = AgentContext {
-        model,
-        thinking: Thinking::Medium,
-    };
-    if matches!(model, HarnessModel::Claude(_))
-        && recipe.config.claude().auth() == ClaudeAuthMode::Subscription
-    {
-        return recipe.build(
-            context,
-            ReasoningMode::Standard,
-            false,
-            Arc::from("Use the installed tools."),
-            None,
-            None,
-        );
-    }
+    let AgentContext { model, thinking } = context;
     let tools = install_agent_tools(
         recipe.tools.clone(),
         &recipe.subagents,
@@ -305,13 +240,16 @@ fn build_agent(
             .map_err(|error| NanocodexError::InvalidRequest(error.to_string()))?;
         Nanocodex::builder(openai)
             .model(model)
-            .thinking(Thinking::Medium)
+            .thinking(thinking)
             .workspace(&recipe.workspace)
             .tools(tools)
             .build()
     } else {
         let client =
             recipe.claude_client(|| Ok(Some(SecretString::new("fixture-token".into()))))?;
+        let clean_recipe = Arc::clone(recipe);
+        let spawn: claude::CleanAgentFactory =
+            Arc::new(move |context| build_agent(context, &clean_recipe, codex.clone()));
         claude::build_client(
             client,
             context,
@@ -319,7 +257,7 @@ fn build_agent(
             Arc::from("Use the installed tools."),
             claude::ClaudeSession::default(),
             claude::tool_runtime(&recipe.config, &recipe.workspace, &tools)?,
-            None,
+            Some(spawn),
         )
     }
 }
@@ -329,7 +267,7 @@ async fn claude_root_runs_codex_child_through_code_mode() {
     mixed_provider_roundtrip(
         HarnessModel::Claude(ClaudeModel::Opus55),
         HarnessModel::Codex(CodexModel::Sol),
-        false,
+        1,
         false,
     )
     .await;
@@ -340,40 +278,29 @@ async fn codex_root_runs_claude_child_through_code_mode() {
     mixed_provider_roundtrip(
         HarnessModel::Codex(CodexModel::Luna),
         HarnessModel::Claude(ClaudeModel::Fable51),
-        false,
-        false,
-    )
-    .await;
-}
-
-#[tokio::test]
-async fn subscription_claude_root_delegates_to_codex_after_refresh() {
-    mixed_provider_roundtrip(
-        HarnessModel::Claude(ClaudeModel::Opus55),
-        HarnessModel::Codex(CodexModel::Sol),
-        true,
+        1,
         false,
     )
     .await;
 }
 
 #[tokio::test]
-async fn codex_root_shares_subscription_refresh_between_claude_children() {
+async fn codex_root_runs_multiple_claude_children_through_code_mode() {
     mixed_provider_roundtrip(
         HarnessModel::Codex(CodexModel::Luna),
         HarnessModel::Claude(ClaudeModel::Fable51),
-        true,
+        2,
         false,
     )
     .await;
 }
 
 #[tokio::test]
-async fn subscription_recipe_clean_spawn_keeps_parent_and_child_isolated() {
+async fn api_key_clean_spawn_keeps_parent_and_child_isolated() {
     mixed_provider_roundtrip(
         HarnessModel::Claude(ClaudeModel::Opus55),
         HarnessModel::Codex(CodexModel::Sol),
-        true,
+        2,
         true,
     )
     .await;
@@ -419,7 +346,7 @@ async fn api_key_messages_reject_redirects_without_forwarding_credentials() {
         let path = directory.path().join("config.toml");
         fs::write(
             &path,
-            format!("[claude]\nenabled = true\nauth = 'api-key'\napi_base_url = {origin:?}\n"),
+            format!("[claude]\nenabled = true\napi_base_url = {origin:?}\n"),
         )
         .unwrap();
         let config = Config::load(ConfigOverrides {
@@ -431,7 +358,6 @@ async fn api_key_messages_reject_redirects_without_forwarding_credentials() {
         let (subagents, _updates) = Subagents::new(1);
         let recipe = Arc::new(AgentRecipe {
             config,
-            claude_subscription: None,
             workspace: directory.path().to_owned(),
             memory: None,
             subagents: subagents.downgrade(),
@@ -443,7 +369,10 @@ async fn api_key_messages_reject_redirects_without_forwarding_credentials() {
         });
         let model = HarnessModel::Claude(ClaudeModel::Opus55);
         let (agent, mut events) = build_agent(
-            model,
+            AgentContext {
+                model,
+                thinking: Thinking::Medium,
+            },
             &recipe,
             Script::new(HarnessModel::Codex(CodexModel::Sol), String::new()),
         )
@@ -484,34 +413,24 @@ async fn api_key_messages_reject_redirects_without_forwarding_credentials() {
 }
 
 fn assert_no_credentials(text: &str) {
-    for sentinel in [
-        "fixture-token",
-        "synthetic-access-1",
-        "synthetic-access-2",
-        "synthetic-refresh-1",
-        "synthetic-refresh-2",
-        "synthetic-code#",
-    ] {
-        assert!(
-            !text.contains(sentinel),
-            "credential escaped into model or session data"
-        );
-    }
+    assert!(
+        !text.contains("fixture-token"),
+        "credential escaped into model or session data"
+    );
 }
 
 async fn mixed_provider_roundtrip(
     root_model: HarnessModel,
     child_model: HarnessModel,
-    subscription: bool,
+    child_count: usize,
     clean_spawn: bool,
 ) {
     crate::install_tls_provider();
-    let child_count = if subscription { 2 } else { 1 };
     let directory = tempdir().unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let origin = format!("http://{}", listener.local_addr().unwrap());
     let config_path = directory.path().join("config.toml");
-    fs::write(&config_path, format!("[agent]\nweb_search = false\nimage_generation = false\n[claude]\nenabled = true\nauth = {:?}\napi_base_url = {origin:?}\nsubscription_store = \"private/auth\"\n[subagents]\nenabled = true\n", if subscription { "subscription" } else { "api-key" })).unwrap();
+    fs::write(&config_path, format!("[agent]\nweb_search = false\nimage_generation = false\n[claude]\nenabled = true\napi_base_url = {origin:?}\n[subagents]\nenabled = true\n")).unwrap();
     let config = Config::load(ConfigOverrides {
         path: Some(config_path),
         auth_file: Some(directory.path().join("unused-auth.json")),
@@ -540,64 +459,21 @@ async fn mixed_provider_roundtrip(
     if clean_spawn {
         native_claude.thinking = Thinking::High;
     }
-    let claude_sessions = if matches!(child_model, HarnessModel::Claude(_)) {
-        child_count
-    } else {
-        1
-    };
     let provider = Provider {
         script: native_claude.clone(),
-        subscription,
-        exchanges: Arc::default(),
-        rejected: Arc::default(),
-        rejection_barrier: Arc::new(Barrier::new(claude_sessions)),
         parent_entered: Arc::default(),
         parent_release: Arc::default(),
     };
     let router = Router::new()
         .route("/messages", post(messages))
-        .route("/token", post(token))
-        .route("/profile", get(profile))
         .with_state(provider.clone());
     let server = tokio::spawn(async move {
         axum::serve(listener, router).await.unwrap();
     });
-    let claude_subscription = if subscription {
-        let auth = ClaudeAuth::with_config(
-            config.claude().subscription_store().to_path_buf(),
-            ClaudeSubscriptionConfig {
-                authorize_url: format!("{origin}/authorize"),
-                token_url: format!("{origin}/token"),
-                profile_url: format!("{origin}/profile"),
-                manual_redirect_uri: format!("{origin}/callback"),
-                allow_loopback_http: true,
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        let manager = auth.subscription();
-        let login = manager.begin_login(ClaudeLoginMode::Manual).await.unwrap();
-        let state = reqwest::Url::parse(&login.authorization_url)
-            .unwrap()
-            .query_pairs()
-            .find(|(name, _)| name == "state")
-            .unwrap()
-            .1
-            .into_owned();
-        manager
-            .complete_login(&format!("synthetic-code#{state}"))
-            .await
-            .unwrap();
-        assert!(Arc::ptr_eq(&manager, &auth.subscription()));
-        Some(Arc::new(auth))
-    } else {
-        None
-    };
     let (subagents, mut updates) = Subagents::new(child_count);
     subagents.set_claude_enabled(config.claude().enabled());
     let recipe = Arc::new(AgentRecipe {
         config: config.clone(),
-        claude_subscription,
         workspace: directory.path().to_owned(),
         tools: Tools::builder()
             .web_search(false)
@@ -616,12 +492,24 @@ async fn mixed_provider_roundtrip(
             assert_eq!(model, child_model);
             assert_eq!(thinking, Thinking::Medium);
             assert!(!fast);
-            let (agent, events) = build_agent(model, &child_recipe, child_codex.clone())?;
+            let (agent, events) = build_agent(
+                AgentContext { model, thinking },
+                &child_recipe,
+                child_codex.clone(),
+            )?;
             captured_children.lock().unwrap().push(agent.clone());
             Ok((agent, events))
         })
         .unwrap();
-    let (root, mut events) = build_agent(root_model, &recipe, codex.clone()).unwrap();
+    let (root, mut events) = build_agent(
+        AgentContext {
+            model: root_model,
+            thinking: Thinking::Medium,
+        },
+        &recipe,
+        codex.clone(),
+    )
+    .unwrap();
     if clean_spawn {
         root.set_thinking(Thinking::High).await.unwrap();
         for model in [
@@ -717,15 +605,6 @@ async fn mixed_provider_roundtrip(
             assert_no_credentials(&request.to_string());
         }
     }
-    if subscription {
-        assert_eq!(provider.rejected.load(Ordering::SeqCst), claude_sessions);
-        assert_eq!(
-            provider.exchanges.load(Ordering::SeqCst),
-            2,
-            "one login exchange and one shared refresh"
-        );
-    }
-
     let clean = if clean_spawn {
         let held_parent = root.prompt("held-parent-task").await.unwrap();
         timeout(Duration::from_secs(5), provider.parent_entered.notified())

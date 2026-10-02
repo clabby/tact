@@ -4,8 +4,6 @@
 
 #[path = "../app/browser.rs"]
 pub(crate) mod browser;
-#[path = "../app/claude_auth.rs"]
-pub(crate) mod claude_auth;
 #[path = "../app/config.rs"]
 pub(crate) mod config;
 #[path = "../app/error.rs"]
@@ -17,7 +15,7 @@ pub(crate) mod model;
 #[path = "../app/secret.rs"]
 pub(crate) mod secret;
 mod app {
-    pub(crate) use crate::{browser, claude_auth, config, error, installation, model, secret};
+    pub(crate) use crate::{browser, config, error, installation, model, secret};
 }
 
 #[cfg(test)]

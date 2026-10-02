@@ -2,7 +2,6 @@
 
 mod auth;
 pub(crate) mod browser;
-pub(crate) mod claude_auth;
 mod cli;
 pub(crate) mod config;
 pub(crate) mod error;

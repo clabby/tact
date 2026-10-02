@@ -162,35 +162,16 @@ pub(crate) struct AuthConfig {
     file: PathBuf,
 }
 
-/// The credential source selected for Claude requests.
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub(crate) enum ClaudeAuthMode {
-    ApiKey,
-    #[default]
-    Subscription,
-}
-
 /// Availability and endpoint for Claude models.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct ClaudeConfig {
     enabled: bool,
-    auth: ClaudeAuthMode,
-    subscription_store: PathBuf,
     #[serde(serialize_with = "serialize_optional_string")]
     api_base_url: Option<String>,
 }
 
 impl ClaudeConfig {
-    pub(crate) const fn auth(&self) -> ClaudeAuthMode {
-        self.auth
-    }
-
-    pub(crate) fn subscription_store(&self) -> &Path {
-        &self.subscription_store
-    }
-
     pub(crate) fn ensure_enabled(&self) -> Result<()> {
         if !self.enabled {
             return Err(ConfigError::ClaudeDisabled.into());
@@ -506,16 +487,6 @@ impl Config {
         )
         .unwrap_or_else(|| current_dir.to_path_buf());
         let config_dir = path.parent().unwrap_or(Path::new("."));
-        file.claude.subscription_store = if file.claude.subscription_store.as_os_str().is_empty() {
-            environment
-                .tact_home
-                .clone()
-                .or_else(|| environment.home.as_ref().map(|home| home.join(".tact")))
-                .unwrap_or_else(|| config_dir.to_path_buf())
-                .join("claude/private/auth")
-        } else {
-            Self::resolve_path(file.claude.subscription_store, config_dir)
-        };
         let mcp_servers = file
             .mcp_servers
             .into_iter()
@@ -1705,58 +1676,32 @@ mod tests {
     }
 
     #[test]
-    fn claude_auth_selection_and_store_path_round_trip() {
-        let directory = tempdir().unwrap();
-        let config_path = directory.path().join("config.toml");
-        fs::write(&config_path, "[claude]\nenabled = true\nauth = 'subscription'\nsubscription_store = 'private/auth'\n").unwrap();
-        let config = load_config_at(config_path, directory.path()).unwrap();
-        assert_eq!(config.claude().auth(), super::ClaudeAuthMode::Subscription);
-        assert_eq!(
-            config.claude().subscription_store(),
-            directory.path().join("private/auth")
-        );
-        assert!(!config.claude().subscription_store().exists());
-        let rendered = config.to_toml().unwrap();
-        let restored = load_config(&rendered).unwrap();
-        assert_eq!(
-            restored.claude().auth(),
-            super::ClaudeAuthMode::Subscription
-        );
-        assert_eq!(
-            restored.claude().subscription_store(),
-            config.claude().subscription_store()
-        );
-        assert!(!rendered.contains("ANTHROPIC_API_KEY"));
-        assert!(load_config("[claude]\nauth = 'auto'").is_err());
+    fn legacy_claude_authentication_configuration_is_rejected() {
+        for legacy in [
+            "auth = 'subscription'",
+            "auth = 'api-key'",
+            "subscription_store = 'private/auth'",
+            "auth = 'subscription'\nsubscription_store = 'private/auth'",
+        ] {
+            let error = load_config(&format!("[claude]\nenabled = true\n{legacy}\n")).unwrap_err();
+            assert!(matches!(error, Error::Config(ConfigError::Parse { .. })));
+        }
     }
 
     #[test]
-    fn claude_defaults_use_subscription_and_tact_home_store_without_accessing_it() {
-        let directory = tempdir().unwrap();
-        let tact_home = directory.path().join("private-tact-home");
-        let config = Config::load_with(
-            ConfigOverrides::default(),
-            Environment {
-                tact_home: Some(tact_home.clone()),
-                codex_home: Some(directory.path().join("codex")),
-                ..Environment::default()
-            },
-            directory.path(),
-        )
-        .unwrap();
-        assert_eq!(config.claude().auth(), super::ClaudeAuthMode::Subscription);
+    fn claude_api_key_configuration_round_trips() {
+        let config =
+            load_config("[claude]\nenabled = true\napi_base_url = 'http://localhost:8080'\n")
+                .unwrap();
+        let rendered = config.to_toml().unwrap();
+        let restored = load_config(&rendered).unwrap();
+        assert!(restored.claude().enabled());
         assert_eq!(
-            config.claude().subscription_store(),
-            tact_home.join("claude/private/auth")
+            restored.claude().api_base_url(),
+            Some("http://localhost:8080")
         );
-        assert!(!tact_home.exists());
-        assert_eq!(
-            load_config("[claude]\nauth = 'api-key'")
-                .unwrap()
-                .claude()
-                .auth(),
-            super::ClaudeAuthMode::ApiKey
-        );
+        assert!(!rendered.contains("subscription"));
+        assert!(!rendered.contains("ANTHROPIC_API_KEY"));
     }
 
     #[test]
@@ -1841,12 +1786,8 @@ mod tests {
             ],
         );
         assert_table_fields(&rendered["auth"], &["mode", "file"]);
-        assert_table_fields(
-            &rendered["claude"],
-            &["enabled", "auth", "subscription_store", "api_base_url"],
-        );
+        assert_table_fields(&rendered["claude"], &["enabled", "api_base_url"]);
         assert_eq!(rendered["claude"]["enabled"].as_bool(), Some(false));
-        assert_eq!(rendered["claude"]["auth"].as_str(), Some("subscription"));
         assert_table_fields(
             &rendered["agent"],
             &[
