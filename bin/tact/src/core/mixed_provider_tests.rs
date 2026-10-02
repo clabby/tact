@@ -224,6 +224,7 @@ fn build_agent(
     context: AgentContext,
     recipe: &Arc<AgentRecipe>,
     codex: Script,
+    fast_mode: bool,
 ) -> Result<(Nanocodex, AgentEvents), NanocodexError> {
     let AgentContext { model, thinking } = context;
     let tools = install_agent_tools(
@@ -242,6 +243,7 @@ fn build_agent(
         Nanocodex::builder(openai)
             .model(model)
             .thinking(thinking)
+            .fast_mode(fast_mode && context.model.supports_fast_mode())
             .workspace(&recipe.workspace)
             .tools(tools)
             .build()
@@ -249,14 +251,18 @@ fn build_agent(
         let client = recipe
             .claude_client(|| Ok(Some(SecretString::new("sk-ant-usr-fixture-token".into()))))?;
         let clean_recipe = Arc::clone(recipe);
-        let spawn: claude::CleanAgentFactory =
-            Arc::new(move |context| build_agent(context, &clean_recipe, codex.clone()));
+        let spawn: claude::CleanAgentFactory = Arc::new(move |context, fast_mode| {
+            build_agent(context, &clean_recipe, codex.clone(), fast_mode)
+        });
         claude::build_client(
             client,
             context,
             &recipe.workspace,
             Arc::from("Use the installed tools."),
-            claude::ClaudeSession::default(),
+            claude::ClaudeSession {
+                fast_mode,
+                ..claude::ClaudeSession::default()
+            },
             claude::tool_runtime(&recipe.config, &recipe.workspace, &tools)?,
             Some(spawn),
         )
@@ -378,6 +384,7 @@ async fn api_key_messages_reject_redirects_without_forwarding_credentials() {
             },
             &recipe,
             Script::new(HarnessModel::Codex(CodexModel::Sol), String::new()),
+            false,
         )
         .unwrap();
         let result = timeout(Duration::from_secs(5), async {
@@ -499,6 +506,7 @@ async fn mixed_provider_roundtrip(
                 AgentContext { model, thinking },
                 &child_recipe,
                 child_codex.clone(),
+                fast,
             )?;
             captured_children.lock().unwrap().push(agent.clone());
             Ok((agent, events))
@@ -511,6 +519,7 @@ async fn mixed_provider_roundtrip(
         },
         &recipe,
         codex.clone(),
+        false,
     )
     .unwrap();
     if clean_spawn {

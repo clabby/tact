@@ -133,7 +133,11 @@ thinking = "medium"
 With Claude enabled, `--model` and the model picker also accept `opus-5.5` and `fable-5.1`
 (native IDs `claude-opus-5-5` and `claude-fable-5-1`). Both support `low`, `medium`, `high`,
 `xhigh`, and `max`. Their default efforts are medium for Opus and high for Fable.
-Claude uses standard mode without Codex priority processing. Web search and image generation
+Claude uses standard reasoning mode. Opus 5.5 supports fast mode through `agent.fast_mode = true`
+or the **Fast mode** action; Fable 5.1 does not. Fast mode defaults to off and uses Anthropic's
+[premium fast-mode service](https://platform.claude.com/docs/en/build-with-claude/fast-mode),
+which requires access on the API account. Changes apply to subsequently accepted turns.
+Web search and image generation
 remain available to Claude and use OpenAI credentials. For an Anthropic-only setup, set
 `agent.web_search = false` and `agent.image_generation = false`. Codex children need the
 configured OpenAI credentials.

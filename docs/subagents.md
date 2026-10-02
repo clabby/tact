@@ -73,8 +73,9 @@ therefore installed independently of the subagent tool group.
 does not inherit the caller's conversation. Each child model's instructions are composed from the
 configuration and skill catalog when the root runtime starts. This includes configured replacement
 and appended instructions. A resumed parent keeps its saved instructions; its new children use
-these freshly composed instructions. Codex children inherit the configured reasoning mode and fast-mode
-setting where supported. Claude children use standard mode without Codex priority processing. Their initial prompt contains:
+these freshly composed instructions. Children inherit the configured fast-mode setting where the
+selected model supports it, including Opus 5.5 but excluding Fable 5.1. Codex children also inherit
+the configured reasoning mode; Claude children use standard reasoning mode. Their initial prompt contains:
 
 - the assigned role and task;
 - its agent ID and place in the task tree;

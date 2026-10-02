@@ -1801,7 +1801,7 @@ mod tests {
     }
 
     #[test]
-    fn claude_models_hide_codex_mode_indicators() {
+    fn claude_models_show_only_supported_mode_indicators() {
         for model in [
             Model::Claude(ClaudeModel::Opus55),
             Model::Claude(ClaudeModel::Fable51),
@@ -1813,7 +1813,10 @@ mod tests {
             let terminal = render(&mut composer, 72, 5);
             let top = &rows(&terminal)[0];
             assert!(top.contains(model.as_str()));
-            assert!(!top.contains('⚡'));
+            assert_eq!(
+                top.contains('⚡'),
+                model == Model::Claude(ClaudeModel::Opus55)
+            );
             assert!(!top.contains(" pro"));
         }
     }

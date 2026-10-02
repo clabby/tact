@@ -646,6 +646,7 @@ impl AgentRecipe {
         snapshot: Option<AgentSnapshot>,
     ) -> nanocodex::agent::Result<(Nanocodex, AgentEvents)> {
         let AgentContext { model, thinking } = context;
+        let fast_mode = fast_mode && model.supports_fast_mode();
         if let Some(snapshot) = &snapshot {
             snapshot.validate_identity(model, session_id)?;
         }
@@ -714,7 +715,7 @@ impl AgentRecipe {
             let runtime = claude::tool_runtime(config, &self.workspace, &tool_factory()?)?;
             let recipe = Arc::clone(self);
             let clean_instructions = Arc::clone(&instructions);
-            let spawn: claude::CleanAgentFactory = Arc::new(move |context| {
+            let spawn: claude::CleanAgentFactory = Arc::new(move |context, fast_mode| {
                 recipe.build(
                     context,
                     supported_reasoning_mode(context.model, reasoning_mode),
@@ -732,6 +733,7 @@ impl AgentRecipe {
                 claude::ClaudeSession {
                     session_id,
                     snapshot,
+                    fast_mode,
                 },
                 runtime,
                 Some(spawn),

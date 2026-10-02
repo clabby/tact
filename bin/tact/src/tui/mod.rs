@@ -3015,7 +3015,10 @@ mod tests {
                 true,
                 model,
             );
-            assert!(!settings.fast_mode);
+            assert_eq!(
+                settings.fast_mode,
+                model == Model::Claude(ClaudeModel::Opus55)
+            );
         }
         assert!(
             super::PaneSettings::new(

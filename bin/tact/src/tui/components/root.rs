@@ -3181,7 +3181,7 @@ mod tests {
         MouseEventKind,
     };
     use nanocodex::{
-        HarnessModel as Model, Model as CodexModel, Thinking,
+        ClaudeModel, HarnessModel as Model, Model as CodexModel, Thinking,
         agent::{
             events::{AgentEvent, AgentEventKind},
             input::{PromptInput, UserInput},
@@ -6088,25 +6088,50 @@ mod tests {
 
     #[test]
     fn fast_mode_action_toggles_the_runtime_setting() {
+        for model in [
+            Model::Codex(CodexModel::Sol),
+            Model::Claude(ClaudeModel::Opus55),
+        ] {
+            let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+            root.set_model(model);
+            root.update(key(KeyCode::Char('/'), KeyModifiers::NONE));
+            for character in "fast mode".chars() {
+                root.update(key(KeyCode::Char(character), KeyModifiers::NONE));
+            }
+
+            let enabled = root.update(key(KeyCode::Enter, KeyModifiers::NONE));
+
+            assert_eq!(enabled.effects, [RootEffect::SetFastMode(true)]);
+            assert!(root.composer().fast_mode());
+            assert!(root.overlay.is_none());
+
+            root.update(key(KeyCode::Char('/'), KeyModifiers::NONE));
+            for character in "priority".chars() {
+                root.update(key(KeyCode::Char(character), KeyModifiers::NONE));
+            }
+            let disabled = root.update(key(KeyCode::Enter, KeyModifiers::NONE));
+
+            assert_eq!(disabled.effects, [RootEffect::SetFastMode(false)]);
+            assert!(!root.composer().fast_mode());
+        }
+    }
+
+    #[test]
+    fn fable_model_clears_fast_mode_and_disables_its_action() {
         let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        root.set_model(Model::Claude(ClaudeModel::Opus55));
+        root.set_fast_mode(true);
+        root.set_model(Model::Claude(ClaudeModel::Fable51));
+        assert!(!root.composer().fast_mode());
         root.update(key(KeyCode::Char('/'), KeyModifiers::NONE));
         for character in "fast mode".chars() {
             root.update(key(KeyCode::Char(character), KeyModifiers::NONE));
         }
-
-        let enabled = root.update(key(KeyCode::Enter, KeyModifiers::NONE));
-
-        assert_eq!(enabled.effects, [RootEffect::SetFastMode(true)]);
-        assert!(root.composer().fast_mode());
-        assert!(root.overlay.is_none());
-
-        root.update(key(KeyCode::Char('/'), KeyModifiers::NONE));
-        for character in "priority".chars() {
-            root.update(key(KeyCode::Char(character), KeyModifiers::NONE));
-        }
-        let disabled = root.update(key(KeyCode::Enter, KeyModifiers::NONE));
-
-        assert_eq!(disabled.effects, [RootEffect::SetFastMode(false)]);
+        assert!(
+            root.update(key(KeyCode::Enter, KeyModifiers::NONE))
+                .effects
+                .is_empty()
+        );
         assert!(!root.composer().fast_mode());
     }
 

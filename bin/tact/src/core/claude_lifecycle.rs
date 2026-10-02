@@ -22,12 +22,14 @@ pub(super) fn wrap(
     native: Nanocodex,
     bridge: Arc<Bridge>,
     spawn: Option<CleanAgentFactory>,
+    fast_mode: bool,
 ) -> (Nanocodex, AgentEvents) {
     let (runtime, events) = BackendRuntime::new(native.session_id());
     let state = Arc::new(State {
         native,
         bridge,
         spawn,
+        fast_mode: AtomicBool::new(fast_mode),
         active: AsyncMutex::new(None),
         stopped: AtomicBool::new(false),
         shutdown: AsyncMutex::new(()),
@@ -45,6 +47,8 @@ struct State {
     native: Nanocodex,
     bridge: Arc<Bridge>,
     spawn: Option<CleanAgentFactory>,
+    // Clean recipes inherit the last successfully applied fast-mode setting.
+    fast_mode: AtomicBool,
     active: AsyncMutex<Option<Active>>,
     stopped: AtomicBool,
     shutdown: AsyncMutex<()>,
@@ -306,8 +310,13 @@ impl LifecycleBackend for Driver {
     fn set_fast_mode(&self, enabled: bool) -> BackendFuture<Result<()>> {
         let state = self.0.clone();
         Box::pin(async move {
-            let _idle = state.idle().await?;
-            state.native.set_fast_mode(enabled).await
+            let _admission = state.active.lock().await;
+            if state.stopped.load(Ordering::Acquire) {
+                return Err(NanocodexError::AgentStopped);
+            }
+            state.native.set_fast_mode(enabled).await?;
+            state.fast_mode.store(enabled, Ordering::Release);
+            Ok(())
         })
     }
     fn compact(&self) -> BackendFuture<Result<()>> {
@@ -361,10 +370,13 @@ impl LifecycleBackend for Driver {
                     "Claude clean spawn cannot change models; use spawn_agent",
                 ));
             }
-            spawn(AgentContext {
-                model,
-                thinking: options.selected_thinking().unwrap_or(thinking),
-            })
+            spawn(
+                AgentContext {
+                    model,
+                    thinking: options.selected_thinking().unwrap_or(thinking),
+                },
+                state.fast_mode.load(Ordering::Acquire),
+            )
         })
     }
     fn fork(

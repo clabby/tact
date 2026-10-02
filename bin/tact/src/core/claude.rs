@@ -80,12 +80,13 @@ pub(super) fn tool_runtime(
 }
 
 pub(super) type CleanAgentFactory =
-    Arc<dyn Fn(AgentContext) -> Result<(Nanocodex, AgentEvents)> + Send + Sync>;
+    Arc<dyn Fn(AgentContext, bool) -> Result<(Nanocodex, AgentEvents)> + Send + Sync>;
 
 #[derive(Default)]
 pub(super) struct ClaudeSession<'a> {
     pub(super) session_id: Option<&'a str>,
     pub(super) snapshot: Option<AgentSnapshot>,
+    pub(super) fast_mode: bool,
 }
 
 pub(super) fn build_client(
@@ -100,6 +101,7 @@ pub(super) fn build_client(
     let ClaudeSession {
         session_id,
         snapshot,
+        fast_mode,
     } = session;
     let AgentContext { model, thinking } = context;
     if let Some(snapshot) = &snapshot {
@@ -135,11 +137,14 @@ pub(super) fn build_client(
         builder = builder.restore_runtime(snapshot.into_claude()?)?;
     }
     // Adaptive reasoning and generated code share the output-token budget.
-    builder = builder.thinking(thinking)?.max_tokens(128_000);
+    builder = builder
+        .thinking(thinking)?
+        .fast_mode(fast_mode)
+        .max_tokens(128_000);
     let (native, native_events) = builder.build()?;
     // The wrapper consumes each native turn's mirrored stream instead.
     drop(native_events);
-    Ok(lifecycle::wrap(native, bridge, spawn))
+    Ok(lifecycle::wrap(native, bridge, spawn, fast_mode))
 }
 
 struct TurnEvents {
@@ -459,7 +464,7 @@ mod tests {
         routing::post,
     };
     use nanocodex::{
-        Tool,
+        ClaudeModel, Tool,
         tools::contract::{ToolContext, ToolOutput, ToolResult, async_trait},
     };
     use std::{
@@ -477,10 +482,12 @@ mod tests {
     struct ServerState {
         responses: Mutex<VecDeque<ResponseFactory>>,
         seen: mpsc::UnboundedSender<Value>,
+        headers: mpsc::UnboundedSender<HeaderMap>,
     }
     struct Server {
         endpoint: String,
         requests: mpsc::UnboundedReceiver<Value>,
+        headers: mpsc::UnboundedReceiver<HeaderMap>,
         task: JoinHandle<()>,
     }
     impl Drop for Server {
@@ -492,9 +499,11 @@ mod tests {
     async fn server(responses: Vec<ResponseFactory>) -> Server {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let (seen, requests) = mpsc::unbounded_channel();
+        let (headers, received_headers) = mpsc::unbounded_channel();
         let state = Arc::new(ServerState {
             responses: Mutex::new(responses.into()),
             seen,
+            headers,
         });
         let router = Router::new()
             .route(
@@ -505,6 +514,7 @@ mod tests {
                      Json(body): Json<Value>| async move {
                         assert_eq!(headers.get("x-api-key").unwrap(), "fixture-key");
                         assert!(!headers.contains_key("authorization"));
+                        let _ = state.headers.send(headers);
                         let _ = state.seen.send(body.clone());
                         let next = state.responses.lock().unwrap().pop_front();
                         let content = match next {
@@ -524,6 +534,7 @@ mod tests {
         Server {
             endpoint,
             requests,
+            headers: received_headers,
             task,
         }
     }
@@ -573,6 +584,7 @@ mod tests {
             ClaudeSession {
                 session_id: Some("claude-fixture"),
                 snapshot: None,
+                ..ClaudeSession::default()
             },
             ToolRuntime::new_with_tools(workspace, None, None, &tools),
             None,
@@ -581,6 +593,187 @@ mod tests {
     }
     fn tools() -> nanocodex::tools::ToolsBuilder {
         Tools::builder().web_search(false).image_generation(false)
+    }
+
+    fn fast_agent(
+        endpoint: &str,
+        workspace: &Path,
+        model: ClaudeModel,
+        session: ClaudeSession<'_>,
+        spawn: Option<CleanAgentFactory>,
+    ) -> (Nanocodex, AgentEvents) {
+        let selected = tools().build().unwrap();
+        build_client(
+            ClaudeClient::new(reqwest::Client::new(), endpoint, "fixture-key"),
+            AgentContext {
+                model: Model::Claude(model),
+                thinking: Thinking::Medium,
+            },
+            workspace,
+            Arc::from("test instructions"),
+            session,
+            ToolRuntime::new_with_tools(workspace, None, None, &selected),
+            spawn,
+        )
+        .unwrap()
+    }
+
+    async fn assert_fast_request(server: &mut Server, agent: &Nanocodex, expected: bool) -> Value {
+        timeout(
+            Duration::from_secs(10),
+            agent.prompt("fast fixture").await.unwrap(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_fast_wire(server, expected).await
+    }
+
+    async fn assert_fast_wire(server: &mut Server, expected: bool) -> Value {
+        let request = server.requests.recv().await.unwrap();
+        let headers = server.headers.recv().await.unwrap();
+        assert_eq!(request.get("speed"), expected.then_some(&json!("fast")));
+        let beta = headers
+            .get("anthropic-beta")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.split(',').any(|beta| beta == "fast-mode-2026-02-01"));
+        assert_eq!(beta, expected);
+        request
+    }
+
+    #[tokio::test]
+    async fn fast_mode_initial_toggle_and_restore_follow_selected_model() {
+        for model in [ClaudeModel::Opus55, ClaudeModel::Fable51] {
+            let mut server = server((0..4).map(|_| final_text()).collect()).await;
+            let workspace = tempfile::tempdir().unwrap();
+            let supported = model == ClaudeModel::Opus55;
+            let (original, _) = fast_agent(
+                &server.endpoint,
+                workspace.path(),
+                model,
+                ClaudeSession {
+                    fast_mode: true,
+                    ..ClaudeSession::default()
+                },
+                None,
+            );
+            assert_fast_request(&mut server, &original, supported).await;
+            original.set_fast_mode(false).await.unwrap();
+            assert_fast_request(&mut server, &original, false).await;
+            let snapshot =
+                AgentSnapshot::from_claude(original.runtime_snapshot().await.unwrap()).unwrap();
+            original.shutdown().await.unwrap();
+            let (restored, _) = fast_agent(
+                &server.endpoint,
+                workspace.path(),
+                model,
+                ClaudeSession {
+                    snapshot: Some(snapshot),
+                    fast_mode: true,
+                    ..ClaudeSession::default()
+                },
+                None,
+            );
+            let resumed = assert_fast_request(&mut server, &restored, supported).await;
+            assert!(resumed["messages"].as_array().unwrap().len() > 1);
+            let snapshot =
+                AgentSnapshot::from_claude(restored.runtime_snapshot().await.unwrap()).unwrap();
+            restored.shutdown().await.unwrap();
+            let (standard, _) = fast_agent(
+                &server.endpoint,
+                workspace.path(),
+                model,
+                ClaudeSession {
+                    snapshot: Some(snapshot),
+                    fast_mode: false,
+                    ..ClaudeSession::default()
+                },
+                None,
+            );
+            assert_fast_request(&mut server, &standard, false).await;
+            standard.shutdown().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn fast_mode_toggle_during_active_turn_applies_to_successor() {
+        let release = Arc::new(Notify::new());
+        let gate = Arc::clone(&release);
+        let held: ResponseFactory = Box::new(move |_| {
+            let gate = Arc::clone(&gate);
+            Box::pin(async move {
+                gate.notified().await;
+                json!({"type":"text","text":"finished"})
+            })
+        });
+        let mut server = server(vec![held, final_text()]).await;
+        let workspace = tempfile::tempdir().unwrap();
+        let (agent, _) = fast_agent(
+            &server.endpoint,
+            workspace.path(),
+            ClaudeModel::Opus55,
+            ClaudeSession {
+                fast_mode: true,
+                ..ClaudeSession::default()
+            },
+            None,
+        );
+        let active = agent.prompt("held fast turn").await.unwrap();
+        timeout(Duration::from_secs(10), assert_fast_wire(&mut server, true))
+            .await
+            .unwrap();
+        timeout(Duration::from_secs(10), agent.set_fast_mode(false))
+            .await
+            .unwrap()
+            .unwrap();
+        release.notify_one();
+        timeout(Duration::from_secs(10), active)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_fast_request(&mut server, &agent, false).await;
+        agent.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn clean_spawn_inherits_live_fast_mode_without_conversation() {
+        let mut server = server((0..3).map(|_| final_text()).collect()).await;
+        let workspace = tempfile::tempdir().unwrap();
+        let endpoint = server.endpoint.clone();
+        let child_workspace = workspace.path().to_path_buf();
+        let model = ClaudeModel::Opus55;
+        let spawn: CleanAgentFactory = Arc::new(move |context, fast_mode| {
+            let Model::Claude(model) = context.model else {
+                unreachable!()
+            };
+            Ok(fast_agent(
+                &endpoint,
+                &child_workspace,
+                model,
+                ClaudeSession {
+                    fast_mode,
+                    ..ClaudeSession::default()
+                },
+                None,
+            ))
+        });
+        let (parent, _) = fast_agent(
+            &server.endpoint,
+            workspace.path(),
+            model,
+            ClaudeSession::default(),
+            Some(spawn),
+        );
+        assert_fast_request(&mut server, &parent, false).await;
+        for enabled in [true, false] {
+            parent.set_fast_mode(enabled).await.unwrap();
+            let (child, _) = parent.spawn().await.unwrap();
+            assert_ne!(child.session_id(), parent.session_id());
+            let request = assert_fast_request(&mut server, &child, enabled).await;
+            assert_eq!(request["messages"].as_array().unwrap().len(), 1);
+            child.shutdown().await.unwrap();
+        }
+        parent.shutdown().await.unwrap();
     }
 
     struct Inspect(mpsc::UnboundedSender<(String, String, String, String, Option<u64>)>);
@@ -682,6 +875,7 @@ mod tests {
             ClaudeSession {
                 session_id: Some("compaction-fixture"),
                 snapshot: Some(snapshot),
+                ..ClaudeSession::default()
             },
             ToolRuntime::new_with_tools(workspace.path(), None, None, &selected),
             None,
@@ -868,6 +1062,7 @@ mod tests {
             ClaudeSession {
                 session_id: Some("claude-fixture"),
                 snapshot: Some(snapshot),
+                ..ClaudeSession::default()
             },
             ToolRuntime::new_with_tools(workspace.path(), None, None, &selected),
             None,
