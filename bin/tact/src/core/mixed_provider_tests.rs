@@ -158,6 +158,10 @@ async fn messages(
     assert_eq!(headers["x-api-key"], "sk-ant-usr-fixture-token");
     assert_eq!(headers["anthropic-workspace-id"], "wrkspc_fixture");
     assert!(!headers.contains_key(header::AUTHORIZATION));
+    assert_eq!(
+        request["cache_control"],
+        json!({"type":"ephemeral","ttl":"1h"})
+    );
     if request["messages"]
         .as_array()
         .unwrap()

@@ -137,6 +137,10 @@ Claude uses standard reasoning mode. Opus 5.5 supports fast mode through `agent.
 or the **Fast mode** action; Fable 5.1 does not. Fast mode defaults to off and uses Anthropic's
 [premium fast-mode service](https://platform.claude.com/docs/en/build-with-claude/fast-mode),
 which requires access on the API account. Changes apply to subsequently accepted turns.
+Claude requests use automatic prompt caching with a one-hour TTL, covering the system prompt,
+tools, and reusable conversation prefix across long tool calls and user pauses. Cache hits refresh
+the TTL. One-hour cache writes cost twice the base input rate; repeated prefixes use discounted
+cache reads. Expiration affects cost and latency, not the saved conversation.
 Web search and image generation
 remain available to Claude and use OpenAI credentials. For an Anthropic-only setup, set
 `agent.web_search = false` and `agent.image_generation = false`. Codex children need the

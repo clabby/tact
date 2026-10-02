@@ -140,6 +140,7 @@ pub(super) fn build_client(
     builder = builder
         .thinking(thinking)?
         .fast_mode(fast_mode)
+        .cache_one_hour()
         .max_tokens(128_000);
     let (native, native_events) = builder.build()?;
     // The wrapper consumes each native turn's mirrored stream instead.
@@ -894,6 +895,10 @@ mod tests {
         assert!(call.starts_with("after-compact/"));
         let first = server.requests.recv().await.unwrap();
         assert_eq!(first["max_tokens"], 128_000);
+        assert_eq!(
+            first["cache_control"],
+            json!({"type":"ephemeral","ttl":"1h"})
+        );
         let summary = server.requests.recv().await.unwrap();
         assert!(
             summary["messages"].as_array().unwrap().last().unwrap()["content"][0]["text"]
@@ -998,10 +1003,16 @@ mod tests {
         let first = server.requests.recv().await.unwrap();
         assert_eq!(first["max_tokens"], 128_000);
         assert_eq!(
+            first["cache_control"],
+            json!({"type":"ephemeral","ttl":"1h"})
+        );
+        assert_eq!(
             first["tools"][0]["input_schema"]["properties"]["code"]["type"],
             "string"
         );
         let second = server.requests.recv().await.unwrap();
+        assert_eq!(second["cache_control"], first["cache_control"]);
+        assert_eq!(second["system"], first["system"]);
         let content =
             &second["messages"].as_array().unwrap().last().unwrap()["content"][0]["content"];
         assert!(
@@ -1036,10 +1047,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn restore_applies_requested_effort_after_native_checkpoint() {
+    async fn restore_applies_effort_and_caching_after_native_checkpoint() {
         let mut server = server(vec![final_text(), final_text()]).await;
         let workspace = tempfile::tempdir().unwrap();
-        let (original, _) = agent(&server, workspace.path(), tools().build().unwrap());
+        let (original, _) = Nanocodex::builder(Claude::new(
+            ClaudeClient::new(reqwest::Client::new(), &server.endpoint, "fixture-key"),
+            nanocodex::ClaudeModel::Opus55.as_str(),
+        ))
+        .system("test instructions")
+        .thinking(Thinking::Medium)
+        .unwrap()
+        .build()
+        .unwrap();
         timeout(
             Duration::from_secs(20),
             original.prompt("first").await.unwrap(),
@@ -1060,7 +1079,7 @@ mod tests {
             workspace.path(),
             Arc::from("test instructions"),
             ClaudeSession {
-                session_id: Some("claude-fixture"),
+                session_id: Some(original.session_id()),
                 snapshot: Some(snapshot),
                 ..ClaudeSession::default()
             },
@@ -1075,13 +1094,21 @@ mod tests {
         .await
         .unwrap()
         .unwrap();
-        assert_eq!(
-            server.requests.recv().await.unwrap()["output_config"]["effort"],
-            "medium"
-        );
+        let first = server.requests.recv().await.unwrap();
+        assert_eq!(first["output_config"]["effort"], "medium");
+        assert!(first.get("cache_control").is_none());
         let resumed = server.requests.recv().await.unwrap();
         assert_eq!(resumed["output_config"]["effort"], "high");
         assert_eq!(resumed["max_tokens"], 128_000);
+        assert_eq!(
+            resumed["cache_control"],
+            json!({"type":"ephemeral","ttl":"1h"})
+        );
+        assert_eq!(resumed["system"][0]["text"], first["system"]);
+        assert_eq!(
+            resumed["system"][0]["cache_control"],
+            json!({"type":"ephemeral","ttl":"1h"})
+        );
         assert!(resumed["messages"].as_array().unwrap().len() > 1);
         restored.shutdown().await.unwrap();
     }
