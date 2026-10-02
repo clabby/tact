@@ -15,7 +15,9 @@ const OPENAI_API_KEY: &str = "OPENAI_API_KEY";
 
 pub(crate) fn validate_claude_api_key(key: &SecretString) -> AuthResult<()> {
     let value = key.expose_secret();
-    if !value.starts_with("sk-ant-api") || value.bytes().any(|byte| byte.is_ascii_whitespace()) {
+    if !(value.starts_with("sk-ant-api") || value.starts_with("sk-ant-usr-"))
+        || value.bytes().any(|byte| byte.is_ascii_whitespace())
+    {
         return Err(AuthError::InvalidClaudeApiKey);
     }
     Ok(())
@@ -164,16 +166,18 @@ mod tests {
             "",
             " sk-ant-api03-sentinel",
             "sk-ant-api03-sentinel\n",
+            " sk-ant-usr-sentinel",
+            "sk-ant-usr-sentinel\n",
+            "sk-ant-usr",
         ] {
             let error = super::validate_claude_api_key(&SecretString::new(value.into()))
                 .expect_err("only API keys are accepted");
             assert!(matches!(error, AuthError::InvalidClaudeApiKey));
             assert!(!error.to_string().contains("sentinel"));
         }
-        assert!(
-            super::validate_claude_api_key(&SecretString::new("sk-ant-api03-sentinel".into()))
-                .is_ok()
-        );
+        for value in ["sk-ant-api03-sentinel", "sk-ant-usr-sentinel"] {
+            assert!(super::validate_claude_api_key(&SecretString::new(value.into())).is_ok());
+        }
     }
 
     use super::SelectedAuth;

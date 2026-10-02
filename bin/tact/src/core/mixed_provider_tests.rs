@@ -155,7 +155,7 @@ async fn messages(
     headers: HeaderMap,
     Json(request): Json<Value>,
 ) -> Response {
-    assert_eq!(headers["x-api-key"], "sk-ant-api03-fixture-token");
+    assert_eq!(headers["x-api-key"], "sk-ant-usr-fixture-token");
     assert!(!headers.contains_key(header::AUTHORIZATION));
     if request["messages"]
         .as_array()
@@ -246,7 +246,7 @@ fn build_agent(
             .build()
     } else {
         let client = recipe
-            .claude_client(|| Ok(Some(SecretString::new("sk-ant-api03-fixture-token".into()))))?;
+            .claude_client(|| Ok(Some(SecretString::new("sk-ant-usr-fixture-token".into()))))?;
         let clean_recipe = Arc::clone(recipe);
         let spawn: claude::CleanAgentFactory =
             Arc::new(move |context| build_agent(context, &clean_recipe, codex.clone()));
@@ -320,7 +320,7 @@ async fn api_key_messages_reject_redirects_without_forwarding_credentials() {
                 post(move |headers: HeaderMap| {
                     let requests = initial.clone();
                     async move {
-                        assert_eq!(headers["x-api-key"], "sk-ant-api03-fixture-token");
+                        assert_eq!(headers["x-api-key"], "sk-ant-usr-fixture-token");
                         requests.fetch_add(1, Ordering::SeqCst);
                         (status, [(header::LOCATION, "/redirected")])
                     }
@@ -331,7 +331,7 @@ async fn api_key_messages_reject_redirects_without_forwarding_credentials() {
                 any(move |headers: HeaderMap| {
                     let requests = destination.clone();
                     async move {
-                        assert_eq!(headers["x-api-key"], "sk-ant-api03-fixture-token");
+                        assert_eq!(headers["x-api-key"], "sk-ant-usr-fixture-token");
                         requests.fetch_add(1, Ordering::SeqCst);
                         StatusCode::OK
                     }
@@ -400,7 +400,7 @@ async fn api_key_messages_reject_redirects_without_forwarding_credentials() {
         // The default transport follows this fixture's redirect and forwards the key.
         reqwest::Client::new()
             .post(format!("{origin}/messages"))
-            .header("x-api-key", "sk-ant-api03-fixture-token")
+            .header("x-api-key", "sk-ant-usr-fixture-token")
             .send()
             .await
             .unwrap()

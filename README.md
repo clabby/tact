@@ -145,7 +145,7 @@ tact auth --provider claude status
 ```
 
 Claude supports API-key authentication only. Tact does not log into Claude subscriptions or
-read subscription credentials. Keys must use Anthropic's `sk-ant-api` prefix; subscription
+read subscription credentials. Keys must use the `sk-ant-api` or `sk-ant-usr-` prefix; subscription
 tokens and other credential formats are rejected before a client is constructed. This checks
 the credential format, not its validity with Anthropic. The key stays in the environment and
 is not written to config, model prompts, or session checkpoints. Codex can independently use a ChatGPT subscription
