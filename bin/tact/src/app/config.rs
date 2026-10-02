@@ -162,16 +162,25 @@ pub(crate) struct AuthConfig {
     file: PathBuf,
 }
 
-/// Availability and endpoint for Claude models.
+/// Availability, endpoint, and API workspace for Claude models.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct ClaudeConfig {
     enabled: bool,
     #[serde(serialize_with = "serialize_optional_string")]
     api_base_url: Option<String>,
+    #[serde(serialize_with = "serialize_optional_string")]
+    workspace_id: Option<String>,
 }
 
 impl ClaudeConfig {
+    pub(crate) fn workspace_id(&self) -> Option<&str> {
+        self.workspace_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+    }
+
     pub(crate) fn ensure_enabled(&self) -> Result<()> {
         if !self.enabled {
             return Err(ConfigError::ClaudeDisabled.into());
@@ -1691,11 +1700,12 @@ mod tests {
     #[test]
     fn claude_api_key_configuration_round_trips() {
         let config =
-            load_config("[claude]\nenabled = true\napi_base_url = 'http://localhost:8080'\n")
+            load_config("[claude]\nenabled = true\napi_base_url = 'http://localhost:8080'\nworkspace_id = 'wrkspc_fixture'\n")
                 .unwrap();
         let rendered = config.to_toml().unwrap();
         let restored = load_config(&rendered).unwrap();
         assert!(restored.claude().enabled());
+        assert_eq!(restored.claude().workspace_id(), Some("wrkspc_fixture"));
         assert_eq!(
             restored.claude().api_base_url(),
             Some("http://localhost:8080")
@@ -1719,6 +1729,7 @@ mod tests {
             let restored = load_config(&config.to_toml().unwrap()).unwrap();
             assert_eq!(restored.agent().model(), config.agent().model());
             assert!(restored.claude().api_base_url().is_none());
+            assert!(restored.claude().workspace_id().is_none());
         }
     }
 
@@ -1786,7 +1797,10 @@ mod tests {
             ],
         );
         assert_table_fields(&rendered["auth"], &["mode", "file"]);
-        assert_table_fields(&rendered["claude"], &["enabled", "api_base_url"]);
+        assert_table_fields(
+            &rendered["claude"],
+            &["enabled", "api_base_url", "workspace_id"],
+        );
         assert_eq!(rendered["claude"]["enabled"].as_bool(), Some(false));
         assert_table_fields(
             &rendered["agent"],

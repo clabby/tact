@@ -151,7 +151,12 @@ the credential format, not its validity with Anthropic. The key stays in the env
 is not written to config, model prompts, or session checkpoints. Codex can independently use a ChatGPT subscription
 through `tact auth --provider codex login`, including in mixed-provider task trees.
 
-The `[claude]` section accepts `enabled` and the optional `api_base_url`. Unknown fields,
+For an API key that is not scoped to a workspace, set `claude.workspace_id` to the ID from
+[Console Settings → Workspaces](https://platform.claude.com/settings/workspaces). Tact sends it
+as `anthropic-workspace-id` for Claude roots, children, and auxiliary agents. Workspace-scoped
+keys can leave this unset. Start a new session after changing it.
+
+The `[claude]` section accepts `enabled`, `api_base_url`, and `workspace_id`. Unknown fields,
 including the retired `auth` and `subscription_store` settings, are rejected. Remove those
 fields and explicitly supply `ANTHROPIC_API_KEY` to use Claude.
 

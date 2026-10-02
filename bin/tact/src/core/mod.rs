@@ -28,6 +28,7 @@ use nanocodex::{
 };
 #[cfg(feature = "harbor-evals")]
 use orchestration::{OrchestrationRecorder, RunOutcome};
+use reqwest::header::{HeaderMap, HeaderValue};
 use std::{
     io,
     io::Write,
@@ -758,7 +759,17 @@ impl AgentRecipe {
             })?;
         crate::app::auth::validate_claude_api_key(&key)
             .map_err(|error| NanocodexError::InvalidRequest(error.to_string()))?;
+        let mut headers = HeaderMap::new();
+        if let Some(workspace_id) = config.workspace_id() {
+            let value = HeaderValue::from_str(workspace_id).map_err(|_| {
+                NanocodexError::InvalidRequest(
+                    "claude.workspace_id is not a valid HTTP header value".into(),
+                )
+            })?;
+            headers.insert("anthropic-workspace-id", value);
+        }
         let http = reqwest::Client::builder()
+            .default_headers(headers)
             .redirect(reqwest::redirect::Policy::none())
             .retry(reqwest::retry::never())
             .build()

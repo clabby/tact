@@ -11,6 +11,8 @@ Claude requires `ANTHROPIC_API_KEY`. `tact auth --provider claude status` report
 that environment variable is configured without displaying its value. Claude login and logout
 commands explain how to configure or unset the key; they do not perform authentication.
 Tact does not read or store Claude subscription credentials.
+Keys without a workspace scope require `claude.workspace_id`, which supplies the
+`anthropic-workspace-id` request header. Unset or blank values omit the header.
 Both status and client construction accept the `sk-ant-api` and `sk-ant-usr-` key prefixes
 and reject other formats, including OAuth access and refresh tokens placed in `ANTHROPIC_API_KEY`.
 

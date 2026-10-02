@@ -156,6 +156,7 @@ async fn messages(
     Json(request): Json<Value>,
 ) -> Response {
     assert_eq!(headers["x-api-key"], "sk-ant-usr-fixture-token");
+    assert_eq!(headers["anthropic-workspace-id"], "wrkspc_fixture");
     assert!(!headers.contains_key(header::AUTHORIZATION));
     if request["messages"]
         .as_array()
@@ -321,6 +322,7 @@ async fn api_key_messages_reject_redirects_without_forwarding_credentials() {
                     let requests = initial.clone();
                     async move {
                         assert_eq!(headers["x-api-key"], "sk-ant-usr-fixture-token");
+                        assert!(!headers.contains_key("anthropic-workspace-id"));
                         requests.fetch_add(1, Ordering::SeqCst);
                         (status, [(header::LOCATION, "/redirected")])
                     }
@@ -332,6 +334,7 @@ async fn api_key_messages_reject_redirects_without_forwarding_credentials() {
                     let requests = destination.clone();
                     async move {
                         assert_eq!(headers["x-api-key"], "sk-ant-usr-fixture-token");
+                        assert!(!headers.contains_key("anthropic-workspace-id"));
                         requests.fetch_add(1, Ordering::SeqCst);
                         StatusCode::OK
                     }
@@ -430,7 +433,7 @@ async fn mixed_provider_roundtrip(
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let origin = format!("http://{}", listener.local_addr().unwrap());
     let config_path = directory.path().join("config.toml");
-    fs::write(&config_path, format!("[agent]\nweb_search = false\nimage_generation = false\n[claude]\nenabled = true\napi_base_url = {origin:?}\n[subagents]\nenabled = true\n")).unwrap();
+    fs::write(&config_path, format!("[agent]\nweb_search = false\nimage_generation = false\n[claude]\nenabled = true\napi_base_url = {origin:?}\nworkspace_id = \"wrkspc_fixture\"\n[subagents]\nenabled = true\n")).unwrap();
     let config = Config::load(ConfigOverrides {
         path: Some(config_path),
         auth_file: Some(directory.path().join("unused-auth.json")),
