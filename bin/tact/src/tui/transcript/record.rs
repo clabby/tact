@@ -1,4 +1,7 @@
-use crate::app::config::{ReasoningEffort, ReasoningMode};
+use crate::{
+    app::config::{ReasoningEffort, ReasoningMode},
+    tui::context::ContextBudget,
+};
 use nanocodex::agent::events::{AgentEvent, AgentEventKind};
 use serde::{Deserialize, Serialize};
 use serde_json::value::{RawValue, to_raw_value};
@@ -99,6 +102,7 @@ pub(crate) enum LocalEvent {
         from: bool,
         to: bool,
     },
+    ContextBudget(ContextBudget),
     ContextObserved {
         prompt_cache: bool,
         previous_response: bool,
@@ -215,6 +219,7 @@ impl TranscriptRecord {
                 "fast_mode.changed",
                 to_raw_value(&FastModeChanged { from, to })?,
             ),
+            LocalEvent::ContextBudget(budget) => ("context.budget", to_raw_value(&budget)?),
             LocalEvent::ContextObserved {
                 prompt_cache,
                 previous_response,

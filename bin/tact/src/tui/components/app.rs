@@ -9,6 +9,7 @@ use crate::{
     app::config::{ReasoningEffort, ReasoningMode, TuiConfig},
     core::extensions::Skill,
     tui::{
+        context::ContextBudget,
         pane::PaneId,
         session::{RecentPrompt, SessionSummary},
         theme::{ColorScheme, Theme, ThemeMode},
@@ -33,6 +34,10 @@ const SPLIT_HINT: &str = " mouse: focus · Ctrl+C: clear · Ctrl+C×2: close ";
 const MIN_SPLIT_HINT_WIDTH: u16 = 60;
 
 pub(crate) enum AppEvent {
+    ContextBudget {
+        pane: PaneId,
+        budget: ContextBudget,
+    },
     Terminal(Event),
     PasteImage(String),
     Transcript {
@@ -242,6 +247,9 @@ impl AppNode {
             AppEvent::Terminal(event) => self.update_terminal(event),
             AppEvent::PasteImage(data_url) => {
                 self.update_root(self.focus, RootEvent::PasteImage(data_url))
+            }
+            AppEvent::ContextBudget { pane, budget } => {
+                self.update_root(pane, RootEvent::ContextBudget(budget))
             }
             AppEvent::Transcript { pane, record } => {
                 self.update_root(pane, RootEvent::Transcript(record))
@@ -894,6 +902,33 @@ mod tests {
     }
 
     #[test]
+    fn replacing_claude_with_codex_resets_context_capacity() {
+        let mut app = app();
+        app.pane_mut(PaneId::Main)
+            .unwrap()
+            .component_mut()
+            .set_model(Model::Claude(nanocodex::ClaudeModel::Opus55));
+        app.update(AppEvent::ContextBudget {
+            pane: PaneId::Main,
+            budget: crate::tui::context::ContextBudget {
+                active_tokens: 0,
+                window_tokens: 1_000_000,
+            },
+        });
+        assert!(rendered(&mut app, 80, 12).contains("0%/1m"));
+        app.update(AppEvent::NewSessionReady {
+            pane: PaneId::Main,
+            effort: ReasoningEffort::Medium,
+            reasoning_mode: ReasoningMode::Standard,
+            fast_mode: false,
+            model: Model::Codex(CodexModel::Sol),
+            draft_reset: DraftReset::Preserve,
+            skills: Arc::from([]),
+        });
+        assert!(rendered(&mut app, 80, 12).contains("0%/272k"));
+    }
+
+    #[test]
     fn model_session_replacement_preserves_the_preferred_reasoning_mode() {
         let mut app = app();
         app.set_preferred_reasoning_mode(ReasoningMode::Pro);
@@ -1048,7 +1083,13 @@ mod tests {
     #[test]
     fn fork_inherits_the_primary_context_usage() {
         let mut app = app();
-        app.update_root(PaneId::Main, RootEvent::ContextTokens(136_000));
+        app.update(AppEvent::ContextBudget {
+            pane: PaneId::Main,
+            budget: crate::tui::context::ContextBudget {
+                active_tokens: 136_000,
+                window_tokens: 272_000,
+            },
+        });
 
         app.update(control('t'));
 

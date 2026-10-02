@@ -32,7 +32,7 @@ use crate::{
     },
     core::extensions::Skill,
     tui::{
-        context::ContextDiagnostics,
+        context::{ContextBudget, ContextDiagnostics},
         prompt::Submission,
         session::{RecentPrompt, SessionSummary},
         theme::{Theme, ThemeMode},
@@ -141,8 +141,7 @@ impl Notification {
 pub(crate) enum RootEvent {
     Terminal(Event),
     PasteImage(String),
-    #[cfg(test)]
-    ContextTokens(u64),
+    ContextBudget(ContextBudget),
     Transcript(Arc<TranscriptRecord>),
     AgentStreamClosed,
     Subagent(AgentUpdate),
@@ -409,9 +408,10 @@ impl RootNode {
         root.transcript = Node::new(self.transcript.component().fork_snapshot());
         root.composer
             .component_mut()
-            .update(ComposerEvent::ContextTokens(
-                self.composer.component().context_tokens(),
-            ));
+            .update(ComposerEvent::ContextBudget(ContextBudget {
+                active_tokens: self.composer.component().context_tokens(),
+                window_tokens: self.context_diagnostics.model_window_tokens,
+            }));
         root.set_fast_mode(self.composer.component().fast_mode());
         root.set_model(self.composer.component().model());
         root.set_reasoning_modes(
@@ -627,7 +627,10 @@ impl RootNode {
             let _ = self
                 .composer
                 .component_mut()
-                .update(ComposerEvent::ContextTokens(tokens));
+                .update(ComposerEvent::ContextBudget(ContextBudget {
+                    active_tokens: tokens,
+                    window_tokens: self.context_diagnostics.model_window_tokens,
+                }));
         }
         self.thread = ThreadState::Started;
     }
@@ -2577,11 +2580,18 @@ impl Component for RootNode {
                     )
                 }
             }
-            #[cfg(test)]
-            RootEvent::ContextTokens(tokens) => self.update_composer(
-                ComposerEvent::ContextTokens(tokens),
-                RenderRequest::Streaming,
-            ),
+            RootEvent::ContextBudget(budget) => {
+                self.context_diagnostics.set_native_budget(budget);
+                if let Some(Overlay::ContextDiagnostics(panel)) = &mut self.overlay {
+                    panel
+                        .component_mut()
+                        .replace(self.context_diagnostics.clone());
+                }
+                self.update_composer(
+                    ComposerEvent::ContextBudget(budget),
+                    RenderRequest::Streaming,
+                )
+            }
             RootEvent::Transcript(record) => {
                 if let Some(prompt) = recent_prompt(&record) {
                     self.recent_prompts.push(prompt);
@@ -2603,7 +2613,10 @@ impl Component for RootNode {
                 }
                 if let Some(tokens) = observation.completed_tokens {
                     let context = self.update_composer(
-                        ComposerEvent::ContextTokens(tokens),
+                        ComposerEvent::ContextBudget(ContextBudget {
+                            active_tokens: tokens,
+                            window_tokens: self.context_diagnostics.model_window_tokens,
+                        }),
                         RenderRequest::Streaming,
                     );
                     update.effects.extend(context.effects);
@@ -3332,6 +3345,43 @@ mod tests {
             projection,
         );
         assert_eq!(root.tui.mouse_scroll_lines.get(), 1);
+    }
+
+    #[test]
+    fn native_context_budget_updates_live_and_restored_meter() {
+        let record: TranscriptRecord = serde_json::from_value(json!({
+            "schema_version": 2, "sequence": 1, "recorded_at_unix_ms": 1,
+            "source": "tact", "type": "context.budget",
+            "payload": {"active_tokens": 125_000, "window_tokens": 1_000_000}
+        }))
+        .unwrap();
+        let record = Arc::new(record);
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        root.set_model(Model::Claude(nanocodex::ClaudeModel::Opus55));
+        root.update(super::RootEvent::ContextBudget(
+            crate::tui::context::ContextBudget {
+                active_tokens: 0,
+                window_tokens: 900_000,
+            },
+        ));
+        assert!(render_root_text(&mut root, 80, 12).contains("0%/900k"));
+        assert!(root.context_diagnostics.auto_compact_token_limit.is_none());
+        root.update(super::RootEvent::Transcript(record.clone()));
+        assert_eq!(root.context_diagnostics.active_tokens, Some(125_000));
+        assert!(root.context_diagnostics.usage.is_none());
+        assert_eq!(root.composer().context_tokens(), 125_000);
+        assert!(render_root_text(&mut root, 80, 12).contains("13%/1m"));
+        root.restore_session(
+            Path::new("/work"),
+            ReasoningEffort::Medium,
+            ReasoningMode::Standard,
+            ReasoningMode::Standard,
+            false,
+            vec![record],
+        );
+        root.set_model(Model::Claude(nanocodex::ClaudeModel::Opus55));
+        assert_eq!(root.composer().context_tokens(), 125_000);
+        assert!(render_root_text(&mut root, 80, 12).contains("13%/1m"));
     }
 
     #[test]

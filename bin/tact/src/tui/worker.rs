@@ -5,6 +5,7 @@ use crate::{
     core::{IMAGE_RENDERING_INSTRUCTIONS, MEMORY_REVIEW_CHECKPOINT},
     tui::{
         components::QueueId,
+        context::ContextBudget,
         pane::PaneId,
         prompt::Submission,
         session::AgentSnapshot,
@@ -109,6 +110,11 @@ pub(crate) enum AuxiliaryError {
 }
 
 pub(crate) enum WorkerEvent {
+    ContextBudget {
+        pane: PaneId,
+        session_id: String,
+        budget: ContextBudget,
+    },
     TurnAccepted {
         pane: PaneId,
         id: TurnId,
@@ -175,23 +181,67 @@ struct CompletedTurn {
 
 async fn complete_turn(
     agent: &Nanocodex,
-    result: nanocodex::agent::TurnResult,
+    result: Result<nanocodex::agent::TurnResult, NanocodexError>,
     claude: bool,
     auxiliary: bool,
+    pane: PaneId,
+    updates: &mpsc::UnboundedSender<WorkerEvent>,
 ) -> TurnResult {
     let snapshot = if auxiliary {
-        None
+        Ok(None)
     } else if claude {
-        Some(AgentSnapshot::from_claude(agent.runtime_snapshot().await?)?)
+        agent
+            .runtime_snapshot()
+            .await
+            .and_then(AgentSnapshot::from_claude)
+            .map(Some)
     } else {
-        result
-            .snapshot()
-            .map(|snapshot| AgentSnapshot::Codex(Box::new(snapshot)))
+        Ok(result
+            .as_ref()
+            .ok()
+            .and_then(|result| result.snapshot())
+            .map(|snapshot| AgentSnapshot::Codex(Box::new(snapshot))))
     };
+    if let Ok(Some(snapshot)) = &snapshot {
+        publish_context_budget(snapshot, agent.session_id(), pane, updates);
+    }
+    // Failed turns may update telemetry but never replace the successful resume checkpoint.
+    let result = result?;
     Ok(CompletedTurn {
         final_message: result.final_message().to_owned(),
-        snapshot: snapshot.map(Box::new),
+        snapshot: snapshot?.map(Box::new),
     })
+}
+
+fn publish_context_budget(
+    snapshot: &AgentSnapshot,
+    session_id: &str,
+    pane: PaneId,
+    updates: &mpsc::UnboundedSender<WorkerEvent>,
+) {
+    if let Some(budget) = snapshot.context_budget() {
+        drop(updates.send(WorkerEvent::ContextBudget {
+            pane,
+            session_id: session_id.to_owned(),
+            budget,
+        }));
+    }
+}
+
+async fn observe_initial_context(
+    agent: &Nanocodex,
+    model: HarnessModel,
+    pane: PaneId,
+    updates: &mpsc::UnboundedSender<WorkerEvent>,
+) {
+    if matches!(model, HarnessModel::Claude(_))
+        && let Ok(snapshot) = agent
+            .runtime_snapshot()
+            .await
+            .and_then(AgentSnapshot::from_claude)
+    {
+        publish_context_budget(&snapshot, agent.session_id(), pane, updates);
+    }
 }
 
 enum TurnPurpose {
@@ -426,6 +476,7 @@ async fn run(
     updates: mpsc::UnboundedSender<WorkerEvent>,
     shutdown: CancellationToken,
 ) {
+    observe_initial_context(&agent, context.model, PaneId::Main, &updates).await;
     let mut main = Some((PaneId::Main, PaneAgent { agent, context }));
     let mut fork = None::<(PaneId, PaneAgent)>;
     let mut controls = HashMap::<TurnKey, TurnControl>::new();
@@ -531,6 +582,7 @@ async fn run(
                         memory_review,
                     } => {
                         debug_assert!(!controls.keys().any(|key| key.pane == pane));
+                        observe_initial_context(&agent, context.model, pane, &updates).await;
                         let retired = if main.as_ref().is_some_and(|(id, _)| *id == pane) {
                             memory_reviews.insert(pane, memory_review);
                             main.replace((pane, PaneAgent { agent, context })).map(|(_, agent)| agent.agent)
@@ -830,6 +882,7 @@ async fn start_turn(
     controls.insert(key, control);
     let checkpoint_agent = agent.agent.clone();
     let claude = matches!(agent.context.model, HarnessModel::Claude(_));
+    let context_updates = updates.clone();
     turns.spawn(async move {
         let mut turn = Box::pin(turn);
         let (cancelled_by_scope, result) = match shutdown {
@@ -844,10 +897,15 @@ async fn start_turn(
             }
             None => (false, turn.await),
         };
-        let result = match result {
-            Ok(result) => complete_turn(&checkpoint_agent, result, claude, auxiliary).await,
-            Err(error) => Err(error),
-        };
+        let result = complete_turn(
+            &checkpoint_agent,
+            result,
+            claude,
+            auxiliary,
+            pane,
+            &context_updates,
+        )
+        .await;
         if let Some(agent) = isolated_agent {
             drop(agent.shutdown().await);
         }
@@ -945,11 +1003,17 @@ async fn steer_turn(
             };
             let checkpoint_agent = agent.agent.clone();
             let claude = matches!(agent.context.model, HarnessModel::Claude(_));
+            let context_updates = updates.clone();
             turns.spawn(async move {
-                let result = match turn.await {
-                    Ok(result) => complete_turn(&checkpoint_agent, result, claude, false).await,
-                    Err(error) => Err(error),
-                };
+                let result = complete_turn(
+                    &checkpoint_agent,
+                    turn.await,
+                    claude,
+                    false,
+                    pane,
+                    &context_updates,
+                )
+                .await;
                 (key, TurnPurpose::Conversation, false, result)
             });
             controls.insert(key, control);
@@ -1277,11 +1341,21 @@ mod tests {
         ].into_iter().map(|frame| format!("event: {}\ndata: {frame}\n\n", frame["type"].as_str().unwrap())).collect::<String>();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (requested, mut requests) = mpsc::unbounded_channel();
         let router = Router::new().route(
             "/v1/messages",
             post(move || {
                 let frames = frames.clone();
-                async move { ([("content-type", "text/event-stream")], frames) }
+                let index = calls.fetch_add(1, Ordering::Relaxed);
+                let requested = requested.clone();
+                async move {
+                    requested.send(()).unwrap();
+                    if index > 0 {
+                        pending::<()>().await;
+                    }
+                    ([("content-type", "text/event-stream")], frames)
+                }
             }),
         );
         let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
@@ -1301,6 +1375,7 @@ mod tests {
         .build()
         .unwrap();
         let expected_session = agent.session_id().to_owned();
+        let probe = agent.clone();
         let shutdown = CancellationToken::new();
         let (commands, mut updates) = spawn(
             agent,
@@ -1312,6 +1387,23 @@ mod tests {
             shutdown.clone(),
         );
         let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
+        match timeout(Duration::from_secs(5), updates.recv())
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            WorkerEvent::ContextBudget {
+                pane,
+                session_id,
+                budget,
+            } => {
+                assert_eq!(pane, PaneId::Main);
+                assert_eq!(session_id, expected_session);
+                assert_eq!(budget.active_tokens, 0);
+                assert_eq!(budget.window_tokens, 1_000_000);
+            }
+            _ => panic!("expected native context before the first prompt"),
+        }
         commands
             .send(WorkerCommand::Submit {
                 pane: PaneId::Main,
@@ -1320,13 +1412,25 @@ mod tests {
             })
             .unwrap();
         let snapshot = timeout(Duration::from_secs(5), async {
+            let mut latest = None;
             loop {
-                if let Some(WorkerEvent::TurnFinished {
-                    snapshot, error, ..
-                }) = updates.recv().await
-                {
-                    assert!(error.is_none(), "{error:?}");
-                    break snapshot.expect("successful Claude turn must checkpoint");
+                match updates.recv().await.unwrap() {
+                    WorkerEvent::ContextBudget {
+                        session_id, budget, ..
+                    } => {
+                        assert_eq!(session_id, expected_session);
+                        latest = Some(budget);
+                    }
+                    WorkerEvent::TurnFinished {
+                        snapshot, error, ..
+                    } => {
+                        assert!(error.is_none(), "{error:?}");
+                        let snapshot = snapshot.expect("successful Claude turn must checkpoint");
+                        assert_eq!(latest, snapshot.context_budget());
+                        assert_eq!(latest.unwrap().active_tokens, 11);
+                        break snapshot;
+                    }
+                    _ => {}
                 }
             }
         })
@@ -1364,6 +1468,48 @@ mod tests {
         })
         .await
         .unwrap();
+        requests.recv().await.unwrap();
+        commands
+            .send(WorkerCommand::Submit {
+                pane: PaneId::Main,
+                id: TurnId::new(2),
+                prompt: "cancel this turn".to_owned().into(),
+            })
+            .unwrap();
+        timeout(Duration::from_secs(5), requests.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        commands
+            .send(WorkerCommand::CancelAll(PaneId::Main))
+            .unwrap();
+        let budget = timeout(Duration::from_secs(5), async {
+            let mut latest = None;
+            loop {
+                match updates.recv().await.unwrap() {
+                    WorkerEvent::ContextBudget { budget, .. } => latest = Some(budget),
+                    WorkerEvent::TurnFinished {
+                        id,
+                        snapshot,
+                        error,
+                        ..
+                    } if id == TurnId::new(2) => {
+                        assert!(snapshot.is_none());
+                        assert!(error.is_none());
+                        break latest.expect("cancelled turn must publish current context");
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .unwrap();
+        let snapshot = crate::tui::session::AgentSnapshot::from_claude(
+            probe.runtime_snapshot().await.unwrap(),
+        )
+        .unwrap();
+        assert_eq!(Some(budget), snapshot.context_budget());
+        drop(probe);
         shutdown.cancel();
         drain.await.unwrap();
         server.abort();

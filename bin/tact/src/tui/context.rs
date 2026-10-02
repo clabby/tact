@@ -6,7 +6,7 @@ use nanocodex::oai::{
     events::{CompactionStarted, ModelCallCompleted},
     responses::Usage,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -17,6 +17,12 @@ pub(crate) enum ContinuationMode {
 
 pub(crate) const MODEL_WINDOW_TOKENS: u64 = oai::CONTEXT_WINDOW_TOKENS;
 pub(crate) const AUTO_COMPACT_TOKEN_LIMIT: u64 = 244_800;
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct ContextBudget {
+    pub(crate) active_tokens: u64,
+    pub(crate) window_tokens: u64,
+}
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct TokenUsage {
@@ -45,7 +51,8 @@ pub(crate) enum CompactionTrigger {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ContextDiagnostics {
     pub(crate) model_window_tokens: u64,
-    pub(crate) auto_compact_token_limit: u64,
+    pub(crate) auto_compact_token_limit: Option<u64>,
+    pub(crate) active_tokens: Option<u64>,
     pub(crate) usage: Option<TokenUsage>,
     pub(crate) continuation: Option<ContinuationMode>,
     pub(crate) prompt_cache: Option<bool>,
@@ -64,7 +71,8 @@ impl Default for ContextDiagnostics {
     fn default() -> Self {
         Self {
             model_window_tokens: MODEL_WINDOW_TOKENS,
-            auto_compact_token_limit: AUTO_COMPACT_TOKEN_LIMIT,
+            auto_compact_token_limit: Some(AUTO_COMPACT_TOKEN_LIMIT),
+            active_tokens: None,
             usage: None,
             continuation: None,
             prompt_cache: None,
@@ -98,12 +106,30 @@ impl ContextDiagnostics {
                 self.observe_compaction_completed(record);
                 ContextObservation::default()
             }
+            ("tact", "context.budget") => {
+                let Ok(budget) = record.decode_payload::<ContextBudget>() else {
+                    return ContextObservation::default();
+                };
+                if budget.window_tokens == 0 {
+                    return ContextObservation::default();
+                }
+                self.set_native_budget(budget);
+                ContextObservation {
+                    completed_tokens: Some(budget.active_tokens),
+                }
+            }
             ("tact", "context.observed") => {
                 self.observe_context_snapshot(record);
                 ContextObservation::default()
             }
             _ => ContextObservation::default(),
         }
+    }
+
+    pub(crate) fn set_native_budget(&mut self, budget: ContextBudget) {
+        self.model_window_tokens = budget.window_tokens;
+        self.active_tokens = Some(budget.active_tokens);
+        self.auto_compact_token_limit = None;
     }
 
     fn observe_api_event(&mut self, record: &TranscriptRecord) -> ContextObservation {
@@ -182,6 +208,7 @@ impl ContextDiagnostics {
         let Some(usage) = usage else {
             return;
         };
+        self.active_tokens = Some(usage.total);
         self.usage = Some(usage);
         if self.awaiting_post_compaction_usage {
             if let Some(compaction) = &mut self.last_compaction {
@@ -197,7 +224,7 @@ impl ContextDiagnostics {
             .as_ref()
             .map(|payload| payload.active_context_tokens);
         if let Some(payload) = payload {
-            self.auto_compact_token_limit = payload.auto_compact_token_limit;
+            self.auto_compact_token_limit = Some(payload.auto_compact_token_limit);
         }
         self.compactions_started = self.compactions_started.saturating_add(1);
         self.last_compaction = Some(CompactionDiagnostics {
@@ -395,7 +422,7 @@ mod tests {
             diagnostics.model_window_tokens,
             nanocodex::oai::CONTEXT_WINDOW_TOKENS
         );
-        assert_eq!(diagnostics.auto_compact_token_limit, 200_000);
+        assert_eq!(diagnostics.auto_compact_token_limit, Some(200_000));
         assert_eq!(
             diagnostics.last_compaction.unwrap().before_tokens,
             Some(900)

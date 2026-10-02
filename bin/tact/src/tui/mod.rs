@@ -914,6 +914,18 @@ pub(crate) async fn run(
                         worker_stopped = true;
                         worker_error = error;
                     }
+                    WorkerEvent::ContextBudget { pane, session_id, budget } => {
+                        let Some(runtime) = panes.get_mut(&pane).filter(|runtime| runtime.session_id == session_id) else {
+                            continue;
+                        };
+                        let update = if runtime.journal_mut()?.is_empty() {
+                            app.update(AppEvent::ContextBudget { pane, budget })
+                        } else {
+                            let record = runtime.journal_mut()?.append_local(LocalEvent::ContextBudget(budget))?;
+                            app.update(AppEvent::Transcript { pane, record })
+                        };
+                        schedule(update, &mut scheduler);
+                    }
                     WorkerEvent::TurnAccepted { pane, id } => {
                         review_turn_active.store(true, Ordering::Release);
                         if herdr_turns.insert((pane, id)) && herdr_turns.len() == 1 {

@@ -51,14 +51,14 @@ impl ContextDiagnosticsPanel {
             .add_modifier(Modifier::BOLD);
         let mut lines = vec![Line::styled(" Context budget", heading)];
         let usage = self.diagnostics.usage;
-        let current = usage.map(|usage| usage.total);
+        let current = self.diagnostics.active_tokens;
         lines.extend([
             fact(
                 " Window / auto compact",
                 format!(
                     "{} / {}",
                     format_count(self.diagnostics.model_window_tokens),
-                    format_count(self.diagnostics.auto_compact_token_limit)
+                    optional_count(self.diagnostics.auto_compact_token_limit)
                 ),
                 label,
                 value,
@@ -82,11 +82,11 @@ impl ContextDiagnosticsPanel {
             ),
             fact(
                 " Until auto compact",
-                optional_count(current.map(|tokens| {
-                    self.diagnostics
-                        .auto_compact_token_limit
-                        .saturating_sub(tokens)
-                })),
+                optional_count(
+                    current
+                        .zip(self.diagnostics.auto_compact_token_limit)
+                        .map(|(tokens, limit)| limit.saturating_sub(tokens)),
+                ),
                 label,
                 value,
             ),
@@ -322,6 +322,7 @@ mod tests {
             output: 2_000,
             total: 102_000,
         });
+        diagnostics.active_tokens = Some(102_000);
         diagnostics.continuation = Some(ContinuationMode::PreviousResponse);
         diagnostics.prompt_cache = Some(true);
         let mut panel = ContextDiagnosticsPanel::new(diagnostics);
@@ -341,6 +342,7 @@ mod tests {
         for expected in [
             "Context diagnostics",
             "100,000 (75,000/25,000)",
+            "102,000 / 170,000",
             "previous response",
             "Context categories",
             "Pending shell",

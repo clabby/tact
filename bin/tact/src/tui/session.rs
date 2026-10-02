@@ -1,5 +1,6 @@
 //! V2 resumable session storage and indexed session discovery.
 
+use super::context::ContextBudget;
 use crate::{
     app::{
         config::{ReasoningEffort, ReasoningMode},
@@ -64,6 +65,38 @@ pub(crate) struct ClaudeSnapshot {
 }
 
 impl AgentSnapshot {
+    /// Reads count-only metadata from the pinned Claude checkpoint schema.
+    pub(crate) fn context_budget(&self) -> Option<ContextBudget> {
+        #[derive(Deserialize)]
+        struct Native {
+            version: u32,
+            context_window_tokens: u64,
+            snapshot: Snapshot,
+        }
+        #[derive(Deserialize)]
+        struct Snapshot {
+            provider: String,
+            version: u32,
+            conversation: Conversation,
+        }
+        #[derive(Deserialize)]
+        struct Conversation {
+            active_context_tokens: u64,
+        }
+        let Self::Claude(snapshot) = self else {
+            return None;
+        };
+        let native: Native = serde_json::from_str(&snapshot.payload).ok()?;
+        (native.version == 1
+            && native.snapshot.version == 1
+            && native.snapshot.provider == "claude"
+            && native.context_window_tokens > 0)
+            .then_some(ContextBudget {
+                active_tokens: native.snapshot.conversation.active_context_tokens,
+                window_tokens: native.context_window_tokens,
+            })
+    }
+
     pub(crate) fn validate_identity(
         &self,
         model: Model,
@@ -951,6 +984,50 @@ mod tests {
         }))
         .unwrap();
         assert!(snapshot.into_claude().is_err());
+    }
+
+    #[test]
+    fn native_context_budget_requires_supported_complete_metadata() {
+        let payload = serde_json::json!({
+            "version": 1, "context_window_tokens": 1_000_000,
+            "snapshot": {"version": 1, "provider": "claude",
+                "conversation": {"active_context_tokens": 42}}
+        });
+        let project = |payload: serde_json::Value| {
+            super::AgentSnapshot::from_claude(nanocodex::agent::ChildSnapshot::Native {
+                model: nanocodex::HarnessModel::Claude(nanocodex::ClaudeModel::Opus55),
+                session_id: "context-fixture".into(),
+                thinking: nanocodex::Thinking::Medium,
+                payload: payload.to_string(),
+                has_conversation: true,
+            })
+            .unwrap()
+            .context_budget()
+        };
+        assert_eq!(
+            project(payload.clone()),
+            Some(super::ContextBudget {
+                active_tokens: 42,
+                window_tokens: 1_000_000,
+            })
+        );
+        for path in ["/version", "/snapshot/version"] {
+            let mut invalid = payload.clone();
+            *invalid.pointer_mut(path).unwrap() = serde_json::json!(2);
+            assert_eq!(project(invalid), None);
+        }
+        for (path, value) in [
+            ("/context_window_tokens", serde_json::json!(0)),
+            ("/snapshot/provider", serde_json::json!("other")),
+            (
+                "/snapshot/conversation/active_context_tokens",
+                serde_json::Value::Null,
+            ),
+        ] {
+            let mut invalid = payload.clone();
+            *invalid.pointer_mut(path).unwrap() = value;
+            assert_eq!(project(invalid), None);
+        }
     }
 
     #[test]

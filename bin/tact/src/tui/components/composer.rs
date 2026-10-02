@@ -11,7 +11,7 @@ use super::{
 use crate::{
     app::config::{ReasoningEffort, ReasoningMode},
     tui::{
-        context::MODEL_WINDOW_TOKENS,
+        context::{ContextBudget, MODEL_WINDOW_TOKENS},
         format::{
             format_turn_duration, normalize_line_endings, sanitize_terminal_text, shorten_home,
             terminal_text_width,
@@ -62,7 +62,7 @@ pub(super) enum ComposerChromeTarget {
 pub(crate) enum ComposerEvent {
     Terminal(Event),
     PasteImage(String),
-    ContextTokens(u64),
+    ContextBudget(ContextBudget),
     ReplaceRange {
         range: Range<usize>,
         text: String,
@@ -105,6 +105,7 @@ pub(crate) struct Composer {
     scroll: usize,
     last_width: usize,
     context_tokens: u64,
+    context_window_tokens: u64,
     workspace: String,
     thinking: ReasoningEffort,
     model: Model,
@@ -204,6 +205,7 @@ impl Composer {
             scroll: 0,
             last_width: 78,
             context_tokens: 0,
+            context_window_tokens: MODEL_WINDOW_TOKENS,
             workspace: shorten_home(workspace),
             thinking,
             model: Model::Codex(CodexModel::Sol),
@@ -243,12 +245,12 @@ impl Composer {
                 self.insert_image(data_url);
                 ComposerUpdate::changed()
             }
-            ComposerEvent::ContextTokens(tokens) => {
-                if self.context_tokens == tokens {
-                    return ComposerUpdate::unchanged();
-                }
-                self.context_tokens = tokens;
-                ComposerUpdate::changed()
+            ComposerEvent::ContextBudget(budget) => {
+                let changed = self.context_tokens != budget.active_tokens
+                    || self.context_window_tokens != budget.window_tokens;
+                self.context_tokens = budget.active_tokens;
+                self.context_window_tokens = budget.window_tokens;
+                ComposerUpdate::from_change(changed)
             }
             ComposerEvent::ReplaceRange { range, text } => {
                 self.history.detach();
@@ -1187,7 +1189,18 @@ impl Composer {
         let content_start = area.x + 2;
         let content_width = usize::from(area.width - 4);
         let content_end = content_start + u16::try_from(content_width).unwrap_or(u16::MAX);
-        let usage_prefix = format!(" {}%/272k ", context_percent(self.context_tokens));
+        let window = self.context_window_tokens;
+        let capacity = if window.is_multiple_of(1_000_000) {
+            format!("{}m", window / 1_000_000)
+        } else if window.is_multiple_of(1_000) {
+            format!("{}k", window / 1_000)
+        } else {
+            window.to_string()
+        };
+        let usage_prefix = format!(
+            " {}%/{capacity} ",
+            context_percent(self.context_tokens, window)
+        );
         let input_mode_segment = self
             .input_mode
             .as_ref()
@@ -1503,11 +1516,8 @@ impl ComposerUpdate {
     }
 }
 
-fn context_percent(tokens: u64) -> u64 {
-    tokens
-        .saturating_mul(100)
-        .saturating_add(MODEL_WINDOW_TOKENS / 2)
-        / MODEL_WINDOW_TOKENS
+fn context_percent(tokens: u64, window: u64) -> u64 {
+    tokens.saturating_mul(100).saturating_add(window / 2) / window.max(1)
 }
 
 fn draw_symbol(buffer: &mut Buffer, x: u16, y: u16, symbol: &str, style: Style) {
@@ -2564,9 +2574,9 @@ mod tests {
 
     #[test]
     fn context_percentage_is_rounded() {
-        assert_eq!(context_percent(0), 0);
-        assert_eq!(context_percent(136_000), 50);
-        assert_eq!(context_percent(1_400), 1);
+        assert_eq!(context_percent(0, 272_000), 0);
+        assert_eq!(context_percent(136_000, 272_000), 50);
+        assert_eq!(context_percent(1_400, 272_000), 1);
     }
 
     #[test]

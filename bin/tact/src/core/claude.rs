@@ -530,12 +530,17 @@ mod tests {
 
     fn sse(block: Value) -> String {
         let tool = block["type"] == "tool_use";
+        let usage = if tool {
+            json!({"input_tokens":10,"cache_read_input_tokens":20,"cache_creation_input_tokens":30,"output_tokens":0})
+        } else {
+            json!({"input_tokens":15,"cache_read_input_tokens":25,"cache_creation_input_tokens":35,"output_tokens":0})
+        };
         let mut output = String::new();
         for event in [
-            json!({"type":"message_start","message":{"id":"fixture-message","type":"message","role":"assistant","model":"claude-opus-5-5","content":[],"stop_reason":null,"usage":{"input_tokens":10,"output_tokens":0}}}),
+            json!({"type":"message_start","message":{"id":"fixture-message","type":"message","role":"assistant","model":"claude-opus-5-5","content":[],"stop_reason":null,"usage":usage}}),
             json!({"type":"content_block_start","index":0,"content_block":block}),
             json!({"type":"content_block_stop","index":0}),
-            json!({"type":"message_delta","delta":{"stop_reason":if tool {"tool_use"} else {"end_turn"}},"usage":{"output_tokens":2}}),
+            json!({"type":"message_delta","delta":{"stop_reason":if tool {"tool_use"} else {"end_turn"}},"usage":{"output_tokens":if tool {2} else {3}}}),
             json!({"type":"message_stop"}),
         ] {
             output.push_str(&format!(
@@ -600,6 +605,153 @@ mod tests {
                 .unwrap();
             Ok(ToolOutput::text("visible fixture").with_structured_result(json!({"exact":7})))
         }
+    }
+
+    #[tokio::test]
+    async fn native_model_windows_reach_tact_snapshots() {
+        let server = server(vec![]).await;
+        let workspace = tempfile::tempdir().unwrap();
+        for model in [
+            nanocodex::ClaudeModel::Opus55,
+            nanocodex::ClaudeModel::Fable51,
+        ] {
+            let selected = tools().build().unwrap();
+            let (agent, _) = build_client(
+                ClaudeClient::new(reqwest::Client::new(), &server.endpoint, "fixture-key"),
+                AgentContext {
+                    model: Model::Claude(model),
+                    thinking: Thinking::Medium,
+                },
+                workspace.path(),
+                Arc::from("test instructions"),
+                ClaudeSession::default(),
+                ToolRuntime::new_with_tools(workspace.path(), None, None, &selected),
+                None,
+            )
+            .unwrap();
+            let snapshot =
+                AgentSnapshot::from_claude(agent.runtime_snapshot().await.unwrap()).unwrap();
+            let budget = snapshot.context_budget().unwrap();
+            assert_eq!(budget.window_tokens, 1_000_000, "{model:?}");
+            assert_eq!(budget.active_tokens, 0);
+            agent.shutdown().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn automatic_compaction_preserves_code_mode_continuation_and_active_count() {
+        let mut server = server(vec![
+            tool(
+                "before-compact",
+                "exec",
+                json!({"code":"text('large receipt '.repeat(1000));"}),
+            ),
+            Box::new(|_| {
+                Box::pin(async { json!({"type":"text","text":"compacted fixture summary"}) })
+            }),
+            tool(
+                "after-compact",
+                "exec",
+                json!({"code":"text(await tools.inspect({}));"}),
+            ),
+            final_text(),
+        ])
+        .await;
+        let workspace = tempfile::tempdir().unwrap();
+        let client = ClaudeClient::new(reqwest::Client::new(), &server.endpoint, "fixture-key");
+        let (seed, _) = Nanocodex::builder(Claude::new(
+            client.clone(),
+            nanocodex::ClaudeModel::Opus55.as_str(),
+        ))
+        .session_id("compaction-fixture")
+        .context_window_tokens(1_000)
+        .build()
+        .unwrap();
+        let snapshot = AgentSnapshot::from_claude(seed.runtime_snapshot().await.unwrap()).unwrap();
+        seed.shutdown().await.unwrap();
+        let (tx, mut calls) = mpsc::unbounded_channel();
+        let selected = tools().tool(Inspect(tx)).build().unwrap();
+        let (agent, _) = build_client(
+            client,
+            AgentContext {
+                model: Model::Claude(nanocodex::ClaudeModel::Opus55),
+                thinking: Thinking::Medium,
+            },
+            workspace.path(),
+            Arc::from("test instructions"),
+            ClaudeSession {
+                session_id: Some("compaction-fixture"),
+                snapshot: Some(snapshot),
+            },
+            ToolRuntime::new_with_tools(workspace.path(), None, None, &selected),
+            None,
+        )
+        .unwrap();
+        let result = timeout(
+            Duration::from_secs(20),
+            agent.prompt("exercise compaction").await.unwrap(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(result.final_message(), "finished");
+        let (_, session, _, call, _) = calls.recv().await.unwrap();
+        assert_eq!(session, "compaction-fixture");
+        assert!(call.starts_with("after-compact/"));
+        let first = server.requests.recv().await.unwrap();
+        assert_eq!(first["max_tokens"], 128_000);
+        let summary = server.requests.recv().await.unwrap();
+        assert!(
+            summary["messages"].as_array().unwrap().last().unwrap()["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("Summarize the conversation")
+        );
+        let continued = server.requests.recv().await.unwrap();
+        let messages = continued["messages"].as_array().unwrap();
+        assert!(
+            messages[0]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("compacted fixture summary")
+        );
+        assert!(messages.iter().any(|message| {
+            message["content"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|block| block["type"] == "tool_use" && block["id"] == "before-compact")
+        }));
+        assert!(
+            messages.iter().any(|message| message["content"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|block| block["type"] == "tool_result"
+                    && block["tool_use_id"] == "before-compact"))
+        );
+        let final_request = server.requests.recv().await.unwrap();
+        assert!(
+            final_request["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|message| message["content"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|block| block["type"] == "tool_result"
+                        && block["tool_use_id"] == "after-compact"))
+        );
+        let snapshot = AgentSnapshot::from_claude(agent.runtime_snapshot().await.unwrap()).unwrap();
+        let budget = snapshot.context_budget().unwrap();
+        assert_eq!(budget.window_tokens, 1_000);
+        assert_eq!(budget.active_tokens, 15 + 25 + 35 + 3);
+        assert_eq!(
+            result.usage().unwrap().total_tokens(),
+            2 * (10 + 20 + 30 + 2) + 2 * budget.active_tokens
+        );
+        agent.shutdown().await.unwrap();
     }
 
     #[tokio::test]
