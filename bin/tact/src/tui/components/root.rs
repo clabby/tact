@@ -655,7 +655,6 @@ impl RootNode {
     pub(crate) fn animation_deadline(&self) -> Option<Instant> {
         let selector = match &self.overlay {
             Some(Overlay::Effort(selector)) => selector.component().animation_deadline(),
-            Some(Overlay::Model(selector)) => selector.component().animation_deadline(),
             _ => None,
         };
         [
@@ -1265,9 +1264,7 @@ impl RootNode {
             Some(Overlay::Actions(_)) => self.update_actions(event),
             Some(Overlay::ContextDiagnostics(_)) => self.update_context_diagnostics(event),
             Some(Overlay::Effort(_)) => self.update_effort(EffortEvent::Terminal { event, now }),
-            Some(Overlay::Model(_)) => {
-                self.update_model(ModelSelectorEvent::Terminal { event, now })
-            }
+            Some(Overlay::Model(_)) => self.update_model(ModelSelectorEvent::Terminal(event)),
             Some(Overlay::Theme(_)) => {
                 self.update_theme_selector(ThemeSelectorEvent::Terminal(event))
             }
@@ -2438,7 +2435,6 @@ impl RootNode {
             RenderRequest::None
         };
         let effort = self.update_effort(EffortEvent::AnimationFrame(now));
-        let model = self.update_model(ModelSelectorEvent::AnimationFrame(now));
         let transcript = self.update_transcript(TranscriptEvent::AnimationFrame(now));
         let composer =
             self.update_composer(ComposerEvent::AnimationFrame(now), RenderRequest::Streaming);
@@ -2461,15 +2457,9 @@ impl RootNode {
             RenderRequest::None
         };
         ComponentUpdate {
-            effects: effort
-                .effects
-                .into_iter()
-                .chain(model.effects)
-                .chain(composer.effects)
-                .collect(),
+            effects: effort.effects.into_iter().chain(composer.effects).collect(),
             render: effort
                 .render
-                .max(model.render)
                 .max(transcript.render)
                 .max(composer.render)
                 .max(queue.render)

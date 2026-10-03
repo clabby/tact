@@ -130,6 +130,9 @@ model = "sonnet-5.5" # or opus-5.5, fable-5.1
 thinking = "medium"
 ```
 
+Type in the model picker to filter by name, provider, or model ID. Use ↑/↓ to select a model,
+Enter to apply it, and Esc to cancel. The check mark identifies the current model.
+
 With Claude enabled, `--model` and the model picker also accept `sonnet-5.5`, `opus-5.5`, and `fable-5.1`
 (native IDs `claude-sonnet-5-5`, `claude-opus-5-5`, and `claude-fable-5-1`). All support
 `low`, `medium`, `high`, `xhigh`, and `max`. Their default efforts are medium for Opus and high for Sonnet and Fable.
