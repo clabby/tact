@@ -105,6 +105,10 @@ pub(crate) enum AuthError {
     #[error("OPENAI_API_KEY is not set; set it or select ChatGPT authentication")]
     ApiKeyUnavailable,
     #[error(
+        "ANTHROPIC_API_KEY must contain an Anthropic API key (sk-ant-api... or sk-ant-usr-...); Claude subscription and OAuth tokens are not supported"
+    )]
+    InvalidClaudeApiKey,
+    #[error(
         "no ChatGPT credentials found at {path} and OPENAI_API_KEY is not set; run `tact auth login` or set OPENAI_API_KEY"
     )]
     CredentialsUnavailable { path: PathBuf },
@@ -114,6 +118,8 @@ pub(crate) enum AuthError {
 
 #[derive(Debug, Error)]
 pub(crate) enum ConfigError {
+    #[error("Claude models require [claude] enabled = true in the configuration")]
+    ClaudeDisabled,
     #[error("could not determine the config directory; set TACT_HOME or pass --config")]
     ConfigHomeUnavailable,
     #[error("could not determine the credential directory; set CODEX_HOME or pass --auth-file")]
@@ -238,8 +244,6 @@ pub(crate) enum RuntimeError {
     SessionTask(#[source] tokio::task::JoinError),
     #[error("the Nanocodex worker stopped before accepting a command")]
     AgentWorkerStopped,
-    #[error("invalid Nanocodex session ID: {0}")]
-    InvalidSessionId(#[source] nanocodex::oai::session::SessionIdError),
     #[error("failed to resolve workspace {path}: {source}")]
     ResolveWorkspace {
         path: PathBuf,

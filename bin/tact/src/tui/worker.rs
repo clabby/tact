@@ -5,17 +5,16 @@ use crate::{
     core::{IMAGE_RENDERING_INSTRUCTIONS, MEMORY_REVIEW_CHECKPOINT},
     tui::{
         components::QueueId,
+        context::ContextBudget,
         pane::PaneId,
         prompt::Submission,
+        session::AgentSnapshot,
         transcript::{TerminalStopReason, TurnId},
     },
 };
 use nanocodex::{
-    AgentEvents, Nanocodex, NanocodexError, TurnControl,
-    agent::{
-        input::{Prompt, PromptInput, UserInput},
-        session::SessionSnapshot,
-    },
+    AgentEvents, HarnessModel, Nanocodex, NanocodexError, TurnControl,
+    agent::input::{Prompt, PromptInput, UserInput},
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -24,11 +23,12 @@ use std::{
 use tact_subagents::AgentContext;
 use tokio::{
     sync::{mpsc, oneshot},
-    task::{JoinError, JoinSet},
+    task::{Id as TaskId, JoinError, JoinSet},
 };
 use tokio_util::sync::CancellationToken;
 
 pub(crate) enum WorkerCommand {
+    Compact(PaneId),
     Submit {
         pane: PaneId,
         id: TurnId,
@@ -111,6 +111,17 @@ pub(crate) enum AuxiliaryError {
 }
 
 pub(crate) enum WorkerEvent {
+    CompactionFinished {
+        pane: PaneId,
+        result: Result<Box<AgentSnapshot>, String>,
+        terminal_stop: Option<TerminalStopReason>,
+        duration_ns: u64,
+    },
+    ContextBudget {
+        pane: PaneId,
+        session_id: String,
+        budget: ContextBudget,
+    },
     TurnAccepted {
         pane: PaneId,
         id: TurnId,
@@ -120,7 +131,7 @@ pub(crate) enum WorkerEvent {
         id: TurnId,
         error: Option<String>,
         terminal_stop: Option<TerminalStopReason>,
-        snapshot: Option<Box<SessionSnapshot>>,
+        snapshot: Option<Box<AgentSnapshot>>,
         terminal_expected: bool,
     },
     SteerAdmitted {
@@ -170,9 +181,80 @@ pub(crate) enum WorkerEvent {
 
 type TurnResult = Result<CompletedTurn, NanocodexError>;
 
+struct CompletedCompaction {
+    pane: PaneId,
+    result: Result<Box<AgentSnapshot>, NanocodexError>,
+    duration_ns: u64,
+}
+
 struct CompletedTurn {
     final_message: String,
-    snapshot: Option<Box<SessionSnapshot>>,
+    snapshot: Option<Box<AgentSnapshot>>,
+}
+
+async fn complete_turn(
+    agent: &Nanocodex,
+    result: Result<nanocodex::agent::TurnResult, NanocodexError>,
+    claude: bool,
+    auxiliary: bool,
+    pane: PaneId,
+    updates: &mpsc::UnboundedSender<WorkerEvent>,
+) -> TurnResult {
+    let snapshot = if auxiliary {
+        Ok(None)
+    } else if claude {
+        agent
+            .runtime_snapshot()
+            .await
+            .and_then(AgentSnapshot::from_claude)
+            .map(Some)
+    } else {
+        Ok(result
+            .as_ref()
+            .ok()
+            .and_then(|result| result.snapshot())
+            .map(|snapshot| AgentSnapshot::Codex(Box::new(snapshot))))
+    };
+    if let Ok(Some(snapshot)) = &snapshot {
+        publish_context_budget(snapshot, agent.session_id(), pane, updates);
+    }
+    // Failed turns may update telemetry but never replace the successful resume checkpoint.
+    let result = result?;
+    Ok(CompletedTurn {
+        final_message: result.final_message().to_owned(),
+        snapshot: snapshot?.map(Box::new),
+    })
+}
+
+fn publish_context_budget(
+    snapshot: &AgentSnapshot,
+    session_id: &str,
+    pane: PaneId,
+    updates: &mpsc::UnboundedSender<WorkerEvent>,
+) {
+    if let Some(budget) = snapshot.context_budget() {
+        drop(updates.send(WorkerEvent::ContextBudget {
+            pane,
+            session_id: session_id.to_owned(),
+            budget,
+        }));
+    }
+}
+
+async fn observe_initial_context(
+    agent: &Nanocodex,
+    model: HarnessModel,
+    pane: PaneId,
+    updates: &mpsc::UnboundedSender<WorkerEvent>,
+) {
+    if matches!(model, HarnessModel::Claude(_))
+        && let Ok(snapshot) = agent
+            .runtime_snapshot()
+            .await
+            .and_then(AgentSnapshot::from_claude)
+    {
+        publish_context_budget(&snapshot, agent.session_id(), pane, updates);
+    }
 }
 
 enum TurnPurpose {
@@ -407,17 +489,23 @@ async fn run(
     updates: mpsc::UnboundedSender<WorkerEvent>,
     shutdown: CancellationToken,
 ) {
+    observe_initial_context(&agent, context.model, PaneId::Main, &updates).await;
     let mut main = Some((PaneId::Main, PaneAgent { agent, context }));
     let mut fork = None::<(PaneId, PaneAgent)>;
     let mut controls = HashMap::<TurnKey, TurnControl>::new();
     let mut memory_reviews = HashMap::from([(PaneId::Main, memory_review)]);
     let mut cancelled = HashSet::<TurnKey>::new();
     let mut turns = JoinSet::<(TurnKey, TurnPurpose, bool, TurnResult)>::new();
+    let mut compactions = JoinSet::new();
+    let mut compacting = HashMap::<PaneId, TaskId>::new();
 
     loop {
         tokio::select! {
             biased;
             () = shutdown.cancelled() => break,
+            Some(result) = compactions.join_next(), if !compactions.is_empty() => {
+                finish_compaction(result, &mut compacting, &updates);
+            }
             result = turns.join_next(), if !turns.is_empty() => {
                 finish_turn(result, false, &mut controls, &mut cancelled, &updates);
             }
@@ -426,6 +514,35 @@ async fn run(
                     break;
                 };
                 let request = match command {
+                    WorkerCommand::Compact(pane) => {
+                        let rejection = if controls.keys().any(|key| key.pane == pane) || compacting.contains_key(&pane) {
+                            Some("finish active work before compacting context")
+                        } else if agent_for(pane, main.as_ref(), fork.as_ref()).is_none() {
+                            Some("session pane is no longer available")
+                        } else { None };
+                        if let Some(error) = rejection {
+                            drop(updates.send(WorkerEvent::CompactionFinished { pane, result: Err(error.to_owned()), terminal_stop: None, duration_ns: 0 }));
+                            continue;
+                        }
+                        let agent = agent_for(pane, main.as_ref(), fork.as_ref()).unwrap();
+                        let claude = matches!(agent.context.model, HarnessModel::Claude(_));
+                        let agent = agent.agent.clone();
+                        let task = compactions.spawn(async move {
+                            let started = std::time::Instant::now();
+                            let operation = async {
+                                agent.compact().await?;
+                                if claude {
+                                    agent.runtime_snapshot().await.and_then(AgentSnapshot::from_claude)
+                                } else {
+                                    agent.snapshot().await.map(|snapshot| AgentSnapshot::Codex(Box::new(snapshot)))
+                                }
+                            };
+                            let result = operation.await.map(Box::new);
+                            CompletedCompaction { pane, result, duration_ns: u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX) }
+                        });
+                        compacting.insert(pane, task.id());
+                        continue;
+                    }
                     WorkerCommand::Submit { pane, id, prompt } => TurnRequest {
                         pane,
                         id,
@@ -471,6 +588,10 @@ async fn run(
                         fallback_id,
                         prompt,
                     } => {
+                        if compacting.contains_key(&pane) {
+                            drop(updates.send(WorkerEvent::SteerFailed { pane, queue_id, error: "context compaction is still running".to_owned() }));
+                            continue;
+                        }
                         let Some(agent) = agent_for(pane, main.as_ref(), fork.as_ref()) else {
                             drop(updates.send(WorkerEvent::SteerFailed {
                                 pane,
@@ -512,6 +633,7 @@ async fn run(
                         memory_review,
                     } => {
                         debug_assert!(!controls.keys().any(|key| key.pane == pane));
+                        observe_initial_context(&agent, context.model, pane, &updates).await;
                         let retired = if main.as_ref().is_some_and(|(id, _)| *id == pane) {
                             memory_reviews.insert(pane, memory_review);
                             main.replace((pane, PaneAgent { agent, context })).map(|(_, agent)| agent.agent)
@@ -531,6 +653,10 @@ async fn run(
                         continue;
                     }
                     WorkerCommand::SetThinking { pane, effort } => {
+                        if compacting.contains_key(&pane) {
+                            drop(updates.send(WorkerEvent::ThinkingUpdated { pane, effort, result: Err(NanocodexError::InvalidRequest("context compaction is still running".to_owned())) }));
+                            continue;
+                        }
                         let result = match main.iter_mut().chain(fork.iter_mut()).find(|(id, _)| *id == pane) {
                             Some((_, agent)) => {
                                 let result = agent.agent.set_thinking(effort.into()).await;
@@ -549,6 +675,10 @@ async fn run(
                         continue;
                     }
                     WorkerCommand::SetFastMode { pane, enabled } => {
+                        if compacting.contains_key(&pane) {
+                            drop(updates.send(WorkerEvent::FastModeUpdated { pane, enabled, result: Err(NanocodexError::InvalidRequest("context compaction is still running".to_owned())) }));
+                            continue;
+                        }
                         let result = match agent_for(pane, main.as_ref(), fork.as_ref()) {
                             Some(agent) => agent.agent.set_fast_mode(enabled).await,
                             None => Err(NanocodexError::AgentStopped),
@@ -582,7 +712,15 @@ async fn run(
                             }));
                             continue;
                         };
+                        if compacting.contains_key(main_pane) {
+                            drop(updates.send(WorkerEvent::ForkFailed { pane, error: "context compaction is still running".to_owned() }));
+                            continue;
+                        }
                         let context = agent.context;
+                        if matches!(context.model, HarnessModel::Claude(_)) {
+                            drop(updates.send(WorkerEvent::ForkFailed { pane, error: "Claude does not support forking the current conversation".to_owned() }));
+                            continue;
+                        }
                         match agent.agent.fork().await {
                             Ok((agent, events)) => {
                                 let memory_review = *memory_reviews
@@ -620,6 +758,10 @@ async fn run(
                         continue;
                     }
                 };
+                if compacting.contains_key(&request.pane) {
+                    reject_turn(request, "context compaction is still running".to_owned(), &updates);
+                    continue;
+                }
                 let Some(agent) = agent_for(request.pane, main.as_ref(), fork.as_ref()) else {
                     reject_turn(request, "session pane is no longer available".to_owned(), &updates);
                     continue;
@@ -661,9 +803,68 @@ async fn run(
         finish_turn(Some(result), true, &mut controls, &mut cancelled, &updates);
     }
 
+    while let Some(result) = compactions.join_next().await {
+        finish_compaction(result, &mut compacting, &updates);
+    }
     drop(updates.send(WorkerEvent::Stopped {
         error: shutdown_error,
     }));
+}
+
+fn finish_compaction(
+    completion: Result<CompletedCompaction, JoinError>,
+    compacting: &mut HashMap<PaneId, TaskId>,
+    updates: &mpsc::UnboundedSender<WorkerEvent>,
+) {
+    let (pane, result, duration_ns, terminal_stop) = match completion {
+        Ok(CompletedCompaction {
+            pane,
+            result,
+            duration_ns,
+        }) => {
+            let terminal_stop = result.as_ref().err().and_then(terminal_stop_reason);
+            (
+                pane,
+                result.map_err(|error| error.to_string()),
+                duration_ns,
+                terminal_stop,
+            )
+        }
+        Err(error) => {
+            let Some((&pane, _)) = compacting.iter().find(|(_, id)| **id == error.id()) else {
+                return;
+            };
+            (
+                pane,
+                Err(format!("compaction task stopped unexpectedly: {error}")),
+                0,
+                None,
+            )
+        }
+    };
+    compacting.remove(&pane);
+    drop(updates.send(WorkerEvent::CompactionFinished {
+        pane,
+        result,
+        terminal_stop,
+        duration_ns,
+    }));
+}
+
+fn terminal_stop_reason(error: &NanocodexError) -> Option<TerminalStopReason> {
+    if let NanocodexError::Shutdown(source) = error {
+        return terminal_stop_reason(source);
+    }
+    (matches!(
+        error,
+        NanocodexError::CompactionFailed {
+            requires_session_stop: true,
+            ..
+        }
+    ) || error
+        .responses_error()
+        .is_some_and(|source| source.is_misalignment_policy_violation()))
+    .then_some(TerminalStopReason::MisalignmentPolicyViolation)
 }
 
 async fn start_turn(
@@ -692,6 +893,36 @@ async fn start_turn(
         prompt_kind,
     } = request;
     let auxiliary = auxiliary_context.is_some();
+    // A native turn owns its control entry through checkpoint capture, so the next
+    // prompt cannot change the committed conversation before it is copied.
+    if matches!(agent.context.model, HarnessModel::Claude(_)) {
+        let reason = if matches!(
+            auxiliary_context,
+            Some(AuxiliaryContext::CurrentConversation)
+        ) {
+            Some("Claude does not support forking the current conversation")
+        } else if !auxiliary && controls.keys().any(|key| key.pane == pane) {
+            Some("Claude is still finishing the current turn and its checkpoint")
+        } else {
+            None
+        };
+        if let Some(reason) = reason {
+            reject_turn(
+                TurnRequest {
+                    pane,
+                    id,
+                    prompt,
+                    purpose,
+                    auxiliary_context,
+                    shutdown,
+                    prompt_kind,
+                },
+                reason.to_owned(),
+                updates,
+            );
+            return false;
+        }
+    }
     let (isolated_agent, event_drain) = if let Some(context) = auxiliary_context {
         let create_agent = async {
             match context {
@@ -775,6 +1006,9 @@ async fn start_turn(
     let control = turn.control();
     let task_control = control.clone();
     controls.insert(key, control);
+    let checkpoint_agent = agent.agent.clone();
+    let claude = matches!(agent.context.model, HarnessModel::Claude(_));
+    let context_updates = updates.clone();
     turns.spawn(async move {
         let mut turn = Box::pin(turn);
         let (cancelled_by_scope, result) = match shutdown {
@@ -789,14 +1023,15 @@ async fn start_turn(
             }
             None => (false, turn.await),
         };
-        let result = result.map(|result| CompletedTurn {
-            final_message: result.final_message().to_owned(),
-            snapshot: if auxiliary {
-                None
-            } else {
-                result.snapshot().map(Box::new)
-            },
-        });
+        let result = complete_turn(
+            &checkpoint_agent,
+            result,
+            claude,
+            auxiliary,
+            pane,
+            &context_updates,
+        )
+        .await;
         if let Some(agent) = isolated_agent {
             drop(agent.shutdown().await);
         }
@@ -870,6 +1105,17 @@ async fn steer_turn(
         }
     }
 
+    if matches!(agent.context.model, HarnessModel::Claude(_))
+        && controls.keys().any(|key| key.pane == pane)
+    {
+        drop(updates.send(WorkerEvent::SteerFailed {
+            pane,
+            queue_id,
+            error: "Claude is still finishing the current turn and its checkpoint".to_owned(),
+        }));
+        return false;
+    }
+
     match agent
         .agent
         .prompt(agent.context.prompt(memory_review.steer_prompt(&prompt)))
@@ -881,11 +1127,19 @@ async fn steer_turn(
                 pane,
                 id: fallback_id,
             };
+            let checkpoint_agent = agent.agent.clone();
+            let claude = matches!(agent.context.model, HarnessModel::Claude(_));
+            let context_updates = updates.clone();
             turns.spawn(async move {
-                let result = turn.await.map(|result| CompletedTurn {
-                    final_message: result.final_message().to_owned(),
-                    snapshot: result.snapshot().map(Box::new),
-                });
+                let result = complete_turn(
+                    &checkpoint_agent,
+                    turn.await,
+                    claude,
+                    false,
+                    pane,
+                    &context_updates,
+                )
+                .await;
                 (key, TurnPurpose::Conversation, false, result)
             });
             controls.insert(key, control);
@@ -970,10 +1224,7 @@ fn finish_turn(
                     (None, None, None)
                 }
                 Err(error) => {
-                    let terminal_stop = error
-                        .responses_error()
-                        .is_some_and(|source| source.is_misalignment_policy_violation())
-                        .then_some(TerminalStopReason::MisalignmentPolicyViolation);
+                    let terminal_stop = terminal_stop_reason(&error);
                     (Some(error.to_string()), None, terminal_stop)
                 }
             };
@@ -1065,7 +1316,8 @@ mod tests {
         },
     };
     use nanocodex::{
-        AgentEvents, Model, Nanocodex, NanocodexError, OpenAi, Thinking,
+        AgentEvents, HarnessModel as Model, Model as CodexModel, Nanocodex, NanocodexError, OpenAi,
+        Thinking,
         agent::input::{Prompt, PromptInput, UserInput},
         oai::{
             ResponseError,
@@ -1096,8 +1348,342 @@ mod tests {
     use tokio_util::sync::CancellationToken;
     use tower::Service;
 
+    #[derive(Clone)]
+    struct CompactionService {
+        requests: mpsc::UnboundedSender<oneshot::Sender<StdResult<(), ResponsesError>>>,
+    }
+
+    impl Service<ResponsesAttempt> for CompactionService {
+        type Response = ResponsesServiceResponse;
+        type Error = ResponseError;
+        type Future = std::pin::Pin<
+            Box<dyn std::future::Future<Output = StdResult<Self::Response, Self::Error>> + Send>,
+        >;
+
+        fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<StdResult<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, request: ResponsesAttempt) -> Self::Future {
+            use nanocodex::oai::{
+                responses::{ResponseItem, ResponseItemId},
+                tower::{CompactionOutput, ResponsePipelineStats, ResponsesOutput},
+            };
+            assert!(matches!(request.kind(), ResponsesAttemptKind::Compaction));
+            let (send, receive) = oneshot::channel();
+            self.requests.send(send).unwrap();
+            Box::pin(async move {
+                if let Err(error) = receive.await.unwrap() {
+                    return Err(ResponseError::from(ResponsesServiceError::from(error)));
+                }
+                Ok(ResponsesServiceResponse::new(ResponsesOutput::Compaction(
+                    CompactionOutput {
+                        id: "compact-response".to_owned(),
+                        status: "completed".to_owned(),
+                        item: ResponseItem::Compaction {
+                            id: Some(ResponseItemId::from("compact-item")),
+                            encrypted_content: "opaque-summary".into(),
+                            created_by: None,
+                            internal_chat_message_metadata_passthrough: None,
+                        },
+                        usage: None,
+                        time_to_first_event_ns: 0,
+                        time_to_first_output_ns: None,
+                        pipeline_stats: ResponsePipelineStats::default(),
+                    },
+                )))
+            })
+        }
+    }
+
+    async fn stopped(updates: &mut mpsc::UnboundedReceiver<WorkerEvent>) {
+        timeout(Duration::from_secs(5), async {
+            loop {
+                if matches!(updates.recv().await.unwrap(), WorkerEvent::Stopped { .. }) {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    async fn compacted(
+        updates: &mut mpsc::UnboundedReceiver<WorkerEvent>,
+    ) -> Result<Box<crate::tui::session::AgentSnapshot>, String> {
+        timeout(Duration::from_secs(5), async {
+            loop {
+                if let WorkerEvent::CompactionFinished { pane, result, .. } =
+                    updates.recv().await.unwrap()
+                {
+                    assert_eq!(pane, PaneId::Main);
+                    return result;
+                }
+            }
+        })
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn manual_compaction_task_failure_releases_its_pane_and_reports_error() {
+        let mut tasks = tokio::task::JoinSet::new();
+        let task = tasks.spawn(async {
+            pending::<()>().await;
+            unreachable!()
+        });
+        let mut compacting = std::collections::HashMap::from([(PaneId::Main, task.id())]);
+        let (updates, mut receive) = mpsc::unbounded_channel();
+        task.abort();
+        super::finish_compaction(tasks.join_next().await.unwrap(), &mut compacting, &updates);
+        assert!(compacting.is_empty());
+        assert!(
+            compacted(&mut receive)
+                .await
+                .err()
+                .unwrap()
+                .contains("task stopped unexpectedly")
+        );
+    }
+
+    #[tokio::test]
+    async fn manual_compaction_captures_codex_snapshot_and_failure_has_no_checkpoint() {
+        let (requests, mut receive) = mpsc::unbounded_channel();
+        let openai = OpenAi::builder("test-key")
+            .service(move || CompactionService {
+                requests: requests.clone(),
+            })
+            .build()
+            .unwrap();
+        let (agent, mut events) = Nanocodex::builder(openai).build().unwrap();
+        let shutdown = CancellationToken::new();
+        let (commands, mut updates) = spawn(
+            agent,
+            TEST_CONTEXT,
+            MemoryReviewState::fresh(false),
+            shutdown.clone(),
+        );
+        let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
+        commands.send(WorkerCommand::Compact(PaneId::Main)).unwrap();
+        let release = timeout(Duration::from_secs(5), receive.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        commands
+            .send(WorkerCommand::Submit {
+                pane: PaneId::Main,
+                id: TurnId::new(9),
+                prompt: "must not race checkpoint".to_owned().into(),
+            })
+            .unwrap();
+        match timeout(Duration::from_secs(5), updates.recv())
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            WorkerEvent::TurnFinished {
+                error: Some(error),
+                snapshot: None,
+                ..
+            } => assert!(error.contains("compaction")),
+            _ => panic!("prompt must be rejected while compacting"),
+        }
+        release.send(Ok(())).unwrap();
+        let snapshot = compacted(&mut updates).await.unwrap();
+        assert!(
+            serde_json::to_string(&snapshot)
+                .unwrap()
+                .contains("opaque-summary")
+        );
+        commands.send(WorkerCommand::Compact(PaneId::Main)).unwrap();
+        timeout(Duration::from_secs(5), receive.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .send(Err(ResponsesError::HttpRejected {
+                status: 400,
+                body: "synthetic compaction failure".to_owned(),
+                retry_after: None,
+            }))
+            .unwrap();
+        assert!(
+            compacted(&mut updates)
+                .await
+                .err()
+                .unwrap()
+                .contains("synthetic compaction failure")
+        );
+        shutdown.cancel();
+        stopped(&mut updates).await;
+        drain.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn manual_compaction_terminal_failure_stops_followups_and_resume() {
+        use crate::tui::{
+            session,
+            transcript::{LocalEvent, TranscriptJournal},
+        };
+        let (requests, mut receive) = mpsc::unbounded_channel();
+        let openai = OpenAi::builder("test-key")
+            .service(move || CompactionService {
+                requests: requests.clone(),
+            })
+            .build()
+            .unwrap();
+        let (agent, mut events) = Nanocodex::builder(openai).build().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let config = directory.path().join("config.toml");
+        let shutdown = CancellationToken::new();
+        let (commands, mut updates) = spawn(
+            agent,
+            TEST_CONTEXT,
+            MemoryReviewState::fresh(false),
+            shutdown.clone(),
+        );
+        let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
+        commands.send(WorkerCommand::Compact(PaneId::Main)).unwrap();
+        timeout(Duration::from_secs(5), receive.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .send(Ok(()))
+            .unwrap();
+        let snapshot = compacted(&mut updates).await.unwrap();
+        session::save_checkpoint(
+            &config,
+            "session",
+            &snapshot.into_codex().unwrap(),
+            "instructions",
+            false,
+        )
+        .unwrap();
+        commands.send(WorkerCommand::Compact(PaneId::Main)).unwrap();
+        timeout(Duration::from_secs(5), receive.recv()).await.unwrap().unwrap().send(Err(ResponsesError::HttpRejected {
+            status: 403, body: r#"{"error":{"code":"misalignment_policy_violation","message":"conversation stopped"}}"#.to_owned(), retry_after: None,
+        })).unwrap();
+        let WorkerEvent::CompactionFinished {
+            result,
+            terminal_stop,
+            duration_ns,
+            ..
+        } = timeout(Duration::from_secs(5), updates.recv())
+            .await
+            .unwrap()
+            .unwrap()
+        else {
+            panic!("expected compaction failure");
+        };
+        assert_eq!(
+            terminal_stop,
+            Some(TerminalStopReason::MisalignmentPolicyViolation)
+        );
+        let error = result
+            .err()
+            .expect("terminal compaction must not publish a snapshot");
+        let (mut journal, writer) = TranscriptJournal::open(&config, "session").unwrap();
+        journal.defer_start(crate::tui::transcript::SessionStarted {
+            session_id: "session".to_owned(),
+            parent_session_id: None,
+            parent_sequence: None,
+            model: nanocodex::oai::MODEL.to_owned(),
+            effort: ReasoningEffort::Medium,
+            reasoning_mode: crate::app::config::ReasoningMode::Standard,
+            fast_mode: false,
+            workspace: directory.path().to_path_buf(),
+            application_version: "test".to_owned(),
+        });
+        journal
+            .append_local(LocalEvent::CompactionFinished {
+                error: Some(error),
+                terminal_stop,
+                duration_ns,
+            })
+            .unwrap();
+        journal.flush().await.unwrap();
+        assert!(matches!(
+            session::load_checkpoint(&config, "session"),
+            Err(session::SessionError::TerminalStop { .. })
+        ));
+        commands
+            .send(WorkerCommand::Submit {
+                pane: PaneId::Main,
+                id: TurnId::new(1),
+                prompt: "must remain stopped".to_owned().into(),
+            })
+            .unwrap();
+        let WorkerEvent::TurnFinished {
+            error: Some(_),
+            snapshot: None,
+            ..
+        } = timeout(Duration::from_secs(5), updates.recv())
+            .await
+            .unwrap()
+            .unwrap()
+        else {
+            panic!("stopped agent must reject followup");
+        };
+        assert!(receive.try_recv().is_err());
+        shutdown.cancel();
+        stopped(&mut updates).await;
+        drain.await.unwrap();
+        drop(journal);
+        writer.into_task().await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn manual_compaction_is_idle_only_and_shutdown_is_responsive() {
+        for close_commands in [true, false] {
+            let called = Arc::new(Notify::new());
+            let calls = Arc::new(AtomicUsize::new(0));
+            let (agent, mut events) = pending_agent(called.clone(), calls.clone());
+            let shutdown = CancellationToken::new();
+            let (commands, mut updates) = spawn(
+                agent,
+                TEST_CONTEXT,
+                MemoryReviewState::fresh(false),
+                shutdown.clone(),
+            );
+            let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
+            commands
+                .send(WorkerCommand::Submit {
+                    pane: PaneId::Main,
+                    id: TurnId::new(1),
+                    prompt: "pending".to_owned().into(),
+                })
+                .unwrap();
+            timeout(Duration::from_secs(5), called.notified())
+                .await
+                .unwrap();
+            commands.send(WorkerCommand::Compact(PaneId::Main)).unwrap();
+            assert!(
+                compacted(&mut updates)
+                    .await
+                    .err()
+                    .unwrap()
+                    .contains("finish active work")
+            );
+            assert_eq!(calls.load(Ordering::Relaxed), 1);
+            commands
+                .send(WorkerCommand::CancelAll(PaneId::Main))
+                .unwrap();
+            finished(&mut updates, TurnId::new(1)).await;
+            commands.send(WorkerCommand::Compact(PaneId::Main)).unwrap();
+            timeout(Duration::from_secs(5), called.notified())
+                .await
+                .unwrap();
+            if close_commands {
+                drop(commands);
+            } else {
+                shutdown.cancel();
+            }
+            stopped(&mut updates).await;
+            drain.await.unwrap();
+        }
+    }
+
     struct CapturedRequest {
-        model: Model,
+        model: nanocodex::Model,
         thinking: Thinking,
         input: String,
         release: oneshot::Sender<()>,
@@ -1154,7 +1740,7 @@ mod tests {
             .build()
             .unwrap();
         Nanocodex::builder(openai)
-            .model(context.model)
+            .model(context.model.as_str().parse::<CodexModel>().unwrap())
             .thinking(context.thinking)
             .build()
             .unwrap()
@@ -1169,14 +1755,14 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(request.model, model);
+        assert_eq!(request.model, model.as_str().parse::<CodexModel>().unwrap());
         assert_eq!(request.thinking, thinking);
         let context = request
             .input
             .rsplit_once("<agent_context>")
             .expect("request must contain turn context")
             .1;
-        let model_name = format!("{model:?}").to_ascii_lowercase();
+        let model_name = crate::app::model::name(model).to_ascii_lowercase();
         assert!(
             context.contains(&format!(
                 "This turn runs on {model_name} with {thinking} reasoning effort."
@@ -1192,6 +1778,305 @@ mod tests {
                 if matches!(updates.recv().await, Some(WorkerEvent::TurnFinished { id: actual, .. }) if actual == id) { break; }
             }
         }).await.unwrap();
+    }
+
+    fn claude_text_frames(text: &str) -> String {
+        use serde_json::json;
+        [
+            json!({"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"claude-opus-5-5","content":[],"stop_reason":null,"usage":{"input_tokens":10,"output_tokens":0}}}),
+            json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":text}}),
+            json!({"type":"content_block_stop","index":0}),
+            json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}),
+            json!({"type":"message_stop"}),
+        ].into_iter().map(|frame| format!("event: {}\ndata: {frame}\n\n", frame["type"].as_str().unwrap())).collect::<String>()
+    }
+
+    #[tokio::test]
+    async fn manual_compaction_captures_claude_native_state_and_shuts_down_pending_work() {
+        use axum::{Router, http::StatusCode, routing::post};
+        use nanocodex::{Claude, ClaudeModel, claude::ClaudeClient};
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let (requested, mut requests) =
+            mpsc::unbounded_channel::<oneshot::Sender<Option<String>>>();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let router = Router::new().route("/v1/messages", post(move || {
+            let requested = requested.clone();
+            async move {
+                let (send, receive) = oneshot::channel();
+                requested.send(send).unwrap();
+                match receive.await.unwrap() {
+                    Some(text) => (StatusCode::OK, [("content-type", "text/event-stream")], claude_text_frames(&text)),
+                    None => (StatusCode::BAD_REQUEST, [("content-type", "application/json")], "{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"synthetic compaction failure\"}}".to_owned()),
+                }
+            }
+        }));
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let directory = tempfile::tempdir().unwrap();
+        let client = ClaudeClient::new(
+            reqwest::Client::new(),
+            format!("http://{address}/v1/messages"),
+            "synthetic-key",
+        );
+        let (agent, mut events) = Nanocodex::builder(Claude::new(
+            client,
+            Model::Claude(ClaudeModel::Opus55).as_str(),
+        ))
+        .workspace(directory.path().to_string_lossy())
+        .build()
+        .unwrap();
+        let probe = agent.clone();
+        let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
+        let seed = agent.prompt("seed conversation").await.unwrap();
+        timeout(Duration::from_secs(5), requests.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .send(Some("seed answer".to_owned()))
+            .unwrap();
+        timeout(Duration::from_secs(5), seed)
+            .await
+            .unwrap()
+            .unwrap();
+        let shutdown = CancellationToken::new();
+        let (commands, mut updates) = spawn(
+            agent,
+            AgentContext {
+                model: Model::Claude(ClaudeModel::Opus55),
+                thinking: Thinking::Medium,
+            },
+            MemoryReviewState::fresh(false),
+            shutdown.clone(),
+        );
+        commands.send(WorkerCommand::Compact(PaneId::Main)).unwrap();
+        timeout(Duration::from_secs(5), requests.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .send(Some("compacted native summary".to_owned()))
+            .unwrap();
+        let snapshot = compacted(&mut updates).await.unwrap();
+        assert!(snapshot.context_budget().is_some());
+        let expected = serde_json::to_value(&snapshot).unwrap();
+        assert!(
+            expected["payload"]
+                .as_str()
+                .unwrap()
+                .contains("compacted native summary")
+        );
+        commands.send(WorkerCommand::Compact(PaneId::Main)).unwrap();
+        timeout(Duration::from_secs(5), requests.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .send(None)
+            .unwrap();
+        assert!(
+            compacted(&mut updates)
+                .await
+                .err()
+                .unwrap()
+                .contains("synthetic compaction failure")
+        );
+        let actual =
+            super::AgentSnapshot::from_claude(probe.runtime_snapshot().await.unwrap()).unwrap();
+        assert_eq!(serde_json::to_value(actual).unwrap(), expected);
+        drop(probe);
+        commands.send(WorkerCommand::Compact(PaneId::Main)).unwrap();
+        let pending = timeout(Duration::from_secs(5), requests.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        shutdown.cancel();
+        stopped(&mut updates).await;
+        drain.await.unwrap();
+        server.abort();
+        let _ = server.await;
+        drop(pending);
+    }
+
+    #[tokio::test]
+    async fn claude_success_publishes_a_native_checkpoint_and_rejects_fork() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        use axum::{Router, routing::post};
+        use nanocodex::{
+            Claude, ClaudeModel, HarnessModel, agent::ChildSnapshot, claude::ClaudeClient,
+        };
+        let frames = claude_text_frames("done");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (requested, mut requests) = mpsc::unbounded_channel();
+        let router = Router::new().route(
+            "/v1/messages",
+            post(move || {
+                let frames = frames.clone();
+                let index = calls.fetch_add(1, Ordering::Relaxed);
+                let requested = requested.clone();
+                async move {
+                    requested.send(()).unwrap();
+                    if index > 0 {
+                        pending::<()>().await;
+                    }
+                    ([("content-type", "text/event-stream")], frames)
+                }
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let directory = tempfile::tempdir().unwrap();
+        let client = ClaudeClient::new(
+            reqwest::Client::new(),
+            format!("http://{address}/v1/messages"),
+            "synthetic-key",
+        );
+        let (agent, mut events) = Nanocodex::builder(Claude::new(
+            client,
+            Model::Claude(ClaudeModel::Opus55).as_str(),
+        ))
+        .workspace(directory.path().to_string_lossy())
+        .thinking(Thinking::High)
+        .unwrap()
+        .build()
+        .unwrap();
+        let expected_session = agent.session_id().to_owned();
+        let probe = agent.clone();
+        let shutdown = CancellationToken::new();
+        let (commands, mut updates) = spawn(
+            agent,
+            AgentContext {
+                model: Model::Claude(ClaudeModel::Opus55),
+                thinking: Thinking::High,
+            },
+            MemoryReviewState::fresh(false),
+            shutdown.clone(),
+        );
+        let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
+        match timeout(Duration::from_secs(5), updates.recv())
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            WorkerEvent::ContextBudget {
+                pane,
+                session_id,
+                budget,
+            } => {
+                assert_eq!(pane, PaneId::Main);
+                assert_eq!(session_id, expected_session);
+                assert_eq!(budget.active_tokens, 0);
+                assert_eq!(budget.window_tokens, 1_000_000);
+            }
+            _ => panic!("expected native context before the first prompt"),
+        }
+        commands
+            .send(WorkerCommand::Submit {
+                pane: PaneId::Main,
+                id: TurnId::new(1),
+                prompt: "hello".to_owned().into(),
+            })
+            .unwrap();
+        let snapshot = timeout(Duration::from_secs(5), async {
+            let mut latest = None;
+            loop {
+                match updates.recv().await.unwrap() {
+                    WorkerEvent::ContextBudget {
+                        session_id, budget, ..
+                    } => {
+                        assert_eq!(session_id, expected_session);
+                        latest = Some(budget);
+                    }
+                    WorkerEvent::TurnFinished {
+                        snapshot, error, ..
+                    } => {
+                        assert!(error.is_none(), "{error:?}");
+                        let snapshot = snapshot.expect("successful Claude turn must checkpoint");
+                        assert_eq!(latest, snapshot.context_budget());
+                        assert_eq!(latest.unwrap().active_tokens, 11);
+                        break snapshot;
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .unwrap();
+        let ChildSnapshot::Native {
+            model,
+            session_id,
+            thinking,
+            has_conversation,
+            payload,
+        } = snapshot.into_claude().unwrap()
+        else {
+            panic!("expected native checkpoint")
+        };
+        assert_eq!(model, HarnessModel::Claude(ClaudeModel::Opus55));
+        assert_eq!(session_id, expected_session);
+        assert_eq!(thinking, Thinking::High);
+        assert!(has_conversation);
+        assert!(payload.contains("hello"));
+        assert!(payload.contains("done"));
+        commands
+            .send(WorkerCommand::OpenFork {
+                pane: PaneId::Fork(1),
+                parent_sequence: 1,
+            })
+            .unwrap();
+        timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(WorkerEvent::ForkFailed { error, .. }) = updates.recv().await {
+                    assert!(error.contains("Claude does not support forking"));
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        requests.recv().await.unwrap();
+        commands
+            .send(WorkerCommand::Submit {
+                pane: PaneId::Main,
+                id: TurnId::new(2),
+                prompt: "cancel this turn".to_owned().into(),
+            })
+            .unwrap();
+        timeout(Duration::from_secs(5), requests.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        commands
+            .send(WorkerCommand::CancelAll(PaneId::Main))
+            .unwrap();
+        let budget = timeout(Duration::from_secs(5), async {
+            let mut latest = None;
+            loop {
+                match updates.recv().await.unwrap() {
+                    WorkerEvent::ContextBudget { budget, .. } => latest = Some(budget),
+                    WorkerEvent::TurnFinished {
+                        id,
+                        snapshot,
+                        error,
+                        ..
+                    } if id == TurnId::new(2) => {
+                        assert!(snapshot.is_none());
+                        assert!(error.is_none());
+                        break latest.expect("cancelled turn must publish current context");
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .unwrap();
+        let snapshot = crate::tui::session::AgentSnapshot::from_claude(
+            probe.runtime_snapshot().await.unwrap(),
+        )
+        .unwrap();
+        assert_eq!(Some(budget), snapshot.context_budget());
+        drop(probe);
+        shutdown.cancel();
+        drain.await.unwrap();
+        server.abort();
     }
 
     #[tokio::test]
@@ -1216,7 +2101,12 @@ mod tests {
                 })
                 .unwrap();
         }
-        let first = captured(&mut requests, Model::Astra, Thinking::Low).await;
+        let first = captured(
+            &mut requests,
+            Model::Codex(CodexModel::Astra),
+            Thinking::Low,
+        )
+        .await;
         commands
             .send(WorkerCommand::SetThinking {
                 pane: PaneId::Main,
@@ -1237,16 +2127,24 @@ mod tests {
             })
             .unwrap();
         first.release.send(()).unwrap();
-        captured(&mut requests, Model::Astra, Thinking::Low)
-            .await
-            .release
-            .send(())
-            .unwrap();
-        captured(&mut requests, Model::Astra, Thinking::High)
-            .await
-            .release
-            .send(())
-            .unwrap();
+        captured(
+            &mut requests,
+            Model::Codex(CodexModel::Astra),
+            Thinking::Low,
+        )
+        .await
+        .release
+        .send(())
+        .unwrap();
+        captured(
+            &mut requests,
+            Model::Codex(CodexModel::Astra),
+            Thinking::High,
+        )
+        .await
+        .release
+        .send(())
+        .unwrap();
         finished(&mut updates, TurnId::new(3)).await;
 
         for context in [
@@ -1264,11 +2162,15 @@ mod tests {
                     completion,
                 })
                 .unwrap();
-            captured(&mut requests, Model::Astra, Thinking::High)
-                .await
-                .release
-                .send(())
-                .unwrap();
+            captured(
+                &mut requests,
+                Model::Codex(CodexModel::Astra),
+                Thinking::High,
+            )
+            .await
+            .release
+            .send(())
+            .unwrap();
             assert!(
                 timeout(Duration::from_secs(5), result)
                     .await
@@ -1298,15 +2200,19 @@ mod tests {
                 prompt: "fork".to_owned().into(),
             })
             .unwrap();
-        captured(&mut requests, Model::Astra, Thinking::High)
-            .await
-            .release
-            .send(())
-            .unwrap();
+        captured(
+            &mut requests,
+            Model::Codex(CodexModel::Astra),
+            Thinking::High,
+        )
+        .await
+        .release
+        .send(())
+        .unwrap();
         finished(&mut updates, TurnId::new(5)).await;
 
         let replacement_context = AgentContext {
-            model: Model::Sol,
+            model: Model::Codex(CodexModel::Sol),
             thinking: Thinking::Medium,
         };
         let (replacement, mut replacement_events) = capture_agent(sender, replacement_context);
@@ -1328,11 +2234,15 @@ mod tests {
                 prompt: "replacement fallback".to_owned().into(),
             })
             .unwrap();
-        captured(&mut requests, Model::Sol, Thinking::Medium)
-            .await
-            .release
-            .send(())
-            .unwrap();
+        captured(
+            &mut requests,
+            Model::Codex(CodexModel::Sol),
+            Thinking::Medium,
+        )
+        .await
+        .release
+        .send(())
+        .unwrap();
         finished(&mut updates, TurnId::new(6)).await;
         shutdown.cancel();
         for task in [drain, fork_drain, replacement_drain] {
@@ -1431,7 +2341,7 @@ mod tests {
     }
 
     const TEST_CONTEXT: AgentContext = AgentContext {
-        model: Model::Astra,
+        model: Model::Codex(CodexModel::Astra),
         thinking: Thinking::Low,
     };
 

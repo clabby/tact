@@ -53,7 +53,7 @@ use crate::{
 };
 use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
 use futures_util::StreamExt;
-use nanocodex::Model;
+use nanocodex::HarnessModel as Model;
 use std::{
     collections::{HashMap, HashSet},
     io::{self, IsTerminal},
@@ -221,7 +221,7 @@ impl PaneSettings {
         Self {
             effort,
             reasoning_mode,
-            fast_mode,
+            fast_mode: fast_mode && model.supports_fast_mode(),
             model,
         }
     }
@@ -509,6 +509,7 @@ pub(crate) async fn run(
                 1,
             )
         };
+    let initial_fast_mode = initial_fast_mode && model.supports_fast_mode();
     let workspace = config.agent().workspace().to_path_buf();
     let mut terminal = TerminalSession::enter().map_err(RuntimeError::Terminal)?;
     terminal
@@ -564,6 +565,7 @@ pub(crate) async fn run(
     );
     let mut root = RootNode::new(&workspace, initial_effort);
     root.set_tui_config(*config.tui());
+    root.set_claude_enabled(config.claude().enabled());
     root.set_reasoning_modes(reasoning_mode, preferred_reasoning_mode);
     root.set_fast_mode(initial_fast_mode);
     root.set_max_subagents(initial_max_subagents);
@@ -912,6 +914,18 @@ pub(crate) async fn run(
                         worker_stopped = true;
                         worker_error = error;
                     }
+                    WorkerEvent::ContextBudget { pane, session_id, budget } => {
+                        let Some(runtime) = panes.get_mut(&pane).filter(|runtime| runtime.session_id == session_id) else {
+                            continue;
+                        };
+                        let update = if runtime.journal_mut()?.is_empty() {
+                            app.update(AppEvent::ContextBudget { pane, budget })
+                        } else {
+                            let record = runtime.journal_mut()?.append_local(LocalEvent::ContextBudget(budget))?;
+                            app.update(AppEvent::Transcript { pane, record })
+                        };
+                        schedule(update, &mut scheduler);
+                    }
                     WorkerEvent::TurnAccepted { pane, id } => {
                         review_turn_active.store(true, Ordering::Release);
                         if herdr_turns.insert((pane, id)) && herdr_turns.len() == 1 {
@@ -924,6 +938,28 @@ pub(crate) async fn run(
                         let record = panes.get_mut(&pane).expect("worker pane must exist")
                             .journal_mut()?.append_local(LocalEvent::WorkerTurnAccepted { id })?;
                         schedule(app.update(AppEvent::Transcript { pane, record }), &mut scheduler);
+                    }
+                    WorkerEvent::CompactionFinished { pane, result, terminal_stop, duration_ns } => {
+                        let Some(runtime) = panes.get_mut(&pane) else { continue; };
+                        let (snapshot, error) = match result {
+                            Ok(snapshot) => (Some(snapshot), None),
+                            Err(error) => (None, Some(error)),
+                        };
+                        let event = LocalEvent::CompactionFinished { error, duration_ns, terminal_stop };
+                        let record = match snapshot.as_ref() {
+                            Some(snapshot) => {
+                                let state = session::encode_checkpoint(snapshot, &runtime.instructions, runtime.skills_catalog_present)?;
+                                runtime.journal_mut()?.append_local_with_resume_state(event, state)?
+                            }
+                            None => runtime.journal_mut()?.append_local(event)?,
+                        };
+                        runtime.journal_mut()?.flush().await?;
+                        schedule(app.update(AppEvent::Transcript { pane, record }), &mut scheduler);
+                        if let Some(budget) = snapshot.as_ref().and_then(|snapshot| snapshot.context_budget()) {
+                            let record = runtime.journal_mut()?.append_local(LocalEvent::ContextBudget(budget))?;
+                            schedule(app.update(AppEvent::Transcript { pane, record }), &mut scheduler);
+                        }
+                        apply_app_update!(app.update(AppEvent::CompactionFinished(pane)));
                     }
                     WorkerEvent::TurnFinished {
                         pane,
@@ -1101,8 +1137,15 @@ pub(crate) async fn run(
                         effort,
                         result,
                     } => {
-                        result?;
                         let runtime = panes.get_mut(&pane).expect("effort pane must exist");
+                        if let Err(error) = result {
+                            let effort = runtime.current_effort;
+                            input = Some(EventStream::new());
+                            apply_app_update!(app.update(AppEvent::EffortUpdateFailed {
+                                pane, effort, error: format!("Could not change effort: {error}"),
+                            }));
+                            continue;
+                        }
                         let previous_effort = runtime.current_effort;
                         let journal = runtime.journal_mut()?;
                         if journal.is_empty() {
@@ -1115,10 +1158,6 @@ pub(crate) async fn run(
                             schedule(app.update(AppEvent::Transcript { pane, record }), &mut scheduler);
                         }
                         runtime.current_effort = effort;
-                        runtime.subagent_control.set_max_thinking(effort.into());
-                        if app.main_pane() == Some(pane) {
-                            config.set_thinking(effort);
-                        }
                         input = Some(EventStream::new());
                         scheduler.request_immediate(Instant::now());
                     }
@@ -1252,6 +1291,12 @@ pub(crate) async fn run(
                 effort_task = None;
                 let update = result.map_err(RuntimeError::EffortUpdateTask)??;
                 config.set_reasoning_mode(update.preferred_reasoning_mode);
+                if app.main_pane() == Some(update.pane) {
+                    config.set_thinking(update.to);
+                    for runtime in panes.values() {
+                        runtime.subagent_control.set_max_thinking(update.to.into());
+                    }
+                }
                 app.set_preferred_reasoning_mode(update.preferred_reasoning_mode);
                 commands
                     .send(WorkerCommand::SetThinking {
@@ -2010,6 +2055,23 @@ fn apply_pane_effect(
                 runtime.pending_submission = Some(submission);
             }
         }
+        components::RootEffect::Compact => {
+            let runtime = context
+                .panes
+                .get_mut(&pane)
+                .expect("UI pane must have a runtime");
+            let record = runtime
+                .journal_mut()?
+                .append_local(LocalEvent::CompactionStarted)?;
+            schedule(
+                context.app.update(AppEvent::Transcript { pane, record }),
+                context.scheduler,
+            );
+            context
+                .commands
+                .send(WorkerCommand::Compact(pane))
+                .map_err(|_| RuntimeError::AgentWorkerStopped)?;
+        }
         components::RootEffect::Reflect(instructions) => {
             let runtime = context
                 .panes
@@ -2135,11 +2197,7 @@ fn apply_pane_effect(
             let root = context.app.root(pane).expect("model pane must exist");
             let effort = root.composer().effort();
             let reasoning_mode = supported_reasoning_mode(model, root.preferred_reasoning_mode());
-            let fast_mode = context
-                .panes
-                .get(&pane)
-                .expect("model pane must have a runtime")
-                .current_fast_mode;
+            let fast_mode = context.config.agent().fast_mode() && model.supports_fast_mode();
             let config = context.config.clone();
             *context.new_session_task = Some(tokio::task::spawn_blocking(move || {
                 let configured =
@@ -2212,6 +2270,20 @@ fn apply_pane_effect(
         components::RootEffect::ReloadConfig => match context.config.reload() {
             Ok(reload) => {
                 let (config, workspace_changed) = reload.into_parts();
+                if let Err(error) = context.panes.values().try_for_each(|runtime| {
+                    config.claude().ensure_model_enabled(runtime.current_model)
+                }) {
+                    schedule(
+                        context.app.update(AppEvent::ConfigReloadFailed {
+                            pane,
+                            error: format!(
+                                "Could not reload config while a Claude session is open: {error}"
+                            ),
+                        }),
+                        context.scheduler,
+                    );
+                    return Ok(());
+                }
                 let theme = config.theme().clone();
                 let tui = *config.tui();
                 let max_subagents = config.agent().max_subagents();
@@ -2234,14 +2306,15 @@ fn apply_pane_effect(
                 invalidate_memory_generations(context.memory_generations);
                 *context.memory_store = selected_memory_store;
                 context.app.set_max_subagents(max_subagents);
+                context.app.set_claude_enabled(config.claude().enabled());
                 for runtime in context.panes.values() {
-                    runtime.subagent_control.set_max_concurrency(max_subagents);
+                    apply_subagent_config(&runtime.subagent_control, &config);
                 }
                 *context.config = config;
                 let message = if workspace_changed {
-                    "Reloaded config · theme, UI, and memory browser applied · agent/auth/tool settings apply to new sessions · workspace requires restart"
+                    "Reloaded config · theme, UI, memory browser, and subagent limits applied · agent/auth/tool settings apply to new sessions · workspace requires restart"
                 } else {
-                    "Reloaded config · theme, UI, and memory browser applied · agent/auth/tool settings apply to new sessions"
+                    "Reloaded config · theme, UI, memory browser, and subagent limits applied · agent/auth/tool settings apply to new sessions"
                 };
                 schedule(
                     context.app.update(AppEvent::ConfigReloaded {
@@ -2854,6 +2927,12 @@ fn is_image_paste(event: &Event) -> bool {
     )
 }
 
+fn apply_subagent_config(subagents: &Subagents, config: &Config) {
+    subagents.set_claude_enabled(config.claude().enabled());
+    subagents.set_max_concurrency(config.agent().max_subagents());
+    subagents.set_max_thinking(config.agent().thinking().into());
+}
+
 fn schedule(update: ComponentUpdate<AppEffect>, scheduler: &mut RenderScheduler) {
     debug_assert!(update.effects.is_empty());
     request_render(update.render, scheduler);
@@ -2892,20 +2971,114 @@ mod tests {
             worker::WorkerCommand,
         },
     };
-    use nanocodex::Model;
+    use nanocodex::{ClaudeModel, HarnessModel as Model, Model as CodexModel};
     use std::{cell::Cell, collections::HashMap, fs, path::Path, sync::Arc};
     use tact_memory::{MemoryLimits, MemoryStore, SelectedMemoryStore};
     use tact_subagents::{AgentId, AgentStatus, AgentUpdate};
     use tempfile::tempdir;
 
+    #[tokio::test]
+    async fn config_reload_updates_claude_admission_in_existing_registry() {
+        use nanocodex::{
+            NanocodexError, Thinking, Tools,
+            tools::{
+                contract::{ToolContext, ToolInput},
+                runtime::ToolRuntime,
+            },
+        };
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        fs::write(&path, "[claude]\nenabled = true\n").unwrap();
+        let mut config = Config::load(ConfigOverrides {
+            path: Some(path.clone()),
+            auth_file: Some(directory.path().join("codex-auth")),
+            ..ConfigOverrides::default()
+        })
+        .unwrap();
+        let (subagents, _updates) = tact_subagents::Subagents::new(1);
+        subagents.set_claude_enabled(true);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = calls.clone();
+        subagents
+            .set_agent_factory(Thinking::Max, false, move |_, _, _| {
+                observed.fetch_add(1, Ordering::SeqCst);
+                Err(NanocodexError::InvalidRequest(
+                    "test factory admitted".to_owned(),
+                ))
+            })
+            .unwrap();
+        let tools = subagents
+            .downgrade()
+            .install_tools(Tools::builder())
+            .build()
+            .unwrap();
+        let runtime = ToolRuntime::new_with_tools(directory.path(), None, None, &tools);
+        for (enabled, expected_calls) in [(false, 0), (true, 1), (false, 1)] {
+            fs::write(&path, format!("[claude]\nenabled = {enabled}\n")).unwrap();
+            config = config.reload().unwrap().into_parts().0;
+            super::apply_subagent_config(&subagents, &config);
+            let input = serde_json::json!({"role":"test","task":"test","model":"opus-5.5","thinking":"low","output_schema":{"type":"object"}});
+            let output = runtime
+                .execute_tool(
+                    "spawn_agent",
+                    ToolInput::Function(serde_json::value::to_raw_value(&input).unwrap()),
+                    ToolContext::new(
+                        Model::Codex(CodexModel::Sol).as_str(),
+                        "root",
+                        "spawn",
+                        &[],
+                        128,
+                    ),
+                )
+                .await
+                .unwrap();
+            assert!(!output.success);
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                expected_calls,
+                "Claude enabled={enabled}"
+            );
+        }
+    }
+
+    #[test]
+    fn pane_fast_mode_tracks_model_support() {
+        for model in [
+            Model::Claude(ClaudeModel::Sonnet55),
+            Model::Claude(ClaudeModel::Opus55),
+            Model::Claude(ClaudeModel::Fable51),
+        ] {
+            let settings = super::PaneSettings::new(
+                ReasoningEffort::High,
+                ReasoningMode::Standard,
+                true,
+                model,
+            );
+            assert_eq!(
+                settings.fast_mode,
+                model == Model::Claude(ClaudeModel::Opus55)
+            );
+        }
+        assert!(
+            super::PaneSettings::new(
+                ReasoningEffort::High,
+                ReasoningMode::Standard,
+                true,
+                Model::Codex(CodexModel::Sol)
+            )
+            .fast_mode
+        );
+    }
+
     #[test]
     fn astra_uses_standard_reasoning_without_changing_other_models() {
         assert_eq!(
-            supported_reasoning_mode(Model::Astra, ReasoningMode::Pro),
+            supported_reasoning_mode(Model::Codex(CodexModel::Astra), ReasoningMode::Pro),
             ReasoningMode::Standard
         );
         assert_eq!(
-            supported_reasoning_mode(Model::Sol, ReasoningMode::Pro),
+            supported_reasoning_mode(Model::Codex(CodexModel::Sol), ReasoningMode::Pro),
             ReasoningMode::Pro
         );
     }
@@ -3200,7 +3373,7 @@ mod tests {
                 ReasoningEffort::Low,
                 ReasoningMode::Standard,
                 false,
-                Model::Luna,
+                Model::Codex(CodexModel::Luna),
             ),
             Arc::from("instructions"),
             subagent_control.clone(),
@@ -3218,7 +3391,7 @@ mod tests {
                 ReasoningEffort::Low,
                 ReasoningMode::Standard,
                 false,
-                Model::Luna,
+                Model::Codex(CodexModel::Luna),
             ),
             Arc::from("instructions"),
             subagent_control.clone(),
@@ -3278,7 +3451,7 @@ mod tests {
             .decode_payload::<crate::tui::transcript::SessionStarted>()
             .unwrap();
         assert_eq!(started.parent_session_id.as_deref(), Some("main-session"));
-        assert_eq!(started.model, Model::Luna.to_string());
+        assert_eq!(started.model, Model::Codex(CodexModel::Luna).to_string());
         assert_eq!(records[1].kind(), "user.submitted");
     }
 
@@ -3306,7 +3479,7 @@ mod tests {
                 ReasoningEffort::Medium,
                 ReasoningMode::Standard,
                 false,
-                Model::Sol,
+                Model::Codex(CodexModel::Sol),
             ),
             Arc::from("instructions"),
             subagent_control.clone(),
@@ -3333,7 +3506,7 @@ mod tests {
                 ReasoningEffort::Medium,
                 ReasoningMode::Standard,
                 false,
-                Model::Sol,
+                Model::Codex(CodexModel::Sol),
             ),
             Arc::from("instructions"),
             subagent_control,

@@ -11,7 +11,7 @@ use super::{
 use crate::{
     app::config::{ReasoningEffort, ReasoningMode},
     tui::{
-        context::MODEL_WINDOW_TOKENS,
+        context::{ContextBudget, MODEL_WINDOW_TOKENS},
         format::{
             format_turn_duration, normalize_line_endings, sanitize_terminal_text, shorten_home,
             terminal_text_width,
@@ -23,7 +23,7 @@ use crate::{
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use history::PromptHistory;
 use layout::{VisualLayout, byte_at_column, grapheme_at_column};
-use nanocodex::Model;
+use nanocodex::{HarnessModel as Model, Model as CodexModel};
 use ratatui::{
     Frame,
     buffer::Buffer,
@@ -62,7 +62,7 @@ pub(super) enum ComposerChromeTarget {
 pub(crate) enum ComposerEvent {
     Terminal(Event),
     PasteImage(String),
-    ContextTokens(u64),
+    ContextBudget(ContextBudget),
     ReplaceRange {
         range: Range<usize>,
         text: String,
@@ -105,6 +105,7 @@ pub(crate) struct Composer {
     scroll: usize,
     last_width: usize,
     context_tokens: u64,
+    context_window_tokens: u64,
     workspace: String,
     thinking: ReasoningEffort,
     model: Model,
@@ -204,9 +205,10 @@ impl Composer {
             scroll: 0,
             last_width: 78,
             context_tokens: 0,
+            context_window_tokens: MODEL_WINDOW_TOKENS,
             workspace: shorten_home(workspace),
             thinking,
-            model: Model::Sol,
+            model: Model::Codex(CodexModel::Sol),
             reasoning_mode: ReasoningMode::Standard,
             fast_mode: false,
             input_mode: None,
@@ -243,12 +245,12 @@ impl Composer {
                 self.insert_image(data_url);
                 ComposerUpdate::changed()
             }
-            ComposerEvent::ContextTokens(tokens) => {
-                if self.context_tokens == tokens {
-                    return ComposerUpdate::unchanged();
-                }
-                self.context_tokens = tokens;
-                ComposerUpdate::changed()
+            ComposerEvent::ContextBudget(budget) => {
+                let changed = self.context_tokens != budget.active_tokens
+                    || self.context_window_tokens != budget.window_tokens;
+                self.context_tokens = budget.active_tokens;
+                self.context_window_tokens = budget.window_tokens;
+                ComposerUpdate::from_change(changed)
             }
             ComposerEvent::ReplaceRange { range, text } => {
                 self.history.detach();
@@ -1187,7 +1189,18 @@ impl Composer {
         let content_start = area.x + 2;
         let content_width = usize::from(area.width - 4);
         let content_end = content_start + u16::try_from(content_width).unwrap_or(u16::MAX);
-        let usage_prefix = format!(" {}%/272k ", context_percent(self.context_tokens));
+        let window = self.context_window_tokens;
+        let capacity = if window.is_multiple_of(1_000_000) {
+            format!("{}m", window / 1_000_000)
+        } else if window.is_multiple_of(1_000) {
+            format!("{}k", window / 1_000)
+        } else {
+            window.to_string()
+        };
+        let usage_prefix = format!(
+            " {}%/{capacity} ",
+            context_percent(self.context_tokens, window)
+        );
         let input_mode_segment = self
             .input_mode
             .as_ref()
@@ -1221,8 +1234,10 @@ impl Composer {
             .map(|timer| format!(" {} ", timer.label()))
             .unwrap_or_default();
         let effort = format!(" {} ", self.thinking.as_str());
-        let fast_mode = self.fast_mode.then_some("⚡ ");
-        let pro_mode = (self.reasoning_mode == ReasoningMode::Pro).then_some("pro ");
+        let fast_mode = (self.fast_mode && self.model.supports_fast_mode()).then_some("⚡ ");
+        let pro_mode = (self.reasoning_mode == ReasoningMode::Pro
+            && matches!(self.model, Model::Codex(_)))
+        .then_some("pro ");
         let right_width = timer.width()
             + model.width()
             + effort.width()
@@ -1501,11 +1516,8 @@ impl ComposerUpdate {
     }
 }
 
-fn context_percent(tokens: u64) -> u64 {
-    tokens
-        .saturating_mul(100)
-        .saturating_add(MODEL_WINDOW_TOKENS / 2)
-        / MODEL_WINDOW_TOKENS
+fn context_percent(tokens: u64, window: u64) -> u64 {
+    tokens.saturating_mul(100).saturating_add(window / 2) / window.max(1)
 }
 
 fn draw_symbol(buffer: &mut Buffer, x: u16, y: u16, symbol: &str, style: Style) {
@@ -1597,7 +1609,7 @@ mod tests {
     };
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use nanocodex::{
-        Model,
+        ClaudeModel, HarnessModel as Model, Model as CodexModel,
         agent::input::{PromptInput, UserInput},
     };
     use ratatui::{
@@ -1689,9 +1701,18 @@ mod tests {
     #[test]
     fn composer_chrome_uses_the_model_palette() {
         for (model, color) in [
-            (Model::Luna, Color::White),
-            (Model::Sol, Color::Yellow),
-            (Model::Astra, Color::LightMagenta),
+            (
+                Model::Codex(CodexModel::Luna),
+                Theme::default().model(Model::Codex(CodexModel::Luna)),
+            ),
+            (
+                Model::Codex(CodexModel::Sol),
+                Theme::default().model(Model::Codex(CodexModel::Sol)),
+            ),
+            (
+                Model::Codex(CodexModel::Astra),
+                Theme::default().model(Model::Codex(CodexModel::Astra)),
+            ),
         ] {
             let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
             composer.update(ComposerEvent::SetModel(model));
@@ -1786,6 +1807,28 @@ mod tests {
         assert!(rendered.contains("medium ⚡"));
         assert_eq!(top[bolt].fg, Color::Yellow);
         assert!(top[bolt].modifier.contains(ratatui::style::Modifier::BOLD));
+    }
+
+    #[test]
+    fn claude_models_show_only_supported_mode_indicators() {
+        for model in [
+            Model::Claude(ClaudeModel::Sonnet55),
+            Model::Claude(ClaudeModel::Opus55),
+            Model::Claude(ClaudeModel::Fable51),
+        ] {
+            let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Max);
+            composer.update(ComposerEvent::SetModel(model));
+            composer.update(ComposerEvent::SetFastMode(true));
+            composer.update(ComposerEvent::SetReasoningMode(ReasoningMode::Pro));
+            let terminal = render(&mut composer, 72, 5);
+            let top = &rows(&terminal)[0];
+            assert!(top.contains(model.as_str()));
+            assert_eq!(
+                top.contains('⚡'),
+                model == Model::Claude(ClaudeModel::Opus55)
+            );
+            assert!(!top.contains(" pro"));
+        }
     }
 
     #[test]
@@ -2544,9 +2587,9 @@ mod tests {
 
     #[test]
     fn context_percentage_is_rounded() {
-        assert_eq!(context_percent(0), 0);
-        assert_eq!(context_percent(136_000), 50);
-        assert_eq!(context_percent(1_400), 1);
+        assert_eq!(context_percent(0, 272_000), 0);
+        assert_eq!(context_percent(136_000, 272_000), 50);
+        assert_eq!(context_percent(1_400, 272_000), 1);
     }
 
     #[test]

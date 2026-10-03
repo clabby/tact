@@ -118,6 +118,70 @@ When no effort is configured, Sol and Astra use low effort and Luna uses medium.
 effort takes precedence. Tact supports low through max effort. Sol and Luna support Pro mode;
 Astra uses standard mode.
 
+Claude support requires an explicit config opt-in and an Anthropic API key in
+`ANTHROPIC_API_KEY`:
+
+```toml
+[claude]
+enabled = true
+
+[agent]
+model = "sonnet-5.5" # or opus-5.5, fable-5.1
+thinking = "medium"
+```
+
+Type in the model picker to filter by name, provider, or model ID. Use ↑/↓ to select a model,
+Enter to apply it, and Esc to cancel. The check mark identifies the current model.
+
+With Claude enabled, `--model` and the model picker also accept `sonnet-5.5`, `opus-5.5`, and `fable-5.1`
+(native IDs `claude-sonnet-5-5`, `claude-opus-5-5`, and `claude-fable-5-1`). All support
+`low`, `medium`, `high`, `xhigh`, and `max`. Their default efforts are medium for Opus and high for Sonnet and Fable.
+Claude uses standard reasoning mode. Opus 5.5 supports fast mode through `agent.fast_mode = true`
+or the **Fast mode** action; Sonnet 5.5 and Fable 5.1 do not. Fast mode defaults to off and uses
+Anthropic's [premium fast-mode service](https://platform.claude.com/docs/en/build-with-claude/fast-mode),
+which requires access on the API account. Changes apply to subsequently accepted turns.
+Claude requests use automatic prompt caching with a one-hour TTL, covering the system prompt,
+tools, and reusable conversation prefix across long tool calls and user pauses. Cache hits refresh
+the TTL. One-hour cache writes cost twice the base input rate; repeated prefixes use discounted
+cache reads. Expiration affects cost and latency, not the saved conversation.
+Web search and image generation
+remain available to Claude and use OpenAI credentials. For an Anthropic-only setup, set
+`agent.web_search = false` and `agent.image_generation = false`. Codex children need the
+configured OpenAI credentials.
+
+Check whether the Claude API key is configured:
+
+```sh
+tact auth --provider claude status
+```
+
+Claude supports API-key authentication only. Tact does not log into Claude subscriptions or
+read subscription credentials. Keys must use the `sk-ant-api` or `sk-ant-usr-` prefix; subscription
+tokens and other credential formats are rejected before a client is constructed. This checks
+the credential format, not its validity with Anthropic. The key stays in the environment and
+is not written to config, model prompts, or session checkpoints. Codex can independently use a ChatGPT subscription
+through `tact auth --provider codex login`, including in mixed-provider task trees.
+
+For an API key that is not scoped to a workspace, set `claude.workspace_id` to the ID from
+[Console Settings → Workspaces](https://platform.claude.com/settings/workspaces). Tact sends it
+as `anthropic-workspace-id` for Claude roots, children, and auxiliary agents. Workspace-scoped
+keys can leave this unset. Start a new session after changing it.
+
+The `[claude]` section accepts `enabled`, `api_base_url`, and `workspace_id`. Unknown fields,
+including the retired `auth` and `subscription_store` settings, are rejected. Remove those
+fields and explicitly supply `ANTHROPIC_API_KEY` to use Claude.
+
+`claude.api_base_url` selects a Messages API base URL; Tact appends `/messages`.
+
+Claude uses Tact's Code Mode `exec`/`wait` runtime, including nested tools, memory, MCP, and
+mixed-provider subagents. At this pinned upstream version, Claude cannot fork a conversation or
+change effort after its first prompt; start a new session to choose another effort. Claude usage
+has no dollar estimate from upstream. These limits are reported without substituting Codex
+behavior or pricing.
+
+See the [Claude integration](docs/claude-integration.md) for authentication ownership, Code Mode
+cleanup, and validation boundaries.
+
 ## Configuration
 
 The configuration file is optional. Tact reads `$TACT_HOME/config.toml`, or
@@ -190,6 +254,12 @@ thinking_medium = "#007878"
 thinking_high = "#9A6700"
 thinking_xhigh = "red"
 thinking_max = "magenta"
+model_luna = "reset"
+model_sol = "yellow"
+model_astra = "magenta"
+model_sonnet = "green"
+model_opus = "red"
+model_fable = "cyan"
 
 [theme.dark]
 text = "reset"
@@ -203,6 +273,12 @@ thinking_medium = "cyan"
 thinking_high = "yellow"
 thinking_xhigh = "red"
 thinking_max = "magenta"
+model_luna = "reset"
+model_sol = "yellow"
+model_astra = "magenta"
+model_sonnet = "green"
+model_opus = "red"
+model_fable = "cyan"
 ```
 
 Set `agent.completion_hook` to a shell command to run after each conversation turn finishes. Tact
@@ -256,8 +332,17 @@ thinking_medium = "cyan"
 thinking_high = "yellow"
 thinking_xhigh = "red"
 thinking_max = "magenta"
+model_luna = "reset"
+model_sol = "yellow"
+model_astra = "magenta"
+model_sonnet = "green"
+model_opus = "red"
+model_fable = "cyan"
 ```
 
+The `model_*` colors apply to the model picker, composer, and subagent displays. Their defaults
+use the terminal's foreground for Luna and its yellow, magenta, green, red, and cyan slots for
+the other models in both light and dark mode, so the terminal theme controls their appearance. Set a color to an RGB value for a fixed override.
 Put any of the color options under `[theme.light]` or `[theme.dark]` to override that palette. Colors
 may be Ratatui names, indexed values such as `239`, or RGB values such as `"#AABBCC"`. Auto mode
 follows the operating-system theme while tact is running.
@@ -287,9 +372,14 @@ change the tool surface of an already-running session. `agent.max_subagents` con
 when the feature is enabled; setting it does not enable or disable subagents. See the
 [subagent design](docs/subagents.md) for the tool, lifecycle, messaging, and authority contracts.
 
-Agents explicitly choose `luna`, `sol`, or `astra` and `thinking` for each delegated task.
-Each turn receives its own model and effort in context. Children cannot exceed their parent's
-model: the model order is Luna, Sol, Astra. Root agents use the live `agent.thinking` cap
+Agents explicitly choose a model and `thinking` for each delegated task. The default choices are
+`luna`, `sol`, and `astra`; enabling Claude adds `sonnet-5.5`, `opus-5.5`, and `fable-5.1` for
+both root and child agents. Agents may mix providers within one task tree. Each turn receives its own model and effort
+in context. When both parent and child use Codex, the child cannot exceed the parent in the order
+Luna < Sol < Astra. Cross-provider selection and delegation between Claude models are allowed.
+Model-selection guidance ranks intelligence as Fable 5.1 > Astra > Opus 5.5 > Sol > Luna.
+Consider Sonnet 5.5 for speed and cost.
+Root agents use the live `agent.thinking` cap
 for new spawns, including after an update during an active turn. Registered subagents are also
 bounded by their own assigned effort. Changing the cap leaves existing children unchanged. Model
 selection has no per-model configuration switches or `selected` alias.
@@ -353,6 +443,13 @@ contracts, the remote HTTP contract, and an in-memory server walkthrough.
 Config reload applies memory-browser availability immediately. Like other agent tool and prompt
 settings, the agent-facing memory setting applies when a new session starts or is restored; an
 already-running agent retains the tool surface and instructions with which it was created.
+
+### Manual compaction
+
+Enter `/compact` or choose **Compact context** from the Actions menu while the session is idle.
+Tact uses the selected provider's native compaction and shows **Compacting context…** in the composer.
+Successful compaction updates the saved session, so resume uses the compacted context. Failed compaction
+does not replace the previous saved state.
 
 ### Reflection
 

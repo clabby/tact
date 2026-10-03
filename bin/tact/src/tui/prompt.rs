@@ -71,6 +71,9 @@ impl Submission {
     }
 
     pub(crate) fn agent_prompt(&self) -> Prompt {
+        if self.images.is_empty() {
+            return self.text.clone().into();
+        }
         let mut content = Vec::new();
         let mut cursor = 0;
         for image in &self.images {
@@ -114,6 +117,12 @@ impl From<String> for Submission {
 mod tests {
     use super::Submission;
     use nanocodex::agent::input::{PromptInput, UserInput};
+
+    #[test]
+    fn text_submission_uses_text_input() {
+        let prompt = Submission::text("hello".to_owned()).agent_prompt();
+        assert!(matches!(prompt.instruction, PromptInput::Text(text) if text == "hello"));
+    }
 
     #[test]
     fn multimodal_prompt_replaces_markers_with_ordered_images() {
