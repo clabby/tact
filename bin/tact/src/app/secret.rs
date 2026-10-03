@@ -1,6 +1,7 @@
 //! Application-owned secret storage with redaction and zeroization.
 
 use crate::app::error::SecretError;
+use serde::{Deserialize, Deserializer, de::Error as _};
 use std::{
     env::{self, VarError},
     fmt,
@@ -45,13 +46,28 @@ impl fmt::Debug for SecretString {
     }
 }
 
+impl<'de> Deserialize<'de> for SecretString {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        // Deserializer errors can include the rejected value; secret diagnostics use fixed text.
+        String::deserialize(deserializer)
+            .map(Self::new)
+            .map_err(|_| D::Error::custom("expected a secret string"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::SecretString;
-    use zeroize::Zeroize;
+    use zeroize::{Zeroize, ZeroizeOnDrop};
 
     #[test]
     fn debug_output_is_redacted() {
+        fn assert_zeroize_on_drop<T: ZeroizeOnDrop>() {}
+
+        assert_zeroize_on_drop::<SecretString>();
         let secret = SecretString::new("secret-sentinel".into());
 
         let output = format!("{secret:?}");

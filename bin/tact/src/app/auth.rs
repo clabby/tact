@@ -1,7 +1,7 @@
-//! Authentication selection and shared ChatGPT credential management.
+//! Provider authentication selection and shared ChatGPT credential management.
 
 use crate::app::{
-    config::{AuthConfig, AuthMode},
+    config::{AuthConfig, AuthMode, ClaudeConfig},
     error::{AuthError, AuthResult, SecretError},
     secret::SecretString,
 };
@@ -9,7 +9,7 @@ use nanocodex::oai::auth::{
     ChatGptAuthStatus, ChatGptLogin, OpenAiAuth, load_chatgpt_auth, logout_chatgpt,
     resolve_chatgpt_auth_status,
 };
-use std::{path::Path, result::Result as StdResult};
+use std::{path::Path, result::Result as StdResult, sync::Arc};
 
 const OPENAI_API_KEY: &str = "OPENAI_API_KEY";
 
@@ -26,6 +26,46 @@ pub(crate) fn validate_claude_api_key(key: &SecretString) -> AuthResult<()> {
 enum SelectedAuth {
     ChatGpt,
     ApiKey(SecretString),
+}
+
+#[derive(Debug)]
+pub(crate) enum ClaudeApiKey {
+    Environment(SecretString),
+    Config(Arc<SecretString>),
+}
+
+impl ClaudeConfig {
+    pub(crate) fn resolve_api_key(
+        &self,
+        read_environment: impl FnOnce() -> StdResult<Option<SecretString>, SecretError>,
+    ) -> AuthResult<Option<ClaudeApiKey>> {
+        let selected = match read_environment()? {
+            Some(key) => Some(ClaudeApiKey::Environment(key)),
+            None => self
+                .api_key()
+                .map(|key| ClaudeApiKey::Config(Arc::clone(key))),
+        };
+        if let Some(key) = &selected {
+            validate_claude_api_key(key.key())?;
+        }
+        Ok(selected)
+    }
+}
+
+impl ClaudeApiKey {
+    pub(crate) fn key(&self) -> &SecretString {
+        match self {
+            Self::Environment(key) => key,
+            Self::Config(key) => key,
+        }
+    }
+
+    pub(crate) const fn source(&self) -> &'static str {
+        match self {
+            Self::Environment(_) => "ANTHROPIC_API_KEY",
+            Self::Config(_) => "claude.api_key",
+        }
+    }
 }
 
 impl AuthConfig {
@@ -182,13 +222,86 @@ mod tests {
 
     use super::SelectedAuth;
     use crate::app::{
-        config::{AuthConfig, AuthMode},
-        error::AuthError,
+        config::{AuthConfig, AuthMode, ClaudeConfig},
+        error::{AuthError, SecretError},
         secret::SecretString,
     };
     use nanocodex::oai::auth::OpenAiAuthMode;
     use std::{cell::Cell, fs};
     use tempfile::tempdir;
+
+    #[test]
+    fn claude_key_selection_prefers_environment_then_config() {
+        for (configured, environment, expected_source) in [
+            (None, None, None),
+            (
+                Some("sk-ant-api03-config-sentinel"),
+                None,
+                Some("claude.api_key"),
+            ),
+            (
+                None,
+                Some("sk-ant-usr-env-sentinel"),
+                Some("ANTHROPIC_API_KEY"),
+            ),
+            (
+                Some("sk-ant-api03-config-sentinel"),
+                Some("sk-ant-usr-env-sentinel"),
+                Some("ANTHROPIC_API_KEY"),
+            ),
+            (
+                Some("invalid-config-sentinel"),
+                Some("sk-ant-usr-env-sentinel"),
+                Some("ANTHROPIC_API_KEY"),
+            ),
+            (Some(" \t"), None, None),
+        ] {
+            let text = configured.map_or(String::new(), |key| format!("api_key = {key:?}"));
+            let config: ClaudeConfig = toml::from_str(&text).unwrap();
+            let selected = config
+                .resolve_api_key(|| Ok(environment.map(|key| SecretString::new(key.into()))))
+                .unwrap();
+            assert_eq!(selected.as_ref().map(|key| key.source()), expected_source);
+            if let Some(key) = selected {
+                assert_eq!(
+                    key.key().expose_secret(),
+                    environment.or(configured).unwrap()
+                );
+                assert!(!format!("{key:?}").contains("sentinel"));
+            }
+        }
+    }
+
+    #[test]
+    fn claude_key_selection_rejects_invalid_selected_credentials_without_fallback() {
+        for (configured, environment) in [
+            (
+                "sk-ant-usr-config-sentinel",
+                Some("sk-ant-oat01-env-sentinel"),
+            ),
+            ("sk-ant-oat01-config-sentinel", None),
+            ("sk-ant-api03-config-sentinel\n", None),
+        ] {
+            let config: ClaudeConfig =
+                toml::from_str(&format!("api_key = {configured:?}")).unwrap();
+            let error = config
+                .resolve_api_key(|| Ok(environment.map(|key| SecretString::new(key.into()))))
+                .unwrap_err();
+            assert!(matches!(error, AuthError::InvalidClaudeApiKey));
+            assert!(!format!("{error:?} {error}").contains("sentinel"));
+        }
+        let config: ClaudeConfig =
+            toml::from_str("api_key = 'sk-ant-usr-config-sentinel'").unwrap();
+        let error = config
+            .resolve_api_key(|| {
+                Err(SecretError {
+                    name: "ANTHROPIC_API_KEY",
+                })
+            })
+            .unwrap_err();
+        assert!(matches!(error, AuthError::Secret(_)));
+        assert!(!format!("{error:?} {error}").contains("sentinel"));
+    }
 
     #[test]
     fn auto_prefers_an_existing_chatgpt_file_without_reading_the_api_key() {

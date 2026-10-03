@@ -3,7 +3,7 @@
 use crate::{
     app::{
         config::{AuthMode, Config, ConfigOverrides, ReasoningEffort, ReasoningMode, Transport},
-        error::{AuthError, Error, Result, RuntimeError},
+        error::{Error, Result, RuntimeError},
         model,
         secret::SecretString,
         shutdown, update,
@@ -675,23 +675,24 @@ impl AuthCommand {
         match self {
             Self::Login { .. } => {
                 println!(
-                    "Claude uses API keys only. Set ANTHROPIC_API_KEY to your Anthropic API key."
+                    "Set claude.api_key in your config or ANTHROPIC_API_KEY in your environment to your Anthropic API key."
                 );
             }
             Self::Status => {
-                let key =
-                    SecretString::from_environment("ANTHROPIC_API_KEY").map_err(AuthError::from)?;
-                if let Some(key) = &key {
-                    crate::app::auth::validate_claude_api_key(key)?;
-                }
+                let key = config
+                    .claude()
+                    .resolve_api_key(|| SecretString::from_environment("ANTHROPIC_API_KEY"))?;
                 let configured = key.is_some();
                 println!("Authentication: Claude API key");
-                println!("Source: ANTHROPIC_API_KEY");
+                println!(
+                    "Source: {}",
+                    key.as_ref().map_or("none", |key| key.source())
+                );
                 println!("Configured: {}", if configured { "yes" } else { "no" });
             }
             Self::Logout => {
                 println!(
-                    "Claude uses API keys only. Unset ANTHROPIC_API_KEY to remove it from your environment."
+                    "Remove claude.api_key from your config and unset ANTHROPIC_API_KEY to remove Claude credentials."
                 );
             }
         }
