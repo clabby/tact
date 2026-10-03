@@ -517,12 +517,16 @@ mod tests {
                         assert!(!headers.contains_key("authorization"));
                         let _ = state.headers.send(headers);
                         let _ = state.seen.send(body.clone());
+                        let model = body["model"].as_str().unwrap().to_owned();
                         let next = state.responses.lock().unwrap().pop_front();
                         let content = match next {
                             Some(next) => next(body).await,
                             None => std::future::pending::<Value>().await,
                         };
-                        ([(header::CONTENT_TYPE, "text/event-stream")], sse(content))
+                        (
+                            [(header::CONTENT_TYPE, "text/event-stream")],
+                            sse(content, &model),
+                        )
                     },
                 ),
             )
@@ -540,7 +544,7 @@ mod tests {
         }
     }
 
-    fn sse(block: Value) -> String {
+    fn sse(block: Value, model: &str) -> String {
         let tool = block["type"] == "tool_use";
         let usage = if tool {
             json!({"input_tokens":10,"cache_read_input_tokens":20,"cache_creation_input_tokens":30,"output_tokens":0})
@@ -549,7 +553,7 @@ mod tests {
         };
         let mut output = String::new();
         for event in [
-            json!({"type":"message_start","message":{"id":"fixture-message","type":"message","role":"assistant","model":"claude-opus-5-5","content":[],"stop_reason":null,"usage":usage}}),
+            json!({"type":"message_start","message":{"id":"fixture-message","type":"message","role":"assistant","model":model,"content":[],"stop_reason":null,"usage":usage}}),
             json!({"type":"content_block_start","index":0,"content_block":block}),
             json!({"type":"content_block_stop","index":0}),
             json!({"type":"message_delta","delta":{"stop_reason":if tool {"tool_use"} else {"end_turn"}},"usage":{"output_tokens":if tool {2} else {3}}}),
@@ -721,7 +725,8 @@ mod tests {
                 },
                 None,
             );
-            assert_fast_request(&mut server, &original, supported).await;
+            let request = assert_fast_request(&mut server, &original, supported).await;
+            assert_eq!(request["model"], model.as_str());
             original.set_fast_mode(false).await.unwrap();
             assert_fast_request(&mut server, &original, false).await;
             let snapshot =

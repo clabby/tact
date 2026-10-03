@@ -1716,7 +1716,11 @@ mod tests {
 
     #[test]
     fn claude_models_require_explicit_opt_in() {
-        for model in ["sonnet-5.5", "opus-5.5", "fable-5.1"] {
+        for (model, default_effort) in [
+            ("sonnet-5.5", ReasoningEffort::High),
+            ("opus-5.5", ReasoningEffort::Medium),
+            ("fable-5.1", ReasoningEffort::High),
+        ] {
             let agent = format!("[agent]\nmodel = '{model}'\n");
             assert!(matches!(
                 load_config(&agent),
@@ -1725,6 +1729,7 @@ mod tests {
             let config = load_config(&format!("{agent}[claude]\nenabled = true\n")).unwrap();
             assert!(config.claude().enabled());
             assert!(matches!(config.agent().model(), Model::Claude(_)));
+            assert_eq!(config.agent().thinking(), default_effort);
             assert!(config.claude().api_base_url().is_none());
             let restored = load_config(&config.to_toml().unwrap()).unwrap();
             assert_eq!(restored.agent().model(), config.agent().model());
