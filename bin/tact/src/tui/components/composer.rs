@@ -1701,9 +1701,18 @@ mod tests {
     #[test]
     fn composer_chrome_uses_the_model_palette() {
         for (model, color) in [
-            (Model::Codex(CodexModel::Luna), Color::White),
-            (Model::Codex(CodexModel::Sol), Color::Yellow),
-            (Model::Codex(CodexModel::Astra), Color::LightMagenta),
+            (
+                Model::Codex(CodexModel::Luna),
+                Theme::default().model(Model::Codex(CodexModel::Luna)),
+            ),
+            (
+                Model::Codex(CodexModel::Sol),
+                Theme::default().model(Model::Codex(CodexModel::Sol)),
+            ),
+            (
+                Model::Codex(CodexModel::Astra),
+                Theme::default().model(Model::Codex(CodexModel::Astra)),
+            ),
         ] {
             let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
             composer.update(ComposerEvent::SetModel(model));

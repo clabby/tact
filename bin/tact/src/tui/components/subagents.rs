@@ -1572,7 +1572,10 @@ mod tests {
                     .eq(["L", "u", "n", "a"])
             })
             .unwrap();
-        assert_eq!(luna[0].fg, Color::White);
+        assert_eq!(
+            luna[0].fg,
+            Theme::default().model(Model::Codex(CodexModel::Luna))
+        );
         assert_eq!(buffer[(0, 0)].symbol(), "╭");
         assert_eq!(buffer[(89, 39)].symbol(), "╯");
     }

@@ -322,16 +322,10 @@ mod tests {
         }
         assert_eq!(
             rendered_label_color(&mut enabled, "Sonnet 5.5"),
-            Color::LightGreen
+            Color::Green
         );
-        assert_eq!(
-            rendered_label_color(&mut enabled, "Opus 5.5"),
-            Color::LightRed
-        );
-        assert_eq!(
-            rendered_label_color(&mut enabled, "Fable 5.1"),
-            Color::LightCyan
-        );
+        assert_eq!(rendered_label_color(&mut enabled, "Opus 5.5"), Color::Red);
+        assert_eq!(rendered_label_color(&mut enabled, "Fable 5.1"), Color::Cyan);
     }
 
     #[test]
@@ -375,12 +369,9 @@ mod tests {
     fn every_supported_model_has_a_colored_stop() {
         let mut selector = ModelSelector::new(Model::Codex(CodexModel::Sol), false);
 
-        assert_eq!(rendered_label_color(&mut selector, "Luna"), Color::White);
+        assert_eq!(rendered_label_color(&mut selector, "Luna"), Color::Reset);
         assert_eq!(rendered_label_color(&mut selector, "Sol"), Color::Yellow);
-        assert_eq!(
-            rendered_label_color(&mut selector, "Astra"),
-            Color::LightMagenta
-        );
+        assert_eq!(rendered_label_color(&mut selector, "Astra"), Color::Magenta);
     }
 
     #[test]
@@ -396,7 +387,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert!(!rail.is_empty());
-        assert!(rail.iter().all(|cell| cell.fg == Color::LightMagenta));
+        assert!(rail.iter().all(|cell| cell.fg == Color::Magenta));
     }
 
     #[test]
@@ -420,7 +411,7 @@ mod tests {
                 Model::Codex(CodexModel::Astra),
                 false
             )),
-            [Color::LightMagenta, Color::LightMagenta]
+            [Color::Magenta, Color::Magenta]
         );
     }
 

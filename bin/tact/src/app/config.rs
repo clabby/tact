@@ -1847,6 +1847,12 @@ mod tests {
             "thinking_high",
             "thinking_xhigh",
             "thinking_max",
+            "model_luna",
+            "model_sol",
+            "model_astra",
+            "model_sonnet",
+            "model_opus",
+            "model_fable",
         ];
         assert_table_fields(&rendered["theme"]["light"], &palette_fields);
         assert_table_fields(&rendered["theme"]["dark"], &palette_fields);
@@ -3379,7 +3385,7 @@ mod tests {
         let config_path = directory.path().join("config.toml");
         fs::write(
             &config_path,
-            "[theme]\ntext = \"#AABBCC\"\nborder = 239\ncode_text = \"white\"\ncode_background = \"#101010\"\nthinking_high = \"green\"\n",
+            "[theme]\ntext = \"#AABBCC\"\nborder = 239\ncode_text = \"white\"\ncode_background = \"#101010\"\nthinking_high = \"green\"\nmodel_sol = \"#123456\"\n",
         )
         .unwrap();
 
@@ -3402,10 +3408,15 @@ mod tests {
         assert_eq!(config.theme.code_background(), Color::Rgb(0x10, 0x10, 0x10));
         assert_eq!(config.theme.thinking_high(), Color::Green);
         assert_eq!(config.theme.accent(), Color::Blue);
+        assert_eq!(
+            config.theme.model(Model::Codex(CodexModel::Sol)),
+            Color::Rgb(0x12, 0x34, 0x56)
+        );
 
         let rendered = config.to_toml().unwrap();
         assert!(rendered.contains("text = \"#AABBCC\""));
         assert!(rendered.contains("border = \"239\""));
+        assert!(rendered.contains("model_sol = \"#123456\""));
     }
 
     #[test]

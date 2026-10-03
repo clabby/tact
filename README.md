@@ -251,6 +251,12 @@ thinking_medium = "#007878"
 thinking_high = "#9A6700"
 thinking_xhigh = "red"
 thinking_max = "magenta"
+model_luna = "reset"
+model_sol = "yellow"
+model_astra = "magenta"
+model_sonnet = "green"
+model_opus = "red"
+model_fable = "cyan"
 
 [theme.dark]
 text = "reset"
@@ -264,6 +270,12 @@ thinking_medium = "cyan"
 thinking_high = "yellow"
 thinking_xhigh = "red"
 thinking_max = "magenta"
+model_luna = "reset"
+model_sol = "yellow"
+model_astra = "magenta"
+model_sonnet = "green"
+model_opus = "red"
+model_fable = "cyan"
 ```
 
 Set `agent.completion_hook` to a shell command to run after each conversation turn finishes. Tact
@@ -317,8 +329,17 @@ thinking_medium = "cyan"
 thinking_high = "yellow"
 thinking_xhigh = "red"
 thinking_max = "magenta"
+model_luna = "reset"
+model_sol = "yellow"
+model_astra = "magenta"
+model_sonnet = "green"
+model_opus = "red"
+model_fable = "cyan"
 ```
 
+The `model_*` colors apply to the model picker, composer, and subagent displays. Their defaults
+use the terminal's foreground for Luna and its yellow, magenta, green, red, and cyan slots for
+the other models in both light and dark mode, so the terminal theme controls their appearance. Set a color to an RGB value for a fixed override.
 Put any of the color options under `[theme.light]` or `[theme.dark]` to override that palette. Colors
 may be Ratatui names, indexed values such as `239`, or RGB values such as `"#AABBCC"`. Auto mode
 follows the operating-system theme while tact is running.
