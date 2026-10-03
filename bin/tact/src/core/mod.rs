@@ -11,7 +11,7 @@ mod orchestration;
 use crate::{
     app::{
         config::{Config, ReasoningEffort, ReasoningMode, SkillsConfig},
-        error::{ConfigError, Result, RuntimeError, SecretError},
+        error::{AuthError, ConfigError, Result, RuntimeError, SecretError},
         hook,
         secret::SecretString,
     },
@@ -776,15 +776,12 @@ impl AgentRecipe {
         let endpoint = config
             .api_base_url()
             .map(|base| format!("{}/messages", base.trim_end_matches('/')));
-        let key = read_key()
+        let key = config
+            .resolve_api_key(read_key)
             .map_err(|error| NanocodexError::InvalidRequest(error.to_string()))?
             .ok_or_else(|| {
-                NanocodexError::InvalidRequest(
-                    "Claude API-key authentication requires ANTHROPIC_API_KEY".into(),
-                )
+                NanocodexError::InvalidRequest(AuthError::ClaudeApiKeyUnavailable.to_string())
             })?;
-        crate::app::auth::validate_claude_api_key(&key)
-            .map_err(|error| NanocodexError::InvalidRequest(error.to_string()))?;
         let mut headers = HeaderMap::new();
         if let Some(workspace_id) = config.workspace_id() {
             let value = HeaderValue::from_str(workspace_id).map_err(|_| {
@@ -802,8 +799,8 @@ impl AgentRecipe {
             .map_err(|error| NanocodexError::InvalidRequest(error.to_string()))?;
         // The native client owns a non-zeroizing copy after this boundary.
         Ok(match endpoint {
-            Some(endpoint) => ClaudeClient::new(http, endpoint, key.expose_secret()),
-            None => ClaudeClient::official(http, key.expose_secret()),
+            Some(endpoint) => ClaudeClient::new(http, endpoint, key.key().expose_secret()),
+            None => ClaudeClient::official(http, key.key().expose_secret()),
         })
     }
 }
@@ -1134,6 +1131,25 @@ mod tests {
                         ))))
                         .is_ok()
                 );
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+
+                    let path = recipe.config.path();
+                    fs::write(
+                        path,
+                        "[claude]\nenabled = true\napi_key = 'sk-ant-api03-configured-sentinel'\n",
+                    )
+                    .unwrap();
+                    fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+                    let config = Config::load(ConfigOverrides {
+                        path: Some(path.to_path_buf()),
+                        ..Default::default()
+                    })
+                    .unwrap();
+                    let recipe = AgentRecipe { config, ..recipe };
+                    assert!(recipe.claude_client(|| Ok(None)).is_ok());
+                }
             }
         }
     }
