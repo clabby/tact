@@ -20,7 +20,8 @@ enabled = false
 ```
 
 Disabling the feature removes all subagent tools and omits Tact's built-in delegation instructions
-from fresh sessions. Resumed parents retain their saved instructions. The setting does not disable
+from fresh sessions. Resumed parents retain their saved instructions apart from the managed
+model-selection guide, which follows the current feature settings. The setting does not disable
 memory, skills, MCP servers, or ordinary code-mode tools.
 
 The setting applies when an agent runtime is created. Reloading configuration does not mutate the
@@ -30,8 +31,8 @@ reloaded setting.
 Subagents explicitly choose `luna`, `sol`, or `astra` for each task. Setting `[claude] enabled = true`
 also exposes `sonnet-5.5`, `opus-5.5`, and `fable-5.1`. Both providers can create children using
 either provider. Claude is rejected at the runtime boundary unless enabled. There is no `selected`
-alias. Consider Luna for simple tasks, Sol for bounded coding and analysis, and Astra for the
-hardest reasoning. Consider Sonnet 5.5 for speed and cost.
+alias. Tact's session instructions include a self-contained model-selection guide for the enabled
+models; the `spawn_agent` schema states availability and delegation limits.
 
 `agent.max_subagents` is independent of the enable switch:
 
@@ -74,9 +75,11 @@ therefore installed independently of the subagent tool group.
 does not inherit the caller's conversation. Each child model's instructions are composed from the
 configuration and skill catalog when the root runtime starts. This includes configured replacement
 and appended instructions. A resumed parent keeps its saved instructions; its new children use
-these freshly composed instructions. Children inherit the configured fast-mode setting where the
-selected model supports it, including Opus 5.5 but excluding Fable 5.1. Codex children also inherit
-the configured reasoning mode; Claude children use standard reasoning mode. Their initial prompt contains:
+these freshly composed instructions. Fresh and resumed sessions include the model-selection guide
+directly in their instruction Markdown. Children inherit the configured fast-mode setting where
+the selected model supports it, including Opus 5.5 but excluding Sonnet 5.5 and
+Fable 5.1. Codex children also inherit the configured reasoning mode; Claude children use standard
+reasoning mode. Their initial prompt contains:
 
 - the assigned role and task;
 - its agent ID and place in the task tree;
@@ -86,8 +89,7 @@ the configured reasoning mode; Claude children use standard reasoning mode. Thei
 
 The required `model` and `thinking` fields choose the child's capabilities at creation. A child
 cannot exceed the spawning parent's model when both use Codex (Luna < Sol < Astra). Cross-provider
-selection and delegation between Claude models are allowed. Capability guidance ranks intelligence
-as Fable 5.1 > Astra > Opus 5.5 > Sol > Luna. Effort order is
+selection and delegation between Claude models are allowed. Effort order is
 low < medium < high < xhigh < max for every provider. Root agents use the live configured `agent.thinking` cap for
 spawning effort. Registered subagents are additionally bounded by their own assigned effort. For
 example, an Astra root with a high cap can spawn a Sol/medium child, but that child cannot spawn
@@ -104,9 +106,45 @@ Every new turn receives an `<agent_context>` block identifying its own model and
 restored, forked, auxiliary, and child sessions receive this context. Effort changes update it for
 subsequently accepted turns; already accepted turns and active steering retain their original effort.
 
-Choose model and effort for the full delegated reasoning obligation. Optimize expected total cost
-and time to a correct completed result, including rework. Higher effort or a stronger model upfront
-can avoid repeated weaker runs; a cheaper or lower-effort attempt is not a prerequisite.
+## Model selection
+
+- When Claude is enabled, use `opus-5.5` or `sonnet-5.5` as the normal starting choices for
+  implementation, analysis, and document, system, or protocol review.
+- Among Codex models, start with `sol` (GPT-6.1 Sol).
+- Bring in `astra`, `fable-5.1`, or another eligible model for especially deep reviews, unresolved
+  premises, or independent challenges. Prefer model diversity for second opinions: use an eligible
+  Codex model alongside Claude.
+
+Choose effort separately for the full reasoning obligation. Optimize total cost and time to a
+correct result, including verification and rework. Use higher effort upfront when it can avoid
+repeated weaker attempts.
+
+For document, system, and protocol reviews, request explicit assumptions, counterexamples,
+safety/liveness conditions, and proof obligations. Verify findings against source evidence.
+
+DeepSWE 1.1 (Artificial Analysis, native Codex/Claude Code). Cost/time are averages across AA's coding suite.
+
+| Model | Effort | DeepSWE | API $/task | Time/task |
+| --- | --- | --- | --- | --- |
+| `luna` | max | 64% | $0.18 | 21.4m |
+| `sol` | xhigh | 73% | $1.04 | 15.5m |
+| `astra` | max | 68% | $7.47 | 29.4m |
+| `sonnet-5.5` | max | 72% | $14.19 | 1.5h |
+| `opus-5.5` | max | 68% | $13.04 | 1.1h |
+| `fable-5.1` (with fallback) | max | 64% | $12.39 | 34.8m |
+
+FrontierCode 1.1 Main (native Codex/Claude Code; best scoring effort per model).
+
+| Model | Effort | Score / 100 | API $/rollout |
+| --- | --- | --- | --- |
+| `luna` | max | 42.42 | $0.10 |
+| `sol` | medium | 50.23 | $0.36 |
+| `astra` | max | 53.26 | $4.59 |
+| `sonnet-5.5` | xhigh | 52.09 | $1.59 |
+| `opus-5.5` | medium | 54.64 | $0.80 |
+| `fable-5.1` | medium | 50.91 | $3.28 |
+
+### Reasoning effort
 
 | Effort | Typical delegated work |
 | --- | --- |
