@@ -2812,7 +2812,7 @@ dependencies = [
 [[package]]
 name = "nanocodex"
 version = "0.6.6"
-source = "git+https://github.com/clabby/nanocodex?branch=cl%2Fclaude-integration#c0d6e8ac4a6458bcd9b8f14be6a9c7378ef2757c"
+source = "git+https://github.com/clabby/nanocodex?branch=cl%2Fclaude-integration#c0a030f24686ff82851997ac61eba0d03e177b07"
 dependencies = [
  "nanocodex-agent",
  "nanocodex-claude",
@@ -2825,7 +2825,7 @@ dependencies = [
 [[package]]
 name = "nanocodex-agent"
 version = "0.6.6"
-source = "git+https://github.com/clabby/nanocodex?branch=cl%2Fclaude-integration#c0d6e8ac4a6458bcd9b8f14be6a9c7378ef2757c"
+source = "git+https://github.com/clabby/nanocodex?branch=cl%2Fclaude-integration#c0a030f24686ff82851997ac61eba0d03e177b07"
 dependencies = [
  "chrono",
  "futures-util",
@@ -2847,7 +2847,7 @@ dependencies = [
 [[package]]
 name = "nanocodex-claude"
 version = "0.6.6"
-source = "git+https://github.com/clabby/nanocodex?branch=cl%2Fclaude-integration#c0d6e8ac4a6458bcd9b8f14be6a9c7378ef2757c"
+source = "git+https://github.com/clabby/nanocodex?branch=cl%2Fclaude-integration#c0a030f24686ff82851997ac61eba0d03e177b07"
 dependencies = [
  "base64 0.22.1",
  "futures-util",
@@ -2870,7 +2870,7 @@ dependencies = [
 [[package]]
 name = "nanocodex-durability"
 version = "0.6.6"
-source = "git+https://github.com/clabby/nanocodex?branch=cl%2Fclaude-integration#c0d6e8ac4a6458bcd9b8f14be6a9c7378ef2757c"
+source = "git+https://github.com/clabby/nanocodex?branch=cl%2Fclaude-integration#c0a030f24686ff82851997ac61eba0d03e177b07"
 dependencies = [
  "nanocodex-agent",
  "nanocodex-claude",
@@ -2886,7 +2886,7 @@ dependencies = [
 [[package]]
 name = "nanocodex-managed"
 version = "0.6.6"
-source = "git+https://github.com/clabby/nanocodex?branch=cl%2Fclaude-integration#c0d6e8ac4a6458bcd9b8f14be6a9c7378ef2757c"
+source = "git+https://github.com/clabby/nanocodex?branch=cl%2Fclaude-integration#c0a030f24686ff82851997ac61eba0d03e177b07"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -2918,7 +2918,7 @@ dependencies = [
 [[package]]
 name = "nanocodex-oai-api"
 version = "0.6.6"
-source = "git+https://github.com/clabby/nanocodex?branch=cl%2Fclaude-integration#c0d6e8ac4a6458bcd9b8f14be6a9c7378ef2757c"
+source = "git+https://github.com/clabby/nanocodex?branch=cl%2Fclaude-integration#c0a030f24686ff82851997ac61eba0d03e177b07"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -2949,7 +2949,7 @@ dependencies = [
 [[package]]
 name = "nanocodex-oai-tools"
 version = "0.6.6"
-source = "git+https://github.com/clabby/nanocodex?branch=cl%2Fclaude-integration#c0d6e8ac4a6458bcd9b8f14be6a9c7378ef2757c"
+source = "git+https://github.com/clabby/nanocodex?branch=cl%2Fclaude-integration#c0a030f24686ff82851997ac61eba0d03e177b07"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -2985,7 +2985,7 @@ dependencies = [
 [[package]]
 name = "nanocodex-oai-tools-macros"
 version = "0.6.6"
-source = "git+https://github.com/clabby/nanocodex?branch=cl%2Fclaude-integration#c0d6e8ac4a6458bcd9b8f14be6a9c7378ef2757c"
+source = "git+https://github.com/clabby/nanocodex?branch=cl%2Fclaude-integration#c0a030f24686ff82851997ac61eba0d03e177b07"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
