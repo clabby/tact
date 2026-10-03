@@ -126,16 +126,16 @@ Claude support requires an explicit config opt-in and an Anthropic API key in
 enabled = true
 
 [agent]
-model = "opus-5.5" # or fable-5.1
+model = "sonnet-5.5" # or opus-5.5, fable-5.1
 thinking = "medium"
 ```
 
-With Claude enabled, `--model` and the model picker also accept `opus-5.5` and `fable-5.1`
-(native IDs `claude-opus-5-5` and `claude-fable-5-1`). Both support `low`, `medium`, `high`,
-`xhigh`, and `max`. Their default efforts are medium for Opus and high for Fable.
+With Claude enabled, `--model` and the model picker also accept `sonnet-5.5`, `opus-5.5`, and `fable-5.1`
+(native IDs `claude-sonnet-5-5`, `claude-opus-5-5`, and `claude-fable-5-1`). All support
+`low`, `medium`, `high`, `xhigh`, and `max`. Their default efforts are medium for Opus and high for Sonnet and Fable.
 Claude uses standard reasoning mode. Opus 5.5 supports fast mode through `agent.fast_mode = true`
-or the **Fast mode** action; Fable 5.1 does not. Fast mode defaults to off and uses Anthropic's
-[premium fast-mode service](https://platform.claude.com/docs/en/build-with-claude/fast-mode),
+or the **Fast mode** action; Sonnet 5.5 and Fable 5.1 do not. Fast mode defaults to off and uses
+Anthropic's [premium fast-mode service](https://platform.claude.com/docs/en/build-with-claude/fast-mode),
 which requires access on the API account. Changes apply to subsequently accepted turns.
 Claude requests use automatic prompt caching with a one-hour TTL, covering the system prompt,
 tools, and reusable conversation prefix across long tool calls and user pauses. Cache hits refresh
@@ -349,11 +349,12 @@ when the feature is enabled; setting it does not enable or disable subagents. Se
 [subagent design](docs/subagents.md) for the tool, lifecycle, messaging, and authority contracts.
 
 Agents explicitly choose a model and `thinking` for each delegated task. The default choices are
-`luna`, `sol`, and `astra`; enabling Claude adds `opus-5.5` and `fable-5.1` for both root and child
-agents. Agents may mix providers within one task tree. Each turn receives its own model and effort
+`luna`, `sol`, and `astra`; enabling Claude adds `sonnet-5.5`, `opus-5.5`, and `fable-5.1` for
+both root and child agents. Agents may mix providers within one task tree. Each turn receives its own model and effort
 in context. When both parent and child use Codex, the child cannot exceed the parent in the order
 Luna < Sol < Astra. Cross-provider selection and delegation between Claude models are allowed.
 Model-selection guidance ranks intelligence as Fable 5.1 > Astra > Opus 5.5 > Sol > Luna.
+Consider Sonnet 5.5 for speed and cost.
 Root agents use the live `agent.thinking` cap
 for new spawns, including after an update during an active turn. Registered subagents are also
 bounded by their own assigned effort. Changing the cap leaves existing children unchanged. Model

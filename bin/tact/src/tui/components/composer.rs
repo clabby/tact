@@ -1803,6 +1803,7 @@ mod tests {
     #[test]
     fn claude_models_show_only_supported_mode_indicators() {
         for model in [
+            Model::Claude(ClaudeModel::Sonnet55),
             Model::Claude(ClaudeModel::Opus55),
             Model::Claude(ClaudeModel::Fable51),
         ] {

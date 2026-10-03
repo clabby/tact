@@ -627,6 +627,7 @@ mod tests {
     fn restored_model_comes_from_the_session_start_record() {
         for selected in [
             Model::Codex(CodexModel::Luna),
+            Model::Claude(ClaudeModel::Sonnet55),
             Model::Claude(ClaudeModel::Opus55),
             Model::Claude(ClaudeModel::Fable51),
         ] {

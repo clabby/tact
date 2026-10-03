@@ -175,6 +175,7 @@ impl Theme {
             Model::Codex(CodexModel::Luna) => Color::White,
             Model::Codex(CodexModel::Sol) => Color::Yellow,
             Model::Codex(CodexModel::Astra) => Color::LightMagenta,
+            Model::Claude(ClaudeModel::Sonnet55) => Color::LightGreen,
             Model::Claude(ClaudeModel::Opus55) => Color::LightRed,
             Model::Claude(ClaudeModel::Fable51) => Color::LightCyan,
             _ => Color::White,

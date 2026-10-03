@@ -703,7 +703,11 @@ mod tests {
 
     #[tokio::test]
     async fn fast_mode_initial_toggle_and_restore_follow_selected_model() {
-        for model in [ClaudeModel::Opus55, ClaudeModel::Fable51] {
+        for model in [
+            ClaudeModel::Sonnet55,
+            ClaudeModel::Opus55,
+            ClaudeModel::Fable51,
+        ] {
             let mut server = server((0..4).map(|_| final_text()).collect()).await;
             let workspace = tempfile::tempdir().unwrap();
             let supported = model == ClaudeModel::Opus55;
@@ -865,6 +869,7 @@ mod tests {
         let server = server(vec![]).await;
         let workspace = tempfile::tempdir().unwrap();
         for model in [
+            nanocodex::ClaudeModel::Sonnet55,
             nanocodex::ClaudeModel::Opus55,
             nanocodex::ClaudeModel::Fable51,
         ] {

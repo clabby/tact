@@ -116,13 +116,14 @@ const CLAUDE_CODE_MODE_INSTRUCTIONS: &str = concat!(
 );
 
 const CLAUDE_SUBAGENT_INSTRUCTIONS: &str = concat!(
-    "\n\nClaude is enabled. In spawn_agent, choose luna, sol, astra, opus-5.5, or fable-5.1 ",
+    "\n\nClaude is enabled. In spawn_agent, choose luna, sol, astra, sonnet-5.5, opus-5.5, or fable-5.1 ",
     "explicitly. Intelligence order, strongest first: Fable 5.1 > Astra > Opus 5.5 > Sol > Luna. ",
     "Use this order when judging the capability a task needs, together with expected cost, time, ",
-    "and rework. Claude and Codex agents may delegate to either provider. Both Claude models ",
+    "and rework. Consider Sonnet 5.5 for speed and cost. Claude and Codex agents may delegate ",
+    "to either provider. All Claude models ",
     "support low, medium, high, xhigh, and max; the same effort caps apply to all providers. ",
     "The Codex model hierarchy applies only when both parent and child use Codex. ",
-    "Opus and Fable may delegate to each other."
+    "Claude models may delegate to each other."
 );
 
 const TOOL_ORCHESTRATION_INSTRUCTIONS: &str = concat!(
@@ -238,6 +239,7 @@ struct AgentInstructions {
     luna: Arc<str>,
     sol: Arc<str>,
     astra: Arc<str>,
+    sonnet: Arc<str>,
     opus: Arc<str>,
     fable: Arc<str>,
 }
@@ -273,6 +275,13 @@ impl AgentInstructions {
                 memory_enabled,
             )
             .text,
+            sonnet: SessionInstructions::from_config(
+                config,
+                Model::Claude(ClaudeModel::Sonnet55),
+                None,
+                memory_enabled,
+            )
+            .text,
             opus: SessionInstructions::from_config(
                 config,
                 Model::Claude(ClaudeModel::Opus55),
@@ -290,6 +299,7 @@ impl AgentInstructions {
         };
         if config.claude().enabled() {
             let context = claude_context::context(config.agent().workspace(), config.codex_home())?;
+            prompts.sonnet = format!("{}\n\n{context}", prompts.sonnet).into();
             prompts.opus = format!("{}\n\n{context}", prompts.opus).into();
             prompts.fable = format!("{}\n\n{context}", prompts.fable).into();
             if fresh && matches!(model, Model::Claude(_)) {
@@ -304,6 +314,7 @@ impl AgentInstructions {
             Model::Codex(CodexModel::Luna) => &self.luna,
             Model::Codex(CodexModel::Sol) => &self.sol,
             Model::Codex(CodexModel::Astra) => &self.astra,
+            Model::Claude(ClaudeModel::Sonnet55) => &self.sonnet,
             Model::Claude(ClaudeModel::Opus55) => &self.opus,
             Model::Claude(ClaudeModel::Fable51) => &self.fable,
             _ => unreachable!("unsupported models rejected at configuration and tool boundaries"),
@@ -1364,12 +1375,14 @@ mod tests {
         })
         .unwrap();
         for model in [
+            Model::Claude(ClaudeModel::Sonnet55),
             Model::Claude(ClaudeModel::Opus55),
             Model::Claude(ClaudeModel::Fable51),
         ] {
             let instructions = AgentInstructions::from_config(&config, model, None, true).unwrap();
             for text in [
                 &instructions.session.text,
+                &instructions.sonnet,
                 &instructions.opus,
                 &instructions.fable,
             ] {
@@ -1377,6 +1390,7 @@ mod tests {
                 assert!(text.contains(TOOL_ORCHESTRATION_INSTRUCTIONS));
                 assert!(text.contains(super::CLAUDE_CODE_MODE_INSTRUCTIONS));
                 assert!(text.contains(MEMORY_INSTRUCTIONS));
+                assert!(text.contains("sonnet-5.5"));
                 assert!(text.contains("opus-5.5"));
                 assert!(text.contains("fable-5.1"));
                 assert!(text.contains("low, medium, high, xhigh, and max"));

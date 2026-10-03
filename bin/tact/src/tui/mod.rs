@@ -3045,6 +3045,7 @@ mod tests {
     #[test]
     fn pane_fast_mode_tracks_model_support() {
         for model in [
+            Model::Claude(ClaudeModel::Sonnet55),
             Model::Claude(ClaudeModel::Opus55),
             Model::Claude(ClaudeModel::Fable51),
         ] {

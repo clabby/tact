@@ -275,24 +275,36 @@ fn build_agent(
 
 #[tokio::test]
 async fn claude_root_runs_codex_child_through_code_mode() {
-    mixed_provider_roundtrip(
-        HarnessModel::Claude(ClaudeModel::Opus55),
-        HarnessModel::Codex(CodexModel::Sol),
-        1,
-        false,
-    )
-    .await;
+    for model in [
+        ClaudeModel::Sonnet55,
+        ClaudeModel::Opus55,
+        ClaudeModel::Fable51,
+    ] {
+        mixed_provider_roundtrip(
+            HarnessModel::Claude(model),
+            HarnessModel::Codex(CodexModel::Sol),
+            1,
+            false,
+        )
+        .await;
+    }
 }
 
 #[tokio::test]
 async fn codex_root_runs_claude_child_through_code_mode() {
-    mixed_provider_roundtrip(
-        HarnessModel::Codex(CodexModel::Luna),
-        HarnessModel::Claude(ClaudeModel::Fable51),
-        1,
-        false,
-    )
-    .await;
+    for model in [
+        ClaudeModel::Sonnet55,
+        ClaudeModel::Opus55,
+        ClaudeModel::Fable51,
+    ] {
+        mixed_provider_roundtrip(
+            HarnessModel::Codex(CodexModel::Luna),
+            HarnessModel::Claude(model),
+            1,
+            false,
+        )
+        .await;
+    }
 }
 
 #[tokio::test]

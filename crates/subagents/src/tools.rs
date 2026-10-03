@@ -117,8 +117,15 @@ impl Tool for SpawnAgent {
             .is_some_and(|registry| registry.claude_enabled());
         let (models, model_description) = if claude_enabled {
             (
-                vec!["luna", "sol", "astra", "opus-5.5", "fable-5.1"],
-                "Intelligence order, strongest first: fable-5.1 > astra > opus-5.5 > sol > luna. Consider capability and expected total completion cost and time, including rework. Codex parents may spawn Codex models at or below their own tier: luna < sol < astra. Cross-provider selection and delegation between Claude models are allowed, subject to effort caps.",
+                vec![
+                    "luna",
+                    "sol",
+                    "astra",
+                    "sonnet-5.5",
+                    "opus-5.5",
+                    "fable-5.1",
+                ],
+                "Intelligence order, strongest first: fable-5.1 > astra > opus-5.5 > sol > luna. Consider Sonnet 5.5 for speed and cost. Consider capability and expected total completion cost and time, including rework. Codex parents may spawn Codex models at or below their own tier: luna < sol < astra. Cross-provider selection and delegation between Claude models are allowed, subject to effort caps.",
             )
         } else {
             (
@@ -665,7 +672,7 @@ mod tests {
             let definition = tool.definition();
             let validator =
                 jsonschema::validator_for(definition.parameters().unwrap().as_value()).unwrap();
-            for model in ["opus-5.5", "fable-5.1"] {
+            for model in ["sonnet-5.5", "opus-5.5", "fable-5.1"] {
                 let input = json!({"role": "review", "task": "Review", "model": model,
                     "thinking": "medium", "output_schema": {"type": "object"}});
                 assert_eq!(validator.is_valid(&input), enabled);

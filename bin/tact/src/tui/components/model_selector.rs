@@ -310,6 +310,7 @@ mod tests {
         );
         let mut enabled = ModelSelector::new(Model::Codex(CodexModel::Astra), true);
         for model in [
+            Model::Claude(ClaudeModel::Sonnet55),
             Model::Claude(ClaudeModel::Opus55),
             Model::Claude(ClaudeModel::Fable51),
         ] {
@@ -319,6 +320,10 @@ mod tests {
                 [ModelSelectorEffect::Apply(model)]
             );
         }
+        assert_eq!(
+            rendered_label_color(&mut enabled, "Sonnet 5.5"),
+            Color::LightGreen
+        );
         assert_eq!(
             rendered_label_color(&mut enabled, "Opus 5.5"),
             Color::LightRed

@@ -28,9 +28,10 @@ tool surface or instructions of an existing runtime. A later new or restored ses
 reloaded setting.
 
 Subagents explicitly choose `luna`, `sol`, or `astra` for each task. Setting `[claude] enabled = true`
-also exposes `opus-5.5` and `fable-5.1`. Both providers can create children using either provider.
-Claude is rejected at the runtime boundary unless enabled. There is no `selected` alias. Consider Luna for simple tasks, Sol for bounded coding and
-analysis, and Astra for the hardest reasoning.
+also exposes `sonnet-5.5`, `opus-5.5`, and `fable-5.1`. Both providers can create children using
+either provider. Claude is rejected at the runtime boundary unless enabled. There is no `selected`
+alias. Consider Luna for simple tasks, Sol for bounded coding and analysis, and Astra for the
+hardest reasoning. Consider Sonnet 5.5 for speed and cost.
 
 `agent.max_subagents` is independent of the enable switch:
 
