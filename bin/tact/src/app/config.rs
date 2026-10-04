@@ -2,8 +2,9 @@
 
 use crate::{
     app::{
-        error::{ConfigError, McpUrlError, RemoteMemoryConfigError, Result},
+        error::{ConfigError, ConfigSyntaxError, McpUrlError, RemoteMemoryConfigError, Result},
         model,
+        secret::SecretString,
     },
     tui::theme::{Theme, ThemeMode},
 };
@@ -162,11 +163,16 @@ pub(crate) struct AuthConfig {
     file: PathBuf,
 }
 
-/// Availability, endpoint, and API workspace for Claude models.
+/// Availability, credentials, and API routing for Claude models.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct ClaudeConfig {
     enabled: bool,
+    #[serde(
+        deserialize_with = "deserialize_optional_secret",
+        serialize_with = "serialize_optional_secret"
+    )]
+    api_key: Option<Arc<SecretString>>,
     #[serde(serialize_with = "serialize_optional_string")]
     api_base_url: Option<String>,
     #[serde(serialize_with = "serialize_optional_string")]
@@ -174,6 +180,10 @@ pub(crate) struct ClaudeConfig {
 }
 
 impl ClaudeConfig {
+    pub(crate) fn api_key(&self) -> Option<&Arc<SecretString>> {
+        self.api_key.as_ref()
+    }
+
     pub(crate) fn workspace_id(&self) -> Option<&str> {
         self.workspace_id
             .as_deref()
@@ -263,7 +273,7 @@ pub(crate) struct LocalMemoryConfig {
 pub(crate) struct RemoteMemoryConfig {
     endpoint: String,
     namespace: String,
-    bearer_token: Arc<crate::app::secret::SecretString>,
+    bearer_token: Arc<SecretString>,
     workspace_roots: Vec<PathBuf>,
 }
 
@@ -823,7 +833,9 @@ impl Config {
             .parse::<DocumentMut>()
             .map_err(|source| ConfigError::UpdateParse {
                 path: path.to_path_buf(),
-                source,
+                source: ConfigSyntaxError {
+                    message: source.message().to_owned(),
+                },
             })
             .map_err(Into::into)
     }
@@ -842,9 +854,9 @@ impl Config {
             path: path.to_path_buf(),
             source,
         })?;
-        // toml_edit retains non-zeroizing copies of values while the document is alive. Secret
-        // guarantees therefore cover the parsed CLI values owned by tact, not toml_edit's
-        // transient representation used to update the configuration file.
+        // toml_edit owns non-zeroizing copies of file values while the document is alive.
+        // Zeroization covers Tact's input and output buffers and secret owners, not the
+        // dependency's transient document representation.
         let rendered = Zeroizing::new(document.to_string());
         temporary
             .write_all(rendered.as_bytes())
@@ -1034,6 +1046,26 @@ where
     S: serde::Serializer,
 {
     serializer.serialize_str(value.as_deref().unwrap_or_default())
+}
+
+fn deserialize_optional_secret<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<Arc<SecretString>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let secret = SecretString::deserialize(deserializer)?;
+    Ok((!secret.expose_secret().trim().is_empty()).then(|| Arc::new(secret)))
+}
+
+fn serialize_optional_secret<S>(
+    secret: &Option<Arc<SecretString>>,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.serialize_str(if secret.is_some() { "[REDACTED]" } else { "" })
 }
 
 fn optional_string(value: Option<String>) -> Option<String> {
@@ -1279,9 +1311,7 @@ impl RemoteMemoryConfig {
         Ok(Some(Self {
             endpoint: file.endpoint,
             namespace: file.namespace,
-            bearer_token: Arc::new(crate::app::secret::SecretString::new(
-                bearer_token.to_string(),
-            )),
+            bearer_token: Arc::new(SecretString::new(bearer_token.to_string())),
             workspace_roots: file
                 .workspace_roots
                 .into_iter()
@@ -1511,13 +1541,14 @@ impl ConfigFile {
     fn validate_secret_permissions(&mut self, path: &Path) -> Result<()> {
         use std::os::unix::fs::PermissionsExt;
 
-        if self.memory.remote.bearer_token.is_empty() {
+        if self.memory.remote.bearer_token.is_empty() && self.claude.api_key.is_none() {
             return Ok(());
         }
         let metadata = match fs::metadata(path) {
             Ok(metadata) => metadata,
             Err(source) => {
                 self.memory.remote.bearer_token.zeroize();
+                drop(self.claude.api_key.take());
                 return Err(ConfigError::Read {
                     path: path.to_path_buf(),
                     source,
@@ -1528,7 +1559,8 @@ impl ConfigFile {
         let mode = metadata.permissions().mode() & 0o777;
         if mode & 0o077 != 0 {
             self.memory.remote.bearer_token.zeroize();
-            return Err(ConfigError::InsecureRemoteMemoryPermissions {
+            drop(self.claude.api_key.take());
+            return Err(ConfigError::InsecureSecretPermissions {
                 path: path.to_path_buf(),
                 mode,
             }
@@ -1539,11 +1571,12 @@ impl ConfigFile {
 
     #[cfg(not(unix))]
     fn validate_secret_permissions(&mut self, path: &Path) -> Result<()> {
-        if self.memory.remote.bearer_token.is_empty() {
+        if self.memory.remote.bearer_token.is_empty() && self.claude.api_key.is_none() {
             return Ok(());
         }
         self.memory.remote.bearer_token.zeroize();
-        Err(ConfigError::UnsupportedRemoteMemoryPermissions {
+        drop(self.claude.api_key.take());
+        Err(ConfigError::UnsupportedSecretPermissions {
             path: path.to_path_buf(),
         }
         .into())
@@ -1609,6 +1642,7 @@ mod tests {
     use ratatui::style::Color;
     use std::{
         collections::BTreeMap,
+        error::Error as StdError,
         fs,
         path::{Path, PathBuf},
         sync::Arc,
@@ -1637,6 +1671,14 @@ mod tests {
         fs::write(&config_path, contents).unwrap();
 
         load_config_at(config_path, directory.path())
+    }
+
+    fn assert_error_redacts(error: &Error, secret: &str) {
+        let mut source: Option<&dyn StdError> = Some(error);
+        while let Some(error) = source {
+            assert!(!format!("{error:?} {error}").contains(secret));
+            source = error.source();
+        }
     }
 
     fn load_config_at(
@@ -1714,9 +1756,55 @@ mod tests {
         assert!(!rendered.contains("ANTHROPIC_API_KEY"));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn claude_config_key_is_shared_and_redacted_even_when_disabled() {
+        let secret = "sk-ant-api-fixture-secret";
+        let config = load_config(&format!("[claude]\napi_key = '{secret}'\n")).unwrap();
+        let key = config.claude().api_key().unwrap();
+        assert!(!config.claude().enabled());
+        assert_eq!(key.expose_secret(), secret);
+        let cloned = config.clone();
+        assert!(Arc::ptr_eq(key, cloned.claude().api_key().unwrap()));
+
+        let rendered = config.to_toml().unwrap();
+        assert!(!rendered.contains(secret));
+        assert!(!format!("{config:?}").contains(secret));
+        let document: toml::Value = toml::from_str(&rendered).unwrap();
+        assert_eq!(document["claude"]["api_key"].as_str(), Some("[REDACTED]"));
+    }
+
+    #[test]
+    fn blank_claude_config_keys_are_absent() {
+        for value in ["''", "'   '", "\" \\t\\n \""] {
+            let config = load_config(&format!("[claude]\napi_key = {value}\n")).unwrap();
+            assert!(config.claude().api_key().is_none());
+            let rendered: toml::Value = toml::from_str(&config.to_toml().unwrap()).unwrap();
+            assert_eq!(rendered["claude"]["api_key"].as_str(), Some(""));
+        }
+    }
+
+    #[test]
+    fn malformed_claude_keys_do_not_appear_in_parse_errors() {
+        for (value, secret) in [
+            ("987654321", "987654321"),
+            ("['secret-sentinel']", "secret-sentinel"),
+            ("{ value = 'secret-sentinel' }", "secret-sentinel"),
+            ("'secret-sentinel' trailing", "secret-sentinel"),
+        ] {
+            let error = load_config(&format!("[claude]\napi_key = {value}\n")).unwrap_err();
+            assert!(matches!(error, Error::Config(ConfigError::Parse { .. })));
+            assert_error_redacts(&error, secret);
+        }
+    }
+
     #[test]
     fn claude_models_require_explicit_opt_in() {
-        for model in ["sonnet-5.5", "opus-5.5", "fable-5.1"] {
+        for (model, default_effort) in [
+            ("sonnet-5.5", ReasoningEffort::High),
+            ("opus-5.5", ReasoningEffort::Medium),
+            ("fable-5.1", ReasoningEffort::High),
+        ] {
             let agent = format!("[agent]\nmodel = '{model}'\n");
             assert!(matches!(
                 load_config(&agent),
@@ -1725,6 +1813,7 @@ mod tests {
             let config = load_config(&format!("{agent}[claude]\nenabled = true\n")).unwrap();
             assert!(config.claude().enabled());
             assert!(matches!(config.agent().model(), Model::Claude(_)));
+            assert_eq!(config.agent().thinking(), default_effort);
             assert!(config.claude().api_base_url().is_none());
             let restored = load_config(&config.to_toml().unwrap()).unwrap();
             assert_eq!(restored.agent().model(), config.agent().model());
@@ -1799,9 +1888,11 @@ mod tests {
         assert_table_fields(&rendered["auth"], &["mode", "file"]);
         assert_table_fields(
             &rendered["claude"],
-            &["enabled", "api_base_url", "workspace_id"],
+            &["enabled", "api_key", "api_base_url", "workspace_id"],
         );
         assert_eq!(rendered["claude"]["enabled"].as_bool(), Some(false));
+        assert_eq!(rendered["claude"]["api_key"].as_str(), Some(""));
+        assert!(config.claude().api_key().is_none());
         assert_table_fields(
             &rendered["agent"],
             &[
@@ -2205,10 +2296,57 @@ mod tests {
         let rendered = format!("{error:?} {error}");
         assert!(matches!(
             error,
-            Error::Config(ConfigError::InsecureRemoteMemoryPermissions { ref path, mode })
+            Error::Config(ConfigError::InsecureSecretPermissions { ref path, mode })
                 if path == &config_path && mode == 0o644
         ));
         assert!(!rendered.contains("permission-test-token"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claude_config_key_requires_private_permissions_even_when_disabled() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempdir().unwrap();
+        let config_path = directory.path().join("config.toml");
+        let secret = "sk-ant-api-permission-fixture";
+        fs::write(&config_path, format!("[claude]\napi_key = '{secret}'\n")).unwrap();
+        let load = || {
+            Config::load_with(
+                ConfigOverrides {
+                    path: Some(config_path.clone()),
+                    ..ConfigOverrides::default()
+                },
+                Environment {
+                    codex_home: Some(directory.path().join("codex")),
+                    ..Environment::default()
+                },
+                directory.path(),
+            )
+        };
+
+        fs::set_permissions(&config_path, fs::Permissions::from_mode(0o600)).unwrap();
+        load().unwrap();
+        fs::set_permissions(&config_path, fs::Permissions::from_mode(0o644)).unwrap();
+        let error = load().unwrap_err();
+        assert!(matches!(
+            error,
+            Error::Config(ConfigError::InsecureSecretPermissions { ref path, mode })
+                if path == &config_path && mode == 0o644
+        ));
+        assert_error_redacts(&error, secret);
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn claude_config_key_requires_verifiable_file_privacy() {
+        let secret = "sk-ant-api-permission-fixture";
+        let error = load_config(&format!("[claude]\napi_key = '{secret}'\n")).unwrap_err();
+        assert!(matches!(
+            error,
+            Error::Config(ConfigError::UnsupportedSecretPermissions { .. })
+        ));
+        assert_error_redacts(&error, secret);
     }
 
     #[test]
@@ -3457,6 +3595,65 @@ mod tests {
         assert_eq!(document["agent"]["thinking"].as_str(), Some("xhigh"));
         assert_eq!(document["agent"]["web_search"].as_bool(), Some(false));
         assert_eq!(document["theme"]["accent"].as_str(), Some("#AABBCC"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn persisting_settings_preserves_literal_credentials_and_private_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let claude_key = " sk-ant-api-persistence-fixture ";
+        let memory_token = "memory-persistence-fixture";
+        fs::write(
+            &path,
+            format!(
+                "# Keep this comment.\n[claude]\napi_key = '{claude_key}'\n\n{}\n\
+                 [agent]\nthinking = 'low'\n",
+                remote_memory_config("https://memory.example/", "personal", memory_token, ".")
+            ),
+        )
+        .unwrap();
+        let config = load_config_at(path.clone(), directory.path()).unwrap();
+        config.persist_thinking(ReasoningEffort::Max).unwrap();
+
+        let contents = fs::read_to_string(&path).unwrap();
+        let document: toml::Value = toml::from_str(&contents).unwrap();
+        assert!(contents.contains("# Keep this comment."));
+        assert_eq!(document["claude"]["api_key"].as_str(), Some(claude_key));
+        assert_eq!(
+            document["memory"]["remote"]["bearer_token"].as_str(),
+            Some(memory_token)
+        );
+        assert_eq!(document["agent"]["thinking"].as_str(), Some("max"));
+        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o077, 0);
+        let reloaded = load_config_at(path, directory.path()).unwrap();
+        assert_eq!(
+            reloaded.claude().api_key().unwrap().expose_secret(),
+            claude_key
+        );
+        assert_eq!(
+            reloaded.memory().remote().unwrap().bearer_token(),
+            memory_token
+        );
+    }
+
+    #[test]
+    fn update_parse_errors_do_not_retain_credentials() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let secret = "secret-sentinel";
+        let contents = format!("[claude]\napi_key = '{secret}' trailing\n");
+        fs::write(&path, &contents).unwrap();
+
+        let error = Config::persist_thinking_at(&path, ReasoningEffort::Max).unwrap_err();
+        assert!(matches!(
+            error,
+            Error::Config(ConfigError::UpdateParse { .. })
+        ));
+        assert_error_redacts(&error, secret);
+        assert_eq!(fs::read_to_string(path).unwrap(), contents);
     }
 
     #[test]

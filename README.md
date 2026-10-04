@@ -92,7 +92,7 @@ export OPENAI_API_KEY="your-api-key"
 tact --auth api-key
 ```
 
-API keys are never written to tact's configuration or shown in status output.
+OpenAI API keys are supplied through the environment and are not shown in status output.
 
 ## Non-interactive use
 
@@ -118,12 +118,13 @@ When no effort is configured, Sol and Astra use low effort and Luna uses medium.
 effort takes precedence. Tact supports low through max effort. Sol and Luna support Pro mode;
 Astra uses standard mode.
 
-Claude support requires an explicit config opt-in and an Anthropic API key in
-`ANTHROPIC_API_KEY`:
+Claude support requires an explicit config opt-in and an Anthropic API key in `claude.api_key`
+or `ANTHROPIC_API_KEY`:
 
 ```toml
 [claude]
 enabled = true
+api_key = "sk-ant-api03-..."
 
 [agent]
 model = "sonnet-5.5" # or opus-5.5, fable-5.1
@@ -155,21 +156,27 @@ Check whether the Claude API key is configured:
 tact auth --provider claude status
 ```
 
+An explicitly set, nonblank `ANTHROPIC_API_KEY` overrides `claude.api_key`. Configured keys are not
+added to shell or MCP environments. Config files containing a key must have private permissions
+on Unix, for example `chmod 600 ~/.tact/config.toml`, just like files containing a memory token.
+Config output, debug output, and authentication status do not display the key. Status identifies
+which source is selected. On platforms where file privacy cannot be verified, use the environment.
+
 Claude supports API-key authentication only. Tact does not log into Claude subscriptions or
 read subscription credentials. Keys must use the `sk-ant-api` or `sk-ant-usr-` prefix; subscription
 tokens and other credential formats are rejected before a client is constructed. This checks
-the credential format, not its validity with Anthropic. The key stays in the environment and
-is not written to config, model prompts, or session checkpoints. Codex can independently use a ChatGPT subscription
-through `tact auth --provider codex login`, including in mixed-provider task trees.
+the credential format, not its validity with Anthropic. Keys are not added to model prompts or
+session checkpoints. Codex can independently use a ChatGPT subscription through
+`tact auth --provider codex login`, including in mixed-provider task trees.
 
 For an API key that is not scoped to a workspace, set `claude.workspace_id` to the ID from
 [Console Settings → Workspaces](https://platform.claude.com/settings/workspaces). Tact sends it
 as `anthropic-workspace-id` for Claude roots, children, and auxiliary agents. Workspace-scoped
 keys can leave this unset. Start a new session after changing it.
 
-The `[claude]` section accepts `enabled`, `api_base_url`, and `workspace_id`. Unknown fields,
+The `[claude]` section accepts `enabled`, `api_key`, `api_base_url`, and `workspace_id`. Unknown fields,
 including the retired `auth` and `subscription_store` settings, are rejected. Remove those
-fields and explicitly supply `ANTHROPIC_API_KEY` to use Claude.
+fields and supply an API key to use Claude.
 
 `claude.api_base_url` selects a Messages API base URL; Tact appends `/messages`.
 
@@ -373,16 +380,17 @@ when the feature is enabled; setting it does not enable or disable subagents. Se
 [subagent design](docs/subagents.md) for the tool, lifecycle, messaging, and authority contracts.
 
 Agents explicitly choose a model and `thinking` for each delegated task. The default choices are
-`luna`, `sol`, and `astra`; enabling Claude adds `sonnet-5.5`, `opus-5.5`, and `fable-5.1` for
-both root and child agents. Agents may mix providers within one task tree. Each turn receives its own model and effort
-in context. When both parent and child use Codex, the child cannot exceed the parent in the order
-Luna < Sol < Astra. Cross-provider selection and delegation between Claude models are allowed.
-Model-selection guidance ranks intelligence as Fable 5.1 > Astra > Opus 5.5 > Sol > Luna.
-Consider Sonnet 5.5 for speed and cost.
-Root agents use the live `agent.thinking` cap
-for new spawns, including after an update during an active turn. Registered subagents are also
-bounded by their own assigned effort. Changing the cap leaves existing children unchanged. Model
-selection has no per-model configuration switches or `selected` alias.
+`luna`, `sol`, and `astra`; enabling Claude adds `sonnet-5.5`, `opus-5.5`, and `fable-5.1` for both
+root and child agents. Agents may mix providers within one task tree. Each turn receives its own
+model and effort in context. When both parent and child use Codex, the child cannot exceed the
+parent in the order Luna < Sol < Astra. Cross-provider selection and delegation between Claude
+models are allowed.
+Tact's subagent instructions include tips for choosing a model, reasoning effort, and when
+to seek an independent opinion.
+Root agents use the live `agent.thinking` cap for new spawns, including after an update during an
+active turn. Registered subagents are also bounded by their own assigned effort. Changing the cap
+leaves existing children unchanged. Model selection has no per-model configuration switches or
+`selected` alias.
 
 Optimize total cost and time to a correct result, including rework. Use `low` for mechanical work,
 `medium` for localized implementation, `high` for bounded difficult correctness proofs, `xhigh`

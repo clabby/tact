@@ -125,12 +125,22 @@ impl Tool for SpawnAgent {
                     "opus-5.5",
                     "fable-5.1",
                 ],
-                "Intelligence order, strongest first: fable-5.1 > astra > opus-5.5 > sol > luna. Consider Sonnet 5.5 for speed and cost. Consider capability and expected total completion cost and time, including rework. Codex parents may spawn Codex models at or below their own tier: luna < sol < astra. Cross-provider selection and delegation between Claude models are allowed, subject to effort caps.",
+                concat!(
+                    "Name luna, sol, astra, sonnet-5.5, opus-5.5, or fable-5.1 explicitly. ",
+                    "Choose model and effort independently for expected quality, total cost, and completion time, including rework. ",
+                    "Codex children cannot exceed a Codex parent's tier: luna < sol < astra. ",
+                    "Cross-provider selection and delegation between Claude models are supported, subject to effort caps.",
+                ),
             )
         } else {
             (
                 vec!["luna", "sol", "astra"],
-                "Choose a model at or below the spawning parent: luna < sol < astra. Consider capability and expected total completion cost and time, including rework.",
+                concat!(
+                    "Name luna, sol, or astra explicitly. ",
+                    "Choose model and effort independently for expected quality, total cost, and completion time, including rework. ",
+                    "Only Codex is enabled. Choose at or below the spawning parent's tier: luna < sol < astra, ",
+                    "subject to effort caps.",
+                ),
             )
         };
         ToolDefinition::function(
