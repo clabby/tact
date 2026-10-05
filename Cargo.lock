@@ -2812,7 +2812,7 @@ dependencies = [
 [[package]]
 name = "nanocodex"
 version = "0.6.6"
-source = "git+https://github.com/patrick-ogrady/nanocodex?rev=caf6544bcea2d6d18a717479591053699f3fb8dc#caf6544bcea2d6d18a717479591053699f3fb8dc"
+source = "git+https://github.com/patrick-ogrady/nanocodex?rev=ec5100c63f24140d9b832cb18f8a33f28e8fdde9#ec5100c63f24140d9b832cb18f8a33f28e8fdde9"
 dependencies = [
  "nanocodex-agent",
  "nanocodex-claude",
@@ -2825,7 +2825,7 @@ dependencies = [
 [[package]]
 name = "nanocodex-agent"
 version = "0.6.6"
-source = "git+https://github.com/patrick-ogrady/nanocodex?rev=caf6544bcea2d6d18a717479591053699f3fb8dc#caf6544bcea2d6d18a717479591053699f3fb8dc"
+source = "git+https://github.com/patrick-ogrady/nanocodex?rev=ec5100c63f24140d9b832cb18f8a33f28e8fdde9#ec5100c63f24140d9b832cb18f8a33f28e8fdde9"
 dependencies = [
  "chrono",
  "futures-util",
@@ -2847,7 +2847,7 @@ dependencies = [
 [[package]]
 name = "nanocodex-claude"
 version = "0.6.6"
-source = "git+https://github.com/patrick-ogrady/nanocodex?rev=caf6544bcea2d6d18a717479591053699f3fb8dc#caf6544bcea2d6d18a717479591053699f3fb8dc"
+source = "git+https://github.com/patrick-ogrady/nanocodex?rev=ec5100c63f24140d9b832cb18f8a33f28e8fdde9#ec5100c63f24140d9b832cb18f8a33f28e8fdde9"
 dependencies = [
  "base64 0.22.1",
  "futures-util",
@@ -2873,7 +2873,7 @@ dependencies = [
 [[package]]
 name = "nanocodex-durability"
 version = "0.6.6"
-source = "git+https://github.com/patrick-ogrady/nanocodex?rev=caf6544bcea2d6d18a717479591053699f3fb8dc#caf6544bcea2d6d18a717479591053699f3fb8dc"
+source = "git+https://github.com/patrick-ogrady/nanocodex?rev=ec5100c63f24140d9b832cb18f8a33f28e8fdde9#ec5100c63f24140d9b832cb18f8a33f28e8fdde9"
 dependencies = [
  "nanocodex-agent",
  "nanocodex-claude",
@@ -2889,7 +2889,7 @@ dependencies = [
 [[package]]
 name = "nanocodex-managed"
 version = "0.6.6"
-source = "git+https://github.com/patrick-ogrady/nanocodex?rev=caf6544bcea2d6d18a717479591053699f3fb8dc#caf6544bcea2d6d18a717479591053699f3fb8dc"
+source = "git+https://github.com/patrick-ogrady/nanocodex?rev=ec5100c63f24140d9b832cb18f8a33f28e8fdde9#ec5100c63f24140d9b832cb18f8a33f28e8fdde9"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -2921,7 +2921,7 @@ dependencies = [
 [[package]]
 name = "nanocodex-oai-api"
 version = "0.6.6"
-source = "git+https://github.com/patrick-ogrady/nanocodex?rev=caf6544bcea2d6d18a717479591053699f3fb8dc#caf6544bcea2d6d18a717479591053699f3fb8dc"
+source = "git+https://github.com/patrick-ogrady/nanocodex?rev=ec5100c63f24140d9b832cb18f8a33f28e8fdde9#ec5100c63f24140d9b832cb18f8a33f28e8fdde9"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -2952,7 +2952,7 @@ dependencies = [
 [[package]]
 name = "nanocodex-oai-tools"
 version = "0.6.6"
-source = "git+https://github.com/patrick-ogrady/nanocodex?rev=caf6544bcea2d6d18a717479591053699f3fb8dc#caf6544bcea2d6d18a717479591053699f3fb8dc"
+source = "git+https://github.com/patrick-ogrady/nanocodex?rev=ec5100c63f24140d9b832cb18f8a33f28e8fdde9#ec5100c63f24140d9b832cb18f8a33f28e8fdde9"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -2988,7 +2988,7 @@ dependencies = [
 [[package]]
 name = "nanocodex-oai-tools-macros"
 version = "0.6.6"
-source = "git+https://github.com/patrick-ogrady/nanocodex?rev=caf6544bcea2d6d18a717479591053699f3fb8dc#caf6544bcea2d6d18a717479591053699f3fb8dc"
+source = "git+https://github.com/patrick-ogrady/nanocodex?rev=ec5100c63f24140d9b832cb18f8a33f28e8fdde9#ec5100c63f24140d9b832cb18f8a33f28e8fdde9"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",

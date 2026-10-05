@@ -839,7 +839,11 @@ impl TranscriptModel {
     fn retrying(&mut self, record: &TranscriptRecord) -> Result<bool, serde_json::Error> {
         let payload = record.decode_payload::<RetryPayload>()?;
         self.pending_error = Some(payload.error);
-        self.transient = Some(TransientStatus::Retrying(payload.delay_ns));
+        self.transient = Some(TransientStatus::Retrying {
+            delay_ns: payload.delay_ns,
+            next_attempt: payload.next_attempt,
+            max_attempts: payload.max_attempts,
+        });
         Ok(true)
     }
 
@@ -1422,6 +1426,8 @@ struct ErrorPayload {
 #[derive(Deserialize)]
 struct RetryPayload {
     delay_ns: u64,
+    next_attempt: u32,
+    max_attempts: u32,
     error: String,
 }
 
@@ -2174,7 +2180,7 @@ mod tests {
         model.apply(&agent(AgentEventKind::RunStarted, json!({})));
         model.apply(&agent(
             AgentEventKind::ModelAttemptRetrying,
-            json!({"delay_ns": 500_000_000, "error": "temporary"}),
+            json!({"delay_ns": 500_000_000, "attempt": 1, "next_attempt": 2, "max_attempts": 5, "error": "temporary"}),
         ));
         assert!(model.transient().is_some());
         model.apply(&agent(AgentEventKind::ModelConnectionCompleted, json!({})));
