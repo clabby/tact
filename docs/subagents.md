@@ -247,6 +247,12 @@ or steered. Failed or interrupted delivery is surfaced explicitly rather than tr
 status. Its default timeout is 30 seconds and its maximum timeout is 300 seconds. A timeout returns
 current summaries with `timed_out = true`; it does not cancel the agents.
 
+Every selected agent must be active when the wait begins. An already terminal agent causes an
+immediate error listing the remaining active IDs. Use `list_agents({include_completed:true})` to
+read available reports in `status.output`; `last_output` retains the latest completed report after
+reuse or closure. Save those reports and wait only on active IDs. A completion that arrives after
+the wait begins returns normally. Rejection leaves running agents active.
+
 `interrupt_agent` cancels active model and tool work for the selected subtree and waits for cleanup.
 The sessions remain reusable. `close_agent` additionally closes those sessions and prevents later
 turns. Both operations have a bounded internal stop deadline of 30 seconds.

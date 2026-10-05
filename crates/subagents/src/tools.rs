@@ -383,7 +383,7 @@ impl Tool for ListAgents {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::function(
             LIST_AGENTS_TOOL,
-            "Lists a compact directory of agents in the same task tree. Active recipients are returned by default; completed agents can be included when a follow-up message is needed.",
+            "Lists agents in the same task tree. Set include_completed to retrieve terminal statuses and completed results in status.output. After reuse or closure, last_output retains the latest completed result.",
             json!({
                 "type": "object",
                 "properties": {
@@ -429,7 +429,7 @@ impl Tool for WaitAgent {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::function(
             WAIT_AGENT_TOOL,
-            "Waits until any requested subagent reaches a terminal status and returns current statuses and reports. Use one call with multiple IDs instead of polling the workspace.",
+            "Waits until any requested active subagent reaches a terminal status. Errors immediately if any selected agent is already terminal, listing remaining active IDs. Retrieve available results with list_agents({include_completed:true}), save them, and wait only on active IDs.",
             json!({
                 "type": "object",
                 "properties": {
@@ -437,7 +437,7 @@ impl Tool for WaitAgent {
                         "type": "array",
                         "items": { "type": "integer", "minimum": 1 },
                         "minItems": 1,
-                        "description": "Agent IDs returned by spawn_agent. Waiting returns when any one becomes terminal."
+                        "description": "Active agent IDs returned by spawn_agent. Waiting returns when any one becomes terminal; already terminal IDs cause an immediate error."
                     },
                     "timeout_ms": {
                         "type": "integer",

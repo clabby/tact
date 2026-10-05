@@ -467,7 +467,17 @@ async fn mixed_provider_roundtrip(
     let output = json!({"native_model":child_model.as_str(), "answer":42});
     let child_code = format!("text(await tools.submit_result({{turn_token:1,output:{output}}}));");
     let root_code = format!(
-        "const children = await Promise.all(Array.from({{length:{child_count}}}, () => tools.spawn_agent({{role:'fixture',task:'Return the required object',model:'{}',thinking:'medium',output_schema:{{type:'object',properties:{{native_model:{{type:'string'}},answer:{{type:'integer'}}}},required:['native_model','answer'],additionalProperties:false}}}}))); text(await Promise.all(children.map(child => tools.wait_agent({{agent_ids:[child.agent_id],timeout_ms:5000}}))));",
+        r#"
+const children = await Promise.all(Array.from({{length:{child_count}}}, () => tools.spawn_agent({{
+  role: 'fixture', task: 'Return the required object', model: '{}', thinking: 'medium',
+  output_schema: {{type:'object',properties:{{native_model:{{type:'string'}},answer:{{type:'integer'}}}},required:['native_model','answer'],additionalProperties:false}}
+}})));
+await Promise.allSettled(children.map(child => tools.wait_agent({{agent_ids:[child.agent_id],timeout_ms:5000}})));
+text(await tools.list_agents({{include_completed:true}}));
+for (let attempt = 0; attempt < 3; attempt++) {{
+  await tools.wait_agent({{agent_ids:children.map(child => child.agent_id),timeout_ms:5000}});
+}}
+"#,
         child_model.as_str()
     );
     let (codex, mut native_claude) = if matches!(root_model, HarnessModel::Codex(_)) {
@@ -574,14 +584,27 @@ async fn mixed_provider_roundtrip(
         .find(|event| event["tool"] == "spawn_agent")
         .expect("nested spawn event");
     assert_eq!(spawn["structured_result"]["model"], child_model.as_str());
-    let wait = root_results
+    let waits = root_results
         .iter()
-        .find(|event| event["tool"] == "wait_agent")
-        .expect("nested wait event");
-    assert_eq!(
-        wait["structured_result"]["agents"][0]["status"]["output"],
-        output
-    );
+        .filter(|event| event["tool"] == "wait_agent")
+        .collect::<Vec<_>>();
+    assert_eq!(waits.len(), child_count + 1);
+    assert_eq!(waits.last().unwrap()["status"], "failed");
+    let directory = root_results
+        .iter()
+        .find(|event| event["tool"] == "list_agents")
+        .expect("completed result inspection");
+    let reports = directory["structured_result"]["agents"].as_array().unwrap();
+    assert_eq!(reports.len(), child_count);
+    for report in reports {
+        assert_eq!(report["status"]["state"], "completed");
+        assert_eq!(report["status"]["output"], output);
+    }
+    let exec = root_results
+        .iter()
+        .find(|event| event["tool"] == "exec")
+        .expect("code cell result");
+    assert_eq!(exec["status"], "failed");
     let mut completed = 0;
     let mut submitted = 0;
     while let Ok(update) = updates.try_recv() {
@@ -666,12 +689,11 @@ async fn mixed_provider_roundtrip(
             assert_eq!(event.event.request_id.as_ref(), clean.session_id());
             if event.event.kind == AgentEventKind::ToolResult {
                 let payload: Value = serde_json::from_str(event.event.payload.get()).unwrap();
-                if payload["tool"] == "wait_agent" {
-                    assert_eq!(
-                        payload["structured_result"]["agents"][0]["status"]["output"],
-                        output
-                    );
-                    nested_results += 1;
+                if payload["tool"] == "list_agents" {
+                    for report in payload["structured_result"]["agents"].as_array().unwrap() {
+                        assert_eq!(report["status"]["output"], output);
+                        nested_results += 1;
+                    }
                 }
             }
         }

@@ -226,6 +226,8 @@ pub(super) struct AgentDirectoryEntry {
     pub(super) task: String,
     pub(super) parent_agent_id: Option<AgentId>,
     pub(super) status: AgentStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) last_output: Option<Value>,
     pub(super) can_message: bool,
     pub(super) can_manage: bool,
 }
@@ -485,6 +487,11 @@ impl RegistryState {
                     task: bounded_summary(&session.descriptor.task),
                     parent_agent_id: session.descriptor.parent,
                     status: session.status.clone(),
+                    last_output: if matches!(session.status, AgentStatus::Completed { .. }) {
+                        None
+                    } else {
+                        session.last_output.clone()
+                    },
                     can_message,
                     can_manage,
                 })
@@ -1389,6 +1396,28 @@ impl Registry {
         }
         let mut revision = self.revision.subscribe();
         let deadline = Instant::now() + duration;
+        {
+            let summaries = self.state.lock().await.summaries(session_id, ids)?;
+            let terminal = summaries
+                .iter()
+                .filter(|summary| summary.status.is_wait_terminal())
+                .map(|summary| summary.agent_id.to_string())
+                .collect::<Vec<_>>();
+            if !terminal.is_empty() {
+                let active = summaries
+                    .iter()
+                    .filter(|summary| summary.status.is_active())
+                    .map(|summary| summary.agent_id.to_string())
+                    .collect::<Vec<_>>();
+                return Err(std::io::Error::other(format!(
+                    "already terminal agent_ids: [{}]; remaining active agent_ids: [{}]. \
+                     Read available results with list_agents({{include_completed:true}}) and \
+                     wait only on active IDs.",
+                    terminal.join(", "),
+                    active.join(", ")
+                )));
+            }
+        }
         loop {
             let summaries = self.state.lock().await.summaries(session_id, ids)?;
             if summaries
@@ -2526,7 +2555,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn closed_agent_summaries_keep_the_last_completed_output() {
+    async fn agent_directory_keeps_results_after_reuse_and_close() {
         let (registry, _control, _updates) = super::channel(32);
         let reservation = registry.reserve("main").await.unwrap();
         let mut session = test_session(reservation.id, "child-session", None);
@@ -2546,12 +2575,63 @@ mod tests {
             )
             .unwrap();
 
+        let directory =
+            serde_json::to_value(registry.directory("main", true, false).await).unwrap();
+        assert_eq!(
+            directory[0]["status"]["output"],
+            json!({ "report": "completed work" })
+        );
+        assert!(directory[0].get("last_output").is_none());
+        assert!(
+            registry
+                .wait("main", &[reservation.id], Duration::from_secs(1))
+                .await
+                .is_err()
+        );
+
+        for error in [
+            NanocodexError::TurnCancelled,
+            NanocodexError::InvalidRequest("failed follow-up".to_owned()),
+        ] {
+            registry
+                .harness_turn_started("main", reservation.id)
+                .await
+                .unwrap();
+            registry
+                .harness_turn_finished("main", reservation.id, Err(error))
+                .await;
+            let directory =
+                serde_json::to_value(registry.directory("main", true, false).await).unwrap();
+            assert_eq!(
+                directory[0]["last_output"],
+                json!({ "report": "completed work" })
+            );
+            assert!(
+                registry
+                    .wait("main", &[reservation.id], Duration::from_secs(1))
+                    .await
+                    .is_err()
+            );
+        }
         let summaries = registry.close("main", reservation.id).await.unwrap();
 
         assert_eq!(summaries[0].status, AgentStatus::Closed);
         assert_eq!(
             summaries[0].last_output,
             Some(json!({ "report": "completed work" }))
+        );
+        let directory =
+            serde_json::to_value(registry.directory("main", true, false).await).unwrap();
+        assert_eq!(directory[0]["status"]["state"], "closed");
+        assert_eq!(
+            directory[0]["last_output"],
+            json!({ "report": "completed work" })
+        );
+        assert!(
+            registry
+                .wait("main", &[reservation.id], Duration::from_secs(1))
+                .await
+                .is_err()
         );
     }
 
@@ -2630,6 +2710,10 @@ mod tests {
                 .all(|summary| summary.status == AgentStatus::Running)
         );
 
+        let ids = [parent.id, child.id];
+        let mut waiting = Box::pin(registry.wait("main", &ids, Duration::from_secs(5)));
+        assert!(futures_util::poll!(&mut waiting).is_pending());
+
         let interrupted = registry.interrupt("main", parent.id).await.unwrap();
         assert_eq!(
             interrupted
@@ -2641,12 +2725,25 @@ mod tests {
                 (&parent.id, &AgentStatus::Interrupted),
             ]
         );
-        let (finished, timed_out) = registry
-            .wait("main", &[parent.id, child.id], Duration::from_secs(1))
-            .await
-            .unwrap();
+        let (finished, timed_out) = waiting.await.unwrap();
         assert!(!timed_out);
         assert_eq!(finished.len(), 2);
+        let ids = [parent.id, child.id, sibling.id];
+        let mut rejected = Box::pin(registry.wait("main", &ids, Duration::from_secs(1)));
+        let Poll::Ready(Err(error)) = futures_util::poll!(&mut rejected) else {
+            panic!("a terminal member must reject the mixed wait immediately");
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("already terminal agent_ids: [1, 2]")
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("remaining active agent_ids: [3]")
+        );
+        assert!(error.to_string().contains("list_agents"));
         assert_eq!(
             registry
                 .state
