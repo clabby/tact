@@ -6130,22 +6130,24 @@ mod tests {
     }
 
     #[test]
-    fn fable_model_clears_fast_mode_and_disables_its_action() {
-        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
-        root.set_model(Model::Claude(ClaudeModel::Opus55));
-        root.set_fast_mode(true);
-        root.set_model(Model::Claude(ClaudeModel::Fable51));
-        assert!(!root.composer().fast_mode());
-        root.update(key(KeyCode::Char('/'), KeyModifiers::NONE));
-        for character in "fast mode".chars() {
-            root.update(key(KeyCode::Char(character), KeyModifiers::NONE));
+    fn unsupported_claude_models_clear_fast_mode_and_disable_its_action() {
+        for model in [ClaudeModel::Sonnet55, ClaudeModel::Fable51] {
+            let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+            root.set_model(Model::Claude(ClaudeModel::Opus55));
+            root.set_fast_mode(true);
+            root.set_model(Model::Claude(model));
+            assert!(!root.composer().fast_mode());
+            root.update(key(KeyCode::Char('/'), KeyModifiers::NONE));
+            for character in "fast mode".chars() {
+                root.update(key(KeyCode::Char(character), KeyModifiers::NONE));
+            }
+            assert!(
+                root.update(key(KeyCode::Enter, KeyModifiers::NONE))
+                    .effects
+                    .is_empty()
+            );
+            assert!(!root.composer().fast_mode());
         }
-        assert!(
-            root.update(key(KeyCode::Enter, KeyModifiers::NONE))
-                .effects
-                .is_empty()
-        );
-        assert!(!root.composer().fast_mode());
     }
 
     #[test]
