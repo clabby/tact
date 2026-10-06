@@ -3567,7 +3567,7 @@ mod tests {
         let top = root.composer_area.y;
         let model_x = text_column(terminal.backend().buffer(), top, "gpt-6.1-sol");
         let effort_x = text_column(terminal.backend().buffer(), top, "medium");
-        let speed_x = text_column(terminal.backend().buffer(), top, "standard");
+        let speed_x = text_column(terminal.backend().buffer(), top, "󰳗");
         assert_eq!(
             root.composer
                 .component()
@@ -6175,13 +6175,13 @@ mod tests {
             assert_eq!(root.composer().speed(), Speed::Ultrafast);
             let fork = root.fork(Path::new("/work"), ReasoningEffort::Medium);
             assert_eq!(fork.composer().speed(), Speed::Ultrafast);
-            assert!(render_root_text(&mut root, 80, 18).contains("medium standard"));
+            assert!(render_root_text(&mut root, 80, 18).contains("medium 󰳗"));
             root.open_speed();
             assert!(render_root_text(&mut root, 80, 18).contains("Uses standard with this model"));
             root.update(key(KeyCode::Esc, KeyModifiers::NONE));
         }
         root.set_model(Model::Codex(CodexModel::Astra));
-        assert!(render_root_text(&mut root, 80, 18).contains("medium ultrafast"));
+        assert!(render_root_text(&mut root, 80, 18).contains("medium 󰑣"));
         assert_eq!(root.composer().speed(), Speed::Ultrafast);
     }
 

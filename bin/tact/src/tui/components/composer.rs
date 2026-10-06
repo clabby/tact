@@ -1245,8 +1245,15 @@ impl Composer {
             .map(|timer| format!(" {} ", timer.label()))
             .unwrap_or_default();
         let effort = format!(" {} ", self.thinking.as_str());
+
+        // Nerd Fonts: md-turtle, md-rabbit, and md-rocket.
         let effective_speed = self.speed.for_model(self.model);
-        let speed = format!("{} ", effective_speed.as_str());
+        let speed = match effective_speed {
+            Speed::Standard => "󰳗 ",
+            Speed::Fast => "󰤇 ",
+            Speed::Ultrafast => "󰑣 ",
+        };
+
         let pro_mode = (self.reasoning_mode == ReasoningMode::Pro
             && matches!(self.model, Model::Codex(_)))
         .then_some("pro ");
@@ -1373,7 +1380,7 @@ impl Composer {
             buffer.set_stringn(
                 speed_start,
                 top,
-                &speed,
+                speed,
                 usize::from(content_end - speed_start),
                 Style::default()
                     .fg(theme.speed(effective_speed))
@@ -1690,7 +1697,7 @@ mod tests {
         assert_eq!(
             rows(&terminal),
             [
-                "╭─ 0%/272k ───────────────── gpt-6.1-sol  medium standard ─╮",
+                "╭─ 0%/272k ──────────────────────── gpt-6.1-sol  medium 󰳗 ─╮",
                 "│                                                          │",
                 "│                                                          │",
                 "│                                                          │",
@@ -1801,19 +1808,19 @@ mod tests {
     }
 
     #[test]
-    fn speed_label_displays_the_effective_tier_and_is_clickable() {
+    fn speed_icon_displays_the_effective_tier_and_is_clickable() {
         let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
         composer.update(ComposerEvent::SetSpeed(Speed::Ultrafast));
-        for (model, effective) in [
-            (Model::Codex(CodexModel::Astra), Speed::Ultrafast),
-            (Model::Codex(CodexModel::Sol), Speed::Fast),
-            (Model::Claude(ClaudeModel::Opus55), Speed::Fast),
-            (Model::Claude(ClaudeModel::Sonnet55), Speed::Standard),
-            (Model::Claude(ClaudeModel::Fable51), Speed::Standard),
+        for (model, effective, icon) in [
+            (Model::Codex(CodexModel::Astra), Speed::Ultrafast, "󰑣"),
+            (Model::Codex(CodexModel::Sol), Speed::Fast, "󰤇"),
+            (Model::Claude(ClaudeModel::Opus55), Speed::Fast, "󰤇"),
+            (Model::Claude(ClaudeModel::Sonnet55), Speed::Standard, "󰳗"),
+            (Model::Claude(ClaudeModel::Fable51), Speed::Standard, "󰳗"),
         ] {
             composer.update(ComposerEvent::SetModel(model));
             let terminal = render(&mut composer, 72, 5);
-            assert!(rows(&terminal)[0].contains(&format!("medium {} ", effective.as_str())));
+            assert!(rows(&terminal)[0].contains(&format!("medium {icon} ")));
             assert_eq!(composer.speed(), Speed::Ultrafast);
             let hit = composer
                 .speed_hit_area
@@ -1822,18 +1829,19 @@ mod tests {
                 composer.chrome_target(Position::new(hit.x, hit.y)),
                 Some(ComposerChromeTarget::Speed)
             );
-            let label = &terminal.backend().buffer()[(hit.x, hit.y)];
-            assert_eq!(label.fg, Theme::default().speed(effective));
-            assert!(label.modifier.contains(ratatui::style::Modifier::BOLD));
+            let cell = &terminal.backend().buffer()[(hit.x, hit.y)];
+            assert_eq!(cell.symbol(), icon);
+            assert_eq!(cell.fg, Theme::default().speed(effective));
+            assert!(cell.modifier.contains(ratatui::style::Modifier::BOLD));
         }
     }
 
     #[test]
     fn claude_models_show_their_effective_speed_and_hide_pro() {
-        for model in [
-            Model::Claude(ClaudeModel::Sonnet55),
-            Model::Claude(ClaudeModel::Opus55),
-            Model::Claude(ClaudeModel::Fable51),
+        for (model, icon) in [
+            (Model::Claude(ClaudeModel::Sonnet55), "󰳗"),
+            (Model::Claude(ClaudeModel::Opus55), "󰤇"),
+            (Model::Claude(ClaudeModel::Fable51), "󰳗"),
         ] {
             let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Max);
             composer.update(ComposerEvent::SetModel(model));
@@ -1842,10 +1850,7 @@ mod tests {
             let terminal = render(&mut composer, 72, 5);
             let top = &rows(&terminal)[0];
             assert!(top.contains(model.as_str()));
-            assert!(top.contains(&format!(
-                "max {} ",
-                Speed::Ultrafast.for_model(model).as_str()
-            )));
+            assert!(top.contains(&format!("max {icon} ")));
             assert!(!top.contains(" pro"));
         }
     }
@@ -1866,7 +1871,7 @@ mod tests {
             })
             .expect("Pro mode should render its badge");
 
-        assert!(rendered.contains("medium fast pro"));
+        assert!(rendered.contains("medium 󰤇 pro"));
         for cell in &top[pro..pro + 3] {
             assert_eq!(cell.fg, Color::Green);
             assert!(cell.modifier.contains(ratatui::style::Modifier::BOLD));

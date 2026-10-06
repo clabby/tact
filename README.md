@@ -130,7 +130,8 @@ When no effort is configured, Sol and Astra use low effort and Luna uses medium.
 effort takes precedence. Tact supports low through max effort. Sol and Luna support Pro mode;
 Astra uses standard mode.
 
-Click the speed label or choose **Change speed** to open the Standard/Fast/Ultrafast dial.
+Click the speed icon or choose **Change speed** to open the Standard/Fast/Ultrafast dial.
+The Nerd Fonts turtle, rabbit, and rocket glyphs show Standard, Fast, and Ultrafast effective speeds.
 Speed is independent of effort and remains selected when switching models. Ultrafast uses the
 fastest tier supported by each model:
 
