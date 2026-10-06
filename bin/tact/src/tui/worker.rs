@@ -1,8 +1,8 @@
 //! Independently scheduled Nanocodex turn worker.
 
 use crate::{
-    app::config::ReasoningEffort,
-    core::{IMAGE_RENDERING_INSTRUCTIONS, MEMORY_REVIEW_CHECKPOINT},
+    app::config::{ReasoningEffort, Speed},
+    core::{IMAGE_RENDERING_INSTRUCTIONS, MEMORY_REVIEW_CHECKPOINT, set_speed},
     tui::{
         components::QueueId,
         context::ContextBudget,
@@ -64,9 +64,9 @@ pub(crate) enum WorkerCommand {
         pane: PaneId,
         effort: ReasoningEffort,
     },
-    SetFastMode {
+    SetSpeed {
         pane: PaneId,
-        enabled: bool,
+        speed: Speed,
     },
     CancelAll(PaneId),
     OpenFork {
@@ -169,9 +169,9 @@ pub(crate) enum WorkerEvent {
         effort: ReasoningEffort,
         result: Result<(), NanocodexError>,
     },
-    FastModeUpdated {
+    SpeedUpdated {
         pane: PaneId,
-        enabled: bool,
+        speed: Speed,
         result: Result<(), NanocodexError>,
     },
     Stopped {
@@ -674,18 +674,18 @@ async fn run(
                         }));
                         continue;
                     }
-                    WorkerCommand::SetFastMode { pane, enabled } => {
+                    WorkerCommand::SetSpeed { pane, speed } => {
                         if compacting.contains_key(&pane) {
-                            drop(updates.send(WorkerEvent::FastModeUpdated { pane, enabled, result: Err(NanocodexError::InvalidRequest("context compaction is still running".to_owned())) }));
+                            drop(updates.send(WorkerEvent::SpeedUpdated { pane, speed, result: Err(NanocodexError::InvalidRequest("context compaction is still running".to_owned())) }));
                             continue;
                         }
                         let result = match agent_for(pane, main.as_ref(), fork.as_ref()) {
-                            Some(agent) => agent.agent.set_fast_mode(enabled).await,
+                            Some(agent) => set_speed(&agent.agent, agent.context.model, speed).await,
                             None => Err(NanocodexError::AgentStopped),
                         };
-                        drop(updates.send(WorkerEvent::FastModeUpdated {
+                        drop(updates.send(WorkerEvent::SpeedUpdated {
                             pane,
-                            enabled,
+                            speed,
                             result,
                         }));
                         continue;
@@ -1306,7 +1306,7 @@ mod tests {
         finish_turn, reflection_prompt, spawn,
     };
     use crate::{
-        app::config::ReasoningEffort,
+        app::config::{ReasoningEffort, Speed},
         core::{IMAGE_RENDERING_INSTRUCTIONS, MEMORY_REVIEW_CHECKPOINT},
         tui::{
             components::QueueId,
@@ -1589,7 +1589,7 @@ mod tests {
             model: nanocodex::oai::MODEL.to_owned(),
             effort: ReasoningEffort::Medium,
             reasoning_mode: crate::app::config::ReasoningMode::Standard,
-            fast_mode: false,
+            speed: Speed::Standard,
             workspace: directory.path().to_path_buf(),
             application_version: "test".to_owned(),
         });
@@ -2503,7 +2503,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fast_mode_can_change_while_a_turn_is_active() {
+    async fn speed_can_change_while_a_turn_is_active() {
         let called = Arc::new(Notify::new());
         let calls = Arc::new(AtomicUsize::new(0));
         let (agent, mut events) = pending_agent(Arc::clone(&called), calls);
@@ -2532,16 +2532,16 @@ mod tests {
         ));
 
         commands
-            .send(WorkerCommand::SetFastMode {
+            .send(WorkerCommand::SetSpeed {
                 pane: PaneId::Main,
-                enabled: true,
+                speed: Speed::Ultrafast,
             })
             .unwrap();
         assert!(matches!(
             timeout(Duration::from_secs(5), updates.recv()).await,
-            Ok(Some(WorkerEvent::FastModeUpdated {
+            Ok(Some(WorkerEvent::SpeedUpdated {
                 pane: PaneId::Main,
-                enabled: true,
+                speed: Speed::Ultrafast,
                 result: Ok(()),
             }))
         ));

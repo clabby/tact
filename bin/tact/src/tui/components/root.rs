@@ -21,13 +21,14 @@ use super::{
     selection::{Selection, Surface, TextSpan},
     session_picker::{SessionPicker, SessionPickerEffect, SessionPickerEvent, SessionPickerMode},
     skill_picker::{SkillPicker, SkillPickerEffect, SkillPickerEvent},
+    speed::{SpeedEffect, SpeedEvent, SpeedSelector},
     subagents::{SubagentEffect, SubagentOverlay, SubagentTree},
     theme_selector::{ThemeSelector, ThemeSelectorEffect, ThemeSelectorEvent},
     transcript::{ScrollCommand, Transcript, TranscriptEvent},
 };
 use crate::{
     app::{
-        config::{ReasoningEffort, ReasoningMode, TuiConfig},
+        config::{ReasoningEffort, ReasoningMode, Speed, TuiConfig},
         model,
     },
     core::extensions::Skill,
@@ -190,7 +191,7 @@ pub(crate) enum RootEvent {
         effort: ReasoningEffort,
         reasoning_mode: ReasoningMode,
         preferred_reasoning_mode: ReasoningMode,
-        fast_mode: bool,
+        speed: Speed,
         model: Model,
         skills: Arc<[Skill]>,
     },
@@ -261,7 +262,7 @@ pub(crate) enum RootEffect {
         reasoning_mode: ReasoningMode,
     },
     SetModel(Model),
-    SetFastMode(bool),
+    SetSpeed(Speed),
     SetMaxSubagents(usize),
     SetTheme(ThemeMode),
     Fork,
@@ -275,6 +276,7 @@ enum Overlay {
     Actions(Node<ActionsMenu>),
     ContextDiagnostics(Node<ContextDiagnosticsPanel>),
     Effort(Node<EffortSelector>),
+    Speed(Node<SpeedSelector>),
     Model(Node<ModelSelector>),
     Theme(Node<ThemeSelector>),
     FileFinder(FileMention),
@@ -415,7 +417,7 @@ impl RootNode {
                 active_tokens: self.composer.component().context_tokens(),
                 window_tokens: self.context_diagnostics.model_window_tokens,
             }));
-        root.set_fast_mode(self.composer.component().fast_mode());
+        root.set_speed(self.composer.component().speed());
         root.set_model(self.composer.component().model());
         root.set_reasoning_modes(
             self.composer.component().reasoning_mode(),
@@ -482,11 +484,11 @@ impl RootNode {
         self.theme_mode = mode;
     }
 
-    pub(crate) fn set_fast_mode(&mut self, enabled: bool) {
+    pub(crate) fn set_speed(&mut self, speed: Speed) {
         let _ = self
             .composer
             .component_mut()
-            .update(ComposerEvent::SetFastMode(enabled));
+            .update(ComposerEvent::SetSpeed(speed));
     }
 
     pub(crate) fn set_model(&mut self, model: Model) {
@@ -494,9 +496,6 @@ impl RootNode {
             .composer
             .component_mut()
             .update(ComposerEvent::SetModel(model));
-        if !model.supports_fast_mode() {
-            self.set_fast_mode(false);
-        }
     }
 
     pub(crate) fn set_reasoning_modes(&mut self, actual: ReasoningMode, preferred: ReasoningMode) {
@@ -564,7 +563,7 @@ impl RootNode {
         thinking: ReasoningEffort,
         reasoning_mode: ReasoningMode,
         preferred_reasoning_mode: ReasoningMode,
-        fast_mode: bool,
+        speed: Speed,
         records: Vec<Arc<TranscriptRecord>>,
     ) {
         let projection = Self::project_session(thinking, records);
@@ -573,7 +572,7 @@ impl RootNode {
             thinking,
             reasoning_mode,
             preferred_reasoning_mode,
-            fast_mode,
+            speed,
             projection,
         );
     }
@@ -611,7 +610,7 @@ impl RootNode {
         thinking: ReasoningEffort,
         reasoning_mode: ReasoningMode,
         preferred_reasoning_mode: ReasoningMode,
-        fast_mode: bool,
+        speed: Speed,
         mut projection: RestoredSessionProjection,
     ) {
         self.reset_session(
@@ -621,7 +620,7 @@ impl RootNode {
             preferred_reasoning_mode,
             DraftReset::Clear,
         );
-        self.set_fast_mode(fast_mode);
+        self.set_speed(speed);
         projection.transcript.set_workspace(workspace);
         self.transcript = Node::new(projection.transcript);
         self.context_diagnostics = projection.context_diagnostics;
@@ -655,6 +654,7 @@ impl RootNode {
     pub(crate) fn animation_deadline(&self) -> Option<Instant> {
         let selector = match &self.overlay {
             Some(Overlay::Effort(selector)) => selector.component().animation_deadline(),
+            Some(Overlay::Speed(selector)) => selector.component().animation_deadline(),
             _ => None,
         };
         [
@@ -752,6 +752,7 @@ impl RootNode {
                 Overlay::Actions(actions) => actions.render(frame, area, theme),
                 Overlay::ContextDiagnostics(panel) => panel.render(frame, area, theme),
                 Overlay::Effort(selector) => selector.render(frame, area, theme),
+                Overlay::Speed(selector) => selector.render(frame, area, theme),
                 Overlay::Model(selector) => selector.render(frame, area, theme),
                 Overlay::Theme(selector) => selector.render(frame, area, theme),
                 Overlay::FileFinder(mention) => mention.finder.render(frame, area, theme),
@@ -925,6 +926,7 @@ impl RootNode {
             let position = Position::new(mouse.column, mouse.row);
             match self.composer.component().chrome_target(position) {
                 Some(ComposerChromeTarget::Effort) => return self.open_effort(),
+                Some(ComposerChromeTarget::Speed) => return self.open_speed(),
                 Some(ComposerChromeTarget::Model) => return self.open_model(),
                 Some(ComposerChromeTarget::Subagents) => {
                     self.subagents.open_tree();
@@ -1012,8 +1014,6 @@ impl RootNode {
                     new_session: new_session_enabled,
                     review: self.blocking_task.is_none(),
                     fork: self.can_fork(),
-                    fast_mode: self.composer.component().fast_mode(),
-                    fast_mode_available: self.composer.component().model().supports_fast_mode(),
                     memory: self.memory_enabled,
                     model: self.thread == ThreadState::New,
                 },
@@ -1264,6 +1264,7 @@ impl RootNode {
             Some(Overlay::Actions(_)) => self.update_actions(event),
             Some(Overlay::ContextDiagnostics(_)) => self.update_context_diagnostics(event),
             Some(Overlay::Effort(_)) => self.update_effort(EffortEvent::Terminal { event, now }),
+            Some(Overlay::Speed(_)) => self.update_speed(SpeedEvent::Terminal { event, now }),
             Some(Overlay::Model(_)) => self.update_model(ModelSelectorEvent::Terminal(event)),
             Some(Overlay::Theme(_)) => {
                 self.update_theme_selector(ThemeSelectorEvent::Terminal(event))
@@ -1496,15 +1497,7 @@ impl RootNode {
             Some(ActionsEffect::Trigger(Action::Model)) => {
                 return self.open_model();
             }
-            Some(ActionsEffect::Trigger(Action::FastMode)) => {
-                self.overlay = None;
-                let enabled = !self.composer.component().fast_mode();
-                self.set_fast_mode(enabled);
-                return ComponentUpdate {
-                    effects: vec![RootEffect::SetFastMode(enabled)],
-                    render: RenderRequest::Immediate,
-                };
-            }
+            Some(ActionsEffect::Trigger(Action::Speed)) => return self.open_speed(),
             Some(ActionsEffect::Trigger(Action::Theme)) => {
                 self.overlay = Some(Overlay::Theme(Node::new(ThemeSelector::new(
                     self.theme_mode,
@@ -1701,6 +1694,38 @@ impl RootNode {
             matches!(self.composer.component().model(), Model::Codex(_)),
         ))));
         ComponentUpdate::render(RenderRequest::Immediate)
+    }
+
+    fn open_speed(&mut self) -> ComponentUpdate<RootEffect> {
+        self.overlay = Some(Overlay::Speed(Node::new(SpeedSelector::new(
+            self.composer.component().speed(),
+            self.composer.component().model(),
+        ))));
+        ComponentUpdate::render(RenderRequest::Immediate)
+    }
+
+    fn update_speed(&mut self, event: SpeedEvent) -> ComponentUpdate<RootEffect> {
+        let Some(Overlay::Speed(selector)) = &mut self.overlay else {
+            return ComponentUpdate::none();
+        };
+        let update = selector.update(event);
+        let Some(effect) = update.effects.into_iter().next() else {
+            return ComponentUpdate {
+                effects: Vec::new(),
+                render: update.render,
+            };
+        };
+        self.overlay = None;
+        match effect {
+            SpeedEffect::Dismiss => ComponentUpdate::render(RenderRequest::Immediate),
+            SpeedEffect::Apply(speed) => {
+                self.set_speed(speed);
+                ComponentUpdate {
+                    effects: vec![RootEffect::SetSpeed(speed)],
+                    render: RenderRequest::Immediate,
+                }
+            }
+        }
     }
 
     fn open_model(&mut self) -> ComponentUpdate<RootEffect> {
@@ -2435,6 +2460,7 @@ impl RootNode {
             RenderRequest::None
         };
         let effort = self.update_effort(EffortEvent::AnimationFrame(now));
+        let speed = self.update_speed(SpeedEvent::AnimationFrame(now));
         let transcript = self.update_transcript(TranscriptEvent::AnimationFrame(now));
         let composer =
             self.update_composer(ComposerEvent::AnimationFrame(now), RenderRequest::Streaming);
@@ -2457,9 +2483,15 @@ impl RootNode {
             RenderRequest::None
         };
         ComponentUpdate {
-            effects: effort.effects.into_iter().chain(composer.effects).collect(),
+            effects: effort
+                .effects
+                .into_iter()
+                .chain(speed.effects)
+                .chain(composer.effects)
+                .collect(),
             render: effort
                 .render
+                .max(speed.render)
                 .max(transcript.render)
                 .max(composer.render)
                 .max(queue.render)
@@ -2830,7 +2862,7 @@ impl Component for RootNode {
                 effort,
                 reasoning_mode,
                 preferred_reasoning_mode,
-                fast_mode,
+                speed,
                 model,
                 skills,
             } => {
@@ -2840,7 +2872,7 @@ impl Component for RootNode {
                     effort,
                     reasoning_mode,
                     preferred_reasoning_mode,
-                    fast_mode,
+                    speed,
                     *projection,
                 );
                 self.set_model(model);
@@ -3181,7 +3213,7 @@ mod tests {
         TranscriptEvent,
     };
     use crate::{
-        app::config::{ReasoningEffort, ReasoningMode, TuiConfig},
+        app::config::{ReasoningEffort, ReasoningMode, Speed, TuiConfig},
         core::extensions::Skill,
         tui::{
             session::{RecentPrompt, SessionSummary},
@@ -3354,7 +3386,7 @@ mod tests {
             ReasoningEffort::Medium,
             ReasoningMode::Standard,
             ReasoningMode::Standard,
-            false,
+            Speed::Standard,
             projection,
         );
         assert_eq!(root.tui.mouse_scroll_lines.get(), 1);
@@ -3389,7 +3421,7 @@ mod tests {
             ReasoningEffort::Medium,
             ReasoningMode::Standard,
             ReasoningMode::Standard,
-            false,
+            Speed::Standard,
             vec![record],
         );
         root.set_model(Model::Claude(nanocodex::ClaudeModel::Opus55));
@@ -3417,7 +3449,7 @@ mod tests {
             ReasoningEffort::Medium,
             ReasoningMode::Standard,
             ReasoningMode::Standard,
-            false,
+            Speed::Standard,
             vec![outbound],
         );
         assert_eq!(
@@ -3526,7 +3558,7 @@ mod tests {
     }
 
     #[test]
-    fn clicking_composer_chrome_opens_model_effort_and_subagents() {
+    fn clicking_composer_chrome_opens_model_effort_speed_and_subagents() {
         let mut terminal = Terminal::new(TestBackend::new(100, 16)).unwrap();
         let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
         terminal
@@ -3535,6 +3567,7 @@ mod tests {
         let top = root.composer_area.y;
         let model_x = text_column(terminal.backend().buffer(), top, "gpt-6.1-sol");
         let effort_x = text_column(terminal.backend().buffer(), top, "medium");
+        let speed_x = text_column(terminal.backend().buffer(), top, "standard");
         assert_eq!(
             root.composer
                 .component()
@@ -3558,6 +3591,14 @@ mod tests {
             top,
         ));
         assert!(matches!(root.overlay, Some(Overlay::Effort(_))));
+
+        root.overlay = None;
+        assert_eq!(
+            root.composer().chrome_target(Position::new(speed_x, top)),
+            Some(ComposerChromeTarget::Speed)
+        );
+        root.update(mouse(MouseEventKind::Down(MouseButton::Left), speed_x, top));
+        assert!(matches!(root.overlay, Some(Overlay::Speed(_))));
 
         root.overlay = None;
         root.update(super::RootEvent::Subagent(AgentUpdate::Added(
@@ -6100,54 +6141,48 @@ mod tests {
     }
 
     #[test]
-    fn fast_mode_action_toggles_the_runtime_setting() {
-        for model in [
-            Model::Codex(CodexModel::Sol),
-            Model::Claude(ClaudeModel::Opus55),
-        ] {
-            let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
-            root.set_model(model);
-            root.update(key(KeyCode::Char('/'), KeyModifiers::NONE));
-            for character in "fast mode".chars() {
-                root.update(key(KeyCode::Char(character), KeyModifiers::NONE));
-            }
-
-            let enabled = root.update(key(KeyCode::Enter, KeyModifiers::NONE));
-
-            assert_eq!(enabled.effects, [RootEffect::SetFastMode(true)]);
-            assert!(root.composer().fast_mode());
-            assert!(root.overlay.is_none());
-
-            root.update(key(KeyCode::Char('/'), KeyModifiers::NONE));
-            for character in "priority".chars() {
-                root.update(key(KeyCode::Char(character), KeyModifiers::NONE));
-            }
-            let disabled = root.update(key(KeyCode::Enter, KeyModifiers::NONE));
-
-            assert_eq!(disabled.effects, [RootEffect::SetFastMode(false)]);
-            assert!(!root.composer().fast_mode());
+    fn speed_action_selects_applies_and_cancels_preferences() {
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        root.update(key(KeyCode::Char('/'), KeyModifiers::NONE));
+        for character in "speed".chars() {
+            root.update(key(KeyCode::Char(character), KeyModifiers::NONE));
         }
+        let opened = root.update(key(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(opened.effects.is_empty());
+        assert!(matches!(root.overlay, Some(Overlay::Speed(_))));
+        root.update(key(KeyCode::Left, KeyModifiers::NONE));
+        assert_eq!(root.composer().speed(), Speed::Standard);
+        assert!(root.animation_deadline().is_some());
+        let applied = root.update(key(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(applied.effects, [RootEffect::SetSpeed(Speed::Ultrafast)]);
+        assert_eq!(root.composer().speed(), Speed::Ultrafast);
+        assert!(root.overlay.is_none());
+
+        root.open_speed();
+        root.update(key(KeyCode::Right, KeyModifiers::NONE));
+        let cancelled = root.update(key(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(cancelled.effects.is_empty());
+        assert_eq!(root.composer().speed(), Speed::Ultrafast);
+        assert!(root.overlay.is_none());
     }
 
     #[test]
-    fn unsupported_claude_models_clear_fast_mode_and_disable_its_action() {
+    fn unsupported_models_preserve_speed_preference_for_forks_and_later_models() {
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        root.set_speed(Speed::Ultrafast);
         for model in [ClaudeModel::Sonnet55, ClaudeModel::Fable51] {
-            let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
-            root.set_model(Model::Claude(ClaudeModel::Opus55));
-            root.set_fast_mode(true);
             root.set_model(Model::Claude(model));
-            assert!(!root.composer().fast_mode());
-            root.update(key(KeyCode::Char('/'), KeyModifiers::NONE));
-            for character in "fast mode".chars() {
-                root.update(key(KeyCode::Char(character), KeyModifiers::NONE));
-            }
-            assert!(
-                root.update(key(KeyCode::Enter, KeyModifiers::NONE))
-                    .effects
-                    .is_empty()
-            );
-            assert!(!root.composer().fast_mode());
+            assert_eq!(root.composer().speed(), Speed::Ultrafast);
+            let fork = root.fork(Path::new("/work"), ReasoningEffort::Medium);
+            assert_eq!(fork.composer().speed(), Speed::Ultrafast);
+            assert!(render_root_text(&mut root, 80, 18).contains("medium standard"));
+            root.open_speed();
+            assert!(render_root_text(&mut root, 80, 18).contains("Uses standard with this model"));
+            root.update(key(KeyCode::Esc, KeyModifiers::NONE));
         }
+        root.set_model(Model::Codex(CodexModel::Astra));
+        assert!(render_root_text(&mut root, 80, 18).contains("medium ultrafast"));
+        assert_eq!(root.composer().speed(), Speed::Ultrafast);
     }
 
     #[test]

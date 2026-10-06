@@ -1,8 +1,11 @@
 use super::{TranscriptError, TranscriptRecord};
-use crate::tui::{
-    context::outbound_context_snapshot,
-    storage::{SessionStorage, database_path},
-    transcript::{LocalEvent, SessionStarted},
+use crate::{
+    app::config::{ReasoningEffort, Speed},
+    tui::{
+        context::outbound_context_snapshot,
+        storage::{SessionStorage, database_path},
+        transcript::{LocalEvent, SessionStarted},
+    },
 };
 use nanocodex::agent::events::AgentEvent;
 use std::{
@@ -131,15 +134,15 @@ impl TranscriptJournal {
         Ok(record)
     }
 
-    pub(crate) fn set_initial_effort(&mut self, effort: crate::app::config::ReasoningEffort) {
+    pub(crate) fn set_initial_effort(&mut self, effort: ReasoningEffort) {
         if let Some(started) = &mut self.pending_start {
             started.effort = effort;
         }
     }
 
-    pub(crate) fn set_initial_fast_mode(&mut self, enabled: bool) {
+    pub(crate) fn set_initial_speed(&mut self, speed: Speed) {
         if let Some(started) = &mut self.pending_start {
-            started.fast_mode = enabled;
+            started.speed = speed;
         }
     }
 
@@ -339,7 +342,7 @@ fn unix_milliseconds() -> u64 {
 mod tests {
     use super::TranscriptJournal;
     use crate::{
-        app::config::{ReasoningEffort, ReasoningMode},
+        app::config::{ReasoningEffort, ReasoningMode, Speed},
         tui::{
             session,
             storage::{SessionStorage, database_path},
@@ -348,7 +351,7 @@ mod tests {
     };
     use nanocodex::agent::events::{AgentEvent, AgentEventKind};
     use rusqlite::Connection;
-    use serde_json::{json, value::to_raw_value};
+    use serde_json::{Value, json, value::to_raw_value};
     use std::sync::Arc;
     use tempfile::tempdir;
 
@@ -360,31 +363,48 @@ mod tests {
             model: "model".to_owned(),
             effort: ReasoningEffort::Medium,
             reasoning_mode: ReasoningMode::Standard,
-            fast_mode: false,
+            speed: Speed::Standard,
             workspace: "/work".into(),
             application_version: "test".to_owned(),
         }
     }
 
     #[tokio::test]
-    async fn semantic_records_round_trip_in_order() {
+    async fn initial_speed_and_changes_round_trip_without_overwriting_the_start() {
         let directory = tempdir().unwrap();
         let config = directory.path().join("config.toml");
         let (mut journal, writer) = TranscriptJournal::open(&config, "session").unwrap();
         journal.defer_start(started("session"));
+        journal.set_initial_speed(Speed::Ultrafast);
         journal
             .append_local(LocalEvent::UserSubmitted {
                 id: TurnId::new(1),
                 text: "hello".to_owned(),
             })
             .unwrap();
+        journal.set_initial_speed(Speed::Fast);
+        journal
+            .append_local(LocalEvent::SpeedChanged {
+                from: Speed::Ultrafast,
+                to: Speed::Fast,
+            })
+            .unwrap();
         drop(journal);
         writer.into_task().await.unwrap().unwrap();
 
         let records = session::load_transcript(&config, "session").unwrap();
-        assert_eq!(records.len(), 2);
+        assert_eq!(records.len(), 3);
         assert_eq!(records[0].kind(), "session.started");
+        assert_eq!(
+            records[0].decode_payload::<SessionStarted>().unwrap().speed,
+            Speed::Ultrafast
+        );
         assert_eq!(records[1].kind(), "user.submitted");
+        assert_eq!(records[2].kind(), "speed.changed");
+        assert_eq!(
+            records[2].decode_payload::<Value>().unwrap(),
+            json!({"from": "ultrafast", "to": "fast"})
+        );
     }
 
     #[tokio::test]

@@ -75,7 +75,8 @@ provided through the `TACT_GIT_SHA`, `TACT_GIT_BRANCH`, `TACT_GIT_COMMIT_TIMESTA
 ## Authentication
 
 By default, tact uses the ChatGPT session stored by Codex in `$CODEX_HOME/auth.json` or
-`~/.codex/auth.json`. If that file does not exist, it looks for `OPENAI_API_KEY`.
+`~/.codex/auth.json`. If that file does not exist, it uses `OPENAI_API_KEY`, then `openai.api_key`
+in the TOML configuration.
 
 To sign in with a ChatGPT subscription:
 
@@ -84,15 +85,26 @@ tact auth login
 tact auth status
 ```
 
-`tact auth logout` removes the shared credential file, which also signs Codex out. If you want to
-require API-key authentication, pass the key through the environment:
+`tact auth logout` removes the shared credential file, which also signs Codex out. To require
+API-key authentication even with a stored ChatGPT login, configure:
 
-```sh
-export OPENAI_API_KEY="your-api-key"
-tact --auth api-key
+```toml
+[auth]
+mode = "api-key"
+
+[openai]
+api_key = "your-api-key"
 ```
 
-OpenAI API keys are supplied through the environment and are not shown in status output.
+You can also select API-key authentication with `tact --auth api-key`. A nonblank `OPENAI_API_KEY`
+overrides `openai.api_key`; a blank or absent environment value uses the configured key. Auto mode
+continues to prefer the stored ChatGPT login. A rejected credential returns an error without
+switching authentication or billing sources.
+
+Files containing an API key require private permissions on Unix, such as `chmod 600 ~/.tact/config.toml`.
+Config output, debug output, and authentication status redact the key; status identifies its source.
+The same OpenAI credentials authenticate web search and image generation, including those tools
+used by Claude sessions. Remove `openai.api_key` and unset `OPENAI_API_KEY` to remove API credentials.
 
 ## Non-interactive use
 
@@ -118,6 +130,24 @@ When no effort is configured, Sol and Astra use low effort and Luna uses medium.
 effort takes precedence. Tact supports low through max effort. Sol and Luna support Pro mode;
 Astra uses standard mode.
 
+Click the speed label or choose **Change speed** to open the Standard/Fast/Ultrafast dial.
+Speed is independent of effort and remains selected when switching models. Ultrafast uses the
+fastest tier supported by each model:
+
+| Model | Effective ultrafast preference |
+| --- | --- |
+| Astra | Ultrafast |
+| Sol, Luna, Opus 5.5 | Fast |
+| Sonnet 5.5, Fable 5.1 | Standard |
+
+Astra sends `service_tier = "ultrafast"`; access and pricing depend on the account.
+See [OpenAI ultrafast mode](https://developers.openai.com/api/docs/guides/ultrafast-mode).
+
+OpenAI models use automatic prompt caching. Tact keeps request prefixes and conversation history
+stable across related turns, children, and restored sessions to support reuse. Cache hits depend on
+the provider and matching context. For the GPT-6 API models, the default minimum cache lifetime is
+30 minutes after a write or reuse; see [OpenAI prompt caching](https://developers.openai.com/api/docs/guides/prompt-caching).
+
 Claude support requires an explicit config opt-in and an Anthropic API key in `claude.api_key`
 or `ANTHROPIC_API_KEY`:
 
@@ -137,8 +167,9 @@ Enter to apply it, and Esc to cancel. The check mark identifies the current mode
 With Claude enabled, `--model` and the model picker also accept `sonnet-5.5`, `opus-5.5`, and `fable-5.1`
 (native IDs `claude-sonnet-5-5`, `claude-opus-5-5`, and `claude-fable-5-1`). All support
 `low`, `medium`, `high`, `xhigh`, and `max`. Their default efforts are medium for Opus and high for Sonnet and Fable.
-Claude uses standard reasoning mode. Opus 5.5 supports fast mode through `agent.fast_mode = true`
-or the **Fast mode** action; Sonnet 5.5 and Fable 5.1 do not. Fast mode defaults to off and uses
+Claude uses standard reasoning mode. Opus 5.5 supports accelerated processing through
+`agent.speed = "fast"` or the speed dial; Sonnet 5.5 and Fable 5.1 use standard processing.
+The default speed is standard. Opus fast processing uses
 Anthropic's [premium fast-mode service](https://platform.claude.com/docs/en/build-with-claude/fast-mode),
 which requires access on the API account. Changes apply to subsequently accepted turns.
 Claude requests use automatic prompt caching with a one-hour TTL, covering the system prompt,
@@ -203,6 +234,10 @@ tact config path
 tact config show
 ```
 
+`agent.speed` stores the requested preference even when the current model uses a slower supported
+speed. Existing `agent.fast_mode` booleans load as standard or fast; an explicit `agent.speed` wins.
+Saving a speed choice writes `agent.speed` and removes the legacy key.
+
 The default effective configuration looks like this (paths depend on your environment):
 
 ```toml
@@ -210,12 +245,15 @@ The default effective configuration looks like this (paths depend on your enviro
 mode = "auto" # auto, chatgpt, or api-key
 file = "/path/to/.codex/auth.json"
 
+[openai]
+api_key = ""
+
 [agent]
 workspace = "/path/to/workspace"
 model = "sol" # luna, sol, or astra
 thinking = "low" # low, medium, high, xhigh, or max
 reasoning_mode = "standard" # standard or pro
-fast_mode = false
+speed = "standard" # standard, fast, or ultrafast
 max_subagents = 32
 instructions = ""
 append_instructions = ""

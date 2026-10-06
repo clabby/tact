@@ -93,7 +93,7 @@ mod tui {
 }
 
 use components::{AppEvent, AppNode, RootNode};
-use config::{ReasoningEffort, ReasoningMode};
+use config::{ReasoningEffort, ReasoningMode, Speed};
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use nanocodex::agent::events::{AgentEvent, AgentEventKind};
@@ -427,7 +427,7 @@ fn write_session(config_path: &Path, session_id: &str, workspace: &Path, event_c
             model: nanocodex::oai::MODEL.to_owned(),
             effort: ReasoningEffort::Medium,
             reasoning_mode: ReasoningMode::Standard,
-            fast_mode: false,
+            speed: Speed::Standard,
             workspace: workspace.to_path_buf(),
             application_version: "benchmark".to_owned(),
         }),
@@ -465,7 +465,7 @@ fn write_mixed_session_segment(config_path: &Path, session_id: &str, workspace: 
             model: nanocodex::oai::MODEL.to_owned(),
             effort: ReasoningEffort::Medium,
             reasoning_mode: ReasoningMode::Standard,
-            fast_mode: false,
+            speed: Speed::Standard,
             workspace: workspace.to_path_buf(),
             application_version: "benchmark".to_owned(),
         }),
@@ -714,7 +714,7 @@ fn benchmarks(criterion: &mut Criterion) {
                     ReasoningEffort::Medium,
                     ReasoningMode::Standard,
                     ReasoningMode::Standard,
-                    false,
+                    Speed::Standard,
                     records,
                 );
                 black_box(root);
@@ -737,7 +737,7 @@ fn benchmarks(criterion: &mut Criterion) {
                     ReasoningEffort::Medium,
                     ReasoningMode::Standard,
                     ReasoningMode::Standard,
-                    false,
+                    Speed::Standard,
                     records,
                 );
                 black_box(root);
@@ -755,7 +755,7 @@ fn benchmarks(criterion: &mut Criterion) {
                 ReasoningEffort::Medium,
                 ReasoningMode::Standard,
                 ReasoningMode::Standard,
-                false,
+                Speed::Standard,
                 records,
             );
             black_box(root);
@@ -770,7 +770,7 @@ fn benchmarks(criterion: &mut Criterion) {
                 ReasoningEffort::Medium,
                 ReasoningMode::Standard,
                 ReasoningMode::Standard,
-                false,
+                Speed::Standard,
                 records,
             );
             black_box(root);

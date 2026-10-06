@@ -466,6 +466,7 @@ impl CodeModeObserver for Observer<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{app::config::Speed, core::set_speed};
     use axum::{
         Json, Router,
         extract::State,
@@ -720,7 +721,7 @@ mod tests {
             ClaudeModel::Opus55,
             ClaudeModel::Fable51,
         ] {
-            let mut server = server((0..4).map(|_| final_text()).collect()).await;
+            let mut server = server((0..5).map(|_| final_text()).collect()).await;
             let workspace = tempfile::tempdir().unwrap();
             let supported = model == ClaudeModel::Opus55;
             let (original, _) = fast_agent(
@@ -735,7 +736,13 @@ mod tests {
             );
             let request = assert_fast_request(&mut server, &original, supported).await;
             assert_eq!(request["model"], model.as_str());
-            original.set_fast_mode(false).await.unwrap();
+            set_speed(&original, Model::Claude(model), Speed::Ultrafast)
+                .await
+                .unwrap();
+            assert_fast_request(&mut server, &original, supported).await;
+            set_speed(&original, Model::Claude(model), Speed::Standard)
+                .await
+                .unwrap();
             assert_fast_request(&mut server, &original, false).await;
             let snapshot =
                 AgentSnapshot::from_claude(original.runtime_snapshot().await.unwrap()).unwrap();

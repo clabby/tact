@@ -1793,27 +1793,19 @@ fn render_entry(
                 Style::default().fg(theme.muted()),
             ),
         ])]),
-        EntryKind::FastModeChanged { enabled } => {
-            let status = if *enabled { "enabled" } else { "disabled" };
-            layout_without_links(vec![Line::from(vec![
-                Span::styled(
-                    "⚡ ",
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!("Fast mode {status}"),
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    " · takes effect on the next turn",
-                    Style::default().fg(theme.muted()),
-                ),
-            ])])
-        }
+        EntryKind::SpeedChanged { speed } => layout_without_links(vec![Line::from(vec![
+            Span::styled("◇ Speed changed to ", Style::default().fg(theme.muted())),
+            Span::styled(
+                speed.as_str(),
+                Style::default()
+                    .fg(theme.speed(*speed))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                " · takes effect on the next turn",
+                Style::default().fg(theme.muted()),
+            ),
+        ])]),
         EntryKind::ReflectionStarted => layout_without_links(vec![Line::from(Span::styled(
             "◇ Reflection started",
             Style::default().fg(theme.muted()),
@@ -2004,7 +1996,7 @@ mod tests {
         Transcript, TranscriptEvent, render_user, unix_milliseconds,
     };
     use crate::{
-        app::config::{ReasoningEffort, ReasoningMode, TuiConfig},
+        app::config::{ReasoningEffort, ReasoningMode, Speed, TuiConfig},
         tui::{
             theme::Theme,
             transcript::{EntryKind, LocalEvent, SessionStarted, TranscriptRecord, TurnId},
@@ -2017,7 +2009,7 @@ mod tests {
         HarnessModel as Model, Model as CodexModel,
         agent::events::{AgentEvent, AgentEventKind},
     };
-    use ratatui::{Terminal, backend::TestBackend, layout::Position, style::Color};
+    use ratatui::{Terminal, backend::TestBackend, layout::Position};
     use serde_json::{json, value::to_raw_value};
     use std::{
         fs::File,
@@ -2067,7 +2059,7 @@ mod tests {
                     model: Model::Codex(CodexModel::Luna).to_string(),
                     effort: ReasoningEffort::Medium,
                     reasoning_mode: ReasoningMode::Standard,
-                    fast_mode: false,
+                    speed: Speed::Standard,
                     workspace: "/work".into(),
                     application_version: "test".to_owned(),
                 }),
@@ -2959,9 +2951,9 @@ mod tests {
             TranscriptRecord::from_local(
                 2,
                 2,
-                LocalEvent::FastModeChanged {
-                    from: false,
-                    to: true,
+                LocalEvent::SpeedChanged {
+                    from: Speed::Standard,
+                    to: Speed::Fast,
                 },
             )
             .unwrap(),
@@ -2970,10 +2962,15 @@ mod tests {
         let backend = render(&mut transcript, 72, 6);
         let cells = backend.buffer().content();
         let rendered = cells.iter().map(|cell| cell.symbol()).collect::<String>();
-        let bolt = cells
-            .iter()
-            .find(|cell| cell.symbol() == "⚡")
-            .expect("fast-mode notification should include a bolt");
+        let fast = cells
+            .windows(4)
+            .find(|cells| {
+                cells
+                    .iter()
+                    .map(|cell| cell.symbol())
+                    .eq(["f", "a", "s", "t"])
+            })
+            .expect("speed notification should include its value");
         let high = cells
             .windows(4)
             .find(|cells| {
@@ -2985,8 +2982,8 @@ mod tests {
             .expect("effort notification should include its value");
 
         assert!(rendered.contains("Effort changed to high · takes effect on the next turn"));
-        assert!(rendered.contains("Fast mode enabled · takes effect on the next turn"));
-        assert_eq!(bolt.fg, Color::Yellow);
+        assert!(rendered.contains("Speed changed to fast · takes effect on the next turn"));
+        assert_eq!(fast[0].fg, Theme::default().speed(Speed::Fast));
         assert_eq!(high[0].fg, Theme::default().effort(ReasoningEffort::High));
     }
 

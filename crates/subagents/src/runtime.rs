@@ -1,6 +1,7 @@
 //! Async child-agent sessions, turns, and lifecycle orchestration.
 
 use super::{
+    Speed,
     capacity::{Capacity, TurnCapacity},
     harness::{self, HarnessHandle},
     message::MessageThreads,
@@ -92,13 +93,14 @@ struct AgentFactory {
     settings: Mutex<AgentSettings>,
 }
 
-type AgentBuilder =
-    dyn Fn(Model, Thinking, bool) -> Result<(Nanocodex, AgentEvents), NanocodexError> + Send + Sync;
+type AgentBuilder = dyn Fn(Model, Thinking, Speed) -> Result<(Nanocodex, AgentEvents), NanocodexError>
+    + Send
+    + Sync;
 
 #[derive(Clone, Copy)]
 struct AgentSettings {
     max_thinking: Thinking,
-    fast_mode: bool,
+    speed: Speed,
 }
 
 fn thinking_rank(thinking: Thinking) -> Result<u8, NanocodexError> {
@@ -857,11 +859,11 @@ impl Registry {
     pub(crate) fn set_agent_factory<F>(
         &self,
         max_thinking: Thinking,
-        fast_mode: bool,
+        speed: Speed,
         factory: F,
     ) -> Result<(), NanocodexError>
     where
-        F: Fn(Model, Thinking, bool) -> Result<(Nanocodex, AgentEvents), NanocodexError>
+        F: Fn(Model, Thinking, Speed) -> Result<(Nanocodex, AgentEvents), NanocodexError>
             + Send
             + Sync
             + 'static,
@@ -871,7 +873,7 @@ impl Registry {
                 build: Box::new(factory),
                 settings: Mutex::new(AgentSettings {
                     max_thinking,
-                    fast_mode,
+                    speed,
                 }),
             })
             .map_err(|_| {
@@ -912,7 +914,7 @@ impl Registry {
                 settings.max_thinking
             )));
         }
-        (factory.build)(model, thinking, settings.fast_mode)
+        (factory.build)(model, thinking, settings.speed)
     }
 
     pub(super) fn claude_enabled(&self) -> bool {
@@ -929,13 +931,13 @@ impl Registry {
         }
     }
 
-    fn set_agent_fast_mode(&self, fast_mode: bool) {
+    fn set_agent_speed(&self, speed: Speed) {
         if let Some(factory) = self.agent_factory.get() {
             factory
                 .settings
                 .lock()
                 .expect("subagent settings lock should not be poisoned")
-                .fast_mode = fast_mode;
+                .speed = speed;
         }
     }
 
@@ -1773,7 +1775,7 @@ impl Subagents {
     ///
     /// The factory must return a new session and its event stream on every call. The runtime
     /// supplies the requested model and thinking effort, bounded by `max_thinking`, plus the current
-    /// fast-mode setting. A runtime accepts exactly one factory; a second call returns
+    /// speed preference. A runtime accepts exactly one factory; a second call returns
     /// [`NanocodexError::InvalidRequest`].
     ///
     /// # Errors
@@ -1782,17 +1784,17 @@ impl Subagents {
     pub fn set_agent_factory<F>(
         &self,
         max_thinking: Thinking,
-        fast_mode: bool,
+        speed: Speed,
         factory: F,
     ) -> Result<(), NanocodexError>
     where
-        F: Fn(Model, Thinking, bool) -> Result<(Nanocodex, AgentEvents), NanocodexError>
+        F: Fn(Model, Thinking, Speed) -> Result<(Nanocodex, AgentEvents), NanocodexError>
             + Send
             + Sync
             + 'static,
     {
         self.registry
-            .set_agent_factory(max_thinking, fast_mode, factory)
+            .set_agent_factory(max_thinking, speed, factory)
     }
 
     /// Returns a root-session authority checker for application-owned tools.
@@ -1813,9 +1815,9 @@ impl Subagents {
         self.registry.set_agent_max_thinking(thinking);
     }
 
-    /// Changes the fast-mode setting inherited by newly created child sessions.
-    pub fn set_fast_mode(&self, enabled: bool) {
-        self.registry.set_agent_fast_mode(enabled);
+    /// Changes the speed preference inherited by newly created child sessions.
+    pub fn set_speed(&self, speed: Speed) {
+        self.registry.set_agent_speed(speed);
     }
 
     /// Attempts to interrupt every active child without closing reusable sessions.
@@ -1904,6 +1906,7 @@ mod tests {
     };
     use crate::{
         AgentUpdate, MessageDeliveryState, MessageDisposition, MessagePriority, MessagePurpose,
+        Speed,
     };
     use futures_util::future::Either;
     use nanocodex::{
@@ -1985,16 +1988,16 @@ mod tests {
         registry
             .set_agent_factory(
                 Thinking::Medium,
-                false,
-                move |model, thinking, fast_mode| {
-                    *captured.lock().unwrap() = Some((model, thinking, fast_mode));
+                Speed::Standard,
+                move |model, thinking, speed| {
+                    *captured.lock().unwrap() = Some((model, thinking, speed));
                     Err(NanocodexError::InvalidRequest(
                         "stop after capture".to_owned(),
                     ))
                 },
             )
             .unwrap();
-        registry.set_agent_fast_mode(true);
+        registry.set_agent_speed(Speed::Ultrafast);
 
         for (maximum, requested, allowed) in [
             (Thinking::Medium, Thinking::Low, true),
@@ -2017,7 +2020,7 @@ mod tests {
                 assert!(error.to_string().contains("stop after capture"));
                 assert_eq!(
                     actual,
-                    Some((Model::Codex(CodexModel::Luna), requested, true))
+                    Some((Model::Codex(CodexModel::Luna), requested, Speed::Ultrafast))
                 );
             } else {
                 assert_eq!(actual, None);
@@ -2032,12 +2035,16 @@ mod tests {
         let registry = Registry::new(updates, 1);
         let (captured, mut arguments) = mpsc::unbounded_channel();
         registry
-            .set_agent_factory(Thinking::High, false, move |model, thinking, fast_mode| {
-                captured.send((model, thinking, fast_mode)).unwrap();
-                Err(NanocodexError::InvalidRequest(
-                    "stop after capture".to_owned(),
-                ))
-            })
+            .set_agent_factory(
+                Thinking::High,
+                Speed::Standard,
+                move |model, thinking, speed| {
+                    captured.send((model, thinking, speed)).unwrap();
+                    Err(NanocodexError::InvalidRequest(
+                        "stop after capture".to_owned(),
+                    ))
+                },
+            )
             .unwrap();
         let parent = registry.reserve("root").await.unwrap();
         parent
@@ -2065,7 +2072,10 @@ mod tests {
             let error = result.err().unwrap();
             if allowed {
                 assert!(error.to_string().contains("stop after capture"));
-                assert_eq!(arguments.try_recv().unwrap(), (model, thinking, false));
+                assert_eq!(
+                    arguments.try_recv().unwrap(),
+                    (model, thinking, Speed::Standard)
+                );
             } else {
                 assert!(arguments.try_recv().is_err());
                 assert!(error.to_string().contains("exceeds parent"));
@@ -2088,7 +2098,11 @@ mod tests {
                 assert!(error.to_string().contains("stop after capture"));
                 assert_eq!(
                     arguments.try_recv().unwrap(),
-                    (Model::Codex(CodexModel::Sol), Thinking::Medium, false)
+                    (
+                        Model::Codex(CodexModel::Sol),
+                        Thinking::Medium,
+                        Speed::Standard
+                    )
                 );
             } else {
                 assert!(error.to_string().contains("exceeds configured maximum"));
@@ -2253,7 +2267,7 @@ mod tests {
         let weak = subagents.downgrade();
         let factory_weak = weak.clone();
         subagents
-            .set_agent_factory(Thinking::Medium, false, move |_, _, _| {
+            .set_agent_factory(Thinking::Medium, Speed::Standard, move |_, _, _| {
                 let _ = &factory_weak;
                 Err(NanocodexError::InvalidRequest("unused factory".to_owned()))
             })

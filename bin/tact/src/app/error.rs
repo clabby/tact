@@ -102,7 +102,7 @@ pub(crate) enum AuthError {
         #[source]
         source: io::Error,
     },
-    #[error("OPENAI_API_KEY is not set; set it or select ChatGPT authentication")]
+    #[error("OpenAI API-key authentication requires openai.api_key or OPENAI_API_KEY")]
     ApiKeyUnavailable,
     #[error("Claude API-key authentication requires claude.api_key or ANTHROPIC_API_KEY")]
     ClaudeApiKeyUnavailable,
@@ -111,7 +111,7 @@ pub(crate) enum AuthError {
     )]
     InvalidClaudeApiKey,
     #[error(
-        "no ChatGPT credentials found at {path} and OPENAI_API_KEY is not set; run `tact auth login` or set OPENAI_API_KEY"
+        "no ChatGPT credentials found at {path} and no OpenAI API key is configured; run `tact auth login` or set openai.api_key or OPENAI_API_KEY"
     )]
     CredentialsUnavailable { path: PathBuf },
     #[error(transparent)]
@@ -243,8 +243,8 @@ pub(crate) enum RuntimeError {
     ExternalEditorTask(#[source] tokio::task::JoinError),
     #[error("the effort update task stopped unexpectedly: {0}")]
     EffortUpdateTask(#[source] tokio::task::JoinError),
-    #[error("the fast-mode update task stopped unexpectedly: {0}")]
-    FastModeUpdateTask(#[source] tokio::task::JoinError),
+    #[error("the speed update task stopped unexpectedly: {0}")]
+    SpeedUpdateTask(#[source] tokio::task::JoinError),
     #[error("the new-session task stopped unexpectedly: {0}")]
     NewSessionTask(#[source] tokio::task::JoinError),
     #[error("the handoff task stopped unexpectedly: {0}")]

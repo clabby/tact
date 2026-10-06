@@ -24,6 +24,7 @@ use std::{
     sync::Arc,
 };
 use tact_memory::MemoryLimits;
+pub(crate) use tact_subagents::Speed;
 use tempfile::NamedTempFile;
 use toml_edit::{Array, DocumentMut, Item, Table, value};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
@@ -41,7 +42,7 @@ pub(crate) enum AuthMode {
     #[serde(rename = "chatgpt")]
     #[value(name = "chatgpt")]
     ChatGpt,
-    /// Require `OPENAI_API_KEY`.
+    /// Require an OpenAI API key from configuration or the environment.
     ApiKey,
 }
 
@@ -110,6 +111,7 @@ pub(crate) struct Config {
     #[serde(skip)]
     codex_home: Option<PathBuf>,
     auth: AuthConfig,
+    openai: OpenAiConfig,
     claude: ClaudeConfig,
     agent: AgentConfig,
     mcp_servers: BTreeMap<String, McpServerConfig>,
@@ -161,6 +163,19 @@ pub(crate) struct McpEnvironment(BTreeMap<String, McpSecretString>);
 pub(crate) struct AuthConfig {
     mode: AuthMode,
     file: PathBuf,
+    #[serde(skip)]
+    api_key: Option<Arc<SecretString>>,
+}
+
+/// Credentials for OpenAI Platform requests.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+struct OpenAiConfig {
+    #[serde(
+        deserialize_with = "deserialize_optional_secret",
+        serialize_with = "serialize_optional_secret"
+    )]
+    api_key: Option<Arc<SecretString>>,
 }
 
 /// Availability, credentials, and API routing for Claude models.
@@ -223,7 +238,7 @@ pub(crate) struct AgentConfig {
     model: Model,
     thinking: ReasoningEffort,
     reasoning_mode: ReasoningMode,
-    fast_mode: bool,
+    speed: Speed,
     max_subagents: usize,
     #[serde(serialize_with = "serialize_optional_string")]
     instructions: Option<String>,
@@ -325,6 +340,7 @@ pub(crate) struct ConfigReload {
 #[serde(default, deny_unknown_fields)]
 struct ConfigFile {
     auth: AuthConfigFile,
+    openai: OpenAiConfig,
     claude: ClaudeConfig,
     agent: AgentConfigFile,
     mcp_servers: BTreeMap<String, McpServerConfigFile>,
@@ -437,6 +453,7 @@ struct AgentConfigFile {
     model: Option<Model>,
     thinking: Option<ReasoningEffort>,
     reasoning_mode: Option<ReasoningMode>,
+    speed: Option<Speed>,
     fast_mode: Option<bool>,
     max_subagents: Option<usize>,
     instructions: Option<String>,
@@ -541,7 +558,9 @@ impl Config {
             auth: AuthConfig::new(
                 overrides.auth_mode.or(file.auth.mode).unwrap_or_default(),
                 auth_file,
+                file.openai.api_key.as_ref().map(Arc::clone),
             ),
+            openai: file.openai,
             claude: file.claude,
             agent: AgentConfig {
                 workspace,
@@ -551,7 +570,13 @@ impl Config {
                     .reasoning_mode
                     .or(file.agent.reasoning_mode)
                     .unwrap_or_default(),
-                fast_mode: file.agent.fast_mode.unwrap_or(false),
+                speed: file.agent.speed.unwrap_or_else(|| {
+                    if file.agent.fast_mode.unwrap_or(false) {
+                        Speed::Fast
+                    } else {
+                        Speed::Standard
+                    }
+                }),
                 max_subagents: overrides
                     .max_subagents
                     .or(file.agent.max_subagents)
@@ -615,8 +640,8 @@ impl Config {
         self.agent.reasoning_mode = mode;
     }
 
-    pub(crate) fn set_fast_mode(&mut self, enabled: bool) {
-        self.agent.fast_mode = enabled;
+    pub(crate) fn set_speed(&mut self, speed: Speed) {
+        self.agent.speed = speed;
     }
 
     pub(crate) fn set_max_subagents(&mut self, limit: usize) {
@@ -688,8 +713,8 @@ impl Config {
         Self::persist_reasoning_mode_at(&self.path, mode)
     }
 
-    pub(crate) fn persist_fast_mode(&self, enabled: bool) -> Result<()> {
-        Self::persist_fast_mode_at(&self.path, enabled)
+    pub(crate) fn persist_speed(&self, speed: Speed) -> Result<()> {
+        Self::persist_speed_at(&self.path, speed)
     }
 
     pub(crate) fn persist_max_subagents(&self, limit: usize) -> Result<()> {
@@ -790,12 +815,16 @@ impl Config {
         Self::persist_setting(path, "agent", "reasoning_mode", mode.as_str())
     }
 
-    fn persist_fast_mode_at(path: &Path, enabled: bool) -> Result<()> {
+    fn persist_speed_at(path: &Path, speed: Speed) -> Result<()> {
         let mut document = Self::read_document(path)?;
         if !document.contains_key("agent") {
             document["agent"] = Item::Table(Table::new());
         }
-        document["agent"]["fast_mode"] = value(enabled);
+        document["agent"]
+            .as_table_like_mut()
+            .unwrap()
+            .remove("fast_mode");
+        document["agent"]["speed"] = value(speed.as_str());
         Self::write_document(path, document)
     }
 
@@ -1111,8 +1140,20 @@ impl ConfigReload {
 }
 
 impl AuthConfig {
-    pub(crate) const fn new(mode: AuthMode, file: PathBuf) -> Self {
-        Self { mode, file }
+    pub(crate) const fn new(
+        mode: AuthMode,
+        file: PathBuf,
+        api_key: Option<Arc<SecretString>>,
+    ) -> Self {
+        Self {
+            mode,
+            file,
+            api_key,
+        }
+    }
+
+    pub(crate) fn api_key(&self) -> Option<&Arc<SecretString>> {
+        self.api_key.as_ref()
     }
 
     pub(crate) const fn mode(&self) -> AuthMode {
@@ -1141,8 +1182,8 @@ impl AgentConfig {
         self.reasoning_mode
     }
 
-    pub(crate) const fn fast_mode(&self) -> bool {
-        self.fast_mode
+    pub(crate) const fn speed(&self) -> Speed {
+        self.speed
     }
 
     pub(crate) const fn max_subagents(&self) -> usize {
@@ -1541,13 +1582,17 @@ impl ConfigFile {
     fn validate_secret_permissions(&mut self, path: &Path) -> Result<()> {
         use std::os::unix::fs::PermissionsExt;
 
-        if self.memory.remote.bearer_token.is_empty() && self.claude.api_key.is_none() {
+        if self.memory.remote.bearer_token.is_empty()
+            && self.openai.api_key.is_none()
+            && self.claude.api_key.is_none()
+        {
             return Ok(());
         }
         let metadata = match fs::metadata(path) {
             Ok(metadata) => metadata,
             Err(source) => {
                 self.memory.remote.bearer_token.zeroize();
+                drop(self.openai.api_key.take());
                 drop(self.claude.api_key.take());
                 return Err(ConfigError::Read {
                     path: path.to_path_buf(),
@@ -1559,6 +1604,7 @@ impl ConfigFile {
         let mode = metadata.permissions().mode() & 0o777;
         if mode & 0o077 != 0 {
             self.memory.remote.bearer_token.zeroize();
+            drop(self.openai.api_key.take());
             drop(self.claude.api_key.take());
             return Err(ConfigError::InsecureSecretPermissions {
                 path: path.to_path_buf(),
@@ -1571,10 +1617,14 @@ impl ConfigFile {
 
     #[cfg(not(unix))]
     fn validate_secret_permissions(&mut self, path: &Path) -> Result<()> {
-        if self.memory.remote.bearer_token.is_empty() && self.claude.api_key.is_none() {
+        if self.memory.remote.bearer_token.is_empty()
+            && self.openai.api_key.is_none()
+            && self.claude.api_key.is_none()
+        {
             return Ok(());
         }
         self.memory.remote.bearer_token.zeroize();
+        drop(self.openai.api_key.take());
         drop(self.claude.api_key.take());
         Err(ConfigError::UnsupportedSecretPermissions {
             path: path.to_path_buf(),
@@ -1635,7 +1685,7 @@ mod tests {
     use super::{
         AuthMode, Config, ConfigOverrides, Environment, McpEnvironment, McpSecretString,
         McpServerConfig, ReasoningEffort, ReasoningMode, RemoteMemoryConfigFile,
-        RemoteMemoryTokenFile, ThemeMode, Transport, validate_mcp_url,
+        RemoteMemoryTokenFile, Speed, ThemeMode, Transport, validate_mcp_url,
     };
     use crate::app::error::{ConfigError, Error, McpUrlError, RemoteMemoryConfigError};
     use nanocodex::{ClaudeModel, HarnessModel as Model, Model as CodexModel};
@@ -1774,27 +1824,75 @@ mod tests {
         assert_eq!(document["claude"]["api_key"].as_str(), Some("[REDACTED]"));
     }
 
+    #[cfg(unix)]
     #[test]
-    fn blank_claude_config_keys_are_absent() {
-        for value in ["''", "'   '", "\" \\t\\n \""] {
-            let config = load_config(&format!("[claude]\napi_key = {value}\n")).unwrap();
-            assert!(config.claude().api_key().is_none());
+    fn openai_config_key_is_shared_and_redacted_with_chatgpt_authentication() {
+        let secret = "openai-config-secret-sentinel";
+        let config = load_config(&format!(
+            "[auth]\nmode = 'chatgpt'\n[openai]\napi_key = '{secret}'\n"
+        ))
+        .unwrap();
+        let key = config.auth().api_key().unwrap();
+        assert_eq!(key.expose_secret(), secret);
+        let cloned = config.clone();
+        assert!(Arc::ptr_eq(key, cloned.auth().api_key().unwrap()));
+        assert!(Arc::ptr_eq(key, config.openai.api_key.as_ref().unwrap()));
+        let rendered = config.to_toml().unwrap();
+        assert!(!rendered.contains(secret));
+        assert!(!format!("{config:?}").contains(secret));
+        let document: toml::Value = toml::from_str(&rendered).unwrap();
+        assert_eq!(document["openai"]["api_key"].as_str(), Some("[REDACTED]"));
+        assert!(document["auth"].get("api_key").is_none());
+    }
+
+    #[test]
+    fn speed_preference_migrates_legacy_values_without_clamping() {
+        for (fields, expected) in [
+            ("", Speed::Standard),
+            ("fast_mode = false", Speed::Standard),
+            ("fast_mode = true", Speed::Fast),
+            ("speed = 'standard'\nfast_mode = true", Speed::Standard),
+            ("speed = 'fast'\nfast_mode = false", Speed::Fast),
+            ("speed = 'ultrafast'\nfast_mode = false", Speed::Ultrafast),
+        ] {
+            let config = load_config(&format!("[agent]\nmodel = 'luna'\n{fields}\n")).unwrap();
+            assert_eq!(config.agent().speed(), expected);
             let rendered: toml::Value = toml::from_str(&config.to_toml().unwrap()).unwrap();
-            assert_eq!(rendered["claude"]["api_key"].as_str(), Some(""));
+            assert_eq!(rendered["agent"]["speed"].as_str(), Some(expected.as_str()));
+            assert!(rendered["agent"].get("fast_mode").is_none());
+        }
+        assert!(load_config("[agent]\nspeed = 'instant'\n").is_err());
+    }
+
+    #[test]
+    fn blank_provider_config_keys_are_absent() {
+        for provider in ["openai", "claude"] {
+            for value in ["''", "'   '", "\" \\t\\n \""] {
+                let config = load_config(&format!("[{provider}]\napi_key = {value}\n")).unwrap();
+                let key = match provider {
+                    "openai" => config.auth().api_key(),
+                    _ => config.claude().api_key(),
+                };
+                assert!(key.is_none());
+                let rendered: toml::Value = toml::from_str(&config.to_toml().unwrap()).unwrap();
+                assert_eq!(rendered[provider]["api_key"].as_str(), Some(""));
+            }
         }
     }
 
     #[test]
-    fn malformed_claude_keys_do_not_appear_in_parse_errors() {
-        for (value, secret) in [
-            ("987654321", "987654321"),
-            ("['secret-sentinel']", "secret-sentinel"),
-            ("{ value = 'secret-sentinel' }", "secret-sentinel"),
-            ("'secret-sentinel' trailing", "secret-sentinel"),
-        ] {
-            let error = load_config(&format!("[claude]\napi_key = {value}\n")).unwrap_err();
-            assert!(matches!(error, Error::Config(ConfigError::Parse { .. })));
-            assert_error_redacts(&error, secret);
+    fn malformed_provider_keys_do_not_appear_in_parse_errors() {
+        for provider in ["openai", "claude"] {
+            for (value, secret) in [
+                ("987654321", "987654321"),
+                ("['secret-sentinel']", "secret-sentinel"),
+                ("{ value = 'secret-sentinel' }", "secret-sentinel"),
+                ("'secret-sentinel' trailing", "secret-sentinel"),
+            ] {
+                let error = load_config(&format!("[{provider}]\napi_key = {value}\n")).unwrap_err();
+                assert!(matches!(error, Error::Config(ConfigError::Parse { .. })));
+                assert_error_redacts(&error, secret);
+            }
         }
     }
 
@@ -1861,7 +1959,7 @@ mod tests {
         assert_eq!(config.agent.model, Model::Codex(CodexModel::Sol));
         assert_eq!(config.agent.thinking, ReasoningEffort::Low);
         assert_eq!(config.agent.reasoning_mode, ReasoningMode::Standard);
-        assert!(!config.agent.fast_mode);
+        assert_eq!(config.agent.speed(), Speed::Standard);
         assert_eq!(config.agent.max_subagents, 32);
         assert!(config.agent.web_search);
         assert!(config.agent.image_generation);
@@ -1875,6 +1973,7 @@ mod tests {
             &rendered,
             &[
                 "auth",
+                "openai",
                 "claude",
                 "agent",
                 "mcp_servers",
@@ -1886,6 +1985,8 @@ mod tests {
             ],
         );
         assert_table_fields(&rendered["auth"], &["mode", "file"]);
+        assert_table_fields(&rendered["openai"], &["api_key"]);
+        assert_eq!(rendered["openai"]["api_key"].as_str(), Some(""));
         assert_table_fields(
             &rendered["claude"],
             &["enabled", "api_key", "api_base_url", "workspace_id"],
@@ -1900,7 +2001,7 @@ mod tests {
                 "model",
                 "thinking",
                 "reasoning_mode",
-                "fast_mode",
+                "speed",
                 "max_subagents",
                 "instructions",
                 "append_instructions",
@@ -1962,7 +2063,7 @@ mod tests {
             directory.path().to_str()
         );
         assert_eq!(rendered["agent"]["thinking"].as_str(), Some("low"));
-        assert_eq!(rendered["agent"]["fast_mode"].as_bool(), Some(false));
+        assert_eq!(rendered["agent"]["speed"].as_str(), Some("standard"));
         assert_eq!(rendered["agent"]["max_subagents"].as_integer(), Some(32));
         for field in [
             "instructions",
@@ -2304,49 +2405,57 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn claude_config_key_requires_private_permissions_even_when_disabled() {
+    fn provider_config_keys_require_private_permissions_even_when_unused() {
         use std::os::unix::fs::PermissionsExt;
 
-        let directory = tempdir().unwrap();
-        let config_path = directory.path().join("config.toml");
-        let secret = "sk-ant-api-permission-fixture";
-        fs::write(&config_path, format!("[claude]\napi_key = '{secret}'\n")).unwrap();
-        let load = || {
-            Config::load_with(
-                ConfigOverrides {
-                    path: Some(config_path.clone()),
-                    ..ConfigOverrides::default()
-                },
-                Environment {
-                    codex_home: Some(directory.path().join("codex")),
-                    ..Environment::default()
-                },
-                directory.path(),
+        for provider in ["openai", "claude"] {
+            let directory = tempdir().unwrap();
+            let config_path = directory.path().join("config.toml");
+            let secret = "sk-ant-api-permission-fixture";
+            fs::write(
+                &config_path,
+                format!("[auth]\nmode = 'chatgpt'\n[{provider}]\napi_key = '{secret}'\n"),
             )
-        };
+            .unwrap();
+            let load = || {
+                Config::load_with(
+                    ConfigOverrides {
+                        path: Some(config_path.clone()),
+                        ..ConfigOverrides::default()
+                    },
+                    Environment {
+                        codex_home: Some(directory.path().join("codex")),
+                        ..Environment::default()
+                    },
+                    directory.path(),
+                )
+            };
 
-        fs::set_permissions(&config_path, fs::Permissions::from_mode(0o600)).unwrap();
-        load().unwrap();
-        fs::set_permissions(&config_path, fs::Permissions::from_mode(0o644)).unwrap();
-        let error = load().unwrap_err();
-        assert!(matches!(
-            error,
-            Error::Config(ConfigError::InsecureSecretPermissions { ref path, mode })
-                if path == &config_path && mode == 0o644
-        ));
-        assert_error_redacts(&error, secret);
+            fs::set_permissions(&config_path, fs::Permissions::from_mode(0o600)).unwrap();
+            load().unwrap();
+            fs::set_permissions(&config_path, fs::Permissions::from_mode(0o644)).unwrap();
+            let error = load().unwrap_err();
+            assert!(matches!(
+                error,
+                Error::Config(ConfigError::InsecureSecretPermissions { ref path, mode })
+                    if path == &config_path && mode == 0o644
+            ));
+            assert_error_redacts(&error, secret);
+        }
     }
 
     #[cfg(not(unix))]
     #[test]
-    fn claude_config_key_requires_verifiable_file_privacy() {
-        let secret = "sk-ant-api-permission-fixture";
-        let error = load_config(&format!("[claude]\napi_key = '{secret}'\n")).unwrap_err();
-        assert!(matches!(
-            error,
-            Error::Config(ConfigError::UnsupportedSecretPermissions { .. })
-        ));
-        assert_error_redacts(&error, secret);
+    fn provider_config_keys_require_verifiable_file_privacy() {
+        for provider in ["openai", "claude"] {
+            let secret = "sk-ant-api-permission-fixture";
+            let error = load_config(&format!("[{provider}]\napi_key = '{secret}'\n")).unwrap_err();
+            assert!(matches!(
+                error,
+                Error::Config(ConfigError::UnsupportedSecretPermissions { .. })
+            ));
+            assert_error_redacts(&error, secret);
+        }
     }
 
     #[test]
@@ -3045,7 +3154,7 @@ mod tests {
         assert_eq!(config.agent.model, Model::Codex(CodexModel::Astra));
         assert_eq!(config.agent.thinking, ReasoningEffort::Xhigh);
         assert_eq!(config.agent.reasoning_mode, ReasoningMode::Pro);
-        assert!(config.agent.fast_mode);
+        assert_eq!(config.agent.speed(), Speed::Fast);
         assert_eq!(config.agent.max_subagents, 7);
         assert_eq!(config.agent.instructions.as_deref(), Some("Be concise."));
         assert_eq!(
@@ -3605,23 +3714,28 @@ mod tests {
         let directory = tempdir().unwrap();
         let path = directory.path().join("config.toml");
         let claude_key = " sk-ant-api-persistence-fixture ";
+        let openai_key = "openai-persistence-fixture";
         let memory_token = "memory-persistence-fixture";
         fs::write(
             &path,
             format!(
-                "# Keep this comment.\n[claude]\napi_key = '{claude_key}'\n\n{}\n\
-                 [agent]\nthinking = 'low'\n",
+                "# Keep this comment.\n[openai]\napi_key = '{openai_key}'\n[claude]\napi_key = '{claude_key}'\n\n{}\n\
+                 [agent]\nthinking = 'low'\nfast_mode = true\n",
                 remote_memory_config("https://memory.example/", "personal", memory_token, ".")
             ),
         )
         .unwrap();
         let config = load_config_at(path.clone(), directory.path()).unwrap();
         config.persist_thinking(ReasoningEffort::Max).unwrap();
+        config.persist_speed(Speed::Ultrafast).unwrap();
 
         let contents = fs::read_to_string(&path).unwrap();
         let document: toml::Value = toml::from_str(&contents).unwrap();
         assert!(contents.contains("# Keep this comment."));
         assert_eq!(document["claude"]["api_key"].as_str(), Some(claude_key));
+        assert_eq!(document["openai"]["api_key"].as_str(), Some(openai_key));
+        assert_eq!(document["agent"]["speed"].as_str(), Some("ultrafast"));
+        assert!(document["agent"].get("fast_mode").is_none());
         assert_eq!(
             document["memory"]["remote"]["bearer_token"].as_str(),
             Some(memory_token)
@@ -3629,6 +3743,11 @@ mod tests {
         assert_eq!(document["agent"]["thinking"].as_str(), Some("max"));
         assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o077, 0);
         let reloaded = load_config_at(path, directory.path()).unwrap();
+        assert_eq!(
+            reloaded.auth().api_key().unwrap().expose_secret(),
+            openai_key
+        );
+        assert_eq!(reloaded.agent().speed(), Speed::Ultrafast);
         assert_eq!(
             reloaded.claude().api_key().unwrap().expose_secret(),
             claude_key
@@ -3676,7 +3795,7 @@ mod tests {
     }
 
     #[test]
-    fn persisting_fast_mode_preserves_the_rest_of_the_config() {
+    fn persisting_speed_replaces_legacy_setting_and_preserves_the_rest_of_the_config() {
         let directory = tempdir().unwrap();
         let path = directory.path().join("config.toml");
         fs::write(
@@ -3686,12 +3805,13 @@ mod tests {
         )
         .unwrap();
 
-        Config::persist_fast_mode_at(&path, true).unwrap();
+        Config::persist_speed_at(&path, Speed::Ultrafast).unwrap();
 
         let contents = fs::read_to_string(&path).unwrap();
         let document = toml::from_str::<toml::Value>(&contents).unwrap();
         assert!(contents.contains("# Keep this comment."));
-        assert_eq!(document["agent"]["fast_mode"].as_bool(), Some(true));
+        assert_eq!(document["agent"]["speed"].as_str(), Some("ultrafast"));
+        assert!(document["agent"].get("fast_mode").is_none());
         assert_eq!(document["agent"]["web_search"].as_bool(), Some(false));
         assert_eq!(document["theme"]["accent"].as_str(), Some("#AABBCC"));
     }

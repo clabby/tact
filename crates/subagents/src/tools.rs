@@ -653,7 +653,7 @@ fn agent_status_schema() -> Value {
 #[cfg(test)]
 mod tests {
     use super::{SendAgentMessage, SpawnAgent, SubmitResult, WaitAgent};
-    use crate::runtime::Registry;
+    use crate::{Speed, runtime::Registry};
     use nanocodex::{
         HarnessModel as Model, Model as CodexModel, NanocodexError, Thinking, Tool,
         tools::contract::{ToolContext, ToolInput},
@@ -667,12 +667,16 @@ mod tests {
         let (runtime, _updates) = crate::Subagents::new(1);
         let (captured, mut arguments) = mpsc::unbounded_channel();
         runtime
-            .set_agent_factory(Thinking::Max, false, move |model, thinking, fast_mode| {
-                captured.send((model, thinking, fast_mode)).unwrap();
-                Err(NanocodexError::InvalidRequest(
-                    "stop after capture".to_owned(),
-                ))
-            })
+            .set_agent_factory(
+                Thinking::Max,
+                Speed::Standard,
+                move |model, thinking, speed| {
+                    captured.send((model, thinking, speed)).unwrap();
+                    Err(NanocodexError::InvalidRequest(
+                        "stop after capture".to_owned(),
+                    ))
+                },
+            )
             .unwrap();
         let tool = SpawnAgent {
             registry: runtime.downgrade().registry,
@@ -721,12 +725,16 @@ mod tests {
         let registry = Arc::new(Registry::new(updates, 1));
         let (captured, mut arguments) = mpsc::unbounded_channel();
         registry
-            .set_agent_factory(Thinking::Max, false, move |model, thinking, fast_mode| {
-                captured.send((model, thinking, fast_mode)).unwrap();
-                Err(NanocodexError::InvalidRequest(
-                    "stop after capture".to_owned(),
-                ))
-            })
+            .set_agent_factory(
+                Thinking::Max,
+                Speed::Standard,
+                move |model, thinking, speed| {
+                    captured.send((model, thinking, speed)).unwrap();
+                    Err(NanocodexError::InvalidRequest(
+                        "stop after capture".to_owned(),
+                    ))
+                },
+            )
             .unwrap();
         let tool = SpawnAgent {
             registry: Arc::downgrade(&registry),
@@ -779,7 +787,7 @@ mod tests {
                     assert!(error.to_string().contains("stop after capture"));
                     assert_eq!(
                         arguments.try_recv().unwrap(),
-                        (expected_model, expected, false)
+                        (expected_model, expected, Speed::Standard)
                     );
                 }
             }

@@ -2,7 +2,10 @@ use super::{
     DirectedMessageEntry, EntryId, EntryKind, MessageDelivery, MessagePhase, SessionStarted,
     ShellId, ToolEntry, ToolState, TranscriptEntry, TranscriptRecord, TransientStatus,
 };
-use crate::{app::config::ReasoningEffort, tui::format::humanize_tool};
+use crate::{
+    app::config::{ReasoningEffort, Speed},
+    tui::format::humanize_tool,
+};
 use nanocodex::{
     agent::events::{
         AssistantDelta, AssistantMessage, CompactionCompleted, CompactionFailed,
@@ -313,9 +316,16 @@ impl TranscriptModel {
             "effort.changed" => self.decode_local::<EffortChanged>(record).map(|payload| {
                 self.push(EntryKind::EffortChanged { to: payload.to });
             }),
+            "speed.changed" => self.decode_local::<SpeedChanged>(record).map(|payload| {
+                self.push(EntryKind::SpeedChanged { speed: payload.to });
+            }),
             "fast_mode.changed" => self.decode_local::<FastModeChanged>(record).map(|payload| {
-                self.push(EntryKind::FastModeChanged {
-                    enabled: payload.to,
+                self.push(EntryKind::SpeedChanged {
+                    speed: if payload.to {
+                        Speed::Fast
+                    } else {
+                        Speed::Standard
+                    },
                 });
             }),
             "worker.turn_finished" => {
@@ -1200,6 +1210,7 @@ fn visibility(source: &str, kind: &str) -> EventVisibility {
             | "reflection.started"
             | "worker.turns_interrupted"
             | "effort.changed"
+            | "speed.changed"
             | "fast_mode.changed" => EventVisibility::Persistent,
             "compaction.finished" => EventVisibility::Persistent,
             "compaction.started" => EventVisibility::Transient,
@@ -1363,6 +1374,11 @@ struct EffortChanged {
 }
 
 #[derive(Deserialize)]
+struct SpeedChanged {
+    to: Speed,
+}
+
+#[derive(Deserialize)]
 struct FastModeChanged {
     to: bool,
 }
@@ -1443,7 +1459,7 @@ mod tests {
         merge_shell_result, visibility,
     };
     use crate::{
-        app::config::ReasoningEffort,
+        app::config::{ReasoningEffort, Speed},
         tui::transcript::{
             LocalEvent, SessionEnded, SessionOutcome, ShellId, TranscriptRecord, TurnId,
         },
@@ -2291,9 +2307,9 @@ mod tests {
             &TranscriptRecord::from_local(
                 2,
                 2,
-                LocalEvent::FastModeChanged {
-                    from: false,
-                    to: true,
+                LocalEvent::SpeedChanged {
+                    from: Speed::Standard,
+                    to: Speed::Ultrafast,
                 },
             )
             .unwrap(),
@@ -2307,8 +2323,36 @@ mod tests {
         ));
         assert!(matches!(
             model.entries()[1].kind,
-            EntryKind::FastModeChanged { enabled: true }
+            EntryKind::SpeedChanged {
+                speed: Speed::Ultrafast
+            }
         ));
+    }
+
+    #[test]
+    fn historical_fast_mode_changes_render_as_speed_entries() {
+        let mut model = TranscriptModel::default();
+        for (sequence, from, to, speed) in [
+            (1, false, true, Speed::Fast),
+            (2, true, false, Speed::Standard),
+        ] {
+            let encoded = json!({
+                "schema_version": 2,
+                "sequence": sequence,
+                "recorded_at_unix_ms": sequence,
+                "source": "tact",
+                "type": "fast_mode.changed",
+                "payload": { "from": from, "to": to },
+            });
+            let record: TranscriptRecord = serde_json::from_value(encoded.clone()).unwrap();
+            model.apply(&record);
+
+            assert!(matches!(
+                model.entries().last().map(|entry| &entry.kind),
+                Some(EntryKind::SpeedChanged { speed: rendered }) if *rendered == speed
+            ));
+            assert_eq!(serde_json::to_value(record).unwrap(), encoded);
+        }
     }
 
     #[test]

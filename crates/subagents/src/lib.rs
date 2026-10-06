@@ -6,6 +6,7 @@ mod message;
 mod model;
 mod roster;
 mod runtime;
+mod speed;
 mod task_tree;
 mod tools;
 
@@ -16,3 +17,4 @@ pub use model::{
 };
 pub use roster::{SUPPORTED_MODELS, parse_model};
 pub use runtime::{AuthorityError, RootAgentAuthority, Subagents, WeakSubagents};
+pub use speed::Speed;

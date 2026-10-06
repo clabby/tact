@@ -1,6 +1,6 @@
 //! Configurable terminal colors and light/dark mode selection.
 
-use crate::app::config::ReasoningEffort;
+use crate::app::config::{ReasoningEffort, Speed};
 use nanocodex::{ClaudeModel, HarnessModel as Model, Model as CodexModel};
 use ratatui::style::Color;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
@@ -179,6 +179,14 @@ impl Theme {
             ReasoningEffort::High => self.thinking_high(),
             ReasoningEffort::Xhigh => self.thinking_xhigh(),
             ReasoningEffort::Max => self.thinking_max(),
+        }
+    }
+
+    pub(crate) const fn speed(&self, speed: Speed) -> Color {
+        match speed {
+            Speed::Standard => self.thinking_low(),
+            Speed::Fast => self.thinking_high(),
+            Speed::Ultrafast => self.thinking_max(),
         }
     }
 

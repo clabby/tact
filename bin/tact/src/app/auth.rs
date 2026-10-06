@@ -25,7 +25,29 @@ pub(crate) fn validate_claude_api_key(key: &SecretString) -> AuthResult<()> {
 
 enum SelectedAuth {
     ChatGpt,
-    ApiKey(SecretString),
+    ApiKey(OpenAiApiKey),
+}
+
+#[derive(Debug)]
+enum OpenAiApiKey {
+    Environment(SecretString),
+    Config(Arc<SecretString>),
+}
+
+impl OpenAiApiKey {
+    fn key(&self) -> &SecretString {
+        match self {
+            Self::Environment(key) => key,
+            Self::Config(key) => key,
+        }
+    }
+
+    const fn source(&self) -> &'static str {
+        match self {
+            Self::Environment(_) => OPENAI_API_KEY,
+            Self::Config(_) => "openai.api_key",
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -98,9 +120,9 @@ impl AuthConfig {
     pub(crate) async fn status(&self) -> AuthResult<()> {
         match self.select_auth(|| SecretString::from_environment(OPENAI_API_KEY))? {
             SelectedAuth::ChatGpt => self.print_chatgpt_status().await?,
-            SelectedAuth::ApiKey(_api_key) => {
+            SelectedAuth::ApiKey(api_key) => {
                 println!("Authentication: OpenAI API key");
-                println!("Source: {OPENAI_API_KEY}");
+                println!("Source: {}", api_key.source());
             }
         }
 
@@ -128,10 +150,7 @@ impl AuthConfig {
         F: FnOnce() -> StdResult<Option<SecretString>, SecretError>,
     {
         match self.mode() {
-            AuthMode::ChatGpt => Ok(SelectedAuth::ChatGpt),
-            AuthMode::ApiKey => read_api_key()?
-                .map(SelectedAuth::ApiKey)
-                .ok_or(AuthError::ApiKeyUnavailable),
+            AuthMode::ChatGpt => return Ok(SelectedAuth::ChatGpt),
             AuthMode::Auto => {
                 if self
                     .file()
@@ -143,14 +162,24 @@ impl AuthConfig {
                 {
                     return Ok(SelectedAuth::ChatGpt);
                 }
-
-                read_api_key()?.map(SelectedAuth::ApiKey).ok_or_else(|| {
-                    AuthError::CredentialsUnavailable {
-                        path: self.file().to_path_buf(),
-                    }
-                })
             }
+            AuthMode::ApiKey => {}
         }
+
+        let selected = match read_api_key()? {
+            Some(key) => Some(OpenAiApiKey::Environment(key)),
+            None => self
+                .api_key()
+                .map(|key| OpenAiApiKey::Config(Arc::clone(key))),
+        };
+        selected
+            .map(SelectedAuth::ApiKey)
+            .ok_or_else(|| match self.mode() {
+                AuthMode::ApiKey => AuthError::ApiKeyUnavailable,
+                _ => AuthError::CredentialsUnavailable {
+                    path: self.file().to_path_buf(),
+                },
+            })
     }
 
     async fn print_chatgpt_status(&self) -> AuthResult<()> {
@@ -186,9 +215,9 @@ impl SelectedAuth {
         match self {
             Self::ChatGpt => load_chatgpt_auth(auth_file).map_err(Into::into),
             Self::ApiKey(api_key) => {
-                // Nanocodex owns the retained key after this boundary. The application-owned
-                // buffer is still zeroized when `api_key` is dropped.
-                Ok(OpenAiAuth::api_key(api_key.expose_secret()))
+                // Nanocodex retains a non-zeroizing copy. The application-owned secret is
+                // zeroized when its last application owner is dropped.
+                Ok(OpenAiAuth::api_key(api_key.key().expose_secret()))
             }
         }
     }
@@ -220,14 +249,14 @@ mod tests {
         }
     }
 
-    use super::SelectedAuth;
+    use super::{OpenAiApiKey, SelectedAuth};
     use crate::app::{
         config::{AuthConfig, AuthMode, ClaudeConfig},
         error::{AuthError, SecretError},
         secret::SecretString,
     };
     use nanocodex::oai::auth::OpenAiAuthMode;
-    use std::{cell::Cell, fs};
+    use std::{cell::Cell, fs, sync::Arc};
     use tempfile::tempdir;
 
     #[test]
@@ -304,13 +333,75 @@ mod tests {
     }
 
     #[test]
+    fn openai_key_selection_prefers_environment_then_config_without_changing_auth_mode() {
+        let directory = tempdir().unwrap();
+        let auth_file = directory.path().join("auth.json");
+        fs::write(&auth_file, "present login").unwrap();
+        for mode in [AuthMode::ApiKey, AuthMode::Auto] {
+            if mode == AuthMode::Auto {
+                fs::remove_file(&auth_file).unwrap();
+            }
+            for (configured, environment, expected_source) in [
+                (Some("config-sentinel"), None, "openai.api_key"),
+                (
+                    Some("config-sentinel"),
+                    Some("env-sentinel"),
+                    "OPENAI_API_KEY",
+                ),
+                (None, Some("env-sentinel"), "OPENAI_API_KEY"),
+            ] {
+                let config = AuthConfig::new(
+                    mode,
+                    auth_file.clone(),
+                    configured.map(|key| Arc::new(SecretString::new(key.into()))),
+                );
+                let selected = config
+                    .select_auth(|| Ok(environment.map(|key| SecretString::new(key.into()))))
+                    .unwrap();
+                let SelectedAuth::ApiKey(key) = selected else {
+                    panic!("expected API key")
+                };
+                assert_eq!(key.source(), expected_source);
+                assert_eq!(
+                    key.key().expose_secret(),
+                    environment.or(configured).unwrap()
+                );
+                assert!(!format!("{key:?}").contains("sentinel"));
+                let auth = SelectedAuth::ApiKey(key)
+                    .into_openai_auth(&auth_file)
+                    .unwrap();
+                assert_eq!(auth.mode(), OpenAiAuthMode::ApiKey);
+            }
+        }
+    }
+
+    #[test]
+    fn openai_environment_error_does_not_fall_back_to_config() {
+        let config = AuthConfig::new(
+            AuthMode::ApiKey,
+            "unused.json".into(),
+            Some(Arc::new(SecretString::new("config-sentinel".into()))),
+        );
+        let result = config.select_auth(|| {
+            Err(SecretError {
+                name: "OPENAI_API_KEY",
+            })
+        });
+        assert!(matches!(result, Err(AuthError::Secret(_))));
+    }
+
+    #[test]
     fn auto_prefers_an_existing_chatgpt_file_without_reading_the_api_key() {
         let directory = tempdir().unwrap();
         let auth_file = directory.path().join("auth.json");
         fs::write(&auth_file, "invalid but present").unwrap();
         let api_key_read = Cell::new(false);
 
-        let config = AuthConfig::new(AuthMode::Auto, auth_file);
+        let config = AuthConfig::new(
+            AuthMode::Auto,
+            auth_file,
+            Some(Arc::new(SecretString::new("config-sentinel".into()))),
+        );
         let selected = config
             .select_auth(|| {
                 api_key_read.set(true);
@@ -325,7 +416,7 @@ mod tests {
     #[test]
     fn auto_falls_back_to_an_api_key_when_chatgpt_is_absent() {
         let directory = tempdir().unwrap();
-        let config = AuthConfig::new(AuthMode::Auto, directory.path().join("auth.json"));
+        let config = AuthConfig::new(AuthMode::Auto, directory.path().join("auth.json"), None);
         let selected = config
             .select_auth(|| Ok(Some(SecretString::new("api-key".into()))))
             .unwrap();
@@ -336,7 +427,11 @@ mod tests {
     #[test]
     fn forced_chatgpt_does_not_read_the_api_key() {
         let api_key_read = Cell::new(false);
-        let config = AuthConfig::new(AuthMode::ChatGpt, "missing.json".into());
+        let config = AuthConfig::new(
+            AuthMode::ChatGpt,
+            "missing.json".into(),
+            Some(Arc::new(SecretString::new("config-sentinel".into()))),
+        );
         let selected = config
             .select_auth(|| {
                 api_key_read.set(true);
@@ -349,8 +444,8 @@ mod tests {
     }
 
     #[test]
-    fn forced_api_key_reports_a_missing_environment_value() {
-        let config = AuthConfig::new(AuthMode::ApiKey, "unused.json".into());
+    fn forced_api_key_reports_missing_credentials() {
+        let config = AuthConfig::new(AuthMode::ApiKey, "unused.json".into(), None);
         let result = config.select_auth(|| Ok(None));
 
         assert!(matches!(result, Err(AuthError::ApiKeyUnavailable)));
@@ -358,7 +453,9 @@ mod tests {
 
     #[test]
     fn selected_api_key_constructs_nanocodex_authorization() {
-        let selected = SelectedAuth::ApiKey(SecretString::new("api-key".into()));
+        let selected = SelectedAuth::ApiKey(OpenAiApiKey::Environment(SecretString::new(
+            "api-key".into(),
+        )));
         let auth = selected.into_openai_auth("unused.json".as_ref()).unwrap();
 
         assert_eq!(auth.mode(), OpenAiAuthMode::ApiKey);
@@ -369,7 +466,7 @@ mod tests {
         let directory = tempdir().unwrap();
         let auth_file = directory.path().join("auth.json");
         fs::write(&auth_file, "credentials").unwrap();
-        let config = AuthConfig::new(AuthMode::ChatGpt, auth_file.clone());
+        let config = AuthConfig::new(AuthMode::ChatGpt, auth_file.clone(), None);
 
         config.logout().unwrap();
         assert!(!auth_file.exists());

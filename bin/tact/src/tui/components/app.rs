@@ -6,7 +6,7 @@ use super::{
     root::{DraftReset, RestoredSessionProjection, RootEffect, RootEvent, RootNode},
 };
 use crate::{
-    app::config::{ReasoningEffort, ReasoningMode, TuiConfig},
+    app::config::{ReasoningEffort, ReasoningMode, Speed, TuiConfig},
     core::extensions::Skill,
     tui::{
         context::ContextBudget,
@@ -72,7 +72,7 @@ pub(crate) enum AppEvent {
         prompt: String,
         effort: ReasoningEffort,
         reasoning_mode: ReasoningMode,
-        fast_mode: bool,
+        speed: Speed,
         model: Model,
         skills: Arc<[Skill]>,
     },
@@ -111,7 +111,7 @@ pub(crate) enum AppEvent {
         pane: PaneId,
         effort: ReasoningEffort,
         reasoning_mode: ReasoningMode,
-        fast_mode: bool,
+        speed: Speed,
         model: Model,
         draft_reset: DraftReset,
         skills: Arc<[Skill]>,
@@ -163,7 +163,7 @@ pub(crate) enum AppEvent {
         effort: ReasoningEffort,
         reasoning_mode: ReasoningMode,
         preferred_reasoning_mode: ReasoningMode,
-        fast_mode: bool,
+        speed: Speed,
         model: Model,
         skills: Arc<[Skill]>,
     },
@@ -280,7 +280,7 @@ impl AppNode {
                 prompt,
                 effort,
                 reasoning_mode,
-                fast_mode,
+                speed,
                 model,
                 skills,
             } => {
@@ -297,7 +297,7 @@ impl AppNode {
                         preferred_reasoning_mode,
                         DraftReset::Clear,
                     );
-                    root.component_mut().set_fast_mode(fast_mode);
+                    root.component_mut().set_speed(speed);
                     root.component_mut().set_model(model);
                     root.component_mut().set_skills(skills);
                 }
@@ -343,7 +343,7 @@ impl AppNode {
                 pane,
                 effort,
                 reasoning_mode,
-                fast_mode,
+                speed,
                 model,
                 draft_reset,
                 skills,
@@ -360,7 +360,7 @@ impl AppNode {
                     preferred_reasoning_mode,
                     draft_reset,
                 );
-                root.component_mut().set_fast_mode(fast_mode);
+                root.component_mut().set_speed(speed);
                 root.component_mut().set_model(model);
                 root.component_mut().set_skills(skills);
                 ComponentUpdate::render(RenderRequest::Immediate)
@@ -420,7 +420,7 @@ impl AppNode {
                 effort,
                 reasoning_mode,
                 preferred_reasoning_mode,
-                fast_mode,
+                speed,
                 model,
                 skills,
             } => self.update_root(
@@ -430,7 +430,7 @@ impl AppNode {
                     effort,
                     reasoning_mode,
                     preferred_reasoning_mode,
-                    fast_mode,
+                    speed,
                     model,
                     skills,
                 },
@@ -845,7 +845,7 @@ mod tests {
         RootNode, SPLIT_HINT,
     };
     use crate::{
-        app::config::{ReasoningEffort, ReasoningMode, TuiConfig},
+        app::config::{ReasoningEffort, ReasoningMode, Speed, TuiConfig},
         tui::{
             pane::PaneId,
             theme::{ColorScheme, Theme, ThemeMode},
@@ -894,7 +894,7 @@ mod tests {
             pane: PaneId::Main,
             effort: ReasoningEffort::Low,
             reasoning_mode: ReasoningMode::Standard,
-            fast_mode: false,
+            speed: Speed::Standard,
             model: Model::Codex(CodexModel::Luna),
             draft_reset: DraftReset::Preserve,
             skills: Arc::from([]),
@@ -924,7 +924,7 @@ mod tests {
             pane: PaneId::Main,
             effort: ReasoningEffort::Medium,
             reasoning_mode: ReasoningMode::Standard,
-            fast_mode: false,
+            speed: Speed::Standard,
             model: Model::Codex(CodexModel::Sol),
             draft_reset: DraftReset::Preserve,
             skills: Arc::from([]),
@@ -941,7 +941,7 @@ mod tests {
             pane: PaneId::Main,
             effort: ReasoningEffort::High,
             reasoning_mode: ReasoningMode::Standard,
-            fast_mode: false,
+            speed: Speed::Standard,
             model: Model::Codex(CodexModel::Astra),
             draft_reset: DraftReset::Preserve,
             skills: Arc::from([]),
@@ -1115,7 +1115,7 @@ mod tests {
             prompt: "Continue from the validated parser design.".to_owned(),
             effort: ReasoningEffort::High,
             reasoning_mode: ReasoningMode::Standard,
-            fast_mode: false,
+            speed: Speed::Standard,
             model: Model::Codex(CodexModel::Luna),
             skills: Arc::from([]),
         });

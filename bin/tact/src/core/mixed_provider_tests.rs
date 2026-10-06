@@ -1,6 +1,6 @@
 use super::{AgentRecipe, claude, install_agent_tools};
 use crate::app::{
-    config::{Config, ConfigOverrides},
+    config::{Config, ConfigOverrides, Speed},
     secret::SecretString,
 };
 use axum::{
@@ -228,9 +228,10 @@ fn build_agent(
     context: AgentContext,
     recipe: &Arc<AgentRecipe>,
     codex: Script,
-    fast_mode: bool,
+    speed: Speed,
 ) -> Result<(Nanocodex, AgentEvents), NanocodexError> {
     let AgentContext { model, thinking } = context;
+    let speed = speed.for_model(model);
     let tools = install_agent_tools(
         recipe.tools.clone(),
         &recipe.subagents,
@@ -247,7 +248,7 @@ fn build_agent(
         Nanocodex::builder(openai)
             .model(model)
             .thinking(thinking)
-            .fast_mode(fast_mode && context.model.supports_fast_mode())
+            .service_tier(speed.into())
             .workspace(&recipe.workspace)
             .tools(tools)
             .build()
@@ -256,7 +257,16 @@ fn build_agent(
             .claude_client(|| Ok(Some(SecretString::new("sk-ant-usr-fixture-token".into()))))?;
         let clean_recipe = Arc::clone(recipe);
         let spawn: claude::CleanAgentFactory = Arc::new(move |context, fast_mode| {
-            build_agent(context, &clean_recipe, codex.clone(), fast_mode)
+            build_agent(
+                context,
+                &clean_recipe,
+                codex.clone(),
+                if fast_mode {
+                    Speed::Fast
+                } else {
+                    Speed::Standard
+                },
+            )
         });
         claude::build_client(
             client,
@@ -264,7 +274,7 @@ fn build_agent(
             &recipe.workspace,
             Arc::from("Use the installed tools."),
             claude::ClaudeSession {
-                fast_mode,
+                fast_mode: speed != Speed::Standard,
                 ..claude::ClaudeSession::default()
             },
             claude::tool_runtime(&recipe.config, &recipe.workspace, &tools)?,
@@ -400,7 +410,7 @@ async fn api_key_messages_reject_redirects_without_forwarding_credentials() {
             },
             &recipe,
             Script::new(HarnessModel::Codex(CodexModel::Sol), String::new()),
-            false,
+            Speed::Standard,
         )
         .unwrap();
         let result = timeout(Duration::from_secs(5), async {
@@ -524,19 +534,23 @@ for (let attempt = 0; attempt < 3; attempt++) {{
     let children = Arc::new(Mutex::new(Vec::new()));
     let captured_children = children.clone();
     subagents
-        .set_agent_factory(Thinking::Medium, false, move |model, thinking, fast| {
-            assert_eq!(model, child_model);
-            assert_eq!(thinking, Thinking::Medium);
-            assert!(!fast);
-            let (agent, events) = build_agent(
-                AgentContext { model, thinking },
-                &child_recipe,
-                child_codex.clone(),
-                fast,
-            )?;
-            captured_children.lock().unwrap().push(agent.clone());
-            Ok((agent, events))
-        })
+        .set_agent_factory(
+            Thinking::Medium,
+            Speed::Standard,
+            move |model, thinking, speed| {
+                assert_eq!(model, child_model);
+                assert_eq!(thinking, Thinking::Medium);
+                assert_eq!(speed, Speed::Standard);
+                let (agent, events) = build_agent(
+                    AgentContext { model, thinking },
+                    &child_recipe,
+                    child_codex.clone(),
+                    speed,
+                )?;
+                captured_children.lock().unwrap().push(agent.clone());
+                Ok((agent, events))
+            },
+        )
         .unwrap();
     let (root, mut events) = build_agent(
         AgentContext {
@@ -545,7 +559,7 @@ for (let attempt = 0; attempt < 3; attempt++) {{
         },
         &recipe,
         codex.clone(),
-        false,
+        Speed::Standard,
     )
     .unwrap();
     if clean_spawn {

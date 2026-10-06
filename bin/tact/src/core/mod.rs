@@ -5,12 +5,14 @@ mod claude_context;
 pub(crate) mod extensions;
 #[cfg(test)]
 mod mixed_provider_tests;
+#[cfg(test)]
+mod openai_tests;
 #[cfg(feature = "harbor-evals")]
 mod orchestration;
 
 use crate::{
     app::{
-        config::{Config, ReasoningEffort, ReasoningMode, SkillsConfig},
+        config::{Config, ReasoningEffort, ReasoningMode, SkillsConfig, Speed},
         error::{AuthError, ConfigError, Result, RuntimeError, SecretError},
         hook,
         secret::SecretString,
@@ -501,19 +503,19 @@ impl ConfiguredAgent {
                 thinking: thinking.into(),
             },
             reasoning_mode,
-            agent_config.fast_mode(),
+            agent_config.speed(),
             Arc::clone(&instructions),
             session_id,
             snapshot,
         )?;
         subagent_control.set_agent_factory(
             thinking.into(),
-            agent_config.fast_mode(),
-            move |model, thinking, fast_mode| {
+            agent_config.speed(),
+            move |model, thinking, speed| {
                 recipe.build(
                     AgentContext { model, thinking },
                     supported_reasoning_mode(model, reasoning_mode),
-                    fast_mode,
+                    speed,
                     prompts.for_model(model),
                     None,
                     None,
@@ -651,6 +653,18 @@ impl ConfiguredAgent {
     }
 }
 
+pub(crate) async fn set_speed(
+    agent: &Nanocodex,
+    model: Model,
+    speed: Speed,
+) -> nanocodex::agent::Result<()> {
+    let speed = speed.for_model(model);
+    match model {
+        Model::Codex(_) => agent.set_service_tier(speed.into()).await,
+        Model::Claude(_) => agent.set_fast_mode(speed != Speed::Standard).await,
+    }
+}
+
 struct AgentRecipe {
     config: Config,
     workspace: PathBuf,
@@ -664,13 +678,13 @@ impl AgentRecipe {
         self: &Arc<Self>,
         context: AgentContext,
         reasoning_mode: ReasoningMode,
-        fast_mode: bool,
+        speed: Speed,
         instructions: Arc<str>,
         session_id: Option<&str>,
         snapshot: Option<AgentSnapshot>,
     ) -> nanocodex::agent::Result<(Nanocodex, AgentEvents)> {
         let AgentContext { model, thinking } = context;
-        let fast_mode = fast_mode && model.supports_fast_mode();
+        let speed = speed.for_model(model);
         if let Some(snapshot) = &snapshot {
             snapshot.validate_identity(model, session_id)?;
         }
@@ -712,7 +726,6 @@ impl AgentRecipe {
                 .workspace(&self.workspace)
                 .thinking(thinking)
                 .reasoning_mode(reasoning_mode.into())
-                .fast_mode(fast_mode)
                 .instructions(instructions)
                 .tools_factory(move |_| tool_factory());
             if let Some(home) = config.codex_home() {
@@ -727,7 +740,7 @@ impl AgentRecipe {
             if let Some(snapshot) = snapshot {
                 builder = builder.resume(snapshot.into_codex()?);
             }
-            builder.build()
+            builder.service_tier(speed.into()).build()
         } else {
             if !config.claude().enabled() {
                 return Err(NanocodexError::InvalidRequest(
@@ -743,7 +756,11 @@ impl AgentRecipe {
                 recipe.build(
                     context,
                     supported_reasoning_mode(context.model, reasoning_mode),
-                    fast_mode,
+                    if fast_mode {
+                        Speed::Fast
+                    } else {
+                        Speed::Standard
+                    },
                     Arc::clone(&clean_instructions),
                     None,
                     None,
@@ -757,7 +774,7 @@ impl AgentRecipe {
                 claude::ClaudeSession {
                     session_id,
                     snapshot,
-                    fast_mode,
+                    fast_mode: speed != Speed::Standard,
                 },
                 runtime,
                 Some(spawn),

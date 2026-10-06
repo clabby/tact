@@ -1,7 +1,7 @@
 //! SQLite-backed V2 session persistence.
 
 use crate::{
-    app::config::{ReasoningEffort, ReasoningMode},
+    app::config::{ReasoningEffort, ReasoningMode, Speed},
     tui::transcript::{SCHEMA_VERSION, SessionStarted, TerminalStopReason, TranscriptRecord},
 };
 use rusqlite::{
@@ -829,7 +829,7 @@ fn upsert_session(
                 started.model,
                 effort,
                 reasoning_mode,
-                started.fast_mode,
+                started.speed != Speed::Standard,
                 started.application_version,
                 to_sql_u64(record.recorded_at_unix_ms())
             ],
@@ -876,6 +876,10 @@ fn update_settings(
         to: ReasoningEffort,
     }
     #[derive(serde::Deserialize)]
+    struct SpeedChanged {
+        to: Speed,
+    }
+    #[derive(serde::Deserialize)]
     struct FastModeChanged {
         to: bool,
     }
@@ -889,8 +893,12 @@ fn update_settings(
                 )
                 .map_err(|source| query(path, source))?;
         }
-        ("tact", "fast_mode.changed") => {
-            let enabled = record.decode_payload::<FastModeChanged>()?.to;
+        ("tact", "speed.changed" | "fast_mode.changed") => {
+            let enabled = if record.kind() == "speed.changed" {
+                record.decode_payload::<SpeedChanged>()?.to != Speed::Standard
+            } else {
+                record.decode_payload::<FastModeChanged>()?.to
+            };
             transaction
                 .execute(
                     "UPDATE sessions SET fast_mode=?2 WHERE session_id=?1",
@@ -980,12 +988,156 @@ fn set_private_file_permissions(path: &Path) -> Result<(), StorageError> {
 mod tests {
     use super::{SessionStorage, StorageError, database_path};
     use crate::{
-        app::config::{ReasoningEffort, ReasoningMode},
+        app::config::{ReasoningEffort, ReasoningMode, Speed},
         tui::transcript::{LocalEvent, SessionStarted, TranscriptRecord, TurnId},
     };
     use rusqlite::Connection;
+    use serde_json::{Value, json};
     use std::{fs, path::Path, sync::Arc};
     use tempfile::tempdir;
+
+    #[test]
+    fn speed_records_round_trip_with_boolean_metadata_projection() {
+        let directory = tempdir().unwrap();
+        let config = directory.path().join("config.toml");
+        let mut storage = SessionStorage::open(&config).unwrap();
+        append_prompt(&mut storage, "session", 100, "prompt");
+
+        for (index, from, to) in [
+            (0, Speed::Standard, Speed::Ultrafast),
+            (1, Speed::Ultrafast, Speed::Fast),
+            (2, Speed::Fast, Speed::Standard),
+        ] {
+            let record = Arc::new(
+                TranscriptRecord::from_local(
+                    index + 3,
+                    index + 101,
+                    LocalEvent::SpeedChanged { from, to },
+                )
+                .unwrap(),
+            );
+            storage.append_records("session", &[record]).unwrap();
+            let enabled: bool = storage
+                .connection
+                .query_row(
+                    "SELECT fast_mode FROM sessions WHERE session_id='session'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(enabled, to != Speed::Standard);
+        }
+        drop(storage);
+
+        let storage = SessionStorage::open(&config).unwrap();
+        let records = storage.load_records("session").unwrap();
+        assert_eq!(records.len(), 5);
+        assert_eq!(
+            records[0].decode_payload::<SessionStarted>().unwrap().speed,
+            Speed::Standard
+        );
+        for (record, to) in
+            records[2..]
+                .iter()
+                .zip([Speed::Ultrafast, Speed::Fast, Speed::Standard])
+        {
+            assert_eq!(record.kind(), "speed.changed");
+            assert_eq!(record.decode_payload::<Value>().unwrap()["to"], json!(to));
+        }
+    }
+
+    #[test]
+    fn historical_speed_records_remain_unchanged_when_loaded_and_extended() {
+        let directory = tempdir().unwrap();
+        let config = directory.path().join("config.toml");
+        let mut storage = SessionStorage::open(&config).unwrap();
+        let legacy = [
+            json!({
+                "schema_version": 2,
+                "sequence": 1,
+                "recorded_at_unix_ms": 100,
+                "source": "tact",
+                "type": "session.started",
+                "payload": {
+                    "session_id": "legacy", "model": "gpt-6-astra", "effort": "medium",
+                    "reasoning_mode": "standard", "fast_mode": true,
+                    "workspace": "/work", "application_version": "test",
+                },
+            }),
+            json!({
+                "schema_version": 2,
+                "sequence": 2,
+                "recorded_at_unix_ms": 101,
+                "source": "tact",
+                "type": "fast_mode.changed",
+                "payload": { "from": true, "to": false },
+            }),
+        ];
+        let records = legacy
+            .iter()
+            .map(|encoded| {
+                Arc::new(serde_json::from_value::<TranscriptRecord>(encoded.clone()).unwrap())
+            })
+            .collect::<Vec<_>>();
+        let original = records
+            .iter()
+            .map(|record| serde_json::to_vec(record.as_ref()).unwrap())
+            .collect::<Vec<_>>();
+        storage.append_records("legacy", &records).unwrap();
+        let enabled: bool = storage
+            .connection
+            .query_row(
+                "SELECT fast_mode FROM sessions WHERE session_id='legacy'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!enabled);
+        drop(storage);
+
+        let mut storage = SessionStorage::open(&config).unwrap();
+        let loaded = storage.load_records("legacy").unwrap();
+        assert_eq!(loaded.len(), legacy.len());
+        assert_eq!(
+            loaded[0].decode_payload::<SessionStarted>().unwrap().speed,
+            Speed::Fast
+        );
+        for (record, encoded) in loaded.iter().zip(&legacy) {
+            assert_eq!(&serde_json::to_value(record.as_ref()).unwrap(), encoded);
+        }
+        let changed = Arc::new(
+            TranscriptRecord::from_local(
+                3,
+                102,
+                LocalEvent::SpeedChanged {
+                    from: Speed::Standard,
+                    to: Speed::Ultrafast,
+                },
+            )
+            .unwrap(),
+        );
+        storage.append_records("legacy", &[changed]).unwrap();
+
+        let enabled: bool = storage
+            .connection
+            .query_row(
+                "SELECT fast_mode FROM sessions WHERE session_id='legacy'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(enabled);
+
+        let mut statement = storage.connection.prepare(
+            "SELECT record_json FROM events WHERE session_id='legacy' ORDER BY event_id LIMIT 2",
+        ).unwrap();
+        let retained = statement
+            .query_map([], |row| row.get::<_, Vec<u8>>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(retained, original);
+    }
 
     #[test]
     fn rejects_an_unknown_database_version() {
@@ -1202,7 +1354,7 @@ mod tests {
                         model: "model".to_owned(),
                         effort: ReasoningEffort::Medium,
                         reasoning_mode: ReasoningMode::Standard,
-                        fast_mode: false,
+                        speed: Speed::Standard,
                         workspace: "/work".into(),
                         application_version: "test".to_owned(),
                     }),
