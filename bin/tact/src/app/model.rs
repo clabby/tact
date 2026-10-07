@@ -110,8 +110,46 @@ pub(crate) const fn name(model: Model) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::parse;
+    use super::{ModelCatalog, Provider, parse};
+    use crate::app::config::{ReasoningMode, Speed};
     use nanocodex::{ClaudeModel, HarnessModel as Model, Model as CodexModel};
+
+    #[test]
+    fn catalog_lists_the_enabled_roster_with_its_setting_couplings() {
+        let openai_only = ModelCatalog::new(false);
+        assert!(
+            openai_only
+                .models
+                .iter()
+                .all(|model| model.provider == Provider::Openai)
+        );
+        let catalog = ModelCatalog::new(true);
+        assert_eq!(catalog.speeds, Speed::ALL);
+        assert_eq!(catalog.efforts.len(), 5);
+
+        let astra = catalog
+            .models
+            .iter()
+            .find(|model| model.id == Model::Codex(CodexModel::Astra).as_str())
+            .unwrap();
+        assert_eq!(
+            astra.reasoning_modes,
+            [ReasoningMode::Standard, ReasoningMode::Pro]
+        );
+        assert_eq!(astra.effective_speeds, Speed::ALL);
+        assert!(!astra.effort_fixed_after_start);
+
+        let sonnet = catalog
+            .models
+            .iter()
+            .find(|model| model.id == Model::Claude(ClaudeModel::Sonnet55).as_str())
+            .unwrap();
+        assert_eq!(sonnet.label, "Sonnet 5.5");
+        assert_eq!(sonnet.provider, Provider::Anthropic);
+        assert_eq!(sonnet.reasoning_modes, [ReasoningMode::Standard]);
+        assert_eq!(sonnet.effective_speeds, [Speed::Standard; 3]);
+        assert!(sonnet.effort_fixed_after_start);
+    }
 
     #[test]
     fn accepts_current_model_ids_and_short_names() {
