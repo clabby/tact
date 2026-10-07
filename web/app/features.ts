@@ -10,7 +10,7 @@ import { openSheet, sheetMessage } from "./sheet";
 import { transcriptData, upsert, type SessionView } from "./store";
 import type { Theme } from "./theme";
 import { toast } from "./toast";
-import type { ContextDiagnostics, MemoryRecord, Subagent } from "./wire";
+import type { ContextDiagnostics, ListedMemory, Subagent } from "./wire";
 
 function rows(container: HTMLElement, entries: [string, string][]) {
   const list = document.createElement("dl");
@@ -80,12 +80,15 @@ type MemorySort = "updated" | "used" | "created";
 export async function openMemories(api: ApiClient) {
   const sheet = openSheet("Memory", { wide: true });
   sheetMessage(sheet.body, "Loading…");
-  let records: MemoryRecord[];
-  let access: string;
-  try {
+  let records: ListedMemory[] = [];
+  let access = "";
+  const fetchRecords = async () => {
     const reply = await api.query("memories");
     records = reply.records;
     access = [reply.access.source, reply.access.namespace, reply.access.role].filter(Boolean).join(" · ");
+  };
+  try {
+    await fetchRecords();
   } catch (error) {
     sheetMessage(sheet.body, error instanceof ApiError && error.code === "disabled" ? "Memory is turned off in the configuration." : describeError(error), "danger");
     return;
@@ -99,7 +102,7 @@ export async function openMemories(api: ApiClient) {
   const caption = sheet.body.querySelector<HTMLElement>(".sheet-caption")!;
   const render = () => {
     const query = filter.value.trim().toLowerCase();
-    const order: Record<MemorySort, (a: MemoryRecord, b: MemoryRecord) => number> = {
+    const order: Record<MemorySort, (a: ListedMemory, b: ListedMemory) => number> = {
       updated: (a, b) => b.updated_at_ms - a.updated_at_ms,
       used: (a, b) => b.use_count - a.use_count || b.updated_at_ms - a.updated_at_ms,
       created: (a, b) => a.created_at_ms - b.created_at_ms,
@@ -109,7 +112,7 @@ export async function openMemories(api: ApiClient) {
     list.replaceChildren(...shown.map((record) => {
       const item = document.createElement("li");
       item.className = "memory";
-      item.innerHTML = `<p class="memory-content"></p><div class="memory-meta"><span></span><button type="button" class="icon-button small" aria-label="Delete memory">${glyph("trash")}</button></div>`;
+      item.innerHTML = `<p class="memory-content"></p><div class="memory-meta"><span></span>${record.deletable ? `<button type="button" class="icon-button small" aria-label="Delete memory">${glyph("trash")}</button>` : ""}</div>`;
       const content = item.querySelector<HTMLElement>(".memory-content")!;
       content.textContent = record.content;
       content.addEventListener("click", () => content.classList.toggle("expanded"));
@@ -120,14 +123,19 @@ export async function openMemories(api: ApiClient) {
         record.key.namespace ?? "",
         record.probation_until_ms && record.probation_until_ms > Date.now() ? "on probation" : "",
       ].filter(Boolean).join(" · ");
-      item.querySelector("button")!.addEventListener("click", async () => {
+      item.querySelector("button")?.addEventListener("click", async () => {
         if (!confirm("Delete this memory?")) return;
         try {
           await api.command("delete_memory", { key: record.key });
           records = records.filter((candidate) => candidate !== record);
           render();
         } catch (error) {
-          toast(describeError(error), "danger");
+          if (!(error instanceof ApiError && error.code === "stale")) {
+            toast(describeError(error), "danger");
+            return;
+          }
+          toast("That memory changed since the list loaded. The list is refreshed.", "danger");
+          await fetchRecords().then(render, (refresh) => toast(describeError(refresh), "danger"));
         }
       });
       return item;
@@ -162,7 +170,10 @@ export async function openConfigEditor(api: ApiClient) {
   try {
     await load();
   } catch (error) {
-    sheetMessage(sheet.body, describeError(error), "danger");
+    const credentials = error instanceof ApiError && error.code === "not_available_remotely";
+    sheetMessage(sheet.body, credentials
+      ? "This configuration holds credentials, so it can only be edited in the terminal."
+      : describeError(error), "danger");
     save.disabled = true;
     return;
   }
@@ -174,9 +185,7 @@ export async function openConfigEditor(api: ApiClient) {
       revision = (await api.query("config")).revision;
       notice("Saved. Tact reloaded the configuration.", "success");
     } catch (error) {
-      notice(error instanceof ApiError && error.code === "stale"
-        ? "The file changed on disk since it was opened. Copy your edits, close, and open it again."
-        : describeError(error), "danger");
+      notice(writeConfigError(error), "danger");
     } finally {
       save.disabled = false;
     }
@@ -189,6 +198,17 @@ export async function openConfigEditor(api: ApiClient) {
       notice(describeError(error), "danger");
     }
   });
+}
+
+function writeConfigError(error: unknown) {
+  if (!(error instanceof ApiError)) return describeError(error);
+  switch (error.code) {
+    case "stale": return "The file changed on disk since it was opened. Copy your edits, close, and open it again.";
+    case "not_available_remotely": return "Credentials can only be added in the terminal.";
+    // The server's message says why the text does not load.
+    case "invalid_request": return error.message;
+    default: return describeError(error);
+  }
 }
 
 export function openReflect(api: ApiClient, session: string) {

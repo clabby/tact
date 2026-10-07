@@ -232,6 +232,9 @@ export type MemoryRecord = {
   probation_until_ms: number | null;
 };
 
+/** A memory as listed for this user; `deletable` says whether the backend lets them delete it. */
+export type ListedMemory = MemoryRecord & { deletable: boolean };
+
 /** Query arguments and replies; `undefined` arguments mark a query without `args`. */
 export type Queries = {
   models: { args: undefined; reply: ModelCatalog };
@@ -245,7 +248,7 @@ export type Queries = {
   context_diagnostics: { args: { session: string }; reply: ContextDiagnostics };
   memories: {
     args: undefined;
-    reply: { access: { source: string; namespace: string | null; role: string | null }; records: MemoryRecord[] };
+    reply: { access: { source: string; namespace: string | null; role: string | null }; records: ListedMemory[] };
   };
   config: { args: undefined; reply: { path: string; text: string; revision: string } };
 };

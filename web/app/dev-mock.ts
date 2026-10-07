@@ -9,7 +9,7 @@ import type {
   ContextBudget,
   Draft,
   Effort,
-  MemoryRecord,
+  ListedMemory,
   ModelCatalog,
   PersistedSession,
   Queries,
@@ -147,7 +147,7 @@ export class MockTact {
     text: ["# Tact configuration", 'model = "sol"', 'effort = "high"', "", "[web]", "enabled = true", "port = 7878", ""].join("\n"),
     revision: "1",
   };
-  memories: MemoryRecord[] = memorySeed();
+  memories: ListedMemory[] = memorySeed();
   active: string | null = null;
   workspaceVersion = "1";
   /** Multiplies every scripted delay; tests set it to 0. */
@@ -336,12 +336,14 @@ export class MockTact {
       }
       case "delete_memory": {
         const { key } = body as Commands["delete_memory"];
-        this.memories = this.memories.filter((record) => record.key.id !== key.id);
+        const record = this.memories.find((candidate) => candidate.key.id === key.id);
+        if (!record?.deletable) throw new MockRefusal("not_available_remotely", "You cannot delete that memory.");
+        if (record.key.version !== key.version) throw new MockRefusal("stale", "That memory changed.");
+        this.memories = this.memories.filter((candidate) => candidate !== record);
         return {};
       }
       case "set_max_subagents": {
         const { limit } = body as Commands["set_max_subagents"];
-        if (!Number.isInteger(limit) || limit < 1) throw new MockRefusal("invalid_request", "The limit must be at least 1.", 400);
         for (const session of this.sessions.values()) {
           session.subagents.max_subagents = limit;
           this.emit("subagents", { session: session.id, ...session.subagents });
@@ -840,7 +842,7 @@ const recentPrompts = [
   text, recorded_at_unix_ms: Date.now() - index * 2_700_000, session_id: "019a0001-7c1e-7d55-9b1f-3e2a9c8d4f10", workspace: "/Users/dev/src/tact",
 }));
 
-function memorySeed(): MemoryRecord[] {
+function memorySeed(): ListedMemory[] {
   return [
     "In the Tact repository, use jj instead of git for version control.",
     "Prefer typed errors with context; never include credentials in logs or errors.",
@@ -851,5 +853,7 @@ function memorySeed(): MemoryRecord[] {
     created_at_ms: Date.now() - (index + 3) * 86_400_000, updated_at_ms: Date.now() - index * 7_200_000,
     last_scanned_at_ms: Date.now() - index * 600_000, scan_count: 12 - index * 2, last_used_at_ms: null,
     use_count: 6 - index, probation_until_ms: index === 3 ? Date.now() + 86_400_000 : null,
+    // One shared memory the user may read but not delete.
+    deletable: index !== 1,
   }));
 }
