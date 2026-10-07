@@ -84,7 +84,8 @@ diffs-container { --diffs-light-bg: var(--bg); --diffs-dark-bg: var(--bg); }
 .app[data-viewport="desktop"] .glyph-close, .app:not([data-viewport="desktop"]) .glyph-collapse { display: none; }
 .app[data-viewport="desktop"] .glyph-open, .app:not([data-viewport="desktop"]) .glyph-expand { display: none; }
 .app[data-viewport="desktop"]:not(.sidebar-collapsed) .menu-button { display: none; }
-.app.sidebar-collapsed > .sidebar { visibility: hidden; border-right: 0; }
+/* Only desktops fold the sidebar; the collapsed preference must not hide a narrower window's drawer. */
+.app[data-viewport="desktop"].sidebar-collapsed > .sidebar { visibility: hidden; border-right: 0; }
 
 
 /* Sidebar */
