@@ -215,7 +215,10 @@ pub(crate) enum RootEvent {
 #[derive(Debug)]
 pub(crate) enum PaneCommand {
     SetDraft(String),
-    Submit,
+    /// Sends the draft, or queues it instead of steering when a turn is running and `queue` is set.
+    Submit {
+        queue: bool,
+    },
     Interrupt,
     Steer(QueueId),
     Dequeue(QueueId),
@@ -2297,14 +2300,18 @@ impl RootNode {
             PaneCommand::SetDraft(text) => {
                 self.update_composer(ComposerEvent::ReplaceDraft(text), RenderRequest::Immediate)
             }
-            PaneCommand::Submit if self.reflection_input => self.submit_reflection(),
-            PaneCommand::Submit => self.update_composer_with(
+            PaneCommand::Submit { .. } if self.reflection_input => self.submit_reflection(),
+            PaneCommand::Submit { queue } => self.update_composer_with(
                 ComposerEvent::Terminal(Event::Key(KeyEvent::new(
                     KeyCode::Enter,
                     KeyModifiers::NONE,
                 ))),
                 RenderRequest::Immediate,
-                BusyDelivery::Queue,
+                if queue {
+                    BusyDelivery::Queue
+                } else {
+                    BusyDelivery::Steer
+                },
             ),
             PaneCommand::Interrupt => {
                 self.key_confirmation = None;
@@ -2370,7 +2377,7 @@ impl RootNode {
 
     fn check_remote_command(&self, command: &PaneCommand) -> Result<(), CommandError> {
         match command {
-            PaneCommand::Submit => {
+            PaneCommand::Submit { .. } => {
                 let draft = self.shared_draft().trim();
                 if draft.is_empty() {
                     return Err(CommandError::Invalid("the draft is empty".to_owned()));

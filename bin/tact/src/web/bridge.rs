@@ -167,10 +167,13 @@ pub(crate) enum Command {
         session: String,
         text: String,
     },
-    /// Submits the draft exactly as the composer's Enter would, provided it is still at `rev`.
+    /// Submits the draft provided it is still at `rev`. While a turn runs the prompt steers it, as
+    /// the composer's Enter does, or waits in the queue when `queue` is set, as Shift+Tab does.
     Submit {
         session: String,
         rev: u64,
+        #[serde(default)]
+        queue: bool,
     },
     Interrupt {
         session: String,

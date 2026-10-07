@@ -151,7 +151,8 @@ export type MemoryKey = { id: number; version: number; namespace?: string };
 /** Command arguments (`args`); `undefined` marks a command without arguments. */
 export type Commands = {
   set_draft: { session: string; text: string };
-  submit: { session: string; rev: number };
+  /** While a turn runs the prompt steers it, or waits in the queue when `queue` is set. */
+  submit: { session: string; rev: number; queue?: boolean };
   interrupt: { session: string };
   steer: { session: string; queue_id: number };
   dequeue: { session: string; queue_id: number };

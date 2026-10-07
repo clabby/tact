@@ -225,7 +225,7 @@ export class MockTact {
         return {};
       }
       case "submit": {
-        const { session: id, rev } = body as Commands["submit"];
+        const { session: id, rev, queue } = body as Commands["submit"];
         const session = this.session(id);
         if (session.draft.rev !== rev) {
           throw new MockRefusal("draft_changed", "The draft changed before it was sent.");
@@ -237,7 +237,7 @@ export class MockTact {
         }
         this.setDraft(session, "", origin);
         if (session.running) {
-          session.queue.push({ id: this.nextQueue++, text, steering: false });
+          session.queue.push({ id: this.nextQueue++, text, steering: !queue });
           this.emit("queue", { session: session.id, items: session.queue });
         } else {
           void this.runTurn(session, text);

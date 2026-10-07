@@ -1393,7 +1393,11 @@ impl AppNode {
                     "opening a session needs the event loop".to_owned(),
                 ));
             }
-            Command::Submit { session, rev } => {
+            Command::Submit {
+                session,
+                rev,
+                queue,
+            } => {
                 let pane = self.live_pane(&session)?;
                 let published = self.panes[&pane]
                     .published
@@ -1402,7 +1406,7 @@ impl AppNode {
                 if published.draft.rev != rev {
                     return Err(CommandError::DraftChanged);
                 }
-                (session, PaneCommand::Submit)
+                (session, PaneCommand::Submit { queue })
             }
             Command::SetDraft { session, text } => (session, PaneCommand::SetDraft(text)),
             Command::Interrupt { session } => (session, PaneCommand::Interrupt),
@@ -2413,6 +2417,7 @@ mod registry_tests {
             harness.command(Command::Submit {
                 session: "main".to_owned(),
                 rev: 1,
+                queue: false,
             }),
             Err(CommandError::DraftChanged)
         );
@@ -2422,6 +2427,7 @@ mod registry_tests {
             .command(Command::Submit {
                 session: "main".to_owned(),
                 rev: 2,
+                queue: false,
             })
             .unwrap();
         assert_eq!(submitted(&effects), Some("first!"));
@@ -2442,6 +2448,7 @@ mod registry_tests {
             harness.command(Command::Submit {
                 session: "main".to_owned(),
                 rev,
+                queue: false,
             }),
             Err(CommandError::NotAvailableRemotely)
         );
@@ -2485,26 +2492,41 @@ mod registry_tests {
         assert_eq!(actual, expected);
         assert_eq!(actual, [RootEffect::CancelTurns]);
 
-        // Submitting while a turn runs queues the prompt instead of sending it.
-        let mut web = Harness::new();
-        running(&mut web);
-        web.command(Command::SetDraft {
-            session: session(),
-            text: "next".to_owned(),
-        })
-        .unwrap();
-        let rev = drafts(&web.publications()).last().unwrap().1;
-        let queued = web
-            .command(Command::Submit {
+        // Submitting while a turn runs steers it, or queues the prompt when asked to.
+        for queue in [false, true] {
+            let mut web = Harness::new();
+            running(&mut web);
+            web.command(Command::SetDraft {
                 session: session(),
-                rev,
+                text: "next".to_owned(),
             })
             .unwrap();
-        assert!(submitted(&queued).is_none());
-        assert!(web.publications().iter().any(|publication| matches!(
-            publication,
-            Publication::Queue { items, .. } if items.len() == 1 && items[0].text == "next"
-        )));
+            let rev = drafts(&web.publications()).last().unwrap().1;
+            let effects = web
+                .command(Command::Submit {
+                    session: session(),
+                    rev,
+                    queue,
+                })
+                .unwrap();
+            assert!(submitted(&effects).is_none());
+            assert_eq!(
+                effects.iter().any(|effect| matches!(
+                    effect,
+                    AppEffect::Pane {
+                        effect: RootEffect::Steer { .. },
+                        ..
+                    }
+                )),
+                !queue
+            );
+            assert!(web.publications().iter().any(|publication| matches!(
+                publication,
+                Publication::Queue { items, .. } if items.len() == 1 && items[0].text == "next"
+            )));
+        }
+        let mut web = Harness::new();
+        running(&mut web);
 
         // Compact is refused while a turn runs, like the disabled action.
         assert_eq!(
@@ -2934,6 +2956,7 @@ mod parity_tests {
             .command(Command::Submit {
                 session: "main".to_owned(),
                 rev: 3,
+                queue: false,
             })
             .unwrap();
 
@@ -2983,6 +3006,7 @@ mod parity_tests {
             .command(Command::Submit {
                 session: "main".to_owned(),
                 rev: 1,
+                queue: true,
             })
             .unwrap();
         let [(id, text)] = queue_ids(&harness.publications())

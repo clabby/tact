@@ -279,7 +279,7 @@ export class Composer {
   private bind() {
     this.form.addEventListener("submit", (event) => {
       event.preventDefault();
-      void this.submit();
+      void this.submit(false);
     });
     this.textarea.addEventListener("input", () => {
       if (!this.sync) return;
@@ -353,7 +353,10 @@ export class Composer {
       // Touch keyboards keep Enter for new lines; the send button submits.
       if (matchMedia("(pointer: coarse)").matches && !event.metaKey && !event.ctrlKey) return;
       event.preventDefault();
-      void this.submit();
+      void this.submit(false);
+    } else if (event.key === "Tab" && event.shiftKey && this.host.running()) {
+      event.preventDefault();
+      void this.submit(true);
     } else if (event.key === "ArrowUp" && this.textarea.value === "") {
       event.preventDefault();
       this.host.openRecentPrompts();
@@ -423,7 +426,8 @@ export class Composer {
     });
   }
 
-  private async submit() {
+  /** Sends the draft. While a turn runs it steers that turn, or waits in the queue when `queue` is set. */
+  private async submit(queue: boolean) {
     const sync = this.sync;
     const session = this.session;
     this.closeMentions();
@@ -433,7 +437,7 @@ export class Composer {
     try {
       const rev = await sync.settledRev();
       if (this.sync !== sync) return;
-      await this.host.api.command("submit", { session: session.id, rev });
+      await this.host.api.command("submit", { session: session.id, rev, queue });
       this.hideMessage();
     } catch (error) {
       this.showMessage(describeError(error), "warning");
@@ -680,9 +684,9 @@ export class Composer {
     this.root.classList.toggle("blocked", blocked);
     this.sendButton.disabled = !this.session || blocked || this.submitting || !this.textarea.value.trim();
     this.sendButton.classList.toggle("busy", this.submitting);
-    this.textarea.placeholder = blocked ? "Compacting context…" : running ? "Queue a message" : "Message Tact";
-    this.sendButton.setAttribute("aria-label", running ? "Queue" : "Send");
-    this.sendButton.title = running ? "Queue (Enter)" : "Send (Enter)";
+    this.textarea.placeholder = blocked ? "Compacting context…" : running ? "Steer the running turn" : "Message Tact";
+    this.sendButton.setAttribute("aria-label", running ? "Steer" : "Send");
+    this.sendButton.title = running ? "Steer (Enter), queue (Shift+Tab)" : "Send (Enter)";
   }
 
   private cueMirror() {
