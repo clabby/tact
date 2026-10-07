@@ -1,6 +1,7 @@
 import { describeError, type ApiClient } from "./api-client";
 import { isActive, layoutAgents, NODE_HEIGHT, NODE_WIDTH } from "./agent-graph";
 import { Transcript } from "./chat";
+import { createSphere } from "./dot-sphere";
 import { modelColor } from "./format";
 import { glyph } from "./glyphs";
 import { openSheet } from "./sheet";
@@ -176,6 +177,7 @@ export function openSubagents(
       button.innerHTML = `<span class="node-top"><span class="node-state" aria-hidden="true"></span><span class="node-role"></span><span class="node-id"></span></span>
         <span class="node-model"><span class="model-dot"></span><span class="node-model-text"></span></span>
         <span class="node-status"></span>`;
+      if (isActive(agent)) button.querySelector(".node-state")!.append(createSphere(18, 36));
       button.querySelector(".node-role")!.textContent = agent.role;
       button.querySelector(".node-id")!.textContent = `#${agent.id}`;
       button.querySelector<HTMLElement>(".model-dot")!.style.background = modelColor(agent.model);

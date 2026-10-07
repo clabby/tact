@@ -1,5 +1,6 @@
 import { describeError, type ApiClient } from "./api-client";
 import { isActive } from "./agent-graph";
+import { createSphere } from "./dot-sphere";
 import { DraftSync } from "./draft";
 import { effortColor, formatTokens, modelColor, statusLabel } from "./format";
 import { glyph } from "./glyphs";
@@ -66,7 +67,7 @@ export class Composer {
     root.innerHTML = `
       <div class="status-line" hidden>
         <span class="status-pulse" aria-hidden="true"></span><span class="status-text"></span>
-        <button type="button" class="agents-chip" hidden>${glyph("agents")}<span class="agents-label"></span></button>
+        <button type="button" class="agents-chip" hidden><span class="agents-sphere" aria-hidden="true"></span><span class="agents-label"></span></button>
       </div>
       <div class="interrupt-confirm" role="alert" hidden><span><kbd>Esc</kbd> again to interrupt</span><span class="interrupt-cancel">any other key cancels</span></div>
       <ol class="queue" aria-label="Queued prompts" hidden></ol>
@@ -93,6 +94,8 @@ export class Composer {
         </div>
         <input type="file" accept="image/*" multiple hidden>
       </form>`;
+    root.querySelector(".status-pulse")!.append(createSphere(16, 28));
+    root.querySelector(".agents-sphere")!.append(createSphere(14, 24));
     this.form = root.querySelector("form")!;
     this.textarea = root.querySelector("textarea")!;
     this.sendButton = root.querySelector(".send-button")!;

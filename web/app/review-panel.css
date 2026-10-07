@@ -22,7 +22,7 @@
   .live-badge { display: inline-flex; align-items: center; gap: 6px; padding: 1px var(--space-2); border-radius: var(--radius-pill); background: var(--success-soft); color: var(--success); font-size: var(--text-xs); font-weight: 650; }
   .live-badge i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; animation: tact-pulse 1.5s ease-in-out infinite; }
   .updating { display: inline-flex; align-items: center; gap: 6px; font-size: var(--text-xs); }
-  .updating .activity-spinner { width: 10px; height: 10px; border-width: 1.5px; }
+  .updating .activity-spinner { width: 10px; height: 10px; }
   .live-badge[hidden], .updating[hidden] { display: none; }
   .generation { font: var(--text-xs) var(--font-mono); }
   .topbar-actions { position: relative; display: flex; align-items: center; gap: var(--space-2); flex: none; }
@@ -84,7 +84,7 @@
   .tab:hover { color: var(--text); }
   .tab.active { color: var(--text); border-color: var(--accent-strong); font-weight: 600; }
   .tab span { margin-left: 4px; color: var(--muted); }
-  .activity-spinner { display: inline-block; flex: none; width: 14px; height: 14px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: tact-spin .9s linear infinite; }
+  .activity-spinner { display: inline-block; flex: none; width: 14px; height: 14px; }
   .tab .overview-tab-activity { display: none; margin-left: 8px; color: var(--accent); vertical-align: -2px; }
   .tab.loading .overview-tab-activity { display: inline-block; }
   #ai-review:has(.activity-spinner) { display: inline-flex; align-items: center; justify-content: center; gap: 8px; }

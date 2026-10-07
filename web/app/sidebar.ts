@@ -1,6 +1,7 @@
 import { describeError, type ApiClient } from "./api-client";
 import { formatAge, modelColor } from "./format";
 import { glyph } from "./glyphs";
+import { createSphere } from "./dot-sphere";
 import { openMenu } from "./menu";
 import { orderSessions } from "./session-pins";
 import type { Connection } from "./store";
@@ -172,6 +173,8 @@ export class Sidebar {
         ${session.has_draft ? `<span class="draft-mark" title="Unsent draft">${glyph("pencil")}</span>` : ""}
       </button>
       <button type="button" class="icon-button row-menu" aria-label="Session actions" aria-haspopup="menu">${glyph("more")}</button>`;
+    // The globe's visible diameter matches the 8px steady-state dots (the canvas is slightly larger).
+    if (session.state === "running") row.querySelector(".session-marker")!.append(createSphere(10, 14));
     row.querySelector(".session-title")!.textContent = session.title || "New chat";
     row.querySelector(".session-model")!.textContent = label;
     row.querySelector(".session-age")!.textContent = formatAge(session.last_activity_unix_ms);

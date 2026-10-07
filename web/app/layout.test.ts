@@ -74,7 +74,7 @@ test("working indicators stay visibly animated", async () => {
   expect(app).toContain('tab.classList.toggle("loading", loading)');
   expect(app).toContain('class="activity-spinner" aria-hidden="true"></span>Reviewing…');
   expect(css).toMatch(/\.tab\.loading\s+\.overview-tab-activity\s*{/s);
-  expect(rule(css, ".activity-spinner")).toMatch(/animation:\s*tact-spin/);
+  expect(await read("shell.css")).toMatch(/\.review-panel \.activity-spinner[^{]*{[^}]*animation:\s*tact-chase/s);
   expect(css).toMatch(/\.overview-spinner::before\s*{[^}]*animation:\s*tact-spin/s);
   expect(rule(css, ".thread-spinner")).toMatch(/display:\s*inline-block/);
   expect(rule(css, ".thread-spinner")).toMatch(/animation:\s*tact-thread-spin/);

@@ -10,6 +10,7 @@ import { openConfigEditor, openContextDiagnostics, openMemories, openPhoneLink, 
 import { openSubagents, type SubagentsView } from "./subagents";
 import { formatAge } from "./format";
 import { Palette, type PaletteCommand } from "./palette";
+import { PromptRail } from "./prompt-rail-view";
 import { mountReviewPanel } from "./review-panel";
 import { Sidebar } from "./sidebar";
 import { effectiveSpeed, speedChoices } from "./speed";
@@ -51,6 +52,7 @@ class App {
   private readonly palette = new Palette();
   private readonly transcript: Transcript;
   private readonly composer: Composer;
+  private readonly rail: PromptRail;
   private readonly sidebar: Sidebar;
   private readonly stream: StreamClient;
   private readonly shell: HTMLElement;
@@ -103,6 +105,7 @@ class App {
       root.querySelector(".jump-latest")!,
       () => this.theme.current,
     );
+    this.rail = new PromptRail(root.querySelector("#view-chat")!, root.querySelector(".transcript-scroller")!, () => this.store.state.session);
     this.composer = new Composer(root.querySelector(".dock")!, {
       api,
       catalog: () => this.catalog,
@@ -195,6 +198,7 @@ class App {
         }
         case "session":
           this.transcript.show(state.session && this.sessionSource(state.session.id));
+          this.rail.refresh();
           this.composer.show(state.session);
           this.renderHeader();
           if ((state.session?.id ?? null) !== this.shownSession) {
@@ -204,6 +208,7 @@ class App {
           break;
         case "entry":
           this.transcript.entryChanged(change.id);
+          this.rail.refresh();
           // The first entry fixes the model; settings controls depend on it.
           if (change.added && state.session?.order.length === 1) this.composer.settingsChanged();
           break;

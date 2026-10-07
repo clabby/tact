@@ -2,6 +2,7 @@ import { FileDiff } from "@pierre/diffs";
 import { ApiError, errorMessage } from "./api-client";
 import { firstLine, formatDuration } from "./format";
 import { glyph } from "./glyphs";
+import { openLightbox } from "./lightbox";
 import { renderMarkdown } from "./markdown";
 import type { TranscriptData } from "./store";
 import type { Theme } from "./theme";
@@ -375,6 +376,10 @@ export class Transcript {
 
   private handleClick(event: MouseEvent) {
     const target = event.target as HTMLElement;
+    if (target instanceof HTMLImageElement && target.closest(".markdown, .user-image")) {
+      openLightbox(target.currentSrc || target.src, target.alt);
+      return;
+    }
     const row = target.closest<HTMLElement>(".tool-row");
     if (row) {
       const id = Number(row.closest<HTMLElement>(".entry")!.dataset.id);
