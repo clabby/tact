@@ -2923,25 +2923,6 @@ mod parity_tests {
     }
 
     #[test]
-    fn claude_sessions_refuse_image_attachments() {
-        let mut harness = Harness::new();
-        harness
-            .app
-            .pane_mut(PaneId::Main)
-            .unwrap()
-            .component_mut()
-            .set_model(Model::Claude(ClaudeModel::Sonnet55));
-        assert!(matches!(
-            harness.command(Command::AttachImage {
-                session: "main".to_owned(),
-                data_url: IMAGE.to_owned(),
-            }),
-            Err(CommandError::Invalid(_))
-        ));
-        assert_eq!(harness.app.root(PaneId::Main).unwrap().shared_draft(), "");
-    }
-
-    #[test]
     fn submitting_a_draft_with_an_attached_image_sends_the_image() {
         let mut harness = Harness::new();
         harness.set_draft("look ");

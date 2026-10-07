@@ -1703,12 +1703,6 @@ impl RootNode {
     }
 
     /// Claude fixes effort when its session starts.
-    /// The Claude driver accepts text-only prompts, so a draft holding an image could never be
-    /// sent; images are refused up front instead.
-    fn images_supported(&self) -> bool {
-        !matches!(self.composer.component().model(), Model::Claude(_))
-    }
-
     fn effort_locked(&self) -> bool {
         self.thread == ThreadState::Started
             && matches!(self.composer.component().model(), Model::Claude(_))
@@ -2406,11 +2400,6 @@ impl RootNode {
             PaneCommand::Compact | PaneCommand::Reflect(_) | PaneCommand::Handoff => {
                 self.compaction_allowed()?;
             }
-            PaneCommand::AttachImage(_) if !self.images_supported() => {
-                return Err(CommandError::Invalid(
-                    "Claude does not support image attachments yet".to_owned(),
-                ));
-            }
             PaneCommand::AttachImage(data_url)
                 if !(data_url.starts_with("data:image/") && data_url.contains(";base64,")) =>
             {
@@ -2978,13 +2967,6 @@ impl Component for RootNode {
     fn update(&mut self, event: Self::Event) -> ComponentUpdate<Self::Effect> {
         match event {
             RootEvent::Terminal(event) => self.update_terminal(event),
-            RootEvent::PasteImage(_) if !self.images_supported() => {
-                self.notification = Some(Notification::plain(
-                    "Claude does not support image attachments yet.".to_owned(),
-                    Color::Yellow,
-                ));
-                ComponentUpdate::render(RenderRequest::Immediate)
-            }
             RootEvent::PasteImage(data_url) => {
                 if self.blocking_task.is_some()
                     || self.overlay.is_some()

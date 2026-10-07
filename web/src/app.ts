@@ -485,7 +485,7 @@ class App {
         { id: "handoff", title: "Prepare handoff", group: "Session", icon: "handoff", unavailable: rewriteBlock, run: () => this.command("handoff", { session: id }) },
         { id: "subagents", title: "Subagents", group: "Session", icon: "agents", hint: String(session.subagents.agents.length || ""), keywords: "agents tree", run: () => this.openSubagents() },
         { id: "context", title: "Context diagnostics", group: "Session", icon: "gauge", keywords: "tokens debug", run: () => void openContextDiagnostics(this.api, id) },
-        { id: "attach", title: "Attach image…", group: "Session", icon: "image", unavailable: model?.provider === "anthropic" ? "Claude sessions are text-only" : undefined, run: () => root.querySelector<HTMLButtonElement>(".attach-chip")?.click() },
+        { id: "attach", title: "Attach image…", group: "Session", icon: "image", run: () => root.querySelector<HTMLButtonElement>(".attach-chip")?.click() },
         { id: "fork", title: "Fork session", group: "Session", icon: "fork", unavailable: started ? undefined : "Available after the first turn", run: () => this.command("open_session", { fork: { session: id } }) },
         { id: "close", title: "Close session", group: "Session", icon: "trash", run: () => {
           if (running && !confirm("A turn is running. Stop it and close the session?")) return;

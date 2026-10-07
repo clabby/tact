@@ -219,7 +219,7 @@ In addition to the commands above:
 | `set_reasoning_mode` | `session, mode: "standard" \| "pro"` | `invalid_request` if the model does not list the mode, or after the first prompt: a session's mode is fixed when it is created, so a new thread is recreated to apply the choice |
 | `set_speed` | `session, speed: Speed` | never; the model may run a lower tier |
 | `edit_queued` | `session, queue_id, text` | `unknown_session` for a consumed item |
-| `attach_image` | `session, data_url` (a `data:image/...;base64` URL) | `invalid_request` for a non-image, or on a Claude session (the Claude driver is text-only) |
+| `attach_image` | `session, data_url` (a `data:image/...;base64` URL) | `invalid_request` for a non-image |
 | `reflect` | `session, instructions?` | `turn_running`, `queue_not_empty` |
 | `handoff` | `session` | `turn_running`, `queue_not_empty` |
 | `reload_config` | none | `failed` with the load error |

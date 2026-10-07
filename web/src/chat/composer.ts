@@ -55,7 +55,6 @@ export class Composer {
   private session: SessionView | null = null;
   private sync: DraftSync | null = null;
   private mirrorTimer = 0;
-  private attachChip!: HTMLButtonElement;
   private submitting = false;
   private editingQueue: number | null = null;
   private mention: { at: Mention | null; items: MentionItem[]; selected: number } | null = null;
@@ -108,7 +107,6 @@ export class Composer {
     this.mentions = root.querySelector(".mention-list")!;
     this.meter = root.querySelector(".context-meter")!;
     this.fileInput = root.querySelector("input[type=file]")!;
-    this.attachChip = root.querySelector(".attach-chip")!;
     this.controls = {
       model: root.querySelector(".model-chip")!,
       effort: root.querySelector(".effort-chip")!,
@@ -176,8 +174,6 @@ export class Composer {
     const model = this.model();
     const started = (session?.order.length ?? 0) > 0;
     const { model: modelChip, effort, mode, speed } = this.controls;
-    // The Claude driver is text-only, so there is nowhere to send an attached image.
-    this.attachChip.hidden = model?.provider === "anthropic";
     this.chip(modelChip, model?.label ?? session?.model ?? "Model", session ? modelColor(session.model) : "var(--muted)");
     modelChip.disabled = !session || started;
     modelChip.title = started ? "The model is fixed after the first turn" : "Model";
@@ -452,10 +448,6 @@ export class Composer {
     const session = this.session;
     const sync = this.sync;
     if (!session || !sync || this.blocked()) return;
-    if (this.attachChip.hidden) {
-      this.showMessage("This model does not support image attachments.", "warning");
-      return;
-    }
     // Pending text must reach the server first, or it would overwrite the inserted marker.
     await sync.flush();
     for (const file of files) {
