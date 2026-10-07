@@ -32,7 +32,6 @@ use std::{
 use tokio::sync::{MappedMutexGuard, Mutex, MutexGuard, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
-const MAX_DECISION_BYTES: usize = 1024 * 1024;
 const MAX_COMMENTS: usize = 256;
 const MAX_COMMENT_BYTES: usize = 64 * 1024;
 const MAX_SUMMARY_BYTES: usize = 64 * 1024;
@@ -258,13 +257,6 @@ enum QuestionStatus {
 struct QuestionListResponse {
     generation: u64,
     questions: Vec<StoredQuestion>,
-}
-
-#[derive(Serialize)]
-struct ReviewStatus {
-    generation: u64,
-    changed: bool,
-    turn_running: bool,
 }
 
 #[derive(Serialize)]
@@ -2157,8 +2149,6 @@ mod tests {
         time::Duration,
     };
     use tokio::sync::Notify;
-
-    const FULL: Value = json!(null);
 
     fn full_range() -> Value {
         json!({"from": 0, "to": 2})

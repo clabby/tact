@@ -896,7 +896,6 @@ mod tests {
                     effort: ReasoningEffort::Low,
                     reasoning_mode: ReasoningMode::Standard,
                     speed: Speed::Standard,
-                    workspace: "/work".into(),
                 },
                 records,
                 draft: Draft::default(),

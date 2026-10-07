@@ -149,7 +149,6 @@ impl Harness {
                 effort: ReasoningEffort::Low,
                 reasoning_mode: ReasoningMode::Standard,
                 speed: Speed::Standard,
-                workspace: self.workspace.path().to_owned(),
             },
             records: Vec::new(),
             draft: Draft::default(),

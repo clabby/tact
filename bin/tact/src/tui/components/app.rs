@@ -1246,7 +1246,6 @@ impl AppNode {
                     effort: settings.effort,
                     reasoning_mode: settings.reasoning_mode,
                     speed: settings.speed,
-                    workspace: self.workspace.clone(),
                 },
                 records,
                 draft: published.draft.clone(),

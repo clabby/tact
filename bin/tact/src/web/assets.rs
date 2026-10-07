@@ -210,35 +210,6 @@ impl WebAssets {
     pub(crate) fn entrypoint(&self) -> &str {
         &self.manifest.entrypoint
     }
-
-    #[cfg(test)]
-    pub(super) fn for_test(path: PathBuf) -> Self {
-        let files = [
-            ("index.html", "text/html; charset=utf-8"),
-            ("app.js", "text/javascript; charset=utf-8"),
-            ("app.css", "text/css; charset=utf-8"),
-            ("overview-frame.html", "text/html; charset=utf-8"),
-        ]
-        .into_iter()
-        .map(|(path, content_type)| {
-            (
-                path.to_owned(),
-                ValidatedFile {
-                    content_type: content_type.to_owned(),
-                    bytes: 0,
-                    sha256: Sha256::digest([]).into(),
-                },
-            )
-        })
-        .collect();
-        Self {
-            path,
-            manifest: Arc::new(ValidatedManifest {
-                entrypoint: "index.html".to_owned(),
-                files,
-            }),
-        }
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -735,12 +706,6 @@ mod tests {
     }
 
     impl EnvironmentGuard {
-        fn set(name: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
-            let previous = std::env::var_os(name);
-            unsafe { std::env::set_var(name, value) };
-            Self { name, previous }
-        }
-
         fn remove(name: &'static str) -> Self {
             let previous = std::env::var_os(name);
             unsafe { std::env::remove_var(name) };

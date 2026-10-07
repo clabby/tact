@@ -23,7 +23,7 @@ use crate::{
     },
 };
 use serde::{Deserialize, Serialize};
-use std::{path::PathBuf, sync::Arc};
+use std::sync::Arc;
 use tact_memory::{MemoryAccess, MemoryKey, MemoryRecord};
 use tact_subagents::AgentId;
 use thiserror::Error;
@@ -50,7 +50,6 @@ pub(crate) struct SessionInfo {
     pub(crate) reasoning_mode: ReasoningMode,
     /// The requested speed preference; the model may run it at a lower tier (`Speed::for_model`).
     pub(crate) speed: Speed,
-    pub(crate) workspace: PathBuf,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
