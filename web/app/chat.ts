@@ -1,9 +1,12 @@
+import { FileDiff } from "@pierre/diffs";
 import { ApiError, errorMessage } from "./api-client";
 import { firstLine, formatDuration } from "./format";
 import { glyph } from "./glyphs";
 import { renderMarkdown } from "./markdown";
 import type { TranscriptData } from "./store";
 import type { Theme } from "./theme";
+import { promptParts } from "./user-prompt";
+import { presentDetail, TOOL_DEFAULT_OPEN, TOOL_LABELS } from "./tool-detail";
 import type { ToolDetail, WireEntry } from "./wire";
 
 type Rendered = { element: HTMLElement; revision: number };
@@ -16,6 +19,8 @@ export type TranscriptSource = {
   key: string;
   data: TranscriptData;
   detail(entry: number): Promise<ToolDetail>;
+  /** The URL of an image attached to a user entry, when this transcript has them. */
+  image?(entry: number, index: number): string;
 };
 
 /** Distance from the bottom, in pixels, within which the transcript keeps following new output. */
@@ -35,7 +40,11 @@ export class Transcript {
   private source: TranscriptSource | null = null;
   private following = true;
   private readonly lazy: IntersectionObserver;
-  private readonly expanded = new Set<number>();
+  /** Tool calls whose open state differs from their default, and patches shown untruncated. */
+  private readonly toggled = new Set<number>();
+  private readonly showAll = new Set<number>();
+  private readonly diffs = new Map<number, FileDiff[]>();
+  private readonly lazyDetail: IntersectionObserver;
   private readonly details = new Map<number, { revision: number; detail: Promise<ToolDetail> }>();
 
   constructor(
@@ -58,6 +67,16 @@ export class Transcript {
         this.lazy.unobserve(element);
         const entry = this.source?.data.entries.get(Number(element.closest<HTMLElement>(".entry")?.dataset.id));
         if (entry) this.renderBody(element, entry, true);
+      }
+    }, { root: scroller, rootMargin: "1200px 0px" });
+
+    this.lazyDetail = new IntersectionObserver((records) => {
+      for (const record of records) {
+        if (!record.isIntersecting) continue;
+        const container = record.target as HTMLElement;
+        this.lazyDetail.unobserve(container);
+        const entry = this.source?.data.entries.get(Number(container.closest<HTMLElement>(".entry")?.dataset.id));
+        if (entry?.kind === "tool") void this.renderDetail(container, entry);
       }
     }, { root: scroller, rootMargin: "1200px 0px" });
 
@@ -85,7 +104,10 @@ export class Transcript {
     this.source = source;
     if (!same) {
       this.rendered.clear();
-      this.expanded.clear();
+      this.toggled.clear();
+      this.showAll.clear();
+      for (const id of [...this.diffs.keys()]) this.releaseDiffs(id);
+      this.lazyDetail.disconnect();
       this.details.clear();
       this.lazy.disconnect();
       this.list.replaceChildren();
@@ -161,7 +183,22 @@ export class Transcript {
     switch (entry.kind) {
       case "user": {
         const bubble = child(element, "div", "user-bubble");
-        bubble.textContent = entry.text;
+        const image = this.source?.image;
+        bubble.replaceChildren(...promptParts(entry.text, image ? entry.images ?? 0 : 0).map((part) => {
+          const block = document.createElement("div");
+          if (part.kind === "text") {
+            block.className = "user-text";
+            block.textContent = part.text;
+          } else {
+            block.className = "user-image";
+            const picture = document.createElement("img");
+            picture.alt = part.marker;
+            picture.loading = "lazy";
+            picture.src = image!(entry.id, part.index);
+            block.append(picture);
+          }
+          return block;
+        }));
         return;
       }
       case "assistant": {
@@ -244,15 +281,22 @@ export class Transcript {
     delete container.dataset.stale;
     const streaming = entry.kind === "assistant" && !entry.complete;
     void renderMarkdown(container, text, this.theme() === "dark" ? "pierre-dark" : "pierre-light", {
+      imageSource: localImageSource,
       highlight: !streaming,
       placeholder: streaming ? "" : " ",
     });
   }
 
+  private isOpen(entry: ToolEntry) {
+    return TOOL_DEFAULT_OPEN.has(entry.name) !== this.toggled.has(entry.id);
+  }
+
   private renderTool(element: HTMLElement, entry: ToolEntry) {
-    const open = this.expanded.has(entry.id);
+    const open = this.isOpen(entry);
     element.classList.toggle("open", open);
     element.dataset.state = entry.state;
+    element.dataset.tool = entry.name;
+    this.releaseDiffs(entry.id);
     const extra = [
       entry.child_count ? `${entry.child_count} agent${entry.child_count === 1 ? "" : "s"}` : "",
       entry.substeps.length ? `${entry.substeps.length} step${entry.substeps.length === 1 ? "" : "s"}` : "",
@@ -264,17 +308,23 @@ export class Transcript {
       <span class="tool-meta"></span>
       ${glyph("chevron-right", "glyph chevron")}
     </button>`;
-    element.querySelector(".tool-name")!.textContent = entry.name;
+    const name = element.querySelector<HTMLElement>(".tool-name")!;
+    name.textContent = TOOL_LABELS[entry.name] ?? entry.name;
+    name.title = entry.name;
     element.querySelector(".tool-summary")!.textContent = entry.summary;
     element.querySelector(".tool-meta")!.textContent = [extra, entry.duration_ns === null ? "" : formatDuration(entry.duration_ns)]
       .filter(Boolean).join(" · ");
     if (!open) return;
-    const detail = child(element, "div", "tool-detail");
+    const body = child(element, "div", "tool-body");
     if (entry.substeps.length) {
-      const steps = child(detail, "ol", "tool-steps");
+      const steps = child(body, "ol", "tool-steps");
       for (const step of entry.substeps) child(steps, "li", "").textContent = step;
     }
-    if (entry.has_detail) void this.renderDetail(child(detail, "div", "tool-io"), entry);
+    if (entry.has_detail) {
+      const detail = child(body, "div", "tool-io");
+      detail.innerHTML = `<div class="tool-loading"><span class="spinner"></span>Loading</div>`;
+      this.lazyDetail.observe(detail);
+    }
   }
 
   private async renderDetail(container: HTMLElement, entry: ToolEntry) {
@@ -285,14 +335,24 @@ export class Transcript {
       cached = { revision: entry.revision, detail: source.detail(entry.id) };
       this.details.set(entry.id, cached);
     }
-    container.innerHTML = `<div class="tool-loading"><span class="spinner"></span>Loading details</div>`;
     try {
       const detail = await cached.detail;
-      container.replaceChildren(
-        detailBlock("Arguments", detail.arguments),
-        ...(detail.result === null ? [] : [detailBlock("Result", detail.result)]),
-        ...(detail.metadata === null ? [] : [detailBlock("Metadata", detail.metadata)]),
-      );
+      if (!container.isConnected) return;
+      presentDetail(container, entry.name, detail, {
+        theme: this.theme(),
+        full: this.showAll.has(entry.id),
+        track: (instances) => this.diffs.set(entry.id, instances),
+        toggleFull: () => {
+          if (!this.showAll.delete(entry.id)) this.showAll.add(entry.id);
+          this.rerenderEntry(entry.id);
+        },
+      });
+      const patch = container.querySelector<HTMLElement>(".patch");
+      const meta = container.closest(".entry")?.querySelector(".tool-meta");
+      if (patch && meta) {
+        const stats = `<span class="add">+${patch.dataset.additions}</span><span class="del">−${patch.dataset.deletions}</span>`;
+        meta.innerHTML = meta.textContent ? `${stats} · ${meta.innerHTML}` : stats;
+      }
     } catch (error) {
       this.details.delete(entry.id);
       container.innerHTML = `<p class="tool-error"></p>`;
@@ -302,16 +362,24 @@ export class Transcript {
     }
   }
 
+  private releaseDiffs(id: number) {
+    for (const instance of this.diffs.get(id) ?? []) instance.cleanUp();
+    this.diffs.delete(id);
+  }
+
+  private rerenderEntry(id: number) {
+    const rendered = this.rendered.get(id);
+    if (rendered) rendered.revision = -1;
+    this.entryChanged(id);
+  }
+
   private handleClick(event: MouseEvent) {
     const target = event.target as HTMLElement;
     const row = target.closest<HTMLElement>(".tool-row");
     if (row) {
       const id = Number(row.closest<HTMLElement>(".entry")!.dataset.id);
-      if (this.expanded.has(id)) this.expanded.delete(id);
-      else this.expanded.add(id);
-      const rendered = this.rendered.get(id);
-      if (rendered) rendered.revision = -1;
-      this.entryChanged(id);
+      if (!this.toggled.delete(id)) this.toggled.add(id);
+      this.rerenderEntry(id);
       return;
     }
     const summary = target.closest("summary");
@@ -334,6 +402,21 @@ export class Transcript {
     this.jump.hidden = true;
     this.scroller.scrollTo({ top: this.scroller.scrollHeight, behavior });
   }
+}
+
+/**
+ * Local image destinations (absolute, file://, or workspace-relative) are served by the instance;
+ * remote ones are never loaded by the page.
+ */
+function localImageSource(destination: string) {
+  if (!destination || /^([a-z][a-z0-9+.-]*:(?!\/\/\/)|\/\/)/i.test(destination)) return null;
+  let path = destination;
+  try {
+    path = decodeURIComponent(destination);
+  } catch {
+    // A destination that is not percent-encoded is used as written.
+  }
+  return `./api/file?path=${encodeURIComponent(path)}`;
 }
 
 function child<K extends keyof HTMLElementTagNameMap>(parent: HTMLElement, tag: K, className: string) {
@@ -370,12 +453,4 @@ function emptyState(title: string, body: string) {
   element.querySelector("h2")!.textContent = title;
   element.querySelector("p")!.textContent = body;
   return element;
-}
-
-function detailBlock(label: string, value: unknown) {
-  const section = document.createElement("section");
-  section.innerHTML = `<h4></h4><pre></pre>`;
-  section.querySelector("h4")!.textContent = label;
-  section.querySelector("pre")!.textContent = typeof value === "string" ? value : JSON.stringify(value, null, 2);
-  return section;
 }

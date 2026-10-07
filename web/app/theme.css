@@ -46,6 +46,7 @@
   --surface: #ffffff;
   --surface-raised: #ffffff;
   --surface-sunken: #f3f3f1;
+  --sidebar-bg: #f6f6f4;
   --surface-hover: rgb(20 22 28 / .045);
   --surface-active: rgb(20 22 28 / .075);
   --line: rgb(20 22 28 / .085);
@@ -94,6 +95,7 @@
   --surface: #17181b;
   --surface-raised: #1d1e22;
   --surface-sunken: #0c0d0f;
+  --sidebar-bg: #0c0d0f;
   --surface-hover: rgb(255 255 255 / .05);
   --surface-active: rgb(255 255 255 / .085);
   --line: rgb(255 255 255 / .075);

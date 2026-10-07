@@ -5,12 +5,14 @@ import { Transcript } from "./chat";
 import { Composer } from "./composer";
 import { effortColor, modelColor } from "./format";
 import { glyph } from "./glyphs";
-import { layoutReducer, loadLayout, saveLayout, type Layout, type LayoutAction } from "./layout";
-import { openConfigEditor, openContextDiagnostics, openMemories, openReflect, openSubagents, type SubagentsView } from "./features";
+import { layoutReducer, loadLayout, type Layout, type LayoutAction, type View } from "./layout";
+import { openConfigEditor, openContextDiagnostics, openMemories, openPhoneLink, openReflect } from "./features";
+import { openSubagents, type SubagentsView } from "./subagents";
 import { formatAge } from "./format";
 import { Palette, type PaletteCommand } from "./palette";
 import { mountReviewPanel } from "./review-panel";
 import { Sidebar } from "./sidebar";
+import { effectiveSpeed, speedChoices } from "./speed";
 import { Store, type Change } from "./store";
 import { StreamClient } from "./stream";
 import { ThemeController } from "./theme";
@@ -19,6 +21,7 @@ import { toast } from "./toast";
 import type { CommandName, Commands, ModelCatalog, SiblingInstance } from "./wire";
 
 const root = document.getElementById("app")!;
+const SIDEBAR_KEY = "tact.web.sidebar";
 const isMac = /Mac|iPhone|iPad/.test(navigator.platform);
 
 /** The full-window message shown when this browser has no valid login. */
@@ -70,28 +73,31 @@ class App {
       <div class="app">
         <aside class="sidebar" aria-label="Sessions"></aside>
         <div class="scrim" aria-hidden="true"></div>
-        <main class="chat">
+        <main class="main">
           <header class="chat-header">
-            <button type="button" class="icon-button menu-button" aria-label="Open sessions">${glyph("sidebar")}</button>
+            <button type="button" class="icon-button menu-button" aria-label="Toggle sidebar" title="Toggle sidebar">${glyph("sidebar", "glyph glyph-open")}${glyph("sidebar-expand", "glyph glyph-expand")}</button>
             <div class="chat-title"><h1>Tact</h1><div class="chat-sub"><span class="model-dot"></span><span class="chat-model"></span><span class="chat-effort"></span></div></div>
+            <nav class="view-tabs" role="tablist" aria-label="View">
+              <button type="button" class="view-tab" role="tab" id="tab-chat" aria-controls="view-chat" data-view="chat">Chat</button>
+              <button type="button" class="view-tab" role="tab" id="tab-review" aria-controls="view-review" data-view="review">Review<span class="tab-count" hidden></span></button>
+            </nav>
             <div class="header-actions">
               <button type="button" class="palette-button" aria-label="Command palette">${glyph("search")}<span>Search</span><kbd>${isMac ? "⌘K" : "Ctrl K"}</kbd></button>
-              <button type="button" class="icon-button panel-button" aria-label="Changes and overview" aria-pressed="false" title="Changes">${glyph("panel")}</button>
             </div>
           </header>
-          <div class="connection-banner" role="status" hidden></div>
-          <div class="transcript-scroller"></div>
-          <button type="button" class="jump-latest" hidden>${glyph("arrow-down")}Latest</button>
-          <div class="dock"></div>
+          <section class="view chat" id="view-chat" role="tabpanel" aria-labelledby="tab-chat">
+            <div class="connection-banner" role="status" hidden></div>
+            <div class="transcript-scroller"></div>
+            <button type="button" class="jump-latest" hidden>${glyph("arrow-down")}Latest</button>
+            <div class="dock"></div>
+          </section>
+          <section class="view review-view" id="view-review" role="tabpanel" aria-labelledby="tab-review" hidden>
+            <div class="panel-body"></div>
+          </section>
         </main>
-        <div class="panel-resizer" role="separator" aria-orientation="vertical" aria-label="Resize panel" tabindex="0"></div>
-        <section class="side-panel" aria-label="Changes and overview">
-          <header class="panel-head"><strong>Changes</strong><button type="button" class="icon-button panel-close" aria-label="Close panel">${glyph("close")}</button></header>
-          <div class="panel-body"></div>
-        </section>
       </div>`;
     this.shell = root.querySelector(".app")!;
-    this.layout = loadLayout(localStorage, innerWidth);
+    this.layout = loadLayout(innerWidth, localStorage.getItem(SIDEBAR_KEY) === "collapsed");
     this.transcript = new Transcript(
       root.querySelector(".transcript-scroller")!,
       root.querySelector(".jump-latest")!,
@@ -103,13 +109,16 @@ class App {
       running: () => this.activeRunning(),
       openRecentPrompts: () => this.openRecentPrompts(),
       openContext: () => this.withSession((id) => void openContextDiagnostics(api, id)),
+      actions: (query) => this.palette.matching(query),
+      openSubagents: () => this.openSubagents(),
     });
     this.sidebar = new Sidebar(root.querySelector(".sidebar")!, {
       api,
       catalog: () => this.catalog,
       navigated: () => this.dispatch({ type: "toggle-drawer", open: false }),
-      toggleTheme: () => this.theme.cycle(),
+      setTheme: (choice) => this.theme.set(choice),
       themeChoice: () => this.theme.choice,
+      resolvedTheme: () => this.theme.current,
     });
     this.stream = new StreamClient({
       url: "./api/stream",
@@ -129,6 +138,8 @@ class App {
     this.store.subscribe((changes) => this.apply(changes));
     this.theme.subscribe(() => {
       this.transcript.rerender();
+      this.subagents?.themeChanged();
+      this.sidebar.renderFooter(this.store.state.connection, this.instances);
       for (const listener of this.reviewListeners.theme) listener();
     });
     this.bindShell();
@@ -214,6 +225,7 @@ class App {
           break;
         case "subagents":
           this.subagents?.rosterChanged();
+          this.composer.statusChanged();
           break;
         case "subagent_entry":
           this.subagents?.entryChanged(change.agent, change.id);
@@ -238,8 +250,9 @@ class App {
     const label = this.catalog?.models.find((model) => model.id === session?.model)?.label ?? session?.model ?? "";
     root.querySelector(".chat-model")!.textContent = label;
     const effort = root.querySelector<HTMLElement>(".chat-effort")!;
+    const speedTier = session && this.catalog ? effectiveSpeed(this.catalog.models.find((model) => model.id === session.model), this.catalog, session.speed) : session?.speed;
     effort.textContent = session
-      ? [session.effort, session.reasoningMode === "pro" ? "pro" : "", session.speed === "standard" ? "" : session.speed].filter(Boolean).join(" · ")
+      ? [session.effort, session.reasoningMode === "pro" ? "pro" : "", speedTier === "standard" ? "" : speedTier].filter(Boolean).join(" · ")
       : "";
     effort.style.color = session ? effortColor(session.effort) : "";
     root.querySelector<HTMLElement>(".chat-sub .model-dot")!.style.background = session ? modelColor(session.model) : "transparent";
@@ -260,27 +273,34 @@ class App {
   private dispatch(action: LayoutAction) {
     const next = layoutReducer(this.layout, action);
     if (next === this.layout) return;
-    const panelChanged = next.panelOpen !== this.layout.panelOpen;
+    const viewChanged = next.view !== this.layout.view;
     this.layout = next;
-    saveLayout(localStorage, next);
     this.applyLayout();
-    if (panelChanged && next.panelOpen) this.ensureReview();
-    this.review?.setVisible?.(next.panelOpen);
+    if (!viewChanged) return;
+    if (next.view === "review") this.ensureReview();
+    this.review?.setVisible?.(next.view === "review");
+    if (next.view === "chat") this.composer.focus();
   }
 
   private applyLayout() {
-    const { viewport, drawerOpen, panelOpen, panelWidth } = this.layout;
+    const { viewport, drawerOpen, sidebarCollapsed, view } = this.layout;
     this.shell.dataset.viewport = viewport;
+    this.shell.dataset.view = view;
     this.shell.classList.toggle("drawer-open", drawerOpen);
-    this.shell.classList.toggle("panel-open", panelOpen);
-    this.shell.style.setProperty("--panel-width", `${panelWidth}px`);
-    root.querySelector(".panel-button")!.setAttribute("aria-pressed", String(panelOpen));
-    const sidebar = root.querySelector<HTMLElement>(".sidebar")!;
-    const overlaySidebar = viewport !== "desktop";
-    sidebar.toggleAttribute("inert", overlaySidebar && !drawerOpen);
-    const panel = root.querySelector<HTMLElement>(".side-panel")!;
-    panel.toggleAttribute("inert", !panelOpen);
-    if (panelOpen && viewport === "desktop") this.ensureReview();
+    this.shell.classList.toggle("sidebar-collapsed", sidebarCollapsed);
+    localStorage.setItem(SIDEBAR_KEY, sidebarCollapsed ? "collapsed" : "open");
+    for (const tab of root.querySelectorAll<HTMLButtonElement>(".view-tab")) {
+      const selected = tab.dataset.view === view;
+      tab.setAttribute("aria-selected", String(selected));
+      tab.tabIndex = selected ? 0 : -1;
+    }
+    root.querySelector<HTMLElement>("#view-chat")!.hidden = view !== "chat";
+    root.querySelector<HTMLElement>("#view-review")!.hidden = view !== "review";
+    root.querySelector<HTMLElement>(".sidebar")!.toggleAttribute("inert", viewport === "desktop" ? sidebarCollapsed : !drawerOpen);
+  }
+
+  private showView(view: View) {
+    this.dispatch({ type: "view", view });
   }
 
   private ensureReview() {
@@ -299,30 +319,50 @@ class App {
       onRunningChange: subscribe(this.reviewListeners.running),
       sendToChat: (markdown) => {
         this.composer.append(markdown);
-        if (this.layout.viewport !== "desktop") this.dispatch({ type: "toggle-panel", open: false });
+        this.showView("chat");
       },
       theme: () => this.theme.current,
       onThemeChange: subscribe(this.reviewListeners.theme),
     });
-    this.review.setVisible?.(this.layout.panelOpen);
+    this.review.setVisible?.(this.layout.view === "review");
+    // The Review tab shows how many files changed, as counted by the panel itself.
+    const badge = root.querySelector<HTMLElement>(".tab-count")!;
+    let frame = 0;
+    new MutationObserver(() => {
+      frame ||= requestAnimationFrame(() => {
+        frame = 0;
+        const files = Number(body.querySelector("#file-count")?.textContent) || 0;
+        badge.hidden = files === 0;
+        badge.textContent = String(files);
+      });
+    }).observe(body, { childList: true, characterData: true, subtree: true });
   }
 
   private bindShell() {
-    root.querySelector(".menu-button")!.addEventListener("click", () => this.dispatch({ type: "toggle-drawer" }));
-    root.querySelector(".drawer-close")!.addEventListener("click", () => this.dispatch({ type: "toggle-drawer", open: false }));
+    root.querySelector(".menu-button")!.addEventListener("click", () => this.dispatch({ type: "toggle-sidebar" }));
+    root.querySelector(".drawer-close")!.addEventListener("click", () => this.dispatch({ type: "toggle-sidebar" }));
     root.querySelector(".scrim")!.addEventListener("click", () => this.dispatch({ type: "escape" }));
-    root.querySelector(".panel-button")!.addEventListener("click", () => this.dispatch({ type: "toggle-panel" }));
-    root.querySelector(".panel-close")!.addEventListener("click", () => this.dispatch({ type: "toggle-panel", open: false }));
+    for (const tab of root.querySelectorAll<HTMLButtonElement>(".view-tab")) {
+      tab.addEventListener("click", () => this.showView(tab.dataset.view as View));
+    }
     root.querySelector(".palette-button")!.addEventListener("click", () => this.palette.open());
     addEventListener("resize", () => this.dispatch({ type: "resize", width: innerWidth }), { passive: true });
+    // Any input other than the confirming Esc cancels a pending interrupt.
+    document.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape" && !["Shift", "Control", "Alt", "Meta"].includes(event.key)) this.composer.disarmInterrupt();
+    }, true);
+    document.addEventListener("pointerdown", () => this.composer.disarmInterrupt(), true);
     document.addEventListener("keydown", (event) => {
       const mod = isMac ? event.metaKey : event.ctrlKey;
-      if (mod && event.key.toLowerCase() === "k") {
+      if (mod && event.key.toLowerCase() === "b") {
+        event.preventDefault();
+        this.dispatch({ type: "toggle-sidebar" });
+      } else if (mod && event.key.toLowerCase() === "k") {
         event.preventDefault();
         if (this.palette.isOpen) this.palette.close();
         else this.palette.open();
-      } else if (event.key === "Escape" && !event.defaultPrevented && !this.palette.isOpen) {
-        this.dispatch({ type: "escape" });
+      } else if (event.key === "Escape" && !event.defaultPrevented && !document.querySelector("dialog[open]")) {
+        this.escape();
       } else if (event.key === "/" && !isEditable(event.target)) {
         event.preventDefault();
         this.composer.focus();
@@ -331,34 +371,19 @@ class App {
         showShortcuts();
       }
     });
-    this.bindResizer(root.querySelector(".panel-resizer")!);
   }
 
-  private bindResizer(handle: HTMLElement) {
-    handle.addEventListener("pointerdown", (event) => {
-      event.preventDefault();
-      handle.setPointerCapture(event.pointerId);
-      this.shell.classList.add("resizing");
-      const move = (moveEvent: PointerEvent) => {
-        this.dispatch({ type: "panel-width", width: innerWidth - moveEvent.clientX, windowWidth: innerWidth });
-      };
-      const up = () => {
-        this.shell.classList.remove("resizing");
-        handle.removeEventListener("pointermove", move);
-        handle.removeEventListener("pointerup", up);
-        handle.removeEventListener("pointercancel", up);
-      };
-      handle.addEventListener("pointermove", move);
-      handle.addEventListener("pointerup", up);
-      handle.addEventListener("pointercancel", up);
-    });
-    handle.addEventListener("keydown", (event) => {
-      if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
-      event.preventDefault();
-      const step = event.shiftKey ? 64 : 16;
-      const width = this.layout.panelWidth + (event.key === "ArrowLeft" ? step : -step);
-      this.dispatch({ type: "panel-width", width, windowWidth: innerWidth });
-    });
+  /** Esc closes the drawer; otherwise it interrupts a running turn, but only when pressed twice. */
+  private escape() {
+    if (this.layout.drawerOpen) {
+      this.dispatch({ type: "escape" });
+    } else if (!this.activeRunning()) {
+      this.composer.disarmInterrupt();
+    } else if (this.composer.interruptArmed) {
+      this.composer.interrupt();
+    } else {
+      this.composer.armInterrupt();
+    }
   }
 
   private sessionSource(id: string) {
@@ -366,6 +391,7 @@ class App {
       key: id,
       data: this.store.state.session!,
       detail: (entry: number) => this.api.toolDetail(id, entry),
+      image: (entry: number, index: number) => this.api.imageUrl(id, entry, index),
     };
   }
 
@@ -430,58 +456,65 @@ class App {
       const running = this.activeRunning();
       const started = session.order.length > 0;
       const model = this.catalog?.models.find((candidate) => candidate.id === session.model);
+      // As in the terminal, work that rewrites the conversation waits for an idle session.
+      const idle = !running && session.queue.length === 0;
       const commands: PaletteCommand[] = [];
       if (running) commands.push({ id: "stop", title: "Stop", group: "Session", icon: "stop", hint: "esc", keywords: "interrupt cancel", run: () => this.command("interrupt", { session: id }) });
       commands.push(
         { id: "recent", title: "Recent prompts…", group: "Session", icon: "history", hint: "↑", run: () => this.openRecentPrompts() },
-        { id: "compact", title: "Compact context", group: "Session", icon: "compact", run: () => this.command("compact", { session: id }) },
-        { id: "reflect", title: "Reflect…", group: "Session", icon: "reflect", keywords: "reflection learn", run: () => openReflect(this.api, id) },
-        { id: "handoff", title: "Prepare handoff", group: "Session", icon: "handoff", run: () => this.command("handoff", { session: id }) },
+        ...(started && idle ? [
+          { id: "compact", title: "Compact context", group: "Session", icon: "compact", run: () => this.command("compact", { session: id }) },
+          { id: "reflect", title: "Reflect…", group: "Session", icon: "reflect", keywords: "reflection learn", run: () => openReflect(this.api, id) },
+          { id: "handoff", title: "Prepare handoff", group: "Session", icon: "handoff", run: () => this.command("handoff", { session: id }) },
+        ] satisfies PaletteCommand[] : []),
         { id: "subagents", title: "Subagents", group: "Session", icon: "agents", hint: String(session.subagents.agents.length || ""), keywords: "agents tree", run: () => this.openSubagents() },
         { id: "context", title: "Context diagnostics", group: "Session", icon: "gauge", keywords: "tokens debug", run: () => void openContextDiagnostics(this.api, id) },
-        { id: "attach", title: "Attach image…", group: "Session", icon: "image", run: () => root.querySelector<HTMLButtonElement>(".attach-chip")?.click() },
-        { id: "fork", title: "Fork session", group: "Session", icon: "fork", run: () => this.command("open_session", { fork: { session: id } }) },
+        ...(model?.provider === "anthropic" ? [] : [{ id: "attach", title: "Attach image…", group: "Session", icon: "image", run: () => root.querySelector<HTMLButtonElement>(".attach-chip")?.click() } satisfies PaletteCommand]),
+        ...(started ? [{ id: "fork", title: "Fork session", group: "Session", icon: "fork", run: () => this.command("open_session", { fork: { session: id } }) } satisfies PaletteCommand] : []),
         { id: "close", title: "Close session", group: "Session", icon: "trash", run: () => {
           if (running && !confirm("A turn is running. Stop it and close the session?")) return;
           this.command("close_session", { session: id, force: running });
         } },
       );
       if (!started) {
-        commands.push(...(this.catalog?.models ?? []).map((candidate): PaletteCommand => ({
+        commands.push(...(this.catalog?.models ?? []).filter((candidate) => candidate.id !== session.model).map((candidate): PaletteCommand => ({
           id: `model:${candidate.id}`, title: `Model: ${candidate.label}`, group: "Settings", icon: "sparkles",
-          hint: candidate.id === session.model ? "current" : "",
           run: () => this.command("set_model", { session: id, model: candidate.id }),
         })));
       }
       if (!(started && model?.effort_fixed_after_start)) {
-        commands.push(...(this.catalog?.efforts ?? []).map((effort): PaletteCommand => ({
+        commands.push(...(this.catalog?.efforts ?? []).filter((effort) => effort !== session.effort).map((effort): PaletteCommand => ({
           id: `effort:${effort}`, title: `Effort: ${effort}`, group: "Settings", icon: "brain",
-          hint: effort === session.effort ? "current" : "",
           run: () => this.command("set_effort", { session: id, effort }),
         })));
       }
-      if (model?.reasoning_modes.includes("pro")) {
+      if (!started && model?.reasoning_modes.includes("pro")) {
         const pro = session.reasoningMode === "pro";
         commands.push({ id: "mode", title: pro ? "Turn pro reasoning off" : "Turn pro reasoning on", group: "Settings", icon: "sparkles",
           run: () => this.command("set_reasoning_mode", { session: id, mode: pro ? "standard" : "pro" }) });
       }
-      commands.push(...(this.catalog?.speeds ?? []).map((speed): PaletteCommand => ({
-        id: `speed:${speed}`, title: `Speed: ${speed}`, group: "Settings", icon: "bolt",
-        hint: speed === session.speed ? "current" : "",
-        run: () => this.command("set_speed", { session: id, speed }),
-      })));
+      const catalog = this.catalog;
+      if (catalog) {
+        const current = effectiveSpeed(model, catalog, session.speed);
+        commands.push(...speedChoices(model, catalog).filter(({ tier }) => tier !== current).map(({ preference, tier }): PaletteCommand => ({
+          id: `speed:${tier}`, title: `Speed: ${tier}`, group: "Settings", icon: "bolt",
+          run: () => this.command("set_speed", { session: id, speed: preference }),
+        })));
+      }
       return commands;
     });
     palette.register(() => [
       { id: "memory", title: "Memory", group: "Tact", icon: "database", keywords: "memories", run: () => void openMemories(this.api) },
       { id: "config", title: "Edit configuration", group: "Tact", icon: "settings", keywords: "config settings", run: () => void openConfigEditor(this.api) },
+      { id: "phone", title: "Open on your phone (QR code)", group: "Tact", icon: "monitor", keywords: "qr scan mobile link", run: () => void openPhoneLink(this.api) },
       { id: "reload", title: "Reload configuration", group: "Tact", icon: "refresh", keywords: "config", run: () => {
         void this.api.command("reload_config").then(() => toast("Configuration reloaded."), (error) => toast(describeError(error), "danger"));
       } },
-      { id: "panel", title: this.layout.panelOpen ? "Hide changes" : "Show changes", group: "View", icon: "panel", keywords: "diff review overview", run: () => this.dispatch({ type: "toggle-panel" }) },
+      { id: "view", title: this.layout.view === "review" ? "Show chat" : "Show review", group: "View", icon: this.layout.view === "review" ? "message" : "panel", keywords: "diff changes overview", run: () => this.showView(this.layout.view === "review" ? "chat" : "review") },
+      { id: "sidebar", title: "Toggle sidebar", group: "View", icon: "sidebar", hint: isMac ? "⌘B" : "Ctrl B", run: () => this.dispatch({ type: "toggle-sidebar" }) },
       { id: "composer", title: "Focus composer", group: "View", icon: "pencil", hint: "/", run: () => this.composer.focus() },
       { id: "shortcuts", title: "Keyboard shortcuts", group: "View", icon: "keyboard", hint: "?", run: () => showShortcuts() },
-      ...(["system", "light", "dark"] as const).map((choice): PaletteCommand => ({
+      ...(["system", "light", "dark"] as const).filter((choice) => choice !== this.theme.choice).map((choice): PaletteCommand => ({
         id: `theme:${choice}`, title: `Theme: ${choice}`, group: "View", icon: choice === "dark" ? "moon" : choice === "light" ? "sun" : "monitor",
         hint: this.theme.choice === choice ? "current" : "",
         run: () => {
@@ -510,6 +543,7 @@ class App {
 
 const SHORTCUTS: [string, string][] = [
   [isMac ? "⌘K" : "Ctrl K", "Command palette"],
+  [isMac ? "⌘B" : "Ctrl B", "Show or hide the sidebar"],
   ["/", "Focus the composer"],
   ["Enter", "Send, or queue while a turn runs"],
   ["Shift Enter", "New line"],

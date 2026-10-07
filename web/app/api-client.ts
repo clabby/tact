@@ -89,6 +89,11 @@ export class ApiClient {
     return this.get<Instance>("instance", options);
   }
 
+  /** What a sign-in link for another device needs: the configured public origin and the token. */
+  link(options?: RequestOptions) {
+    return this.get<{ public_origin: string | null; token: string }>("link", options);
+  }
+
   instances(options?: RequestOptions) {
     return this.get<{ instances: SiblingInstance[] }>("instances", options);
   }
@@ -96,6 +101,11 @@ export class ApiClient {
   /** One entry's full tool detail; `agent` addresses a subagent's transcript. */
   toolDetail(session: string, entry: number, agent?: number, options?: RequestOptions) {
     return this.get<ToolDetail>(`${sessionPath(session, agent)}/entries/${entry}`, options);
+  }
+
+  /** The URL of the n-th image attached to a user entry. */
+  imageUrl(session: string, entry: number, index: number) {
+    return `${this.base}/${sessionPath(session)}/entries/${entry}/images/${index}`;
   }
 
   agentEntries(session: string, agent: number, options?: RequestOptions) {

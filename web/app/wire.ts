@@ -45,7 +45,8 @@ export type TransientStatus =
 export type ToolState = "running" | "succeeded" | "failed";
 
 export type EntryBody =
-  | { kind: "user"; text: string }
+  /** `images` counts the attachments; the i-th replaces the i-th "[Image #N]" marker in the text. */
+  | { kind: "user"; text: string; images?: number }
   | { kind: "assistant"; text: string; complete: boolean; commentary: boolean }
   | { kind: "reasoning"; text: string }
   | {

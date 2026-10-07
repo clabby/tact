@@ -17,6 +17,7 @@ import type {
   QueuedPrompt,
   ReasoningMode,
   Speed,
+  Subagent,
   SubagentRoster,
   SessionSnapshot,
   SessionSummary,
@@ -672,21 +673,37 @@ export class MockTact {
   private seed() {
     const main = new MockSession(this.newId(), "sol", "high", "Wire the web bridge into the TUI loop");
     const transcript: EntryBody[] = [
-      { kind: "user", text: "Wire the web bridge into the TUI loop. Publications must never block the loop, and every web command has to go through the same effect as its keypress." },
+      { kind: "user", text: "Wire the web bridge into the TUI loop. Publications must never block the loop, and every web command has to go through the same effect as its keypress.\n\n[Image #1]\nThe current flow is above; compare it with [Image #2] before you start.", images: 2 },
       { kind: "reasoning", text: "The loop already owns all session state, so the bridge only needs a non-blocking publisher and a request channel the select loop polls next to terminal input." },
       { kind: "tool", name: "read", summary: "bin/tact/src/web/bridge.rs", state: "succeeded", duration_ns: 4_000_000, substeps: [], child_count: 0, has_detail: false },
-      { kind: "tool", name: "shell", summary: "rg -n \"enum Action\" bin/tact/src/tui", state: "succeeded", duration_ns: 182_000_000, substeps: [], child_count: 0, has_detail: false },
-      { kind: "tool", name: "apply_patch", summary: "bin/tact/src/tui/app.rs (+84 −12)", state: "succeeded", duration_ns: 31_000_000, substeps: [], child_count: 0, has_detail: false },
-      { kind: "tool", name: "shell", summary: "cargo nextest run -p tact -E 'test(bridge)'", state: "failed", duration_ns: 48_200_000_000, substeps: [], child_count: 0, has_detail: false },
+      { kind: "tool", name: "exec_command", summary: "rg -n \"enum Action\" bin/tact/src/tui", state: "succeeded", duration_ns: 182_000_000, substeps: [], child_count: 0, has_detail: true },
+      { kind: "tool", name: "apply_patch", summary: "bin/tact/src/tui/app.rs, bin/tact/src/web/bridge.rs", state: "succeeded", duration_ns: 31_000_000, substeps: [], child_count: 0, has_detail: true },
+      { kind: "tool", name: "exec_command", summary: "cargo nextest run -p tact -E 'test(bridge)'", state: "failed", duration_ns: 48_200_000_000, substeps: [], child_count: 0, has_detail: true },
       { kind: "assistant", text: "One test failed: the draft echo arrived before the acknowledgement. I'll make the reply wait for the loop to apply the command.", complete: true, commentary: true },
       { kind: "directed_message", from: "agent 4", to: "agent 2", body: "The stream now coalesces entry events to the frame interval.", delivery: "deferred" },
       { kind: "tool", name: "spawn_agent", summary: "review bridge ordering · sol xhigh", state: "succeeded", duration_ns: 312_000_000_000, substeps: ["read bridge.rs", "trace Publisher::publish", "report"], child_count: 1, has_detail: false },
-      { kind: "assistant", text: "## Done\n\nThe loop now polls `requests` next to terminal input:\n\n```rust\ntokio::select! {\n    Some(request) = web.requests.recv() => self.apply(request),\n    Some(event) = terminal.next() => self.handle(event),\n}\n```\n\n- Publications go through an unbounded channel, so a stalled browser cannot block a frame.\n- Every command is applied with the same effect function as its keypress.\n\n| Command | Keypress |\n| :-- | :-- |\n| `submit` | Enter |\n| `interrupt` | Esc Esc |\n\nAll **312** tests pass.", complete: true, commentary: false },
+      { kind: "assistant", text: "## Done\n\nThe loop now polls `requests` next to terminal input:\n\n```rust\ntokio::select! {\n    Some(request) = web.requests.recv() => self.apply(request),\n    Some(event) = terminal.next() => self.handle(event),\n}\n```\n\n- Publications go through an unbounded channel, so a stalled browser cannot block a frame.\n- Every command is applied with the same effect function as its keypress.\n\n| Command | Keypress |\n| :-- | :-- |\n| `submit` | Enter |\n| `interrupt` | Esc Esc |\n\nAll **312** tests pass.\n\n![screenshot](/Users/ben/Downloads/absolute-cinema.png)", complete: true, commentary: false },
       { kind: "turn_completed", duration_ns: 402_000_000_000 },
       { kind: "effort_changed", to: "high" },
       { kind: "context_compacted", duration_ns: 3_100_000_000 },
     ];
-    for (const body of transcript) main.push(body);
+    const rows = transcript.map((body) => main.push(body));
+    const detail = (index: number, value: ToolDetail) => main.details.set(rows[index]!.id, value);
+    detail(3, {
+      arguments: { cmd: 'rg -n "enum Action" bin/tact/src/tui' },
+      result: { chunk_id: "a1", exit_code: 0, wall_time_seconds: 0.18, output: "bin/tact/src/tui/components/actions.rs:73:pub(super) enum Action {\nbin/tact/src/tui/components/app.rs:112:enum Action {\n" },
+      metadata: null,
+    });
+    detail(4, {
+      arguments: PATCH_ENVELOPE,
+      result: { output: "Success. Updated the following files:\nM bin/tact/src/tui/app.rs\nM bin/tact/src/web/bridge.rs" },
+      metadata: null,
+    });
+    detail(5, {
+      arguments: { cmd: "cargo nextest run -p tact -E 'test(bridge)'" },
+      result: { chunk_id: "b2", exit_code: 101, wall_time_seconds: 48.2, output: "        FAIL [   0.412s] tact web::bridge::tests::draft_echo_follows_acknowledgement\n\nassertion failed: echo arrived before the acknowledgement\n     Summary [  48.201s] 18 tests run: 17 passed, 1 failed\n" },
+      metadata: null,
+    });
     main.context.active_tokens = 142_600;
     main.speed = "fast";
     main.subagents.agents.push({
@@ -699,6 +716,21 @@ export class MockTact {
       { id: 2, revision: 1, parent: null, kind: "tool", name: "read", summary: "bin/tact/src/web/bridge.rs", state: "succeeded", duration_ns: 5_000_000, substeps: [], child_count: 0, has_detail: false },
       { id: 3, revision: 1, parent: null, kind: "assistant", text: "The acknowledgement must follow the publication, otherwise a tab can submit a stale revision.", complete: true, commentary: false },
     ]);
+
+    const extra: [number, number | null, string, string, string, Subagent["status"]][] = [
+      [2, null, "protocol auditor", "sol", "Audit the web protocol for versioning gaps.", { state: "running" }],
+      [3, 2, "schema checker", "luna", "Compare wire.ts with wire.rs field by field.", { state: "running" }],
+      [4, 2, "docs verifier", "opus-5.5", "Verify docs/web.md against the implementation.", { state: "failed", error: "The documentation file could not be read: permission denied." }],
+      [5, 1, "ordering prover", "astra", "Prove the acknowledgement ordering invariant.", { state: "pending" }],
+    ];
+    for (const [id, parent, role, model, task, status] of extra) {
+      main.subagents.agents.push({ id, parent, session_id: "019a00ff-0000-7000-8000-00000000000" + id, role, task, model, thinking: "high", status });
+      main.agentEntries.set(id, [
+        { id: 1, revision: 1, parent: null, kind: "user", text: task },
+        { id: 2, revision: 1, parent: null, kind: "reasoning", text: "Start with the entry points, then follow the data through each layer." },
+        { id: 3, revision: 1, parent: null, kind: "assistant", text: "Working on it: " + role + " has read the relevant files.", complete: false, commentary: true },
+      ]);
+    }
 
     const ideas = new MockSession(this.newId(), "opus-5.5", "medium", "Sketch the overview prompt");
     ideas.push({ kind: "user", text: "Draft a better overview prompt." });
@@ -720,6 +752,36 @@ export class MockTact {
   }
 }
 
+const PATCH_ENVELOPE = [
+  "*** Begin Patch",
+  "*** Update File: bin/tact/src/tui/app.rs",
+  "@@ async fn run(&mut self)",
+  "     loop {",
+  "-        let event = self.terminal.next().await;",
+  "-        self.handle(event);",
+  "+        tokio::select! {",
+  "+            Some(request) = self.web.requests.recv() => self.apply(request),",
+  "+            Some(event) = self.terminal.next() => self.handle(event),",
+  "+        }",
+  "     }",
+  "@@ fn apply(&mut self, request: Request)",
+  "+        // Web commands end in the same effects as their keypresses.",
+  "         self.dispatch(request.into_effect());",
+  "*** Add File: bin/tact/src/web/bridge.rs",
+  "+//! The bridge between the event loop and the web interface.",
+  "+",
+  "+pub(crate) struct Bridge {",
+  "+    requests: mpsc::UnboundedReceiver<Request>,",
+  "+}",
+  "+",
+  "+impl Bridge {",
+  "+    pub(crate) fn new() -> Self {",
+  "+        todo!()",
+  "+    }",
+  "+}",
+  "*** End Patch",
+].join("\n");
+
 type ScriptedTool = {
   name: string;
   summary: string;
@@ -734,9 +796,9 @@ function scriptFor(prompt: string) {
   const subject = prompt.length > 60 ? `${prompt.slice(0, 57)}…` : prompt;
   const tools: ScriptedTool[] = [
     {
-      name: "shell", summary: "rg -n \"fn publish\" bin/tact/src", ms: 420,
-      arguments: { command: ["rg", "-n", "fn publish", "bin/tact/src"] },
-      result: { output: "bin/tact/src/web/bridge.rs:104:    pub(crate) fn publish(&self, publication: Publication) {\n" },
+      name: "exec_command", summary: "rg -n \"fn publish\" bin/tact/src", ms: 420,
+      arguments: { cmd: 'rg -n "fn publish" bin/tact/src' },
+      result: { exit_code: 0, output: "bin/tact/src/web/bridge.rs:104:    pub(crate) fn publish(&self, publication: Publication) {\n" },
     },
     {
       name: "read", summary: "bin/tact/src/web/server.rs:1-180", ms: 160,
@@ -744,15 +806,15 @@ function scriptFor(prompt: string) {
       result: { content: "//! The HTTP server for the web interface.\n…" },
     },
     {
-      name: "apply_patch", summary: "bin/tact/src/web/stream.rs (+42 −7)", ms: 260,
-      arguments: { patch: "*** Begin Patch\n*** Update File: bin/tact/src/web/stream.rs\n@@\n-    let interval = Duration::from_millis(16);\n+    let interval = FRAME_INTERVAL;\n*** End Patch" },
+      name: "apply_patch", summary: "bin/tact/src/web/stream.rs", ms: 260,
+      arguments: "*** Begin Patch\n*** Update File: bin/tact/src/web/stream.rs\n@@\n-    let interval = Duration::from_millis(16);\n+    let interval = FRAME_INTERVAL;\n*** End Patch",
       result: { output: "Success. Updated the following files:\nM bin/tact/src/web/stream.rs" },
     },
     {
-      name: "shell", summary: "cargo nextest run -p tact -E 'test(stream)'", ms: 2600,
+      name: "exec_command", summary: "cargo nextest run -p tact -E 'test(stream)'", ms: 2600,
       substeps: ["Compiling tact v0.7.0", "Running 18 tests", "18 passed"],
-      arguments: { command: ["cargo", "nextest", "run", "-p", "tact", "-E", "test(stream)"] },
-      result: { output: "Summary [ 2.481s] 18 tests run: 18 passed, 0 skipped" },
+      arguments: { cmd: "cargo nextest run -p tact -E 'test(stream)'" },
+      result: { exit_code: 0, output: "Summary [ 2.481s] 18 tests run: 18 passed, 0 skipped" },
     },
   ];
   return {

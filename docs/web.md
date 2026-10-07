@@ -56,6 +56,8 @@ Static assets are public. Every `/api/*` route except `POST /api/login` requires
 | `GET /api/instances` | `{ instances: [{ pid, port, workspace, live, running, current }] }` (siblings that answer) |
 | `GET /api/sessions/{id}/entries/{n}` | `ToolDetail` of one entry (full arguments, result, metadata, each string truncated at 256 KiB) |
 | `GET /api/sessions/{id}/agents/{agent}/entries` | `{ entries: WireEntry[] }`, the projected transcript of one subagent |
+| `GET /api/sessions/{id}/entries/{n}/images/{i}` | The i-th image attached to a user entry, decoded; only PNG, JPEG, GIF, and WebP are served |
+| `GET /api/file?path=` | A local image that Markdown refers to (absolute, `file://`, or workspace-relative path), as the terminal transcript shows such images. Only files whose bytes are PNG, JPEG, GIF, or WebP and at most 25 MiB are served; anything else is 404 |
 | `GET /api/sessions/{id}/agents/{agent}/entries/{n}` | `ToolDetail` of one subagent entry |
 | `GET /api/stream` | Server-Sent Events, below |
 
@@ -111,7 +113,7 @@ type TransientStatus =
   | { kind: "error"; message: string };
 // Hidden entries are omitted. `id` is stable; `revision` increases on each change.
 type WireEntry = { id: number; revision: number; parent: number | null } & (
-  | { kind: "user"; text: string }
+  | { kind: "user"; text: string; images: number } // the i-th image replaces the i-th "[Image #N]" marker
   | { kind: "assistant"; text: string; complete: boolean; commentary: boolean }
   | { kind: "reasoning"; text: string }
   | { kind: "tool"; name: string; summary: string; state: "running" | "succeeded" | "failed";
@@ -213,10 +215,10 @@ In addition to the commands above:
 
 | Command | Args | Refused |
 | :-- | :-- | :-- |
-| `set_reasoning_mode` | `session, mode: "standard" \| "pro"` | `invalid_request` if the model does not list the mode |
+| `set_reasoning_mode` | `session, mode: "standard" \| "pro"` | `invalid_request` if the model does not list the mode, or after the first prompt: a session's mode is fixed when it is created, so a new thread is recreated to apply the choice |
 | `set_speed` | `session, speed: Speed` | never; the model may run a lower tier |
 | `edit_queued` | `session, queue_id, text` | `unknown_session` for a consumed item |
-| `attach_image` | `session, data_url` (a `data:image/...;base64` URL) | `invalid_request` for a non-image |
+| `attach_image` | `session, data_url` (a `data:image/...;base64` URL) | `invalid_request` for a non-image, or on a Claude session (the Claude driver is text-only) |
 | `reflect` | `session, instructions?` | `turn_running`, `queue_not_empty` |
 | `handoff` | `session` | `turn_running`, `queue_not_empty` |
 | `reload_config` | none | `failed` with the load error |
@@ -305,10 +307,16 @@ The review engine keeps its existing payloads (`web/app/protocol.ts`) with these
 ## UI
 
 Chat first. Left sidebar: **+ New chat**, **Live** sessions with state markers (pulsing running,
-idle, accent unread, pencil draft), **History** with search; an instance switcher. The main pane is
-the transcript and the shared composer. A secondary panel (a drawer on phones) has **Changes**
-(Pierre diffs, live while the agent edits) and **Overview** tabs. The styling takes its palette and
-rhythm from the TUI theme and is mobile-first.
+idle, accent unread, pencil draft), **History** with search; an instance switcher. The main area has
+two full-width tabs: **Chat** (the transcript and the shared composer) and **Review** (Pierre diffs,
+live while the agent edits, plus an **Overview** sub-tab). Live sessions are ordered by recent activity; Pin to top in a row's menu keeps a session above the rest (remembered per browser). Subagents appear as a hierarchy graph (Active or All, active by default as in the terminal) that fills the popup; selecting an agent opens its transcript beside the graph (same renderer as the chat), and the back button returns to the full graph; a chip above the composer reports running subagents and opens the popup. Apply-patch calls render as truncated
+Pierre diffs in the transcript; shell and code calls render as terminal blocks.
+
+In the composer, `/` at the start of the draft lists the actions that apply to the session's
+current state (compaction and handoff wait for an idle, started session; the model and Pro mode
+only before the first prompt). Esc interrupts a running turn only when pressed twice; the first
+press shows a confirmation and any other input cancels it, as in the terminal. The sidebar folds away on desktops (button in the header, Cmd/Ctrl B, remembered per browser) and is a drawer on narrower windows. The styling takes
+its palette and rhythm from the TUI theme and is mobile-first.
 
 ## Security notes
 

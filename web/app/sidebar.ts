@@ -2,17 +2,23 @@ import { describeError, type ApiClient } from "./api-client";
 import { formatAge, modelColor } from "./format";
 import { glyph } from "./glyphs";
 import { openMenu } from "./menu";
+import { orderSessions } from "./session-pins";
 import type { Connection } from "./store";
 import { toast } from "./toast";
 import type { ModelCatalog, OpenSpec, PersistedSession, SessionSummary, SiblingInstance } from "./wire";
+
+const PINS_KEY = "tact.web.pinned-sessions";
+const isMac = /Mac|iPhone|iPad/.test(navigator.platform);
 
 export type SidebarHost = {
   api: ApiClient;
   catalog(): ModelCatalog | null;
   /** Called after the user picked a session, so phones can close the drawer. */
   navigated(): void;
-  toggleTheme(): void;
+  setTheme(choice: "system" | "light" | "dark"): void;
   themeChoice(): "system" | "light" | "dark";
+  /** The scheme in effect, which a "system" choice resolves to. */
+  resolvedTheme(): "light" | "dark";
 };
 
 const CONNECTION_LABELS: Record<Connection, string> = {
@@ -33,6 +39,10 @@ export class Sidebar {
   private active: string | null = null;
   private historyCursor: string | null = null;
   private historyQuery = "";
+  /** What the search field filters the live list by; History is searched on the server. */
+  private filter = "";
+  /** Sessions this browser keeps above the rest of the live list. */
+  private pinned = new Set<string>(JSON.parse(localStorage.getItem(PINS_KEY) ?? "[]") as string[]);
   private historyRequest: AbortController | null = null;
   private historyLoaded = false;
   private searchTimer = 0;
@@ -41,24 +51,24 @@ export class Sidebar {
     root.innerHTML = `
       <div class="sidebar-head">
         <div class="brand"><span class="brand-mark" aria-hidden="true">t</span><div class="brand-text"><strong>Tact</strong><span class="brand-workspace"></span></div></div>
-        <button type="button" class="icon-button drawer-close" aria-label="Close sidebar">${glyph("close")}</button>
+        <button type="button" class="icon-button drawer-close" aria-label="Hide sidebar" title="Hide sidebar (${isMac ? "⌘B" : "Ctrl B"})">${glyph("sidebar-collapse", "glyph glyph-collapse")}${glyph("close", "glyph glyph-close")}</button>
       </div>
       <div class="new-chat">
         <button type="button" class="new-chat-button">${glyph("plus")}<span>New chat</span></button>
         <button type="button" class="new-chat-model" aria-label="New chat with model" aria-haspopup="menu">${glyph("chevron-down")}</button>
       </div>
+      <label class="chat-search">${glyph("search")}<input type="search" placeholder="Search chats" aria-label="Search chats" autocomplete="off"></label>
       <nav class="sidebar-scroll" aria-label="Sessions">
-        <h2 class="section-title">Live <span class="live-count"></span></h2>
+        <h2 class="section-title live-title">Live <span class="live-count"></span></h2>
         <ul class="session-list live-list" role="list"></ul>
         <h2 class="section-title">History</h2>
-        <label class="history-search">${glyph("search")}<input type="search" placeholder="Search history" aria-label="Search history" autocomplete="off"></label>
         <ul class="session-list history-list" role="list"></ul>
         <button type="button" class="history-more" hidden>Load more</button>
       </nav>
       <div class="sidebar-foot"></div>`;
     this.liveList = root.querySelector(".live-list")!;
     this.historyList = root.querySelector(".history-list")!;
-    this.search = root.querySelector(".history-search input")!;
+    this.search = root.querySelector(".chat-search input")!;
     this.more = root.querySelector(".history-more")!;
     this.footer = root.querySelector(".sidebar-foot")!;
     this.bind();
@@ -73,37 +83,54 @@ export class Sidebar {
 
   /** Re-renders the live list; rows are small and few (bounded by max_live_sessions). */
   setLive(live: SessionSummary[], active: string | null) {
-    this.live = [...live].sort((a, b) => b.last_activity_unix_ms - a.last_activity_unix_ms);
+    this.live = orderSessions(live, this.pinned);
     this.active = active;
-    this.root.querySelector(".live-count")!.textContent = live.length ? String(live.length) : "";
-    if (this.live.length === 0) {
-      this.liveList.innerHTML = `<li class="list-empty">No live sessions</li>`;
+    this.renderLive();
+  }
+
+  private renderLive() {
+    const needle = this.filter.trim().toLowerCase();
+    const visible = needle
+      ? this.live.filter((session) => `${session.title} ${session.model}`.toLowerCase().includes(needle))
+      : this.live;
+    this.root.querySelector(".live-count")!.textContent = this.live.length ? String(this.live.length) : "";
+    // While searching, a Live section with no match would only be noise above the results.
+    this.root.querySelector<HTMLElement>(".live-title")!.hidden = needle !== "" && visible.length === 0;
+    if (visible.length === 0) {
+      this.liveList.innerHTML = needle ? "" : `<li class="list-empty">No live sessions</li>`;
       return;
     }
-    this.liveList.replaceChildren(...this.live.map((session) => this.liveRow(session)));
+    this.liveList.replaceChildren(...visible.map((session) => this.liveRow(session)));
   }
 
   renderFooter(connection: Connection, instances: SiblingInstance[]) {
     const running = this.live.filter((session) => session.state === "running").length;
     const others = instances.filter((instance) => !instance.current);
     const theme = this.host.themeChoice();
+    const resolved = this.host.resolvedTheme();
     this.footer.innerHTML = `
       <button type="button" class="instance-button" aria-haspopup="menu" ${others.length ? "" : "disabled"}>
         <span class="connection-dot" data-connection="${connection}" aria-hidden="true"></span>
         <span class="instance-text"><strong></strong><small></small></span>
         ${others.length ? glyph("chevron-down") : ""}
       </button>
-      <button type="button" class="icon-button theme-toggle" aria-label="Theme: ${theme}" title="Theme: ${theme}">${glyph(theme === "dark" ? "moon" : theme === "light" ? "sun" : "monitor")}</button>`;
+      <button type="button" class="icon-button theme-button" aria-haspopup="menu" aria-label="Theme: ${theme}" title="Theme: ${theme}">${glyph(resolved === "dark" ? "moon" : "sun")}</button>`;
     this.footer.querySelector(".instance-text strong")!.textContent = CONNECTION_LABELS[connection];
     this.footer.querySelector(".instance-text small")!.textContent = [
       `${this.live.length} live`,
       running ? `${running} running` : "",
       others.length ? `${others.length + 1} instances` : "",
     ].filter(Boolean).join(" · ");
-    this.footer.querySelector(".theme-toggle")!.addEventListener("click", () => {
-      this.host.toggleTheme();
-      this.renderFooter(connection, instances);
-    });
+    const themeButton = this.footer.querySelector<HTMLButtonElement>(".theme-button")!;
+    themeButton.addEventListener("click", () => openMenu(themeButton, (["system", "light", "dark"] as const).map((choice) => ({
+      label: choice[0]!.toUpperCase() + choice.slice(1),
+      icon: glyph(choice === "dark" ? "moon" : choice === "light" ? "sun" : "monitor"),
+      checked: choice === theme,
+      run: () => {
+        this.host.setTheme(choice);
+        this.renderFooter(connection, instances);
+      },
+    })), "Theme"));
     const button = this.footer.querySelector<HTMLButtonElement>(".instance-button")!;
     button.addEventListener("click", () => openMenu(button, instances.map((instance) => ({
       label: instance.workspace.split("/").pop() || instance.workspace,
@@ -131,6 +158,8 @@ export class Sidebar {
   private liveRow(session: SessionSummary) {
     const row = document.createElement("li");
     row.className = "session-row";
+    const pinned = this.pinned.has(session.id);
+    row.classList.toggle("pinned", pinned);
     row.dataset.state = session.state;
     row.classList.toggle("active", session.id === this.active);
     row.classList.toggle("unread", session.unread);
@@ -139,6 +168,7 @@ export class Sidebar {
       <button type="button" class="session-main" ${session.id === this.active ? 'aria-current="true"' : ""}>
         <span class="session-marker" aria-hidden="true"></span>
         <span class="session-text"><span class="session-title"></span><span class="session-meta"><span class="model-dot"></span><span class="session-model"></span><span class="session-age"></span></span></span>
+        ${pinned ? `<span class="pin-mark" title="Pinned">${glyph("pin")}</span>` : ""}
         ${session.has_draft ? `<span class="draft-mark" title="Unsent draft">${glyph("pencil")}</span>` : ""}
       </button>
       <button type="button" class="icon-button row-menu" aria-label="Session actions" aria-haspopup="menu">${glyph("more")}</button>`;
@@ -154,9 +184,16 @@ export class Sidebar {
     const menu = row.querySelector<HTMLButtonElement>(".row-menu")!;
     menu.addEventListener("click", () => openMenu(menu, [
       { label: "Fork", detail: "", run: () => void this.open({ fork: { session: session.id } }) },
+      { label: pinned ? "Unpin" : "Pin to top", run: () => this.togglePin(session.id) },
       { label: session.state === "running" ? "Stop and close…" : "Close", danger: true, run: () => void this.close(session) },
     ], "Session actions"));
     return row;
+  }
+
+  private togglePin(id: string) {
+    if (!this.pinned.delete(id)) this.pinned.add(id);
+    localStorage.setItem(PINS_KEY, JSON.stringify([...this.pinned]));
+    this.setLive(this.live, this.active);
   }
 
   private bind() {
@@ -175,6 +212,8 @@ export class Sidebar {
       if (!this.historyLoaded) void this.loadHistory(true);
     });
     this.search.addEventListener("input", () => {
+      this.filter = this.search.value;
+      this.renderLive();
       clearTimeout(this.searchTimer);
       this.searchTimer = window.setTimeout(() => void this.loadHistory(true), 160);
     });

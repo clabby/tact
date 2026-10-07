@@ -1,5 +1,7 @@
 export type MenuItem = {
   label: string;
+  /** A glyph for the leading slot, instead of a colour dot. */
+  icon?: string;
   detail?: string;
   /** A CSS colour for the leading dot, e.g. a model hue. */
   swatch?: string;
@@ -32,7 +34,8 @@ export function openMenu(anchor: HTMLElement, items: MenuItem[], label: string) 
     button.classList.toggle("danger", item.danger ?? false);
     button.innerHTML = `<span class="menu-swatch"></span><span class="menu-label"></span><span class="menu-detail"></span>`;
     const swatch = button.querySelector<HTMLElement>(".menu-swatch")!;
-    if (item.swatch) swatch.style.background = item.swatch;
+    if (item.icon) swatch.outerHTML = item.icon;
+    else if (item.swatch) swatch.style.background = item.swatch;
     else swatch.remove();
     button.querySelector(".menu-label")!.textContent = item.label;
     button.querySelector(".menu-detail")!.textContent = item.detail ?? (item.checked ? "✓" : "");

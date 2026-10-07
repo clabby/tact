@@ -118,11 +118,26 @@ async function api(request: Request, url: URL): Promise<Response> {
     }
     const agentEntries = path.match(/^sessions\/([^/]+)\/agents\/(\d+)\/entries$/);
     if (agentEntries) return Response.json(tact.agentTranscript(decodeURIComponent(agentEntries[1]!), Number(agentEntries[2])));
+    if (path === "file") {
+      return new Response(
+        '<svg xmlns="http://www.w3.org/2000/svg" width="480" height="260"><rect width="480" height="260" fill="hsl(150 55% 90%)"/><circle cx="240" cy="130" r="70" fill="hsl(150 50% 50%)"/></svg>',
+        { headers: { "content-type": "image/svg+xml" } },
+      );
+    }
+    const image = path.match(/^sessions\/[^/]+\/entries\/\d+\/images\/(\d+)$/);
+    if (image) {
+      const hue = 200 + Number(image[1]) * 70;
+      return new Response(
+        '<svg xmlns="http://www.w3.org/2000/svg" width="480" height="260"><rect width="480" height="260" fill="hsl(' + hue + ' 60% 92%)"/><rect x="30" y="30" width="200" height="14" rx="4" fill="hsl(' + hue + ' 55% 55%)"/><rect x="30" y="64" width="420" height="10" rx="4" fill="hsl(' + hue + ' 30% 75%)"/><rect x="30" y="86" width="360" height="10" rx="4" fill="hsl(' + hue + ' 30% 75%)"/><rect x="30" y="140" width="130" height="80" rx="8" fill="hsl(' + hue + ' 50% 80%)"/></svg>',
+        { headers: { "content-type": "image/svg+xml" } },
+      );
+    }
     const detail = path.match(/^sessions\/([^/]+)(?:\/agents\/\d+)?\/entries\/(\d+)$/);
     if (detail) {
       await Bun.sleep(180);
       return Response.json(tact.toolDetail(decodeURIComponent(detail[1]!), Number(detail[2])));
     }
+    if (path === "link") return Response.json({ public_origin: process.env.TACT_DEV_PUBLIC_ORIGIN ?? null, token });
     if (path === "review") return Response.json(reviewSession());
     return failure("invalid_request", `Unknown endpoint ${path}.`, 404);
   }

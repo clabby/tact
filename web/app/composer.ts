@@ -1,9 +1,12 @@
 import { describeError, type ApiClient } from "./api-client";
+import { isActive } from "./agent-graph";
 import { DraftSync } from "./draft";
 import { effortColor, formatTokens, modelColor, statusLabel } from "./format";
 import { glyph } from "./glyphs";
 import { completeMention, findMention, type Mention } from "./mentions";
 import { openMenu } from "./menu";
+import { effectiveSpeed, speedChoices } from "./speed";
+import { type PaletteCommand } from "./palette";
 import type { SessionView } from "./store";
 import type { CommandName, Commands, ModelCatalog, ModelInfo } from "./wire";
 
@@ -14,13 +17,19 @@ export type ComposerHost = {
   running(): boolean;
   openRecentPrompts(): void;
   openContext(): void;
+  openSubagents(): void;
+  /** The applicable actions matching `query`, as offered by typing "/" in an empty composer. */
+  actions(query: string): PaletteCommand[];
 };
 
 type SessionCommand = Exclude<CommandName, "open_session" | "reload_config" | "write_config" | "delete_memory" | "set_max_subagents">;
 type SessionArgs<Name extends SessionCommand> = Omit<Commands[Name], "session">;
 
 const MIRROR_CUE_MS = 2200;
+/** How long a first Esc waits for its confirming second press, as in the terminal. */
+const INTERRUPT_CONFIRM_MS = 3000;
 const MENTION_LIMIT = 8;
+const ACTION_GROUP_ORDER = ["Session", "Settings", "Tact", "View", "Sessions"];
 
 /**
  * The shared composer of the active session: the draft (kept in step with the terminal by
@@ -45,15 +54,21 @@ export class Composer {
   private session: SessionView | null = null;
   private sync: DraftSync | null = null;
   private mirrorTimer = 0;
+  private attachChip!: HTMLButtonElement;
   private submitting = false;
   private editingQueue: number | null = null;
-  private mention: { at: Mention; items: { label: string; detail: string; value: string }[]; selected: number } | null = null;
+  private mention: { at: Mention | null; items: MentionItem[]; selected: number } | null = null;
+  private interruptTimer = 0;
   private mentionRequest: AbortController | null = null;
   private mentionTimer = 0;
 
   constructor(private readonly root: HTMLElement, private readonly host: ComposerHost) {
     root.innerHTML = `
-      <div class="status-line" hidden><span class="status-pulse" aria-hidden="true"></span><span class="status-text"></span></div>
+      <div class="status-line" hidden>
+        <span class="status-pulse" aria-hidden="true"></span><span class="status-text"></span>
+        <button type="button" class="agents-chip" hidden>${glyph("agents")}<span class="agents-label"></span></button>
+      </div>
+      <div class="interrupt-confirm" role="alert" hidden><span><kbd>Esc</kbd> again to interrupt</span><span class="interrupt-cancel">any other key cancels</span></div>
       <ol class="queue" aria-label="Queued prompts" hidden></ol>
       <form class="composer" aria-label="Message composer">
         <ul class="mention-list" role="listbox" aria-label="Suggestions" hidden></ul>
@@ -90,6 +105,7 @@ export class Composer {
     this.mentions = root.querySelector(".mention-list")!;
     this.meter = root.querySelector(".context-meter")!;
     this.fileInput = root.querySelector("input[type=file]")!;
+    this.attachChip = root.querySelector(".attach-chip")!;
     this.controls = {
       model: root.querySelector(".model-chip")!,
       effort: root.querySelector(".effort-chip")!,
@@ -157,18 +173,26 @@ export class Composer {
     const model = this.model();
     const started = (session?.order.length ?? 0) > 0;
     const { model: modelChip, effort, mode, speed } = this.controls;
+    // The Claude driver is text-only, so there is nowhere to send an attached image.
+    this.attachChip.hidden = model?.provider === "anthropic";
     this.chip(modelChip, model?.label ?? session?.model ?? "Model", session ? modelColor(session.model) : "var(--muted)");
     modelChip.disabled = !session || started;
     modelChip.title = started ? "The model is fixed after the first turn" : "Model";
     this.chip(effort, session?.effort ?? "effort", session ? effortColor(session.effort) : "var(--muted)");
     effort.disabled = !session || (started && (model?.effort_fixed_after_start ?? false));
-    mode.hidden = !model?.reasoning_modes.includes("pro");
-    mode.setAttribute("aria-pressed", String(session?.reasoningMode === "pro"));
-    mode.disabled = !session;
-    speed.querySelector(".chip-label")!.textContent = session?.speed === "standard" ? "Standard" : capitalize(session?.speed ?? "");
-    speed.dataset.speed = session?.speed ?? "standard";
+    // The mode is fixed when a session is created, so it is offered only where it can change.
+    const pro = session?.reasoningMode === "pro";
+    mode.hidden = !model?.reasoning_modes.includes("pro") || (started && !pro);
+    mode.setAttribute("aria-pressed", String(pro));
+    mode.disabled = !session || started;
+    mode.title = started ? "Pro reasoning is fixed after the first prompt" : "Pro reasoning";
+    const catalog = this.host.catalog();
+    const tier = catalog && session ? effectiveSpeed(model, catalog, session.speed) : session?.speed ?? "standard";
+    speed.querySelector(".chip-label")!.textContent = capitalize(tier);
+    speed.dataset.speed = tier;
     speed.disabled = !session;
-    this.controls.speed.hidden = (this.host.catalog()?.speeds.length ?? 0) < 2;
+    // A model with a single tier has nothing to choose.
+    speed.hidden = !catalog || speedChoices(model, catalog).length < 2;
   }
 
   contextChanged() {
@@ -213,9 +237,16 @@ export class Composer {
   statusChanged() {
     const running = this.session !== null && this.host.running();
     const label = statusLabel(this.session?.status ?? null) ?? (running ? "Working" : null);
-    this.status.hidden = label === null;
+    const agents = this.session?.subagents.agents.filter(isActive).length ?? 0;
+    const chip = this.status.querySelector<HTMLButtonElement>(".agents-chip")!;
+    chip.hidden = agents === 0;
+    chip.querySelector(".agents-label")!.textContent = `${agents} agent${agents === 1 ? "" : "s"} running`;
+    this.status.hidden = label === null && agents === 0;
+    this.status.classList.toggle("agents-only", label === null);
+    this.status.querySelector<HTMLElement>(".status-pulse")!.hidden = label === null;
     this.status.classList.toggle("error", this.session?.status?.kind === "error");
     this.status.querySelector(".status-text")!.textContent = label ?? "";
+    if (!running) this.disarmInterrupt();
     this.stopButton.hidden = !running;
     this.updateSendState();
   }
@@ -289,7 +320,8 @@ export class Composer {
       this.acceptMention(Number(item.dataset.index));
     });
     this.meter.addEventListener("click", () => this.host.openContext());
-    this.stopButton.addEventListener("click", () => this.run("interrupt", {}));
+    this.status.querySelector(".agents-chip")!.addEventListener("click", () => this.host.openSubagents());
+    this.stopButton.addEventListener("click", () => this.interrupt());
     this.bindSettings();
   }
 
@@ -322,10 +354,30 @@ export class Composer {
     } else if (event.key === "ArrowUp" && this.textarea.value === "") {
       event.preventDefault();
       this.host.openRecentPrompts();
-    } else if (event.key === "Escape" && this.host.running() && this.textarea.value === "") {
-      event.preventDefault();
-      void this.run("interrupt", {});
     }
+  }
+
+  /** Whether a first Esc is waiting for its confirming second press. */
+  get interruptArmed() {
+    return this.interruptTimer !== 0;
+  }
+
+  /** Shows the interrupt confirmation; the caller sends the interrupt on the confirming Esc. */
+  armInterrupt() {
+    this.root.querySelector<HTMLElement>(".interrupt-confirm")!.hidden = false;
+    clearTimeout(this.interruptTimer);
+    this.interruptTimer = window.setTimeout(() => this.disarmInterrupt(), INTERRUPT_CONFIRM_MS);
+  }
+
+  disarmInterrupt() {
+    clearTimeout(this.interruptTimer);
+    this.interruptTimer = 0;
+    this.root.querySelector<HTMLElement>(".interrupt-confirm")!.hidden = true;
+  }
+
+  interrupt() {
+    this.disarmInterrupt();
+    void this.run("interrupt", {});
   }
 
   private bindSettings() {
@@ -359,16 +411,12 @@ export class Composer {
       const session = this.session;
       const catalog = this.host.catalog();
       if (!session || !catalog) return;
-      const effective = this.model()?.effective_speeds;
-      openMenu(speed, catalog.speeds.map((candidate, index) => {
-        const runs = effective?.[index];
-        return {
-          label: capitalize(candidate),
-          detail: runs && runs !== candidate ? `runs ${runs}` : undefined,
-          checked: candidate === session.speed,
-          run: () => this.run("set_speed", { speed: candidate }),
-        };
-      }), "Speed");
+      const current = effectiveSpeed(this.model(), catalog, session.speed);
+      openMenu(speed, speedChoices(this.model(), catalog).map(({ preference, tier }) => ({
+        label: capitalize(tier),
+        checked: tier === current,
+        run: () => this.run("set_speed", { speed: preference }),
+      })), "Speed");
     });
   }
 
@@ -397,6 +445,10 @@ export class Composer {
     const session = this.session;
     const sync = this.sync;
     if (!session || !sync) return;
+    if (this.attachChip.hidden) {
+      this.showMessage("This model does not support image attachments.", "warning");
+      return;
+    }
     // Pending text must reach the server first, or it would overwrite the inserted marker.
     await sync.flush();
     for (const file of files) {
@@ -440,8 +492,33 @@ export class Composer {
   }
 
   private updateMentions() {
-    const at = findMention(this.textarea.value, this.textarea.selectionStart);
-    if (!at || !this.session || this.textarea.selectionStart !== this.textarea.selectionEnd) {
+    const text = this.textarea.value;
+    const caret = this.textarea.selectionStart;
+    if (!this.session || caret !== this.textarea.selectionEnd) {
+      this.closeMentions();
+      return;
+    }
+    // "/" at the very start of the draft lists the actions that apply right now.
+    const action = /^\/(\S*)$/.exec(text);
+    if (action && caret === text.length) {
+      clearTimeout(this.mentionTimer);
+      this.mentionRequest?.abort();
+      // Unfiltered, every applicable action is listed (the list scrolls), with the current
+      // session's actions ahead of the ones that open other sessions.
+      const query = action[1]!;
+      const rank = (group: string) => (query ? 0 : ACTION_GROUP_ORDER.indexOf(group));
+      const items = this.host.actions(query)
+        .filter((command) => command.group !== "Live sessions")
+        .sort((a, b) => rank(a.group) - rank(b.group))
+        .map((command): MentionItem => ({
+        label: command.title, detail: command.hint ?? command.group, value: command.id, run: command.run,
+      }));
+      this.mention = { at: null, items, selected: 0 };
+      this.renderMentions();
+      return;
+    }
+    const at = findMention(text, caret);
+    if (!at) {
       this.closeMentions();
       return;
     }
@@ -463,7 +540,7 @@ export class Composer {
     }
   }
 
-  private async mentionItems(at: Mention) {
+  private async mentionItems(at: Mention): Promise<MentionItem[]> {
     const api = this.host.api;
     switch (at.kind) {
       case "file":
@@ -480,6 +557,7 @@ export class Composer {
   private renderMentions() {
     const mention = this.mention;
     this.mentions.hidden = !mention || mention.items.length === 0;
+    this.mentions.dataset.kind = mention?.at ? "mention" : "actions";
     this.textarea.setAttribute("aria-expanded", String(!this.mentions.hidden));
     if (!mention) return;
     this.mentions.replaceChildren(...mention.items.map((item, index) => {
@@ -502,6 +580,12 @@ export class Composer {
     const mention = this.mention;
     const item = mention?.items[index];
     if (!mention || !item || !this.sync) return;
+    if (!mention.at) {
+      this.closeMentions();
+      this.replaceText("");
+      item.run?.();
+      return;
+    }
     const { text, caret } = completeMention(this.textarea.value, mention.at, item.value);
     this.closeMentions();
     this.textarea.value = text;
@@ -566,8 +650,6 @@ export class Composer {
     const shell = this.textarea.value.startsWith("!");
     this.form.classList.toggle("shell", shell);
     this.root.querySelector<HTMLElement>(".shell-badge")!.hidden = !shell;
-    const running = this.host.running();
-    this.textarea.placeholder = running ? "Queue a message" : "Message Tact";
     this.textarea.style.height = "auto";
     this.textarea.style.height = `${Math.min(this.textarea.scrollHeight, Math.round(innerHeight * 0.4))}px`;
     this.renderImages();
@@ -583,6 +665,7 @@ export class Composer {
     const running = this.session !== null && this.host.running();
     this.sendButton.disabled = !this.session || this.submitting || !this.textarea.value.trim();
     this.sendButton.classList.toggle("busy", this.submitting);
+    this.textarea.placeholder = running ? "Queue a message" : "Message Tact";
     this.sendButton.setAttribute("aria-label", running ? "Queue" : "Send");
     this.sendButton.title = running ? "Queue (Enter)" : "Send (Enter)";
   }
@@ -607,6 +690,8 @@ export class Composer {
     this.message.hidden = true;
   }
 }
+
+type MentionItem = { label: string; detail: string; value: string; run?: () => void };
 
 function capitalize(text: string) {
   return text ? text[0]!.toUpperCase() + text.slice(1) : text;

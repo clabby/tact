@@ -103,6 +103,11 @@ export class Palette {
     this.providers.push(provider);
   }
 
+  /** The commands that apply right now and match `query`, best first. */
+  matching(query: string) {
+    return rankCommands(this.providers.flatMap((provider) => provider()), query);
+  }
+
   get isOpen() {
     return this.dialog.open;
   }

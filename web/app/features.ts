@@ -1,16 +1,15 @@
 // Sheets for terminal features that need more room than a palette entry: context diagnostics,
-// memory, the configuration editor, reflection, and the subagent tree. Each reads through the
+// memory, the configuration editor, reflection. Each reads through the
 // generic query route and acts through the generic command route.
 
 import { ApiError, describeError, type ApiClient } from "./api-client";
-import { Transcript } from "./chat";
 import { formatAge, formatTokens, modelColor } from "./format";
 import { glyph } from "./glyphs";
+import { qrSvg } from "./qr";
+import { shareableOrigin, signInLink } from "./phone-link";
 import { openSheet, sheetMessage } from "./sheet";
-import { transcriptData, upsert, type SessionView } from "./store";
-import type { Theme } from "./theme";
 import { toast } from "./toast";
-import type { ContextDiagnostics, ListedMemory, Subagent } from "./wire";
+import type { ContextDiagnostics, ListedMemory } from "./wire";
 
 function rows(container: HTMLElement, entries: [string, string][]) {
   const list = document.createElement("dl");
@@ -228,112 +227,36 @@ export function openReflect(api: ApiClient, session: string) {
   });
 }
 
-/** A live subagent tree and transcript viewer; the app forwards roster and entry changes. */
-export type SubagentsView = { rosterChanged(): void; entryChanged(agent: number, entry: number): void };
-
-export function openSubagents(
-  api: ApiClient,
-  session: () => SessionView | null,
-  theme: () => Theme,
-  onClose: () => void,
-): SubagentsView {
-  const sheet = openSheet("Subagents", { wide: true });
-  sheet.actions.innerHTML = `<label class="max-agents">Max <input type="number" min="1" step="1" inputmode="numeric" aria-label="Maximum subagents"></label>`;
-  sheet.body.innerHTML = `<div class="agents"><ul class="agent-tree" role="tree" aria-label="Subagents"></ul><div class="agent-view"><div class="agent-head"></div><div class="agent-scroller"></div><button type="button" class="jump-latest" hidden>${glyph("arrow-down")}Latest</button></div></div>`;
-  const tree = sheet.body.querySelector<HTMLElement>(".agent-tree")!;
-  const head = sheet.body.querySelector<HTMLElement>(".agent-head")!;
-  const max = sheet.actions.querySelector("input")!;
-  const transcript = new Transcript(
-    sheet.body.querySelector(".agent-scroller")!,
-    sheet.body.querySelector(".agent-view .jump-latest")!,
-    theme,
-    { title: "Pick a subagent", body: "Its transcript streams here while it works." },
-  );
-  let selected: number | null = null;
-  let closed = false;
-  sheet.onClose(() => {
-    closed = true;
-    onClose();
-  });
-
-  max.addEventListener("change", async () => {
-    const limit = Number(max.value);
-    if (!Number.isInteger(limit) || limit < 1) return;
-    try {
-      await api.command("set_max_subagents", { limit });
-    } catch (error) {
-      toast(describeError(error), "warning");
+/**
+ * Shows a QR code that signs a phone in to this Tact. The address is the configured public origin,
+ * else the origin this page was opened from; a link only this computer can reach is never shown.
+ */
+export async function openPhoneLink(api: ApiClient) {
+  const sheet = openSheet("Open on your phone");
+  sheetMessage(sheet.body, "Preparing the link…");
+  try {
+    const { public_origin, token } = await api.link();
+    const origin = shareableOrigin(public_origin, location.origin);
+    if (!origin) {
+      sheet.body.innerHTML = `<div class="phone-link"><p class="phone-caption">This page is open at an address only this computer can reach (${location.host}), so a phone cannot use a link built from it. Open Tact through your tunnel's address (for example a Tailscale name) and try again, or set <code>web.public_url</code>.</p></div>`;
+      return;
     }
-  });
-
-  const showAgent = async (agent: Subagent) => {
-    const current = session();
-    if (!current) return;
-    selected = agent.id;
-    renderTree();
-    head.innerHTML = `<strong></strong><span></span>`;
-    head.querySelector("strong")!.textContent = agent.role;
-    head.querySelector("span")!.textContent = agent.task;
-    if (!current.agents.has(agent.id)) {
+    const url = signInLink(origin, token);
+    sheet.body.innerHTML = `<div class="phone-link"><div class="qr"></div>
+      <p class="phone-origin"></p>
+      <p class="phone-caption">Scan with your phone's camera. It signs the phone in to this Tact, so treat the code like a password.</p>
+      <button type="button" class="button">Copy link</button></div>`;
+    sheet.body.querySelector(".qr")!.append(qrSvg(url));
+    sheet.body.querySelector(".phone-origin")!.textContent = origin;
+    sheet.body.querySelector("button")!.addEventListener("click", async () => {
       try {
-        const { entries } = await api.agentEntries(current.id, agent.id);
-        const data = current.agents.get(agent.id) ?? transcriptData([]);
-        for (const entry of entries) upsert(data, entry);
-        current.agents.set(agent.id, data);
-      } catch (error) {
-        toast(describeError(error), "warning");
-        return;
+        await navigator.clipboard.writeText(url);
+        toast("Copied the sign-in link. Share it carefully.");
+      } catch {
+        toast("Could not copy the link.", "warning");
       }
-    }
-    if (closed || selected !== agent.id) return;
-    transcript.show({
-      key: `${current.id}/${agent.id}`,
-      data: current.agents.get(agent.id)!,
-      detail: (entry) => api.toolDetail(current.id, entry, agent.id),
     });
-  };
-
-  const renderTree = () => {
-    const roster = session()?.subagents ?? { max_subagents: 0, agents: [] };
-    if (document.activeElement !== max) max.value = String(roster.max_subagents || "");
-    const ids = new Set(roster.agents.map((agent) => agent.id));
-    const children = new Map<number | null, Subagent[]>();
-    for (const agent of roster.agents) {
-      const parent = agent.parent !== null && ids.has(agent.parent) ? agent.parent : null;
-      children.set(parent, [...children.get(parent) ?? [], agent]);
-    }
-    const items: HTMLElement[] = [];
-    const walk = (parent: number | null, depth: number) => {
-      for (const agent of children.get(parent) ?? []) {
-        const item = document.createElement("li");
-        item.className = "agent-row";
-        item.setAttribute("role", "treeitem");
-        item.setAttribute("aria-selected", String(agent.id === selected));
-        item.dataset.state = agent.status.state;
-        item.style.setProperty("--depth", String(depth));
-        item.innerHTML = `<button type="button"><span class="agent-state"></span><span class="agent-text"><span class="agent-role"></span><span class="agent-meta"><span class="model-dot"></span><span></span></span></span></button>`;
-        item.querySelector(".agent-role")!.textContent = `${agent.role} · #${agent.id}`;
-        item.querySelector(".agent-meta span:last-child")!.textContent = `${agent.model} · ${agent.thinking} · ${agent.status.state}`;
-        item.querySelector<HTMLElement>(".model-dot")!.style.background = modelColor(agent.model);
-        item.querySelector("button")!.title = agent.status.state === "failed" && "error" in agent.status ? agent.status.error : agent.task;
-        item.querySelector("button")!.addEventListener("click", () => void showAgent(agent));
-        items.push(item);
-        walk(agent.id, depth + 1);
-      }
-    };
-    walk(null, 0);
-    if (items.length === 0) tree.innerHTML = `<li class="list-empty">No subagents in this session</li>`;
-    else tree.replaceChildren(...items);
-  };
-
-  renderTree();
-  transcript.show(null);
-  return {
-    rosterChanged: () => {
-      if (!closed) renderTree();
-    },
-    entryChanged: (agent, entry) => {
-      if (!closed && agent === selected) transcript.entryChanged(entry);
-    },
-  };
+  } catch (error) {
+    sheetMessage(sheet.body, describeError(error), "danger");
+  }
 }

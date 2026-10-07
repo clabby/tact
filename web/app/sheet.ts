@@ -12,10 +12,10 @@ export type Sheet = {
  * A modal sheet: centred on wide screens, full height from the bottom on phones. Escape, the close
  * button, and a backdrop click dismiss it; focus returns to where it was.
  */
-export function openSheet(title: string, options: { wide?: boolean } = {}): Sheet {
+export function openSheet(title: string, options: { wide?: boolean; size?: "xl" } = {}): Sheet {
   const restore = document.activeElement as HTMLElement | null;
   const dialog = document.createElement("dialog");
-  dialog.className = `sheet${options.wide ? " wide" : ""}`;
+  dialog.className = `sheet${options.wide || options.size ? " wide" : ""}${options.size ? ` ${options.size}` : ""}`;
   dialog.innerHTML = `<header class="sheet-head"><h2></h2><div class="sheet-actions"></div><button type="button" class="icon-button sheet-close" aria-label="Close">${glyph("close")}</button></header><div class="sheet-body"></div>`;
   dialog.querySelector("h2")!.textContent = title;
   dialog.setAttribute("aria-label", title);

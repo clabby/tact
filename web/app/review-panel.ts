@@ -418,6 +418,10 @@ class ReviewPanel {
             <span class="range-chevron">${icon("chevron-down")}</span>
           </button>
           <p class="scope-description" id="scope-description" title="${escapeHtml(this.bootstrap.repository)}">Loading changes…</p>
+          <div class="layout-toggle" role="group" aria-label="Diff layout">
+            <button type="button" data-diff-style="unified">Unified</button>
+            <button type="button" data-diff-style="split">Split</button>
+          </div>
           <div class="change-stats" id="change-stats" aria-label="Change statistics"></div>
         </div>
         <section class="panel overview-panel" id="overview-panel" role="tabpanel" aria-labelledby="overview-tab" data-panel="overview" hidden>
@@ -622,7 +626,11 @@ class ReviewPanel {
     }
 
     const description = this.root.querySelector<HTMLElement>("#scope-description");
-    if (description) description.textContent = page.scope;
+    if (description) {
+      description.textContent = page.scope;
+      // The range button already names a preset scope; the description only adds detail.
+      description.hidden = page.scope === rangeLabel(this.bootstrap.range_targets, page.selected_range);
+    }
     this.renderStats();
     this.renderOverviewState();
     this.renderDiff(!preserveView);
@@ -1586,9 +1594,18 @@ class ReviewPanel {
       button.setAttribute("aria-expanded", String(!popover.hidden));
     });
     popover?.addEventListener("click", (event) => event.stopPropagation());
+    for (const button of this.root.querySelectorAll<HTMLElement>("[data-diff-style]")) {
+      button.addEventListener("click", () => {
+        const select = this.root.querySelector<HTMLSelectElement>("[data-setting=diffStyle]");
+        if (!select || select.value === button.dataset.diffStyle) return;
+        select.value = button.dataset.diffStyle!;
+        select.dispatchEvent(new Event("change"));
+      });
+    }
     for (const control of this.root.querySelectorAll<HTMLInputElement | HTMLSelectElement>("[data-setting]")) {
       control.addEventListener("change", () => {
         this.readSettingsControls();
+        this.syncSettingsControls();
         saveReviewSettings(window.localStorage, this.settings, (cookie) => {
           document.cookie = cookie;
         });
@@ -1604,6 +1621,9 @@ class ReviewPanel {
     const lineNumbers = this.root.querySelector<HTMLInputElement>("[data-setting=lineNumbers]");
     if (theme) theme.value = this.settings.syntaxTheme;
     if (layout) layout.value = this.settings.diffStyle;
+    for (const button of this.root.querySelectorAll<HTMLElement>("[data-diff-style]")) {
+      button.setAttribute("aria-pressed", String(button.dataset.diffStyle === this.settings.diffStyle));
+    }
     if (wrap) wrap.checked = this.settings.wrapLines;
     if (lineNumbers) lineNumbers.checked = this.settings.lineNumbers;
   }

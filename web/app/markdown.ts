@@ -15,6 +15,11 @@ renderer.link = function ({ href, title, tokens }) {
   return `<a href="${escapeHtml(safeHref)}"${titleAttribute} target="_blank" rel="noreferrer">${label}</a>`;
 };
 
+renderer.image = ({ href, title, text }) => {
+  const titleAttribute = title ? ` title="${escapeHtml(title)}"` : "";
+  return `<img src="${escapeHtml(href)}" alt="${escapeHtml(text)}"${titleAttribute}>`;
+};
+
 const markdown = new Marked({ breaks: true, gfm: true, renderer });
 const themes: DiffsThemeNames[] = [
   "pierre-light", "pierre-light-soft", "pierre-dark", "pierre-dark-soft",
@@ -36,12 +41,25 @@ export async function renderMarkdown(
   container: HTMLElement,
   source: string,
   themeName: Exclude<SyntaxTheme, "system">,
-  { highlight = true, placeholder = "*Nothing to preview yet.*" }: { highlight?: boolean; placeholder?: string } = {},
+  { highlight = true, placeholder = "*Nothing to preview yet.*", imageSource }: {
+    highlight?: boolean;
+    placeholder?: string;
+    /** Maps an image destination to a URL the page may load, or null to show only its alt text. */
+    imageSource?: (destination: string) => string | null;
+  } = {},
 ) {
   const template = document.createElement("template");
   template.innerHTML = markdownHtml(source || placeholder);
-  sanitize(template.content);
+  sanitize(template.content, imageSource);
   container.replaceChildren(template.content);
+  for (const image of container.querySelectorAll("img")) {
+    image.addEventListener("error", () => {
+      const missing = document.createElement("span");
+      missing.className = "image-missing";
+      missing.textContent = image.alt ? `Image not available: ${image.alt}` : "Image not available";
+      image.replaceWith(missing);
+    }, { once: true });
+  }
   if (!highlight) return;
 
   const codeBlocks = [...container.querySelectorAll<HTMLElement>("pre > code")];
@@ -68,12 +86,27 @@ export async function renderMarkdown(
   }));
 }
 
-function sanitize(fragment: DocumentFragment) {
+function sanitize(fragment: DocumentFragment, imageSource?: (destination: string) => string | null) {
   const allowed = new Set([
     "A", "BLOCKQUOTE", "BR", "CODE", "DEL", "EM", "H1", "H2", "H3", "H4", "H5", "H6",
     "HR", "LI", "OL", "P", "PRE", "STRONG", "TABLE", "TBODY", "TD", "TH", "THEAD", "TR", "UL",
   ]);
   for (const element of [...fragment.querySelectorAll<HTMLElement>("*")]) {
+    if (element.tagName === "IMG") {
+      const source = imageSource?.(element.getAttribute("src") ?? "");
+      if (!source) {
+        element.replaceWith(document.createTextNode(element.getAttribute("alt") ?? ""));
+        continue;
+      }
+      const alt = element.getAttribute("alt") ?? "";
+      const title = element.getAttribute("title");
+      for (const attribute of [...element.attributes]) element.removeAttribute(attribute.name);
+      element.setAttribute("src", source);
+      element.setAttribute("alt", alt);
+      element.setAttribute("loading", "lazy");
+      if (title) element.setAttribute("title", title);
+      continue;
+    }
     if (!allowed.has(element.tagName)) {
       element.replaceWith(document.createTextNode(element.textContent ?? ""));
       continue;
