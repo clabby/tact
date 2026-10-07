@@ -3,7 +3,7 @@
 mod agent_events;
 mod clipboard;
 mod components;
-mod context;
+pub(crate) mod context;
 mod editor;
 mod format;
 mod handoff_controller;

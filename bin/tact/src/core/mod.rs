@@ -9,6 +9,7 @@ mod mixed_provider_tests;
 mod openai_tests;
 #[cfg(feature = "harbor-evals")]
 mod orchestration;
+pub(crate) mod subagent_roster;
 
 use crate::{
     app::{

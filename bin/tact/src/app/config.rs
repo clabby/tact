@@ -13,12 +13,13 @@ use nanocodex::{
     HarnessModel as Model, Model as CodexModel, Thinking, oai::transport::ResponsesTransport,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     env,
     ffi::OsString,
     fmt, fs,
-    io::{ErrorKind, Write},
+    io::{self, ErrorKind, Write},
     net::{IpAddr, Ipv4Addr},
     num::{NonZeroU16, NonZeroUsize},
     path::{Path, PathBuf},
@@ -348,6 +349,37 @@ struct ReloadSource {
 pub(crate) struct ConfigReload {
     config: Config,
     workspace_changed: bool,
+}
+
+/// The configuration file as a remote editor sees it.
+#[derive(Debug, Eq, PartialEq, Serialize)]
+pub(crate) struct ConfigDocument {
+    pub(crate) path: PathBuf,
+    /// The file's text; empty when the file does not exist yet.
+    pub(crate) text: String,
+    /// A digest of `text`. A write must name the revision it replaces so it cannot silently
+    /// discard a concurrent edit.
+    pub(crate) revision: String,
+}
+
+impl ConfigDocument {
+    pub(crate) fn read(path: &Path) -> io::Result<Self> {
+        let text = match fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == ErrorKind::NotFound => String::new(),
+            Err(error) => return Err(error),
+        };
+        Ok(Self {
+            path: path.to_path_buf(),
+            revision: Self::revision_of(&text),
+            text,
+        })
+    }
+
+    pub(crate) fn revision_of(text: &str) -> String {
+        let digest = Sha256::digest(text.as_bytes());
+        digest.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
 }
 
 #[derive(Default, Deserialize)]

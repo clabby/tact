@@ -9,7 +9,8 @@ use nanocodex::oai::{
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum ContinuationMode {
     FullContext,
     PreviousResponse,
@@ -24,7 +25,7 @@ pub(crate) struct ContextBudget {
     pub(crate) window_tokens: u64,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
 pub(crate) struct TokenUsage {
     pub(crate) input: u64,
     pub(crate) cached_input: u64,
@@ -33,7 +34,7 @@ pub(crate) struct TokenUsage {
     pub(crate) total: u64,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub(crate) struct CompactionDiagnostics {
     pub(crate) trigger: CompactionTrigger,
     pub(crate) started_at_unix_ms: u64,
@@ -42,14 +43,15 @@ pub(crate) struct CompactionDiagnostics {
     pub(crate) after_tokens: Option<u64>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum CompactionTrigger {
     Automatic,
     Manual,
 }
 
 /// A count-only projection that never retains request content or opaque identifiers.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub(crate) struct ContextDiagnostics {
     pub(crate) model_window_tokens: u64,
     pub(crate) auto_compact_token_limit: Option<u64>,
@@ -60,7 +62,9 @@ pub(crate) struct ContextDiagnostics {
     pub(crate) compactions_started: u64,
     pub(crate) compactions_completed: u64,
     pub(crate) last_compaction: Option<CompactionDiagnostics>,
+    #[serde(skip)]
     awaiting_post_compaction_usage: bool,
+    #[serde(skip)]
     manual_compaction: bool,
 }
 

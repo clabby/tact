@@ -41,8 +41,9 @@ Static assets are public. Every `/api/*` route except `POST /api/login` requires
   must have it match `Host`. The SSE request is checked the same way. No CORS headers.
 - Errors are JSON `{ "code": string, "message": string }`. Codes: `unauthorized` (401),
   `invalid_request` (400), `turn_running`, `queue_not_empty`, `nothing_running`, `draft_changed`,
-  `session_locked`, `unknown_session`, `too_many_sessions`, `not_available_remotely` (409/404),
-  `failed` (500), plus the review codes in `web/app/protocol.ts`.
+  `session_locked`, `unknown_session`, `too_many_sessions`, `not_available_remotely`, `stale`,
+  `disabled` (409/404), `failed` (500), plus the review codes in `web/app/protocol.ts`. Commands
+  and queries share one mapping (`bridge::CommandError::code`).
 
 ## Reads
 
@@ -50,9 +51,9 @@ Static assets are public. Every `/api/*` route except `POST /api/login` requires
 | :-- | :-- |
 | `GET /api/instance` | `{ protocol_version, workspace, repository, live, running }` |
 | `GET /api/instances` | `{ instances: [{ pid, port, workspace, live, running, current }] }` (siblings that answer) |
-| `GET /api/models` | `{ models: [{ id, label }], efforts: string[] }` |
-| `GET /api/history?q=&cursor=` | `{ sessions: [{ session_id, started_at_unix_ms, model, preview, workspace }], next_cursor }` persisted, not live |
 | `GET /api/sessions/{id}/entries/{n}` | `ToolDetail` of one entry (full arguments, result, metadata, each string truncated at 256 KiB) |
+| `GET /api/sessions/{id}/agents/{agent}/entries` | `{ entries: WireEntry[] }`, the projected transcript of one subagent |
+| `GET /api/sessions/{id}/agents/{agent}/entries/{n}` | `ToolDetail` of one subagent entry |
 | `GET /api/stream` | Server-Sent Events, below |
 
 ## Stream
@@ -72,7 +73,10 @@ the TUI's frame interval.
 | `status` | `{ session, status: TransientStatus \| null }` |
 | `queue` | `{ session, items: QueuedPrompt[] }` |
 | `draft` | `{ session, rev, text, origin }`, origin is `"terminal"` or `"web:<client>"` |
-| `settings` | `{ session, model, effort, fast_mode }` |
+| `settings` | `{ session, model, effort, reasoning_mode, speed }` |
+| `context` | `{ session, active_tokens, window_tokens }`, the composer's context budget |
+| `subagents` | `{ session } & SubagentRoster`, coalesced to the frame interval |
+| `subagent_entry` | `{ session, agent, entry: WireEntry }` for the active session; same upsert rule as `entry` |
 | `closed` | `{ session }` |
 | `workspace` | `{ version }` the working tree changed; marks the diff stale |
 
@@ -85,10 +89,17 @@ type SessionSummary = {
   last_activity_unix_ms: number;
 };
 type SessionSnapshot = {
-  session: string; title: string; model: string; effort: string; fast_mode: boolean;
+  session: string; title: string; model: string; effort: Effort;
+  reasoning_mode: "standard" | "pro"; speed: Speed;
   entries: WireEntry[]; status: TransientStatus | null; queue: QueuedPrompt[];
-  draft: { rev: number; text: string }; running: boolean;
+  draft: Draft; running: boolean;
+  context: { active_tokens: number; window_tokens: number } | null;
+  subagents: SubagentRoster;
 };
+type Effort = "low" | "medium" | "high" | "xhigh" | "max";
+type Speed = "standard" | "fast" | "ultrafast";
+// An image belongs to the draft while its marker (e.g. "[Image #2]") occurs in `text`.
+type Draft = { rev: number; text: string; images: { marker: string; data_url: string }[] };
 type QueuedPrompt = { id: number; text: string; steering: boolean };
 type TransientStatus =
   | { kind: "thinking" | "responding" | "warming" | "waiting_for_background_work" | "compacting" | "connecting" | "reconnecting" }
@@ -119,9 +130,11 @@ Clients must render unknown entry kinds as a muted generic row.
 
 ## Commands
 
-`POST /api/cmd/<name>` with JSON, `X-Tact: 1`, always including `client` (a random per-tab integer).
-Success is 200 `{}` (`open_session` returns `{ session }`). The command is acknowledged only after
-the loop applied it.
+`POST /api/cmd` with `X-Tact: 1` and the body `{ client, cmd: <name>, args: { ...body } }`
+(`client` is a random per-tab integer; commands without a body omit `args`). The body deserializes
+straight into `bridge::Command`; there is no per-command route. Success is 200 `{}`
+(`open_session` returns `{ session }`). The command is acknowledged only after the loop applied it.
+`open_session` takes its variant as `args`, for example `{ cmd: "open_session", args: { new: {} } }`.
 
 | Command | Body | Keyboard equivalent | Refused |
 | :-- | :-- | :-- | :-- |
@@ -130,12 +143,143 @@ the loop applied it.
 | `interrupt` | `session` | cancel-all | `nothing_running` |
 | `steer` / `dequeue` | `session, queue_id` | queue panel | `nothing_running` / `unknown_session` for a consumed item |
 | `compact` | `session` | Actions: Compact | `turn_running`, `queue_not_empty` |
-| `set_model` / `set_effort` / `set_fast` | `session, model\|effort\|enabled` | pickers | same as TUI |
+| `set_model` / `set_effort` / `set_reasoning_mode` / `set_speed` | `session, model\|effort\|mode\|speed` | pickers | see Feature parity |
 | `activate` | `session` | focus / Sessions action | `unknown_session` |
 | `open_session` | `{ new: { model? } }` \| `{ resume: { session } }` \| `{ fork: { session } }` | Sessions action | `too_many_sessions`, `unknown_session`, `session_locked`, `turn_running` (fork) |
 | `close_session` | `session, force?` | close pane | `turn_running` without `force` |
 
 Opening or activating a session from either window makes it the shared active session.
+
+## Feature parity
+
+Everything the terminal can do is reachable from the web through three generic paths, so a new
+feature is an enum variant plus its loop-side handler and never a new route:
+
+- **Commands** (`bridge::Command`, `POST /api/cmd`) change state and obey the same preconditions
+  as the keypress, evaluated by the loop on the target pane.
+- **Queries** (`bridge::Query`, `POST /api/query`) read data on demand. The body is
+  `{ query: <name>, args?: { ... } }` with `X-Tact: 1`; the reply is the bare payload below.
+  The server forwards every query to the loop, which answers from state it owns or by calling,
+  off the loop thread, the same UI-agnostic function the terminal picker uses. Refusals use the
+  common error codes.
+- **Publications** (`bridge::Publication`, stream events) carry state that changes over time.
+
+Data is computed once, in modules both front-ends call: `search` (fuzzy ranking, workspace
+paths), `core::extensions::SkillMatches`, `tui::session` (history pages, recent prompts),
+`tui::context` (diagnostics), `core::subagent_roster` (the subagent tree), `app::model` (the model
+catalog and its couplings), and `app::config::ConfigDocument`. Ranking is identical in both
+front-ends: best match first, ties in source order.
+
+### Inventory
+
+| Terminal feature | Web |
+| :-- | :-- |
+| Change effort | `set_effort` command; choices from the `models` query |
+| Pro reasoning (`p` in the effort dial) | `set_reasoning_mode` |
+| Speed tiers | `set_speed`; `effective_speeds` in `models` shows the tier a model actually runs |
+| Select model | `set_model`, before the session's first turn |
+| New / resume / fork / switch / close session | `open_session`, `activate`, `close_session`; `history` query |
+| Compact | `compact` |
+| Reflection | `reflect` |
+| Prepare handoff | `handoff` |
+| Reload config | `reload_config` |
+| Edit config ($EDITOR) | `config` query, then `write_config` from an in-browser editor |
+| Memory browser | `memories` query, `delete_memory`; sort and filter are view state |
+| Subagents overlay | `subagents` event and snapshot field; transcripts via `GET .../agents/{agent}/entries` and `subagent_entry` events |
+| Max subagents (tree overlay) | `set_max_subagents` |
+| Continue after a subagent completes | automatic in the loop; nothing to send |
+| Debug context | `context_diagnostics` query |
+| Context budget in the composer | `context` event and snapshot field |
+| `@` file mention | `files` query; inserting the path is a local draft edit |
+| `@@` session mention | `history` query; inserting `@@<id>` is a local draft edit |
+| `$` skill mention | `skills` query |
+| Recent prompts picker | `recent_prompts` query |
+| Paste image | `attach_image`; images are part of the shared draft |
+| `!` shell command | `submit` of a draft starting with `!`, exactly like Enter |
+| Queue: steer / edit / delete | `steer`, `edit_queued`, `dequeue` |
+| Interrupt (cancel-all) | `interrupt`; also cancels a pending compaction or handoff |
+| Theme | web-local view state (light/dark), never synchronized |
+| Keybindings | the web's own shortcut help |
+| Copy | browser clipboard from the rendered transcript |
+| Open draft in $EDITOR | not offered (`not_available_remotely` if attempted through `submit`) |
+| Open in browser / Copy web link | terminal-only by nature |
+
+### Commands
+
+In addition to the commands above:
+
+| Command | Args | Refused |
+| :-- | :-- | :-- |
+| `set_reasoning_mode` | `session, mode: "standard" \| "pro"` | `invalid_request` if the model does not list the mode |
+| `set_speed` | `session, speed: Speed` | never; the model may run a lower tier |
+| `edit_queued` | `session, queue_id, text` | `unknown_session` for a consumed item |
+| `attach_image` | `session, data_url` (a `data:image/...;base64` URL) | `invalid_request` for a non-image |
+| `reflect` | `session, instructions?` | `turn_running`, `queue_not_empty` |
+| `handoff` | `session` | `turn_running`, `queue_not_empty` |
+| `reload_config` | none | `failed` with the load error |
+| `write_config` | `text, revision` | `stale` if the file changed since `config`; `invalid_request` with the parse error; the file is unchanged on refusal |
+| `delete_memory` | `key: { id, version, namespace? }` | `disabled`; `not_available_remotely` for a read-only remote backend; `failed` |
+| `set_max_subagents` | `limit` (at least 1) | `invalid_request` |
+
+Settings couplings come from the `models` catalog and are enforced by the loop: the model is
+selectable only before the first turn; `effort_fixed_after_start` models refuse `set_effort`
+once a turn started (`invalid_request`). A session has started when its snapshot has entries.
+`attach_image` appends a new marker to the draft text and publishes a `draft` event. A
+`set_draft` whose text no longer contains a marker drops that image.
+
+### Queries
+
+| Query | Args | Reply |
+| :-- | :-- | :-- |
+| `models` | none | `ModelCatalog` |
+| `history` | `query?, cursor?` | `{ sessions: SessionSummary[], next_cursor: string \| null }` (persisted sessions of this workspace, newest first, pages of 50) |
+| `files` | `query?` | `{ paths: string[] }` (at most 50; directories end in `/`) |
+| `skills` | `query?` | `{ skills: { name, description }[] }` |
+| `recent_prompts` | `session, scope?: "global" \| "current_session", query?` | `{ prompts: { text, recorded_at_unix_ms, session_id, workspace }[] }` |
+| `context_diagnostics` | `session` | `ContextDiagnostics` |
+| `memories` | none | `{ access: { source, namespace, role }, records: MemoryRecord[] }`; `disabled` when memory is off |
+| `config` | none | `{ path, text, revision }` |
+
+```ts
+type ModelCatalog = {
+  models: {
+    id: string; label: string; provider: "openai" | "anthropic";
+    reasoning_modes: ("standard" | "pro")[];
+    effective_speeds: Speed[];          // indexed like `speeds`
+    effort_fixed_after_start: boolean;
+  }[];
+  efforts: Effort[];
+  speeds: Speed[];                      // increasing
+};
+type PersistedSession = {
+  session_id: string; started_at_unix_ms: number; model: string; effort: Effort;
+  reasoning_mode: "standard" | "pro"; workspace: string; preview: string;
+};
+type ContextDiagnostics = {
+  model_window_tokens: number; auto_compact_token_limit: number | null;
+  active_tokens: number | null;
+  usage: { input: number; cached_input: number; uncached_input: number; output: number; total: number } | null;
+  continuation: "full_context" | "previous_response" | null; prompt_cache: boolean | null;
+  compactions_started: number; compactions_completed: number;
+  last_compaction: { trigger: "automatic" | "manual"; started_at_unix_ms: number;
+    completed_at_unix_ms: number | null; before_tokens: number | null; after_tokens: number | null } | null;
+};
+type MemoryRecord = {
+  key: { id: number; version: number; namespace?: string }; content: string;
+  created_at_ms: number; updated_at_ms: number; last_scanned_at_ms: number | null;
+  scan_count: number; last_used_at_ms: number | null; use_count: number;
+  probation_until_ms: number | null;
+};
+type SubagentRoster = {
+  max_subagents: number;
+  agents: {                             // arrival order; an unlisted parent makes a root
+    id: number; parent: number | null; session_id: string; role: string; task: string;
+    model: string; thinking: Effort;
+    status: { state: "pending" | "running" | "interrupted" | "closing" | "closed" }
+      | { state: "completed"; output: unknown } | { state: "failed"; error: string };
+  }[];
+};
+```
 
 ## Review (diff and overview)
 
