@@ -1,5 +1,5 @@
 import { activeIndex, lineLength, MAX_LINES, promptLabel, windowFor } from "./prompt-rail";
-import type { TranscriptData } from "./store";
+import type { TranscriptData } from "../core/store";
 
 type Prompt = { id: number; text: string };
 

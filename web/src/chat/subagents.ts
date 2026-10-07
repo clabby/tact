@@ -1,14 +1,14 @@
-import { describeError, type ApiClient } from "./api-client";
+import { describeError, type ApiClient } from "../core/api-client";
 import { isActive, layoutAgents, NODE_HEIGHT, NODE_WIDTH } from "./agent-graph";
 import { Transcript } from "./chat";
-import { createSphere } from "./dot-sphere";
-import { modelColor } from "./format";
-import { glyph } from "./glyphs";
-import { openSheet } from "./sheet";
-import { transcriptData, upsert, type SessionView } from "./store";
-import type { Theme } from "./theme";
-import { toast } from "./toast";
-import type { Subagent } from "./wire";
+import { createSphere } from "../ui/dot-sphere";
+import { modelColor } from "../core/format";
+import { glyph } from "../ui/glyphs";
+import { openSheet } from "../ui/sheet";
+import { transcriptData, upsert, type SessionView } from "../core/store";
+import type { Theme } from "../core/theme";
+import { toast } from "../ui/toast";
+import type { Subagent } from "../core/wire";
 
 /** A live subagent viewer; the app forwards roster, entry, and theme changes. */
 export type SubagentsView = {

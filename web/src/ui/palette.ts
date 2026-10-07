@@ -1,4 +1,4 @@
-import { describeError } from "./api-client";
+import { describeError } from "../core/api-client";
 import { glyph, type GlyphName } from "./glyphs";
 
 export type PaletteCommand = {

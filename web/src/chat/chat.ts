@@ -1,14 +1,14 @@
 import { FileDiff } from "@pierre/diffs";
-import { ApiError, errorMessage } from "./api-client";
-import { firstLine, formatDuration } from "./format";
-import { glyph } from "./glyphs";
+import { ApiError, errorMessage } from "../core/api-client";
+import { firstLine, formatDuration } from "../core/format";
+import { glyph } from "../ui/glyphs";
 import { openLightbox } from "./lightbox";
-import { renderMarkdown } from "./markdown";
-import type { TranscriptData } from "./store";
-import type { Theme } from "./theme";
+import { renderMarkdown } from "../core/markdown";
+import type { TranscriptData } from "../core/store";
+import type { Theme } from "../core/theme";
 import { promptParts } from "./user-prompt";
 import { presentDetail, TOOL_DEFAULT_OPEN, TOOL_LABELS } from "./tool-detail";
-import type { ToolDetail, WireEntry } from "./wire";
+import type { ToolDetail, WireEntry } from "../core/wire";
 
 type Rendered = { element: HTMLElement; revision: number };
 

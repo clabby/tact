@@ -1,4 +1,4 @@
-import type { SessionSummary } from "./wire";
+import type { SessionSummary } from "../core/wire";
 
 /** Live sessions by recent activity, with pinned ones kept above the rest. */
 export function orderSessions(live: readonly SessionSummary[], pinned: ReadonlySet<string>): SessionSummary[] {

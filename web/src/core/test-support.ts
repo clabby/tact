@@ -1,4 +1,4 @@
-import type { Timers } from "./draft";
+import type { Timers } from "../chat/draft";
 
 /** Deterministic timers for tests: callbacks run only when the test advances the clock. */
 export class ManualTimers implements Timers {

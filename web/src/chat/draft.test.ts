@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { DraftSync } from "./draft";
-import { ManualTimers, settle } from "./test-support";
+import { ManualTimers, settle } from "../core/test-support";
 
 const ORIGIN = "web:1";
 

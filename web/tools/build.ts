@@ -1,9 +1,9 @@
 import { mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
-import { overviewFrameDocument } from "./overview";
+import { overviewFrameDocument } from "../src/review/overview";
 import { reviewEntrypoints, reviewScriptAssets } from "./build-config";
 
-const outputDirectory = join(import.meta.dir, "dist");
+const outputDirectory = join(import.meta.dir, "..", "dist");
 await rm(outputDirectory, { recursive: true, force: true });
 await mkdir(outputDirectory, { recursive: true });
 
@@ -22,16 +22,17 @@ if (!result.success) {
 await Bun.write(join(outputDirectory, "overview-frame.html"), overviewFrameDocument());
 await Bun.write(
   join(outputDirectory, "index.html"),
-  Bun.file(join(import.meta.dir, "index.html")),
+  Bun.file(join(import.meta.dir, "..", "index.html")),
 );
 await Bun.write(
   join(outputDirectory, "LICENSE.md"),
-  Bun.file(join(import.meta.dir, "..", "LICENSE.md")),
+  Bun.file(join(import.meta.dir, "..", "..", "LICENSE.md")),
 );
 await Bun.write(
   join(outputDirectory, "FONT-AWESOME-LICENSE.txt"),
   Bun.file(join(
     import.meta.dir,
+    "..",
     "node_modules",
     "@fortawesome",
     "free-solid-svg-icons",
@@ -40,7 +41,7 @@ await Bun.write(
 );
 await Bun.write(
   join(outputDirectory, "favicon.svg"),
-  Bun.file(join(import.meta.dir, "..", "assets", "favicon.svg")),
+  Bun.file(join(import.meta.dir, "..", "..", "assets", "favicon.svg")),
 );
 
 const contentTypes: Record<string, string> = {

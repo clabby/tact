@@ -1,4 +1,4 @@
-import type { Subagent } from "./wire";
+import type { Subagent } from "../core/wire";
 
 export const NODE_WIDTH = 184;
 export const NODE_HEIGHT = 68;

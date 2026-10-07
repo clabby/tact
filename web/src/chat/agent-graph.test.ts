@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { isActive, layoutAgents } from "./agent-graph";
-import type { Subagent } from "./wire";
+import type { Subagent } from "../core/wire";
 
 const agent = (id: number, parent: number | null, state: Subagent["status"]["state"] = "running"): Subagent => ({
   id, parent, session_id: `s${id}`, role: `agent ${id}`, task: "", model: "sol", thinking: "high",

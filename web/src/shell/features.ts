@@ -2,14 +2,14 @@
 // memory, the configuration editor, reflection. Each reads through the
 // generic query route and acts through the generic command route.
 
-import { ApiError, describeError, type ApiClient } from "./api-client";
-import { formatAge, formatTokens, modelColor } from "./format";
-import { glyph } from "./glyphs";
+import { ApiError, describeError, type ApiClient } from "../core/api-client";
+import { formatAge, formatTokens, modelColor } from "../core/format";
+import { glyph } from "../ui/glyphs";
 import { qrSvg } from "./qr";
 import { shareableOrigin, signInLink } from "./phone-link";
-import { openSheet, sheetMessage } from "./sheet";
-import { toast } from "./toast";
-import type { ContextDiagnostics, ListedMemory } from "./wire";
+import { openSheet, sheetMessage } from "../ui/sheet";
+import { toast } from "../ui/toast";
+import type { ContextDiagnostics, ListedMemory } from "../core/wire";
 
 function rows(container: HTMLElement, entries: [string, string][]) {
   const list = document.createElement("dl");

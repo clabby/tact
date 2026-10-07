@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { parsePatchFiles } from "@pierre/diffs";
 import { reviewBootstrap, reviewFixtures } from "./dev-fixture";
-import { rangeKey } from "./range-selection";
+import { rangeKey } from "../src/review/range-selection";
 
 test("standalone review fixtures contain valid patches", () => {
   for (const fixture of Object.values(reviewFixtures)) {

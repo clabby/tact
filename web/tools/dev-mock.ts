@@ -26,7 +26,7 @@ import type {
   ToolDetail,
   TransientStatus,
   WireEntry,
-} from "./wire";
+} from "../src/core/wire";
 
 type EntryBody = WireEntry extends infer Entry
   ? Entry extends WireEntry ? Omit<Entry, "id" | "revision" | "parent"> : never

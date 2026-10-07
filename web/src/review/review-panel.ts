@@ -22,7 +22,7 @@ import {
   treeIcons,
   type FormattingIconName,
 } from "./icons";
-import { renderMarkdown } from "./markdown";
+import { renderMarkdown } from "../core/markdown";
 import {
   activatePage,
   allQuestions,

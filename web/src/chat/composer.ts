@@ -1,15 +1,15 @@
-import { describeError, type ApiClient } from "./api-client";
+import { describeError, type ApiClient } from "../core/api-client";
 import { isActive } from "./agent-graph";
-import { createSphere } from "./dot-sphere";
+import { createSphere } from "../ui/dot-sphere";
 import { DraftSync } from "./draft";
-import { effortColor, formatTokens, inputBlocked, modelColor, statusLabel } from "./format";
-import { glyph } from "./glyphs";
+import { effortColor, formatTokens, inputBlocked, modelColor, statusLabel } from "../core/format";
+import { glyph } from "../ui/glyphs";
 import { completeMention, findMention, type Mention } from "./mentions";
-import { openMenu } from "./menu";
-import { effectiveSpeed, speedChoices } from "./speed";
-import { availableFirst, type PaletteCommand } from "./palette";
-import type { SessionView } from "./store";
-import type { CommandName, Commands, ModelCatalog, ModelInfo } from "./wire";
+import { openMenu } from "../ui/menu";
+import { effectiveSpeed, speedChoices } from "../core/speed";
+import { availableFirst, type PaletteCommand } from "../ui/palette";
+import type { SessionView } from "../core/store";
+import type { CommandName, Commands, ModelCatalog, ModelInfo } from "../core/wire";
 
 export type ComposerHost = {
   api: ApiClient;

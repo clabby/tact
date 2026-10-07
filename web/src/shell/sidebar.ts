@@ -1,12 +1,12 @@
-import { describeError, type ApiClient } from "./api-client";
-import { formatAge, modelColor } from "./format";
-import { glyph } from "./glyphs";
-import { createSphere } from "./dot-sphere";
-import { openMenu } from "./menu";
+import { describeError, type ApiClient } from "../core/api-client";
+import { formatAge, modelColor } from "../core/format";
+import { glyph } from "../ui/glyphs";
+import { createSphere } from "../ui/dot-sphere";
+import { openMenu } from "../ui/menu";
 import { orderSessions } from "./session-pins";
-import type { Connection } from "./store";
-import { toast } from "./toast";
-import type { ModelCatalog, OpenSpec, PersistedSession, SessionSummary, SiblingInstance } from "./wire";
+import type { Connection } from "../core/store";
+import { toast } from "../ui/toast";
+import type { ModelCatalog, OpenSpec, PersistedSession, SessionSummary, SiblingInstance } from "../core/wire";
 
 const PINS_KEY = "tact.web.pinned-sessions";
 const isMac = /Mac|iPhone|iPad/.test(navigator.platform);

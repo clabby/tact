@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { orderSessions } from "./session-pins";
-import type { SessionSummary } from "./wire";
+import type { SessionSummary } from "../core/wire";
 
 const session = (id: string, activity: number) => ({ id, last_activity_unix_ms: activity }) as SessionSummary;
 

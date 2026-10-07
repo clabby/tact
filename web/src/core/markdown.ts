@@ -4,7 +4,7 @@ import {
   type SupportedLanguages,
 } from "@pierre/diffs";
 import { Marked, Renderer } from "marked";
-import type { SyntaxTheme } from "./review-settings";
+import type { SyntaxTheme } from "../review/review-settings";
 
 const renderer = new Renderer();
 renderer.html = ({ text }) => escapeHtml(text);

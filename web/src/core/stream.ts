@@ -1,4 +1,4 @@
-import { realTimers, type Timers } from "./draft";
+import { realTimers, type Timers } from "../chat/draft";
 import type { Connection } from "./store";
 import { STREAM_EVENTS, type StreamEvent } from "./wire";
 

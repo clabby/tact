@@ -1,4 +1,4 @@
-import type { DraftOrigin } from "./wire";
+import type { DraftOrigin } from "../core/wire";
 
 export type Timers = {
   set(callback: () => void, ms: number): unknown;

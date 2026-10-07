@@ -1,9 +1,10 @@
 import { join } from "node:path";
 
 export const reviewEntrypoints = [
-  join(import.meta.dir, "app.ts"),
+  join(import.meta.dir, "..", "src", "app.ts"),
   join(
     import.meta.dir,
+    "..",
     "node_modules",
     "@pierre",
     "diffs",

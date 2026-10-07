@@ -1,9 +1,9 @@
 import { FileDiff } from "@pierre/diffs";
-import { glyph } from "./glyphs";
-import { renderMarkdown } from "./markdown";
+import { glyph } from "../ui/glyphs";
+import { renderMarkdown } from "../core/markdown";
 import { parseApplyPatch, patchFileDiff, patchStats } from "./patch";
-import type { Theme } from "./theme";
-import type { ToolDetail } from "./wire";
+import type { Theme } from "../core/theme";
+import type { ToolDetail } from "../core/wire";
 
 /** Height of a patch before "Show full diff" is needed, in pixels. */
 export const PATCH_PREVIEW_HEIGHT = 260;

@@ -1,4 +1,4 @@
-import { glyph } from "./glyphs";
+import { glyph } from "../ui/glyphs";
 
 /**
  * Shows an image large over the page. A click on the backdrop or the close button, or Escape,

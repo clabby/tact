@@ -1,0 +1,12 @@
+{
+  "compilerOptions": {
+    "noEmit": true,
+    "skipLibCheck": true,
+    "module": "Preserve",
+    "moduleResolution": "bundler",
+    "target": "ES2022",
+    "types": ["bun"],
+    "lib": ["ES2022", "DOM", "DOM.Iterable"]
+  },
+  "include": ["src", "tools"]
+}

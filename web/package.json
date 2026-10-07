@@ -3,10 +3,10 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "bun run build.ts",
-    "dev": "bun run dev.ts",
+    "build": "bun run tools/build.ts",
+    "dev": "bun run tools/dev.ts",
     "test": "bun test",
-    "typecheck": "tsc --noEmit --skipLibCheck --module Preserve --moduleResolution bundler --target ES2022 --types bun --lib ES2022,DOM,DOM.Iterable *.ts"
+    "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {
     "@fortawesome/fontawesome-svg-core": "7.3.1",

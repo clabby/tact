@@ -8,14 +8,14 @@ import { join } from "node:path";
 import { reviewEntrypoints, reviewScriptAssets } from "./build-config";
 import { overviewFixtures, reviewBootstrap, reviewFixtures } from "./dev-fixture";
 import { MockRefusal, MockTact } from "./dev-mock";
-import { overviewFrameDocument } from "./overview";
-import type { QuestionRequest, ReviewDecision, ReviewPage, StoredOverview, StoredQuestionThread } from "./protocol";
-import { rangeKey, type ReviewRange } from "./range-selection";
-import type { CommandName, QueryName } from "./wire";
+import { overviewFrameDocument } from "../src/review/overview";
+import type { QuestionRequest, ReviewDecision, ReviewPage, StoredOverview, StoredQuestionThread } from "../src/review/protocol";
+import { rangeKey, type ReviewRange } from "../src/review/range-selection";
+import type { CommandName, QueryName } from "../src/core/wire";
 
 const token = process.env.TACT_DEV_TOKEN ?? "dev";
 const port = Number(process.env.PORT ?? 4173);
-const outputDirectory = join(import.meta.dir, ".dev");
+const outputDirectory = join(import.meta.dir, "..", ".dev");
 const staticFiles = new Set(["index.html", "overview-frame.html", "app.css", "favicon.svg", ...reviewScriptAssets]);
 
 async function buildAssets() {
@@ -31,8 +31,8 @@ async function buildAssets() {
     return false;
   }
   await Bun.write(join(outputDirectory, "overview-frame.html"), overviewFrameDocument());
-  await Bun.write(join(outputDirectory, "favicon.svg"), Bun.file(join(import.meta.dir, "..", "assets", "favicon.svg")));
-  const html = await Bun.file(join(import.meta.dir, "index.html")).text();
+  await Bun.write(join(outputDirectory, "favicon.svg"), Bun.file(join(import.meta.dir, "..", "..", "assets", "favicon.svg")));
+  const html = await Bun.file(join(import.meta.dir, "..", "index.html")).text();
   await Bun.write(join(outputDirectory, "index.html"), html.replace(
     "</body>",
     "<script>new WebSocket(`ws://${location.host}/__reload`).onmessage=()=>location.reload()</script></body>",
@@ -270,7 +270,7 @@ console.log(`Tact web (mock): http://localhost:${server.port}/#k=${token}`);
 console.log("Type a line and press Enter to set the active draft as the terminal.");
 
 let rebuildTimer: ReturnType<typeof setTimeout> | undefined;
-watch(import.meta.dir, { recursive: true }, (_event, filename) => {
+watch(join(import.meta.dir, ".."), { recursive: true }, (_event, filename) => {
   if (!filename || /^(\.dev|dist|node_modules)\b/.test(filename)) return;
   clearTimeout(rebuildTimer);
   rebuildTimer = setTimeout(async () => {
