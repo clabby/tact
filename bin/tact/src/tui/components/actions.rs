@@ -16,7 +16,7 @@ use ratatui::{
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-const ACTIONS: [Action; 17] = [
+const ACTIONS: [Action; 18] = [
     Action::Effort,
     Action::FastMode,
     Action::Theme,
@@ -34,6 +34,7 @@ const ACTIONS: [Action; 17] = [
     Action::Handoff,
     Action::Review,
     Action::Model,
+    Action::Compact,
 ];
 const KEY_BINDINGS: [(&str, &str); 3] = [("↑↓", "move"), ("enter/tab", "open"), ("esc", "close")];
 const SEARCH_LABEL: &str = "Search: ";
@@ -48,6 +49,7 @@ pub(super) struct ActionAvailability {
     pub(super) review: bool,
     pub(super) fork: bool,
     pub(super) fast_mode: bool,
+    pub(super) fast_mode_available: bool,
     pub(super) memory: bool,
     pub(super) model: bool,
 }
@@ -71,6 +73,7 @@ pub(super) enum Action {
     DebugContext,
     Copy,
     Reflection,
+    Compact,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -284,12 +287,12 @@ impl ActionsMenu {
 
     const fn is_enabled(&self, action: Action) -> bool {
         match action {
-            Action::Handoff | Action::Reflection => self.availability.new_session,
+            Action::Handoff | Action::Reflection | Action::Compact => self.availability.new_session,
             Action::Review => self.availability.review,
             Action::Subagents => true,
             Action::Effort => true,
             Action::Model => self.availability.model,
-            Action::FastMode => true,
+            Action::FastMode => self.availability.fast_mode_available,
             Action::Theme => true,
             Action::NewSession => self.availability.new_session,
             Action::ResumeSession => self.availability.new_session,
@@ -316,8 +319,14 @@ impl ActionsMenu {
             Action::Handoff if !self.availability.new_session => {
                 "Prepare handoff · finish active work first"
             }
+            Action::Compact if !self.availability.new_session => {
+                "Compact context · finish active work first"
+            }
             Action::Reflection if !self.availability.new_session => {
                 "Reflect on session · finish active work first"
+            }
+            Action::FastMode if !self.availability.fast_mode_available => {
+                "Fast mode · unavailable for this model"
             }
             Action::FastMode if self.availability.fast_mode => "Disable fast mode",
             Action::Model if !self.availability.model => "Select model · start a new session first",
@@ -349,6 +358,7 @@ impl Action {
             Self::DebugContext => "Debug context",
             Self::Copy => "Copy response",
             Self::Reflection => "Reflect on session",
+            Self::Compact => "Compact context",
         }
     }
 
@@ -368,6 +378,7 @@ impl Action {
             Self::Memory => Some("remember/forget"),
             Self::Copy => Some("copy"),
             Self::Reflection => Some("reflection"),
+            Self::Compact => Some("compact"),
             Self::Keybindings | Self::EditConfig | Self::DebugContext => None,
         }
     }
@@ -467,6 +478,7 @@ mod tests {
             review: true,
             fork: true,
             fast_mode: false,
+            fast_mode_available: true,
             memory: true,
             model: true,
         }

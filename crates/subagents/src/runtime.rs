@@ -14,12 +14,17 @@ use super::{
 };
 use futures_util::future::join_all;
 use jsonschema::Validator;
-use nanocodex::{AgentEvents, Model, Nanocodex, NanocodexError, Thinking};
+use nanocodex::{
+    AgentEvents, HarnessModel as Model, Model as CodexModel, Nanocodex, NanocodexError, Thinking,
+};
 use serde::Serialize;
 use serde_json::Value;
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex, OnceLock, Weak},
+    sync::{
+        Arc, Mutex, OnceLock, Weak,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 use thiserror::Error;
@@ -77,6 +82,7 @@ pub(crate) struct Registry {
     capacity: Capacity,
     message_lock: tokio::sync::Mutex<()>,
     agent_factory: OnceLock<AgentFactory>,
+    claude_enabled: AtomicBool,
 }
 
 /// Owns the clean-agent recipe and the settings applied to the next spawn.
@@ -167,27 +173,23 @@ impl AgentReservation {
                 }
                 parent.model
             }
-            None => caller_model
-                .parse::<Model>()
-                .map_err(NanocodexError::InvalidRequest)?,
+            None => crate::parse_model(caller_model).map_err(NanocodexError::InvalidRequest)?,
         };
-        if model_rank(model)? > model_rank(parent_model)? {
+        if matches!(
+            (parent_model, model),
+            (
+                Model::Codex(CodexModel::Luna),
+                Model::Codex(CodexModel::Sol | CodexModel::Astra)
+            ) | (
+                Model::Codex(CodexModel::Sol),
+                Model::Codex(CodexModel::Astra)
+            )
+        ) {
             return Err(NanocodexError::InvalidRequest(format!(
                 "subagent model {model} exceeds parent model {parent_model}"
             )));
         }
         Ok(())
-    }
-}
-
-fn model_rank(model: Model) -> Result<u8, NanocodexError> {
-    match model {
-        Model::Luna => Ok(0),
-        Model::Sol => Ok(1),
-        Model::Astra => Ok(2),
-        _ => Err(NanocodexError::InvalidRequest(
-            "unsupported subagent model".to_owned(),
-        )),
     }
 }
 
@@ -841,6 +843,7 @@ impl Registry {
             capacity: Capacity::new(max_concurrency),
             message_lock: tokio::sync::Mutex::new(()),
             agent_factory: OnceLock::new(),
+            claude_enabled: AtomicBool::new(false),
         }
     }
 
@@ -874,6 +877,21 @@ impl Registry {
         model: Model,
         thinking: Thinking,
     ) -> Result<(Nanocodex, AgentEvents), NanocodexError> {
+        if !crate::SUPPORTED_MODELS.contains(&model) {
+            return Err(NanocodexError::InvalidRequest(
+                "unsupported subagent model".into(),
+            ));
+        }
+        if matches!(model, Model::Claude(_)) && !self.claude_enabled() {
+            return Err(NanocodexError::InvalidRequest(
+                "Claude subagents are disabled".to_owned(),
+            ));
+        }
+        if !model.supports_thinking(thinking) {
+            return Err(NanocodexError::InvalidRequest(format!(
+                "model {model} does not support thinking {thinking}"
+            )));
+        }
         let factory = self.agent_factory.get().ok_or_else(|| {
             NanocodexError::InvalidRequest("subagent factory is not configured".to_owned())
         })?;
@@ -888,6 +906,10 @@ impl Registry {
             )));
         }
         (factory.build)(model, thinking, settings.fast_mode)
+    }
+
+    pub(super) fn claude_enabled(&self) -> bool {
+        self.claude_enabled.load(Ordering::Relaxed)
     }
 
     fn set_agent_max_thinking(&self, max_thinking: Thinking) {
@@ -1691,6 +1713,14 @@ pub struct WeakSubagents {
 }
 
 impl Subagents {
+    /// Enables Claude choices for every root and descendant sharing this registry.
+    /// Runtime admission checks the current policy even when a caller retained an older schema.
+    pub fn set_claude_enabled(&self, enabled: bool) {
+        self.registry
+            .claude_enabled
+            .store(enabled, Ordering::Relaxed);
+    }
+
     /// Creates an isolated runtime and its typed update stream.
     ///
     /// The receiver carries model events as well as lifecycle changes. Keep it alive and drain it
@@ -1848,7 +1878,7 @@ mod tests {
     };
     use futures_util::future::Either;
     use nanocodex::{
-        Model, Nanocodex, NanocodexError, OpenAi, Thinking,
+        HarnessModel as Model, Model as CodexModel, Nanocodex, NanocodexError, OpenAi, Thinking,
         oai::{
             ResponseError,
             tower::{
@@ -1869,6 +1899,53 @@ mod tests {
         time::timeout,
     };
     use tower::Service;
+
+    #[tokio::test]
+    async fn descendants_can_switch_providers_with_local_model_and_shared_effort_caps() {
+        let (updates, _receiver) = mpsc::unbounded_channel();
+        let registry = Registry::new(updates, 1);
+        for parent_model in crate::SUPPORTED_MODELS {
+            let parent = registry.reserve("root").await.unwrap();
+            let session_id = format!("parent-{parent_model}");
+            {
+                let mut state = registry.state.lock().await;
+                insert_session(&mut state, "root", parent.id, &session_id, None);
+                state
+                    .scopes
+                    .get_mut("root")
+                    .unwrap()
+                    .sessions
+                    .get_mut(&parent.id)
+                    .unwrap()
+                    .descriptor
+                    .model = parent_model;
+            }
+            let child = registry.reserve(&session_id).await.unwrap();
+            for child_model in crate::SUPPORTED_MODELS {
+                let denied = matches!(
+                    (parent_model, child_model),
+                    (
+                        Model::Codex(CodexModel::Luna),
+                        Model::Codex(CodexModel::Sol) | Model::Codex(CodexModel::Astra)
+                    ) | (
+                        Model::Codex(CodexModel::Sol),
+                        Model::Codex(CodexModel::Astra)
+                    )
+                );
+                assert_eq!(
+                    child
+                        .validate_child("ignored", child_model, Thinking::Medium)
+                        .is_ok(),
+                    !denied
+                );
+                assert!(
+                    child
+                        .validate_child("ignored", child_model, Thinking::High)
+                        .is_err()
+                );
+            }
+        }
+    }
 
     #[test]
     fn agent_factory_enforces_thinking_cap() {
@@ -1903,13 +1980,16 @@ mod tests {
         ] {
             registry.set_agent_max_thinking(maximum);
             let error = registry
-                .spawn_agent(Model::Luna, requested)
+                .spawn_agent(Model::Codex(CodexModel::Luna), requested)
                 .err()
                 .expect("factory should stop after capture");
             let actual = seen.lock().unwrap().take();
             if allowed {
                 assert!(error.to_string().contains("stop after capture"));
-                assert_eq!(actual, Some((Model::Luna, requested, true)));
+                assert_eq!(
+                    actual,
+                    Some((Model::Codex(CodexModel::Luna), requested, true))
+                );
             } else {
                 assert_eq!(actual, None);
                 assert!(matches!(error, NanocodexError::InvalidRequest(_)));
@@ -1932,7 +2012,11 @@ mod tests {
             .unwrap();
         let parent = registry.reserve("root").await.unwrap();
         parent
-            .validate_child(Model::Astra.as_str(), Model::Sol, Thinking::Medium)
+            .validate_child(
+                Model::Codex(CodexModel::Astra).as_str(),
+                Model::Codex(CodexModel::Sol),
+                Thinking::Medium,
+            )
             .unwrap();
         {
             let mut state = registry.state.lock().await;
@@ -1941,13 +2025,13 @@ mod tests {
         let reservation = registry.reserve("sol-child").await.unwrap();
         assert_eq!(reservation.parent, Some(parent.id));
         for (model, thinking, allowed) in [
-            (Model::Astra, Thinking::Medium, false),
-            (Model::Sol, Thinking::High, false),
-            (Model::Sol, Thinking::Medium, true),
-            (Model::Luna, Thinking::Low, true),
+            (Model::Codex(CodexModel::Astra), Thinking::Medium, false),
+            (Model::Codex(CodexModel::Sol), Thinking::High, false),
+            (Model::Codex(CodexModel::Sol), Thinking::Medium, true),
+            (Model::Codex(CodexModel::Luna), Thinking::Low, true),
         ] {
             let result = reservation
-                .validate_child(Model::Astra.as_str(), model, thinking)
+                .validate_child(Model::Codex(CodexModel::Astra).as_str(), model, thinking)
                 .and_then(|()| registry.spawn_agent(model, thinking));
             let error = result.err().unwrap();
             if allowed {
@@ -1963,19 +2047,19 @@ mod tests {
             reservation
                 .validate_child(
                     "ignored for registered children",
-                    Model::Sol,
+                    Model::Codex(CodexModel::Sol),
                     Thinking::Medium,
                 )
                 .unwrap();
             let error = registry
-                .spawn_agent(Model::Sol, Thinking::Medium)
+                .spawn_agent(Model::Codex(CodexModel::Sol), Thinking::Medium)
                 .err()
                 .unwrap();
             if allowed {
                 assert!(error.to_string().contains("stop after capture"));
                 assert_eq!(
                     arguments.try_recv().unwrap(),
-                    (Model::Sol, Thinking::Medium, false)
+                    (Model::Codex(CodexModel::Sol), Thinking::Medium, false)
                 );
             } else {
                 assert!(error.to_string().contains("exceeds configured maximum"));
@@ -1988,7 +2072,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(token, expected_token);
-            assert_eq!(context.model, Model::Sol);
+            assert_eq!(context.model, Model::Codex(CodexModel::Sol));
             assert_eq!(context.thinking, Thinking::Medium);
             let mut state = registry.state.lock().await;
             let session = state
@@ -2006,7 +2090,7 @@ mod tests {
     #[derive(Clone)]
     struct PendingService {
         called: Arc<Notify>,
-        prompts: Option<mpsc::UnboundedSender<(Model, Thinking, String)>>,
+        prompts: Option<mpsc::UnboundedSender<(nanocodex::Model, Thinking, String)>>,
     }
 
     impl Service<ResponsesAttempt> for PendingService {
@@ -2069,7 +2153,7 @@ mod tests {
             .build()
             .unwrap();
         let (agent, events) = Nanocodex::builder(openai)
-            .model(Model::Sol)
+            .model(nanocodex::Model::Sol)
             .thinking(Thinking::Medium)
             .build()
             .unwrap();
@@ -2089,7 +2173,7 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap();
-            assert_eq!(model, Model::Sol);
+            assert_eq!(model, nanocodex::Model::Sol);
             assert_eq!(thinking, Thinking::Medium);
             assert!(prompt.contains(&format!("task {token}")), "{prompt}");
             assert!(prompt.contains(&format!("turn_token: {token}")));
@@ -2185,7 +2269,7 @@ mod tests {
         let descriptor = AgentDescriptor {
             id: reservation.id,
             session_id: session_id.clone(),
-            model: Model::Sol,
+            model: Model::Codex(CodexModel::Sol),
             thinking: Thinking::Medium,
             role: format!("agent-{}", reservation.id),
             task: "wait forever".to_owned(),
@@ -2266,7 +2350,7 @@ mod tests {
         let descriptor = AgentDescriptor {
             id,
             session_id: session_id.to_owned(),
-            model: Model::Sol,
+            model: Model::Codex(CodexModel::Sol),
             thinking: Thinking::Medium,
             role: format!("agent-{id}"),
             task: "test lifecycle".to_owned(),

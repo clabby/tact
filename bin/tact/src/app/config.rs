@@ -8,7 +8,9 @@ use crate::{
     tui::theme::{Theme, ThemeMode},
 };
 use clap::ValueEnum;
-use nanocodex::{Model, Thinking, oai::transport::ResponsesTransport};
+use nanocodex::{
+    HarnessModel as Model, Model as CodexModel, Thinking, oai::transport::ResponsesTransport,
+};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -107,6 +109,7 @@ pub(crate) struct Config {
     #[serde(skip)]
     codex_home: Option<PathBuf>,
     auth: AuthConfig,
+    claude: ClaudeConfig,
     agent: AgentConfig,
     mcp_servers: BTreeMap<String, McpServerConfig>,
     skills: SkillsConfig,
@@ -157,6 +160,50 @@ pub(crate) struct McpEnvironment(BTreeMap<String, McpSecretString>);
 pub(crate) struct AuthConfig {
     mode: AuthMode,
     file: PathBuf,
+}
+
+/// Availability, endpoint, and API workspace for Claude models.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct ClaudeConfig {
+    enabled: bool,
+    #[serde(serialize_with = "serialize_optional_string")]
+    api_base_url: Option<String>,
+    #[serde(serialize_with = "serialize_optional_string")]
+    workspace_id: Option<String>,
+}
+
+impl ClaudeConfig {
+    pub(crate) fn workspace_id(&self) -> Option<&str> {
+        self.workspace_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+    }
+
+    pub(crate) fn ensure_enabled(&self) -> Result<()> {
+        if !self.enabled {
+            return Err(ConfigError::ClaudeDisabled.into());
+        }
+        Ok(())
+    }
+
+    pub(crate) const fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    pub(crate) fn api_base_url(&self) -> Option<&str> {
+        self.api_base_url
+            .as_deref()
+            .filter(|url| !url.trim().is_empty())
+    }
+
+    pub(crate) fn ensure_model_enabled(&self, model: Model) -> Result<()> {
+        if matches!(model, Model::Claude(_)) {
+            self.ensure_enabled()?;
+        }
+        Ok(())
+    }
 }
 
 /// Effective Nanocodex configuration.
@@ -268,6 +315,7 @@ pub(crate) struct ConfigReload {
 #[serde(default, deny_unknown_fields)]
 struct ConfigFile {
     auth: AuthConfigFile,
+    claude: ClaudeConfig,
     agent: AgentConfigFile,
     mcp_servers: BTreeMap<String, McpServerConfigFile>,
     skills: SkillsConfigFile,
@@ -462,7 +510,11 @@ impl Config {
             .clone()
             .or_else(|| environment.home.as_ref().map(|home| home.join(".codex")));
 
-        let model = overrides.model.or(file.agent.model).unwrap_or(Model::Sol);
+        let model = overrides
+            .model
+            .or(file.agent.model)
+            .unwrap_or(Model::Codex(CodexModel::Sol));
+        file.claude.ensure_model_enabled(model)?;
         let thinking = overrides
             .thinking
             .or(file.agent.thinking)
@@ -480,6 +532,7 @@ impl Config {
                 overrides.auth_mode.or(file.auth.mode).unwrap_or_default(),
                 auth_file,
             ),
+            claude: file.claude,
             agent: AgentConfig {
                 workspace,
                 model,
@@ -570,6 +623,10 @@ impl Config {
 
     pub(crate) fn codex_home(&self) -> Option<&Path> {
         self.codex_home.as_deref()
+    }
+
+    pub(crate) const fn claude(&self) -> &ClaudeConfig {
+        &self.claude
     }
 
     pub(crate) fn agent(&self) -> &AgentConfig {
@@ -1548,7 +1605,7 @@ mod tests {
         RemoteMemoryTokenFile, ThemeMode, Transport, validate_mcp_url,
     };
     use crate::app::error::{ConfigError, Error, McpUrlError, RemoteMemoryConfigError};
-    use nanocodex::Model;
+    use nanocodex::{ClaudeModel, HarnessModel as Model, Model as CodexModel};
     use ratatui::style::Color;
     use std::{
         collections::BTreeMap,
@@ -1628,6 +1685,73 @@ mod tests {
     }
 
     #[test]
+    fn legacy_claude_authentication_configuration_is_rejected() {
+        for legacy in [
+            "auth = 'subscription'",
+            "auth = 'api-key'",
+            "subscription_store = 'private/auth'",
+            "auth = 'subscription'\nsubscription_store = 'private/auth'",
+        ] {
+            let error = load_config(&format!("[claude]\nenabled = true\n{legacy}\n")).unwrap_err();
+            assert!(matches!(error, Error::Config(ConfigError::Parse { .. })));
+        }
+    }
+
+    #[test]
+    fn claude_api_key_configuration_round_trips() {
+        let config =
+            load_config("[claude]\nenabled = true\napi_base_url = 'http://localhost:8080'\nworkspace_id = 'wrkspc_fixture'\n")
+                .unwrap();
+        let rendered = config.to_toml().unwrap();
+        let restored = load_config(&rendered).unwrap();
+        assert!(restored.claude().enabled());
+        assert_eq!(restored.claude().workspace_id(), Some("wrkspc_fixture"));
+        assert_eq!(
+            restored.claude().api_base_url(),
+            Some("http://localhost:8080")
+        );
+        assert!(!rendered.contains("subscription"));
+        assert!(!rendered.contains("ANTHROPIC_API_KEY"));
+    }
+
+    #[test]
+    fn claude_models_require_explicit_opt_in() {
+        for model in ["sonnet-5.5", "opus-5.5", "fable-5.1"] {
+            let agent = format!("[agent]\nmodel = '{model}'\n");
+            assert!(matches!(
+                load_config(&agent),
+                Err(Error::Config(ConfigError::ClaudeDisabled))
+            ));
+            let config = load_config(&format!("{agent}[claude]\nenabled = true\n")).unwrap();
+            assert!(config.claude().enabled());
+            assert!(matches!(config.agent().model(), Model::Claude(_)));
+            assert!(config.claude().api_base_url().is_none());
+            let restored = load_config(&config.to_toml().unwrap()).unwrap();
+            assert_eq!(restored.agent().model(), config.agent().model());
+            assert!(restored.claude().api_base_url().is_none());
+            assert!(restored.claude().workspace_id().is_none());
+        }
+    }
+
+    #[test]
+    fn startup_model_override_cannot_bypass_claude_opt_in() {
+        let directory = tempdir().unwrap();
+        let error = Config::load_with(
+            ConfigOverrides {
+                model: Some(Model::Claude(ClaudeModel::Opus55)),
+                ..ConfigOverrides::default()
+            },
+            Environment {
+                home: Some(directory.path().to_path_buf()),
+                ..Environment::default()
+            },
+            directory.path(),
+        )
+        .unwrap_err();
+        assert!(matches!(error, Error::Config(ConfigError::ClaudeDisabled)));
+    }
+
+    #[test]
     fn missing_default_file_materializes_all_defaults() {
         let directory = tempdir().unwrap();
         let home = directory.path().join("home");
@@ -1645,7 +1769,7 @@ mod tests {
         assert_eq!(config.auth.mode, AuthMode::Auto);
         assert_eq!(config.auth.file, home.join(".codex/auth.json"));
         assert_eq!(config.agent.workspace, directory.path());
-        assert_eq!(config.agent.model, Model::Sol);
+        assert_eq!(config.agent.model, Model::Codex(CodexModel::Sol));
         assert_eq!(config.agent.thinking, ReasoningEffort::Low);
         assert_eq!(config.agent.reasoning_mode, ReasoningMode::Standard);
         assert!(!config.agent.fast_mode);
@@ -1662,6 +1786,7 @@ mod tests {
             &rendered,
             &[
                 "auth",
+                "claude",
                 "agent",
                 "mcp_servers",
                 "skills",
@@ -1672,6 +1797,11 @@ mod tests {
             ],
         );
         assert_table_fields(&rendered["auth"], &["mode", "file"]);
+        assert_table_fields(
+            &rendered["claude"],
+            &["enabled", "api_base_url", "workspace_id"],
+        );
+        assert_eq!(rendered["claude"]["enabled"].as_bool(), Some(false));
         assert_table_fields(
             &rendered["agent"],
             &[
@@ -1717,6 +1847,12 @@ mod tests {
             "thinking_high",
             "thinking_xhigh",
             "thinking_max",
+            "model_luna",
+            "model_sol",
+            "model_astra",
+            "model_sonnet",
+            "model_opus",
+            "model_fable",
         ];
         assert_table_fields(&rendered["theme"]["light"], &palette_fields);
         assert_table_fields(&rendered["theme"]["dark"], &palette_fields);
@@ -1725,7 +1861,10 @@ mod tests {
             rendered["auth"]["file"].as_str(),
             home.join(".codex/auth.json").to_str()
         );
-        assert_eq!(rendered["agent"]["model"].as_str(), Some("sol"));
+        assert_eq!(
+            rendered["agent"]["model"].as_str(),
+            Some(Model::Codex(CodexModel::Sol).as_str())
+        );
         assert_eq!(rendered["agent"]["transport"].as_str(), Some("websocket"));
         assert_eq!(
             rendered["agent"]["workspace"].as_str(),
@@ -1799,8 +1938,14 @@ mod tests {
             ("sol", ReasoningEffort::Low),
             ("luna", ReasoningEffort::Medium),
             ("astra", ReasoningEffort::Low),
+            ("sonnet-5.5", ReasoningEffort::High),
+            ("opus-5.5", ReasoningEffort::Medium),
+            ("fable-5.1", ReasoningEffort::High),
         ] {
-            let config = load_config(&format!("[agent]\nmodel = \"{model}\"\n")).unwrap();
+            let config = load_config(&format!(
+                "[claude]\nenabled = true\n[agent]\nmodel = \"{model}\"\n"
+            ))
+            .unwrap();
             assert_eq!(config.agent.thinking, expected, "model {model}");
         }
 
@@ -2641,7 +2786,7 @@ mod tests {
                 auth_mode: Some(AuthMode::ChatGpt),
                 auth_file: Some("cli-auth.json".into()),
                 workspace: Some("cli-workspace".into()),
-                model: Some(Model::Luna),
+                model: Some(Model::Codex(CodexModel::Luna)),
                 thinking: Some(ReasoningEffort::High),
                 web_search: Some(false),
                 ..ConfigOverrides::default()
@@ -2657,7 +2802,7 @@ mod tests {
             config.agent.workspace,
             directory.path().join("cli-workspace")
         );
-        assert_eq!(config.agent.model, Model::Luna);
+        assert_eq!(config.agent.model, Model::Codex(CodexModel::Luna));
         assert_eq!(config.agent.thinking, ReasoningEffort::High);
         assert!(!config.agent.web_search);
     }
@@ -2759,7 +2904,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(config.agent.workspace, directory.path().join("workspace"));
-        assert_eq!(config.agent.model, Model::Astra);
+        assert_eq!(config.agent.model, Model::Codex(CodexModel::Astra));
         assert_eq!(config.agent.thinking, ReasoningEffort::Xhigh);
         assert_eq!(config.agent.reasoning_mode, ReasoningMode::Pro);
         assert!(config.agent.fast_mode);
@@ -3240,7 +3385,7 @@ mod tests {
         let config_path = directory.path().join("config.toml");
         fs::write(
             &config_path,
-            "[theme]\ntext = \"#AABBCC\"\nborder = 239\ncode_text = \"white\"\ncode_background = \"#101010\"\nthinking_high = \"green\"\n",
+            "[theme]\ntext = \"#AABBCC\"\nborder = 239\ncode_text = \"white\"\ncode_background = \"#101010\"\nthinking_high = \"green\"\nmodel_sol = \"#123456\"\n",
         )
         .unwrap();
 
@@ -3263,10 +3408,15 @@ mod tests {
         assert_eq!(config.theme.code_background(), Color::Rgb(0x10, 0x10, 0x10));
         assert_eq!(config.theme.thinking_high(), Color::Green);
         assert_eq!(config.theme.accent(), Color::Blue);
+        assert_eq!(
+            config.theme.model(Model::Codex(CodexModel::Sol)),
+            Color::Rgb(0x12, 0x34, 0x56)
+        );
 
         let rendered = config.to_toml().unwrap();
         assert!(rendered.contains("text = \"#AABBCC\""));
         assert!(rendered.contains("border = \"239\""));
+        assert!(rendered.contains("model_sol = \"#123456\""));
     }
 
     #[test]

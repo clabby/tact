@@ -1,7 +1,7 @@
 //! Configurable terminal colors and light/dark mode selection.
 
 use crate::app::config::ReasoningEffort;
-use nanocodex::Model;
+use nanocodex::{ClaudeModel, HarnessModel as Model, Model as CodexModel};
 use ratatui::style::Color;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use std::{fmt, str::FromStr};
@@ -45,6 +45,12 @@ struct ThemePalette {
     thinking_high: ThemeColor,
     thinking_xhigh: ThemeColor,
     thinking_max: ThemeColor,
+    model_luna: ThemeColor,
+    model_sol: ThemeColor,
+    model_astra: ThemeColor,
+    model_sonnet: ThemeColor,
+    model_opus: ThemeColor,
+    model_fable: ThemeColor,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -74,6 +80,12 @@ struct PaletteFields {
     thinking_high: Option<ThemeColor>,
     thinking_xhigh: Option<ThemeColor>,
     thinking_max: Option<ThemeColor>,
+    model_luna: Option<ThemeColor>,
+    model_sol: Option<ThemeColor>,
+    model_astra: Option<ThemeColor>,
+    model_sonnet: Option<ThemeColor>,
+    model_opus: Option<ThemeColor>,
+    model_fable: Option<ThemeColor>,
 }
 
 #[derive(Deserialize)]
@@ -172,10 +184,13 @@ impl Theme {
 
     pub(crate) const fn model(&self, model: Model) -> Color {
         match model {
-            Model::Luna => Color::White,
-            Model::Sol => Color::Yellow,
-            Model::Astra => Color::LightMagenta,
-            _ => Color::White,
+            Model::Codex(CodexModel::Luna) => self.palette().model_luna.0,
+            Model::Codex(CodexModel::Sol) => self.palette().model_sol.0,
+            Model::Codex(CodexModel::Astra) => self.palette().model_astra.0,
+            Model::Claude(ClaudeModel::Sonnet55) => self.palette().model_sonnet.0,
+            Model::Claude(ClaudeModel::Opus55) => self.palette().model_opus.0,
+            Model::Claude(ClaudeModel::Fable51) => self.palette().model_fable.0,
+            _ => self.text(),
         }
     }
 
@@ -217,6 +232,12 @@ impl ThemePalette {
             thinking_high: ThemeColor(Color::Yellow),
             thinking_xhigh: ThemeColor(Color::Red),
             thinking_max: ThemeColor(Color::Magenta),
+            model_luna: ThemeColor(Color::Reset),
+            model_sol: ThemeColor(Color::Yellow),
+            model_astra: ThemeColor(Color::Magenta),
+            model_sonnet: ThemeColor(Color::Green),
+            model_opus: ThemeColor(Color::Red),
+            model_fable: ThemeColor(Color::Cyan),
         }
     }
 
@@ -233,6 +254,12 @@ impl ThemePalette {
             thinking_high: ThemeColor(Color::Rgb(0x9A, 0x67, 0x00)),
             thinking_xhigh: ThemeColor(Color::Red),
             thinking_max: ThemeColor(Color::Magenta),
+            model_luna: ThemeColor(Color::Reset),
+            model_sol: ThemeColor(Color::Yellow),
+            model_astra: ThemeColor(Color::Magenta),
+            model_sonnet: ThemeColor(Color::Green),
+            model_opus: ThemeColor(Color::Red),
+            model_fable: ThemeColor(Color::Cyan),
         }
     }
 
@@ -248,6 +275,12 @@ impl ThemePalette {
         self.thinking_high = fields.thinking_high.unwrap_or(self.thinking_high);
         self.thinking_xhigh = fields.thinking_xhigh.unwrap_or(self.thinking_xhigh);
         self.thinking_max = fields.thinking_max.unwrap_or(self.thinking_max);
+        self.model_luna = fields.model_luna.unwrap_or(self.model_luna);
+        self.model_sol = fields.model_sol.unwrap_or(self.model_sol);
+        self.model_astra = fields.model_astra.unwrap_or(self.model_astra);
+        self.model_sonnet = fields.model_sonnet.unwrap_or(self.model_sonnet);
+        self.model_opus = fields.model_opus.unwrap_or(self.model_opus);
+        self.model_fable = fields.model_fable.unwrap_or(self.model_fable);
     }
 }
 
@@ -367,7 +400,7 @@ impl fmt::Display for ColorName {
 #[cfg(test)]
 mod tests {
     use super::{ColorScheme, SYSTEM_SCHEME_POLL_INTERVAL, Theme, ThemeMode};
-    use nanocodex::Model;
+    use nanocodex::{HarnessModel as Model, Model as CodexModel};
     use ratatui::style::Color;
 
     #[test]
@@ -387,12 +420,44 @@ mod tests {
     }
 
     #[test]
-    fn models_have_a_shared_semantic_palette() {
-        let theme = Theme::default();
+    fn model_defaults_use_terminal_color_slots_in_both_modes() {
+        let mut theme = Theme::default();
+        let models = crate::app::model::available(true);
+        let colors = [
+            Color::Reset,
+            Color::Yellow,
+            Color::Magenta,
+            Color::Green,
+            Color::Red,
+            Color::Cyan,
+        ];
+        for mode in [ThemeMode::Dark, ThemeMode::Light] {
+            theme.set_mode(mode);
+            for (&model, color) in models.iter().zip(colors) {
+                assert_eq!(theme.model(model), color);
+            }
+        }
+    }
 
-        assert_eq!(theme.model(Model::Luna), Color::White);
-        assert_eq!(theme.model(Model::Sol), Color::Yellow);
-        assert_eq!(theme.model(Model::Astra), Color::LightMagenta);
+    #[test]
+    fn model_overrides_roundtrip_and_reload_with_system_scheme() {
+        let mut theme: Theme = toml::from_str("model_luna = \"red\"\nmodel_opus = 123\n[light]\nmodel_luna = \"#123456\"\n[dark]\nmodel_sol = \"green\"\n").unwrap();
+        let luna = Model::Codex(CodexModel::Luna);
+        let sol = Model::Codex(CodexModel::Sol);
+        let opus = Model::Claude(nanocodex::ClaudeModel::Opus55);
+        assert_eq!(theme.model(luna), Color::Red);
+        assert_eq!(theme.model(sol), Color::Green);
+        assert_eq!(theme.model(opus), Color::Indexed(123));
+        theme.set_system_scheme(ColorScheme::Light);
+        assert_eq!(theme.model(luna), Color::Rgb(0x12, 0x34, 0x56));
+        assert_eq!(theme.model(opus), Color::Indexed(123));
+        let rendered = toml::to_string(&theme).unwrap();
+        let restored: Theme = toml::from_str(&rendered).unwrap();
+        theme.replace_from_config(restored);
+        assert_eq!(theme.model(luna), Color::Rgb(0x12, 0x34, 0x56));
+        theme.set_mode(ThemeMode::Dark);
+        assert_eq!(theme.model(luna), Color::Red);
+        assert_eq!(theme.model(sol), Color::Green);
     }
 
     #[test]

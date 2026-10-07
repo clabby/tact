@@ -7,7 +7,7 @@ use super::{
     runtime::{AgentDirectoryEntry, AgentSummary, OutputContract, Registry, forward_events},
 };
 use nanocodex::{
-    Model, Thinking, Tool,
+    HarnessModel as Model, Thinking, Tool,
     tools::{
         ToolsBuilder,
         contract::{ToolContext, ToolDefinition, ToolInput, ToolOutput, ToolResult, async_trait},
@@ -34,6 +34,7 @@ const WAIT_AGENT_TOOL: &str = "wait_agent";
 struct AgentTask {
     role: String,
     task: String,
+    #[serde(deserialize_with = "crate::roster::deserialize_model")]
     model: Model,
     thinking: Thinking,
     output_schema: Value,
@@ -110,6 +111,28 @@ struct SpawnAgent {
 #[async_trait]
 impl Tool for SpawnAgent {
     fn definition(&self) -> ToolDefinition {
+        let claude_enabled = self
+            .registry
+            .upgrade()
+            .is_some_and(|registry| registry.claude_enabled());
+        let (models, model_description) = if claude_enabled {
+            (
+                vec![
+                    "luna",
+                    "sol",
+                    "astra",
+                    "sonnet-5.5",
+                    "opus-5.5",
+                    "fable-5.1",
+                ],
+                "Intelligence order, strongest first: fable-5.1 > astra > opus-5.5 > sol > luna. Consider Sonnet 5.5 for speed and cost. Consider capability and expected total completion cost and time, including rework. Codex parents may spawn Codex models at or below their own tier: luna < sol < astra. Cross-provider selection and delegation between Claude models are allowed, subject to effort caps.",
+            )
+        } else {
+            (
+                vec!["luna", "sol", "astra"],
+                "Choose a model at or below the spawning parent: luna < sol < astra. Consider capability and expected total completion cost and time, including rework.",
+            )
+        };
         ToolDefinition::function(
             SPAWN_AGENT_TOOL,
             "Starts a reusable clean-room subagent without inherited conversation history and immediately returns its ID.",
@@ -126,8 +149,8 @@ impl Tool for SpawnAgent {
                     },
                     "model": {
                         "type": "string",
-                        "enum": ["luna", "sol", "astra"],
-                        "description": "Choose a model at or below the spawning parent: luna < sol < astra. Consider capability and expected total completion cost and time, including rework."
+                        "enum": models,
+                        "description": model_description
                     },
                     "thinking": {
                         "type": "string",
@@ -622,12 +645,65 @@ mod tests {
     use super::{SendAgentMessage, SpawnAgent, SubmitResult, WaitAgent};
     use crate::runtime::Registry;
     use nanocodex::{
-        Model, NanocodexError, Thinking, Tool,
+        HarnessModel as Model, Model as CodexModel, NanocodexError, Thinking, Tool,
         tools::contract::{ToolContext, ToolInput},
     };
     use serde_json::{json, value::to_raw_value};
     use std::sync::{Arc, Weak};
     use tokio::sync::mpsc;
+
+    #[tokio::test]
+    async fn claude_opt_in_controls_schema_and_runtime_admission() {
+        let (runtime, _updates) = crate::Subagents::new(1);
+        let (captured, mut arguments) = mpsc::unbounded_channel();
+        runtime
+            .set_agent_factory(Thinking::Max, false, move |model, thinking, fast_mode| {
+                captured.send((model, thinking, fast_mode)).unwrap();
+                Err(NanocodexError::InvalidRequest(
+                    "stop after capture".to_owned(),
+                ))
+            })
+            .unwrap();
+        let tool = SpawnAgent {
+            registry: runtime.downgrade().registry,
+        };
+        for enabled in [false, true, false] {
+            runtime.set_claude_enabled(enabled);
+            let definition = tool.definition();
+            let validator =
+                jsonschema::validator_for(definition.parameters().unwrap().as_value()).unwrap();
+            for model in ["sonnet-5.5", "opus-5.5", "fable-5.1"] {
+                let input = json!({"role": "review", "task": "Review", "model": model,
+                    "thinking": "medium", "output_schema": {"type": "object"}});
+                assert_eq!(validator.is_valid(&input), enabled);
+                // Execute directly to exercise admission independently of schema validation.
+                let error = tool
+                    .execute(
+                        ToolInput::Function(to_raw_value(&input).unwrap()),
+                        ToolContext::new(
+                            Model::Codex(CodexModel::Luna).as_str(),
+                            "root",
+                            "spawn",
+                            &[],
+                            128,
+                        ),
+                    )
+                    .await
+                    .err()
+                    .unwrap();
+                if enabled {
+                    assert!(error.to_string().contains("stop after capture"));
+                    assert_eq!(
+                        arguments.try_recv().unwrap().0,
+                        crate::parse_model(model).unwrap()
+                    );
+                } else {
+                    assert!(error.to_string().contains("Claude subagents are disabled"));
+                    assert!(arguments.try_recv().is_err());
+                }
+            }
+        }
+    }
 
     #[tokio::test]
     async fn spawn_agent_enforces_root_model_order_and_accepts_supported_efforts() {
@@ -656,9 +732,9 @@ mod tests {
             jsonschema::validator_for(definition.parameters().unwrap().as_value()).unwrap();
 
         let models = [
-            ("luna", Model::Luna),
-            ("sol", Model::Sol),
-            ("astra", Model::Astra),
+            ("luna", Model::Codex(CodexModel::Luna)),
+            ("sol", Model::Codex(CodexModel::Sol)),
+            ("astra", Model::Codex(CodexModel::Astra)),
         ];
         for (parent_rank, (_, parent_model)) in models.iter().enumerate() {
             for (child_rank, (model, expected_model)) in models.iter().copied().enumerate() {
@@ -705,7 +781,6 @@ mod tests {
             Some(json!("selected")),
             Some(json!("terra")),
             Some(json!("unknown")),
-            Some(json!("gpt-6-astra")),
             Some(json!("Astra")),
             Some(json!(1)),
         ] {

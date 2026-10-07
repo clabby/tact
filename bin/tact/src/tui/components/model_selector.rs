@@ -1,31 +1,29 @@
-//! Animated linear selector for the model fixed to a new session.
+//! Searchable model menu for a new session.
 
 use super::{
+    file_finder::visible_query_tail,
     floating::Floating,
     node::{Component, ComponentUpdate, RenderRequest},
 };
 use crate::{
-    app::model::{SUPPORTED_MODELS, name},
+    app::model::{available, name},
     tui::theme::Theme,
 };
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind};
-use nanocodex::Model;
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use nanocodex::HarnessModel as Model;
 use ratatui::{
     Frame,
-    layout::{Alignment, Rect},
+    layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::Paragraph,
+    widgets::{List, ListItem, ListState, Paragraph},
 };
-use std::time::{Duration, Instant};
+use unicode_segmentation::UnicodeSegmentation;
 
-const ANIMATION_DURATION: Duration = Duration::from_millis(280);
-const ANIMATION_FRAME_INTERVAL: Duration = Duration::from_millis(16);
-const KEY_BINDINGS: [(&str, &str); 3] = [("←/→", "model"), ("enter", "apply"), ("esc", "cancel")];
+const KEY_BINDINGS: [(&str, &str); 3] = [("↑↓", "move"), ("enter", "apply"), ("esc", "cancel")];
 
 pub(super) enum ModelSelectorEvent {
-    Terminal { event: Event, now: Instant },
-    AnimationFrame(Instant),
+    Terminal(Event),
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -35,152 +33,97 @@ pub(super) enum ModelSelectorEffect {
 }
 
 pub(super) struct ModelSelector {
+    models: &'static [Model],
+    current: Model,
+    query: String,
+    matches: Vec<usize>,
     selected: usize,
-    displayed_position: f64,
-    animation: Option<Animation>,
-}
-
-struct Animation {
-    from: f64,
-    to: f64,
-    started_at: Instant,
-    next_frame: Instant,
 }
 
 impl ModelSelector {
-    pub(super) fn new(initial: Model) -> Self {
-        let selected = model_index(initial);
+    pub(super) fn new(initial: Model, claude_enabled: bool) -> Self {
+        let models = available(claude_enabled);
+        let selected = models
+            .iter()
+            .position(|model| *model == initial)
+            .unwrap_or(1);
         Self {
+            models,
+            current: initial,
+            query: String::new(),
+            matches: (0..models.len()).collect(),
             selected,
-            displayed_position: selected as f64,
-            animation: None,
         }
     }
 
-    pub(super) fn animation_deadline(&self) -> Option<Instant> {
-        self.animation
-            .as_ref()
-            .map(|animation| animation.next_frame)
-    }
-
-    fn update_key(&mut self, key: KeyEvent, now: Instant) -> ComponentUpdate<ModelSelectorEffect> {
+    fn update_key(&mut self, key: KeyEvent) -> ComponentUpdate<ModelSelectorEffect> {
         if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
             return ComponentUpdate::none();
         }
-
         match key.code {
-            KeyCode::Left | KeyCode::Up => self.select_relative(-1, now),
-            KeyCode::Right | KeyCode::Down => self.select_relative(1, now),
-            KeyCode::Enter => ComponentUpdate {
-                effects: vec![ModelSelectorEffect::Apply(SUPPORTED_MODELS[self.selected])],
-                render: RenderRequest::Immediate,
-            },
-            KeyCode::Esc | KeyCode::Backspace => ComponentUpdate {
+            KeyCode::Esc => ComponentUpdate {
                 effects: vec![ModelSelectorEffect::Dismiss],
                 render: RenderRequest::Immediate,
             },
+            KeyCode::Enter => {
+                let Some(&index) = self.matches.get(self.selected) else {
+                    return ComponentUpdate::none();
+                };
+                ComponentUpdate {
+                    effects: vec![ModelSelectorEffect::Apply(self.models[index])],
+                    render: RenderRequest::Immediate,
+                }
+            }
+            KeyCode::Up | KeyCode::Left => {
+                self.selected = self.selected.saturating_sub(1);
+                ComponentUpdate::render(RenderRequest::Immediate)
+            }
+            KeyCode::Down | KeyCode::Right => {
+                self.selected = (self.selected + 1).min(self.matches.len().saturating_sub(1));
+                ComponentUpdate::render(RenderRequest::Immediate)
+            }
+            KeyCode::Backspace => {
+                if let Some((index, _)) = self.query.grapheme_indices(true).next_back() {
+                    self.query.truncate(index);
+                    self.refresh_matches();
+                }
+                ComponentUpdate::render(RenderRequest::Immediate)
+            }
+            KeyCode::Char(character)
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                    && !character.is_control() =>
+            {
+                self.query.push(character);
+                self.refresh_matches();
+                ComponentUpdate::render(RenderRequest::Immediate)
+            }
             _ => ComponentUpdate::none(),
         }
     }
 
-    fn select_relative(
-        &mut self,
-        direction: isize,
-        now: Instant,
-    ) -> ComponentUpdate<ModelSelectorEffect> {
-        self.advance_animation(now);
-        let next = self
-            .selected
-            .saturating_add_signed(direction)
-            .min(SUPPORTED_MODELS.len() - 1);
-        if next == self.selected {
-            return ComponentUpdate::none();
-        }
-        self.selected = next;
-        self.animation = Some(Animation {
-            from: self.displayed_position,
-            to: next as f64,
-            started_at: now,
-            next_frame: now + ANIMATION_FRAME_INTERVAL,
-        });
-        ComponentUpdate::render(RenderRequest::Immediate)
+    fn refresh_matches(&mut self) {
+        let query = self.query.trim().to_ascii_lowercase();
+        self.matches = self
+            .models
+            .iter()
+            .enumerate()
+            .filter(|(_, model)| {
+                let provider = match model {
+                    Model::Codex(_) => "openai codex",
+                    Model::Claude(_) => "anthropic claude",
+                };
+                let label = name(**model).to_ascii_lowercase();
+                label.contains(&query)
+                    || label.replace(' ', "-").contains(&query)
+                    || model.as_str().contains(&query)
+                    || provider.contains(&query)
+            })
+            .map(|(index, _)| index)
+            .collect();
+        self.selected = 0;
     }
-
-    fn advance_animation(&mut self, now: Instant) -> bool {
-        let Some(animation) = &mut self.animation else {
-            return false;
-        };
-        let elapsed = now.saturating_duration_since(animation.started_at);
-        let progress = (elapsed.as_secs_f64() / ANIMATION_DURATION.as_secs_f64()).min(1.0);
-        let eased = 1.0 - (1.0 - progress).powi(3);
-        self.displayed_position = animation.from + (animation.to - animation.from) * eased;
-        if progress >= 1.0 {
-            self.displayed_position = self.selected as f64;
-            self.animation = None;
-        } else {
-            animation.next_frame = now + ANIMATION_FRAME_INTERVAL;
-        }
-        true
-    }
-
-    fn render_slider(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
-        if area.width < 5 || area.height < 2 {
-            return;
-        }
-        let left = area.x.saturating_add(2);
-        let right = area.right().saturating_sub(3).max(left);
-        let width = right.saturating_sub(left);
-        let indicator_column = left.saturating_add(
-            (f64::from(width) * self.displayed_position / (SUPPORTED_MODELS.len() - 1) as f64)
-                .round() as u16,
-        );
-        let selected_color = theme.model(SUPPORTED_MODELS[self.selected]);
-        let buffer = frame.buffer_mut();
-        for column in left..=right {
-            let color = if column <= indicator_column {
-                selected_color
-            } else {
-                theme.muted()
-            };
-            buffer.set_string(column, area.y, "━", Style::default().fg(color));
-        }
-        for index in 0..SUPPORTED_MODELS.len() {
-            let column = model_column(left, width, index);
-            let color = if column <= indicator_column {
-                selected_color
-            } else {
-                theme.muted()
-            };
-            buffer.set_string(column, area.y, "●", Style::default().fg(color));
-        }
-        buffer.set_string(
-            indicator_column,
-            area.y,
-            "◆",
-            Style::default()
-                .fg(selected_color)
-                .add_modifier(Modifier::BOLD),
-        );
-
-        for (index, model) in SUPPORTED_MODELS.into_iter().enumerate() {
-            let column = model_column(left, width, index);
-            let label = name(model);
-            let label_width = u16::try_from(label.len()).unwrap_or(u16::MAX);
-            let start = column.saturating_sub(label_width / 2).max(area.x);
-            buffer.set_string(
-                start,
-                area.y.saturating_add(1),
-                label,
-                Style::default().fg(theme.model(model)),
-            );
-        }
-    }
-}
-
-fn model_column(left: u16, width: u16, index: usize) -> u16 {
-    left.saturating_add(
-        (f64::from(width) * index as f64 / (SUPPORTED_MODELS.len() - 1) as f64).round() as u16,
-    )
 }
 
 impl Component for ModelSelector {
@@ -189,260 +132,296 @@ impl Component for ModelSelector {
 
     fn update(&mut self, event: Self::Event) -> ComponentUpdate<Self::Effect> {
         match event {
-            ModelSelectorEvent::Terminal {
-                event: Event::Key(key),
-                now,
-            } => self.update_key(key, now),
-            ModelSelectorEvent::Terminal { .. } => ComponentUpdate::none(),
-            ModelSelectorEvent::AnimationFrame(now) => {
-                if self.advance_animation(now) {
-                    ComponentUpdate::render(RenderRequest::Streaming)
-                } else {
-                    ComponentUpdate::none()
-                }
+            ModelSelectorEvent::Terminal(Event::Key(key)) => self.update_key(key),
+            ModelSelectorEvent::Terminal(Event::Paste(text)) => {
+                self.query
+                    .extend(text.chars().filter(|character| !character.is_control()));
+                self.refresh_matches();
+                ComponentUpdate::render(RenderRequest::Immediate)
             }
+            ModelSelectorEvent::Terminal(_) => ComponentUpdate::none(),
         }
     }
 
     fn render(&mut self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
-        let layout = Floating::new("Select model", 52, 7, &KEY_BINDINGS).render(frame, area, theme);
-        if layout.body.is_empty() {
+        if area.is_empty() {
             return;
         }
-        let model = SUPPORTED_MODELS[self.selected];
-        let title = Line::from(vec![
-            Span::styled("Selected: ", Style::default().fg(theme.border())),
-            Span::styled(
-                name(model),
-                Style::default()
-                    .fg(theme.model(model))
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]);
-        frame.render_widget(
-            Paragraph::new(title).alignment(Alignment::Center),
-            Rect {
-                height: 1,
-                ..layout.body
-            },
-        );
-        let slider_offset = if layout.body.height >= 4 { 2 } else { 1 };
-        self.render_slider(
-            frame,
-            Rect {
-                y: layout.body.y.saturating_add(slider_offset),
-                height: 2,
-                ..layout.body
+        let selected_model = self
+            .matches
+            .get(self.selected)
+            .map(|&index| self.models[index]);
+        let color = selected_model.map_or(theme.accent(), |model| theme.model(model));
+        let bindings = if area.height >= 6 && area.width >= 22 {
+            &KEY_BINDINGS[..]
+        } else {
+            &[]
+        };
+        let layout = Floating::new("Select model", 68, self.models.len() as u16 + 6, bindings)
+            .colors(color, color)
+            .render(frame, area, theme);
+        let mut body = layout.body;
+        if body.is_empty() {
+            return;
+        }
+        if body.height >= 2 {
+            let query = visible_query_tail(&self.query, usize::from(body.width).saturating_sub(10));
+            let search = Line::from(vec![
+                Span::styled("  Search: ", Style::default().fg(theme.muted())),
+                Span::styled(query, Style::default().fg(theme.text())),
+                Span::styled("▏", Style::default().fg(color)),
+            ]);
+            frame.render_widget(Paragraph::new(search), Rect { height: 1, ..body });
+            body.y += 1;
+            body.height -= 1;
+            if body.height > self.models.len() as u16 {
+                body.y += 1;
+                body.height -= 1;
             }
-            .intersection(layout.body),
-            theme,
-        );
+        }
+        if self.matches.is_empty() {
+            frame.render_widget(
+                Paragraph::new("  No matching models").style(Style::default().fg(theme.muted())),
+                body,
+            );
+            return;
+        }
+        let items = self.matches.iter().map(|&index| {
+            let model = self.models[index];
+            let provider = match model {
+                Model::Codex(_) => "OpenAI",
+                Model::Claude(_) => "Anthropic",
+            };
+            let mut spans = vec![Span::styled(
+                if body.width >= 32 {
+                    format!("{:<14}", name(model))
+                } else {
+                    name(model).to_owned()
+                },
+                Style::default().fg(theme.model(model)),
+            )];
+            if model == self.current {
+                spans.push(Span::styled(" ✓", Style::default().fg(theme.model(model))));
+            } else if body.width >= 32 {
+                spans.push(Span::raw("  "));
+            }
+            if body.width >= 32 {
+                spans.push(Span::styled(
+                    format!("  {provider}"),
+                    Style::default().fg(theme.muted()),
+                ));
+            }
+            if body.width >= 56 {
+                spans.push(Span::styled(
+                    format!(" · {}", model.as_str()),
+                    Style::default().fg(theme.muted()),
+                ));
+            }
+            ListItem::new(Line::from(spans))
+        });
+        let list = List::new(items)
+            .style(Style::default().fg(color))
+            .highlight_symbol("▸ ")
+            .highlight_style(
+                Style::default()
+                    .bg(theme.code_background())
+                    .add_modifier(Modifier::BOLD),
+            );
+        let mut state = ListState::default().with_selected(Some(self.selected));
+        frame.render_stateful_widget(list, body, &mut state);
     }
-}
-
-fn model_index(model: Model) -> usize {
-    SUPPORTED_MODELS
-        .iter()
-        .position(|candidate| *candidate == model)
-        .unwrap_or_else(|| unreachable!("closed Model roster must have a selector entry"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crossterm::event::{KeyEvent, KeyModifiers};
+    use nanocodex::{ClaudeModel, Model as CodexModel};
     use ratatui::{Terminal, backend::TestBackend, style::Color};
 
-    fn key(code: KeyCode) -> KeyEvent {
-        KeyEvent::new(code, KeyModifiers::NONE)
+    const SOL: Model = Model::Codex(CodexModel::Sol);
+    const LUNA: Model = Model::Codex(CodexModel::Luna);
+    const FABLE: Model = Model::Claude(ClaudeModel::Fable51);
+
+    fn key(selector: &mut ModelSelector, code: KeyCode) -> ComponentUpdate<ModelSelectorEffect> {
+        selector.update(ModelSelectorEvent::Terminal(Event::Key(KeyEvent::new(
+            code,
+            KeyModifiers::NONE,
+        ))))
     }
 
-    fn render(selector: &mut ModelSelector) -> Terminal<TestBackend> {
-        let mut terminal = Terminal::new(TestBackend::new(60, 9)).unwrap();
+    fn paste(selector: &mut ModelSelector, text: &str) {
+        selector.update(ModelSelectorEvent::Terminal(Event::Paste(text.to_owned())));
+    }
+
+    fn render(
+        selector: &mut ModelSelector,
+        width: u16,
+        height: u16,
+        theme: &Theme,
+    ) -> Terminal<TestBackend> {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
-            .draw(|frame| selector.render(frame, frame.area(), &Theme::default()))
+            .draw(|frame| selector.render(frame, frame.area(), theme))
             .unwrap();
         terminal
     }
 
-    fn rendered_label_color(selector: &mut ModelSelector, label: &str) -> Color {
-        let terminal = render(selector);
+    fn rows(terminal: &Terminal<TestBackend>) -> Vec<String> {
         let buffer = terminal.backend().buffer();
-        let label = label.chars().collect::<Vec<_>>();
-        let label_width = u16::try_from(label.len()).unwrap();
-        for y in 0..buffer.area.height {
-            for x in 0..=buffer.area.width.saturating_sub(label_width) {
-                if label.iter().enumerate().all(|(offset, character)| {
-                    buffer[(x + u16::try_from(offset).unwrap(), y)].symbol()
-                        == character.to_string()
-                }) {
-                    return buffer[(x, y)].fg;
-                }
-            }
-        }
-        panic!("label not rendered: {label:?}");
-    }
-
-    fn rendered_stop_colors(selector: &mut ModelSelector) -> Vec<Color> {
-        render(selector)
-            .backend()
-            .buffer()
-            .content
-            .iter()
-            .filter(|cell| cell.symbol() == "●")
-            .map(|cell| cell.fg)
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect()
+            })
             .collect()
     }
 
     #[test]
-    fn sol_label_is_centered_under_its_stop() {
-        let terminal = render(&mut ModelSelector::new(Model::Sol));
+    fn navigation_and_apply_respect_the_enabled_roster() {
+        let mut selector = ModelSelector::new(SOL, false);
+        key(&mut selector, KeyCode::Up);
+        key(&mut selector, KeyCode::Up);
+        assert_eq!(
+            key(&mut selector, KeyCode::Enter).effects,
+            [ModelSelectorEffect::Apply(LUNA)]
+        );
+        for _ in 0..10 {
+            key(&mut selector, KeyCode::Down);
+        }
+        assert_eq!(
+            key(&mut selector, KeyCode::Enter).effects,
+            [ModelSelectorEffect::Apply(Model::Codex(CodexModel::Astra))]
+        );
+        paste(&mut selector, "claude");
+        assert!(key(&mut selector, KeyCode::Enter).effects.is_empty());
+        let mut enabled = ModelSelector::new(FABLE, true);
+        assert_eq!(
+            key(&mut enabled, KeyCode::Enter).effects,
+            [ModelSelectorEffect::Apply(FABLE)]
+        );
+        assert_eq!(
+            key(&mut enabled, KeyCode::Esc).effects,
+            [ModelSelectorEffect::Dismiss]
+        );
+    }
+
+    #[test]
+    fn searches_names_aliases_providers_and_canonical_ids() {
+        for (query, expected) in [
+            ("SoL", vec![SOL]),
+            ("sonnet-5.5", vec![Model::Claude(ClaudeModel::Sonnet55)]),
+            ("gpt-6.1-sol", vec![SOL]),
+            ("claude-fable-5-1", vec![FABLE]),
+            ("OpenAI", available(false).to_vec()),
+            ("codex", available(false).to_vec()),
+            ("Anthropic", available(true)[3..].to_vec()),
+            ("claude", available(true)[3..].to_vec()),
+        ] {
+            let mut selector = ModelSelector::new(FABLE, true);
+            paste(&mut selector, query);
+            assert_eq!(
+                selector
+                    .matches
+                    .iter()
+                    .map(|&index| selector.models[index])
+                    .collect::<Vec<_>>(),
+                expected,
+                "query: {query}"
+            );
+            assert_eq!(
+                key(&mut selector, KeyCode::Enter).effects,
+                [ModelSelectorEffect::Apply(expected[0])]
+            );
+        }
+    }
+
+    #[test]
+    fn typing_paste_and_backspace_handle_graphemes_and_no_results() {
+        let mut selector = ModelSelector::new(SOL, true);
+        key(&mut selector, KeyCode::Char('é'));
+        assert!(selector.matches.is_empty());
+        assert!(key(&mut selector, KeyCode::Enter).effects.is_empty());
+        assert!(
+            rows(&render(&mut selector, 68, 12, &Theme::default()))
+                .join("\n")
+                .contains("No matching models")
+        );
+        key(&mut selector, KeyCode::Backspace);
+        paste(&mut selector, "sol\ne\u{301}👩‍💻\t");
+        assert_eq!(selector.query, "sole\u{301}👩‍💻");
+        key(&mut selector, KeyCode::Backspace);
+        assert_eq!(selector.query, "sole\u{301}");
+        key(&mut selector, KeyCode::Backspace);
+        assert_eq!(selector.query, "sol");
+        assert_eq!(
+            key(&mut selector, KeyCode::Enter).effects,
+            [ModelSelectorEffect::Apply(SOL)]
+        );
+        for _ in 0..4 {
+            key(&mut selector, KeyCode::Backspace);
+        }
+        assert!(selector.query.is_empty());
+        assert_eq!(key(&mut selector, KeyCode::Enter).effects.len(), 1);
+        let modified = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        selector.update(ModelSelectorEvent::Terminal(Event::Key(modified)));
+        assert!(selector.query.is_empty());
+    }
+
+    #[test]
+    fn vertical_rows_use_configured_colors_and_distinguish_current_from_selection() {
+        let theme: Theme = toml::from_str("model_sol = '#123456'\nmodel_fable = 'red'\n").unwrap();
+        let mut selector = ModelSelector::new(SOL, true);
+        for _ in 0..4 {
+            key(&mut selector, KeyCode::Down);
+        }
+        let terminal = render(&mut selector, 68, 12, &theme);
+        let text = rows(&terminal);
+        assert!(
+            text.iter()
+                .any(|row| row.contains("Sol") && row.contains('✓') && !row.contains('▸'))
+        );
+        assert!(text.iter().any(|row| row.contains("▸ Fable 5.1")
+            && row.contains("Anthropic")
+            && row.contains("claude-fable-5-1")));
         let buffer = terminal.backend().buffer();
-        let stop = buffer
+        let sol_row = text.iter().position(|row| row.contains("Sol")).unwrap() as u16;
+        let sol_x = text[usize::from(sol_row)]
+            .chars()
+            .position(|c| c == 'S')
+            .unwrap() as u16;
+        assert_eq!(buffer[(sol_x, sol_row)].fg, Color::Rgb(0x12, 0x34, 0x56));
+        let marker = buffer
             .content
             .iter()
-            .position(|cell| cell.symbol() == "◆")
+            .find(|cell| cell.symbol() == "▸")
             .unwrap();
-        let width = usize::from(buffer.area.width);
-        let label_row = stop / width + 1;
-        let sol = buffer.content[label_row * width..(label_row + 1) * width]
-            .windows(3)
-            .position(|cells| cells.iter().map(|cell| cell.symbol()).collect::<String>() == "Sol")
-            .unwrap();
-
-        assert_eq!(sol + 1, stop % width);
+        assert_eq!(marker.fg, Color::Red);
+        assert_eq!(marker.bg, theme.code_background());
+        assert!(marker.modifier.contains(Modifier::BOLD));
+        assert_eq!(buffer[(0, 0)].fg, Color::Red);
     }
 
     #[test]
-    fn selection_moves_linearly_and_does_not_wrap() {
-        let now = Instant::now();
-        let mut selector = ModelSelector::new(Model::Sol);
-
-        selector.update_key(key(KeyCode::Right), now);
-        assert_eq!(selector.selected, 2);
-        selector.update_key(key(KeyCode::Left), now);
-        assert_eq!(selector.selected, 1);
-        selector.update_key(key(KeyCode::Left), now);
-        selector.update_key(key(KeyCode::Left), now);
-        selector.update_key(key(KeyCode::Left), now);
-        assert_eq!(selector.selected, 0);
-    }
-
-    #[test]
-    fn every_supported_model_has_a_colored_stop() {
-        let mut selector = ModelSelector::new(Model::Sol);
-
-        assert_eq!(rendered_label_color(&mut selector, "Luna"), Color::White);
-        assert_eq!(rendered_label_color(&mut selector, "Sol"), Color::Yellow);
-        assert_eq!(
-            rendered_label_color(&mut selector, "Astra"),
-            Color::LightMagenta
-        );
-    }
-
-    #[test]
-    fn filled_bar_uses_the_selected_model_color() {
-        let mut selector = ModelSelector::new(Model::Astra);
-        let terminal = render(&mut selector);
-        let rail = terminal
-            .backend()
-            .buffer()
-            .content
-            .iter()
-            .filter(|cell| cell.symbol() == "━")
-            .collect::<Vec<_>>();
-
-        assert!(!rail.is_empty());
-        assert!(rail.iter().all(|cell| cell.fg == Color::LightMagenta));
-    }
-
-    #[test]
-    fn stops_use_the_filled_bar_color_only_when_covered() {
-        assert_eq!(
-            rendered_stop_colors(&mut ModelSelector::new(Model::Luna)),
-            [Color::DarkGray, Color::DarkGray]
-        );
-        assert_eq!(
-            rendered_stop_colors(&mut ModelSelector::new(Model::Sol)),
-            [Color::Yellow, Color::DarkGray]
-        );
-        assert_eq!(
-            rendered_stop_colors(&mut ModelSelector::new(Model::Astra)),
-            [Color::LightMagenta, Color::LightMagenta]
-        );
-    }
-
-    #[test]
-    fn title_does_not_describe_the_model_order() {
-        let terminal = render(&mut ModelSelector::new(Model::Sol));
-        let rendered = terminal
-            .backend()
-            .buffer()
-            .content
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect::<String>();
-
-        assert!(!rendered.contains("smarter"));
-    }
-
-    #[test]
-    fn narrow_selector_does_not_overwrite_wrapped_menu_help() {
-        let mut terminal = Terminal::new(TestBackend::new(30, 7)).unwrap();
-        terminal
-            .draw(|frame| {
-                ModelSelector::new(Model::Sol).render(frame, frame.area(), &Theme::default());
-            })
-            .unwrap();
-
-        let rendered = terminal
-            .backend()
-            .buffer()
-            .content
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect::<String>();
-        assert!(rendered.contains("←/→ model"));
-        assert!(rendered.contains("enter apply"));
-        assert!(rendered.contains("esc cancel"));
-        assert!(rendered.contains('◆'));
-        assert!(rendered.contains("Sol"));
-        assert_eq!(terminal.backend().buffer()[(0, 6)].symbol(), "╰");
-        assert_eq!(terminal.backend().buffer()[(29, 6)].symbol(), "╯");
-    }
-
-    #[test]
-    fn applying_returns_the_selected_model() {
-        let now = Instant::now();
-        let mut selector = ModelSelector::new(Model::Sol);
-        selector.update_key(key(KeyCode::Left), now);
-
-        let update = selector.update_key(key(KeyCode::Enter), now);
-
-        assert_eq!(update.effects, [ModelSelectorEffect::Apply(Model::Luna)]);
-    }
-
-    #[test]
-    fn astra_initialization_and_apply_preserve_astra() {
-        let now = Instant::now();
-        let mut selector = ModelSelector::new(Model::Astra);
-
-        assert_eq!(selector.selected, 2);
-        let update = selector.update_key(key(KeyCode::Enter), now);
-
-        assert_eq!(update.effects, [ModelSelectorEffect::Apply(Model::Astra)]);
-    }
-
-    #[test]
-    fn animation_reaches_the_selected_stop() {
-        let now = Instant::now();
-        let mut selector = ModelSelector::new(Model::Luna);
-        selector.update_key(key(KeyCode::Right), now);
-        assert!(selector.animation_deadline().is_some());
-
-        selector.update(ModelSelectorEvent::AnimationFrame(now + ANIMATION_DURATION));
-
-        assert_eq!(selector.displayed_position, 1.0);
-        assert!(selector.animation_deadline().is_none());
+    fn narrow_and_tiny_frames_keep_selection_visible_and_preserve_chrome() {
+        let theme = Theme::default();
+        for (width, height) in [(30, 7), (22, 6), (12, 4), (6, 3), (1, 1), (0, 0)] {
+            let mut selector = ModelSelector::new(FABLE, true);
+            let terminal = render(&mut selector, width, height, &theme);
+            if width >= 12 && height >= 4 {
+                let text = rows(&terminal).join("\n");
+                assert!(text.contains("▸ Fable"), "{width}x{height}: {text}");
+                let buffer = terminal.backend().buffer();
+                assert_eq!(buffer[(0, height - 1)].symbol(), "╰");
+                assert_eq!(buffer[(width - 1, height - 1)].symbol(), "╯");
+            }
+        }
+        let mut selector = ModelSelector::new(SOL, true);
+        paste(&mut selector, &"界e\u{301}".repeat(40));
+        let terminal = render(&mut selector, 30, 8, &theme);
+        let buffer = terminal.backend().buffer();
+        for y in 1..7 {
+            assert_eq!(buffer[(29, y)].symbol(), "│");
+        }
     }
 }

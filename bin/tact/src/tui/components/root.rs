@@ -32,7 +32,7 @@ use crate::{
     },
     core::extensions::Skill,
     tui::{
-        context::ContextDiagnostics,
+        context::{ContextBudget, ContextDiagnostics},
         prompt::Submission,
         session::{RecentPrompt, SessionSummary},
         theme::{Theme, ThemeMode},
@@ -40,7 +40,7 @@ use crate::{
     },
 };
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind};
-use nanocodex::Model;
+use nanocodex::HarnessModel as Model;
 use ratatui::{
     Frame,
     layout::{Position, Rect},
@@ -141,8 +141,7 @@ impl Notification {
 pub(crate) enum RootEvent {
     Terminal(Event),
     PasteImage(String),
-    #[cfg(test)]
-    ContextTokens(u64),
+    ContextBudget(ContextBudget),
     Transcript(Arc<TranscriptRecord>),
     AgentStreamClosed,
     Subagent(AgentUpdate),
@@ -155,6 +154,7 @@ pub(crate) enum RootEvent {
     ReviewCancelled,
     ReviewFinished(String),
     ReviewFailed(String),
+    CompactionFinished,
     WorkerTurnFinished {
         terminal_expected: bool,
     },
@@ -194,6 +194,10 @@ pub(crate) enum RootEvent {
         model: Model,
         skills: Arc<[Skill]>,
     },
+    EffortUpdateFailed {
+        effort: ReasoningEffort,
+        error: String,
+    },
     NotifyError(String),
     NotifySuccess(String),
     ConfirmReviewDownload,
@@ -229,6 +233,7 @@ pub(crate) enum SessionListKind {
 pub(crate) enum RootEffect {
     Submit(Submission),
     Reflect(Submission),
+    Compact,
     RunShell(String),
     ContinueSubagent(Submission),
     OpenDraftEditor,
@@ -284,6 +289,7 @@ enum Overlay {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum BlockingTask {
+    Compaction,
     Handoff,
     Review,
 }
@@ -343,6 +349,7 @@ pub(crate) struct RootNode {
     fork_available: bool,
     skills: Arc<[Skill]>,
     memory_enabled: bool,
+    claude_enabled: bool,
     interactive: bool,
     theme_mode: ThemeMode,
     tui: TuiConfig,
@@ -386,6 +393,7 @@ impl RootNode {
             fork_available: true,
             skills: Arc::from([]),
             memory_enabled: false,
+            claude_enabled: false,
             interactive: true,
             theme_mode: ThemeMode::Auto,
             tui: TuiConfig::default(),
@@ -403,9 +411,10 @@ impl RootNode {
         root.transcript = Node::new(self.transcript.component().fork_snapshot());
         root.composer
             .component_mut()
-            .update(ComposerEvent::ContextTokens(
-                self.composer.component().context_tokens(),
-            ));
+            .update(ComposerEvent::ContextBudget(ContextBudget {
+                active_tokens: self.composer.component().context_tokens(),
+                window_tokens: self.context_diagnostics.model_window_tokens,
+            }));
         root.set_fast_mode(self.composer.component().fast_mode());
         root.set_model(self.composer.component().model());
         root.set_reasoning_modes(
@@ -417,6 +426,7 @@ impl RootNode {
         root.fork_available = false;
         root.set_skills(Arc::clone(&self.skills));
         root.memory_enabled = self.memory_enabled;
+        root.claude_enabled = self.claude_enabled;
         root.theme_mode = self.theme_mode;
         root.tui = self.tui;
         root.context_diagnostics = self.context_diagnostics.clone();
@@ -457,6 +467,13 @@ impl RootNode {
         }
     }
 
+    pub(crate) fn set_claude_enabled(&mut self, enabled: bool) {
+        self.claude_enabled = enabled;
+        if matches!(self.overlay, Some(Overlay::Model(_))) {
+            self.open_model();
+        }
+    }
+
     pub(crate) fn set_tui_config(&mut self, tui: TuiConfig) {
         self.tui = tui;
     }
@@ -477,6 +494,9 @@ impl RootNode {
             .composer
             .component_mut()
             .update(ComposerEvent::SetModel(model));
+        if !model.supports_fast_mode() {
+            self.set_fast_mode(false);
+        }
     }
 
     pub(crate) fn set_reasoning_modes(&mut self, actual: ReasoningMode, preferred: ReasoningMode) {
@@ -516,6 +536,7 @@ impl RootNode {
         };
         let fork_available = self.fork_available;
         let memory_enabled = self.memory_enabled;
+        let claude_enabled = self.claude_enabled;
         let theme_mode = self.theme_mode;
         let tui = self.tui;
         let max_subagents = self.subagents.max_subagents();
@@ -524,6 +545,7 @@ impl RootNode {
         self.discarded_draft = discarded_draft;
         self.fork_available = fork_available;
         self.memory_enabled = memory_enabled;
+        self.claude_enabled = claude_enabled;
         self.theme_mode = theme_mode;
         self.tui = tui;
         self.set_max_subagents(max_subagents);
@@ -608,7 +630,10 @@ impl RootNode {
             let _ = self
                 .composer
                 .component_mut()
-                .update(ComposerEvent::ContextTokens(tokens));
+                .update(ComposerEvent::ContextBudget(ContextBudget {
+                    active_tokens: tokens,
+                    window_tokens: self.context_diagnostics.model_window_tokens,
+                }));
         }
         self.thread = ThreadState::Started;
     }
@@ -630,7 +655,6 @@ impl RootNode {
     pub(crate) fn animation_deadline(&self) -> Option<Instant> {
         let selector = match &self.overlay {
             Some(Overlay::Effort(selector)) => selector.component().animation_deadline(),
-            Some(Overlay::Model(selector)) => selector.component().animation_deadline(),
             _ => None,
         };
         [
@@ -777,6 +801,7 @@ impl RootNode {
             return self.update_key_confirmation(ConfirmationAction::Exit, Instant::now());
         }
         match self.blocking_task {
+            Some(BlockingTask::Compaction) => return ComponentUpdate::none(),
             Some(BlockingTask::Review) => return self.update_review_input(event),
             Some(BlockingTask::Handoff) => return self.update_handoff_input(event),
             None => {}
@@ -988,6 +1013,7 @@ impl RootNode {
                     review: self.blocking_task.is_none(),
                     fork: self.can_fork(),
                     fast_mode: self.composer.component().fast_mode(),
+                    fast_mode_available: self.composer.component().model().supports_fast_mode(),
                     memory: self.memory_enabled,
                     model: self.thread == ThreadState::New,
                 },
@@ -1238,9 +1264,7 @@ impl RootNode {
             Some(Overlay::Actions(_)) => self.update_actions(event),
             Some(Overlay::ContextDiagnostics(_)) => self.update_context_diagnostics(event),
             Some(Overlay::Effort(_)) => self.update_effort(EffortEvent::Terminal { event, now }),
-            Some(Overlay::Model(_)) => {
-                self.update_model(ModelSelectorEvent::Terminal { event, now })
-            }
+            Some(Overlay::Model(_)) => self.update_model(ModelSelectorEvent::Terminal(event)),
             Some(Overlay::Theme(_)) => {
                 self.update_theme_selector(ThemeSelectorEvent::Terminal(event))
             }
@@ -1528,6 +1552,21 @@ impl RootNode {
                     ContextDiagnosticsPanel::new(self.context_diagnostics.clone()),
                 )));
             }
+            Some(ActionsEffect::Trigger(Action::Compact)) => {
+                self.overlay = None;
+                if self.in_flight_turns > 0
+                    || self.in_flight_shells > 0
+                    || self.blocking_task.is_some()
+                    || !self.queue.component().is_empty()
+                {
+                    return ComponentUpdate::none();
+                }
+                self.blocking_task = Some(BlockingTask::Compaction);
+                return ComponentUpdate {
+                    effects: vec![RootEffect::Compact],
+                    render: RenderRequest::Immediate,
+                };
+            }
             Some(ActionsEffect::Trigger(Action::Reflection)) => {
                 self.overlay = None;
                 self.reflection_input = true;
@@ -1645,9 +1684,21 @@ impl RootNode {
     }
 
     fn open_effort(&mut self) -> ComponentUpdate<RootEffect> {
+        if self.thread == ThreadState::Started
+            && matches!(self.composer.component().model(), Model::Claude(_))
+        {
+            self.overlay = None;
+            self.notification = Some(Notification::plain(
+                "Effort is fixed for this Claude session; start a new session to change it."
+                    .to_owned(),
+                Color::Yellow,
+            ));
+            return ComponentUpdate::render(RenderRequest::Immediate);
+        }
         self.overlay = Some(Overlay::Effort(Node::new(EffortSelector::new(
             self.composer.component().effort(),
             self.preferred_reasoning_mode == ReasoningMode::Pro,
+            matches!(self.composer.component().model(), Model::Codex(_)),
         ))));
         ComponentUpdate::render(RenderRequest::Immediate)
     }
@@ -1658,6 +1709,7 @@ impl RootNode {
         }
         self.overlay = Some(Overlay::Model(Node::new(ModelSelector::new(
             self.composer.component().model(),
+            self.claude_enabled,
         ))));
         ComponentUpdate::render(RenderRequest::Immediate)
     }
@@ -1956,6 +2008,14 @@ impl RootNode {
         ComponentUpdate::render(update.render)
     }
 
+    fn set_effort(&mut self, effort: ReasoningEffort) {
+        self.transcript.component_mut().set_effort(effort);
+        self.subagents.set_effort(effort);
+        self.composer
+            .component_mut()
+            .update(ComposerEvent::SetEffort(effort));
+    }
+
     fn update_effort(&mut self, event: EffortEvent) -> ComponentUpdate<RootEffect> {
         let Some(Overlay::Effort(selector)) = &mut self.overlay else {
             return ComponentUpdate::none();
@@ -1989,12 +2049,7 @@ impl RootNode {
                     let message = format!("Pro {state} for new sessions{suffix}");
                     self.notification = Some(Notification::plain(message, Color::Green));
                 }
-                self.transcript.component_mut().set_effort(effort);
-                self.subagents.set_effort(effort);
-                let _ = self
-                    .composer
-                    .component_mut()
-                    .update(ComposerEvent::SetEffort(effort));
+                self.set_effort(effort);
                 ComponentUpdate {
                     effects: vec![RootEffect::SetEffort {
                         effort,
@@ -2380,7 +2435,6 @@ impl RootNode {
             RenderRequest::None
         };
         let effort = self.update_effort(EffortEvent::AnimationFrame(now));
-        let model = self.update_model(ModelSelectorEvent::AnimationFrame(now));
         let transcript = self.update_transcript(TranscriptEvent::AnimationFrame(now));
         let composer =
             self.update_composer(ComposerEvent::AnimationFrame(now), RenderRequest::Streaming);
@@ -2403,15 +2457,9 @@ impl RootNode {
             RenderRequest::None
         };
         ComponentUpdate {
-            effects: effort
-                .effects
-                .into_iter()
-                .chain(model.effects)
-                .chain(composer.effects)
-                .collect(),
+            effects: effort.effects.into_iter().chain(composer.effects).collect(),
             render: effort
                 .render
-                .max(model.render)
                 .max(transcript.render)
                 .max(composer.render)
                 .max(queue.render)
@@ -2541,11 +2589,18 @@ impl Component for RootNode {
                     )
                 }
             }
-            #[cfg(test)]
-            RootEvent::ContextTokens(tokens) => self.update_composer(
-                ComposerEvent::ContextTokens(tokens),
-                RenderRequest::Streaming,
-            ),
+            RootEvent::ContextBudget(budget) => {
+                self.context_diagnostics.set_native_budget(budget);
+                if let Some(Overlay::ContextDiagnostics(panel)) = &mut self.overlay {
+                    panel
+                        .component_mut()
+                        .replace(self.context_diagnostics.clone());
+                }
+                self.update_composer(
+                    ComposerEvent::ContextBudget(budget),
+                    RenderRequest::Streaming,
+                )
+            }
             RootEvent::Transcript(record) => {
                 if let Some(prompt) = recent_prompt(&record) {
                     self.recent_prompts.push(prompt);
@@ -2567,7 +2622,10 @@ impl Component for RootNode {
                 }
                 if let Some(tokens) = observation.completed_tokens {
                     let context = self.update_composer(
-                        ComposerEvent::ContextTokens(tokens),
+                        ComposerEvent::ContextBudget(ContextBudget {
+                            active_tokens: tokens,
+                            window_tokens: self.context_diagnostics.model_window_tokens,
+                        }),
                         RenderRequest::Streaming,
                     );
                     update.effects.extend(context.effects);
@@ -2728,6 +2786,10 @@ impl Component for RootNode {
                     RenderRequest::Immediate,
                 )
             }
+            RootEvent::CompactionFinished => {
+                self.blocking_task = None;
+                ComponentUpdate::render(RenderRequest::Immediate)
+            }
             RootEvent::WorkerTurnFinished { terminal_expected } => {
                 self.worker_turn_finished(terminal_expected)
             }
@@ -2783,6 +2845,11 @@ impl Component for RootNode {
                 );
                 self.set_model(model);
                 self.set_skills(skills);
+                ComponentUpdate::render(RenderRequest::Immediate)
+            }
+            RootEvent::EffortUpdateFailed { effort, error } => {
+                self.set_effort(effort);
+                self.notification = Some(Notification::plain(error, Color::Red));
                 ComponentUpdate::render(RenderRequest::Immediate)
             }
             RootEvent::NotifyError(message) => {
@@ -3127,7 +3194,7 @@ mod tests {
         MouseEventKind,
     };
     use nanocodex::{
-        Model, Thinking,
+        ClaudeModel, HarnessModel as Model, Model as CodexModel, Thinking,
         agent::{
             events::{AgentEvent, AgentEventKind},
             input::{PromptInput, UserInput},
@@ -3291,6 +3358,43 @@ mod tests {
             projection,
         );
         assert_eq!(root.tui.mouse_scroll_lines.get(), 1);
+    }
+
+    #[test]
+    fn native_context_budget_updates_live_and_restored_meter() {
+        let record: TranscriptRecord = serde_json::from_value(json!({
+            "schema_version": 2, "sequence": 1, "recorded_at_unix_ms": 1,
+            "source": "tact", "type": "context.budget",
+            "payload": {"active_tokens": 125_000, "window_tokens": 1_000_000}
+        }))
+        .unwrap();
+        let record = Arc::new(record);
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        root.set_model(Model::Claude(nanocodex::ClaudeModel::Opus55));
+        root.update(super::RootEvent::ContextBudget(
+            crate::tui::context::ContextBudget {
+                active_tokens: 0,
+                window_tokens: 900_000,
+            },
+        ));
+        assert!(render_root_text(&mut root, 80, 12).contains("0%/900k"));
+        assert!(root.context_diagnostics.auto_compact_token_limit.is_none());
+        root.update(super::RootEvent::Transcript(record.clone()));
+        assert_eq!(root.context_diagnostics.active_tokens, Some(125_000));
+        assert!(root.context_diagnostics.usage.is_none());
+        assert_eq!(root.composer().context_tokens(), 125_000);
+        assert!(render_root_text(&mut root, 80, 12).contains("13%/1m"));
+        root.restore_session(
+            Path::new("/work"),
+            ReasoningEffort::Medium,
+            ReasoningMode::Standard,
+            ReasoningMode::Standard,
+            false,
+            vec![record],
+        );
+        root.set_model(Model::Claude(nanocodex::ClaudeModel::Opus55));
+        assert_eq!(root.composer().context_tokens(), 125_000);
+        assert!(render_root_text(&mut root, 80, 12).contains("13%/1m"));
     }
 
     #[test]
@@ -3460,7 +3564,7 @@ mod tests {
             AgentDescriptor {
                 id: AgentId::new(1),
                 session_id: "child".to_owned(),
-                model: Model::Sol,
+                model: Model::Codex(CodexModel::Sol),
                 thinking: Thinking::Medium,
                 role: "worker".to_owned(),
                 task: "work".to_owned(),
@@ -3489,7 +3593,7 @@ mod tests {
         root.update(RootEvent::Subagent(AgentUpdate::Added(AgentDescriptor {
             id: AgentId::new(1),
             session_id: "child".to_owned(),
-            model: Model::Sol,
+            model: Model::Codex(CodexModel::Sol),
             thinking: Thinking::Medium,
             role: "worker".to_owned(),
             task: "verify ordering".to_owned(),
@@ -3577,7 +3681,7 @@ mod tests {
             root.update(RootEvent::Subagent(AgentUpdate::Added(AgentDescriptor {
                 id: AgentId::new(id),
                 session_id: format!("child-{id}"),
-                model: Model::Sol,
+                model: Model::Codex(CodexModel::Sol),
                 thinking: Thinking::Medium,
                 role: role.to_owned(),
                 task: "coordinate with a peer".to_owned(),
@@ -3621,7 +3725,7 @@ mod tests {
             AgentDescriptor {
                 id: AgentId::new(1),
                 session_id: "child".to_owned(),
-                model: Model::Sol,
+                model: Model::Codex(CodexModel::Sol),
                 thinking: Thinking::Medium,
                 role: "worker".to_owned(),
                 task: "work".to_owned(),
@@ -3656,7 +3760,7 @@ mod tests {
             AgentDescriptor {
                 id: AgentId::new(1),
                 session_id: "child".to_owned(),
-                model: Model::Sol,
+                model: Model::Codex(CodexModel::Sol),
                 thinking: Thinking::Medium,
                 role: "worker".to_owned(),
                 task: "inspect the queue".to_owned(),
@@ -3689,7 +3793,7 @@ mod tests {
             AgentDescriptor {
                 id: AgentId::new(1),
                 session_id: "child".to_owned(),
-                model: Model::Sol,
+                model: Model::Codex(CodexModel::Sol),
                 thinking: Thinking::Medium,
                 role: "worker".to_owned(),
                 task: "inspect the queue".to_owned(),
@@ -3715,7 +3819,7 @@ mod tests {
             AgentDescriptor {
                 id: AgentId::new(2),
                 session_id: "grandchild".to_owned(),
-                model: Model::Sol,
+                model: Model::Codex(CodexModel::Sol),
                 thinking: Thinking::Medium,
                 role: "worker".to_owned(),
                 task: "inspect the queue".to_owned(),
@@ -5849,6 +5953,46 @@ mod tests {
     }
 
     #[test]
+    fn rejected_effort_update_restores_display_and_reports_error() {
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::High);
+        let update = root.update(RootEvent::EffortUpdateFailed {
+            effort: ReasoningEffort::Low,
+            error: "Effort update rejected".to_owned(),
+        });
+        assert_eq!(root.composer().effort(), ReasoningEffort::Low);
+        assert!(update.effects.is_empty());
+        assert!(
+            root.notification
+                .as_ref()
+                .unwrap()
+                .message
+                .to_string()
+                .contains("Effort update rejected")
+        );
+    }
+
+    #[test]
+    fn started_claude_session_explains_why_effort_is_fixed() {
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        root.set_model(Model::Claude(nanocodex::ClaudeModel::Opus55));
+        root.open_effort();
+        assert!(matches!(root.overlay, Some(Overlay::Effort(_))));
+        root.thread = ThreadState::Started;
+        let update = root.open_effort();
+        assert!(update.effects.is_empty());
+        assert!(root.overlay.is_none());
+        assert_eq!(root.composer().effort(), ReasoningEffort::Medium);
+        assert!(
+            root.notification
+                .as_ref()
+                .unwrap()
+                .message
+                .to_string()
+                .contains("Effort is fixed for this Claude session")
+        );
+    }
+
+    #[test]
     fn effort_action_opens_the_selector_and_applies_the_selection() {
         let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
         root.update(key(KeyCode::Char('/'), KeyModifiers::NONE));
@@ -5957,25 +6101,50 @@ mod tests {
 
     #[test]
     fn fast_mode_action_toggles_the_runtime_setting() {
+        for model in [
+            Model::Codex(CodexModel::Sol),
+            Model::Claude(ClaudeModel::Opus55),
+        ] {
+            let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+            root.set_model(model);
+            root.update(key(KeyCode::Char('/'), KeyModifiers::NONE));
+            for character in "fast mode".chars() {
+                root.update(key(KeyCode::Char(character), KeyModifiers::NONE));
+            }
+
+            let enabled = root.update(key(KeyCode::Enter, KeyModifiers::NONE));
+
+            assert_eq!(enabled.effects, [RootEffect::SetFastMode(true)]);
+            assert!(root.composer().fast_mode());
+            assert!(root.overlay.is_none());
+
+            root.update(key(KeyCode::Char('/'), KeyModifiers::NONE));
+            for character in "priority".chars() {
+                root.update(key(KeyCode::Char(character), KeyModifiers::NONE));
+            }
+            let disabled = root.update(key(KeyCode::Enter, KeyModifiers::NONE));
+
+            assert_eq!(disabled.effects, [RootEffect::SetFastMode(false)]);
+            assert!(!root.composer().fast_mode());
+        }
+    }
+
+    #[test]
+    fn fable_model_clears_fast_mode_and_disables_its_action() {
         let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        root.set_model(Model::Claude(ClaudeModel::Opus55));
+        root.set_fast_mode(true);
+        root.set_model(Model::Claude(ClaudeModel::Fable51));
+        assert!(!root.composer().fast_mode());
         root.update(key(KeyCode::Char('/'), KeyModifiers::NONE));
         for character in "fast mode".chars() {
             root.update(key(KeyCode::Char(character), KeyModifiers::NONE));
         }
-
-        let enabled = root.update(key(KeyCode::Enter, KeyModifiers::NONE));
-
-        assert_eq!(enabled.effects, [RootEffect::SetFastMode(true)]);
-        assert!(root.composer().fast_mode());
-        assert!(root.overlay.is_none());
-
-        root.update(key(KeyCode::Char('/'), KeyModifiers::NONE));
-        for character in "priority".chars() {
-            root.update(key(KeyCode::Char(character), KeyModifiers::NONE));
-        }
-        let disabled = root.update(key(KeyCode::Enter, KeyModifiers::NONE));
-
-        assert_eq!(disabled.effects, [RootEffect::SetFastMode(false)]);
+        assert!(
+            root.update(key(KeyCode::Enter, KeyModifiers::NONE))
+                .effects
+                .is_empty()
+        );
         assert!(!root.composer().fast_mode());
     }
 
@@ -6004,7 +6173,7 @@ mod tests {
             root.update(RootEvent::Subagent(AgentUpdate::Added(AgentDescriptor {
                 id: AgentId::new(id),
                 session_id: format!("agent-{id}"),
-                model: Model::Sol,
+                model: Model::Codex(CodexModel::Sol),
                 thinking: Thinking::Medium,
                 role: role.to_owned(),
                 task: role.to_owned(),
@@ -6065,7 +6234,10 @@ mod tests {
 
         root.update(key(KeyCode::Left, KeyModifiers::NONE));
         let selected = root.update(key(KeyCode::Enter, KeyModifiers::NONE));
-        assert_eq!(selected.effects, [RootEffect::SetModel(Model::Luna)]);
+        assert_eq!(
+            selected.effects,
+            [RootEffect::SetModel(Model::Codex(CodexModel::Luna))]
+        );
 
         root.interactive = true;
         root.thread = super::ThreadState::Started;
@@ -6075,13 +6247,35 @@ mod tests {
     }
 
     #[test]
+    fn claude_availability_survives_reset_and_fork() {
+        let workspace = Path::new("/work");
+        let mut root = RootNode::new(workspace, ReasoningEffort::Medium);
+        root.set_claude_enabled(true);
+        assert!(root.fork(workspace, ReasoningEffort::Medium).claude_enabled);
+        root.reset_session(
+            workspace,
+            ReasoningEffort::Medium,
+            ReasoningMode::Standard,
+            ReasoningMode::Standard,
+            DraftReset::Clear,
+        );
+        root.set_model(Model::Codex(CodexModel::Astra));
+        root.open_model();
+        root.set_claude_enabled(false);
+        root.update(key(KeyCode::Right, KeyModifiers::NONE));
+        let result = root.update(key(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(result.effects.is_empty());
+        assert_eq!(root.composer().model(), Model::Codex(CodexModel::Astra));
+    }
+
+    #[test]
     fn fork_inherits_the_model_and_cannot_change_it() {
         let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
-        root.set_model(Model::Luna);
+        root.set_model(Model::Codex(CodexModel::Luna));
 
         let mut fork = root.fork(Path::new("/work"), ReasoningEffort::Medium);
 
-        assert_eq!(fork.composer().model(), Model::Luna);
+        assert_eq!(fork.composer().model(), Model::Codex(CodexModel::Luna));
         let update = fork.update(key(KeyCode::Char('d'), KeyModifiers::CONTROL));
         assert!(update.effects.is_empty());
         assert!(fork.overlay.is_none());
@@ -6272,6 +6466,103 @@ mod tests {
     }
 
     #[test]
+    fn manual_compaction_uses_composer_activity_and_clears_success_and_failure() {
+        for error in [None, Some("synthetic failure".to_owned())] {
+            let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+            root.update(key(KeyCode::Char('/'), KeyModifiers::NONE));
+            for character in "compact".chars() {
+                root.update(key(KeyCode::Char(character), KeyModifiers::NONE));
+            }
+            assert_eq!(
+                root.update(key(KeyCode::Enter, KeyModifiers::NONE)).effects,
+                [RootEffect::Compact]
+            );
+            root.update(super::RootEvent::Transcript(Arc::new(
+                TranscriptRecord::from_local(1, 1, LocalEvent::CompactionStarted).unwrap(),
+            )));
+            assert!(render_root_text(&mut root, 100, 20).contains("Compacting context"));
+            assert!(
+                root.update(key(KeyCode::Char('x'), KeyModifiers::NONE))
+                    .effects
+                    .is_empty()
+            );
+            assert!(root.composer().draft().is_empty());
+            assert!(
+                root.update(key(KeyCode::Esc, KeyModifiers::NONE))
+                    .effects
+                    .is_empty()
+            );
+            root.update(super::RootEvent::Transcript(Arc::new(
+                TranscriptRecord::from_local(
+                    2,
+                    2,
+                    LocalEvent::CompactionFinished {
+                        terminal_stop: None,
+                        error: error.clone(),
+                        duration_ns: 1_000_000,
+                    },
+                )
+                .unwrap(),
+            )));
+            root.update(super::RootEvent::CompactionFinished);
+            assert!(root.blocking_task.is_none());
+            let text = render_root_text(&mut root, 100, 20);
+            assert!(!text.contains("Compacting context"));
+            if let Some(error) = error {
+                assert!(text.contains(&error));
+            }
+            // The provider stream and worker receipts have independent delivery schedules.
+            root.update(super::RootEvent::Transcript(agent_record(
+                3,
+                AgentEventKind::ModelCompactionStarted,
+                json!({}),
+            )));
+            root.update(super::RootEvent::Transcript(agent_record(
+                4,
+                AgentEventKind::ModelCompactionCompleted,
+                json!({"duration_ns": 1}),
+            )));
+            assert!(!render_root_text(&mut root, 100, 20).contains("Compacting context"));
+            assert_eq!(render_root_text(&mut root, 100, 20), text);
+            assert_eq!(root.context_diagnostics.compactions_started, 1);
+            root.update(super::RootEvent::Transcript(agent_record(
+                5,
+                AgentEventKind::RunStarted,
+                json!({}),
+            )));
+            root.update(super::RootEvent::Transcript(agent_record(
+                6,
+                AgentEventKind::ModelCompactionStarted,
+                json!({}),
+            )));
+            assert!(render_root_text(&mut root, 100, 20).contains("Compacting context"));
+            assert_eq!(root.context_diagnostics.compactions_started, 2);
+        }
+    }
+
+    #[test]
+    fn manual_compaction_is_unavailable_during_active_work() {
+        for active_shell in [true, false] {
+            let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+            if active_shell {
+                root.in_flight_shells = 1;
+            } else {
+                root.in_flight_turns = 1;
+            }
+            root.update(key(KeyCode::Char('/'), KeyModifiers::NONE));
+            for character in "compact".chars() {
+                root.update(key(KeyCode::Char(character), KeyModifiers::NONE));
+            }
+            assert!(
+                root.update(key(KeyCode::Enter, KeyModifiers::NONE))
+                    .effects
+                    .is_empty()
+            );
+            assert!(root.blocking_task.is_none());
+        }
+    }
+
+    #[test]
     fn reflection_action_collects_hidden_optional_instructions() {
         let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
         root.update(key(KeyCode::Char('/'), KeyModifiers::NONE));
@@ -6447,7 +6738,7 @@ mod tests {
     #[test]
     fn new_session_action_clears_the_completed_thread_after_runtime_replacement() {
         let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
-        root.set_model(Model::Luna);
+        root.set_model(Model::Codex(CodexModel::Luna));
         for character in "old prompt".chars() {
             root.update(key(KeyCode::Char(character), KeyModifiers::NONE));
         }
@@ -6462,7 +6753,10 @@ mod tests {
 
         let requested = root.update(key(KeyCode::Enter, KeyModifiers::NONE));
 
-        assert_eq!(requested.effects, [RootEffect::NewSession(Model::Luna)]);
+        assert_eq!(
+            requested.effects,
+            [RootEffect::NewSession(Model::Codex(CodexModel::Luna))]
+        );
         assert!(root.overlay.is_none());
         assert!(!root.interactive);
 

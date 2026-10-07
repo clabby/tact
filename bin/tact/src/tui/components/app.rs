@@ -9,6 +9,7 @@ use crate::{
     app::config::{ReasoningEffort, ReasoningMode, TuiConfig},
     core::extensions::Skill,
     tui::{
+        context::ContextBudget,
         pane::PaneId,
         session::{RecentPrompt, SessionSummary},
         theme::{ColorScheme, Theme, ThemeMode},
@@ -16,7 +17,7 @@ use crate::{
     },
 };
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
-use nanocodex::Model;
+use nanocodex::HarnessModel as Model;
 use ratatui::{
     Frame,
     layout::{Position, Rect},
@@ -33,6 +34,10 @@ const SPLIT_HINT: &str = " mouse: focus · Ctrl+C: clear · Ctrl+C×2: close ";
 const MIN_SPLIT_HINT_WIDTH: u16 = 60;
 
 pub(crate) enum AppEvent {
+    ContextBudget {
+        pane: PaneId,
+        budget: ContextBudget,
+    },
     Terminal(Event),
     PasteImage(String),
     Transcript {
@@ -76,6 +81,7 @@ pub(crate) enum AppEvent {
         pane: PaneId,
         error: String,
     },
+    CompactionFinished(PaneId),
     WorkerTurnFinished {
         pane: PaneId,
         terminal_expected: bool,
@@ -161,6 +167,11 @@ pub(crate) enum AppEvent {
         model: Model,
         skills: Arc<[Skill]>,
     },
+    EffortUpdateFailed {
+        pane: PaneId,
+        effort: ReasoningEffort,
+        error: String,
+    },
     NotifyError {
         pane: PaneId,
         error: String,
@@ -238,6 +249,9 @@ impl AppNode {
             AppEvent::PasteImage(data_url) => {
                 self.update_root(self.focus, RootEvent::PasteImage(data_url))
             }
+            AppEvent::ContextBudget { pane, budget } => {
+                self.update_root(pane, RootEvent::ContextBudget(budget))
+            }
             AppEvent::Transcript { pane, record } => {
                 self.update_root(pane, RootEvent::Transcript(record))
             }
@@ -292,6 +306,9 @@ impl AppNode {
             AppEvent::HandoffCancelled(pane) => self.update_root(pane, RootEvent::HandoffCancelled),
             AppEvent::HandoffFailed { pane, error } => {
                 self.update_root(pane, RootEvent::HandoffFailed(error))
+            }
+            AppEvent::CompactionFinished(pane) => {
+                self.update_root(pane, RootEvent::CompactionFinished)
             }
             AppEvent::WorkerTurnFinished {
                 pane,
@@ -418,6 +435,11 @@ impl AppNode {
                     skills,
                 },
             ),
+            AppEvent::EffortUpdateFailed {
+                pane,
+                effort,
+                error,
+            } => self.update_root(pane, RootEvent::EffortUpdateFailed { effort, error }),
             AppEvent::NotifyError { pane, error } => {
                 self.update_root(pane, RootEvent::NotifyError(error))
             }
@@ -685,6 +707,15 @@ impl AppNode {
         }
     }
 
+    pub(crate) fn set_claude_enabled(&mut self, enabled: bool) {
+        if let Some((_, main)) = &mut self.main {
+            main.component_mut().set_claude_enabled(enabled);
+        }
+        if let Some((_, fork)) = &mut self.fork {
+            fork.component_mut().set_claude_enabled(enabled);
+        }
+    }
+
     pub(crate) fn set_max_subagents(&mut self, limit: usize) {
         if let Some((_, main)) = &mut self.main {
             main.component_mut().set_max_subagents(limit);
@@ -824,7 +855,7 @@ mod tests {
     use crossterm::event::{
         Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     };
-    use nanocodex::Model;
+    use nanocodex::{HarnessModel as Model, Model as CodexModel};
     use ratatui::{Terminal, backend::TestBackend};
     use semver::Version;
     use std::{num::NonZeroU16, path::PathBuf, sync::Arc};
@@ -864,14 +895,41 @@ mod tests {
             effort: ReasoningEffort::Low,
             reasoning_mode: ReasoningMode::Standard,
             fast_mode: false,
-            model: Model::Luna,
+            model: Model::Codex(CodexModel::Luna),
             draft_reset: DraftReset::Preserve,
             skills: Arc::from([]),
         });
 
         let root = app.root(PaneId::Main).unwrap();
         assert_eq!(root.composer().draft(), "send with luna");
-        assert_eq!(root.composer().model(), Model::Luna);
+        assert_eq!(root.composer().model(), Model::Codex(CodexModel::Luna));
+    }
+
+    #[test]
+    fn replacing_claude_with_codex_resets_context_capacity() {
+        let mut app = app();
+        app.pane_mut(PaneId::Main)
+            .unwrap()
+            .component_mut()
+            .set_model(Model::Claude(nanocodex::ClaudeModel::Opus55));
+        app.update(AppEvent::ContextBudget {
+            pane: PaneId::Main,
+            budget: crate::tui::context::ContextBudget {
+                active_tokens: 0,
+                window_tokens: 1_000_000,
+            },
+        });
+        assert!(rendered(&mut app, 80, 12).contains("0%/1m"));
+        app.update(AppEvent::NewSessionReady {
+            pane: PaneId::Main,
+            effort: ReasoningEffort::Medium,
+            reasoning_mode: ReasoningMode::Standard,
+            fast_mode: false,
+            model: Model::Codex(CodexModel::Sol),
+            draft_reset: DraftReset::Preserve,
+            skills: Arc::from([]),
+        });
+        assert!(rendered(&mut app, 80, 12).contains("0%/272k"));
     }
 
     #[test]
@@ -884,7 +942,7 @@ mod tests {
             effort: ReasoningEffort::High,
             reasoning_mode: ReasoningMode::Standard,
             fast_mode: false,
-            model: Model::Astra,
+            model: Model::Codex(CodexModel::Astra),
             draft_reset: DraftReset::Preserve,
             skills: Arc::from([]),
         });
@@ -1029,7 +1087,13 @@ mod tests {
     #[test]
     fn fork_inherits_the_primary_context_usage() {
         let mut app = app();
-        app.update_root(PaneId::Main, RootEvent::ContextTokens(136_000));
+        app.update(AppEvent::ContextBudget {
+            pane: PaneId::Main,
+            budget: crate::tui::context::ContextBudget {
+                active_tokens: 136_000,
+                window_tokens: 272_000,
+            },
+        });
 
         app.update(control('t'));
 
@@ -1052,7 +1116,7 @@ mod tests {
             effort: ReasoningEffort::High,
             reasoning_mode: ReasoningMode::Standard,
             fast_mode: false,
-            model: Model::Luna,
+            model: Model::Codex(CodexModel::Luna),
             skills: Arc::from([]),
         });
 
@@ -1062,7 +1126,7 @@ mod tests {
             root.composer().draft(),
             "Continue from the validated parser design."
         );
-        assert_eq!(root.composer().model(), Model::Luna);
+        assert_eq!(root.composer().model(), Model::Codex(CodexModel::Luna));
     }
 
     #[test]

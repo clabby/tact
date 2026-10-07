@@ -3,15 +3,17 @@
 use crate::{
     app::{
         config::{AuthMode, Config, ConfigOverrides, ReasoningEffort, ReasoningMode, Transport},
-        error::{AuthResult, Error, Result, RuntimeError},
-        model, shutdown, update,
+        error::{AuthError, Error, Result, RuntimeError},
+        model,
+        secret::SecretString,
+        shutdown, update,
     },
     core::ConfiguredAgent,
     tui,
 };
 use clap::{ArgAction, Parser, Subcommand, builder::NonEmptyStringValueParser};
 use crossterm::style::{Color, Stylize};
-use nanocodex::Model;
+use nanocodex::{HarnessFamily, HarnessModel as Model};
 use std::{env, env::VarError, fmt, path::PathBuf};
 use tokio_util::sync::CancellationToken;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
@@ -49,7 +51,7 @@ pub(crate) struct Cli {
     #[arg(long, global = true, env = "TACT_CONFIG", value_name = "PATH")]
     config: Option<PathBuf>,
 
-    /// Select the authentication method.
+    /// Select the Codex authentication method.
     #[arg(
         long,
         global = true,
@@ -172,6 +174,9 @@ pub(crate) struct Cli {
 enum Command {
     /// Manage authentication.
     Auth {
+        /// Provider whose credentials to manage: codex or claude.
+        #[arg(long, global = true, default_value = "codex", value_name = "PROVIDER")]
+        provider: HarnessFamily,
         #[command(subcommand)]
         command: AuthCommand,
     },
@@ -234,11 +239,15 @@ enum MemoryCommand {
 
 #[derive(Debug, Subcommand)]
 enum AuthCommand {
-    /// Sign in with a ChatGPT subscription.
-    Login,
+    /// Sign in to Codex, or show API-key setup instructions for Claude.
+    Login {
+        /// Print the sign-in URL without opening a browser.
+        #[arg(long)]
+        no_open: bool,
+    },
     /// Show the effective authentication source.
     Status,
-    /// Remove the shared ChatGPT credentials.
+    /// Remove Codex credentials, or show API-key removal instructions for Claude.
     Logout,
 }
 
@@ -472,7 +481,7 @@ impl Command {
 
     async fn run_with_config(self, config: &Config, model: Model) -> Result<()> {
         match self {
-            Self::Auth { command } => command.run(config).await.map_err(Into::into),
+            Self::Auth { provider, command } => command.run(config, provider).await,
             Self::Config { command } => command.run(config),
             Self::Mcp { command } => command.run(config),
             Self::Run {
@@ -653,12 +662,40 @@ fn same_replication_snapshot(
 }
 
 impl AuthCommand {
-    async fn run(self, config: &Config) -> AuthResult<()> {
-        match self {
-            Self::Login => config.auth().login().await,
-            Self::Status => config.auth().status().await,
-            Self::Logout => config.auth().logout(),
+    async fn run(self, config: &Config, provider: HarnessFamily) -> Result<()> {
+        if provider == HarnessFamily::Codex {
+            match self {
+                Self::Login { no_open } => config.auth().login(!no_open).await?,
+                Self::Status => config.auth().status().await?,
+                Self::Logout => config.auth().logout()?,
+            }
+            return Ok(());
         }
+        config.claude().ensure_enabled()?;
+        match self {
+            Self::Login { .. } => {
+                println!(
+                    "Claude uses API keys only. Set ANTHROPIC_API_KEY to your Anthropic API key."
+                );
+            }
+            Self::Status => {
+                let key =
+                    SecretString::from_environment("ANTHROPIC_API_KEY").map_err(AuthError::from)?;
+                if let Some(key) = &key {
+                    crate::app::auth::validate_claude_api_key(key)?;
+                }
+                let configured = key.is_some();
+                println!("Authentication: Claude API key");
+                println!("Source: ANTHROPIC_API_KEY");
+                println!("Configured: {}", if configured { "yes" } else { "no" });
+            }
+            Self::Logout => {
+                println!(
+                    "Claude uses API keys only. Unset ANTHROPIC_API_KEY to remove it from your environment."
+                );
+            }
+        }
+        Ok(())
     }
 }
 
@@ -759,7 +796,7 @@ mod tests {
         error::{ConfigError, Error},
     };
     use clap::{CommandFactory, Parser, error::ErrorKind};
-    use nanocodex::Model;
+    use nanocodex::{HarnessModel as Model, Model as CodexModel};
     use std::{
         env::VarError,
         ffi::OsString,
@@ -839,7 +876,7 @@ mod tests {
     fn model_selects_the_initial_agent() {
         let cli = Cli::try_parse_from(["tact", "--model", "gpt-6.1-sol"]).unwrap();
 
-        assert_eq!(cli.model, Some(Model::Sol));
+        assert_eq!(cli.model, Some(Model::Codex(CodexModel::Sol)));
     }
 
     #[test]
@@ -896,7 +933,7 @@ mod tests {
         assert_eq!(cli.config.unwrap(), PathBuf::from("tact.toml"));
         assert_eq!(cli.auth, Some(AuthMode::ChatGpt));
         assert_eq!(cli.auth_file.unwrap(), PathBuf::from("auth.json"));
-        assert_eq!(cli.model, Some(Model::Luna));
+        assert_eq!(cli.model, Some(Model::Codex(CodexModel::Luna)));
         assert_eq!(cli.max_subagents, Some(12));
         assert!(matches!(cli.command, Some(Command::Config { .. })));
     }
@@ -906,6 +943,95 @@ mod tests {
         let cli = Cli::try_parse_from(["tact", "--auth", "api-key", "config", "show"]).unwrap();
 
         assert_eq!(cli.auth, Some(AuthMode::ApiKey));
+    }
+
+    #[test]
+    fn authentication_provider_and_login_options_are_parallel() {
+        for provider in ["codex", "claude"] {
+            for args in [
+                vec!["tact", "auth", "--provider", provider, "login", "--no-open"],
+                vec!["tact", "auth", "login", "--no-open", "--provider", provider],
+            ] {
+                let cli = Cli::try_parse_from(args).unwrap();
+                let Some(Command::Auth {
+                    provider: actual,
+                    command: super::AuthCommand::Login { no_open },
+                }) = cli.command
+                else {
+                    panic!("expected login")
+                };
+                assert_eq!(actual.as_str(), provider);
+                assert!(no_open);
+            }
+            for command in ["status", "logout"] {
+                assert!(
+                    Cli::try_parse_from(["tact", "auth", command, "--provider", provider]).is_ok()
+                );
+            }
+        }
+        let cli = Cli::try_parse_from(["tact", "auth", "status"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Auth {
+                provider: nanocodex::HarnessFamily::Codex,
+                ..
+            })
+        ));
+        assert!(Cli::try_parse_from(["tact", "auth", "--provider", "other", "status"]).is_err());
+    }
+
+    #[tokio::test]
+    async fn claude_auth_commands_require_explicit_opt_in() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        std::fs::write(&path, "[claude]\n").unwrap();
+        let config = Config::load(ConfigOverrides {
+            path: Some(path),
+            auth_file: Some(directory.path().join("codex-auth")),
+            ..ConfigOverrides::default()
+        })
+        .unwrap();
+        for command in [
+            super::AuthCommand::Login { no_open: true },
+            super::AuthCommand::Status,
+            super::AuthCommand::Logout,
+        ] {
+            let error = command
+                .run(&config, nanocodex::HarnessFamily::Claude)
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                error,
+                crate::app::error::Error::Config(crate::app::error::ConfigError::ClaudeDisabled)
+            ));
+        }
+        assert!(!directory.path().join("codex-auth").exists());
+    }
+
+    #[tokio::test]
+    async fn claude_login_and_logout_do_not_create_credentials() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let contents = "[claude]\nenabled = true\n";
+        std::fs::write(&path, contents).unwrap();
+        let config = Config::load(ConfigOverrides {
+            path: Some(path.clone()),
+            auth_file: Some(directory.path().join("codex-auth")),
+            ..ConfigOverrides::default()
+        })
+        .unwrap();
+        for command in [
+            super::AuthCommand::Login { no_open: false },
+            super::AuthCommand::Login { no_open: true },
+            super::AuthCommand::Logout,
+        ] {
+            command
+                .run(&config, nanocodex::HarnessFamily::Claude)
+                .await
+                .unwrap();
+        }
+        assert_eq!(std::fs::read_to_string(path).unwrap(), contents);
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
     }
 
     #[test]

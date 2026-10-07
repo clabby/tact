@@ -3,7 +3,7 @@ use crate::{
     core::ConfiguredAgent,
     tui::{pane::PaneId, worker::AuxiliaryError},
 };
-use nanocodex::Model;
+use nanocodex::HarnessModel as Model;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 

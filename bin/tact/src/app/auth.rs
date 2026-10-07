@@ -13,20 +13,32 @@ use std::{path::Path, result::Result as StdResult};
 
 const OPENAI_API_KEY: &str = "OPENAI_API_KEY";
 
+pub(crate) fn validate_claude_api_key(key: &SecretString) -> AuthResult<()> {
+    let value = key.expose_secret();
+    if !(value.starts_with("sk-ant-api") || value.starts_with("sk-ant-usr-"))
+        || value.bytes().any(|byte| byte.is_ascii_whitespace())
+    {
+        return Err(AuthError::InvalidClaudeApiKey);
+    }
+    Ok(())
+}
+
 enum SelectedAuth {
     ChatGpt,
     ApiKey(SecretString),
 }
 
 impl AuthConfig {
-    pub(crate) async fn login(&self) -> AuthResult<()> {
+    pub(crate) async fn login(&self, open_automatically: bool) -> AuthResult<()> {
         let login = ChatGptLogin::start(self.file()).await?;
 
         eprintln!(
             "Open this URL to sign in with ChatGPT:\n\n{}\n",
             login.authorization_url()
         );
-        if let Err(error) = crate::app::browser::open(login.authorization_url()).await {
+        if open_automatically
+            && let Err(error) = crate::app::browser::open(login.authorization_url()).await
+        {
             eprintln!(
                 "Could not open a browser automatically ({error}). Open the URL above manually."
             );
@@ -144,6 +156,30 @@ impl SelectedAuth {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn claude_api_key_validation_rejects_other_credentials_without_disclosing_them() {
+        for value in [
+            "sk-ant-oat01-access-sentinel",
+            "sk-ant-ort01-refresh-sentinel",
+            "Bearer sk-ant-oat01-access-sentinel",
+            "session-sentinel",
+            "",
+            " sk-ant-api03-sentinel",
+            "sk-ant-api03-sentinel\n",
+            " sk-ant-usr-sentinel",
+            "sk-ant-usr-sentinel\n",
+            "sk-ant-usr",
+        ] {
+            let error = super::validate_claude_api_key(&SecretString::new(value.into()))
+                .expect_err("only API keys are accepted");
+            assert!(matches!(error, AuthError::InvalidClaudeApiKey));
+            assert!(!error.to_string().contains("sentinel"));
+        }
+        for value in ["sk-ant-api03-sentinel", "sk-ant-usr-sentinel"] {
+            assert!(super::validate_claude_api_key(&SecretString::new(value.into())).is_ok());
+        }
+    }
+
     use super::SelectedAuth;
     use crate::app::{
         config::{AuthConfig, AuthMode},
