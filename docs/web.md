@@ -29,6 +29,9 @@ Tailscale, an SSH forward, or similar. Tact implements no transport.
   `$TACT_HOME/web/instances/<pid>.json` (pid, port, workspace, started_at), removed on exit; readers
   tolerate stale files. Assets: `$TACT_HOME/web/assets/v<version>` (bundle id
   `tact-web-v<version>.tar.gz`, override `TACT_WEB_ASSETS`).
+- The bundle is looked up on every request while it is missing, so one installed after startup is
+  served without a restart; until then `/` shows a built-in page explaining the installation. A
+  release build also downloads and verifies the matching bundle in the background on first start.
 - The login URL is `http://127.0.0.1:<port>/#k=<token>` (or `public_url` + fragment).
 
 ## Authentication
@@ -290,6 +293,8 @@ The review engine keeps its existing payloads (`web/app/protocol.ts`) with these
 - Overviews, AI reviews, and inline question threads belong to a session. Their requests gain
   `session`; they run through that session's worker as a clean-context auxiliary prompt, and are
   cancelled when the session closes.
+  `GET /api/review?session=<id>` and `POST /api/refresh` (optional `session`) include that session's
+  selected overview and question threads; `POST /api/questions` requires `session`.
 - `/api/status` polling is replaced by the `workspace` stream event. The server watches the
   workspace version while any stream is connected and emits it when it changes. "Agent running" for
   staleness means any live session is busy.
