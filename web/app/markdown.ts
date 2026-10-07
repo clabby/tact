@@ -20,16 +20,29 @@ const themes: DiffsThemeNames[] = [
   "pierre-light", "pierre-light-soft", "pierre-dark", "pierre-dark-soft",
 ];
 
+/**
+ * Markdown to HTML with raw HTML escaped and links restricted to http(s) and mailto. The DOM pass
+ * in `renderMarkdown` additionally strips any element or attribute outside a small allowlist.
+ */
+export function markdownHtml(source: string) {
+  return markdown.parse(source, { async: false });
+}
+
+/**
+ * Renders sanitized Markdown into `container`. Pass `highlight: false` while text is still
+ * streaming: highlighting is the expensive part and re-runs on every render.
+ */
 export async function renderMarkdown(
   container: HTMLElement,
   source: string,
   themeName: Exclude<SyntaxTheme, "system">,
+  { highlight = true, placeholder = "*Nothing to preview yet.*" }: { highlight?: boolean; placeholder?: string } = {},
 ) {
-  const rendered = await markdown.parse(source || "*Nothing to preview yet.*");
   const template = document.createElement("template");
-  template.innerHTML = rendered;
+  template.innerHTML = markdownHtml(source || placeholder);
   sanitize(template.content);
-  container.replaceChildren(template.content.cloneNode(true));
+  container.replaceChildren(template.content);
+  if (!highlight) return;
 
   const codeBlocks = [...container.querySelectorAll<HTMLElement>("pre > code")];
   await Promise.all(codeBlocks.map(async (code) => {
@@ -78,7 +91,7 @@ function sanitize(fragment: DocumentFragment) {
 
 function safeLink(value: string) {
   try {
-    const url = new URL(value, window.location.href);
+    const url = new URL(value, globalThis.location?.href ?? "http://localhost/");
     if (["http:", "https:", "mailto:"].includes(url.protocol)) return value;
   } catch {
     // Invalid links render as inert anchors.

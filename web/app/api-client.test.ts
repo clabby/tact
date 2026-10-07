@@ -1,41 +1,82 @@
 import { afterEach, expect, test } from "bun:test";
-import { ApiClient, ApiError } from "./api-client";
-import type { ReviewPage } from "./protocol";
+import { ApiClient, ApiError, describeError } from "./api-client";
 
 const originalFetch = globalThis.fetch;
 afterEach(() => { globalThis.fetch = originalFetch; });
 
-test("overview requests send trimmed custom instructions only when supplied", async () => {
-  const requests: Record<string, unknown>[] = [];
-  globalThis.fetch = async (_url, options) => {
-    requests.push(JSON.parse(String(options?.body)) as Record<string, unknown>);
-    return new Response(JSON.stringify({ overview_mdx: "# Overview" }), { status: 200 });
-  };
-  const page = {
-    generation: 12,
-    selected_range: { from: 0, to: 2 },
-  } as ReviewPage;
+function respond(handler: (url: string, init: RequestInit) => Response) {
+  const requests: { url: string; init: RequestInit }[] = [];
+  globalThis.fetch = (async (url: string, init: RequestInit) => {
+    requests.push({ url, init });
+    return handler(url, init);
+  }) as unknown as typeof fetch;
+  return requests;
+}
 
-  const api = new ApiClient();
-  await api.overview(page, "  Focus on migrations.  ");
-  await api.overview(page, "  \n  ");
-  expect(requests).toEqual([
-    { generation: 12, range: page.selected_range, instructions: "Focus on migrations." },
-    { generation: 12, range: page.selected_range },
-  ]);
+test("commands use the single command route with a tagged envelope", async () => {
+  const requests = respond(() => new Response("{}", { status: 200 }));
+  const api = new ApiClient("./api", 42);
+
+  await api.command("steer", { session: "s1", queue_id: 3 });
+  await api.command("reload_config");
+
+  expect(requests.map((request) => request.url)).toEqual(["./api/cmd", "./api/cmd"]);
+  expect(requests[0]!.init.method).toBe("POST");
+  expect((requests[0]!.init.headers as Record<string, string>)["x-tact"]).toBe("1");
+  expect(JSON.parse(String(requests[0]!.init.body))).toEqual({ client: 42, cmd: "steer", args: { session: "s1", queue_id: 3 } });
+  expect(JSON.parse(String(requests[1]!.init.body))).toEqual({ client: 42, cmd: "reload_config" });
+  expect(api.origin).toBe("web:42");
 });
 
-test("an active turn response retains its code for the review banner", async () => {
-  globalThis.fetch = async () => new Response(JSON.stringify({
-    code: "turn_running",
-    error: "The agent turn is still running.",
-  }), { status: 409, headers: { "content-type": "application/json" } });
+test("queries use the single query route and omit absent arguments", async () => {
+  const requests = respond(() => Response.json({ paths: ["src/"] }));
+  const api = new ApiClient();
 
-  try {
-    await new ApiClient().status();
-    throw new Error("Expected a turn_running response");
-  } catch (error) {
-    expect(error).toBeInstanceOf(ApiError);
-    expect((error as ApiError).code).toBe("turn_running");
+  expect(await api.query("files", { query: "sr" })).toEqual({ paths: ["src/"] });
+  await api.query("models");
+
+  expect(requests[0]!.url).toBe("./api/query");
+  expect(JSON.parse(String(requests[0]!.init.body))).toEqual({ query: "files", args: { query: "sr" } });
+  expect(JSON.parse(String(requests[1]!.init.body))).toEqual({ query: "models" });
+});
+
+test("refusals keep their wire code and message", async () => {
+  respond(() => Response.json({ code: "draft_changed", message: "the draft changed" }, { status: 409 }));
+
+  const error = await new ApiClient().command("submit", { session: "s1", rev: 4 }).catch((caught) => caught);
+
+  expect(error).toBeInstanceOf(ApiError);
+  expect(error.code).toBe("draft_changed");
+  expect(error.message).toBe("the draft changed");
+  expect(describeError(error)).toContain("changed in another window");
+});
+
+test("a 401 without a JSON body is reported as unauthorized", async () => {
+  respond(() => new Response("nope", { status: 401 }));
+
+  const error = await new ApiClient().instance().catch((caught) => caught);
+
+  expect(error.code).toBe("unauthorized");
+  expect(error.status).toBe(401);
+});
+
+test("an empty success body (204) resolves", async () => {
+  respond(() => new Response(null, { status: 204 }));
+
+  await expect(new ApiClient().login("token")).resolves.toBeUndefined();
+});
+
+test("network failures become retryable network errors", async () => {
+  globalThis.fetch = (async () => { throw new TypeError("Failed to fetch"); }) as unknown as typeof fetch;
+
+  const error = await new ApiClient().query("models").catch((caught) => caught);
+
+  expect(error.code).toBe("network_error");
+  expect(error.retryable).toBe(true);
+});
+
+test("client ids are safe JSON integers", () => {
+  for (let index = 0; index < 100; index += 1) {
+    expect(Number.isSafeInteger(new ApiClient().client)).toBe(true);
   }
 });
