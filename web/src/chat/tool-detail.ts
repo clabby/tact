@@ -2,6 +2,7 @@ import { FileDiff } from "@pierre/diffs";
 import { glyph } from "../ui/glyphs";
 import { renderMarkdown } from "../core/markdown";
 import { presentMemory } from "./memory-detail";
+import { parsePlan, presentPlan } from "./plan-detail";
 import { messageElement, sentMessage, type Markdown, type Participants } from "./directed";
 import { parseApplyPatch, patchFileDiff, patchStats } from "./patch";
 import type { Theme } from "../core/theme";
@@ -46,7 +47,7 @@ export function toolLabel(name: string, childCount: number) {
 }
 
 /** Tools whose body is shown without being opened. */
-export const TOOL_DEFAULT_OPEN = new Set(["apply_patch"]);
+export const TOOL_DEFAULT_OPEN = new Set(["apply_patch", "update_plan"]);
 
 export type DetailContext = {
   theme: Theme;
@@ -82,6 +83,12 @@ export function presentDetail(container: HTMLElement, name: string, detail: Tool
     const memory = presentMemory(args, detail.result, context);
     if (memory) {
       container.replaceChildren(memory);
+      return;
+    }
+  } else if (name === "update_plan") {
+    const plan = parsePlan(args);
+    if (plan) {
+      container.replaceChildren(presentPlan(plan));
       return;
     }
   } else if (name === "send_agent_message") {

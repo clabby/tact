@@ -344,6 +344,16 @@ diffs-container { --diffs-light-bg: var(--bg); --diffs-dark-bg: var(--bg); }
 
 /* Shell commands and code */
 .term { overflow: hidden; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--code-bg); font: var(--text-sm)/1.55 var(--font-mono); }
+.plan { display: grid; gap: var(--space-2); }
+.plan-note { margin: 0; color: var(--muted); font-size: var(--text-sm); line-height: 1.5; }
+.plan-steps { display: grid; gap: var(--space-1); margin: 0; padding: 0; list-style: none; }
+.plan-step { display: flex; align-items: baseline; gap: var(--space-2); color: var(--text); font-size: var(--text-md); line-height: 1.5; }
+.plan-mark { position: relative; top: 2px; display: grid; flex: none; place-items: center; width: 14px; height: 14px; border: 1.5px solid var(--line-strong); border-radius: 50%; }
+.plan-step[data-status="in_progress"] .plan-mark { border-color: var(--accent); }
+.plan-step[data-status="in_progress"] .plan-mark::after { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
+.plan-step[data-status="completed"] .plan-mark { border-color: var(--success); background: var(--success); }
+.plan-step[data-status="completed"] .plan-mark::after { content: ""; width: 3px; height: 6px; margin-top: -1px; border: solid var(--bg); border-width: 0 1.5px 1.5px 0; transform: rotate(45deg); }
+.plan-step[data-status="completed"] .plan-text { color: var(--muted); text-decoration: line-through; text-decoration-color: var(--line-strong); }
 .memory-call { display: grid; gap: var(--space-2); }
 .memory-call-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-2); font-size: var(--text-sm); }
 .memory-call-op { color: var(--text); font-weight: 650; }

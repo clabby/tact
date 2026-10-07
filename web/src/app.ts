@@ -66,6 +66,9 @@ class App {
   private instances: SiblingInstance[] = [];
   /** The default workspace and its repository's checkouts, which name other sessions' workspaces. */
   private defaults: Workspaces | null = null;
+  private finishedUnseen = false;
+  private viewedRunning = false;
+  private runningSession: string | null = null;
   /** The active session's repository checkouts, for the composer's workspace chip. */
   private workspaces: { session: string; reply: Workspaces } | null = null;
   private review: { dispose(): void; setVisible?(visible: boolean): void } | null = null;
@@ -184,8 +187,11 @@ class App {
       this.sidebar.renderFooter(this.store.state.connection, instances);
     }).catch(() => {});
     document.addEventListener("visibilitychange", () => {
-      if (document.visibilityState === "visible") this.stream.reconnectNow();
+      if (document.visibilityState !== "visible") return;
+      this.stream.reconnectNow();
+      this.markObserved();
     });
+    addEventListener("focus", () => this.markObserved());
     addEventListener("online", () => this.stream.reconnectNow());
   }
 
@@ -260,6 +266,27 @@ class App {
           break;
       }
     }
+  }
+
+  /** The tab is in front of the user, so anything it shows has been seen. */
+  private markObserved() {
+    if (!this.finishedUnseen) return;
+    this.finishedUnseen = false;
+    this.renderHeader();
+  }
+
+  /**
+   * Notes that the viewed session stopped running while the tab was out of sight. Other sessions
+   * report this themselves as unread; the viewed one needs the tab's own visibility.
+   */
+  private trackFinish(running: boolean) {
+    const id = this.store.state.session?.id ?? null;
+    if (id === this.runningSession && this.viewedRunning && !running && !(document.visibilityState === "visible" && document.hasFocus())) {
+      this.finishedUnseen = true;
+    }
+    if (id !== this.runningSession) this.finishedUnseen = false;
+    this.runningSession = id;
+    this.viewedRunning = running;
   }
 
   private activeRunning() {
@@ -354,10 +381,11 @@ class App {
     workspace.title = path ?? "";
     root.querySelector<HTMLElement>(".chat-sub .model-dot")!.style.background = session ? modelColor(session.model) : "transparent";
     const running = this.activeRunning();
+    this.trackFinish(running);
     this.shell.classList.toggle("running", running);
     const unread = this.store.state.live.filter((summary) => summary.unread).length;
     document.title = `${unread ? `(${unread}) ` : ""}${title} · Tact`;
-    setAttentionBadge(unread > 0);
+    setAttentionBadge(unread > 0 || this.finishedUnseen);
   }
 
   private renderConnection() {

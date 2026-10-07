@@ -429,7 +429,13 @@ fn tool_summary(tool: &ToolEntry) -> String {
         "update_plan" => arguments
             .get("plan")
             .and_then(Value::as_array)
-            .map(|steps| format!("{} steps", steps.len())),
+            .map(|steps| {
+                let done = steps
+                    .iter()
+                    .filter(|step| step.get("status").and_then(Value::as_str) == Some("completed"))
+                    .count();
+                format!("{done}/{} done", steps.len())
+            }),
         "wait_agent" => arguments
             .get("agent_ids")
             .and_then(Value::as_array)
