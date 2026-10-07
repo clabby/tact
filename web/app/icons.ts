@@ -34,6 +34,7 @@ const icons = {
   bold: faBold,
   check: faCheck,
   "chevron-down": faChevronDown,
+  comment: faComment,
   close: faXmark,
   code: faCode,
   "code-block": faTerminal,

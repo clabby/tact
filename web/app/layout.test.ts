@@ -42,7 +42,7 @@ test("review search integrates with the virtualized review lifecycle", async () 
   expect(search).toContain("moveSearchTarget(");
   expect(search).toContain("this.searchPaused = true");
   expect(search).toContain("occurrenceIndex + 1");
-  expect(search).toContain("[data-mobile-panel=diff]:not(.active)");
+  expect(search).toContain('this.selectMobilePanel("diff")');
   expect(search).toContain("CSS.highlights.set");
   expect(search).toContain("data-line-type");
   expect(open).not.toContain("this.revealSearchMatch()");

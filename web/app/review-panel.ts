@@ -375,15 +375,29 @@ class ReviewPanel {
             <button class="tab active" id="changes-tab" role="tab" aria-selected="true" aria-controls="changes-panel" data-tab="changes">Changes <span id="file-count">0</span></button>
             <button class="tab" id="overview-tab" role="tab" aria-selected="false" aria-controls="overview-panel" tabindex="-1" data-tab="overview">Overview<span class="activity-spinner overview-tab-activity" aria-hidden="true"></span></button>
           </nav>
-          <div class="live-status" role="status" aria-live="polite">
-            <span class="live-badge" id="live-badge" title="The agent is working; this diff follows its edits." hidden><i aria-hidden="true"></i>Live</span>
-            <span class="updating" id="updating" hidden><span class="activity-spinner" aria-hidden="true"></span>Updating</span>
-            <span class="generation" id="generation" title="Snapshot generation"></span>
-          </div>
+          <button class="range-button" id="range-button" aria-haspopup="dialog" aria-controls="range-dialog" aria-expanded="false" aria-label="Change range">
+            ${icon("git-branch")}
+            <strong id="range-label">Full branch</strong>
+            <span class="range-chevron">${icon("chevron-down")}</span>
+          </button>
+          <div class="change-stats" id="change-stats" aria-label="Change statistics"></div>
+          <p class="scope-description" id="scope-description" title="${escapeHtml(this.bootstrap.repository)}">Loading changes…</p>
           <div class="topbar-actions">
+            <div class="live-status" role="status" aria-live="polite">
+              <span class="live-badge" id="live-badge" title="The agent is working; this diff follows its edits." hidden><i aria-hidden="true"></i>Live</span>
+              <span class="updating" id="updating" hidden><span class="activity-spinner" aria-hidden="true"></span>Updating</span>
+            </div>
             <button class="refresh-notice" id="refresh-notice" hidden>
               <i aria-hidden="true"></i><span>New changes available</span><strong>Refresh</strong>
             </button>
+            <div class="layout-toggle" role="group" aria-label="Diff layout">
+              <button type="button" data-diff-style="unified">Unified</button>
+              <button type="button" data-diff-style="split">Split</button>
+            </div>
+            <div class="view-toggles" role="group" aria-label="Changes navigation">
+              <button class="icon-button" type="button" aria-pressed="false" aria-label="Files" data-mobile-panel="files">${icon("list")}</button>
+              <button class="icon-button" type="button" aria-pressed="false" aria-label="Comments" data-mobile-panel="comments">${icon("comment")}<span class="count-badge" id="mobile-comment-count" hidden>0</span></button>
+            </div>
             <button class="icon-button settings-button" id="settings-button" aria-label="Review settings" aria-expanded="false">
               ${icon("settings")}
             </button>
@@ -408,22 +422,10 @@ class ReviewPanel {
               </label>
               <label class="toggle-setting"><span>Wrap long lines</span><input type="checkbox" data-setting="wrapLines"></label>
               <label class="toggle-setting"><span>Line numbers</span><input type="checkbox" data-setting="lineNumbers"></label>
+              <div class="settings-footer">Snapshot <span id="generation"></span></div>
             </div>
           </div>
         </header>
-        <div class="scope-bar">
-          <button class="range-button" id="range-button" aria-haspopup="dialog" aria-controls="range-dialog" aria-expanded="false">
-            <span class="range-button-icon">${icon("git-branch")}</span>
-            <span><small>Change range</small><strong id="range-label">Full branch</strong></span>
-            <span class="range-chevron">${icon("chevron-down")}</span>
-          </button>
-          <p class="scope-description" id="scope-description" title="${escapeHtml(this.bootstrap.repository)}">Loading changes…</p>
-          <div class="layout-toggle" role="group" aria-label="Diff layout">
-            <button type="button" data-diff-style="unified">Unified</button>
-            <button type="button" data-diff-style="split">Split</button>
-          </div>
-          <div class="change-stats" id="change-stats" aria-label="Change statistics"></div>
-        </div>
         <section class="panel overview-panel" id="overview-panel" role="tabpanel" aria-labelledby="overview-tab" data-panel="overview" hidden>
           <div class="overview-state" id="overview-state"></div>
           <iframe class="overview" title="Agent overview" sandbox="allow-scripts" hidden></iframe>
@@ -436,11 +438,6 @@ class ReviewPanel {
             <button class="small-icon-button search-previous" data-search-previous aria-label="Previous match" title="Previous match" disabled>${icon("chevron-down")}</button>
             <button class="small-icon-button" data-search-next aria-label="Next match" title="Next match" disabled>${icon("chevron-down")}</button>
             <button class="small-icon-button" data-search-close aria-label="Close search" title="Close search">${icon("close")}</button>
-          </div>
-          <div class="mobile-navigation" role="tablist" aria-label="Changes navigation">
-            <button class="active" role="tab" aria-selected="true" data-mobile-panel="diff">Diff</button>
-            <button role="tab" aria-selected="false" tabindex="-1" data-mobile-panel="files">Files</button>
-            <button role="tab" aria-selected="false" tabindex="-1" data-mobile-panel="comments">Comments <span id="mobile-comment-count">0</span></button>
           </div>
           <aside class="sidebar">
             <div class="files-navigation" data-mobile-content="files">
@@ -1269,7 +1266,7 @@ class ReviewPanel {
     const match = this.searchMatch;
     if (!match) return;
     this.updateSearchHighlight();
-    this.root.querySelector<HTMLButtonElement>("[data-mobile-panel=diff]:not(.active)")?.click();
+    this.selectMobilePanel("diff");
     if (match.kind === "path") {
       this.restoreSearchExpandedItem();
       this.restoreSearchSelection();
@@ -1402,31 +1399,26 @@ class ReviewPanel {
     this.bindSettings();
   }
 
+  /** On narrow screens the file list and the comment list replace the diff; choosing one again returns to it. */
+  private selectMobilePanel(name: "diff" | "files" | "comments") {
+    for (const button of this.root.querySelectorAll<HTMLButtonElement>("[data-mobile-panel]")) {
+      button.setAttribute("aria-pressed", String(button.dataset.mobilePanel === name));
+    }
+    const panel = this.root.querySelector("#changes-panel");
+    if (panel?.getAttribute("data-mobile-active") === name) return;
+    panel?.setAttribute("data-mobile-active", name);
+    if (name === "diff") this.viewer?.render(true);
+  }
+
   private bindMobileNavigation() {
-    const tabs = [...this.root.querySelectorAll<HTMLButtonElement>("[data-mobile-panel]")];
-    const select = (name: string) => {
-      for (const tab of tabs) {
-        const active = tab.dataset.mobilePanel === name;
-        tab.classList.toggle("active", active);
-        tab.setAttribute("aria-selected", String(active));
-        tab.tabIndex = active ? 0 : -1;
-      }
-      this.root.querySelector("#changes-panel")?.setAttribute("data-mobile-active", name);
-      if (name === "diff") this.viewer?.render(true);
-    };
-    for (const [index, tab] of tabs.entries()) {
-      tab.addEventListener("click", () => select(tab.dataset.mobilePanel ?? "diff"));
-      tab.addEventListener("keydown", (event) => {
-        if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
-        event.preventDefault();
-        const targetIndex = event.key === "Home" ? 0
-          : event.key === "End" ? tabs.length - 1
-          : (index + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
-        tabs[targetIndex].focus();
-        select(tabs[targetIndex].dataset.mobilePanel ?? "diff");
+    const panel = this.root.querySelector("#changes-panel");
+    for (const button of this.root.querySelectorAll<HTMLButtonElement>("[data-mobile-panel]")) {
+      button.addEventListener("click", () => {
+        const name = button.dataset.mobilePanel as "files" | "comments";
+        this.selectMobilePanel(panel?.getAttribute("data-mobile-active") === name ? "diff" : name);
       });
     }
-    select("diff");
+    this.selectMobilePanel("diff");
   }
 
   private bindRangeEvents() {
@@ -2386,7 +2378,10 @@ class ReviewPanel {
     const list = this.root.querySelector<HTMLElement>("#comment-list");
     if (!count || !list) return;
     count.textContent = String(this.comments.length);
-    if (mobileCount) mobileCount.textContent = String(this.comments.length);
+    if (mobileCount) {
+      mobileCount.textContent = String(this.comments.length);
+      mobileCount.hidden = this.comments.length === 0;
+    }
     list.replaceChildren();
     if (this.comments.length === 0) {
       const empty = document.createElement("p");
