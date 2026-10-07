@@ -154,6 +154,8 @@ class App {
 
   start() {
     this.stream.start();
+    // The review mounts up front so its diff is loaded and watched before the tab is first opened.
+    this.ensureReview();
     void this.api.query("models").then((catalog) => {
       this.catalog = catalog;
       this.composer.settingsChanged();
@@ -282,7 +284,6 @@ class App {
     this.layout = next;
     this.applyLayout();
     if (!viewChanged) return;
-    if (next.view === "review") this.ensureReview();
     this.review?.setVisible?.(next.view === "review");
     if (next.view === "chat") this.composer.focus();
   }

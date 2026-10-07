@@ -173,8 +173,9 @@ export type ReviewHost = {
 const LIVE_REFRESH_DELAY_MS = 400;
 
 /**
- * Mounts the review panel into `container`, which must have a definite height. The panel keeps the
- * diff current while visible; `setVisible(false)` defers refreshes until it is shown again.
+ * Mounts the review panel into `container`, which must have a definite height. The panel loads and
+ * keeps the diff current whether or not it is shown; `setVisible` tells it when to redraw the diff,
+ * which cannot be laid out while hidden.
  */
 export function mountReviewPanel(container: HTMLElement, host: ReviewHost) {
   const panel = new ReviewPanel(container, new ReviewApi(host.api), host);
@@ -332,7 +333,6 @@ class ReviewPanel {
 
   setVisible(visible: boolean) {
     this.visible = visible;
-    this.refresher.setVisible(visible);
     if (visible && this.loaded) this.viewer?.render(true);
   }
 

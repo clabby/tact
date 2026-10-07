@@ -45,18 +45,6 @@ describe("refresh scheduling", () => {
     expect(refreshes()).toBe(1);
   });
 
-  test("a hidden panel stays stale and refreshes when shown", () => {
-    const { timers, scheduler, refreshes } = harness();
-    scheduler.setVisible(false);
-    scheduler.markStale();
-    timers.advance(5_000);
-    expect(refreshes()).toBe(0);
-    expect(scheduler.stale).toBe(true);
-    scheduler.setVisible(true);
-    timers.advance(400);
-    expect(refreshes()).toBe(1);
-  });
-
   test("a blocked panel waits for the blocking work to finish", () => {
     const { timers, scheduler, refreshes } = harness();
     scheduler.setBlocked(true);

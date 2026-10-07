@@ -6,8 +6,8 @@ type Timers = {
 
 /**
  * Decides when a stale diff snapshot is refreshed. Changes are coalesced into one refresh after a
- * quiet period; nothing runs while the panel is hidden or while another operation needs the
- * snapshot to stay put, and a failed refresh waits for an explicit retry instead of looping.
+ * quiet period; nothing runs while another operation needs the snapshot to stay put, and a failed
+ * refresh waits for an explicit retry instead of looping.
  */
 export class RefreshScheduler {
   /** The workspace changed after the installed snapshot was taken. */
@@ -15,7 +15,6 @@ export class RefreshScheduler {
   /** Why the last refresh failed; cleared by the next change or retry. */
   failed?: string;
   private timer?: ReturnType<typeof setTimeout>;
-  private visible = true;
   private blocked = false;
 
   constructor(
@@ -31,11 +30,6 @@ export class RefreshScheduler {
     this.stale = true;
     this.failed = undefined;
     this.cancel();
-    this.schedule();
-  }
-
-  setVisible(visible: boolean) {
-    this.visible = visible;
     this.schedule();
   }
 
@@ -72,7 +66,7 @@ export class RefreshScheduler {
 
   private schedule() {
     if (this.timer !== undefined) return;
-    if (!this.stale || this.failed !== undefined || !this.visible || this.blocked) return;
+    if (!this.stale || this.failed !== undefined || this.blocked) return;
     this.timer = this.timers.setTimeout(() => {
       this.timer = undefined;
       this.refresh();
