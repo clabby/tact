@@ -3,12 +3,15 @@
 
 use super::{
     assets::AssetStore,
-    bridge::{CommandEnvelope, CommandError, Query, QueryReply, QueryRequest, Request},
+    bridge::{
+        Command, CommandEnvelope, CommandError, OpenSpec, Query, QueryReply, QueryRequest, Request,
+    },
     hub::Hub,
     registry::{self, InstanceRecord},
     tailscale::Tailnet,
     token::MachineToken,
     wire::PROTOCOL_VERSION,
+    workspaces::{WorkspaceError, Workspaces},
 };
 use axum::{
     Json, Router,
@@ -61,6 +64,7 @@ pub(super) struct AppState {
     pub(super) workspace: PathBuf,
     pub(super) port: u16,
     pub(super) public_origin: PublicOrigin,
+    pub(super) workspaces: Arc<Workspaces>,
     pub(super) registry_directory: PathBuf,
     pub(super) assets: AssetStore,
     pub(super) client: reqwest::Client,
@@ -127,6 +131,17 @@ impl ApiError {
             "unauthorized",
             "authentication required",
         )
+    }
+}
+
+impl From<WorkspaceError> for ApiError {
+    fn from(error: WorkspaceError) -> Self {
+        match error {
+            WorkspaceError::UnknownSession => {
+                Self::new(StatusCode::NOT_FOUND, "unknown_session", error.to_string())
+            }
+            WorkspaceError::NotACheckout(_) => Self::invalid(error.to_string()),
+        }
     }
 }
 
@@ -252,8 +267,21 @@ async fn login(
 
 async fn command(
     State(state): State<Arc<AppState>>,
-    ApiJson(body): ApiJson<CommandEnvelope>,
+    ApiJson(mut body): ApiJson<CommandEnvelope>,
 ) -> ApiResult<ApiError> {
+    if let Command::Open(OpenSpec::New {
+        workspace: Some(workspace),
+        ..
+    }) = &mut body.command
+    {
+        // The terminal loop accepts any directory; only checkouts of known repositories are
+        // offered to clients.
+        let allowed = state
+            .workspaces
+            .startable(std::path::Path::new(workspace.as_str()))
+            .await?;
+        *workspace = allowed.to_string_lossy().into_owned();
+    }
     let (reply, outcome) = oneshot::channel();
     let request = Request {
         command: body.command,
@@ -268,6 +296,10 @@ async fn query(
     State(state): State<Arc<AppState>>,
     ApiJson(query): ApiJson<Query>,
 ) -> ApiResult<ApiError> {
+    if let Query::Workspaces { session } = &query {
+        let reply = state.workspaces.list(session.as_deref()).await?;
+        return Ok(secure_json(StatusCode::OK, reply));
+    }
     let (reply, outcome) = oneshot::channel();
     state
         .queries
@@ -640,7 +672,7 @@ pub(super) fn secure(response: &mut Response<Body>) {
 #[cfg(test)]
 mod tests {
     use super::super::{
-        bridge::{Command, CommandError, Publication, Query, Reply},
+        bridge::{self, Command, CommandError, Publication, Query, Reply},
         tailscale::Tailnet,
         testing::{self, Harness},
     };
@@ -1063,5 +1095,97 @@ mod tests {
             .call(Method::GET, "/api/sessions/s1/agents/3/entries", None)
             .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn workspaces_list_the_checkouts_of_the_sessions_repository() {
+        let harness = Harness::new();
+        harness.open_session("s1").await;
+        let (_directory, worktree) = testing::worktree(harness.workspace.path());
+        std::fs::write(worktree.join("scratch.txt"), "scratch\n").unwrap();
+
+        let (status, body) = harness
+            .call(
+                Method::POST,
+                "/api/query",
+                Some(json!({"query": "workspaces", "args": {"session": "s1"}})),
+            )
+            .await;
+
+        assert_eq!(status, StatusCode::OK);
+        let checkouts = body["checkouts"].as_array().unwrap();
+        assert_eq!(checkouts.len(), 2, "{body}");
+        let main = checkouts
+            .iter()
+            .find(|entry| entry["current"] == true)
+            .unwrap();
+        assert_eq!(main["label"], "feature");
+        assert_eq!(main["changed_files"], 1);
+        let other = checkouts
+            .iter()
+            .find(|entry| entry["path"] == worktree.to_str().unwrap())
+            .unwrap();
+        assert_eq!(other["label"], "elsewhere");
+        assert_eq!(other["current"], false);
+        assert_eq!(other["changed_files"], 1);
+        assert_eq!(other["kind"], "git");
+    }
+
+    #[tokio::test]
+    async fn workspaces_omit_checkouts_whose_directory_was_deleted() {
+        let harness = Harness::new();
+        harness.open_session("s1").await;
+        let (_directory, worktree) = testing::worktree(harness.workspace.path());
+        std::fs::remove_dir_all(&worktree).unwrap();
+
+        let (status, body) = harness
+            .call(
+                Method::POST,
+                "/api/query",
+                Some(json!({"query": "workspaces", "args": {"session": "s1"}})),
+            )
+            .await;
+
+        assert_eq!(status, StatusCode::OK);
+        let checkouts = body["checkouts"].as_array().unwrap();
+        assert_eq!(checkouts.len(), 1, "{body}");
+        assert_eq!(checkouts[0]["current"], true);
+    }
+
+    #[tokio::test]
+    async fn a_session_may_only_start_in_a_checkout_of_a_known_repository() {
+        let mut harness = Harness::new();
+        harness.open_session("s1").await;
+        let (_directory, worktree) = testing::worktree(harness.workspace.path());
+        let stranger = tempfile::tempdir().unwrap();
+
+        let (status, body) = harness
+            .call(
+                Method::POST,
+                "/api/cmd",
+                Some(json!({"client": 1, "cmd": "open_session", "args": {
+                    "new": {"workspace": stranger.path()}
+                }})),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "invalid_request");
+
+        let (status, _, request) = harness
+            .command(
+                json!({"client": 1, "cmd": "open_session", "args": {
+                    "new": {"workspace": worktree}
+                }}),
+                Ok(Reply::Opened {
+                    session: "s2".into(),
+                }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(matches!(
+            request.command,
+            Command::Open(bridge::OpenSpec::New { workspace: Some(ref path), .. })
+                if std::path::Path::new(path) == worktree
+        ));
     }
 }

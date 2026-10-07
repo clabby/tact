@@ -153,6 +153,35 @@ impl Checkout {
             .any(|name| path == *name || path.starts_with(&format!("{name}/")))
     }
 
+    /// How many files differ from the head commit, counting files git does not track yet. `None`
+    /// when git cannot say.
+    pub(super) async fn changed_files(&self) -> Option<usize> {
+        let changed = self
+            .git()
+            .args(["diff", "--name-only", "-z", self.head(), "--"])
+            .output()
+            .await
+            .ok()?;
+        let untracked = self
+            .git()
+            .args(["ls-files", "--others", "--exclude-standard", "-z"])
+            .output()
+            .await
+            .ok()?;
+        if !changed.status.success() || !untracked.status.success() {
+            return None;
+        }
+        let names = changed
+            .stdout
+            .split(|byte| *byte == 0)
+            .chain(untracked.stdout.split(|byte| *byte == 0))
+            .filter(|name| !name.is_empty())
+            .filter_map(|name| std::str::from_utf8(name).ok())
+            .filter(|name| !Self::is_bookkeeping(name))
+            .collect::<std::collections::HashSet<_>>();
+        Some(names.len())
+    }
+
     /// Every checkout of the same repository, this one included, main checkout first.
     pub(super) async fn family(&self) -> Vec<FamilyMember> {
         let mut members = Vec::new();
@@ -193,6 +222,20 @@ pub(super) struct FamilyMember {
     pub(super) kind: CheckoutKind,
     /// The directory no longer exists, for example a worktree that was deleted without pruning.
     pub(super) missing: bool,
+}
+
+impl FamilyMember {
+    /// A checkout known only by its directory, such as one whose repository could not be read.
+    pub(super) fn standalone(path: &Path) -> Self {
+        Self {
+            path: path.to_owned(),
+            label: path
+                .file_name()
+                .map_or_else(String::new, |name| name.to_string_lossy().into_owned()),
+            kind: CheckoutKind::Git,
+            missing: !path.exists(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]

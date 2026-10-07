@@ -32,6 +32,7 @@ use base64::{Engine as _, prelude::BASE64_STANDARD};
 use serde::Serialize;
 use std::{
     collections::HashMap,
+    path::PathBuf,
     sync::{
         Arc, Mutex, MutexGuard,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -198,6 +199,43 @@ impl Hub {
             .iter()
             .find(|live| live.info.id == session)
             .map(|live| live.closed.clone())
+    }
+
+    /// The directory the session's agent runs in.
+    pub(super) fn session_workspace(&self, session: &str) -> Option<PathBuf> {
+        Some(self.state().live(session)?.info.workspace.clone())
+    }
+
+    /// The directories of every live session.
+    pub(super) fn live_workspaces(&self) -> Vec<PathBuf> {
+        self.state()
+            .sessions
+            .iter()
+            .map(|live| live.info.workspace.clone())
+            .collect()
+    }
+
+    /// The arguments of the most recent tool calls of a session and its subagents, as one text.
+    /// Clients use it to tell which checkouts the agents are working in.
+    pub(super) fn recent_tool_arguments(&self, session: &str) -> Option<String> {
+        const RECENT_TOOL_CALLS: usize = 80;
+        let state = self.state();
+        let live = state.live(session)?;
+        let mut text = String::new();
+        for model in std::iter::once(&live.model).chain(live.agents.values()) {
+            let tools = model
+                .entries()
+                .iter()
+                .filter_map(|entry| match &entry.kind {
+                    EntryKind::Tool(tool) => Some(tool),
+                    _ => None,
+                });
+            for tool in tools.rev().take(RECENT_TOOL_CALLS) {
+                text.push_str(&tool.arguments.to_string());
+                text.push('\n');
+            }
+        }
+        Some(text)
     }
 
     pub(super) fn entry_detail(&self, session: &str, entry: usize) -> Option<ToolDetail> {
@@ -379,6 +417,7 @@ impl Live {
             id: self.info.id.clone(),
             title: self.title(),
             model: self.info.model.clone(),
+            workspace: self.info.workspace.to_string_lossy().into_owned(),
             state,
             unread: self.unread,
             has_draft: !self.draft.text.is_empty(),
@@ -395,6 +434,7 @@ impl Live {
             session: self.info.id.clone(),
             title: self.title(),
             model: self.info.model.clone(),
+            workspace: self.info.workspace.to_string_lossy().into_owned(),
             effort: self.info.effort,
             reasoning_mode: self.info.reasoning_mode,
             speed: self.info.speed,
@@ -948,6 +988,7 @@ mod tests {
             self.publish(Publication::Opened {
                 info: SessionInfo {
                     id: id.to_owned(),
+                    workspace: "/work".into(),
                     model: "gpt-6.1-sol".to_owned(),
                     effort: ReasoningEffort::Low,
                     reasoning_mode: ReasoningMode::Standard,

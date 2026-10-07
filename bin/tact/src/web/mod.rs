@@ -17,6 +17,7 @@ mod tailscale;
 mod testing;
 mod token;
 mod wire;
+mod workspaces;
 
 use crate::app::config::Config;
 use api::{AppState, PublicOrigin};
@@ -24,7 +25,7 @@ use assets::AssetStore;
 pub(crate) use assets::{Located, WebAssets};
 use hub::Hub;
 use registry::{InstanceRecord, Registration, RegistryError};
-use review::{ReviewState, bridge_agent};
+use review::{ReviewRegistry, bridge_agent};
 use std::{
     io,
     net::{IpAddr, SocketAddr},
@@ -37,6 +38,7 @@ use thiserror::Error;
 use token::{MachineToken, TokenError};
 use tokio::{net::TcpListener, sync::mpsc::UnboundedSender};
 use tokio_util::sync::CancellationToken;
+use workspaces::Workspaces;
 
 /// Ports tried after the configured one before falling back to an ephemeral port.
 const PORT_SCAN_SPAN: u16 = 20;
@@ -159,7 +161,6 @@ struct Server {
     app: axum::Router,
     login_url: String,
     shutdown: CancellationToken,
-    review: Arc<ReviewState>,
     _registration: Registration,
     tailnet: Option<Tailnet>,
 }
@@ -224,8 +225,9 @@ impl Server {
             },
         )?;
 
-        let review = ReviewState::new(
-            settings.workspace.clone(),
+        let workspaces = Arc::new(Workspaces::new(settings.workspace.clone(), hub.clone()));
+        let review = ReviewRegistry::new(
+            Arc::clone(&workspaces),
             hub.clone(),
             bridge_agent(channels.auxiliary),
             shutdown.clone(),
@@ -238,6 +240,7 @@ impl Server {
             workspace: settings.workspace,
             port,
             public_origin,
+            workspaces,
             registry_directory,
             assets: AssetStore::new(settings.home),
             client: reqwest::Client::builder()
@@ -245,20 +248,18 @@ impl Server {
                 .map_err(StartError::Client)?,
             shutdown: shutdown.clone(),
         });
-        let app = api::router(state, review::router(Arc::clone(&review)));
+        let app = api::router(state, review::router(review));
         Ok(Self {
             listener,
             app,
             login_url,
             shutdown,
-            review,
             _registration: registration,
             tailnet,
         })
     }
 
     async fn run(self) {
-        tokio::spawn(review::watch_workspace(self.review, self.shutdown.clone()));
         let shutdown = self.shutdown.clone();
         let served = axum::serve(self.listener, self.app)
             .with_graceful_shutdown(shutdown.cancelled_owned())

@@ -1255,6 +1255,7 @@ impl AppNode {
             publisher.publish(Publication::Opened {
                 info: SessionInfo {
                     id: published.session.clone(),
+                    workspace: root.workspace().to_owned(),
                     model: settings.model,
                     effort: settings.effort,
                     reasoning_mode: settings.reasoning_mode,

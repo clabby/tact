@@ -135,6 +135,9 @@ fn prepare(query: Query, state: &QueryState<'_>) -> Result<Answer<QueryReply>, C
                 Ok(QueryReply::Memories { access, records })
             })
         }
+        Query::Workspaces { .. } => Answer::Ready(Err(CommandError::Invalid(
+            "answered by the web server".to_owned(),
+        ))),
         Query::Config => Answer::Ready(
             state
                 .config

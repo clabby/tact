@@ -24,7 +24,7 @@ use crate::{
     },
 };
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 use tact_memory::{MemoryAccess, MemoryKey, MemoryRecord};
 use tact_subagents::AgentId;
 use thiserror::Error;
@@ -45,6 +45,8 @@ pub(crate) enum Origin {
 #[derive(Clone, Debug)]
 pub(crate) struct SessionInfo {
     pub(crate) id: String,
+    /// The directory the session's agent runs in.
+    pub(crate) workspace: PathBuf,
     /// The model identifier accepted by `app::model::parse`.
     pub(crate) model: String,
     pub(crate) effort: ReasoningEffort,
@@ -340,6 +342,11 @@ pub(crate) enum Query {
     Memories,
     /// The configuration file's text, for the in-browser editor.
     Config,
+    /// The checkouts of a session's repository. The server answers it without the terminal loop.
+    Workspaces {
+        #[serde(default)]
+        session: Option<String>,
+    },
 }
 
 /// The data answering a [`Query`]. Serialized as the bare payload of its variant.

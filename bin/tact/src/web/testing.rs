@@ -5,8 +5,9 @@ use super::{
     assets::AssetStore,
     bridge::{self, Busy, Draft, LoopEnd, Publication, SessionInfo},
     hub::Hub,
-    review::{self, ReviewAgent, ReviewState},
+    review::{self, ReviewAgent, ReviewRegistry},
     token::MachineToken,
+    workspaces::Workspaces,
 };
 use crate::app::config::{ReasoningEffort, ReasoningMode, Speed};
 use axum::{
@@ -53,8 +54,9 @@ impl Harness {
         let (terminal, end) = bridge::bridge();
         let shutdown = CancellationToken::new();
         let hub = Hub::spawn(end.publications, shutdown.clone());
-        let review = ReviewState::new(
-            workspace.path().to_owned(),
+        let workspaces = Arc::new(Workspaces::new(workspace.path().to_owned(), hub.clone()));
+        let review = ReviewRegistry::new(
+            Arc::clone(&workspaces),
             hub.clone(),
             agent,
             shutdown.clone(),
@@ -68,6 +70,7 @@ impl Harness {
             workspace: workspace.path().to_owned(),
             port: 7878,
             public_origin,
+            workspaces,
             registry_directory: home.path().join("web/instances"),
             assets: AssetStore::new(home.path().to_owned()),
             client: reqwest::Client::new(),
@@ -155,6 +158,7 @@ impl Harness {
         self.terminal.publisher.publish(Publication::Opened {
             info: SessionInfo {
                 id: id.to_owned(),
+                workspace: self.workspace.path().to_owned(),
                 model: "gpt-6.1-sol".to_owned(),
                 effort: ReasoningEffort::Low,
                 reasoning_mode: ReasoningMode::Standard,
@@ -195,6 +199,26 @@ pub(super) fn repository() -> TempDir {
     git(directory.path(), ["commit", "--quiet", "-m", "feature"]);
     fs::write(directory.path().join("working.txt"), "working\n").unwrap();
     directory
+}
+
+/// Adds a git worktree of `repository` on a new branch. The worktree is the `checkout` directory
+/// inside the returned directory, which removes it when dropped.
+pub(super) fn worktree(repository: &Path) -> (TempDir, std::path::PathBuf) {
+    let directory = TempDir::new().unwrap();
+    let path = directory.path().join("checkout");
+    git(
+        repository,
+        [
+            "worktree",
+            "add",
+            "--quiet",
+            "-b",
+            "elsewhere",
+            path.to_str().unwrap(),
+        ],
+    );
+    let path = fs::canonicalize(path).unwrap();
+    (directory, path)
 }
 
 fn git<const N: usize>(root: &Path, arguments: [&str; N]) {

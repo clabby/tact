@@ -9,9 +9,11 @@
 use super::{
     api::secure_json,
     bridge::{AuxiliaryError, AuxiliaryRequest},
+    checkout::CheckoutKind,
     diff::{self, ReviewRange},
     hub::Hub,
     wire::PROTOCOL_VERSION,
+    workspaces::{Target, WorkspaceError, Workspaces},
 };
 use axum::{
     Json, Router,
@@ -25,7 +27,7 @@ use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, VecDeque},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex as StdMutex},
     time::Duration,
 };
@@ -81,9 +83,19 @@ pub(super) struct ReviewBootstrap {
     pub(super) generation: u64,
     pub(super) title: String,
     pub(super) repository: String,
+    /// The checkout this review reads.
+    pub(super) checkout: CheckoutIdentity,
     pub(super) trunk: String,
     pub(super) range_targets: Vec<diff::ReviewTarget>,
     pub(super) default_range: diff::ReviewRange,
+}
+
+#[derive(Clone, Serialize)]
+pub(super) struct CheckoutIdentity {
+    path: PathBuf,
+    name: String,
+    label: String,
+    kind: CheckoutKind,
 }
 
 #[derive(Clone)]
@@ -99,12 +111,18 @@ pub(super) struct PreparedReview {
 struct RangeRequest {
     generation: u64,
     range: diff::ReviewRange,
+    #[serde(default)]
+    session: Option<String>,
+    #[serde(default)]
+    checkout: Option<String>,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct OverviewRequest {
     session: String,
+    #[serde(default)]
+    checkout: Option<String>,
     generation: u64,
     range: diff::ReviewRange,
     instructions: Option<String>,
@@ -114,6 +132,8 @@ struct OverviewRequest {
 #[serde(deny_unknown_fields)]
 struct AiReviewRequest {
     session: String,
+    #[serde(default)]
+    checkout: Option<String>,
     generation: u64,
     range: diff::ReviewRange,
 }
@@ -125,11 +145,14 @@ struct GenerationRequest {
     /// The session whose overview and questions the response includes.
     #[serde(default)]
     session: Option<String>,
+    #[serde(default)]
+    checkout: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct SessionQuery {
     session: Option<String>,
+    checkout: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -183,6 +206,8 @@ enum OverviewStatus {
 #[serde(deny_unknown_fields)]
 pub(super) struct QuestionRequest {
     pub(super) session: String,
+    #[serde(default)]
+    pub(super) checkout: Option<String>,
     pub(super) thread_id: String,
     pub(super) operation_id: String,
     pub(super) generation: u64,
@@ -295,6 +320,7 @@ enum ErrorCode {
     SessionCancelled,
     InvalidCommentAnchor,
     UnknownSession,
+    InvalidCheckout,
 }
 
 pub(super) enum ScopeLoadError {
@@ -305,6 +331,13 @@ pub(super) enum ScopeLoadError {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ReviewDecision {
+    #[serde(default)]
+    pub(super) session: Option<String>,
+    #[serde(default)]
+    pub(super) checkout: Option<String>,
+    /// The reviewed checkout when it is not the session's workspace; the composed review names it.
+    #[serde(skip_deserializing, default)]
+    pub(super) reviewed_in: Option<PathBuf>,
     pub(super) generation: u64,
     pub(super) range: diff::ReviewRange,
     #[serde(skip_deserializing, default)]
@@ -348,8 +381,10 @@ const WORKSPACE_POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// the next poll retries, and a transient git error must not look like a change.
 pub(super) async fn watch_workspace(state: Arc<ReviewState>, shutdown: CancellationToken) {
     #[derive(Serialize)]
-    struct WorkspaceEvent {
+    struct WorkspaceEvent<'a> {
         version: String,
+        /// The checkout whose files changed, so a client reviewing another one can ignore it.
+        checkout: &'a Path,
     }
 
     let mut seen: Option<diff::WorkspaceVersion> = None;
@@ -372,6 +407,7 @@ pub(super) async fn watch_workspace(state: Arc<ReviewState>, shutdown: Cancellat
                 "workspace",
                 &WorkspaceEvent {
                     version: version.to_hex(),
+                    checkout: &state.backend.workspace,
                 },
             );
         }
@@ -380,11 +416,11 @@ pub(super) async fn watch_workspace(state: Arc<ReviewState>, shutdown: Cancellat
 }
 
 /// Routes for the review engine. The caller supplies authentication and request limits.
-pub(super) fn router<S>(state: Arc<ReviewState>) -> Router<S>
+pub(super) fn router<S>(registry: Arc<ReviewRegistry>) -> Router<S>
 where
     S: Clone + Send + Sync + 'static,
 {
-    Router::<Arc<ReviewState>>::new()
+    Router::<Arc<ReviewRegistry>>::new()
         .route("/api/review", get(review))
         .route("/api/review/compose", post(compose))
         .route("/api/refresh", post(refresh_review))
@@ -394,7 +430,121 @@ where
         .route("/api/question", post(ask_question))
         .route("/api/questions", post(list_questions))
         .route("/api/question/cancel", post(cancel_question))
-        .with_state(state)
+        .with_state(registry)
+}
+
+/// The most checkouts whose review is kept at once. A checkout reviewed longer ago is dropped, with
+/// its cached pages and watcher, and prepared again when it is next opened.
+const MAX_REVIEWED_CHECKOUTS: usize = 4;
+
+struct ReviewedCheckout {
+    path: PathBuf,
+    state: Arc<ReviewState>,
+    /// Stops the checkout's watcher and its operations.
+    stop: CancellationToken,
+}
+
+/// The review of every checkout clients have opened, most recently used first.
+///
+/// A request names its checkout, or its session, whose workspace is the default; the registry
+/// resolves that to one of the repository's checkouts and returns the review kept for it.
+pub(super) struct ReviewRegistry {
+    workspaces: Arc<Workspaces>,
+    hub: Hub,
+    review_agent: ReviewAgent,
+    shutdown: CancellationToken,
+    reviewed: Mutex<Vec<ReviewedCheckout>>,
+}
+
+impl ReviewRegistry {
+    pub(super) fn new(
+        workspaces: Arc<Workspaces>,
+        hub: Hub,
+        review_agent: ReviewAgent,
+        shutdown: CancellationToken,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            workspaces,
+            hub,
+            review_agent,
+            shutdown,
+            reviewed: Mutex::new(Vec::new()),
+        })
+    }
+
+    /// The review for the checkout a request names, with the checkout it resolved to.
+    async fn resolve(
+        &self,
+        session: Option<&str>,
+        checkout: Option<&str>,
+    ) -> Result<(Arc<ReviewState>, Target), Box<Response<Body>>> {
+        let target = self
+            .workspaces
+            .resolve(session, checkout)
+            .await
+            .map_err(|error| Box::new(checkout_error(&error)))?;
+        let mut reviewed = self.reviewed.lock().await;
+        if let Some(index) = reviewed.iter().position(|kept| kept.path == target.path) {
+            let kept = reviewed.remove(index);
+            let state = Arc::clone(&kept.state);
+            reviewed.insert(0, kept);
+            return Ok((state, target));
+        }
+        let stop = self.shutdown.child_token();
+        let state = ReviewState::new(
+            target.clone(),
+            self.hub.clone(),
+            Arc::clone(&self.review_agent),
+            stop.clone(),
+        );
+        tokio::spawn(watch_workspace(Arc::clone(&state), stop.clone()));
+        reviewed.insert(
+            0,
+            ReviewedCheckout {
+                path: target.path.clone(),
+                state: Arc::clone(&state),
+                stop,
+            },
+        );
+        let kept = MAX_REVIEWED_CHECKOUTS.min(reviewed.len());
+        for evicted in reviewed.drain(kept..) {
+            evicted.stop.cancel();
+        }
+        Ok((state, target))
+    }
+
+    /// Every review currently kept, for requests that identify their operation instead of a
+    /// checkout.
+    async fn all(&self) -> Vec<Arc<ReviewState>> {
+        self.reviewed
+            .lock()
+            .await
+            .iter()
+            .map(|kept| Arc::clone(&kept.state))
+            .collect()
+    }
+}
+
+fn checkout_error(error: &WorkspaceError) -> Response<Body> {
+    match error {
+        WorkspaceError::UnknownSession => unknown_session(),
+        WorkspaceError::NotACheckout(_) => error_response(
+            StatusCode::BAD_REQUEST,
+            ErrorCode::InvalidCheckout,
+            error.to_string(),
+            false,
+            true,
+        ),
+    }
+}
+
+macro_rules! resolve {
+    ($registry:expr, $session:expr, $checkout:expr) => {
+        match $registry.resolve($session, $checkout).await {
+            Ok(resolved) => resolved,
+            Err(response) => return *response,
+        }
+    };
 }
 
 /// The review engine's shared state, one per process.
@@ -420,8 +570,8 @@ macro_rules! loaded {
 }
 
 impl ReviewState {
-    pub(super) fn new(
-        workspace: PathBuf,
+    fn new(
+        target: Target,
         hub: Hub,
         review_agent: ReviewAgent,
         shutdown: CancellationToken,
@@ -429,7 +579,13 @@ impl ReviewState {
         Arc::new(Self {
             session: Mutex::new(None),
             backend: ReviewBackend {
-                workspace,
+                workspace: target.path.clone(),
+                identity: CheckoutIdentity {
+                    path: target.path,
+                    name: target.name,
+                    label: target.label,
+                    kind: target.kind,
+                },
                 hub: hub.clone(),
                 review_agent,
                 #[cfg(test)]
@@ -680,9 +836,14 @@ fn preparation_failure(error: ReviewError) -> Response<Body> {
 }
 
 async fn review(
-    State(state): State<Arc<ReviewState>>,
+    State(registry): State<Arc<ReviewRegistry>>,
     Query(query): Query<SessionQuery>,
 ) -> Response<Body> {
+    let (state, _) = resolve!(
+        registry,
+        query.session.as_deref(),
+        query.checkout.as_deref()
+    );
     if let Err(response) = ensure_loaded(&state).await {
         return *response;
     }
@@ -702,9 +863,15 @@ async fn review(
 
 /// Renders a review decision as the Markdown a browser inserts into a session's draft.
 async fn compose(
-    State(state): State<Arc<ReviewState>>,
+    State(registry): State<Arc<ReviewRegistry>>,
     Json(mut decision): Json<ReviewDecision>,
 ) -> Response<Body> {
+    let (state, target) = resolve!(
+        registry,
+        decision.session.as_deref(),
+        decision.checkout.as_deref()
+    );
+    decision.reviewed_in = (target.path != target.session_workspace).then(|| target.path.clone());
     if invalid_decision(&decision) {
         return error_response(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -746,9 +913,14 @@ struct ComposeResponse {
 }
 
 async fn refresh_review(
-    State(state): State<Arc<ReviewState>>,
+    State(registry): State<Arc<ReviewRegistry>>,
     Json(request): Json<GenerationRequest>,
 ) -> Response<Body> {
+    let (state, _) = resolve!(
+        registry,
+        request.session.as_deref(),
+        request.checkout.as_deref()
+    );
     let session_id = request.session.as_deref().unwrap_or_default();
     let _refresh = state.refresh_generation.lock().await;
     let shutdown = {
@@ -785,9 +957,14 @@ async fn refresh_review(
 }
 
 async fn load_range(
-    State(state): State<Arc<ReviewState>>,
+    State(registry): State<Arc<ReviewRegistry>>,
     Json(request): Json<RangeRequest>,
 ) -> Response<Body> {
+    let (state, _) = resolve!(
+        registry,
+        request.session.as_deref(),
+        request.checkout.as_deref()
+    );
     let (context, generation, version, shutdown) = {
         let mut session = loaded!(state);
         if request.generation != session.generation {
@@ -886,9 +1063,14 @@ async fn load_range(
 }
 
 async fn load_overview(
-    State(state): State<Arc<ReviewState>>,
+    State(registry): State<Arc<ReviewRegistry>>,
     Json(mut request): Json<OverviewRequest>,
 ) -> Response<Body> {
+    let (state, _) = resolve!(
+        registry,
+        Some(&request.session),
+        request.checkout.as_deref()
+    );
     if state.turn_running() {
         return turn_running();
     }
@@ -1181,9 +1363,14 @@ fn overview_response(
 }
 
 async fn run_ai_review(
-    State(state): State<Arc<ReviewState>>,
+    State(registry): State<Arc<ReviewRegistry>>,
     Json(request): Json<AiReviewRequest>,
 ) -> Response<Body> {
+    let (state, _) = resolve!(
+        registry,
+        Some(&request.session),
+        request.checkout.as_deref()
+    );
     if state.turn_running() {
         return turn_running();
     }
@@ -1306,9 +1493,14 @@ fn workspace_error(error: String) -> Response<Body> {
 }
 
 async fn ask_question(
-    State(state): State<Arc<ReviewState>>,
+    State(registry): State<Arc<ReviewRegistry>>,
     Json(request): Json<QuestionRequest>,
 ) -> Response<Body> {
+    let (state, _) = resolve!(
+        registry,
+        Some(&request.session),
+        request.checkout.as_deref()
+    );
     if state.turn_running() {
         return turn_running();
     }
@@ -1387,12 +1579,18 @@ async fn ask_question(
 }
 
 async fn list_questions(
-    State(state): State<Arc<ReviewState>>,
+    State(registry): State<Arc<ReviewRegistry>>,
     Json(request): Json<GenerationRequest>,
 ) -> Response<Body> {
-    let Some(session_id) = request.session else {
+    let Some(session_id) = request.session.clone() else {
         return invalid_thread("the question list requires a session");
     };
+    // Listing is allowed for a session that has since closed: it finds nothing.
+    let live = registry
+        .hub
+        .is_live(&session_id)
+        .then_some(session_id.as_str());
+    let (state, _) = resolve!(registry, live, request.checkout.as_deref());
     let session = loaded!(state);
     if session.generation != request.generation {
         return stale_snapshot("the question list belongs to an older review generation");
@@ -1540,7 +1738,7 @@ fn question_response(
 }
 
 async fn cancel_question(
-    State(state): State<Arc<ReviewState>>,
+    State(registry): State<Arc<ReviewRegistry>>,
     Json(request): Json<QuestionCancelRequest>,
 ) -> impl IntoResponse {
     if invalid_operation_id(&request.operation_id) {
@@ -1552,14 +1750,17 @@ async fn cancel_question(
             true,
         );
     }
-    let Ok(active) = state.active_questions.lock() else {
-        return internal_error("the active question state is unavailable");
-    };
-    if let Some(question) = active.get(&request.operation_id)
-        && question.generation == request.generation
-        && question.range == request.range
-    {
-        question.cancellation.cancel();
+    // The operation identifier names the question; which checkout it belongs to does not matter.
+    for state in registry.all().await {
+        let Ok(active) = state.active_questions.lock() else {
+            return internal_error("the active question state is unavailable");
+        };
+        if let Some(question) = active.get(&request.operation_id)
+            && question.generation == request.generation
+            && question.range == request.range
+        {
+            question.cancellation.cancel();
+        }
     }
     StatusCode::NO_CONTENT.into_response()
 }
@@ -1830,6 +2031,7 @@ pub(super) fn bridge_agent(requests: mpsc::UnboundedSender<AuxiliaryRequest>) ->
 
 struct ReviewBackend {
     workspace: PathBuf,
+    identity: CheckoutIdentity,
     hub: Hub,
     review_agent: ReviewAgent,
     #[cfg(test)]
@@ -1875,6 +2077,7 @@ impl ReviewBackend {
                 generation: 0,
                 title: format!("Review {}", context.repository()),
                 repository: context.repository().to_owned(),
+                checkout: self.identity.clone(),
                 trunk: context.trunk_name().to_owned(),
                 range_targets: context.range_targets(),
                 default_range,
@@ -2088,6 +2291,9 @@ impl ReviewDecision {
             Decision::RequestChanges => "Changes requested",
         };
         let mut markdown = format!("## Review: {heading}\n\n**Scope:** {}\n", self.scope);
+        if let Some(checkout) = &self.reviewed_in {
+            markdown.push_str(&format!("**Checkout:** `{}`\n", checkout.display()));
+        }
         if !self.summary.trim().is_empty() {
             markdown.push('\n');
             markdown.push_str(self.summary.trim());
@@ -2511,16 +2717,8 @@ mod tests {
     async fn the_workspace_watcher_reports_changes_only_to_connected_streams() {
         let harness = Harness::new();
         let mut stream = harness.hub.subscribe().unwrap();
-        let review = crate::web::review::ReviewState::new(
-            harness.workspace.path().to_owned(),
-            harness.hub.clone(),
-            idle_agent(),
-            harness.shutdown.clone(),
-        );
-        tokio::spawn(crate::web::review::watch_workspace(
-            review,
-            harness.shutdown.clone(),
-        ));
+        // Opening the review starts watching its checkout.
+        harness.call(Method::GET, "/api/review", None).await;
 
         let mut seen = false;
         'attempts: for attempt in 0..20 {
@@ -2566,5 +2764,106 @@ mod tests {
             )
             .await;
         assert_eq!(status, StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn a_checkout_of_the_repository_is_reviewed_on_its_own() {
+        let harness = Harness::new();
+        harness.open_session("s1").await;
+        let (_directory, worktree) = crate::web::testing::worktree(harness.workspace.path());
+        std::fs::write(worktree.join("only-here.txt"), "elsewhere\n").unwrap();
+        let uri = format!("/api/review?session=s1&checkout={}", worktree.display());
+
+        let (status, other) = harness.call(Method::GET, &uri, None).await;
+        let (_, own) = harness
+            .call(Method::GET, "/api/review?session=s1", None)
+            .await;
+
+        assert_eq!(status, StatusCode::OK, "{other}");
+        assert_eq!(other["checkout"]["path"], worktree.to_str().unwrap());
+        assert_eq!(other["checkout"]["label"], "elsewhere");
+        assert!(
+            other["page"]["patch"]
+                .as_str()
+                .unwrap()
+                .contains("only-here.txt")
+        );
+        assert!(
+            !own["page"]["patch"]
+                .as_str()
+                .unwrap()
+                .contains("only-here.txt")
+        );
+        assert!(
+            own["page"]["patch"]
+                .as_str()
+                .unwrap()
+                .contains("working.txt")
+        );
+        assert_ne!(own["checkout"]["path"], other["checkout"]["path"]);
+    }
+
+    #[tokio::test]
+    async fn a_directory_outside_the_repository_cannot_be_reviewed() {
+        let harness = Harness::new();
+        harness.open_session("s1").await;
+        let stranger = tempfile::tempdir().unwrap();
+        let uri = format!(
+            "/api/review?session=s1&checkout={}",
+            stranger.path().display()
+        );
+
+        let (status, body) = harness.call(Method::GET, &uri, None).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "invalid_checkout");
+    }
+
+    #[tokio::test]
+    async fn a_review_of_another_checkout_names_it_when_composed() {
+        let harness = Harness::new();
+        harness.open_session("s1").await;
+        let (_directory, worktree) = crate::web::testing::worktree(harness.workspace.path());
+        let uri = format!("/api/review?session=s1&checkout={}", worktree.display());
+        harness.call(Method::GET, &uri, None).await;
+        let request = |checkout: Option<&std::path::Path>| {
+            let mut request = json!({
+                "session": "s1",
+                "generation": 0,
+                "range": full_range(),
+                "decision": "approve",
+            });
+            if let Some(checkout) = checkout {
+                request["checkout"] = json!(checkout);
+            }
+            request
+        };
+
+        let (status, other) = harness
+            .call(
+                Method::POST,
+                "/api/review/compose",
+                Some(request(Some(&worktree))),
+            )
+            .await;
+        harness
+            .call(Method::GET, "/api/review?session=s1", None)
+            .await;
+        let (_, own) = harness
+            .call(Method::POST, "/api/review/compose", Some(request(None)))
+            .await;
+
+        assert_eq!(status, StatusCode::OK, "{other}");
+        assert!(
+            other["markdown"]
+                .as_str()
+                .unwrap()
+                .contains(&format!("**Checkout:** `{}`", worktree.display())),
+            "{other}"
+        );
+        assert!(
+            !own["markdown"].as_str().unwrap().contains("Checkout:"),
+            "{own}"
+        );
     }
 }
