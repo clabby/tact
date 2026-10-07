@@ -8,7 +8,7 @@ use crate::{
     },
     search::rank,
     tui::{
-        storage::{SessionStorage, StorageError},
+        storage::{SessionStorage, StorageError, database_path},
         transcript::{SessionStarted, TerminalStopReason, TranscriptRecord},
     },
 };
@@ -19,6 +19,7 @@ use nanocodex::{
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashSet,
+    fs::{self, File, TryLockError},
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -352,6 +353,48 @@ pub(crate) enum SessionError {
     StorageTask(#[source] tokio::task::JoinError),
     #[error("stored session uses unsupported model {model:?}")]
     UnsupportedModel { model: String },
+    #[error("session {session_id} is open in another Tact")]
+    Locked { session_id: String },
+    #[error("failed to lock session file {path}: {source}")]
+    Lock {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+/// Exclusive ownership of a live session across Tact processes, released on drop.
+///
+/// A session's journal has one writer, so a session is live in at most one pane of one process.
+/// The lock is an advisory file lock that the operating system releases if the process exits.
+#[derive(Debug)]
+pub(crate) struct SessionLock {
+    _file: File,
+}
+
+impl SessionLock {
+    pub(crate) fn acquire(config_path: &Path, session_id: &str) -> Result<Self, SessionError> {
+        let directory = database_path(config_path).with_file_name("locks");
+        let path = directory.join(format!("{session_id}.lock"));
+        let lock_error = |source| SessionError::Lock {
+            path: path.clone(),
+            source,
+        };
+        fs::create_dir_all(&directory).map_err(lock_error)?;
+        let file = File::options()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)
+            .map_err(lock_error)?;
+        match file.try_lock() {
+            Ok(()) => Ok(Self { _file: file }),
+            Err(TryLockError::WouldBlock) => Err(SessionError::Locked {
+                session_id: session_id.to_owned(),
+            }),
+            Err(TryLockError::Error(source)) => Err(lock_error(source)),
+        }
+    }
 }
 
 #[cfg(test)]

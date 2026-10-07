@@ -23,9 +23,12 @@ const STEERING_TEXT: &str = "steering";
 pub(crate) struct QueueId(u64);
 
 impl QueueId {
-    #[cfg(test)]
     pub(crate) const fn new(value: u64) -> Self {
         Self(value)
+    }
+
+    pub(crate) const fn get(self) -> u64 {
+        self.0
     }
 }
 
@@ -129,6 +132,32 @@ impl MessageQueue {
         let drained = self.items.drain(..ready).map(|item| item.prompt).collect();
         self.repair_selection();
         drained
+    }
+
+    /// Every item in display order as `(id, text, steering)`; steering items are being delivered
+    /// into the running turn.
+    pub(super) fn items(&self) -> impl Iterator<Item = (QueueId, &str, bool)> {
+        self.items.iter().map(|item| {
+            let steering = matches!(
+                item.state,
+                QueueItemState::SubmittingSteer | QueueItemState::AdmittedSteer
+            );
+            (item.id, item.prompt.display_text(), steering)
+        })
+    }
+
+    /// Highlights a queued item so a keyboard action applies to it. Returns false when the item is
+    /// gone or no longer waiting in the queue.
+    pub(super) fn select_queued(&mut self, id: QueueId) -> bool {
+        let Some(index) = self
+            .items
+            .iter()
+            .position(|item| item.id == id && item.state == QueueItemState::Queued)
+        else {
+            return false;
+        };
+        self.selected = index;
+        true
     }
 
     pub(super) fn is_empty(&self) -> bool {

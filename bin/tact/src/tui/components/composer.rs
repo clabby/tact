@@ -79,11 +79,13 @@ pub(crate) enum ComposerEvent {
         status: Option<String>,
         now: Instant,
     },
-    ReviewWaiting {
-        waiting: bool,
+    /// Shows the status of a task that blocks the composer, or clears it with `None`.
+    TaskStatus {
         status: Option<String>,
         now: Instant,
     },
+    /// Summarizes this process's live sessions when there is more than one.
+    LiveSessions(Option<String>),
     ActiveSubagents {
         count: usize,
         now: Instant,
@@ -115,8 +117,9 @@ pub(crate) struct Composer {
     input_mode: Option<String>,
     activity_wave: Option<WavedText>,
     activity_status: Option<String>,
-    review_wave: Option<WavedText>,
-    review_status: Option<String>,
+    task_wave: Option<WavedText>,
+    task_status: Option<String>,
+    live_sessions: Option<String>,
     active_subagents: usize,
     subagent_wave: Option<WavedText>,
     turn_timers: VecDeque<TurnTimer>,
@@ -133,6 +136,12 @@ pub(crate) struct ComposerDraft {
     images: Vec<PastedImage>,
     next_image: u64,
     cursor: usize,
+}
+
+impl ComposerDraft {
+    pub(crate) fn text(&self) -> &str {
+        &self.text
+    }
 }
 
 struct PastedImage {
@@ -216,8 +225,9 @@ impl Composer {
             input_mode: None,
             activity_wave: None,
             activity_status: None,
-            review_wave: None,
-            review_status: None,
+            task_wave: None,
+            task_status: None,
+            live_sessions: None,
             active_subagents: 0,
             subagent_wave: None,
             turn_timers: VecDeque::new(),
@@ -318,22 +328,23 @@ impl Composer {
                 self.activity_status = status;
                 ComposerUpdate::changed()
             }
-            ComposerEvent::ReviewWaiting {
-                waiting,
-                status,
-                now,
-            } => {
-                let status =
-                    waiting.then(|| status.unwrap_or_else(|| "Waiting for review…".to_owned()));
-                if self.review_status == status {
+            ComposerEvent::TaskStatus { status, now } => {
+                if self.task_status == status {
                     return ComposerUpdate::unchanged();
                 }
-                self.review_wave = status.as_ref().map(|status| {
+                self.task_wave = status.as_ref().map(|status| {
                     let mut wave = WavedText::new(status, Color::Green);
                     wave.set_active(true, now);
                     wave
                 });
-                self.review_status = status;
+                self.task_status = status;
+                ComposerUpdate::changed()
+            }
+            ComposerEvent::LiveSessions(summary) => {
+                if self.live_sessions == summary {
+                    return ComposerUpdate::unchanged();
+                }
+                self.live_sessions = summary;
                 ComposerUpdate::changed()
             }
             ComposerEvent::ActiveSubagents { count, now } => {
@@ -370,8 +381,8 @@ impl Composer {
                     .activity_wave
                     .as_mut()
                     .is_some_and(|wave| wave.advance(now));
-                let review_changed = self
-                    .review_wave
+                let task_changed = self
+                    .task_wave
                     .as_mut()
                     .is_some_and(|wave| wave.advance(now));
                 let subagent_changed = self
@@ -383,7 +394,7 @@ impl Composer {
                     timer_changed |= timer.advance(now);
                 }
                 ComposerUpdate::from_change(
-                    activity_changed || review_changed || subagent_changed || timer_changed,
+                    activity_changed || task_changed || subagent_changed || timer_changed,
                 )
             }
         }
@@ -419,7 +430,7 @@ impl Composer {
             .and_then(WavedText::animation_deadline)
             .into_iter()
             .chain(
-                self.review_wave
+                self.task_wave
                     .as_ref()
                     .and_then(WavedText::animation_deadline),
             )
@@ -1217,8 +1228,8 @@ impl Composer {
             .as_ref()
             .map(|mode| format!("{mode} "))
             .unwrap_or_default();
-        let review_segment = self
-            .review_status
+        let task_segment = self
+            .task_status
             .as_ref()
             .map(|status| format!("{status} "))
             .unwrap_or_default();
@@ -1228,16 +1239,20 @@ impl Composer {
         } else {
             String::new()
         };
-        let usage_before_activity = format!("{usage_prefix}{input_mode_segment}{review_segment}");
+        let usage_before_activity = format!("{usage_prefix}{input_mode_segment}{task_segment}");
         let usage_before_subagents = self.activity_wave.as_ref().map_or_else(
             || usage_before_activity.clone(),
             |_| format!("{usage_before_activity}{status_segment} "),
         );
-        let usage = if subagent_segment.is_empty() {
+        let mut usage = if subagent_segment.is_empty() {
             usage_before_subagents.clone()
         } else {
             format!("{usage_before_subagents}{} ", subagent_segment.trim_start())
         };
+        if let Some(sessions) = &self.live_sessions {
+            usage.push_str(sessions);
+            usage.push(' ');
+        }
         let model = format!(" {} ", self.model);
         let timer = self
             .turn_timers
@@ -1273,7 +1288,7 @@ impl Composer {
             usage_space,
             Style::default().fg(theme.muted()),
         );
-        if let Some(wave) = &self.review_wave {
+        if let Some(wave) = &self.task_wave {
             let mut x = content_start + u16::try_from(usage_prefix.width()).unwrap_or(u16::MAX);
             for span in wave.spans() {
                 if x >= right_start {
@@ -1454,7 +1469,7 @@ impl Composer {
     }
 
     fn border_style(&self, theme: &Theme) -> Style {
-        Style::default().fg(if self.review_wave.is_some() {
+        Style::default().fg(if self.task_wave.is_some() {
             Color::Green
         } else if self.draft.starts_with('!') {
             Color::Yellow
@@ -1748,17 +1763,16 @@ mod tests {
     }
 
     #[test]
-    fn review_waiting_uses_green_chrome_next_to_context() {
+    fn task_status_uses_green_chrome_next_to_context() {
         let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
-        composer.update(ComposerEvent::ReviewWaiting {
-            waiting: true,
-            status: None,
+        composer.update(ComposerEvent::TaskStatus {
+            status: Some("Preparing handoff…".to_owned()),
             now: Instant::now(),
         });
 
         let terminal = render(&mut composer, 80, 5);
 
-        assert!(rows(&terminal)[0].contains("0%/272k Waiting for review"));
+        assert!(rows(&terminal)[0].contains("0%/272k Preparing handoff…"));
         assert_eq!(terminal.backend().buffer()[(0, 0)].fg, Color::Green);
     }
 
