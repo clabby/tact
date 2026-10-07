@@ -186,6 +186,8 @@ enum WireToolState {
 enum WireBody {
     User {
         text: String,
+        /** Attachments: the i-th replaces the i-th "[Image #N]" marker; bytes are served separately. */
+        images: usize,
     },
     Assistant {
         text: String,
@@ -241,7 +243,10 @@ enum WireBody {
 impl WireEntry {
     pub(super) fn new(entry: &TranscriptEntry) -> Self {
         let body = match &entry.kind {
-            EntryKind::User { text } => WireBody::User { text: cap(text) },
+            EntryKind::User { text, images } => WireBody::User {
+                text: cap(text),
+                images: images.len(),
+            },
             EntryKind::Assistant { text, complete } => WireBody::Assistant {
                 text: cap(text),
                 complete: *complete,

@@ -27,6 +27,7 @@ use crate::{
         },
     },
 };
+use base64::{Engine as _, prelude::BASE64_STANDARD};
 use serde::Serialize;
 use std::{
     collections::HashMap,
@@ -203,6 +204,17 @@ impl Hub {
         tool_detail(&state.live(session)?.model, entry)
     }
 
+    /// The bytes and media type of the `index`-th image attached to a user entry.
+    pub(super) fn user_image(
+        &self,
+        session: &str,
+        entry: usize,
+        index: usize,
+    ) -> Option<(&'static str, Vec<u8>)> {
+        let state = self.state();
+        user_image(&state.live(session)?.model, entry, index)
+    }
+
     /// The projected transcript of one subagent of `session`.
     pub(super) fn agent_entries(&self, session: &str, agent: AgentId) -> Option<Vec<WireEntry>> {
         let state = self.state();
@@ -336,7 +348,7 @@ impl Live {
                 .entries()
                 .iter()
                 .find_map(|entry| match &entry.kind {
-                    EntryKind::User { text } => Some(title_from(text)),
+                    EntryKind::User { text, .. } => Some(title_from(text)),
                     _ => None,
                 });
         }
@@ -437,6 +449,30 @@ fn tool_detail(model: &TranscriptModel, entry: usize) -> Option<ToolDetail> {
         EntryKind::Tool(tool) => Some(ToolDetail::new(tool)),
         _ => None,
     }
+}
+
+/// Decodes an attached image. Only raster formats a browser renders inertly are served.
+fn user_image(
+    model: &TranscriptModel,
+    entry: usize,
+    index: usize,
+) -> Option<(&'static str, Vec<u8>)> {
+    let entry = model
+        .entries()
+        .iter()
+        .find(|candidate| candidate.id.index() == entry)?;
+    let EntryKind::User { images, .. } = &entry.kind else {
+        return None;
+    };
+    let (header, data) = images
+        .get(index)?
+        .data_url
+        .strip_prefix("data:")?
+        .split_once(";base64,")?;
+    let media_type = ["image/png", "image/jpeg", "image/gif", "image/webp"]
+        .into_iter()
+        .find(|candidate| *candidate == header)?;
+    Some((media_type, BASE64_STANDARD.decode(data).ok()?))
 }
 
 fn title_from(prompt: &str) -> String {
@@ -853,13 +889,14 @@ fn diff_active(live: &mut Live, previous: &ActiveSent, frames: &mut Vec<Frame>) 
 
 #[cfg(test)]
 mod tests {
-    use super::{CLIENT_BUFFER, FLUSH_INTERVAL, Hub, MAX_STREAMS, Subscription};
+    use super::{CLIENT_BUFFER, FLUSH_INTERVAL, Hub, MAX_STREAMS, Subscription, user_image};
     use crate::{
         app::config::{ReasoningEffort, ReasoningMode, Speed},
-        tui::transcript::{LocalEvent, TranscriptRecord, TurnId},
+        tui::transcript::{LocalEvent, TranscriptModel, TranscriptRecord, TurnId},
         web::bridge::{self, Busy, Draft, LoopEnd, Origin, Publication, QueuedPrompt, SessionInfo},
     };
-    use serde_json::{Value, json};
+    use nanocodex::agent::events::{AgentEvent, AgentEventKind};
+    use serde_json::{Value, json, value::to_raw_value};
     use std::{sync::Arc, time::Duration};
     use tokio_util::sync::CancellationToken;
 
@@ -923,6 +960,41 @@ mod tests {
             )
             .unwrap(),
         )
+    }
+
+    #[test]
+    fn attached_images_are_served_as_decoded_raster_bytes_only() {
+        let mut model = TranscriptModel::default();
+        model.apply(&user_record(1, "look [Image #1] and [Image #2]"));
+        let accepted = |payload: Value| {
+            TranscriptRecord::from_agent(
+                2,
+                2_000,
+                AgentEvent {
+                    protocol_version: 1,
+                    request_id: Arc::from("s1"),
+                    seq: 1,
+                    kind: AgentEventKind::InputAccepted,
+                    payload: to_raw_value(&payload).unwrap().into(),
+                },
+            )
+        };
+        model.apply(&accepted(json!({"input": [
+            {"type": "image", "image_url": "data:image/png;base64,aGk="},
+            {"type": "image", "image_url": "data:image/svg+xml;base64,aGk="},
+        ]})));
+        let entry = model.entries()[0].id.index();
+
+        assert_eq!(
+            user_image(&model, entry, 0),
+            Some(("image/png", b"hi".to_vec()))
+        );
+        assert_eq!(
+            user_image(&model, entry, 1),
+            None,
+            "scriptable formats are refused"
+        );
+        assert_eq!(user_image(&model, entry, 2), None);
     }
 
     /// Lets the hub apply publications and flush them.

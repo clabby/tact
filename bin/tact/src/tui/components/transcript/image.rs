@@ -1,3 +1,4 @@
+use base64::{Engine, engine::general_purpose::STANDARD};
 use image::{DynamicImage, ImageReader};
 use ratatui::layout::Size;
 use ratatui_image::{
@@ -5,9 +6,12 @@ use ratatui_image::{
     picker::{Picker, ProtocolType},
     sliced::SlicedProtocol,
 };
+use sha2::{Digest, Sha256};
 use std::{
     collections::{HashSet, VecDeque},
-    env, fs, mem,
+    env, fs,
+    io::{self, Write},
+    mem,
     path::{Path, PathBuf},
     process::Command,
     sync::{
@@ -557,6 +561,59 @@ fn encode(picker: &Picker, image: DynamicImage, size: Size) -> Option<Arc<Sliced
     SlicedProtocol::new_with_resize(picker, image, size, Resize::Fit(None))
         .ok()
         .map(Arc::new)
+}
+
+pub(super) fn materialize_user_image(data_url: &str) -> Option<String> {
+    let (header, encoded) = data_url.strip_prefix("data:")?.split_once(',')?;
+    let mime = header.strip_suffix(";base64")?;
+    let extension = match mime {
+        "image/png" => "png",
+        "image/jpeg" => "jpg",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        _ => return None,
+    };
+    let directory = env::temp_dir().join("tact-user-images");
+    let mut builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    match builder.create(&directory) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(_) => return None,
+    }
+    let metadata = fs::symlink_metadata(&directory).ok()?;
+    if !metadata.is_dir() {
+        return None;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o777 != 0o700 {
+            return None;
+        }
+    }
+    let digest = Sha256::digest(data_url.as_bytes());
+    let path = directory.join(format!("{digest:x}.{extension}"));
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.is_file() => {}
+        Ok(_) => return None,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            let bytes = STANDARD.decode(encoded).ok()?;
+            let mut file = tempfile::NamedTempFile::new_in(&directory).ok()?;
+            file.write_all(&bytes).ok()?;
+            match file.persist_noclobber(&path) {
+                Ok(_) => {}
+                Err(error) if error.error.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(_) => return None,
+            }
+        }
+        Err(_) => return None,
+    }
+    Url::from_file_path(path).ok().map(|url| url.to_string())
 }
 
 fn local_path(destination: &str, workspace: &Path) -> Option<PathBuf> {

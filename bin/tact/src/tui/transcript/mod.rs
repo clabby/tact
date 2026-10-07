@@ -8,7 +8,7 @@ mod record;
 use crate::tui::storage::StorageError;
 pub(crate) use entry::{
     DirectedMessageEntry, EntryId, EntryKind, MessageDelivery, MessagePhase, ToolEntry, ToolState,
-    TranscriptEntry, TransientStatus,
+    TranscriptEntry, TransientStatus, UserImage,
 };
 pub(crate) use journal::TranscriptJournal;
 pub(crate) use model::TranscriptModel;

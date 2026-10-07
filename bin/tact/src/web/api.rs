@@ -60,6 +60,10 @@ pub(super) fn router(state: Arc<AppState>, extra: Router<Arc<AppState>>) -> Rout
         .route("/api/instances", get(instances))
         .route("/api/sessions/{session}/entries/{entry}", get(entry_detail))
         .route(
+            "/api/sessions/{session}/entries/{entry}/images/{index}",
+            get(user_image),
+        )
+        .route(
             "/api/sessions/{session}/agents/{agent}/entries",
             get(agent_entries),
         )
@@ -384,6 +388,22 @@ async fn entry_detail(
         .entry_detail(&session, entry)
         .ok_or_else(entry_not_found)?;
     Ok(secure_json(StatusCode::OK, detail))
+}
+
+async fn user_image(
+    State(state): State<Arc<AppState>>,
+    Path((session, entry, index)): Path<(String, usize, usize)>,
+) -> Result<Response<Body>, ApiError> {
+    let (media_type, bytes) = state
+        .hub
+        .user_image(&session, entry, index)
+        .ok_or_else(entry_not_found)?;
+    let mut response = Response::new(Body::from(bytes));
+    response
+        .headers_mut()
+        .insert(header::CONTENT_TYPE, HeaderValue::from_static(media_type));
+    secure(&mut response);
+    Ok(response)
 }
 
 async fn agent_entries(

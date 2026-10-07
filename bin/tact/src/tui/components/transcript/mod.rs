@@ -21,7 +21,8 @@ use crate::{
         spinner::Spinner,
         theme::Theme,
         transcript::{
-            EntryId, EntryKind, TranscriptEntry, TranscriptModel, TranscriptRecord, TransientStatus,
+            EntryId, EntryKind, TranscriptEntry, TranscriptModel, TranscriptRecord,
+            TransientStatus, UserImage,
         },
     },
 };
@@ -1733,7 +1734,10 @@ fn render_entry(
     images: &mut image::Cache,
 ) -> markdown::Layout {
     let mut layout = match &entry.kind {
-        EntryKind::User { text, .. } => render_user(text, width, theme),
+        EntryKind::User {
+            text,
+            images: attached,
+        } => render_user_images(text, attached, width, theme, workspace, images),
         EntryKind::Assistant { text, .. } => {
             markdown::render_cached(text, width, theme, workspace, images)
         }
@@ -1918,7 +1922,7 @@ fn indent_nested_tool(
 
 fn entry_selection_source(entry: &TranscriptEntry) -> Option<&str> {
     match &entry.kind {
-        EntryKind::User { text }
+        EntryKind::User { text, .. }
         | EntryKind::Assistant { text, .. }
         | EntryKind::Reasoning { text } => Some(text),
         _ => None,
@@ -1936,6 +1940,148 @@ fn layout_without_links(lines: Vec<Line<'static>>) -> markdown::Layout {
         envelopes: Vec::new(),
         selection_source: None,
         image_state: markdown::ImageState::None,
+    }
+}
+
+fn render_user_images(
+    text: &str,
+    attached: &[UserImage],
+    width: u16,
+    theme: &Theme,
+    workspace: &Path,
+    cache: &mut image::Cache,
+) -> markdown::Layout {
+    if attached.is_empty() {
+        return render_user(text, width, theme);
+    }
+    let mut layout = layout_without_links(Vec::new());
+    let mut offset = 0;
+    for attached in attached {
+        let range = &attached.range;
+        if range.start < offset || text.get(range.clone()).is_none() {
+            continue;
+        }
+        append_user_text(&mut layout, text, offset..range.start, width, theme);
+        let marker = &text[range.clone()];
+        let destination = image::materialize_user_image(&attached.data_url);
+        if layout.image_state == markdown::ImageState::None {
+            layout.image_state = markdown::ImageState::Ready;
+        }
+        match destination
+            .as_ref()
+            .map(|destination| (destination, cache.load(destination, workspace, width)))
+        {
+            Some((destination, image::LoadResult::Loaded(protocol))) => {
+                let line = layout.lines.len();
+                let size = protocol.size();
+                for _ in 0..size.height {
+                    layout
+                        .lines
+                        .push(Line::from(Span::raw(" ".repeat(usize::from(size.width)))));
+                    layout.selections.push(Vec::new());
+                }
+                layout.images.push(markdown::ImagePlacement {
+                    line,
+                    destination: Arc::from(destination.as_str()),
+                    protocol,
+                    retransmit: false,
+                });
+            }
+            result => {
+                let (label, style) = match result {
+                    Some((_, image::LoadResult::Deferred)) => {
+                        layout.image_state = markdown::ImageState::Pending;
+                        (
+                            marker,
+                            Style::default()
+                                .fg(theme.accent())
+                                .add_modifier(Modifier::UNDERLINED),
+                        )
+                    }
+                    Some((_, image::LoadResult::Unsupported)) => (
+                        marker,
+                        Style::default()
+                            .fg(theme.accent())
+                            .add_modifier(Modifier::UNDERLINED),
+                    ),
+                    Some((_, image::LoadResult::Failed)) => (
+                        "image could not be rendered",
+                        Style::default().fg(Color::Red),
+                    ),
+                    _ => (marker, Style::default().fg(theme.thinking_medium())),
+                };
+                for line in markdown::wrap_plain_preserving_whitespace(
+                    label,
+                    width.saturating_sub(2).max(1),
+                    style,
+                ) {
+                    layout.lines.push(Line::from(
+                        std::iter::once(Span::styled(
+                            "┃ ",
+                            Style::default().fg(theme.thinking_medium()),
+                        ))
+                        .chain(line.spans)
+                        .collect::<Vec<_>>(),
+                    ));
+                    layout.selections.push(Vec::new());
+                }
+            }
+        }
+        offset = range.end;
+    }
+    append_user_text(&mut layout, text, offset..text.len(), width, theme);
+    layout.links = vec![Vec::new(); layout.lines.len()];
+    layout
+}
+
+fn append_user_text(
+    layout: &mut markdown::Layout,
+    text: &str,
+    mut range: Range<usize>,
+    width: u16,
+    theme: &Theme,
+) {
+    if range.start > 0 {
+        let segment = &text[range.clone()];
+        range.start += if segment.starts_with("\r\n") {
+            2
+        } else {
+            usize::from(segment.starts_with(['\r', '\n']))
+        };
+    }
+    if range.end < text.len() {
+        let segment = &text[range.clone()];
+        range.end -= if segment.ends_with("\r\n") {
+            2
+        } else {
+            usize::from(segment.ends_with(['\r', '\n']))
+        };
+    }
+    if range.is_empty() {
+        return;
+    }
+    let mut offset = range.start;
+    loop {
+        let remaining = &text[offset..range.end];
+        let end = remaining.find(['\r', '\n']).unwrap_or(remaining.len());
+        let rendered = render_user(&remaining[..end], width, theme);
+        layout.lines.extend(rendered.lines);
+        for mut selections in rendered.selections {
+            for selection in &mut selections {
+                selection.source.start += offset;
+                selection.source.end += offset;
+            }
+            layout.selections.push(selections);
+        }
+        if end == remaining.len() {
+            break;
+        }
+        offset += end
+            + if remaining[end..].starts_with("\r\n") {
+                2
+            } else {
+                1
+            };
     }
 }
 
@@ -2231,6 +2377,114 @@ mod tests {
         transcript.update(TranscriptEvent::Scroll(command));
     }
 
+    fn user_image_transcript(workspace: &Path, text: &str, inline: bool) -> Transcript {
+        use base64::{Engine, engine::general_purpose::STANDARD};
+        let path = workspace.join("user.png");
+        write_png(&path);
+        let data_url = format!(
+            "data:image/png;base64,{}",
+            STANDARD.encode(std::fs::read(path).unwrap())
+        );
+        let mut transcript = Transcript::new();
+        transcript.set_workspace(workspace);
+        transcript.cache.images = super::image::Cache::with_inline_images(inline);
+        transcript.update(TranscriptEvent::Record(user(1, text)));
+        transcript.update(TranscriptEvent::Record(agent_with_payload(
+            2,
+            AgentEventKind::InputAccepted,
+            json!({
+                "input": [{"type": "image", "image_url": data_url}]
+            }),
+        )));
+        transcript
+    }
+
+    #[test]
+    fn user_images_occupy_their_own_rows_and_preserve_text_selection_offsets() {
+        let workspace = tempfile::tempdir().unwrap();
+        let text = "before [Image #1] after";
+        let mut transcript = user_image_transcript(workspace.path(), text, true);
+        render_until_image_ready(&mut transcript, 40, 10);
+        let entry = &transcript.model.entries()[0];
+        let layout = &transcript.cache.entries[&entry.id];
+        let image = &layout.images[0];
+        assert_eq!(image.line, 1);
+        assert_eq!(layout.lines[0].to_string(), "┃ before ");
+        let after = image.line + usize::from(image.protocol.size().height);
+        assert_eq!(layout.lines[after].to_string(), "┃  after");
+        assert_eq!(layout.selections[0].first().unwrap().source.start, 0);
+        assert_eq!(layout.selections[after].first().unwrap().source.start, 17);
+        assert_eq!(
+            layout.selections[after].last().unwrap().source.end,
+            text.len()
+        );
+        assert_eq!(layout.selections[after].first().unwrap().columns.start, 2);
+        assert!(
+            layout.selections[image.line..after]
+                .iter()
+                .all(Vec::is_empty)
+        );
+    }
+
+    #[test]
+    fn user_image_text_offsets_preserve_original_line_endings() {
+        let workspace = tempfile::tempdir().unwrap();
+        let text = "a\r\nb\rc\r\n[Image #1]\r\nd\re";
+        let mut transcript = user_image_transcript(workspace.path(), text, false);
+        render(&mut transcript, 40, 10);
+        let entry = &transcript.model.entries()[0];
+        let layout = &transcript.cache.entries[&entry.id];
+        assert_eq!(
+            layout
+                .lines
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            ["┃ a", "┃ b", "┃ c", "┃ [Image #1]", "┃ d", "┃ e", ""]
+        );
+        for (line, expected) in [(0, "a"), (1, "b"), (2, "c"), (4, "d"), (5, "e")] {
+            let span = &layout.selections[line][0];
+            assert_eq!(&text[span.source.clone()], expected);
+        }
+    }
+
+    #[test]
+    fn marker_only_user_prompt_has_only_image_rows() {
+        let workspace = tempfile::tempdir().unwrap();
+        let mut transcript = user_image_transcript(workspace.path(), "[Image #1]", true);
+        render_until_image_ready(&mut transcript, 40, 10);
+        let entry = &transcript.model.entries()[0];
+        let layout = &transcript.cache.entries[&entry.id];
+        assert_eq!(layout.images[0].line, 0);
+        assert_eq!(
+            layout.lines.len(),
+            usize::from(layout.images[0].protocol.size().height) + 1
+        );
+    }
+
+    #[test]
+    fn unsupported_user_images_keep_markers_on_separate_rows() {
+        let workspace = tempfile::tempdir().unwrap();
+        let mut transcript =
+            user_image_transcript(workspace.path(), "before [Image #1] after", false);
+        render(&mut transcript, 40, 10);
+        let entry = &transcript.model.entries()[0];
+        let layout = &transcript.cache.entries[&entry.id];
+        assert!(layout.images.is_empty());
+        assert_eq!(
+            layout
+                .lines
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            ["┃ before ", "┃ [Image #1]", "┃  after", ""]
+        );
+        assert_eq!(
+            layout.lines[1].spans[1].style.fg,
+            Some(Theme::default().accent())
+        );
+    }
+
     #[test]
     fn user_lines_have_a_cyan_gutter_without_outer_chrome() {
         let mut transcript = Transcript::new();
@@ -2419,7 +2673,7 @@ mod tests {
         assert_eq!(transcript.model.entries().len(), 2);
         assert!(matches!(
             &transcript.model.entries()[0].kind,
-            EntryKind::User { text } if text == "completed"
+            EntryKind::User { text, .. } if text == "completed"
         ));
         assert!(matches!(
             &transcript.model.entries()[1].kind,
