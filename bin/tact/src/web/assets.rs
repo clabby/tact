@@ -29,13 +29,13 @@ const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
 
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum AssetAvailability {
-    Ready(ReviewAssets),
+    Ready(WebAssets),
     DownloadRequired,
     DevelopmentInstallRequired { path: PathBuf },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct ReviewAssets {
+pub(crate) struct WebAssets {
     path: PathBuf,
     manifest: Arc<ValidatedManifest>,
 }
@@ -46,7 +46,7 @@ pub(crate) struct ResolvedReviewAsset {
     pub(crate) content_type: String,
 }
 
-impl ReviewAssets {
+impl WebAssets {
     pub(crate) fn availability() -> Result<AssetAvailability, AssetError> {
         if let Some(path) = env::var_os(REVIEW_ASSETS_ENV).map(PathBuf::from) {
             return Self::from_directory(path, InstallKind::DevelopmentOverride)
@@ -658,8 +658,8 @@ pub(crate) enum AssetError {
 #[cfg(test)]
 mod tests {
     use super::{
-        ApiCompatibility, AssetError, AssetFile, AssetManifest, InstallKind, ReviewAssets,
-        TactCompatibility, extract, validate_directory,
+        ApiCompatibility, AssetError, AssetFile, AssetManifest, InstallKind, TactCompatibility,
+        WebAssets, extract, validate_directory,
     };
     use flate2::{Compression, write::GzEncoder};
     use sha2::{Digest, Sha256};
@@ -789,7 +789,7 @@ mod tests {
     fn serves_only_safe_manifest_assets() {
         let directory = tempfile::tempdir().unwrap();
         write_valid_assets(directory.path());
-        let assets = ReviewAssets::from_directory(
+        let assets = WebAssets::from_directory(
             directory.path().to_owned(),
             InstallKind::DevelopmentOverride,
         )
@@ -825,7 +825,7 @@ mod tests {
         let _override = EnvironmentGuard::remove(super::REVIEW_ASSETS_ENV);
 
         assert!(matches!(
-            ReviewAssets::availability(),
+            WebAssets::availability(),
             Ok(super::AssetAvailability::Ready(_))
         ));
     }

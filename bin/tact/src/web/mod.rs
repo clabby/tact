@@ -5,7 +5,8 @@ pub(crate) mod bridge;
 mod diff;
 mod server;
 
-pub(crate) use assets::{AssetAvailability, ReviewAssets};
+use crate::app::config::Config;
+pub(crate) use assets::{AssetAvailability, WebAssets};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 pub(crate) use diff::ReviewRange;
 use futures_util::future::BoxFuture;
@@ -55,7 +56,7 @@ impl ReviewService {
     pub(crate) async fn start(
         review_agent: ReviewAgent,
         workspace: &Path,
-        assets: ReviewAssets,
+        assets: WebAssets,
         turn_active: Arc<AtomicBool>,
     ) -> Result<ReviewHandle, ReviewError> {
         let preparation_shutdown = CancellationToken::new();
@@ -595,4 +596,21 @@ mod tests {
             "## Review: Changes requested\n\n**Scope:** Full branch\n\nPlease address this before merging.\n\n### Comments\n\n- `src/main.rs:12-14` (new)\n  Handle the error.\n  This can fail.\n"
         );
     }
+}
+
+/// Starts the web server for this process and reports its readiness through `end.status`.
+///
+/// The server runs until `shutdown` is cancelled.
+pub(crate) fn spawn(
+    _config: &Config,
+    _workspace: &Path,
+    end: bridge::WebEnd,
+    shutdown: CancellationToken,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        end.status.send_replace(bridge::WebStatus::Unavailable {
+            reason: "the web server is not implemented yet".to_owned(),
+        });
+        shutdown.cancelled().await;
+    })
 }

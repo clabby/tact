@@ -2430,7 +2430,7 @@ fn apply_pane_effect(
                 return Ok(());
             }
 
-            match crate::web::ReviewAssets::availability() {
+            match crate::web::WebAssets::availability() {
                 Ok(crate::web::AssetAvailability::Ready(assets)) => {
                     start_review(context, pane, Some(assets));
                 }
@@ -2780,7 +2780,7 @@ async fn prepare_handoff(
 fn start_review(
     context: &mut EffectContext<'_>,
     pane: PaneId,
-    assets: Option<crate::web::ReviewAssets>,
+    assets: Option<crate::web::WebAssets>,
 ) {
     let pane_generation = context
         .panes
@@ -2812,14 +2812,14 @@ fn spawn_review(
     auxiliary_jobs: mpsc::UnboundedSender<AuxiliaryJobRequest>,
     ready_updates: mpsc::UnboundedSender<ReviewReady>,
     workspace: PathBuf,
-    assets: Option<crate::web::ReviewAssets>,
+    assets: Option<crate::web::WebAssets>,
     turn_active: Arc<AtomicBool>,
 ) -> ReviewTask {
     tokio::spawn(async move {
         let result = async {
             let assets = match assets {
                 Some(assets) => assets,
-                None => crate::web::ReviewAssets::download().await?,
+                None => crate::web::WebAssets::download().await?,
             };
             let review_agent: crate::web::ReviewAgent = Arc::new(move |prompt, shutdown| {
                 let auxiliary_jobs = auxiliary_jobs.clone();

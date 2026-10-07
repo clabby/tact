@@ -313,7 +313,7 @@ pub(super) enum CommentSide {
 }
 
 struct ServerState {
-    assets: super::ReviewAssets,
+    assets: super::WebAssets,
     session: Mutex<ReviewSession>,
     backend: Arc<super::ReviewBackend>,
     turn_active: Arc<AtomicBool>,
@@ -514,7 +514,7 @@ impl ReviewServer {
         review: PreparedReview,
         backend: Arc<super::ReviewBackend>,
         token: String,
-        assets: super::ReviewAssets,
+        assets: super::WebAssets,
         turn_active: Arc<AtomicBool>,
     ) -> Result<Self, std::io::Error> {
         crate::install_tls_provider();
@@ -1794,7 +1794,7 @@ fn secure_json(status: StatusCode, value: impl Serialize) -> Response<Body> {
     response
 }
 
-async fn asset(assets: &super::ReviewAssets, request_path: &str) -> Response<Body> {
+async fn asset(assets: &super::WebAssets, request_path: &str) -> Response<Body> {
     let Some(asset) = assets.resolve(request_path) else {
         return StatusCode::NOT_FOUND.into_response();
     };
@@ -3625,7 +3625,7 @@ mod tests {
             review,
             backend,
             "test-token".to_owned(),
-            crate::web::ReviewAssets::for_test(assets.path().to_owned()),
+            crate::web::WebAssets::for_test(assets.path().to_owned()),
             Arc::new(AtomicBool::new(false)),
         )
         .await
