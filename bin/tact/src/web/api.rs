@@ -12,7 +12,9 @@ use super::{
 use axum::{
     Json, Router,
     body::{Body, Bytes},
-    extract::{DefaultBodyLimit, FromRequest, Path, State, rejection::JsonRejection},
+    extract::{
+        DefaultBodyLimit, FromRequest, Path, Query as QueryParams, State, rejection::JsonRejection,
+    },
     http::{HeaderMap, HeaderValue, Method, Response, StatusCode, Uri, header},
     middleware::{self, Next},
     response::IntoResponse,
@@ -60,6 +62,7 @@ pub(super) fn router(state: Arc<AppState>, extra: Router<Arc<AppState>>) -> Rout
         .route("/api/login", post(login))
         .route("/api/instance", get(instance))
         .route("/api/link", get(link))
+        .route("/api/file", get(local_image))
         .route("/api/instances", get(instances))
         .route("/api/sessions/{session}/entries/{entry}", get(entry_detail))
         .route(
@@ -290,6 +293,66 @@ struct InstanceInfo {
     repository: String,
     live: usize,
     running: bool,
+}
+
+/// The largest local image the transcript will display.
+const MAX_LOCAL_IMAGE_BYTES: u64 = 25 * 1024 * 1024;
+
+#[derive(Deserialize)]
+struct FileQuery {
+    path: String,
+}
+
+/// Serves an image that an agent's Markdown refers to, wherever it lives on this machine, as the
+/// terminal transcript displays such images. Only files whose bytes are a raster image the browser
+/// renders inertly are served, so this reads no other file. Relative paths are the workspace's.
+async fn local_image(
+    State(state): State<Arc<AppState>>,
+    QueryParams(query): QueryParams<FileQuery>,
+) -> Result<Response<Body>, ApiError> {
+    let missing = || ApiError::new(StatusCode::NOT_FOUND, "invalid_request", "no such image");
+    let path = match query.path.strip_prefix("file://") {
+        Some(rest) => PathBuf::from(rest),
+        None => PathBuf::from(&query.path),
+    };
+    let path = state.workspace.join(path);
+    let metadata = tokio::fs::metadata(&path).await.map_err(|_| missing())?;
+    if !metadata.is_file() || metadata.len() > MAX_LOCAL_IMAGE_BYTES {
+        return Err(missing());
+    }
+    let bytes = tokio::fs::read(&path).await.map_err(|_| missing())?;
+    let media_type = sniff_image(&bytes).ok_or_else(missing)?;
+    let mut response = Response::new(Body::from(bytes));
+    response
+        .headers_mut()
+        .insert(header::CONTENT_TYPE, HeaderValue::from_static(media_type));
+    secure(&mut response);
+    Ok(response)
+}
+
+/// The media type of a PNG, JPEG, GIF, or WebP file, judged by its leading bytes.
+fn sniff_image(bytes: &[u8]) -> Option<&'static str> {
+    match bytes {
+        [0x89, b'P', b'N', b'G', ..] => Some("image/png"),
+        [0xFF, 0xD8, 0xFF, ..] => Some("image/jpeg"),
+        [b'G', b'I', b'F', b'8', ..] => Some("image/gif"),
+        [
+            b'R',
+            b'I',
+            b'F',
+            b'F',
+            _,
+            _,
+            _,
+            _,
+            b'W',
+            b'E',
+            b'B',
+            b'P',
+            ..,
+        ] => Some("image/webp"),
+        _ => None,
+    }
 }
 
 /// What a client needs to build a sign-in link for another device: the configured public origin,
@@ -581,6 +644,7 @@ mod tests {
             (Method::GET, "/api/sessions/s/entries/1"),
             (Method::GET, "/api/review"),
             (Method::GET, "/api/link"),
+            (Method::GET, "/api/file?path=x.png"),
             (Method::POST, "/api/cmd"),
             (Method::POST, "/api/refresh"),
             (Method::POST, "/api/range"),
@@ -798,6 +862,35 @@ mod tests {
 
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body["code"], "failed");
+    }
+
+    #[tokio::test]
+    async fn only_real_images_are_served_from_disk() {
+        let harness = Harness::new();
+        let directory = tempfile::tempdir().unwrap();
+        let png = directory.path().join("shot.png");
+        std::fs::write(&png, b"\x89PNG\r\n\x1a\nrest").unwrap();
+        let disguised = directory.path().join("notes.png");
+        std::fs::write(&disguised, b"api key: hunter2").unwrap();
+        let get = |path: &std::path::Path| {
+            let uri = format!("/api/file?path={}", path.display());
+            Request::builder()
+                .uri(uri)
+                .header(header::COOKIE, harness.cookie())
+                .body(Body::empty())
+                .unwrap()
+        };
+
+        let (status, headers, body) = harness.send(get(&png)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers[header::CONTENT_TYPE], "image/png");
+        assert!(body.starts_with(b"\x89PNG"));
+        let (status, _, _) = harness.send(get(&disguised)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "a non-image is never served");
+        let (status, _, _) = harness
+            .send(get(&directory.path().join("absent.png")))
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
