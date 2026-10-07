@@ -20,13 +20,13 @@ use crate::{
     app::{
         config::{ReasoningEffort, ReasoningMode, Speed, TuiConfig},
         model,
+        theme::{ColorScheme, Theme, ThemeMode},
     },
     core::{extensions::Skill, subagent_roster::SubagentRoster},
     tui::{
         context::ContextBudget,
         pane::PaneId,
         session::{RecentPrompt, SessionSummary},
-        theme::{ColorScheme, Theme, ThemeMode},
         transcript::TranscriptRecord,
     },
     web::bridge::{
@@ -1540,10 +1540,12 @@ mod tests {
         RootNode, SPLIT_HINT,
     };
     use crate::{
-        app::config::{ReasoningEffort, ReasoningMode, Speed, TuiConfig},
+        app::{
+            config::{ReasoningEffort, ReasoningMode, Speed, TuiConfig},
+            theme::{ColorScheme, Theme, ThemeMode},
+        },
         tui::{
             pane::PaneId,
-            theme::{ColorScheme, Theme, ThemeMode},
             transcript::{LocalEvent, TranscriptRecord, TurnId},
         },
     };
@@ -2282,8 +2284,11 @@ mod tests {
 mod registry_tests {
     use super::{AppEffect, AppEvent, AppNode, DraftReset, RootEffect, RootNode};
     use crate::{
-        app::config::{ReasoningEffort, ReasoningMode, Speed},
-        tui::{pane::PaneId, prompt::Submission, theme::Theme},
+        app::{
+            config::{ReasoningEffort, ReasoningMode, Speed},
+            theme::Theme,
+        },
+        tui::{pane::PaneId, prompt::Submission},
         web::bridge::{self, Command, CommandError, Draft, Origin, Publication, Reply, WebEnd},
     };
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
@@ -2827,8 +2832,11 @@ mod registry_tests {
 mod parity_tests {
     use super::{AppEffect, AppEvent, AppNode, RootEffect, RootNode};
     use crate::{
-        app::config::{ReasoningEffort, ReasoningMode},
-        tui::{context::ContextBudget, pane::PaneId, theme::Theme},
+        app::{
+            config::{ReasoningEffort, ReasoningMode},
+            theme::Theme,
+        },
+        tui::{context::ContextBudget, pane::PaneId},
         web::bridge::{self, Command, CommandError, DraftImage, Origin, Publication, WebEnd},
     };
     use nanocodex::{

@@ -1,5 +1,5 @@
 use super::{super::markdown::wrap_plain, Presentation};
-use crate::tui::{theme::Theme, transcript::ToolEntry};
+use crate::{app::theme::Theme, tui::transcript::ToolEntry};
 use ratatui::style::Style;
 use serde_json::Value;
 use std::borrow::Cow;
@@ -80,9 +80,9 @@ fn decoded_result(value: &Value) -> Option<Cow<'_, Value>> {
 #[cfg(test)]
 mod tests {
     use super::present;
-    use crate::tui::{
-        theme::Theme,
-        transcript::{ToolEntry, ToolState},
+    use crate::{
+        app::theme::Theme,
+        tui::transcript::{ToolEntry, ToolState},
     };
     use serde_json::json;
 

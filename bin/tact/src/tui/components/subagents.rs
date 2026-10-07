@@ -9,9 +9,9 @@ use super::{
     transcript::{Transcript, TranscriptEvent},
 };
 use crate::{
-    app::{config::DEFAULT_MAX_SUBAGENTS, model},
+    app::{config::DEFAULT_MAX_SUBAGENTS, model, theme::Theme},
     core::subagent_roster::{SubagentNode, SubagentRoster},
-    tui::{format::sanitize_terminal_text_inline, theme::Theme, transcript::TranscriptRecord},
+    tui::{format::sanitize_terminal_text_inline, transcript::TranscriptRecord},
 };
 use crossterm::event::{Event, KeyCode, KeyEventKind};
 use nanocodex::agent::events::AgentEvent;
@@ -1084,7 +1084,7 @@ fn unix_time_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{AgentFilter, SubagentEffect, SubagentTree};
-    use crate::{app::config::ReasoningEffort, tui::theme::Theme};
+    use crate::app::{config::ReasoningEffort, theme::Theme};
     use crossterm::event::{
         Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     };

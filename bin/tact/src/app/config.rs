@@ -1,15 +1,13 @@
 //! Configuration loading, precedence, and effective runtime settings.
 
-use crate::{
-    app::{
-        error::{
-            ConfigEditError, ConfigError, ConfigSyntaxError, McpUrlError, RemoteMemoryConfigError,
-            Result,
-        },
-        model,
-        secret::SecretString,
+use crate::app::{
+    error::{
+        ConfigEditError, ConfigError, ConfigSyntaxError, McpUrlError, RemoteMemoryConfigError,
+        Result,
     },
-    tui::theme::{Theme, ThemeMode},
+    model,
+    secret::SecretString,
+    theme::{Theme, ThemeMode},
 };
 use clap::ValueEnum;
 use nanocodex::{

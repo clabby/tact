@@ -5,9 +5,9 @@ use super::{
     floating::Floating,
     node::{Component, ComponentUpdate, RenderRequest},
 };
-use crate::{
-    app::model::{available, name},
-    tui::theme::Theme,
+use crate::app::{
+    model::{available, name},
+    theme::Theme,
 };
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use nanocodex::HarnessModel as Model;

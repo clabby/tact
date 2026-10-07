@@ -1,12 +1,14 @@
 //! Configurable terminal colors and light/dark mode selection.
+//!
+//! The theme is parsed and persisted as part of the configuration file. Front-ends report the
+//! operating system's color scheme through [`Theme::set_system_scheme`] so that `auto` mode can
+//! follow it.
 
 use crate::app::config::{ReasoningEffort, Speed};
 use nanocodex::{ClaudeModel, HarnessModel as Model, Model as CodexModel};
 use ratatui::style::Color;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use std::{fmt, str::FromStr};
-use tokio::{sync::mpsc, time::Duration};
-use tokio_util::sync::CancellationToken;
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -337,46 +339,6 @@ impl Serialize for ThemeColor {
     }
 }
 
-pub(crate) fn detect_system_scheme() -> Option<ColorScheme> {
-    match dark_light::detect().ok()? {
-        dark_light::Mode::Light => Some(ColorScheme::Light),
-        dark_light::Mode::Dark => Some(ColorScheme::Dark),
-        dark_light::Mode::Unspecified => None,
-    }
-}
-
-const SYSTEM_SCHEME_POLL_INTERVAL: Duration = Duration::from_millis(100);
-
-pub(crate) fn watch_system_scheme(
-    updates: mpsc::UnboundedSender<ColorScheme>,
-    shutdown: CancellationToken,
-) {
-    tokio::spawn(async move {
-        let mut last = None;
-        let mut interval = tokio::time::interval(SYSTEM_SCHEME_POLL_INTERVAL);
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        loop {
-            tokio::select! {
-                _ = shutdown.cancelled() => break,
-                _ = interval.tick() => {
-                    let detected = tokio::task::spawn_blocking(detect_system_scheme)
-                        .await
-                        .ok()
-                        .flatten();
-                    if let Some(scheme) = detected
-                        && last != Some(scheme)
-                    {
-                        last = Some(scheme);
-                        if updates.send(scheme).is_err() {
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-    });
-}
-
 struct ColorName(Color);
 
 impl fmt::Display for ColorName {
@@ -407,7 +369,7 @@ impl fmt::Display for ColorName {
 
 #[cfg(test)]
 mod tests {
-    use super::{ColorScheme, SYSTEM_SCHEME_POLL_INTERVAL, Theme, ThemeMode};
+    use super::{ColorScheme, Theme, ThemeMode};
     use nanocodex::{HarnessModel as Model, Model as CodexModel};
     use ratatui::style::Color;
 
@@ -420,11 +382,6 @@ mod tests {
         assert_eq!(theme.code_text(), Color::Rgb(0xD7, 0xD7, 0xD7));
         assert_eq!(theme.code_background(), Color::Rgb(0x26, 0x26, 0x26));
         assert_eq!(theme.thinking_medium(), Color::Cyan);
-    }
-
-    #[test]
-    fn system_theme_polling_is_perceptually_immediate() {
-        assert!(SYSTEM_SCHEME_POLL_INTERVAL <= std::time::Duration::from_millis(100));
     }
 
     #[test]

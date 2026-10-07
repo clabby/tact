@@ -16,8 +16,8 @@ mod shell;
 mod spinner;
 pub(crate) mod storage;
 mod subagent_updates;
+mod system_scheme;
 mod terminal;
-pub(crate) mod theme;
 pub(crate) mod transcript;
 mod worker;
 
@@ -612,7 +612,7 @@ pub(crate) async fn run(
     root.set_model(model);
     root.set_skills(skills);
     let mut theme = config.theme().clone();
-    if let Some(scheme) = theme::detect_system_scheme() {
+    if let Some(scheme) = system_scheme::detect_system_scheme() {
         theme.set_system_scheme(scheme);
     }
     let mut app = AppNode::new(theme, workspace.clone(), root);
@@ -648,7 +648,7 @@ pub(crate) async fn run(
     let mut recent_prompt_request = None::<RecentPromptRequest>;
     let mut update_check_task = spawn_update_check();
     let (system_theme_sender, mut system_theme_updates) = mpsc::unbounded_channel();
-    theme::watch_system_scheme(system_theme_sender, shutdown.clone());
+    system_scheme::watch_system_scheme(system_theme_sender, shutdown.clone());
     let mut input = Some(EventStream::new());
     let mut editor_task = None::<EditorTask>;
     let mut effort_task = None::<EffortUpdateTask>;

@@ -201,12 +201,12 @@ mod tests {
         app::{
             config::{Config, ConfigOverrides, ReasoningEffort},
             model::ModelCatalog,
+            theme::Theme,
         },
         tui::{
             components::{AppNode, RootNode},
             pane::PaneId,
             session::{RecentPrompt, RecentPromptScope},
-            theme::Theme,
         },
         web::bridge::{CommandError, Query, QueryReply},
     };

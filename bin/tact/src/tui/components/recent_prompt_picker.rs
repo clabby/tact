@@ -5,9 +5,9 @@ use super::{
     floating::Floating,
     node::{Component, ComponentUpdate, RenderRequest},
 };
-use crate::tui::{
-    session::{RecentPrompt, RecentPromptScope, rank_recent_prompts},
-    theme::Theme,
+use crate::{
+    app::theme::Theme,
+    tui::session::{RecentPrompt, RecentPromptScope, rank_recent_prompts},
 };
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::{
@@ -338,7 +338,7 @@ mod tests {
         Component, RecentPromptPicker, RecentPromptPickerEffect, RecentPromptPickerEvent,
         RecentPromptScope,
     };
-    use crate::tui::{session::RecentPrompt, theme::Theme};
+    use crate::{app::theme::Theme, tui::session::RecentPrompt};
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use ratatui::{Terminal, backend::TestBackend};
     use std::path::PathBuf;

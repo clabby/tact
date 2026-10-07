@@ -4,9 +4,9 @@ use super::{
     floating::Floating,
     node::{Component, ComponentUpdate, RenderRequest},
 };
-use crate::tui::{
-    session::{SessionSummary, format_age},
-    theme::Theme,
+use crate::{
+    app::theme::Theme,
+    tui::session::{SessionSummary, format_age},
 };
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::{

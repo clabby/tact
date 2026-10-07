@@ -13,13 +13,12 @@ use super::{
     selection::{TextRange, TextSpan},
 };
 use crate::{
-    app::config::ReasoningEffort,
+    app::{config::ReasoningEffort, theme::Theme},
     tui::{
         format::{
             duration_display_tick, format_duration, format_turn_duration, normalize_line_endings,
         },
         spinner::Spinner,
-        theme::Theme,
         transcript::{
             EntryId, EntryKind, TranscriptEntry, TranscriptModel, TranscriptRecord,
             TransientStatus, UserImage,
@@ -2142,11 +2141,11 @@ mod tests {
         Transcript, TranscriptEvent, render_user, unix_milliseconds,
     };
     use crate::{
-        app::config::{ReasoningEffort, ReasoningMode, Speed, TuiConfig},
-        tui::{
+        app::{
+            config::{ReasoningEffort, ReasoningMode, Speed, TuiConfig},
             theme::Theme,
-            transcript::{EntryKind, LocalEvent, SessionStarted, TranscriptRecord, TurnId},
         },
+        tui::transcript::{EntryKind, LocalEvent, SessionStarted, TranscriptRecord, TurnId},
     };
     use crossterm::event::{
         Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,

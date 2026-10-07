@@ -4,7 +4,7 @@ use super::{
     floating::Floating,
     node::{Component, ComponentUpdate, RenderRequest},
 };
-use crate::tui::{session::format_age, theme::Theme};
+use crate::{app::theme::Theme, tui::session::format_age};
 use chrono::{DateTime, Utc};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::{
@@ -1216,7 +1216,7 @@ mod tests {
         BrowserState, Component, MemoryBrowser, MemoryBrowserEffect, MemoryBrowserEvent,
         NamespaceScope, ReturnView, SortMode,
     };
-    use crate::tui::theme::Theme;
+    use crate::app::theme::Theme;
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
     use ratatui::{Terminal, backend::TestBackend};
     use tact_memory::{MemoryAccess, MemoryKey, MemoryRecord, MemorySource, RemoteRole};

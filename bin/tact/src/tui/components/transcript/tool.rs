@@ -10,10 +10,12 @@ mod web;
 use super::markdown::{
     Layout, SourceSpan, plain_selection_spans_excluding, sanitize, wrap_plain, wrap_spans,
 };
-use crate::tui::{
-    format::{format_duration, humanize_tool},
-    theme::Theme,
-    transcript::{ToolEntry, ToolState},
+use crate::{
+    app::theme::Theme,
+    tui::{
+        format::{format_duration, humanize_tool},
+        transcript::{ToolEntry, ToolState},
+    },
 };
 use ratatui::{
     style::{Color, Modifier, Style},
@@ -658,9 +660,9 @@ fn status_style(state: ToolState, theme: &Theme) -> Style {
 #[cfg(test)]
 mod tests {
     use super::{render, render_expanded, render_layout, render_live};
-    use crate::tui::{
-        theme::Theme,
-        transcript::{ToolEntry, ToolState},
+    use crate::{
+        app::theme::Theme,
+        tui::transcript::{ToolEntry, ToolState},
     };
     use ratatui::style::{Color, Modifier};
     use serde_json::json;

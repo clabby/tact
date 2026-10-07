@@ -5,7 +5,7 @@ use super::{
     floating::Floating,
     node::{Component, ComponentUpdate, RenderRequest},
 };
-use crate::{core::extensions::Skill, search::rank, tui::theme::Theme};
+use crate::{app::theme::Theme, core::extensions::Skill, search::rank};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind};
 use ratatui::{
     Frame,

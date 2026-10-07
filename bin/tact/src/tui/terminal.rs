@@ -392,11 +392,8 @@ mod tests {
         write_osc7_working_directory,
     };
     use crate::{
-        app::config::ReasoningEffort,
-        tui::{
-            components::{AppNode, RootNode},
-            theme::Theme,
-        },
+        app::{config::ReasoningEffort, theme::Theme},
+        tui::components::{AppNode, RootNode},
     };
     use ratatui::{Terminal, backend::TestBackend, layout::Position};
     use std::path::Path;

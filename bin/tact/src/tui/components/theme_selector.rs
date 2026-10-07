@@ -4,7 +4,7 @@ use super::{
     floating::Floating,
     node::{Component, ComponentUpdate, RenderRequest},
 };
-use crate::tui::theme::{Theme, ThemeMode};
+use crate::app::theme::{Theme, ThemeMode};
 use crossterm::event::{Event, KeyCode, KeyEventKind};
 use ratatui::{
     Frame,
@@ -116,7 +116,7 @@ impl Component for ThemeSelector {
 #[cfg(test)]
 mod tests {
     use super::{Component, ThemeSelector, ThemeSelectorEffect, ThemeSelectorEvent};
-    use crate::tui::theme::ThemeMode;
+    use crate::app::theme::ThemeMode;
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 
     fn key(code: KeyCode) -> ThemeSelectorEvent {

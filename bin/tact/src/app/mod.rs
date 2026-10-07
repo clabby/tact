@@ -11,6 +11,7 @@ pub(crate) mod installation;
 pub(crate) mod model;
 pub(crate) mod secret;
 mod shutdown;
+pub(crate) mod theme;
 pub(crate) mod update;
 
 pub(crate) use cli::Cli;

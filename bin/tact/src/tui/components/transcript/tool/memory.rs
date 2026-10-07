@@ -1,5 +1,5 @@
 use super::{Presentation, generic};
-use crate::tui::{theme::Theme, transcript::ToolEntry};
+use crate::{app::theme::Theme, tui::transcript::ToolEntry};
 use ratatui::{
     style::{Color, Style},
     text::Line,
@@ -568,9 +568,9 @@ fn format_score(score: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::super::{render, render_expanded, render_layout};
-    use crate::tui::{
-        theme::Theme,
-        transcript::{ToolEntry, ToolState},
+    use crate::{
+        app::theme::Theme,
+        tui::transcript::{ToolEntry, ToolState},
     };
     use serde_json::{Value, json};
 

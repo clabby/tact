@@ -5,7 +5,7 @@ use super::{
     floating::Floating,
     node::{Component, ComponentUpdate, RenderRequest},
 };
-use crate::{app::config::Speed, tui::theme::Theme};
+use crate::app::{config::Speed, theme::Theme};
 use crossterm::event::{Event, KeyCode, KeyEventKind};
 use nanocodex::HarnessModel as Model;
 use ratatui::{
@@ -136,7 +136,7 @@ mod tests {
         },
         SpeedEffect, SpeedEvent, SpeedSelector,
     };
-    use crate::{app::config::Speed, tui::theme::Theme};
+    use crate::app::{config::Speed, theme::Theme};
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use nanocodex::{ClaudeModel, HarnessModel as Model, Model as CodexModel};
     use ratatui::{Terminal, backend::TestBackend};

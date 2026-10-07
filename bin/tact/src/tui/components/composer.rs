@@ -9,7 +9,10 @@ use super::{
     waved_text::WavedText,
 };
 use crate::{
-    app::config::{ReasoningEffort, ReasoningMode, Speed},
+    app::{
+        config::{ReasoningEffort, ReasoningMode, Speed},
+        theme::Theme,
+    },
     tui::{
         context::{ContextBudget, MODEL_WINDOW_TOKENS},
         format::{
@@ -17,7 +20,6 @@ use crate::{
             terminal_text_width,
         },
         prompt::Submission,
-        theme::Theme,
     },
 };
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -1686,9 +1688,9 @@ mod tests {
         super::selection::{Selection, Surface, TextRange},
         Composer, ComposerChromeTarget, ComposerEffect, ComposerEvent, context_percent,
     };
-    use crate::{
-        app::config::{ReasoningEffort, ReasoningMode, Speed},
-        tui::theme::Theme,
+    use crate::app::{
+        config::{ReasoningEffort, ReasoningMode, Speed},
+        theme::Theme,
     };
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use nanocodex::{

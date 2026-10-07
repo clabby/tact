@@ -4,7 +4,7 @@ use super::{
     floating::Floating,
     node::{Component, ComponentUpdate, RenderRequest},
 };
-use crate::tui::theme::Theme;
+use crate::app::theme::Theme;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::{
     Frame,
@@ -470,7 +470,7 @@ mod tests {
     use super::{
         ACTIONS, Action, ActionAvailability, ActionsEffect, ActionsEvent, ActionsMenu, Component,
     };
-    use crate::tui::theme::Theme;
+    use crate::app::theme::Theme;
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use ratatui::{Terminal, backend::TestBackend, style::Color};
 

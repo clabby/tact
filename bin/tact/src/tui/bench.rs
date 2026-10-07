@@ -14,8 +14,10 @@ pub(crate) mod installation;
 pub(crate) mod model;
 #[path = "../app/secret.rs"]
 pub(crate) mod secret;
+#[path = "../app/theme.rs"]
+mod theme;
 mod app {
-    pub(crate) use crate::{browser, config, error, installation, model, secret};
+    pub(crate) use crate::{browser, config, error, installation, model, secret, theme};
 }
 
 #[cfg(test)]
@@ -82,16 +84,13 @@ mod prompt;
 mod session;
 mod spinner;
 mod storage;
-mod theme;
 #[path = "transcript/mod.rs"]
 pub(crate) mod transcript;
 
 // `config.rs` uses the production module path while this benchmark compiles the
 // same internal modules directly into its private target.
 mod tui {
-    pub(crate) use crate::{
-        context, format, pane, prompt, session, spinner, storage, theme, transcript,
-    };
+    pub(crate) use crate::{context, format, pane, prompt, session, spinner, storage, transcript};
 }
 
 use components::{AppEvent, AppNode, RootNode};

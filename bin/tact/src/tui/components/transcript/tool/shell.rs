@@ -1,5 +1,8 @@
 use super::{Presentation, format_bytes};
-use crate::tui::{format::shorten_home, theme::Theme, transcript::ToolEntry};
+use crate::{
+    app::theme::Theme,
+    tui::{format::shorten_home, transcript::ToolEntry},
+};
 use ratatui::{
     style::{Color, Style},
     text::Span,

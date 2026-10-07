@@ -4,7 +4,10 @@ use super::{
     floating::Floating,
     node::{Component, ComponentUpdate, RenderRequest},
 };
-use crate::tui::{format::sanitize_terminal_text_inline, pane::PaneId, theme::Theme};
+use crate::{
+    app::theme::Theme,
+    tui::{format::sanitize_terminal_text_inline, pane::PaneId},
+};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::{
     Frame,
@@ -379,7 +382,7 @@ fn truncate(text: &str, width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{Component, LiveSession, SessionsEffect, SessionsEvent, SessionsOverlay, truncate};
-    use crate::tui::{pane::PaneId, theme::Theme};
+    use crate::{app::theme::Theme, tui::pane::PaneId};
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use ratatui::{Terminal, backend::TestBackend};
 

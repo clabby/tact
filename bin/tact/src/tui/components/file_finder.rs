@@ -5,8 +5,8 @@ use super::{
     node::{Component, ComponentUpdate, RenderRequest},
 };
 use crate::{
+    app::theme::Theme,
     search::{discover_paths, rank},
-    tui::theme::Theme,
 };
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind};
 use ratatui::{
@@ -203,7 +203,7 @@ pub(super) fn visible_query_tail(query: &str, width: usize) -> &str {
 #[cfg(test)]
 mod tests {
     use super::{Component, FileFinder, FileFinderEffect, FileFinderEvent};
-    use crate::tui::theme::Theme;
+    use crate::app::theme::Theme;
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use ratatui::{Terminal, backend::TestBackend};
     use std::fs;

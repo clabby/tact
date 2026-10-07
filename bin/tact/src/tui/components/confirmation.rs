@@ -4,7 +4,7 @@ use super::{
     floating::Floating,
     node::{Component, ComponentUpdate, RenderRequest},
 };
-use crate::tui::theme::Theme;
+use crate::app::theme::Theme;
 use crossterm::event::{Event, KeyCode, KeyEventKind};
 use ratatui::{
     Frame,
@@ -100,7 +100,7 @@ impl Component for Confirmation {
 #[cfg(test)]
 mod tests {
     use super::{Component, Confirmation, ConfirmationEffect, ConfirmationEvent, HEIGHT, WIDTH};
-    use crate::tui::theme::Theme;
+    use crate::app::theme::Theme;
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use ratatui::{Terminal, backend::TestBackend};
 

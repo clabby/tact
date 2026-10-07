@@ -4,7 +4,10 @@ use super::{
     node::{Component, ComponentUpdate, RenderRequest},
     waved_text::WavedText,
 };
-use crate::tui::{format::sanitize_terminal_text_inline, prompt::Submission, theme::Theme};
+use crate::{
+    app::theme::Theme,
+    tui::{format::sanitize_terminal_text_inline, prompt::Submission},
+};
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::{
     Frame,
@@ -585,7 +588,7 @@ mod tests {
         Component, MessageQueue, QueueEffect, QueueEvent, QueueId, STEERING_TEXT, Submission,
         truncate,
     };
-    use crate::tui::theme::Theme;
+    use crate::app::theme::Theme;
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use ratatui::{Terminal, backend::TestBackend, style::Color};
 

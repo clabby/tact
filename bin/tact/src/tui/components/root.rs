@@ -29,13 +29,13 @@ use crate::{
     app::{
         config::{ReasoningEffort, ReasoningMode, Speed, TuiConfig},
         model,
+        theme::{Theme, ThemeMode},
     },
     core::{extensions::Skill, subagent_roster::SubagentRoster},
     tui::{
         context::{ContextBudget, ContextDiagnostics},
         prompt::Submission,
         session::{RecentPrompt, SessionSummary},
-        theme::{Theme, ThemeMode},
         transcript::TranscriptRecord,
     },
     web::bridge::{Busy, CommandError},
@@ -3509,11 +3509,13 @@ mod tests {
         TranscriptEvent,
     };
     use crate::{
-        app::config::{ReasoningEffort, ReasoningMode, Speed, TuiConfig},
+        app::{
+            config::{ReasoningEffort, ReasoningMode, Speed, TuiConfig},
+            theme::{Theme, ThemeMode},
+        },
         core::extensions::Skill,
         tui::{
             session::{RecentPrompt, SessionSummary},
-            theme::{Theme, ThemeMode},
             transcript::{LocalEvent, TranscriptRecord, TurnId},
         },
     };

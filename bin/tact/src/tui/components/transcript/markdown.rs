@@ -1,4 +1,4 @@
-use crate::tui::{format::sanitize_terminal_text, theme::Theme};
+use crate::{app::theme::Theme, tui::format::sanitize_terminal_text};
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use ratatui::{
     style::{Modifier, Style},
@@ -1528,7 +1528,7 @@ mod tests {
         super::image::{Cache, MAX_IMAGE_HEIGHT},
         ImageState, Layout, render, render_cached,
     };
-    use crate::tui::theme::Theme;
+    use crate::app::theme::Theme;
     use ratatui::style::{Color, Modifier};
     use std::{fs::File, path::Path, sync::Arc, time::Instant};
 
