@@ -61,7 +61,7 @@ Static assets are public. Every `/api/*` route except `POST /api/login` requires
 | `GET /api/sessions/{id}/entries/{n}` | `ToolDetail` of one entry (full arguments, result, metadata, each string truncated at 256 KiB) |
 | `GET /api/sessions/{id}/agents/{agent}/entries` | `{ entries: WireEntry[] }`, the projected transcript of one subagent |
 | `GET /api/sessions/{id}/entries/{n}/images/{i}` | The i-th image attached to a user entry, decoded; only PNG, JPEG, GIF, and WebP are served |
-| `GET /api/file?path=` | A local image that Markdown refers to (absolute, `file://`, or workspace-relative path), as the terminal transcript shows such images. Only files whose bytes are PNG, JPEG, GIF, or WebP and at most 25 MiB are served; anything else is 404 |
+| `GET /api/file?path=&session=` | A local image that Markdown refers to (absolute, `file://`, or a path relative to the session's workspace, else the default workspace), as the terminal transcript shows such images. Only files whose bytes are PNG, JPEG, GIF, or WebP and at most 25 MiB are served; anything else is 404 |
 | `GET /api/sessions/{id}/agents/{agent}/entries/{n}` | `ToolDetail` of one subagent entry |
 | `GET /api/stream` | Server-Sent Events, below |
 
@@ -87,18 +87,19 @@ the TUI's frame interval.
 | `subagents` | `{ session } & SubagentRoster`, coalesced to the frame interval |
 | `subagent_entry` | `{ session, agent, entry: WireEntry }` for the active session; same upsert rule as `entry` |
 | `closed` | `{ session }` |
-| `workspace` | `{ version }` the working tree changed; marks the diff stale |
+| `workspace` | `{ version, checkout }` the working tree of `checkout` (an absolute path) changed; marks that checkout's diff stale |
 
 ```ts
 type SessionSummary = {
   id: string; title: string; model: string;
+  workspace: string;          // the directory the session's agent runs in
   state: "idle" | "running" | "error";
   unread: boolean;            // finished or errored while not active
   has_draft: boolean;
   last_activity_unix_ms: number;
 };
 type SessionSnapshot = {
-  session: string; title: string; model: string; effort: Effort;
+  session: string; title: string; model: string; workspace: string; effort: Effort;
   reasoning_mode: "standard" | "pro"; speed: Speed;
   entries: WireEntry[]; status: TransientStatus | null; queue: QueuedPrompt[];
   draft: Draft; running: boolean;
@@ -123,7 +124,8 @@ type WireEntry = { id: number; revision: number; parent: number | null } & (
   | { kind: "tool"; name: string; summary: string; state: "running" | "succeeded" | "failed";
       duration_ns: number | null; elapsed_ns: number | null; // elapsed so far, while running
       substeps: string[]; child_count: number; has_detail: boolean }
-  | { kind: "directed_message"; from: string; to: string; body: string; delivery: string }
+  | { kind: "directed_message"; from: string; to: string; body: string; delivery: string; // the latest message
+      thread: number; messages: DirectedMessage[] }
   | { kind: "forked_from"; session: string }
   | { kind: "effort_changed"; to: string }
   | { kind: "fast_mode_changed"; enabled: boolean }
@@ -155,7 +157,7 @@ straight into `bridge::Command`; there is no per-command route. Success is 200 `
 | `compact` | `session` | Actions: Compact | `turn_running`, `queue_not_empty` |
 | `set_model` / `set_effort` / `set_reasoning_mode` / `set_speed` | `session, model\|effort\|mode\|speed` | pickers | see Feature parity |
 | `activate` | `session` | focus / Sessions action | `unknown_session` |
-| `open_session` | `{ new: { model? } }` \| `{ resume: { session } }` \| `{ fork: { session } }` | Sessions action | `too_many_sessions`, `unknown_session`, `session_locked`, `turn_running` (fork) |
+| `open_session` | `{ new: { model?, workspace? } }` \| `{ resume: { session } }` \| `{ fork: { session } }` | Sessions action | `too_many_sessions`, `unknown_session`, `session_locked`, `turn_running` (fork) |
 | `close_session` | `session, force?` | close pane | `turn_running` without `force` |
 
 Opening or activating a session from either window makes it the shared active session.
@@ -242,10 +244,11 @@ once a turn started (`invalid_request`). A session has started when its snapshot
 | Query | Args | Reply |
 | :-- | :-- | :-- |
 | `models` | none | `ModelCatalog` |
-| `history` | `query?, cursor?` | `{ sessions: PersistedSession[], next_cursor: string \| null }` (resumable persisted sessions of this workspace, newest first, pages of 50) |
+| `history` | `query?, cursor?` | `{ sessions: PersistedSession[], next_cursor: string \| null }` (resumable persisted sessions of the focused session's repository, any of its checkouts, newest first, pages of 50) |
 | `files` | `query?` | `{ paths: string[] }` (at most 50; directories end in `/`) |
 | `skills` | `query?` | `{ skills: { name, description }[] }` |
 | `recent_prompts` | `session, scope?: "global" \| "current_session", query?` | `{ prompts: { text, recorded_at_unix_ms, session_id, workspace }[] }` |
+| `workspaces` | `session?` | `{ default: string, checkouts: Checkout[], recent: string[] }`: the checkouts of the session's repository (the default workspace's without a session), main checkout first, and other workspaces live sessions run in. Answered by the server without the terminal loop |
 | `context_diagnostics` | `session` | `ContextDiagnostics` |
 | `memories` | none | `{ access: { source, namespace, role }, records: (MemoryRecord & { deletable: boolean })[] }`; `disabled` when memory is off |
 | `config` | none | `{ path, text, revision }`; `not_available_remotely` when the file holds credentials (they never leave the terminal), `invalid_request` when it does not parse |
@@ -260,6 +263,18 @@ type ModelCatalog = {
   }[];
   efforts: Effort[];
   speeds: Speed[];                      // increasing
+};
+// One message of a conversation between agents. `from` is null for the root session.
+type DirectedMessage = {
+  id: number; from: number | null; to: number;
+  purpose: "delegate" | "coordinate" | "finding" | "question" | "reply";
+  priority: "deferred" | "urgent"; in_reply_to: number | null; body: string;
+  delivery: "admitted" | "delivered" | "failed" | "unknown";
+  detail: string | null; // "started" | "queued" | "steered", or the failure
+};
+type Checkout = {
+  path: string; name: string; label: string; kind: "git" | "jj"; head: string | null;
+  changed_files: number | null; current: boolean; missing: boolean; touched: boolean;
 };
 type PersistedSession = {
   session_id: string; started_at_unix_ms: number; model: string; effort: Effort;
@@ -295,8 +310,13 @@ type SubagentRoster = {
 
 The review engine keeps its existing payloads (`web/protocol.ts`) with these changes:
 
-- The diff context is per workspace and prepared lazily by `GET /api/review`, then cached by
-  generation. `POST /api/refresh`, `/api/range` are unchanged.
+- The diff context is per checkout and prepared lazily by `GET /api/review`, then cached by
+  generation. Every review request may name a `checkout` (an absolute path); without one it is the
+  session's workspace. A checkout must be a member of the session's repository (a git worktree or a
+  jj workspace, found with `git worktree list` and `jj workspace list`), or of the default workspace's
+  or another live session's; anything else is `invalid_checkout` (400). The review payload carries
+  `checkout: { path, name, label, kind }`. The server keeps the four most recently used checkouts
+  and watches each only while kept. `POST /api/refresh`, `/api/range` also accept `session`.
 - Overviews, AI reviews, and inline question threads belong to a session. Their requests gain
   `session`; they run through that session's worker as a clean-context auxiliary prompt, and are
   cancelled when the session closes.
@@ -307,7 +327,8 @@ The review engine keeps its existing payloads (`web/protocol.ts`) with these cha
   staleness means any live session is busy.
 - `/api/decision` and `/api/cancel` are gone. `POST /api/review/compose` with the former decision
   body returns `{ markdown }`, the canonical review text; the client writes it into the active
-  session's draft (**Send to chat**).
+  session's draft (**Send to chat**). When the reviewed checkout is not the session's workspace the
+  text names it (`**Checkout:** `path``) so the agent knows where the comments apply.
 
 ## UI
 
