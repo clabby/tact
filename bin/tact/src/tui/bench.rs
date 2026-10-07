@@ -23,30 +23,23 @@ fn install_tls_provider() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
+#[path = "../web/bridge.rs"]
+mod bridge;
+#[path = "../search.rs"]
+mod search;
+#[path = "../core/extensions/skills.rs"]
+mod skills;
+#[path = "../core/subagent_roster.rs"]
+mod subagent_roster;
+mod web {
+    pub(crate) use crate::bridge;
+}
+
 mod core {
+    pub(crate) use crate::subagent_roster;
+
     pub(crate) mod extensions {
-        #[derive(Clone, Debug, Eq, PartialEq)]
-        pub(crate) struct Skill {
-            name: String,
-            description: String,
-        }
-
-        impl Skill {
-            pub(crate) fn new(name: impl Into<String>, description: impl Into<String>) -> Self {
-                Self {
-                    name: name.into(),
-                    description: description.into(),
-                }
-            }
-
-            pub(crate) fn name(&self) -> &str {
-                &self.name
-            }
-
-            pub(crate) fn description(&self) -> &str {
-                &self.description
-            }
-        }
+        pub(crate) use crate::skills::{Skill, SkillMatches};
 
         pub(crate) mod memory {
             #[derive(Clone, Copy, Debug, Eq, PartialEq)]
