@@ -198,6 +198,9 @@ pub(super) struct QuestionRequest {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct QuestionCancelRequest {
+    /// Accepted for symmetry with the other session-scoped requests; operations are looked up by id.
+    #[serde(default, rename = "session")]
+    _session: serde::de::IgnoredAny,
     operation_id: String,
     generation: u64,
     range: diff::ReviewRange,
@@ -299,6 +302,7 @@ enum ErrorCode {
     OperationCancelled,
     SessionCancelled,
     InvalidCommentAnchor,
+    UnknownSession,
 }
 
 pub(super) enum ScopeLoadError {
@@ -896,6 +900,9 @@ async fn load_overview(
     if state.turn_running() {
         return turn_running();
     }
+    if !state.hub.is_live(&request.session) {
+        return unknown_session();
+    }
     request.instructions = request
         .instructions
         .map(|value| value.trim().to_owned())
@@ -955,7 +962,7 @@ async fn load_overview(
         session.finish_overview(&overview_key);
         drop(session);
         state.overview_operations.lock().await.remove(&overview_key);
-        return overview_response(overview_key, result);
+        return overview_response(&state, overview_key, result);
     }
     let (page, version, shutdown) = {
         let mut session = loaded!(state);
@@ -1023,7 +1030,7 @@ async fn load_overview(
         let result = store_overview_result(&task_state, &overview_key, result).await;
         *operation.result.lock().await = Some(result.clone());
         let initiating_browser_is_connected = completion
-            .send(overview_response(overview_key.clone(), result))
+            .send(overview_response(&task_state, overview_key.clone(), result))
             .is_ok();
         let reloaded_browser_is_waiting = Arc::strong_count(&operation) > 2;
         if initiating_browser_is_connected || !reloaded_browser_is_waiting {
@@ -1146,6 +1153,7 @@ async fn store_overview_result(
 }
 
 fn overview_response(
+    state: &ReviewState,
     overview_key: OverviewOperationKey,
     result: OverviewRunResult,
 ) -> Response<Body> {
@@ -1159,13 +1167,9 @@ fn overview_response(
                 instructions: overview_key.2,
             },
         ),
-        OverviewRunResult::Cancelled => error_response(
-            StatusCode::CONFLICT,
-            ErrorCode::OperationCancelled,
-            "overview generation was cancelled",
-            true,
-            true,
-        ),
+        OverviewRunResult::Cancelled => {
+            cancelled(state, &overview_key.3, "overview generation was cancelled")
+        }
         OverviewRunResult::Stale(message) => stale_snapshot(message),
         OverviewRunResult::Workspace(error) => error_response(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -1190,6 +1194,9 @@ async fn run_ai_review(
 ) -> Response<Body> {
     if state.turn_running() {
         return turn_running();
+    }
+    if !state.hub.is_live(&request.session) {
+        return unknown_session();
     }
     let (page, version, shutdown) = {
         let session = loaded!(state);
@@ -1224,7 +1231,9 @@ async fn run_ai_review(
         .await
     {
         Ok(comments) => comments,
-        Err(ScopeLoadError::Cancelled) => return operation_cancelled("AI review was cancelled"),
+        Err(ScopeLoadError::Cancelled) => {
+            return cancelled(&state, &request.session, "AI review was cancelled");
+        }
         Err(ScopeLoadError::Failed(error)) => {
             return error_response(
                 StatusCode::UNPROCESSABLE_ENTITY,
@@ -1311,6 +1320,9 @@ async fn ask_question(
     if state.turn_running() {
         return turn_running();
     }
+    if !state.hub.is_live(&request.session) {
+        return unknown_session();
+    }
     if invalid_question(&request) {
         return invalid_thread("the question thread is invalid");
     }
@@ -1374,7 +1386,7 @@ async fn ask_question(
             result = QuestionRunResult::Cancelled;
         }
         store_question_result(&task_state, &request, &mut result).await;
-        let _ = completion.send(question_response(&request, result));
+        let _ = completion.send(question_response(&task_state, &request, result));
     });
 
     response
@@ -1500,7 +1512,11 @@ async fn store_question_result(
     }
 }
 
-fn question_response(request: &QuestionRequest, result: QuestionRunResult) -> Response<Body> {
+fn question_response(
+    state: &ReviewState,
+    request: &QuestionRequest,
+    result: QuestionRunResult,
+) -> Response<Body> {
     match result {
         QuestionRunResult::Answer(answer) => secure_json(
             StatusCode::OK,
@@ -1510,7 +1526,9 @@ fn question_response(request: &QuestionRequest, result: QuestionRunResult) -> Re
                 answer,
             },
         ),
-        QuestionRunResult::Cancelled => operation_cancelled("question answering was cancelled"),
+        QuestionRunResult::Cancelled => {
+            cancelled(state, &request.session, "question answering was cancelled")
+        }
         QuestionRunResult::Stale(message) => stale_snapshot(message),
         QuestionRunResult::Workspace(error) => error_response(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -1706,6 +1724,30 @@ fn invalid_thread(message: impl Into<String>) -> Response<Body> {
     error_response(
         StatusCode::UNPROCESSABLE_ENTITY,
         ErrorCode::InvalidThread,
+        message,
+        false,
+        true,
+    )
+}
+
+fn unknown_session() -> Response<Body> {
+    error_response(
+        StatusCode::NOT_FOUND,
+        ErrorCode::UnknownSession,
+        "the session is not live",
+        false,
+        true,
+    )
+}
+
+/// A cancellation caused by the session closing is reported distinctly from a user cancel.
+fn cancelled(state: &ReviewState, session: &str, message: &str) -> Response<Body> {
+    if state.hub.is_live(session) {
+        return operation_cancelled(message);
+    }
+    error_response(
+        StatusCode::CONFLICT,
+        ErrorCode::SessionCancelled,
         message,
         false,
         true,
@@ -2373,7 +2415,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(status, StatusCode::CONFLICT);
-        assert_eq!(body["code"], "operation_cancelled");
+        assert_eq!(body["code"], "session_cancelled");
     }
 
     #[tokio::test]
@@ -2509,5 +2551,30 @@ mod tests {
         }
         harness.shutdown.cancel();
         assert!(seen, "an edit should produce a workspace event");
+    }
+
+    #[tokio::test]
+    async fn review_actions_for_a_session_that_is_not_live_are_unknown_session() {
+        let harness = Harness::new();
+        harness.call(Method::GET, "/api/review", None).await;
+
+        for (route, request) in [
+            ("/api/overview", overview_request("ghost", None)),
+            ("/api/question", question_request("ghost")),
+        ] {
+            let (status, body) = harness.call(Method::POST, route, Some(request)).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{route}");
+            assert_eq!(body["code"], "unknown_session", "{route}");
+        }
+        let (status, _) = harness
+            .call(
+                Method::POST,
+                "/api/question/cancel",
+                Some(json!({
+                    "session": "ghost", "operation_id": "q", "generation": 0, "range": full_range()
+                })),
+            )
+            .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
     }
 }
