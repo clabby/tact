@@ -2560,7 +2560,7 @@ fn apply_pane_effect(
                     true
                 }
                 Ok(crate::web::Located::Absent) => {
-                    let error = "You are running a development build of Tact, which cannot download the web interface automatically. Run `cd web/app && bun install --frozen-lockfile && just install-dev`, or set TACT_WEB_ASSETS to the absolute `web/app/dist` path."
+                    let error = "You are running a development build of Tact, which cannot download the web interface automatically. Run `cd web && bun install --frozen-lockfile && just install-dev`, or set TACT_WEB_ASSETS to the absolute `web/dist` path."
                         .to_owned();
                     schedule(
                         context.app.update(AppEvent::NotifyError { pane, error }),

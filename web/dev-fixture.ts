@@ -34,8 +34,8 @@ index 82a06c1..90c03be 100644
 +++ b/.github/workflows/release.yml
 @@ -21,2 +21,4 @@ jobs:
        - run: cargo build --release
-+      - run: cd web/app && bun install --frozen-lockfile
-+      - run: cd web/app && bun run build
++      - run: cd web && bun install --frozen-lockfile
++      - run: cd web && bun run build
        - run: cargo test
 `;
 

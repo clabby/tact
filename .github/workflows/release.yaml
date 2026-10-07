@@ -109,7 +109,7 @@ jobs:
       contents: read
     defaults:
       run:
-        working-directory: web/app
+        working-directory: web
     steps:
       - name: Checkout sources
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -141,8 +141,8 @@ jobs:
         with:
           name: web-assets
           path: |
-            web/app/tact-web-${{ github.ref_name }}.tar.gz
-            web/app/tact-web-${{ github.ref_name }}.tar.gz.sha256
+            web/tact-web-${{ github.ref_name }}.tar.gz
+            web/tact-web-${{ github.ref_name }}.tar.gz.sha256
           if-no-files-found: error
 
   sign:

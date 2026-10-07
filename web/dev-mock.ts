@@ -883,7 +883,7 @@ const files = [
   "bin/", "bin/tact/", "bin/tact/src/", "bin/tact/src/web/", "bin/tact/src/web/bridge.rs", "bin/tact/src/web/server.rs",
   "bin/tact/src/web/mod.rs", "bin/tact/src/tui/", "bin/tact/src/tui/app.rs", "bin/tact/src/tui/theme.rs",
   "bin/tact/src/tui/context.rs", "bin/tact/src/app/config.rs", "bin/tact/src/app/model.rs", "docs/web.md",
-  "web/app/app.ts", "web/app/chat.ts", "web/app/composer.ts", "web/app/store.ts", "README.md", "Cargo.toml",
+  "web/app.ts", "web/chat.ts", "web/composer.ts", "web/store.ts", "README.md", "Cargo.toml",
 ];
 
 const skills = [

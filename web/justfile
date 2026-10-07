@@ -1,5 +1,5 @@
 review_directory := justfile_directory()
-repository_directory := review_directory + "/../.."
+repository_directory := review_directory + "/.."
 
 build:
     cd "{{ review_directory }}" && bun run build

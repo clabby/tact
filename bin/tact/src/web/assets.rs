@@ -93,7 +93,7 @@ impl AssetStore {
              <p>This Tact (v{version}) is running, but the browser files it serves are missing.</p>\
              <p>Download <code>tact-web-v{version}.tar.gz</code> from the Tact release, extract it, and \
              move the extracted <code>web</code> directory to <code>{path}</code>. \
-             Development builds can instead run <code>just install-dev</code> in <code>web/app</code>.</p>\
+             Development builds can instead run <code>just install-dev</code> in <code>web</code>.</p>\
              <p>Reload this page afterwards; no restart is needed.</p>"
         )
     }

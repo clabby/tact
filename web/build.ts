@@ -26,7 +26,7 @@ await Bun.write(
 );
 await Bun.write(
   join(outputDirectory, "LICENSE.md"),
-  Bun.file(join(import.meta.dir, "..", "..", "LICENSE.md")),
+  Bun.file(join(import.meta.dir, "..", "LICENSE.md")),
 );
 await Bun.write(
   join(outputDirectory, "FONT-AWESOME-LICENSE.txt"),
@@ -40,7 +40,7 @@ await Bun.write(
 );
 await Bun.write(
   join(outputDirectory, "favicon.svg"),
-  Bun.file(join(import.meta.dir, "..", "..", "assets", "favicon.svg")),
+  Bun.file(join(import.meta.dir, "..", "assets", "favicon.svg")),
 );
 
 const contentTypes: Record<string, string> = {

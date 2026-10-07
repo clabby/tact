@@ -553,7 +553,7 @@ Development builds do not download browser assets. Install Bun, then build and l
 the development Tact directory:
 
 ```sh
-cd web/app
+cd web
 bun install --frozen-lockfile
 just install-dev
 ```
@@ -564,7 +564,7 @@ To work on the interface in a browser with sample data, run:
 just dev
 ```
 
-`TACT_WEB_ASSETS=/absolute/path/to/web/app/dist` remains available as a manual override. The
+`TACT_WEB_ASSETS=/absolute/path/to/web/dist` remains available as a manual override. The
 development server watches browser sources, rebuilds them, and reloads connected pages.
 
 ### Copying Responses

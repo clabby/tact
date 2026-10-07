@@ -45,7 +45,7 @@ Static assets are public. Every `/api/*` route except `POST /api/login` requires
 - Errors are JSON `{ "code": string, "message": string }`. Codes: `unauthorized` (401),
   `invalid_request` (400), `turn_running`, `queue_not_empty`, `nothing_running`, `draft_changed`,
   `session_locked`, `unknown_session`, `too_many_sessions`, `not_available_remotely`, `stale`,
-  `disabled` (409/404), `failed` (500), plus the review codes in `web/app/protocol.ts`. Commands
+  `disabled` (409/404), `failed` (500), plus the review codes in `web/protocol.ts`. Commands
   and queries share one mapping (`bridge::CommandError::code`).
 
 ## Reads
@@ -288,7 +288,7 @@ type SubagentRoster = {
 
 ## Review (diff and overview)
 
-The review engine keeps its existing payloads (`web/app/protocol.ts`) with these changes:
+The review engine keeps its existing payloads (`web/protocol.ts`) with these changes:
 
 - The diff context is per workspace and prepared lazily by `GET /api/review`, then cached by
   generation. `POST /api/refresh`, `/api/range` are unchanged.

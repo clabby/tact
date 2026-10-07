@@ -1047,7 +1047,10 @@ class ReviewPanel {
       disableLineNumbers: !this.settings.lineNumbers,
       theme: diffTheme(this.settings),
       themeType: appearance(this.settings, this.host.theme()),
-      unsafeCSS: `::highlight(${SEARCH_HIGHLIGHT}) { color: #171717; background-color: #ffd54f; }`,
+      unsafeCSS: `
+        ::highlight(${SEARCH_HIGHLIGHT}) { color: #171717; background-color: #ffd54f; }
+        [data-diffs-header="default"] [data-additions-count] { color: var(--add); }
+        [data-diffs-header="default"] [data-deletions-count] { color: var(--del); }`,
       hunkSeparators: "line-info" as const,
       expansionLineCount: 20,
       enableLineSelection: true,

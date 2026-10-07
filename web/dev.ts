@@ -31,7 +31,7 @@ async function buildAssets() {
     return false;
   }
   await Bun.write(join(outputDirectory, "overview-frame.html"), overviewFrameDocument());
-  await Bun.write(join(outputDirectory, "favicon.svg"), Bun.file(join(import.meta.dir, "..", "..", "assets", "favicon.svg")));
+  await Bun.write(join(outputDirectory, "favicon.svg"), Bun.file(join(import.meta.dir, "..", "assets", "favicon.svg")));
   const html = await Bun.file(join(import.meta.dir, "index.html")).text();
   await Bun.write(join(outputDirectory, "index.html"), html.replace(
     "</body>",
