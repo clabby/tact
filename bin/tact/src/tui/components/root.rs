@@ -341,6 +341,15 @@ enum ThreadState {
     Started,
 }
 
+/// How a prompt submitted while a turn is running reaches the agent.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum BusyDelivery {
+    /// Joins the running turn at its next opportunity.
+    Steer,
+    /// Waits in the queue until the turn finishes.
+    Queue,
+}
+
 #[derive(Clone, Copy)]
 pub(crate) enum DraftReset {
     Clear,
@@ -999,6 +1008,16 @@ impl RootNode {
                 None => {}
             }
         }
+        if is_queue_shortcut(&event) && self.can_queue_draft() {
+            return self.update_composer_with(
+                ComposerEvent::Terminal(Event::Key(KeyEvent::new(
+                    KeyCode::Enter,
+                    KeyModifiers::NONE,
+                ))),
+                RenderRequest::Immediate,
+                BusyDelivery::Queue,
+            );
+        }
         if is_focus_toggle(&event) {
             return self.update_focus();
         }
@@ -1029,14 +1048,6 @@ impl RootNode {
             return ComponentUpdate::render(RenderRequest::Immediate);
         }
         if self.queue.component().focused() {
-            return self.update_queue(event);
-        }
-        if self.in_flight_turns > 0
-            && self.composer.component().draft().is_empty()
-            && !self.queue.component().is_empty()
-            && !self.queue.component().has_pending_steer()
-            && is_plain_enter(&event)
-        {
             return self.update_queue(event);
         }
         if !self.skills.is_empty()
@@ -2287,12 +2298,13 @@ impl RootNode {
                 self.update_composer(ComposerEvent::ReplaceDraft(text), RenderRequest::Immediate)
             }
             PaneCommand::Submit if self.reflection_input => self.submit_reflection(),
-            PaneCommand::Submit => self.update_composer(
+            PaneCommand::Submit => self.update_composer_with(
                 ComposerEvent::Terminal(Event::Key(KeyEvent::new(
                     KeyCode::Enter,
                     KeyModifiers::NONE,
                 ))),
                 RenderRequest::Immediate,
+                BusyDelivery::Queue,
             ),
             PaneCommand::Interrupt => {
                 self.key_confirmation = None;
@@ -2552,6 +2564,23 @@ impl RootNode {
         event: ComposerEvent,
         priority: RenderRequest,
     ) -> ComponentUpdate<RootEffect> {
+        self.update_composer_with(event, priority, BusyDelivery::Steer)
+    }
+
+    /// Whether shift+tab has a draft to queue: a turn (or a steer still being applied) is busy and
+    /// the composer holds a prompt.
+    fn can_queue_draft(&self) -> bool {
+        !self.reflection_input
+            && (self.in_flight_turns > 0 || self.queue.component().has_pending_steer())
+            && !self.composer.component().draft().trim().is_empty()
+    }
+
+    fn update_composer_with(
+        &mut self,
+        event: ComposerEvent,
+        priority: RenderRequest,
+        delivery: BusyDelivery,
+    ) -> ComponentUpdate<RootEffect> {
         let update = self.composer.component_mut().update(event);
         if let Some(ComposerEffect::Submit(prompt)) = &update.effect
             && let Some(argument) = copy_command_argument(prompt.display_text().trim())
@@ -2575,7 +2604,18 @@ impl RootNode {
                 if self.in_flight_turns > 0 || self.queue.component().has_pending_steer() =>
             {
                 self.queue.component_mut().push(prompt);
-                Vec::new()
+                // A steer is only possible while a turn runs; while one is still being applied the
+                // prompt waits behind it.
+                if delivery == BusyDelivery::Steer && self.in_flight_turns > 0 {
+                    let steer = self.update_queue(Event::Key(KeyEvent::new(
+                        KeyCode::Enter,
+                        KeyModifiers::NONE,
+                    )));
+                    render = render.max(steer.render);
+                    steer.effects
+                } else {
+                    Vec::new()
+                }
             }
             Some(ComposerEffect::Submit(prompt)) => {
                 self.in_flight_turns = self.in_flight_turns.saturating_add(1);
@@ -3382,6 +3422,13 @@ fn is_file_query_character(character: char) -> bool {
 
 fn is_skill_query_character(character: char) -> bool {
     character.is_ascii_alphanumeric() || character == '-'
+}
+
+fn is_queue_shortcut(event: &Event) -> bool {
+    let Event::Key(key) = event else {
+        return false;
+    };
+    matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) && key.code == KeyCode::BackTab
 }
 
 fn is_focus_toggle(event: &Event) -> bool {
@@ -5044,11 +5091,11 @@ mod tests {
     }
 
     #[test]
-    fn enter_in_an_empty_composer_steers_the_selected_queued_message() {
+    fn enter_steers_a_prompt_submitted_while_a_turn_runs() {
         let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
         root.in_flight_turns = 1;
         root.queue.component_mut().push("later".to_owned());
-        root.queue.component_mut().push("steer now".to_owned());
+        root.update(super::RootEvent::ReplaceDraft("steer now".to_owned()));
 
         let update = root.update(key(KeyCode::Enter, KeyModifiers::NONE));
 
@@ -5057,6 +5104,31 @@ mod tests {
             [RootEffect::Steer { prompt, .. }] if prompt.display_text() == "steer now"
         ));
         assert!(!root.queue.component().focused());
+        assert!(root.composer().draft().is_empty());
+    }
+
+    #[test]
+    fn enter_in_an_empty_composer_leaves_the_queue_alone() {
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        root.in_flight_turns = 1;
+        root.queue.component_mut().push("later".to_owned());
+
+        let update = root.update(key(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(update.effects.is_empty());
+        assert_eq!(root.queue.component().len(), 1);
+    }
+
+    #[test]
+    fn shift_tab_queues_a_draft_without_steering() {
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        root.in_flight_turns = 1;
+        root.update(super::RootEvent::ReplaceDraft("later".to_owned()));
+
+        let update = root.update(key(KeyCode::BackTab, KeyModifiers::SHIFT));
+
+        assert!(update.effects.is_empty());
+        assert_eq!(root.queue.component().len(), 1);
         assert!(root.composer().draft().is_empty());
     }
 
@@ -5127,7 +5199,7 @@ mod tests {
             for character in prompt.chars() {
                 root.update(key(KeyCode::Char(character), KeyModifiers::NONE));
             }
-            let update = root.update(key(KeyCode::Enter, KeyModifiers::NONE));
+            let update = root.update(key(KeyCode::BackTab, KeyModifiers::SHIFT));
             assert!(update.effects.is_empty());
         }
 

@@ -496,7 +496,7 @@ impl Component for MessageQueue {
             spans.push(Span::styled(" ", Style::default().fg(border)));
             Line::from(spans)
         } else {
-            Line::styled(" queue · enter steer latest ", Style::default().fg(border))
+            Line::styled(" queue · tab to select ", Style::default().fg(border))
         };
         let mut block = Block::new()
             .borders(Borders::ALL)
@@ -678,7 +678,7 @@ mod tests {
 
         let rows = rendered_rows(&mut queue, 100, 3);
 
-        assert!(rows[0].contains(" queue · enter steer latest "));
+        assert!(rows[0].contains(" queue · tab to select "));
     }
 
     #[test]
