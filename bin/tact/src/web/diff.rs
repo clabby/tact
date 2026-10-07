@@ -93,6 +93,13 @@ pub(super) enum PatchSide {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct WorkspaceVersion([u8; 32]);
 
+impl WorkspaceVersion {
+    /// An opaque, comparable rendering for clients.
+    pub(super) fn to_hex(&self) -> String {
+        self.0.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+}
+
 impl ReviewContext {
     pub(super) async fn load(workspace: &Path) -> Result<Self, DiffError> {
         let root = repository_root(workspace).await?;

@@ -14,24 +14,96 @@ use std::{
     io::{self, Read, Write},
     path::{Component, Path, PathBuf},
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tempfile::tempdir_in;
+use tokio::{sync::Mutex, time::Instant};
 
-const REVIEW_ASSETS_ENV: &str = "TACT_WEB_ASSETS";
+const WEB_ASSETS_ENV: &str = "TACT_WEB_ASSETS";
 const MANIFEST_NAME: &str = "manifest.json";
 const BUNDLE_SCHEMA_VERSION: u32 = 2;
-const REVIEW_API_VERSION: u32 = super::server::PROTOCOL_VERSION;
+const WEB_API_VERSION: u32 = super::wire::PROTOCOL_VERSION;
 const MAX_ARCHIVE_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_EXPANDED_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
 
-#[derive(Debug, Eq, PartialEq)]
-pub(crate) enum AssetAvailability {
+/// How long a missing or unusable bundle is trusted before the disk is inspected again.
+const RECHECK_INTERVAL: Duration = Duration::from_secs(1);
+
+/// The bundle the server serves, discovered lazily so one installed after startup is picked up.
+pub(crate) struct AssetStore {
+    home: PathBuf,
+    cached: Mutex<Cached>,
+}
+
+enum Cached {
     Ready(WebAssets),
-    DownloadRequired,
-    DevelopmentInstallRequired { path: PathBuf },
+    Unavailable { checked: Option<Instant> },
+}
+
+impl AssetStore {
+    pub(crate) fn new(home: PathBuf) -> Self {
+        Self {
+            home,
+            cached: Mutex::new(Cached::Unavailable { checked: None }),
+        }
+    }
+
+    /// The installed bundle, if any. Validation hashes every file, so it runs off the async
+    /// threads and at most once per [`RECHECK_INTERVAL`] while nothing usable is installed.
+    pub(crate) async fn current(&self) -> Option<WebAssets> {
+        let mut cached = self.cached.lock().await;
+        match &*cached {
+            Cached::Ready(assets) => return Some(assets.clone()),
+            Cached::Unavailable { checked: Some(checked) }
+                if checked.elapsed() < RECHECK_INTERVAL =>
+            {
+                return None;
+            }
+            Cached::Unavailable { .. } => {}
+        }
+        let home = self.home.clone();
+        let located = tokio::task::spawn_blocking(move || WebAssets::locate(&home)).await;
+        if let Ok(Ok(Located::Ready(assets))) = located {
+            *cached = Cached::Ready(assets.clone());
+            return Some(assets);
+        }
+        *cached = Cached::Unavailable {
+            checked: Some(Instant::now()),
+        };
+        None
+    }
+
+    /// A self-contained page that explains how to install the bundle. It needs no network.
+    pub(crate) fn placeholder_html(&self) -> String {
+        let version = env!("CARGO_PKG_VERSION");
+        let path = install_path(&self.home);
+        let path = path
+            .to_string_lossy()
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;");
+        format!(
+            "<!doctype html><meta charset=utf-8><meta name=viewport content=\"width=device-width\">\
+             <title>Tact web interface</title>\
+             <style>body{{font:16px/1.5 system-ui;max-width:40rem;margin:4rem auto;padding:0 1rem}}\
+             code{{background:#8881;padding:.1em .3em;border-radius:3px}}</style>\
+             <h1>The Tact web bundle is not installed</h1>\
+             <p>This Tact (v{version}) is running, but the browser files it serves are missing.</p>\
+             <p>Download <code>tact-web-v{version}.tar.gz</code> from the Tact release, extract it, and \
+             move the extracted <code>web</code> directory to <code>{path}</code>. \
+             Development builds can instead run <code>just install-dev</code> in <code>web/app</code>.</p>\
+             <p>Reload this page afterwards; no restart is needed.</p>"
+        )
+    }
+}
+
+/// The result of looking for an installed bundle.
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) enum Located {
+    Ready(WebAssets),
+    Absent,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -41,53 +113,51 @@ pub(crate) struct WebAssets {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct ResolvedReviewAsset {
+pub(crate) struct ResolvedAsset {
     pub(crate) path: PathBuf,
     pub(crate) content_type: String,
 }
 
 impl WebAssets {
-    pub(crate) fn availability() -> Result<AssetAvailability, AssetError> {
-        if let Some(path) = env::var_os(REVIEW_ASSETS_ENV).map(PathBuf::from) {
+    /// Finds the installed bundle, or reports where one would be installed.
+    ///
+    /// `TACT_WEB_ASSETS` names a development bundle and takes precedence. Managed bundles live
+    /// under `<home>/web/assets`; a corrupt managed bundle counts as absent so it can be replaced.
+    pub(crate) fn locate(home: &Path) -> Result<Located, AssetError> {
+        if let Some(path) = env::var_os(WEB_ASSETS_ENV).map(PathBuf::from) {
             return Self::from_directory(path, InstallKind::DevelopmentOverride)
-                .map(AssetAvailability::Ready);
+                .map(Located::Ready);
         }
-
-        let path = install_path(&tact_home()?);
-        if path.exists() {
-            let can_download = !installation().is_development();
-            let kind = if can_download {
-                InstallKind::Managed
-            } else {
-                InstallKind::DevelopmentOverride
-            };
-            match Self::from_directory(path, kind) {
-                Ok(assets) => return Ok(AssetAvailability::Ready(assets)),
-                Err(_) if can_download => {
-                    return Ok(AssetAvailability::DownloadRequired);
-                }
-                Err(error) => return Err(error),
-            }
+        let path = install_path(home);
+        if !path.exists() {
+            return Ok(Located::Absent);
         }
-        if !installation().is_development() {
-            return Ok(AssetAvailability::DownloadRequired);
+        let managed = !installation().is_development();
+        let kind = if managed {
+            InstallKind::Managed
+        } else {
+            InstallKind::DevelopmentOverride
+        };
+        match Self::from_directory(path, kind) {
+            Ok(assets) => Ok(Located::Ready(assets)),
+            Err(_) if managed => Ok(Located::Absent),
+            Err(error) => Err(error),
         }
-        Ok(AssetAvailability::DevelopmentInstallRequired { path })
     }
 
-    pub(crate) async fn download() -> Result<Self, AssetError> {
+    /// Downloads, verifies, and installs the bundle matching this binary's version.
+    pub(crate) async fn download(home: &Path) -> Result<Self, AssetError> {
         if installation().is_development() {
             return Err(AssetError::DevelopmentDownload);
         }
 
-        let tact_home = tact_home()?;
-        let review_root = tact_home.join("review");
-        fs::create_dir_all(&review_root).map_err(|source| AssetError::CreateDirectory {
-            path: review_root.clone(),
+        let assets_root = home.join("web").join("assets");
+        fs::create_dir_all(&assets_root).map_err(|source| AssetError::CreateDirectory {
+            path: assets_root.clone(),
             source,
         })?;
-        let _lock = acquire_install_lock(&review_root).await?;
-        let destination = install_path(&tact_home);
+        let _lock = acquire_install_lock(&assets_root).await?;
+        let destination = install_path(home);
 
         if destination.exists() {
             match Self::from_directory(destination.clone(), InstallKind::Managed) {
@@ -98,18 +168,18 @@ impl WebAssets {
 
         let version =
             Version::parse(env!("CARGO_PKG_VERSION")).map_err(AssetError::PackageVersion)?;
-        let archive_name = format!("tact-review-v{version}.tar.gz");
+        let archive_name = format!("tact-web-v{version}.tar.gz");
         let archive =
             download_verified_release_artifact(&version, &archive_name, MAX_ARCHIVE_BYTES).await?;
-        let temporary = tempdir_in(&review_root).map_err(AssetError::TemporaryDirectory)?;
+        let temporary = tempdir_in(&assets_root).map_err(AssetError::TemporaryDirectory)?;
         extract(archive.path(), temporary.path())?;
-        let extracted = temporary.path().join("review");
+        let extracted = temporary.path().join("web");
         let assets = Self::from_directory(extracted.clone(), InstallKind::Managed)?;
         fs::rename(&extracted, &destination).map_err(|source| AssetError::Install {
             path: destination.clone(),
             source,
         })?;
-        sync_directory(&review_root)?;
+        sync_directory(&assets_root)?;
 
         Ok(Self {
             path: destination,
@@ -125,13 +195,13 @@ impl WebAssets {
         })
     }
 
-    pub(crate) fn resolve(&self, request_path: &str) -> Option<ResolvedReviewAsset> {
+    pub(crate) fn resolve(&self, request_path: &str) -> Option<ResolvedAsset> {
         let request_path = request_path.strip_prefix('/').unwrap_or(request_path);
         if !safe_relative_path(Path::new(request_path)) {
             return None;
         }
         let file = self.manifest.files.get(request_path)?;
-        Some(ResolvedReviewAsset {
+        Some(ResolvedAsset {
             path: self.path.join(request_path),
             content_type: file.content_type.clone(),
         })
@@ -191,8 +261,8 @@ impl Drop for InstallLock {
     }
 }
 
-async fn acquire_install_lock(review_root: &Path) -> Result<InstallLock, AssetError> {
-    let path = review_root.join(format!("v{}.lock", env!("CARGO_PKG_VERSION")));
+async fn acquire_install_lock(assets_root: &Path) -> Result<InstallLock, AssetError> {
+    let path = assets_root.join(format!("v{}.lock", env!("CARGO_PKG_VERSION")));
     tokio::task::spawn_blocking(move || {
         let file = OpenOptions::new()
             .create(true)
@@ -214,21 +284,9 @@ async fn acquire_install_lock(review_root: &Path) -> Result<InstallLock, AssetEr
     .map_err(AssetError::LockTask)?
 }
 
-fn tact_home() -> Result<PathBuf, AssetError> {
-    if let Some(path) = env::var_os("TACT_HOME").filter(|value| !value.is_empty()) {
-        return Ok(PathBuf::from(path));
-    }
-    env::var_os("HOME")
-        .or_else(|| env::var_os("USERPROFILE"))
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .map(|home| home.join(".tact"))
-        .ok_or(AssetError::HomeUnavailable)
-}
-
-fn install_path(tact_home: &Path) -> PathBuf {
-    tact_home
-        .join("review")
+fn install_path(home: &Path) -> PathBuf {
+    home.join("web")
+        .join("assets")
         .join(format!("v{}", env!("CARGO_PKG_VERSION")))
 }
 
@@ -321,11 +379,11 @@ fn validate_manifest(
     if manifest.schema_version != BUNDLE_SCHEMA_VERSION {
         return Err(AssetError::ManifestVersion(manifest.schema_version));
     }
-    if manifest.review_api.min > REVIEW_API_VERSION || manifest.review_api.max < REVIEW_API_VERSION
+    if manifest.web_api.min > WEB_API_VERSION || manifest.web_api.max < WEB_API_VERSION
     {
-        return Err(AssetError::ReviewApi {
-            min: manifest.review_api.min,
-            max: manifest.review_api.max,
+        return Err(AssetError::WebApi {
+            min: manifest.web_api.min,
+            max: manifest.web_api.max,
         });
     }
     let current_version = env!("CARGO_PKG_VERSION");
@@ -457,7 +515,7 @@ fn extract(archive_path: &Path, destination: &Path) -> Result<(), AssetError> {
         if !seen.insert(path.clone()) {
             return Err(AssetError::DuplicateArchivePath(path));
         }
-        if path == Path::new("review") && entry.header().entry_type().is_dir() {
+        if path == Path::new("web") && entry.header().entry_type().is_dir() {
             continue;
         }
         if !safe_archive_path(&path) {
@@ -471,7 +529,7 @@ fn extract(archive_path: &Path, destination: &Path) -> Result<(), AssetError> {
             return Err(AssetError::InvalidArchiveEntry(path));
         }
         let size = entry.header().size().map_err(AssetError::Archive)?;
-        let limit = if path == Path::new("review").join(MANIFEST_NAME) {
+        let limit = if path == Path::new("web").join(MANIFEST_NAME) {
             MAX_MANIFEST_BYTES
         } else {
             MAX_FILE_BYTES
@@ -508,7 +566,7 @@ fn extract(archive_path: &Path, destination: &Path) -> Result<(), AssetError> {
 
 fn safe_archive_path(path: &Path) -> bool {
     let mut components = path.components();
-    components.next() == Some(Component::Normal("review".as_ref()))
+    components.next() == Some(Component::Normal("web".as_ref()))
         && components.clone().next().is_some()
         && components.all(|component| matches!(component, Component::Normal(_)))
 }
@@ -523,7 +581,7 @@ fn safe_relative_path(path: &Path) -> bool {
 #[derive(Deserialize, Serialize)]
 struct AssetManifest {
     schema_version: u32,
-    review_api: ApiCompatibility,
+    web_api: ApiCompatibility,
     tact: TactCompatibility,
     entrypoint: String,
     files: Vec<AssetFile>,
@@ -563,95 +621,93 @@ struct ValidatedFile {
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum AssetError {
-    #[error("could not determine the Tact directory; set TACT_HOME")]
-    HomeUnavailable,
     #[error(
-        "this development build cannot download release review assets; set TACT_WEB_ASSETS to an explicit development bundle"
+        "this development build cannot download release web assets; set TACT_WEB_ASSETS to an explicit development bundle"
     )]
     DevelopmentDownload,
     #[error("the built-in package version is invalid: {0}")]
     PackageVersion(semver::Error),
     #[error("authenticated release artifact download failed: {0}")]
     ReleaseArtifact(#[from] UpdateError),
-    #[error("failed to parse review manifest {path}: {source}")]
+    #[error("failed to parse web manifest {path}: {source}")]
     Manifest {
         path: PathBuf,
         source: serde_json::Error,
     },
-    #[error("unsupported review asset manifest version {0}")]
+    #[error("unsupported web asset manifest version {0}")]
     ManifestVersion(u32),
     #[error(
-        "review assets require API versions {min} through {max}, but this binary uses API version {REVIEW_API_VERSION}"
+        "web assets require API versions {min} through {max}, but this binary uses API version {WEB_API_VERSION}"
     )]
-    ReviewApi { min: u32, max: u32 },
-    #[error("review assets target Tact `{actual}`, but this binary is Tact `{expected}`")]
+    WebApi { min: u32, max: u32 },
+    #[error("web assets target Tact `{actual}`, but this binary is Tact `{expected}`")]
     TactVersion {
         expected: &'static str,
         actual: String,
     },
-    #[error("review manifest contains unsafe asset path `{0}`")]
+    #[error("web manifest contains unsafe asset path `{0}`")]
     UnsafeManifestPath(String),
-    #[error("review manifest contains duplicate asset path `{0}`")]
+    #[error("web manifest contains duplicate asset path `{0}`")]
     DuplicateManifestPath(String),
-    #[error("review manifest entry `{0}` has an invalid content type")]
+    #[error("web manifest entry `{0}` has an invalid content type")]
     ContentType(String),
-    #[error("review manifest entry `{0}` has an invalid SHA-256 checksum")]
+    #[error("web manifest entry `{0}` has an invalid SHA-256 checksum")]
     AssetChecksum(PathBuf),
-    #[error("review asset `{path}` is {actual} bytes, but its manifest declares {expected}")]
+    #[error("web asset `{path}` is {actual} bytes, but its manifest declares {expected}")]
     AssetSize {
         path: PathBuf,
         expected: u64,
         actual: u64,
     },
-    #[error("review asset `{0}` does not match its manifest checksum")]
+    #[error("web asset `{0}` does not match its manifest checksum")]
     AssetDigest(PathBuf),
-    #[error("review manifest entrypoint `{0}` is not a listed asset")]
+    #[error("web manifest entrypoint `{0}` is not a listed asset")]
     MissingEntrypoint(String),
-    #[error("review asset manifest exceeds the {0}-byte limit")]
+    #[error("web asset manifest exceeds the {0}-byte limit")]
     ManifestTooLarge(u64),
-    #[error("review asset file `{path}` exceeds the {limit}-byte expanded limit")]
+    #[error("web asset file `{path}` exceeds the {limit}-byte expanded limit")]
     ExpandedFileTooLarge { path: PathBuf, limit: u64 },
-    #[error("review assets exceed the {0}-byte total expanded limit")]
+    #[error("web assets exceed the {0}-byte total expanded limit")]
     ExpandedArchiveTooLarge(u64),
-    #[error("managed review assets cannot contain symlink `{0}`")]
+    #[error("managed web assets cannot contain symlink `{0}`")]
     ManagedSymlink(PathBuf),
-    #[error("review asset `{0}` is not a regular file or directory")]
+    #[error("web asset `{0}` is not a regular file or directory")]
     InvalidAssetType(PathBuf),
-    #[error("failed to read review manifest {path}: {source}")]
+    #[error("failed to read web manifest {path}: {source}")]
     ReadManifest { path: PathBuf, source: io::Error },
-    #[error("failed to read review asset {path}: {source}")]
+    #[error("failed to read web asset {path}: {source}")]
     ReadAsset { path: PathBuf, source: io::Error },
-    #[error("failed to create review asset directory {path}: {source}")]
+    #[error("failed to create web asset directory {path}: {source}")]
     CreateDirectory { path: PathBuf, source: io::Error },
-    #[error("failed to create temporary review directory: {0}")]
+    #[error("failed to create temporary web directory: {0}")]
     TemporaryDirectory(io::Error),
-    #[error("failed to acquire review asset lock {path}: {source}")]
+    #[error("failed to acquire web asset lock {path}: {source}")]
     Lock { path: PathBuf, source: io::Error },
-    #[error("review asset lock task failed: {0}")]
+    #[error("web asset lock task failed: {0}")]
     LockTask(tokio::task::JoinError),
-    #[error("failed to quarantine corrupt review assets from {path} to {quarantine}: {source}")]
+    #[error("failed to quarantine corrupt web assets from {path} to {quarantine}: {source}")]
     Quarantine {
         path: PathBuf,
         quarantine: PathBuf,
         source: io::Error,
     },
-    #[error("failed to read review archive: {0}")]
+    #[error("failed to read web archive: {0}")]
     Archive(io::Error),
-    #[error("review archive contains unsafe path `{0}`")]
+    #[error("web archive contains unsafe path `{0}`")]
     UnsafeArchivePath(PathBuf),
-    #[error("review archive contains duplicate path `{0}`")]
+    #[error("web archive contains duplicate path `{0}`")]
     DuplicateArchivePath(PathBuf),
-    #[error("review archive contains unsupported entry `{0}`")]
+    #[error("web archive contains unsupported entry `{0}`")]
     InvalidArchiveEntry(PathBuf),
-    #[error("review archive entry `{path}` declared {size} bytes but contained {written}")]
+    #[error("web archive entry `{path}` declared {size} bytes but contained {written}")]
     ArchiveSize {
         path: PathBuf,
         size: u64,
         written: u64,
     },
-    #[error("failed to install review assets at {path}: {source}")]
+    #[error("failed to install web assets at {path}: {source}")]
     Install { path: PathBuf, source: io::Error },
-    #[error("failed to sync review asset directory {path}: {source}")]
+    #[error("failed to sync web asset directory {path}: {source}")]
     SyncDirectory { path: PathBuf, source: io::Error },
 }
 
@@ -727,9 +783,9 @@ mod tests {
             .collect();
         let manifest = AssetManifest {
             schema_version: 2,
-            review_api: ApiCompatibility {
-                min: super::REVIEW_API_VERSION,
-                max: super::REVIEW_API_VERSION,
+            web_api: ApiCompatibility {
+                min: super::WEB_API_VERSION,
+                max: super::WEB_API_VERSION,
             },
             tact: TactCompatibility {
                 version: env!("CARGO_PKG_VERSION").to_owned(),
@@ -821,12 +877,11 @@ mod tests {
         let destination = super::install_path(tact_home.path());
         fs::create_dir_all(destination.parent().unwrap()).unwrap();
         std::os::unix::fs::symlink(bundle.path(), &destination).unwrap();
-        let _home = EnvironmentGuard::set("TACT_HOME", tact_home.path());
-        let _override = EnvironmentGuard::remove(super::REVIEW_ASSETS_ENV);
+        let _override = EnvironmentGuard::remove(super::WEB_ASSETS_ENV);
 
         assert!(matches!(
-            WebAssets::availability(),
-            Ok(super::AssetAvailability::Ready(_))
+            WebAssets::locate(tact_home.path()),
+            Ok(super::Located::Ready(_))
         ));
     }
 
@@ -858,11 +913,11 @@ mod tests {
         write_valid_assets(directory.path());
         let mut manifest: serde_json::Value =
             serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
-        manifest["review_api"]["min"] = (super::REVIEW_API_VERSION + 1).into();
+        manifest["web_api"]["min"] = (super::WEB_API_VERSION + 1).into();
         fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
         assert!(matches!(
             validate_directory(directory.path(), InstallKind::DevelopmentOverride),
-            Err(AssetError::ReviewApi { .. })
+            Err(AssetError::WebApi { .. })
         ));
     }
 
@@ -877,22 +932,22 @@ mod tests {
 
     #[test]
     fn rejects_archive_traversal_duplicates_and_symlinks() {
-        let traversal = archive_with_raw_path("review/../escape", b"bad");
+        let traversal = archive_with_raw_path("web/../escape", b"bad");
         assert!(matches!(
             extract_bytes(&traversal),
             Err(AssetError::UnsafeArchivePath(_))
         ));
 
         let duplicate = archive(&[
-            ("review/app.js", EntryType::Regular, b"first"),
-            ("review/app.js", EntryType::Regular, b"second"),
+            ("web/app.js", EntryType::Regular, b"first"),
+            ("web/app.js", EntryType::Regular, b"second"),
         ]);
         assert!(matches!(
             extract_bytes(&duplicate),
             Err(AssetError::DuplicateArchivePath(_))
         ));
 
-        let symlink = archive(&[("review/app.js", EntryType::Symlink, b"")]);
+        let symlink = archive(&[("web/app.js", EntryType::Symlink, b"")]);
         assert!(matches!(
             extract_bytes(&symlink),
             Err(AssetError::InvalidArchiveEntry(_))
@@ -911,7 +966,7 @@ mod tests {
         builder
             .append_data(
                 &mut header,
-                "review/huge.js",
+                "web/huge.js",
                 io::repeat(0).take(super::MAX_FILE_BYTES + 1),
             )
             .unwrap();
