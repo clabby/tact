@@ -402,6 +402,18 @@ impl AppNode {
                 self.update_root(pane, RootEvent::SubagentRecord { id, record })
             }
             AppEvent::Subagent { pane, update } => {
+                if let (AgentUpdate::Message(message), Some(publisher), Some(published)) = (
+                    &update,
+                    &self.publisher,
+                    self.panes
+                        .get(&pane)
+                        .and_then(|entry| entry.published.as_ref()),
+                ) {
+                    publisher.publish(Publication::Message {
+                        session: published.session.clone(),
+                        update: message.clone(),
+                    });
+                }
                 self.update_root(pane, RootEvent::Subagent(update))
             }
             AppEvent::EditorDraft { pane, draft } => {

@@ -18,7 +18,10 @@ use crate::{
 use serde::Serialize;
 use serde_json::Value;
 use std::sync::Arc;
-use tact_subagents::{MessageDeliveryState, MessageSender};
+use tact_subagents::{
+    AgentMessage, MessageDeliveryState, MessageDisposition, MessagePriority, MessagePurpose,
+    MessageSender,
+};
 
 /// Version of the browser protocol. Bundles declare the range they speak in their manifest.
 pub(super) const PROTOCOL_VERSION: u32 = 9;
@@ -220,6 +223,10 @@ enum WireBody {
         to: String,
         body: String,
         delivery: String,
+        /// The conversation's identity; every message of one conversation shares it.
+        thread: u64,
+        /// The retained conversation in delivery order, so a client can show replies together.
+        messages: Vec<WireMessage>,
     },
     ForkedFrom {
         session: String,
@@ -340,6 +347,13 @@ impl WireBody {
             to,
             body: latest.map_or_else(String::new, |latest| cap(&latest.body)),
             delivery: delivery.to_owned(),
+            thread: numeric(message.thread.id),
+            messages: message
+                .thread
+                .messages
+                .iter()
+                .map(|sent| WireMessage::new(sent, message.delivery(sent.id)))
+                .collect(),
         }
     }
 }
@@ -575,6 +589,73 @@ fn first_line(text: &str) -> String {
         return format!("{head} …");
     }
     head
+}
+
+/// One message of a directed conversation between agents.
+#[derive(Serialize)]
+pub(super) struct WireMessage {
+    pub(super) id: u64,
+    /// The sending agent, or `None` for the root session.
+    pub(super) from: Option<u64>,
+    pub(super) to: u64,
+    pub(super) purpose: &'static str,
+    pub(super) priority: &'static str,
+    pub(super) in_reply_to: Option<u64>,
+    pub(super) body: String,
+    /// `admitted`, `delivered`, `failed`, or `unknown` before any delivery state arrived.
+    pub(super) delivery: &'static str,
+    /// How the recipient took the message (`started`, `queued` or `steered`), or the failure.
+    pub(super) detail: Option<String>,
+}
+impl WireMessage {
+    fn new(message: &AgentMessage, delivery: Option<&MessageDeliveryState>) -> Self {
+        let (delivery, detail) = match delivery {
+            None => ("unknown", None),
+            Some(MessageDeliveryState::Admitted { disposition }) => {
+                ("admitted", Some(disposition_name(*disposition).to_owned()))
+            }
+            Some(MessageDeliveryState::Delivered { disposition }) => {
+                ("delivered", Some(disposition_name(*disposition).to_owned()))
+            }
+            Some(MessageDeliveryState::Failed { error }) => ("failed", Some(cap(error))),
+        };
+        Self {
+            id: numeric(message.id),
+            from: match message.from {
+                MessageSender::Root => None,
+                MessageSender::Agent { agent_id } => Some(numeric(agent_id)),
+            },
+            to: numeric(message.to),
+            purpose: match message.purpose {
+                MessagePurpose::Delegate => "delegate",
+                MessagePurpose::Coordinate => "coordinate",
+                MessagePurpose::Finding => "finding",
+                MessagePurpose::Question => "question",
+                MessagePurpose::Reply => "reply",
+            },
+            priority: match message.priority {
+                MessagePriority::Deferred => "deferred",
+                MessagePriority::Urgent => "urgent",
+            },
+            in_reply_to: message.in_reply_to.map(numeric),
+            body: cap(&message.body),
+            delivery,
+            detail,
+        }
+    }
+}
+
+const fn disposition_name(disposition: MessageDisposition) -> &'static str {
+    match disposition {
+        MessageDisposition::Started => "started",
+        MessageDisposition::Queued => "queued",
+        MessageDisposition::Steered => "steered",
+    }
+}
+
+/// The number inside an identifier whose only public form is its `Display`.
+fn numeric(id: impl std::fmt::Display) -> u64 {
+    id.to_string().parse().unwrap_or_default()
 }
 
 #[cfg(test)]

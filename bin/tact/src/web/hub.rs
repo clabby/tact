@@ -39,7 +39,7 @@ use std::{
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tact_subagents::AgentId;
+use tact_subagents::{AgentId, AgentMessageUpdate, MessageSender};
 use tokio::{
     sync::mpsc::{self, UnboundedReceiver},
     time::{Instant, sleep_until},
@@ -662,6 +662,11 @@ impl State {
                     live.agents.entry(agent).or_default().apply(&record);
                 }
             }
+            Publication::Message { session, update } => {
+                if let Some(live) = self.live_mut(&session) {
+                    apply_message(live, update);
+                }
+            }
             Publication::Busy { session, busy } => {
                 let active = self.active.as_deref() == Some(session.as_str());
                 if let Some(live) = self.live_mut(&session) {
@@ -781,6 +786,36 @@ fn fork_parent(record: &TranscriptRecord) -> Option<String> {
         .decode_payload::<SessionStarted>()
         .ok()?
         .parent_session_id
+}
+
+/// Applies a directed-message update the way the terminal does: the session's own transcript shows
+/// messages that agents sent, and each agent's transcript shows its conversations.
+fn apply_message(live: &mut Live, update: AgentMessageUpdate) {
+    let from_agent = update.thread.messages.iter().any(|message| {
+        message.id == update.message_id && matches!(message.from, MessageSender::Agent { .. })
+    });
+    if from_agent {
+        let change = live
+            .model
+            .apply_message(MessageSender::Root, update.clone());
+        if change.removed.is_some() {
+            live.reshaped = true;
+        }
+    }
+    let mut previous = None;
+    for participant in update.thread.participants {
+        let MessageSender::Agent { agent_id } = participant else {
+            continue;
+        };
+        if previous == Some(agent_id) {
+            continue;
+        }
+        previous = Some(agent_id);
+        live.agents
+            .entry(agent_id)
+            .or_default()
+            .apply_message(participant, update.clone());
+    }
 }
 
 fn apply_record(live: &mut Live, record: &Arc<TranscriptRecord>) {
@@ -1383,5 +1418,61 @@ mod tests {
         let transcript = fixture.hub.agent_entries("s1", AgentId::new(4)).unwrap();
         assert_eq!(transcript.len(), 1);
         assert!(fixture.hub.agent_entries("s1", AgentId::new(9)).is_none());
+    }
+    #[tokio::test(start_paused = true)]
+    async fn agent_messages_reach_the_session_and_each_agents_transcript() {
+        use tact_subagents::{AgentId, AgentMessageUpdate};
+
+        let update: AgentMessageUpdate = serde_json::from_value(json!({
+            "message_id": 7,
+            "thread": {
+                "id": 7,
+                "participants": [
+                    {"kind": "agent", "agent_id": 4},
+                    {"kind": "agent", "agent_id": 2}
+                ],
+                "messages": [{
+                    "id": 7, "thread_id": 7,
+                    "from": {"kind": "agent", "agent_id": 4}, "to": 2,
+                    "priority": "urgent", "purpose": "finding",
+                    "body": "the stream coalesces events"
+                }]
+            },
+            "delivery": {"state": "delivered", "disposition": "steered"}
+        }))
+        .unwrap();
+        let fixture = fixture();
+        fixture.open("s1", None);
+        fixture.activate("s1");
+        let mut subscription = fixture.hub.subscribe().unwrap();
+        settle().await;
+        drain(&mut subscription);
+
+        fixture.publish(Publication::Message {
+            session: "s1".into(),
+            update,
+        });
+        settle().await;
+
+        let events = drain(&mut subscription);
+        let entry = events
+            .iter()
+            .find(|event| event.0 == "entry")
+            .expect("the session transcript shows messages sent by agents");
+        assert_eq!(entry.1["entry"]["kind"], "directed_message");
+        assert_eq!(entry.1["entry"]["delivery"], "delivered");
+        let message = &entry.1["entry"]["messages"][0];
+        assert_eq!(message["from"], 4);
+        assert_eq!(message["to"], 2);
+        assert_eq!(message["purpose"], "finding");
+        assert_eq!(message["priority"], "urgent");
+        assert_eq!(message["detail"], "steered");
+        for agent in [4, 2] {
+            let entries = fixture
+                .hub
+                .agent_entries("s1", AgentId::new(agent))
+                .unwrap();
+            assert_eq!(entries.len(), 1, "agent {agent}");
+        }
     }
 }

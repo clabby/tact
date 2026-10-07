@@ -26,7 +26,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc};
 use tact_memory::{MemoryAccess, MemoryKey, MemoryRecord};
-use tact_subagents::AgentId;
+use tact_subagents::{AgentId, AgentMessageUpdate};
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
@@ -145,6 +145,12 @@ pub(crate) enum Publication {
         session: String,
         agent: AgentId,
         record: Arc<TranscriptRecord>,
+    },
+    /// A directed message between agents of `session` changed delivery state. Carries the whole
+    /// retained thread, as the terminal's transcripts receive it.
+    Message {
+        session: String,
+        update: AgentMessageUpdate,
     },
 }
 
