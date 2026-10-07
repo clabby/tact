@@ -349,6 +349,19 @@ diffs-container { --diffs-light-bg: var(--bg); --diffs-dark-bg: var(--bg); }
 
 /* Shell commands and code */
 .term { overflow: hidden; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--code-bg); font: var(--text-sm)/1.55 var(--font-mono); }
+.memory-call { display: grid; gap: var(--space-2); }
+.memory-call-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-2); font-size: var(--text-sm); }
+.memory-call-op { color: var(--text); font-weight: 650; }
+.memory-call-backend { padding: 0 var(--space-2); border-radius: var(--radius-sm); background: var(--surface-active); color: var(--muted); font-size: var(--text-xs); }
+.memory-call-subject { min-width: 0; overflow-wrap: anywhere; color: var(--muted); }
+.memory-call-item { display: grid; gap: 2px; padding: var(--space-2) var(--space-3); border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--code-bg); }
+.memory-call-key { display: flex; justify-content: space-between; gap: var(--space-2); color: var(--accent); font: var(--text-sm)/1.5 var(--font-mono); }
+.memory-call-score { color: var(--faint); }
+.memory-call-text { color: var(--text); font-size: var(--text-sm); line-height: 1.5; overflow-wrap: anywhere; white-space: pre-wrap; }
+.memory-call-meta { color: var(--faint); font-size: var(--text-xs); }
+.memory-call-diff { overflow: hidden; border-radius: var(--radius-sm); }
+.memory-call-error { color: var(--del); font-size: var(--text-sm); }
+.memory-call-foot { color: var(--faint); font-size: var(--text-xs); }
 .term-cmd { display: flex; gap: var(--space-2); padding: var(--space-2) var(--space-3); color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere; }
 .term-cmd code { font: inherit; }
 .term-prompt { flex: none; color: var(--accent); user-select: none; }

@@ -679,6 +679,10 @@ export class MockTact {
       { kind: "tool", name: "exec_command", summary: "rg -n \"enum Action\" bin/tact/src/tui", state: "succeeded", duration_ns: 182_000_000, substeps: [], child_count: 0, has_detail: true },
       { kind: "tool", name: "apply_patch", summary: "bin/tact/src/tui/app.rs, bin/tact/src/web/bridge.rs", state: "succeeded", duration_ns: 31_000_000, substeps: [], child_count: 0, has_detail: true },
       { kind: "tool", name: "exec_command", summary: "cargo nextest run -p tact -E 'test(bridge)'", state: "failed", duration_ns: 48_200_000_000, substeps: [], child_count: 0, has_detail: true },
+      { kind: "tool", name: "memory", summary: "scan · local · web bridge ordering · 2 candidates", state: "succeeded", duration_ns: 41_000_000, substeps: [], child_count: 0, has_detail: true },
+      { kind: "tool", name: "memory", summary: "read · local · 12@v2 · 1 memory", state: "succeeded", duration_ns: 6_000_000, substeps: [], child_count: 0, has_detail: true },
+      { kind: "tool", name: "memory", summary: "replace · local · 12@v3", state: "succeeded", duration_ns: 9_000_000, substeps: [], child_count: 0, has_detail: true },
+      { kind: "tool", name: "memory", summary: "delete · 9@v1", state: "failed", duration_ns: 3_000_000, substeps: [], child_count: 0, has_detail: true },
       { kind: "assistant", text: "One test failed: the draft echo arrived before the acknowledgement. I'll make the reply wait for the loop to apply the command.", complete: true, commentary: true },
       { kind: "directed_message", from: "agent 4", to: "agent 2", body: "The stream now coalesces entry events to the frame interval.", delivery: "deferred" },
       { kind: "tool", name: "spawn_agent", summary: "review bridge ordering · sol xhigh", state: "succeeded", duration_ns: 312_000_000_000, substeps: ["read bridge.rs", "trace Publisher::publish", "report"], child_count: 1, has_detail: false },
@@ -702,6 +706,48 @@ export class MockTact {
     detail(5, {
       arguments: { cmd: "cargo nextest run -p tact -E 'test(bridge)'" },
       result: { chunk_id: "b2", exit_code: 101, wall_time_seconds: 48.2, output: "        FAIL [   0.412s] tact web::bridge::tests::draft_echo_follows_acknowledgement\n\nassertion failed: echo arrived before the acknowledgement\n     Summary [  48.201s] 18 tests run: 17 passed, 1 failed\n" },
+      metadata: null,
+    });
+    const memoryRecord = (version: number, content: string) => ({
+      key: { id: 12, version },
+      content,
+      created_at_ms: 1_790_000_000_000,
+      updated_at_ms: 1_790_100_000_000,
+      last_scanned_at_ms: null,
+      scan_count: 3,
+      last_used_at_ms: 1_790_200_000_000,
+      use_count: 2,
+      probation_until_ms: null,
+    });
+    const local = { source: "local", namespace: null, role: null };
+    detail(6, {
+      arguments: { operation: "scan", query: "web bridge ordering" },
+      result: {
+        operation: "scan", backend: local, abstained: false,
+        candidates: [
+          { key: { id: 12, version: 2 }, preview: "The web bridge applies commands through the same effect function as a keypress.", score: 0.8123 },
+          { key: { id: 4, version: 1 }, preview: "Publications are non-blocking; a stalled browser must never stall a frame.", score: 0.6 },
+        ],
+      },
+      metadata: null,
+    });
+    detail(7, {
+      arguments: { operation: "read", keys: [{ id: 12, version: 2 }] },
+      result: { operation: "read", backend: local, memories: [memoryRecord(2, "The web bridge applies commands through the same effect function as a keypress.")] },
+      metadata: null,
+    });
+    detail(8, {
+      arguments: { operation: "put", content: "The web bridge applies commands through the same effect function as a keypress.\nAcknowledgements follow the publication.", replace: { id: 12, version: 2 } },
+      result: {
+        operation: "put", backend: local, replaced: { id: 12, version: 2 },
+        previous_content: "The web bridge applies commands through the same effect function as a keypress.",
+        memory: memoryRecord(3, "The web bridge applies commands through the same effect function as a keypress.\nAcknowledgements follow the publication."),
+      },
+      metadata: null,
+    });
+    detail(9, {
+      arguments: { operation: "delete", key: { id: 9, version: 1 } },
+      result: { error: "memory 9 changed since version 1" },
       metadata: null,
     });
     main.context.active_tokens = 142_600;

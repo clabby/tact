@@ -1,6 +1,7 @@
 import { FileDiff } from "@pierre/diffs";
 import { glyph } from "../ui/glyphs";
 import { renderMarkdown } from "../core/markdown";
+import { presentMemory } from "./memory-detail";
 import { parseApplyPatch, patchFileDiff, patchStats } from "./patch";
 import type { Theme } from "../core/theme";
 import type { ToolDetail } from "../core/wire";
@@ -55,6 +56,12 @@ export function presentDetail(container: HTMLElement, name: string, detail: Tool
     void renderMarkdown(code, "```js\n" + String(field("code")) + "\n```", markdownTheme, { highlight: true, placeholder: " " });
     container.replaceChildren(code, ...(detail.result === null ? [] : [terminal(null, resultOutput(detail.result), null)]));
     return;
+  } else if (name === "memory") {
+    const memory = presentMemory(args, detail.result, context);
+    if (memory) {
+      container.replaceChildren(memory);
+      return;
+    }
   }
   container.replaceChildren(
     jsonBlock("Arguments", detail.arguments),

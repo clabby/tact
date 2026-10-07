@@ -405,6 +405,7 @@ fn tool_summary(tool: &ToolEntry) -> String {
             .map(|steps| format!("{} steps", steps.len())),
         "exec" => Some("code".to_owned()),
         "wait" => Some("background work".to_owned()),
+        "memory" => memory_summary(tool),
         _ => None,
     }
     .or_else(|| {
@@ -417,6 +418,93 @@ fn tool_summary(tool: &ToolEntry) -> String {
         format!("{count} arguments")
     });
     first_line(&subject)
+}
+
+/// Names a memory call's operation, backend, subject and outcome, mirroring the terminal's memory
+/// rows: `scan · local · rust style · 3 candidates`. Parts the call does not have yet (the
+/// backend and outcome before it finishes) are left out.
+fn memory_summary(tool: &ToolEntry) -> Option<String> {
+    let arguments = &tool.arguments;
+    let result = tool.result.as_ref();
+    let operation = arguments.get("operation")?.as_str()?;
+    let count = |key: &str, singular: &str, plural: &str| {
+        let total = result?.get(key)?.as_array()?.len();
+        Some(format!(
+            "{total} {}",
+            if total == 1 { singular } else { plural }
+        ))
+    };
+    let keys = |value: Option<&Value>| {
+        value.and_then(Value::as_array).map(|keys| {
+            keys.iter()
+                .filter_map(memory_key)
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+    };
+    let (name, subject, outcome) = match operation {
+        "scan" => (
+            "scan",
+            arguments.get("query")?.as_str().map(str::to_owned),
+            if result.and_then(|result| result.get("abstained")?.as_bool()) == Some(true) {
+                Some("abstained".to_owned())
+            } else {
+                count("candidates", "candidate", "candidates")
+            },
+        ),
+        "read" => (
+            "read",
+            keys(arguments.get("keys").or_else(|| arguments.get("ids"))),
+            count("memories", "memory", "memories"),
+        ),
+        "put" => {
+            let replaced = arguments.get("replace").and_then(memory_key);
+            let stored = result
+                .and_then(|result| result.get("memory"))
+                .and_then(memory_key);
+            (
+                if replaced.is_some() {
+                    "replace"
+                } else {
+                    "store"
+                },
+                stored.or(replaced),
+                None,
+            )
+        }
+        "delete" => ("delete", memory_key(arguments), None),
+        _ => return None,
+    };
+    let backend = result
+        .and_then(|result| result.get("backend")?.get("source")?.as_str())
+        .map(str::to_owned);
+    let parts: Vec<String> = [Some(name.to_owned()), backend, subject, outcome]
+        .into_iter()
+        .flatten()
+        .filter(|part| !part.is_empty())
+        .collect();
+    Some(parts.join(" · "))
+}
+
+/// Formats a memory key (or a record holding one) as `namespace:id@vN`.
+fn memory_key(value: &Value) -> Option<String> {
+    let key = value.get("key").unwrap_or(value);
+    let id = match key.get("id")? {
+        Value::Number(number) => number.to_string(),
+        Value::String(text) if !text.is_empty() => text.clone(),
+        _ => return None,
+    };
+    let namespace = key
+        .get("namespace")
+        .and_then(Value::as_str)
+        .map(|namespace| format!("{namespace}:"))
+        .unwrap_or_default();
+    let version = key
+        .get("version")
+        .and_then(Value::as_u64)
+        .map(|version| format!("@v{version}"))
+        .unwrap_or_default();
+    Some(format!("{namespace}{id}{version}"))
 }
 
 /// Lists the files an `apply_patch` envelope touches.
@@ -491,6 +579,65 @@ mod tests {
         ];
         for (name, arguments, expected) in cases {
             assert_eq!(tool_summary(&tool(name, arguments)), expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn memory_summaries_name_the_operation_backend_subject_and_outcome() {
+        let finished = |arguments: Value, result: Value| ToolEntry {
+            result: Some(result),
+            ..tool("memory", arguments)
+        };
+        let cases = [
+            (
+                tool(
+                    "memory",
+                    json!({"operation": "scan", "query": "rust style"}),
+                ),
+                "scan · rust style",
+            ),
+            (
+                finished(
+                    json!({"operation": "scan", "query": "rust style"}),
+                    json!({"backend": {"source": "local"}, "abstained": false, "candidates": [{}, {}]}),
+                ),
+                "scan · local · rust style · 2 candidates",
+            ),
+            (
+                finished(
+                    json!({"operation": "scan", "query": "x"}),
+                    json!({"abstained": true, "candidates": []}),
+                ),
+                "scan · x · abstained",
+            ),
+            (
+                finished(
+                    json!({"operation": "read", "keys": [{"id": 7, "version": 2}, {"namespace": "alice", "id": 8, "version": 1}]}),
+                    json!({"backend": {"source": "remote"}, "memories": [{}, {}]}),
+                ),
+                "read · remote · 7@v2, alice:8@v1 · 2 memories",
+            ),
+            (
+                finished(
+                    json!({"operation": "put", "content": "c", "replace": {"id": 7, "version": 1}}),
+                    json!({"memory": {"key": {"id": 7, "version": 2}}, "replaced": true}),
+                ),
+                "replace · 7@v2",
+            ),
+            (
+                tool("memory", json!({"operation": "put", "content": "c"})),
+                "store",
+            ),
+            (
+                tool(
+                    "memory",
+                    json!({"operation": "delete", "key": {"id": 7, "version": 2}}),
+                ),
+                "delete · 7@v2",
+            ),
+        ];
+        for (entry, expected) in cases {
+            assert_eq!(tool_summary(&entry), expected);
         }
     }
 
