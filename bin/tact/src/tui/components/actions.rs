@@ -16,7 +16,7 @@ use ratatui::{
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-const ACTIONS: [Action; 20] = [
+const ACTIONS: [Action; 21] = [
     Action::Effort,
     Action::Speed,
     Action::Theme,
@@ -34,6 +34,7 @@ const ACTIONS: [Action; 20] = [
     Action::Handoff,
     Action::OpenInBrowser,
     Action::CopyWebLink,
+    Action::ShowQrCode,
     Action::Model,
     Action::Compact,
     Action::Sessions,
@@ -58,6 +59,7 @@ pub(super) enum Action {
     Handoff,
     OpenInBrowser,
     CopyWebLink,
+    ShowQrCode,
     Sessions,
     Subagents,
     Effort,
@@ -289,7 +291,9 @@ impl ActionsMenu {
     const fn is_enabled(&self, action: Action) -> bool {
         match action {
             Action::Handoff | Action::Reflection | Action::Compact => self.availability.new_session,
-            Action::OpenInBrowser | Action::CopyWebLink | Action::Sessions => true,
+            Action::OpenInBrowser | Action::CopyWebLink | Action::ShowQrCode | Action::Sessions => {
+                true
+            }
             Action::Subagents => true,
             Action::Effort => true,
             Action::Model => self.availability.model,
@@ -340,6 +344,7 @@ impl Action {
             Self::Handoff => "Prepare handoff",
             Self::OpenInBrowser => "Open in browser",
             Self::CopyWebLink => "Copy web link",
+            Self::ShowQrCode => "Show QR code",
             Self::Sessions => "Sessions",
             Self::Subagents => "Subagents",
             Self::Effort => "Change effort",
@@ -365,6 +370,7 @@ impl Action {
             Self::Handoff => Some("handoff"),
             Self::OpenInBrowser => Some("web/review"),
             Self::CopyWebLink => Some("url"),
+            Self::ShowQrCode => Some("phone/scan"),
             Self::Sessions => Some("switch/chats"),
             Self::Subagents => Some("agents"),
             Self::Effort => Some("thinking"),

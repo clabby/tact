@@ -1,0 +1,248 @@
+//! A QR code that signs a phone in to the web interface.
+
+use super::{
+    floating::Floating,
+    node::{Component, ComponentUpdate, RenderRequest},
+};
+use crate::tui::theme::Theme;
+use crossterm::event::{Event, KeyCode, KeyEventKind};
+use qrcode::{Color as Module, EcLevel, QrCode};
+use ratatui::{
+    Frame,
+    layout::{Constraint, Layout, Rect},
+    style::{Color, Style},
+    text::{Line, Span},
+    widgets::{Paragraph, Wrap},
+};
+
+const FOOTER: [(&str, &str); 1] = [("esc", "close")];
+/// Blank modules around the code that scanners need to find its edges.
+const QUIET_ZONE: usize = 2;
+const CAPTION: &str = "Scan with your phone's camera. It signs the phone in to Tact, so treat the code like a password.";
+const CAPTION_ROWS: u16 = 3;
+const MIN_WIDTH: u16 = 46;
+/// Border, title, and footer rows that surround the popup's body.
+const CHROME_ROWS: u16 = 3;
+
+pub(super) enum QrCodeEvent {
+    Terminal(Event),
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(super) enum QrCodeEffect {
+    Dismiss,
+}
+
+/// The code for one sign-in link. The link carries the credential, so only its origin is ever shown
+/// as text.
+pub(super) struct QrCodeView {
+    /// Dark modules, row by row, including the quiet zone.
+    modules: Vec<Vec<bool>>,
+    origin: String,
+}
+
+impl QrCodeView {
+    pub(super) fn new(link: &str) -> Result<Self, String> {
+        let code = QrCode::with_error_correction_level(link.as_bytes(), EcLevel::L)
+            .map_err(|error| format!("Could not build the QR code: {error}"))?;
+        let width = code.width();
+        let colors = code.to_colors();
+        let side = width + 2 * QUIET_ZONE;
+        let mut modules = vec![vec![false; side]; side];
+        for (index, color) in colors.into_iter().enumerate() {
+            modules[QUIET_ZONE + index / width][QUIET_ZONE + index % width] = color == Module::Dark;
+        }
+        let origin = link
+            .split_once("/#")
+            .map_or(link, |(origin, _)| origin)
+            .to_owned();
+        Ok(Self { modules, origin })
+    }
+
+    fn columns(&self) -> u16 {
+        u16::try_from(self.modules.len()).unwrap_or(u16::MAX)
+    }
+
+    /// Terminal rows for the code: each row shows two module rows with a half block.
+    fn rows(&self) -> u16 {
+        self.columns().div_ceil(2)
+    }
+
+    /// Black and white are fixed, whatever the theme: scanners expect dark modules on light.
+    fn lines(&self, width: u16) -> Vec<Line<'static>> {
+        let padding = usize::from(width.saturating_sub(self.columns()) / 2);
+        let color = |dark: bool| {
+            if dark {
+                Color::Rgb(0, 0, 0)
+            } else {
+                Color::Rgb(255, 255, 255)
+            }
+        };
+        (0..usize::from(self.rows()))
+            .map(|row| {
+                let mut spans = vec![Span::raw(" ".repeat(padding))];
+                for column in 0..self.modules.len() {
+                    let top = self.modules[row * 2][column];
+                    let bottom = self
+                        .modules
+                        .get(row * 2 + 1)
+                        .is_some_and(|line| line[column]);
+                    spans.push(Span::styled(
+                        "\u{2580}",
+                        Style::default().fg(color(top)).bg(color(bottom)),
+                    ));
+                }
+                Line::from(spans)
+            })
+            .collect()
+    }
+}
+
+impl Component for QrCodeView {
+    type Event = QrCodeEvent;
+    type Effect = QrCodeEffect;
+
+    fn update(&mut self, event: Self::Event) -> ComponentUpdate<Self::Effect> {
+        match event {
+            QrCodeEvent::Terminal(Event::Key(key))
+                if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
+                    && key.code == KeyCode::Esc =>
+            {
+                ComponentUpdate {
+                    effects: vec![QrCodeEffect::Dismiss],
+                    render: RenderRequest::Immediate,
+                }
+            }
+            QrCodeEvent::Terminal(_) => ComponentUpdate::none(),
+        }
+    }
+
+    fn render(&mut self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
+        let width = (self.columns() + 4).max(MIN_WIDTH);
+        let height = self.rows() + CAPTION_ROWS + CHROME_ROWS;
+        let layout =
+            Floating::new("Open on your phone", width, height, &FOOTER).render(frame, area, theme);
+        let body = layout.body;
+        if body.is_empty() {
+            return;
+        }
+        if body.width < self.columns() || body.height < self.rows() + CAPTION_ROWS {
+            let message = format!(
+                "Enlarge the terminal to show the code ({}x{} needed).",
+                width + 2,
+                height + 2
+            );
+            frame.render_widget(
+                Paragraph::new(message)
+                    .style(Style::default().fg(theme.muted()))
+                    .wrap(Wrap { trim: true }),
+                body,
+            );
+            return;
+        }
+        let [code, caption] =
+            Layout::vertical([Constraint::Length(self.rows()), Constraint::Min(0)]).areas(body);
+        frame.render_widget(Paragraph::new(self.lines(code.width)), code);
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::styled(self.origin.clone(), Style::default().fg(theme.accent())).centered(),
+                Line::styled(CAPTION, Style::default().fg(theme.muted())).centered(),
+            ])
+            .wrap(Wrap { trim: true }),
+            caption,
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Component, QrCodeEffect, QrCodeEvent, QrCodeView};
+    use crate::tui::theme::Theme;
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::{Terminal, backend::TestBackend, style::Color};
+
+    const LINK: &str = "https://laptop.tail1234.ts.net/#k=secret-token-value";
+
+    fn render(view: &mut QrCodeView, width: u16, height: u16) -> Terminal<TestBackend> {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| view.render(frame, frame.area(), &Theme::default()))
+            .unwrap();
+        terminal
+    }
+
+    fn text(terminal: &Terminal<TestBackend>) -> String {
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+
+    #[test]
+    fn the_code_has_finder_patterns_inside_a_quiet_zone() {
+        let view = QrCodeView::new(LINK).unwrap();
+        let side = view.modules.len();
+        assert!(
+            view.modules[..2]
+                .iter()
+                .all(|row| row.iter().all(|dark| !dark))
+        );
+        assert!(
+            view.modules[2][2..9].iter().all(|dark| *dark),
+            "top-left finder"
+        );
+        assert!(
+            view.modules[2][side - 9..side - 2].iter().all(|dark| *dark),
+            "top-right finder"
+        );
+        assert!(
+            view.modules[side - 9][2..9].iter().all(|dark| *dark),
+            "bottom-left finder"
+        );
+    }
+
+    #[test]
+    fn modules_are_drawn_black_on_white_and_the_credential_is_never_shown() {
+        let mut view = QrCodeView::new(LINK).unwrap();
+        let terminal = render(&mut view, 90, 40);
+
+        let buffer = terminal.backend().buffer();
+        let code = buffer
+            .content()
+            .iter()
+            .filter(|cell| cell.symbol() == "\u{2580}")
+            .collect::<Vec<_>>();
+        assert!(!code.is_empty());
+        assert!(code.iter().all(|cell| {
+            [Color::Rgb(0, 0, 0), Color::Rgb(255, 255, 255)].contains(&cell.fg)
+                && [Color::Rgb(0, 0, 0), Color::Rgb(255, 255, 255)].contains(&cell.bg)
+        }));
+        let rendered = text(&terminal);
+        assert!(rendered.contains("https://laptop.tail1234.ts.net"));
+        assert!(!rendered.contains("secret-token-value"));
+        assert!(rendered.contains("esc close"));
+    }
+
+    #[test]
+    fn a_terminal_that_is_too_small_explains_what_is_needed() {
+        let mut view = QrCodeView::new(LINK).unwrap();
+        let terminal = render(&mut view, 50, 14);
+
+        let rendered = text(&terminal);
+        assert!(rendered.contains("Enlarge the terminal"));
+        assert!(!rendered.contains("\u{2580}"));
+    }
+
+    #[test]
+    fn escape_dismisses_the_popup() {
+        let mut view = QrCodeView::new(LINK).unwrap();
+        let update = view.update(QrCodeEvent::Terminal(Event::Key(KeyEvent::new(
+            KeyCode::Esc,
+            KeyModifiers::NONE,
+        ))));
+        assert_eq!(update.effects, [QrCodeEffect::Dismiss]);
+    }
+}

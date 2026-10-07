@@ -2612,6 +2612,15 @@ fn apply_pane_effect(
             };
             schedule(context.app.update(event), context.scheduler);
         }
+        components::RootEffect::ShowWebQr => {
+            let link =
+                web_link(context.web_status, context.config.web().enabled()).and_then(phone_link);
+            let event = match link {
+                Ok(link) => AppEvent::ShowWebQr { pane, link },
+                Err(error) => AppEvent::NotifyError { pane, error },
+            };
+            schedule(context.app.update(event), context.scheduler);
+        }
         components::RootEffect::ResumeSession(session_id) => {
             if let Some(live) = context.app.pane_for_session(&session_id) {
                 schedule(
@@ -2914,6 +2923,27 @@ fn web_link(
         WebStatus::Unavailable { reason } => {
             Err(format!("The web interface is unavailable: {reason}"))
         }
+    }
+}
+
+/// A sign-in link that a phone can use. A link whose address is this computer's own (the default
+/// when no `web.public_url` is set) is refused rather than encoded into a code that cannot work.
+fn phone_link(link: String) -> std::result::Result<String, String> {
+    use url::Host;
+    let reachable = url::Url::parse(&link)
+        .ok()
+        .and_then(|url| {
+            url.host().map(|host| match host {
+                Host::Domain(domain) => domain != "localhost" && !domain.ends_with(".localhost"),
+                Host::Ipv4(address) => !address.is_loopback() && !address.is_unspecified(),
+                Host::Ipv6(address) => !address.is_loopback() && !address.is_unspecified(),
+            })
+        })
+        .unwrap_or(false);
+    if reachable {
+        Ok(link)
+    } else {
+        Err("The web link points at this computer, so a phone cannot use it. Set web.public_url to your tunnel's address (for example a Tailscale name).".to_owned())
     }
 }
 
@@ -3290,6 +3320,27 @@ mod tests {
             supported_reasoning_mode(Model::Codex(CodexModel::Sol), ReasoningMode::Pro),
             ReasoningMode::Pro
         );
+    }
+
+    #[test]
+    fn a_phone_cannot_use_a_link_to_this_computer() {
+        for local in [
+            "http://127.0.0.1:7878/#k=t",
+            "http://localhost:7878/#k=t",
+            "http://[::1]:7878/#k=t",
+            "http://0.0.0.0:7878/#k=t",
+        ] {
+            assert!(super::phone_link(local.to_owned()).is_err(), "{local}");
+        }
+        for reachable in [
+            "https://laptop.tail1234.ts.net/#k=t",
+            "http://100.64.0.7:7878/#k=t",
+        ] {
+            assert_eq!(
+                super::phone_link(reachable.to_owned()).as_deref(),
+                Ok(reachable)
+            );
+        }
     }
 
     #[test]

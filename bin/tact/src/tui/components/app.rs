@@ -190,6 +190,10 @@ pub(crate) enum AppEvent {
         pane: PaneId,
         message: String,
     },
+    ShowWebQr {
+        pane: PaneId,
+        link: String,
+    },
     ConfirmWebInstall {
         pane: PaneId,
     },
@@ -555,6 +559,9 @@ impl AppNode {
             }
             AppEvent::NotifySuccess { pane, message } => {
                 self.update_root(pane, RootEvent::NotifySuccess(message))
+            }
+            AppEvent::ShowWebQr { pane, link } => {
+                self.update_root(pane, RootEvent::ShowQrCode(link))
             }
             AppEvent::ConfirmWebInstall { pane } => {
                 self.update_root(pane, RootEvent::ConfirmWebInstall)

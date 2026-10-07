@@ -14,6 +14,7 @@ use super::{
     memory::{MemoryBrowser, MemoryBrowserEffect, MemoryBrowserEvent},
     model_selector::{ModelSelector, ModelSelectorEffect, ModelSelectorEvent},
     node::{Component, ComponentUpdate, Node, RenderRequest},
+    qr_code::{QrCodeEffect, QrCodeEvent, QrCodeView},
     queue::{MessageQueue, QueueEffect, QueueEvent, QueueId},
     recent_prompt_picker::{RecentPromptPicker, RecentPromptPickerEffect, RecentPromptPickerEvent},
     selection::{Selection, Surface, TextSpan},
@@ -198,6 +199,8 @@ pub(crate) enum RootEvent {
     },
     NotifyError(String),
     NotifySuccess(String),
+    /// Shows the QR code for a web sign-in link.
+    ShowQrCode(String),
     ConfirmWebInstall,
     UpdateAvailable(Version),
     SteerAdmitted(QueueId),
@@ -275,6 +278,8 @@ pub(crate) enum RootEffect {
         install: bool,
     },
     CopyWebLink,
+    /// Shows the web sign-in link as a QR code for a phone to scan.
+    ShowWebQr,
     OpenSessions,
     SetEffort {
         effort: ReasoningEffort,
@@ -300,6 +305,7 @@ enum Overlay {
     FileFinder(FileMention),
     Skills(SkillMention),
     Keybindings(Node<KeybindingsHelp>),
+    QrCode(Node<QrCodeView>),
     Memory(Node<MemoryBrowser>),
     RecentPrompts(Node<RecentPromptPicker>),
     Sessions(Node<SessionPicker>),
@@ -817,6 +823,7 @@ impl RootNode {
                 Overlay::FileFinder(mention) => mention.finder.render(frame, area, theme),
                 Overlay::Skills(mention) => mention.picker.render(frame, area, theme),
                 Overlay::Keybindings(help) => help.render(frame, area, theme),
+                Overlay::QrCode(view) => view.render(frame, area, theme),
                 Overlay::Memory(browser) => browser.render(frame, area, theme),
                 Overlay::RecentPrompts(picker) => picker.render(frame, area, theme),
                 Overlay::Sessions(picker) => picker.render(frame, area, theme),
@@ -1290,6 +1297,7 @@ impl RootNode {
             Some(Overlay::FileFinder(_)) => self.update_file_finder(event),
             Some(Overlay::Skills(_)) => self.update_skill_picker(event),
             Some(Overlay::Keybindings(_)) => self.update_keybindings(event),
+            Some(Overlay::QrCode(_)) => self.update_qr_code(event),
             Some(Overlay::Memory(_)) => self.update_memory(MemoryBrowserEvent::Terminal(event)),
             Some(Overlay::RecentPrompts(_)) => self.update_recent_prompt_picker(event),
             Some(Overlay::Sessions(_)) => self.update_session_picker(event),
@@ -1580,12 +1588,16 @@ impl RootNode {
                 );
             }
             Some(ActionsEffect::Trigger(
-                action @ (Action::OpenInBrowser | Action::CopyWebLink | Action::Sessions),
+                action @ (Action::OpenInBrowser
+                | Action::CopyWebLink
+                | Action::ShowQrCode
+                | Action::Sessions),
             )) => {
                 self.overlay = None;
                 let effect = match action {
                     Action::OpenInBrowser => RootEffect::OpenWebInterface { install: false },
                     Action::CopyWebLink => RootEffect::CopyWebLink,
+                    Action::ShowQrCode => RootEffect::ShowWebQr,
                     _ => RootEffect::OpenSessions,
                 };
                 return ComponentUpdate {
@@ -2032,6 +2044,17 @@ impl RootNode {
             });
         debug_assert!(update.changed);
         ComponentUpdate::render(RenderRequest::Immediate)
+    }
+
+    fn update_qr_code(&mut self, event: Event) -> ComponentUpdate<RootEffect> {
+        let Some(Overlay::QrCode(view)) = &mut self.overlay else {
+            return ComponentUpdate::none();
+        };
+        let update = view.update(QrCodeEvent::Terminal(event));
+        if matches!(update.effects.as_slice(), [QrCodeEffect::Dismiss]) {
+            self.overlay = None;
+        }
+        ComponentUpdate::render(update.render)
     }
 
     fn update_keybindings(&mut self, event: Event) -> ComponentUpdate<RootEffect> {
@@ -3118,6 +3141,13 @@ impl Component for RootNode {
             }
             RootEvent::NotifySuccess(message) => {
                 self.notification = Some(Notification::plain(message, Color::Green));
+                ComponentUpdate::render(RenderRequest::Immediate)
+            }
+            RootEvent::ShowQrCode(link) => {
+                match QrCodeView::new(&link) {
+                    Ok(view) => self.overlay = Some(Overlay::QrCode(Node::new(view))),
+                    Err(error) => self.notification = Some(Notification::plain(error, Color::Red)),
+                }
                 ComponentUpdate::render(RenderRequest::Immediate)
             }
             RootEvent::ConfirmWebInstall => {

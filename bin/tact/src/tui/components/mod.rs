@@ -13,6 +13,7 @@ mod keybindings;
 mod memory;
 mod model_selector;
 mod node;
+mod qr_code;
 mod queue;
 mod recent_prompt_picker;
 mod root;

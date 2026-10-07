@@ -69,6 +69,7 @@ toml.workspace = true
 toml_edit.workspace = true
 unicode-segmentation.workspace = true
 unicode-width.workspace = true
+qrcode.workspace = true
 url.workspace = true
 zeroize.workspace = true
 zstd.workspace = true
