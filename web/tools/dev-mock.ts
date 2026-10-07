@@ -556,7 +556,7 @@ export class MockTact {
         this.setStatus(session, { kind: "tool", name: tool.name });
         const row = this.append(session, {
           kind: "tool", name: tool.name, summary: tool.summary, state: "running",
-          duration_ns: null, substeps: [], child_count: 0, has_detail: true,
+          duration_ns: null, elapsed_ns: 0, substeps: [], child_count: 0, has_detail: true,
         });
         session.details.set(row.id, { arguments: tool.arguments, result: null, metadata: null });
         for (const step of tool.substeps ?? []) {

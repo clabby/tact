@@ -320,7 +320,7 @@ struct SessionRef<'a> {
     session: &'a str,
 }
 
-fn now_unix_ms() -> u64 {
+pub(super) fn now_unix_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |elapsed| {

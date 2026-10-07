@@ -10,7 +10,10 @@ use crate::{
             DirectedMessageEntry, EntryKind, ToolEntry, ToolState, TranscriptEntry, TransientStatus,
         },
     },
-    web::bridge::{DraftImage, Origin, QueuedPrompt},
+    web::{
+        bridge::{DraftImage, Origin, QueuedPrompt},
+        hub::now_unix_ms,
+    },
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -203,6 +206,9 @@ enum WireBody {
         summary: String,
         state: WireToolState,
         duration_ns: Option<u64>,
+        /// How long a running tool has been running, as of this frame. Clients count on from here
+        /// with their own clock, so a browser clock that disagrees with this machine's cannot skew it.
+        elapsed_ns: Option<u64>,
         substeps: Vec<String>,
         child_count: usize,
         has_detail: bool,
@@ -297,6 +303,11 @@ impl WireBody {
                 ToolState::Failed => WireToolState::Failed,
             },
             duration_ns: tool.duration_ns,
+            elapsed_ns: (tool.state == ToolState::Running).then(|| {
+                now_unix_ms()
+                    .saturating_sub(tool.started_at_unix_ms)
+                    .saturating_mul(1_000_000)
+            }),
             substeps: tool.substeps.iter().map(|step| cap(step)).collect(),
             child_count: tool.child_count,
             has_detail: true,
@@ -566,7 +577,7 @@ fn first_line(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_STRING_BYTES, cap, tool_summary};
+    use super::{MAX_STRING_BYTES, WireBody, cap, now_unix_ms, tool_summary};
     use crate::tui::transcript::{ToolEntry, ToolState};
     use serde_json::{Value, json};
 
@@ -582,6 +593,22 @@ mod tests {
             substeps: Vec::new(),
             child_count: 0,
         }
+    }
+
+    #[test]
+    fn only_running_tools_report_elapsed_time() {
+        let mut entry = tool("exec_command", json!({"cmd": "sleep 1"}));
+        entry.state = ToolState::Running;
+        entry.started_at_unix_ms = now_unix_ms().saturating_sub(5_000);
+        let running = serde_json::to_value(WireBody::tool(&entry)).unwrap();
+        let elapsed = running["elapsed_ns"]
+            .as_u64()
+            .expect("a running tool has an elapsed time");
+        assert!(elapsed >= 5_000_000_000);
+
+        entry.state = ToolState::Succeeded;
+        let finished = serde_json::to_value(WireBody::tool(&entry)).unwrap();
+        assert!(finished["elapsed_ns"].is_null());
     }
 
     #[test]

@@ -47,6 +47,8 @@ export class Transcript {
   private readonly diffs = new Map<number, FileDiff[]>();
   private readonly lazyDetail: IntersectionObserver;
   private readonly details = new Map<number, { revision: number; detail: Promise<ToolDetail> }>();
+  /** Drives the clocks of running tool calls; runs only while one is on screen. */
+  private clockTimer = 0;
 
   constructor(
     private readonly scroller: HTMLElement,
@@ -314,8 +316,20 @@ export class Transcript {
     name.textContent = toolLabel(entry.name, entry.child_count);
     name.title = entry.name;
     element.querySelector(".tool-summary")!.textContent = entry.summary;
-    element.querySelector(".tool-meta")!.textContent = [extra, entry.duration_ns === null ? "" : formatDuration(entry.duration_ns)]
+    const meta = element.querySelector<HTMLElement>(".tool-meta")!;
+    meta.textContent = [extra, entry.duration_ns === null ? "" : formatDuration(entry.duration_ns)]
       .filter(Boolean).join(" · ");
+    // The server reports how long a running call has already run; the browser counts on from its own
+    // clock, so a skewed clock cannot misstate the time.
+    if (entry.state === "running" && entry.elapsed_ns != null) {
+      element.dataset.since = String(performance.now() - entry.elapsed_ns / 1e6);
+      if (extra) meta.append(" · ");
+      child(meta, "span", "tool-clock").textContent = formatDuration(entry.elapsed_ns);
+      // The element may not be attached yet, so the timer cannot depend on finding it in the list.
+      if (!this.clockTimer) this.clockTimer = window.setInterval(this.tickClocks, 1000);
+    } else {
+      delete element.dataset.since;
+    }
     if (!open) return;
     const body = child(element, "div", "tool-body");
     if (entry.substeps.length) {
@@ -328,6 +342,20 @@ export class Transcript {
       this.lazyDetail.observe(detail);
     }
   }
+
+  /** Refreshes every running tool call's clock; the timer stops once none remain. */
+  private tickClocks = () => {
+    const now = performance.now();
+    const running = this.list.querySelectorAll<HTMLElement>(".entry-tool[data-since]");
+    for (const element of running) {
+      const clock = element.querySelector(".tool-clock");
+      if (clock) clock.textContent = formatDuration((now - Number(element.dataset.since)) * 1e6);
+    }
+    if (!running.length) {
+      clearInterval(this.clockTimer);
+      this.clockTimer = 0;
+    }
+  };
 
   private async renderDetail(container: HTMLElement, entry: ToolEntry) {
     const source = this.source;

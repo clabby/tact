@@ -55,6 +55,8 @@ export type EntryBody =
     summary: string;
     state: ToolState;
     duration_ns: number | null;
+    /** How long a running call had run when the server sent this; absent once it finishes. */
+    elapsed_ns?: number | null;
     substeps: string[];
     child_count: number;
     has_detail: boolean;
