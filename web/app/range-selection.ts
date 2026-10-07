@@ -26,6 +26,32 @@ export function rangeLabel(targets: ReviewTarget[], range: ReviewRange) {
   return `${targetLabel(targets[range.from])} → ${targetLabel(targets[range.to])}`;
 }
 
+export type RangePreset = {
+  id: "branch" | "latest" | "uncommitted";
+  label: string;
+  range: ReviewRange;
+};
+
+/**
+ * The one-click ranges: everything on the branch, the newest commit alone, and the uncommitted
+ * work. Targets run from the trunk through the commits to the working tree, and a range reviews
+ * the changes after `from` up to and including `to`. A preset that would repeat an earlier one
+ * (a branch with no commits) is dropped.
+ */
+export function rangePresets(targets: ReviewTarget[]): RangePreset[] {
+  const last = targets.length - 1;
+  const candidates: (RangePreset | null)[] = [
+    last >= 1 ? { id: "branch", label: "Full branch", range: { from: 0, to: last } } : null,
+    last >= 2 ? { id: "latest", label: "Latest commit", range: { from: last - 2, to: last - 1 } } : null,
+    last >= 1 ? { id: "uncommitted", label: "Uncommitted", range: { from: last - 1, to: last } } : null,
+  ];
+  const presets: RangePreset[] = [];
+  for (const candidate of candidates) {
+    if (candidate && !presets.some((preset) => rangesEqual(preset.range, candidate.range))) presets.push(candidate);
+  }
+  return presets;
+}
+
 export function targetLabel(target: ReviewTarget) {
   return target.kind === "working_tree" ? "Working tree" : target.short_id;
 }

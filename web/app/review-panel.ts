@@ -76,6 +76,7 @@ import {
   moveRangeBoundary,
   rangeKey,
   rangeLabel,
+  rangePresets,
   rangesEqual,
   targetLabel,
   type RangeBoundary,
@@ -474,6 +475,9 @@ class ReviewPanel {
               </div>
               <button class="icon-button" data-range-close aria-label="Close range selector">${icon("close")}</button>
             </header>
+            <div class="range-presets" id="range-presets" role="group" aria-label="Quick ranges">
+              ${rangePresets(this.bootstrap.range_targets).map((preset) => `<button type="button" class="button quiet" data-range-preset="${preset.id}" aria-pressed="false">${preset.label}</button>`).join("")}
+            </div>
             <div class="range-builder">
               <div class="range-endpoints" aria-label="Selected range endpoints" aria-live="polite">
                 <div class="range-endpoint">
@@ -1378,6 +1382,9 @@ class ReviewPanel {
     }
     this.bindMobileNavigation();
     this.root.querySelector("#range-button")?.addEventListener("click", () => this.openRangeDialog());
+    for (const button of this.root.querySelectorAll<HTMLButtonElement>("[data-range-preset]")) {
+      button.addEventListener("click", () => this.previewPreset(button.dataset.rangePreset));
+    }
     this.bindRangeEvents();
     this.root.querySelector("#refresh-notice")?.addEventListener("click", () => this.refresher.retry());
     for (const button of this.root.querySelectorAll<HTMLButtonElement>("[data-range-close]")) {
@@ -1706,6 +1713,10 @@ class ReviewPanel {
       target.classList.toggle("interior", index > pending.from && index < pending.to);
       target.classList.toggle("outside", index < pending.from || index > pending.to);
     }
+    for (const button of this.root.querySelectorAll<HTMLButtonElement>("[data-range-preset]")) {
+      const preset = rangePresets(this.bootstrap.range_targets).find((candidate) => candidate.id === button.dataset.rangePreset);
+      button.setAttribute("aria-pressed", String(preset !== undefined && rangesEqual(preset.range, pending)));
+    }
     this.syncRangeWarning();
   }
 
@@ -1801,6 +1812,15 @@ class ReviewPanel {
     }
     warning.textContent = `Switching ranges will discard ${pendingFeedback}.`;
     warning.hidden = false;
+  }
+
+  private previewPreset(id: string | undefined) {
+    const preset = rangePresets(this.bootstrap.range_targets).find((candidate) => candidate.id === id);
+    if (!preset || !this.pendingRange) return;
+    this.pendingRange = { ...preset.range };
+    this.previewRange = undefined;
+    this.closeBoundaryActions();
+    this.syncRangeSelector();
   }
 
   private async applyRange() {

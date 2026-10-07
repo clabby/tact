@@ -4,6 +4,7 @@ import {
   moveRangeBoundary,
   rangeKey,
   rangeLabel,
+  rangePresets,
   rangesEqual,
   type ReviewTarget,
 } from "./range-selection";
@@ -48,5 +49,20 @@ describe("commit range selection", () => {
   test("range identity is stable across decoded objects", () => {
     expect(rangeKey({ from: 1, to: 3 })).toBe("1:3");
     expect(rangesEqual({ from: 1, to: 3 }, { from: 1, to: 3 })).toBe(true);
+  });
+
+  test("presets cover the branch, its newest commit, and the uncommitted work", () => {
+    const last = targets.length - 1;
+    expect(rangePresets(targets).map(({ id, range }) => [id, range])).toEqual([
+      ["branch", { from: 0, to: last }],
+      ["latest", { from: last - 2, to: last - 1 }],
+      ["uncommitted", { from: last - 1, to: last }],
+    ]);
+  });
+
+  test("presets that would repeat each other are dropped", () => {
+    const trunkAndWorkingTree = [targets[0]!, targets.at(-1)!];
+    expect(rangePresets(trunkAndWorkingTree).map(({ id }) => id)).toEqual(["branch"]);
+    expect(rangePresets([targets[0]!])).toEqual([]);
   });
 });
