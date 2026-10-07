@@ -9,6 +9,7 @@ mod format;
 mod handoff_controller;
 mod pane;
 mod prompt;
+mod remote;
 mod scheduler;
 pub(crate) mod session;
 mod shell;
@@ -668,41 +669,43 @@ pub(crate) async fn run(
     let mut subagent_shutdowns = JoinSet::<()>::new();
     let mut subagents_stopping = false;
 
+    macro_rules! effect_context {
+        () => {
+            EffectContext {
+                app: &mut app,
+                commands: &commands,
+                workspace: &workspace,
+                config: &mut config,
+                shutdown: &shutdown,
+                input: &mut input,
+                editor_task: &mut editor_task,
+                effort_task: &mut effort_task,
+                speed_task: &mut speed_task,
+                new_session_task: &mut new_session_task,
+                session_list_task: &mut session_list_task,
+                recent_prompt_task: &mut recent_prompt_task,
+                recent_prompt_cache: &mut recent_prompt_cache,
+                recent_prompt_request: &mut recent_prompt_request,
+                handoff_controller: &mut handoff_controller,
+                web_status: &web_status,
+                open_tasks: &mut open_tasks,
+                resume_session_task: &mut resume_session_task,
+                terminal: &mut terminal,
+                scheduler: &mut scheduler,
+                panes: &mut panes,
+                shell_tasks: &mut shell_tasks,
+                browser_open_tasks: &mut browser_open_tasks,
+                memory_store: &mut memory_store,
+                memory_tasks: &mut memory_tasks,
+                memory_generations: &mut memory_generations,
+                subagent_shutdowns: &mut subagent_shutdowns,
+            }
+        };
+    }
+
     macro_rules! apply_app_update {
         ($update:expr) => {
-            apply_update(
-                $update,
-                EffectContext {
-                    app: &mut app,
-                    commands: &commands,
-                    workspace: &workspace,
-                    config: &mut config,
-                    shutdown: &shutdown,
-                    input: &mut input,
-                    editor_task: &mut editor_task,
-                    effort_task: &mut effort_task,
-                    speed_task: &mut speed_task,
-                    new_session_task: &mut new_session_task,
-                    session_list_task: &mut session_list_task,
-                    recent_prompt_task: &mut recent_prompt_task,
-                    recent_prompt_cache: &mut recent_prompt_cache,
-                    recent_prompt_request: &mut recent_prompt_request,
-                    handoff_controller: &mut handoff_controller,
-                    web_status: &web_status,
-                    open_tasks: &mut open_tasks,
-                    resume_session_task: &mut resume_session_task,
-                    terminal: &mut terminal,
-                    scheduler: &mut scheduler,
-                    panes: &mut panes,
-                    shell_tasks: &mut shell_tasks,
-                    browser_open_tasks: &mut browser_open_tasks,
-                    memory_store: &mut memory_store,
-                    memory_tasks: &mut memory_tasks,
-                    memory_generations: &mut memory_generations,
-                    subagent_shutdowns: &mut subagent_shutdowns,
-                },
-            )
-            .await?;
+            apply_update($update, effect_context!()).await?;
         };
     }
 
@@ -900,7 +903,34 @@ pub(crate) async fn run(
                     && resume_session_task.is_none() =>
             {
                 let Request { command, client, reply } = request;
+                let active = app.active_pane();
                 match command {
+                    Command::DeleteMemory { key } => {
+                        remote::delete_memory(memory_store.as_ref(), key).deliver(reply);
+                    }
+                    Command::ReloadConfig => {
+                        let result = reload_config(&mut effect_context!(), active);
+                        request_render(app.publish_changes(Origin::Web(client)), &mut scheduler);
+                        drop(reply.send(result.map(|()| Reply::Done)));
+                    }
+                    Command::WriteConfig { text, revision } => {
+                        let result = config
+                            .replace_document(&text, &revision)
+                            .map_err(remote::config_edit_error)
+                            .and_then(|()| reload_config(&mut effect_context!(), active));
+                        request_render(app.publish_changes(Origin::Web(client)), &mut scheduler);
+                        drop(reply.send(result.map(|()| Reply::Done)));
+                    }
+                    Command::SetMaxSubagents { limit } => {
+                        let result = apply_pane_effect(
+                            active,
+                            components::RootEffect::SetMaxSubagents(limit),
+                            &mut effect_context!(),
+                        )
+                        .map_err(|error| CommandError::Failed(error.to_string()));
+                        request_render(app.publish_changes(Origin::Web(client)), &mut scheduler);
+                        drop(reply.send(result.map(|()| Reply::Done)));
+                    }
                     Command::Open(spec) => {
                         match open_session(spec, &mut app, &config, &mut panes, &commands, &mut open_tasks).await {
                             Ok(OpenStarted::Pending(pane)) => {
@@ -928,7 +958,14 @@ pub(crate) async fn run(
                 }
             }
             Some(request) = web_queries.recv(), if !stopping => {
-                drop(request.reply.send(Err(CommandError::NotAvailableRemotely)));
+                let state = remote::QueryState {
+                    app: &app,
+                    config: &config,
+                    workspace: &workspace,
+                    memory_store: memory_store.as_ref(),
+                    recent_prompts: recent_prompt_cache.as_deref(),
+                };
+                remote::answer(request.query, &state).deliver(request.reply);
             }
             Some(request) = auxiliary_requests.recv(), if !stopping => {
                 let AuxiliaryRequest {
@@ -2054,6 +2091,87 @@ async fn apply_update(
     Ok(())
 }
 
+/// Reloads the configuration and applies what can change in-process. The outcome is shown in the
+/// terminal as a notification on `pane` and returned to a web caller.
+fn reload_config(
+    context: &mut EffectContext<'_>,
+    pane: PaneId,
+) -> std::result::Result<(), CommandError> {
+    fn refuse(
+        context: &mut EffectContext<'_>,
+        pane: PaneId,
+        error: String,
+    ) -> std::result::Result<(), CommandError> {
+        schedule(
+            context.app.update(AppEvent::ConfigReloadFailed {
+                pane,
+                error: error.clone(),
+            }),
+            context.scheduler,
+        );
+        Err(CommandError::Failed(error))
+    }
+
+    let reload = match context.config.reload() {
+        Ok(reload) => reload,
+        Err(error) => return refuse(context, pane, format!("Could not reload config: {error}")),
+    };
+    let (config, workspace_changed) = reload.into_parts();
+    if let Err(error) = context
+        .panes
+        .values()
+        .try_for_each(|runtime| config.claude().ensure_model_enabled(runtime.current_model))
+    {
+        return refuse(
+            context,
+            pane,
+            format!("Could not reload config while a Claude session is open: {error}"),
+        );
+    }
+    let selected_memory_store =
+        match crate::core::configured_memory_store(&config, context.workspace) {
+            Ok(store) => store,
+            Err(error) => {
+                return refuse(
+                    context,
+                    pane,
+                    format!("Could not apply memory configuration: {error}"),
+                );
+            }
+        };
+    let theme = config.theme().clone();
+    let tui = *config.tui();
+    let preferred_reasoning_mode = config.agent().reasoning_mode();
+    let memory_enabled = config.memory().enabled();
+    invalidate_memory_generations(context.memory_generations);
+    *context.memory_store = selected_memory_store;
+    context
+        .app
+        .set_max_subagents(config.agent().max_subagents());
+    context.app.set_claude_enabled(config.claude().enabled());
+    for runtime in context.panes.values() {
+        apply_subagent_config(&runtime.subagent_control, &config);
+    }
+    *context.config = config;
+    let message = if workspace_changed {
+        "Reloaded config · theme, UI, memory browser, and subagent limits applied · agent/auth/tool settings apply to new sessions · workspace requires restart"
+    } else {
+        "Reloaded config · theme, UI, memory browser, and subagent limits applied · agent/auth/tool settings apply to new sessions"
+    };
+    schedule(
+        context.app.update(AppEvent::ConfigReloaded {
+            pane,
+            theme,
+            tui,
+            preferred_reasoning_mode,
+            memory_enabled,
+            message: message.to_owned(),
+        }),
+        context.scheduler,
+    );
+    Ok(())
+}
+
 fn apply_pane_effect(
     pane: PaneId,
     effect: components::RootEffect,
@@ -2329,75 +2447,10 @@ fn apply_pane_effect(
                 run_memory_operation(pane, generation, &store, MemoryOperation::Delete(key)).await
             });
         }
-        components::RootEffect::ReloadConfig => match context.config.reload() {
-            Ok(reload) => {
-                let (config, workspace_changed) = reload.into_parts();
-                if let Err(error) = context.panes.values().try_for_each(|runtime| {
-                    config.claude().ensure_model_enabled(runtime.current_model)
-                }) {
-                    schedule(
-                        context.app.update(AppEvent::ConfigReloadFailed {
-                            pane,
-                            error: format!(
-                                "Could not reload config while a Claude session is open: {error}"
-                            ),
-                        }),
-                        context.scheduler,
-                    );
-                    return Ok(());
-                }
-                let theme = config.theme().clone();
-                let tui = *config.tui();
-                let max_subagents = config.agent().max_subagents();
-                let preferred_reasoning_mode = config.agent().reasoning_mode();
-                let memory_enabled = config.memory().enabled();
-                let selected_memory_store =
-                    match crate::core::configured_memory_store(&config, context.workspace) {
-                        Ok(store) => store,
-                        Err(error) => {
-                            schedule(
-                                context.app.update(AppEvent::ConfigReloadFailed {
-                                    pane,
-                                    error: format!("Could not apply memory configuration: {error}"),
-                                }),
-                                context.scheduler,
-                            );
-                            return Ok(());
-                        }
-                    };
-                invalidate_memory_generations(context.memory_generations);
-                *context.memory_store = selected_memory_store;
-                context.app.set_max_subagents(max_subagents);
-                context.app.set_claude_enabled(config.claude().enabled());
-                for runtime in context.panes.values() {
-                    apply_subagent_config(&runtime.subagent_control, &config);
-                }
-                *context.config = config;
-                let message = if workspace_changed {
-                    "Reloaded config · theme, UI, memory browser, and subagent limits applied · agent/auth/tool settings apply to new sessions · workspace requires restart"
-                } else {
-                    "Reloaded config · theme, UI, memory browser, and subagent limits applied · agent/auth/tool settings apply to new sessions"
-                };
-                schedule(
-                    context.app.update(AppEvent::ConfigReloaded {
-                        pane,
-                        theme,
-                        tui,
-                        preferred_reasoning_mode,
-                        memory_enabled,
-                        message: message.to_owned(),
-                    }),
-                    context.scheduler,
-                );
-            }
-            Err(error) => schedule(
-                context.app.update(AppEvent::ConfigReloadFailed {
-                    pane,
-                    error: format!("Could not reload config: {error}"),
-                }),
-                context.scheduler,
-            ),
-        },
+        components::RootEffect::ReloadConfig => {
+            // The terminal reports the outcome through the notification reload_config schedules.
+            let _ = reload_config(context, pane);
+        }
         components::RootEffect::NewSession(model) => {
             *context.input = None;
             let PaneSettings {

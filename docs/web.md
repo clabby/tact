@@ -197,7 +197,7 @@ front-ends: best match first, ties in source order.
 | Paste image | `attach_image`; images are part of the shared draft |
 | `!` shell command | `submit` of a draft starting with `!`, exactly like Enter |
 | Queue: steer / edit / delete | `steer`, `edit_queued`, `dequeue` |
-| Interrupt (cancel-all) | `interrupt`; also cancels a pending compaction or handoff |
+| Interrupt (cancel-all) | `interrupt`; also cancels a handoff being prepared (Esc in the terminal). A compaction cannot be interrupted (`turn_running`) |
 | Theme | web-local view state (light/dark), never synchronized |
 | Keybindings | the web's own shortcut help |
 | Copy | browser clipboard from the rendered transcript |
@@ -218,7 +218,7 @@ In addition to the commands above:
 | `handoff` | `session` | `turn_running`, `queue_not_empty` |
 | `reload_config` | none | `failed` with the load error |
 | `write_config` | `text, revision` | `stale` if the file changed since `config`; `invalid_request` if `text` does not load; `not_available_remotely` if `text` adds credentials. The file is unchanged on refusal and reloaded on success |
-| `delete_memory` | `key: { id, version, namespace? }` | `disabled`; `not_available_remotely` for a read-only remote backend; `failed` |
+| `delete_memory` | `key: { id, version, namespace? }` | `disabled`; `not_available_remotely` unless the backend lets this user delete the key (`deletable` in `memories`); `stale` if the memory changed; `failed` |
 | `set_max_subagents` | `limit` | never |
 
 Settings couplings come from the `models` catalog and are enforced by the loop: the model is
@@ -232,7 +232,7 @@ once a turn started (`invalid_request`). A session has started when its snapshot
 | Query | Args | Reply |
 | :-- | :-- | :-- |
 | `models` | none | `ModelCatalog` |
-| `history` | `query?, cursor?` | `{ sessions: SessionSummary[], next_cursor: string \| null }` (persisted sessions of this workspace, newest first, pages of 50) |
+| `history` | `query?, cursor?` | `{ sessions: SessionSummary[], next_cursor: string \| null }` (resumable persisted sessions of this workspace, newest first, pages of 50) |
 | `files` | `query?` | `{ paths: string[] }` (at most 50; directories end in `/`) |
 | `skills` | `query?` | `{ skills: { name, description }[] }` |
 | `recent_prompts` | `session, scope?: "global" \| "current_session", query?` | `{ prompts: { text, recorded_at_unix_ms, session_id, workspace }[] }` |
