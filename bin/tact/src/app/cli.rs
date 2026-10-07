@@ -121,6 +121,10 @@ pub(crate) struct Cli {
     )]
     append_instructions: Option<String>,
 
+    /// Serve the web interface from this Tact.
+    #[arg(long, global = true, env = "TACT_WEB", action = ArgAction::Set)]
+    web: Option<bool>,
+
     /// Expose standalone web search to the model.
     #[arg(long, global = true, env = "TACT_WEB_SEARCH", action = ArgAction::Set)]
     web_search: Option<bool>,
@@ -378,6 +382,7 @@ impl Cli {
             thinking: self.thinking,
             reasoning_mode: self.reasoning_mode,
             max_subagents: self.max_subagents,
+            web: self.web,
             instructions: self.instructions,
             append_instructions: self.append_instructions,
             web_search: self.web_search,
@@ -1505,6 +1510,7 @@ mod tests {
             ("reasoning_mode", "TACT_REASONING_MODE"),
             ("model", "TACT_MODEL"),
             ("max_subagents", "TACT_MAX_SUBAGENTS"),
+            ("web", "TACT_WEB"),
             ("instructions", "TACT_INSTRUCTIONS"),
             ("append_instructions", "TACT_APPEND_INSTRUCTIONS"),
             ("web_search", "TACT_WEB_SEARCH"),

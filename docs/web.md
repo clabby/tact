@@ -24,7 +24,7 @@ Tailscale, an SSH forward, or similar. Tact implements no transport.
 - Started on launch in the background; failure to start only sets a status string.
 - Config `[web]`: `enabled = true`, `bind = "127.0.0.1"`, `port = 7878` (first port tried; scans 21
   ports, then ephemeral), `public_url = ""` (only used to build copyable links),
-  `max_live_sessions = 8`. CLI `--no-web` disables it.
+  `max_live_sessions = 8`. `--web=false` (`TACT_WEB`) disables it.
 - Machine token: `$TACT_HOME/web/token` (0600, 32 CSPRNG bytes, base64url). Registry:
   `$TACT_HOME/web/instances/<pid>.json` (pid, port, workspace, started_at), removed on exit; readers
   tolerate stale files. Assets: `$TACT_HOME/web/assets/v<version>` (bundle id

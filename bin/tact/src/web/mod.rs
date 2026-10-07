@@ -1,7 +1,7 @@
 //! Native browser workflow for human review of workspace changes.
 
-pub(crate) mod bridge;
 mod assets;
+pub(crate) mod bridge;
 mod diff;
 mod server;
 

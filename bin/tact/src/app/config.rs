@@ -19,6 +19,7 @@ use std::{
     ffi::OsString,
     fmt, fs,
     io::{ErrorKind, Write},
+    net::{IpAddr, Ipv4Addr},
     num::{NonZeroU16, NonZeroUsize},
     path::{Path, PathBuf},
     sync::Arc,
@@ -118,6 +119,7 @@ pub(crate) struct Config {
     skills: SkillsConfig,
     memory: MemoryConfig,
     subagents: SubagentsConfig,
+    web: WebConfig,
     tui: TuiConfig,
     theme: Theme,
     #[serde(skip)]
@@ -298,6 +300,17 @@ pub(crate) struct SubagentsConfig {
     enabled: bool,
 }
 
+/// Effective web interface configuration.
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct WebConfig {
+    enabled: bool,
+    bind: IpAddr,
+    port: u16,
+    /// Empty when unset, so the materialized defaults list every key.
+    public_url: String,
+    max_live_sessions: NonZeroUsize,
+}
+
 /// Effective terminal interface configuration.
 #[derive(Clone, Copy, Debug, Serialize)]
 pub(crate) struct TuiConfig {
@@ -314,6 +327,7 @@ pub(crate) struct ConfigOverrides {
     pub(crate) thinking: Option<ReasoningEffort>,
     pub(crate) reasoning_mode: Option<ReasoningMode>,
     pub(crate) max_subagents: Option<usize>,
+    pub(crate) web: Option<bool>,
     pub(crate) instructions: Option<String>,
     pub(crate) append_instructions: Option<String>,
     pub(crate) web_search: Option<bool>,
@@ -347,6 +361,7 @@ struct ConfigFile {
     skills: SkillsConfigFile,
     memory: MemoryConfigFile,
     subagents: SubagentsConfigFile,
+    web: WebConfigFile,
     tui: TuiConfigFile,
     theme: Theme,
 }
@@ -403,6 +418,16 @@ impl fmt::Debug for RemoteMemoryTokenFile {
 #[serde(default, deny_unknown_fields)]
 struct SubagentsConfigFile {
     enabled: Option<bool>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct WebConfigFile {
+    enabled: Option<bool>,
+    bind: Option<IpAddr>,
+    port: Option<u16>,
+    public_url: Option<String>,
+    max_live_sessions: Option<NonZeroUsize>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -611,6 +636,16 @@ impl Config {
             subagents: SubagentsConfig {
                 enabled: file.subagents.enabled.unwrap_or(true),
             },
+            web: WebConfig {
+                enabled: overrides.web.or(file.web.enabled).unwrap_or(true),
+                bind: file.web.bind.unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+                port: file.web.port.unwrap_or(7878),
+                public_url: file.web.public_url.unwrap_or_default().trim().to_owned(),
+                max_live_sessions: file
+                    .web
+                    .max_live_sessions
+                    .unwrap_or(NonZeroUsize::new(8).expect("8 is non-zero")),
+            },
             tui: TuiConfig::new(file.tui),
             theme: file.theme,
             reload,
@@ -682,6 +717,10 @@ impl Config {
 
     pub(crate) const fn subagents(&self) -> &SubagentsConfig {
         &self.subagents
+    }
+
+    pub(crate) const fn web(&self) -> &WebConfig {
+        &self.web
     }
 
     pub(crate) const fn tui(&self) -> &TuiConfig {
@@ -1459,6 +1498,31 @@ impl SubagentsConfig {
     }
 }
 
+impl WebConfig {
+    pub(crate) const fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    pub(crate) const fn bind(&self) -> IpAddr {
+        self.bind
+    }
+
+    /// The first port the server tries.
+    pub(crate) const fn port(&self) -> u16 {
+        self.port
+    }
+
+    /// The externally reachable origin used only to build copyable links.
+    pub(crate) fn public_url(&self) -> Option<&str> {
+        Some(self.public_url.as_str()).filter(|url| !url.is_empty())
+    }
+
+    /// The most live sessions one process may host, across the terminal and the web interface.
+    pub(crate) const fn max_live_sessions(&self) -> usize {
+        self.max_live_sessions.get()
+    }
+}
+
 impl TuiConfig {
     fn new(file: TuiConfigFile) -> Self {
         Self {
@@ -1980,6 +2044,7 @@ mod tests {
                 "skills",
                 "memory",
                 "subagents",
+                "web",
                 "tui",
                 "theme",
             ],
@@ -2025,6 +2090,10 @@ mod tests {
             &["endpoint", "namespace", "bearer_token", "workspace_roots"],
         );
         assert_table_fields(&rendered["subagents"], &["enabled"]);
+        assert_table_fields(
+            &rendered["web"],
+            &["enabled", "bind", "port", "public_url", "max_live_sessions"],
+        );
         assert_table_fields(&rendered["tui"], &["mouse_scroll_lines"]);
         assert_table_fields(&rendered["theme"], &["mode", "light", "dark"]);
         let palette_fields = [
@@ -2741,6 +2810,26 @@ mod tests {
                 .matches_workspace(&unregistered.canonicalize().unwrap())
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn web_interface_is_enabled_on_loopback_by_default() {
+        let config = load_config("").unwrap();
+        assert!(config.web().enabled());
+        assert!(config.web().bind().is_loopback());
+        assert_eq!(config.web().port(), 7878);
+        assert_eq!(config.web().public_url(), None);
+        assert_eq!(config.web().max_live_sessions(), 8);
+
+        let config = load_config(
+            "[web]\nenabled = false\nport = 9000\npublic_url = \"https://host.ts.net\"\nmax_live_sessions = 3\n",
+        )
+        .unwrap();
+        assert!(!config.web().enabled());
+        assert_eq!(config.web().port(), 9000);
+        assert_eq!(config.web().public_url(), Some("https://host.ts.net"));
+        assert_eq!(config.web().max_live_sessions(), 3);
+        assert!(load_config("[web]\nmax_live_sessions = 0\n").is_err());
     }
 
     #[test]

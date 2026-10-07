@@ -5,10 +5,7 @@
 //! [`Request`]s through exactly the same effects a keypress would produce. The server holds
 //! projections of what was published and never mutates session state directly.
 
-use crate::{
-    app::config::ReasoningEffort,
-    tui::transcript::TranscriptRecord,
-};
+use crate::{app::config::ReasoningEffort, tui::transcript::TranscriptRecord};
 use std::{path::PathBuf, sync::Arc};
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot, watch};
@@ -114,19 +111,49 @@ impl Publisher {
 /// A command from a browser. Each carries the session it targets where one applies.
 #[derive(Debug)]
 pub(crate) enum Command {
-    SetDraft { session: String, text: String },
+    SetDraft {
+        session: String,
+        text: String,
+    },
     /// Submits the draft exactly as the composer's Enter would, provided it is still at `rev`.
-    Submit { session: String, rev: u64 },
-    Interrupt { session: String },
-    Steer { session: String, queue_id: u64 },
-    Dequeue { session: String, queue_id: u64 },
-    Compact { session: String },
-    SetModel { session: String, model: String },
-    SetEffort { session: String, effort: ReasoningEffort },
-    SetFast { session: String, enabled: bool },
-    Activate { session: String },
+    Submit {
+        session: String,
+        rev: u64,
+    },
+    Interrupt {
+        session: String,
+    },
+    Steer {
+        session: String,
+        queue_id: u64,
+    },
+    Dequeue {
+        session: String,
+        queue_id: u64,
+    },
+    Compact {
+        session: String,
+    },
+    SetModel {
+        session: String,
+        model: String,
+    },
+    SetEffort {
+        session: String,
+        effort: ReasoningEffort,
+    },
+    SetFast {
+        session: String,
+        enabled: bool,
+    },
+    Activate {
+        session: String,
+    },
     Open(OpenSpec),
-    Close { session: String, force: bool },
+    Close {
+        session: String,
+        force: bool,
+    },
 }
 
 #[derive(Debug)]
@@ -140,7 +167,9 @@ pub(crate) enum OpenSpec {
 pub(crate) enum Reply {
     Done,
     /// The session that `Command::Open` created or activated.
-    Opened { session: String },
+    Opened {
+        session: String,
+    },
 }
 
 /// Typed refusals. Each maps one-to-one onto a wire error code.
@@ -194,10 +223,12 @@ pub(crate) struct AuxiliaryRequest {
 pub(crate) enum WebStatus {
     Starting,
     /// `url` embeds the login credential in its fragment and must only be shown on request.
-    Ready { url: String },
-    /// The web interface bundle is not installed; opening it needs the user's consent to download.
-    AssetsMissing,
-    Unavailable { reason: String },
+    Ready {
+        url: String,
+    },
+    Unavailable {
+        reason: String,
+    },
 }
 
 /// The loop's half of the bridge.
@@ -205,7 +236,7 @@ pub(crate) struct LoopEnd {
     pub(crate) publisher: Publisher,
     pub(crate) requests: mpsc::UnboundedReceiver<Request>,
     pub(crate) auxiliary: mpsc::UnboundedReceiver<AuxiliaryRequest>,
-    pub(crate) status: watch::Sender<WebStatus>,
+    pub(crate) status: watch::Receiver<WebStatus>,
 }
 
 /// The server's half of the bridge.
@@ -213,7 +244,7 @@ pub(crate) struct WebEnd {
     pub(crate) publications: mpsc::UnboundedReceiver<Publication>,
     pub(crate) requests: mpsc::UnboundedSender<Request>,
     pub(crate) auxiliary: mpsc::UnboundedSender<AuxiliaryRequest>,
-    pub(crate) status: watch::Receiver<WebStatus>,
+    pub(crate) status: watch::Sender<WebStatus>,
 }
 
 pub(crate) fn bridge() -> (LoopEnd, WebEnd) {
@@ -226,13 +257,13 @@ pub(crate) fn bridge() -> (LoopEnd, WebEnd) {
             publisher: Publisher(publish),
             requests,
             auxiliary,
-            status: status_tx,
+            status,
         },
         WebEnd {
             publications,
             requests: requests_tx,
             auxiliary: auxiliary_tx,
-            status,
+            status: status_tx,
         },
     )
 }

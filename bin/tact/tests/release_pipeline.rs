@@ -7,8 +7,8 @@ const CHANGELOG_CONFIG: &str = include_str!("../../../cliff.toml");
 const RELEASE_INSTRUCTIONS: &str = include_str!("../../../RELEASES.md");
 const PACKAGE_MANIFEST: &str = include_str!("../Cargo.toml");
 const REVIEW_BUILD: &str = include_str!("../../../web/app/build.ts");
-const REVIEW_ASSETS: &str = include_str!("../src/review/assets.rs");
-const REVIEW_SERVER: &str = include_str!("../src/review/server.rs");
+const REVIEW_ASSETS: &str = include_str!("../src/web/assets.rs");
+const REVIEW_SERVER: &str = include_str!("../src/web/server.rs");
 const JUSTFILE: &str = include_str!("../../../justfile");
 
 fn assert_contains(document: &str, expected: &str) {
