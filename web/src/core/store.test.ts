@@ -58,7 +58,7 @@ test("live updates do not disturb the transcript", () => {
     type: "live",
     data: {
       active: "a",
-      sessions: [{ id: "a", title: "Session a", model: "sol", state: "running", unread: false, has_draft: false, last_activity_unix_ms: 1 }],
+      sessions: [{ id: "a", title: "Session a", model: "sol", state: "running", unread: false, has_draft: false, last_activity_unix_ms: 1, workspace: "/src/tact" }],
     },
   });
 

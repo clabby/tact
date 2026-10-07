@@ -26,13 +26,25 @@ export class ProtocolMismatch extends Error {
 /**
  * Review endpoints. Overviews, AI reviews, and question threads run in a chat session, so every
  * request that starts or reads them names the session; the diff and the snapshot (which carries
- * the active session's stored overview and questions) belong to the workspace.
+ * the session's stored overview and questions) belong to the reviewed checkout. Every request
+ * names that checkout when it is not the session's workspace.
  */
 export class ReviewApi {
-  constructor(private readonly transport: ReviewTransport) {}
+  constructor(
+    private readonly transport: ReviewTransport,
+    /** The reviewed checkout's path, or null for the session's workspace. */
+    private readonly checkout: () => string | null = () => null,
+    /** The session the review belongs to; the server resolves the session's workspace from it. */
+    private readonly session: () => string | null = () => null,
+  ) {}
 
-  async review(signal?: AbortSignal): Promise<ReviewSession> {
-    const review = await this.transport.get<ReviewSession>("review", { signal });
+  async review(session: string | null, signal?: AbortSignal): Promise<ReviewSession> {
+    const query = new URLSearchParams();
+    if (session !== null) query.set("session", session);
+    const checkout = this.checkout();
+    if (checkout !== null) query.set("checkout", checkout);
+    const search = query.toString();
+    const review = await this.transport.get<ReviewSession>(search ? `review?${search}` : "review", { signal });
     if (review.protocol_version !== REVIEW_PROTOCOL_VERSION) {
       throw new ProtocolMismatch(
         `This review UI supports protocol ${REVIEW_PROTOCOL_VERSION}, but Tact returned ${review.protocol_version}.`,
@@ -42,11 +54,11 @@ export class ReviewApi {
   }
 
   loadRange(generation: number, range: ReviewRange, signal?: AbortSignal): Promise<ReviewPage> {
-    return this.transport.post("range", { generation, range }, { signal });
+    return this.transport.post("range", { generation, range, ...this.scope() }, { signal });
   }
 
   refresh(generation: number, signal?: AbortSignal): Promise<ReviewSession> {
-    return this.transport.post("refresh", { generation }, { signal });
+    return this.transport.post("refresh", { generation, ...this.scope() }, { signal });
   }
 
   overview(
@@ -60,6 +72,7 @@ export class ReviewApi {
       generation: page.generation,
       range: page.selected_range,
       ...(instructions?.trim() ? { instructions: instructions.trim() } : {}),
+      ...this.scope(),
     }, { signal });
   }
 
@@ -68,15 +81,16 @@ export class ReviewApi {
       session,
       generation: page.generation,
       range: page.selected_range,
+      ...this.scope(),
     }, { signal });
   }
 
   question(session: string, request: QuestionRequest, signal?: AbortSignal): Promise<QuestionResponse> {
-    return this.transport.post("question", { ...request, session }, { signal });
+    return this.transport.post("question", { ...request, session, ...this.scope() }, { signal });
   }
 
   questions(session: string, generation: number, signal?: AbortSignal): Promise<QuestionListResponse> {
-    return this.transport.post("questions", { session, generation }, { signal });
+    return this.transport.post("questions", { session, generation, ...this.scope() }, { signal });
   }
 
   async cancelQuestion(session: string, request: QuestionCancelRequest): Promise<void> {
@@ -85,8 +99,18 @@ export class ReviewApi {
 
   /** Returns the canonical markdown for the review, ready to be written into the chat draft. */
   async compose(decision: ReviewDecision): Promise<string> {
-    const { markdown } = await this.transport.post<{ markdown: string }>("review/compose", decision);
+    const { markdown } = await this.transport.post<{ markdown: string }>("review/compose", { ...decision, ...this.scope() });
     return markdown;
+  }
+
+  /** Names the session and, when it is not the session's workspace, the reviewed checkout. */
+  private scope(): { session?: string; checkout?: string } {
+    const session = this.session();
+    const checkout = this.checkout();
+    return {
+      ...(session === null ? {} : { session }),
+      ...(checkout === null ? {} : { checkout }),
+    };
   }
 }
 

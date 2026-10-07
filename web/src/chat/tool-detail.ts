@@ -2,6 +2,7 @@ import { FileDiff } from "@pierre/diffs";
 import { glyph } from "../ui/glyphs";
 import { renderMarkdown } from "../core/markdown";
 import { presentMemory } from "./memory-detail";
+import { messageElement, sentMessage, type Markdown, type Participants } from "./directed";
 import { parseApplyPatch, patchFileDiff, patchStats } from "./patch";
 import type { Theme } from "../core/theme";
 import type { ToolDetail } from "../core/wire";
@@ -49,6 +50,9 @@ export const TOOL_DEFAULT_OPEN = new Set(["apply_patch"]);
 
 export type DetailContext = {
   theme: Theme;
+  /** Names the parties of agent messages. */
+  participants: Participants;
+  markdown: Markdown;
   /** Whether this call's patch is shown in full rather than truncated. */
   full: boolean;
   /** Reports the Pierre instances created, so the owner can release them. */
@@ -78,6 +82,12 @@ export function presentDetail(container: HTMLElement, name: string, detail: Tool
     const memory = presentMemory(args, detail.result, context);
     if (memory) {
       container.replaceChildren(memory);
+      return;
+    }
+  } else if (name === "send_agent_message") {
+    const message = sentMessage(args, detail.result, context.participants.viewer);
+    if (message) {
+      container.replaceChildren(messageElement(message, context.participants, context.markdown, { replyTo: message.in_reply_to === null ? undefined : "#" + message.in_reply_to }));
       return;
     }
   }

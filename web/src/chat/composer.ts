@@ -19,6 +19,10 @@ export type ComposerHost = {
   openRecentPrompts(): void;
   openContext(): void;
   openSubagents(): void;
+  /** The active session's workspace as the chip shows it, or null when the chip is not shown. */
+  workspaceChip(): { label: string; path: string } | null;
+  /** Offers the repository's checkouts and recent workspaces for a new chat, anchored to `anchor`. */
+  chooseWorkspace(anchor: HTMLElement): void;
   /** The applicable actions matching `query`, as offered by typing "/" in an empty composer. */
   actions(query: string): PaletteCommand[];
 };
@@ -52,7 +56,7 @@ export class Composer {
   private readonly mentions: HTMLElement;
   private readonly meter: HTMLButtonElement;
   private readonly fileInput: HTMLInputElement;
-  private readonly controls: Record<"model" | "effort" | "mode" | "speed", HTMLButtonElement>;
+  private readonly controls: Record<"model" | "effort" | "mode" | "speed" | "workspace", HTMLButtonElement>;
   private session: SessionView | null = null;
   private sync: DraftSync | null = null;
   private mirrorTimer = 0;
@@ -84,6 +88,7 @@ export class Composer {
             <button type="button" class="chip effort-chip" aria-haspopup="menu" aria-label="Reasoning effort"><span class="chip-dot"></span><span class="chip-label"></span>${glyph("chevron-down", "glyph chip-caret")}</button>
             <button type="button" class="chip mode-chip" aria-pressed="false" aria-label="Pro reasoning" title="Pro reasoning">${glyph("sparkles")}<span class="chip-label">Pro</span></button>
             <button type="button" class="chip speed-chip" aria-haspopup="menu" aria-label="Speed">${glyph("bolt")}<span class="chip-label"></span></button>
+            <button type="button" class="chip workspace-chip" aria-haspopup="menu" hidden>${glyph("git-branch")}<span class="chip-label"></span>${glyph("chevron-down", "glyph chip-caret")}</button>
             <span class="mirror-cue" aria-live="polite" hidden>${glyph("terminal")}From terminal</span>
           </div>
           <div class="composer-actions">
@@ -115,6 +120,7 @@ export class Composer {
       effort: root.querySelector(".effort-chip")!,
       mode: root.querySelector(".mode-chip")!,
       speed: root.querySelector(".speed-chip")!,
+      workspace: root.querySelector(".workspace-chip")!,
     };
     this.bind();
   }
@@ -176,7 +182,7 @@ export class Composer {
     const session = this.session;
     const model = this.model();
     const started = (session?.order.length ?? 0) > 0;
-    const { model: modelChip, effort, mode, speed } = this.controls;
+    const { model: modelChip, effort, mode, speed, workspace } = this.controls;
     this.chip(modelChip, model?.label ?? session?.model ?? "Model", session ? modelColor(session.model) : "var(--muted)");
     modelChip.disabled = !session || started;
     modelChip.title = started ? "The model is fixed after the first turn" : "Model";
@@ -195,6 +201,14 @@ export class Composer {
     speed.disabled = !session;
     // A model with a single tier has nothing to choose.
     speed.hidden = !catalog || speedChoices(model, catalog).length < 2;
+    const chip = session ? this.host.workspaceChip() : null;
+    workspace.hidden = !chip;
+    if (chip) {
+      workspace.querySelector(".chip-label")!.textContent = chip.label;
+      workspace.disabled = started;
+      workspace.title = started ? `${chip.path}\nThe workspace is fixed after the first turn` : chip.path;
+      workspace.setAttribute("aria-label", `Workspace: ${chip.label}`);
+    }
   }
 
   contextChanged() {
@@ -388,7 +402,8 @@ export class Composer {
   }
 
   private bindSettings() {
-    const { model, effort, mode, speed } = this.controls;
+    const { model, effort, mode, speed, workspace } = this.controls;
+    workspace.addEventListener("click", () => this.host.chooseWorkspace(workspace));
     model.addEventListener("click", () => {
       const session = this.session;
       const catalog = this.host.catalog();

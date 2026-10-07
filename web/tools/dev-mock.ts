@@ -4,6 +4,8 @@
 // It follows docs/web.md; the dev server (dev.ts) only adapts it to HTTP.
 
 import type {
+  AgentMessage,
+  Checkout,
   CommandName,
   Commands,
   ContextBudget,
@@ -26,6 +28,7 @@ import type {
   ToolDetail,
   TransientStatus,
   WireEntry,
+  Workspaces,
 } from "../src/core/wire";
 
 type EntryBody = WireEntry extends infer Entry
@@ -57,6 +60,36 @@ export const MOCK_CATALOG: ModelCatalog = {
 const WINDOW_TOKENS = 272_000;
 const MAX_LIVE = 8;
 
+export const MOCK_DEFAULT_WORKSPACE = "/Users/dev/src/tact";
+const WS2 = "/Users/dev/src/tact-ws2";
+type MockCheckout = Omit<Checkout, "current" | "touched">;
+/** The default workspace's repository: the main checkout, a git worktree, and a jj workspace. */
+export const MOCK_CHECKOUTS: MockCheckout[] = [
+  { path: MOCK_DEFAULT_WORKSPACE, name: "tact", label: "main", kind: "git", head: "9d3b7456e1", changed_files: 2, missing: false },
+  { path: WS2, name: "tact-ws2", label: "ws2", kind: "git", head: "4be0c2d913", changed_files: 4, missing: false },
+  { path: "/Users/dev/src/review-ui", name: "review-ui", label: "review-ui", kind: "jj", head: "77a1f0c5e2", changed_files: 0, missing: false },
+];
+const RECENT_WORKSPACES = [WS2, "/Users/dev/src/commonware", "/Users/dev/notes"];
+/** How the synthetic review diff is relabelled for checkouts other than the main one. */
+const CHECKOUT_FILES: Record<string, [string, string][]> = {
+  [WS2]: [
+    ["src/review/mod.rs", "src/web/checkout.rs"],
+    ["src/tui/components/actions.rs", "src/web/diff.rs"],
+    [".github/workflows/release.yml", "docs/workspaces.md"],
+  ],
+};
+
+/**
+ * A review page as `checkout` would show it: the main checkout's diff unchanged, the worktree's
+ * with other files, and a checkout without changes empty.
+ */
+export function mockCheckoutPage<Page extends { patch: string; repository: string }>(page: Page, checkout: Checkout): Page {
+  if (checkout.path === MOCK_DEFAULT_WORKSPACE) return page;
+  const renames = CHECKOUT_FILES[checkout.path];
+  const patch = renames ? renames.reduce((text, [from, to]) => text.replaceAll(from, to), page.patch) : "";
+  return { ...page, repository: checkout.name, patch };
+}
+
 class MockSession {
   title: string;
   entries: WireEntry[] = [];
@@ -81,6 +114,7 @@ class MockSession {
     public model: string,
     public effort: Effort = "medium",
     title = "New chat",
+    readonly workspace = MOCK_DEFAULT_WORKSPACE,
   ) {
     this.title = title;
   }
@@ -98,6 +132,7 @@ class MockSession {
       unread: this.unread,
       has_draft: this.draft.text.trim().length > 0,
       last_activity_unix_ms: this.lastActivity,
+      workspace: this.workspace,
     };
   }
 
@@ -204,9 +239,41 @@ export class MockTact {
     return detail;
   }
 
-  touchWorkspace() {
+  /** Announces that files changed in `checkout`, by default the default workspace. */
+  touchWorkspace(checkout = MOCK_DEFAULT_WORKSPACE) {
     this.workspaceVersion = String(Number(this.workspaceVersion) + 1);
-    this.emit("workspace", { version: this.workspaceVersion });
+    this.emit("workspace", { version: this.workspaceVersion, checkout });
+  }
+
+  /**
+   * The checkouts of `sessionId`'s repository. A session outside the default workspace's
+   * repository has a family of one. While a session runs, its agent is working in the git worktree.
+   */
+  workspaces(sessionId?: string): Workspaces {
+    const session = sessionId === undefined ? undefined : this.session(sessionId);
+    const workspace = session?.workspace ?? MOCK_DEFAULT_WORKSPACE;
+    const family: MockCheckout[] = MOCK_CHECKOUTS.some((checkout) => checkout.path === workspace)
+      ? MOCK_CHECKOUTS
+      : [{ path: workspace, name: workspace.split("/").pop()!, label: "main", kind: "git", head: null, changed_files: 0, missing: false }];
+    return {
+      default: MOCK_DEFAULT_WORKSPACE,
+      checkouts: family.map((checkout) => ({
+        ...checkout,
+        current: checkout.path === workspace,
+        touched: (session?.running ?? false) && checkout.path === WS2,
+      })),
+      recent: RECENT_WORKSPACES.filter((path) => path !== workspace),
+    };
+  }
+
+  /** The checkout a review request addresses, refusing paths outside the session's repository. */
+  reviewCheckout(sessionId: string | undefined, path: string | undefined): Checkout {
+    const { checkouts } = this.workspaces(sessionId);
+    const checkout = path === undefined
+      ? checkouts.find((candidate) => candidate.current)
+      : checkouts.find((candidate) => candidate.path === path);
+    if (!checkout) throw new MockRefusal("unknown_checkout", "That checkout is not part of the session's repository.", 404);
+    return checkout;
   }
 
   /** Simulates typing in the terminal's composer. */
@@ -367,19 +434,23 @@ export class MockTact {
           const record = history.find((candidate) => candidate.session_id === spec.resume.session);
           if (!record) throw new MockRefusal("unknown_session", "No such session.", 404);
           this.ensureCapacity();
-          session = new MockSession(record.session_id, record.model, record.effort, record.preview);
+          session = new MockSession(record.session_id, record.model, record.effort, record.preview, record.workspace);
           session.push({ kind: "user", text: record.preview });
           session.push({ kind: "assistant", text: "Resumed from history.", complete: true, commentary: false });
         } else if ("fork" in spec) {
           const source = this.session(spec.fork.session);
           if (source.running) throw new MockRefusal("turn_running", "Wait for the turn to finish before forking.");
           this.ensureCapacity();
-          session = new MockSession(this.newId(), source.model, source.effort, `${source.title} (fork)`);
+          session = new MockSession(this.newId(), source.model, source.effort, `${source.title} (fork)`, source.workspace);
           for (const entry of source.entries) session.push({ ...entry });
           session.push({ kind: "forked_from", session: source.id });
         } else {
           this.ensureCapacity();
-          session = new MockSession(this.newId(), spec.new.model ?? "sol");
+          const workspace = spec.new.workspace ?? MOCK_DEFAULT_WORKSPACE;
+          if (!MOCK_CHECKOUTS.some((checkout) => checkout.path === workspace) && !RECENT_WORKSPACES.includes(workspace)) {
+            throw new MockRefusal("invalid_request", `${workspace} is not a known workspace.`, 400);
+          }
+          session = new MockSession(this.newId(), spec.new.model ?? "sol", "medium", "New chat", workspace);
         }
         this.sessions.set(session.id, session);
         this.activate(session.id);
@@ -437,6 +508,8 @@ export class MockTact {
           return { access: { source: "local", namespace: null, role: "writer" }, records: this.memories };
         case "config":
           return this.config;
+        case "workspaces":
+          return this.workspaces((args as Queries["workspaces"]["args"] | undefined)?.session);
       }
       throw new MockRefusal("invalid_request", `Unknown query ${name}.`, 400);
     };
@@ -566,6 +639,8 @@ export class MockTact {
         }
         if (tool.name === "spawn_agent") await this.runSubagent(session, signal);
         await sleep(tool.ms * this.pace, signal);
+        // The agent also edits the git worktree, which the review offers as a touched checkout.
+        if (tool.name === "apply_patch") this.touchWorkspace(WS2);
         this.growContext(session, 2_000 + Math.floor(Math.random() * 6_000));
         session.details.set(row.id, { arguments: tool.arguments, result: tool.result, metadata: { exit_code: tool.failed ? 1 : 0 } });
         this.update(session, row, {
@@ -593,7 +668,7 @@ export class MockTact {
     }
     if (this.active !== session.id) session.unread = true;
     if (!this.sessions.has(session.id)) return;
-    this.touchWorkspace();
+    this.touchWorkspace(session.workspace);
     const next = session.queue.shift();
     if (next) {
       this.emit("queue", { session: session.id, items: session.queue });
@@ -687,7 +762,10 @@ export class MockTact {
       { kind: "tool", name: "memory", summary: "replace · local · 12@v3", state: "succeeded", duration_ns: 9_000_000, substeps: [], child_count: 0, has_detail: true },
       { kind: "tool", name: "memory", summary: "delete · 9@v1", state: "failed", duration_ns: 3_000_000, substeps: [], child_count: 0, has_detail: true },
       { kind: "assistant", text: "One test failed: the draft echo arrived before the acknowledgement. I'll make the reply wait for the loop to apply the command.", complete: true, commentary: true },
-      { kind: "directed_message", from: "agent 4", to: "agent 2", body: "The stream now coalesces entry events to the frame interval.", delivery: "deferred" },
+      directedThread(1, THREAD_DOCS),
+      { kind: "tool", name: "send_agent_message", summary: "→ #2", state: "succeeded", duration_ns: 3_000_000, substeps: [], child_count: 0, has_detail: true },
+      directedThread(2, THREAD_SCHEMA),
+      directedThread(3, THREAD_FAILED),
       { kind: "tool", name: "spawn_agent", summary: "review bridge ordering · sol xhigh", state: "succeeded", duration_ns: 312_000_000_000, substeps: ["read bridge.rs", "trace Publisher::publish", "report"], child_count: 1, has_detail: false },
       { kind: "assistant", text: "## Done\n\nThe loop now polls `requests` next to terminal input:\n\n```rust\ntokio::select! {\n    Some(request) = web.requests.recv() => self.apply(request),\n    Some(event) = terminal.next() => self.handle(event),\n}\n```\n\n- Publications go through an unbounded channel, so a stalled browser cannot block a frame.\n- Every command is applied with the same effect function as its keypress.\n\n| Command | Keypress |\n| :-- | :-- |\n| `submit` | Enter |\n| `interrupt` | Esc Esc |\n\nAll **312** tests pass.\n\n![screenshot](/Users/ben/Downloads/absolute-cinema.png)", complete: true, commentary: false },
       { kind: "turn_completed", duration_ns: 402_000_000_000 },
@@ -753,6 +831,17 @@ export class MockTact {
       result: { error: "memory 9 changed since version 1" },
       metadata: null,
     });
+    detail(15, {
+      arguments: {
+        agent_id: 2,
+        purpose: "question",
+        priority: "urgent",
+        in_reply_to: null,
+        message: "Does the version check also cover the `subagent_entry` event, or only `snapshot`? If only the snapshot, list the events a v1 client would misparse.",
+      },
+      result: JSON.stringify({ message_id: 16, thread_id: 4, disposition: "steered" }),
+      metadata: null,
+    });
     main.context.active_tokens = 142_600;
     main.speed = "fast";
     main.subagents.agents.push({
@@ -780,8 +869,19 @@ export class MockTact {
         { id: 3, revision: 1, parent: null, kind: "assistant", text: "Working on it: " + role + " has read the relevant files.", complete: false, commentary: true },
       ]);
     }
+    // The root turn has finished its own work and waits on the agents it started.
+    main.turn = new AbortController();
+    main.status = { kind: "waiting_for_background_work" };
+    // Each agent's transcript shows the threads it takes part in.
+    for (const [thread, messages] of [[1, THREAD_DOCS], [2, THREAD_SCHEMA], [3, THREAD_FAILED]] as const) {
+      const parties = new Set(messages.flatMap((message) => [message.from, message.to]));
+      for (const agent of parties) {
+        const entries = agent === null ? undefined : main.agentEntries.get(agent);
+        entries?.push({ id: entries.length + 1, revision: 1, parent: null, ...directedThread(thread, messages) });
+      }
+    }
 
-    const ideas = new MockSession(this.newId(), "opus-5.5", "medium", "Sketch the overview prompt");
+    const ideas = new MockSession(this.newId(), "opus-5.5", "medium", "Sketch the overview prompt", WS2);
     ideas.push({ kind: "user", text: "Draft a better overview prompt." });
     ideas.push({ kind: "assistant", text: "Here is a tighter prompt that asks for a **narrative** first and a risk list second.", complete: true, commentary: false });
     ideas.push({ kind: "turn_completed", duration_ns: 21_000_000_000 });
@@ -800,6 +900,83 @@ export class MockTact {
     this.active = main.id;
   }
 }
+
+/** A conversation thread entry as the server publishes it: the thread plus its latest message. */
+function directedThread(thread: number, messages: readonly AgentMessage[]): EntryBody {
+  const latest = messages.at(-1)!;
+  const label = (agent: number | null) => (agent === null ? "root" : `agent ${agent}`);
+  return {
+    kind: "directed_message",
+    from: label(latest.from),
+    to: label(latest.to),
+    body: latest.body,
+    delivery: latest.delivery,
+    thread,
+    messages: [...messages],
+  };
+}
+
+const message = (fields: Pick<AgentMessage, "id" | "from" | "to" | "purpose" | "body"> & Partial<AgentMessage>): AgentMessage => ({
+  priority: "deferred",
+  in_reply_to: null,
+  delivery: "delivered",
+  detail: "queued",
+  ...fields,
+});
+
+/** The docs verifier reports a finding to the protocol auditor, which replies; the follow-up is long. */
+const THREAD_DOCS: AgentMessage[] = [
+  message({
+    id: 11, from: 4, to: 2, purpose: "finding",
+    body: "`docs/web.md` still documents `directed_message` with four fields; the bridge now also sends `thread` and `messages`:\n\n```ts\n{ kind: \"directed_message\"; from; to; body; delivery; thread: number; messages: Message[] }\n```",
+  }),
+  message({
+    id: 12, from: 2, to: 4, purpose: "reply", in_reply_to: 11, detail: "steered",
+    body: "Confirmed against `wire.rs`. Keep the four summary fields documented as the latest message; I will flag the protocol version separately.",
+  }),
+  message({
+    id: 13, from: 4, to: 2, purpose: "coordinate", in_reply_to: 12, detail: "started",
+    body: [
+      "Proposed wording for the section, so we do not both edit it:",
+      "",
+      "1. `thread` identifies the conversation; every message of one conversation shares it.",
+      "2. `messages` is the retained thread in delivery order.",
+      "3. Each message carries `id`, `from` (`null` for the root), `to`, `purpose`, and `priority`.",
+      "4. `in_reply_to` names the message it answers, when any.",
+      "5. `delivery` is `admitted`, `delivered`, `failed`, or `unknown`.",
+      "6. `detail` says how the recipient took it, or why delivery failed.",
+      "",
+      "Open questions:",
+      "",
+      "- Does a client need the thread's participants, or are `from`/`to` enough?",
+      "- Should the entry carry a revision per message?",
+      "",
+      "```rust",
+      "pub(super) struct WireMessage {",
+      "    pub(super) id: u64,",
+      "    pub(super) from: Option<u64>,",
+      "    pub(super) to: u64,",
+      "}",
+      "```",
+    ].join("\n"),
+  }),
+];
+
+/** The protocol auditor delegates urgently to the schema checker, which has not taken it yet. */
+const THREAD_SCHEMA: AgentMessage[] = [
+  message({
+    id: 14, from: 2, to: 3, purpose: "delegate", priority: "urgent", delivery: "admitted", detail: "steered",
+    body: "Stop the field-by-field pass and diff `WireMessage` against `AgentMessage` in `wire.ts` first; report any field whose nullability differs.",
+  }),
+];
+
+/** The schema checker asks the docs verifier, which had already failed. */
+const THREAD_FAILED: AgentMessage[] = [
+  message({
+    id: 15, from: 3, to: 4, purpose: "question", delivery: "failed", detail: "agent 4 has failed and cannot receive messages",
+    body: "Which section of `docs/web.md` lists the stream events?",
+  }),
+];
 
 const PATCH_ENVELOPE = [
   "*** Begin Patch",
@@ -914,7 +1091,7 @@ const history: PersistedSession[] = [
   effort: MOCK_CATALOG.efforts[index % MOCK_CATALOG.efforts.length]!,
   reasoning_mode: "standard" as const,
   preview,
-  workspace: "/Users/dev/src/tact",
+  workspace: index % 5 === 1 ? WS2 : MOCK_DEFAULT_WORKSPACE,
 }));
 
 /** Subsequence match, enough for fixture search. */

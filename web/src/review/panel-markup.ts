@@ -13,11 +13,18 @@ export function panelMarkup(repository: string, settingsPopover: string, rangeDi
             <button class="segment active" id="changes-tab" role="tab" aria-selected="true" aria-controls="changes-panel" data-tab="changes">Changes<span class="tab-count" id="file-count">0</span></button>
             <button class="segment" id="overview-tab" role="tab" aria-selected="false" aria-controls="overview-panel" tabindex="-1" data-tab="overview">Overview<span class="activity-spinner overview-tab-activity" aria-hidden="true"></span></button>
           </nav>
-          <button class="range-button" id="range-button" aria-haspopup="dialog" aria-controls="range-dialog" aria-expanded="false" aria-label="Change range">
-            ${icon("git-branch")}
-            <strong id="range-label">Full branch</strong>
-            <span class="range-chevron">${icon("chevron-down")}</span>
-          </button>
+          <div class="review-target">
+            <button class="range-button" id="range-button" aria-haspopup="dialog" aria-controls="range-dialog" aria-expanded="false" aria-label="Change range">
+              ${icon("git-branch")}
+              <strong id="range-label">Full branch</strong>
+              <span class="range-chevron">${icon("chevron-down")}</span>
+            </button>
+            <button class="range-button checkout-button" id="checkout-button" aria-haspopup="menu" aria-expanded="false" hidden>
+              ${icon("folder")}
+              <strong id="checkout-label"></strong>
+              <span class="range-chevron">${icon("chevron-down")}</span>
+            </button>
+          </div>
           <div class="change-stats" id="change-stats" aria-label="Change statistics"></div>
           <p class="scope-description" id="scope-description" title="${escapeHtml(repository)}">Loading changes…</p>
           <div class="topbar-actions">
@@ -25,6 +32,9 @@ export function panelMarkup(repository: string, settingsPopover: string, rangeDi
               <span class="live-badge" id="live-badge" title="The agent is working; this diff follows its edits." hidden><i aria-hidden="true"></i>Live</span>
               <span class="updating" id="updating" hidden><span class="activity-spinner" aria-hidden="true"></span>Updating</span>
             </div>
+            <button class="refresh-notice touched-notice" id="touched-notice" hidden>
+              <i aria-hidden="true"></i><span></span><strong></strong>
+            </button>
             <button class="refresh-notice" id="refresh-notice" hidden>
               <i aria-hidden="true"></i><span>New changes available</span><strong>Refresh</strong>
             </button>

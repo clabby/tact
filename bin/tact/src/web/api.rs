@@ -344,6 +344,8 @@ const MAX_LOCAL_IMAGE_BYTES: u64 = 25 * 1024 * 1024;
 #[derive(Deserialize)]
 struct FileQuery {
     path: String,
+    /// Relative paths are the session's workspace's; without a session, the default workspace's.
+    session: Option<String>,
 }
 
 /// Serves an image that an agent's Markdown refers to, wherever it lives on this machine, as the
@@ -358,7 +360,12 @@ async fn local_image(
         Some(rest) => PathBuf::from(rest),
         None => PathBuf::from(&query.path),
     };
-    let path = state.workspace.join(path);
+    let workspace = query
+        .session
+        .as_deref()
+        .and_then(|session| state.hub.session_workspace(session))
+        .unwrap_or_else(|| state.workspace.clone());
+    let path = workspace.join(path);
     let metadata = tokio::fs::metadata(&path).await.map_err(|_| missing())?;
     if !metadata.is_file() || metadata.len() > MAX_LOCAL_IMAGE_BYTES {
         return Err(missing());

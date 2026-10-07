@@ -58,8 +58,10 @@ export type AppState = {
 export type Change =
   | {
     type: "connection" | "live" | "session" | "status" | "queue" | "draft" | "settings" | "context"
-      | "subagents" | "workspace";
+      | "subagents";
   }
+  /** Files changed in `checkout`, or in the session's workspace when it is null. */
+  | { type: "workspace"; checkout: string | null }
   | { type: "entry"; id: number; added: boolean }
   | { type: "subagent_entry"; agent: number; id: number };
 
@@ -146,7 +148,7 @@ export function reduce(state: AppState, event: StreamEvent): Change[] {
     }
     case "workspace":
       state.workspace = event.data.version;
-      return [{ type: "workspace" }];
+      return [{ type: "workspace", checkout: event.data.checkout ?? null }];
   }
 
   const session = state.session;

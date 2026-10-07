@@ -7,11 +7,11 @@ import { mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { reviewEntrypoints, reviewScriptAssets } from "./build-config";
 import { overviewFixtures, reviewBootstrap, reviewFixtures } from "./dev-fixture";
-import { MockRefusal, MockTact } from "./dev-mock";
+import { MockRefusal, MockTact, mockCheckoutPage } from "./dev-mock";
 import { overviewFrameDocument } from "../src/review/overview";
 import type { QuestionRequest, ReviewDecision, ReviewPage, StoredOverview, StoredQuestionThread } from "../src/review/protocol";
 import { rangeKey, type ReviewRange } from "../src/review/range-selection";
-import type { CommandName, QueryName } from "../src/core/wire";
+import type { Checkout, CommandName, QueryName } from "../src/core/wire";
 
 const token = process.env.TACT_DEV_TOKEN ?? "dev";
 const port = Number(process.env.PORT ?? 4173);
@@ -48,12 +48,24 @@ const tact = new MockTact();
 tact.startAmbientWork();
 setInterval(() => tact.touchWorkspace(), 20_000);
 
-const review = {
-  page: reviewBootstrap.page as ReviewPage,
-  overview: null as StoredOverview | null,
-  questions: [] as StoredQuestionThread[],
-  cancellations: new Map<string, () => void>(),
-};
+/** One review context per checkout, as the server keeps them. */
+type CheckoutReview = { page: ReviewPage; overview: StoredOverview | null; questions: StoredQuestionThread[] };
+const reviews = new Map<string, CheckoutReview>();
+const cancellations = new Map<string, () => void>();
+
+/**
+ * The review context of the checkout a request names, or of the session's workspace. Requests that
+ * name no session (range, refresh) belong to the active one.
+ */
+function reviewContext(session: string | null | undefined, path: string | null | undefined) {
+  const checkout = tact.reviewCheckout(session ?? tact.active ?? undefined, path ?? undefined);
+  let review = reviews.get(checkout.path);
+  if (!review) {
+    review = { page: mockCheckoutPage(reviewBootstrap.page as ReviewPage, checkout), overview: null, questions: [] };
+    reviews.set(checkout.path, review);
+  }
+  return { checkout, review };
+}
 
 const encoder = new TextEncoder();
 
@@ -138,7 +150,10 @@ async function api(request: Request, url: URL): Promise<Response> {
       return Response.json(tact.toolDetail(decodeURIComponent(detail[1]!), Number(detail[2])));
     }
     if (path === "link") return Response.json({ public_origin: process.env.TACT_DEV_PUBLIC_ORIGIN ?? null, token });
-    if (path === "review") return Response.json(reviewSession());
+    if (path === "review") {
+      const { checkout, review } = reviewContext(url.searchParams.get("session"), url.searchParams.get("checkout"));
+      return Response.json(reviewSession(checkout, review));
+    }
     return failure("invalid_request", `Unknown endpoint ${path}.`, 404);
   }
 
@@ -154,9 +169,12 @@ async function api(request: Request, url: URL): Promise<Response> {
   return reviewCommand(path, body);
 }
 
-function reviewSession() {
+function reviewSession(checkout: Checkout, review: CheckoutReview) {
   return {
     ...reviewBootstrap,
+    title: `Review ${checkout.label}`,
+    repository: checkout.name,
+    checkout: { path: checkout.path, name: checkout.name, label: checkout.label, kind: checkout.kind },
     page: review.page,
     overview: review.overview,
     questions: review.questions,
@@ -165,17 +183,18 @@ function reviewSession() {
 }
 
 async function reviewCommand(path: string, body: Record<string, unknown>): Promise<Response> {
+  const { checkout, review } = reviewContext(body.session as string | undefined, body.checkout as string | undefined);
   switch (path) {
     case "refresh":
-      review.page = reviewBootstrap.page;
+      review.page = mockCheckoutPage(reviewBootstrap.page as ReviewPage, checkout);
       review.overview = null;
-      return Response.json(reviewSession());
+      return Response.json(reviewSession(checkout, review));
     case "range": {
       const fixture = reviewFixtures[rangeKey(body.range as ReviewRange) as keyof typeof reviewFixtures];
       if (!fixture) return failure("invalid_range", "Unknown review range.", 422);
       await Bun.sleep(350);
-      review.page = fixture;
-      return Response.json(fixture);
+      review.page = mockCheckoutPage(fixture as ReviewPage, checkout);
+      return Response.json(review.page);
     }
     case "overview": {
       const range = body.range as ReviewRange;
@@ -197,19 +216,19 @@ async function reviewCommand(path: string, body: Record<string, unknown>): Promi
         }],
       });
     case "question":
-      return question(body as unknown as QuestionRequest);
+      return question(body as unknown as QuestionRequest, review);
     case "questions":
       return Response.json({ generation: reviewBootstrap.generation, questions: review.questions });
     case "question/cancel":
-      review.cancellations.get(body.operation_id as string)?.();
+      cancellations.get(body.operation_id as string)?.();
       return new Response(null, { status: 204 });
     case "review/compose":
-      return Response.json({ markdown: composeReview(body as unknown as ReviewDecision) });
+      return Response.json({ markdown: composeReview(body as unknown as ReviewDecision, body.checkout as string | undefined) });
   }
   return failure("invalid_request", `Unknown endpoint ${path}.`, 404);
 }
 
-async function question(body: QuestionRequest) {
+async function question(body: QuestionRequest, review: CheckoutReview) {
   const thread: StoredQuestionThread = {
     ...body,
     messages: body.messages.map((message) => ({ ...message })),
@@ -221,9 +240,9 @@ async function question(body: QuestionRequest) {
 
   const cancelled = await Promise.race([
     Bun.sleep(900).then(() => false),
-    new Promise<boolean>((resolve) => review.cancellations.set(body.operation_id, () => resolve(true))),
+    new Promise<boolean>((resolve) => cancellations.set(body.operation_id, () => resolve(true))),
   ]);
-  review.cancellations.delete(body.operation_id);
+  cancellations.delete(body.operation_id);
   if (cancelled) {
     thread.status = "cancelled";
     return failure("operation_cancelled", "Question answering was cancelled.", 409);
@@ -235,10 +254,11 @@ async function question(body: QuestionRequest) {
   return Response.json({ generation: body.generation, selected_range: body.range, answer });
 }
 
-function composeReview(decision: ReviewDecision) {
+/** The review as chat markdown; a checkout other than the session's workspace is named. */
+function composeReview(decision: ReviewDecision, checkout: string | undefined) {
   const heading = decision.decision === "approve" ? "Review: approved" : "Review: changes requested";
   const comments = decision.comments.map((comment) => `- \`${comment.path}:${comment.start_line}\` ${comment.body}`);
-  return [heading, decision.summary.trim(), comments.join("\n")].filter(Boolean).join("\n\n");
+  return [heading, checkout ? `Checkout: ${checkout}` : "", decision.summary.trim(), comments.join("\n")].filter(Boolean).join("\n\n");
 }
 
 const server = Bun.serve({

@@ -2,12 +2,16 @@ export type MenuItem = {
   label: string;
   /** A glyph for the leading slot, instead of a colour dot. */
   icon?: string;
+  /** Dim secondary text after the label, e.g. a path. */
+  hint?: string;
   detail?: string;
   /** A CSS colour for the leading dot, e.g. a model hue. */
   swatch?: string;
   checked?: boolean;
   danger?: boolean;
   disabled?: boolean;
+  /** A heading shown above the first item of each run of items with the same section. */
+  section?: string;
   run(): void;
 };
 
@@ -24,7 +28,14 @@ export function openMenu(anchor: HTMLElement, items: MenuItem[], label: string) 
   menu.className = "menu";
   menu.setAttribute("role", "menu");
   menu.setAttribute("aria-label", label);
-  const buttons = items.map((item) => {
+  const buttons = items.map((item, index) => {
+    if (item.section && item.section !== items[index - 1]?.section) {
+      const heading = document.createElement("div");
+      heading.className = "menu-section";
+      heading.setAttribute("role", "presentation");
+      heading.textContent = item.section;
+      menu.append(heading);
+    }
     const button = document.createElement("button");
     button.type = "button";
     button.className = "menu-item";
@@ -32,13 +43,16 @@ export function openMenu(anchor: HTMLElement, items: MenuItem[], label: string) 
     if (item.checked !== undefined) button.setAttribute("aria-checked", String(item.checked));
     button.disabled = item.disabled ?? false;
     button.classList.toggle("danger", item.danger ?? false);
-    button.innerHTML = `<span class="menu-swatch"></span><span class="menu-label"></span><span class="menu-detail"></span>`;
+    button.innerHTML = `<span class="menu-swatch"></span><span class="menu-label"></span><span class="menu-hint"></span><span class="menu-detail"></span>`;
     const swatch = button.querySelector<HTMLElement>(".menu-swatch")!;
     if (item.icon) swatch.outerHTML = item.icon;
     else if (item.swatch) swatch.style.background = item.swatch;
     else swatch.remove();
     button.querySelector(".menu-label")!.textContent = item.label;
-    button.querySelector(".menu-detail")!.textContent = item.detail ?? (item.checked ? "✓" : "");
+    const hint = button.querySelector(".menu-hint")!;
+    if (item.hint) hint.textContent = item.hint;
+    else hint.remove();
+    button.querySelector(".menu-detail")!.textContent = [item.detail, item.checked ? "✓" : ""].filter(Boolean).join(" ");
     button.addEventListener("click", () => {
       close();
       item.run();

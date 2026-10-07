@@ -8,7 +8,7 @@ test("a stale generation re-bootstraps instead of refreshing the stale generatio
   const refresh = app.slice(app.indexOf("private async refreshReview"), app.indexOf("private async installSnapshot"));
 
   expect(refresh).toContain('errorCode(error) !== "stale_snapshot"');
-  expect(refresh).toContain("this.api.review()");
+  expect(refresh).toContain("this.api.review(this.session)");
 });
 
 test("range retry preserves the confirmed feedback discard", async () => {

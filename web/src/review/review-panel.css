@@ -38,6 +38,10 @@
   .range-button:hover:not(:disabled) { border-color: var(--line-strong); background: var(--surface-raised); }
   .range-button > svg { flex: none; width: 14px; height: 14px; color: var(--accent); }
   .range-button strong { min-width: 0; overflow: hidden; font-size: var(--text-md); font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+  .review-target { display: flex; flex: 0 1 auto; align-items: center; gap: var(--space-2); min-width: 0; }
+  .checkout-button { max-width: 200px; }
+  .checkout-button[hidden] { display: none; }
+  .checkout-button > svg { color: var(--muted); }
   .range-chevron { display: grid; flex: none; place-items: center; color: var(--muted); }
   .range-chevron svg { width: 13px; height: 13px; }
 
@@ -60,6 +64,7 @@
   .refresh-notice strong { display: inline-flex; align-items: center; min-height: 16px; padding-left: 8px; border-left: 1px solid color-mix(in srgb, currentColor 22%, transparent); font-size: 10px; line-height: 1; }
   .refresh-notice.loading i { background: transparent; border: 1.5px solid color-mix(in srgb, currentColor 25%, transparent); border-top-color: currentColor; box-shadow: none; animation: spin .8s linear infinite; }
   .refresh-notice.error { border-color: color-mix(in srgb, var(--danger) 32%, var(--line)); background: color-mix(in srgb, var(--danger) 7%, var(--surface)); color: var(--danger); }
+  .touched-notice { --info: var(--accent); }
 
   .icon-button, .small-icon-button, .format-button {
     display: grid;
@@ -330,7 +335,8 @@
     .review-tabs { grid-area: tabs; justify-self: start; }
     .changes-nav { grid-area: nav; display: grid; grid-template-columns: repeat(3, 1fr); }
     .topbar-actions { grid-area: actions; gap: var(--space-2); }
-    .range-button { grid-area: range; justify-self: start; max-width: 100%; }
+    .review-target { grid-area: range; justify-self: start; max-width: 100%; }
+    .range-button { max-width: 100%; }
     .change-stats { grid-area: stats; }
     .layout-toggle { display: none; }
     .changes-panel.active { grid-template-columns: 1fr; grid-template-rows: minmax(0, 1fr); }

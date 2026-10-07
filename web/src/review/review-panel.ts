@@ -1,8 +1,18 @@
 import type { DiffLineAnnotation, FileDiffMetadata } from "@pierre/diffs";
 import { renderMarkdown } from "../core/markdown";
+import type { Workspaces } from "../core/wire";
+import { checkoutMenu, workspaceLabel } from "../core/workspaces";
+import { openMenu } from "../ui/menu";
 import { AiReview } from "./ai-review";
 import { annotationKey, type AnnotationMetadata, type ReviewDiffItem } from "./annotations";
 import { ChangedFilesTree } from "./changed-files-tree";
+import {
+  TouchedCheckouts,
+  changeAffectsTarget,
+  loadCheckoutChoice,
+  saveCheckoutChoice,
+  touchedNotice,
+} from "./checkout-target";
 import { CommentEditor } from "./comment-editor";
 import { annotationPath } from "./comment-state";
 import { DiffView } from "./diff-view";
@@ -44,10 +54,14 @@ export type ReviewHost = {
   api: ReviewTransport;
   activeSession(): string | null;
   onActiveSessionChange(listener: () => void): () => void;
-  /** Fires when the workspace's files may have changed. */
-  onWorkspaceChanged(listener: () => void): () => void;
+  /** Fires when files in `checkout` (null: the session's workspace) may have changed. */
+  onWorkspaceChanged(listener: (checkout: string | null) => void): () => void;
+  /** The checkouts of the session's repository, or of the default workspace's without a session. */
+  workspaces(session: string | null): Promise<Workspaces>;
   /** Whether any live session is working, and so possibly editing the workspace. */
   anyRunning(): boolean;
+  /** Whether the active session is working. */
+  sessionRunning(): boolean;
   onRunningChange(listener: () => void): () => void;
   /** Places the composed review into the active session's draft. */
   sendToChat(markdown: string): void | Promise<void>;
@@ -57,6 +71,8 @@ export type ReviewHost = {
 
 /** How long workspace changes are coalesced before the visible diff is refreshed. */
 const LIVE_REFRESH_DELAY_MS = 400;
+/** How often the checkouts the agent touches are polled while the session runs and the panel is shown. */
+const WORKSPACES_POLL_MS = 4000;
 
 /**
  * Mounts the review panel into `container`, which must have a definite height. The panel loads and
@@ -64,7 +80,7 @@ const LIVE_REFRESH_DELAY_MS = 400;
  * which cannot be laid out while hidden.
  */
 export function mountReviewPanel(container: HTMLElement, host: ReviewHost) {
-  const panel = new ReviewPanel(container, new ReviewApi(host.api), host);
+  const panel = new ReviewPanel(container, host);
   void panel.start();
   return {
     dispose: () => panel.cleanUp(),
@@ -87,8 +103,16 @@ class ReviewPanel {
   private disposed = false;
   private loaded = false;
   private session: string | null;
-  /** Invalidates every response that was requested for an earlier session. */
+  /** Invalidates every response that was requested for an earlier session or checkout. */
   private sessionEpoch = 0;
+  /** The reviewed checkout's path, or null for the session's workspace. */
+  private target: string | null = null;
+  private switchingCheckout = false;
+  private workspaces: Workspaces | null = null;
+  private workspacesRequest = 0;
+  private workspacesTimer = 0;
+  private readonly touched = new TouchedCheckouts();
+  private readonly api: ReviewApi;
   private bootstrap!: ReviewSession;
   private state!: ReviewState;
   private readonly unsubscribe: Array<() => void>;
@@ -105,10 +129,11 @@ class ReviewPanel {
 
   constructor(
     private readonly root: HTMLElement,
-    private readonly api: ReviewApi,
     private readonly host: ReviewHost,
   ) {
     this.session = host.activeSession();
+    this.api = new ReviewApi(host.api, () => this.target, () => this.session);
+    const api = this.api;
     this.settings = new SettingsPopover(root, () => this.applySettings(true));
     this.status = new ReviewStatus(root);
     this.diffView = new DiffView(root, {
@@ -211,7 +236,7 @@ class ReviewPanel {
       recordActionError: (error) => this.recordActionError(error),
     });
     this.unsubscribe = [
-      host.onWorkspaceChanged(() => this.workspaceChanged()),
+      host.onWorkspaceChanged((checkout) => this.workspaceChanged(checkout)),
       host.onRunningChange(() => this.runningChanged()),
       host.onActiveSessionChange(() => void this.sessionChanged()),
       host.onThemeChange(() => this.themeChanged()),
@@ -230,7 +255,7 @@ class ReviewPanel {
   }
   /** Comments are local to the browser, so only snapshot changes in flight lock them. */
   private get commentsLocked() {
-    return this.loadingRange !== undefined || this.refreshing || this.sending;
+    return this.loadingRange !== undefined || this.refreshing || this.sending || this.switchingCheckout;
   }
   /** Overviews, AI review, and questions need an idle chat session to run in. */
   private get agentUnavailable() {
@@ -241,6 +266,16 @@ class ReviewPanel {
     return this.running ? "The agent is working. These actions are available when it finishes." : "";
   }
 
+  /** The session's workspace path, once known. */
+  private get sessionWorkspace() {
+    return this.workspaces?.checkouts.find((checkout) => checkout.current)?.path
+      ?? (this.target === null && this.loaded ? this.bootstrap.checkout?.path ?? null : null);
+  }
+
+  private get targetPath() {
+    return this.target ?? this.sessionWorkspace;
+  }
+
   async start() {
     this.root.classList.add("review-panel");
     await this.load();
@@ -248,17 +283,20 @@ class ReviewPanel {
 
   private async load() {
     const epoch = this.sessionEpoch;
+    if (this.session !== null) this.target = loadCheckoutChoice(localStorage, this.session);
     this.root.innerHTML = '<div class="panel-notice" role="status"><span class="activity-spinner" aria-hidden="true"></span>Loading changes…</div>';
     try {
-      const review = await this.api.review();
+      const review = await this.api.review(this.session);
       if (this.disposed || epoch !== this.sessionEpoch) return;
       this.bootstrap = review;
       this.state = createReviewState(review);
       this.loaded = true;
       this.render();
       this.installInitialPage();
+      void this.refreshWorkspaces();
     } catch (error) {
       if (this.disposed || epoch !== this.sessionEpoch) return;
+      if (this.forgetUnknownCheckout(error)) return void this.load();
       this.root.innerHTML = '<div class="panel-notice error" role="alert"><strong>Could not load the changes</strong><span></span><button class="button primary" data-retry>Retry</button></div>';
       const message = this.root.querySelector("span");
       if (message) message.textContent = errorMessage(error);
@@ -269,6 +307,13 @@ class ReviewPanel {
   setVisible(visible: boolean) {
     this.visible = visible;
     if (visible && this.loaded) this.diffView.viewer?.render(true);
+    clearInterval(this.workspacesTimer);
+    this.workspacesTimer = 0;
+    if (!visible || this.disposed) return;
+    void this.refreshWorkspaces();
+    this.workspacesTimer = window.setInterval(() => {
+      if (this.host.sessionRunning()) void this.refreshWorkspaces();
+    }, WORKSPACES_POLL_MS);
   }
 
   installInitialPage() {
@@ -309,6 +354,7 @@ class ReviewPanel {
 
   cleanUp() {
     this.disposed = true;
+    clearInterval(this.workspacesTimer);
     for (const stop of this.unsubscribe) stop();
     this.refresher.dispose();
     this.questionThreads.dispose();
@@ -491,6 +537,8 @@ class ReviewPanel {
     this.bindMobileNavigation();
     this.rangeDialog.bind();
     this.root.querySelector("#refresh-notice")?.addEventListener("click", () => this.refresher.retry());
+    this.root.querySelector("#checkout-button")?.addEventListener("click", () => this.openCheckoutMenu());
+    this.root.querySelector("#touched-notice")?.addEventListener("click", () => this.reviewTouched());
     this.root.querySelector("#ai-review")?.addEventListener("click", () => void this.aiReview.run());
     for (const button of this.root.querySelectorAll<HTMLButtonElement>("[data-decision]")) {
       button.addEventListener("click", () => void this.sendToChat(button.dataset.decision as ReviewDecision["decision"]));
@@ -518,14 +566,17 @@ class ReviewPanel {
     this.selectMobilePanel("diff");
   }
 
-  private workspaceChanged() {
-    this.refresher.markStale();
+  private workspaceChanged(checkout: string | null) {
+    if (changeAffectsTarget(checkout, this.target, this.sessionWorkspace)) this.refresher.markStale();
   }
 
   private async sessionChanged() {
     const session = this.host.activeSession();
     if (session === this.session) return;
     this.session = session;
+    this.target = session === null ? null : loadCheckoutChoice(localStorage, session);
+    this.workspaces = null;
+    this.touched.reset();
     const epoch = ++this.sessionEpoch;
     // Responses requested for the previous session are ignored when they arrive.
     this.overview.reset();
@@ -537,11 +588,138 @@ class ReviewPanel {
     }
     this.syncAgentControls();
     try {
-      const review = await this.api.review();
+      let review: ReviewSession;
+      try {
+        review = await this.api.review(session);
+      } catch (error) {
+        if (!this.forgetUnknownCheckout(error)) throw error;
+        review = await this.api.review(session);
+      }
       if (epoch === this.sessionEpoch && !this.disposed) await this.installSnapshot(review, epoch);
     } catch (error) {
       if (epoch === this.sessionEpoch) this.status.showInlineError(errorMessage(error));
     }
+    if (epoch === this.sessionEpoch) void this.refreshWorkspaces();
+  }
+
+  /**
+   * Drops a remembered checkout the server no longer reviews for this session, so the panel
+   * returns to the session's workspace. Reports whether it did.
+   */
+  private forgetUnknownCheckout(error: unknown) {
+    if (this.target === null || (error as { status?: unknown }).status !== 404) return false;
+    if (this.session !== null) saveCheckoutChoice(localStorage, this.session, null);
+    this.target = null;
+    return true;
+  }
+
+  /** Fetches the session's checkouts for the selector and the touched notice. */
+  private async refreshWorkspaces() {
+    const epoch = this.sessionEpoch;
+    const request = ++this.workspacesRequest;
+    let workspaces: Workspaces;
+    try {
+      workspaces = await this.host.workspaces(this.session);
+    } catch {
+      // The selector keeps its last state; the next poll asks again.
+      return;
+    }
+    if (this.disposed || !this.loaded || epoch !== this.sessionEpoch || request !== this.workspacesRequest) return;
+    this.workspaces = workspaces;
+    const target = workspaces.checkouts.find((checkout) => checkout.path === this.target);
+    if (this.target !== null && (!target || target.missing)) {
+      const lost = this.target;
+      await this.switchCheckout(null, true);
+      this.status.showInlineError(`${lost} is no longer available, so the review shows the session's workspace.`);
+      return;
+    }
+    this.touched.update(workspaces.checkouts, this.targetPath ?? "");
+    this.renderCheckout();
+  }
+
+  private openCheckoutMenu() {
+    const button = this.root.querySelector<HTMLButtonElement>("#checkout-button");
+    const workspaces = this.workspaces;
+    if (!button || !workspaces) return;
+    this.touched.acknowledge();
+    this.renderCheckout();
+    const session = this.sessionWorkspace;
+    openMenu(button, checkoutMenu(workspaces, {
+      selected: this.targetPath ?? "",
+      recent: false,
+      pick: (path) => void this.switchCheckout(path === session ? null : path),
+    }), "Review checkout");
+  }
+
+  /** Follows the touched notice: one checkout is opened directly, several are offered in the selector. */
+  private reviewTouched() {
+    const unseen = this.touched.unseen;
+    if (unseen.length !== 1) return this.openCheckoutMenu();
+    this.touched.acknowledge();
+    this.renderCheckout();
+    const path = unseen[0]!.path;
+    void this.switchCheckout(path === this.sessionWorkspace ? null : path);
+  }
+
+  /**
+   * Reviews another checkout from its default range. Comments belong to the diff they were written
+   * on, so pending feedback is discarded, after confirmation unless `force` is set.
+   */
+  private async switchCheckout(target: string | null, force = false) {
+    if (target === this.target || this.switchingCheckout || !this.loaded) return;
+    if (!force && (this.loadingRange || this.refreshing || this.agentBusy || this.sending)) return;
+    const pending = feedbackDescription(this.feedback);
+    if (pending && !force && !confirm(`Switching checkouts will discard ${pending}.`)) return;
+    const previous = this.target;
+    this.target = target;
+    const epoch = ++this.sessionEpoch;
+    this.overview.reset();
+    this.aiReview.reset();
+    this.questionThreads.reset();
+    this.switchingCheckout = true;
+    const label = workspaceLabel(this.targetPath ?? "", this.workspaces?.checkouts);
+    this.showLoading(`Loading ${label}`, "Capturing the checkout's changes.");
+    this.syncAgentControls();
+    try {
+      const review = await this.api.review(this.session);
+      if (epoch !== this.sessionEpoch || this.disposed) return;
+      await this.installSnapshot(review, epoch);
+      if (this.session !== null) saveCheckoutChoice(localStorage, this.session, target);
+    } catch (error) {
+      if (epoch !== this.sessionEpoch) return;
+      this.target = previous;
+      this.status.showInlineError(errorMessage(error));
+    } finally {
+      if (epoch === this.sessionEpoch) {
+        this.switchingCheckout = false;
+        this.hideLoading();
+        if (this.workspaces) this.touched.update(this.workspaces.checkouts, this.targetPath ?? "");
+        this.syncAgentControls();
+      }
+    }
+  }
+
+  /** The checkout selector, shown when the repository has several checkouts, and the touched notice. */
+  private renderCheckout() {
+    const button = this.root.querySelector<HTMLButtonElement>("#checkout-button");
+    const notice = this.root.querySelector<HTMLButtonElement>("#touched-notice");
+    if (!button || !notice) return;
+    const workspaces = this.workspaces;
+    const path = this.targetPath ?? "";
+    const label = workspaces ? workspaceLabel(path, workspaces.checkouts) : this.bootstrap.checkout?.label ?? "";
+    button.hidden = !workspaces || workspaces.checkouts.length < 2;
+    button.querySelector("#checkout-label")!.textContent = label;
+    button.title = path;
+    button.setAttribute("aria-label", `Reviewed checkout: ${label}`);
+    button.disabled = this.loadingRange !== undefined || this.agentBusy || this.switchingCheckout;
+    const unseen = this.touched.unseen;
+    const text = touchedNotice(unseen);
+    notice.hidden = button.hidden || unseen.length === 0;
+    notice.disabled = button.disabled;
+    notice.title = text;
+    notice.setAttribute("aria-label", text);
+    notice.querySelector("span")!.textContent = text;
+    notice.querySelector("strong")!.textContent = unseen.length === 1 ? "Review" : "Show";
   }
 
   private async refreshReview() {
@@ -557,7 +735,7 @@ class ReviewPanel {
       } catch (error) {
         if (errorCode(error) !== "stale_snapshot") throw error;
         // Another window already moved the workspace to a newer generation.
-        review = await this.api.review();
+        review = await this.api.review(this.session);
       }
       if (epoch === this.sessionEpoch && !this.disposed) await this.installSnapshot(review, epoch);
     } catch (error) {
@@ -571,17 +749,23 @@ class ReviewPanel {
   /**
    * Installs a newer snapshot, or another session's overview and questions. The reviewer's
    * comments, drafts, seen marks, range, and scroll position follow the diff where it allows.
+   * Another checkout starts afresh from its default range.
    */
   private async installSnapshot(review: ReviewSession, epoch: number) {
     const previous = this.state;
     const previousRange = this.page?.selected_range ?? review.default_range;
-    const sameTimeline = JSON.stringify(review.range_targets) === JSON.stringify(this.bootstrap.range_targets);
+    const sameCheckout = review.checkout?.path === this.bootstrap.checkout?.path;
+    const sameTimeline = sameCheckout
+      && JSON.stringify(review.range_targets) === JSON.stringify(this.bootstrap.range_targets);
     let page = review.page;
     if (sameTimeline && !rangesEqual(previousRange, page.selected_range)) {
       page = await this.api.loadRange(review.generation, previousRange).catch(() => review.page);
       if (epoch !== this.sessionEpoch || this.disposed) return;
+    } else if (!sameCheckout && !rangesEqual(review.default_range, page.selected_range)) {
+      page = await this.api.loadRange(review.generation, review.default_range).catch(() => review.page);
+      if (epoch !== this.sessionEpoch || this.disposed) return;
     }
-    const sameRange = rangesEqual(page.selected_range, previousRange);
+    const sameRange = sameCheckout && rangesEqual(page.selected_range, previousRange);
     const files = this.parsePage(page);
     if (sameRange && review.generation === previous.session.generation) {
       this.state = replaceQuestions({ ...previous, page }, review);
@@ -593,7 +777,7 @@ class ReviewPanel {
         carryQuestions(this.files, files, currentQuestions(previous)),
       );
     } else {
-      this.state = createReviewState(review);
+      this.state = createReviewState({ ...review, page });
     }
     this.bootstrap = review;
     this.overview.restore();
@@ -700,18 +884,25 @@ class ReviewPanel {
 
   private setRangeLoading(range: ReviewRange) {
     this.loadingRange = range;
-    const state = this.root.querySelector<HTMLElement>("#scope-state");
-    if (state) {
-      state.className = "scope-state loading";
-      state.innerHTML = `<div class="scope-spinner"></div><strong>Loading ${escapeHtml(rangeLabel(this.bootstrap.range_targets, range))}</strong><span>Capturing an immutable diff for this review.</span>`;
-      state.hidden = false;
-    }
+    this.showLoading(`Loading ${rangeLabel(this.bootstrap.range_targets, range)}`, "Capturing an immutable diff for this review.");
     this.syncAgentControls();
   }
 
   private setRangeReady() {
     this.loadingRange = undefined;
     this.syncAgentControls();
+    this.hideLoading();
+  }
+
+  private showLoading(title: string, detail: string) {
+    const state = this.root.querySelector<HTMLElement>("#scope-state");
+    if (!state) return;
+    state.className = "scope-state loading";
+    state.innerHTML = `<div class="scope-spinner"></div><strong>${escapeHtml(title)}</strong><span>${escapeHtml(detail)}</span>`;
+    state.hidden = false;
+  }
+
+  private hideLoading() {
     const state = this.root.querySelector<HTMLElement>("#scope-state");
     if (state?.classList.contains("loading")) state.hidden = true;
   }
@@ -745,6 +936,7 @@ class ReviewPanel {
     if (button) button.disabled = this.loadingRange !== undefined || this.agentBusy;
     const refresh = this.root.querySelector<HTMLButtonElement>("#refresh-notice");
     if (refresh) refresh.disabled = this.loadingRange !== undefined || this.agentBusy || this.refreshing;
+    this.renderCheckout();
   }
 
   private syncAgentControls() {

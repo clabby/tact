@@ -20,6 +20,8 @@ export type SidebarHost = {
   themeChoice(): "system" | "light" | "dark";
   /** The scheme in effect, which a "system" choice resolves to. */
   resolvedTheme(): "light" | "dark";
+  /** A session row's workspace name, or null when the session works in the default workspace. */
+  workspaceToken(workspace: string): string | null;
 };
 
 const CONNECTION_LABELS: Record<Connection, string> = {
@@ -156,6 +158,13 @@ export class Sidebar {
     this.search.focus();
   }
 
+  /** Re-labels every row's workspace, e.g. once the default workspace is known. */
+  refreshWorkspaces() {
+    for (const row of this.root.querySelectorAll<HTMLElement>(".session-row[data-workspace]")) {
+      this.renderWorkspace(row, row.dataset.workspace!);
+    }
+  }
+
   private liveRow(session: SessionSummary) {
     const row = document.createElement("li");
     row.className = "session-row";
@@ -168,7 +177,7 @@ export class Sidebar {
     row.innerHTML = `
       <button type="button" class="session-main" ${session.id === this.active ? 'aria-current="true"' : ""}>
         <span class="session-marker" aria-hidden="true"></span>
-        <span class="session-text"><span class="session-title"></span><span class="session-meta"><span class="model-dot"></span><span class="session-model"></span><span class="session-age"></span></span></span>
+        <span class="session-text"><span class="session-title"></span><span class="session-meta"><span class="model-dot"></span><span class="session-model"></span><span class="session-workspace"></span><span class="session-age"></span></span></span>
         ${pinned ? `<span class="pin-mark" title="Pinned">${glyph("pin")}</span>` : ""}
         ${session.has_draft ? `<span class="draft-mark" title="Unsent draft">${glyph("pencil")}</span>` : ""}
       </button>
@@ -177,10 +186,12 @@ export class Sidebar {
     if (session.state === "running") row.querySelector(".session-marker")!.append(createSphere(10, 14));
     row.querySelector(".session-title")!.textContent = session.title || "New chat";
     row.querySelector(".session-model")!.textContent = label;
+    this.renderWorkspace(row, session.workspace);
     row.querySelector(".session-age")!.textContent = formatAge(session.last_activity_unix_ms);
     row.querySelector<HTMLElement>(".model-dot")!.style.background = modelColor(session.model);
     row.querySelector<HTMLElement>(".session-main")!.setAttribute("aria-label", [
-      session.title || "New chat", label, session.state === "running" ? "running" : session.state === "error" ? "error" : "",
+      session.title || "New chat", label, this.host.workspaceToken(session.workspace) ?? "",
+      session.state === "running" ? "running" : session.state === "error" ? "error" : "",
       session.unread ? "unread" : "", session.has_draft ? "has draft" : "",
     ].filter(Boolean).join(", "));
     row.querySelector(".session-main")!.addEventListener("click", () => this.activate(session.id));
@@ -191,6 +202,15 @@ export class Sidebar {
       { label: session.state === "running" ? "Stop and close…" : "Close", danger: true, run: () => void this.close(session) },
     ], "Session actions"));
     return row;
+  }
+
+  private renderWorkspace(row: HTMLElement, workspace: string) {
+    row.dataset.workspace = workspace;
+    const token = row.querySelector<HTMLElement>(".session-workspace")!;
+    const name = this.host.workspaceToken(workspace);
+    token.hidden = name === null;
+    token.textContent = name ?? "";
+    token.title = workspace;
   }
 
   private togglePin(id: string) {
@@ -288,9 +308,10 @@ export class Sidebar {
   private historyRow(session: PersistedSession) {
     const row = document.createElement("li");
     row.className = "session-row history-row";
-    row.innerHTML = `<button type="button" class="session-main"><span class="session-text"><span class="session-title"></span><span class="session-meta"><span class="model-dot"></span><span class="session-model"></span><span class="session-age"></span></span></span></button>`;
+    row.innerHTML = `<button type="button" class="session-main"><span class="session-text"><span class="session-title"></span><span class="session-meta"><span class="model-dot"></span><span class="session-model"></span><span class="session-workspace"></span><span class="session-age"></span></span></span></button>`;
     row.querySelector(".session-title")!.textContent = session.preview || session.session_id.slice(0, 8);
     row.querySelector(".session-model")!.textContent = this.host.catalog()?.models.find((model) => model.id === session.model)?.label ?? session.model;
+    this.renderWorkspace(row, session.workspace);
     row.querySelector(".session-age")!.textContent = formatAge(session.started_at_unix_ms);
     row.querySelector<HTMLElement>(".model-dot")!.style.background = modelColor(session.model);
     row.querySelector<HTMLElement>(".session-main")!.title = "Resume";

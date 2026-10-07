@@ -8,6 +8,7 @@ import type { TranscriptData } from "../core/store";
 import type { Theme } from "../core/theme";
 import { promptParts } from "./user-prompt";
 import { presentDetail, TOOL_DEFAULT_OPEN, toolLabel } from "./tool-detail";
+import { renderThread, type Participants } from "./directed";
 import type { ToolDetail, WireEntry } from "../core/wire";
 
 type Rendered = { element: HTMLElement; revision: number };
@@ -22,6 +23,8 @@ export type TranscriptSource = {
   detail(entry: number): Promise<ToolDetail>;
   /** The URL of an image attached to a user entry, when this transcript has them. */
   image?(entry: number, index: number): string;
+  /** The transcript's owner and the session's agents, which name the parties of agent messages. */
+  participants(): Participants;
 };
 
 /** Distance from the bottom, in pixels, within which the transcript keeps following new output. */
@@ -41,9 +44,13 @@ export class Transcript {
   private source: TranscriptSource | null = null;
   private following = true;
   private readonly lazy: IntersectionObserver;
-  /** Tool calls whose open state differs from their default, and patches shown untruncated. */
+  /**
+   * Tool calls and agent threads whose open state differs from their default, patches shown
+   * untruncated, and long agent messages shown in full (keyed "entry:message").
+   */
   private readonly toggled = new Set<number>();
   private readonly showAll = new Set<number>();
+  private readonly fullMessages = new Set<string>();
   private readonly diffs = new Map<number, FileDiff[]>();
   private readonly lazyDetail: IntersectionObserver;
   private readonly details = new Map<number, { revision: number; detail: Promise<ToolDetail> }>();
@@ -109,6 +116,7 @@ export class Transcript {
       this.rendered.clear();
       this.toggled.clear();
       this.showAll.clear();
+      this.fullMessages.clear();
       for (const id of [...this.diffs.keys()]) this.releaseDiffs(id);
       this.lazyDetail.disconnect();
       this.details.clear();
@@ -228,9 +236,17 @@ export class Transcript {
         this.renderTool(element, entry);
         return;
       case "directed_message": {
-        element.innerHTML = `<div class="directed"><div class="directed-route">${glyph("message")}<span></span></div><div class="markdown"></div></div>`;
-        element.querySelector(".directed-route span")!.textContent = `${entry.from} → ${entry.to} · ${entry.delivery}`;
-        this.renderBody(element.querySelector<HTMLElement>(".markdown")!, entry, false);
+        const key = (message: number) => `${entry.id}:${message}`;
+        renderThread(element, entry, {
+          participants: this.source!.participants(),
+          open: this.toggled.has(entry.id),
+          markdown: this.markdown,
+          full: (message) => this.fullMessages.has(key(message)),
+          setFull: (message, full) => {
+            if (full) this.fullMessages.add(key(message));
+            else this.fullMessages.delete(key(message));
+          },
+        });
         return;
       }
       case "turn_completed":
@@ -284,11 +300,23 @@ export class Transcript {
     delete container.dataset.stale;
     const streaming = entry.kind === "assistant" && !entry.complete;
     void renderMarkdown(container, text, this.theme() === "dark" ? "pierre-dark" : "pierre-light", {
-      imageSource: localImageSource,
+      imageSource: this.imageSource,
       highlight: !streaming,
       placeholder: streaming ? "" : " ",
     });
   }
+
+  /** Local images resolve against the viewed session workspace; a subagent key is session/agent. */
+  private imageSource = (destination: string) =>
+    localImageSource(destination, this.source?.key.split("/")[0]);
+
+  /** Renders settled Markdown at once, highlighted, as assistant text is. */
+  private markdown = (container: HTMLElement, text: string) => {
+    void renderMarkdown(container, text, this.theme() === "dark" ? "pierre-dark" : "pierre-light", {
+      imageSource: this.imageSource,
+      placeholder: " ",
+    });
+  };
 
   private isOpen(entry: ToolEntry) {
     return TOOL_DEFAULT_OPEN.has(entry.name) !== this.toggled.has(entry.id);
@@ -372,6 +400,8 @@ export class Transcript {
       if (!container.isConnected) return;
       presentDetail(container, entry.name, detail, {
         theme: this.theme(),
+        participants: source.participants(),
+        markdown: this.markdown,
         full: this.showAll.has(entry.id),
         track: (instances) => this.diffs.set(entry.id, instances),
         toggleFull: () => {
@@ -411,7 +441,7 @@ export class Transcript {
       openLightbox(target.currentSrc || target.src, target.alt);
       return;
     }
-    const row = target.closest<HTMLElement>(".tool-row");
+    const row = target.closest<HTMLElement>(".tool-row, .dm-head");
     if (row) {
       const id = Number(row.closest<HTMLElement>(".entry")!.dataset.id);
       if (!this.toggled.delete(id)) this.toggled.add(id);
@@ -444,7 +474,7 @@ export class Transcript {
  * Local image destinations (absolute, file://, or workspace-relative) are served by the instance;
  * remote ones are never loaded by the page.
  */
-function localImageSource(destination: string) {
+function localImageSource(destination: string, session?: string) {
   if (!destination || /^([a-z][a-z0-9+.-]*:(?!\/\/\/)|\/\/)/i.test(destination)) return null;
   let path = destination;
   try {
@@ -452,7 +482,8 @@ function localImageSource(destination: string) {
   } catch {
     // A destination that is not percent-encoded is used as written.
   }
-  return `./api/file?path=${encodeURIComponent(path)}`;
+  const query = session ? `&session=${encodeURIComponent(session)}` : "";
+  return `./api/file?path=${encodeURIComponent(path)}${query}`;
 }
 
 function child<K extends keyof HTMLElementTagNameMap>(parent: HTMLElement, tag: K, className: string) {

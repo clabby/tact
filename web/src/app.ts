@@ -21,7 +21,9 @@ import { StreamClient } from "./core/stream";
 import { ThemeController } from "./core/theme";
 import { openSheet } from "./ui/sheet";
 import { toast } from "./ui/toast";
-import type { CommandName, Commands, ModelCatalog, SiblingInstance } from "./core/wire";
+import { openMenu } from "./ui/menu";
+import { checkoutMenu, workspaceChip, workspaceLabel } from "./core/workspaces";
+import type { CommandName, Commands, ModelCatalog, SiblingInstance, Workspaces } from "./core/wire";
 
 const root = document.getElementById("app")!;
 const SIDEBAR_KEY = "tact.web.sidebar";
@@ -62,10 +64,14 @@ class App {
   private catalog: ModelCatalog | null = null;
   private subagents: SubagentsView | null = null;
   private instances: SiblingInstance[] = [];
+  /** The default workspace and its repository's checkouts, which name other sessions' workspaces. */
+  private defaults: Workspaces | null = null;
+  /** The active session's repository checkouts, for the composer's workspace chip. */
+  private workspaces: { session: string; reply: Workspaces } | null = null;
   private review: { dispose(): void; setVisible?(visible: boolean): void } | null = null;
   private readonly reviewListeners = {
     active: new Set<() => void>(),
-    workspace: new Set<() => void>(),
+    workspace: new Set<(checkout: string | null) => void>(),
     running: new Set<() => void>(),
     theme: new Set<() => void>(),
   };
@@ -80,7 +86,7 @@ class App {
         <main class="main">
           <header class="chat-header">
             <button type="button" class="icon-button menu-button" aria-label="Toggle sidebar" title="Toggle sidebar">${glyph("sidebar")}</button>
-            <div class="chat-title"><h1>Tact</h1><div class="chat-sub"><span class="model-dot"></span><span class="chat-model"></span><span class="chat-effort"></span></div></div>
+            <div class="chat-title"><h1>Tact</h1><div class="chat-sub"><span class="model-dot"></span><span class="chat-model"></span><span class="chat-effort"></span><span class="chat-workspace" hidden></span></div></div>
             <nav class="segmented view-tabs" role="tablist" aria-label="View">
               <button type="button" class="segment" role="tab" id="tab-chat" aria-controls="view-chat" data-view="chat">Chat</button>
               <button type="button" class="segment" role="tab" id="tab-review" aria-controls="view-review" data-view="review">Review<span class="tab-count" hidden></span></button>
@@ -116,6 +122,8 @@ class App {
       openContext: () => this.withSession((id) => void openContextDiagnostics(api, id)),
       actions: (query) => this.palette.matching(query),
       openSubagents: () => this.openSubagents(),
+      workspaceChip: () => workspaceChip(this.activeWorkspaces(), this.sessionWorkspace()),
+      chooseWorkspace: (anchor) => void this.chooseWorkspace(anchor, true),
     });
     this.sidebar = new Sidebar(root.querySelector(".sidebar")!, {
       api,
@@ -124,6 +132,7 @@ class App {
       setTheme: (choice) => this.theme.set(choice),
       themeChoice: () => this.theme.choice,
       resolvedTheme: () => this.theme.current,
+      workspaceToken: (workspace) => this.workspaceToken(workspace),
     });
     this.stream = new StreamClient({
       url: "./api/stream",
@@ -165,6 +174,11 @@ class App {
       this.sidebar.setLive(this.store.state.live, this.store.state.active);
     }).catch((error) => toast(`Could not load models: ${describeError(error)}`, "warning"));
     void this.api.instance().then((instance) => this.sidebar.setWorkspace(instance.repository, instance.workspace)).catch(() => {});
+    void this.api.query("workspaces", {}).then((defaults) => {
+      this.defaults = defaults;
+      this.renderHeader();
+      this.sidebar.refreshWorkspaces();
+    }).catch(() => {});
     void this.api.instances().then(({ instances }) => {
       this.instances = instances;
       this.sidebar.renderFooter(this.store.state.connection, instances);
@@ -192,6 +206,7 @@ class App {
           this.sidebar.setLive(state.live, state.active);
           this.sidebar.renderFooter(state.connection, this.instances);
           this.composer.statusChanged();
+          this.composer.settingsChanged();
           this.renderHeader();
           const running = this.store.anyRunning();
           if (running !== this.wasRunning) {
@@ -207,6 +222,7 @@ class App {
           this.renderHeader();
           if ((state.session?.id ?? null) !== this.shownSession) {
             this.shownSession = state.session?.id ?? null;
+            void this.loadWorkspaces();
             for (const listener of this.reviewListeners.active) listener();
           }
           break;
@@ -240,7 +256,7 @@ class App {
           this.subagents?.entryChanged(change.agent, change.id);
           break;
         case "workspace":
-          for (const listener of this.reviewListeners.workspace) listener();
+          for (const listener of this.reviewListeners.workspace) listener(change.checkout);
           break;
       }
     }
@@ -250,6 +266,72 @@ class App {
     const state = this.store.state;
     const summary = state.live.find((session) => session.id === state.session?.id);
     return summary ? summary.state === "running" : state.session?.running ?? false;
+  }
+
+  private sessionWorkspace() {
+    const state = this.store.state;
+    return state.live.find((session) => session.id === state.session?.id)?.workspace;
+  }
+
+  private activeWorkspaces() {
+    return this.workspaces?.session === this.store.state.session?.id ? this.workspaces?.reply ?? null : null;
+  }
+
+  /** A workspace's short name where it differs from the default workspace; null where it does not. */
+  private workspaceToken(workspace: string) {
+    if (!this.defaults || workspace === this.defaults.default) return null;
+    return workspaceLabel(workspace, this.defaults.checkouts);
+  }
+
+  private async loadWorkspaces() {
+    const session = this.store.state.session?.id;
+    if (!session) return;
+    try {
+      const reply = await this.api.query("workspaces", { session });
+      if (this.store.state.session?.id !== session) return;
+      this.workspaces = { session, reply };
+      this.composer.settingsChanged();
+    } catch {
+      // Without the checkouts the chip stays hidden; the next session change asks again.
+    }
+  }
+
+  /**
+   * Offers the repository's checkouts and recent workspaces. A session's workspace is fixed when it
+   * is created, so choosing one always opens a new chat; with `replace`, it stands in for the active
+   * unstarted chat.
+   */
+  private async chooseWorkspace(anchor: HTMLElement, replace: boolean) {
+    const session = this.store.state.session;
+    let workspaces: Workspaces;
+    try {
+      workspaces = await this.api.query("workspaces", session ? { session: session.id } : {});
+    } catch (error) {
+      toast(describeError(error), "warning");
+      return;
+    }
+    if (session) this.workspaces = { session: session.id, reply: workspaces };
+    const current = this.sessionWorkspace() ?? workspaces.default;
+    openMenu(anchor, checkoutMenu(workspaces, {
+      selected: current,
+      recent: true,
+      pick: (path) => {
+        if (!replace || path !== current) void this.newChatIn(path, replace);
+      },
+    }), replace ? "Workspace" : "New chat in workspace");
+  }
+
+  /** Opens a chat in `workspace`. A replaced chat lends its model and is closed when it holds nothing. */
+  private async newChatIn(workspace: string, replace: boolean) {
+    const previous = replace ? this.store.state.session : null;
+    try {
+      await this.api.command("open_session", { new: { ...(previous ? { model: previous.model } : {}), workspace } });
+      if (previous && previous.order.length === 0 && !previous.draft.text.trim() && previous.queue.length === 0) {
+        await this.api.command("close_session", { session: previous.id });
+      }
+    } catch (error) {
+      toast(describeError(error), "warning");
+    }
   }
 
   private renderHeader() {
@@ -264,6 +346,12 @@ class App {
       ? [session.effort, session.reasoningMode === "pro" ? "pro" : "", speedTier === "standard" ? "" : speedTier].filter(Boolean).join(" · ")
       : "";
     effort.style.color = session ? effortColor(session.effort) : "";
+    const workspace = root.querySelector<HTMLElement>(".chat-workspace")!;
+    const path = session ? this.sessionWorkspace() : undefined;
+    const token = path ? this.workspaceToken(path) : null;
+    workspace.hidden = token === null;
+    workspace.textContent = token ?? "";
+    workspace.title = path ?? "";
     root.querySelector<HTMLElement>(".chat-sub .model-dot")!.style.background = session ? modelColor(session.model) : "transparent";
     const running = this.activeRunning();
     this.shell.classList.toggle("running", running);
@@ -315,7 +403,7 @@ class App {
   private ensureReview() {
     if (this.review) return;
     const body = root.querySelector<HTMLElement>(".panel-body")!;
-    const subscribe = (set: Set<() => void>) => (listener: () => void) => {
+    const subscribe = <Listener>(set: Set<Listener>) => (listener: Listener) => {
       set.add(listener);
       return () => void set.delete(listener);
     };
@@ -324,7 +412,9 @@ class App {
       activeSession: () => this.store.state.session?.id ?? null,
       onActiveSessionChange: subscribe(this.reviewListeners.active),
       onWorkspaceChanged: subscribe(this.reviewListeners.workspace),
+      workspaces: (session) => this.api.query("workspaces", session === null ? {} : { session }),
       anyRunning: () => this.store.anyRunning(),
+      sessionRunning: () => this.activeRunning(),
       onRunningChange: subscribe(this.reviewListeners.running),
       sendToChat: (markdown) => {
         this.composer.append(markdown);
@@ -406,6 +496,7 @@ class App {
       data: this.store.state.session!,
       detail: (entry: number) => this.api.toolDetail(id, entry),
       image: (entry: number, index: number) => this.api.imageUrl(id, entry, index),
+      participants: () => ({ agents: this.store.state.session?.subagents.agents ?? [] }),
     };
   }
 
@@ -457,6 +548,13 @@ class App {
       })));
     palette.register(() => [
       { id: "new", title: "New chat", group: "Sessions", icon: "plus", run: () => void this.sidebar.newChat() },
+      ...(((this.activeWorkspaces() ?? this.defaults)?.checkouts.length ?? 0) > 1 ? [{
+        id: "new-in-workspace", title: "New chat in workspace…", group: "Sessions", icon: "plus" as const, keywords: "worktree checkout",
+        run: () => void this.chooseWorkspace(
+          root.querySelector<HTMLElement>(".workspace-chip:not([hidden])") ?? root.querySelector<HTMLElement>(".palette-button")!,
+          false,
+        ),
+      }] : []),
       ...(this.catalog?.models ?? []).map((model): PaletteCommand => ({
         id: `new:${model.id}`, title: `New chat with ${model.label}`, group: "Sessions", icon: "plus",
         run: () => void this.sidebar.newChat(model.id),

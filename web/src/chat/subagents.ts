@@ -118,6 +118,7 @@ export function openSubagents(
       key: `${current.id}/${agent.id}`,
       data: current.agents.get(agent.id)!,
       detail: (entry) => api.toolDetail(current.id, entry, agent.id),
+      participants: () => ({ viewer: agent.id, agents: roster().agents }),
     });
   };
 
@@ -242,4 +243,3 @@ export function openSubagents(
     },
   };
 }
-

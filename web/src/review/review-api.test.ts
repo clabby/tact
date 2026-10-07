@@ -1,16 +1,16 @@
 import { describe, expect, test } from "bun:test";
-import type { ReviewPage, ReviewSession } from "./protocol";
+import { REVIEW_PROTOCOL_VERSION, type QuestionRequest, type ReviewPage, type ReviewSession } from "./protocol";
 import { ProtocolMismatch, ReviewApi, errorCode, type ReviewTransport } from "./review-api";
 
 type Call = { method: "get" | "post"; path: string; body?: unknown };
 
-function fakeApi(reply: unknown = {}) {
+function fakeApi(reply: unknown = {}, checkout: string | null = null) {
   const calls: Call[] = [];
   const transport: ReviewTransport = {
     get: async (path) => { calls.push({ method: "get", path }); return reply as never; },
     post: async (path, body) => { calls.push({ method: "post", path, body }); return reply as never; },
   };
-  return { api: new ReviewApi(transport), calls };
+  return { api: new ReviewApi(transport, () => checkout), calls };
 }
 
 const page = { generation: 4, selected_range: { from: 0, to: 2 } } as ReviewPage;
@@ -35,6 +35,30 @@ describe("review requests are scoped to the session that owns them", () => {
   });
 });
 
+describe("reviewing another checkout", () => {
+  test("every request names the checkout, and the snapshot names the session", async () => {
+    const { api, calls } = fakeApi({ protocol_version: REVIEW_PROTOCOL_VERSION, markdown: "" }, "/src/tact-ws2");
+    await api.review("s1");
+    await api.loadRange(4, page.selected_range);
+    await api.refresh(4);
+    await api.overview("s1", page);
+    await api.aiReview("s1", page);
+    await api.question("s1", { thread_id: "t" } as QuestionRequest);
+    await api.questions("s1", 4);
+    await api.compose({ generation: 4, range: page.selected_range, decision: "approve", summary: "", comments: [] });
+    expect(calls[0]).toEqual({ method: "get", path: "review?session=s1&checkout=%2Fsrc%2Ftact-ws2" });
+    for (const call of calls.slice(1)) expect(call.body).toMatchObject({ checkout: "/src/tact-ws2" });
+  });
+
+  test("the session's own workspace is implied", async () => {
+    const { api, calls } = fakeApi({ protocol_version: REVIEW_PROTOCOL_VERSION });
+    await api.review(null);
+    await api.refresh(4);
+    expect(calls[0]!.path).toBe("review");
+    expect(calls[1]!.body).toEqual({ generation: 4 });
+  });
+});
+
 describe("sending a review to the chat", () => {
   test("composing posts the decision and returns the canonical markdown", async () => {
     const { api, calls } = fakeApi({ markdown: "Requested changes\n" });
@@ -50,7 +74,7 @@ describe("sending a review to the chat", () => {
 describe("protocol checks", () => {
   test("an unsupported protocol version is rejected with a typed error", async () => {
     const { api } = fakeApi({ protocol_version: 99 });
-    const failure = await api.review().catch((error) => error);
+    const failure = await api.review(null).catch((error) => error);
     expect(failure).toBeInstanceOf(ProtocolMismatch);
     expect(errorCode(failure)).toBe("invalid_response");
   });

@@ -1,3 +1,4 @@
+import type { Checkout } from "../core/wire";
 import type { ReviewRange, ReviewTarget } from "./range-selection";
 
 export const REVIEW_PROTOCOL_VERSION = 9;
@@ -26,6 +27,8 @@ export type ReviewSession = {
   generation: number;
   title: string;
   repository: string;
+  /** The checkout this review diffs. */
+  checkout: Pick<Checkout, "path" | "name" | "label" | "kind">;
   trunk: string;
   range_targets: ReviewTarget[];
   default_range: ReviewRange;

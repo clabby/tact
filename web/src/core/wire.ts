@@ -14,6 +14,8 @@ export type SessionSummary = {
   unread: boolean;
   has_draft: boolean;
   last_activity_unix_ms: number;
+  /** The directory the session's agent works in, fixed when the session is created. */
+  workspace: string;
 };
 
 export type QueuedPrompt = { id: number; text: string; steering: boolean };
@@ -44,6 +46,26 @@ export type TransientStatus =
 
 export type ToolState = "running" | "succeeded" | "failed";
 
+export type MessagePurpose = "delegate" | "coordinate" | "finding" | "question" | "reply";
+export type MessageDelivery = "admitted" | "delivered" | "failed" | "unknown";
+
+/** One message of a conversation between agents. */
+export type AgentMessage = {
+  id: number;
+  /** The sending agent, or `null` for the root session. */
+  from: number | null;
+  /** The recipient agent. */
+  to: number;
+  purpose: MessagePurpose;
+  priority: "deferred" | "urgent";
+  in_reply_to: number | null;
+  body: string;
+  /** `unknown` until the first delivery state arrives. */
+  delivery: MessageDelivery;
+  /** How the recipient took the message (`started`, `queued` or `steered`), or the failure. */
+  detail: string | null;
+};
+
 export type EntryBody =
   /** `images` counts the attachments; the i-th replaces the i-th "[Image #N]" marker in the text. */
   | { kind: "user"; text: string; images?: number }
@@ -61,7 +83,20 @@ export type EntryBody =
     child_count: number;
     has_detail: boolean;
   }
-  | { kind: "directed_message"; from: string; to: string; body: string; delivery: string }
+  /**
+   * One conversation thread between agents, updated in place as messages arrive and delivery
+   * states change. `messages` is the retained thread in delivery order; `from`, `to`, `body`
+   * and `delivery` summarize its latest message.
+   */
+  | {
+    kind: "directed_message";
+    from: string;
+    to: string;
+    body: string;
+    delivery: string;
+    thread: number;
+    messages: AgentMessage[];
+  }
   | { kind: "forked_from"; session: string }
   | { kind: "effort_changed"; to: string }
   | { kind: "fast_mode_changed"; enabled: boolean }
@@ -129,7 +164,8 @@ export type StreamEvents = {
   subagents: { session: string } & SubagentRoster;
   subagent_entry: { session: string; agent: number; entry: WireEntry };
   closed: { session: string };
-  workspace: { version: string };
+  /** `checkout` is the directory whose files changed; without it, the session's workspace. */
+  workspace: { version: string; checkout?: string };
 };
 
 export type StreamEventName = keyof StreamEvents;
@@ -144,7 +180,8 @@ export const STREAM_EVENTS = [
 ] as const satisfies readonly StreamEventName[];
 
 export type OpenSpec =
-  | { new: { model?: string } }
+  /** `workspace` is an absolute path; without it the default workspace is used. */
+  | { new: { model?: string; workspace?: string } }
   | { resume: { session: string } }
   | { fork: { session: string } };
 
@@ -239,6 +276,27 @@ export type MemoryRecord = {
 /** A memory as listed for this user; `deletable` says whether the backend lets them delete it. */
 export type ListedMemory = MemoryRecord & { deletable: boolean };
 
+/**
+ * A working copy of a repository: its main checkout, a git worktree, or a jj workspace. `label` is
+ * the branch (git) or workspace name (jj). `current` marks the session's workspace (the default
+ * workspace without a session); `touched` says the session's recent tool calls referred to a path
+ * inside it, as a hint.
+ */
+export type Checkout = {
+  path: string;
+  name: string;
+  label: string;
+  kind: "git" | "jj";
+  head: string | null;
+  changed_files: number | null;
+  current: boolean;
+  missing: boolean;
+  touched: boolean;
+};
+
+/** The checkouts of a session's repository (main checkout first) and other recent workspaces, newest first. */
+export type Workspaces = { default: string; checkouts: Checkout[]; recent: string[] };
+
 /** Query arguments and replies; `undefined` arguments mark a query without `args`. */
 export type Queries = {
   models: { args: undefined; reply: ModelCatalog };
@@ -255,6 +313,7 @@ export type Queries = {
     reply: { access: { source: string; namespace: string | null; role: string | null }; records: ListedMemory[] };
   };
   config: { args: undefined; reply: { path: string; text: string; revision: string } };
+  workspaces: { args: { session?: string }; reply: Workspaces };
 };
 
 export type QueryName = keyof Queries;

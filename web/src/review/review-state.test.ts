@@ -19,6 +19,7 @@ const session: ReviewSession = {
   generation: 3,
   title: "Review",
   repository: "tact",
+  checkout: { path: "/src/tact", name: "tact", label: "main", kind: "git" },
   trunk: "main",
   range_targets: [],
   default_range: firstPage.selected_range,
