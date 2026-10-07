@@ -84,7 +84,7 @@ import {
 } from "./range-selection";
 import "./styles.css";
 
-const SEARCH_HIGHLIGHT = "tact-review-search-match";
+const SEARCH_HIGHLIGHT = "tact-web-search-match";
 const TREE_STYLES = `
   [data-type="item"] {
     --tact-tree-row-bg: var(--trees-bg);
@@ -519,7 +519,7 @@ export class ReviewApp {
     this.page = page;
     this.state = activatePage(this.state, page);
     const seenFiles = this.seenFiles();
-    const cacheKey = `tact-review-${page.generation}-${rangeKey(page.selected_range)}`;
+    const cacheKey = `tact-web-${page.generation}-${rangeKey(page.selected_range)}`;
     const patchFiles = parseReviewPatch(page.patch, cacheKey, page.full_context === true);
     // Git's patch owns changed-line identity. Pierre may expand context already present in
     // that immutable patch, but browser-side re-diffing must never replace its hunks.

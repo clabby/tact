@@ -4,7 +4,7 @@
 
 mod app;
 mod core;
-mod review;
+mod web;
 mod tui;
 
 use app::Cli;

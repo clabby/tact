@@ -2430,26 +2430,26 @@ fn apply_pane_effect(
                 return Ok(());
             }
 
-            match crate::review::ReviewAssets::availability() {
-                Ok(crate::review::AssetAvailability::Ready(assets)) => {
+            match crate::web::ReviewAssets::availability() {
+                Ok(crate::web::AssetAvailability::Ready(assets)) => {
                     start_review(context, pane, Some(assets));
                 }
-                Ok(crate::review::AssetAvailability::DownloadRequired) if !download_assets => {
+                Ok(crate::web::AssetAvailability::DownloadRequired) if !download_assets => {
                     schedule(
                         context.app.update(AppEvent::ConfirmReviewDownload { pane }),
                         context.scheduler,
                     );
                     return Ok(());
                 }
-                Ok(crate::review::AssetAvailability::DownloadRequired) => {
+                Ok(crate::web::AssetAvailability::DownloadRequired) => {
                     start_review(context, pane, None);
                 }
-                Ok(crate::review::AssetAvailability::DevelopmentInstallRequired { path }) => {
+                Ok(crate::web::AssetAvailability::DevelopmentInstallRequired { path }) => {
                     schedule(
                         context.app.update(AppEvent::NotifyError {
                             pane,
                             error: format!(
-                                "You are running a development build of Tact, which cannot download review assets automatically. Run `cd web/review && bun install --frozen-lockfile && just install-dev`, or set TACT_REVIEW_ASSETS to the absolute `web/review/dist` path. The development install path is {}.",
+                                "You are running a development build of Tact, which cannot download review assets automatically. Run `cd web/app && bun install --frozen-lockfile && just install-dev`, or set TACT_WEB_ASSETS to the absolute `web/app/dist` path. The development install path is {}.",
                                 path.display()
                             ),
                         }),
@@ -2780,7 +2780,7 @@ async fn prepare_handoff(
 fn start_review(
     context: &mut EffectContext<'_>,
     pane: PaneId,
-    assets: Option<crate::review::ReviewAssets>,
+    assets: Option<crate::web::ReviewAssets>,
 ) {
     let pane_generation = context
         .panes
@@ -2812,21 +2812,21 @@ fn spawn_review(
     auxiliary_jobs: mpsc::UnboundedSender<AuxiliaryJobRequest>,
     ready_updates: mpsc::UnboundedSender<ReviewReady>,
     workspace: PathBuf,
-    assets: Option<crate::review::ReviewAssets>,
+    assets: Option<crate::web::ReviewAssets>,
     turn_active: Arc<AtomicBool>,
 ) -> ReviewTask {
     tokio::spawn(async move {
         let result = async {
             let assets = match assets {
                 Some(assets) => assets,
-                None => crate::review::ReviewAssets::download().await?,
+                None => crate::web::ReviewAssets::download().await?,
             };
-            let review_agent: crate::review::ReviewAgent = Arc::new(move |prompt, shutdown| {
+            let review_agent: crate::web::ReviewAgent = Arc::new(move |prompt, shutdown| {
                 let auxiliary_jobs = auxiliary_jobs.clone();
                 let cancellation = cancellation.clone();
                 Box::pin(async move {
                     if cancellation.is_cancelled() || shutdown.is_cancelled() {
-                        return Err(crate::review::ReviewAgentError::Cancelled);
+                        return Err(crate::web::ReviewAgentError::Cancelled);
                     }
                     let (completion, result) = tokio::sync::oneshot::channel();
                     auxiliary_jobs
@@ -2837,27 +2837,27 @@ fn spawn_review(
                             completion,
                         })
                         .map_err(|_| {
-                            crate::review::ReviewAgentError::Failed(
+                            crate::web::ReviewAgentError::Failed(
                                 "review agent worker stopped".to_owned(),
                             )
                         })?;
                     match result.await.map_err(|_| {
-                        crate::review::ReviewAgentError::Failed(
+                        crate::web::ReviewAgentError::Failed(
                             "review agent worker stopped".to_owned(),
                         )
                     })? {
                         Ok(response) => Ok(response),
                         Err(AuxiliaryError::Cancelled) => {
-                            Err(crate::review::ReviewAgentError::Cancelled)
+                            Err(crate::web::ReviewAgentError::Cancelled)
                         }
                         Err(AuxiliaryError::Failed(error)) => {
-                            Err(crate::review::ReviewAgentError::Failed(error))
+                            Err(crate::web::ReviewAgentError::Failed(error))
                         }
                     }
                 })
             });
             let handle =
-                crate::review::ReviewService::start(review_agent, &workspace, assets, turn_active)
+                crate::web::ReviewService::start(review_agent, &workspace, assets, turn_active)
                     .await?;
             drop(ready_updates.send(ReviewReady {
                 identity,

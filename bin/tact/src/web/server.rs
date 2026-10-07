@@ -1852,7 +1852,7 @@ pub(crate) enum ServerError {
 #[cfg(test)]
 mod tests {
     use super::{Decision, PROTOCOL_VERSION, ReviewOutcome, ReviewServer};
-    use crate::review::{ReviewAgent, ReviewAgentError, ReviewBackend, diff::ReviewRange};
+    use crate::web::{ReviewAgent, ReviewAgentError, ReviewBackend, diff::ReviewRange};
     use std::{
         fs,
         path::Path,
@@ -3625,7 +3625,7 @@ mod tests {
             review,
             backend,
             "test-token".to_owned(),
-            crate::review::ReviewAssets::for_test(assets.path().to_owned()),
+            crate::web::ReviewAssets::for_test(assets.path().to_owned()),
             Arc::new(AtomicBool::new(false)),
         )
         .await

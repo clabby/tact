@@ -5,7 +5,7 @@ import { basename, join } from "node:path";
 import { reviewEntrypoints } from "./build-config";
 
 test("the review worker builds as a runnable browser asset", async () => {
-  const outputDirectory = await mkdtemp(join(tmpdir(), "tact-review-worker-"));
+  const outputDirectory = await mkdtemp(join(tmpdir(), "tact-web-worker-"));
   const workerEntrypoint = reviewEntrypoints.find((path) => basename(path) === "worker.js");
 
   try {

@@ -6,7 +6,7 @@ const RELEASE_TEMPLATE: &str = include_str!("../../../.github/RELEASE_TEMPLATE.m
 const CHANGELOG_CONFIG: &str = include_str!("../../../cliff.toml");
 const RELEASE_INSTRUCTIONS: &str = include_str!("../../../RELEASES.md");
 const PACKAGE_MANIFEST: &str = include_str!("../Cargo.toml");
-const REVIEW_BUILD: &str = include_str!("../../../web/review/build.ts");
+const REVIEW_BUILD: &str = include_str!("../../../web/app/build.ts");
 const REVIEW_ASSETS: &str = include_str!("../src/review/assets.rs");
 const REVIEW_SERVER: &str = include_str!("../src/review/server.rs");
 const JUSTFILE: &str = include_str!("../../../justfile");
@@ -113,11 +113,11 @@ fn crate_package_omits_repository_only_assets() {
 }
 
 #[test]
-fn ci_tests_builds_and_typechecks_review_assets_with_locked_dependencies() {
+fn ci_tests_builds_and_typechecks_web_assets_with_locked_dependencies() {
     let workflow = workflow(CI_WORKFLOW);
-    let steps = workflow["jobs"]["review-web"]["steps"]
+    let steps = workflow["jobs"]["web-app"]["steps"]
         .as_sequence()
-        .expect("review-web should contain steps");
+        .expect("web-app should contain steps");
 
     for command in [
         "bun install --frozen-lockfile",
@@ -129,7 +129,7 @@ fn ci_tests_builds_and_typechecks_review_assets_with_locked_dependencies() {
             steps.iter().any(|step| step["run"]
                 .as_str()
                 .is_some_and(|run| run.starts_with(command))),
-            "review-web should run `{command}`"
+            "web-app should run `{command}`"
         );
     }
 }
@@ -153,9 +153,9 @@ fn review_bundle_api_matches_the_rust_asset_validator() {
 #[test]
 fn release_packages_and_signs_the_review_bundle() {
     let workflow = workflow(RELEASE_WORKFLOW);
-    let review_steps = workflow["jobs"]["review_assets"]["steps"]
+    let review_steps = workflow["jobs"]["web_assets"]["steps"]
         .as_sequence()
-        .expect("review_assets should contain steps");
+        .expect("web_assets should contain steps");
     let package = review_steps
         .iter()
         .find(|step| step["name"] == "Package review assets")
@@ -163,7 +163,7 @@ fn release_packages_and_signs_the_review_bundle() {
         .as_str()
         .expect("review packaging should be a shell command");
 
-    assert_contains(package, "archive=\"tact-review-${GITHUB_REF_NAME}.tar.gz\"");
+    assert_contains(package, "archive=\"tact-web-${GITHUB_REF_NAME}.tar.gz\"");
     assert_contains(package, "cp -R dist/. review/");
     assert_contains(package, "tar -czf \"$archive\" review");
     assert_contains(package, "shasum -a 256 \"$archive\"");
@@ -171,7 +171,7 @@ fn release_packages_and_signs_the_review_bundle() {
     let sign_needs = workflow["jobs"]["sign"]["needs"]
         .as_sequence()
         .expect("sign should depend on all asset builds");
-    assert!(sign_needs.iter().any(|need| need == "review_assets"));
+    assert!(sign_needs.iter().any(|need| need == "web_assets"));
 
     assert_contains(RELEASE_WORKFLOW, "for archive in dist/*.tar.gz");
     assert_contains(RELEASE_WORKFLOW, "test -s \"${archive}.sig\"");

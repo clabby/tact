@@ -12,13 +12,13 @@ jobs:
   cache:
     uses: ./.github/workflows/cache.yaml
 
-  review-web:
+  web-app:
     runs-on: ubuntu-latest
     name: Review Web
     timeout-minutes: 10
     defaults:
       run:
-        working-directory: web/review
+        working-directory: web/app
     steps:
       - name: Checkout sources
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

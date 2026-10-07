@@ -101,7 +101,7 @@ jobs:
             ${{ env.BINARY_NAME }}-${{ matrix.target }}-${{ github.ref_name }}.${{ matrix.archive_ext }}.sha256
           if-no-files-found: error
 
-  review_assets:
+  web_assets:
     name: Build Review Assets
     needs: validate
     runs-on: ubuntu-latest
@@ -109,7 +109,7 @@ jobs:
       contents: read
     defaults:
       run:
-        working-directory: web/review
+        working-directory: web/app
     steps:
       - name: Checkout sources
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -131,7 +131,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          archive="tact-review-${GITHUB_REF_NAME}.tar.gz"
+          archive="tact-web-${GITHUB_REF_NAME}.tar.gz"
           mkdir review
           cp -R dist/. review/
           tar -czf "$archive" review
@@ -141,13 +141,13 @@ jobs:
         with:
           name: review-assets
           path: |
-            web/review/tact-review-${{ github.ref_name }}.tar.gz
-            web/review/tact-review-${{ github.ref_name }}.tar.gz.sha256
+            web/app/tact-web-${{ github.ref_name }}.tar.gz
+            web/app/tact-web-${{ github.ref_name }}.tar.gz.sha256
           if-no-files-found: error
 
   sign:
     name: Sign Release Assets
-    needs: [build, review_assets]
+    needs: [build, web_assets]
     runs-on: ubuntu-latest
     permissions:
       contents: read

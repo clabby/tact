@@ -18,7 +18,7 @@ use std::{
 };
 use tempfile::tempdir_in;
 
-const REVIEW_ASSETS_ENV: &str = "TACT_REVIEW_ASSETS";
+const REVIEW_ASSETS_ENV: &str = "TACT_WEB_ASSETS";
 const MANIFEST_NAME: &str = "manifest.json";
 const BUNDLE_SCHEMA_VERSION: u32 = 2;
 const REVIEW_API_VERSION: u32 = super::server::PROTOCOL_VERSION;
@@ -566,7 +566,7 @@ pub(crate) enum AssetError {
     #[error("could not determine the Tact directory; set TACT_HOME")]
     HomeUnavailable,
     #[error(
-        "this development build cannot download release review assets; set TACT_REVIEW_ASSETS to an explicit development bundle"
+        "this development build cannot download release review assets; set TACT_WEB_ASSETS to an explicit development bundle"
     )]
     DevelopmentDownload,
     #[error("the built-in package version is invalid: {0}")]

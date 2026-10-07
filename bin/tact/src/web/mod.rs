@@ -1,5 +1,6 @@
 //! Native browser workflow for human review of workspace changes.
 
+pub(crate) mod bridge;
 mod assets;
 mod diff;
 mod server;
@@ -436,7 +437,7 @@ mod tests {
         ReviewAgent, ReviewBackend, ReviewError, generate_overview,
         server::{CommentSide, Decision, ReviewComment, ReviewDecision},
     };
-    use crate::review::diff::{OverviewContext, OverviewRange, ReviewRange};
+    use crate::web::diff::{OverviewContext, OverviewRange, ReviewRange};
     use std::{
         fs,
         process::Command,
