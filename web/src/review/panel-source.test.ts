@@ -2,6 +2,24 @@ import { expect, test } from "bun:test";
 
 const read = (name: string) => Bun.file(new URL(name, import.meta.url)).text();
 const panel = () => read("review-panel.ts");
+/** Every module that implements the review panel. */
+const panelModules = [
+  "review-panel.ts",
+  "panel-markup.ts",
+  "markup.ts",
+  "annotations.ts",
+  "ai-review.ts",
+  "changed-files-tree.ts",
+  "comment-editor.ts",
+  "diff-view.ts",
+  "overview-panel.ts",
+  "question-threads.ts",
+  "range-dialog.ts",
+  "review-status.ts",
+  "search-bar.ts",
+  "settings-popover.ts",
+];
+const allPanelSources = async () => (await Promise.all(panelModules.map(read))).join("\n");
 const styles = () => read("review-panel.css");
 const rule = (css: string, selector: string) =>
   css.match(new RegExp("(?:^|\\n)\\s*" + selector.replace(/[.*+?^$()|[\]\\]/g, "\\$&") + "\\s*{([^}]*)}"))?.[1];
@@ -28,33 +46,39 @@ test("the layout follows the panel's width, not the window's", async () => {
 
 test("review search integrates with the virtualized review lifecycle", async () => {
   const app = await panel();
+  const search = await read("search-bar.ts");
+  const diff = await read("diff-view.ts");
   const css = await styles();
-  const shortcuts = app.slice(app.indexOf("handleSearchShortcut"), app.indexOf("constructor("));
-  const open = app.slice(app.indexOf("private openSearch"), app.indexOf("private closeSearch"));
-  const close = app.slice(app.indexOf("private closeSearch"), app.indexOf("private resetSearch"));
-  const search = app.slice(app.indexOf("private bindSearch"), app.indexOf("private bindEvents"));
-  const cleanup = app.slice(app.indexOf("cleanUp()"), app.indexOf("private runningChanged"));
+  const shortcuts = search.slice(search.indexOf("handleShortcut"), search.indexOf("constructor("));
+  const open = search.slice(search.indexOf("private open()"), search.indexOf("\n  close()"));
+  const close = search.slice(search.indexOf("\n  close()"), search.indexOf("\n  reset()"));
+  const dispose = search.slice(search.indexOf("\n  dispose()"), search.indexOf("\n  selectedLinesChanged("));
+  const cleanup = app.slice(app.indexOf("\n  cleanUp()"), app.indexOf("private runningChanged"));
+  const diffDispose = diff.slice(diff.indexOf("\n  dispose()"), diff.indexOf("\n  render("));
 
-  expect(app).toContain('id="review-search" role="search" hidden');
+  expect(await read("panel-markup.ts")).toContain('id="review-search" role="search" hidden');
   expect(shortcuts.indexOf("dialog[open]")).toBeLessThan(shortcuts.indexOf('key === "f"'));
   expect(shortcuts).toContain("this.root.contains(event.target as Node)");
   expect(search).toContain("event.isComposing");
   expect(search).toContain("moveSearchTarget(");
-  expect(search).toContain("this.searchPaused = true");
+  expect(search).toContain("this.paused = true");
   expect(search).toContain("occurrenceIndex + 1");
-  expect(search).toContain('this.selectMobilePanel("diff")');
+  expect(search).toContain('this.deps.selectMobilePanel("diff")');
   expect(search).toContain("CSS.highlights.set");
   expect(search).toContain("data-line-type");
-  expect(open).not.toContain("this.revealSearchMatch()");
-  expect(close).not.toContain("this.searchMatch = undefined");
-  expect(app).toContain("deepActiveElement(document)");
+  expect(open).not.toContain("this.reveal()");
+  expect(close).not.toContain("this.match = undefined");
+  expect(search).toContain("deepActiveElement(document)");
   expect(search).toContain('this.root.querySelector<HTMLElement>("#diff-view")');
-  expect(app).toContain("context.item.id === this.searchMatch?.itemId");
-  expect(app).toContain('phase === "unmount" ? null : node.shadowRoot');
-  expect(app).toContain("if (this.searchIsOpen()) this.searchSelection = null");
-  expect(app.match(/this\.viewer\?\.clearSelectedLines\(\)/g)).toHaveLength(1);
-  expect(cleanup).toContain('document.removeEventListener("keydown", this.handleSearchShortcut)');
-  expect(cleanup.indexOf("viewer?.cleanUp()")).toBeLessThan(cleanup.indexOf("CSS.highlights?.delete"));
+  expect(search).toContain("if (itemId === this.match?.itemId) this.updateHighlight(root)");
+  expect(diff).toContain('this.deps.itemRendered(context.item.id, phase === "unmount" ? null : node.shadowRoot)');
+  expect(app).toContain("itemRendered: (itemId, root) => this.search.itemRendered(itemId, root)");
+  expect(search).toContain("if (this.isOpen()) this.selection = null");
+  expect((await allPanelSources()).match(/viewer(\(\))?\?\.clearSelectedLines\(\)/g)).toHaveLength(1);
+  expect(cleanup).toContain("this.search.dispose()");
+  expect(dispose).toContain('document.removeEventListener("keydown", this.handleShortcut)');
+  expect(cleanup.indexOf("this.diffView.dispose()")).toBeLessThan(cleanup.indexOf("CSS.highlights?.delete"));
+  expect(diffDispose).toContain("this.codeView?.cleanUp()");
   expect(css).toMatch(/\.review-search\s*{[^}]*position:\s*absolute/s);
 });
 
@@ -66,7 +90,7 @@ test("the refresh banner keeps stable spacing around its separator", async () =>
 });
 
 test("working indicators stay visibly animated", async () => {
-  const app = await panel();
+  const app = await allPanelSources();
   const css = await styles();
   const reducedMotion = css.match(/@media\s*\(prefers-reduced-motion:\s*reduce\)\s*{([\s\S]*)}\s*$/)?.[1];
 
@@ -84,14 +108,14 @@ test("working indicators stay visibly animated", async () => {
 });
 
 test("seen files are crossed out in the file tree", async () => {
-  const app = await panel();
+  const app = await read("changed-files-tree.ts");
   expect(app).toContain('[title*="Seen"]');
   expect(app).toMatch(/text-decoration:\s*line-through/);
 });
 
 test("the comment editor keeps its actions after the comment body", async () => {
-  const app = await panel();
-  const editor = app.slice(app.indexOf("private commentComposerElement"), app.indexOf("private pendingCommentElement"));
+  const comments = await read("comment-editor.ts");
+  const editor = comments.slice(comments.indexOf("\n  composerElement("), comments.indexOf("\n  commentElement("));
   expect(editor.indexOf('class="editor-heading"')).toBeLessThan(editor.indexOf('class="comment-input"'));
   expect(editor.indexOf('class="comment-input"')).toBeLessThan(editor.indexOf('class="editor-footer"'));
   expect(editor).toContain('data-comment-action="ask"');
@@ -106,35 +130,42 @@ test("the comment input uses a neutral focus indicator", async () => {
 
 test("comments stay editable while the agent works, but agent actions wait for it", async () => {
   const app = await panel();
+  const editor = await read("comment-editor.ts");
+  const threads = await read("question-threads.ts");
   const locked = app.slice(app.indexOf("private get commentsLocked"), app.indexOf("private get agentUnavailable"));
   const unavailable = app.slice(app.indexOf("private get agentUnavailable"), app.indexOf("private get agentUnavailableReason"));
-  const comments = app.slice(app.indexOf("private openCommentComposer"), app.indexOf("private refreshTreeDecorations"));
-  const questions = app.slice(app.indexOf("private askDraftQuestion"), app.indexOf("private startQuestion"));
+  const comments = editor.slice(editor.indexOf("\n  open("), editor.indexOf("\n  composerElement("));
+  const questions = threads.slice(threads.indexOf("\n  askDraft()"), threads.indexOf("private startQuestion"));
 
   expect(locked).not.toContain("this.running");
   expect(unavailable).toContain("this.running");
   expect(unavailable).toContain("this.session === null");
-  expect(comments).toContain("if (!selection || this.commentsLocked) return");
-  expect(questions).toContain("this.agentUnavailable");
-  expect(app).toContain("this.loadingOverview !== undefined || this.aiReviewPending || this.questionOperations.size > 0");
+  expect(comments).toContain("if (!selection || this.deps.commentsLocked()) return");
+  expect(questions).toContain("this.deps.agentUnavailable()");
+  expect(app).toContain("this.overview.loading || this.aiReview.pending || this.questionThreads.busy");
+  expect(await read("overview-panel.ts")).toContain("return this.loadingOverview !== undefined;");
+  expect(await read("ai-review.ts")).toContain("return this.aiReviewPending;");
+  expect(threads).toContain("return this.questionOperations.size > 0;");
   expect(app).toContain('querySelectorAll<HTMLTextAreaElement>("[data-overview-instructions], [data-thread-input]")');
 });
 
 test("independent requests retain their own pending state", async () => {
-  const app = await panel();
-  const overview = app.slice(app.indexOf("private async loadOverview"), app.indexOf("private showOverviewError"));
-  const question = app.slice(app.indexOf("private askDraftQuestion"), app.indexOf("private pendingCommentElement"));
+  const overviewPanel = await read("overview-panel.ts");
+  const threads = await read("question-threads.ts");
+  const overview = overviewPanel.slice(overviewPanel.indexOf("\n  async load("), overviewPanel.indexOf("private showError"));
+  const question = threads.slice(threads.indexOf("\n  askDraft()"), threads.indexOf("\n  threadElement("));
 
   expect(overview).toContain("rangesEqual(this.loadingOverview, page.selected_range)");
-  expect(overview).not.toContain("this.aiReviewPending");
+  expect(overview).not.toContain("aiReviewPending");
   expect(question).toContain("this.questionOperations.set(thread.id");
   expect(question).toContain("this.questionOperations.get(thread.id)");
   expect(question).toContain("this.questionsToPoll.add(thread.id)");
 });
 
 test("the review is delivered to the chat, not decided in a one-shot flow", async () => {
-  const app = await panel();
-  const send = app.slice(app.indexOf("private async sendToChat"), app.indexOf("private showNotice"));
+  const app = await allPanelSources();
+  const panelSource = await panel();
+  const send = panelSource.slice(panelSource.indexOf("private async sendToChat"), panelSource.indexOf("\nfunction outdatedNote"));
 
   expect(send).toContain("this.api.compose(");
   expect(send).toContain("this.host.sendToChat(markdown)");
@@ -148,7 +179,7 @@ test("the review is delivered to the chat, not decided in a one-shot flow", asyn
 
 test("a panel stays alive across session changes and releases everything on dispose", async () => {
   const app = await panel();
-  const cleanup = app.slice(app.indexOf("cleanUp()"), app.indexOf("private runningChanged"));
+  const cleanup = app.slice(app.indexOf("\n  cleanUp()"), app.indexOf("private runningChanged"));
 
   expect(app).toContain("host.onActiveSessionChange(");
   expect(app).toContain("host.onWorkspaceChanged(");
@@ -156,7 +187,9 @@ test("a panel stays alive across session changes and releases everything on disp
   expect(app).toContain("host.onThemeChange(");
   expect(cleanup).toContain("for (const stop of this.unsubscribe) stop()");
   expect(cleanup).toContain("this.refresher.dispose()");
-  expect(cleanup).toContain("this.workerPool.terminate()");
+  expect(cleanup).toContain("this.diffView.dispose()");
+  const diff = await read("diff-view.ts");
+  expect(diff.slice(diff.indexOf("\n  dispose()"), diff.indexOf("\n  render("))).toContain("this.workerPool.terminate()");
 });
 
 test("the changed-file wrapper owns the tree's available height", async () => {
@@ -168,8 +201,8 @@ test("the changed-file wrapper owns the tree's available height", async () => {
 });
 
 test("change totals layer above long file names", async () => {
-  const app = await panel();
-  const treeStyles = app.slice(app.indexOf("const TREE_STYLES"), app.indexOf("type AnnotationMetadata"));
+  const tree = await read("changed-files-tree.ts");
+  const treeStyles = tree.slice(tree.indexOf("const TREE_STYLES"), tree.indexOf("export type ChangedFilesTreeDeps"));
 
   expect(treeStyles).toMatch(/\[data-item-section="decoration"\][^{]*{[^}]*position:\s*absolute/s);
   expect(treeStyles).toMatch(/\[data-item-section="decoration"\][^{]*{[^}]*z-index:\s*2/s);
@@ -179,8 +212,8 @@ test("change totals layer above long file names", async () => {
 });
 
 test("the file change totals and comment indicator preserve their spacing", async () => {
-  const app = await panel();
-  const treeStyles = app.slice(app.indexOf("const TREE_STYLES"), app.indexOf("type AnnotationMetadata"));
+  const app = await read("changed-files-tree.ts");
+  const treeStyles = app.slice(app.indexOf("const TREE_STYLES"), app.indexOf("export type ChangedFilesTreeDeps"));
 
   expect(app).toContain('text: "\\u00a0/\\u00a0"');
   expect(app).toContain('{ text: "\\u00a0\\u00a0" }');
@@ -191,12 +224,17 @@ test("the file change totals and comment indicator preserve their spacing", asyn
 });
 
 test("the file tree and diff follow the application theme", async () => {
-  const app = await panel();
-  const sync = app.slice(app.indexOf("private syncTreeAppearance"), app.indexOf("private treeGitStatus"));
+  const app = await allPanelSources();
+  const panelSource = await panel();
+  const tree = await read("changed-files-tree.ts");
+  const sync = tree.slice(tree.indexOf("\n  syncAppearance()"), tree.indexOf("private gitStatus"));
+  const themed = /appearance: \(\) => appearance\(this\.settings\.current, this\.host\.theme\(\)\)/g;
 
   expect(sync).toContain("getFileTreeContainer()");
-  expect(sync).toContain("appearance(this.settings, this.host.theme())");
-  expect(app).toContain("themeType: appearance(this.settings, this.host.theme())");
+  expect(sync).toContain("this.deps.appearance()");
+  expect(await read("diff-view.ts")).toContain("themeType: this.deps.appearance()");
+  // The tree, the diff, and the overview frame all follow the application theme.
+  expect(panelSource.match(themed)).toHaveLength(3);
   expect(app).not.toContain("prefers-color-scheme");
   expect(app).not.toContain("documentElement");
 });
