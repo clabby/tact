@@ -1,7 +1,7 @@
 //! Shared fixtures for the server's tests.
 
 use super::{
-    api::{self, AppState},
+    api::{self, AppState, PublicOrigin},
     assets::AssetStore,
     bridge::{self, Busy, Draft, LoopEnd, Publication, SessionInfo},
     hub::Hub,
@@ -40,6 +40,14 @@ impl Harness {
     }
 
     pub(super) fn with(workspace: TempDir, agent: ReviewAgent) -> Self {
+        Self::with_origin(workspace, agent, PublicOrigin::None)
+    }
+
+    pub(super) fn with_origin(
+        workspace: TempDir,
+        agent: ReviewAgent,
+        public_origin: PublicOrigin,
+    ) -> Self {
         crate::install_tls_provider();
         let home = tempfile::tempdir().unwrap();
         let (terminal, end) = bridge::bridge();
@@ -59,7 +67,7 @@ impl Harness {
             queries: end.queries,
             workspace: workspace.path().to_owned(),
             port: 7878,
-            public_origin: None,
+            public_origin,
             registry_directory: home.path().join("web/instances"),
             assets: AssetStore::new(home.path().to_owned()),
             client: reqwest::Client::new(),

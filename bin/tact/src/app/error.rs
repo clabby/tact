@@ -120,6 +120,8 @@ pub(crate) enum AuthError {
 
 #[derive(Debug, Error)]
 pub(crate) enum ConfigError {
+    #[error("[web] public_url and tailscale are mutually exclusive; set only one of them")]
+    WebExposureConflict,
     #[error("Claude models require [claude] enabled = true in the configuration")]
     ClaudeDisabled,
     #[error("could not determine the config directory; set TACT_HOME or pass --config")]

@@ -6,6 +6,7 @@ use super::{
     bridge::{CommandEnvelope, CommandError, Query, QueryReply, QueryRequest, Request},
     hub::Hub,
     registry::{self, InstanceRecord},
+    tailscale::Tailnet,
     token::MachineToken,
     wire::PROTOCOL_VERSION,
 };
@@ -40,6 +41,17 @@ const SIBLING_TIMEOUT: Duration = Duration::from_millis(500);
 const COOKIE_NAME: &str = "tact";
 const ENTRY_NOT_FOUND: &str = "the entry does not exist";
 
+/// How other devices reach this server, as configured.
+pub(super) enum PublicOrigin {
+    /// Only this computer can reach it.
+    None,
+    /// The address of a tunnel the user runs (`web.public_url`).
+    Fixed(String),
+    /// A Tailscale address that exists only while the server is published to the tailnet
+    /// (`web.tailscale`).
+    Tailnet(Tailnet),
+}
+
 /// Everything the handlers share. Built once the listener is bound.
 pub(super) struct AppState {
     pub(super) token: MachineToken,
@@ -48,8 +60,7 @@ pub(super) struct AppState {
     pub(super) queries: mpsc::UnboundedSender<QueryRequest>,
     pub(super) workspace: PathBuf,
     pub(super) port: u16,
-    /// The externally reachable origin from \`web.public_url\`, when configured.
-    pub(super) public_origin: Option<String>,
+    pub(super) public_origin: PublicOrigin,
     pub(super) registry_directory: PathBuf,
     pub(super) assets: AssetStore,
     pub(super) client: reqwest::Client,
@@ -355,17 +366,31 @@ fn sniff_image(bytes: &[u8]) -> Option<&'static str> {
     }
 }
 
-/// What a client needs to build a sign-in link for another device: the configured public origin,
-/// if any, and the token. The token already authorizes everything this request does, so an
-/// authenticated client learns nothing new; it is never logged.
-async fn link(State(state): State<Arc<AppState>>) -> Response<Body> {
-    secure_json(
+/// What a client needs to build a sign-in link for another device: the public origin, if any, and
+/// the token. The token already authorizes everything this request does, so an authenticated client
+/// learns nothing new; it is never logged.
+///
+/// With `web.tailscale` this is the moment the server is published to the tailnet, and Tailscale is
+/// checked on every request, so a client switched on after an earlier refusal is picked up.
+async fn link(State(state): State<Arc<AppState>>) -> Result<Response<Body>, ApiError> {
+    let public_origin = match &state.public_origin {
+        PublicOrigin::None => None,
+        PublicOrigin::Fixed(origin) => Some(origin.clone()),
+        PublicOrigin::Tailnet(tailnet) => Some(tailnet.origin().await.map_err(|error| {
+            ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "tailscale_unavailable",
+                format!("Cannot share over Tailscale: {error}"),
+            )
+        })?),
+    };
+    Ok(secure_json(
         StatusCode::OK,
         serde_json::json!({
-            "public_origin": state.public_origin,
+            "public_origin": public_origin,
             "token": state.token.expose(),
         }),
-    )
+    ))
 }
 
 async fn instance(State(state): State<Arc<AppState>>) -> Response<Body> {
@@ -616,13 +641,16 @@ pub(super) fn secure(response: &mut Response<Body>) {
 mod tests {
     use super::super::{
         bridge::{Command, CommandError, Publication, Query, Reply},
-        testing::Harness,
+        tailscale::Tailnet,
+        testing::{self, Harness},
     };
+    use super::PublicOrigin;
     use axum::{
         body::Body,
         http::{Method, Request, StatusCode, header},
     };
     use serde_json::json;
+    use std::{path::PathBuf, time::Duration};
 
     fn unauthenticated(method: Method, uri: &str) -> Request<Body> {
         Request::builder()
@@ -902,6 +930,44 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["token"], harness.state.token.expose());
         assert_eq!(body["public_origin"], serde_json::Value::Null);
+    }
+
+    #[tokio::test]
+    async fn a_fixed_public_origin_is_served_with_the_token() {
+        let harness = Harness::with_origin(
+            testing::repository(),
+            testing::idle_agent(),
+            PublicOrigin::Fixed("https://tact.example.net".to_owned()),
+        );
+
+        let (status, body) = harness.call(Method::GET, "/api/link", None).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["public_origin"], "https://tact.example.net");
+        assert_eq!(body["token"], harness.state.token.expose());
+    }
+
+    #[tokio::test]
+    async fn a_tailnet_that_cannot_be_reached_refuses_the_link_without_the_token() {
+        let tailnet = Tailnet::with(
+            vec![PathBuf::from("/nonexistent/tailscale")],
+            7878,
+            Duration::from_millis(10),
+        );
+        let harness = Harness::with_origin(
+            testing::repository(),
+            testing::idle_agent(),
+            PublicOrigin::Tailnet(tailnet),
+        );
+
+        let (status, body) = harness.call(Method::GET, "/api/link", None).await;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(
+            body["message"].as_str().unwrap().contains("Tailscale"),
+            "{body}"
+        );
+        assert!(body.get("token").is_none());
     }
 
     #[tokio::test]

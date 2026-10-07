@@ -313,6 +313,9 @@ pub(crate) struct WebConfig {
     port: u16,
     /// Empty when unset, so the materialized defaults list every key.
     public_url: String,
+    /// Publishes the server to the tailnet with `tailscale serve` while this process runs.
+    /// Mutually exclusive with `public_url`.
+    tailscale: bool,
     max_live_sessions: NonZeroUsize,
 }
 
@@ -453,6 +456,7 @@ struct WebConfigFile {
     bind: Option<IpAddr>,
     port: Option<u16>,
     public_url: Option<String>,
+    tailscale: Option<bool>,
     max_live_sessions: Option<NonZeroUsize>,
 }
 
@@ -662,16 +666,7 @@ impl Config {
             subagents: SubagentsConfig {
                 enabled: file.subagents.enabled.unwrap_or(true),
             },
-            web: WebConfig {
-                enabled: overrides.web.or(file.web.enabled).unwrap_or(true),
-                bind: file.web.bind.unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST)),
-                port: file.web.port.unwrap_or(7878),
-                public_url: file.web.public_url.unwrap_or_default().trim().to_owned(),
-                max_live_sessions: file
-                    .web
-                    .max_live_sessions
-                    .unwrap_or(NonZeroUsize::new(8).expect("8 is non-zero")),
-            },
+            web: WebConfig::new(file.web, overrides.web)?,
             tui: TuiConfig::new(file.tui),
             theme: file.theme,
             reload,
@@ -1621,6 +1616,24 @@ impl SubagentsConfig {
 }
 
 impl WebConfig {
+    fn new(file: WebConfigFile, enabled_override: Option<bool>) -> Result<Self> {
+        let public_url = file.public_url.unwrap_or_default().trim().to_owned();
+        let tailscale = file.tailscale.unwrap_or(false);
+        if tailscale && !public_url.is_empty() {
+            return Err(ConfigError::WebExposureConflict.into());
+        }
+        Ok(Self {
+            enabled: enabled_override.or(file.enabled).unwrap_or(true),
+            bind: file.bind.unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+            port: file.port.unwrap_or(7878),
+            public_url,
+            tailscale,
+            max_live_sessions: file
+                .max_live_sessions
+                .unwrap_or(NonZeroUsize::new(8).expect("8 is non-zero")),
+        })
+    }
+
     pub(crate) const fn enabled(&self) -> bool {
         self.enabled
     }
@@ -1637,6 +1650,11 @@ impl WebConfig {
     /// The externally reachable origin used only to build copyable links.
     pub(crate) fn public_url(&self) -> Option<&str> {
         Some(self.public_url.as_str()).filter(|url| !url.is_empty())
+    }
+
+    /// Whether the server publishes itself to the tailnet while this process runs.
+    pub(crate) const fn tailscale(&self) -> bool {
+        self.tailscale
     }
 
     /// The most live sessions one process may host, across the terminal and the web interface.
@@ -2216,7 +2234,14 @@ mod tests {
         assert_table_fields(&rendered["subagents"], &["enabled"]);
         assert_table_fields(
             &rendered["web"],
-            &["enabled", "bind", "port", "public_url", "max_live_sessions"],
+            &[
+                "enabled",
+                "bind",
+                "port",
+                "public_url",
+                "tailscale",
+                "max_live_sessions",
+            ],
         );
         assert_table_fields(&rendered["tui"], &["mouse_scroll_lines"]);
         assert_table_fields(&rendered["theme"], &["mode", "light", "dark"]);
@@ -2943,6 +2968,7 @@ mod tests {
         assert!(config.web().bind().is_loopback());
         assert_eq!(config.web().port(), 7878);
         assert_eq!(config.web().public_url(), None);
+        assert!(!config.web().tailscale());
         assert_eq!(config.web().max_live_sessions(), 8);
 
         let config = load_config(
@@ -2954,6 +2980,23 @@ mod tests {
         assert_eq!(config.web().public_url(), Some("https://host.ts.net"));
         assert_eq!(config.web().max_live_sessions(), 3);
         assert!(load_config("[web]\nmax_live_sessions = 0\n").is_err());
+    }
+
+    #[test]
+    fn web_tailscale_and_public_url_are_mutually_exclusive() {
+        let config = load_config("[web]\ntailscale = true\n").unwrap();
+        assert!(config.web().tailscale());
+        assert_eq!(config.web().public_url(), None);
+
+        let config = load_config("[web]\npublic_url = \"https://host.example\"\n").unwrap();
+        assert!(!config.web().tailscale());
+
+        // A blank public_url is unset, so it does not conflict.
+        assert!(load_config("[web]\ntailscale = true\npublic_url = \" \"\n").is_ok());
+        assert!(matches!(
+            load_config("[web]\ntailscale = true\npublic_url = \"https://host.example\"\n"),
+            Err(Error::Config(ConfigError::WebExposureConflict))
+        ));
     }
 
     #[test]

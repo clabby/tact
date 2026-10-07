@@ -9,6 +9,7 @@
 //! new feature is a new variant plus its loop-side handler, never a new route. Query replies are
 //! typed structures owned by the UI-agnostic modules that compute them for the terminal as well.
 
+use crate::web::tailscale::Tailnet;
 use crate::{
     app::{
         config::{ConfigDocument, ReasoningEffort, ReasoningMode, Speed},
@@ -449,6 +450,9 @@ pub(crate) enum WebStatus {
     /// `url` embeds the login credential in its fragment and must only be shown on request.
     Ready {
         url: String,
+        /// Present with `web.tailscale`: publishes the server to the tailnet when a sign-in link
+        /// for another device is wanted.
+        tailnet: Option<Tailnet>,
     },
     Unavailable {
         reason: String,

@@ -525,12 +525,16 @@ sessions that process runs: the terminal and the browser share the active sessio
 session's draft, queue, settings, and transcript, and either can start, switch, fork, and close
 sessions. The terminal must stay open (there is no headless mode). The interface binds to
 `127.0.0.1:7878` by default (the next free port is used when that one is taken); put it behind
-Tailscale, an SSH forward, or similar to reach it from elsewhere. Tact implements no transport.
+Tailscale, an SSH forward, or similar to reach it from elsewhere. For Tailscale, set
+`tailscale = true` under `[web]` and Tact publishes the interface to your tailnet with
+`tailscale serve` the first time you ask for a QR code (Tact checks that Tailscale is online each
+time, and the local interface works regardless); for any other tunnel, set `public_url` to its
+address. The two settings are mutually exclusive.
 
 Open the login URL Tact shows for the web interface. Its fragment carries the machine token, which
 is stored in `~/.tact/web/token` (mode 0600) and shared by every Tact instance of your user. The
 token grants the same access as a shell, so treat the URL like a password. Configure the server in
-the `[web]` section (`enabled`, `bind`, `port`, `public_url`, `max_live_sessions`) or pass
+the `[web]` section (`enabled`, `bind`, `port`, `public_url`, `tailscale`, `max_live_sessions`) or pass
 `--web=false` (`TACT_WEB`) to turn it off. The design is described in [docs/web.md](docs/web.md).
 
 The review tool lives in the interface's side panel. It shows the full branch from trunk by

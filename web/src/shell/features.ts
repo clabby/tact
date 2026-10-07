@@ -238,7 +238,7 @@ export async function openPhoneLink(api: ApiClient) {
     const { public_origin, token } = await api.link();
     const origin = shareableOrigin(public_origin, location.origin);
     if (!origin) {
-      sheet.body.innerHTML = `<div class="phone-link"><p class="phone-caption">This page is open at an address only this computer can reach (${location.host}), so a phone cannot use a link built from it. Open Tact through your tunnel's address (for example a Tailscale name) and try again, or set <code>web.public_url</code>.</p></div>`;
+      sheet.body.innerHTML = `<div class="phone-link"><p class="phone-caption">This page is open at an address only this computer can reach (${location.host}), so a phone cannot use a link built from it. Open Tact through your tunnel's address (for example a Tailscale name) and try again, or set <code>web.tailscale</code> or <code>web.public_url</code>.</p></div>`;
       return;
     }
     const url = signInLink(origin, token);

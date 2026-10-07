@@ -117,10 +117,11 @@ type ResumeSessionTask = JoinHandle<(
 type UpdateCheckTask =
     JoinHandle<std::result::Result<Option<semver::Version>, crate::app::update::UpdateError>>;
 
-struct BrowserOpenCompletion {
+struct WebTaskCompletion {
     pane: PaneId,
-    /// A user-facing failure message.
-    result: std::result::Result<(), String>,
+    /// A sign-in link to show as a QR code, when the task was a QR request; otherwise a user-facing
+    /// failure message is the only thing worth reporting.
+    result: std::result::Result<Option<String>, String>,
 }
 
 type CommandReply = oneshot::Sender<std::result::Result<Reply, CommandError>>;
@@ -663,7 +664,7 @@ pub(crate) async fn run(
     let mut writer_error = None::<TranscriptError>;
     let mut writers_open = 1_usize;
     let mut shell_tasks = JoinSet::<(PaneId, ShellExecution)>::new();
-    let mut browser_open_tasks = JoinSet::<BrowserOpenCompletion>::new();
+    let mut web_tasks = JoinSet::<WebTaskCompletion>::new();
     let mut memory_tasks = JoinSet::<MemoryCompletion>::new();
     let mut memory_generations = HashMap::<PaneId, u64>::new();
     let mut subagent_shutdowns = JoinSet::<()>::new();
@@ -694,7 +695,7 @@ pub(crate) async fn run(
                 scheduler: &mut scheduler,
                 panes: &mut panes,
                 shell_tasks: &mut shell_tasks,
-                browser_open_tasks: &mut browser_open_tasks,
+                web_tasks: &mut web_tasks,
                 memory_store: &mut memory_store,
                 memory_tasks: &mut memory_tasks,
                 memory_generations: &mut memory_generations,
@@ -1398,18 +1399,19 @@ pub(crate) async fn run(
                     )?;
                 }
             }
-            result = browser_open_tasks.join_next(), if !browser_open_tasks.is_empty() => {
+            result = web_tasks.join_next(), if !web_tasks.is_empty() => {
                 let Some(Ok(completion)) = result else {
                     continue;
                 };
-                if let Err(error) = completion.result {
-                    schedule(
-                        app.update(AppEvent::NotifyError {
-                            pane: completion.pane,
-                            error,
-                        }),
-                        &mut scheduler,
-                    );
+                let pane = completion.pane;
+                match completion.result {
+                    Ok(Some(link)) => {
+                        schedule(app.update(AppEvent::ShowWebQr { pane, link }), &mut scheduler);
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        schedule(app.update(AppEvent::NotifyError { pane, error }), &mut scheduler);
+                    }
                 }
             }
             result = memory_tasks.join_next(), if !memory_tasks.is_empty() && !stopping => {
@@ -2048,7 +2050,7 @@ struct EffectContext<'a> {
     scheduler: &'a mut RenderScheduler,
     panes: &'a mut HashMap<PaneId, PaneRuntime>,
     shell_tasks: &'a mut JoinSet<(PaneId, ShellExecution)>,
-    browser_open_tasks: &'a mut JoinSet<BrowserOpenCompletion>,
+    web_tasks: &'a mut JoinSet<WebTaskCompletion>,
     memory_store: &'a mut Option<SelectedMemoryStore>,
     memory_tasks: &'a mut JoinSet<MemoryCompletion>,
     memory_generations: &'a mut HashMap<PaneId, u64>,
@@ -2304,11 +2306,12 @@ fn apply_pane_effect(
                 .spawn(async move { (pane, shell::execute(id, command, workspace).await) });
         }
         components::RootEffect::OpenLink(destination) if is_web_link(&destination) => {
-            context.browser_open_tasks.spawn(async move {
-                BrowserOpenCompletion {
+            context.web_tasks.spawn(async move {
+                WebTaskCompletion {
                     pane,
                     result: crate::app::browser::open(&destination)
                         .await
+                        .map(|()| None)
                         .map_err(|error| format!("Could not open link: {error}")),
                 }
             });
@@ -2581,7 +2584,7 @@ fn apply_pane_effect(
             };
             let status = context.web_status.clone();
             let enabled = context.config.web().enabled();
-            context.browser_open_tasks.spawn(async move {
+            context.web_tasks.spawn(async move {
                 let result = async {
                     if download {
                         crate::web::WebAssets::download(&home)
@@ -2593,10 +2596,11 @@ fn apply_pane_effect(
                     let url = web_link(&status, enabled)?;
                     crate::app::browser::open(&url).await.map_err(|error| {
                         format!("Could not open the browser: {error}. Use Copy web link instead.")
-                    })
+                    })?;
+                    Ok(None)
                 }
                 .await;
-                BrowserOpenCompletion { pane, result }
+                WebTaskCompletion { pane, result }
             });
         }
         components::RootEffect::CopyWebLink => {
@@ -2613,13 +2617,16 @@ fn apply_pane_effect(
             schedule(context.app.update(event), context.scheduler);
         }
         components::RootEffect::ShowWebQr => {
-            let link =
-                web_link(context.web_status, context.config.web().enabled()).and_then(phone_link);
-            let event = match link {
-                Ok(link) => AppEvent::ShowWebQr { pane, link },
-                Err(error) => AppEvent::NotifyError { pane, error },
-            };
-            schedule(context.app.update(event), context.scheduler);
+            let status = context.web_status.clone();
+            let enabled = context.config.web().enabled();
+            context.web_tasks.spawn(async move {
+                let result = async {
+                    let link = web_link(&status, enabled)?;
+                    phone_link(link, &status).await.map(Some)
+                }
+                .await;
+                WebTaskCompletion { pane, result }
+            });
         }
         components::RootEffect::ResumeSession(session_id) => {
             if let Some(live) = context.app.pane_for_session(&session_id) {
@@ -2918,7 +2925,7 @@ fn web_link(
         return Err("The web interface is disabled; set web.enabled = true.".to_owned());
     }
     match &*status.borrow() {
-        WebStatus::Ready { url } => Ok(url.clone()),
+        WebStatus::Ready { url, .. } => Ok(url.clone()),
         WebStatus::Starting => Err("The web interface is still starting.".to_owned()),
         WebStatus::Unavailable { reason } => {
             Err(format!("The web interface is unavailable: {reason}"))
@@ -2926,9 +2933,34 @@ fn web_link(
     }
 }
 
-/// A sign-in link that a phone can use. A link whose address is this computer's own (the default
-/// when no `web.public_url` is set) is refused rather than encoded into a code that cannot work.
-fn phone_link(link: String) -> std::result::Result<String, String> {
+/// A sign-in link that a phone can use.
+///
+/// With `web.tailscale`, the server is published to the tailnet now, and Tailscale is checked again
+/// on every call, so a client that was switched on after an earlier refusal is picked up.
+async fn phone_link(
+    link: String,
+    status: &watch::Receiver<WebStatus>,
+) -> std::result::Result<String, String> {
+    let tailnet = match &*status.borrow() {
+        WebStatus::Ready { tailnet, .. } => tailnet.clone(),
+        _ => None,
+    };
+    let Some(tailnet) = tailnet else {
+        return reachable_link(link);
+    };
+    let origin = tailnet
+        .origin()
+        .await
+        .map_err(|error| format!("Cannot share over Tailscale: {error}"))?;
+    let (_, credential) = link
+        .split_once('#')
+        .ok_or_else(|| "The web link has no sign-in credential.".to_owned())?;
+    Ok(format!("{origin}/#{credential}"))
+}
+
+/// Refuses a link whose address is this computer's own (the default when neither `web.tailscale`
+/// nor `web.public_url` is set) rather than encoding it into a code that cannot work.
+fn reachable_link(link: String) -> std::result::Result<String, String> {
     use url::Host;
     let reachable = url::Url::parse(&link)
         .ok()
@@ -2943,7 +2975,7 @@ fn phone_link(link: String) -> std::result::Result<String, String> {
     if reachable {
         Ok(link)
     } else {
-        Err("The web link points at this computer, so a phone cannot use it. Set web.public_url to your tunnel's address (for example a Tailscale name).".to_owned())
+        Err("The web link points at this computer, so a phone cannot use it. Set web.tailscale = true, or web.public_url to your tunnel's address.".to_owned())
     }
 }
 
@@ -3330,14 +3362,14 @@ mod tests {
             "http://[::1]:7878/#k=t",
             "http://0.0.0.0:7878/#k=t",
         ] {
-            assert!(super::phone_link(local.to_owned()).is_err(), "{local}");
+            assert!(super::reachable_link(local.to_owned()).is_err(), "{local}");
         }
         for reachable in [
             "https://laptop.tail1234.ts.net/#k=t",
             "http://100.64.0.7:7878/#k=t",
         ] {
             assert_eq!(
-                super::phone_link(reachable.to_owned()).as_deref(),
+                super::reachable_link(reachable.to_owned()).as_deref(),
                 Ok(reachable)
             );
         }

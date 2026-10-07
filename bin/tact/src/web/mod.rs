@@ -11,13 +11,14 @@ mod diff;
 mod hub;
 mod registry;
 mod review;
+mod tailscale;
 #[cfg(test)]
 mod testing;
 mod token;
 mod wire;
 
 use crate::app::config::Config;
-use api::AppState;
+use api::{AppState, PublicOrigin};
 use assets::AssetStore;
 pub(crate) use assets::{Located, WebAssets};
 use hub::Hub;
@@ -30,6 +31,7 @@ use std::{
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
+use tailscale::Tailnet;
 use thiserror::Error;
 use token::{MachineToken, TokenError};
 use tokio::{net::TcpListener, sync::mpsc::UnboundedSender};
@@ -91,6 +93,7 @@ pub(crate) fn spawn(
             Ok(server) => {
                 status.send_replace(bridge::WebStatus::Ready {
                     url: server.login_url.clone(),
+                    tailnet: server.tailnet.clone(),
                 });
                 server.run().await;
             }
@@ -108,10 +111,21 @@ struct Settings {
     enabled: bool,
     bind: IpAddr,
     port: u16,
-    public_url: Option<String>,
+    exposure: Exposure,
     /// The Tact home directory; the web state lives in its `web` subdirectory.
     home: PathBuf,
     workspace: PathBuf,
+}
+
+/// How the server is reached from other devices.
+enum Exposure {
+    /// Only from this computer.
+    Local,
+    /// Through a tunnel the user runs; the address is used for links and origin checks.
+    PublicUrl(String),
+    /// Through `tailscale serve`, which is started the first time a sign-in link for another
+    /// device is wanted and stopped with the server.
+    Tailscale,
 }
 
 impl Settings {
@@ -121,9 +135,11 @@ impl Settings {
             enabled: web.enabled(),
             bind: web.bind(),
             port: web.port(),
-            public_url: web
-                .public_url()
-                .map(|url| url.trim_end_matches('/').to_owned()),
+            exposure: match (web.tailscale(), web.public_url()) {
+                (true, _) => Exposure::Tailscale,
+                (false, Some(url)) => Exposure::PublicUrl(url.trim_end_matches('/').to_owned()),
+                (false, None) => Exposure::Local,
+            },
             home: config.path().parent().unwrap_or(Path::new(".")).to_owned(),
             workspace: workspace.to_owned(),
         }
@@ -144,6 +160,7 @@ struct Server {
     shutdown: CancellationToken,
     review: Arc<ReviewState>,
     _registration: Registration,
+    tailnet: Option<Tailnet>,
 }
 
 impl Server {
@@ -173,13 +190,22 @@ impl Server {
                 source,
             })?
             .port();
-        let public_origin = settings.public_url.clone();
-        let origin = settings.public_url.unwrap_or_else(|| {
-            format!(
-                "http://{}",
-                SocketAddr::new(reachable_host(settings.bind), port)
-            )
-        });
+        let local_origin = format!(
+            "http://{}",
+            SocketAddr::new(reachable_host(settings.bind), port)
+        );
+        let (origin, public_origin, tailnet) = match settings.exposure {
+            Exposure::Local => (local_origin, PublicOrigin::None, None),
+            Exposure::PublicUrl(url) => (url.clone(), PublicOrigin::Fixed(url), None),
+            Exposure::Tailscale => {
+                let tailnet = Tailnet::new(port);
+                (
+                    local_origin,
+                    PublicOrigin::Tailnet(tailnet.clone()),
+                    Some(tailnet),
+                )
+            }
+        };
         let login_url = format!("{origin}/#k={}", token.expose());
 
         let registry_directory = web_directory.join("instances");
@@ -226,6 +252,7 @@ impl Server {
             shutdown,
             review,
             _registration: registration,
+            tailnet,
         })
     }
 
@@ -238,6 +265,9 @@ impl Server {
         if served.is_err() {
             // The listener failed; the registry entry is removed on drop either way.
             self.shutdown.cancel();
+        }
+        if let Some(tailnet) = self.tailnet {
+            tailnet.stop().await;
         }
     }
 }
@@ -273,7 +303,7 @@ fn reachable_host(bind: IpAddr) -> IpAddr {
 
 #[cfg(test)]
 mod tests {
-    use super::{Channels, Server, Settings, bind, bridge, hub::Hub, registry};
+    use super::{Channels, Exposure, Server, Settings, bind, bridge, hub::Hub, registry};
     use std::{
         fs,
         net::{IpAddr, Ipv4Addr},
@@ -307,7 +337,7 @@ mod tests {
                 enabled: true,
                 bind: LOOPBACK,
                 port: 0,
-                public_url: None,
+                exposure: Exposure::Local,
                 home: home.path().to_owned(),
                 workspace: workspace.path().to_owned(),
             },
@@ -368,7 +398,7 @@ mod tests {
                 enabled: true,
                 bind: LOOPBACK,
                 port: 0,
-                public_url: Some("https://tact.example.net".to_owned()),
+                exposure: Exposure::PublicUrl("https://tact.example.net".to_owned()),
                 home: home.path().to_owned(),
                 workspace: home.path().to_owned(),
             },
@@ -397,7 +427,7 @@ mod tests {
                 enabled: false,
                 bind: LOOPBACK,
                 port: 0,
-                public_url: None,
+                exposure: Exposure::Local,
                 home: ".".into(),
                 workspace: ".".into(),
             },

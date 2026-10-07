@@ -31,8 +31,10 @@ mod search;
 mod skills;
 #[path = "../core/subagent_roster.rs"]
 mod subagent_roster;
+#[path = "../web/tailscale.rs"]
+mod tailscale;
 mod web {
-    pub(crate) use crate::bridge;
+    pub(crate) use crate::{bridge, tailscale};
 }
 
 mod core {

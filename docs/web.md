@@ -3,8 +3,9 @@
 Every running Tact serves a web interface in the background. It is a second front-end onto the
 sessions the process is running, not a separate client: the terminal and the browser share the active
 session, each session's draft, queue, settings, and transcript. The TUI must stay open for the web
-interface to be served (there is no headless mode). Reachability is external: put the port behind
-Tailscale, an SSH forward, or similar. Tact implements no transport.
+interface to be served (there is no headless mode). Reachability needs a tunnel: Tact can publish
+itself to your tailnet (`web.tailscale`), or you run a tunnel (Tailscale, an SSH forward, or
+similar) and give Tact its address (`web.public_url`). See "Remote access".
 
 ## Ownership
 
@@ -23,8 +24,10 @@ Tailscale, an SSH forward, or similar. Tact implements no transport.
 
 - Started on launch in the background; failure to start only sets a status string.
 - Config `[web]`: `enabled = true`, `bind = "127.0.0.1"`, `port = 7878` (first port tried; scans 21
-  ports, then ephemeral), `public_url = ""` (only used to build copyable links),
-  `max_live_sessions = 8`. `--web=false` (`TACT_WEB`) disables it.
+  ports, then ephemeral), `public_url = ""` (the address of a tunnel you run; used for sign-in links), `tailscale = false` (publish the server to your tailnet when a sign-in link for
+  another device is first wanted),
+  `max_live_sessions = 8`. `public_url` and `tailscale` are mutually exclusive: setting both is a
+  configuration error. `--web=false` (`TACT_WEB`) disables the server.
 - Machine token: `$TACT_HOME/web/token` (0600, 32 CSPRNG bytes, base64url). Registry:
   `$TACT_HOME/web/instances/<pid>.json` (pid, port, workspace, started_at), removed on exit; readers
   tolerate stale files. Assets: `$TACT_HOME/web/assets/v<version>` (bundle id
@@ -32,7 +35,8 @@ Tailscale, an SSH forward, or similar. Tact implements no transport.
 - The bundle is looked up on every request while it is missing, so one installed after startup is
   served without a restart; until then `/` shows a built-in page explaining the installation. A
   release build also downloads and verifies the matching bundle in the background on first start.
-- The login URL is `http://127.0.0.1:<port>/#k=<token>` (or `public_url` + fragment).
+- The login URL is `http://127.0.0.1:<port>/#k=<token>`, or the `public_url` or Tailscale address
+  plus the same fragment.
 
 ## Authentication
 
@@ -310,7 +314,7 @@ The review engine keeps its existing payloads (`web/protocol.ts`) with these cha
 Chat first. Left sidebar: **+ New chat**, **Live** sessions with state markers (pulsing running,
 idle, accent unread, pencil draft), **History** with search; an instance switcher. The main area has
 two full-width tabs: **Chat** (the transcript and the shared composer) and **Review** (Pierre diffs,
-live while the agent edits, plus an **Overview** sub-tab). A prompt minimap on the chat's right edge shows one tick per prompt (longer prompts draw longer ticks, the current one is highlighted); pointing at it unfolds a list of prompt previews, choosing one scrolls there, and sessions with more than 12 prompts page through them. The terminal's Actions menu has **Show QR code**, which draws the sign-in link as a Unicode QR code (black on white, whatever the theme) for a phone to scan; like the web version it refuses an address that only this computer can reach, so set web.public_url first. The credential is only inside the code, never shown as text. Live sessions are ordered by recent activity; Pin to top in a row's menu keeps a session above the rest (remembered per browser). Subagents appear as a hierarchy graph (Active or All, active by default as in the terminal) that fills the popup; selecting an agent opens its transcript beside the graph (same renderer as the chat), and the back button returns to the full graph; a chip above the composer reports running subagents and opens the popup. Apply-patch calls render as truncated
+live while the agent edits, plus an **Overview** sub-tab). A prompt minimap on the chat's right edge shows one tick per prompt (longer prompts draw longer ticks, the current one is highlighted); pointing at it unfolds a list of prompt previews, choosing one scrolls there, and sessions with more than 12 prompts page through them. The terminal's Actions menu has **Show QR code**, which draws the sign-in link as a Unicode QR code (black on white, whatever the theme) for a phone to scan; like the web version it refuses an address that only this computer can reach, so set web.tailscale or web.public_url first. The credential is only inside the code, never shown as text. Live sessions are ordered by recent activity; Pin to top in a row's menu keeps a session above the rest (remembered per browser). Subagents appear as a hierarchy graph (Active or All, active by default as in the terminal) that fills the popup; selecting an agent opens its transcript beside the graph (same renderer as the chat), and the back button returns to the full graph; a chip above the composer reports running subagents and opens the popup. Apply-patch calls render as truncated
 Pierre diffs in the transcript; shell and code calls render as terminal blocks.
 
 In the composer, `/` at the start of the draft lists the actions that apply to the session's
@@ -322,23 +326,63 @@ its palette and rhythm from the TUI theme and is mobile-first.
 ## Remote access
 
 The server listens on `127.0.0.1` by default and speaks plain HTTP, so reaching it from a phone or
-another machine takes a tunnel that you run. The token in the login URL is the only credential.
+another machine takes a tunnel. The token in the login URL is the only credential. Tact can run the
+tunnel for you on Tailscale; for anything else you run it and tell Tact its address.
 
-With Tailscale, keep `bind` on loopback and publish the port to your tailnet:
+### Tailscale (managed)
+
+```toml
+[web]
+tailscale = true
+```
+
+The web interface starts and works locally exactly as without the setting; Tailscale is not touched
+at startup, so using the browser on this machine never involves it. It is only used when you ask
+for a sign-in link for another device: the terminal's **Show QR code** action, or the web
+interface's "Open on your phone". Then Tact runs `tailscale status --json` to find this machine's
+HTTPS name and, if it is not already running, `tailscale serve --https=443` against its own
+loopback port. The QR code carries that address (`https://<machine>.<tailnet>.ts.net`) and the
+token, so scanning it signs a phone in.
+
+Tailscale is checked again every time a code is requested. If it is off or not usable, no code is
+shown; the message says what is wrong, and asking again after fixing it (turning Tailscale on, for
+example) picks up from there. While Tailscale is off, an earlier publication is withdrawn.
+
+The `serve` command runs without `--bg`, so it publishes only while that command runs, and Tact
+stops it when it exits. If Tact is killed without a chance to clean up (for example with
+`kill -9`), the `serve` command may keep running; `tailscale serve status` shows what is
+published and `tailscale serve reset` clears it.
+
+Requirements:
+
+- The `tailscale` command is on the `PATH` (on macOS the app bundle's copy is also tried), and the
+  client is connected.
+- HTTPS certificates are enabled for the tailnet, and Tailscale Serve is enabled for it. If either is
+  missing, the code is refused with the reason; the local web interface is unaffected.
+- Only one interface can be shared at a time. The address is the machine's HTTPS port 443, so if
+  anything is already served there (another Tact, or a `tailscale serve` you ran), the request is
+  refused with a message saying so. Sharing several Tact instances is not supported. Use a
+  separate tunnel and `public_url` for each if you need it; Tact cannot tell whether a tunnel you
+  run yourself is shared between instances.
+
+The publication is tailnet-only (`tailscale serve`, never `tailscale funnel`).
+
+### Other tunnels
+
+Set `public_url` to the address your tunnel exposes, for example `https://tact.example.net`, and
+run the tunnel yourself. Tact then uses that address for the QR code and the copyable link, and does
+nothing else. This is also how to publish with Tailscale by hand:
 
 ```sh
 tailscale serve --bg 7878
 ```
 
-Set `public_url` in `[web]` to the HTTPS address `tailscale serve` prints (for example
-`https://<machine>.<tailnet>.ts.net`). The terminal's QR code and copyable link then carry that
-address and the token, so scanning the code signs a phone in. The request's `Origin` must match its
-`Host`, which holds when the tunnel forwards the original host name.
+An SSH forward (`ssh -L 7878:127.0.0.1:7878 host`) works the same way, with the login URL pointing
+at the local end. In every case a request's `Origin` must match its `Host`, which holds when the
+tunnel forwards the original host name.
 
-Share the port only with your own devices: use `tailscale serve` (tailnet only), not `tailscale
-funnel`, which publishes to the internet. An SSH forward (`ssh -L 7878:127.0.0.1:7878 host`) works the
-same way, with the login URL pointing at the local end. Every connected device sees and edits the same
-drafts, and the token grants the same access as a shell.
+Share the port only with your own devices. Every connected device sees and edits the same drafts,
+and the token grants the same access as a shell.
 
 ## Security notes
 
