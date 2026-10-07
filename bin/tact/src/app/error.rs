@@ -182,6 +182,19 @@ pub(crate) enum ConfigError {
     },
 }
 
+/// Why a remote edit of the configuration file was refused.
+#[derive(Debug, Error)]
+pub(crate) enum ConfigEditError {
+    #[error("the configuration file changed since it was read")]
+    Stale,
+    #[error("the configuration file holds credentials and can only be edited in the terminal")]
+    HoldsCredentials,
+    #[error(transparent)]
+    Invalid(Error),
+    #[error(transparent)]
+    Io(ConfigError),
+}
+
 /// A syntax diagnostic that excludes the parser's retained source document.
 #[derive(Debug, Error)]
 #[error("{message}")]

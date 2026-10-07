@@ -2,7 +2,10 @@
 
 use crate::{
     app::{
-        error::{ConfigError, ConfigSyntaxError, McpUrlError, RemoteMemoryConfigError, Result},
+        error::{
+            ConfigEditError, ConfigError, ConfigSyntaxError, McpUrlError, RemoteMemoryConfigError,
+            Result,
+        },
         model,
         secret::SecretString,
     },
@@ -23,6 +26,7 @@ use std::{
     net::{IpAddr, Ipv4Addr},
     num::{NonZeroU16, NonZeroUsize},
     path::{Path, PathBuf},
+    result::Result as StdResult,
     sync::Arc,
 };
 use tact_memory::MemoryLimits;
@@ -351,7 +355,8 @@ pub(crate) struct ConfigReload {
     workspace_changed: bool,
 }
 
-/// The configuration file as a remote editor sees it.
+/// The configuration file as a remote editor sees it. Only files without credentials are offered:
+/// credentials never leave the terminal.
 #[derive(Debug, Eq, PartialEq, Serialize)]
 pub(crate) struct ConfigDocument {
     pub(crate) path: PathBuf,
@@ -363,22 +368,11 @@ pub(crate) struct ConfigDocument {
 }
 
 impl ConfigDocument {
-    pub(crate) fn read(path: &Path) -> io::Result<Self> {
-        let text = match fs::read_to_string(path) {
-            Ok(text) => text,
-            Err(error) if error.kind() == ErrorKind::NotFound => String::new(),
-            Err(error) => return Err(error),
-        };
-        Ok(Self {
-            path: path.to_path_buf(),
-            revision: Self::revision_of(&text),
-            text,
-        })
-    }
-
-    pub(crate) fn revision_of(text: &str) -> String {
-        let digest = Sha256::digest(text.as_bytes());
-        digest.iter().map(|byte| format!("{byte:02x}")).collect()
+    fn revision_of(text: &str) -> String {
+        Sha256::digest(text.as_bytes())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
     }
 }
 
@@ -794,6 +788,102 @@ impl Config {
 
     pub(crate) fn persist_theme_mode(&self, mode: ThemeMode) -> Result<()> {
         Self::persist_setting(&self.path, "theme", "mode", mode.as_str())
+    }
+
+    /// Reads the configuration file for a remote editor.
+    pub(crate) fn document(&self) -> StdResult<ConfigDocument, ConfigEditError> {
+        let text = Self::read_editable(&self.path)?;
+        Ok(ConfigDocument {
+            path: self.path.clone(),
+            revision: ConfigDocument::revision_of(&text),
+            text: text.to_string(),
+        })
+    }
+
+    /// Replaces the configuration file with `text` if the file still has `revision` and `text`
+    /// loads as a valid configuration under this process's overrides and environment. The file
+    /// is replaced atomically and is untouched on refusal. The caller reloads afterwards.
+    pub(crate) fn replace_document(
+        &self,
+        text: &str,
+        revision: &str,
+    ) -> StdResult<(), ConfigEditError> {
+        let current = Self::read_editable(&self.path)?;
+        if ConfigDocument::revision_of(&current) != revision {
+            return Err(ConfigEditError::Stale);
+        }
+        let parsed = toml::from_str::<ConfigFile>(text).map_err(|mut source| {
+            source.set_input(None);
+            ConfigEditError::Invalid(
+                ConfigError::Parse {
+                    path: self.path.clone(),
+                    source,
+                }
+                .into(),
+            )
+        })?;
+        if parsed.has_credentials() {
+            return Err(ConfigEditError::HoldsCredentials);
+        }
+        let write_error = |source| {
+            ConfigEditError::Io(ConfigError::Write {
+                path: self.path.clone(),
+                source,
+            })
+        };
+        let parent = self
+            .path
+            .parent()
+            .ok_or_else(|| write_error(io::Error::other("configuration path has no parent")))?;
+        fs::create_dir_all(parent).map_err(write_error)?;
+        let mut candidate = NamedTempFile::new_in(parent).map_err(write_error)?;
+        candidate
+            .write_all(text.as_bytes())
+            .and_then(|()| candidate.as_file().sync_all())
+            .map_err(write_error)?;
+        let overrides = ConfigOverrides {
+            path: Some(candidate.path().to_path_buf()),
+            ..self.reload.overrides.clone()
+        };
+        Self::load_with(
+            overrides,
+            self.reload.environment.clone(),
+            &self.reload.current_dir,
+        )
+        .map_err(ConfigEditError::Invalid)?;
+        candidate
+            .persist(&self.path)
+            .map_err(|error| write_error(error.error))?;
+        Ok(())
+    }
+
+    /// Reads the file's text, refusing a file that holds credentials.
+    fn read_editable(path: &Path) -> StdResult<Zeroizing<String>, ConfigEditError> {
+        let text = match fs::read_to_string(path) {
+            Ok(text) => Zeroizing::new(text),
+            Err(source) if source.kind() == ErrorKind::NotFound => Zeroizing::new(String::new()),
+            Err(source) => {
+                return Err(ConfigEditError::Io(ConfigError::Read {
+                    path: path.to_path_buf(),
+                    source,
+                }));
+            }
+        };
+        // A file that does not parse may still hold credentials, so it is not offered either.
+        let file = toml::from_str::<ConfigFile>(&text).map_err(|mut source| {
+            source.set_input(None);
+            ConfigEditError::Invalid(
+                ConfigError::Parse {
+                    path: path.to_path_buf(),
+                    source,
+                }
+                .into(),
+            )
+        })?;
+        if file.has_credentials() {
+            return Err(ConfigEditError::HoldsCredentials);
+        }
+        Ok(text)
     }
 
     pub(crate) fn add_mcp_server<'a>(
@@ -1674,14 +1764,17 @@ impl ConfigFile {
         })
     }
 
+    fn has_credentials(&self) -> bool {
+        !self.memory.remote.bearer_token.is_empty()
+            || self.openai.api_key.is_some()
+            || self.claude.api_key.is_some()
+    }
+
     #[cfg(unix)]
     fn validate_secret_permissions(&mut self, path: &Path) -> Result<()> {
         use std::os::unix::fs::PermissionsExt;
 
-        if self.memory.remote.bearer_token.is_empty()
-            && self.openai.api_key.is_none()
-            && self.claude.api_key.is_none()
-        {
+        if !self.has_credentials() {
             return Ok(());
         }
         let metadata = match fs::metadata(path) {
@@ -1713,10 +1806,7 @@ impl ConfigFile {
 
     #[cfg(not(unix))]
     fn validate_secret_permissions(&mut self, path: &Path) -> Result<()> {
-        if self.memory.remote.bearer_token.is_empty()
-            && self.openai.api_key.is_none()
-            && self.claude.api_key.is_none()
-        {
+        if !self.has_credentials() {
             return Ok(());
         }
         self.memory.remote.bearer_token.zeroize();
@@ -1783,7 +1873,9 @@ mod tests {
         McpServerConfig, ReasoningEffort, ReasoningMode, RemoteMemoryConfigFile,
         RemoteMemoryTokenFile, Speed, ThemeMode, Transport, validate_mcp_url,
     };
-    use crate::app::error::{ConfigError, Error, McpUrlError, RemoteMemoryConfigError};
+    use crate::app::error::{
+        ConfigEditError, ConfigError, Error, McpUrlError, RemoteMemoryConfigError,
+    };
     use nanocodex::{ClaudeModel, HarnessModel as Model, Model as CodexModel};
     use ratatui::style::Color;
     use std::{
@@ -3100,6 +3192,79 @@ mod tests {
         let rendered: toml::Value = toml::from_str(&config.to_toml().unwrap()).unwrap();
         assert_eq!(rendered["skills"]["enabled"].as_bool(), Some(true));
         assert_eq!(rendered["skills"]["roots"].as_array().unwrap().len(), 3);
+    }
+
+    fn editable_config(text: &str) -> (tempfile::TempDir, Config) {
+        let directory = tempdir().unwrap();
+        let config_path = directory.path().join("config.toml");
+        fs::write(&config_path, text).unwrap();
+        let config = Config::load_with(
+            ConfigOverrides {
+                path: Some(config_path),
+                ..ConfigOverrides::default()
+            },
+            Environment {
+                codex_home: Some(directory.path().join("codex")),
+                ..Environment::default()
+            },
+            directory.path(),
+        )
+        .unwrap();
+        (directory, config)
+    }
+
+    #[test]
+    fn remote_config_edits_replace_a_current_valid_file() {
+        let (_directory, config) = editable_config("[skills]\nenabled = false\n");
+        let document = config.document().unwrap();
+        assert_eq!(document.text, "[skills]\nenabled = false\n");
+
+        let replacement = "[skills]\nenabled = true\n";
+        config
+            .replace_document(replacement, &document.revision)
+            .unwrap();
+        assert_eq!(fs::read_to_string(config.path()).unwrap(), replacement);
+        assert!(matches!(
+            config.replace_document("", &document.revision),
+            Err(ConfigEditError::Stale)
+        ));
+    }
+
+    #[test]
+    fn remote_config_edits_refuse_invalid_text_and_leave_the_file_alone() {
+        let original = "[skills]\nenabled = false\n";
+        let (directory, config) = editable_config(original);
+        let revision = config.document().unwrap().revision;
+
+        for invalid in ["[skills\n", "[agent]\nno_such_setting = 1\n"] {
+            assert!(matches!(
+                config.replace_document(invalid, &revision),
+                Err(ConfigEditError::Invalid(_))
+            ));
+        }
+        assert_eq!(fs::read_to_string(config.path()).unwrap(), original);
+        assert_eq!(
+            fs::read_dir(directory.path()).unwrap().count(),
+            1,
+            "a refused candidate leaves no file behind"
+        );
+    }
+
+    #[test]
+    fn remote_config_edits_never_carry_credentials() {
+        let (_directory, config) = editable_config("");
+        let revision = config.document().unwrap().revision;
+        assert!(matches!(
+            config.replace_document("[openai]\napi_key = \"sk-test\"\n", &revision),
+            Err(ConfigEditError::HoldsCredentials)
+        ));
+
+        let (_directory, config) = editable_config("");
+        fs::write(config.path(), "[claude]\napi_key = \"sk-test\"\n").unwrap();
+        assert!(matches!(
+            config.document(),
+            Err(ConfigEditError::HoldsCredentials)
+        ));
     }
 
     #[test]

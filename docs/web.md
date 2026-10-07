@@ -217,9 +217,9 @@ In addition to the commands above:
 | `reflect` | `session, instructions?` | `turn_running`, `queue_not_empty` |
 | `handoff` | `session` | `turn_running`, `queue_not_empty` |
 | `reload_config` | none | `failed` with the load error |
-| `write_config` | `text, revision` | `stale` if the file changed since `config`; `invalid_request` with the parse error; the file is unchanged on refusal |
+| `write_config` | `text, revision` | `stale` if the file changed since `config`; `invalid_request` if `text` does not load; `not_available_remotely` if `text` adds credentials. The file is unchanged on refusal and reloaded on success |
 | `delete_memory` | `key: { id, version, namespace? }` | `disabled`; `not_available_remotely` for a read-only remote backend; `failed` |
-| `set_max_subagents` | `limit` (at least 1) | `invalid_request` |
+| `set_max_subagents` | `limit` | never |
 
 Settings couplings come from the `models` catalog and are enforced by the loop: the model is
 selectable only before the first turn; `effort_fixed_after_start` models refuse `set_effort`
@@ -237,8 +237,8 @@ once a turn started (`invalid_request`). A session has started when its snapshot
 | `skills` | `query?` | `{ skills: { name, description }[] }` |
 | `recent_prompts` | `session, scope?: "global" \| "current_session", query?` | `{ prompts: { text, recorded_at_unix_ms, session_id, workspace }[] }` |
 | `context_diagnostics` | `session` | `ContextDiagnostics` |
-| `memories` | none | `{ access: { source, namespace, role }, records: MemoryRecord[] }`; `disabled` when memory is off |
-| `config` | none | `{ path, text, revision }` |
+| `memories` | none | `{ access: { source, namespace, role }, records: (MemoryRecord & { deletable: boolean })[] }`; `disabled` when memory is off |
+| `config` | none | `{ path, text, revision }`; `not_available_remotely` when the file holds credentials (they never leave the terminal), `invalid_request` when it does not parse |
 
 ```ts
 type ModelCatalog = {
