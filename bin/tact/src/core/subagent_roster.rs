@@ -2,8 +2,8 @@
 //! and each agent's lifecycle state. The terminal's Subagents overlay and the web interface both
 //! render this model, which is folded from the runtime's [`AgentUpdate`]s.
 
-use nanocodex::Thinking;
-use serde::Serialize;
+use nanocodex::{HarnessModel as Model, Thinking};
+use serde::{Serialize, Serializer};
 use tact_subagents::{AgentDescriptor, AgentId, AgentStatus, AgentUpdate};
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
@@ -22,8 +22,9 @@ pub(crate) struct SubagentNode {
     pub(crate) session_id: String,
     pub(crate) role: String,
     pub(crate) task: String,
-    /// The canonical model identifier.
-    pub(crate) model: &'static str,
+    /// Serialized as the canonical model identifier.
+    #[serde(serialize_with = "serialize_model")]
+    pub(crate) model: Model,
     pub(crate) thinking: Thinking,
     pub(crate) status: AgentStatus,
 }
@@ -88,7 +89,7 @@ impl SubagentNode {
             session_id: descriptor.session_id.clone(),
             role: descriptor.role.clone(),
             task: descriptor.task.clone(),
-            model: descriptor.model.as_str(),
+            model: descriptor.model,
             thinking: descriptor.thinking,
             status: AgentStatus::Running,
         }
@@ -100,5 +101,85 @@ impl SubagentNode {
             status,
             ..Self::new(descriptor)
         };
+    }
+}
+
+fn serialize_model<S: Serializer>(model: &Model, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(model.as_str())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SubagentRoster;
+    use nanocodex::{HarnessModel as Model, Model as CodexModel, Thinking};
+    use serde_json::json;
+    use tact_subagents::{AgentDescriptor, AgentId, AgentStatus, AgentUpdate};
+
+    fn added(id: u64, parent: Option<u64>, task: &str) -> AgentUpdate {
+        AgentUpdate::Added(AgentDescriptor {
+            id: AgentId::new(id),
+            session_id: format!("child-{id}"),
+            model: Model::Codex(CodexModel::Sol),
+            thinking: Thinking::High,
+            role: "reviewer".to_owned(),
+            task: task.to_owned(),
+            parent: parent.map(AgentId::new),
+        })
+    }
+
+    #[test]
+    fn folds_additions_and_status_changes_and_ignores_transcript_updates() {
+        let mut roster = SubagentRoster::new(4);
+        assert!(roster.apply(&added(1, None, "audit")));
+        assert!(roster.apply(&added(2, Some(1), "trace")));
+        assert_eq!(roster.active_count(), 2);
+
+        let completed = AgentUpdate::Status {
+            id: AgentId::new(2),
+            status: AgentStatus::Completed {
+                output: json!({ "ok": true }),
+            },
+        };
+        assert!(roster.apply(&completed));
+        assert!(
+            !roster.apply(&completed),
+            "an unchanged status is not a change"
+        );
+        assert!(!roster.apply(&AgentUpdate::Status {
+            id: AgentId::new(9),
+            status: AgentStatus::Running,
+        }));
+        assert_eq!(roster.active_count(), 1);
+
+        assert!(roster.apply(&added(2, Some(1), "trace again")));
+        let child = roster.agent(AgentId::new(2)).unwrap();
+        assert_eq!(child.task, "trace again");
+        assert!(
+            matches!(child.status, AgentStatus::Completed { .. }),
+            "a new task keeps the agent's last known status"
+        );
+        assert_eq!(roster.agents.len(), 2);
+    }
+
+    #[test]
+    fn serializes_the_wire_shape() {
+        let mut roster = SubagentRoster::new(3);
+        roster.apply(&added(1, None, "audit"));
+        assert_eq!(
+            serde_json::to_value(&roster).unwrap(),
+            json!({
+                "max_subagents": 3,
+                "agents": [{
+                    "id": 1,
+                    "parent": null,
+                    "session_id": "child-1",
+                    "role": "reviewer",
+                    "task": "audit",
+                    "model": Model::Codex(CodexModel::Sol).as_str(),
+                    "thinking": "high",
+                    "status": { "state": "running" },
+                }],
+            })
+        );
     }
 }
