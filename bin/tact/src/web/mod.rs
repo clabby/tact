@@ -18,7 +18,8 @@ mod wire;
 
 use crate::app::config::Config;
 use api::AppState;
-use assets::{AssetStore, WebAssets};
+use assets::AssetStore;
+pub(crate) use assets::{Located, WebAssets};
 use hub::Hub;
 use registry::{InstanceRecord, Registration, RegistryError};
 use review::{ReviewState, bridge_agent};
