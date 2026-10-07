@@ -4,7 +4,7 @@ use nanocodex::{
     AgentEvents, Claude, HarnessModel as Model, Nanocodex, NanocodexError, Thinking, Tools,
     agent::{AgentHandle, Result},
     claude::{
-        ClaudeClient, ClaudeToolInvocation, ClaudeToolReply, ClaudeTools, MAX_TOOL_IMAGE_DIMENSION,
+        ClaudeClient, ClaudeToolInvocation, ClaudeToolReply, ClaudeTools,
         ToolDefinition as NativeDefinition, ToolResultContent,
     },
     oai::{
@@ -16,7 +16,6 @@ use nanocodex::{
         ToolDefinition, ToolInput,
         contract::{DEFAULT_TOOL_OUTPUT_TOKENS, ToolOutputBody, ToolOutputContent},
         embedded::{CodeModeObserver, CodeModeUpdate, OwnedToolContext},
-        image::prepare_base64_image,
         runtime::{ImageGenerationConfig, ToolRuntime, WebSearchConfig},
     },
 };
@@ -286,7 +285,7 @@ impl Bridge {
             }
             let structured = execution.output.structured_result();
             self.retain_output(&invocation.call_id, &execution.output);
-            let mut reply = tool_reply(execution.output, execution.success, None, structured).await;
+            let mut reply = tool_reply(execution.output, execution.success, None, structured);
             for notification in execution.notifications {
                 match &mut reply.content {
                     ToolResultContent::Text(text) => {
@@ -323,26 +322,24 @@ impl Bridge {
             .map(|value| serde_json::from_str(value.get()))
             .transpose()
             .map_err(|error| error.to_string())?;
-        Ok(tool_reply(output.output, output.success, metadata, structured).await)
+        Ok(tool_reply(
+            output.output,
+            output.success,
+            metadata,
+            structured,
+        ))
     }
 }
 
-async fn tool_reply(
+/// Converts a tool result for the Claude driver. Images pass through unmodified: the driver prepares
+/// them before they enter request history.
+fn tool_reply(
     output: ToolOutputBody,
     success: bool,
     metadata: Option<Value>,
     structured: Value,
 ) -> ClaudeToolReply {
-    let content = if matches!(&output, ToolOutputBody::Content(items) if items.iter().any(|item| matches!(item, ToolOutputContent::InputImage { .. })))
-    {
-        tokio::task::spawn_blocking(move || native_content(output))
-            .await
-            .unwrap_or_else(|_| {
-                Err("image content omitted because it could not be processed".into())
-            })
-    } else {
-        native_content(output)
-    };
+    let content = native_content(output);
     let (content, is_error) = match content {
         Ok(content) => (content, !success),
         Err(reason) => (ToolResultContent::Text(reason), true),
@@ -408,19 +405,11 @@ fn native_content(body: ToolOutputBody) -> std::result::Result<ToolResultContent
     for item in items {
         blocks.push(match item {
             ToolOutputContent::InputText { text } => json!({"type":"text","text":text}),
-            ToolOutputContent::InputImage { image_url, detail } => {
+            ToolOutputContent::InputImage { image_url, .. } => {
                 let source = if let Some(data) = image_url.strip_prefix("data:") {
-                    let (_, data) = data
+                    let (media_type, data) = data
                         .split_once(";base64,")
                         .ok_or("invalid image data URL")?;
-                    let (data, media_type) =
-                        match prepare_base64_image(data, detail, MAX_TOOL_IMAGE_DIMENSION) {
-                            Ok(image) => image,
-                            Err(reason) => {
-                                blocks.push(json!({"type":"text","text":reason}));
-                                continue;
-                            }
-                        };
                     json!({"type":"base64","media_type":media_type,"data":data})
                 } else if image_url.starts_with("https://") {
                     json!({"type":"url","url":image_url})
@@ -429,7 +418,9 @@ fn native_content(body: ToolOutputBody) -> std::result::Result<ToolResultContent
                 };
                 json!({"type":"image","source":source})
             }
-            ToolOutputContent::InputAudio { .. } | ToolOutputContent::EncryptedContent { .. } => {
+            ToolOutputContent::InputImageFile { .. }
+            | ToolOutputContent::InputAudio { .. }
+            | ToolOutputContent::EncryptedContent { .. } => {
                 return Err("Claude Messages cannot accept this tool media type".into());
             }
         });
@@ -988,7 +979,7 @@ mod tests {
             summary["messages"].as_array().unwrap().last().unwrap()["content"][0]["text"]
                 .as_str()
                 .unwrap()
-                .contains("Summarize the conversation")
+                .contains("concise text-only handoff")
         );
         let continued = server.requests.recv().await.unwrap();
         let messages = continued["messages"].as_array().unwrap();
@@ -1109,7 +1100,9 @@ mod tests {
         let mut kinds = Vec::new();
         while let Some(event) = events.recv().await {
             let value: Value = serde_json::from_str(event.payload.get()).unwrap();
-            assert_eq!(value["turn_id"], id);
+            if event.kind != AgentEventKind::InputAccepted {
+                assert_eq!(value["turn_id"], id);
+            }
             if value["tool"] == "inspect" && event.kind == AgentEventKind::ToolResult {
                 assert_eq!(value["structured_result"], json!({"exact":7}));
             }

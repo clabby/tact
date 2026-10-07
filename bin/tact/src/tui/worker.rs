@@ -1729,6 +1729,7 @@ mod tests {
         receiver: &mut mpsc::UnboundedReceiver<CapturedRequest>,
         model: Model,
         thinking: Thinking,
+        context_thinking: Thinking,
     ) -> CapturedRequest {
         let request = timeout(Duration::from_secs(5), receiver.recv())
             .await
@@ -1744,7 +1745,7 @@ mod tests {
         let model_name = crate::app::model::name(model).to_ascii_lowercase();
         assert!(
             context.contains(&format!(
-                "This turn runs on {model_name} with {thinking} reasoning effort."
+                "This turn runs on {model_name} with {context_thinking} reasoning effort."
             )),
             "{context}"
         );
@@ -2085,6 +2086,7 @@ mod tests {
             &mut requests,
             Model::Codex(CodexModel::Astra),
             Thinking::Low,
+            Thinking::Low,
         )
         .await;
         commands
@@ -2111,14 +2113,18 @@ mod tests {
             &mut requests,
             Model::Codex(CodexModel::Astra),
             Thinking::Low,
+            Thinking::Low,
         )
         .await
         .release
         .send(())
         .unwrap();
+        // The provider request keeps the context window's pinned effort so its prompt cache stays
+        // valid; the new effort reaches the model through the turn context asserted below.
         captured(
             &mut requests,
             Model::Codex(CodexModel::Astra),
+            Thinking::Low,
             Thinking::High,
         )
         .await
@@ -2142,9 +2148,15 @@ mod tests {
                     completion,
                 })
                 .unwrap();
+            // A fork of the current conversation keeps that conversation's pinned request effort.
+            let requested = match context {
+                super::AuxiliaryContext::Clean => Thinking::High,
+                super::AuxiliaryContext::CurrentConversation => Thinking::Low,
+            };
             captured(
                 &mut requests,
                 Model::Codex(CodexModel::Astra),
+                requested,
                 Thinking::High,
             )
             .await
@@ -2184,6 +2196,7 @@ mod tests {
         captured(
             &mut requests,
             Model::Codex(CodexModel::Astra),
+            Thinking::Low,
             Thinking::High,
         )
         .await
@@ -2219,6 +2232,7 @@ mod tests {
             &mut requests,
             Model::Codex(CodexModel::Sol),
             Thinking::Medium,
+            Thinking::Medium,
         )
         .await
         .release
@@ -2243,6 +2257,7 @@ mod tests {
             (
                 ResponsesError::Api {
                     event: violation.to_owned(),
+                    retry_after: None,
                 },
                 true,
             ),
@@ -2257,6 +2272,7 @@ mod tests {
             (
                 ResponsesError::Api {
                     event: ordinary.to_owned(),
+                    retry_after: None,
                 },
                 false,
             ),
