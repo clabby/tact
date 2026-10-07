@@ -1,10 +1,12 @@
+use super::checkout::Checkout;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     path::{Path, PathBuf},
     process::{Output, Stdio},
+    sync::Arc,
 };
-use tokio::{io::AsyncReadExt, process::Command};
+use tokio::io::AsyncReadExt;
 
 #[cfg(test)]
 type PatchHook = std::sync::Arc<dyn Fn(&Path, bool, PatchHookPhase) + Send + Sync>;
@@ -55,7 +57,7 @@ struct RangePoint {
 
 #[derive(Clone)]
 pub(super) struct ReviewContext {
-    root: PathBuf,
+    root: Arc<Checkout>,
     repository: String,
     trunk: Trunk,
     range_points: Vec<RangePoint>,
@@ -102,17 +104,18 @@ impl WorkspaceVersion {
 
 impl ReviewContext {
     pub(super) async fn load(workspace: &Path) -> Result<Self, DiffError> {
-        let root = repository_root(workspace).await?;
+        let root = Checkout::detect(workspace).await?;
         let trunk = resolve_trunk(&root).await?;
         let version = workspace_version_at(&root, &trunk).await?;
         let range_points = load_range_points(&root, &trunk).await?;
         let repository = root
+            .work_tree()
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or("repository")
             .to_owned();
         Ok(Self {
-            root,
+            root: Arc::new(root),
             repository,
             trunk,
             range_points,
@@ -178,7 +181,7 @@ impl ReviewContext {
         Ok(DiffSnapshot {
             patch,
             overview: OverviewContext {
-                repository: self.root.clone(),
+                repository: self.root.work_tree().to_owned(),
                 range: OverviewRange::Commits {
                     base: base.to_owned(),
                     head: head.to_owned(),
@@ -207,7 +210,7 @@ impl ReviewContext {
             return Ok(DiffSnapshot {
                 patch,
                 overview: OverviewContext {
-                    repository: self.root.clone(),
+                    repository: self.root.work_tree().to_owned(),
                     range: OverviewRange::WorkingTree {
                         base: base.to_owned(),
                     },
@@ -374,13 +377,16 @@ pub(super) async fn load(workspace: &Path) -> Result<ReviewContext, DiffError> {
 }
 
 pub(super) async fn current_version(workspace: &Path) -> Result<WorkspaceVersion, DiffError> {
-    let root = repository_root(workspace).await?;
+    let root = Checkout::detect(workspace).await?;
     let trunk = resolve_trunk(&root).await?;
     workspace_version_at(&root, &trunk).await
 }
 
-async fn workspace_version_at(root: &Path, trunk: &Trunk) -> Result<WorkspaceVersion, DiffError> {
-    let output = git_output(root, ["rev-parse", "HEAD"]).await?;
+async fn workspace_version_at(
+    root: &Checkout,
+    trunk: &Trunk,
+) -> Result<WorkspaceVersion, DiffError> {
+    let output = git_output(root, ["rev-parse", root.head()]).await?;
     ensure_success(output.status, &output.stderr)?;
     let head = String::from_utf8(output.stdout)?.trim().to_owned();
     let patch = working_tree_patch(root, &head, false).await?;
@@ -396,21 +402,7 @@ fn workspace_version(trunk: &str, head: &str, patch: &str) -> WorkspaceVersion {
     WorkspaceVersion(digest.finalize().into())
 }
 
-async fn repository_root(workspace: &Path) -> Result<std::path::PathBuf, DiffError> {
-    let output = git_output(workspace, ["rev-parse", "--show-toplevel"]).await?;
-    if !output.status.success() {
-        let error = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-        if error.contains("not a git repository") {
-            return Err(DiffError::NotRepository(workspace.to_owned()));
-        }
-        return Err(DiffError::GitFailed(error));
-    }
-
-    let root = String::from_utf8(output.stdout)?;
-    Ok(std::path::PathBuf::from(root.trim()))
-}
-
-async fn resolve_trunk(root: &Path) -> Result<Trunk, DiffError> {
+async fn resolve_trunk(root: &Checkout) -> Result<Trunk, DiffError> {
     let current_branch = current_branch(root).await?;
     let mut candidates = ["refs/remotes/origin/HEAD", "refs/remotes/upstream/HEAD"]
         .map(str::to_owned)
@@ -434,11 +426,11 @@ async fn resolve_trunk(root: &Path) -> Result<Trunk, DiffError> {
     Err(DiffError::BaseNotFound)
 }
 
-async fn current_branch(root: &Path) -> Result<Option<String>, DiffError> {
-    symbolic_ref(root, "HEAD").await
+async fn current_branch(root: &Checkout) -> Result<Option<String>, DiffError> {
+    symbolic_ref(root, root.head()).await
 }
 
-async fn symbolic_ref(root: &Path, reference: &str) -> Result<Option<String>, DiffError> {
+async fn symbolic_ref(root: &Checkout, reference: &str) -> Result<Option<String>, DiffError> {
     let output = git_output(root, ["symbolic-ref", "--quiet", "--short", reference]).await?;
     if output.status.code() == Some(1) {
         return Ok(None);
@@ -449,7 +441,7 @@ async fn symbolic_ref(root: &Path, reference: &str) -> Result<Option<String>, Di
 }
 
 async fn current_upstream(
-    root: &Path,
+    root: &Checkout,
     current_branch: Option<&str>,
 ) -> Result<Option<String>, DiffError> {
     let Some(current_branch) = current_branch else {
@@ -482,7 +474,7 @@ struct Trunk {
     merge_base: String,
 }
 
-async fn load_range_points(root: &Path, trunk: &Trunk) -> Result<Vec<RangePoint>, DiffError> {
+async fn load_range_points(root: &Checkout, trunk: &Trunk) -> Result<Vec<RangePoint>, DiffError> {
     let trunk_commit = commit_metadata(root, &trunk.merge_base).await?;
     let mut points = vec![RangePoint {
         target: ReviewTarget {
@@ -493,7 +485,7 @@ async fn load_range_points(root: &Path, trunk: &Trunk) -> Result<Vec<RangePoint>
         },
         revision: Some(trunk.merge_base.clone()),
     }];
-    let range = format!("{}..HEAD", trunk.merge_base);
+    let range = format!("{}..{}", trunk.merge_base, root.head());
     let output = git_output(
         root,
         [
@@ -542,7 +534,7 @@ struct CommitMetadata {
     title: String,
 }
 
-async fn commit_metadata(root: &Path, revision: &str) -> Result<CommitMetadata, DiffError> {
+async fn commit_metadata(root: &Checkout, revision: &str) -> Result<CommitMetadata, DiffError> {
     let output = git_output(root, ["show", "--no-patch", "--format=%h%x00%s", revision]).await?;
     ensure_success(output.status, &output.stderr)?;
     let value = String::from_utf8(output.stdout)?;
@@ -555,7 +547,7 @@ async fn commit_metadata(root: &Path, revision: &str) -> Result<CommitMetadata, 
     })
 }
 
-async fn revision_exists(root: &Path, revision: &str) -> Result<bool, DiffError> {
+async fn revision_exists(root: &Checkout, revision: &str) -> Result<bool, DiffError> {
     let output = git_output(root, ["rev-parse", "--verify", "--quiet", revision]).await?;
     if output.status.success() {
         return Ok(true);
@@ -567,8 +559,8 @@ async fn revision_exists(root: &Path, revision: &str) -> Result<bool, DiffError>
     Ok(false)
 }
 
-async fn merge_base(root: &Path, revision: &str) -> Result<String, DiffError> {
-    let output = git_output(root, ["merge-base", revision, "HEAD"]).await?;
+async fn merge_base(root: &Checkout, revision: &str) -> Result<String, DiffError> {
+    let output = git_output(root, ["merge-base", revision, root.head()]).await?;
     if !output.status.success() {
         return Err(DiffError::InvalidBase(revision.to_owned()));
     }
@@ -576,7 +568,7 @@ async fn merge_base(root: &Path, revision: &str) -> Result<String, DiffError> {
 }
 
 async fn committed_patch(
-    root: &Path,
+    root: &Checkout,
     base: &str,
     head: &str,
     full_context: bool,
@@ -600,7 +592,7 @@ async fn committed_patch(
 }
 
 async fn append_untracked_files(
-    root: &Path,
+    root: &Checkout,
     patch: &mut String,
     full_context: bool,
 ) -> Result<(), DiffError> {
@@ -613,6 +605,9 @@ async fn append_untracked_files(
         .filter(|path| !path.is_empty())
     {
         let path = std::str::from_utf8(bytes)?;
+        if Checkout::is_bookkeeping(path) {
+            continue;
+        }
         let mut arguments = vec![
             "diff",
             "--binary",
@@ -641,12 +636,12 @@ async fn append_untracked_files(
 }
 
 async fn working_tree_patch(
-    root: &Path,
+    root: &Checkout,
     base: &str,
     full_context: bool,
 ) -> Result<String, DiffError> {
     #[cfg(test)]
-    run_patch_hook(root, full_context, PatchHookPhase::Before);
+    run_patch_hook(root.work_tree(), full_context, PatchHookPhase::Before);
 
     let mut arguments = vec![
         "diff",
@@ -667,7 +662,7 @@ async fn working_tree_patch(
     append_untracked_files(root, &mut patch, full_context).await?;
 
     #[cfg(test)]
-    run_patch_hook(root, full_context, PatchHookPhase::After);
+    run_patch_hook(root.work_tree(), full_context, PatchHookPhase::After);
 
     Ok(patch)
 }
@@ -681,20 +676,18 @@ fn run_patch_hook(root: &Path, full_context: bool, phase: PatchHookPhase) {
 }
 
 async fn git_output<const N: usize>(
-    root: &Path,
+    root: &Checkout,
     arguments: [&str; N],
 ) -> Result<Output, DiffError> {
-    Command::new("git")
+    root.git()
         .args(arguments)
-        .current_dir(root)
-        .kill_on_drop(true)
         .output()
         .await
         .map_err(DiffError::StartGit)
 }
 
 async fn git_output_limited<I, S>(
-    root: &Path,
+    root: &Checkout,
     arguments: I,
     limit: usize,
     used: usize,
@@ -703,10 +696,9 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<std::ffi::OsStr>,
 {
-    let mut child = Command::new("git")
+    let mut child = root
+        .git()
         .args(arguments)
-        .current_dir(root)
-        .kill_on_drop(true)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -766,6 +758,12 @@ const fn null_device() -> &'static str {
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum DiffError {
+    #[error("the repository is managed by jj, which is not installed or not on the PATH")]
+    JjMissing,
+    #[error("jj failed: {0}")]
+    Jj(String),
+    #[error("could not create scratch space for the review: {0}")]
+    Scratch(#[source] std::io::Error),
     #[error("failed to start git: {0}")]
     StartGit(#[source] std::io::Error),
     #[error("failed to read git output: {0}")]
@@ -803,8 +801,8 @@ pub(crate) enum DiffError {
 #[cfg(test)]
 mod tests {
     use super::{
-        DiffSnapshot, PatchHook, PatchHookPhase, PatchSide, ReviewRange, ReviewTargetKind,
-        current_version, load, repository_root,
+        Checkout, DiffSnapshot, PatchHook, PatchHookPhase, PatchSide, ReviewRange,
+        ReviewTargetKind, current_version, load,
     };
     use std::{
         fs,
@@ -948,7 +946,7 @@ mod tests {
         assert_eq!(
             committed.overview,
             super::OverviewContext {
-                repository: context.root.clone(),
+                repository: context.root.work_tree().to_owned(),
                 range: super::OverviewRange::Commits {
                     base: context.range_points[1].revision.clone().unwrap(),
                     head: context.range_points[2].revision.clone().unwrap(),
@@ -966,7 +964,7 @@ mod tests {
         assert_eq!(
             through_working_tree.overview,
             super::OverviewContext {
-                repository: context.root.clone(),
+                repository: context.root.work_tree().to_owned(),
                 range: super::OverviewRange::WorkingTree {
                     base: context.range_points[2].revision.clone().unwrap(),
                 },
@@ -1195,7 +1193,7 @@ mod tests {
         fs::write(repository.path().join(".git/config"), "[invalid\n").unwrap();
 
         assert!(matches!(
-            repository_root(repository.path()).await,
+            Checkout::detect(repository.path()).await.map(|_| ()),
             Err(super::DiffError::GitFailed(error)) if error.contains("config")
         ));
     }
@@ -1205,7 +1203,7 @@ mod tests {
         let directory = TempDir::new().unwrap();
 
         assert!(matches!(
-            repository_root(directory.path()).await,
+            Checkout::detect(directory.path()).await.map(|_| ()),
             Err(super::DiffError::NotRepository(path)) if path == directory.path()
         ));
     }
