@@ -317,13 +317,15 @@ export class Transcript {
     name.title = entry.name;
     element.querySelector(".tool-summary")!.textContent = entry.summary;
     const meta = element.querySelector<HTMLElement>(".tool-meta")!;
-    meta.textContent = [extra, entry.duration_ns === null ? "" : formatDuration(entry.duration_ns)]
-      .filter(Boolean).join(" · ");
     // The server reports how long a running call has already run; the browser counts on from its own
-    // clock, so a skewed clock cannot misstate the time.
-    if (entry.state === "running" && entry.elapsed_ns != null) {
-      element.dataset.since = String(performance.now() - entry.elapsed_ns / 1e6);
-      if (extra) meta.append(" · ");
+    // clock, so a skewed clock cannot misstate the time. A call that is still running can already
+    // carry a duration (a backgrounded command reports when it yielded), which the live clock replaces.
+    const live = entry.state === "running" && entry.elapsed_ns != null;
+    meta.textContent = [extra, entry.duration_ns === null || live ? "" : formatDuration(entry.duration_ns)]
+      .filter(Boolean).join(" · ");
+    if (live) {
+      element.dataset.since = String(performance.now() - entry.elapsed_ns! / 1e6);
+      if (meta.textContent) meta.append(" · ");
       child(meta, "span", "tool-clock").textContent = formatDuration(entry.elapsed_ns);
       // The element may not be attached yet, so the timer cannot depend on finding it in the list.
       if (!this.clockTimer) this.clockTimer = window.setInterval(this.tickClocks, 1000);
