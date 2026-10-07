@@ -63,7 +63,10 @@ pub(crate) fn read_all(directory: &Path) -> Vec<InstanceRecord> {
     let mut records: Vec<InstanceRecord> = entries
         .filter_map(Result::ok)
         .map(|entry| entry.path())
-        .filter(|path| path.extension().is_some_and(|extension| extension == "json"))
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "json")
+        })
         .filter_map(|path| serde_json::from_slice(&fs::read(path).ok()?).ok())
         .collect();
     records.sort_by_key(|record| record.pid);
@@ -121,4 +124,3 @@ mod tests {
         assert_eq!(read_all(directory.path()), [record(5)]);
     }
 }
-

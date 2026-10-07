@@ -8,7 +8,7 @@ use super::{
     review::{self, ReviewAgent, ReviewState},
     token::MachineToken,
 };
-use crate::app::config::ReasoningEffort;
+use crate::app::config::{ReasoningEffort, ReasoningMode, Speed};
 use axum::{
     Router,
     body::Body,
@@ -55,6 +55,7 @@ impl Harness {
             token: MachineToken::load_or_create(&home.path().join("web")).unwrap(),
             hub: hub.clone(),
             requests: end.requests,
+            queries: end.queries,
             workspace: workspace.path().to_owned(),
             port: 7878,
             registry_directory: home.path().join("web/instances"),
@@ -146,7 +147,8 @@ impl Harness {
                 id: id.to_owned(),
                 model: "gpt-6.1-sol".to_owned(),
                 effort: ReasoningEffort::Low,
-                fast_mode: false,
+                reasoning_mode: ReasoningMode::Standard,
+                speed: Speed::Standard,
                 workspace: self.workspace.path().to_owned(),
             },
             records: Vec::new(),
@@ -165,8 +167,14 @@ impl Harness {
 
 pub(super) fn repository() -> TempDir {
     let directory = TempDir::new().unwrap();
-    git(directory.path(), ["init", "--quiet", "--initial-branch=main"]);
-    git(directory.path(), ["config", "user.email", "test@example.com"]);
+    git(
+        directory.path(),
+        ["init", "--quiet", "--initial-branch=main"],
+    );
+    git(
+        directory.path(),
+        ["config", "user.email", "test@example.com"],
+    );
     git(directory.path(), ["config", "user.name", "Test User"]);
     git(directory.path(), ["config", "commit.gpgSign", "false"]);
     fs::write(directory.path().join("tracked.txt"), "initial\n").unwrap();
@@ -188,4 +196,3 @@ fn git<const N: usize>(root: &Path, arguments: [&str; N]) {
         .unwrap();
     assert!(status.success());
 }
-

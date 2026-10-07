@@ -56,9 +56,9 @@ impl AssetStore {
         let mut cached = self.cached.lock().await;
         match &*cached {
             Cached::Ready(assets) => return Some(assets.clone()),
-            Cached::Unavailable { checked: Some(checked) }
-                if checked.elapsed() < RECHECK_INTERVAL =>
-            {
+            Cached::Unavailable {
+                checked: Some(checked),
+            } if checked.elapsed() < RECHECK_INTERVAL => {
                 return None;
             }
             Cached::Unavailable { .. } => {}
@@ -143,6 +143,23 @@ impl WebAssets {
             Err(_) if managed => Ok(Located::Absent),
             Err(error) => Err(error),
         }
+    }
+
+    /// Installs the release bundle in the background when none is present. Development builds
+    /// never download; a failed attempt leaves the server on its installation page.
+    pub(crate) fn install_if_missing(home: PathBuf) {
+        if installation().is_development() {
+            return;
+        }
+        tokio::spawn(async move {
+            let located = {
+                let home = home.clone();
+                tokio::task::spawn_blocking(move || Self::locate(&home)).await
+            };
+            if matches!(located, Ok(Ok(Located::Absent))) {
+                drop(Self::download(&home).await);
+            }
+        });
     }
 
     /// Downloads, verifies, and installs the bundle matching this binary's version.
@@ -379,8 +396,7 @@ fn validate_manifest(
     if manifest.schema_version != BUNDLE_SCHEMA_VERSION {
         return Err(AssetError::ManifestVersion(manifest.schema_version));
     }
-    if manifest.web_api.min > WEB_API_VERSION || manifest.web_api.max < WEB_API_VERSION
-    {
+    if manifest.web_api.min > WEB_API_VERSION || manifest.web_api.max < WEB_API_VERSION {
         return Err(AssetError::WebApi {
             min: manifest.web_api.min,
             max: manifest.web_api.max,

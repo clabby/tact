@@ -2,11 +2,15 @@
 //! transcript entries onto them.
 
 use crate::{
-    app::config::Speed,
-    tui::transcript::{
-        DirectedMessageEntry, EntryKind, ToolEntry, ToolState, TranscriptEntry, TransientStatus,
+    app::config::{ReasoningEffort, ReasoningMode, Speed},
+    core::subagent_roster::SubagentRoster,
+    tui::{
+        context::ContextBudget,
+        transcript::{
+            DirectedMessageEntry, EntryKind, ToolEntry, ToolState, TranscriptEntry, TransientStatus,
+        },
     },
-    web::bridge::{Origin, QueuedPrompt},
+    web::bridge::{DraftImage, Origin, QueuedPrompt},
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -14,7 +18,7 @@ use std::sync::Arc;
 use tact_subagents::{MessageDeliveryState, MessageSender};
 
 /// Version of the browser protocol. Bundles declare the range they speak in their manifest.
-pub(super) const PROTOCOL_VERSION: u32 = 8;
+pub(super) const PROTOCOL_VERSION: u32 = 9;
 /// Longest string sent to a browser in an entry or a tool detail.
 const MAX_STRING_BYTES: usize = 256 * 1024;
 const MAX_SUMMARY_CHARS: usize = 200;
@@ -51,19 +55,38 @@ pub(super) struct SessionSnapshot {
     pub(super) session: String,
     pub(super) title: String,
     pub(super) model: String,
-    pub(super) effort: &'static str,
-    pub(super) fast_mode: bool,
+    pub(super) effort: ReasoningEffort,
+    pub(super) reasoning_mode: ReasoningMode,
+    pub(super) speed: Speed,
     pub(super) entries: Vec<WireEntry>,
     pub(super) status: Option<WireStatus>,
     pub(super) queue: Vec<WireQueued>,
     pub(super) draft: WireDraft,
     pub(super) running: bool,
+    pub(super) context: Option<ContextBudget>,
+    pub(super) subagents: SubagentRoster,
 }
 
 #[derive(Serialize)]
 pub(super) struct WireDraft {
     pub(super) rev: u64,
     pub(super) text: String,
+    pub(super) images: Vec<WireImage>,
+}
+
+#[derive(Serialize)]
+pub(super) struct WireImage {
+    marker: String,
+    data_url: String,
+}
+
+impl From<&DraftImage> for WireImage {
+    fn from(image: &DraftImage) -> Self {
+        Self {
+            marker: image.marker.clone(),
+            data_url: image.data_url.clone(),
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -192,7 +215,7 @@ enum WireBody {
         session: String,
     },
     EffortChanged {
-        to: &'static str,
+        to: ReasoningEffort,
     },
     FastModeChanged {
         enabled: bool,
@@ -230,7 +253,7 @@ impl WireEntry {
             EntryKind::ForkedFrom { session_id } => WireBody::ForkedFrom {
                 session: session_id.clone(),
             },
-            EntryKind::EffortChanged { to } => WireBody::EffortChanged { to: effort_name(*to) },
+            EntryKind::EffortChanged { to } => WireBody::EffortChanged { to: *to },
             EntryKind::SpeedChanged { speed } => WireBody::FastModeChanged {
                 enabled: *speed == Speed::Fast,
             },
@@ -300,17 +323,6 @@ impl WireBody {
             body: latest.map_or_else(String::new, |latest| cap(&latest.body)),
             delivery: delivery.to_owned(),
         }
-    }
-}
-
-pub(super) fn effort_name(effort: crate::app::config::ReasoningEffort) -> &'static str {
-    use crate::app::config::ReasoningEffort;
-    match effort {
-        ReasoningEffort::Low => "low",
-        ReasoningEffort::Medium => "medium",
-        ReasoningEffort::High => "high",
-        ReasoningEffort::Xhigh => "xhigh",
-        ReasoningEffort::Max => "max",
     }
 }
 
@@ -452,13 +464,23 @@ mod tests {
     #[test]
     fn tool_summaries_name_the_subject_in_one_line() {
         let cases = [
-            ("exec_command", json!({"cmd": "cargo test\nsecond"}), "cargo test …"),
+            (
+                "exec_command",
+                json!({"cmd": "cargo test\nsecond"}),
+                "cargo test …",
+            ),
             (
                 "apply_patch",
-                json!("*** Begin Patch\n*** Update File: src/a.rs\n*** Add File: b.rs\n*** End Patch"),
+                json!(
+                    "*** Begin Patch\n*** Update File: src/a.rs\n*** Add File: b.rs\n*** End Patch"
+                ),
                 "src/a.rs, b.rs",
             ),
-            ("web__run", json!({"search_query": [{"q": "rust sse"}]}), "rust sse"),
+            (
+                "web__run",
+                json!({"search_query": [{"q": "rust sse"}]}),
+                "rust sse",
+            ),
             ("view_image", json!({"path": "/tmp/a.png"}), "/tmp/a.png"),
             ("mystery", json!({"a": 1, "b": 2}), "2 arguments"),
         ];
@@ -476,4 +498,3 @@ mod tests {
         assert_eq!(cap("short"), "short");
     }
 }
-

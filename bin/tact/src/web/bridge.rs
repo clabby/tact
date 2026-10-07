@@ -283,6 +283,21 @@ pub(crate) enum Reply {
     },
 }
 
+/// The wire form of a successful command: `{}` or, for `open_session`, `{ "session": id }`.
+impl Serialize for Reply {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap as _;
+        match self {
+            Self::Done => serializer.serialize_map(Some(0))?.end(),
+            Self::Opened { session } => {
+                let mut map = serializer.serialize_map(Some(1))?;
+                map.serialize_entry("session", session)?;
+                map.end()
+            }
+        }
+    }
+}
+
 /// A read-only request for data computed on demand, answered by the loop. The wire form is
 /// `{ "query": "<snake_case variant>", "args": { ...fields } }`, the body of `POST /api/query`.
 #[derive(Debug, Deserialize, Eq, PartialEq)]

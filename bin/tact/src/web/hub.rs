@@ -14,21 +14,29 @@ use super::{
     bridge::{Busy, Draft, Origin, Publication, QueuedPrompt, SessionInfo},
     wire::{
         Frame, PROTOCOL_VERSION, SessionSnapshot, SessionSummary, SummaryState, ToolDetail,
-        WireDraft, WireEntry, WireQueued, WireStatus, effort_name, frame, origin_label,
+        WireDraft, WireEntry, WireImage, WireQueued, WireStatus, frame, origin_label,
     },
 };
 use crate::{
-    app::config::ReasoningEffort,
-    tui::transcript::{EntryKind, TranscriptModel, TranscriptRecord, TransientStatus},
+    app::config::{ReasoningEffort, ReasoningMode, Speed},
+    core::subagent_roster::SubagentRoster,
+    tui::{
+        context::ContextBudget,
+        transcript::{
+            EntryKind, TranscriptEntry, TranscriptModel, TranscriptRecord, TransientStatus,
+        },
+    },
 };
 use serde::Serialize;
 use std::{
+    collections::HashMap,
     sync::{
         Arc, Mutex, MutexGuard,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+use tact_subagents::AgentId;
 use tokio::{
     sync::mpsc::{self, UnboundedReceiver},
     time::{Instant, sleep_until},
@@ -82,6 +90,10 @@ struct Live {
     unread: bool,
     last_activity_unix_ms: u64,
     title: Option<String>,
+    context: Option<ContextBudget>,
+    roster: SubagentRoster,
+    /// The transcript of each subagent, projected like the session's own.
+    agents: HashMap<AgentId, TranscriptModel>,
     /// Cancelled when the session closes so work running on its behalf stops.
     closed: CancellationToken,
     /// The transcript changed shape (an entry vanished or moved) and clients need a new snapshot.
@@ -101,13 +113,17 @@ struct ActiveSent {
     queue: Vec<QueuedPrompt>,
     settings: Settings,
     status: Option<WireStatus>,
+    context: Option<ContextBudget>,
+    roster: SubagentRoster,
+    agent_entries: HashMap<AgentId, Vec<(usize, u64)>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Settings {
     model: String,
     effort: ReasoningEffort,
-    fast_mode: bool,
+    reasoning_mode: ReasoningMode,
+    speed: Speed,
 }
 
 impl Hub {
@@ -184,16 +200,24 @@ impl Hub {
 
     pub(super) fn entry_detail(&self, session: &str, entry: usize) -> Option<ToolDetail> {
         let state = self.state();
-        let live = state.sessions.iter().find(|live| live.info.id == session)?;
-        let entry = live
-            .model
-            .entries()
-            .iter()
-            .find(|candidate| candidate.id.index() == entry)?;
-        match &entry.kind {
-            EntryKind::Tool(tool) => Some(ToolDetail::new(tool)),
-            _ => None,
-        }
+        tool_detail(&state.live(session)?.model, entry)
+    }
+
+    /// The projected transcript of one subagent of `session`.
+    pub(super) fn agent_entries(&self, session: &str, agent: AgentId) -> Option<Vec<WireEntry>> {
+        let state = self.state();
+        let model = state.live(session)?.agents.get(&agent)?;
+        Some(visible(model).map(WireEntry::new).collect())
+    }
+
+    pub(super) fn agent_entry_detail(
+        &self,
+        session: &str,
+        agent: AgentId,
+        entry: usize,
+    ) -> Option<ToolDetail> {
+        let state = self.state();
+        tool_detail(state.live(session)?.agents.get(&agent)?, entry)
     }
 
     pub(super) fn is_live(&self, session: &str) -> bool {
@@ -286,7 +310,9 @@ struct SessionRef<'a> {
 fn now_unix_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_or(0, |elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
+        .map_or(0, |elapsed| {
+            u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+        })
 }
 
 impl Live {
@@ -298,16 +324,21 @@ impl Live {
         Settings {
             model: self.info.model.clone(),
             effort: self.info.effort,
-            fast_mode: self.info.fast_mode,
+            reasoning_mode: self.info.reasoning_mode,
+            speed: self.info.speed,
         }
     }
 
     fn title(&mut self) -> String {
         if self.title.is_none() {
-            self.title = self.model.entries().iter().find_map(|entry| match &entry.kind {
-                EntryKind::User { text } => Some(title_from(text)),
-                _ => None,
-            });
+            self.title = self
+                .model
+                .entries()
+                .iter()
+                .find_map(|entry| match &entry.kind {
+                    EntryKind::User { text } => Some(title_from(text)),
+                    _ => None,
+                });
         }
         self.title.clone().unwrap_or_else(|| "New chat".to_owned())
     }
@@ -342,8 +373,8 @@ impl Live {
         }
     }
 
-    fn visible(&self) -> impl Iterator<Item = &crate::tui::transcript::TranscriptEntry> {
-        self.model.entries().iter().filter(|entry| !entry.hidden)
+    fn visible(&self) -> impl Iterator<Item = &TranscriptEntry> {
+        visible(&self.model)
     }
 
     fn snapshot(&mut self) -> SessionSnapshot {
@@ -351,36 +382,69 @@ impl Live {
             session: self.info.id.clone(),
             title: self.title(),
             model: self.info.model.clone(),
-            effort: effort_name(self.info.effort),
-            fast_mode: self.info.fast_mode,
+            effort: self.info.effort,
+            reasoning_mode: self.info.reasoning_mode,
+            speed: self.info.speed,
             entries: self.visible().map(WireEntry::new).collect(),
             status: self.model.transient().map(WireStatus::from),
             queue: self.queue.iter().map(WireQueued::from).collect(),
             draft: WireDraft {
                 rev: self.draft.rev,
                 text: super::wire::cap(&self.draft.text),
+                images: self.draft.images.iter().map(WireImage::from).collect(),
             },
             running: self.running(),
+            context: self.context,
+            subagents: self.roster.clone(),
         }
     }
 
     fn active_sent(&self) -> ActiveSent {
         ActiveSent {
             session: self.info.id.clone(),
-            entries: self
-                .visible()
-                .map(|entry| (entry.id.index(), entry.revision))
-                .collect(),
+            entries: revisions(self.visible()),
             draft_rev: self.draft.rev,
             queue: self.queue.clone(),
             settings: self.settings(),
             status: self.model.transient().map(WireStatus::from),
+            context: self.context,
+            roster: self.roster.clone(),
+            agent_entries: self
+                .agents
+                .iter()
+                .map(|(agent, model)| (*agent, revisions(visible(model))))
+                .collect(),
         }
     }
 }
 
+fn visible(model: &TranscriptModel) -> impl Iterator<Item = &TranscriptEntry> {
+    model.entries().iter().filter(|entry| !entry.hidden)
+}
+
+fn revisions<'a>(entries: impl Iterator<Item = &'a TranscriptEntry>) -> Vec<(usize, u64)> {
+    entries
+        .map(|entry| (entry.id.index(), entry.revision))
+        .collect()
+}
+
+fn tool_detail(model: &TranscriptModel, entry: usize) -> Option<ToolDetail> {
+    let entry = model
+        .entries()
+        .iter()
+        .find(|candidate| candidate.id.index() == entry)?;
+    match &entry.kind {
+        EntryKind::Tool(tool) => Some(ToolDetail::new(tool)),
+        _ => None,
+    }
+}
+
 fn title_from(prompt: &str) -> String {
-    let line = prompt.lines().find(|line| !line.trim().is_empty()).unwrap_or_default().trim();
+    let line = prompt
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or_default()
+        .trim();
     let mut chars = line.chars();
     let head = chars.by_ref().take(MAX_TITLE_CHARS).collect::<String>();
     if chars.next().is_some() {
@@ -390,8 +454,14 @@ fn title_from(prompt: &str) -> String {
 }
 
 impl State {
+    fn live(&self, session: &str) -> Option<&Live> {
+        self.sessions.iter().find(|live| live.info.id == session)
+    }
+
     fn live_mut(&mut self, session: &str) -> Option<&mut Live> {
-        self.sessions.iter_mut().find(|live| live.info.id == session)
+        self.sessions
+            .iter_mut()
+            .find(|live| live.info.id == session)
     }
 
     fn apply(&mut self, publication: Publication) {
@@ -420,6 +490,9 @@ impl State {
                     unread: false,
                     last_activity_unix_ms,
                     title: None,
+                    context: None,
+                    roster: SubagentRoster::default(),
+                    agents: HashMap::new(),
                     closed: CancellationToken::new(),
                     reshaped: false,
                 };
@@ -438,7 +511,10 @@ impl State {
                 apply_record(live, &record);
             }
             Publication::Closed { session } => {
-                let Some(index) = self.sessions.iter().position(|live| live.info.id == session)
+                let Some(index) = self
+                    .sessions
+                    .iter()
+                    .position(|live| live.info.id == session)
                 else {
                     return;
                 };
@@ -473,12 +549,33 @@ impl State {
                 session,
                 model,
                 effort,
-                fast_mode,
+                reasoning_mode,
+                speed,
             } => {
                 if let Some(live) = self.live_mut(&session) {
                     live.info.model = model;
                     live.info.effort = effort;
-                    live.info.fast_mode = fast_mode;
+                    live.info.reasoning_mode = reasoning_mode;
+                    live.info.speed = speed;
+                }
+            }
+            Publication::Context { session, budget } => {
+                if let Some(live) = self.live_mut(&session) {
+                    live.context = Some(budget);
+                }
+            }
+            Publication::Subagents { session, roster } => {
+                if let Some(live) = self.live_mut(&session) {
+                    live.roster = roster;
+                }
+            }
+            Publication::SubagentRecord {
+                session,
+                agent,
+                record,
+            } => {
+                if let Some(live) = self.live_mut(&session) {
+                    live.agents.entry(agent).or_default().apply(&record);
                 }
             }
             Publication::Busy { session, busy } => {
@@ -519,8 +616,7 @@ impl State {
         let active = self.active.clone();
         Sent {
             summaries,
-            active: active
-                .and_then(|active| self.live_mut(&active).map(|live| live.active_sent())),
+            active: active.and_then(|active| self.live_mut(&active).map(|live| live.active_sent())),
         }
     }
 
@@ -570,12 +666,18 @@ impl State {
             return;
         };
         let mut frames = Vec::new();
-        let previous = sent.active.take().filter(|previous| previous.session == active);
-        if let Some(previous) = previous.filter(|_| !live.reshaped) {
-            diff_active(live, &previous, &mut frames);
-        } else {
-            frames.push(frame("active", &SessionRef { session: &active }));
-            frames.push(frame("snapshot", &live.snapshot()));
+        let previous = sent
+            .active
+            .take()
+            .filter(|previous| previous.session == active);
+        match previous {
+            Some(previous) if !live.reshaped => diff_active(live, &previous, &mut frames),
+            previous => {
+                if previous.is_none() {
+                    frames.push(frame("active", &SessionRef { session: &active }));
+                }
+                frames.push(frame("snapshot", &live.snapshot()));
+            }
         }
         live.reshaped = false;
         sent.active = Some(live.active_sent());
@@ -597,11 +699,30 @@ fn apply_record(live: &mut Live, record: &Arc<TranscriptRecord>) {
 /// Appends one event per piece of the active session that differs from `previous`.
 fn diff_active(live: &mut Live, previous: &ActiveSent, frames: &mut Vec<Frame>) {
     #[derive(Serialize)]
-    struct Settings<'a> {
+    struct SettingsEvent<'a> {
         session: &'a str,
         model: &'a str,
-        effort: &'static str,
-        fast_mode: bool,
+        effort: ReasoningEffort,
+        reasoning_mode: ReasoningMode,
+        speed: Speed,
+    }
+    #[derive(Serialize)]
+    struct ContextEvent<'a> {
+        session: &'a str,
+        #[serde(flatten)]
+        budget: ContextBudget,
+    }
+    #[derive(Serialize)]
+    struct SubagentsEvent<'a> {
+        session: &'a str,
+        #[serde(flatten)]
+        roster: &'a SubagentRoster,
+    }
+    #[derive(Serialize)]
+    struct SubagentEntryEvent<'a> {
+        session: &'a str,
+        agent: AgentId,
+        entry: WireEntry,
     }
     #[derive(Serialize)]
     struct EntryEvent<'a> {
@@ -623,6 +744,7 @@ fn diff_active(live: &mut Live, previous: &ActiveSent, frames: &mut Vec<Frame>) 
         session: &'a str,
         rev: u64,
         text: String,
+        images: Vec<WireImage>,
         origin: String,
     }
 
@@ -631,11 +753,12 @@ fn diff_active(live: &mut Live, previous: &ActiveSent, frames: &mut Vec<Frame>) 
     if live.settings() != previous.settings {
         frames.push(frame(
             "settings",
-            &Settings {
+            &SettingsEvent {
                 session,
                 model: &live.info.model,
-                effort: effort_name(live.info.effort),
-                fast_mode: live.info.fast_mode,
+                effort: live.info.effort,
+                reasoning_mode: live.info.reasoning_mode,
+                speed: live.info.speed,
             },
         ));
     }
@@ -646,6 +769,7 @@ fn diff_active(live: &mut Live, previous: &ActiveSent, frames: &mut Vec<Frame>) 
                 session,
                 rev: live.draft.rev,
                 text: super::wire::cap(&live.draft.text),
+                images: live.draft.images.iter().map(WireImage::from).collect(),
                 origin: origin_label(live.draft_origin),
             },
         ));
@@ -662,6 +786,41 @@ fn diff_active(live: &mut Live, previous: &ActiveSent, frames: &mut Vec<Frame>) 
     let status = live.model.transient().map(WireStatus::from);
     if status != previous.status {
         frames.push(frame("status", &StatusEvent { session, status }));
+    }
+
+    if live.context != previous.context
+        && let Some(budget) = live.context
+    {
+        frames.push(frame("context", &ContextEvent { session, budget }));
+    }
+    if live.roster != previous.roster {
+        frames.push(frame(
+            "subagents",
+            &SubagentsEvent {
+                session,
+                roster: &live.roster,
+            },
+        ));
+    }
+    for (agent, model) in &live.agents {
+        let sent = previous.agent_entries.get(agent);
+        for (index, entry) in visible(model).enumerate() {
+            let unchanged = sent
+                .and_then(|sent| sent.get(index))
+                .is_some_and(|(id, revision)| {
+                    *id == entry.id.index() && *revision == entry.revision
+                });
+            if !unchanged {
+                frames.push(frame(
+                    "subagent_entry",
+                    &SubagentEntryEvent {
+                        session,
+                        agent: *agent,
+                        entry: WireEntry::new(entry),
+                    },
+                ));
+            }
+        }
     }
 
     let current: Vec<_> = live.visible().collect();
@@ -692,16 +851,13 @@ fn diff_active(live: &mut Live, previous: &ActiveSent, frames: &mut Vec<Frame>) 
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::{CLIENT_BUFFER, FLUSH_INTERVAL, Hub, MAX_STREAMS, Subscription};
     use crate::{
-        app::config::ReasoningEffort,
+        app::config::{ReasoningEffort, ReasoningMode, Speed},
         tui::transcript::{LocalEvent, TranscriptRecord, TurnId},
-        web::bridge::{
-            self, Busy, Draft, LoopEnd, Origin, Publication, QueuedPrompt, SessionInfo,
-        },
+        web::bridge::{self, Busy, Draft, LoopEnd, Origin, Publication, QueuedPrompt, SessionInfo},
     };
     use serde_json::{Value, json};
     use std::{sync::Arc, time::Duration};
@@ -738,7 +894,8 @@ mod tests {
                     id: id.to_owned(),
                     model: "gpt-6.1-sol".to_owned(),
                     effort: ReasoningEffort::Low,
-                    fast_mode: false,
+                    reasoning_mode: ReasoningMode::Standard,
+                    speed: Speed::Standard,
                     workspace: "/work".into(),
                 },
                 records,
@@ -781,7 +938,10 @@ mod tests {
                 .strip_prefix("event: ")
                 .and_then(|frame| frame.split_once("\ndata: "))
                 .expect("frames are SSE events");
-            events.push((name.to_owned(), serde_json::from_str(data.trim_end()).unwrap()));
+            events.push((
+                name.to_owned(),
+                serde_json::from_str(data.trim_end()).unwrap(),
+            ));
         }
         events
     }
@@ -801,7 +961,7 @@ mod tests {
         let events = drain(&mut subscription);
 
         assert_eq!(names(&events), ["hello", "live", "active", "snapshot"]);
-        assert_eq!(events[0].1["protocol_version"], 8);
+        assert_eq!(events[0].1["protocol_version"], 9);
         let live = &events[1].1;
         assert_eq!(live["active"], "s1");
         assert_eq!(live["sessions"][0]["title"], "Fix the flaky test");
@@ -809,8 +969,14 @@ mod tests {
         let snapshot = &events[3].1;
         assert_eq!(snapshot["session"], "s1");
         assert_eq!(snapshot["entries"][0]["kind"], "user");
-        assert_eq!(snapshot["entries"][0]["text"], "Fix the flaky test\nwith details");
+        assert_eq!(
+            snapshot["entries"][0]["text"],
+            "Fix the flaky test\nwith details"
+        );
         assert_eq!(snapshot["effort"], "low");
+        assert_eq!(snapshot["speed"], "standard");
+        assert_eq!(snapshot["context"], Value::Null);
+        assert_eq!(snapshot["subagents"]["agents"], json!([]));
         assert_eq!(snapshot["running"], false);
     }
 
@@ -829,6 +995,7 @@ mod tests {
                 draft: Draft {
                     rev,
                     text: format!("draft {rev}"),
+                    ..Draft::default()
                 },
                 origin: Origin::Web(5),
             });
@@ -849,7 +1016,8 @@ mod tests {
             session: "s1".into(),
             model: "gpt-6.1-sol".into(),
             effort: ReasoningEffort::High,
-            fast_mode: true,
+            reasoning_mode: ReasoningMode::Pro,
+            speed: Speed::Fast,
         });
         settle().await;
 
@@ -862,7 +1030,7 @@ mod tests {
         let draft = events.iter().find(|(name, _)| name == "draft").unwrap();
         assert_eq!(
             draft.1,
-            json!({"session": "s1", "rev": 3, "text": "draft 3", "origin": "web:5"})
+            json!({"session": "s1", "rev": 3, "text": "draft 3", "images": [], "origin": "web:5"})
         );
         let entry = events.iter().find(|(name, _)| name == "entry").unwrap();
         assert_eq!(entry.1["entry"]["kind"], "user");
@@ -947,6 +1115,7 @@ mod tests {
                 draft: Draft {
                     rev,
                     text: rev.to_string(),
+                    ..Draft::default()
                 },
                 origin: Origin::Terminal,
             });
@@ -957,7 +1126,10 @@ mod tests {
         assert_eq!(fixture.hub.connected_clients(), 1);
         let backlog = drain(&mut slow);
         assert!(backlog.len() <= CLIENT_BUFFER);
-        assert!(slow.frames.recv().await.is_none(), "the stream ends so the browser reconnects");
+        assert!(
+            slow.frames.recv().await.is_none(),
+            "the stream ends so the browser reconnects"
+        );
 
         let mut reconnected = fixture.hub.subscribe().unwrap();
         let events = drain(&mut reconnected);
@@ -993,5 +1165,55 @@ mod tests {
         assert_eq!(events[3].1["entries"][0]["text"], "unseen");
         assert_eq!(events.len(), 4);
     }
-}
 
+    #[tokio::test(start_paused = true)]
+    async fn context_and_subagents_are_projected_and_coalesced() {
+        use crate::{core::subagent_roster::SubagentRoster, tui::context::ContextBudget};
+        use tact_subagents::AgentId;
+
+        let fixture = fixture();
+        fixture.open("s1", None);
+        fixture.activate("s1");
+        let mut subscription = fixture.hub.subscribe().unwrap();
+        settle().await;
+        drain(&mut subscription);
+
+        for window in [100, 200] {
+            fixture.publish(Publication::Context {
+                session: "s1".into(),
+                budget: ContextBudget {
+                    active_tokens: 10,
+                    window_tokens: window,
+                },
+            });
+        }
+        fixture.publish(Publication::Subagents {
+            session: "s1".into(),
+            roster: SubagentRoster {
+                max_subagents: 3,
+                agents: Vec::new(),
+            },
+        });
+        fixture.publish(Publication::SubagentRecord {
+            session: "s1".into(),
+            agent: AgentId::new(4),
+            record: user_record(1, "child task"),
+        });
+        settle().await;
+
+        let events = drain(&mut subscription);
+        let find = |name: &str| events.iter().find(|(event, _)| event == name).unwrap();
+        assert_eq!(
+            find("context").1,
+            json!({"session": "s1", "active_tokens": 10, "window_tokens": 200})
+        );
+        assert_eq!(find("subagents").1["max_subagents"], 3);
+        assert_eq!(find("subagents").1["session"], "s1");
+        let entry = find("subagent_entry");
+        assert_eq!(entry.1["agent"], 4);
+        assert_eq!(entry.1["entry"]["text"], "child task");
+        let transcript = fixture.hub.agent_entries("s1", AgentId::new(4)).unwrap();
+        assert_eq!(transcript.len(), 1);
+        assert!(fixture.hub.agent_entries("s1", AgentId::new(9)).is_none());
+    }
+}

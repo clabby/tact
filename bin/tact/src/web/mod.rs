@@ -11,14 +11,14 @@ mod diff;
 mod hub;
 mod registry;
 mod review;
-mod token;
 #[cfg(test)]
 mod testing;
+mod token;
 mod wire;
 
 use crate::app::config::Config;
 use api::AppState;
-use assets::AssetStore;
+use assets::{AssetStore, WebAssets};
 use hub::Hub;
 use registry::{InstanceRecord, Registration, RegistryError};
 use review::{ReviewState, bridge_agent};
@@ -31,7 +31,7 @@ use std::{
 };
 use thiserror::Error;
 use token::{MachineToken, TokenError};
-use tokio::net::TcpListener;
+use tokio::{net::TcpListener, sync::mpsc::UnboundedSender};
 use tokio_util::sync::CancellationToken;
 
 /// Ports tried after the configured one before falling back to an ephemeral port.
@@ -70,11 +70,23 @@ pub(crate) fn spawn(
         let bridge::WebEnd {
             publications,
             requests,
+            queries,
             auxiliary,
             status,
         } = end;
         let hub = Hub::spawn(publications, shutdown.clone());
-        match Server::start(settings, hub, requests, auxiliary, shutdown.clone()).await {
+        match Server::start(
+            settings,
+            hub,
+            Channels {
+                requests,
+                queries,
+                auxiliary,
+            },
+            shutdown.clone(),
+        )
+        .await
+        {
             Ok(server) => {
                 status.send_replace(bridge::WebStatus::Ready {
                     url: server.login_url.clone(),
@@ -108,11 +120,20 @@ impl Settings {
             enabled: web.enabled(),
             bind: web.bind(),
             port: web.port(),
-            public_url: web.public_url().map(|url| url.trim_end_matches('/').to_owned()),
+            public_url: web
+                .public_url()
+                .map(|url| url.trim_end_matches('/').to_owned()),
             home: config.path().parent().unwrap_or(Path::new(".")).to_owned(),
             workspace: workspace.to_owned(),
         }
     }
+}
+
+/// The command, query, and auxiliary-work senders of the bridge.
+struct Channels {
+    requests: UnboundedSender<bridge::Request>,
+    queries: UnboundedSender<bridge::QueryRequest>,
+    auxiliary: UnboundedSender<bridge::AuxiliaryRequest>,
 }
 
 struct Server {
@@ -128,8 +149,7 @@ impl Server {
     async fn start(
         settings: Settings,
         hub: Hub,
-        requests: tokio::sync::mpsc::UnboundedSender<bridge::Request>,
-        auxiliary: tokio::sync::mpsc::UnboundedSender<bridge::AuxiliaryRequest>,
+        channels: Channels,
         shutdown: CancellationToken,
     ) -> Result<Self, StartError> {
         if !settings.enabled {
@@ -138,12 +158,13 @@ impl Server {
         crate::install_tls_provider();
         let web_directory = settings.home.join("web");
         let token = MachineToken::load_or_create(&web_directory)?;
-        let listener = bind(settings.bind, settings.port)
-            .await
-            .map_err(|source| StartError::Bind {
-                bind: settings.bind,
-                source,
-            })?;
+        let listener =
+            bind(settings.bind, settings.port)
+                .await
+                .map_err(|source| StartError::Bind {
+                    bind: settings.bind,
+                    source,
+                })?;
         let port = listener
             .local_addr()
             .map_err(|source| StartError::Bind {
@@ -151,9 +172,12 @@ impl Server {
                 source,
             })?
             .port();
-        let origin = settings
-            .public_url
-            .unwrap_or_else(|| format!("http://{}", SocketAddr::new(reachable_host(settings.bind), port)));
+        let origin = settings.public_url.unwrap_or_else(|| {
+            format!(
+                "http://{}",
+                SocketAddr::new(reachable_host(settings.bind), port)
+            )
+        });
         let login_url = format!("{origin}/#k={}", token.expose());
 
         let registry_directory = web_directory.join("instances");
@@ -165,20 +189,24 @@ impl Server {
                 workspace: settings.workspace.clone(),
                 started_at: SystemTime::now()
                     .duration_since(UNIX_EPOCH)
-                    .map_or(0, |elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)),
+                    .map_or(0, |elapsed| {
+                        u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+                    }),
             },
         )?;
 
+        WebAssets::install_if_missing(settings.home.clone());
         let review = ReviewState::new(
             settings.workspace.clone(),
             hub.clone(),
-            bridge_agent(auxiliary),
+            bridge_agent(channels.auxiliary),
             shutdown.clone(),
         );
         let state = Arc::new(AppState {
             token,
             hub,
-            requests,
+            requests: channels.requests,
+            queries: channels.queries,
             workspace: settings.workspace,
             port,
             registry_directory,
@@ -231,17 +259,24 @@ async fn bind(address: IpAddr, first: u16) -> io::Result<TcpListener> {
 /// The address a local browser should use for a listener bound to `bind`.
 fn reachable_host(bind: IpAddr) -> IpAddr {
     match bind {
-        IpAddr::V4(address) if address.is_unspecified() => IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
-        IpAddr::V6(address) if address.is_unspecified() => IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
+        IpAddr::V4(address) if address.is_unspecified() => {
+            IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+        }
+        IpAddr::V6(address) if address.is_unspecified() => {
+            IpAddr::V6(std::net::Ipv6Addr::LOCALHOST)
+        }
         address => address,
     }
 }
 
-
 #[cfg(test)]
 mod tests {
-    use super::{Server, Settings, bind, bridge, hub::Hub, registry};
-    use std::{fs, net::{IpAddr, Ipv4Addr}, time::Duration};
+    use super::{Channels, Server, Settings, bind, bridge, hub::Hub, registry};
+    use std::{
+        fs,
+        net::{IpAddr, Ipv4Addr},
+        time::Duration,
+    };
     use tokio_util::sync::CancellationToken;
 
     const LOOPBACK: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
@@ -275,8 +310,11 @@ mod tests {
                 workspace: workspace.path().to_owned(),
             },
             hub,
-            end.requests,
-            end.auxiliary,
+            Channels {
+                requests: end.requests,
+                queries: end.queries,
+                auxiliary: end.auxiliary,
+            },
             shutdown.clone(),
         )
         .await
@@ -288,7 +326,11 @@ mod tests {
         let task = tokio::spawn(server.run());
 
         let client = reqwest::Client::new();
-        let unauthenticated = client.get(format!("{origin}/api/instance")).send().await.unwrap();
+        let unauthenticated = client
+            .get(format!("{origin}/api/instance"))
+            .send()
+            .await
+            .unwrap();
         assert_eq!(unauthenticated.status(), reqwest::StatusCode::UNAUTHORIZED);
         let mut stream = client
             .get(format!("{origin}/api/stream"))
@@ -304,7 +346,10 @@ mod tests {
         assert!(String::from_utf8_lossy(&live).starts_with("event: live\n"));
 
         shutdown.cancel();
-        tokio::time::timeout(Duration::from_secs(10), task).await.unwrap().unwrap();
+        tokio::time::timeout(Duration::from_secs(10), task)
+            .await
+            .unwrap()
+            .unwrap();
         assert!(registry::read_all(&instances).is_empty());
         assert!(fs::metadata(home.path().join("web/token")).is_ok());
     }
@@ -326,8 +371,11 @@ mod tests {
                 workspace: home.path().to_owned(),
             },
             hub,
-            end.requests,
-            end.auxiliary,
+            Channels {
+                requests: end.requests,
+                queries: end.queries,
+                auxiliary: end.auxiliary,
+            },
             shutdown,
         )
         .await
@@ -352,8 +400,11 @@ mod tests {
                 workspace: ".".into(),
             },
             hub,
-            end.requests,
-            end.auxiliary,
+            Channels {
+                requests: end.requests,
+                queries: end.queries,
+                auxiliary: end.auxiliary,
+            },
             shutdown,
         )
         .await;
@@ -361,4 +412,3 @@ mod tests {
         assert!(result.is_err());
     }
 }
-

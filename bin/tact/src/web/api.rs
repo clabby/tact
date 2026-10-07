@@ -3,7 +3,7 @@
 
 use super::{
     assets::AssetStore,
-    bridge::{ClientId, Command, CommandError, Request},
+    bridge::{CommandEnvelope, CommandError, Query, QueryReply, QueryRequest, Request},
     hub::Hub,
     registry::{self, InstanceRecord},
     token::MachineToken,
@@ -21,10 +21,16 @@ use axum::{
 use futures_util::{StreamExt as _, future::join_all, stream};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{convert::Infallible, path::PathBuf, sync::Arc, time::Duration};
-use tokio::{sync::{mpsc, oneshot}, time::{interval, timeout}};
+use tact_subagents::AgentId;
+use tokio::{
+    sync::{mpsc, oneshot},
+    time::{interval, timeout},
+};
 use tokio_util::sync::CancellationToken;
 
 const MAX_BODY_BYTES: usize = 1024 * 1024;
+/// Commands may carry pasted images in a data URL.
+const MAX_COMMAND_BODY_BYTES: usize = 32 * 1024 * 1024;
 const KEEP_ALIVE: Duration = Duration::from_secs(15);
 /// Longest a command may wait for the terminal loop. Opening a large session can be slow.
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
@@ -37,6 +43,7 @@ pub(super) struct AppState {
     pub(super) token: MachineToken,
     pub(super) hub: Hub,
     pub(super) requests: mpsc::UnboundedSender<Request>,
+    pub(super) queries: mpsc::UnboundedSender<QueryRequest>,
     pub(super) workspace: PathBuf,
     pub(super) port: u16,
     pub(super) registry_directory: PathBuf,
@@ -52,8 +59,20 @@ pub(super) fn router(state: Arc<AppState>, extra: Router<Arc<AppState>>) -> Rout
         .route("/api/instance", get(instance))
         .route("/api/instances", get(instances))
         .route("/api/sessions/{session}/entries/{entry}", get(entry_detail))
+        .route(
+            "/api/sessions/{session}/agents/{agent}/entries",
+            get(agent_entries),
+        )
+        .route(
+            "/api/sessions/{session}/agents/{agent}/entries/{entry}",
+            get(agent_entry_detail),
+        )
         .route("/api/stream", get(stream_events))
-        .route("/api/cmd", post(command))
+        .route(
+            "/api/cmd",
+            post(command).layer(DefaultBodyLimit::max(MAX_COMMAND_BODY_BYTES)),
+        )
+        .route("/api/query", post(query))
         .merge(extra)
         .fallback(static_asset)
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
@@ -82,28 +101,24 @@ impl ApiError {
     }
 
     fn unauthorized() -> Self {
-        Self::new(StatusCode::UNAUTHORIZED, "unauthorized", "authentication required")
+        Self::new(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "authentication required",
+        )
     }
 }
 
 impl From<CommandError> for ApiError {
-    /// The single mapping from the loop's typed refusals to wire codes.
+    /// The code comes from [`CommandError::code`]; the status is the transport's choice.
     fn from(error: CommandError) -> Self {
-        let (status, code) = match &error {
-            CommandError::TurnRunning => (StatusCode::CONFLICT, "turn_running"),
-            CommandError::QueueNotEmpty => (StatusCode::CONFLICT, "queue_not_empty"),
-            CommandError::NothingRunning => (StatusCode::CONFLICT, "nothing_running"),
-            CommandError::DraftChanged => (StatusCode::CONFLICT, "draft_changed"),
-            CommandError::SessionLocked => (StatusCode::CONFLICT, "session_locked"),
-            CommandError::UnknownSession => (StatusCode::NOT_FOUND, "unknown_session"),
-            CommandError::TooManySessions => (StatusCode::CONFLICT, "too_many_sessions"),
-            CommandError::NotAvailableRemotely => {
-                (StatusCode::CONFLICT, "not_available_remotely")
-            }
-            CommandError::Invalid(_) => (StatusCode::BAD_REQUEST, "invalid_request"),
-            CommandError::Failed(_) => (StatusCode::INTERNAL_SERVER_ERROR, "failed"),
+        let status = match &error {
+            CommandError::UnknownSession => StatusCode::NOT_FOUND,
+            CommandError::Invalid(_) => StatusCode::BAD_REQUEST,
+            CommandError::Failed(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            _ => StatusCode::CONFLICT,
         };
-        Self::new(status, code, error.to_string())
+        Self::new(status, error.code(), error.to_string())
     }
 }
 
@@ -214,32 +229,43 @@ async fn login(
     Ok(response)
 }
 
-/// A browser command. `client` is the tab's random identifier, used to attribute draft writes.
-#[derive(Deserialize)]
-struct CommandBody {
-    client: ClientId,
-    #[serde(flatten)]
-    command: Command,
-}
-
 async fn command(
     State(state): State<Arc<AppState>>,
-    ApiJson(body): ApiJson<CommandBody>,
+    ApiJson(body): ApiJson<CommandEnvelope>,
+) -> ApiResult<ApiError> {
+    let (reply, outcome) = oneshot::channel();
+    let request = Request {
+        command: body.command,
+        client: body.client,
+        reply,
+    };
+    state.requests.send(request).map_err(|_| unavailable())?;
+    Ok(secure_json(StatusCode::OK, answer(outcome).await?))
+}
+
+async fn query(
+    State(state): State<Arc<AppState>>,
+    ApiJson(query): ApiJson<Query>,
 ) -> ApiResult<ApiError> {
     let (reply, outcome) = oneshot::channel();
     state
-        .requests
-        .send(Request {
-            command: body.command,
-            client: body.client,
-            reply,
-        })
+        .queries
+        .send(QueryRequest { query, reply })
         .map_err(|_| unavailable())?;
-    let reply = timeout(COMMAND_TIMEOUT, outcome)
-        .await
-        .map_err(|_| ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "failed", "the terminal did not answer in time"))?
-        .map_err(|_| unavailable())??;
+    let reply: QueryReply = answer(outcome).await?;
     Ok(secure_json(StatusCode::OK, reply))
+}
+
+/// Waits for the terminal loop's answer to a command or query.
+async fn answer<T>(outcome: oneshot::Receiver<Result<T, CommandError>>) -> Result<T, ApiError> {
+    let answered = timeout(COMMAND_TIMEOUT, outcome).await.map_err(|_| {
+        ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "failed",
+            "the terminal did not answer in time",
+        )
+    })?;
+    Ok(answered.map_err(|_| unavailable())??)
 }
 
 fn unavailable() -> ApiError {
@@ -297,20 +323,23 @@ struct InstanceEntry {
 async fn instances(State(state): State<Arc<AppState>>) -> Response<Body> {
     let own_pid = std::process::id();
     let records = registry::read_all(&state.registry_directory);
-    let probes = records.into_iter().filter(|record| record.pid != own_pid).map(|record| {
-        let state = Arc::clone(&state);
-        async move {
-            let status = probe(&state, &record).await?;
-            Some(InstanceEntry {
-                pid: record.pid,
-                port: record.port,
-                workspace: record.workspace,
-                live: status.live,
-                running: status.running,
-                current: false,
-            })
-        }
-    });
+    let probes = records
+        .into_iter()
+        .filter(|record| record.pid != own_pid)
+        .map(|record| {
+            let state = Arc::clone(&state);
+            async move {
+                let status = probe(&state, &record).await?;
+                Some(InstanceEntry {
+                    pid: record.pid,
+                    port: record.port,
+                    workspace: record.workspace,
+                    live: status.live,
+                    running: status.running,
+                    current: false,
+                })
+            }
+        });
     let mut entries: Vec<_> = join_all(probes).await.into_iter().flatten().collect();
     let (live, running) = state.hub.counts();
     entries.push(InstanceEntry {
@@ -329,7 +358,10 @@ async fn probe(state: &AppState, record: &InstanceRecord) -> Option<SiblingStatu
     let response = state
         .client
         .get(format!("http://127.0.0.1:{}/api/instance", record.port))
-        .header(header::COOKIE, format!("{COOKIE_NAME}={}", state.token.expose()))
+        .header(
+            header::COOKIE,
+            format!("{COOKIE_NAME}={}", state.token.expose()),
+        )
         .timeout(SIBLING_TIMEOUT)
         .send()
         .await
@@ -339,6 +371,10 @@ async fn probe(state: &AppState, record: &InstanceRecord) -> Option<SiblingStatu
     response.json().await.ok()
 }
 
+fn entry_not_found() -> ApiError {
+    ApiError::new(StatusCode::NOT_FOUND, "unknown_session", ENTRY_NOT_FOUND)
+}
+
 async fn entry_detail(
     State(state): State<Arc<AppState>>,
     Path((session, entry)): Path<(String, usize)>,
@@ -346,7 +382,32 @@ async fn entry_detail(
     let detail = state
         .hub
         .entry_detail(&session, entry)
-        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "unknown_session", ENTRY_NOT_FOUND))?;
+        .ok_or_else(entry_not_found)?;
+    Ok(secure_json(StatusCode::OK, detail))
+}
+
+async fn agent_entries(
+    State(state): State<Arc<AppState>>,
+    Path((session, agent)): Path<(String, AgentId)>,
+) -> ApiResult<ApiError> {
+    let entries = state
+        .hub
+        .agent_entries(&session, agent)
+        .ok_or_else(entry_not_found)?;
+    Ok(secure_json(
+        StatusCode::OK,
+        serde_json::json!({ "entries": entries }),
+    ))
+}
+
+async fn agent_entry_detail(
+    State(state): State<Arc<AppState>>,
+    Path((session, agent, entry)): Path<(String, AgentId, usize)>,
+) -> ApiResult<ApiError> {
+    let detail = state
+        .hub
+        .agent_entry_detail(&session, agent, entry)
+        .ok_or_else(entry_not_found)?;
     Ok(secure_json(StatusCode::OK, detail))
 }
 
@@ -369,7 +430,10 @@ async fn stream_events(State(state): State<Arc<AppState>>) -> ApiResult<ApiError
                 _ = keep_alive.tick() => Bytes::from_static(b": keep-alive\n\n"),
                 () = shutdown.cancelled() => return None,
             };
-            Some((Ok::<_, Infallible>(chunk), (subscription, keep_alive, shutdown)))
+            Some((
+                Ok::<_, Infallible>(chunk),
+                (subscription, keep_alive, shutdown),
+            ))
         },
     );
     let mut response = Response::new(Body::from_stream(events.map(|chunk| chunk)));
@@ -395,7 +459,11 @@ async fn static_asset(State(state): State<Arc<AppState>>, uri: Uri) -> Response<
         }
         return StatusCode::NOT_FOUND.into_response();
     };
-    let path = if path.is_empty() { assets.entrypoint() } else { path };
+    let path = if path.is_empty() {
+        assets.entrypoint()
+    } else {
+        path
+    };
     let Some(asset) = assets.resolve(path) else {
         return StatusCode::NOT_FOUND.into_response();
     };
@@ -445,11 +513,10 @@ pub(super) fn secure(response: &mut Response<Body>) {
     );
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::super::{
-        bridge::{Command, CommandError, Publication, Reply},
+        bridge::{Command, CommandError, Publication, Query, Reply},
         testing::Harness,
     };
     use axum::{
@@ -587,12 +654,17 @@ mod tests {
         let (status, headers, body) = harness.send(request).await;
 
         assert_eq!(status, StatusCode::OK);
-        assert!(headers[header::CONTENT_SECURITY_POLICY]
-            .to_str()
-            .unwrap()
-            .contains("default-src 'none'"));
+        assert!(
+            headers[header::CONTENT_SECURITY_POLICY]
+                .to_str()
+                .unwrap()
+                .contains("default-src 'none'")
+        );
         assert!(String::from_utf8(body).unwrap().contains("not installed"));
-        let missing = Request::builder().uri("/app.js").body(Body::empty()).unwrap();
+        let missing = Request::builder()
+            .uri("/app.js")
+            .body(Body::empty())
+            .unwrap();
         assert_eq!(harness.send(missing).await.0, StatusCode::NOT_FOUND);
     }
 
@@ -602,7 +674,7 @@ mod tests {
 
         let (status, reply, request) = harness
             .command(
-                json!({"command": "compact", "client": 9, "session": "s1"}),
+                json!({"client": 9, "cmd": "compact", "args": {"session": "s1"}}),
                 Ok(Reply::Done {}),
             )
             .await;
@@ -619,17 +691,37 @@ mod tests {
     #[tokio::test]
     async fn refusals_map_to_wire_codes() {
         let cases = [
-            (CommandError::TurnRunning, StatusCode::CONFLICT, "turn_running"),
-            (CommandError::UnknownSession, StatusCode::NOT_FOUND, "unknown_session"),
-            (CommandError::DraftChanged, StatusCode::CONFLICT, "draft_changed"),
-            (CommandError::Invalid("bad".into()), StatusCode::BAD_REQUEST, "invalid_request"),
-            (CommandError::Failed("boom".into()), StatusCode::INTERNAL_SERVER_ERROR, "failed"),
+            (
+                CommandError::TurnRunning,
+                StatusCode::CONFLICT,
+                "turn_running",
+            ),
+            (
+                CommandError::UnknownSession,
+                StatusCode::NOT_FOUND,
+                "unknown_session",
+            ),
+            (
+                CommandError::DraftChanged,
+                StatusCode::CONFLICT,
+                "draft_changed",
+            ),
+            (
+                CommandError::Invalid("bad".into()),
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+            ),
+            (
+                CommandError::Failed("boom".into()),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed",
+            ),
         ];
         let mut harness = Harness::new();
         for (error, expected_status, expected_code) in cases {
             let (status, body, _) = harness
                 .command(
-                    json!({"command": "interrupt", "client": 1, "session": "s"}),
+                    json!({"client": 1, "cmd": "interrupt", "args": {"session": "s"}}),
                     Err(error),
                 )
                 .await;
@@ -643,7 +735,11 @@ mod tests {
         let harness = Harness::new();
 
         let (status, body) = harness
-            .call(Method::POST, "/api/cmd", Some(json!({"command": "nope", "client": 1})))
+            .call(
+                Method::POST,
+                "/api/cmd",
+                Some(json!({"client": 1, "cmd": "nope"})),
+            )
             .await;
 
         assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -659,7 +755,7 @@ mod tests {
             .call(
                 Method::POST,
                 "/api/cmd",
-                Some(json!({"command": "compact", "client": 1, "session": "s"})),
+                Some(json!({"client": 1, "cmd": "compact", "args": {"session": "s"}})),
             )
             .await;
 
@@ -673,7 +769,10 @@ mod tests {
         harness.open_session("s1").await;
         harness.terminal.publisher.publish(Publication::Busy {
             session: "s1".into(),
-            busy: crate::web::bridge::Busy { turns: 1, shells: 0 },
+            busy: crate::web::bridge::Busy {
+                turns: 1,
+                shells: 0,
+            },
         });
         while !harness.hub.any_busy() {
             tokio::task::yield_now().await;
@@ -682,9 +781,80 @@ mod tests {
         let (status, body) = harness.call(Method::GET, "/api/instance", None).await;
 
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(body["protocol_version"], 8);
+        assert_eq!(body["protocol_version"], 9);
         assert_eq!(body["live"], 1);
         assert_eq!(body["running"], true);
     }
-}
 
+    #[tokio::test]
+    async fn queries_use_one_route_and_share_the_error_mapping() {
+        let mut harness = Harness::new();
+        let sender = harness.state.queries.clone();
+        let loop_side = tokio::spawn({
+            let mut queries = std::mem::replace(
+                &mut harness.terminal.queries,
+                tokio::sync::mpsc::unbounded_channel().1,
+            );
+            async move {
+                let request = queries.recv().await.unwrap();
+                assert_eq!(request.query, Query::Models);
+                request
+                    .reply
+                    .send(Err(CommandError::Disabled("memory is off".into())))
+                    .unwrap();
+            }
+        });
+        drop(sender);
+
+        let (status, body) = harness
+            .call(Method::POST, "/api/query", Some(json!({"query": "models"})))
+            .await;
+        loop_side.await.unwrap();
+
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["code"], "disabled");
+        let (status, body) = harness
+            .call(Method::POST, "/api/query", Some(json!({"query": "nope"})))
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "invalid_request");
+    }
+
+    #[tokio::test]
+    async fn subagent_transcripts_are_served_for_known_agents_only() {
+        use tact_subagents::AgentId;
+        let harness = Harness::new();
+        harness.open_session("s1").await;
+        harness
+            .terminal
+            .publisher
+            .publish(Publication::SubagentRecord {
+                session: "s1".into(),
+                agent: AgentId::new(2),
+                record: std::sync::Arc::new(
+                    crate::tui::transcript::TranscriptRecord::from_local(
+                        1,
+                        1,
+                        crate::tui::transcript::LocalEvent::UserSubmitted {
+                            id: crate::tui::transcript::TurnId::new(1),
+                            text: "task".into(),
+                        },
+                    )
+                    .unwrap(),
+                ),
+            });
+        while harness.hub.agent_entries("s1", AgentId::new(2)).is_none() {
+            tokio::task::yield_now().await;
+        }
+
+        let (status, body) = harness
+            .call(Method::GET, "/api/sessions/s1/agents/2/entries", None)
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["entries"][0]["text"], "task");
+        let (status, _) = harness
+            .call(Method::GET, "/api/sessions/s1/agents/3/entries", None)
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+}

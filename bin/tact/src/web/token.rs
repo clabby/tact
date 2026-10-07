@@ -97,14 +97,13 @@ impl MachineToken {
         match linked {
             Ok(()) => Ok(Self(token)),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                let existing = fs::read_to_string(path).map_err(create_error)?;
-                Self::parse(&SecretString::new(existing).expose_secret().to_owned())
-                    .ok_or_else(|| {
-                        create_error(io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            "the existing token is malformed",
-                        ))
-                    })
+                let existing = SecretString::new(fs::read_to_string(path).map_err(create_error)?);
+                Self::parse(existing.expose_secret()).ok_or_else(|| {
+                    create_error(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "the existing token is malformed",
+                    ))
+                })
             }
             Err(error) => Err(create_error(error)),
         }
@@ -176,4 +175,3 @@ mod tests {
         assert_eq!(format!("{token:?}"), "MachineToken([REDACTED])");
     }
 }
-

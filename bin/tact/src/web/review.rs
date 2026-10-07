@@ -7,7 +7,7 @@
 //! the session closes.
 
 use super::{
-    api::{secure_json},
+    api::secure_json,
     bridge::{AuxiliaryError, AuxiliaryRequest},
     diff::{self, ReviewRange},
     hub::Hub,
@@ -418,7 +418,7 @@ macro_rules! loaded {
     ($state:expr) => {
         match $state.session().await {
             Ok(session) => session,
-            Err(response) => return response,
+            Err(response) => return *response,
         }
     };
 }
@@ -452,9 +452,9 @@ impl ReviewState {
     }
 
     /// The prepared review, or a stale-snapshot response if none has been loaded yet.
-    async fn session(&self) -> Result<MappedMutexGuard<'_, ReviewSession>, Response<Body>> {
+    async fn session(&self) -> Result<MappedMutexGuard<'_, ReviewSession>, Box<Response<Body>>> {
         MutexGuard::try_map(self.session.lock().await, Option::as_mut)
-            .map_err(|_| stale_snapshot("the review has not been loaded"))
+            .map_err(|_| Box::new(stale_snapshot("the review has not been loaded")))
     }
 }
 
@@ -649,7 +649,7 @@ impl ReviewSession {
 }
 
 /// Prepares the workspace's review on first use.
-async fn ensure_loaded(state: &ReviewState) -> Result<(), Response<Body>> {
+async fn ensure_loaded(state: &ReviewState) -> Result<(), Box<Response<Body>>> {
     let _preparing = state.refresh_generation.lock().await;
     if state.session.lock().await.is_some() {
         return Ok(());
@@ -658,7 +658,7 @@ async fn ensure_loaded(state: &ReviewState) -> Result<(), Response<Body>> {
         .backend
         .prepare(state.shutdown.child_token())
         .await
-        .map_err(preparation_failure)?;
+        .map_err(|error| Box::new(preparation_failure(error)))?;
     *state.session.lock().await = Some(ReviewSession::new(review, state.shutdown.clone()));
     Ok(())
 }
@@ -688,7 +688,7 @@ async fn review(
     Query(query): Query<SessionQuery>,
 ) -> Response<Body> {
     if let Err(response) = ensure_loaded(&state).await {
-        return response;
+        return *response;
     }
     let session_id = query.session.as_deref().unwrap_or_default();
     let session = loaded!(state);
@@ -1133,7 +1133,11 @@ async fn store_overview_result(
     }
     if let OverviewRunResult::Ready(overview_mdx) = &result {
         session.overviews.insert(
-            (overview_key.1, overview_key.2.clone(), overview_key.3.clone()),
+            (
+                overview_key.1,
+                overview_key.2.clone(),
+                overview_key.3.clone(),
+            ),
             overview_mdx.clone(),
             overview_mdx.len(),
         );
@@ -1756,7 +1760,6 @@ fn error_response(
     )
 }
 
-
 const MAX_OVERVIEW_BYTES: usize = 1024 * 1024;
 const MAX_QUESTION_ANSWER_BYTES: usize = 256 * 1024;
 const MAX_AI_REVIEW_BYTES: usize = 1024 * 1024;
@@ -1805,7 +1808,6 @@ fn scope_load_error(error: ReviewError) -> ScopeLoadError {
         error => ScopeLoadError::Failed(error.to_string()),
     }
 }
-
 
 impl ReviewBackend {
     /// Captures the workspace's default page. A live turn can change the workspace between the
@@ -2166,7 +2168,12 @@ mod tests {
         assert_eq!(review["protocol_version"], PROTOCOL_VERSION);
         assert_eq!(review["generation"], 0);
         assert_eq!(review["turn_running"], false);
-        assert!(review["page"]["patch"].as_str().unwrap().contains("working.txt"));
+        assert!(
+            review["page"]["patch"]
+                .as_str()
+                .unwrap()
+                .contains("working.txt")
+        );
         assert!(review["range_targets"].as_array().unwrap().len() >= 2);
         assert_eq!(review["overview"], Value::Null);
         assert_eq!(review["questions"], json!([]));
@@ -2202,7 +2209,11 @@ mod tests {
     async fn refresh_replaces_the_snapshot_and_range_loads_use_the_new_generation() {
         let harness = Harness::new();
         harness.call(Method::GET, "/api/review", None).await;
-        fs::write(harness.workspace.path().join("working.txt"), "changed again\n").unwrap();
+        fs::write(
+            harness.workspace.path().join("working.txt"),
+            "changed again\n",
+        )
+        .unwrap();
 
         let (status, refreshed) = harness
             .call(Method::POST, "/api/refresh", Some(json!({"generation": 0})))
@@ -2210,7 +2221,12 @@ mod tests {
 
         assert_eq!(status, StatusCode::OK);
         assert_eq!(refreshed["generation"], 1);
-        assert!(refreshed["page"]["patch"].as_str().unwrap().contains("changed again"));
+        assert!(
+            refreshed["page"]["patch"]
+                .as_str()
+                .unwrap()
+                .contains("changed again")
+        );
         let (status, stale) = harness
             .call(
                 Method::POST,
@@ -2233,16 +2249,24 @@ mod tests {
 
         for _ in 0..2 {
             let (status, body) = harness
-                .call(Method::POST, "/api/overview", Some(overview_request("s1", None)))
+                .call(
+                    Method::POST,
+                    "/api/overview",
+                    Some(overview_request("s1", None)),
+                )
                 .await;
             assert_eq!(status, StatusCode::OK);
             assert_eq!(body["overview_mdx"], "<p>Overview</p>");
         }
         assert_eq!(calls.load(Ordering::SeqCst), 1);
 
-        let (_, own) = harness.call(Method::GET, "/api/review?session=s1", None).await;
+        let (_, own) = harness
+            .call(Method::GET, "/api/review?session=s1", None)
+            .await;
         assert_eq!(own["overview"]["status"], "ready");
-        let (_, other) = harness.call(Method::GET, "/api/review?session=s2", None).await;
+        let (_, other) = harness
+            .call(Method::GET, "/api/review?session=s2", None)
+            .await;
         assert_eq!(other["overview"], Value::Null);
     }
 
@@ -2284,7 +2308,10 @@ mod tests {
         harness.call(Method::GET, "/api/review", None).await;
         harness.terminal.publisher.publish(Publication::Busy {
             session: "s1".into(),
-            busy: Busy { turns: 1, shells: 0 },
+            busy: Busy {
+                turns: 1,
+                shells: 0,
+            },
         });
         while !harness.hub.any_busy() {
             tokio::task::yield_now().await;
@@ -2292,7 +2319,10 @@ mod tests {
 
         for (route, request) in [
             ("/api/overview", overview_request("s1", None)),
-            ("/api/ai-review", json!({"session": "s1", "generation": 0, "range": full_range()})),
+            (
+                "/api/ai-review",
+                json!({"session": "s1", "generation": 0, "range": full_range()}),
+            ),
             ("/api/question", question_request("s1")),
         ] {
             let (status, body) = harness.call(Method::POST, route, Some(request)).await;
@@ -2324,7 +2354,11 @@ mod tests {
             let harness = Arc::clone(&harness);
             async move {
                 harness
-                    .call(Method::POST, "/api/overview", Some(overview_request("s1", None)))
+                    .call(
+                        Method::POST,
+                        "/api/overview",
+                        Some(overview_request("s1", None)),
+                    )
                     .await
             }
         });
@@ -2377,7 +2411,9 @@ mod tests {
         let mut request = question_request("s1");
         request["path"] = json!("missing.txt");
 
-        let (status, body) = harness.call(Method::POST, "/api/question", Some(request)).await;
+        let (status, body) = harness
+            .call(Method::POST, "/api/question", Some(request))
+            .await;
 
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(body["code"], "invalid_thread");
@@ -2402,24 +2438,38 @@ mod tests {
         });
 
         let (status, body) = harness
-            .call(Method::POST, "/api/review/compose", Some(decision(json!([comment]), 0)))
+            .call(
+                Method::POST,
+                "/api/review/compose",
+                Some(decision(json!([comment]), 0)),
+            )
             .await;
         assert_eq!(status, StatusCode::OK);
         let markdown = body["markdown"].as_str().unwrap();
         assert!(markdown.starts_with("## Review: Changes requested\n\n**Scope:** "));
-        assert!(markdown.contains("\n- `tracked.txt:1` (new)\n  Handle the error.\n  This can fail.\n"));
+        assert!(
+            markdown.contains("\n- `tracked.txt:1` (new)\n  Handle the error.\n  This can fail.\n")
+        );
 
         let unanchored = json!({
             "path": "tracked.txt", "side": "additions", "start_line": 99, "end_line": 99, "body": "x"
         });
         let (status, body) = harness
-            .call(Method::POST, "/api/review/compose", Some(decision(json!([unanchored]), 0)))
+            .call(
+                Method::POST,
+                "/api/review/compose",
+                Some(decision(json!([unanchored]), 0)),
+            )
             .await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(body["code"], "invalid_comment_anchor");
 
         let (status, body) = harness
-            .call(Method::POST, "/api/review/compose", Some(decision(json!([]), 7)))
+            .call(
+                Method::POST,
+                "/api/review/compose",
+                Some(decision(json!([]), 7)),
+            )
             .await;
         assert_eq!(status, StatusCode::CONFLICT);
         assert_eq!(body["code"], "stale_snapshot");
@@ -2435,13 +2485,22 @@ mod tests {
             idle_agent(),
             harness.shutdown.clone(),
         );
-        tokio::spawn(crate::web::review::watch_workspace(review, harness.shutdown.clone()));
+        tokio::spawn(crate::web::review::watch_workspace(
+            review,
+            harness.shutdown.clone(),
+        ));
 
         let mut seen = false;
         'attempts: for attempt in 0..20 {
-            fs::write(harness.workspace.path().join("working.txt"), format!("edit {attempt}\n")).unwrap();
+            fs::write(
+                harness.workspace.path().join("working.txt"),
+                format!("edit {attempt}\n"),
+            )
+            .unwrap();
             let deadline = tokio::time::Instant::now() + Duration::from_millis(1200);
-            while let Ok(Some(frame)) = tokio::time::timeout_at(deadline, stream.frames.recv()).await {
+            while let Ok(Some(frame)) =
+                tokio::time::timeout_at(deadline, stream.frames.recv()).await
+            {
                 if frame.starts_with("event: workspace\n") {
                     seen = true;
                     break 'attempts;
@@ -2452,4 +2511,3 @@ mod tests {
         assert!(seen, "an edit should produce a workspace event");
     }
 }
-
