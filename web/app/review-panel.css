@@ -341,7 +341,7 @@
   }
 
   @container review (max-width: 760px) {
-    .topbar { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "tabs actions" "range stats"; column-gap: var(--space-3); row-gap: 0; padding: 0 var(--space-3); }
+    .topbar { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "tabs actions" "range stats"; column-gap: var(--space-3); row-gap: var(--space-2); padding: 0 var(--space-3); }
     .tabs { grid-area: tabs; margin: 0; padding: 0; border-right: 0; }
     .topbar-actions { grid-area: actions; gap: 0; }
     .range-button { grid-area: range; justify-self: start; max-width: 100%; margin-bottom: var(--space-2); }
