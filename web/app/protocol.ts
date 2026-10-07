@@ -1,6 +1,6 @@
 import type { ReviewRange, ReviewTarget } from "./range-selection";
 
-export const REVIEW_PROTOCOL_VERSION = 7;
+export const REVIEW_PROTOCOL_VERSION = 9;
 
 export type ReviewComment = {
   id: number;
@@ -32,12 +32,7 @@ export type ReviewSession = {
   page: ReviewPage;
   overview: StoredOverview | null;
   questions: StoredQuestionThread[];
-  turn_running: boolean;
-};
-
-export type ReviewStatus = {
-  generation: number;
-  changed: boolean;
+  /** Informational; the panel follows the stream's running state instead. */
   turn_running: boolean;
 };
 
@@ -129,6 +124,7 @@ export type ReviewErrorCode =
   | "turn_running"
   | "operation_cancelled"
   | "session_cancelled"
+  | "unknown_session"
   | "invalid_comment_anchor"
   | "network_error"
   | "invalid_response"

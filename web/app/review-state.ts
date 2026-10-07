@@ -18,7 +18,11 @@ export type CommentDraft = {
   tab: "comment" | "preview";
 };
 
-export type CommentMetadata = ReviewComment & { itemId: string };
+/**
+ * A pending comment. An outdated comment's lines no longer exist in the diff, so it has no item
+ * and is delivered as text instead of an anchored comment.
+ */
+export type CommentMetadata = ReviewComment & { itemId: string; outdated?: boolean };
 
 export type FeedbackState = {
   summary: string;
@@ -27,18 +31,11 @@ export type FeedbackState = {
   seenPaths: Set<string>;
 };
 
-export type TerminalState =
-  | { kind: "idle" }
-  | { kind: "busy"; action: "submit" | "cancel" }
-  | { kind: "error"; action: "submit" | "cancel"; message: string; code: string }
-  | { kind: "finished"; action: "submit" | "cancel" };
-
 export type ReviewState = {
   session: ReviewSession;
   page: ReviewPage;
   feedbackByOwner: Map<string, FeedbackState>;
   questionsByOwner: Map<string, QuestionThread[]>;
-  terminal: TerminalState;
 };
 
 export function feedbackOwner(generation: number, range: ReviewRange) {
@@ -51,7 +48,6 @@ export function createReviewState(session: ReviewSession): ReviewState {
     page: session.page,
     feedbackByOwner: new Map(),
     questionsByOwner: new Map(),
-    terminal: { kind: "idle" },
   }, session.page);
   return synchronizeQuestions(state, session.questions);
 }
@@ -69,8 +65,32 @@ export function activatePage(state: ReviewState, page: ReviewPage): ReviewState 
   return { ...state, page, feedbackByOwner, questionsByOwner };
 }
 
-export function installSession(_state: ReviewState, session: ReviewSession): ReviewState {
-  return createReviewState(session);
+/**
+ * Installs a newer snapshot of the same workspace: the reviewer's `feedback` and any
+ * still-relevant question threads carry over, everything else comes from the server.
+ */
+export function rebaseState(
+  session: ReviewSession,
+  page: ReviewPage,
+  feedback: FeedbackState,
+  carriedQuestions: readonly QuestionThread[],
+): ReviewState {
+  const state = activatePage(createReviewState(session), page);
+  const key = feedbackOwner(page.generation, page.selected_range);
+  state.feedbackByOwner.set(key, feedback);
+  const questions = currentQuestions(state);
+  for (const thread of carriedQuestions) {
+    if (!questions.some((candidate) => candidate.id === thread.id)) questions.push(thread);
+  }
+  return state;
+}
+
+/** Replaces the question threads, which belong to one session, keeping all review feedback. */
+export function replaceQuestions(state: ReviewState, session: ReviewSession): ReviewState {
+  const questionsByOwner = new Map(
+    [...state.questionsByOwner.keys()].map((key) => [key, [] as QuestionThread[]]),
+  );
+  return synchronizeQuestions({ ...state, session, questionsByOwner }, session.questions);
 }
 
 export function currentFeedback(state: ReviewState): FeedbackState {
@@ -133,30 +153,6 @@ export function discardCurrentFeedback(state: ReviewState): ReviewState {
   const feedbackByOwner = new Map(state.feedbackByOwner);
   feedbackByOwner.set(key, emptyFeedback());
   return { ...state, feedbackByOwner };
-}
-
-export function beginTerminal(
-  state: ReviewState,
-  action: "submit" | "cancel",
-): ReviewState {
-  if (state.terminal.kind === "busy" || state.terminal.kind === "finished") return state;
-  return { ...state, terminal: { kind: "busy", action } };
-}
-
-export function failTerminal(
-  state: ReviewState,
-  action: "submit" | "cancel",
-  code: string,
-  message: string,
-): ReviewState {
-  return { ...state, terminal: { kind: "error", action, code, message } };
-}
-
-export function finishTerminal(
-  state: ReviewState,
-  action: "submit" | "cancel",
-): ReviewState {
-  return { ...state, terminal: { kind: "finished", action } };
 }
 
 function emptyFeedback(): FeedbackState {

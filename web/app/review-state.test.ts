@@ -3,18 +3,18 @@ import type { ReviewPage, ReviewSession } from "./protocol";
 import { createQuestionThread } from "./question-state";
 import {
   activatePage,
-  beginTerminal,
   createReviewState,
   currentFeedback,
   currentQuestions,
   discardCurrentFeedback,
   feedbackOwner,
-  finishTerminal,
+  rebaseState,
+  replaceQuestions,
 } from "./review-state";
 
 const firstPage = page(3, { from: 0, to: 2 });
 const session: ReviewSession = {
-  protocol_version: 7,
+  protocol_version: 9,
   turn_running: false,
   generation: 3,
   title: "Review",
@@ -72,13 +72,36 @@ describe("review state transitions", () => {
     expect(currentQuestions(state)).toHaveLength(1);
   });
 
-  test("terminal actions are idempotent while busy and after completion", () => {
-    const idle = createReviewState(session);
-    const busy = beginTerminal(idle, "submit");
-    expect(beginTerminal(busy, "cancel")).toBe(busy);
-    const finished = finishTerminal(busy, "submit");
-    expect(beginTerminal(finished, "submit")).toBe(finished);
+  test("a newer snapshot keeps the reviewer's feedback and replaces the session's questions", () => {
+    const stale = createReviewState(session);
+    currentFeedback(stale).summary = "kept";
+    const carried = createQuestionThread("carried", {
+      itemId: "item", range: { from: 0, to: 2 }, path: "a.rs", side: "additions", startLine: 1, endLine: 1,
+    }, "Why?", 1, "op");
+    const next = page(4, { from: 0, to: 2 });
+    const state = rebaseState({ ...session, generation: 4, page: next }, next, currentFeedback(stale), [carried]);
+    expect(currentFeedback(state).summary).toBe("kept");
+    expect(currentQuestions(state).map((thread) => thread.id)).toEqual(["carried"]);
+    expect(state.feedbackByOwner.has(feedbackOwner(3, { from: 0, to: 2 }))).toBe(false);
   });
+
+  test("switching session clears question threads of every range but keeps feedback", () => {
+    let state = createReviewState(session);
+    currentFeedback(state).summary = "kept";
+    currentQuestions(state).push(createQuestionThread("old", {
+      itemId: "item", range: { from: 0, to: 2 }, path: "a.rs", side: "additions", startLine: 1, endLine: 1,
+    }, "Why?", 1, "op"));
+    state = replaceQuestions(state, {
+      ...session,
+      questions: [{
+        thread_id: "theirs", operation_id: "op2", generation: 3, range: { from: 0, to: 2 }, path: "b.rs",
+        side: "additions", start_line: 2, end_line: 2, messages: [{ role: "reviewer", body: "Hi" }], status: "idle",
+      }],
+    });
+    expect(currentFeedback(state).summary).toBe("kept");
+    expect(currentQuestions(state).map((thread) => thread.id)).toEqual(["theirs"]);
+  });
+
 
   test("restores an in-progress question from the review session", () => {
     const state = createReviewState({

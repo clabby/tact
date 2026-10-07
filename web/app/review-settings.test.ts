@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  appearance,
   DEFAULT_REVIEW_SETTINGS,
   REVIEW_SETTINGS_KEY,
   activeSyntaxTheme,
@@ -78,5 +79,10 @@ describe("review settings", () => {
     });
     expect(activeSyntaxTheme(DEFAULT_REVIEW_SETTINGS, false)).toBe("pierre-light");
     expect(activeSyntaxTheme(DEFAULT_REVIEW_SETTINGS, true)).toBe("pierre-dark");
+  });
+
+  test("system appearance follows the application theme", () => {
+    expect(appearance(DEFAULT_REVIEW_SETTINGS, "dark")).toBe("dark");
+    expect(appearance({ ...DEFAULT_REVIEW_SETTINGS, syntaxTheme: "pierre-light-soft" }, "dark")).toBe("light");
   });
 });

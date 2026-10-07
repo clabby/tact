@@ -68,8 +68,9 @@ export function activeSyntaxTheme(settings: ReviewSettings, prefersDark: boolean
   return prefersDark ? "pierre-dark" : "pierre-light";
 }
 
-export function appearance(settings: ReviewSettings): "light" | "dark" | "system" {
-  if (settings.syntaxTheme === "system") return "system";
+/** The color scheme the review renders in; "system" follows the application's current theme. */
+export function appearance(settings: ReviewSettings, applicationTheme: "light" | "dark"): "light" | "dark" {
+  if (settings.syntaxTheme === "system") return applicationTheme;
   return settings.syntaxTheme.includes("dark") ? "dark" : "light";
 }
 

@@ -1,33 +1,43 @@
 import { expect, test } from "bun:test";
 
-test("the diff view owns its scrollable viewport", async () => {
-  const styles = await Bun.file(new URL("styles.css", import.meta.url)).text();
-  const diffViewRule = styles.match(/\.diff-view\s*{([^}]*)}/)?.[1];
+const read = (name: string) => Bun.file(new URL(name, import.meta.url)).text();
+const panel = () => read("review-panel.ts");
+const styles = () => read("review-panel.css");
+const rule = (css: string, selector: string) =>
+  css.match(new RegExp("(?:^|\\n)\\s*" + selector.replace(/[.*+?^$()|[\]\\]/g, "\\$&") + "\\s*{([^}]*)}"))?.[1];
 
-  expect(diffViewRule).toBeDefined();
-  expect(diffViewRule).toMatch(/overflow:\s*auto/);
+test("the diff view owns its scrollable viewport", async () => {
+  expect(rule(await styles(), ".diff-view")).toMatch(/overflow:\s*auto/);
+});
+
+test("the panel is scoped, themed by shared tokens, and defines no palette of its own", async () => {
+  const css = await styles();
+  expect(css.startsWith(".review-panel {")).toBe(true);
+  expect(css).not.toContain(":root");
+  expect(css).not.toContain("light-dark(");
+  expect(css).not.toMatch(/--(accent-solid|accent-on|blue)\b/);
+  expect(css).not.toMatch(/(^|\s)(html|body)\b/m);
+});
+
+test("the layout follows the panel's width, not the window's", async () => {
+  const css = await styles();
+  expect(css).toMatch(/container:\s*review\s*\/\s*inline-size/);
+  expect(css).toContain("@container review (max-width: 760px)");
+  expect(css).not.toContain("@media (max-width: 760px)");
 });
 
 test("review search integrates with the virtualized review lifecycle", async () => {
-  const app = await Bun.file(new URL("app.ts", import.meta.url)).text();
-  const styles = await Bun.file(new URL("styles.css", import.meta.url)).text();
+  const app = await panel();
+  const css = await styles();
   const shortcuts = app.slice(app.indexOf("handleSearchShortcut"), app.indexOf("constructor("));
-  const open = app.slice(
-    app.indexOf("private openSearch"),
-    app.indexOf("private closeSearch"),
-  );
-  const close = app.slice(
-    app.indexOf("private closeSearch"),
-    app.indexOf("private resetSearch"),
-  );
-  const search = app.slice(
-    app.indexOf("private bindSearch"),
-    app.indexOf("private bindEvents"),
-  );
-  const cleanup = app.slice(app.indexOf("cleanUp()"), app.indexOf("private installPage"));
+  const open = app.slice(app.indexOf("private openSearch"), app.indexOf("private closeSearch"));
+  const close = app.slice(app.indexOf("private closeSearch"), app.indexOf("private resetSearch"));
+  const search = app.slice(app.indexOf("private bindSearch"), app.indexOf("private bindEvents"));
+  const cleanup = app.slice(app.indexOf("cleanUp()"), app.indexOf("private runningChanged"));
 
   expect(app).toContain('id="review-search" role="search" hidden');
-  expect(shortcuts.indexOf('dialog[open]')).toBeLessThan(shortcuts.indexOf('key === "f"'));
+  expect(shortcuts.indexOf("dialog[open]")).toBeLessThan(shortcuts.indexOf('key === "f"'));
+  expect(shortcuts).toContain("this.root.contains(event.target as Node)");
   expect(search).toContain("event.isComposing");
   expect(search).toContain("moveSearchTarget(");
   expect(search).toContain("this.searchPaused = true");
@@ -41,199 +51,125 @@ test("review search integrates with the virtualized review lifecycle", async () 
   expect(search).toContain('this.root.querySelector<HTMLElement>("#diff-view")');
   expect(app).toContain("context.item.id === this.searchMatch?.itemId");
   expect(app).toContain('phase === "unmount" ? null : node.shadowRoot');
-  expect(app).toContain("onSelectedLinesChange");
   expect(app).toContain("if (this.searchIsOpen()) this.searchSelection = null");
   expect(app.match(/this\.viewer\?\.clearSelectedLines\(\)/g)).toHaveLength(1);
-  expect(app).toContain('document.removeEventListener("keydown", this.handleSearchShortcut)');
+  expect(cleanup).toContain('document.removeEventListener("keydown", this.handleSearchShortcut)');
   expect(cleanup.indexOf("viewer?.cleanUp()")).toBeLessThan(cleanup.indexOf("CSS.highlights?.delete"));
-  expect(styles).toMatch(/\.review-search\s*{[^}]*position:\s*absolute/s);
-});
-
-test("new changes appear before the range selector", async () => {
-  const app = await Bun.file(new URL("app.ts", import.meta.url)).text();
-
-  expect(app.indexOf('id="refresh-notice"')).toBeLessThan(
-    app.indexOf('id="range-button"'),
-  );
+  expect(css).toMatch(/\.review-search\s*{[^}]*position:\s*absolute/s);
 });
 
 test("the refresh banner keeps stable spacing around its separator", async () => {
-  const styles = await Bun.file(new URL("styles.css", import.meta.url)).text();
-  const banner = styles.match(/\.refresh-notice\s*{([^}]*)}/)?.[1];
-  const action = styles.match(/\.refresh-notice\s+strong\s*{([^}]*)}/)?.[1];
-
-  expect(banner).toMatch(/gap:\s*8px/);
-  expect(banner).toMatch(/white-space:\s*nowrap/);
-  expect(action).toMatch(/padding-left:\s*8px/);
+  const css = await styles();
+  expect(rule(css, ".refresh-notice")).toMatch(/gap:\s*8px/);
+  expect(rule(css, ".refresh-notice")).toMatch(/white-space:\s*nowrap/);
+  expect(rule(css, ".refresh-notice strong")).toMatch(/padding-left:\s*8px/);
 });
 
-test("the overview tab shows when its agent is working", async () => {
-  const app = await Bun.file(new URL("app.ts", import.meta.url)).text();
-  const styles = await Bun.file(new URL("styles.css", import.meta.url)).text();
+test("working indicators stay visibly animated", async () => {
+  const app = await panel();
+  const css = await styles();
+  const reducedMotion = css.match(/@media\s*\(prefers-reduced-motion:\s*reduce\)\s*{([\s\S]*)}\s*$/)?.[1];
 
   expect(app).toContain('class="activity-spinner overview-tab-activity" aria-hidden="true"');
   expect(app).toContain('tab.classList.toggle("loading", loading)');
-  expect(app).toContain('tab.setAttribute("aria-busy", "true")');
-  expect(app).toContain("this.setOverviewLoading(true)");
-  expect(app).toContain("this.setOverviewLoading(false)");
   expect(app).toContain('class="activity-spinner" aria-hidden="true"></span>Reviewing…');
-  expect(styles).toMatch(/\.tab\.loading\s+\.overview-tab-activity\s*{/s);
-  expect(styles).toMatch(/\.activity-spinner\s*{[^}]*animation:\s*tact-spin/s);
-  expect(styles).toMatch(/\.overview-spinner::before\s*{[^}]*animation:\s*tact-spin/s);
-  expect(styles).toMatch(/\.overview-instructions-actions\s*{[^}]*justify-content:\s*center/s);
-  expect(app).not.toContain('this.showTerminalBusy("Tact is reviewing the selected diff…")');
-});
-
-test("the inline answer spinner can visibly rotate", async () => {
-  const styles = await Bun.file(new URL("styles.css", import.meta.url)).text();
-  const spinner = styles.match(/\.thread-spinner\s*{([^}]*)}/)?.[1];
-
-  expect(spinner).toBeDefined();
-  expect(spinner).toMatch(/display:\s*inline-block/);
-  expect(spinner).toMatch(/animation:\s*tact-thread-spin/);
-  const reducedMotion = styles.match(
-    /@media\s*\(prefers-reduced-motion:\s*reduce\)\s*{([\s\S]*)}\s*$/,
-  )?.[1];
-  expect(reducedMotion).not.toContain(".thread-spinner");
+  expect(css).toMatch(/\.tab\.loading\s+\.overview-tab-activity\s*{/s);
+  expect(rule(css, ".activity-spinner")).toMatch(/animation:\s*tact-spin/);
+  expect(css).toMatch(/\.overview-spinner::before\s*{[^}]*animation:\s*tact-spin/s);
+  expect(rule(css, ".thread-spinner")).toMatch(/display:\s*inline-block/);
+  expect(rule(css, ".thread-spinner")).toMatch(/animation:\s*tact-thread-spin/);
+  expect(rule(css, ".live-badge i")).toMatch(/animation:\s*tact-pulse/);
+  expect(reducedMotion).toBeDefined();
+  expect(reducedMotion).not.toMatch(/\.(thread-spinner|activity-spinner|overview-spinner|live-badge)\b[^{]*{[^}]*animation:\s*none/);
 });
 
 test("seen files are crossed out in the file tree", async () => {
-  const app = await Bun.file(new URL("app.ts", import.meta.url)).text();
-
+  const app = await panel();
   expect(app).toContain('[title*="Seen"]');
   expect(app).toMatch(/text-decoration:\s*line-through/);
 });
 
 test("the comment editor keeps its actions after the comment body", async () => {
-  const app = await Bun.file(new URL("app.ts", import.meta.url)).text();
-  const editor = app.slice(
-    app.indexOf("private commentComposerElement"),
-    app.indexOf("private pendingCommentElement"),
-  );
-
-  expect(editor.indexOf('class="editor-heading"')).toBeLessThan(
-    editor.indexOf('class="comment-input"'),
-  );
-  expect(editor.indexOf('class="comment-input"')).toBeLessThan(
-    editor.indexOf('class="editor-footer"'),
-  );
+  const app = await panel();
+  const editor = app.slice(app.indexOf("private commentComposerElement"), app.indexOf("private pendingCommentElement"));
+  expect(editor.indexOf('class="editor-heading"')).toBeLessThan(editor.indexOf('class="comment-input"'));
+  expect(editor.indexOf('class="comment-input"')).toBeLessThan(editor.indexOf('class="editor-footer"'));
+  expect(editor).toContain('data-comment-action="ask"');
+  expect(editor).toContain("draft.editingId === undefined");
 });
 
 test("the comment input uses a neutral focus indicator", async () => {
-  const styles = await Bun.file(new URL("styles.css", import.meta.url)).text();
-  const focus = styles.match(/\.comment-input:focus\s*{([^}]*)}/)?.[1];
-  const focusVisible = styles.match(/\.comment-input:focus-visible\s*{([^}]*)}/)?.[1];
-
-  expect(focus).toMatch(/box-shadow:\s*0\s+0\s+0\s+1px\s+var\(--line-strong\)\s+inset/);
-  expect(focus).not.toContain("var(--blue)");
-  expect(focusVisible).toMatch(/outline:\s*0/);
+  const css = await styles();
+  expect(rule(css, ".comment-input:focus")).toMatch(/box-shadow:\s*0\s+0\s+0\s+1px\s+var\(--line-strong\)\s+inset/);
+  expect(rule(css, ".comment-input:focus-visible")).toMatch(/outline:\s*0/);
 });
 
-test("new inline drafts can become agent questions", async () => {
-  const app = await Bun.file(new URL("app.ts", import.meta.url)).text();
-  const editor = app.slice(
-    app.indexOf("private commentComposerElement"),
-    app.indexOf("private askDraftQuestion"),
-  );
+test("comments stay editable while the agent works, but agent actions wait for it", async () => {
+  const app = await panel();
+  const locked = app.slice(app.indexOf("private get commentsLocked"), app.indexOf("private get agentUnavailable"));
+  const unavailable = app.slice(app.indexOf("private get agentUnavailable"), app.indexOf("private get agentUnavailableReason"));
+  const comments = app.slice(app.indexOf("private openCommentComposer"), app.indexOf("private refreshTreeDecorations"));
+  const questions = app.slice(app.indexOf("private askDraftQuestion"), app.indexOf("private startQuestion"));
 
-  expect(editor).toContain('data-comment-action="ask"');
-  expect(editor).toContain('Ask <span aria-hidden="true">✨</span>');
-  expect(editor).toContain('draft.editingId === undefined');
+  expect(locked).not.toContain("this.running");
+  expect(unavailable).toContain("this.running");
+  expect(unavailable).toContain("this.session === null");
+  expect(comments).toContain("if (!selection || this.commentsLocked) return");
+  expect(questions).toContain("this.agentUnavailable");
+  expect(app).toContain("this.loadingOverview !== undefined || this.aiReviewPending || this.questionOperations.size > 0");
+  expect(app).toContain('querySelectorAll<HTMLTextAreaElement>("[data-overview-instructions], [data-thread-input]")');
 });
 
-test("independent requests retain their own pending state and terminal actions wait for all", async () => {
-  const app = await Bun.file(new URL("app.ts", import.meta.url)).text();
-  const overview = app.slice(
-    app.indexOf("private async loadOverview"),
-    app.indexOf("private showOverviewError"),
-  );
-  const question = app.slice(
-    app.indexOf("private askDraftQuestion"),
-    app.indexOf("private pendingCommentElement"),
-  );
+test("independent requests retain their own pending state", async () => {
+  const app = await panel();
+  const overview = app.slice(app.indexOf("private async loadOverview"), app.indexOf("private showOverviewError"));
+  const question = app.slice(app.indexOf("private askDraftQuestion"), app.indexOf("private pendingCommentElement"));
 
   expect(overview).toContain("rangesEqual(this.loadingOverview, page.selected_range)");
   expect(overview).not.toContain("this.aiReviewPending");
   expect(question).toContain("this.questionOperations.set(thread.id");
   expect(question).toContain("this.questionOperations.get(thread.id)");
   expect(question).toContain("this.questionsToPoll.add(thread.id)");
-  expect(app).toContain("this.loadingOverview !== undefined || this.aiReviewPending || this.questionOperations.size > 0");
-  expect(app).toContain("if (!this.page || this.agentBusy || this.actionUnavailable) return;");
-  expect(app).toContain('querySelectorAll<HTMLTextAreaElement>("[data-thread-input]")');
 });
 
-test("active-turn banner permits browsing and refresh while blocking review actions", async () => {
-  const app = await Bun.file(new URL("app.ts", import.meta.url)).text();
-  const controls = app.slice(app.indexOf("private syncAgentControls"), app.indexOf("private async submit"));
-  const refresh = app.slice(app.indexOf("private async refreshReview"), app.indexOf("private bindSettings"));
-  const protocol = await Bun.file(new URL("protocol.ts", import.meta.url)).text();
+test("the review is delivered to the chat, not decided in a one-shot flow", async () => {
+  const app = await panel();
+  const send = app.slice(app.indexOf("private async sendToChat"), app.indexOf("private showNotice"));
 
-  expect(app).toContain('id="turn-running-notice"');
-  expect(app).toContain("this.setTurnRunning(status.turn_running)");
-  expect(app).toContain("this.setRefreshNotice(status.changed)");
-  expect(refresh).toContain("this.setTurnRunning(payload.turn_running)");
-  expect(refresh).not.toContain("this.turnRunning) return");
-  expect(controls).toContain("const busy = this.actionUnavailable");
-  expect(controls).toContain("button.disabled = disabled || this.agentBusy");
-  expect(protocol).toContain("turn_running: boolean");
-  const comments = app.slice(app.indexOf("private openCommentComposer"), app.indexOf("private refreshTreeDecorations"));
-  expect(comments).toContain("if (!selection || this.actionUnavailable) return");
-  expect(comments).toContain("if (!draft || this.actionUnavailable) return");
-  expect(comments).toContain("if (this.actionUnavailable) return");
+  expect(send).toContain("this.api.compose(");
+  expect(send).toContain("this.host.sendToChat(markdown)");
+  expect(send.indexOf("this.api.compose(")).toBeLessThan(send.indexOf("this.host.sendToChat(markdown)"));
+  expect(send).toContain("comment.outdated");
+  for (const gone of ["/decision", "cancel-review", "Review submitted", "Review cancelled", "beginTerminal", "/status"]) {
+    expect(app).not.toContain(gone);
+  }
+  expect(app).toContain("Send to chat");
 });
 
-test("the review can be cancelled while the agent is working", async () => {
-  const app = await Bun.file(new URL("app.ts", import.meta.url)).text();
-  const controls = app.slice(
-    app.indexOf("private setReviewControlsDisabled"),
-    app.indexOf("private async submit"),
-  );
-  const cancel = app.slice(
-    app.indexOf("private async cancel()"),
-    app.indexOf("private showTerminalBusy"),
-  );
+test("a panel stays alive across session changes and releases everything on dispose", async () => {
+  const app = await panel();
+  const cleanup = app.slice(app.indexOf("cleanUp()"), app.indexOf("private runningChanged"));
 
-  expect(controls).toContain("cancel.disabled = terminalBusy");
-  expect(cancel).not.toContain("if (this.agentOperation) return");
-});
-
-test("the mobile layout reserves room for its stacked review actions", async () => {
-  const styles = await Bun.file(new URL("styles.css", import.meta.url)).text();
-  const mobile = styles.slice(
-    styles.indexOf("@media (max-width: 760px)"),
-    styles.indexOf("@media (max-width: 600px)"),
-  );
-
-  expect(styles).toContain("--review-footer-height: 68px");
-  expect(styles).toContain("var(--review-footer-height)");
-  expect(mobile).toContain("--review-footer-height: 132px");
+  expect(app).toContain("host.onActiveSessionChange(");
+  expect(app).toContain("host.onWorkspaceChanged(");
+  expect(app).toContain("host.onRunningChange(");
+  expect(app).toContain("host.onThemeChange(");
+  expect(cleanup).toContain("for (const stop of this.unsubscribe) stop()");
+  expect(cleanup).toContain("this.refresher.dispose()");
+  expect(cleanup).toContain("this.workerPool.terminate()");
 });
 
 test("the changed-file wrapper owns the tree's available height", async () => {
-  const styles = await Bun.file(new URL("styles.css", import.meta.url)).text();
-  const navigation = styles.match(/\.files-navigation\s*{([^}]*)}/)?.[1];
-
-  expect(navigation).toBeDefined();
+  const navigation = rule(await styles(), ".files-navigation");
   expect(navigation).toMatch(/display:\s*grid/);
   expect(navigation).toMatch(/grid-template-rows:\s*45px\s+minmax\(0,\s*1fr\)/);
   expect(navigation).toMatch(/min-height:\s*0/);
   expect(navigation).toMatch(/height:\s*100%/);
 });
 
-test("the desktop file tree has room for paths and change totals", async () => {
-  const styles = await Bun.file(new URL("styles.css", import.meta.url)).text();
-  const changesPanel = styles.match(/\.changes-panel\.active\s*{([^}]*)}/)?.[1];
-
-  expect(changesPanel).toBeDefined();
-  expect(changesPanel).toMatch(/grid-template-columns:\s*352px\s+minmax\(0,\s*1fr\)/);
-});
-
 test("change totals layer above long file names", async () => {
-  const app = await Bun.file(new URL("app.ts", import.meta.url)).text();
-  const treeStyles = app.slice(
-    app.indexOf("const TREE_STYLES"),
-    app.indexOf("type AnnotationMetadata"),
-  );
+  const app = await panel();
+  const treeStyles = app.slice(app.indexOf("const TREE_STYLES"), app.indexOf("type AnnotationMetadata"));
 
   expect(treeStyles).toMatch(/\[data-item-section="decoration"\][^{]*{[^}]*position:\s*absolute/s);
   expect(treeStyles).toMatch(/\[data-item-section="decoration"\][^{]*{[^}]*z-index:\s*2/s);
@@ -243,53 +179,28 @@ test("change totals layer above long file names", async () => {
 });
 
 test("the file change totals and comment indicator preserve their spacing", async () => {
-  const app = await Bun.file(new URL("app.ts", import.meta.url)).text();
-  const treeStyles = app.slice(
-    app.indexOf("const TREE_STYLES"),
-    app.indexOf("type AnnotationMetadata"),
-  );
+  const app = await panel();
+  const treeStyles = app.slice(app.indexOf("const TREE_STYLES"), app.indexOf("type AnnotationMetadata"));
 
   expect(app).toContain('text: "\\u00a0/\\u00a0"');
   expect(app).toContain('{ text: "\\u00a0\\u00a0" }');
   expect(app).toContain('text: `\\u00a0${count}`, color: "var(--tact-comment-indicator)"');
-  expect(app).not.toContain("🗨︎");
   expect(treeStyles).toContain("${commentIconMask}");
   expect(treeStyles).toContain("${seenIconMask}");
-  expect(treeStyles).toMatch(/span\[style\*="--tact-comment-indicator"\]::before/);
-  expect(treeStyles).toContain("--tact-seen-icon");
   expect(treeStyles).toMatch(/\[title\*="Seen"\]::after\s*{[^}]*margin-inline-start:\s*8px/s);
-  expect(app).not.toContain('{ text: "  ✓"');
 });
 
-test("the file tree follows explicit appearance settings", async () => {
-  const app = await Bun.file(new URL("app.ts", import.meta.url)).text();
-  const sync = app.slice(
-    app.indexOf("private syncTreeAppearance"),
-    app.indexOf("private treeGitStatus"),
-  );
-  const settings = app.slice(
-    app.indexOf("private applySettings"),
-    app.indexOf("private selectTab"),
-  );
+test("the file tree and diff follow the application theme", async () => {
+  const app = await panel();
+  const sync = app.slice(app.indexOf("private syncTreeAppearance"), app.indexOf("private treeGitStatus"));
 
   expect(sync).toContain("getFileTreeContainer()");
-  expect(sync).toContain('selected === "system" ? "light dark" : selected');
-  expect(settings).toContain("this.syncTreeAppearance()");
+  expect(sync).toContain("appearance(this.settings, this.host.theme())");
+  expect(app).toContain("themeType: appearance(this.settings, this.host.theme())");
+  expect(app).not.toContain("prefers-color-scheme");
+  expect(app).not.toContain("documentElement");
 });
 
 test("the range warning has stable vertical spacing", async () => {
-  const styles = await Bun.file(new URL("styles.css", import.meta.url)).text();
-  const warning = styles.match(/\.range-warning\s*{([^}]*)}/)?.[1];
-
-  expect(warning).toMatch(/margin:\s*14px\s+18px/);
-});
-
-test("dark surfaces are neutral while green remains an accent", async () => {
-  const styles = await Bun.file(new URL("styles.css", import.meta.url)).text();
-
-  expect(styles).toContain("--bg: light-dark(#f7f8f5, #0f1115)");
-  expect(styles).toContain("--surface: light-dark(#ffffff, #171a20)");
-  expect(styles).toContain("--accent: light-dark(#315f36, #9bc59e)");
-  expect(styles).not.toContain("#111311");
-  expect(styles).not.toContain("#181b18");
+  expect(rule(await styles(), ".range-warning")).toMatch(/margin:\s*14px\s+18px/);
 });
