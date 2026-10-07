@@ -19,10 +19,11 @@ const FOOTER: [(&str, &str); 1] = [("esc", "close")];
 /// Blank modules around the code that scanners need to find its edges.
 const QUIET_ZONE: usize = 2;
 const CAPTION: &str = "Scan with your phone's camera. It signs the phone in to Tact, so treat the code like a password.";
-const CAPTION_ROWS: u16 = 3;
 const MIN_WIDTH: u16 = 46;
 /// Border, title, and footer rows that surround the popup's body.
 const CHROME_ROWS: u16 = 3;
+/// Columns the popup's border takes from its width.
+const BORDER_COLUMNS: u16 = 2;
 
 pub(super) enum QrCodeEvent {
     Terminal(Event),
@@ -66,6 +67,18 @@ impl QrCodeView {
     /// Terminal rows for the code: each row shows two module rows with a half block.
     fn rows(&self) -> u16 {
         self.columns().div_ceil(2)
+    }
+
+    /// The origin and the explainer, wrapped to `width` columns so none of it is cut off.
+    fn caption(&self, width: u16, theme: &Theme) -> Vec<Line<'static>> {
+        let width = usize::from(width);
+        let origin = wrap_words(&self.origin, width)
+            .into_iter()
+            .map(|row| Line::styled(row, Style::default().fg(theme.accent())).centered());
+        let explainer = wrap_words(CAPTION, width)
+            .into_iter()
+            .map(|row| Line::styled(row, Style::default().fg(theme.muted())).centered());
+        origin.chain(explainer).collect()
     }
 
     /// Black and white are fixed, whatever the theme: scanners expect dark modules on light.
@@ -119,14 +132,17 @@ impl Component for QrCodeView {
 
     fn render(&mut self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
         let width = (self.columns() + 4).max(MIN_WIDTH);
-        let height = self.rows() + CAPTION_ROWS + CHROME_ROWS;
+        let body_width = width - BORDER_COLUMNS;
+        let caption = self.caption(body_width, theme);
+        let caption_rows = u16::try_from(caption.len()).unwrap_or(u16::MAX);
+        let height = self.rows() + caption_rows + CHROME_ROWS;
         let layout =
             Floating::new("Open on your phone", width, height, &FOOTER).render(frame, area, theme);
         let body = layout.body;
         if body.is_empty() {
             return;
         }
-        if body.width < self.columns() || body.height < self.rows() + CAPTION_ROWS {
+        if body.width < body_width || body.height < self.rows() + caption_rows {
             let message = format!(
                 "Enlarge the terminal to show the code ({}x{} needed).",
                 width + 2,
@@ -140,18 +156,39 @@ impl Component for QrCodeView {
             );
             return;
         }
-        let [code, caption] =
+        let [code, caption_area] =
             Layout::vertical([Constraint::Length(self.rows()), Constraint::Min(0)]).areas(body);
         frame.render_widget(Paragraph::new(self.lines(code.width)), code);
-        frame.render_widget(
-            Paragraph::new(vec![
-                Line::styled(self.origin.clone(), Style::default().fg(theme.accent())).centered(),
-                Line::styled(CAPTION, Style::default().fg(theme.muted())).centered(),
-            ])
-            .wrap(Wrap { trim: true }),
-            caption,
-        );
+        frame.render_widget(Paragraph::new(caption), caption_area);
     }
+}
+
+/// Greedy word wrap that splits any word wider than a row.
+fn wrap_words(text: &str, width: usize) -> Vec<String> {
+    let mut rows = Vec::new();
+    let mut row = String::new();
+    for word in text.split_whitespace() {
+        let mut word = word;
+        while !row.is_empty() && row.chars().count() + 1 + word.chars().count() > width {
+            rows.push(std::mem::take(&mut row));
+        }
+        while word.chars().count() > width {
+            let split = word
+                .char_indices()
+                .nth(width)
+                .map_or(word.len(), |(index, _)| index);
+            rows.push(word[..split].to_owned());
+            word = &word[split..];
+        }
+        if !row.is_empty() {
+            row.push(' ');
+        }
+        row.push_str(word);
+    }
+    if !row.is_empty() {
+        rows.push(row);
+    }
+    rows
 }
 
 #[cfg(test)]
@@ -224,6 +261,32 @@ mod tests {
         assert!(rendered.contains("https://laptop.tail1234.ts.net"));
         assert!(!rendered.contains("secret-token-value"));
         assert!(rendered.contains("esc close"));
+    }
+
+    #[test]
+    fn the_explainer_is_shown_in_full() {
+        let mut view = QrCodeView::new(LINK).unwrap();
+        let terminal = render(&mut view, 90, 40);
+
+        let buffer = terminal.backend().buffer();
+        let caption = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .filter(|row| !row.contains('\u{2580}'))
+            .map(|row| row.replace('\u{2502}', " ").trim().to_owned())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            caption.contains("Scan with your phone's camera."),
+            "{caption}"
+        );
+        assert!(
+            caption.contains("treat the code like a password."),
+            "{caption}"
+        );
     }
 
     #[test]
