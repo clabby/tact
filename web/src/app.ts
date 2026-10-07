@@ -78,7 +78,7 @@ class App {
         <div class="scrim" aria-hidden="true"></div>
         <main class="main">
           <header class="chat-header">
-            <button type="button" class="icon-button menu-button" aria-label="Toggle sidebar" title="Toggle sidebar">${glyph("sidebar", "glyph glyph-open")}${glyph("sidebar-expand", "glyph glyph-expand")}</button>
+            <button type="button" class="icon-button menu-button" aria-label="Toggle sidebar" title="Toggle sidebar">${glyph("sidebar")}</button>
             <div class="chat-title"><h1>Tact</h1><div class="chat-sub"><span class="model-dot"></span><span class="chat-model"></span><span class="chat-effort"></span></div></div>
             <nav class="view-tabs" role="tablist" aria-label="View">
               <button type="button" class="view-tab" role="tab" id="tab-chat" aria-controls="view-chat" data-view="chat">Chat</button>

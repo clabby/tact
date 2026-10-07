@@ -52,7 +52,7 @@ export class Sidebar {
     root.innerHTML = `
       <div class="sidebar-head">
         <div class="brand"><span class="brand-mark" aria-hidden="true">t</span><div class="brand-text"><strong>Tact</strong><span class="brand-workspace"></span></div></div>
-        <button type="button" class="icon-button drawer-close" aria-label="Hide sidebar" title="Hide sidebar (${isMac ? "⌘B" : "Ctrl B"})">${glyph("sidebar-collapse", "glyph glyph-collapse")}${glyph("close", "glyph glyph-close")}</button>
+        <button type="button" class="icon-button drawer-close" aria-label="Hide sidebar" title="Hide sidebar (${isMac ? "⌘B" : "Ctrl B"})">${glyph("sidebar", "glyph glyph-fold")}${glyph("close", "glyph glyph-close")}</button>
       </div>
       <div class="new-chat">
         <button type="button" class="new-chat-button">${glyph("plus")}<span>New chat</span></button>

@@ -195,7 +195,7 @@ export function openSubagents(
       head.innerHTML = "";
       return;
     }
-    head.innerHTML = `<div class="agent-title"><button type="button" class="icon-button small agent-back" aria-label="Back to the hierarchy" title="Back to the hierarchy">${glyph("sidebar-collapse")}</button><strong></strong><span class="status-pill"></span></div>
+    head.innerHTML = `<div class="agent-title"><button type="button" class="icon-button small agent-back" aria-label="Back to the hierarchy" title="Back to the hierarchy">${glyph("arrow-left")}</button><strong></strong><span class="status-pill"></span></div>
       <div class="agent-sub"><span class="model-dot"></span><span class="agent-sub-text"></span></div>
       <details class="agent-task"><summary>Task</summary><p></p></details>`;
     head.dataset.state = agent.status.state;
