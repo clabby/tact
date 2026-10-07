@@ -1316,7 +1316,7 @@ pub(crate) async fn run(
                         let runtime = panes.get_mut(&pane).expect("effort pane must exist");
                         if let Err(error) = result {
                             let effort = runtime.current_effort;
-                            input = Some(EventStream::new());
+                            input.get_or_insert_with(EventStream::new);
                             apply_app_update!(app.update(AppEvent::EffortUpdateFailed {
                                 pane, effort, error: format!("Could not change effort: {error}"),
                             }));
@@ -1334,7 +1334,7 @@ pub(crate) async fn run(
                             schedule(app.update(AppEvent::Transcript { pane, record }), &mut scheduler);
                         }
                         runtime.current_effort = effort;
-                        input = Some(EventStream::new());
+                        input.get_or_insert_with(EventStream::new);
                         scheduler.request_immediate(Instant::now());
                     }
                     WorkerEvent::SpeedUpdated { pane, speed, result } => {
@@ -1356,7 +1356,7 @@ pub(crate) async fn run(
                         if app.main_pane() == Some(pane) {
                             config.set_speed(speed);
                         }
-                        input = Some(EventStream::new());
+                        input.get_or_insert_with(EventStream::new);
                         scheduler.request_immediate(Instant::now());
                     }
                 }
@@ -1437,7 +1437,7 @@ pub(crate) async fn run(
                     .report_working_directory(&workspace)
                     .map_err(RuntimeError::Terminal)?;
                 app.refresh_terminal_images();
-                input = Some(EventStream::new());
+                input.get_or_insert_with(EventStream::new);
                 match result.map_err(RuntimeError::ExternalEditorTask)?? {
                     EditorCompletion::Draft { pane, outcome: EditorOutcome::Updated(draft) } => {
                         schedule(app.update(AppEvent::EditorDraft { pane, draft }), &mut scheduler);
@@ -1549,7 +1549,7 @@ pub(crate) async fn run(
                     .await
             }, if new_session_task.is_some() && !stopping => {
                 new_session_task = None;
-                input = Some(EventStream::new());
+                input.get_or_insert_with(EventStream::new);
                 let (pane, effort, reasoning_mode, speed, model, draft_reset, configured) =
                     result.map_err(RuntimeError::NewSessionTask)?;
                 match configured {
@@ -1592,7 +1592,7 @@ pub(crate) async fn run(
                     .await
             }, if session_list_task.is_some() && !stopping => {
                 session_list_task = None;
-                input = Some(EventStream::new());
+                input.get_or_insert_with(EventStream::new);
                 let (pane, sessions) = result.map_err(RuntimeError::SessionTask)?;
                 match sessions {
                     Ok(sessions) => schedule(
@@ -1620,7 +1620,7 @@ pub(crate) async fn run(
                 match (prompts, recent_prompt_request.take()) {
                     (Ok(prompts), Some(request)) => {
                         recent_prompt_cache = Some(prompts.clone());
-                        input = Some(EventStream::new());
+                        input.get_or_insert_with(EventStream::new);
                         schedule(
                             app.update(recent_prompts_loaded_event(prompts, request)),
                             &mut scheduler,
@@ -1628,7 +1628,7 @@ pub(crate) async fn run(
                     }
                     (Ok(prompts), None) => recent_prompt_cache = Some(prompts),
                     (Err(error), Some(request)) => {
-                        input = Some(EventStream::new());
+                        input.get_or_insert_with(EventStream::new);
                         schedule(
                             app.update(AppEvent::RecentPromptLoadFailed {
                                 pane: request.pane,
@@ -1648,7 +1648,7 @@ pub(crate) async fn run(
                     .await
             }, if resume_session_task.is_some() && !stopping => {
                 resume_session_task = None;
-                input = Some(EventStream::new());
+                input.get_or_insert_with(EventStream::new);
                 let (pane, effort, preferred_reasoning_mode, speed, restored) =
                     result.map_err(RuntimeError::SessionTask)?;
                 match restored {

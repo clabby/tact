@@ -2970,12 +2970,16 @@ mod parity_tests {
     #[test]
     fn reasoning_modes_follow_the_model_catalog() {
         let mut harness = Harness::new();
-        harness
+        let effects = harness
             .command(Command::SetReasoningMode {
                 session: "main".to_owned(),
                 mode: ReasoningMode::Pro,
             })
             .unwrap();
+        assert!(matches!(
+            effects.as_slice(),
+            [RootEffect::SetEffort { .. }, RootEffect::SetModel(_)]
+        ));
 
         harness
             .app

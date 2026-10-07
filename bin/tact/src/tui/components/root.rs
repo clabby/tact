@@ -2290,10 +2290,20 @@ impl RootNode {
             PaneCommand::SetEffort(effort) => {
                 self.apply_effort(effort, self.preferred_reasoning_mode == ReasoningMode::Pro)
             }
-            PaneCommand::SetReasoningMode(mode) => self.apply_effort(
-                self.composer.component().effort(),
-                mode == ReasoningMode::Pro,
-            ),
+            PaneCommand::SetReasoningMode(mode) => {
+                let mut update = self.apply_effort(
+                    self.composer.component().effort(),
+                    mode == ReasoningMode::Pro,
+                );
+                // A session's reasoning mode is fixed when it is created, so a new thread is
+                // recreated to apply the choice immediately.
+                if self.composer.component().reasoning_mode() != mode {
+                    update
+                        .effects
+                        .push(RootEffect::SetModel(self.composer.component().model()));
+                }
+                update
+            }
             PaneCommand::SetSpeed(speed) if speed == self.composer.component().speed() => {
                 ComponentUpdate::none()
             }
@@ -2373,6 +2383,11 @@ impl RootNode {
                 if !model::available(self.claude_enabled).contains(model) =>
             {
                 return Err(CommandError::Invalid(format!("{model} is not available")));
+            }
+            PaneCommand::SetReasoningMode(_) if self.thread != ThreadState::New => {
+                return Err(CommandError::Invalid(
+                    "the reasoning mode can only change before the first prompt".to_owned(),
+                ));
             }
             PaneCommand::SetEffort(_) | PaneCommand::SetReasoningMode(_)
                 if self.effort_locked() =>
