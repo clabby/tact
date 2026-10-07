@@ -1,11 +1,14 @@
 //! Picker for prompts from the current session or all persisted sessions.
 
 use super::{
-    file_finder::{fuzzy_score, visible_query_tail},
+    file_finder::visible_query_tail,
     floating::Floating,
     node::{Component, ComponentUpdate, RenderRequest},
 };
-use crate::tui::{session::RecentPrompt, theme::Theme};
+use crate::tui::{
+    session::{RecentPrompt, RecentPromptScope, rank_recent_prompts},
+    theme::Theme,
+};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::{
     Frame,
@@ -14,7 +17,6 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
 };
-use std::cmp::Reverse;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -37,12 +39,6 @@ pub(super) enum RecentPromptPickerEvent {
 pub(super) enum RecentPromptPickerEffect {
     Dismiss,
     Insert(String),
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum RecentPromptScope {
-    Global,
-    CurrentSession,
 }
 
 pub(super) struct RecentPromptPicker {
@@ -132,31 +128,18 @@ impl RecentPromptPicker {
     }
 
     fn toggle_scope(&mut self) -> ComponentUpdate<RecentPromptPickerEffect> {
-        self.scope = match self.scope {
-            RecentPromptScope::Global => RecentPromptScope::CurrentSession,
-            RecentPromptScope::CurrentSession => RecentPromptScope::Global,
-        };
+        self.scope = self.scope.toggled();
         self.refresh_visible();
         ComponentUpdate::render(RenderRequest::Immediate)
     }
 
     fn refresh_visible(&mut self) {
-        let query = self.query.to_ascii_lowercase();
-        let mut visible = self
-            .prompts
-            .iter()
-            .enumerate()
-            .filter_map(|(index, prompt)| {
-                if self.scope == RecentPromptScope::CurrentSession
-                    && prompt.session_id != self.current_session_id
-                {
-                    return None;
-                }
-                fuzzy_score(&prompt.text, &query).map(|score| (index, score))
-            })
-            .collect::<Vec<_>>();
-        visible.sort_by_key(|(index, score)| (Reverse(*score), *index));
-        self.visible = visible.into_iter().map(|(index, _)| index).collect();
+        self.visible = rank_recent_prompts(
+            &self.prompts,
+            &self.current_session_id,
+            self.scope,
+            &self.query,
+        );
         self.selected = 0;
         self.preview_scroll = 0;
     }

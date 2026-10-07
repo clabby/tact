@@ -4,7 +4,10 @@ use super::{
     floating::Floating,
     node::{Component, ComponentUpdate, RenderRequest},
 };
-use crate::tui::theme::Theme;
+use crate::{
+    search::{discover_paths, rank},
+    tui::theme::Theme,
+};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind};
 use ratatui::{
     Frame,
@@ -13,14 +16,13 @@ use ratatui::{
     text::{Line, Span},
     widgets::{List, ListItem, ListState, Paragraph},
 };
-use std::{cmp::Reverse, fs, path::Path};
+use std::path::Path;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 const KEY_BINDINGS: [(&str, &str); 3] = [("↑↓", "move"), ("enter/tab", "insert"), ("esc", "close")];
 const SEARCH_LABEL: &str = "Search: ";
 const FOCUS_MARKER: &str = "› ";
-const SKIPPED_DIRECTORIES: [&str; 4] = [".git", ".jj", "node_modules", "target"];
 
 pub(super) enum FileFinderEvent {
     Terminal(Event),
@@ -96,15 +98,7 @@ impl FileFinder {
     }
 
     fn refresh_matches(&mut self) {
-        let query = self.query.to_ascii_lowercase();
-        let mut matches = self
-            .paths
-            .iter()
-            .enumerate()
-            .filter_map(|(index, path)| fuzzy_score(path, &query).map(|score| (index, score)))
-            .collect::<Vec<_>>();
-        matches.sort_by_key(|(index, score)| (Reverse(*score), self.paths[*index].as_str()));
-        self.matches = matches.into_iter().map(|(index, _)| index).collect();
+        self.matches = rank(&self.paths, &self.query, String::as_str);
         self.selected = 0;
     }
 
@@ -195,93 +189,6 @@ impl Component for FileFinder {
     }
 }
 
-fn discover_paths(workspace: &Path) -> Vec<String> {
-    let mut paths = Vec::new();
-    visit_directory(workspace, workspace, &mut paths);
-    paths.sort_unstable();
-    paths
-}
-
-fn visit_directory(workspace: &Path, directory: &Path, paths: &mut Vec<String>) {
-    let Ok(entries) = fs::read_dir(directory) else {
-        return;
-    };
-    let mut entries = entries.flatten().collect::<Vec<_>>();
-    entries.sort_unstable_by_key(|entry| entry.file_name());
-
-    for entry in entries {
-        let path = entry.path();
-        let Ok(file_type) = entry.file_type() else {
-            continue;
-        };
-        if file_type.is_dir() {
-            if is_skipped_directory(&path) {
-                continue;
-            }
-
-            if let Some(relative) = relative_path(workspace, &path) {
-                paths.push(format!("{relative}/"));
-            }
-            visit_directory(workspace, &path, paths);
-        } else if file_type.is_file()
-            && let Some(relative) = relative_path(workspace, &path)
-        {
-            paths.push(relative);
-        }
-    }
-}
-
-fn relative_path(workspace: &Path, path: &Path) -> Option<String> {
-    let relative = path
-        .strip_prefix(workspace)
-        .ok()?
-        .to_string_lossy()
-        .replace(std::path::MAIN_SEPARATOR, "/");
-    if relative.chars().any(char::is_control) {
-        return None;
-    }
-    Some(relative)
-}
-
-fn is_skipped_directory(path: &Path) -> bool {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| SKIPPED_DIRECTORIES.contains(&name))
-}
-
-pub(super) fn fuzzy_score(path: &str, query: &str) -> Option<usize> {
-    if query.is_empty() {
-        return Some(0);
-    }
-
-    let path = path.to_ascii_lowercase();
-    let mut query = query.chars();
-    let mut expected = query.next()?;
-    let mut score = 0_usize;
-    let mut previous_match = None;
-    let mut previous_character = None;
-    for (index, character) in path.chars().enumerate() {
-        if character != expected {
-            previous_character = Some(character);
-            continue;
-        }
-        score += 10;
-        if previous_match.is_some_and(|previous| previous + 1 == index) {
-            score += 15;
-        }
-        if previous_character.is_none_or(|previous| previous == '/') {
-            score += 8;
-        }
-        previous_match = Some(index);
-        let Some(next) = query.next() else {
-            return Some(score.saturating_sub(index));
-        };
-        expected = next;
-        previous_character = Some(character);
-    }
-    None
-}
-
 pub(super) fn visible_query_tail(query: &str, width: usize) -> &str {
     let mut used = 0;
     for (index, grapheme) in query.grapheme_indices(true).rev() {
@@ -295,9 +202,7 @@ pub(super) fn visible_query_tail(query: &str, width: usize) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        Component, FileFinder, FileFinderEffect, FileFinderEvent, discover_paths, fuzzy_score,
-    };
+    use super::{Component, FileFinder, FileFinderEffect, FileFinderEvent};
     use crate::tui::theme::Theme;
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use ratatui::{Terminal, backend::TestBackend};
@@ -319,22 +224,6 @@ mod tests {
     }
 
     #[test]
-    fn discovers_relative_workspace_paths_and_skips_build_directories() {
-        let workspace = workspace();
-
-        assert_eq!(
-            discover_paths(workspace.path()),
-            [
-                "README.md",
-                "src/",
-                "src/components/",
-                "src/components/file_finder.rs",
-                "src/lib.rs"
-            ]
-        );
-    }
-
-    #[test]
     fn fuzzy_search_matches_non_contiguous_characters_and_ranks_tight_matches_first() {
         let workspace = workspace();
         let mut finder = FileFinder::new(workspace.path());
@@ -345,8 +234,6 @@ mod tests {
             finder.paths[finder.matches[0]],
             "src/components/file_finder.rs"
         );
-        assert!(fuzzy_score("src/file_finder.rs", "ff").is_some());
-        assert!(fuzzy_score("README.md", "ff").is_none());
     }
 
     #[test]

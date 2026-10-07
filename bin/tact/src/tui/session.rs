@@ -6,6 +6,7 @@ use crate::{
         config::{ReasoningEffort, ReasoningMode},
         model,
     },
+    search::rank,
     tui::{
         storage::{SessionStorage, StorageError},
         transcript::{SessionStarted, TerminalStopReason, TranscriptRecord},
@@ -26,6 +27,8 @@ use thiserror::Error;
 
 const RESUME_STATE_FORMAT_VERSION: u32 = 2;
 pub(crate) const MAX_RECENT_PROMPTS: usize = 100;
+/// The most persisted sessions one history page holds.
+const HISTORY_PAGE_SIZE: usize = 50;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct SessionSummary {
@@ -38,12 +41,124 @@ pub(crate) struct SessionSummary {
     pub(crate) preview: String,
 }
 
+impl SessionSummary {
+    /// Whether a session-picker search matches. `query` must already be lowercase.
+    pub(crate) fn matches(&self, query: &str) -> bool {
+        query.is_empty()
+            || self.session_id.to_ascii_lowercase().contains(query)
+            || self.preview.to_ascii_lowercase().contains(query)
+            || self.model.to_ascii_lowercase().contains(query)
+            || self
+                .workspace
+                .to_string_lossy()
+                .to_ascii_lowercase()
+                .contains(query)
+    }
+}
+
+/// One page of persisted sessions matching a search, in listing order (newest first).
+#[derive(Debug, Serialize)]
+pub(crate) struct HistoryPage {
+    pub(crate) sessions: Vec<SessionSummary>,
+    /// Passed back as `cursor` to read the next page; `None` on the last page.
+    pub(crate) next_cursor: Option<String>,
+}
+
+impl HistoryPage {
+    /// Pages through `sessions` filtered by `query`. The cursor is opaque to clients; an
+    /// unparsable one is a client error.
+    pub(crate) fn new(
+        sessions: Vec<SessionSummary>,
+        query: &str,
+        cursor: Option<&str>,
+    ) -> Result<Self, String> {
+        let skip = cursor
+            .map(|cursor| {
+                cursor
+                    .parse::<usize>()
+                    .map_err(|_| format!("invalid history cursor {cursor:?}"))
+            })
+            .transpose()?
+            .unwrap_or(0);
+        let query = query.to_ascii_lowercase();
+        let mut matching = sessions
+            .into_iter()
+            .filter(|session| session.matches(&query))
+            .skip(skip);
+        let sessions = matching
+            .by_ref()
+            .take(HISTORY_PAGE_SIZE)
+            .collect::<Vec<_>>();
+        let next_cursor = matching.next().map(|_| (skip + sessions.len()).to_string());
+        Ok(Self {
+            sessions,
+            next_cursor,
+        })
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 pub(crate) struct RecentPrompt {
     pub(crate) text: String,
     pub(crate) recorded_at_unix_ms: u64,
     pub(crate) session_id: String,
     pub(crate) workspace: PathBuf,
+}
+
+/// Which prompts the recent-prompt picker offers.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RecentPromptScope {
+    #[default]
+    Global,
+    CurrentSession,
+}
+
+impl RecentPromptScope {
+    pub(crate) const fn toggled(self) -> Self {
+        match self {
+            Self::Global => Self::CurrentSession,
+            Self::CurrentSession => Self::Global,
+        }
+    }
+}
+
+/// Indices of the `prompts` within `scope` that match `query`, best first. Ties keep the order of
+/// `prompts`, which the loader sorts newest first.
+pub(crate) fn rank_recent_prompts(
+    prompts: &[RecentPrompt],
+    current_session_id: &str,
+    scope: RecentPromptScope,
+    query: &str,
+) -> Vec<usize> {
+    let mut ranked = rank(prompts, query, |prompt| prompt.text.as_str());
+    if scope == RecentPromptScope::CurrentSession {
+        ranked.retain(|&index| prompts[index].session_id == current_session_id);
+    }
+    ranked
+}
+
+/// Recent prompts matching a picker query, best first.
+#[derive(Debug, Serialize)]
+pub(crate) struct RecentPrompts {
+    pub(crate) prompts: Vec<RecentPrompt>,
+}
+
+impl RecentPrompts {
+    pub(crate) fn new(
+        prompts: Vec<RecentPrompt>,
+        current_session_id: &str,
+        scope: RecentPromptScope,
+        query: &str,
+    ) -> Self {
+        let ranked = rank_recent_prompts(&prompts, current_session_id, scope, query);
+        let mut slots = prompts.into_iter().map(Some).collect::<Vec<_>>();
+        let prompts = ranked
+            .into_iter()
+            .filter_map(|index| slots[index].take())
+            .collect();
+        Self { prompts }
+    }
 }
 
 /// Provider-owned checkpoints retain their native payload without translating conversation items.

@@ -1,11 +1,11 @@
 //! Searchable picker for skills available to the active session.
 
 use super::{
-    file_finder::{fuzzy_score, visible_query_tail},
+    file_finder::visible_query_tail,
     floating::Floating,
     node::{Component, ComponentUpdate, RenderRequest},
 };
-use crate::{core::extensions::Skill, tui::theme::Theme};
+use crate::{core::extensions::Skill, search::rank, tui::theme::Theme};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind};
 use ratatui::{
     Frame,
@@ -14,7 +14,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{List, ListItem, ListState, Paragraph},
 };
-use std::{cmp::Reverse, sync::Arc};
+use std::sync::Arc;
 use unicode_width::UnicodeWidthStr;
 
 const KEY_BINDINGS: [(&str, &str); 3] = [("↑↓", "move"), ("enter/tab", "insert"), ("esc", "close")];
@@ -74,17 +74,7 @@ impl SkillPicker {
 
     fn set_query(&mut self, query: String) -> ComponentUpdate<SkillPickerEffect> {
         self.query = query;
-        let query = self.query.to_ascii_lowercase();
-        let mut matches = self
-            .skills
-            .iter()
-            .enumerate()
-            .filter_map(|(index, skill)| {
-                fuzzy_score(skill.name(), &query).map(|score| (index, score))
-            })
-            .collect::<Vec<_>>();
-        matches.sort_by_key(|(index, score)| (Reverse(*score), self.skills[*index].name()));
-        self.matches = matches.into_iter().map(|(index, _)| index).collect();
+        self.matches = rank(&self.skills, &self.query, Skill::name);
         self.selected = 0;
         ComponentUpdate::render(RenderRequest::Immediate)
     }

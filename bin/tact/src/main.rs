@@ -4,6 +4,7 @@
 
 mod app;
 mod core;
+mod search;
 mod tui;
 mod web;
 

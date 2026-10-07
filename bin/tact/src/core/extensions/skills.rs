@@ -1,7 +1,7 @@
 //! Bounded discovery and model-facing metadata for local filesystem skills.
 
-use crate::app::config::SkillsConfig;
-use serde::Deserialize;
+use crate::{app::config::SkillsConfig, search::rank};
+use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     fs::{self, File},
@@ -96,7 +96,7 @@ struct SkillMetadata {
     path: PathBuf,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub(crate) struct Skill {
     name: String,
     description: String,
@@ -116,6 +116,22 @@ impl Skill {
 
     pub(crate) fn description(&self) -> &str {
         &self.description
+    }
+}
+
+/// Skills matching a `$` mention query, best first.
+#[derive(Debug, Eq, PartialEq, Serialize)]
+pub(crate) struct SkillMatches {
+    pub(crate) skills: Vec<Skill>,
+}
+
+impl SkillMatches {
+    pub(crate) fn new(skills: &[Skill], query: &str) -> Self {
+        let skills = rank(skills, query, Skill::name)
+            .into_iter()
+            .map(|index| skills[index].clone())
+            .collect();
+        Self { skills }
     }
 }
 
