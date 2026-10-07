@@ -23,7 +23,8 @@ use crate::{
     tui::{
         context::ContextBudget,
         transcript::{
-            EntryKind, TranscriptEntry, TranscriptModel, TranscriptRecord, TransientStatus,
+            EntryKind, SessionStarted, TranscriptEntry, TranscriptModel, TranscriptRecord,
+            TransientStatus,
         },
     },
 };
@@ -541,9 +542,16 @@ impl State {
                 }
             }
             Publication::Record { session, record } => {
+                // A new fork starts from its parent's visible history, as the terminal's does.
+                let inherited = fork_parent(&record)
+                    .and_then(|parent| self.live(&parent))
+                    .map(|parent| parent.model.fork_snapshot());
                 let Some(live) = self.live_mut(&session) else {
                     return;
                 };
+                if let Some(inherited) = inherited {
+                    live.model = inherited;
+                }
                 apply_record(live, &record);
             }
             Publication::Closed { session } => {
@@ -724,6 +732,17 @@ impl State {
     }
 }
 
+/// The parent named by a fork's `session.started` record.
+fn fork_parent(record: &TranscriptRecord) -> Option<String> {
+    if record.source() != "tact" || record.kind() != "session.started" {
+        return None;
+    }
+    record
+        .decode_payload::<SessionStarted>()
+        .ok()?
+        .parent_session_id
+}
+
 fn apply_record(live: &mut Live, record: &Arc<TranscriptRecord>) {
     let change = live.model.apply(record);
     live.last_activity_unix_ms = live.last_activity_unix_ms.max(record.recorded_at_unix_ms());
@@ -892,7 +911,7 @@ mod tests {
     use super::{CLIENT_BUFFER, FLUSH_INTERVAL, Hub, MAX_STREAMS, Subscription, user_image};
     use crate::{
         app::config::{ReasoningEffort, ReasoningMode, Speed},
-        tui::transcript::{LocalEvent, TranscriptModel, TranscriptRecord, TurnId},
+        tui::transcript::{LocalEvent, SessionStarted, TranscriptModel, TranscriptRecord, TurnId},
         web::bridge::{self, Busy, Draft, LoopEnd, Origin, Publication, QueuedPrompt, SessionInfo},
     };
     use nanocodex::agent::events::{AgentEvent, AgentEventKind};
@@ -1235,6 +1254,43 @@ mod tests {
         let events = drain(&mut subscription);
         assert_eq!(events[3].1["entries"][0]["text"], "unseen");
         assert_eq!(events.len(), 4);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_fork_shows_its_parents_transcript_before_the_fork_marker() {
+        let fixture = fixture();
+        fixture.open("parent", Some("before the fork"));
+        fixture.open("fork", None);
+        fixture.activate("fork");
+        fixture.publish(Publication::Record {
+            session: "fork".into(),
+            record: Arc::new(
+                TranscriptRecord::from_local(
+                    1,
+                    2_000,
+                    LocalEvent::SessionStarted(SessionStarted {
+                        session_id: "fork".to_owned(),
+                        parent_session_id: Some("parent".to_owned()),
+                        parent_sequence: Some(1),
+                        model: "gpt-6.1-sol".to_owned(),
+                        effort: ReasoningEffort::Low,
+                        reasoning_mode: ReasoningMode::Standard,
+                        speed: Speed::Standard,
+                        workspace: "/work".into(),
+                        application_version: "test".to_owned(),
+                    }),
+                )
+                .unwrap(),
+            ),
+        });
+        settle().await;
+
+        let mut subscription = fixture.hub.subscribe().unwrap();
+        let events = drain(&mut subscription);
+        let entries = &events[3].1["entries"];
+        assert_eq!(entries[0]["text"], "before the fork");
+        assert_eq!(entries[1]["kind"], "forked_from");
+        assert_eq!(entries[1]["session"], "parent");
     }
 
     #[tokio::test(start_paused = true)]
