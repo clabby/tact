@@ -116,6 +116,9 @@ pub(crate) struct Config {
     path: PathBuf,
     #[serde(skip)]
     codex_home: Option<PathBuf>,
+    /// The process workspace selects the shared memory backend.
+    #[serde(skip)]
+    memory_workspace: PathBuf,
     auth: AuthConfig,
     openai: OpenAiConfig,
     claude: ClaudeConfig,
@@ -610,6 +613,7 @@ impl Config {
         Ok(Self {
             path,
             codex_home,
+            memory_workspace: workspace.clone(),
             auth: AuthConfig::new(
                 overrides.auth_mode.or(file.auth.mode).unwrap_or_default(),
                 auth_file,
@@ -682,6 +686,7 @@ impl Config {
         )?;
         let workspace_changed = config.agent.workspace != self.agent.workspace;
         config.agent.workspace.clone_from(&self.agent.workspace);
+        config.memory_workspace.clone_from(&self.memory_workspace);
         Ok(ConfigReload {
             config,
             workspace_changed,
@@ -718,6 +723,16 @@ impl Config {
 
     pub(crate) const fn claude(&self) -> &ClaudeConfig {
         &self.claude
+    }
+
+    pub(crate) fn with_workspace(&self, workspace: PathBuf) -> Self {
+        let mut config = self.clone();
+        config.agent.workspace = workspace;
+        config
+    }
+
+    pub(crate) fn memory_workspace(&self) -> &Path {
+        &self.memory_workspace
     }
 
     pub(crate) fn agent(&self) -> &AgentConfig {

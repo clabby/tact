@@ -97,7 +97,7 @@ fn prepare(query: Query, state: &QueryState<'_>) -> Result<Answer<QueryReply>, C
             query,
         } => {
             let current = session_root(state.app, &session)?.recent_prompts().to_vec();
-            let workspace = state.workspace.to_path_buf();
+            let workspace = session_root(state.app, &session)?.workspace().to_owned();
             let rank = move |persisted| {
                 let prompts = merge_recent_prompts(persisted, current, &session, &workspace);
                 QueryReply::RecentPrompts(RecentPrompts::new(prompts, &session, scope, &query))

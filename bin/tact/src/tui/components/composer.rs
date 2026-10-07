@@ -219,6 +219,10 @@ pub(crate) struct ComposerUpdate {
 }
 
 impl Composer {
+    pub(super) fn set_workspace(&mut self, workspace: &Path) {
+        self.workspace = shorten_home(workspace);
+    }
+
     pub(crate) fn new(workspace: &Path, thinking: ReasoningEffort) -> Self {
         Self {
             draft: String::new(),

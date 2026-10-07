@@ -615,11 +615,11 @@ impl AppNode {
         draft_reset: DraftReset,
         skills: Arc<[Skill]>,
     ) {
-        let workspace = self.workspace.clone();
         let Some(root) = self.pane_mut(pane) else {
             return;
         };
         let root = root.component_mut();
+        let workspace = root.workspace().to_owned();
         let preferred_reasoning_mode = root.preferred_reasoning_mode();
         root.reset_session(
             &workspace,
@@ -1036,7 +1036,7 @@ impl AppNode {
 
     fn fork_root(&self, parent: PaneId) -> Option<RootNode> {
         let parent = self.root(parent)?;
-        Some(parent.fork(&self.workspace, parent.composer().effort()))
+        Some(parent.fork(parent.workspace(), parent.composer().effort()))
     }
 
     /// The keyboard fork opens beside its parent, so it needs the split to be free.
@@ -1060,6 +1060,12 @@ impl AppNode {
         self.insert_pane(pane, root);
         self.activate(pane);
         Ok(pane)
+    }
+
+    pub(crate) fn set_pane_workspace(&mut self, pane: PaneId, workspace: PathBuf) {
+        if let Some(root) = self.pane_mut(pane) {
+            root.component_mut().set_workspace(workspace);
+        }
     }
 
     /// Opens an empty, non-interactive pane as the active session. The caller starts its session
@@ -2705,6 +2711,22 @@ mod registry_tests {
     }
 
     #[test]
+    fn fork_inherits_the_parents_workspace_and_new_sessions_use_the_default() {
+        let mut app = Harness::new().app;
+        app.set_pane_workspace(PaneId::Main, PathBuf::from("/other/checkout"));
+        let fork = app.begin_fork(PaneId::Main).unwrap();
+        assert_eq!(
+            app.root(fork).unwrap().workspace(),
+            PathBuf::from("/other/checkout")
+        );
+        let fresh = app.begin_open("Starting").unwrap();
+        assert_eq!(
+            app.root(fresh).unwrap().workspace(),
+            PathBuf::from("/workspace")
+        );
+    }
+
+    #[test]
     fn web_forks_take_the_focused_slot_and_keep_the_parent_in_the_background() {
         let mut harness = Harness::new();
         let fork = harness.app.begin_fork(PaneId::Main).unwrap();
@@ -2776,7 +2798,10 @@ mod registry_tests {
             ] if info.id == "new" && info.effort == ReasoningEffort::High && session == "new"
         ));
         assert_eq!(
-            harness.command(Command::Open(bridge::OpenSpec::New { model: None })),
+            harness.command(Command::Open(bridge::OpenSpec::New {
+                model: None,
+                workspace: None
+            })),
             Err(CommandError::Invalid(
                 "opening a session needs the event loop".to_owned()
             ))

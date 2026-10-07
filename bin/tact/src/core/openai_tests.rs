@@ -305,6 +305,28 @@ async fn run_isolated(test_name: &str) -> bool {
 }
 
 #[tokio::test]
+async fn custom_workspace_reaches_the_agent_checkpoint() {
+    if run_isolated("core::openai_tests::custom_workspace_reaches_the_agent_checkpoint").await {
+        return;
+    }
+    let fixture = Fixture::start().await;
+    let directory = tempdir().unwrap();
+    let selected = tempdir().unwrap();
+    let selected = selected.path().canonicalize().unwrap();
+    let config = fixture.config(&directory, Model::Sol, Transport::Https, Speed::Standard);
+    let scoped = config.with_workspace(selected.clone());
+    let agent = configured(&scoped, Model::Sol);
+    prompt(&agent.agent, "Inspect this checkout").await;
+    let snapshot = agent.agent.snapshot().await.unwrap();
+    assert_eq!(
+        serde_json::to_value(snapshot).unwrap()["workspace"],
+        selected.to_string_lossy().as_ref()
+    );
+    assert_eq!(config.agent().workspace(), directory.path());
+    agent.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn configured_api_key_and_model_tiers_reach_both_transports() {
     if run_isolated("core::openai_tests::configured_api_key_and_model_tiers_reach_both_transports")
         .await

@@ -8,7 +8,7 @@ use crate::{
     },
     search::rank,
     tui::{
-        storage::{SessionStorage, StorageError, database_path},
+        storage::{SessionStorage, StorageError, StoredSession, database_path},
         transcript::{SessionStarted, TerminalStopReason, TranscriptRecord},
     },
 };
@@ -40,6 +40,20 @@ pub(crate) struct SessionSummary {
     pub(crate) reasoning_mode: ReasoningMode,
     pub(crate) workspace: PathBuf,
     pub(crate) preview: String,
+}
+
+impl From<StoredSession> for SessionSummary {
+    fn from(session: StoredSession) -> Self {
+        Self {
+            session_id: session.session_id,
+            started_at_unix_ms: session.started_at_unix_ms,
+            model: session.model,
+            effort: session.effort,
+            reasoning_mode: session.reasoning_mode,
+            workspace: session.workspace,
+            preview: session.preview,
+        }
+    }
 }
 
 impl SessionSummary {
@@ -341,6 +355,8 @@ pub(crate) enum SessionError {
         "session {session_id} uses resume-state format {found}; expected {RESUME_STATE_FORMAT_VERSION}"
     )]
     IncompatibleCheckpoint { session_id: String, found: u32 },
+    #[error("session transcript has no workspace metadata")]
+    MissingWorkspace,
     #[error("session lineage contains a cycle at {session_id}")]
     LineageCycle { session_id: String },
     #[error("session lineage references missing ancestor {session_id}")]
@@ -476,21 +492,11 @@ pub(crate) fn list(
     let Some(storage) = SessionStorage::open_read_only(config_path)? else {
         return Ok(Vec::new());
     };
-    storage
+    Ok(storage
         .list_sessions(workspace, resumable_only)?
         .into_iter()
-        .map(|session| {
-            Ok(SessionSummary {
-                session_id: session.session_id,
-                started_at_unix_ms: session.started_at_unix_ms,
-                model: session.model,
-                effort: session.effort,
-                reasoning_mode: session.reasoning_mode,
-                workspace: session.workspace,
-                preview: session.preview,
-            })
-        })
-        .collect()
+        .map(SessionSummary::from)
+        .collect())
 }
 
 pub(crate) async fn list_async(
@@ -498,9 +504,25 @@ pub(crate) async fn list_async(
     workspace: PathBuf,
     resumable_only: bool,
 ) -> Result<Vec<SessionSummary>, SessionError> {
-    tokio::task::spawn_blocking(move || list(&config_path, &workspace, resumable_only))
-        .await
-        .map_err(SessionError::StorageTask)?
+    let workspaces = crate::web::checkout::family_paths(&workspace).await;
+    tokio::task::spawn_blocking(move || {
+        let Some(storage) = SessionStorage::open_read_only(&config_path)? else {
+            return Ok(Vec::new());
+        };
+        let mut sessions = Vec::new();
+        for workspace in workspaces {
+            sessions.extend(storage.list_sessions(&workspace, resumable_only)?);
+        }
+        sessions.sort_by(|left, right| {
+            right
+                .updated_at_unix_ms
+                .cmp(&left.updated_at_unix_ms)
+                .then_with(|| left.session_id.cmp(&right.session_id))
+        });
+        Ok(sessions.into_iter().map(SessionSummary::from).collect())
+    })
+    .await
+    .map_err(SessionError::StorageTask)?
 }
 
 pub(crate) async fn load_recent_prompts_async(
@@ -632,6 +654,16 @@ pub(crate) fn reasoning_mode(records: &[Arc<TranscriptRecord>]) -> ReasoningMode
         .find(|record| record.source() == "tact" && record.kind() == "session.started")
         .and_then(|record| record.decode_payload::<SessionStarted>().ok())
         .map_or(ReasoningMode::Standard, |started| started.reasoning_mode)
+}
+
+pub(crate) fn workspace(records: &[Arc<TranscriptRecord>]) -> Result<PathBuf, SessionError> {
+    records
+        .iter()
+        .rev()
+        .find(|record| record.source() == "tact" && record.kind() == "session.started")
+        .and_then(|record| record.decode_payload::<SessionStarted>().ok())
+        .map(|started| started.workspace)
+        .ok_or(SessionError::MissingWorkspace)
 }
 
 pub(crate) fn model(records: &[Arc<TranscriptRecord>]) -> Result<Model, SessionError> {
@@ -843,6 +875,150 @@ mod tests {
 
         assert!(load_transcript(&config, "missing").unwrap().is_empty());
         assert!(!database_path(&config).exists());
+    }
+
+    #[tokio::test]
+    async fn resume_rejects_the_recorded_workspace_when_it_is_missing() {
+        use crate::app::config::{Config, ConfigOverrides};
+        let directory = tempdir().unwrap();
+        let config_path = directory.path().join("config.toml");
+        std::fs::write(&config_path, "").unwrap();
+        let config = Config::load(ConfigOverrides {
+            path: Some(config_path.clone()),
+            workspace: Some(directory.path().to_owned()),
+            ..ConfigOverrides::default()
+        })
+        .unwrap();
+        let missing = directory.path().join("deleted-checkout");
+        let mut start = started(1, "session", None, None)
+            .decode_payload::<SessionStarted>()
+            .unwrap();
+        start.workspace = missing.clone();
+        let record = Arc::new(
+            TranscriptRecord::from_local(1, 1, LocalEvent::SessionStarted(start)).unwrap(),
+        );
+        SessionStorage::open(&config_path)
+            .unwrap()
+            .append_records("session", &[record])
+            .unwrap();
+        save_checkpoint(
+            &config_path,
+            "session",
+            &snapshot("resume"),
+            "instructions",
+            false,
+        )
+        .unwrap();
+        let lock = super::SessionLock::acquire(&config_path, "session").unwrap();
+        let result =
+            crate::tui::restore_session(config, "session".to_owned(), ReasoningEffort::Low, lock)
+                .await;
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("missing workspace must prevent resume"),
+        };
+        assert!(
+            error
+                .to_string()
+                .contains(missing.to_string_lossy().as_ref())
+        );
+        assert!(
+            matches!(error, crate::app::error::Error::Runtime(crate::app::error::RuntimeError::ResolveWorkspace {path, ..}) if path == missing)
+        );
+    }
+
+    #[tokio::test]
+    async fn history_lists_the_repository_family_and_excludes_unrelated_sessions() {
+        use std::process::Command;
+        let directory = tempdir().unwrap();
+        let repository = directory.path().join("repository");
+        let checkout = directory.path().join("checkout");
+        std::fs::create_dir(&repository).unwrap();
+        let run = |args: &[&str]| {
+            let output = Command::new("git")
+                .args([
+                    "-c",
+                    "commit.gpgsign=false",
+                    "-c",
+                    "core.hooksPath=/dev/null",
+                ])
+                .current_dir(&repository)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        run(&["init", "--quiet"]);
+        run(&[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.test",
+            "commit",
+            "--quiet",
+            "--allow-empty",
+            "-m",
+            "fixture",
+        ]);
+        run(&[
+            "worktree",
+            "add",
+            "--quiet",
+            "--detach",
+            checkout.to_str().unwrap(),
+        ]);
+        let repository = repository.canonicalize().unwrap();
+        let checkout = checkout.canonicalize().unwrap();
+        let config_path = directory.path().join("config.toml");
+        let mut storage = SessionStorage::open(&config_path).unwrap();
+        for (index, workspace) in [
+            repository.clone(),
+            checkout.clone(),
+            directory.path().join("unrelated"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let id = format!("session-{index}");
+            let mut start = started(1, &id, None, None)
+                .decode_payload::<SessionStarted>()
+                .unwrap();
+            start.workspace = workspace;
+            let record = Arc::new(
+                TranscriptRecord::from_local(
+                    1,
+                    index as u64 + 1,
+                    LocalEvent::SessionStarted(start),
+                )
+                .unwrap(),
+            );
+            storage.append_records(&id, &[record]).unwrap();
+        }
+        storage
+            .append_records("session-0", &[prompt(2, "recent activity")])
+            .unwrap();
+        drop(storage);
+        let sessions = super::list_async(config_path.clone(), checkout, false)
+            .await
+            .unwrap();
+        assert_eq!(
+            sessions
+                .iter()
+                .map(|session| session.session_id.as_str())
+                .collect::<Vec<_>>(),
+            ["session-0", "session-1"]
+        );
+        assert_eq!(
+            super::list_async(config_path, repository, false)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
     }
 
     #[test]

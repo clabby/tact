@@ -444,6 +444,17 @@ impl RootNode {
         }
     }
 
+    pub(crate) fn workspace(&self) -> &Path {
+        &self.workspace
+    }
+
+    pub(super) fn set_workspace(&mut self, workspace: PathBuf) {
+        self.transcript.component_mut().set_workspace(&workspace);
+        self.subagents.set_workspace(&workspace);
+        self.composer.component_mut().set_workspace(&workspace);
+        self.workspace = workspace;
+    }
+
     pub(crate) fn fork(&self, workspace: &Path, thinking: ReasoningEffort) -> Self {
         let mut root = Self::new(workspace, thinking);
         root.transcript = Node::new(self.transcript.component().fork_snapshot());

@@ -260,6 +260,8 @@ pub(crate) enum OpenSpec {
     New {
         #[serde(default)]
         model: Option<String>,
+        #[serde(default)]
+        workspace: Option<String>,
     },
     Resume {
         session: String,
@@ -538,7 +540,10 @@ mod tests {
         );
         assert_eq!(
             command(json!({ "client": 1, "cmd": "open_session", "args": { "new": {} } })).1,
-            Command::Open(OpenSpec::New { model: None })
+            Command::Open(OpenSpec::New {
+                model: None,
+                workspace: None
+            })
         );
         assert_eq!(
             command(json!({

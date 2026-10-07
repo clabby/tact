@@ -491,6 +491,7 @@ pub(crate) async fn run(
             let snapshot = snapshot.map_err(RuntimeError::SessionTask)??;
             let records = records?;
             tokio::task::spawn_blocking(move || -> Result<_> {
+                let restored_config = restored_config.with_workspace(session::workspace(&records)?);
                 let reasoning_mode = session::reasoning_mode(&records);
                 let model = session::model(&records)?;
                 let next_sequence = session::next_sequence(&records);
@@ -531,10 +532,8 @@ pub(crate) async fn run(
         };
     let workspace = config.agent().workspace().to_path_buf();
     let mut terminal = TerminalSession::enter().map_err(RuntimeError::Terminal)?;
-    terminal
-        .report_working_directory(&workspace)
-        .map_err(RuntimeError::Terminal)?;
     let ConfiguredAgent {
+        workspace: initial_workspace,
         agent,
         context,
         events,
@@ -544,6 +543,10 @@ pub(crate) async fn run(
         subagent_updates,
         subagent_control,
     } = configured;
+    terminal
+        .report_working_directory(&initial_workspace)
+        .map_err(RuntimeError::Terminal)?;
+    let initial_config = config.with_workspace(initial_workspace.clone());
     let main_session_id = agent.session_id().to_string();
     let main_lock = match resume_lock {
         Some(lock) => lock,
@@ -564,7 +567,7 @@ pub(crate) async fn run(
             } else {
                 PaneSession::new(&main_session_id, None, None, 1, !skills.is_empty())
             },
-            &config,
+            &initial_config,
             PaneSettings::new(initial_effort, reasoning_mode, initial_speed, model),
             instructions,
             subagent_control.clone(),
@@ -587,7 +590,7 @@ pub(crate) async fn run(
         subagent_updates,
         subagent_sender.clone(),
     );
-    let mut root = RootNode::new(&workspace, initial_effort);
+    let mut root = RootNode::new(&initial_workspace, initial_effort);
     root.set_tui_config(*config.tui());
     root.set_claude_enabled(config.claude().enabled());
     root.set_reasoning_modes(reasoning_mode, preferred_reasoning_mode);
@@ -597,7 +600,7 @@ pub(crate) async fn run(
     root.set_memory_enabled(memory_store.is_some());
     let restored_records = restored.map(|(projection, records)| {
         root.install_session_projection(
-            &workspace,
+            &initial_workspace,
             initial_effort,
             reasoning_mode,
             preferred_reasoning_mode,
@@ -711,10 +714,12 @@ pub(crate) async fn run(
     }
 
     macro_rules! install_agent {
-        ($pane:expr, $configured:expr, $history:expr, $settings:expr) => {
+        ($pane:expr, $configured:expr, $history:expr, $settings:expr) => {{
+            let configured = $configured;
+            app.set_pane_workspace($pane, configured.workspace.clone());
             install_agent(
                 $pane,
-                $configured,
+                configured,
                 $history,
                 $settings,
                 &config,
@@ -726,14 +731,23 @@ pub(crate) async fn run(
                 &mut writers_open,
                 &mut subagent_shutdowns,
             )?
-        };
+        }};
     }
 
     if open_resume_selector {
         apply_app_update!(app.open_resume_selector());
     }
 
+    let mut reported_workspace = initial_workspace;
     loop {
+        if let Some(root) = app.root(app.active_pane())
+            && root.workspace() != reported_workspace
+        {
+            terminal
+                .report_working_directory(root.workspace())
+                .map_err(RuntimeError::Terminal)?;
+            reported_workspace = root.workspace().to_owned();
+        }
         if stopping && let Some(task) = update_check_task.take() {
             task.abort();
         }
@@ -864,7 +878,7 @@ pub(crate) async fn run(
                         apply_app_update!(app.update(AppEvent::Transcript { pane, record }));
                         if tool_finished {
                             terminal
-                                .report_working_directory(&workspace)
+                                .report_working_directory(app.root(app.active_pane()).map_or(&workspace, RootNode::workspace))
                                 .map_err(RuntimeError::Terminal)?;
                         }
                     }
@@ -962,7 +976,7 @@ pub(crate) async fn run(
                 let state = remote::QueryState {
                     app: &app,
                     config: &config,
-                    workspace: &workspace,
+                    workspace: app.root(app.active_pane()).map_or(&workspace, RootNode::workspace),
                     memory_store: memory_store.as_ref(),
                     recent_prompts: recent_prompt_cache.as_deref(),
                 };
@@ -1183,7 +1197,7 @@ pub(crate) async fn run(
                         schedule(app.update(AppEvent::Transcript { pane, record }), &mut scheduler);
                         if let Some(command) = config.agent().completion_hook() {
                             let command = command.to_owned();
-                            let workspace = workspace.clone();
+                            let workspace = app.root(pane).expect("hook pane exists").workspace().to_owned();
                             tokio::spawn(async move {
                                 drop(hook::execute(&command, &workspace).await);
                             });
@@ -1273,7 +1287,7 @@ pub(crate) async fn run(
                                 1,
                                 parent_runtime.skills_catalog_present,
                             ),
-                            &config,
+                            &config.with_workspace(app.root(pane).expect("fork pane exists").workspace().to_owned()),
                             PaneSettings::new(
                                 effort,
                                 parent_runtime.reasoning_mode,
@@ -1436,7 +1450,7 @@ pub(crate) async fn run(
                 editor_task = None;
                 terminal.resume().map_err(RuntimeError::Terminal)?;
                 terminal
-                    .report_working_directory(&workspace)
+                    .report_working_directory(app.root(app.active_pane()).map_or(&workspace, RootNode::workspace))
                     .map_err(RuntimeError::Terminal)?;
                 app.refresh_terminal_images();
                 input.get_or_insert_with(EventStream::new);
@@ -1771,7 +1785,9 @@ fn install_agent(
     writers_open: &mut usize,
     subagent_shutdowns: &mut JoinSet<()>,
 ) -> Result<Arc<[Skill]>> {
+    let config = &config.with_workspace(configured.workspace.clone());
     let ConfiguredAgent {
+        workspace: _,
         agent,
         context,
         events,
@@ -2179,6 +2195,12 @@ fn apply_pane_effect(
     effect: components::RootEffect,
     context: &mut EffectContext<'_>,
 ) -> Result<()> {
+    let workspace = context
+        .app
+        .root(pane)
+        .expect("effect pane exists")
+        .workspace()
+        .to_owned();
     match effect {
         components::RootEffect::Submit(prompt) => {
             let runtime = context
@@ -2199,7 +2221,7 @@ fn apply_pane_effect(
                     text: prompt.display_text().to_owned(),
                     recorded_at_unix_ms: record.recorded_at_unix_ms(),
                     session_id: runtime.session_id.clone(),
-                    workspace: context.workspace.to_path_buf(),
+                    workspace: workspace.clone(),
                 },
             );
             schedule(
@@ -2277,7 +2299,7 @@ fn apply_pane_effect(
                     pane,
                     id,
                     instructions,
-                    context: ReflectionContext::new(context.config.path(), context.workspace),
+                    context: ReflectionContext::new(context.config.path(), &workspace),
                 })
                 .map_err(|_| RuntimeError::AgentWorkerStopped)?;
         }
@@ -2294,13 +2316,13 @@ fn apply_pane_effect(
                 .append_local(LocalEvent::ShellStarted {
                     id,
                     command: command.clone(),
-                    workspace: context.workspace.to_path_buf(),
+                    workspace: workspace.clone(),
                 })?;
             schedule(
                 context.app.update(AppEvent::Transcript { pane, record }),
                 context.scheduler,
             );
-            let workspace = context.workspace.to_path_buf();
+            let workspace = workspace.clone();
             context
                 .shell_tasks
                 .spawn(async move { (pane, shell::execute(id, command, workspace).await) });
@@ -2336,11 +2358,11 @@ fn apply_pane_effect(
                     EditorTarget::Config(context.config.path().to_path_buf())
                 }
                 components::RootEffect::OpenLink(destination) => {
-                    EditorTarget::File(local_link_path(&destination, context.workspace))
+                    EditorTarget::File(local_link_path(&destination, &workspace))
                 }
                 _ => unreachable!("editor effect pattern is exhaustive"),
             };
-            let workspace = context.workspace.to_path_buf();
+            let workspace = workspace.clone();
             *context.editor_task = Some(tokio::spawn(async move {
                 match target {
                     EditorTarget::Draft { pane, text } => {
@@ -2381,7 +2403,7 @@ fn apply_pane_effect(
             let effort = root.composer().effort();
             let reasoning_mode = supported_reasoning_mode(model, root.preferred_reasoning_mode());
             let speed = context.config.agent().speed();
-            let config = context.config.clone();
+            let config = context.config.with_workspace(workspace.clone());
             *context.new_session_task = Some(tokio::task::spawn_blocking(move || {
                 let configured =
                     ConfiguredAgent::from_config_with_model(&config, effort, reasoning_mode, model);
@@ -2462,7 +2484,7 @@ fn apply_pane_effect(
                 speed,
                 model,
             } = fresh_settings(context.config, model);
-            let config = context.config.clone();
+            let config = context.config.with_workspace(workspace.clone());
             *context.new_session_task = Some(tokio::task::spawn_blocking(move || {
                 let configured = ConfiguredAgent::from_config_with_session(
                     &config,
@@ -2486,7 +2508,7 @@ fn apply_pane_effect(
         components::RootEffect::LoadSessions(kind) => {
             *context.input = None;
             let config_path = context.config.path().to_path_buf();
-            let workspace = context.workspace.to_path_buf();
+            let workspace = workspace.clone();
             let active_session_id = context
                 .panes
                 .get(&pane)
@@ -2514,7 +2536,7 @@ fn apply_pane_effect(
             let request = RecentPromptRequest {
                 pane,
                 session_id,
-                workspace: context.workspace.to_path_buf(),
+                workspace: workspace.clone(),
                 current_prompts,
             };
             if let Some(prompts) = context.recent_prompt_cache.clone() {
@@ -2701,7 +2723,7 @@ fn apply_pane_effect(
                     text,
                     recorded_at_unix_ms: record.recorded_at_unix_ms(),
                     session_id: runtime.session_id.clone(),
-                    workspace: context.workspace.to_path_buf(),
+                    workspace: workspace.clone(),
                 },
             );
             schedule(
@@ -2824,7 +2846,14 @@ fn start_handoff(context: &mut EffectContext<'_>, pane: PaneId) {
     runtime.next_turn = runtime.next_turn.saturating_add(1);
     let model = runtime.current_model;
     let commands = context.commands.clone();
-    let config = context.config.clone();
+    let config = context.config.with_workspace(
+        context
+            .app
+            .root(pane)
+            .expect("handoff pane exists")
+            .workspace()
+            .to_owned(),
+    );
     let started =
         context
             .handoff_controller
@@ -3030,6 +3059,7 @@ async fn restore_session(
     let (snapshot, records) = tokio::join!(checkpoint, transcript);
     let snapshot = snapshot.map_err(RuntimeError::SessionTask)??;
     let records = records?;
+    let config = config.with_workspace(session::workspace(&records)?);
     tokio::task::spawn_blocking(move || -> Result<_> {
         let reasoning_mode = session::reasoning_mode(&records);
         let model = session::model(&records)?;
@@ -3097,7 +3127,11 @@ async fn open_session(
     open_tasks: &mut JoinSet<OpenTask>,
 ) -> std::result::Result<OpenStarted, CommandError> {
     match spec {
-        OpenSpec::New { model } => {
+        OpenSpec::New { model, workspace } => {
+            let config = match workspace {
+                Some(path) => config.with_workspace(open_workspace(&path)?),
+                None => config.clone(),
+            };
             let model = match model {
                 Some(model) => crate::app::model::parse(&model).map_err(CommandError::Invalid)?,
                 None => app
@@ -3109,7 +3143,7 @@ async fn open_session(
             open_tasks.spawn(configure_fresh(
                 config.clone(),
                 pane,
-                fresh_settings(config, model),
+                fresh_settings(&config, model),
             ));
             Ok(OpenStarted::Pending(pane))
         }
@@ -3156,6 +3190,22 @@ async fn open_session(
             Ok(OpenStarted::Pending(pane))
         }
     }
+}
+
+fn open_workspace(path: &str) -> std::result::Result<PathBuf, CommandError> {
+    let directory = Path::new(path);
+    if !directory.is_absolute() {
+        return Err(CommandError::Invalid(format!(
+            "workspace must be an absolute directory: {path}"
+        )));
+    }
+    directory
+        .canonicalize()
+        .ok()
+        .filter(|directory| directory.is_dir())
+        .ok_or_else(|| {
+            CommandError::Invalid(format!("workspace is not an existing directory: {path}"))
+        })
 }
 
 fn is_web_link(destination: &str) -> bool {
@@ -3473,6 +3523,109 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["just submitted", "other", "first"]
         );
+    }
+
+    fn workspace_config(directory: &Path) -> Config {
+        let path = directory.join("config.toml");
+        fs::write(&path, "[auth]\nmode = 'api-key'\n[openai]\napi_key = 'workspace-fixture'\n[agent]\nweb_search = false\nimage_generation = false\n[skills]\nenabled = false\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        Config::load(ConfigOverrides {
+            path: Some(path),
+            auth_file: Some(directory.join("unused-auth.json")),
+            workspace: Some(directory.to_owned()),
+            ..ConfigOverrides::default()
+        })
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn web_open_builds_the_agent_and_pane_in_the_selected_workspace() {
+        use crate::{
+            tui::components::{AppNode, RootNode},
+            web::bridge::OpenSpec,
+        };
+        let directory = tempdir().unwrap();
+        let selected = tempdir().unwrap();
+        let selected = selected.path().canonicalize().unwrap();
+        let config = workspace_config(directory.path());
+        let mut app = AppNode::new(
+            config.theme().clone(),
+            directory.path().to_owned(),
+            RootNode::new(directory.path(), ReasoningEffort::Low),
+        );
+        let (commands, _) = tokio::sync::mpsc::unbounded_channel();
+        let mut tasks = tokio::task::JoinSet::new();
+        let opened = super::open_session(
+            OpenSpec::New {
+                model: Some("sol".to_owned()),
+                workspace: Some(selected.to_string_lossy().into_owned()),
+            },
+            &mut app,
+            &config,
+            &mut HashMap::new(),
+            &commands,
+            &mut tasks,
+        )
+        .await
+        .unwrap();
+        let super::OpenStarted::Pending(pane) = opened else {
+            panic!("expected pending session")
+        };
+        let (_, opened) = tasks.join_next().await.unwrap().unwrap();
+        let super::OpenedSession::Fresh { configured, .. } = opened.unwrap() else {
+            panic!("expected fresh session")
+        };
+        assert_eq!(configured.workspace, selected);
+        app.set_pane_workspace(pane, configured.workspace.clone());
+        assert_eq!(app.root(pane).unwrap().workspace(), selected);
+        assert_eq!(
+            super::local_link_path("file.txt", app.root(pane).unwrap().workspace()),
+            selected.join("file.txt")
+        );
+        assert_eq!(config.agent().workspace(), directory.path());
+        assert_eq!(
+            config.with_workspace(selected).memory_workspace(),
+            directory.path()
+        );
+        configured.agent.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn web_open_rejects_a_workspace_that_is_a_file() {
+        use crate::{
+            tui::components::{AppNode, RootNode},
+            web::bridge::{CommandError, OpenSpec},
+        };
+        let directory = tempdir().unwrap();
+        let file = directory.path().join("file");
+        fs::write(&file, "text").unwrap();
+        let config = workspace_config(directory.path());
+        let mut app = AppNode::new(
+            config.theme().clone(),
+            directory.path().to_owned(),
+            RootNode::new(directory.path(), ReasoningEffort::Low),
+        );
+        let (commands, _) = tokio::sync::mpsc::unbounded_channel();
+        let result = super::open_session(
+            OpenSpec::New {
+                model: None,
+                workspace: Some(file.to_string_lossy().into_owned()),
+            },
+            &mut app,
+            &config,
+            &mut HashMap::new(),
+            &commands,
+            &mut tokio::task::JoinSet::new(),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(CommandError::Invalid(message)) if message.contains(file.to_string_lossy().as_ref()))
+        );
+        assert!(super::open_workspace("relative").is_err());
     }
 
     #[test]

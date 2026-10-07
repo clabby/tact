@@ -5,14 +5,6 @@
 //! workspace has no `.git`, so git is pointed at the repository's git store with an explicit work
 //! tree and a throwaway index; nothing in the user's repository is written.
 
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the checkout list is read by the workspace protocol"
-    )
-)]
-
 use super::diff::DiffError;
 use serde::Serialize;
 use std::{
@@ -22,6 +14,22 @@ use std::{
 };
 use tempfile::TempDir;
 use tokio::process::Command;
+
+pub(crate) async fn family_paths(directory: &Path) -> Vec<PathBuf> {
+    let Ok(checkout) = Checkout::detect(directory).await else {
+        return vec![directory.to_owned()];
+    };
+    let mut paths = checkout
+        .family()
+        .await
+        .into_iter()
+        .map(|member| member.path)
+        .collect::<Vec<_>>();
+    if !paths.iter().any(|path| path == directory) {
+        paths.push(directory.to_owned());
+    }
+    paths
+}
 
 /// A directory holding one working copy of a repository.
 pub(super) struct Checkout {
