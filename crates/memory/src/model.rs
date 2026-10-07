@@ -156,6 +156,20 @@ pub struct MemoryAccess {
     pub role: Option<RemoteRole>,
 }
 
+impl MemoryAccess {
+    /// Returns whether this backend lets the user delete the memory identified by `key`: any
+    /// local memory, or a remote memory in the writer's own namespace.
+    pub fn can_delete(&self, key: &MemoryKey) -> bool {
+        match self.source {
+            MemorySource::Local => key.is_local(),
+            MemorySource::Remote => {
+                self.role == Some(RemoteRole::Writer)
+                    && key.namespace.as_deref() == self.namespace.as_deref()
+            }
+        }
+    }
+}
+
 /// Counts produced while importing a remote snapshot into local storage.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct MemoryImportReport {

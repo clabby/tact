@@ -15,7 +15,7 @@ use ratatui::{
     widgets::{List, ListItem, ListState, Paragraph, Wrap},
 };
 use std::time::{SystemTime, UNIX_EPOCH};
-use tact_memory::{MemoryAccess, MemoryKey, MemoryRecord, MemorySource, RemoteRole};
+use tact_memory::{MemoryAccess, MemoryKey, MemoryRecord, MemorySource};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -530,13 +530,7 @@ impl MemoryBrowser {
     fn can_delete(&self, key: &MemoryKey) -> bool {
         self.access
             .as_ref()
-            .is_some_and(|access| match access.source {
-                MemorySource::Local => key.is_local(),
-                MemorySource::Remote => {
-                    access.role == Some(RemoteRole::Writer)
-                        && key.namespace.as_deref() == access.namespace.as_deref()
-                }
-            })
+            .is_some_and(|access| access.can_delete(key))
     }
 
     fn is_remote(&self) -> bool {

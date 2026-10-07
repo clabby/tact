@@ -334,9 +334,18 @@ pub(crate) enum QueryReply {
     ContextDiagnostics(ContextDiagnostics),
     Memories {
         access: MemoryAccess,
-        records: Vec<MemoryRecord>,
+        records: Vec<ListedMemory>,
     },
     Config(ConfigDocument),
+}
+
+/// A memory as the browser lists it. `deletable` is [`MemoryAccess::can_delete`], the same rule
+/// the terminal's memory browser applies.
+#[derive(Debug, Serialize)]
+pub(crate) struct ListedMemory {
+    #[serde(flatten)]
+    pub(crate) record: MemoryRecord,
+    pub(crate) deletable: bool,
 }
 
 pub(crate) struct QueryRequest {
