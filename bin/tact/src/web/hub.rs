@@ -961,7 +961,7 @@ mod tests {
         let events = drain(&mut subscription);
 
         assert_eq!(names(&events), ["hello", "live", "active", "snapshot"]);
-        assert_eq!(events[0].1["protocol_version"], 8);
+        assert_eq!(events[0].1["protocol_version"], 9);
         let live = &events[1].1;
         assert_eq!(live["active"], "s1");
         assert_eq!(live["sessions"][0]["title"], "Fix the flaky test");

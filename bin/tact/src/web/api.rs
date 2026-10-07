@@ -781,7 +781,7 @@ mod tests {
         let (status, body) = harness.call(Method::GET, "/api/instance", None).await;
 
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(body["protocol_version"], 8);
+        assert_eq!(body["protocol_version"], 9);
         assert_eq!(body["live"], 1);
         assert_eq!(body["running"], true);
     }
