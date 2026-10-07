@@ -303,7 +303,9 @@ diffs-container { --diffs-light-bg: var(--bg); --diffs-dark-bg: var(--bg); }
 .reasoning[open] .reasoning-preview { display: none; }
 .reasoning-body { margin: var(--space-1) 0 var(--space-2) 1px; padding: var(--space-1) 0 var(--space-1) var(--space-4); border-left: 2px solid var(--line); color: var(--muted); font-size: var(--text-md); }
 
-.entry-tool { margin-top: 2px; }
+/* The row's hover highlight extends one gutter beyond the text column, so the entry must not paint-contain
+   (content-visibility) and clip it. Tool rows are cheap and their bodies load lazily. */
+.entry-tool { margin-top: 2px; content-visibility: visible; }
 .entry:not(.entry-tool) + .entry-tool { margin-top: var(--space-3); }
 .tool-row {
   display: flex; align-items: center; gap: 10px; width: 100%; min-height: max(30px, var(--touch));
