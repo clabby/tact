@@ -475,10 +475,10 @@ class ReviewPanel {
               </div>
               <button class="icon-button" data-range-close aria-label="Close range selector">${icon("close")}</button>
             </header>
-            <div class="range-presets" id="range-presets" role="group" aria-label="Quick ranges">
-              ${rangePresets(this.bootstrap.range_targets).map((preset) => `<button type="button" class="button quiet" data-range-preset="${preset.id}" aria-pressed="false">${preset.label}</button>`).join("")}
-            </div>
             <div class="range-builder">
+              <div class="range-presets" id="range-presets" role="group" aria-label="Quick ranges">
+                ${rangePresets(this.bootstrap.range_targets).map((preset) => `<button type="button" class="button quiet" data-range-preset="${preset.id}" aria-pressed="false">${preset.label}</button>`).join("")}
+              </div>
               <div class="range-endpoints" aria-label="Selected range endpoints" aria-live="polite">
                 <div class="range-endpoint">
                   <small>Base (excluded)</small><strong id="range-from-label"></strong><span id="range-from-title"></span>
@@ -1122,7 +1122,10 @@ class ReviewPanel {
       onSelectionChange: (paths) => {
         const path = paths.at(-1);
         const id = path ? this.pathToItem.get(path) : undefined;
-        if (id) this.viewer?.scrollTo({ type: "item", id, align: "start", behavior: "smooth-auto" });
+        if (!id) return;
+        // On narrow screens the file list replaces the diff, so return to the diff before scrolling.
+        this.selectMobilePanel("diff");
+        this.viewer?.scrollTo({ type: "item", id, align: "start", behavior: "smooth-auto" });
       },
     });
     this.tree.render({ containerWrapper: container });
