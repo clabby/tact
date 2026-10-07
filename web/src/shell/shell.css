@@ -509,6 +509,16 @@ diffs-container { --diffs-light-bg: var(--bg); --diffs-dark-bg: var(--bg); }
 .send-button:not(:disabled):active, .stop-button:active { transform: scale(.94); }
 .send-button.busy .glyph { animation: pulse 1s ease-in-out infinite; }
 .stop-button { background: var(--surface-active); color: var(--text); }
+.queue-button {
+  display: inline-flex; align-items: center; gap: 6px; height: max(34px, var(--touch)); padding: 0 var(--space-3);
+  border: 0; border-radius: var(--radius-pill); background: var(--surface-active); color: var(--text);
+  font-size: var(--text-sm); font-weight: 550;
+  transition: background var(--duration-fast), opacity var(--duration-fast), transform var(--duration-fast);
+}
+.queue-button .glyph { width: 15px; height: 15px; }
+.queue-button:hover:not(:disabled) { background: var(--surface-hover); }
+.queue-button:disabled { opacity: .25; }
+.queue-button:not(:disabled):active { transform: scale(.96); }
 .stop-button .glyph { width: 14px; height: 14px; fill: currentColor; stroke-width: 0; }
 .stop-button:hover { background: var(--danger-soft); color: var(--danger); }
 
@@ -740,7 +750,11 @@ diffs-container { --diffs-light-bg: var(--bg); --diffs-dark-bg: var(--bg); }
 }
 .app[data-viewport="phone"] .mode-chip .chip-label, .app[data-viewport="phone"] .speed-chip .chip-label { display: none; }
 .app[data-viewport="phone"] .chip { padding: 0 6px; }
-.app[data-viewport="phone"] .send-button, .app[data-viewport="phone"] .stop-button { width: 38px; height: 38px; }
+.app[data-viewport="phone"] .send-button, .app[data-viewport="phone"] .stop-button, .app[data-viewport="phone"] .queue-button { width: 38px; height: 38px; }
+/* Beside the model chips there is no room for a label; the title and aria-label name the button. */
+.app[data-viewport="phone"] .queue-button { justify-content: center; padding: 0; border-radius: 50%; }
+.app[data-viewport="phone"] .queue-button span { display: none; }
+.app[data-viewport="phone"] .context-meter .meter-label { display: none; }
 
 /*
  * The general-purpose spinner: four small dots in a square, lit one after another with a soft

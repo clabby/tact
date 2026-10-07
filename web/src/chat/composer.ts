@@ -42,6 +42,7 @@ export class Composer {
   private readonly form: HTMLFormElement;
   private readonly textarea: HTMLTextAreaElement;
   private readonly sendButton: HTMLButtonElement;
+  private readonly queueButton: HTMLButtonElement;
   private readonly stopButton: HTMLButtonElement;
   private readonly message: HTMLElement;
   private readonly queue: HTMLElement;
@@ -87,6 +88,7 @@ export class Composer {
           </div>
           <div class="composer-actions">
             <button type="button" class="context-meter" aria-label="Context usage" hidden><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="8"/><circle class="meter-fill" cx="10" cy="10" r="8" pathLength="100"/></svg><span class="meter-label"></span></button>
+            <button type="button" class="queue-button" aria-label="Queue" title="Queue (Shift+Tab)" hidden>${glyph("layers")}<span>Queue</span></button>
             <button type="button" class="stop-button" aria-label="Stop" title="Stop (Esc)" hidden>${glyph("stop")}</button>
             <button type="submit" class="send-button" aria-label="Send" title="Send (Enter)">${glyph("arrow-up")}</button>
           </div>
@@ -98,6 +100,7 @@ export class Composer {
     this.form = root.querySelector("form")!;
     this.textarea = root.querySelector("textarea")!;
     this.sendButton = root.querySelector(".send-button")!;
+    this.queueButton = root.querySelector(".queue-button")!;
     this.stopButton = root.querySelector(".stop-button")!;
     this.message = root.querySelector(".composer-message")!;
     this.queue = root.querySelector(".queue")!;
@@ -247,6 +250,7 @@ export class Composer {
     this.status.querySelector(".status-text")!.textContent = label ?? "";
     if (!running) this.disarmInterrupt();
     this.stopButton.hidden = !running;
+    this.queueButton.hidden = !running;
     this.updateSendState();
   }
 
@@ -321,6 +325,7 @@ export class Composer {
     this.meter.addEventListener("click", () => this.host.openContext());
     this.status.querySelector(".agents-chip")!.addEventListener("click", () => this.host.openSubagents());
     this.stopButton.addEventListener("click", () => this.interrupt());
+    this.queueButton.addEventListener("click", () => void this.submit(true));
     this.bindSettings();
   }
 
@@ -675,6 +680,7 @@ export class Composer {
     this.textarea.readOnly = blocked;
     this.root.classList.toggle("blocked", blocked);
     this.sendButton.disabled = !this.session || blocked || this.submitting || !this.textarea.value.trim();
+    this.queueButton.disabled = this.sendButton.disabled;
     this.sendButton.classList.toggle("busy", this.submitting);
     this.textarea.placeholder = blocked ? "Compacting context…" : running ? "Steer the running turn" : "Message Tact";
     this.sendButton.setAttribute("aria-label", running ? "Steer" : "Send");

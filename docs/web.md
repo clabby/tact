@@ -149,7 +149,7 @@ straight into `bridge::Command`; there is no per-command route. Success is 200 `
 | Command | Body | Keyboard equivalent | Refused |
 | :-- | :-- | :-- | :-- |
 | `set_draft` | `session, text` | typing | never (last writer wins) |
-| `submit` | `session, rev, queue?` | Enter in the composer, or Shift+Tab with `queue: true` | `draft_changed` if the draft moved; `not_available_remotely` for terminal-local slash commands such as `/copy`. While a turn runs the prompt steers it; with `queue: true`, or while a steer is still being applied, it waits in the queue instead. |
+| `submit` | `session, rev, queue?` | Enter in the composer, or Shift+Tab or the Queue button with `queue: true` | `draft_changed` if the draft moved; `not_available_remotely` for terminal-local slash commands such as `/copy`. While a turn runs the prompt steers it; with `queue: true`, or while a steer is still being applied, it waits in the queue instead. |
 | `interrupt` | `session` | cancel-all | `nothing_running` |
 | `steer` / `dequeue` | `session, queue_id` | queue panel | `nothing_running` / `unknown_session` for a consumed item |
 | `compact` | `session` | Actions: Compact | `turn_running`, `queue_not_empty` |
