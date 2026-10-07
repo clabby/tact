@@ -12,6 +12,8 @@ export type PaletteCommand = {
   /** A second line, e.g. a prompt's age and workspace. */
   detail?: string;
   run(): void;
+  /** Why the command cannot run right now. Such commands are listed after every available one, greyed out. */
+  unavailable?: string;
 };
 
 /** Supplies the commands that apply right now; called each time the palette filters. */
@@ -49,6 +51,15 @@ export function matchScore(query: string, text: string): number | null {
 
 /** Ranks registry commands for `query`: title matches first, then group and keyword matches. */
 export function rankCommands(commands: readonly PaletteCommand[], query: string): PaletteCommand[] {
+  return availableFirst(rankMatches(commands, query));
+}
+
+/** Lists the commands that can run before the ones that cannot, keeping each side's order. */
+export function availableFirst(commands: readonly PaletteCommand[]): PaletteCommand[] {
+  return [...commands.filter((command) => !command.unavailable), ...commands.filter((command) => command.unavailable)];
+}
+
+function rankMatches(commands: readonly PaletteCommand[], query: string): PaletteCommand[] {
   if (!query.trim()) return [...commands];
   return commands
     .flatMap((command, order) => {
@@ -183,10 +194,15 @@ export class Palette {
       item.dataset.index = String(index);
       item.setAttribute("role", "option");
       item.setAttribute("aria-selected", String(index === this.selected));
+      if (command.unavailable) {
+        item.classList.add("unavailable");
+        item.setAttribute("aria-disabled", "true");
+      }
       item.innerHTML = `${glyph(command.icon ?? "chevron-right")}<span class="palette-text"><span class="palette-title"></span><span class="palette-detail"></span></span><span class="palette-hint"></span>`;
       item.querySelector(".palette-title")!.textContent = command.title;
       const detail = item.querySelector<HTMLElement>(".palette-detail")!;
-      if (command.detail) detail.textContent = command.detail;
+      if (command.unavailable) detail.textContent = command.unavailable;
+      else if (command.detail) detail.textContent = command.detail;
       else detail.remove();
       item.querySelector(".palette-hint")!.textContent = command.hint ?? (grouped || this.picker ? "" : command.group);
       items.push(item);
@@ -221,7 +237,7 @@ export class Palette {
 
   private choose(index: number) {
     const command = this.results[index];
-    if (!command) return;
+    if (!command || command.unavailable) return;
     this.restoreFocus = null;
     this.dialog.close();
     command.run();

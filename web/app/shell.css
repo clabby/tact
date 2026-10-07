@@ -598,6 +598,8 @@ diffs-container { --diffs-light-bg: var(--bg); --diffs-dark-bg: var(--bg); }
 }
 .mention-item { display: flex; align-items: baseline; gap: var(--space-3); min-height: max(32px, var(--touch)); padding: 6px 10px; border-radius: var(--radius-sm); cursor: pointer; }
 .mention-item[aria-selected="true"] { background: var(--accent-soft); }
+.palette-item.unavailable, .mention-item.unavailable { color: var(--faint); cursor: not-allowed; }
+.palette-item.unavailable .glyph { opacity: .6; }
 .mention-label { flex: none; max-width: 60%; overflow: hidden; font: var(--text-md)/1.4 var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
 .mention-list[data-kind="actions"] .mention-label { max-width: none; font: 550 var(--text-md)/1.4 var(--font-ui); }
 .mention-detail { flex: 1; min-width: 0; overflow: hidden; color: var(--faint); font-size: var(--text-sm); text-overflow: ellipsis; white-space: nowrap; }

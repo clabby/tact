@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { matchScore, rankCommands, type PaletteCommand } from "./palette";
+import { availableFirst, matchScore, rankCommands, type PaletteCommand } from "./palette";
 
 const command = (title: string, group = "Actions", keywords?: string): PaletteCommand =>
   ({ id: title, title, group, keywords, run() {} });
@@ -21,4 +21,11 @@ test("title matches outrank keyword matches, and ties keep registration order", 
   expect(rankCommands(commands, "toml").map((c) => c.title)).toEqual(["Edit config"]);
   expect(rankCommands(commands, "c")[0]!.title).toBe("Compact context");
   expect(rankCommands(commands, "").map((c) => c.title)).toEqual(commands.map((c) => c.title));
+});
+
+test("unavailable commands follow every available one even when they match better", () => {
+  const compact = { ...command("Compact context"), unavailable: "Available after the first turn" };
+  const commands = [compact, command("Close chat"), command("Edit config", "Settings", "compact")];
+  expect(rankCommands(commands, "compact").map((c) => c.title)).toEqual(["Edit config", "Compact context"]);
+  expect(availableFirst(commands).map((c) => c.title)).toEqual(["Close chat", "Edit config", "Compact context"]);
 });

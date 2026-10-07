@@ -7,7 +7,7 @@ import { glyph } from "./glyphs";
 import { completeMention, findMention, type Mention } from "./mentions";
 import { openMenu } from "./menu";
 import { effectiveSpeed, speedChoices } from "./speed";
-import { type PaletteCommand } from "./palette";
+import { availableFirst, type PaletteCommand } from "./palette";
 import type { SessionView } from "./store";
 import type { CommandName, Commands, ModelCatalog, ModelInfo } from "./wire";
 
@@ -510,11 +510,12 @@ export class Composer {
       // session's actions ahead of the ones that open other sessions.
       const query = action[1]!;
       const rank = (group: string) => (query ? 0 : ACTION_GROUP_ORDER.indexOf(group));
-      const items = this.host.actions(query)
+      const ordered = this.host.actions(query)
         .filter((command) => command.group !== "Live sessions")
-        .sort((a, b) => rank(a.group) - rank(b.group))
-        .map((command): MentionItem => ({
-        label: command.title, detail: command.hint ?? command.group, value: command.id, run: command.run,
+        .sort((a, b) => rank(a.group) - rank(b.group));
+      const items = availableFirst(ordered).map((command): MentionItem => ({
+        label: command.title, detail: command.unavailable ?? command.hint ?? command.group, value: command.id, run: command.run,
+        unavailable: command.unavailable !== undefined,
       }));
       this.mention = { at: null, items, selected: 0 };
       this.renderMentions();
@@ -570,6 +571,10 @@ export class Composer {
       row.dataset.index = String(index);
       row.setAttribute("role", "option");
       row.setAttribute("aria-selected", String(index === mention.selected));
+      if (item.unavailable) {
+        row.classList.add("unavailable");
+        row.setAttribute("aria-disabled", "true");
+      }
       row.innerHTML = `<span class="mention-label"></span><span class="mention-detail"></span>`;
       row.querySelector(".mention-label")!.textContent = item.label;
       row.querySelector(".mention-detail")!.textContent = item.detail;
@@ -582,7 +587,7 @@ export class Composer {
   private acceptMention(index: number) {
     const mention = this.mention;
     const item = mention?.items[index];
-    if (!mention || !item || !this.sync) return;
+    if (!mention || !item || !this.sync || item.unavailable) return;
     if (!mention.at) {
       this.closeMentions();
       this.replaceText("");
@@ -701,7 +706,7 @@ export class Composer {
   }
 }
 
-type MentionItem = { label: string; detail: string; value: string; run?: () => void };
+type MentionItem = { label: string; detail: string; value: string; run?: () => void; unavailable?: boolean };
 
 function capitalize(text: string) {
   return text ? text[0]!.toUpperCase() + text.slice(1) : text;

@@ -462,38 +462,46 @@ class App {
       const started = session.order.length > 0;
       const model = this.catalog?.models.find((candidate) => candidate.id === session.model);
       // As in the terminal, work that rewrites the conversation waits for an idle session.
-      const idle = !running && session.queue.length === 0;
+      const rewriteBlock = !started ? "Available after the first turn"
+        : running ? "Wait for the current turn to finish"
+        : session.queue.length > 0 ? "Wait for the queued messages to send"
+        : undefined;
+      const fixed = "Fixed after the first prompt";
       const commands: PaletteCommand[] = [];
-      if (running) commands.push({ id: "stop", title: "Stop", group: "Session", icon: "stop", hint: "esc", keywords: "interrupt cancel", run: () => this.command("interrupt", { session: id }) });
       commands.push(
+        { id: "stop", title: "Stop", group: "Session", icon: "stop", hint: "esc", keywords: "interrupt cancel", unavailable: running ? undefined : "Nothing is running", run: () => this.command("interrupt", { session: id }) },
         { id: "recent", title: "Recent prompts…", group: "Session", icon: "history", hint: "↑", run: () => this.openRecentPrompts() },
-        ...(started && idle ? [
-          { id: "compact", title: "Compact context", group: "Session", icon: "compact", run: () => this.command("compact", { session: id }) },
-          { id: "reflect", title: "Reflect…", group: "Session", icon: "reflect", keywords: "reflection learn", run: () => openReflect(this.api, id) },
-          { id: "handoff", title: "Prepare handoff", group: "Session", icon: "handoff", run: () => this.command("handoff", { session: id }) },
-        ] satisfies PaletteCommand[] : []),
+        { id: "compact", title: "Compact context", group: "Session", icon: "compact", unavailable: rewriteBlock, run: () => this.command("compact", { session: id }) },
+        { id: "reflect", title: "Reflect…", group: "Session", icon: "reflect", keywords: "reflection learn", unavailable: rewriteBlock, run: () => openReflect(this.api, id) },
+        { id: "handoff", title: "Prepare handoff", group: "Session", icon: "handoff", unavailable: rewriteBlock, run: () => this.command("handoff", { session: id }) },
         { id: "subagents", title: "Subagents", group: "Session", icon: "agents", hint: String(session.subagents.agents.length || ""), keywords: "agents tree", run: () => this.openSubagents() },
         { id: "context", title: "Context diagnostics", group: "Session", icon: "gauge", keywords: "tokens debug", run: () => void openContextDiagnostics(this.api, id) },
-        ...(model?.provider === "anthropic" ? [] : [{ id: "attach", title: "Attach image…", group: "Session", icon: "image", run: () => root.querySelector<HTMLButtonElement>(".attach-chip")?.click() } satisfies PaletteCommand]),
-        ...(started ? [{ id: "fork", title: "Fork session", group: "Session", icon: "fork", run: () => this.command("open_session", { fork: { session: id } }) } satisfies PaletteCommand] : []),
+        { id: "attach", title: "Attach image…", group: "Session", icon: "image", unavailable: model?.provider === "anthropic" ? "Claude sessions are text-only" : undefined, run: () => root.querySelector<HTMLButtonElement>(".attach-chip")?.click() },
+        { id: "fork", title: "Fork session", group: "Session", icon: "fork", unavailable: started ? undefined : "Available after the first turn", run: () => this.command("open_session", { fork: { session: id } }) },
         { id: "close", title: "Close session", group: "Session", icon: "trash", run: () => {
           if (running && !confirm("A turn is running. Stop it and close the session?")) return;
           this.command("close_session", { session: id, force: running });
         } },
       );
-      if (!started) {
+      if (started) {
+        commands.push({ id: "model", title: "Change model", group: "Settings", icon: "sparkles", unavailable: fixed, run() {} });
+      } else {
         commands.push(...(this.catalog?.models ?? []).filter((candidate) => candidate.id !== session.model).map((candidate): PaletteCommand => ({
           id: `model:${candidate.id}`, title: `Model: ${candidate.label}`, group: "Settings", icon: "sparkles",
           run: () => this.command("set_model", { session: id, model: candidate.id }),
         })));
       }
-      if (!(started && model?.effort_fixed_after_start)) {
+      if (started && model?.effort_fixed_after_start) {
+        commands.push({ id: "effort", title: "Change effort", group: "Settings", icon: "brain", unavailable: fixed, run() {} });
+      } else {
         commands.push(...(this.catalog?.efforts ?? []).filter((effort) => effort !== session.effort).map((effort): PaletteCommand => ({
           id: `effort:${effort}`, title: `Effort: ${effort}`, group: "Settings", icon: "brain",
           run: () => this.command("set_effort", { session: id, effort }),
         })));
       }
-      if (!started && model?.reasoning_modes.includes("pro")) {
+      if (started && model?.reasoning_modes.includes("pro")) {
+        commands.push({ id: "mode", title: "Pro reasoning", group: "Settings", icon: "sparkles", unavailable: fixed, run() {} });
+      } else if (model?.reasoning_modes.includes("pro")) {
         const pro = session.reasoningMode === "pro";
         commands.push({ id: "mode", title: pro ? "Turn pro reasoning off" : "Turn pro reasoning on", group: "Settings", icon: "sparkles",
           run: () => this.command("set_reasoning_mode", { session: id, mode: pro ? "standard" : "pro" }) });
