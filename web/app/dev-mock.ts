@@ -168,7 +168,7 @@ export class MockTact {
   /** The events a fresh stream receives: hello, live, active, and the active session's snapshot. */
   greeting(): { name: StreamEventName; data: unknown }[] {
     const events: { name: StreamEventName; data: unknown }[] = [
-      { name: "hello", data: { protocol_version: 7, client_hint: "tact-dev" } },
+      { name: "hello", data: { protocol_version: 9, client_hint: "tact-dev" } },
       { name: "live", data: this.live() },
     ];
     const session = this.active ? this.sessions.get(this.active) : undefined;
@@ -189,7 +189,7 @@ export class MockTact {
   instance() {
     const sessions = [...this.sessions.values()];
     return {
-      protocol_version: 7,
+      protocol_version: 9,
       workspace: "/Users/dev/src/tact",
       repository: "tact",
       live: sessions.length,

@@ -70,7 +70,7 @@ await Bun.write(
   join(outputDirectory, "manifest.json"),
   `${JSON.stringify({
     schema_version: 2,
-    review_api: { min: 7, max: 7 },
+    web_api: { min: 9, max: 9 },
     tact: { version: process.env.TACT_VERSION ?? "development" },
     entrypoint: "index.html",
     files,
