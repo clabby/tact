@@ -445,3 +445,246 @@ pub(super) fn secure(response: &mut Response<Body>) {
     );
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::super::{
+        bridge::{Command, CommandError, Publication, Reply},
+        testing::Harness,
+    };
+    use axum::{
+        body::Body,
+        http::{Method, Request, StatusCode, header},
+    };
+    use serde_json::json;
+
+    fn unauthenticated(method: Method, uri: &str) -> Request<Body> {
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("x-tact", "1")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from("{}"))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn every_api_route_except_login_requires_the_cookie() {
+        let harness = Harness::new();
+        let routes = [
+            (Method::GET, "/api/instance"),
+            (Method::GET, "/api/instances"),
+            (Method::GET, "/api/stream"),
+            (Method::GET, "/api/sessions/s/entries/1"),
+            (Method::GET, "/api/review"),
+            (Method::POST, "/api/cmd"),
+            (Method::POST, "/api/refresh"),
+            (Method::POST, "/api/range"),
+            (Method::POST, "/api/overview"),
+            (Method::POST, "/api/ai-review"),
+            (Method::POST, "/api/question"),
+            (Method::POST, "/api/questions"),
+            (Method::POST, "/api/question/cancel"),
+            (Method::POST, "/api/review/compose"),
+        ];
+        for (method, uri) in routes {
+            let (status, _, body) = harness.send(unauthenticated(method, uri)).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{uri}");
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(body["code"], "unauthorized", "{uri}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_wrong_cookie_is_rejected() {
+        let harness = Harness::new();
+        let mut request = unauthenticated(Method::GET, "/api/instance");
+        request
+            .headers_mut()
+            .insert(header::COOKIE, "tact=wrong".parse().unwrap());
+
+        let (status, _, _) = harness.send(request).await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn login_sets_a_strict_http_only_cookie_for_the_token_only() {
+        let harness = Harness::new();
+        let login = |token: &str| {
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/login")
+                .header("x-tact", "1")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(json!({ "token": token }).to_string()))
+                .unwrap()
+        };
+
+        let (status, headers, _) = harness.send(login("nope")).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(headers.get(header::SET_COOKIE).is_none());
+
+        let (status, headers, _) = harness.send(login(harness.state.token.expose())).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let cookie = headers.get(header::SET_COOKIE).unwrap().to_str().unwrap();
+        assert_eq!(
+            cookie,
+            format!(
+                "tact={}; HttpOnly; SameSite=Strict; Path=/",
+                harness.state.token.expose()
+            )
+        );
+        let (status, _) = harness.call(Method::GET, "/api/instance", None).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn posts_without_the_x_tact_header_are_rejected() {
+        let harness = Harness::new();
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/api/cmd")
+            .header(header::COOKIE, harness.cookie())
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from("{}"))
+            .unwrap();
+
+        let (status, _, body) = harness.send(request).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(String::from_utf8(body).unwrap().contains("invalid_request"));
+    }
+
+    #[tokio::test]
+    async fn an_origin_that_does_not_match_the_host_is_rejected() {
+        let harness = Harness::new();
+        let request = |origin: &str| {
+            Request::builder()
+                .uri("/api/instance")
+                .header(header::HOST, "127.0.0.1:7878")
+                .header(header::ORIGIN, origin)
+                .header(header::COOKIE, harness.cookie())
+                .body(Body::empty())
+                .unwrap()
+        };
+
+        let (status, _, _) = harness.send(request("http://evil.example")).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (status, _, _) = harness.send(request("null")).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (status, headers, _) = harness.send(request("http://127.0.0.1:7878")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(headers.get(header::ACCESS_CONTROL_ALLOW_ORIGIN).is_none());
+        assert_eq!(headers.get(header::CACHE_CONTROL).unwrap(), "no-store");
+    }
+
+    #[tokio::test]
+    async fn static_assets_are_public_and_a_missing_bundle_explains_installation() {
+        let harness = Harness::new();
+        let request = Request::builder().uri("/").body(Body::empty()).unwrap();
+
+        let (status, headers, body) = harness.send(request).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(headers[header::CONTENT_SECURITY_POLICY]
+            .to_str()
+            .unwrap()
+            .contains("default-src 'none'"));
+        assert!(String::from_utf8(body).unwrap().contains("not installed"));
+        let missing = Request::builder().uri("/app.js").body(Body::empty()).unwrap();
+        assert_eq!(harness.send(missing).await.0, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn commands_round_trip_through_the_terminal_loop() {
+        let mut harness = Harness::new();
+
+        let (status, reply, request) = harness
+            .command(
+                json!({"command": "compact", "client": 9, "session": "s1"}),
+                Ok(Reply::Done {}),
+            )
+            .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(reply, json!({}));
+        assert_eq!(request.client, 9);
+        assert!(matches!(
+            request.command,
+            Command::Compact { ref session } if session == "s1"
+        ));
+    }
+
+    #[tokio::test]
+    async fn refusals_map_to_wire_codes() {
+        let cases = [
+            (CommandError::TurnRunning, StatusCode::CONFLICT, "turn_running"),
+            (CommandError::UnknownSession, StatusCode::NOT_FOUND, "unknown_session"),
+            (CommandError::DraftChanged, StatusCode::CONFLICT, "draft_changed"),
+            (CommandError::Invalid("bad".into()), StatusCode::BAD_REQUEST, "invalid_request"),
+            (CommandError::Failed("boom".into()), StatusCode::INTERNAL_SERVER_ERROR, "failed"),
+        ];
+        let mut harness = Harness::new();
+        for (error, expected_status, expected_code) in cases {
+            let (status, body, _) = harness
+                .command(
+                    json!({"command": "interrupt", "client": 1, "session": "s"}),
+                    Err(error),
+                )
+                .await;
+            assert_eq!(status, expected_status);
+            assert_eq!(body["code"], expected_code);
+        }
+    }
+
+    #[tokio::test]
+    async fn malformed_command_bodies_are_invalid_requests() {
+        let harness = Harness::new();
+
+        let (status, body) = harness
+            .call(Method::POST, "/api/cmd", Some(json!({"command": "nope", "client": 1})))
+            .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "invalid_request");
+    }
+
+    #[tokio::test]
+    async fn a_stopped_terminal_loop_is_reported_as_unavailable() {
+        let mut harness = Harness::new();
+        harness.terminal.requests.close();
+
+        let (status, body) = harness
+            .call(
+                Method::POST,
+                "/api/cmd",
+                Some(json!({"command": "compact", "client": 1, "session": "s"})),
+            )
+            .await;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["code"], "failed");
+    }
+
+    #[tokio::test]
+    async fn instance_reports_live_sessions_and_busy_state() {
+        let harness = Harness::new();
+        harness.open_session("s1").await;
+        harness.terminal.publisher.publish(Publication::Busy {
+            session: "s1".into(),
+            busy: crate::web::bridge::Busy { turns: 1, shells: 0 },
+        });
+        while !harness.hub.any_busy() {
+            tokio::task::yield_now().await;
+        }
+
+        let (status, body) = harness.call(Method::GET, "/api/instance", None).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["protocol_version"], 8);
+        assert_eq!(body["live"], 1);
+        assert_eq!(body["running"], true);
+    }
+}
+

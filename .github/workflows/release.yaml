@@ -102,7 +102,7 @@ jobs:
           if-no-files-found: error
 
   web_assets:
-    name: Build Review Assets
+    name: Build Web Assets
     needs: validate
     runs-on: ubuntu-latest
     permissions:
@@ -121,25 +121,25 @@ jobs:
           bun-version: 1.3.14
       - name: Install dependencies
         run: bun install --frozen-lockfile
-      - name: Build review assets
+      - name: Build web assets
         shell: bash
         run: TACT_VERSION="${GITHUB_REF_NAME#v}" bun run build
-      - name: Typecheck review app
+      - name: Typecheck web app
         run: bun run typecheck
-      - name: Package review assets
+      - name: Package web assets
         shell: bash
         run: |
           set -euo pipefail
 
           archive="tact-web-${GITHUB_REF_NAME}.tar.gz"
-          mkdir review
-          cp -R dist/. review/
-          tar -czf "$archive" review
+          mkdir web
+          cp -R dist/. web/
+          tar -czf "$archive" web
           shasum -a 256 "$archive" > "${archive}.sha256"
-      - name: Upload packaged review assets
+      - name: Upload packaged web assets
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: review-assets
+          name: web-assets
           path: |
             web/app/tact-web-${{ github.ref_name }}.tar.gz
             web/app/tact-web-${{ github.ref_name }}.tar.gz.sha256

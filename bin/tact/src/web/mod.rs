@@ -12,6 +12,8 @@ mod hub;
 mod registry;
 mod review;
 mod token;
+#[cfg(test)]
+mod testing;
 mod wire;
 
 use crate::app::config::Config;
@@ -232,6 +234,131 @@ fn reachable_host(bind: IpAddr) -> IpAddr {
         IpAddr::V4(address) if address.is_unspecified() => IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
         IpAddr::V6(address) if address.is_unspecified() => IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
         address => address,
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::{Server, Settings, bind, bridge, hub::Hub, registry};
+    use std::{fs, net::{IpAddr, Ipv4Addr}, time::Duration};
+    use tokio_util::sync::CancellationToken;
+
+    const LOOPBACK: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+
+    #[tokio::test]
+    async fn binding_skips_occupied_ports_and_falls_back_to_any_free_port() {
+        let occupied = bind(LOOPBACK, 0).await.unwrap();
+        let first = occupied.local_addr().unwrap().port();
+
+        let next = bind(LOOPBACK, first).await.unwrap();
+
+        assert_ne!(next.local_addr().unwrap().port(), first);
+        let ephemeral = bind(LOOPBACK, 0).await.unwrap();
+        assert_ne!(ephemeral.local_addr().unwrap().port(), 0);
+    }
+
+    #[tokio::test]
+    async fn the_server_registers_serves_and_unregisters() {
+        let home = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let (_terminal, end) = bridge::bridge();
+        let shutdown = CancellationToken::new();
+        let hub = Hub::spawn(end.publications, shutdown.clone());
+        let server = Server::start(
+            Settings {
+                enabled: true,
+                bind: LOOPBACK,
+                port: 0,
+                public_url: None,
+                home: home.path().to_owned(),
+                workspace: workspace.path().to_owned(),
+            },
+            hub,
+            end.requests,
+            end.auxiliary,
+            shutdown.clone(),
+        )
+        .await
+        .unwrap();
+        let (origin, token) = server.login_url.split_once("/#k=").unwrap();
+        let (origin, token) = (origin.to_owned(), token.to_owned());
+        let instances = home.path().join("web/instances");
+        assert_eq!(registry::read_all(&instances).len(), 1);
+        let task = tokio::spawn(server.run());
+
+        let client = reqwest::Client::new();
+        let unauthenticated = client.get(format!("{origin}/api/instance")).send().await.unwrap();
+        assert_eq!(unauthenticated.status(), reqwest::StatusCode::UNAUTHORIZED);
+        let mut stream = client
+            .get(format!("{origin}/api/stream"))
+            .header("cookie", format!("tact={token}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(stream.status(), reqwest::StatusCode::OK);
+        assert_eq!(stream.headers()["content-type"], "text/event-stream");
+        let first = stream.chunk().await.unwrap().unwrap();
+        assert!(String::from_utf8_lossy(&first).starts_with("event: hello\n"));
+        let live = stream.chunk().await.unwrap().unwrap();
+        assert!(String::from_utf8_lossy(&live).starts_with("event: live\n"));
+
+        shutdown.cancel();
+        tokio::time::timeout(Duration::from_secs(10), task).await.unwrap().unwrap();
+        assert!(registry::read_all(&instances).is_empty());
+        assert!(fs::metadata(home.path().join("web/token")).is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_public_url_replaces_the_local_origin_in_the_login_link() {
+        let home = tempfile::tempdir().unwrap();
+        let (_terminal, end) = bridge::bridge();
+        let shutdown = CancellationToken::new();
+        let hub = Hub::spawn(end.publications, shutdown.clone());
+
+        let server = Server::start(
+            Settings {
+                enabled: true,
+                bind: LOOPBACK,
+                port: 0,
+                public_url: Some("https://tact.example.net".to_owned()),
+                home: home.path().to_owned(),
+                workspace: home.path().to_owned(),
+            },
+            hub,
+            end.requests,
+            end.auxiliary,
+            shutdown,
+        )
+        .await
+        .unwrap();
+
+        assert!(server.login_url.starts_with("https://tact.example.net/#k="));
+    }
+
+    #[tokio::test]
+    async fn a_disabled_server_does_not_start() {
+        let (_terminal, end) = bridge::bridge();
+        let shutdown = CancellationToken::new();
+        let hub = Hub::spawn(end.publications, shutdown.clone());
+
+        let result = Server::start(
+            Settings {
+                enabled: false,
+                bind: LOOPBACK,
+                port: 0,
+                public_url: None,
+                home: ".".into(),
+                workspace: ".".into(),
+            },
+            hub,
+            end.requests,
+            end.auxiliary,
+            shutdown,
+        )
+        .await;
+
+        assert!(result.is_err());
     }
 }
 

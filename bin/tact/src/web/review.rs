@@ -2093,3 +2093,363 @@ enum ReviewError {
     #[error("the workspace kept changing while the review was being prepared; try again")]
     WorkspaceChanged,
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::web::{
+        bridge::{Busy, Publication},
+        review::ReviewAgent,
+        testing::{Harness, idle_agent, repository},
+        wire::PROTOCOL_VERSION,
+    };
+    use axum::http::{Method, StatusCode};
+    use serde_json::{Value, json};
+    use std::{
+        fs,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::Duration,
+    };
+    use tokio::sync::Notify;
+
+    const FULL: Value = json!(null);
+
+    fn full_range() -> Value {
+        json!({"from": 0, "to": 2})
+    }
+
+    fn overview_request(session: &str, instructions: Option<&str>) -> Value {
+        json!({
+            "session": session,
+            "generation": 0,
+            "range": full_range(),
+            "instructions": instructions,
+        })
+    }
+
+    fn question_request(session: &str) -> Value {
+        json!({
+            "session": session,
+            "thread_id": "thread-1",
+            "operation_id": "question-1",
+            "generation": 0,
+            "range": full_range(),
+            "path": "tracked.txt",
+            "side": "additions",
+            "start_line": 1,
+            "end_line": 1,
+            "messages": [{ "role": "reviewer", "body": "Why was this changed?" }]
+        })
+    }
+
+    fn counting_agent(answer: &'static str) -> (ReviewAgent, Arc<AtomicUsize>) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let agent: ReviewAgent = Arc::new({
+            let calls = Arc::clone(&calls);
+            move |_, _, _| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async move { Ok(answer.to_owned()) })
+            }
+        });
+        (agent, calls)
+    }
+
+    #[tokio::test]
+    async fn the_review_is_prepared_lazily_and_matches_the_browser_protocol() {
+        let harness = Harness::new();
+
+        let (status, review) = harness.call(Method::GET, "/api/review", None).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(review["protocol_version"], PROTOCOL_VERSION);
+        assert_eq!(review["generation"], 0);
+        assert_eq!(review["turn_running"], false);
+        assert!(review["page"]["patch"].as_str().unwrap().contains("working.txt"));
+        assert!(review["range_targets"].as_array().unwrap().len() >= 2);
+        assert_eq!(review["overview"], Value::Null);
+        assert_eq!(review["questions"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn other_review_routes_refuse_until_the_review_is_loaded() {
+        let harness = Harness::new();
+
+        let (status, body) = harness
+            .call(
+                Method::POST,
+                "/api/range",
+                Some(json!({"generation": 0, "range": full_range()})),
+            )
+            .await;
+
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["code"], "stale_snapshot");
+    }
+
+    #[tokio::test]
+    async fn a_directory_that_is_not_a_repository_is_reported_plainly() {
+        let harness = Harness::with(tempfile::tempdir().unwrap(), idle_agent());
+
+        let (status, body) = harness.call(Method::GET, "/api/review", None).await;
+
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["error"], "The folder must be a git repository.");
+    }
+
+    #[tokio::test]
+    async fn refresh_replaces_the_snapshot_and_range_loads_use_the_new_generation() {
+        let harness = Harness::new();
+        harness.call(Method::GET, "/api/review", None).await;
+        fs::write(harness.workspace.path().join("working.txt"), "changed again\n").unwrap();
+
+        let (status, refreshed) = harness
+            .call(Method::POST, "/api/refresh", Some(json!({"generation": 0})))
+            .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(refreshed["generation"], 1);
+        assert!(refreshed["page"]["patch"].as_str().unwrap().contains("changed again"));
+        let (status, stale) = harness
+            .call(
+                Method::POST,
+                "/api/range",
+                Some(json!({"generation": 0, "range": full_range()})),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(stale["code"], "stale_snapshot");
+    }
+
+    #[tokio::test]
+    async fn overviews_are_generated_on_demand_cached_and_scoped_to_their_session() {
+        let (agent, calls) = counting_agent("<p>Overview</p>");
+        let harness = Harness::with(repository(), agent);
+        harness.open_session("s1").await;
+        harness.open_session("s2").await;
+        harness.call(Method::GET, "/api/review", None).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+        for _ in 0..2 {
+            let (status, body) = harness
+                .call(Method::POST, "/api/overview", Some(overview_request("s1", None)))
+                .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body["overview_mdx"], "<p>Overview</p>");
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        let (_, own) = harness.call(Method::GET, "/api/review?session=s1", None).await;
+        assert_eq!(own["overview"]["status"], "ready");
+        let (_, other) = harness.call(Method::GET, "/api/review?session=s2", None).await;
+        assert_eq!(other["overview"], Value::Null);
+    }
+
+    #[tokio::test]
+    async fn overview_prompts_name_the_repository_range_and_instructions() {
+        let prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let agent: ReviewAgent = Arc::new({
+            let prompts = Arc::clone(&prompts);
+            move |session, prompt, _| {
+                prompts.lock().unwrap().push((session, prompt));
+                Box::pin(async { Ok("```mdx\n## Overview\n```".to_owned()) })
+            }
+        });
+        let harness = Harness::with(repository(), agent);
+        harness.open_session("s1").await;
+        harness.call(Method::GET, "/api/review", None).await;
+
+        let (_, body) = harness
+            .call(
+                Method::POST,
+                "/api/overview",
+                Some(overview_request("s1", Some("Focus on the migration."))),
+            )
+            .await;
+
+        assert_eq!(body["overview_mdx"], "## Overview");
+        let prompts = prompts.lock().unwrap();
+        let (session, prompt) = &prompts[0];
+        assert_eq!(session, "s1");
+        assert!(prompt.contains("concise MDX explainer"));
+        assert!(prompt.contains(&harness.workspace.path().to_string_lossy().into_owned()));
+        assert!(prompt.contains("Focus on the migration."));
+    }
+
+    #[tokio::test]
+    async fn a_running_session_blocks_review_actions() {
+        let harness = Harness::new();
+        harness.open_session("s1").await;
+        harness.call(Method::GET, "/api/review", None).await;
+        harness.terminal.publisher.publish(Publication::Busy {
+            session: "s1".into(),
+            busy: Busy { turns: 1, shells: 0 },
+        });
+        while !harness.hub.any_busy() {
+            tokio::task::yield_now().await;
+        }
+
+        for (route, request) in [
+            ("/api/overview", overview_request("s1", None)),
+            ("/api/ai-review", json!({"session": "s1", "generation": 0, "range": full_range()})),
+            ("/api/question", question_request("s1")),
+        ] {
+            let (status, body) = harness.call(Method::POST, route, Some(request)).await;
+            assert_eq!(status, StatusCode::CONFLICT, "{route}");
+            assert_eq!(body["code"], "turn_running", "{route}");
+        }
+        let (_, review) = harness.call(Method::GET, "/api/review", None).await;
+        assert_eq!(review["turn_running"], true);
+    }
+
+    #[tokio::test]
+    async fn closing_a_session_cancels_its_running_overview() {
+        let started = Arc::new(Notify::new());
+        let agent: ReviewAgent = Arc::new({
+            let started = Arc::clone(&started);
+            move |_, _, shutdown| {
+                let started = Arc::clone(&started);
+                Box::pin(async move {
+                    started.notify_one();
+                    shutdown.cancelled().await;
+                    Err(crate::web::bridge::AuxiliaryError::Cancelled)
+                })
+            }
+        });
+        let harness = Arc::new(Harness::with(repository(), agent));
+        harness.open_session("s1").await;
+        harness.call(Method::GET, "/api/review", None).await;
+        let request = tokio::spawn({
+            let harness = Arc::clone(&harness);
+            async move {
+                harness
+                    .call(Method::POST, "/api/overview", Some(overview_request("s1", None)))
+                    .await
+            }
+        });
+        started.notified().await;
+
+        harness.terminal.publisher.publish(Publication::Closed {
+            session: "s1".into(),
+        });
+
+        let (status, body) = tokio::time::timeout(Duration::from_secs(10), request)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["code"], "operation_cancelled");
+    }
+
+    #[tokio::test]
+    async fn question_threads_belong_to_their_session() {
+        let (agent, _) = counting_agent("It supports the feature.");
+        let harness = Harness::with(repository(), agent);
+        harness.open_session("s1").await;
+        harness.call(Method::GET, "/api/review", None).await;
+
+        let (status, answer) = harness
+            .call(Method::POST, "/api/question", Some(question_request("s1")))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(answer["answer"], "It supports the feature.");
+
+        let list = |session: &str| {
+            harness.call(
+                Method::POST,
+                "/api/questions",
+                Some(json!({"generation": 0, "session": session})),
+            )
+        };
+        let (_, own) = list("s1").await;
+        assert_eq!(own["questions"][0]["thread_id"], "thread-1");
+        assert_eq!(own["questions"][0]["status"], "idle");
+        let (_, other) = list("s2").await;
+        assert_eq!(other["questions"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn questions_must_anchor_to_the_reviewed_patch() {
+        let harness = Harness::new();
+        harness.open_session("s1").await;
+        harness.call(Method::GET, "/api/review", None).await;
+        let mut request = question_request("s1");
+        request["path"] = json!("missing.txt");
+
+        let (status, body) = harness.call(Method::POST, "/api/question", Some(request)).await;
+
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["code"], "invalid_thread");
+    }
+
+    #[tokio::test]
+    async fn compose_renders_the_canonical_markdown_for_anchored_comments() {
+        let harness = Harness::new();
+        harness.call(Method::GET, "/api/review", None).await;
+        let decision = |comments: Value, generation: u64| {
+            json!({
+                "generation": generation,
+                "range": full_range(),
+                "decision": "request_changes",
+                "summary": "Please address this.",
+                "comments": comments,
+            })
+        };
+        let comment = json!({
+            "path": "tracked.txt", "side": "additions", "start_line": 1, "end_line": 1,
+            "body": "Handle the error.\nThis can fail."
+        });
+
+        let (status, body) = harness
+            .call(Method::POST, "/api/review/compose", Some(decision(json!([comment]), 0)))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        let markdown = body["markdown"].as_str().unwrap();
+        assert!(markdown.starts_with("## Review: Changes requested\n\n**Scope:** "));
+        assert!(markdown.contains("\n- `tracked.txt:1` (new)\n  Handle the error.\n  This can fail.\n"));
+
+        let unanchored = json!({
+            "path": "tracked.txt", "side": "additions", "start_line": 99, "end_line": 99, "body": "x"
+        });
+        let (status, body) = harness
+            .call(Method::POST, "/api/review/compose", Some(decision(json!([unanchored]), 0)))
+            .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["code"], "invalid_comment_anchor");
+
+        let (status, body) = harness
+            .call(Method::POST, "/api/review/compose", Some(decision(json!([]), 7)))
+            .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["code"], "stale_snapshot");
+    }
+
+    #[tokio::test]
+    async fn the_workspace_watcher_reports_changes_only_to_connected_streams() {
+        let harness = Harness::new();
+        let mut stream = harness.hub.subscribe().unwrap();
+        let review = crate::web::review::ReviewState::new(
+            harness.workspace.path().to_owned(),
+            harness.hub.clone(),
+            idle_agent(),
+            harness.shutdown.clone(),
+        );
+        tokio::spawn(crate::web::review::watch_workspace(review, harness.shutdown.clone()));
+
+        let mut seen = false;
+        'attempts: for attempt in 0..20 {
+            fs::write(harness.workspace.path().join("working.txt"), format!("edit {attempt}\n")).unwrap();
+            let deadline = tokio::time::Instant::now() + Duration::from_millis(1200);
+            while let Ok(Some(frame)) = tokio::time::timeout_at(deadline, stream.frames.recv()).await {
+                if frame.starts_with("event: workspace\n") {
+                    seen = true;
+                    break 'attempts;
+                }
+            }
+        }
+        harness.shutdown.cancel();
+        assert!(seen, "an edit should produce a workspace event");
+    }
+}
+

@@ -38,14 +38,14 @@ install-dev: build
         exit 1
     fi
 
-    destination="$tact_directory/review/v$version"
+    destination="$tact_directory/web/assets/v$version"
     mkdir -p "$(dirname "$destination")"
 
     if [[ -e "$destination" && ! -L "$destination" ]]; then
-        echo "refusing to replace non-symlink review assets at $destination" >&2
+        echo "refusing to replace non-symlink web assets at $destination" >&2
         exit 1
     fi
 
     rm -f -- "$destination"
     ln -s -- "$review_directory/dist" "$destination"
-    printf 'Installed development review assets at %s\n' "$destination"
+    printf 'Installed development web assets at %s\n' "$destination"

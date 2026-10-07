@@ -77,6 +77,7 @@ zstd.workspace = true
 axum = { workspace = true, features = ["ws"] }
 criterion.workspace = true
 rstest.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
 tower.workspace = true
 
 [build-dependencies]

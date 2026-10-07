@@ -692,3 +692,306 @@ fn diff_active(live: &mut Live, previous: &ActiveSent, frames: &mut Vec<Frame>) 
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::{CLIENT_BUFFER, FLUSH_INTERVAL, Hub, MAX_STREAMS, Subscription};
+    use crate::{
+        app::config::ReasoningEffort,
+        tui::transcript::{LocalEvent, TranscriptRecord, TurnId},
+        web::bridge::{
+            self, Busy, Draft, LoopEnd, Origin, Publication, QueuedPrompt, SessionInfo,
+        },
+    };
+    use serde_json::{Value, json};
+    use std::{sync::Arc, time::Duration};
+    use tokio_util::sync::CancellationToken;
+
+    struct Fixture {
+        terminal: LoopEnd,
+        hub: Hub,
+        _shutdown: CancellationToken,
+    }
+
+    fn fixture() -> Fixture {
+        let (terminal, end) = bridge::bridge();
+        let shutdown = CancellationToken::new();
+        let hub = Hub::spawn(end.publications, shutdown.clone());
+        Fixture {
+            terminal,
+            hub,
+            _shutdown: shutdown,
+        }
+    }
+
+    impl Fixture {
+        fn publish(&self, publication: Publication) {
+            self.terminal.publisher.publish(publication);
+        }
+
+        fn open(&self, id: &str, prompt: Option<&str>) {
+            let records = prompt
+                .map(|text| vec![user_record(1, text)])
+                .unwrap_or_default();
+            self.publish(Publication::Opened {
+                info: SessionInfo {
+                    id: id.to_owned(),
+                    model: "gpt-6.1-sol".to_owned(),
+                    effort: ReasoningEffort::Low,
+                    fast_mode: false,
+                    workspace: "/work".into(),
+                },
+                records,
+                draft: Draft::default(),
+                queue: Vec::new(),
+                busy: Busy::default(),
+            });
+        }
+
+        fn activate(&self, id: &str) {
+            self.publish(Publication::Active {
+                session: id.to_owned(),
+            });
+        }
+    }
+
+    fn user_record(sequence: u64, text: &str) -> Arc<TranscriptRecord> {
+        Arc::new(
+            TranscriptRecord::from_local(
+                sequence,
+                1_000 + sequence,
+                LocalEvent::UserSubmitted {
+                    id: TurnId::new(sequence),
+                    text: text.to_owned(),
+                },
+            )
+            .unwrap(),
+        )
+    }
+
+    /// Lets the hub apply publications and flush them.
+    async fn settle() {
+        tokio::time::sleep(FLUSH_INTERVAL * 3).await;
+    }
+
+    fn drain(subscription: &mut Subscription) -> Vec<(String, Value)> {
+        let mut events = Vec::new();
+        while let Ok(frame) = subscription.frames.try_recv() {
+            let (name, data) = frame
+                .strip_prefix("event: ")
+                .and_then(|frame| frame.split_once("\ndata: "))
+                .expect("frames are SSE events");
+            events.push((name.to_owned(), serde_json::from_str(data.trim_end()).unwrap()));
+        }
+        events
+    }
+
+    fn names(events: &[(String, Value)]) -> Vec<&str> {
+        events.iter().map(|(name, _)| name.as_str()).collect()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn connecting_yields_hello_live_active_and_a_snapshot() {
+        let fixture = fixture();
+        fixture.open("s1", Some("Fix the flaky test\nwith details"));
+        fixture.activate("s1");
+        settle().await;
+
+        let mut subscription = fixture.hub.subscribe().unwrap();
+        let events = drain(&mut subscription);
+
+        assert_eq!(names(&events), ["hello", "live", "active", "snapshot"]);
+        assert_eq!(events[0].1["protocol_version"], 8);
+        let live = &events[1].1;
+        assert_eq!(live["active"], "s1");
+        assert_eq!(live["sessions"][0]["title"], "Fix the flaky test");
+        assert_eq!(live["sessions"][0]["state"], "idle");
+        let snapshot = &events[3].1;
+        assert_eq!(snapshot["session"], "s1");
+        assert_eq!(snapshot["entries"][0]["kind"], "user");
+        assert_eq!(snapshot["entries"][0]["text"], "Fix the flaky test\nwith details");
+        assert_eq!(snapshot["effort"], "low");
+        assert_eq!(snapshot["running"], false);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn changes_are_coalesced_into_one_event_per_frame() {
+        let fixture = fixture();
+        fixture.open("s1", None);
+        fixture.activate("s1");
+        let mut subscription = fixture.hub.subscribe().unwrap();
+        settle().await;
+        drain(&mut subscription);
+
+        for rev in 1..=3 {
+            fixture.publish(Publication::Draft {
+                session: "s1".into(),
+                draft: Draft {
+                    rev,
+                    text: format!("draft {rev}"),
+                },
+                origin: Origin::Web(5),
+            });
+        }
+        fixture.publish(Publication::Record {
+            session: "s1".into(),
+            record: user_record(1, "hello"),
+        });
+        fixture.publish(Publication::Queue {
+            session: "s1".into(),
+            items: vec![QueuedPrompt {
+                id: 4,
+                text: "later".into(),
+                steering: false,
+            }],
+        });
+        fixture.publish(Publication::Settings {
+            session: "s1".into(),
+            model: "gpt-6.1-sol".into(),
+            effort: ReasoningEffort::High,
+            fast_mode: true,
+        });
+        settle().await;
+
+        let events = drain(&mut subscription);
+        let count = |name: &str| events.iter().filter(|(event, _)| event == name).count();
+        assert_eq!(count("draft"), 1);
+        assert_eq!(count("entry"), 1);
+        assert_eq!(count("queue"), 1);
+        assert_eq!(count("settings"), 1);
+        let draft = events.iter().find(|(name, _)| name == "draft").unwrap();
+        assert_eq!(
+            draft.1,
+            json!({"session": "s1", "rev": 3, "text": "draft 3", "origin": "web:5"})
+        );
+        let entry = events.iter().find(|(name, _)| name == "entry").unwrap();
+        assert_eq!(entry.1["entry"]["kind"], "user");
+        let live = events.iter().find(|(name, _)| name == "live").unwrap();
+        assert_eq!(live.1["sessions"][0]["has_draft"], true);
+        assert_eq!(live.1["sessions"][0]["title"], "hello");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_session_that_finishes_in_the_background_is_unread_until_activated() {
+        let fixture = fixture();
+        fixture.open("s1", None);
+        fixture.open("s2", None);
+        fixture.activate("s1");
+        let mut subscription = fixture.hub.subscribe().unwrap();
+        settle().await;
+        drain(&mut subscription);
+
+        let busy = |turns| Publication::Busy {
+            session: "s2".into(),
+            busy: Busy { turns, shells: 0 },
+        };
+        fixture.publish(busy(1));
+        settle().await;
+        let events = drain(&mut subscription);
+        assert_eq!(events[0].1["sessions"][1]["state"], "running");
+        assert_eq!(events[0].1["sessions"][1]["unread"], false);
+        assert!(fixture.hub.any_busy());
+
+        fixture.publish(busy(0));
+        settle().await;
+        let events = drain(&mut subscription);
+        assert_eq!(events[0].1["sessions"][1]["unread"], true);
+        assert!(!fixture.hub.any_busy());
+
+        fixture.activate("s2");
+        settle().await;
+        let events = drain(&mut subscription);
+        assert_eq!(names(&events), ["live", "active", "snapshot"]);
+        assert_eq!(events[0].1["active"], "s2");
+        assert_eq!(events[0].1["sessions"][1]["unread"], false);
+        assert_eq!(events[2].1["session"], "s2");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn closing_a_session_notifies_clients_and_cancels_its_work() {
+        let fixture = fixture();
+        fixture.open("s1", None);
+        fixture.open("s2", None);
+        fixture.activate("s1");
+        settle().await;
+        let token = fixture.hub.closed_token("s2").unwrap();
+        let mut subscription = fixture.hub.subscribe().unwrap();
+        drain(&mut subscription);
+
+        fixture.publish(Publication::Closed {
+            session: "s2".into(),
+        });
+        settle().await;
+
+        let events = drain(&mut subscription);
+        assert_eq!(names(&events), ["closed", "live"]);
+        assert_eq!(events[0].1, json!({"session": "s2"}));
+        assert_eq!(events[1].1["sessions"].as_array().unwrap().len(), 1);
+        assert!(token.is_cancelled());
+        assert!(fixture.hub.closed_token("s2").is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_slow_client_is_dropped_and_resynchronizes_from_a_snapshot() {
+        let fixture = fixture();
+        fixture.open("s1", None);
+        fixture.activate("s1");
+        let mut slow = fixture.hub.subscribe().unwrap();
+        let mut healthy = fixture.hub.subscribe().unwrap();
+        settle().await;
+        drain(&mut healthy);
+
+        for rev in 1..=u64::try_from(CLIENT_BUFFER).unwrap() {
+            fixture.publish(Publication::Draft {
+                session: "s1".into(),
+                draft: Draft {
+                    rev,
+                    text: rev.to_string(),
+                },
+                origin: Origin::Terminal,
+            });
+            settle().await;
+            drain(&mut healthy);
+        }
+
+        assert_eq!(fixture.hub.connected_clients(), 1);
+        let backlog = drain(&mut slow);
+        assert!(backlog.len() <= CLIENT_BUFFER);
+        assert!(slow.frames.recv().await.is_none(), "the stream ends so the browser reconnects");
+
+        let mut reconnected = fixture.hub.subscribe().unwrap();
+        let events = drain(&mut reconnected);
+        assert_eq!(events[3].1["draft"]["rev"], CLIENT_BUFFER);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn concurrent_streams_are_bounded() {
+        let fixture = fixture();
+        let mut streams = (0..MAX_STREAMS)
+            .map(|_| fixture.hub.subscribe().unwrap())
+            .collect::<Vec<_>>();
+
+        assert!(fixture.hub.subscribe().is_err());
+        streams.pop();
+        assert!(fixture.hub.subscribe().is_ok());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn no_events_are_produced_without_clients() {
+        let fixture = fixture();
+        fixture.open("s1", None);
+        fixture.activate("s1");
+        settle().await;
+        fixture.publish(Publication::Record {
+            session: "s1".into(),
+            record: user_record(1, "unseen"),
+        });
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        let mut subscription = fixture.hub.subscribe().unwrap();
+        let events = drain(&mut subscription);
+        assert_eq!(events[3].1["entries"][0]["text"], "unseen");
+        assert_eq!(events.len(), 4);
+    }
+}
+

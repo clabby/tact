@@ -6,9 +6,9 @@ const RELEASE_TEMPLATE: &str = include_str!("../../../.github/RELEASE_TEMPLATE.m
 const CHANGELOG_CONFIG: &str = include_str!("../../../cliff.toml");
 const RELEASE_INSTRUCTIONS: &str = include_str!("../../../RELEASES.md");
 const PACKAGE_MANIFEST: &str = include_str!("../Cargo.toml");
-const REVIEW_BUILD: &str = include_str!("../../../web/app/build.ts");
-const REVIEW_ASSETS: &str = include_str!("../src/web/assets.rs");
-const REVIEW_SERVER: &str = include_str!("../src/web/server.rs");
+const WEB_BUILD: &str = include_str!("../../../web/app/build.ts");
+const WEB_ASSETS: &str = include_str!("../src/web/assets.rs");
+const WEB_WIRE: &str = include_str!("../src/web/wire.rs");
 const JUSTFILE: &str = include_str!("../../../justfile");
 
 fn assert_contains(document: &str, expected: &str) {
@@ -135,37 +135,37 @@ fn ci_tests_builds_and_typechecks_web_assets_with_locked_dependencies() {
 }
 
 #[test]
-fn review_bundle_api_matches_the_rust_asset_validator() {
+fn web_bundle_api_matches_the_rust_asset_validator() {
     assert_contains(
-        REVIEW_ASSETS,
-        "const REVIEW_API_VERSION: u32 = super::server::PROTOCOL_VERSION;",
+        WEB_ASSETS,
+        "const WEB_API_VERSION: u32 = super::wire::PROTOCOL_VERSION;",
     );
-    let rust_api = number_after(REVIEW_SERVER, "const PROTOCOL_VERSION: u32 = ");
-    let bundle_min = number_after(REVIEW_BUILD, "review_api: { min: ");
-    let bundle_max = number_after(REVIEW_BUILD, "max: ");
+    let rust_api = number_after(WEB_WIRE, "const PROTOCOL_VERSION: u32 = ");
+    let bundle_min = number_after(WEB_BUILD, "web_api: { min: ");
+    let bundle_max = number_after(WEB_BUILD, "max: ");
 
     assert!(
         (bundle_min..=bundle_max).contains(&rust_api),
-        "review bundle API {bundle_min}..={bundle_max} excludes Rust API {rust_api}"
+        "web bundle API {bundle_min}..={bundle_max} excludes Rust API {rust_api}"
     );
 }
 
 #[test]
-fn release_packages_and_signs_the_review_bundle() {
+fn release_packages_and_signs_the_web_bundle() {
     let workflow = workflow(RELEASE_WORKFLOW);
-    let review_steps = workflow["jobs"]["web_assets"]["steps"]
+    let web_steps = workflow["jobs"]["web_assets"]["steps"]
         .as_sequence()
         .expect("web_assets should contain steps");
-    let package = review_steps
+    let package = web_steps
         .iter()
-        .find(|step| step["name"] == "Package review assets")
-        .expect("review assets should be packaged")["run"]
+        .find(|step| step["name"] == "Package web assets")
+        .expect("web assets should be packaged")["run"]
         .as_str()
-        .expect("review packaging should be a shell command");
+        .expect("web packaging should be a shell command");
 
     assert_contains(package, "archive=\"tact-web-${GITHUB_REF_NAME}.tar.gz\"");
-    assert_contains(package, "cp -R dist/. review/");
-    assert_contains(package, "tar -czf \"$archive\" review");
+    assert_contains(package, "cp -R dist/. web/");
+    assert_contains(package, "tar -czf \"$archive\" web");
     assert_contains(package, "shasum -a 256 \"$archive\"");
 
     let sign_needs = workflow["jobs"]["sign"]["needs"]
