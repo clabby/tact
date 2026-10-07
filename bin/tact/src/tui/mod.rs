@@ -23,6 +23,10 @@ use crate::{
         extensions::Skill,
         pane::PaneId,
         prompt::Submission,
+        protocol::{
+            AuxiliaryError, AuxiliaryRequest, Command, CommandError, OpenSpec, Origin, Reply,
+            Request,
+        },
         session::{self, RecentPrompt, SessionLock, SessionSummary},
         shell::{self, ShellExecution},
         subagent_updates::{self, ForwardedSubagentUpdate},
@@ -43,10 +47,7 @@ use crate::{
         scheduler::{RenderScheduler, STREAM_FRAME_INTERVAL},
         terminal::TerminalSession,
     },
-    web::bridge::{
-        self, AuxiliaryError, AuxiliaryRequest, Command, CommandError, OpenSpec, Origin, Reply,
-        Request, WebStatus,
-    },
+    web::bridge::{self, WebStatus},
 };
 use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
 use futures_util::StreamExt;
@@ -3610,8 +3611,8 @@ mod tests {
     #[tokio::test]
     async fn web_open_builds_the_agent_and_pane_in_the_selected_workspace() {
         use crate::{
+            core::protocol::OpenSpec,
             tui::components::{AppNode, RootNode},
-            web::bridge::OpenSpec,
         };
         let directory = tempdir().unwrap();
         let selected = tempdir().unwrap();
@@ -3662,8 +3663,8 @@ mod tests {
     #[tokio::test]
     async fn web_open_rejects_a_workspace_that_is_a_file() {
         use crate::{
+            core::protocol::{CommandError, OpenSpec},
             tui::components::{AppNode, RootNode},
-            web::bridge::{CommandError, OpenSpec},
         };
         let directory = tempdir().unwrap();
         let file = directory.path().join("file");

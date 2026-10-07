@@ -26,13 +26,13 @@ use crate::{
         extensions::Skill,
         pane::PaneId,
         prompt::QueueId,
+        protocol::{
+            Busy, Command, CommandError, Draft, DraftImage, Origin, Publication, Publisher,
+            QueuedPrompt, SessionInfo,
+        },
         session::{RecentPrompt, SessionSummary},
         subagent_roster::SubagentRoster,
         transcript::TranscriptRecord,
-    },
-    web::bridge::{
-        Busy, Command, CommandError, Draft, DraftImage, Origin, Publication, Publisher,
-        QueuedPrompt, SessionInfo,
     },
 };
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
@@ -2289,8 +2289,12 @@ mod registry_tests {
             config::{ReasoningEffort, ReasoningMode, Speed},
             theme::Theme,
         },
-        core::{pane::PaneId, prompt::Submission},
-        web::bridge::{self, Command, CommandError, Draft, Origin, Publication, Reply, WebEnd},
+        core::{
+            pane::PaneId,
+            prompt::Submission,
+            protocol::{Command, CommandError, Draft, OpenSpec, Origin, Publication, Reply},
+        },
+        web::bridge::{self, WebEnd},
     };
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use nanocodex::{HarnessModel as Model, Model as CodexModel};
@@ -2817,7 +2821,7 @@ mod registry_tests {
             ] if info.id == "new" && info.effort == ReasoningEffort::High && session == "new"
         ));
         assert_eq!(
-            harness.command(Command::Open(bridge::OpenSpec::New {
+            harness.command(Command::Open(OpenSpec::New {
                 model: None,
                 workspace: None
             })),
@@ -2837,8 +2841,12 @@ mod parity_tests {
             config::{ReasoningEffort, ReasoningMode},
             theme::Theme,
         },
-        core::{context::ContextBudget, pane::PaneId},
-        web::bridge::{self, Command, CommandError, DraftImage, Origin, Publication, WebEnd},
+        core::{
+            context::ContextBudget,
+            pane::PaneId,
+            protocol::{Command, CommandError, DraftImage, Origin, Publication},
+        },
+        web::bridge::{self, WebEnd},
     };
     use nanocodex::{
         ClaudeModel, HarnessModel as Model, Model as CodexModel, Thinking,

@@ -31,6 +31,8 @@ mod bridge;
 mod checkout;
 #[path = "../vcs/diff.rs"]
 mod diff;
+#[path = "../core/protocol.rs"]
+mod protocol;
 #[path = "../search.rs"]
 mod search;
 #[path = "../core/extensions/skills.rs"]
@@ -47,7 +49,9 @@ mod vcs {
 }
 
 mod core {
-    pub(crate) use crate::{context, pane, prompt, session, storage, subagent_roster, transcript};
+    pub(crate) use crate::{
+        context, pane, prompt, protocol, session, storage, subagent_roster, transcript,
+    };
 
     pub(crate) mod extensions {
         pub(crate) use crate::skills::{Skill, SkillMatches};

@@ -17,6 +17,7 @@ mod openai_tests;
 mod orchestration;
 pub(crate) mod pane;
 pub(crate) mod prompt;
+pub(crate) mod protocol;
 pub(crate) mod session;
 pub(crate) mod shell;
 pub(crate) mod storage;

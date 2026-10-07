@@ -1,18 +1,16 @@
 //! JSON shapes of the web protocol (see `docs/web.md`) and the projection of
 //! transcript entries onto them.
 
+use super::hub::now_unix_ms;
 use crate::{
     app::config::{ReasoningEffort, ReasoningMode, Speed},
     core::{
         context::ContextBudget,
+        protocol::{DraftImage, Origin, QueuedPrompt},
         subagent_roster::SubagentRoster,
         transcript::{
             DirectedMessageEntry, EntryKind, ToolEntry, ToolState, TranscriptEntry, TransientStatus,
         },
-    },
-    web::{
-        bridge::{DraftImage, Origin, QueuedPrompt},
-        hub::now_unix_ms,
     },
 };
 use serde::Serialize;

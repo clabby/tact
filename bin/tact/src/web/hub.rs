@@ -10,17 +10,15 @@
 //! is serialized once and shared by every client. A client whose buffer fills up is dropped; it
 //! reconnects and starts from a fresh snapshot, so a slow browser can never stall the hub.
 
-use super::{
-    bridge::{Busy, Draft, Origin, Publication, QueuedPrompt, SessionInfo},
-    wire::{
-        Frame, PROTOCOL_VERSION, SessionSnapshot, SessionSummary, SummaryState, ToolDetail,
-        WireDraft, WireEntry, WireImage, WireQueued, WireStatus, frame, origin_label,
-    },
+use super::wire::{
+    Frame, PROTOCOL_VERSION, SessionSnapshot, SessionSummary, SummaryState, ToolDetail, WireDraft,
+    WireEntry, WireImage, WireQueued, WireStatus, frame, origin_label,
 };
 use crate::{
     app::config::{ReasoningEffort, ReasoningMode, Speed},
     core::{
         context::ContextBudget,
+        protocol::{Busy, Draft, Origin, Publication, QueuedPrompt, SessionInfo},
         subagent_roster::SubagentRoster,
         transcript::{
             EntryKind, SessionStarted, TranscriptEntry, TranscriptModel, TranscriptRecord,
@@ -986,8 +984,11 @@ mod tests {
     use super::{CLIENT_BUFFER, FLUSH_INTERVAL, Hub, MAX_STREAMS, Subscription, user_image};
     use crate::{
         app::config::{ReasoningEffort, ReasoningMode, Speed},
-        core::transcript::{LocalEvent, SessionStarted, TranscriptModel, TranscriptRecord, TurnId},
-        web::bridge::{self, Busy, Draft, LoopEnd, Origin, Publication, QueuedPrompt, SessionInfo},
+        core::{
+            protocol::{Busy, Draft, Origin, Publication, QueuedPrompt, SessionInfo},
+            transcript::{LocalEvent, SessionStarted, TranscriptModel, TranscriptRecord, TurnId},
+        },
+        web::bridge::{self, LoopEnd},
     };
     use nanocodex::agent::events::{AgentEvent, AgentEventKind};
     use serde_json::{Value, json, value::to_raw_value};

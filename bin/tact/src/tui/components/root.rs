@@ -35,11 +35,11 @@ use crate::{
         context::{ContextBudget, ContextDiagnostics},
         extensions::Skill,
         prompt::{QueueId, Submission},
+        protocol::{Busy, CommandError},
         session::{RecentPrompt, SessionSummary},
         subagent_roster::SubagentRoster,
         transcript::TranscriptRecord,
     },
-    web::bridge::{Busy, CommandError},
 };
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,

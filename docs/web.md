@@ -11,7 +11,8 @@ similar) and give Tact its address (`web.public_url`). See "Remote access".
 
 - The TUI event loop owns every live session (a "pane": agent, journal, composer, queue).
 - The web server (`bin/tact/src/web`) holds projections and a command port. It never mutates
-  session state. The two halves talk only through `web::bridge`.
+  session state. The two halves talk only through the channels in `web::bridge`, which carry the
+  typed messages of `core::protocol`.
 - **Shared state** has one writer, the loop, and every change is published to every front-end: the
   active session, the live-session set, each session's draft, queue, settings, transcript, and busy
   state. **View state** (scroll, expanded rows, caret, open pickers, theme, review tabs) is local to
@@ -50,7 +51,7 @@ Static assets are public. Every `/api/*` route except `POST /api/login` requires
   `invalid_request` (400), `turn_running`, `queue_not_empty`, `nothing_running`, `draft_changed`,
   `session_locked`, `unknown_session`, `too_many_sessions`, `not_available_remotely`, `stale`,
   `disabled` (409/404), `failed` (500), plus the review codes in `web/protocol.ts`. Commands
-  and queries share one mapping (`bridge::CommandError::code`).
+  and queries share one mapping (`protocol::CommandError::code`).
 
 ## Reads
 
@@ -144,7 +145,7 @@ Clients must render unknown entry kinds as a muted generic row.
 
 `POST /api/cmd` with `X-Tact: 1` and the body `{ client, cmd: <name>, args: { ...body } }`
 (`client` is a random per-tab integer; commands without a body omit `args`). The body deserializes
-straight into `bridge::Command`; there is no per-command route. Success is 200 `{}`
+straight into `protocol::Command`; there is no per-command route. Success is 200 `{}`
 (`open_session` returns `{ session }`). The command is acknowledged only after the loop applied it.
 `open_session` takes its variant as `args`, for example `{ cmd: "open_session", args: { new: {} } }`.
 
@@ -167,14 +168,14 @@ Opening or activating a session from either window makes it the shared active se
 Everything the terminal can do is reachable from the web through three generic paths, so a new
 feature is an enum variant plus its loop-side handler and never a new route:
 
-- **Commands** (`bridge::Command`, `POST /api/cmd`) change state and obey the same preconditions
+- **Commands** (`protocol::Command`, `POST /api/cmd`) change state and obey the same preconditions
   as the keypress, evaluated by the loop on the target pane.
-- **Queries** (`bridge::Query`, `POST /api/query`) read data on demand. The body is
+- **Queries** (`protocol::Query`, `POST /api/query`) read data on demand. The body is
   `{ query: <name>, args?: { ... } }` with `X-Tact: 1`; the reply is the bare payload below.
   The server forwards every query to the loop, which answers from state it owns or by calling,
   off the loop thread, the same UI-agnostic function the terminal picker uses. Refusals use the
   common error codes.
-- **Publications** (`bridge::Publication`, stream events) carry state that changes over time.
+- **Publications** (`protocol::Publication`, stream events) carry state that changes over time.
 
 Data is computed once, in modules both front-ends call: `search` (fuzzy ranking, workspace
 paths), `core::extensions::SkillMatches`, `core::session` (history pages, recent prompts),

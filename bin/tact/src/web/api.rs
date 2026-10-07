@@ -3,15 +3,15 @@
 
 use super::{
     assets::AssetStore,
-    bridge::{
-        Command, CommandEnvelope, CommandError, OpenSpec, Query, QueryReply, QueryRequest, Request,
-    },
     hub::Hub,
     registry::{self, InstanceRecord},
     tailscale::Tailnet,
     token::MachineToken,
     wire::PROTOCOL_VERSION,
     workspaces::{WorkspaceError, Workspaces},
+};
+use crate::core::protocol::{
+    Command, CommandEnvelope, CommandError, OpenSpec, Query, QueryReply, QueryRequest, Request,
 };
 use axum::{
     Json, Router,
@@ -680,12 +680,12 @@ pub(super) fn secure(response: &mut Response<Body>) {
 mod tests {
     use super::{
         super::{
-            bridge::{self, Command, CommandError, Publication, Query, Reply},
             tailscale::Tailnet,
             testing::{self, Harness},
         },
         PublicOrigin,
     };
+    use crate::core::protocol::{Command, CommandError, OpenSpec, Publication, Query, Reply};
     use axum::{
         body::Body,
         http::{Method, Request, StatusCode, header},
@@ -1017,7 +1017,7 @@ mod tests {
         harness.open_session("s1").await;
         harness.terminal.publisher.publish(Publication::Busy {
             session: "s1".into(),
-            busy: crate::web::bridge::Busy {
+            busy: crate::core::protocol::Busy {
                 turns: 1,
                 shells: 0,
             },
@@ -1193,7 +1193,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert!(matches!(
             request.command,
-            Command::Open(bridge::OpenSpec::New { workspace: Some(ref path), .. })
+            Command::Open(OpenSpec::New { workspace: Some(ref path), .. })
                 if std::path::Path::new(path) == worktree
         ));
     }

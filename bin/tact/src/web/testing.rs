@@ -3,13 +3,18 @@
 use super::{
     api::{self, AppState, PublicOrigin},
     assets::AssetStore,
-    bridge::{self, Busy, Draft, LoopEnd, Publication, SessionInfo},
+    bridge::{self, LoopEnd},
     hub::Hub,
     review::{self, ReviewAgent, ReviewRegistry},
     token::MachineToken,
     workspaces::Workspaces,
 };
-use crate::app::config::{ReasoningEffort, ReasoningMode, Speed};
+use crate::{
+    app::config::{ReasoningEffort, ReasoningMode, Speed},
+    core::protocol::{
+        Busy, CommandError, Draft, Publication, Reply, Request as LoopRequest, SessionInfo,
+    },
+};
 use axum::{
     Router,
     body::Body,
@@ -128,8 +133,8 @@ impl Harness {
     pub(super) async fn command(
         &mut self,
         body: serde_json::Value,
-        answer: Result<bridge::Reply, bridge::CommandError>,
-    ) -> (StatusCode, serde_json::Value, bridge::Request) {
+        answer: Result<Reply, CommandError>,
+    ) -> (StatusCode, serde_json::Value, LoopRequest) {
         let request = Request::builder()
             .method(Method::POST)
             .uri("/api/cmd")

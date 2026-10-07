@@ -17,7 +17,10 @@ mod token;
 mod wire;
 mod workspaces;
 
-use crate::app::config::Config;
+use crate::{
+    app::config::Config,
+    core::protocol::{AuxiliaryRequest, QueryRequest, Request},
+};
 use api::{AppState, PublicOrigin};
 use assets::AssetStore;
 pub(crate) use assets::{Located, WebAssets};
@@ -149,9 +152,9 @@ impl Settings {
 
 /// The command, query, and auxiliary-work senders of the bridge.
 struct Channels {
-    requests: UnboundedSender<bridge::Request>,
-    queries: UnboundedSender<bridge::QueryRequest>,
-    auxiliary: UnboundedSender<bridge::AuxiliaryRequest>,
+    requests: UnboundedSender<Request>,
+    queries: UnboundedSender<QueryRequest>,
+    auxiliary: UnboundedSender<AuxiliaryRequest>,
 }
 
 struct Server {

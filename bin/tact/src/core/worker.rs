@@ -1,18 +1,16 @@
 //! Independently scheduled Nanocodex turn worker.
 
-use crate::{
-    app::config::{ReasoningEffort, Speed},
-    core::{
-        IMAGE_RENDERING_INSTRUCTIONS, MEMORY_REVIEW_CHECKPOINT,
-        context::ContextBudget,
-        pane::PaneId,
-        prompt::{QueueId, Submission},
-        session::AgentSnapshot,
-        set_speed,
-        transcript::{TerminalStopReason, TurnId},
-    },
-    web::bridge::AuxiliaryError,
+use super::{
+    IMAGE_RENDERING_INSTRUCTIONS, MEMORY_REVIEW_CHECKPOINT,
+    context::ContextBudget,
+    pane::PaneId,
+    prompt::{QueueId, Submission},
+    protocol::AuxiliaryError,
+    session::AgentSnapshot,
+    set_speed,
+    transcript::{TerminalStopReason, TurnId},
 };
+use crate::app::config::{ReasoningEffort, Speed};
 use futures_util::future::join_all;
 use nanocodex::{
     AgentEvents, HarnessModel, Nanocodex, NanocodexError, TurnControl,

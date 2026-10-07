@@ -8,14 +8,16 @@
 
 use super::{
     api::secure_json,
-    bridge::{AuxiliaryError, AuxiliaryRequest},
     hub::Hub,
     wire::PROTOCOL_VERSION,
     workspaces::{Target, WorkspaceError, Workspaces},
 };
-use crate::vcs::{
-    checkout::CheckoutKind,
-    diff::{self, ReviewRange},
+use crate::{
+    core::protocol::{AuxiliaryError, AuxiliaryRequest},
+    vcs::{
+        checkout::CheckoutKind,
+        diff::{self, ReviewRange},
+    },
 };
 use axum::{
     Json, Router,
@@ -2340,11 +2342,13 @@ enum ReviewError {
 
 #[cfg(test)]
 mod tests {
-    use crate::web::{
-        bridge::{Busy, Publication},
-        review::ReviewAgent,
-        testing::{Harness, idle_agent, repository},
-        wire::PROTOCOL_VERSION,
+    use crate::{
+        core::protocol::{Busy, Publication},
+        web::{
+            review::ReviewAgent,
+            testing::{Harness, idle_agent, repository},
+            wire::PROTOCOL_VERSION,
+        },
     };
     use axum::http::{Method, StatusCode};
     use serde_json::{Value, json};
@@ -2583,7 +2587,7 @@ mod tests {
                 Box::pin(async move {
                     started.notify_one();
                     shutdown.cancelled().await;
-                    Err(crate::web::bridge::AuxiliaryError::Cancelled)
+                    Err(crate::core::protocol::AuxiliaryError::Cancelled)
                 })
             }
         });
