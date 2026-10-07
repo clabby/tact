@@ -9,11 +9,13 @@
 use super::{
     api::secure_json,
     bridge::{AuxiliaryError, AuxiliaryRequest},
-    checkout::CheckoutKind,
-    diff::{self, ReviewRange},
     hub::Hub,
     wire::PROTOCOL_VERSION,
     workspaces::{Target, WorkspaceError, Workspaces},
+};
+use crate::vcs::{
+    checkout::CheckoutKind,
+    diff::{self, ReviewRange},
 };
 use axum::{
     Json, Router,

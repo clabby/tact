@@ -32,7 +32,7 @@ pub(crate) async fn family_paths(directory: &Path) -> Vec<PathBuf> {
 }
 
 /// A directory holding one working copy of a repository.
-pub(super) struct Checkout {
+pub(crate) struct Checkout {
     work_tree: PathBuf,
     view: GitView,
 }
@@ -56,7 +56,7 @@ impl Checkout {
     ///
     /// The nearest ancestor with a `.git` or `.jj` decides. A `.git` there means git can be used
     /// directly, including a colocated jj repository; a lone `.jj` means a jj workspace.
-    pub(super) async fn detect(path: &Path) -> Result<Self, DiffError> {
+    pub(crate) async fn detect(path: &Path) -> Result<Self, DiffError> {
         let marker = path.ancestors().find_map(|directory| {
             let git = directory.join(".git").exists();
             let jj = directory.join(".jj").exists();
@@ -121,12 +121,12 @@ impl Checkout {
         })
     }
 
-    pub(super) fn work_tree(&self) -> &Path {
+    pub(crate) fn work_tree(&self) -> &Path {
         &self.work_tree
     }
 
     /// The commit the working copy is based on: git's `HEAD`, or a jj workspace's parent commit.
-    pub(super) fn head(&self) -> &str {
+    pub(crate) fn head(&self) -> &str {
         match &self.view {
             GitView::Ambient => "HEAD",
             GitView::Jj { head, .. } => head,
@@ -134,7 +134,7 @@ impl Checkout {
     }
 
     /// A git command that runs against this checkout.
-    pub(super) fn git(&self) -> Command {
+    pub(crate) fn git(&self) -> Command {
         let mut command = git_at(&self.work_tree);
         if let GitView::Jj { git_dir, index, .. } = &self.view {
             command
@@ -147,7 +147,7 @@ impl Checkout {
 
     /// Whether a path belongs to the version control system's own bookkeeping rather than the
     /// working copy.
-    pub(super) fn is_bookkeeping(path: &str) -> bool {
+    pub(crate) fn is_bookkeeping(path: &str) -> bool {
         [".jj", ".git"]
             .iter()
             .any(|name| path == *name || path.starts_with(&format!("{name}/")))
@@ -155,7 +155,7 @@ impl Checkout {
 
     /// How many files differ from the head commit, counting files git does not track yet. `None`
     /// when git cannot say.
-    pub(super) async fn changed_files(&self) -> Option<usize> {
+    pub(crate) async fn changed_files(&self) -> Option<usize> {
         let changed = self
             .git()
             .args(["diff", "--name-only", "-z", self.head(), "--"])
@@ -183,7 +183,7 @@ impl Checkout {
     }
 
     /// Every checkout of the same repository, this one included, main checkout first.
-    pub(super) async fn family(&self) -> Vec<FamilyMember> {
+    pub(crate) async fn family(&self) -> Vec<FamilyMember> {
         let mut members = Vec::new();
         if self.work_tree.join(".jj").exists() || matches!(self.view, GitView::Jj { .. }) {
             members.extend(jj_workspaces(&self.work_tree).await);
@@ -215,18 +215,18 @@ impl Checkout {
 
 /// One checkout of a repository, as listed to the user.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub(super) struct FamilyMember {
-    pub(super) path: PathBuf,
+pub(crate) struct FamilyMember {
+    pub(crate) path: PathBuf,
     /// The branch, or the jj workspace name.
-    pub(super) label: String,
-    pub(super) kind: CheckoutKind,
+    pub(crate) label: String,
+    pub(crate) kind: CheckoutKind,
     /// The directory no longer exists, for example a worktree that was deleted without pruning.
-    pub(super) missing: bool,
+    pub(crate) missing: bool,
 }
 
 impl FamilyMember {
     /// A checkout known only by its directory, such as one whose repository could not be read.
-    pub(super) fn standalone(path: &Path) -> Self {
+    pub(crate) fn standalone(path: &Path) -> Self {
         Self {
             path: path.to_owned(),
             label: path
@@ -240,7 +240,7 @@ impl FamilyMember {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
-pub(super) enum CheckoutKind {
+pub(crate) enum CheckoutKind {
     Git,
     Jj,
 }
@@ -377,7 +377,7 @@ mod tests {
         );
     }
     use super::Checkout;
-    use crate::web::diff::{current_version, load};
+    use crate::vcs::diff::{current_version, load};
     use std::{fs, path::Path, process::Command};
     use tempfile::TempDir;
 

@@ -25,9 +25,9 @@ fn install_tls_provider() {
 
 #[path = "../web/bridge.rs"]
 mod bridge;
-#[path = "../web/checkout.rs"]
+#[path = "../vcs/checkout.rs"]
 mod checkout;
-#[path = "../web/diff.rs"]
+#[path = "../vcs/diff.rs"]
 mod diff;
 #[path = "../search.rs"]
 mod search;
@@ -38,7 +38,10 @@ mod subagent_roster;
 #[path = "../web/tailscale.rs"]
 mod tailscale;
 mod web {
-    pub(crate) use crate::{bridge, checkout, diff, tailscale};
+    pub(crate) use crate::{bridge, tailscale};
+}
+mod vcs {
+    pub(crate) use crate::{checkout, diff};
 }
 
 mod core {

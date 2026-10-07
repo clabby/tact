@@ -1,3 +1,9 @@
+//! Changes in a checkout, captured for review.
+//!
+//! A review context lists the selectable ranges from trunk through each commit to the working
+//! tree. A range resolves to one full-context patch, and a content version detects when the
+//! checkout changed underneath an open review.
+
 use super::checkout::Checkout;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -34,16 +40,16 @@ pub(crate) struct ReviewRange {
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub(super) struct ReviewTarget {
-    pub(super) index: usize,
-    pub(super) kind: ReviewTargetKind,
-    pub(super) short_id: String,
-    pub(super) title: String,
+pub(crate) struct ReviewTarget {
+    pub(crate) index: usize,
+    pub(crate) kind: ReviewTargetKind,
+    pub(crate) short_id: String,
+    pub(crate) title: String,
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(super) enum ReviewTargetKind {
+pub(crate) enum ReviewTargetKind {
     Trunk,
     Commit,
     WorkingTree,
@@ -56,7 +62,7 @@ struct RangePoint {
 }
 
 #[derive(Clone)]
-pub(super) struct ReviewContext {
+pub(crate) struct ReviewContext {
     root: Arc<Checkout>,
     repository: String,
     trunk: Trunk,
@@ -65,45 +71,45 @@ pub(super) struct ReviewContext {
 }
 
 #[derive(Clone, Serialize)]
-pub(super) struct DiffSnapshot {
-    pub(super) patch: String,
+pub(crate) struct DiffSnapshot {
+    pub(crate) patch: String,
     #[serde(skip)]
-    pub(super) overview: OverviewContext,
-    pub(super) repository: String,
-    pub(super) scope: String,
-    pub(super) base: String,
+    pub(crate) overview: OverviewContext,
+    pub(crate) repository: String,
+    pub(crate) scope: String,
+    pub(crate) base: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct OverviewContext {
-    pub(super) repository: PathBuf,
-    pub(super) range: OverviewRange,
+pub(crate) struct OverviewContext {
+    pub(crate) repository: PathBuf,
+    pub(crate) range: OverviewRange,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) enum OverviewRange {
+pub(crate) enum OverviewRange {
     Commits { base: String, head: String },
     WorkingTree { base: String },
 }
 
 #[derive(Clone, Copy)]
-pub(super) enum PatchSide {
+pub(crate) enum PatchSide {
     Additions,
     Deletions,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct WorkspaceVersion([u8; 32]);
+pub(crate) struct WorkspaceVersion([u8; 32]);
 
 impl WorkspaceVersion {
     /// An opaque, comparable rendering for clients.
-    pub(super) fn to_hex(&self) -> String {
+    pub(crate) fn to_hex(&self) -> String {
         self.0.iter().map(|byte| format!("{byte:02x}")).collect()
     }
 }
 
 impl ReviewContext {
-    pub(super) async fn load(workspace: &Path) -> Result<Self, DiffError> {
+    pub(crate) async fn load(workspace: &Path) -> Result<Self, DiffError> {
         let root = Checkout::detect(workspace).await?;
         let trunk = resolve_trunk(&root).await?;
         let version = workspace_version_at(&root, &trunk).await?;
@@ -123,22 +129,22 @@ impl ReviewContext {
         })
     }
 
-    pub(super) fn repository(&self) -> &str {
+    pub(crate) fn repository(&self) -> &str {
         &self.repository
     }
 
-    pub(super) fn trunk_name(&self) -> &str {
+    pub(crate) fn trunk_name(&self) -> &str {
         &self.trunk.name
     }
 
-    pub(super) fn range_targets(&self) -> Vec<ReviewTarget> {
+    pub(crate) fn range_targets(&self) -> Vec<ReviewTarget> {
         self.range_points
             .iter()
             .map(|point| point.target.clone())
             .collect()
     }
 
-    pub(super) fn default_range(&self) -> ReviewRange {
+    pub(crate) fn default_range(&self) -> ReviewRange {
         self.full_range()
     }
 
@@ -147,14 +153,14 @@ impl ReviewContext {
         ReviewRange { from: to - 1, to }
     }
 
-    pub(super) fn full_range(&self) -> ReviewRange {
+    pub(crate) fn full_range(&self) -> ReviewRange {
         ReviewRange {
             from: 0,
             to: self.range_points.len() - 1,
         }
     }
 
-    pub(super) fn range_label(&self, range: ReviewRange) -> Result<String, DiffError> {
+    pub(crate) fn range_label(&self, range: ReviewRange) -> Result<String, DiffError> {
         self.validate_range(range)?;
         if range == self.uncommitted_range() {
             return Ok("Uncommitted changes".to_owned());
@@ -167,7 +173,7 @@ impl ReviewContext {
         Ok(format!("{} → {}", target_label(from), target_label(to)))
     }
 
-    pub(super) async fn collect(&self, range: ReviewRange) -> Result<DiffSnapshot, DiffError> {
+    pub(crate) async fn collect(&self, range: ReviewRange) -> Result<DiffSnapshot, DiffError> {
         self.validate_range(range)?;
         let base = self.range_points[range.from]
             .revision
@@ -193,7 +199,7 @@ impl ReviewContext {
         })
     }
 
-    pub(super) fn version(&self) -> WorkspaceVersion {
+    pub(crate) fn version(&self) -> WorkspaceVersion {
         self.version.clone()
     }
 
@@ -236,7 +242,7 @@ impl ReviewContext {
 }
 
 impl DiffSnapshot {
-    pub(super) fn contains_anchor(
+    pub(crate) fn contains_anchor(
         &self,
         path: &str,
         side: PatchSide,
@@ -372,11 +378,11 @@ fn target_label(target: &ReviewTarget) -> &str {
     }
 }
 
-pub(super) async fn load(workspace: &Path) -> Result<ReviewContext, DiffError> {
+pub(crate) async fn load(workspace: &Path) -> Result<ReviewContext, DiffError> {
     ReviewContext::load(workspace).await
 }
 
-pub(super) async fn current_version(workspace: &Path) -> Result<WorkspaceVersion, DiffError> {
+pub(crate) async fn current_version(workspace: &Path) -> Result<WorkspaceVersion, DiffError> {
     let root = Checkout::detect(workspace).await?;
     let trunk = resolve_trunk(&root).await?;
     workspace_version_at(&root, &trunk).await
