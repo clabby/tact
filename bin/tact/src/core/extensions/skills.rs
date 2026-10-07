@@ -738,11 +738,29 @@ fn json_string(value: &str) -> String {
 mod tests {
     use super::{
         CATALOG_END_MARKER, CATALOG_START_MARKER, DiagnosticCollector, MAX_DIAGNOSTICS,
-        MAX_RENDERED_BYTES, SkillCatalog, SkillDiagnostic, contains_catalog,
+        MAX_RENDERED_BYTES, Skill, SkillCatalog, SkillDiagnostic, SkillMatches, contains_catalog,
     };
     use crate::app::config::SkillsConfig;
     use std::{fs, path::Path};
     use tempfile::tempdir;
+
+    #[test]
+    fn skill_matches_rank_by_name_and_serialize_for_the_web() {
+        let skills = [
+            Skill::new("review-agent", "Review a change"),
+            Skill::new("jujutsu", "Version control"),
+            Skill::new("autofix", "Fix a branch"),
+        ];
+        let matches = SkillMatches::new(&skills, "u");
+        assert_eq!(
+            matches.skills.iter().map(Skill::name).collect::<Vec<_>>(),
+            ["jujutsu", "autofix"]
+        );
+        assert_eq!(
+            serde_json::to_value(SkillMatches::new(&skills, "auto")).unwrap(),
+            serde_json::json!({ "skills": [{ "name": "autofix", "description": "Fix a branch" }] })
+        );
+    }
 
     #[test]
     fn disabled_catalog_does_not_scan_configured_roots() {

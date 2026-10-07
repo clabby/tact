@@ -648,8 +648,9 @@ pub(crate) fn format_age(started_at_unix_ms: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        SessionError, TerminalStopReason, encode_checkpoint, load_checkpoint, load_transcript,
-        model, save_checkpoint,
+        HistoryPage, RecentPrompt, RecentPromptScope, RecentPrompts, SessionError, SessionSummary,
+        TerminalStopReason, encode_checkpoint, load_checkpoint, load_transcript, model,
+        save_checkpoint,
     };
     use crate::{
         app::config::{ReasoningEffort, ReasoningMode, Speed},
@@ -663,8 +664,71 @@ mod tests {
     };
     use rusqlite::Connection;
     use serde_json::{Value, json};
-    use std::{sync::Arc, time::Duration};
+    use std::{path::PathBuf, sync::Arc, time::Duration};
     use tempfile::tempdir;
+
+    fn summary(index: usize, preview: &str) -> SessionSummary {
+        SessionSummary {
+            session_id: format!("session-{index}"),
+            started_at_unix_ms: 0,
+            model: "gpt-6.1-sol".to_owned(),
+            effort: ReasoningEffort::Medium,
+            reasoning_mode: ReasoningMode::Standard,
+            workspace: PathBuf::from("/work"),
+            preview: preview.to_owned(),
+        }
+    }
+
+    #[test]
+    fn history_pages_filter_like_the_resume_picker() {
+        let sessions = (0..120)
+            .map(|index| summary(index, if index % 2 == 0 { "Fix Parser" } else { "docs" }))
+            .collect::<Vec<_>>();
+
+        let first = HistoryPage::new(sessions.clone(), "PARSER", None).unwrap();
+        assert_eq!(first.sessions.len(), 50);
+        assert_eq!(first.sessions[1].session_id, "session-2");
+        let cursor = first.next_cursor.unwrap();
+        let second = HistoryPage::new(sessions.clone(), "parser", Some(&cursor)).unwrap();
+        assert_eq!(second.sessions.len(), 10);
+        assert_eq!(second.sessions[0].session_id, "session-100");
+        assert_eq!(second.next_cursor, None);
+
+        let by_id = HistoryPage::new(sessions.clone(), "session-7", None).unwrap();
+        assert_eq!(by_id.sessions.len(), 11, "session-7 and session-70..79");
+        assert!(HistoryPage::new(sessions, "", Some("not a cursor")).is_err());
+    }
+
+    #[test]
+    fn recent_prompts_rank_within_the_requested_scope() {
+        let prompt = |text: &str, session_id: &str| RecentPrompt {
+            text: text.to_owned(),
+            recorded_at_unix_ms: 0,
+            session_id: session_id.to_owned(),
+            workspace: PathBuf::from("/work"),
+        };
+        let prompts = vec![
+            prompt("deploy the review app", "other"),
+            prompt("review the diff", "current"),
+            prompt("write docs", "current"),
+        ];
+        let texts = |scope, query| {
+            RecentPrompts::new(prompts.clone(), "current", scope, query)
+                .prompts
+                .into_iter()
+                .map(|prompt| prompt.text)
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            texts(RecentPromptScope::Global, "review"),
+            ["review the diff", "deploy the review app"]
+        );
+        assert_eq!(
+            texts(RecentPromptScope::CurrentSession, ""),
+            ["review the diff", "write docs"]
+        );
+    }
 
     fn snapshot(lineage: &str) -> SessionSnapshot {
         serde_json::from_value(json!({
