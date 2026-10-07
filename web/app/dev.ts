@@ -1,20 +1,22 @@
+// Development server: serves a live-rebuilt bundle against the in-memory MockTact, so the whole
+// web app can be developed and screenshotted without a Rust build. Type a line into this process's
+// stdin to simulate typing it in the terminal's composer.
+
 import { watch } from "node:fs";
 import { mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
-import { overviewFrameDocument } from "./overview";
 import { reviewEntrypoints, reviewScriptAssets } from "./build-config";
 import { overviewFixtures, reviewBootstrap, reviewFixtures } from "./dev-fixture";
+import { MockRefusal, MockTact } from "./dev-mock";
+import { overviewFrameDocument } from "./overview";
+import type { QuestionRequest, ReviewDecision, ReviewPage, StoredOverview, StoredQuestionThread } from "./protocol";
 import { rangeKey, type ReviewRange } from "./range-selection";
-import type {
-  QuestionRequest,
-  ReviewPage,
-  StoredOverview,
-  StoredQuestionThread,
-} from "./protocol";
+import type { CommandName, QueryName } from "./wire";
 
+const token = process.env.TACT_DEV_TOKEN ?? "dev";
+const port = Number(process.env.PORT ?? 4173);
 const outputDirectory = join(import.meta.dir, ".dev");
-await rm(outputDirectory, { recursive: true, force: true });
-await mkdir(outputDirectory, { recursive: true });
+const staticFiles = new Set(["index.html", "overview-frame.html", "app.css", "favicon.svg", ...reviewScriptAssets]);
 
 async function buildAssets() {
   const build = await Bun.build({
@@ -29,138 +31,218 @@ async function buildAssets() {
     return false;
   }
   await Bun.write(join(outputDirectory, "overview-frame.html"), overviewFrameDocument());
+  await Bun.write(join(outputDirectory, "favicon.svg"), Bun.file(join(import.meta.dir, "..", "..", "assets", "favicon.svg")));
   const html = await Bun.file(join(import.meta.dir, "index.html")).text();
   await Bun.write(join(outputDirectory, "index.html"), html.replace(
     "</body>",
-    '<script>const socket=new WebSocket(`ws://${location.host}/__reload`);socket.onmessage=()=>location.reload()</script></body>',
+    "<script>new WebSocket(`ws://${location.host}/__reload`).onmessage=()=>location.reload()</script></body>",
   ));
   return true;
 }
 
+await rm(outputDirectory, { recursive: true, force: true });
+await mkdir(outputDirectory, { recursive: true });
 if (!await buildAssets()) process.exit(1);
 
-let workspaceChanged = true;
-const questionCancellations = new Map<string, () => void>();
-const devQuestions: StoredQuestionThread[] = [];
-let devPage: ReviewPage = reviewBootstrap.page;
-let devOverview: StoredOverview | null = null;
+const tact = new MockTact();
+tact.startAmbientWork();
+setInterval(() => tact.touchWorkspace(), 20_000);
 
-const server = Bun.serve({
-  port: Number(process.env.PORT ?? 4173),
-  async fetch(request) {
-    const url = new URL(request.url);
-    if (request.method === "GET" && url.pathname === "/api/review") {
+const review = {
+  page: reviewBootstrap.page as ReviewPage,
+  overview: null as StoredOverview | null,
+  questions: [] as StoredQuestionThread[],
+  cancellations: new Map<string, () => void>(),
+};
+
+const encoder = new TextEncoder();
+
+function stream(request: Request) {
+  let close = () => {};
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      const send = (name: string, data: unknown) => {
+        controller.enqueue(encoder.encode(`event: ${name}\ndata: ${JSON.stringify(data)}\n\n`));
+      };
+      for (const { name, data } of tact.greeting()) send(name, data);
+      const unsubscribe = tact.subscribe(send);
+      const keepAlive = setInterval(() => controller.enqueue(encoder.encode(": keep-alive\n\n")), 15_000);
+      close = () => {
+        unsubscribe();
+        clearInterval(keepAlive);
+      };
+      request.signal.addEventListener("abort", close);
+    },
+    cancel() {
+      close();
+    },
+  });
+  return new Response(body, {
+    headers: { "content-type": "text/event-stream", "cache-control": "no-store" },
+  });
+}
+
+const failure = (code: string, message: string, status: number) => Response.json({ code, message }, { status });
+
+function authorized(request: Request) {
+  return request.headers.get("cookie")?.split(/;\s*/).includes(`tact=${token}`) ?? false;
+}
+
+async function api(request: Request, url: URL): Promise<Response> {
+  const path = url.pathname.slice("/api/".length);
+  const post = request.method === "POST";
+  if (post && request.headers.get("x-tact") !== "1") {
+    return failure("invalid_request", "Missing the X-Tact header.", 400);
+  }
+  if (post && path === "login") {
+    const body = await request.json() as { token?: string };
+    if (body.token !== token) return failure("unauthorized", "That link is no longer valid.", 401);
+    return new Response(null, {
+      status: 204,
+      headers: { "set-cookie": `tact=${token}; HttpOnly; SameSite=Strict; Path=/` },
+    });
+  }
+  if (!authorized(request)) return failure("unauthorized", "Open the login link printed by Tact.", 401);
+
+  if (!post) {
+    if (path === "stream") return stream(request);
+    if (path === "instance") return Response.json(tact.instance());
+    if (path === "instances") {
+      const current = tact.instance();
       return Response.json({
-        ...reviewBootstrap,
-        page: devPage,
-        overview: devOverview,
-        questions: devQuestions,
+        instances: [
+          { pid: process.pid, port, workspace: current.workspace, live: current.live, running: current.running, current: true },
+          { pid: process.pid + 1, port: port + 1, workspace: "/Users/dev/src/commonware", live: 2, running: 1, current: false },
+        ],
       });
     }
-    if (request.method === "GET" && url.pathname === "/api/status") {
-      return Response.json({ generation: 1, changed: workspaceChanged, turn_running: false });
+    const agentEntries = path.match(/^sessions\/([^/]+)\/agents\/(\d+)\/entries$/);
+    if (agentEntries) return Response.json(tact.agentTranscript(decodeURIComponent(agentEntries[1]!), Number(agentEntries[2])));
+    const detail = path.match(/^sessions\/([^/]+)(?:\/agents\/\d+)?\/entries\/(\d+)$/);
+    if (detail) {
+      await Bun.sleep(180);
+      return Response.json(tact.toolDetail(decodeURIComponent(detail[1]!), Number(detail[2])));
     }
-    if (request.method === "POST" && url.pathname === "/api/refresh") {
-      workspaceChanged = false;
-      devPage = reviewBootstrap.page;
-      devOverview = null;
-      return Response.json({ ...reviewBootstrap, page: devPage, overview: devOverview });
-    }
-    if (request.method === "POST" && url.pathname === "/api/range") {
-      const body = await request.json() as { generation?: number; range?: ReviewRange };
-      const key = body.range ? rangeKey(body.range) : "";
-      const fixture = reviewFixtures[key as keyof typeof reviewFixtures];
-      if (!fixture) return Response.json({ error: "Unknown review range" }, { status: 422 });
+    if (path === "review") return Response.json(reviewSession());
+    return failure("invalid_request", `Unknown endpoint ${path}.`, 404);
+  }
+
+  const body = await request.json() as Record<string, unknown>;
+  if (path === "cmd") {
+    await Bun.sleep(25);
+    return Response.json(tact.command(body.cmd as CommandName, body.args, body.client as number));
+  }
+  if (path === "query") {
+    await Bun.sleep(40);
+    return Response.json(tact.query(body.query as QueryName, body.args));
+  }
+  return reviewCommand(path, body);
+}
+
+function reviewSession() {
+  return {
+    ...reviewBootstrap,
+    page: review.page,
+    overview: review.overview,
+    questions: review.questions,
+    turn_running: tact.instance().running > 0,
+  };
+}
+
+async function reviewCommand(path: string, body: Record<string, unknown>): Promise<Response> {
+  switch (path) {
+    case "refresh":
+      review.page = reviewBootstrap.page;
+      review.overview = null;
+      return Response.json(reviewSession());
+    case "range": {
+      const fixture = reviewFixtures[rangeKey(body.range as ReviewRange) as keyof typeof reviewFixtures];
+      if (!fixture) return failure("invalid_range", "Unknown review range.", 422);
       await Bun.sleep(350);
-      devPage = fixture;
+      review.page = fixture;
       return Response.json(fixture);
     }
-    if (request.method === "POST" && url.pathname === "/api/overview") {
-      const body = await request.json() as { generation?: number; range?: ReviewRange };
-      const key = body.range ? rangeKey(body.range) : "";
-      const overview = overviewFixtures[key as keyof typeof overviewFixtures];
-      if (!overview) return Response.json({ error: "Unknown review range" }, { status: 422 });
-      devOverview = { selected_range: body.range!, status: "generating" };
+    case "overview": {
+      const range = body.range as ReviewRange;
+      const overview = overviewFixtures[rangeKey(range) as keyof typeof overviewFixtures];
+      if (!overview) return failure("invalid_range", "Unknown review range.", 422);
+      review.overview = { selected_range: range, status: "generating" };
       await Bun.sleep(900);
-      devOverview = {
-        selected_range: body.range!,
-        status: "ready",
-        overview_mdx: overview,
-      };
-      return Response.json({ generation: body.generation, selected_range: body.range, overview_mdx: overview });
+      review.overview = { selected_range: range, status: "ready", overview_mdx: overview };
+      return Response.json({ generation: body.generation, selected_range: range, overview_mdx: overview });
     }
-    if (request.method === "POST" && url.pathname === "/api/ai-review") {
-      const body = await request.json() as { generation: number; range: ReviewRange };
+    case "ai-review":
       await Bun.sleep(900);
-      return Response.json({ generation: body.generation, selected_range: body.range, comments: [
-        { path: "src/review/mod.rs", side: "additions", start_line: 3, end_line: 3,
-          body: "[P2] Confirm the snapshot remains valid if the workspace changes while the review is open." },
-      ] });
-    }
-    if (request.method === "POST" && url.pathname === "/api/question") {
-      const body = await request.json() as QuestionRequest;
-      const existing = devQuestions.find((thread) => thread.thread_id === body.thread_id);
-      const nextThread: StoredQuestionThread = {
-        thread_id: body.thread_id,
-        operation_id: body.operation_id,
-        generation: body.generation,
-        range: body.range,
-        path: body.path,
-        side: body.side,
-        start_line: body.start_line,
-        end_line: body.end_line,
-        messages: body.messages.map((message) => ({ ...message })),
-        status: "asking",
-      };
-      const thread = existing ?? nextThread;
-      Object.assign(thread, nextThread);
-      if (!existing) devQuestions.push(thread);
-      const cancelled = await Promise.race([
-        Bun.sleep(900).then(() => false),
-        new Promise<boolean>((resolve) => {
-          questionCancellations.set(body.operation_id, () => resolve(true));
-        }),
-      ]);
-      questionCancellations.delete(body.operation_id);
-      if (cancelled) {
-        thread.status = "cancelled";
-        return Response.json({
-          code: "operation_cancelled",
-          error: "question answering was cancelled",
-        }, { status: 409 });
-      }
-      const answer = `This thread is anchored to \`${body.path}:${body.start_line}${body.end_line === body.start_line ? "" : `-${body.end_line}`}\`. In a real review, Tact asks a sub-agent to inspect the surrounding code and answer with that context.`;
-      thread.messages.push({ role: "agent", body: answer });
-      thread.status = "idle";
       return Response.json({
         generation: body.generation,
         selected_range: body.range,
-        answer,
+        comments: [{
+          path: "src/review/mod.rs", side: "additions", start_line: 3, end_line: 3,
+          body: "[P2] Confirm the snapshot remains valid if the workspace changes while the review is open.",
+        }],
       });
-    }
-    if (request.method === "POST" && url.pathname === "/api/questions") {
-      return Response.json({ generation: reviewBootstrap.generation, questions: devQuestions });
-    }
-    if (request.method === "POST" && url.pathname === "/api/question/cancel") {
-      const body = await request.json() as { operation_id: string };
-      questionCancellations.get(body.operation_id)?.();
+    case "question":
+      return question(body as unknown as QuestionRequest);
+    case "questions":
+      return Response.json({ generation: reviewBootstrap.generation, questions: review.questions });
+    case "question/cancel":
+      review.cancellations.get(body.operation_id as string)?.();
       return new Response(null, { status: 204 });
-    }
-    if (request.method === "POST" && url.pathname === "/api/decision") {
-      console.log("\nReview result:\n", JSON.stringify(await request.json(), null, 2));
-      return new Response(null, { status: 204 });
-    }
-    if (request.method === "POST" && url.pathname === "/api/cancel") {
-      console.log("\nReview cancelled");
-      return new Response(null, { status: 204 });
-    }
+    case "review/compose":
+      return Response.json({ markdown: composeReview(body as unknown as ReviewDecision) });
+  }
+  return failure("invalid_request", `Unknown endpoint ${path}.`, 404);
+}
 
+async function question(body: QuestionRequest) {
+  const thread: StoredQuestionThread = {
+    ...body,
+    messages: body.messages.map((message) => ({ ...message })),
+    status: "asking",
+  };
+  const existing = review.questions.findIndex((candidate) => candidate.thread_id === body.thread_id);
+  if (existing >= 0) review.questions[existing] = thread;
+  else review.questions.push(thread);
+
+  const cancelled = await Promise.race([
+    Bun.sleep(900).then(() => false),
+    new Promise<boolean>((resolve) => review.cancellations.set(body.operation_id, () => resolve(true))),
+  ]);
+  review.cancellations.delete(body.operation_id);
+  if (cancelled) {
+    thread.status = "cancelled";
+    return failure("operation_cancelled", "Question answering was cancelled.", 409);
+  }
+  const lines = body.end_line === body.start_line ? `${body.start_line}` : `${body.start_line}-${body.end_line}`;
+  const answer = `This thread is anchored to \`${body.path}:${lines}\`. In a real review, Tact asks the session's agent to inspect the surrounding code and answer with that context.`;
+  thread.messages.push({ role: "agent", body: answer });
+  thread.status = "idle";
+  return Response.json({ generation: body.generation, selected_range: body.range, answer });
+}
+
+function composeReview(decision: ReviewDecision) {
+  const heading = decision.decision === "approve" ? "Review: approved" : "Review: changes requested";
+  const comments = decision.comments.map((comment) => `- \`${comment.path}:${comment.start_line}\` ${comment.body}`);
+  return [heading, decision.summary.trim(), comments.join("\n")].filter(Boolean).join("\n\n");
+}
+
+const server = Bun.serve({
+  port,
+  idleTimeout: 0,
+  async fetch(request) {
+    const url = new URL(request.url);
+    if (url.pathname.startsWith("/api/")) {
+      try {
+        return await api(request, url);
+      } catch (error) {
+        if (error instanceof MockRefusal) return failure(error.code, error.message, error.status);
+        console.error(error);
+        return failure("failed", String(error), 500);
+      }
+    }
     if (url.pathname === "/__reload" && server.upgrade(request)) return;
-
     const name = url.pathname === "/" ? "index.html" : url.pathname.slice(1);
-    if (!["index.html", "overview-frame.html", "app.css", ...reviewScriptAssets].includes(name)) {
-      return new Response("Not found", { status: 404 });
-    }
+    if (!staticFiles.has(name)) return new Response("Not found", { status: 404 });
     return new Response(Bun.file(join(outputDirectory, name)));
   },
   websocket: {
@@ -169,15 +251,18 @@ const server = Bun.serve({
   },
 });
 
-console.log(`Tact review UI: http://localhost:${server.port}`);
+console.log(`Tact web (mock): http://localhost:${server.port}/#k=${token}`);
+console.log("Type a line and press Enter to set the active draft as the terminal.");
 
 let rebuildTimer: ReturnType<typeof setTimeout> | undefined;
 watch(import.meta.dir, { recursive: true }, (_event, filename) => {
-  if (!filename || filename.startsWith(".dev/") || filename.startsWith("dist/")) return;
+  if (!filename || /^(\.dev|dist|node_modules)\b/.test(filename)) return;
   clearTimeout(rebuildTimer);
   rebuildTimer = setTimeout(async () => {
     if (!await buildAssets()) return;
     server.publish("reload", "reload");
-    console.log("Review UI rebuilt");
+    console.log("Rebuilt");
   }, 80);
 });
+
+for await (const line of console) tact.terminalDraft(line);

@@ -1,0 +1,855 @@
+// A self-contained imitation of a running Tact for UI development: sessions that stream realistic
+// turns with tool rows and subagents, the shared draft with origin echoes and images, queue,
+// every query, history, instances, and the review endpoints.
+// It follows docs/web.md; the dev server (dev.ts) only adapts it to HTTP.
+
+import type {
+  CommandName,
+  Commands,
+  ContextBudget,
+  Draft,
+  Effort,
+  MemoryRecord,
+  ModelCatalog,
+  PersistedSession,
+  Queries,
+  QueryName,
+  QueuedPrompt,
+  ReasoningMode,
+  Speed,
+  SubagentRoster,
+  SessionSnapshot,
+  SessionSummary,
+  StreamEventName,
+  StreamEvents,
+  ToolDetail,
+  TransientStatus,
+  WireEntry,
+} from "./wire";
+
+type EntryBody = WireEntry extends infer Entry
+  ? Entry extends WireEntry ? Omit<Entry, "id" | "revision" | "parent"> : never
+  : never;
+
+export class MockRefusal extends Error {
+  constructor(readonly code: string, message: string, readonly status = 409) {
+    super(message);
+  }
+}
+
+export type MockListener = <Name extends StreamEventName>(name: Name, data: StreamEvents[Name]) => void;
+
+const codex = { provider: "openai" as const, reasoning_modes: ["standard", "pro"] as ReasoningMode[], effort_fixed_after_start: false };
+const claude = { provider: "anthropic" as const, reasoning_modes: ["standard"] as ReasoningMode[], effort_fixed_after_start: true };
+export const MOCK_CATALOG: ModelCatalog = {
+  models: [
+    { id: "sol", label: "Sol", ...codex, effective_speeds: ["standard", "fast", "ultrafast"] },
+    { id: "luna", label: "Luna", ...codex, effective_speeds: ["standard", "fast", "fast"] },
+    { id: "astra", label: "Astra", ...codex, effective_speeds: ["standard", "fast", "fast"] },
+    { id: "opus-5.5", label: "Opus 5.5", ...claude, effective_speeds: ["standard", "fast", "fast"] },
+    { id: "sonnet-5.5", label: "Sonnet 5.5", ...claude, effective_speeds: ["standard", "standard", "standard"] },
+    { id: "fable-5.1", label: "Fable 5.1", ...claude, effective_speeds: ["standard", "standard", "standard"] },
+  ],
+  efforts: ["low", "medium", "high", "xhigh", "max"],
+  speeds: ["standard", "fast", "ultrafast"],
+};
+const WINDOW_TOKENS = 272_000;
+const MAX_LIVE = 8;
+
+class MockSession {
+  title: string;
+  entries: WireEntry[] = [];
+  details = new Map<number, ToolDetail>();
+  status: TransientStatus | null = null;
+  queue: QueuedPrompt[] = [];
+  draft: Draft = { rev: 0, text: "", images: [] };
+  reasoningMode: ReasoningMode = "standard";
+  speed: Speed = "standard";
+  context: ContextBudget = { active_tokens: 18_400, window_tokens: WINDOW_TOKENS };
+  subagents: SubagentRoster = { max_subagents: 4, agents: [] };
+  agentEntries = new Map<number, WireEntry[]>();
+  nextImage = 1;
+  unread = false;
+  failed = false;
+  lastActivity = Date.now();
+  turn: AbortController | null = null;
+  private nextEntry = 1;
+
+  constructor(
+    readonly id: string,
+    public model: string,
+    public effort: Effort = "medium",
+    title = "New chat",
+  ) {
+    this.title = title;
+  }
+
+  get running() {
+    return this.turn !== null;
+  }
+
+  summary(): SessionSummary {
+    return {
+      id: this.id,
+      title: this.title,
+      model: this.model,
+      state: this.running ? "running" : this.failed ? "error" : "idle",
+      unread: this.unread,
+      has_draft: this.draft.text.trim().length > 0,
+      last_activity_unix_ms: this.lastActivity,
+    };
+  }
+
+  snapshot(): SessionSnapshot {
+    return {
+      session: this.id,
+      title: this.title,
+      model: this.model,
+      effort: this.effort,
+      reasoning_mode: this.reasoningMode,
+      speed: this.speed,
+      entries: this.entries.map((entry) => ({ ...entry })),
+      status: this.status,
+      queue: this.queue.map((item) => ({ ...item })),
+      draft: structuredClone(this.draft),
+      running: this.running,
+      context: { ...this.context },
+      subagents: structuredClone(this.subagents),
+    };
+  }
+
+  push(body: EntryBody, parent: number | null = null): WireEntry {
+    const entry = { ...body, id: this.nextEntry++, revision: 1, parent } as WireEntry;
+    this.entries.push(entry);
+    this.lastActivity = Date.now();
+    return entry;
+  }
+}
+
+/** Resolves after `ms`, or rejects when the turn is interrupted. */
+function sleep(ms: number, signal: AbortSignal) {
+  return new Promise<void>((resolve, reject) => {
+    if (signal.aborted) return reject(signal.reason);
+    const timer = setTimeout(resolve, ms);
+    signal.addEventListener("abort", () => {
+      clearTimeout(timer);
+      reject(signal.reason);
+    }, { once: true });
+  });
+}
+
+const words = (text: string) => text.match(/\S+\s*/g) ?? [];
+
+export class MockTact {
+  readonly sessions = new Map<string, MockSession>();
+  config = {
+    path: "/Users/dev/.tact/config.toml",
+    text: ["# Tact configuration", 'model = "sol"', 'effort = "high"', "", "[web]", "enabled = true", "port = 7878", ""].join("\n"),
+    revision: "1",
+  };
+  memories: MemoryRecord[] = memorySeed();
+  active: string | null = null;
+  workspaceVersion = "1";
+  /** Multiplies every scripted delay; tests set it to 0. */
+  pace = 1;
+  private listeners = new Set<MockListener>();
+  private nextSession = 1;
+  private nextQueue = 1;
+
+  constructor(seed = true) {
+    if (seed) this.seed();
+  }
+
+  subscribe(listener: MockListener) {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  /** The events a fresh stream receives: hello, live, active, and the active session's snapshot. */
+  greeting(): { name: StreamEventName; data: unknown }[] {
+    const events: { name: StreamEventName; data: unknown }[] = [
+      { name: "hello", data: { protocol_version: 7, client_hint: "tact-dev" } },
+      { name: "live", data: this.live() },
+    ];
+    const session = this.active ? this.sessions.get(this.active) : undefined;
+    if (session) {
+      events.push({ name: "active", data: { session: session.id } });
+      events.push({ name: "snapshot", data: session.snapshot() });
+    }
+    return events;
+  }
+
+  live(): StreamEvents["live"] {
+    return {
+      active: this.active,
+      sessions: [...this.sessions.values()].map((session) => session.summary()),
+    };
+  }
+
+  instance() {
+    const sessions = [...this.sessions.values()];
+    return {
+      protocol_version: 7,
+      workspace: "/Users/dev/src/tact",
+      repository: "tact",
+      live: sessions.length,
+      running: sessions.filter((session) => session.running).length,
+    };
+  }
+
+  toolDetail(sessionId: string, entry: number): ToolDetail {
+    const detail = this.session(sessionId).details.get(entry);
+    if (!detail) throw new MockRefusal("invalid_request", "That entry has no detail.", 404);
+    return detail;
+  }
+
+  touchWorkspace() {
+    this.workspaceVersion = String(Number(this.workspaceVersion) + 1);
+    this.emit("workspace", { version: this.workspaceVersion });
+  }
+
+  /** Simulates typing in the terminal's composer. */
+  terminalDraft(text: string) {
+    if (!this.active) return;
+    this.setDraft(this.session(this.active), text, "terminal");
+  }
+
+  command(name: CommandName, args: unknown, client: number): unknown {
+    const origin = `web:${client}`;
+    const body = args as never;
+    switch (name) {
+      case "set_draft": {
+        const { session, text } = body as Commands["set_draft"];
+        this.setDraft(this.session(session), text, origin);
+        return {};
+      }
+      case "submit": {
+        const { session: id, rev } = body as Commands["submit"];
+        const session = this.session(id);
+        if (session.draft.rev !== rev) {
+          throw new MockRefusal("draft_changed", "The draft changed before it was sent.");
+        }
+        const text = session.draft.text.trim();
+        if (!text) return {};
+        if (/^\/(copy|editor|quit)\b/.test(text)) {
+          throw new MockRefusal("not_available_remotely", `${text.split(/\s/)[0]} only works in the terminal.`);
+        }
+        this.setDraft(session, "", origin);
+        if (session.running) {
+          session.queue.push({ id: this.nextQueue++, text, steering: false });
+          this.emit("queue", { session: session.id, items: session.queue });
+        } else {
+          void this.runTurn(session, text);
+        }
+        return {};
+      }
+      case "interrupt": {
+        const session = this.session((body as Commands["interrupt"]).session);
+        if (!session.turn) throw new MockRefusal("nothing_running", "Nothing is running.");
+        session.turn.abort(new Error("interrupted"));
+        return {};
+      }
+      case "steer":
+      case "dequeue": {
+        const { session: id, queue_id } = body as Commands["steer"];
+        const session = this.session(id);
+        const item = session.queue.find((candidate) => candidate.id === queue_id);
+        if (!item) throw new MockRefusal("unknown_session", "That prompt was already sent.");
+        if (name === "steer") {
+          if (!session.running) throw new MockRefusal("nothing_running", "Nothing is running.");
+          item.steering = true;
+        } else {
+          session.queue = session.queue.filter((candidate) => candidate !== item);
+        }
+        this.emit("queue", { session: id, items: session.queue });
+        return {};
+      }
+      case "compact": {
+        const session = this.session((body as Commands["compact"]).session);
+        if (session.running) throw new MockRefusal("turn_running", "Wait for the turn to finish.");
+        if (session.queue.length) throw new MockRefusal("queue_not_empty", "The queue is not empty.");
+        void this.compact(session);
+        return {};
+      }
+      case "set_model":
+      case "set_effort":
+      case "set_reasoning_mode":
+      case "set_speed": {
+        const update = body as { session: string; model?: string; effort?: Effort; mode?: ReasoningMode; speed?: Speed };
+        const session = this.session(update.session);
+        const started = session.entries.length > 0;
+        if (update.model !== undefined) {
+          if (started) throw new MockRefusal("invalid_request", "The model is fixed after the first turn.", 400);
+          session.model = update.model;
+        }
+        if (update.effort !== undefined) {
+          const fixed = MOCK_CATALOG.models.find((model) => model.id === session.model)?.effort_fixed_after_start;
+          if (started && fixed) throw new MockRefusal("invalid_request", "This model's effort is fixed after the first turn.", 400);
+          session.effort = update.effort;
+          this.append(session, { kind: "effort_changed", to: update.effort });
+        }
+        if (update.mode !== undefined) session.reasoningMode = update.mode;
+        if (update.speed !== undefined) session.speed = update.speed;
+        this.emit("settings", {
+          session: session.id, model: session.model, effort: session.effort,
+          reasoning_mode: session.reasoningMode, speed: session.speed,
+        });
+        this.publishLive();
+        return {};
+      }
+      case "edit_queued": {
+        const { session: id, queue_id, text } = body as Commands["edit_queued"];
+        const session = this.session(id);
+        const item = session.queue.find((candidate) => candidate.id === queue_id);
+        if (!item) throw new MockRefusal("unknown_session", "That prompt was already sent.");
+        item.text = text;
+        this.emit("queue", { session: id, items: session.queue });
+        return {};
+      }
+      case "attach_image": {
+        const { session: id, data_url } = body as Commands["attach_image"];
+        if (!data_url.startsWith("data:image/")) throw new MockRefusal("invalid_request", "Only images can be attached.", 400);
+        const session = this.session(id);
+        const marker = `[Image #${session.nextImage++}]`;
+        const text = session.draft.text ? `${session.draft.text.replace(/\s*$/, "")} ${marker}` : marker;
+        session.draft.images.push({ marker, data_url });
+        this.setDraft(session, text, origin);
+        return {};
+      }
+      case "reflect":
+      case "handoff": {
+        const session = this.session((body as Commands["handoff"]).session);
+        if (session.running) throw new MockRefusal("turn_running", "Wait for the turn to finish.");
+        if (session.queue.length) throw new MockRefusal("queue_not_empty", "The queue is not empty.");
+        if (name === "reflect") this.append(session, { kind: "reflection_started" });
+        void this.runTurn(session, name === "reflect" ? "Reflect on this session." : "Prepare a handoff for the next session.", false);
+        return {};
+      }
+      case "reload_config":
+        return {};
+      case "write_config": {
+        const { text, revision } = body as Commands["write_config"];
+        if (revision !== this.config.revision) throw new MockRefusal("stale", "The configuration changed since it was read.");
+        if (/^\s*\[[^\]]*$/m.test(text)) throw new MockRefusal("invalid_request", "TOML parse error: unclosed table header.", 400);
+        this.config = { ...this.config, text, revision: String(Number(this.config.revision) + 1) };
+        return {};
+      }
+      case "delete_memory": {
+        const { key } = body as Commands["delete_memory"];
+        this.memories = this.memories.filter((record) => record.key.id !== key.id);
+        return {};
+      }
+      case "set_max_subagents": {
+        const { limit } = body as Commands["set_max_subagents"];
+        if (!Number.isInteger(limit) || limit < 1) throw new MockRefusal("invalid_request", "The limit must be at least 1.", 400);
+        for (const session of this.sessions.values()) {
+          session.subagents.max_subagents = limit;
+          this.emit("subagents", { session: session.id, ...session.subagents });
+        }
+        return {};
+      }
+      case "activate": {
+        this.activate(this.session((body as Commands["activate"]).session).id);
+        return {};
+      }
+      case "open_session": {
+        const spec = body as Commands["open_session"];
+        let session: MockSession;
+        if ("resume" in spec) {
+          const existing = this.sessions.get(spec.resume.session);
+          if (existing) {
+            this.activate(existing.id);
+            return { session: existing.id };
+          }
+          const record = history.find((candidate) => candidate.session_id === spec.resume.session);
+          if (!record) throw new MockRefusal("unknown_session", "No such session.", 404);
+          this.ensureCapacity();
+          session = new MockSession(record.session_id, record.model, record.effort, record.preview);
+          session.push({ kind: "user", text: record.preview });
+          session.push({ kind: "assistant", text: "Resumed from history.", complete: true, commentary: false });
+        } else if ("fork" in spec) {
+          const source = this.session(spec.fork.session);
+          if (source.running) throw new MockRefusal("turn_running", "Wait for the turn to finish before forking.");
+          this.ensureCapacity();
+          session = new MockSession(this.newId(), source.model, source.effort, `${source.title} (fork)`);
+          for (const entry of source.entries) session.push({ ...entry });
+          session.push({ kind: "forked_from", session: source.id });
+        } else {
+          this.ensureCapacity();
+          session = new MockSession(this.newId(), spec.new.model ?? "sol");
+        }
+        this.sessions.set(session.id, session);
+        this.activate(session.id);
+        return { session: session.id };
+      }
+      case "close_session": {
+        const { session: id, force } = body as Commands["close_session"];
+        const session = this.session(id);
+        if (session.running && !force) throw new MockRefusal("turn_running", "A turn is running.");
+        session.turn?.abort(new Error("closed"));
+        this.sessions.delete(id);
+        this.emit("closed", { session: id });
+        if (this.active === id) {
+          const next = [...this.sessions.values()].sort((a, b) => b.lastActivity - a.lastActivity)[0];
+          this.active = null;
+          if (next) this.activate(next.id);
+          else this.publishLive();
+        } else {
+          this.publishLive();
+        }
+        return {};
+      }
+    }
+    throw new MockRefusal("invalid_request", `Unknown command ${name}.`, 400);
+  }
+
+  query<Name extends QueryName>(name: Name, args: unknown): Queries[Name]["reply"] {
+    const query = String((args as { query?: string } | undefined)?.query ?? "").toLowerCase();
+    const reply = (): unknown => {
+      switch (name) {
+        case "models":
+          return MOCK_CATALOG;
+        case "history": {
+          const cursor = (args as { cursor?: string | null } | undefined)?.cursor;
+          const matches = history.filter((session) => `${session.preview} ${session.session_id}`.toLowerCase().includes(query));
+          const start = cursor ? Number(cursor) : 0;
+          return { sessions: matches.slice(start, start + 12), next_cursor: start + 12 < matches.length ? String(start + 12) : null };
+        }
+        case "files":
+          return { paths: files.filter((path) => fuzzy(query, path)).slice(0, 50) };
+        case "skills":
+          return { skills: skills.filter((skill) => fuzzy(query, skill.name)) };
+        case "recent_prompts":
+          return { prompts: recentPrompts.filter((prompt) => prompt.text.toLowerCase().includes(query)) };
+        case "context_diagnostics": {
+          const session = this.session((args as { session: string }).session);
+          return {
+            model_window_tokens: WINDOW_TOKENS, auto_compact_token_limit: 244_800, active_tokens: session.context.active_tokens,
+            usage: { input: session.context.active_tokens, cached_input: Math.round(session.context.active_tokens * .8), uncached_input: Math.round(session.context.active_tokens * .2), output: 1_840, total: session.context.active_tokens + 1_840 },
+            continuation: "previous_response", prompt_cache: true, compactions_started: 1, compactions_completed: 1,
+            last_compaction: { trigger: "automatic", started_at_unix_ms: Date.now() - 3_600_000, completed_at_unix_ms: Date.now() - 3_597_000, before_tokens: 241_000, after_tokens: 31_200 },
+          };
+        }
+        case "memories":
+          return { access: { source: "local", namespace: null, role: "writer" }, records: this.memories };
+        case "config":
+          return this.config;
+      }
+      throw new MockRefusal("invalid_request", `Unknown query ${name}.`, 400);
+    };
+    return structuredClone(reply()) as Queries[Name]["reply"];
+  }
+
+  agentTranscript(sessionId: string, agent: number) {
+    return { entries: this.session(sessionId).agentEntries.get(agent) ?? [] };
+  }
+
+  /** Starts the background session that keeps working, so the sidebar always shows activity. */
+  startAmbientWork() {
+    const worker = [...this.sessions.values()].find((session) => session.title.startsWith("Benchmark"));
+    if (!worker) return;
+    const loop = async () => {
+      while (this.sessions.has(worker.id)) {
+        if (!worker.running) await this.runTurn(worker, "Re-run the journal benchmark and report regressions.");
+        await new Promise((resolve) => setTimeout(resolve, 12_000 * this.pace));
+      }
+    };
+    void loop();
+  }
+
+  private session(id: string) {
+    const session = this.sessions.get(id);
+    if (!session) throw new MockRefusal("unknown_session", "That session is not live.", 404);
+    return session;
+  }
+
+  private newId() {
+    return `019a${(this.nextSession++).toString(16).padStart(4, "0")}-7c1e-7d55-9b1f-3e2a9c8d4f${String(Math.floor(Math.random() * 90) + 10)}`;
+  }
+
+  private ensureCapacity() {
+    if (this.sessions.size >= MAX_LIVE) {
+      throw new MockRefusal("too_many_sessions", `At most ${MAX_LIVE} sessions can be live.`);
+    }
+  }
+
+  private activate(id: string) {
+    const session = this.session(id);
+    session.unread = false;
+    this.active = id;
+    this.publishLive();
+    this.emit("active", { session: id });
+    this.emit("snapshot", session.snapshot());
+  }
+
+  private setDraft(session: MockSession, text: string, origin: string) {
+    const hadDraft = session.draft.text.trim().length > 0;
+    const images = session.draft.images.filter((image) => text.includes(image.marker));
+    session.draft = { rev: session.draft.rev + 1, text, images };
+    this.emit("draft", { session: session.id, rev: session.draft.rev, text, images, origin });
+    if (hadDraft !== text.trim().length > 0) this.publishLive();
+  }
+
+  private emit<Name extends StreamEventName>(name: Name, data: StreamEvents[Name]) {
+    const session = (data as { session?: unknown }).session;
+    const scoped = name !== "live" && name !== "workspace" && name !== "hello" && name !== "active"
+      && name !== "closed" && name !== "snapshot";
+    if (scoped && session !== this.active) return;
+    for (const listener of this.listeners) listener(name, structuredClone(data));
+  }
+
+  private publishLive() {
+    this.emit("live", this.live());
+  }
+
+  private append(session: MockSession, body: EntryBody, parent: number | null = null) {
+    const entry = session.push(body, parent);
+    this.emit("entry", { session: session.id, entry });
+    return entry;
+  }
+
+  private update(session: MockSession, entry: WireEntry, change: Partial<EntryBody>) {
+    Object.assign(entry, change);
+    entry.revision += 1;
+    session.lastActivity = Date.now();
+    this.emit("entry", { session: session.id, entry });
+  }
+
+  private setStatus(session: MockSession, status: TransientStatus | null) {
+    session.status = status;
+    this.emit("status", { session: session.id, status });
+  }
+
+  private async stream(session: MockSession, entry: WireEntry, text: string, signal: AbortSignal) {
+    let shown = "";
+    const pieces = words(text);
+    for (let index = 0; index < pieces.length;) {
+      const take = 2 + Math.floor(Math.random() * 4);
+      shown += pieces.slice(index, index + take).join("");
+      index += take;
+      this.update(session, entry, { text: shown } as Partial<EntryBody>);
+      await sleep(45 * this.pace, signal);
+    }
+  }
+
+  private async runTurn(session: MockSession, prompt: string, showPrompt = true) {
+    const turn = new AbortController();
+    session.turn = turn;
+    session.failed = false;
+    if (session.title === "New chat") session.title = prompt.slice(0, 48);
+    const started = Date.now();
+    if (showPrompt) this.append(session, { kind: "user", text: prompt });
+    this.publishLive();
+    const signal = turn.signal;
+    const script = scriptFor(prompt);
+    let interrupted = false;
+    try {
+      this.setStatus(session, { kind: "warming" });
+      await sleep(500 * this.pace, signal);
+      this.setStatus(session, { kind: "thinking" });
+      const reasoning = this.append(session, { kind: "reasoning", text: "" });
+      await this.stream(session, reasoning, script.reasoning, signal);
+      for (const tool of script.tools) {
+        this.setStatus(session, { kind: "tool", name: tool.name });
+        const row = this.append(session, {
+          kind: "tool", name: tool.name, summary: tool.summary, state: "running",
+          duration_ns: null, substeps: [], child_count: 0, has_detail: true,
+        });
+        session.details.set(row.id, { arguments: tool.arguments, result: null, metadata: null });
+        for (const step of tool.substeps ?? []) {
+          await sleep(350 * this.pace, signal);
+          const current = row as Extract<WireEntry, { kind: "tool" }>;
+          this.update(session, row, { substeps: [...current.substeps, step] } as Partial<EntryBody>);
+        }
+        if (tool.name === "spawn_agent") await this.runSubagent(session, signal);
+        await sleep(tool.ms * this.pace, signal);
+        this.growContext(session, 2_000 + Math.floor(Math.random() * 6_000));
+        session.details.set(row.id, { arguments: tool.arguments, result: tool.result, metadata: { exit_code: tool.failed ? 1 : 0 } });
+        this.update(session, row, {
+          state: tool.failed ? "failed" : "succeeded",
+          duration_ns: tool.ms * 1_000_000,
+        } as Partial<EntryBody>);
+      }
+      if (script.retry) {
+        this.setStatus(session, { kind: "retrying", delay_ns: 2_000_000_000, next_attempt: 2, max_attempts: 5 });
+        await sleep(2000 * this.pace, signal);
+      }
+      this.setStatus(session, { kind: "responding" });
+      const answer = this.append(session, { kind: "assistant", text: "", complete: false, commentary: false });
+      await this.stream(session, answer, script.answer, signal);
+      this.update(session, answer, { complete: true } as Partial<EntryBody>);
+    } catch {
+      interrupted = true;
+    }
+    session.turn = null;
+    this.setStatus(session, null);
+    if (interrupted) {
+      if (this.sessions.has(session.id)) this.append(session, { kind: "interrupted", count: 1 });
+    } else {
+      this.append(session, { kind: "turn_completed", duration_ns: (Date.now() - started) * 1_000_000 });
+    }
+    if (this.active !== session.id) session.unread = true;
+    if (!this.sessions.has(session.id)) return;
+    this.touchWorkspace();
+    const next = session.queue.shift();
+    if (next) {
+      this.emit("queue", { session: session.id, items: session.queue });
+      void this.runTurn(session, next.text);
+    } else {
+      this.publishLive();
+    }
+  }
+
+  private growContext(session: MockSession, tokens: number) {
+    session.context.active_tokens = Math.min(WINDOW_TOKENS, session.context.active_tokens + tokens);
+    this.emit("context", { session: session.id, ...session.context });
+  }
+
+  /** Spawns a subagent whose transcript streams as `subagent_entry` events. */
+  private async runSubagent(session: MockSession, signal: AbortSignal) {
+    const id = session.subagents.agents.length + 1;
+    const agent = {
+      id, parent: null, session_id: this.newId(), role: "bridge reviewer", task: "Check that publications never block the loop.",
+      model: "sol", thinking: "high" as Effort, status: { state: "running" as const },
+    };
+    session.subagents.agents.push(agent);
+    const entries: WireEntry[] = [];
+    session.agentEntries.set(id, entries);
+    const publishRoster = () => this.emit("subagents", { session: session.id, ...session.subagents });
+    const add = (body: EntryBody) => {
+      const entry = { ...body, id: entries.length + 1, revision: 1, parent: null } as WireEntry;
+      entries.push(entry);
+      this.emit("subagent_entry", { session: session.id, agent: id, entry });
+      return entry;
+    };
+    publishRoster();
+    try {
+      add({ kind: "user", text: agent.task });
+      await sleep(400 * this.pace, signal);
+      add({ kind: "tool", name: "read", summary: "bin/tact/src/web/bridge.rs", state: "succeeded", duration_ns: 6_000_000, substeps: [], child_count: 0, has_detail: false });
+      await sleep(600 * this.pace, signal);
+      const answer = add({ kind: "assistant", text: "", complete: false, commentary: false });
+      let text = "";
+      for (const word of words("Publisher::publish only sends on an unbounded channel and drops the error, so a stopped server cannot block or fail the loop.")) {
+        text += word;
+        Object.assign(answer, { text });
+        answer.revision += 1;
+        this.emit("subagent_entry", { session: session.id, agent: id, entry: answer });
+        await sleep(40 * this.pace, signal);
+      }
+      Object.assign(answer, { complete: true });
+      answer.revision += 1;
+      this.emit("subagent_entry", { session: session.id, agent: id, entry: answer });
+      Object.assign(agent, { status: { state: "completed", output: "No blocking path found." } });
+    } catch (error) {
+      Object.assign(agent, { status: { state: "interrupted" } });
+      publishRoster();
+      throw error;
+    }
+    publishRoster();
+  }
+
+  private async compact(session: MockSession) {
+    const turn = new AbortController();
+    session.turn = turn;
+    this.publishLive();
+    this.setStatus(session, { kind: "compacting" });
+    try {
+      await sleep(2500 * this.pace, turn.signal);
+      this.append(session, { kind: "context_compacted", duration_ns: 2_500_000_000 });
+      session.context.active_tokens = 24_000;
+      this.emit("context", { session: session.id, ...session.context });
+    } catch {
+      this.append(session, { kind: "interrupted", count: 1 });
+    }
+    session.turn = null;
+    this.setStatus(session, null);
+    this.publishLive();
+  }
+
+  private seed() {
+    const main = new MockSession(this.newId(), "sol", "high", "Wire the web bridge into the TUI loop");
+    const transcript: EntryBody[] = [
+      { kind: "user", text: "Wire the web bridge into the TUI loop. Publications must never block the loop, and every web command has to go through the same effect as its keypress." },
+      { kind: "reasoning", text: "The loop already owns all session state, so the bridge only needs a non-blocking publisher and a request channel the select loop polls next to terminal input." },
+      { kind: "tool", name: "read", summary: "bin/tact/src/web/bridge.rs", state: "succeeded", duration_ns: 4_000_000, substeps: [], child_count: 0, has_detail: false },
+      { kind: "tool", name: "shell", summary: "rg -n \"enum Action\" bin/tact/src/tui", state: "succeeded", duration_ns: 182_000_000, substeps: [], child_count: 0, has_detail: false },
+      { kind: "tool", name: "apply_patch", summary: "bin/tact/src/tui/app.rs (+84 −12)", state: "succeeded", duration_ns: 31_000_000, substeps: [], child_count: 0, has_detail: false },
+      { kind: "tool", name: "shell", summary: "cargo nextest run -p tact -E 'test(bridge)'", state: "failed", duration_ns: 48_200_000_000, substeps: [], child_count: 0, has_detail: false },
+      { kind: "assistant", text: "One test failed: the draft echo arrived before the acknowledgement. I'll make the reply wait for the loop to apply the command.", complete: true, commentary: true },
+      { kind: "directed_message", from: "agent 4", to: "agent 2", body: "The stream now coalesces entry events to the frame interval.", delivery: "deferred" },
+      { kind: "tool", name: "spawn_agent", summary: "review bridge ordering · sol xhigh", state: "succeeded", duration_ns: 312_000_000_000, substeps: ["read bridge.rs", "trace Publisher::publish", "report"], child_count: 1, has_detail: false },
+      { kind: "assistant", text: "## Done\n\nThe loop now polls `requests` next to terminal input:\n\n```rust\ntokio::select! {\n    Some(request) = web.requests.recv() => self.apply(request),\n    Some(event) = terminal.next() => self.handle(event),\n}\n```\n\n- Publications go through an unbounded channel, so a stalled browser cannot block a frame.\n- Every command is applied with the same effect function as its keypress.\n\n| Command | Keypress |\n| :-- | :-- |\n| `submit` | Enter |\n| `interrupt` | Esc Esc |\n\nAll **312** tests pass.", complete: true, commentary: false },
+      { kind: "turn_completed", duration_ns: 402_000_000_000 },
+      { kind: "effort_changed", to: "high" },
+      { kind: "context_compacted", duration_ns: 3_100_000_000 },
+    ];
+    for (const body of transcript) main.push(body);
+    main.context.active_tokens = 142_600;
+    main.speed = "fast";
+    main.subagents.agents.push({
+      id: 1, parent: null, session_id: "019a00ff-7c1e-7d55-9b1f-3e2a9c8d4f01", role: "ordering reviewer",
+      task: "Review bridge ordering between acknowledgements and draft echoes.", model: "sol", thinking: "xhigh",
+      status: { state: "completed", output: "The acknowledgement must follow the publication." },
+    });
+    main.agentEntries.set(1, [
+      { id: 1, revision: 1, parent: null, kind: "user", text: "Review bridge ordering between acknowledgements and draft echoes." },
+      { id: 2, revision: 1, parent: null, kind: "tool", name: "read", summary: "bin/tact/src/web/bridge.rs", state: "succeeded", duration_ns: 5_000_000, substeps: [], child_count: 0, has_detail: false },
+      { id: 3, revision: 1, parent: null, kind: "assistant", text: "The acknowledgement must follow the publication, otherwise a tab can submit a stale revision.", complete: true, commentary: false },
+    ]);
+
+    const ideas = new MockSession(this.newId(), "opus-5.5", "medium", "Sketch the overview prompt");
+    ideas.push({ kind: "user", text: "Draft a better overview prompt." });
+    ideas.push({ kind: "assistant", text: "Here is a tighter prompt that asks for a **narrative** first and a risk list second.", complete: true, commentary: false });
+    ideas.push({ kind: "turn_completed", duration_ns: 21_000_000_000 });
+    ideas.unread = true;
+    ideas.draft = { rev: 3, text: "Also mention the sandboxed frame.", images: [] };
+    ideas.lastActivity -= 600_000;
+
+    const failing = new MockSession(this.newId(), "luna", "low", "Flaky release pipeline test");
+    failing.push({ kind: "user", text: "Why does release_pipeline fail on CI only?" });
+    failing.push({ kind: "error", message: "stream disconnected before completion: connection reset by peer" });
+    failing.failed = true;
+    failing.lastActivity -= 3_600_000;
+
+    const bench = new MockSession(this.newId(), "astra", "max", "Benchmark journal compaction");
+    for (const session of [main, bench, ideas, failing]) this.sessions.set(session.id, session);
+    this.active = main.id;
+  }
+}
+
+type ScriptedTool = {
+  name: string;
+  summary: string;
+  ms: number;
+  arguments: unknown;
+  result: unknown;
+  substeps?: string[];
+  failed?: boolean;
+};
+
+function scriptFor(prompt: string) {
+  const subject = prompt.length > 60 ? `${prompt.slice(0, 57)}…` : prompt;
+  const tools: ScriptedTool[] = [
+    {
+      name: "shell", summary: "rg -n \"fn publish\" bin/tact/src", ms: 420,
+      arguments: { command: ["rg", "-n", "fn publish", "bin/tact/src"] },
+      result: { output: "bin/tact/src/web/bridge.rs:104:    pub(crate) fn publish(&self, publication: Publication) {\n" },
+    },
+    {
+      name: "read", summary: "bin/tact/src/web/server.rs:1-180", ms: 160,
+      arguments: { path: "bin/tact/src/web/server.rs", offset: 1, limit: 180 },
+      result: { content: "//! The HTTP server for the web interface.\n…" },
+    },
+    {
+      name: "apply_patch", summary: "bin/tact/src/web/stream.rs (+42 −7)", ms: 260,
+      arguments: { patch: "*** Begin Patch\n*** Update File: bin/tact/src/web/stream.rs\n@@\n-    let interval = Duration::from_millis(16);\n+    let interval = FRAME_INTERVAL;\n*** End Patch" },
+      result: { output: "Success. Updated the following files:\nM bin/tact/src/web/stream.rs" },
+    },
+    {
+      name: "shell", summary: "cargo nextest run -p tact -E 'test(stream)'", ms: 2600,
+      substeps: ["Compiling tact v0.7.0", "Running 18 tests", "18 passed"],
+      arguments: { command: ["cargo", "nextest", "run", "-p", "tact", "-E", "test(stream)"] },
+      result: { output: "Summary [ 2.481s] 18 tests run: 18 passed, 0 skipped" },
+    },
+  ];
+  return {
+    retry: /retry/i.test(prompt),
+    reasoning: `The request is: ${subject}. I should look at where publications leave the loop, check how entries are coalesced, then make the smallest change and run the focused tests.`,
+    tools,
+    answer: [
+      `I looked into **${subject.replace(/[*_\`]/g, "")}**.`,
+      "The stream coalesces entry events to the frame interval, so a burst of tokens becomes one event per frame:",
+      [
+        "```rust",
+        "let mut ticker = tokio::time::interval(FRAME_INTERVAL);",
+        "loop {",
+        "    tokio::select! {",
+        "        _ = ticker.tick() => flush(&mut pending, &sink).await?,",
+        "        Some(publication) = publications.recv() => pending.absorb(publication),",
+        "    }",
+        "}",
+        "```",
+      ].join("\n"),
+      "1. Entries are keyed by `(id, revision)`, so a late duplicate is dropped by the client.\n2. Draft events carry their origin, so each tab ignores its own echo.",
+      "The focused tests pass. Want me to run the full suite?",
+    ].join("\n\n"),
+  };
+}
+
+const history: PersistedSession[] = [
+  "Add Linux io_uring benchmark job",
+  "Investigate flaky resume test",
+  "Explain the journal pruning invariant",
+  "Port review search to CSS highlights",
+  "Speed up transcript rendering",
+  "Model colour defaults from the terminal palette",
+  "Fix soft wrap in user prompts",
+  "Shared memory backend design",
+  "Release 0.6.5 changelog",
+  "Cloudflare tunnel example",
+  "Pin prompts in the composer",
+  "Fork action fixes",
+  "Subagent split view",
+  "Read session improvements",
+  "CI cache tuning",
+  "Transcript batch connection",
+].map((preview, index) => ({
+  session_id: `0199${index.toString(16).padStart(4, "0")}-41aa-7b0c-8e3d-5c6f7a8b9c0d`,
+  started_at_unix_ms: Date.now() - (index + 1) * 5_400_000,
+  model: MOCK_CATALOG.models[index % MOCK_CATALOG.models.length]!.id,
+  effort: MOCK_CATALOG.efforts[index % MOCK_CATALOG.efforts.length]!,
+  reasoning_mode: "standard" as const,
+  preview,
+  workspace: "/Users/dev/src/tact",
+}));
+
+/** Subsequence match, enough for fixture search. */
+function fuzzy(query: string, text: string) {
+  let position = 0;
+  const haystack = text.toLowerCase();
+  for (const character of query) {
+    position = haystack.indexOf(character, position) + 1;
+    if (position === 0) return false;
+  }
+  return true;
+}
+
+const files = [
+  "bin/", "bin/tact/", "bin/tact/src/", "bin/tact/src/web/", "bin/tact/src/web/bridge.rs", "bin/tact/src/web/server.rs",
+  "bin/tact/src/web/mod.rs", "bin/tact/src/tui/", "bin/tact/src/tui/app.rs", "bin/tact/src/tui/theme.rs",
+  "bin/tact/src/tui/context.rs", "bin/tact/src/app/config.rs", "bin/tact/src/app/model.rs", "docs/web.md",
+  "web/app/app.ts", "web/app/chat.ts", "web/app/composer.ts", "web/app/store.ts", "README.md", "Cargo.toml",
+];
+
+const skills = [
+  { name: "autofix", description: "Iteratively review and repair a branch until it is merge-ready." },
+  { name: "humanizer", description: "Rewrite text that sounds AI-generated." },
+  { name: "jujutsu", description: "Guide to the jj version control system." },
+  { name: "linux-server", description: "Build and benchmark on the Linux server." },
+  { name: "review-agent", description: "Read-only, defect-first review of a change." },
+];
+
+const recentPrompts = [
+  "Run the focused tests and fix any failure.",
+  "Explain why the draft echo arrives before the acknowledgement.",
+  "Review the diff for missing error context.",
+  "!cargo nextest run -p tact -E 'test(web)'",
+  "Summarize what changed since main and propose a commit message.",
+].map((text, index) => ({
+  text, recorded_at_unix_ms: Date.now() - index * 2_700_000, session_id: "019a0001-7c1e-7d55-9b1f-3e2a9c8d4f10", workspace: "/Users/dev/src/tact",
+}));
+
+function memorySeed(): MemoryRecord[] {
+  return [
+    "In the Tact repository, use jj instead of git for version control.",
+    "Prefer typed errors with context; never include credentials in logs or errors.",
+    "The web UI must mirror the TUI: drafts and the active session are shared state in both directions.",
+    "Progress indicators stay animated even under prefers-reduced-motion.",
+  ].map((content, index) => ({
+    key: { id: index + 1, version: 1 }, content,
+    created_at_ms: Date.now() - (index + 3) * 86_400_000, updated_at_ms: Date.now() - index * 7_200_000,
+    last_scanned_at_ms: Date.now() - index * 600_000, scan_count: 12 - index * 2, last_used_at_ms: null,
+    use_count: 6 - index, probation_until_ms: index === 3 ? Date.now() + 86_400_000 : null,
+  }));
+}
