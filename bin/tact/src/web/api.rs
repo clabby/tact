@@ -46,6 +46,8 @@ pub(super) struct AppState {
     pub(super) queries: mpsc::UnboundedSender<QueryRequest>,
     pub(super) workspace: PathBuf,
     pub(super) port: u16,
+    /// The externally reachable origin from \`web.public_url\`, when configured.
+    pub(super) public_origin: Option<String>,
     pub(super) registry_directory: PathBuf,
     pub(super) assets: AssetStore,
     pub(super) client: reqwest::Client,
@@ -57,6 +59,7 @@ pub(super) fn router(state: Arc<AppState>, extra: Router<Arc<AppState>>) -> Rout
     Router::new()
         .route("/api/login", post(login))
         .route("/api/instance", get(instance))
+        .route("/api/link", get(link))
         .route("/api/instances", get(instances))
         .route("/api/sessions/{session}/entries/{entry}", get(entry_detail))
         .route(
@@ -287,6 +290,19 @@ struct InstanceInfo {
     repository: String,
     live: usize,
     running: bool,
+}
+
+/// What a client needs to build a sign-in link for another device: the configured public origin,
+/// if any, and the token. The token already authorizes everything this request does, so an
+/// authenticated client learns nothing new; it is never logged.
+async fn link(State(state): State<Arc<AppState>>) -> Response<Body> {
+    secure_json(
+        StatusCode::OK,
+        serde_json::json!({
+            "public_origin": state.public_origin,
+            "token": state.token.expose(),
+        }),
+    )
 }
 
 async fn instance(State(state): State<Arc<AppState>>) -> Response<Body> {
@@ -564,6 +580,7 @@ mod tests {
             (Method::GET, "/api/stream"),
             (Method::GET, "/api/sessions/s/entries/1"),
             (Method::GET, "/api/review"),
+            (Method::GET, "/api/link"),
             (Method::POST, "/api/cmd"),
             (Method::POST, "/api/refresh"),
             (Method::POST, "/api/range"),
@@ -781,6 +798,17 @@ mod tests {
 
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body["code"], "failed");
+    }
+
+    #[tokio::test]
+    async fn the_sign_in_link_is_served_to_authenticated_clients() {
+        let harness = Harness::new();
+
+        let (status, body) = harness.call(Method::GET, "/api/link", None).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["token"], harness.state.token.expose());
+        assert_eq!(body["public_origin"], serde_json::Value::Null);
     }
 
     #[tokio::test]

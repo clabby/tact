@@ -173,6 +173,7 @@ impl Server {
                 source,
             })?
             .port();
+        let public_origin = settings.public_url.clone();
         let origin = settings.public_url.unwrap_or_else(|| {
             format!(
                 "http://{}",
@@ -209,6 +210,7 @@ impl Server {
             queries: channels.queries,
             workspace: settings.workspace,
             port,
+            public_origin,
             registry_directory,
             assets: AssetStore::new(settings.home),
             client: reqwest::Client::builder()

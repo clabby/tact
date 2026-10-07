@@ -51,13 +51,15 @@ impl Harness {
             agent,
             shutdown.clone(),
         );
+        let token = MachineToken::load_or_create(&home.path().join("web")).unwrap();
         let state = Arc::new(AppState {
-            token: MachineToken::load_or_create(&home.path().join("web")).unwrap(),
+            token,
             hub: hub.clone(),
             requests: end.requests,
             queries: end.queries,
             workspace: workspace.path().to_owned(),
             port: 7878,
+            public_origin: None,
             registry_directory: home.path().join("web/instances"),
             assets: AssetStore::new(home.path().to_owned()),
             client: reqwest::Client::new(),
