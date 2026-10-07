@@ -1,111 +1,79 @@
 //! Criterion baselines for foundational TUI operations.
+//!
+//! The binary crate has no library target, so this benchmark compiles the modules it measures
+//! directly. The module tree mirrors the binary's so that their crate-relative imports resolve
+//! unchanged.
 
 #![allow(dead_code, unused_imports)]
-
-#[path = "../app/browser.rs"]
-pub(crate) mod browser;
-#[path = "../app/config.rs"]
-pub(crate) mod config;
-#[path = "../app/error.rs"]
-pub(crate) mod error;
-#[path = "../app/installation.rs"]
-pub(crate) mod installation;
-#[path = "../app/model.rs"]
-pub(crate) mod model;
-#[path = "../app/secret.rs"]
-pub(crate) mod secret;
-#[path = "../app/theme.rs"]
-mod theme;
-mod app {
-    pub(crate) use crate::{browser, config, error, installation, model, secret, theme};
-}
 
 #[cfg(test)]
 fn install_tls_provider() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
-#[path = "../web/bridge.rs"]
-mod bridge;
-#[path = "../vcs/checkout.rs"]
-mod checkout;
-#[path = "../vcs/diff.rs"]
-mod diff;
-#[path = "../core/protocol.rs"]
-mod protocol;
-#[path = "../search.rs"]
-mod search;
-#[path = "../core/extensions/skills.rs"]
-mod skills;
-#[path = "../core/subagent_roster.rs"]
-mod subagent_roster;
-#[path = "../web/tailscale.rs"]
-mod tailscale;
-mod web {
-    pub(crate) use crate::{bridge, tailscale};
-}
-mod vcs {
-    pub(crate) use crate::{checkout, diff};
+#[path = "../src/app"]
+mod app {
+    pub(crate) mod browser;
+    pub(crate) mod config;
+    pub(crate) mod error;
+    pub(crate) mod installation;
+    pub(crate) mod model;
+    pub(crate) mod secret;
+    pub(crate) mod theme;
 }
 
+#[path = "../src/core"]
 mod core {
-    pub(crate) use crate::{
-        context, pane, prompt, protocol, session, storage, subagent_roster, transcript,
-    };
+    pub(crate) mod context;
+    pub(crate) mod pane;
+    pub(crate) mod prompt;
+    pub(crate) mod protocol;
+    pub(crate) mod session;
+    pub(crate) mod storage;
+    pub(crate) mod subagent_roster;
+    pub(crate) mod transcript;
 
     pub(crate) mod extensions {
-        pub(crate) use crate::skills::{Skill, SkillMatches};
+        mod skills;
 
-        pub(crate) mod memory {
-            #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-            pub(crate) struct MemoryKey {
-                pub(crate) id: i64,
-                pub(crate) version: u64,
-            }
-
-            #[derive(Clone, Debug, Eq, PartialEq)]
-            pub(crate) struct MemoryRecord {
-                pub(crate) key: MemoryKey,
-                pub(crate) content: String,
-                pub(crate) created_at_ms: i64,
-                pub(crate) updated_at_ms: i64,
-                pub(crate) last_scanned_at_ms: Option<i64>,
-                pub(crate) scan_count: u64,
-                pub(crate) last_used_at_ms: Option<i64>,
-                pub(crate) use_count: u64,
-                pub(crate) probation_until_ms: Option<i64>,
-            }
-        }
+        pub(crate) use skills::{Skill, SkillMatches};
     }
 }
 
-#[path = "components/mod.rs"]
-mod components;
-#[path = "../core/context.rs"]
-mod context;
-mod format;
-#[path = "../core/pane.rs"]
-mod pane;
-#[path = "../core/prompt.rs"]
-mod prompt;
-#[path = "../core/session.rs"]
-mod session;
-mod spinner;
-#[path = "../core/storage.rs"]
-mod storage;
-#[path = "../core/transcript/mod.rs"]
-pub(crate) mod transcript;
+#[path = "../src/search.rs"]
+mod search;
 
+#[path = "../src/tui"]
 mod tui {
-    pub(crate) use crate::{format, spinner};
+    pub(crate) mod components;
+    pub(crate) mod format;
+    pub(crate) mod spinner;
 }
 
-use components::{AppEvent, AppNode, RootNode};
-use config::{ReasoningEffort, ReasoningMode, Speed};
+#[path = "../src/vcs/mod.rs"]
+mod vcs;
+
+#[path = "../src/web"]
+mod web {
+    pub(crate) mod bridge;
+    pub(crate) mod tailscale;
+}
+
+use crate::{
+    app::{
+        config::{ReasoningEffort, ReasoningMode, Speed},
+        theme::Theme,
+    },
+    core::{
+        pane::PaneId,
+        session, storage,
+        transcript::{LocalEvent, SessionStarted, TranscriptRecord, TurnId},
+    },
+    tui::components::{AppEvent, AppNode, RootNode},
+};
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use nanocodex::agent::events::{AgentEvent, AgentEventKind};
-use pane::PaneId;
 use ratatui::{Terminal, backend::TestBackend};
 use serde_json::{json, value::to_raw_value};
 use std::{
@@ -115,8 +83,6 @@ use std::{
     time::Duration,
 };
 use tempfile::TempDir;
-use theme::Theme;
-use transcript::{LocalEvent, SessionStarted, TranscriptRecord, TurnId};
 
 const WIDTH: u16 = 120;
 const HEIGHT: u16 = 40;
