@@ -1,4 +1,5 @@
 import "./shell/theme.css";
+import "./ui/controls.css";
 import "./shell/shell.css";
 import { ApiClient, ApiError, describeError } from "./core/api-client";
 import { Transcript } from "./chat/chat";
@@ -80,9 +81,9 @@ class App {
           <header class="chat-header">
             <button type="button" class="icon-button menu-button" aria-label="Toggle sidebar" title="Toggle sidebar">${glyph("sidebar")}</button>
             <div class="chat-title"><h1>Tact</h1><div class="chat-sub"><span class="model-dot"></span><span class="chat-model"></span><span class="chat-effort"></span></div></div>
-            <nav class="view-tabs" role="tablist" aria-label="View">
-              <button type="button" class="view-tab" role="tab" id="tab-chat" aria-controls="view-chat" data-view="chat">Chat</button>
-              <button type="button" class="view-tab" role="tab" id="tab-review" aria-controls="view-review" data-view="review">Review<span class="tab-count" hidden></span></button>
+            <nav class="segmented view-tabs" role="tablist" aria-label="View">
+              <button type="button" class="segment" role="tab" id="tab-chat" aria-controls="view-chat" data-view="chat">Chat</button>
+              <button type="button" class="segment" role="tab" id="tab-review" aria-controls="view-review" data-view="review">Review<span class="tab-count" hidden></span></button>
             </nav>
             <div class="header-actions">
               <button type="button" class="palette-button" aria-label="Command palette">${glyph("search")}<span>Search</span><kbd>${isMac ? "⌘K" : "Ctrl K"}</kbd></button>
@@ -297,7 +298,7 @@ class App {
     this.shell.classList.toggle("drawer-open", drawerOpen);
     this.shell.classList.toggle("sidebar-collapsed", sidebarCollapsed);
     localStorage.setItem(SIDEBAR_KEY, sidebarCollapsed ? "collapsed" : "open");
-    for (const tab of root.querySelectorAll<HTMLButtonElement>(".view-tab")) {
+    for (const tab of root.querySelectorAll<HTMLButtonElement>(".view-tabs .segment")) {
       const selected = tab.dataset.view === view;
       tab.setAttribute("aria-selected", String(selected));
       tab.tabIndex = selected ? 0 : -1;
@@ -352,7 +353,7 @@ class App {
     root.querySelector(".menu-button")!.addEventListener("click", () => this.dispatch({ type: "toggle-sidebar" }));
     root.querySelector(".drawer-close")!.addEventListener("click", () => this.dispatch({ type: "toggle-sidebar" }));
     root.querySelector(".scrim")!.addEventListener("click", () => this.dispatch({ type: "escape" }));
-    for (const tab of root.querySelectorAll<HTMLButtonElement>(".view-tab")) {
+    for (const tab of root.querySelectorAll<HTMLButtonElement>(".view-tabs .segment")) {
       tab.addEventListener("click", () => this.showView(tab.dataset.view as View));
     }
     root.querySelector(".palette-button")!.addEventListener("click", () => this.palette.open());
@@ -564,7 +565,7 @@ const SHORTCUTS: [string, string][] = [
   [isMac ? "⌘B" : "Ctrl B", "Show or hide the sidebar"],
   ["/", "Focus the composer"],
   ["Enter", "Send, or steer while a turn runs"],
-  ["Shift Tab", "Queue instead of steering"],
+  ["Shift Tab", "Queue the prompt while a turn runs (instead of steering)"],
   ["Shift Enter", "New line"],
   ["↑ in an empty composer", "Recent prompts"],
   ["@  @@  $", "Mention a file, a session, a skill"],

@@ -48,8 +48,8 @@ export class RangeDialog {
               <button class="icon-button" data-range-close aria-label="Close range selector">${icon("close")}</button>
             </header>
             <div class="range-builder">
-              <div class="range-presets" id="range-presets" role="group" aria-label="Quick ranges">
-                ${rangePresets(this.deps.targets()).map((preset) => `<button type="button" class="button quiet" data-range-preset="${preset.id}" aria-pressed="false">${preset.label}</button>`).join("")}
+              <div class="segmented range-presets" id="range-presets" role="group" aria-label="Quick ranges">
+                ${rangePresets(this.deps.targets()).map((preset) => `<button type="button" class="segment" data-range-preset="${preset.id}" aria-pressed="false">${preset.label}</button>`).join("")}
               </div>
               <div class="range-endpoints" aria-label="Selected range endpoints" aria-live="polite">
                 <div class="range-endpoint">

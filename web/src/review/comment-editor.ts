@@ -171,9 +171,9 @@ export class CommentEditor {
         </div>
       </header>
       <div class="editor-topbar" role="tablist" aria-label="Comment editor">
-        <div class="editor-tabs">
-          <button id="${editorId}-comment" role="tab" aria-controls="${editorId}-input" aria-selected="${draft.tab === "comment"}" tabindex="${draft.tab === "comment" ? "0" : "-1"}" class="${draft.tab === "comment" ? "active" : ""}" data-editor-tab="comment">Comment</button>
-          <button id="${editorId}-preview-tab" role="tab" aria-controls="${editorId}-preview" aria-selected="${draft.tab === "preview"}" tabindex="${draft.tab === "preview" ? "0" : "-1"}" class="${draft.tab === "preview" ? "active" : ""}" data-editor-tab="preview">Preview</button>
+        <div class="segmented compact editor-tabs">
+          <button id="${editorId}-comment" role="tab" aria-controls="${editorId}-input" aria-selected="${draft.tab === "comment"}" tabindex="${draft.tab === "comment" ? "0" : "-1"}" class="segment ${draft.tab === "comment" ? "active" : ""}" data-editor-tab="comment">Comment</button>
+          <button id="${editorId}-preview-tab" role="tab" aria-controls="${editorId}-preview" aria-selected="${draft.tab === "preview"}" tabindex="${draft.tab === "preview" ? "0" : "-1"}" class="segment ${draft.tab === "preview" ? "active" : ""}" data-editor-tab="preview">Preview</button>
         </div>
         <div class="formatting-tools" aria-label="Markdown formatting">
           ${formatButton("bold", "Bold")}

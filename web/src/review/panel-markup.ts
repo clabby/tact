@@ -9,9 +9,9 @@ export function panelMarkup(repository: string, settingsPopover: string, rangeDi
   return `
       <div class="review-shell">
         <header class="topbar">
-          <nav class="tabs" role="tablist" aria-label="Review sections">
-            <button class="tab active" id="changes-tab" role="tab" aria-selected="true" aria-controls="changes-panel" data-tab="changes">Changes <span id="file-count">0</span></button>
-            <button class="tab" id="overview-tab" role="tab" aria-selected="false" aria-controls="overview-panel" tabindex="-1" data-tab="overview">Overview<span class="activity-spinner overview-tab-activity" aria-hidden="true"></span></button>
+          <nav class="segmented review-tabs" role="tablist" aria-label="Review sections">
+            <button class="segment active" id="changes-tab" role="tab" aria-selected="true" aria-controls="changes-panel" data-tab="changes">Changes<span class="tab-count" id="file-count">0</span></button>
+            <button class="segment" id="overview-tab" role="tab" aria-selected="false" aria-controls="overview-panel" tabindex="-1" data-tab="overview">Overview<span class="activity-spinner overview-tab-activity" aria-hidden="true"></span></button>
           </nav>
           <button class="range-button" id="range-button" aria-haspopup="dialog" aria-controls="range-dialog" aria-expanded="false" aria-label="Change range">
             ${icon("git-branch")}
@@ -28,15 +28,16 @@ export function panelMarkup(repository: string, settingsPopover: string, rangeDi
             <button class="refresh-notice" id="refresh-notice" hidden>
               <i aria-hidden="true"></i><span>New changes available</span><strong>Refresh</strong>
             </button>
-            <div class="layout-toggle" role="group" aria-label="Diff layout">
-              <button type="button" data-diff-style="unified">Unified</button>
-              <button type="button" data-diff-style="split">Split</button>
-            </div>
-            <div class="view-toggles" role="group" aria-label="Changes navigation">
-              <button class="icon-button" type="button" aria-pressed="false" aria-label="Files" data-mobile-panel="files">${icon("list")}</button>
-              <button class="icon-button" type="button" aria-pressed="false" aria-label="Comments" data-mobile-panel="comments">${icon("comment")}<span class="count-badge" id="mobile-comment-count" hidden>0</span></button>
+            <div class="segmented layout-toggle" role="group" aria-label="Diff layout">
+              <button type="button" class="segment" data-diff-style="unified">Unified</button>
+              <button type="button" class="segment" data-diff-style="split">Split</button>
             </div>
             ${settingsPopover}
+          </div>
+          <div class="segmented changes-nav" role="group" aria-label="Changes view">
+            <button type="button" class="segment" aria-pressed="true" data-mobile-panel="diff">Diff</button>
+            <button type="button" class="segment" aria-pressed="false" data-mobile-panel="files">Files</button>
+            <button type="button" class="segment" aria-pressed="false" data-mobile-panel="comments">Comments<span class="tab-count" id="mobile-comment-count" hidden>0</span></button>
           </div>
         </header>
         <section class="panel overview-panel" id="overview-panel" role="tabpanel" aria-labelledby="overview-tab" data-panel="overview" hidden>

@@ -498,7 +498,7 @@ class ReviewPanel {
     this.settings.bind();
   }
 
-  /** On narrow screens the file list and the comment list replace the diff; choosing one again returns to it. */
+  /** On narrow screens the file list and the comment list replace the diff; the navigation control switches between all three. */
   private selectMobilePanel(name: "diff" | "files" | "comments") {
     for (const button of this.root.querySelectorAll<HTMLButtonElement>("[data-mobile-panel]")) {
       button.setAttribute("aria-pressed", String(button.dataset.mobilePanel === name));
@@ -510,11 +510,9 @@ class ReviewPanel {
   }
 
   private bindMobileNavigation() {
-    const panel = this.root.querySelector("#changes-panel");
     for (const button of this.root.querySelectorAll<HTMLButtonElement>("[data-mobile-panel]")) {
       button.addEventListener("click", () => {
-        const name = button.dataset.mobilePanel as "files" | "comments";
-        this.selectMobilePanel(panel?.getAttribute("data-mobile-active") === name ? "diff" : name);
+        this.selectMobilePanel(button.dataset.mobilePanel as "diff" | "files" | "comments");
       });
     }
     this.selectMobilePanel("diff");

@@ -34,8 +34,8 @@ export function openSubagents(
   sheet.body.innerHTML = `<div class="agents">
     <section class="agent-graph-pane" aria-label="Subagent hierarchy">
       <header class="pane-head"><strong>Hierarchy</strong><span class="agent-summary"></span>
-        <div class="layout-toggle agent-filter" role="group" aria-label="Show subagents">
-          <button type="button" data-filter="active">Active</button><button type="button" data-filter="all">All</button>
+        <div class="segmented compact agent-filter" role="group" aria-label="Show subagents">
+          <button type="button" class="segment" data-filter="active">Active</button><button type="button" class="segment" data-filter="all">All</button>
         </div>
       </header>
       <div class="agent-graph-scroll"><div class="agent-graph"></div></div>
