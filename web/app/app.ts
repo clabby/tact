@@ -330,15 +330,17 @@ class App {
       onThemeChange: subscribe(this.reviewListeners.theme),
     });
     this.review.setVisible?.(this.layout.view === "review");
-    // The Review tab shows how many files changed, as counted by the panel itself.
+    // The Review tab mirrors the added and removed line totals the panel displays. The observer
+    // fires whenever the panel re-renders its statistics, so the badge follows live refreshes.
     const badge = root.querySelector<HTMLElement>(".tab-count")!;
     let frame = 0;
     new MutationObserver(() => {
       frame ||= requestAnimationFrame(() => {
         frame = 0;
-        const files = Number(body.querySelector("#file-count")?.textContent) || 0;
-        badge.hidden = files === 0;
-        badge.textContent = String(files);
+        const additions = body.querySelector("#change-stats .add")?.textContent ?? "";
+        const deletions = body.querySelector("#change-stats .del")?.textContent ?? "";
+        badge.hidden = additions === "" || (additions === "+0" && deletions === "\u22120");
+        badge.innerHTML = `<span class="add">${additions}</span><span class="del">${deletions}</span>`;
       });
     }).observe(body, { childList: true, characterData: true, subtree: true });
   }
