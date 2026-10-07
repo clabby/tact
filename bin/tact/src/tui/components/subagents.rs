@@ -14,6 +14,7 @@ use crate::{
     tui::{format::sanitize_terminal_text_inline, theme::Theme, transcript::TranscriptRecord},
 };
 use crossterm::event::{Event, KeyCode, KeyEventKind};
+use nanocodex::agent::events::AgentEvent;
 use ratatui::{
     Frame,
     layout::Rect,
@@ -177,14 +178,7 @@ impl SubagentTree {
                 self.focused.get_or_insert(id);
                 roster_changed
             }
-            AgentUpdate::Event { id, event } => {
-                let Some(transcript) = self.transcripts.get_mut(&id) else {
-                    return false;
-                };
-                let record = TranscriptRecord::from_agent(event.seq, unix_time_ms(), event);
-                transcript.update(TranscriptEvent::Record(Arc::new(record)));
-                true
-            }
+            AgentUpdate::Event { id, event } => self.apply_record(id, subagent_record(event)),
             AgentUpdate::Status { .. } => roster_changed,
             AgentUpdate::Message(update) => {
                 let mut projected = false;
@@ -209,6 +203,15 @@ impl SubagentTree {
                 projected
             }
         }
+    }
+
+    /// Appends a record to an agent's transcript and reports whether the agent is known.
+    pub(super) fn apply_record(&mut self, id: AgentId, record: Arc<TranscriptRecord>) -> bool {
+        let Some(transcript) = self.transcripts.get_mut(&id) else {
+            return false;
+        };
+        transcript.update(TranscriptEvent::Record(record));
+        true
     }
 
     pub(super) fn active_count(&self) -> usize {
@@ -1059,6 +1062,15 @@ fn truncate_with_ellipsis(text: &str, width: u16) -> String {
 
 fn distance(from: WorldPoint, to: WorldPoint) -> f64 {
     (to.x - from.x).hypot(to.y - from.y)
+}
+
+/// The transcript record of one subagent event, stamped with its arrival time.
+pub(super) fn subagent_record(event: AgentEvent) -> Arc<TranscriptRecord> {
+    Arc::new(TranscriptRecord::from_agent(
+        event.seq,
+        unix_time_ms(),
+        event,
+    ))
 }
 
 fn unix_time_ms() -> u64 {

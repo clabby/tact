@@ -142,6 +142,19 @@ impl ComposerDraft {
     pub(crate) fn text(&self) -> &str {
         &self.text
     }
+
+    pub(crate) fn images(&self) -> impl Iterator<Item = (&str, &str)> {
+        draft_images(&self.text, &self.images)
+    }
+}
+
+fn draft_images<'a>(
+    text: &'a str,
+    images: &'a [PastedImage],
+) -> impl Iterator<Item = (&'a str, &'a str)> {
+    images
+        .iter()
+        .map(|image| (&text[image.range.clone()], image.data_url.as_str()))
 }
 
 struct PastedImage {
@@ -242,6 +255,25 @@ impl Composer {
 
     pub(crate) const fn context_tokens(&self) -> u64 {
         self.context_tokens
+    }
+
+    pub(crate) const fn context_budget(&self) -> ContextBudget {
+        ContextBudget {
+            active_tokens: self.context_tokens,
+            window_tokens: self.context_window_tokens,
+        }
+    }
+
+    /// The draft's images as (marker, data URL) pairs in text order.
+    pub(crate) fn images(&self) -> impl Iterator<Item = (&str, &str)> {
+        draft_images(&self.draft, &self.images)
+    }
+
+    /// Appends an image marker at the end of the draft, as pasting the image there would.
+    pub(crate) fn append_image(&mut self, data_url: String) {
+        self.history.detach();
+        self.cursor = self.draft.len();
+        self.insert_image(data_url);
     }
 
     pub(crate) fn update(&mut self, event: ComposerEvent) -> ComposerUpdate {
@@ -624,14 +656,30 @@ impl Composer {
             .is_none_or(char::is_whitespace)
     }
 
+    /// Replaces the draft text. An image survives while its marker still occurs in the new text,
+    /// so an edit made elsewhere (the web interface or an external editor) keeps the images whose
+    /// markers it left alone.
     pub(crate) fn replace_draft(&mut self, draft: String) {
-        self.draft = if draft.contains('\r') {
+        let draft = if draft.contains('\r') {
             normalize_line_endings(&draft).into_owned()
         } else {
             draft
         };
-        self.images.clear();
-        self.next_image = 1;
+        let previous = mem::replace(&mut self.draft, draft);
+        let mut search_from = 0;
+        self.images.retain_mut(|image| {
+            let marker = &previous[image.range.clone()];
+            let Some(offset) = self.draft[search_from..].find(marker) else {
+                return false;
+            };
+            let start = search_from + offset;
+            image.range = start..start + marker.len();
+            search_from = image.range.end;
+            true
+        });
+        if self.images.is_empty() {
+            self.next_image = 1;
+        }
         self.cursor = self.draft.len();
         self.preferred_column = None;
         self.scroll = 0;

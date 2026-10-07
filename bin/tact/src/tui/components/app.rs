@@ -14,13 +14,14 @@ use super::{
     queue::QueueId,
     root::{DraftReset, PaneCommand, RestoredSessionProjection, RootEffect, RootEvent, RootNode},
     sessions::{LiveSession, SessionsEffect, SessionsEvent, SessionsOverlay},
+    subagents::subagent_record,
 };
 use crate::{
     app::{
         config::{ReasoningEffort, ReasoningMode, Speed, TuiConfig},
         model,
     },
-    core::extensions::Skill,
+    core::{extensions::Skill, subagent_roster::SubagentRoster},
     tui::{
         context::ContextBudget,
         pane::PaneId,
@@ -29,8 +30,8 @@ use crate::{
         transcript::TranscriptRecord,
     },
     web::bridge::{
-        Busy, Command, CommandError, Draft, Origin, Publication, Publisher, QueuedPrompt,
-        SessionInfo,
+        Busy, Command, CommandError, Draft, DraftImage, Origin, Publication, Publisher,
+        QueuedPrompt, SessionInfo,
     },
 };
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
@@ -261,6 +262,9 @@ struct Published {
     queue: Vec<QueuedPrompt>,
     settings: Settings,
     busy: Busy,
+    /// `None` until first published, so a newly opened session announces both.
+    context: Option<ContextBudget>,
+    subagents: Option<SubagentRoster>,
 }
 
 struct Pane {
@@ -373,6 +377,25 @@ impl AppNode {
             }
             AppEvent::AgentStreamClosed(pane) => {
                 self.update_root(pane, RootEvent::AgentStreamClosed)
+            }
+            AppEvent::Subagent {
+                pane,
+                update: AgentUpdate::Event { id, event },
+            } => {
+                let record = subagent_record(event);
+                if let (Some(publisher), Some(published)) = (
+                    &self.publisher,
+                    self.panes
+                        .get(&pane)
+                        .and_then(|entry| entry.published.as_ref()),
+                ) {
+                    publisher.publish(Publication::SubagentRecord {
+                        session: published.session.clone(),
+                        agent: id,
+                        record: Arc::clone(&record),
+                    });
+                }
+                self.update_root(pane, RootEvent::SubagentRecord { id, record })
             }
             AppEvent::Subagent { pane, update } => {
                 self.update_root(pane, RootEvent::Subagent(update))
@@ -1202,11 +1225,13 @@ impl AppNode {
             draft: Draft {
                 rev: previous.as_ref().map_or(0, |previous| previous.draft.rev),
                 text: root.shared_draft().to_owned(),
-                ..Draft::default()
+                images: draft_images(root),
             },
             queue: queued_prompts(root),
             settings: settings.clone(),
             busy: root.busy(),
+            context: None,
+            subagents: None,
         };
         if let Some(publisher) = &self.publisher {
             if let Some(previous) = previous {
@@ -1258,9 +1283,10 @@ impl AppNode {
                 continue;
             };
             let draft = root.shared_draft();
-            if published.draft.text != draft {
+            if published.draft.text != draft || !images_match(&published.draft.images, root) {
                 published.draft.rev = published.draft.rev.saturating_add(1);
                 draft.clone_into(&mut published.draft.text);
+                published.draft.images = draft_images(root);
                 publish(Publication::Draft {
                     session: published.session.clone(),
                     draft: published.draft.clone(),
@@ -1284,6 +1310,22 @@ impl AppNode {
                     speed: settings.speed,
                 });
                 published.settings = settings;
+            }
+            let context = root.composer().context_budget();
+            if published.context != Some(context) {
+                published.context = Some(context);
+                publish(Publication::Context {
+                    session: published.session.clone(),
+                    budget: context,
+                });
+            }
+            let roster = root.subagent_roster();
+            if published.subagents.as_ref() != Some(roster) {
+                published.subagents = Some(roster.clone());
+                publish(Publication::Subagents {
+                    session: published.session.clone(),
+                    roster: roster.clone(),
+                });
             }
             if published.busy != busy {
                 let was_running = published.busy.turns > 0 || published.busy.shells > 0;
@@ -1374,7 +1416,30 @@ impl AppNode {
                 (session, PaneCommand::SetReasoningMode(mode))
             }
             Command::SetSpeed { session, speed } => (session, PaneCommand::SetSpeed(speed)),
-            _ => return Err(CommandError::NotAvailableRemotely),
+            Command::EditQueued {
+                session,
+                queue_id,
+                text,
+            } => (
+                session,
+                PaneCommand::EditQueued(QueueId::new(queue_id), text),
+            ),
+            Command::AttachImage { session, data_url } => {
+                (session, PaneCommand::AttachImage(data_url))
+            }
+            Command::Reflect {
+                session,
+                instructions,
+            } => (session, PaneCommand::Reflect(instructions)),
+            Command::Handoff { session } => (session, PaneCommand::Handoff),
+            Command::ReloadConfig
+            | Command::WriteConfig { .. }
+            | Command::DeleteMemory { .. }
+            | Command::SetMaxSubagents { .. } => {
+                return Err(CommandError::Invalid(
+                    "process-wide commands need the event loop".to_owned(),
+                ));
+            }
         };
         let pane = self.live_pane(&session)?;
         let root = self
@@ -1399,6 +1464,26 @@ fn queued_prompts(root: &RootNode) -> Vec<QueuedPrompt> {
             steering,
         })
         .collect()
+}
+
+fn draft_images(root: &RootNode) -> Vec<DraftImage> {
+    root.shared_draft_images()
+        .map(|(marker, data_url)| DraftImage {
+            marker: marker.to_owned(),
+            data_url: data_url.to_owned(),
+        })
+        .collect()
+}
+
+/// Markers identify images: a marker is never reused for a different image within a draft, so
+/// comparing markers avoids comparing image data on every change.
+fn images_match(published: &[DraftImage], root: &RootNode) -> bool {
+    let mut current = root.shared_draft_images();
+    published.iter().all(|image| {
+        current
+            .next()
+            .is_some_and(|(marker, _)| image.marker == marker)
+    }) && current.next().is_none()
 }
 
 fn queue_matches(published: &[QueuedPrompt], root: &RootNode) -> bool {
@@ -2655,8 +2740,12 @@ mod registry_tests {
         let publications = harness.publications();
         assert!(matches!(
             publications.as_slice(),
-            [Publication::Opened { info, .. }, Publication::Active { session }]
-                if info.id == "new" && info.effort == ReasoningEffort::High && session == "new"
+            [
+                Publication::Opened { info, .. },
+                Publication::Context { .. },
+                Publication::Subagents { .. },
+                Publication::Active { session },
+            ] if info.id == "new" && info.effort == ReasoningEffort::High && session == "new"
         ));
         assert_eq!(
             harness.command(Command::Open(bridge::OpenSpec::New { model: None })),
@@ -2665,5 +2754,309 @@ mod registry_tests {
             ))
         );
         let _ = (Reply::Done, Submission::text(String::new()));
+    }
+}
+
+#[cfg(test)]
+mod parity_tests {
+    use super::{AppEffect, AppEvent, AppNode, RootEffect, RootNode};
+    use crate::{
+        app::config::{ReasoningEffort, ReasoningMode},
+        tui::{context::ContextBudget, pane::PaneId, theme::Theme},
+        web::bridge::{self, Command, CommandError, DraftImage, Origin, Publication, WebEnd},
+    };
+    use nanocodex::{
+        ClaudeModel, HarnessModel as Model, Model as CodexModel, Thinking,
+        agent::events::{AgentEvent, AgentEventKind},
+    };
+    use serde_json::{json, value::to_raw_value};
+    use std::{path::PathBuf, sync::Arc};
+    use tact_subagents::{AgentDescriptor, AgentId, AgentUpdate};
+
+    const IMAGE: &str = "data:image/png;base64,iVBORw0KGgo=";
+
+    struct Harness {
+        app: AppNode,
+        web: WebEnd,
+    }
+
+    impl Harness {
+        fn new() -> Self {
+            let workspace = PathBuf::from("/workspace");
+            let root = RootNode::new(&workspace, ReasoningEffort::Low);
+            let mut app = AppNode::new(Theme::default(), workspace, root);
+            let (loop_end, web) = bridge::bridge();
+            app.attach_publisher(loop_end.publisher);
+            app.session_opened(PaneId::Main, "main".to_owned(), Vec::new());
+            app.publish_changes(Origin::Terminal);
+            let mut harness = Self { app, web };
+            harness.publications();
+            harness
+        }
+
+        fn publications(&mut self) -> Vec<Publication> {
+            let mut publications = Vec::new();
+            while let Ok(publication) = self.web.publications.try_recv() {
+                publications.push(publication);
+            }
+            publications
+        }
+
+        fn command(&mut self, command: Command) -> Result<Vec<RootEffect>, CommandError> {
+            let effects = self.app.remote_command(command).map(|update| {
+                update
+                    .effects
+                    .into_iter()
+                    .filter_map(|effect| match effect {
+                        AppEffect::Pane { effect, .. } => Some(effect),
+                        _ => None,
+                    })
+                    .collect()
+            });
+            self.app.publish_changes(Origin::Web(7));
+            effects
+        }
+
+        fn set_draft(&mut self, text: &str) {
+            self.command(Command::SetDraft {
+                session: "main".to_owned(),
+                text: text.to_owned(),
+            })
+            .unwrap();
+        }
+    }
+
+    fn draft_images(publications: &[Publication]) -> Vec<Vec<DraftImage>> {
+        publications
+            .iter()
+            .filter_map(|publication| match publication {
+                Publication::Draft { draft, .. } => Some(draft.images.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn queue_ids(publications: &[Publication]) -> Vec<(u64, String)> {
+        publications
+            .iter()
+            .rev()
+            .find_map(|publication| match publication {
+                Publication::Queue { items, .. } => Some(
+                    items
+                        .iter()
+                        .map(|item| (item.id, item.text.clone()))
+                        .collect(),
+                ),
+                _ => None,
+            })
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn attached_images_are_shared_draft_state() {
+        let mut harness = Harness::new();
+        assert!(matches!(
+            harness.command(Command::AttachImage {
+                session: "main".to_owned(),
+                data_url: "https://example.com/cat.png".to_owned(),
+            }),
+            Err(CommandError::Invalid(_))
+        ));
+
+        harness.set_draft("look ");
+        harness.publications();
+        harness
+            .command(Command::AttachImage {
+                session: "main".to_owned(),
+                data_url: IMAGE.to_owned(),
+            })
+            .unwrap();
+        let marker = DraftImage {
+            marker: "[Image #1]".to_owned(),
+            data_url: IMAGE.to_owned(),
+        };
+        assert_eq!(
+            harness.app.root(PaneId::Main).unwrap().shared_draft(),
+            "look [Image #1]"
+        );
+        assert_eq!(
+            draft_images(&harness.publications()),
+            [vec![marker.clone()]]
+        );
+
+        harness.set_draft("please look at [Image #1] closely");
+        assert_eq!(draft_images(&harness.publications()), [vec![marker]]);
+
+        harness.set_draft("never mind");
+        assert_eq!(draft_images(&harness.publications()), [Vec::new()]);
+    }
+
+    #[test]
+    fn reflection_handoff_and_queue_edits_obey_terminal_preconditions() {
+        let mut harness = Harness::new();
+        let effects = harness
+            .command(Command::Reflect {
+                session: "main".to_owned(),
+                instructions: "focus on tests".to_owned(),
+            })
+            .unwrap();
+        assert!(matches!(
+            effects.as_slice(),
+            [RootEffect::Reflect(prompt)] if prompt.display_text() == "focus on tests"
+        ));
+        for command in [
+            Command::Reflect {
+                session: "main".to_owned(),
+                instructions: String::new(),
+            },
+            Command::Handoff {
+                session: "main".to_owned(),
+            },
+        ] {
+            assert_eq!(harness.command(command), Err(CommandError::TurnRunning));
+        }
+
+        harness.set_draft("queued while running");
+        harness
+            .command(Command::Submit {
+                session: "main".to_owned(),
+                rev: 1,
+            })
+            .unwrap();
+        let [(id, text)] = queue_ids(&harness.publications())
+            .try_into()
+            .expect("one queued prompt");
+        assert_eq!(text, "queued while running");
+        harness
+            .command(Command::EditQueued {
+                session: "main".to_owned(),
+                queue_id: id,
+                text: "edited remotely".to_owned(),
+            })
+            .unwrap();
+        assert_eq!(
+            queue_ids(&harness.publications()),
+            [(id, "edited remotely".to_owned())]
+        );
+        assert_eq!(
+            harness.command(Command::EditQueued {
+                session: "main".to_owned(),
+                queue_id: id + 1,
+                text: "missing".to_owned(),
+            }),
+            Err(CommandError::UnknownSession)
+        );
+
+        let mut idle = Harness::new();
+        let effects = idle
+            .command(Command::Handoff {
+                session: "main".to_owned(),
+            })
+            .unwrap();
+        assert_eq!(effects, [RootEffect::Handoff]);
+        assert_eq!(
+            idle.command(Command::Compact {
+                session: "main".to_owned(),
+            }),
+            Err(CommandError::TurnRunning)
+        );
+        assert_eq!(
+            idle.command(Command::Interrupt {
+                session: "main".to_owned(),
+            }),
+            Ok(vec![RootEffect::CancelHandoff])
+        );
+    }
+
+    #[test]
+    fn reasoning_modes_follow_the_model_catalog() {
+        let mut harness = Harness::new();
+        harness
+            .command(Command::SetReasoningMode {
+                session: "main".to_owned(),
+                mode: ReasoningMode::Pro,
+            })
+            .unwrap();
+
+        harness
+            .app
+            .pane_mut(PaneId::Main)
+            .unwrap()
+            .component_mut()
+            .set_model(Model::Claude(ClaudeModel::Sonnet55));
+        assert!(matches!(
+            harness.command(Command::SetReasoningMode {
+                session: "main".to_owned(),
+                mode: ReasoningMode::Pro,
+            }),
+            Err(CommandError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn process_wide_commands_are_left_to_the_event_loop() {
+        let mut harness = Harness::new();
+        for command in [Command::ReloadConfig, Command::SetMaxSubagents { limit: 3 }] {
+            assert!(matches!(
+                harness.command(command),
+                Err(CommandError::Invalid(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn context_budget_and_subagents_are_published() {
+        let mut harness = Harness::new();
+        let budget = ContextBudget {
+            active_tokens: 1_200,
+            window_tokens: 200_000,
+        };
+        harness.app.update(AppEvent::ContextBudget {
+            pane: PaneId::Main,
+            budget,
+        });
+        harness.app.update(AppEvent::Subagent {
+            pane: PaneId::Main,
+            update: AgentUpdate::Added(AgentDescriptor {
+                id: AgentId::new(1),
+                session_id: "child".to_owned(),
+                model: Model::Codex(CodexModel::Sol),
+                thinking: Thinking::Medium,
+                role: "worker".to_owned(),
+                task: "trace".to_owned(),
+                parent: None,
+            }),
+        });
+        harness.app.publish_changes(Origin::Terminal);
+        let publications = harness.publications();
+        assert!(publications.iter().any(|publication| matches!(
+            publication,
+            Publication::Context { session, budget: published }
+                if session == "main" && *published == budget
+        )));
+        assert!(publications.iter().any(|publication| matches!(
+            publication,
+            Publication::Subagents { session, roster }
+                if session == "main" && roster.agents.len() == 1
+        )));
+
+        harness.app.update(AppEvent::Subagent {
+            pane: PaneId::Main,
+            update: AgentUpdate::Event {
+                id: AgentId::new(1),
+                event: AgentEvent {
+                    protocol_version: 1,
+                    request_id: Arc::from("child"),
+                    seq: 1,
+                    kind: AgentEventKind::AssistantMessage,
+                    payload: to_raw_value(&json!({ "text": "done" })).unwrap().into(),
+                },
+            },
+        });
+        assert!(harness.publications().iter().any(|publication| matches!(
+            publication,
+            Publication::SubagentRecord { session, agent, .. }
+                if session == "main" && *agent == AgentId::new(1)
+        )));
     }
 }

@@ -29,7 +29,7 @@ use crate::{
         config::{ReasoningEffort, ReasoningMode, Speed, TuiConfig},
         model,
     },
-    core::extensions::Skill,
+    core::{extensions::Skill, subagent_roster::SubagentRoster},
     tui::{
         context::{ContextBudget, ContextDiagnostics},
         prompt::Submission,
@@ -143,6 +143,11 @@ pub(crate) enum RootEvent {
     Transcript(Arc<TranscriptRecord>),
     AgentStreamClosed,
     Subagent(AgentUpdate),
+    /// A subagent transcript record, built once so every front-end shares it.
+    SubagentRecord {
+        id: AgentId,
+        record: Arc<TranscriptRecord>,
+    },
     ReplaceDraft(String),
     HandoffFinished(String),
     HandoffCancelled,
@@ -216,6 +221,10 @@ pub(crate) enum PaneCommand {
     SetEffort(ReasoningEffort),
     SetReasoningMode(ReasoningMode),
     SetSpeed(Speed),
+    EditQueued(QueueId, String),
+    AttachImage(String),
+    Reflect(String),
+    Handoff,
 }
 
 pub(crate) struct RestoredSessionProjection {
@@ -672,6 +681,23 @@ impl RootNode {
 
     pub(crate) const fn composer(&self) -> &Composer {
         self.composer.component()
+    }
+
+    pub(crate) const fn skills(&self) -> &Arc<[Skill]> {
+        &self.skills
+    }
+
+    pub(crate) const fn context_diagnostics(&self) -> &ContextDiagnostics {
+        &self.context_diagnostics
+    }
+
+    /// Prompts submitted in this session, oldest first, for the recent-prompt picker.
+    pub(crate) fn recent_prompts(&self) -> &[RecentPromptDraft] {
+        &self.recent_prompts
+    }
+
+    pub(crate) const fn subagent_roster(&self) -> &SubagentRoster {
+        self.subagents.roster()
     }
 
     pub(crate) fn render_focused(
@@ -1569,18 +1595,7 @@ impl RootNode {
             }
             Some(ActionsEffect::Trigger(Action::Handoff)) => {
                 self.overlay = None;
-                self.blocking_task = Some(BlockingTask::Handoff);
-                let waiting = self.update_composer(
-                    ComposerEvent::TaskStatus {
-                        status: Some("Preparing handoff…".to_owned()),
-                        now: Instant::now(),
-                    },
-                    RenderRequest::Immediate,
-                );
-                return ComponentUpdate {
-                    effects: vec![RootEffect::Handoff],
-                    render: waiting.render.max(RenderRequest::Immediate),
-                };
+                return self.start_handoff();
             }
             None => {}
         }
@@ -1680,7 +1695,7 @@ impl RootNode {
         self.overlay = Some(Overlay::Effort(Node::new(EffortSelector::new(
             self.composer.component().effort(),
             self.preferred_reasoning_mode == ReasoningMode::Pro,
-            matches!(self.composer.component().model(), Model::Codex(_)),
+            model::reasoning_modes(self.composer.component().model()).contains(&ReasoningMode::Pro),
         ))));
         ComponentUpdate::render(RenderRequest::Immediate)
     }
@@ -2224,6 +2239,15 @@ impl RootNode {
                 "the session is still starting".to_owned(),
             ));
         }
+        if self.blocking_task == Some(BlockingTask::Handoff)
+            && matches!(command, PaneCommand::Interrupt)
+        {
+            self.key_confirmation = None;
+            return Ok(ComponentUpdate {
+                effects: vec![RootEffect::CancelHandoff],
+                render: RenderRequest::Immediate,
+            });
+        }
         if self.blocking_task.is_some() {
             return Err(CommandError::TurnRunning);
         }
@@ -2274,6 +2298,19 @@ impl RootNode {
                 ComponentUpdate::none()
             }
             PaneCommand::SetSpeed(speed) => self.apply_speed(speed),
+            PaneCommand::EditQueued(id, text) => {
+                let edited = self.queue.component_mut().finish_edit(id, text);
+                debug_assert!(edited, "remote queue commands are checked first");
+                self.submit_next_queued()
+            }
+            PaneCommand::AttachImage(data_url) => {
+                self.composer.component_mut().append_image(data_url);
+                ComponentUpdate::render(RenderRequest::Immediate)
+            }
+            PaneCommand::Reflect(instructions) => {
+                self.start_reflection(Submission::text(instructions))
+            }
+            PaneCommand::Handoff => self.start_handoff(),
         };
         update.effects.extend(applied.effects);
         update.render = update.render.max(applied.render);
@@ -2299,7 +2336,7 @@ impl RootNode {
             PaneCommand::Steer(_) if self.in_flight_turns == 0 => {
                 return Err(CommandError::NothingRunning);
             }
-            PaneCommand::Steer(id) | PaneCommand::Dequeue(id)
+            PaneCommand::Steer(id) | PaneCommand::Dequeue(id) | PaneCommand::EditQueued(id, _)
                 if !self
                     .queue
                     .component()
@@ -2308,7 +2345,25 @@ impl RootNode {
             {
                 return Err(CommandError::UnknownSession);
             }
-            PaneCommand::Compact => self.compaction_allowed()?,
+            PaneCommand::Compact | PaneCommand::Reflect(_) | PaneCommand::Handoff => {
+                self.compaction_allowed()?;
+            }
+            PaneCommand::AttachImage(data_url)
+                if !(data_url.starts_with("data:image/") && data_url.contains(";base64,")) =>
+            {
+                return Err(CommandError::Invalid(
+                    "an attachment must be a base64 image data URL".to_owned(),
+                ));
+            }
+            PaneCommand::SetReasoningMode(mode)
+                if !model::reasoning_modes(self.composer.component().model()).contains(mode) =>
+            {
+                return Err(CommandError::Invalid(format!(
+                    "{} does not support {} reasoning",
+                    model::name(self.composer.component().model()),
+                    mode.as_str()
+                )));
+            }
             PaneCommand::SetModel(_) if self.thread != ThreadState::New => {
                 return Err(CommandError::Invalid(
                     "the model can only change before the first prompt".to_owned(),
@@ -2378,6 +2433,17 @@ impl RootNode {
         match &self.queue_edit {
             Some(edit) => edit.original_draft.as_ref().map_or("", ComposerDraft::text),
             None => self.composer.component().draft(),
+        }
+    }
+
+    /// The images of [`Self::shared_draft`] as (marker, data URL) pairs.
+    pub(crate) fn shared_draft_images(&self) -> Box<dyn Iterator<Item = (&str, &str)> + '_> {
+        match &self.queue_edit {
+            Some(edit) => match &edit.original_draft {
+                Some(draft) => Box::new(draft.images()),
+                None => Box::new(std::iter::empty()),
+            },
+            None => Box::new(self.composer.component().images()),
         }
     }
 
@@ -2477,12 +2543,31 @@ impl RootNode {
         ComponentUpdate { effects, render }
     }
 
+    fn start_handoff(&mut self) -> ComponentUpdate<RootEffect> {
+        self.blocking_task = Some(BlockingTask::Handoff);
+        let waiting = self.update_composer(
+            ComposerEvent::TaskStatus {
+                status: Some("Preparing handoff…".to_owned()),
+                now: Instant::now(),
+            },
+            RenderRequest::Immediate,
+        );
+        ComponentUpdate {
+            effects: vec![RootEffect::Handoff],
+            render: waiting.render.max(RenderRequest::Immediate),
+        }
+    }
+
     fn submit_reflection(&mut self) -> ComponentUpdate<RootEffect> {
         let instructions = self
             .composer
             .component_mut()
             .take_submission()
             .unwrap_or_else(|| Submission::text(String::new()));
+        self.start_reflection(instructions)
+    }
+
+    fn start_reflection(&mut self, instructions: Submission) -> ComponentUpdate<RootEffect> {
         self.reflection_input = false;
         let mode = self.update_composer(ComposerEvent::InputMode(None), RenderRequest::Immediate);
         self.thread = ThreadState::Started;
@@ -2876,6 +2961,13 @@ impl Component for RootNode {
                 update
             }
             RootEvent::Subagent(update) => self.apply_subagent_update(update),
+            RootEvent::SubagentRecord { id, record } => {
+                if self.subagents.apply_record(id, record) {
+                    ComponentUpdate::render(RenderRequest::Immediate)
+                } else {
+                    ComponentUpdate::none()
+                }
+            }
             RootEvent::ReplaceDraft(draft) => {
                 self.update_composer(ComposerEvent::ReplaceDraft(draft), RenderRequest::Immediate)
             }
