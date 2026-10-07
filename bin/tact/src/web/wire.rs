@@ -18,7 +18,7 @@ use std::sync::Arc;
 use tact_subagents::{MessageDeliveryState, MessageSender};
 
 /// Version of the browser protocol. Bundles declare the range they speak in their manifest.
-pub(super) const PROTOCOL_VERSION: u32 = 9;
+pub(super) const PROTOCOL_VERSION: u32 = 8;
 /// Longest string sent to a browser in an entry or a tool detail.
 const MAX_STRING_BYTES: usize = 256 * 1024;
 const MAX_SUMMARY_CHARS: usize = 200;
