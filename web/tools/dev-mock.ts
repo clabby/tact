@@ -679,6 +679,9 @@ export class MockTact {
       { kind: "tool", name: "exec_command", summary: "rg -n \"enum Action\" bin/tact/src/tui", state: "succeeded", duration_ns: 182_000_000, substeps: [], child_count: 0, has_detail: true },
       { kind: "tool", name: "apply_patch", summary: "bin/tact/src/tui/app.rs, bin/tact/src/web/bridge.rs", state: "succeeded", duration_ns: 31_000_000, substeps: [], child_count: 0, has_detail: true },
       { kind: "tool", name: "exec_command", summary: "cargo nextest run -p tact -E 'test(bridge)'", state: "failed", duration_ns: 48_200_000_000, substeps: [], child_count: 0, has_detail: true },
+      { kind: "tool", name: "exec", summary: "2 tools", state: "succeeded", duration_ns: 11_000_000_000, substeps: [], child_count: 2, has_detail: false },
+      { kind: "tool", name: "wait_agent", summary: "#2, #5", state: "succeeded", duration_ns: 4_000_000_000, substeps: [], child_count: 0, has_detail: false },
+      { kind: "tool", name: "list_agents", summary: "all agents", state: "succeeded", duration_ns: 2_000_000, substeps: [], child_count: 0, has_detail: false },
       { kind: "tool", name: "memory", summary: "scan · local · web bridge ordering · 2 candidates", state: "succeeded", duration_ns: 41_000_000, substeps: [], child_count: 0, has_detail: true },
       { kind: "tool", name: "memory", summary: "read · local · 12@v2 · 1 memory", state: "succeeded", duration_ns: 6_000_000, substeps: [], child_count: 0, has_detail: true },
       { kind: "tool", name: "memory", summary: "replace · local · 12@v3", state: "succeeded", duration_ns: 9_000_000, substeps: [], child_count: 0, has_detail: true },
@@ -720,7 +723,7 @@ export class MockTact {
       probation_until_ms: null,
     });
     const local = { source: "local", namespace: null, role: null };
-    detail(6, {
+    detail(9, {
       arguments: { operation: "scan", query: "web bridge ordering" },
       result: {
         operation: "scan", backend: local, abstained: false,
@@ -731,12 +734,12 @@ export class MockTact {
       },
       metadata: null,
     });
-    detail(7, {
+    detail(10, {
       arguments: { operation: "read", keys: [{ id: 12, version: 2 }] },
       result: { operation: "read", backend: local, memories: [memoryRecord(2, "The web bridge applies commands through the same effect function as a keypress.")] },
       metadata: null,
     });
-    detail(8, {
+    detail(11, {
       arguments: { operation: "put", content: "The web bridge applies commands through the same effect function as a keypress.\nAcknowledgements follow the publication.", replace: { id: 12, version: 2 } },
       result: {
         operation: "put", backend: local, replaced: { id: 12, version: 2 },
@@ -745,7 +748,7 @@ export class MockTact {
       },
       metadata: null,
     });
-    detail(9, {
+    detail(12, {
       arguments: { operation: "delete", key: { id: 9, version: 1 } },
       result: { error: "memory 9 changed since version 1" },
       metadata: null,

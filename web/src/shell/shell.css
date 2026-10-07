@@ -317,7 +317,7 @@ diffs-container { --diffs-light-bg: var(--bg); --diffs-dark-bg: var(--bg); }
 .tool-state::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--success); }
 .entry-tool[data-state="failed"] .tool-state::before { background: var(--danger); }
 .entry-tool[data-state="running"] .tool-state { color: var(--accent); }
-.tool-name { flex: none; width: 56px; overflow: hidden; color: var(--text); font: 600 var(--text-sm)/1.4 var(--font-ui); text-overflow: ellipsis; white-space: nowrap; }
+.tool-name { flex: none; width: 64px; overflow: hidden; color: var(--text); font: 600 var(--text-sm)/1.4 var(--font-ui); text-overflow: ellipsis; white-space: nowrap; }
 .tool-summary { flex: 1; min-width: 0; overflow: hidden; color: var(--muted); font: var(--text-sm)/1.4 var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
 .entry-tool[data-state="failed"] .tool-summary { color: var(--danger); }
 .tool-meta { flex: none; color: var(--faint); font-size: var(--text-xs); font-variant-numeric: tabular-nums; }

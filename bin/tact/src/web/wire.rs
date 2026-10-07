@@ -403,7 +403,33 @@ fn tool_summary(tool: &ToolEntry) -> String {
             .get("plan")
             .and_then(Value::as_array)
             .map(|steps| format!("{} steps", steps.len())),
-        "exec" => Some("code".to_owned()),
+        "wait_agent" => arguments
+            .get("agent_ids")
+            .and_then(Value::as_array)
+            .map(|ids| {
+                ids.iter()
+                    .filter_map(Value::as_u64)
+                    .map(|id| format!("#{id}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            }),
+        "list_agents" => Some(
+            if arguments.get("include_completed").and_then(Value::as_bool) == Some(true) {
+                "all agents"
+            } else {
+                "active agents"
+            }
+            .to_owned(),
+        ),
+        "exec" if tool.child_count > 0 => Some(count_label(tool.child_count, "tool", "tools")),
+        "exec" => {
+            let emitted = tool
+                .result
+                .as_ref()
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len);
+            Some(count_label(emitted, "emitted item", "emitted items"))
+        }
         "wait" => Some("background work".to_owned()),
         "memory" => memory_summary(tool),
         _ => None,
@@ -418,6 +444,10 @@ fn tool_summary(tool: &ToolEntry) -> String {
         format!("{count} arguments")
     });
     first_line(&subject)
+}
+
+fn count_label(count: usize, singular: &str, plural: &str) -> String {
+    format!("{count} {}", if count == 1 { singular } else { plural })
 }
 
 /// Names a memory call's operation, backend, subject and outcome, mirroring the terminal's memory
@@ -575,6 +605,13 @@ mod tests {
                 "rust sse",
             ),
             ("view_image", json!({"path": "/tmp/a.png"}), "/tmp/a.png"),
+            ("wait_agent", json!({"agent_ids": [2, 5]}), "#2, #5"),
+            (
+                "list_agents",
+                json!({"include_completed": true}),
+                "all agents",
+            ),
+            ("list_agents", json!({}), "active agents"),
             ("mystery", json!({"a": 1, "b": 2}), "2 arguments"),
         ];
         for (name, arguments, expected) in cases {

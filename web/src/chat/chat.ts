@@ -7,7 +7,7 @@ import { renderMarkdown } from "../core/markdown";
 import type { TranscriptData } from "../core/store";
 import type { Theme } from "../core/theme";
 import { promptParts } from "./user-prompt";
-import { presentDetail, TOOL_DEFAULT_OPEN, TOOL_LABELS } from "./tool-detail";
+import { presentDetail, TOOL_DEFAULT_OPEN, toolLabel } from "./tool-detail";
 import type { ToolDetail, WireEntry } from "../core/wire";
 
 type Rendered = { element: HTMLElement; revision: number };
@@ -299,7 +299,8 @@ export class Transcript {
     element.dataset.tool = entry.name;
     this.releaseDiffs(entry.id);
     const extra = [
-      entry.child_count ? `${entry.child_count} agent${entry.child_count === 1 ? "" : "s"}` : "",
+      // A Code Mode run reports its tool count in its summary; other tools with children spawned agents.
+      entry.child_count && entry.name !== "exec" ? `${entry.child_count} agent${entry.child_count === 1 ? "" : "s"}` : "",
       entry.substeps.length ? `${entry.substeps.length} step${entry.substeps.length === 1 ? "" : "s"}` : "",
     ].filter(Boolean).join(" · ");
     element.innerHTML = `<button class="tool-row" type="button" aria-expanded="${open}">
@@ -310,7 +311,7 @@ export class Transcript {
       ${glyph("chevron-right", "glyph chevron")}
     </button>`;
     const name = element.querySelector<HTMLElement>(".tool-name")!;
-    name.textContent = TOOL_LABELS[entry.name] ?? entry.name;
+    name.textContent = toolLabel(entry.name, entry.child_count);
     name.title = entry.name;
     element.querySelector(".tool-summary")!.textContent = entry.summary;
     element.querySelector(".tool-meta")!.textContent = [extra, entry.duration_ns === null ? "" : formatDuration(entry.duration_ns)]
