@@ -41,6 +41,15 @@ export function statusLabel(status: TransientStatus | null): string | null {
   return null;
 }
 
+/**
+ * Whether the composer must refuse input. A manual compaction is not a turn, so the session reports
+ * "compacting" while idle and the server rejects every edit until it finishes; an automatic
+ * compaction runs inside a turn, where typing and queueing stay allowed.
+ */
+export function inputBlocked(status: TransientStatus | null, running: boolean): boolean {
+  return status?.kind === "compacting" && !running;
+}
+
 /** The CSS custom property holding a model's hue, following the TUI's model palette. */
 export function modelColor(model: string) {
   const family = ["luna", "sol", "astra", "sonnet", "opus", "fable"].find((name) => model.includes(name));

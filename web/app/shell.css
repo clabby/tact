@@ -461,7 +461,8 @@ diffs-container { --diffs-light-bg: var(--bg); --diffs-dark-bg: var(--bg); }
   transition: border-color var(--duration-fast), box-shadow var(--duration-fast);
 }
 .composer:focus-within { border-color: color-mix(in srgb, var(--text) 32%, transparent); }
-.dock.disabled .composer { opacity: .6; }
+.dock.disabled .composer, .dock.blocked .composer { opacity: .6; }
+.dock.blocked textarea { cursor: not-allowed; }
 .composer textarea {
   display: block; width: 100%; min-height: 52px; max-height: 40dvh; resize: none;
   padding: 14px var(--space-4) var(--space-1); border: 0; outline: 0; background: transparent;

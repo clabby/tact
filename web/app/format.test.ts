@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { firstLine, formatAge, formatDuration, formatTokens, statusLabel } from "./format";
+import { firstLine, formatAge, formatDuration, formatTokens, inputBlocked, statusLabel } from "./format";
 
 test("durations print like the TUI", () => {
   expect([840e6, 4.2e9, 42e9, 402e9, 3_900e9].map(formatDuration)).toEqual(["840ms", "4.2s", "42s", "6m 42s", "1h 05m"]);
@@ -26,4 +26,12 @@ test("retry status names the attempt", () => {
   expect(statusLabel(null)).toBeNull();
   expect(statusLabel({ kind: "retrying", delay_ns: 2e9, next_attempt: 2, max_attempts: 5 } as never))
     .toBe("Retrying in 2.0s · attempt 2 of 5");
+});
+
+test("input is blocked only while a manual compaction runs alone", () => {
+  const compacting = { kind: "compacting" } as const;
+  expect(inputBlocked(compacting, false)).toBe(true);
+  expect(inputBlocked(compacting, true)).toBe(false);
+  expect(inputBlocked({ kind: "thinking" }, false)).toBe(false);
+  expect(inputBlocked(null, false)).toBe(false);
 });

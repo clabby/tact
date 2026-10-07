@@ -2,7 +2,7 @@ import { describeError, type ApiClient } from "./api-client";
 import { isActive } from "./agent-graph";
 import { createSphere } from "./dot-sphere";
 import { DraftSync } from "./draft";
-import { effortColor, formatTokens, modelColor, statusLabel } from "./format";
+import { effortColor, formatTokens, inputBlocked, modelColor, statusLabel } from "./format";
 import { glyph } from "./glyphs";
 import { completeMention, findMention, type Mention } from "./mentions";
 import { openMenu } from "./menu";
@@ -427,7 +427,7 @@ export class Composer {
     const sync = this.sync;
     const session = this.session;
     this.closeMentions();
-    if (!sync || !session || this.submitting || !this.textarea.value.trim()) return;
+    if (!sync || !session || this.blocked() || this.submitting || !this.textarea.value.trim()) return;
     this.submitting = true;
     this.updateSendState();
     try {
@@ -447,7 +447,7 @@ export class Composer {
   private async attach(files: File[]) {
     const session = this.session;
     const sync = this.sync;
-    if (!session || !sync) return;
+    if (!session || !sync || this.blocked()) return;
     if (this.attachChip.hidden) {
       this.showMessage("This model does not support image attachments.", "warning");
       return;
@@ -664,11 +664,18 @@ export class Composer {
     button.querySelector<HTMLElement>(".chip-dot")!.style.background = color;
   }
 
+  private blocked() {
+    return this.session !== null && inputBlocked(this.session.status, this.host.running());
+  }
+
   private updateSendState() {
     const running = this.session !== null && this.host.running();
-    this.sendButton.disabled = !this.session || this.submitting || !this.textarea.value.trim();
+    const blocked = this.blocked();
+    this.textarea.readOnly = blocked;
+    this.root.classList.toggle("blocked", blocked);
+    this.sendButton.disabled = !this.session || blocked || this.submitting || !this.textarea.value.trim();
     this.sendButton.classList.toggle("busy", this.submitting);
-    this.textarea.placeholder = running ? "Queue a message" : "Message Tact";
+    this.textarea.placeholder = blocked ? "Compacting context…" : running ? "Queue a message" : "Message Tact";
     this.sendButton.setAttribute("aria-label", running ? "Queue" : "Send");
     this.sendButton.title = running ? "Queue (Enter)" : "Send (Enter)";
   }
