@@ -102,14 +102,16 @@ pub(crate) enum AuthError {
         #[source]
         source: io::Error,
     },
-    #[error("OPENAI_API_KEY is not set; set it or select ChatGPT authentication")]
+    #[error("OpenAI API-key authentication requires openai.api_key or OPENAI_API_KEY")]
     ApiKeyUnavailable,
+    #[error("Claude API-key authentication requires claude.api_key or ANTHROPIC_API_KEY")]
+    ClaudeApiKeyUnavailable,
     #[error(
-        "ANTHROPIC_API_KEY must contain an Anthropic API key (sk-ant-api... or sk-ant-usr-...); Claude subscription and OAuth tokens are not supported"
+        "Claude API-key authentication requires an Anthropic API key (sk-ant-api... or sk-ant-usr-...); Claude subscription and OAuth tokens are not supported"
     )]
     InvalidClaudeApiKey,
     #[error(
-        "no ChatGPT credentials found at {path} and OPENAI_API_KEY is not set; run `tact auth login` or set OPENAI_API_KEY"
+        "no ChatGPT credentials found at {path} and no OpenAI API key is configured; run `tact auth login` or set openai.api_key or OPENAI_API_KEY"
     )]
     CredentialsUnavailable { path: PathBuf },
     #[error(transparent)]
@@ -140,14 +142,14 @@ pub(crate) enum ConfigError {
     },
     #[cfg(unix)]
     #[error(
-        "configuration file {path} contains a remote memory bearer token but has insecure permissions {mode:#o}; remove all group and other permissions"
+        "configuration file {path} contains credentials but has insecure permissions {mode:#o}; remove all group and other permissions"
     )]
-    InsecureRemoteMemoryPermissions { path: PathBuf, mode: u32 },
+    InsecureSecretPermissions { path: PathBuf, mode: u32 },
     #[cfg(not(unix))]
     #[error(
-        "configuration file {path} contains a remote memory bearer token, but this platform's file privacy cannot be verified"
+        "configuration file {path} contains credentials, but this platform's file privacy cannot be verified"
     )]
-    UnsupportedRemoteMemoryPermissions { path: PathBuf },
+    UnsupportedSecretPermissions { path: PathBuf },
     #[error("failed to serialize the effective configuration: {0}")]
     Serialize(#[source] toml::ser::Error),
     #[error("MCP server `{name}` is already configured")]
@@ -170,7 +172,7 @@ pub(crate) enum ConfigError {
     UpdateParse {
         path: PathBuf,
         #[source]
-        source: toml_edit::TomlError,
+        source: ConfigSyntaxError,
     },
     #[error("failed to write configuration file {path}: {source}")]
     Write {
@@ -178,6 +180,13 @@ pub(crate) enum ConfigError {
         #[source]
         source: io::Error,
     },
+}
+
+/// A syntax diagnostic that excludes the parser's retained source document.
+#[derive(Debug, Error)]
+#[error("{message}")]
+pub(crate) struct ConfigSyntaxError {
+    pub(crate) message: String,
 }
 
 #[derive(Debug, Error)]
@@ -234,8 +243,8 @@ pub(crate) enum RuntimeError {
     ExternalEditorTask(#[source] tokio::task::JoinError),
     #[error("the effort update task stopped unexpectedly: {0}")]
     EffortUpdateTask(#[source] tokio::task::JoinError),
-    #[error("the fast-mode update task stopped unexpectedly: {0}")]
-    FastModeUpdateTask(#[source] tokio::task::JoinError),
+    #[error("the speed update task stopped unexpectedly: {0}")]
+    SpeedUpdateTask(#[source] tokio::task::JoinError),
     #[error("the new-session task stopped unexpectedly: {0}")]
     NewSessionTask(#[source] tokio::task::JoinError),
     #[error("the handoff task stopped unexpectedly: {0}")]

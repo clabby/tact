@@ -738,7 +738,7 @@ mod tests {
         ReadSessionTool, STORAGE_PAGE_SIZE, find_ignore_ascii_case, truncated_record,
     };
     use crate::{
-        app::config::{ReasoningEffort, ReasoningMode},
+        app::config::{ReasoningEffort, ReasoningMode, Speed},
         tui::{
             storage::{DecodedStoredRecord, SessionStorage},
             transcript::{LocalEvent, SessionStarted, TranscriptRecord, TurnId},
@@ -1287,7 +1287,7 @@ mod tests {
                         model: "model".to_owned(),
                         effort: ReasoningEffort::Medium,
                         reasoning_mode: ReasoningMode::Standard,
-                        fast_mode: false,
+                        speed: Speed::Standard,
                         workspace: workspace.into(),
                         application_version: "test".to_owned(),
                     }),
@@ -1321,7 +1321,7 @@ mod tests {
                     model: "model".to_owned(),
                     effort: ReasoningEffort::Medium,
                     reasoning_mode: ReasoningMode::Standard,
-                    fast_mode: false,
+                    speed: Speed::Standard,
                     workspace: "/work".into(),
                     application_version: "test".to_owned(),
                 }),

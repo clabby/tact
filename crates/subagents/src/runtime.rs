@@ -1,6 +1,7 @@
 //! Async child-agent sessions, turns, and lifecycle orchestration.
 
 use super::{
+    Speed,
     capacity::{Capacity, TurnCapacity},
     harness::{self, HarnessHandle},
     message::MessageThreads,
@@ -92,13 +93,14 @@ struct AgentFactory {
     settings: Mutex<AgentSettings>,
 }
 
-type AgentBuilder =
-    dyn Fn(Model, Thinking, bool) -> Result<(Nanocodex, AgentEvents), NanocodexError> + Send + Sync;
+type AgentBuilder = dyn Fn(Model, Thinking, Speed) -> Result<(Nanocodex, AgentEvents), NanocodexError>
+    + Send
+    + Sync;
 
 #[derive(Clone, Copy)]
 struct AgentSettings {
     max_thinking: Thinking,
-    fast_mode: bool,
+    speed: Speed,
 }
 
 fn thinking_rank(thinking: Thinking) -> Result<u8, NanocodexError> {
@@ -226,6 +228,8 @@ pub(super) struct AgentDirectoryEntry {
     pub(super) task: String,
     pub(super) parent_agent_id: Option<AgentId>,
     pub(super) status: AgentStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) last_output: Option<Value>,
     pub(super) can_message: bool,
     pub(super) can_manage: bool,
 }
@@ -485,6 +489,11 @@ impl RegistryState {
                     task: bounded_summary(&session.descriptor.task),
                     parent_agent_id: session.descriptor.parent,
                     status: session.status.clone(),
+                    last_output: if matches!(session.status, AgentStatus::Completed { .. }) {
+                        None
+                    } else {
+                        session.last_output.clone()
+                    },
                     can_message,
                     can_manage,
                 })
@@ -850,11 +859,11 @@ impl Registry {
     pub(crate) fn set_agent_factory<F>(
         &self,
         max_thinking: Thinking,
-        fast_mode: bool,
+        speed: Speed,
         factory: F,
     ) -> Result<(), NanocodexError>
     where
-        F: Fn(Model, Thinking, bool) -> Result<(Nanocodex, AgentEvents), NanocodexError>
+        F: Fn(Model, Thinking, Speed) -> Result<(Nanocodex, AgentEvents), NanocodexError>
             + Send
             + Sync
             + 'static,
@@ -864,7 +873,7 @@ impl Registry {
                 build: Box::new(factory),
                 settings: Mutex::new(AgentSettings {
                     max_thinking,
-                    fast_mode,
+                    speed,
                 }),
             })
             .map_err(|_| {
@@ -905,7 +914,7 @@ impl Registry {
                 settings.max_thinking
             )));
         }
-        (factory.build)(model, thinking, settings.fast_mode)
+        (factory.build)(model, thinking, settings.speed)
     }
 
     pub(super) fn claude_enabled(&self) -> bool {
@@ -922,13 +931,13 @@ impl Registry {
         }
     }
 
-    fn set_agent_fast_mode(&self, fast_mode: bool) {
+    fn set_agent_speed(&self, speed: Speed) {
         if let Some(factory) = self.agent_factory.get() {
             factory
                 .settings
                 .lock()
                 .expect("subagent settings lock should not be poisoned")
-                .fast_mode = fast_mode;
+                .speed = speed;
         }
     }
 
@@ -1389,6 +1398,28 @@ impl Registry {
         }
         let mut revision = self.revision.subscribe();
         let deadline = Instant::now() + duration;
+        {
+            let summaries = self.state.lock().await.summaries(session_id, ids)?;
+            let terminal = summaries
+                .iter()
+                .filter(|summary| summary.status.is_wait_terminal())
+                .map(|summary| summary.agent_id.to_string())
+                .collect::<Vec<_>>();
+            if !terminal.is_empty() {
+                let active = summaries
+                    .iter()
+                    .filter(|summary| summary.status.is_active())
+                    .map(|summary| summary.agent_id.to_string())
+                    .collect::<Vec<_>>();
+                return Err(std::io::Error::other(format!(
+                    "already terminal agent_ids: [{}]; remaining active agent_ids: [{}]. \
+                     Read available results with list_agents({{include_completed:true}}) and \
+                     wait only on active IDs.",
+                    terminal.join(", "),
+                    active.join(", ")
+                )));
+            }
+        }
         loop {
             let summaries = self.state.lock().await.summaries(session_id, ids)?;
             if summaries
@@ -1744,7 +1775,7 @@ impl Subagents {
     ///
     /// The factory must return a new session and its event stream on every call. The runtime
     /// supplies the requested model and thinking effort, bounded by `max_thinking`, plus the current
-    /// fast-mode setting. A runtime accepts exactly one factory; a second call returns
+    /// speed preference. A runtime accepts exactly one factory; a second call returns
     /// [`NanocodexError::InvalidRequest`].
     ///
     /// # Errors
@@ -1753,17 +1784,17 @@ impl Subagents {
     pub fn set_agent_factory<F>(
         &self,
         max_thinking: Thinking,
-        fast_mode: bool,
+        speed: Speed,
         factory: F,
     ) -> Result<(), NanocodexError>
     where
-        F: Fn(Model, Thinking, bool) -> Result<(Nanocodex, AgentEvents), NanocodexError>
+        F: Fn(Model, Thinking, Speed) -> Result<(Nanocodex, AgentEvents), NanocodexError>
             + Send
             + Sync
             + 'static,
     {
         self.registry
-            .set_agent_factory(max_thinking, fast_mode, factory)
+            .set_agent_factory(max_thinking, speed, factory)
     }
 
     /// Returns a root-session authority checker for application-owned tools.
@@ -1784,9 +1815,9 @@ impl Subagents {
         self.registry.set_agent_max_thinking(thinking);
     }
 
-    /// Changes the fast-mode setting inherited by newly created child sessions.
-    pub fn set_fast_mode(&self, enabled: bool) {
-        self.registry.set_agent_fast_mode(enabled);
+    /// Changes the speed preference inherited by newly created child sessions.
+    pub fn set_speed(&self, speed: Speed) {
+        self.registry.set_agent_speed(speed);
     }
 
     /// Attempts to interrupt every active child without closing reusable sessions.
@@ -1875,6 +1906,7 @@ mod tests {
     };
     use crate::{
         AgentUpdate, MessageDeliveryState, MessageDisposition, MessagePriority, MessagePurpose,
+        Speed,
     };
     use futures_util::future::Either;
     use nanocodex::{
@@ -1956,16 +1988,16 @@ mod tests {
         registry
             .set_agent_factory(
                 Thinking::Medium,
-                false,
-                move |model, thinking, fast_mode| {
-                    *captured.lock().unwrap() = Some((model, thinking, fast_mode));
+                Speed::Standard,
+                move |model, thinking, speed| {
+                    *captured.lock().unwrap() = Some((model, thinking, speed));
                     Err(NanocodexError::InvalidRequest(
                         "stop after capture".to_owned(),
                     ))
                 },
             )
             .unwrap();
-        registry.set_agent_fast_mode(true);
+        registry.set_agent_speed(Speed::Ultrafast);
 
         for (maximum, requested, allowed) in [
             (Thinking::Medium, Thinking::Low, true),
@@ -1988,7 +2020,7 @@ mod tests {
                 assert!(error.to_string().contains("stop after capture"));
                 assert_eq!(
                     actual,
-                    Some((Model::Codex(CodexModel::Luna), requested, true))
+                    Some((Model::Codex(CodexModel::Luna), requested, Speed::Ultrafast))
                 );
             } else {
                 assert_eq!(actual, None);
@@ -2003,12 +2035,16 @@ mod tests {
         let registry = Registry::new(updates, 1);
         let (captured, mut arguments) = mpsc::unbounded_channel();
         registry
-            .set_agent_factory(Thinking::High, false, move |model, thinking, fast_mode| {
-                captured.send((model, thinking, fast_mode)).unwrap();
-                Err(NanocodexError::InvalidRequest(
-                    "stop after capture".to_owned(),
-                ))
-            })
+            .set_agent_factory(
+                Thinking::High,
+                Speed::Standard,
+                move |model, thinking, speed| {
+                    captured.send((model, thinking, speed)).unwrap();
+                    Err(NanocodexError::InvalidRequest(
+                        "stop after capture".to_owned(),
+                    ))
+                },
+            )
             .unwrap();
         let parent = registry.reserve("root").await.unwrap();
         parent
@@ -2036,7 +2072,10 @@ mod tests {
             let error = result.err().unwrap();
             if allowed {
                 assert!(error.to_string().contains("stop after capture"));
-                assert_eq!(arguments.try_recv().unwrap(), (model, thinking, false));
+                assert_eq!(
+                    arguments.try_recv().unwrap(),
+                    (model, thinking, Speed::Standard)
+                );
             } else {
                 assert!(arguments.try_recv().is_err());
                 assert!(error.to_string().contains("exceeds parent"));
@@ -2059,7 +2098,11 @@ mod tests {
                 assert!(error.to_string().contains("stop after capture"));
                 assert_eq!(
                     arguments.try_recv().unwrap(),
-                    (Model::Codex(CodexModel::Sol), Thinking::Medium, false)
+                    (
+                        Model::Codex(CodexModel::Sol),
+                        Thinking::Medium,
+                        Speed::Standard
+                    )
                 );
             } else {
                 assert!(error.to_string().contains("exceeds configured maximum"));
@@ -2224,7 +2267,7 @@ mod tests {
         let weak = subagents.downgrade();
         let factory_weak = weak.clone();
         subagents
-            .set_agent_factory(Thinking::Medium, false, move |_, _, _| {
+            .set_agent_factory(Thinking::Medium, Speed::Standard, move |_, _, _| {
                 let _ = &factory_weak;
                 Err(NanocodexError::InvalidRequest("unused factory".to_owned()))
             })
@@ -2526,7 +2569,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn closed_agent_summaries_keep_the_last_completed_output() {
+    async fn agent_directory_keeps_results_after_reuse_and_close() {
         let (registry, _control, _updates) = super::channel(32);
         let reservation = registry.reserve("main").await.unwrap();
         let mut session = test_session(reservation.id, "child-session", None);
@@ -2546,12 +2589,63 @@ mod tests {
             )
             .unwrap();
 
+        let directory =
+            serde_json::to_value(registry.directory("main", true, false).await).unwrap();
+        assert_eq!(
+            directory[0]["status"]["output"],
+            json!({ "report": "completed work" })
+        );
+        assert!(directory[0].get("last_output").is_none());
+        assert!(
+            registry
+                .wait("main", &[reservation.id], Duration::from_secs(1))
+                .await
+                .is_err()
+        );
+
+        for error in [
+            NanocodexError::TurnCancelled,
+            NanocodexError::InvalidRequest("failed follow-up".to_owned()),
+        ] {
+            registry
+                .harness_turn_started("main", reservation.id)
+                .await
+                .unwrap();
+            registry
+                .harness_turn_finished("main", reservation.id, Err(error))
+                .await;
+            let directory =
+                serde_json::to_value(registry.directory("main", true, false).await).unwrap();
+            assert_eq!(
+                directory[0]["last_output"],
+                json!({ "report": "completed work" })
+            );
+            assert!(
+                registry
+                    .wait("main", &[reservation.id], Duration::from_secs(1))
+                    .await
+                    .is_err()
+            );
+        }
         let summaries = registry.close("main", reservation.id).await.unwrap();
 
         assert_eq!(summaries[0].status, AgentStatus::Closed);
         assert_eq!(
             summaries[0].last_output,
             Some(json!({ "report": "completed work" }))
+        );
+        let directory =
+            serde_json::to_value(registry.directory("main", true, false).await).unwrap();
+        assert_eq!(directory[0]["status"]["state"], "closed");
+        assert_eq!(
+            directory[0]["last_output"],
+            json!({ "report": "completed work" })
+        );
+        assert!(
+            registry
+                .wait("main", &[reservation.id], Duration::from_secs(1))
+                .await
+                .is_err()
         );
     }
 
@@ -2630,6 +2724,10 @@ mod tests {
                 .all(|summary| summary.status == AgentStatus::Running)
         );
 
+        let ids = [parent.id, child.id];
+        let mut waiting = Box::pin(registry.wait("main", &ids, Duration::from_secs(5)));
+        assert!(futures_util::poll!(&mut waiting).is_pending());
+
         let interrupted = registry.interrupt("main", parent.id).await.unwrap();
         assert_eq!(
             interrupted
@@ -2641,12 +2739,25 @@ mod tests {
                 (&parent.id, &AgentStatus::Interrupted),
             ]
         );
-        let (finished, timed_out) = registry
-            .wait("main", &[parent.id, child.id], Duration::from_secs(1))
-            .await
-            .unwrap();
+        let (finished, timed_out) = waiting.await.unwrap();
         assert!(!timed_out);
         assert_eq!(finished.len(), 2);
+        let ids = [parent.id, child.id, sibling.id];
+        let mut rejected = Box::pin(registry.wait("main", &ids, Duration::from_secs(1)));
+        let Poll::Ready(Err(error)) = futures_util::poll!(&mut rejected) else {
+            panic!("a terminal member must reject the mixed wait immediately");
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("already terminal agent_ids: [1, 2]")
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("remaining active agent_ids: [3]")
+        );
+        assert!(error.to_string().contains("list_agents"));
         assert_eq!(
             registry
                 .state

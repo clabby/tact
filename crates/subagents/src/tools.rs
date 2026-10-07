@@ -125,12 +125,22 @@ impl Tool for SpawnAgent {
                     "opus-5.5",
                     "fable-5.1",
                 ],
-                "Intelligence order, strongest first: fable-5.1 > astra > opus-5.5 > sol > luna. Consider Sonnet 5.5 for speed and cost. Consider capability and expected total completion cost and time, including rework. Codex parents may spawn Codex models at or below their own tier: luna < sol < astra. Cross-provider selection and delegation between Claude models are allowed, subject to effort caps.",
+                concat!(
+                    "Name luna, sol, astra, sonnet-5.5, opus-5.5, or fable-5.1 explicitly. ",
+                    "Choose model and effort independently for expected quality, total cost, and completion time, including rework. ",
+                    "Codex children cannot exceed a Codex parent's tier: luna < sol < astra. ",
+                    "Cross-provider selection and delegation between Claude models are supported, subject to effort caps.",
+                ),
             )
         } else {
             (
                 vec!["luna", "sol", "astra"],
-                "Choose a model at or below the spawning parent: luna < sol < astra. Consider capability and expected total completion cost and time, including rework.",
+                concat!(
+                    "Name luna, sol, or astra explicitly. ",
+                    "Choose model and effort independently for expected quality, total cost, and completion time, including rework. ",
+                    "Only Codex is enabled. Choose at or below the spawning parent's tier: luna < sol < astra, ",
+                    "subject to effort caps.",
+                ),
             )
         };
         ToolDefinition::function(
@@ -373,7 +383,7 @@ impl Tool for ListAgents {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::function(
             LIST_AGENTS_TOOL,
-            "Lists a compact directory of agents in the same task tree. Active recipients are returned by default; completed agents can be included when a follow-up message is needed.",
+            "Lists agents in the same task tree. Set include_completed to retrieve terminal statuses and completed results in status.output. After reuse or closure, last_output retains the latest completed result.",
             json!({
                 "type": "object",
                 "properties": {
@@ -419,7 +429,7 @@ impl Tool for WaitAgent {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::function(
             WAIT_AGENT_TOOL,
-            "Waits until any requested subagent reaches a terminal status and returns current statuses and reports. Use one call with multiple IDs instead of polling the workspace.",
+            "Waits until any requested active subagent reaches a terminal status. Errors immediately if any selected agent is already terminal, listing remaining active IDs. Retrieve available results with list_agents({include_completed:true}), save them, and wait only on active IDs.",
             json!({
                 "type": "object",
                 "properties": {
@@ -427,7 +437,7 @@ impl Tool for WaitAgent {
                         "type": "array",
                         "items": { "type": "integer", "minimum": 1 },
                         "minItems": 1,
-                        "description": "Agent IDs returned by spawn_agent. Waiting returns when any one becomes terminal."
+                        "description": "Active agent IDs returned by spawn_agent. Waiting returns when any one becomes terminal; already terminal IDs cause an immediate error."
                     },
                     "timeout_ms": {
                         "type": "integer",
@@ -643,7 +653,7 @@ fn agent_status_schema() -> Value {
 #[cfg(test)]
 mod tests {
     use super::{SendAgentMessage, SpawnAgent, SubmitResult, WaitAgent};
-    use crate::runtime::Registry;
+    use crate::{Speed, runtime::Registry};
     use nanocodex::{
         HarnessModel as Model, Model as CodexModel, NanocodexError, Thinking, Tool,
         tools::contract::{ToolContext, ToolInput},
@@ -657,12 +667,16 @@ mod tests {
         let (runtime, _updates) = crate::Subagents::new(1);
         let (captured, mut arguments) = mpsc::unbounded_channel();
         runtime
-            .set_agent_factory(Thinking::Max, false, move |model, thinking, fast_mode| {
-                captured.send((model, thinking, fast_mode)).unwrap();
-                Err(NanocodexError::InvalidRequest(
-                    "stop after capture".to_owned(),
-                ))
-            })
+            .set_agent_factory(
+                Thinking::Max,
+                Speed::Standard,
+                move |model, thinking, speed| {
+                    captured.send((model, thinking, speed)).unwrap();
+                    Err(NanocodexError::InvalidRequest(
+                        "stop after capture".to_owned(),
+                    ))
+                },
+            )
             .unwrap();
         let tool = SpawnAgent {
             registry: runtime.downgrade().registry,
@@ -711,12 +725,16 @@ mod tests {
         let registry = Arc::new(Registry::new(updates, 1));
         let (captured, mut arguments) = mpsc::unbounded_channel();
         registry
-            .set_agent_factory(Thinking::Max, false, move |model, thinking, fast_mode| {
-                captured.send((model, thinking, fast_mode)).unwrap();
-                Err(NanocodexError::InvalidRequest(
-                    "stop after capture".to_owned(),
-                ))
-            })
+            .set_agent_factory(
+                Thinking::Max,
+                Speed::Standard,
+                move |model, thinking, speed| {
+                    captured.send((model, thinking, speed)).unwrap();
+                    Err(NanocodexError::InvalidRequest(
+                        "stop after capture".to_owned(),
+                    ))
+                },
+            )
             .unwrap();
         let tool = SpawnAgent {
             registry: Arc::downgrade(&registry),
@@ -769,7 +787,7 @@ mod tests {
                     assert!(error.to_string().contains("stop after capture"));
                     assert_eq!(
                         arguments.try_recv().unwrap(),
-                        (expected_model, expected, false)
+                        (expected_model, expected, Speed::Standard)
                     );
                 }
             }

@@ -1,6 +1,6 @@
 use super::{AgentRecipe, claude, install_agent_tools};
 use crate::app::{
-    config::{Config, ConfigOverrides},
+    config::{Config, ConfigOverrides, Speed},
     secret::SecretString,
 };
 use axum::{
@@ -228,9 +228,10 @@ fn build_agent(
     context: AgentContext,
     recipe: &Arc<AgentRecipe>,
     codex: Script,
-    fast_mode: bool,
+    speed: Speed,
 ) -> Result<(Nanocodex, AgentEvents), NanocodexError> {
     let AgentContext { model, thinking } = context;
+    let speed = speed.for_model(model);
     let tools = install_agent_tools(
         recipe.tools.clone(),
         &recipe.subagents,
@@ -247,7 +248,7 @@ fn build_agent(
         Nanocodex::builder(openai)
             .model(model)
             .thinking(thinking)
-            .fast_mode(fast_mode && context.model.supports_fast_mode())
+            .service_tier(speed.into())
             .workspace(&recipe.workspace)
             .tools(tools)
             .build()
@@ -256,7 +257,16 @@ fn build_agent(
             .claude_client(|| Ok(Some(SecretString::new("sk-ant-usr-fixture-token".into()))))?;
         let clean_recipe = Arc::clone(recipe);
         let spawn: claude::CleanAgentFactory = Arc::new(move |context, fast_mode| {
-            build_agent(context, &clean_recipe, codex.clone(), fast_mode)
+            build_agent(
+                context,
+                &clean_recipe,
+                codex.clone(),
+                if fast_mode {
+                    Speed::Fast
+                } else {
+                    Speed::Standard
+                },
+            )
         });
         claude::build_client(
             client,
@@ -264,7 +274,7 @@ fn build_agent(
             &recipe.workspace,
             Arc::from("Use the installed tools."),
             claude::ClaudeSession {
-                fast_mode,
+                fast_mode: speed != Speed::Standard,
                 ..claude::ClaudeSession::default()
             },
             claude::tool_runtime(&recipe.config, &recipe.workspace, &tools)?,
@@ -400,7 +410,7 @@ async fn api_key_messages_reject_redirects_without_forwarding_credentials() {
             },
             &recipe,
             Script::new(HarnessModel::Codex(CodexModel::Sol), String::new()),
-            false,
+            Speed::Standard,
         )
         .unwrap();
         let result = timeout(Duration::from_secs(5), async {
@@ -467,7 +477,17 @@ async fn mixed_provider_roundtrip(
     let output = json!({"native_model":child_model.as_str(), "answer":42});
     let child_code = format!("text(await tools.submit_result({{turn_token:1,output:{output}}}));");
     let root_code = format!(
-        "const children = await Promise.all(Array.from({{length:{child_count}}}, () => tools.spawn_agent({{role:'fixture',task:'Return the required object',model:'{}',thinking:'medium',output_schema:{{type:'object',properties:{{native_model:{{type:'string'}},answer:{{type:'integer'}}}},required:['native_model','answer'],additionalProperties:false}}}}))); text(await Promise.all(children.map(child => tools.wait_agent({{agent_ids:[child.agent_id],timeout_ms:5000}}))));",
+        r#"
+const children = await Promise.all(Array.from({{length:{child_count}}}, () => tools.spawn_agent({{
+  role: 'fixture', task: 'Return the required object', model: '{}', thinking: 'medium',
+  output_schema: {{type:'object',properties:{{native_model:{{type:'string'}},answer:{{type:'integer'}}}},required:['native_model','answer'],additionalProperties:false}}
+}})));
+await Promise.allSettled(children.map(child => tools.wait_agent({{agent_ids:[child.agent_id],timeout_ms:5000}})));
+text(await tools.list_agents({{include_completed:true}}));
+for (let attempt = 0; attempt < 3; attempt++) {{
+  await tools.wait_agent({{agent_ids:children.map(child => child.agent_id),timeout_ms:5000}});
+}}
+"#,
         child_model.as_str()
     );
     let (codex, mut native_claude) = if matches!(root_model, HarnessModel::Codex(_)) {
@@ -514,19 +534,23 @@ async fn mixed_provider_roundtrip(
     let children = Arc::new(Mutex::new(Vec::new()));
     let captured_children = children.clone();
     subagents
-        .set_agent_factory(Thinking::Medium, false, move |model, thinking, fast| {
-            assert_eq!(model, child_model);
-            assert_eq!(thinking, Thinking::Medium);
-            assert!(!fast);
-            let (agent, events) = build_agent(
-                AgentContext { model, thinking },
-                &child_recipe,
-                child_codex.clone(),
-                fast,
-            )?;
-            captured_children.lock().unwrap().push(agent.clone());
-            Ok((agent, events))
-        })
+        .set_agent_factory(
+            Thinking::Medium,
+            Speed::Standard,
+            move |model, thinking, speed| {
+                assert_eq!(model, child_model);
+                assert_eq!(thinking, Thinking::Medium);
+                assert_eq!(speed, Speed::Standard);
+                let (agent, events) = build_agent(
+                    AgentContext { model, thinking },
+                    &child_recipe,
+                    child_codex.clone(),
+                    speed,
+                )?;
+                captured_children.lock().unwrap().push(agent.clone());
+                Ok((agent, events))
+            },
+        )
         .unwrap();
     let (root, mut events) = build_agent(
         AgentContext {
@@ -535,7 +559,7 @@ async fn mixed_provider_roundtrip(
         },
         &recipe,
         codex.clone(),
-        false,
+        Speed::Standard,
     )
     .unwrap();
     if clean_spawn {
@@ -574,14 +598,27 @@ async fn mixed_provider_roundtrip(
         .find(|event| event["tool"] == "spawn_agent")
         .expect("nested spawn event");
     assert_eq!(spawn["structured_result"]["model"], child_model.as_str());
-    let wait = root_results
+    let waits = root_results
         .iter()
-        .find(|event| event["tool"] == "wait_agent")
-        .expect("nested wait event");
-    assert_eq!(
-        wait["structured_result"]["agents"][0]["status"]["output"],
-        output
-    );
+        .filter(|event| event["tool"] == "wait_agent")
+        .collect::<Vec<_>>();
+    assert_eq!(waits.len(), child_count + 1);
+    assert_eq!(waits.last().unwrap()["status"], "failed");
+    let directory = root_results
+        .iter()
+        .find(|event| event["tool"] == "list_agents")
+        .expect("completed result inspection");
+    let reports = directory["structured_result"]["agents"].as_array().unwrap();
+    assert_eq!(reports.len(), child_count);
+    for report in reports {
+        assert_eq!(report["status"]["state"], "completed");
+        assert_eq!(report["status"]["output"], output);
+    }
+    let exec = root_results
+        .iter()
+        .find(|event| event["tool"] == "exec")
+        .expect("code cell result");
+    assert_eq!(exec["status"], "failed");
     let mut completed = 0;
     let mut submitted = 0;
     while let Ok(update) = updates.try_recv() {
@@ -666,12 +703,11 @@ async fn mixed_provider_roundtrip(
             assert_eq!(event.event.request_id.as_ref(), clean.session_id());
             if event.event.kind == AgentEventKind::ToolResult {
                 let payload: Value = serde_json::from_str(event.event.payload.get()).unwrap();
-                if payload["tool"] == "wait_agent" {
-                    assert_eq!(
-                        payload["structured_result"]["agents"][0]["status"]["output"],
-                        output
-                    );
-                    nested_results += 1;
+                if payload["tool"] == "list_agents" {
+                    for report in payload["structured_result"]["agents"].as_array().unwrap() {
+                        assert_eq!(report["status"]["output"], output);
+                        nested_results += 1;
+                    }
                 }
             }
         }

@@ -1,5 +1,5 @@
 use crate::{
-    app::config::{ReasoningEffort, ReasoningMode},
+    app::config::{ReasoningEffort, ReasoningMode, Speed},
     core::ConfiguredAgent,
     tui::{pane::PaneId, worker::AuxiliaryError},
 };
@@ -26,7 +26,7 @@ pub(crate) struct PreparedHandoff {
     pub(crate) prompt: String,
     pub(crate) effort: ReasoningEffort,
     pub(crate) reasoning_mode: ReasoningMode,
-    pub(crate) fast_mode: bool,
+    pub(crate) speed: Speed,
     pub(crate) model: Model,
     pub(crate) configured: ConfiguredAgent,
 }

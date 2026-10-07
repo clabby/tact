@@ -18,7 +18,7 @@ use unicode_width::UnicodeWidthStr;
 
 const ACTIONS: [Action; 18] = [
     Action::Effort,
-    Action::FastMode,
+    Action::Speed,
     Action::Theme,
     Action::NewSession,
     Action::ResumeSession,
@@ -48,8 +48,6 @@ pub(super) struct ActionAvailability {
     pub(super) new_session: bool,
     pub(super) review: bool,
     pub(super) fork: bool,
-    pub(super) fast_mode: bool,
-    pub(super) fast_mode_available: bool,
     pub(super) memory: bool,
     pub(super) model: bool,
 }
@@ -61,7 +59,7 @@ pub(super) enum Action {
     Subagents,
     Effort,
     Model,
-    FastMode,
+    Speed,
     Theme,
     NewSession,
     ResumeSession,
@@ -292,7 +290,7 @@ impl ActionsMenu {
             Action::Subagents => true,
             Action::Effort => true,
             Action::Model => self.availability.model,
-            Action::FastMode => self.availability.fast_mode_available,
+            Action::Speed => true,
             Action::Theme => true,
             Action::NewSession => self.availability.new_session,
             Action::ResumeSession => self.availability.new_session,
@@ -325,10 +323,6 @@ impl ActionsMenu {
             Action::Reflection if !self.availability.new_session => {
                 "Reflect on session · finish active work first"
             }
-            Action::FastMode if !self.availability.fast_mode_available => {
-                "Fast mode · unavailable for this model"
-            }
-            Action::FastMode if self.availability.fast_mode => "Disable fast mode",
             Action::Model if !self.availability.model => "Select model · start a new session first",
             Action::Memory if !self.availability.memory => {
                 "Memory · enable in config: memory.enabled = true"
@@ -346,7 +340,7 @@ impl Action {
             Self::Subagents => "Subagents",
             Self::Effort => "Change effort",
             Self::Model => "Select model",
-            Self::FastMode => "Enable fast mode",
+            Self::Speed => "Change speed",
             Self::Theme => "Select theme",
             Self::NewSession => "New session",
             Self::ResumeSession => "Resume session",
@@ -369,7 +363,7 @@ impl Action {
             Self::Subagents => Some("agents"),
             Self::Effort => Some("thinking"),
             Self::Model => Some("intelligence"),
-            Self::FastMode => Some("priority"),
+            Self::Speed => Some("fast/priority/ultrafast"),
             Self::Theme => Some("appearance"),
             Self::NewSession => Some("clear"),
             Self::ResumeSession => Some("restore"),
@@ -477,8 +471,6 @@ mod tests {
             new_session: true,
             review: true,
             fork: true,
-            fast_mode: false,
-            fast_mode_available: true,
             memory: true,
             model: true,
         }
@@ -533,7 +525,7 @@ mod tests {
         );
         assert_eq!(
             row_segment(&terminal, 3, 1, 58),
-            "│  Enable fast mode (alias: priority)                    │"
+            "│  Change speed (alias: fast/priority/ultrafast)         │"
         );
         assert_eq!(
             row_segment(&terminal, 4, 1, 58),
@@ -640,7 +632,7 @@ mod tests {
         assert_eq!(menu.selected, 1);
         assert_eq!(
             menu.update(key(KeyCode::Enter)).effects,
-            [ActionsEffect::Trigger(Action::FastMode)]
+            [ActionsEffect::Trigger(Action::Speed)]
         );
 
         menu.update(key(KeyCode::Char('t')));
@@ -657,7 +649,7 @@ mod tests {
 
         assert_eq!(
             menu.update(key(KeyCode::Tab)).effects,
-            [ActionsEffect::Trigger(Action::FastMode)]
+            [ActionsEffect::Trigger(Action::Speed)]
         );
     }
 
@@ -806,24 +798,17 @@ mod tests {
     }
 
     #[test]
-    fn fast_mode_action_reflects_the_current_setting() {
-        let mut enabled = ActionsMenu::new(available());
-        for character in "priority".chars() {
-            enabled.update(key(KeyCode::Char(character)));
+    fn speed_action_is_searchable_by_name_and_aliases() {
+        for query in ["speed", "fast", "priority", "ultrafast"] {
+            let mut menu = ActionsMenu::new(available());
+            for character in query.chars() {
+                menu.update(key(KeyCode::Char(character)));
+            }
+            assert_eq!(
+                menu.update(key(KeyCode::Enter)).effects,
+                [ActionsEffect::Trigger(Action::Speed)]
+            );
         }
-        assert_eq!(
-            enabled.update(key(KeyCode::Enter)).effects,
-            [ActionsEffect::Trigger(Action::FastMode)]
-        );
-
-        let mut availability = available();
-        availability.fast_mode = true;
-        let mut disabled = ActionsMenu::new(availability);
-        let terminal = render(&mut disabled);
-        assert_eq!(
-            row_segment(&terminal, 3, 1, 58),
-            "│  Disable fast mode (alias: priority)                   │"
-        );
     }
 
     #[test]

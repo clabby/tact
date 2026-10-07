@@ -7,14 +7,21 @@ The temporary dependency uses the fork branch `cl/claude-integration`;
 
 ## Authentication
 
-Claude requires `ANTHROPIC_API_KEY`. `tact auth --provider claude status` reports whether
-that environment variable is configured without displaying its value. Claude login and logout
-commands explain how to configure or unset the key; they do not perform authentication.
+Claude accepts a literal `claude.api_key` in TOML. An explicitly set, nonblank `ANTHROPIC_API_KEY`
+overrides it. `tact auth --provider claude status` reports the selected source without displaying
+the key. Claude login and logout commands explain how to configure or remove the key; they do
+not perform authentication.
 Tact does not read or store Claude subscription credentials.
 Keys without a workspace scope require `claude.workspace_id`, which supplies the
 `anthropic-workspace-id` request header. Unset or blank values omit the header.
-Both status and client construction accept the `sk-ant-api` and `sk-ant-usr-` key prefixes
-and reject other formats, including OAuth access and refresh tokens placed in `ANTHROPIC_API_KEY`.
+Status and client construction share credential resolution and accept the `sk-ant-api` and
+`sk-ant-usr-` prefixes. They reject other formats, including OAuth access and refresh tokens.
+
+Configured keys use shared, zeroizing secret storage and are redacted from config and debug
+output. Config files containing credentials require private Unix permissions, such as `0600`;
+platforms where file privacy cannot be verified must use the environment. Updating another
+setting preserves the original key in the file. Tact does not export configured keys into shell
+or MCP environments. The native Claude client retains its own non-zeroizing copy of the key.
 
 Codex authentication is independent. A Codex root or child can use its ChatGPT subscription
 while Claude agents use API keys. Secrets and authentication details are not added to model

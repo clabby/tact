@@ -5,13 +5,15 @@ mod claude_context;
 pub(crate) mod extensions;
 #[cfg(test)]
 mod mixed_provider_tests;
+#[cfg(test)]
+mod openai_tests;
 #[cfg(feature = "harbor-evals")]
 mod orchestration;
 
 use crate::{
     app::{
-        config::{Config, ReasoningEffort, ReasoningMode, SkillsConfig},
-        error::{ConfigError, Result, RuntimeError, SecretError},
+        config::{Config, ReasoningEffort, ReasoningMode, SkillsConfig, Speed},
+        error::{AuthError, ConfigError, Result, RuntimeError, SecretError},
         hook,
         secret::SecretString,
     },
@@ -22,9 +24,8 @@ use crate::{
     tui::session::{AgentSnapshot, ResumeState},
 };
 use nanocodex::{
-    AgentEvents, ClaudeModel, HarnessModel as Model, Model as CodexModel, Nanocodex,
-    NanocodexError, OpenAi, Tools, TurnControl, agent::session::SessionId, claude::ClaudeClient,
-    oai::tower::ResponsesServiceConfig,
+    AgentEvents, HarnessModel as Model, Nanocodex, NanocodexError, OpenAi, Tools, TurnControl,
+    agent::session::SessionId, claude::ClaudeClient, oai::tower::ResponsesServiceConfig,
 };
 #[cfg(feature = "harbor-evals")]
 use orchestration::{OrchestrationRecorder, RunOutcome};
@@ -40,7 +41,7 @@ use tact_memory::{
     MemoryTool, MutationAuthorizer, RemoteMemoryClient, RemoteToken, SelectedMemoryStore,
 };
 use tact_subagents::{
-    AgentContext, RootAgentAuthority, ScopedAgentUpdate, Subagents, WeakSubagents,
+    AgentContext, RootAgentAuthority, SUPPORTED_MODELS, ScopedAgentUpdate, Subagents, WeakSubagents,
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -56,12 +57,10 @@ const SUBAGENT_INSTRUCTIONS: &str = concat!(
     "For each `spawn_agent` call, choose `model` and `thinking` separately for the assigned subtask. ",
     "Optimize expected total cost and time to a correct completed result, including rework. A ",
     "stronger model or `xhigh`/`max` upfront can be cheaper and faster than repeated weaker runs; ",
-    "do not require a cheaper or lower-effort attempt first. Name a model from the spawn_agent ",
-    "tool schema explicitly. Among Codex models, consider Luna for simple tasks, Sol for bounded ",
-    "coding and analysis, and Astra for the hardest reasoning. The current turn's ",
-    "model and effort are supplied in `<agent_context>`. A child's model cannot exceed the ",
-    "spawning parent's model when both use Codex (`luna` < `sol` < `astra`). Root agents use the live ",
-    "configured `agent.thinking` as their spawning effort cap: user changes authorize subsequent ",
+    "do not require a cheaper or lower-effort attempt first. Name an eligible model explicitly. ",
+    "The current turn's model and effort are supplied in `<agent_context>`. A child's model cannot ",
+    "exceed the spawning parent's model when both use Codex (`luna` < `sol` < `astra`). Root agents ",
+    "use the live configured `agent.thinking` as their spawning effort cap: user changes authorize subsequent ",
     "spawns even during an already active turn. Registered subagents are additionally limited to ",
     "their own assigned effort, regardless of the root's cap. Existing children retain their ",
     "model and effort.\n\n",
@@ -103,6 +102,60 @@ const SUBAGENT_INSTRUCTIONS: &str = concat!(
     "completion condition is met. Keep concurrent write scopes disjoint. You own final synthesis and ",
     "verification."
 );
+const SUBAGENT_MODEL_INSTRUCTIONS: &str = r#"
+
+## Subagent model selection
+
+Among Codex models, start with `sol` (GPT-6.1 Sol). Use `astra` for especially deep reviews or
+unresolved reasoning that warrants it.
+
+For document, system, and protocol reviews, request explicit assumptions, counterexamples,
+safety/liveness conditions, and proof obligations. Verify findings against source evidence.
+
+DeepSWE 1.1 (Artificial Analysis, native Codex). Cost/time are averages across AA's coding suite.
+
+| Model | Effort | DeepSWE | API $/task | Time/task |
+| --- | --- | --- | --- | --- |
+| `luna` | max | 64% | $0.18 | 21.4m |
+| `sol` | xhigh | 73% | $1.04 | 15.5m |
+| `astra` | max | 68% | $7.47 | 29.4m |
+
+FrontierCode 1.1 Main (native Codex; best scoring effort per model).
+
+| Model | Effort | Score / 100 | API $/rollout |
+| --- | --- | --- | --- |
+| `luna` | max | 42.42 | $0.10 |
+| `sol` | medium | 50.23 | $0.36 |
+| `astra` | max | 53.26 | $4.59 |
+"#;
+
+const CLAUDE_SUBAGENT_MODEL_INSTRUCTIONS: &str = r#"
+
+### Available Claude models
+
+Use `opus-5.5` or `sonnet-5.5` as the normal starting choices for implementation, analysis, and
+document, system, or protocol review. Bring in `astra`, `fable-5.1`, or another eligible model
+for especially deep reviews, unresolved premises, or independent challenges. Prefer model diversity
+for second opinions: use an eligible Codex model alongside Claude. Both providers may delegate to
+either provider within the applicable model and effort caps.
+
+DeepSWE 1.1 (Artificial Analysis, native Claude Code). Cost/time are averages across AA's coding suite.
+
+| Model | Effort | DeepSWE | API $/task | Time/task |
+| --- | --- | --- | --- | --- |
+| `sonnet-5.5` | max | 72% | $14.19 | 1.5h |
+| `opus-5.5` | max | 68% | $13.04 | 1.1h |
+| `fable-5.1` (with fallback) | max | 64% | $12.39 | 34.8m |
+
+FrontierCode 1.1 Main (native Claude Code; best scoring effort per model).
+
+| Model | Effort | Score / 100 | API $/rollout |
+| --- | --- | --- | --- |
+| `sonnet-5.5` | xhigh | 52.09 | $1.59 |
+| `opus-5.5` | medium | 54.64 | $0.80 |
+| `fable-5.1` | medium | 50.91 | $3.28 |
+"#;
+
 const CLAUDE_CODE_MODE_INSTRUCTIONS: &str = concat!(
     "\n\nUse Code Mode through the exec and wait tools. Call exec with a JSON object whose ",
     "code field contains JavaScript, for example {\"code\":\"text(await tools.current_session({}));\"}. ",
@@ -113,17 +166,6 @@ const CLAUDE_CODE_MODE_INSTRUCTIONS: &str = concat!(
     "running cell_id, continue that cell with wait using its cell_id; do not restart its work. ",
     "Complete or terminate yielded cells before finishing your turn. Tools, memory, MCP, and ",
     "subagent capabilities are available only when listed in the current tool catalog."
-);
-
-const CLAUDE_SUBAGENT_INSTRUCTIONS: &str = concat!(
-    "\n\nClaude is enabled. In spawn_agent, choose luna, sol, astra, sonnet-5.5, opus-5.5, or fable-5.1 ",
-    "explicitly. Intelligence order, strongest first: Fable 5.1 > Astra > Opus 5.5 > Sol > Luna. ",
-    "Use this order when judging the capability a task needs, together with expected cost, time, ",
-    "and rework. Consider Sonnet 5.5 for speed and cost. Claude and Codex agents may delegate ",
-    "to either provider. All Claude models ",
-    "support low, medium, high, xhigh, and max; the same effort caps apply to all providers. ",
-    "The Codex model hierarchy applies only when both parent and child use Codex. ",
-    "Claude models may delegate to each other."
 );
 
 const TOOL_ORCHESTRATION_INSTRUCTIONS: &str = concat!(
@@ -236,12 +278,7 @@ struct SessionInstructions {
 
 struct AgentInstructions {
     session: SessionInstructions,
-    luna: Arc<str>,
-    sol: Arc<str>,
-    astra: Arc<str>,
-    sonnet: Arc<str>,
-    opus: Arc<str>,
-    fable: Arc<str>,
+    children: [(Model, Arc<str>); SUPPORTED_MODELS.len()],
 }
 
 impl AgentInstructions {
@@ -254,54 +291,20 @@ impl AgentInstructions {
         let fresh = restored.is_none();
         let mut prompts = Self {
             session: SessionInstructions::from_config(config, model, restored, memory_enabled),
-            luna: SessionInstructions::from_config(
-                config,
-                Model::Codex(CodexModel::Luna),
-                None,
-                memory_enabled,
-            )
-            .text,
-            sol: SessionInstructions::from_config(
-                config,
-                Model::Codex(CodexModel::Sol),
-                None,
-                memory_enabled,
-            )
-            .text,
-            astra: SessionInstructions::from_config(
-                config,
-                Model::Codex(CodexModel::Astra),
-                None,
-                memory_enabled,
-            )
-            .text,
-            sonnet: SessionInstructions::from_config(
-                config,
-                Model::Claude(ClaudeModel::Sonnet55),
-                None,
-                memory_enabled,
-            )
-            .text,
-            opus: SessionInstructions::from_config(
-                config,
-                Model::Claude(ClaudeModel::Opus55),
-                None,
-                memory_enabled,
-            )
-            .text,
-            fable: SessionInstructions::from_config(
-                config,
-                Model::Claude(ClaudeModel::Fable51),
-                None,
-                memory_enabled,
-            )
-            .text,
+            children: SUPPORTED_MODELS.map(|model| {
+                (
+                    model,
+                    SessionInstructions::from_config(config, model, None, memory_enabled).text,
+                )
+            }),
         };
         if config.claude().enabled() {
             let context = claude_context::context(config.agent().workspace(), config.codex_home())?;
-            prompts.sonnet = format!("{}\n\n{context}", prompts.sonnet).into();
-            prompts.opus = format!("{}\n\n{context}", prompts.opus).into();
-            prompts.fable = format!("{}\n\n{context}", prompts.fable).into();
+            for (model, text) in &mut prompts.children {
+                if matches!(model, Model::Claude(_)) {
+                    *text = format!("{text}\n\n{context}").into();
+                }
+            }
             if fresh && matches!(model, Model::Claude(_)) {
                 prompts.session.text = format!("{}\n\n{context}", prompts.session.text).into();
             }
@@ -310,15 +313,12 @@ impl AgentInstructions {
     }
 
     fn for_model(&self, model: Model) -> Arc<str> {
-        Arc::clone(match model {
-            Model::Codex(CodexModel::Luna) => &self.luna,
-            Model::Codex(CodexModel::Sol) => &self.sol,
-            Model::Codex(CodexModel::Astra) => &self.astra,
-            Model::Claude(ClaudeModel::Sonnet55) => &self.sonnet,
-            Model::Claude(ClaudeModel::Opus55) => &self.opus,
-            Model::Claude(ClaudeModel::Fable51) => &self.fable,
-            _ => unreachable!("unsupported models rejected at configuration and tool boundaries"),
-        })
+        let (_, text) = self
+            .children
+            .iter()
+            .find(|(candidate, _)| *candidate == model)
+            .expect("unsupported models rejected at configuration and tool boundaries");
+        Arc::clone(text)
     }
 }
 
@@ -354,12 +354,25 @@ impl SessionInstructions {
             config.subagents().enabled(),
             memory_enabled,
         );
-        let mut text = session.text.replace(CLAUDE_SUBAGENT_INSTRUCTIONS, "");
+        let mut text = session.text.to_string();
+        if config.subagents().enabled() {
+            if !text.contains(SUBAGENT_MODEL_INSTRUCTIONS) {
+                text.push_str(SUBAGENT_MODEL_INSTRUCTIONS);
+            }
+            if config.claude().enabled() {
+                if !text.contains(CLAUDE_SUBAGENT_MODEL_INSTRUCTIONS) {
+                    text.push_str(CLAUDE_SUBAGENT_MODEL_INSTRUCTIONS);
+                }
+            } else {
+                text = text.replace(CLAUDE_SUBAGENT_MODEL_INSTRUCTIONS, "");
+            }
+        } else {
+            text = text
+                .replace(SUBAGENT_MODEL_INSTRUCTIONS, "")
+                .replace(CLAUDE_SUBAGENT_MODEL_INSTRUCTIONS, "");
+        }
         if matches!(model, Model::Claude(_)) && !text.contains(CLAUDE_CODE_MODE_INSTRUCTIONS) {
             text.push_str(CLAUDE_CODE_MODE_INSTRUCTIONS);
-        }
-        if config.claude().enabled() && config.subagents().enabled() {
-            text.push_str(CLAUDE_SUBAGENT_INSTRUCTIONS);
         }
         session.text = text.into();
         session
@@ -490,19 +503,19 @@ impl ConfiguredAgent {
                 thinking: thinking.into(),
             },
             reasoning_mode,
-            agent_config.fast_mode(),
+            agent_config.speed(),
             Arc::clone(&instructions),
             session_id,
             snapshot,
         )?;
         subagent_control.set_agent_factory(
             thinking.into(),
-            agent_config.fast_mode(),
-            move |model, thinking, fast_mode| {
+            agent_config.speed(),
+            move |model, thinking, speed| {
                 recipe.build(
                     AgentContext { model, thinking },
                     supported_reasoning_mode(model, reasoning_mode),
-                    fast_mode,
+                    speed,
                     prompts.for_model(model),
                     None,
                     None,
@@ -640,6 +653,18 @@ impl ConfiguredAgent {
     }
 }
 
+pub(crate) async fn set_speed(
+    agent: &Nanocodex,
+    model: Model,
+    speed: Speed,
+) -> nanocodex::agent::Result<()> {
+    let speed = speed.for_model(model);
+    match model {
+        Model::Codex(_) => agent.set_service_tier(speed.into()).await,
+        Model::Claude(_) => agent.set_fast_mode(speed != Speed::Standard).await,
+    }
+}
+
 struct AgentRecipe {
     config: Config,
     workspace: PathBuf,
@@ -653,13 +678,13 @@ impl AgentRecipe {
         self: &Arc<Self>,
         context: AgentContext,
         reasoning_mode: ReasoningMode,
-        fast_mode: bool,
+        speed: Speed,
         instructions: Arc<str>,
         session_id: Option<&str>,
         snapshot: Option<AgentSnapshot>,
     ) -> nanocodex::agent::Result<(Nanocodex, AgentEvents)> {
         let AgentContext { model, thinking } = context;
-        let fast_mode = fast_mode && model.supports_fast_mode();
+        let speed = speed.for_model(model);
         if let Some(snapshot) = &snapshot {
             snapshot.validate_identity(model, session_id)?;
         }
@@ -701,7 +726,6 @@ impl AgentRecipe {
                 .workspace(&self.workspace)
                 .thinking(thinking)
                 .reasoning_mode(reasoning_mode.into())
-                .fast_mode(fast_mode)
                 .instructions(instructions)
                 .tools_factory(move |_| tool_factory());
             if let Some(home) = config.codex_home() {
@@ -716,7 +740,7 @@ impl AgentRecipe {
             if let Some(snapshot) = snapshot {
                 builder = builder.resume(snapshot.into_codex()?);
             }
-            builder.build()
+            builder.service_tier(speed.into()).build()
         } else {
             if !config.claude().enabled() {
                 return Err(NanocodexError::InvalidRequest(
@@ -732,7 +756,11 @@ impl AgentRecipe {
                 recipe.build(
                     context,
                     supported_reasoning_mode(context.model, reasoning_mode),
-                    fast_mode,
+                    if fast_mode {
+                        Speed::Fast
+                    } else {
+                        Speed::Standard
+                    },
                     Arc::clone(&clean_instructions),
                     None,
                     None,
@@ -746,7 +774,7 @@ impl AgentRecipe {
                 claude::ClaudeSession {
                     session_id,
                     snapshot,
-                    fast_mode,
+                    fast_mode: speed != Speed::Standard,
                 },
                 runtime,
                 Some(spawn),
@@ -765,15 +793,12 @@ impl AgentRecipe {
         let endpoint = config
             .api_base_url()
             .map(|base| format!("{}/messages", base.trim_end_matches('/')));
-        let key = read_key()
+        let key = config
+            .resolve_api_key(read_key)
             .map_err(|error| NanocodexError::InvalidRequest(error.to_string()))?
             .ok_or_else(|| {
-                NanocodexError::InvalidRequest(
-                    "Claude API-key authentication requires ANTHROPIC_API_KEY".into(),
-                )
+                NanocodexError::InvalidRequest(AuthError::ClaudeApiKeyUnavailable.to_string())
             })?;
-        crate::app::auth::validate_claude_api_key(&key)
-            .map_err(|error| NanocodexError::InvalidRequest(error.to_string()))?;
         let mut headers = HeaderMap::new();
         if let Some(workspace_id) = config.workspace_id() {
             let value = HeaderValue::from_str(workspace_id).map_err(|_| {
@@ -791,8 +816,8 @@ impl AgentRecipe {
             .map_err(|error| NanocodexError::InvalidRequest(error.to_string()))?;
         // The native client owns a non-zeroizing copy after this boundary.
         Ok(match endpoint {
-            Some(endpoint) => ClaudeClient::new(http, endpoint, key.expose_secret()),
-            None => ClaudeClient::official(http, key.expose_secret()),
+            Some(endpoint) => ClaudeClient::new(http, endpoint, key.key().expose_secret()),
+            None => ClaudeClient::official(http, key.key().expose_secret()),
         })
     }
 }
@@ -1037,7 +1062,7 @@ mod tests {
         core::extensions::Skill,
     };
     use nanocodex::{
-        ClaudeModel, HarnessModel as Model, Model as CodexModel, Nanocodex, OpenAi,
+        HarnessModel as Model, Model as CodexModel, Nanocodex, OpenAi,
         oai::{
             ResponseError,
             tower::{ResponsesAttempt, ResponsesServiceConfig, ResponsesServiceResponse},
@@ -1123,6 +1148,25 @@ mod tests {
                         ))))
                         .is_ok()
                 );
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+
+                    let path = recipe.config.path();
+                    fs::write(
+                        path,
+                        "[claude]\nenabled = true\napi_key = 'sk-ant-api03-configured-sentinel'\n",
+                    )
+                    .unwrap();
+                    fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+                    let config = Config::load(ConfigOverrides {
+                        path: Some(path.to_path_buf()),
+                        ..Default::default()
+                    })
+                    .unwrap();
+                    let recipe = AgentRecipe { config, ..recipe };
+                    assert!(recipe.claude_client(|| Ok(None)).is_ok());
+                }
             }
         }
     }
@@ -1311,7 +1355,10 @@ mod tests {
                     Some((stored.to_owned(), Some(false))),
                     true,
                 );
-                assert_eq!(resumed.text.as_ref(), stored);
+                assert_eq!(
+                    resumed.text.as_ref(),
+                    format!("{stored}{}", super::SUBAGENT_MODEL_INSTRUCTIONS)
+                );
                 assert!(resumed.skills.is_empty());
             }
         }
@@ -1341,15 +1388,19 @@ mod tests {
                 true,
             )
             .unwrap();
-            assert_eq!(instructions.session.text.as_ref(), stored);
-            for (model, actual) in [
-                (Model::Codex(CodexModel::Luna), &instructions.luna),
-                (Model::Codex(CodexModel::Sol), &instructions.sol),
-                (Model::Codex(CodexModel::Astra), &instructions.astra),
+            assert_eq!(
+                instructions.session.text.as_ref(),
+                format!("{stored}{}", super::SUBAGENT_MODEL_INSTRUCTIONS)
+            );
+            for model in [
+                Model::Codex(CodexModel::Luna),
+                Model::Codex(CodexModel::Sol),
+                Model::Codex(CodexModel::Astra),
             ] {
+                let actual = instructions.for_model(model);
                 let expected = SessionInstructions::from_config(&config, model, None, true);
                 assert!(
-                    actual == &expected.text,
+                    actual == expected.text,
                     "{model:?} child must use fresh instructions"
                 );
                 assert!(!actual.contains("Saved project instructions."));
@@ -1360,7 +1411,7 @@ mod tests {
     }
 
     #[test]
-    fn claude_prompts_describe_code_mode_and_enabled_delegation() {
+    fn model_prompts_use_live_selection_guidance_and_provider_code_mode() {
         let directory = tempdir().unwrap();
         let path = directory.path().join("config.toml");
         fs::write(
@@ -1374,43 +1425,66 @@ mod tests {
             ..ConfigOverrides::default()
         })
         .unwrap();
-        for model in [
-            Model::Claude(ClaudeModel::Sonnet55),
-            Model::Claude(ClaudeModel::Opus55),
-            Model::Claude(ClaudeModel::Fable51),
-        ] {
+        for model in super::SUPPORTED_MODELS {
             let instructions = AgentInstructions::from_config(&config, model, None, true).unwrap();
             for text in [
-                &instructions.session.text,
-                &instructions.sonnet,
-                &instructions.opus,
-                &instructions.fable,
+                Arc::clone(&instructions.session.text),
+                instructions.for_model(model),
             ] {
-                assert!(text.starts_with("You are Tact, a coding agent powered by Claude"));
+                if matches!(model, Model::Claude(_)) {
+                    assert!(text.starts_with(&format!(
+                        "You are Tact, a coding agent powered by Claude {}.",
+                        crate::app::model::name(model)
+                    )));
+                    assert!(!text.contains("based on GPT"));
+                }
                 assert!(text.contains(TOOL_ORCHESTRATION_INSTRUCTIONS));
-                assert!(text.contains(super::CLAUDE_CODE_MODE_INSTRUCTIONS));
+                assert_eq!(
+                    text.contains(super::CLAUDE_CODE_MODE_INSTRUCTIONS),
+                    matches!(model, Model::Claude(_))
+                );
                 assert!(text.contains(MEMORY_INSTRUCTIONS));
-                assert!(text.contains("sonnet-5.5"));
-                assert!(text.contains("opus-5.5"));
-                assert!(text.contains("fable-5.1"));
-                assert!(text.contains("low, medium, high, xhigh, and max"));
-                assert!(text.contains("both parent and child use Codex"));
-                assert!(text.contains("Fable 5.1 > Astra > Opus 5.5 > Sol > Luna"));
-                assert!(!text.contains("based on GPT"));
+                assert!(text.contains("when both use Codex"));
+                for guide in [
+                    super::SUBAGENT_MODEL_INSTRUCTIONS,
+                    super::CLAUDE_SUBAGENT_MODEL_INSTRUCTIONS,
+                ] {
+                    assert_eq!(text.matches(guide).count(), 1);
+                }
             }
+            let stored = instructions
+                .session
+                .text
+                .replace(super::SUBAGENT_MODEL_INSTRUCTIONS, "")
+                .replace(super::CLAUDE_SUBAGENT_MODEL_INSTRUCTIONS, "")
+                .replace(super::CLAUDE_CODE_MODE_INSTRUCTIONS, "");
             let restored = SessionInstructions::from_config(
                 &config,
                 model,
-                Some((instructions.session.text.to_string(), Some(false))),
+                Some((stored.clone(), Some(false))),
                 true,
             );
+            assert!(restored.text.starts_with(&stored));
             assert_eq!(
-                restored
-                    .text
-                    .matches(super::CLAUDE_SUBAGENT_INSTRUCTIONS)
-                    .count(),
+                restored.text.matches("## Subagent model selection").count(),
                 1
             );
+            assert_eq!(
+                restored.text.matches("### Available Claude models").count(),
+                1
+            );
+            assert_eq!(
+                restored.text.contains(super::CLAUDE_CODE_MODE_INSTRUCTIONS),
+                matches!(model, Model::Claude(_))
+            );
+            let resumed_again = SessionInstructions::from_config(
+                &config,
+                model,
+                Some((restored.text.to_string(), Some(false))),
+                true,
+            );
+            assert_eq!(resumed_again.text, restored.text);
+            assert!(resumed_again.skills.is_empty());
         }
         fs::write(&path, "[skills]\nenabled = false\n").unwrap();
         let disabled = Config::load(ConfigOverrides {
@@ -1419,10 +1493,36 @@ mod tests {
             ..ConfigOverrides::default()
         })
         .unwrap();
-        let session =
-            SessionInstructions::from_config(&disabled, Model::Codex(CodexModel::Sol), None, false);
-        assert!(!session.text.contains("Claude is enabled"));
-        assert!(!session.text.contains("opus-5.5"));
+        for stored in [
+            None,
+            Some((
+                format!(
+                    "Saved instructions.{}{}",
+                    super::SUBAGENT_MODEL_INSTRUCTIONS,
+                    super::CLAUDE_SUBAGENT_MODEL_INSTRUCTIONS
+                ),
+                Some(false),
+            )),
+        ] {
+            let instructions = AgentInstructions::from_config(
+                &disabled,
+                Model::Codex(CodexModel::Sol),
+                stored,
+                false,
+            )
+            .unwrap();
+            for text in [
+                Arc::clone(&instructions.session.text),
+                instructions.for_model(Model::Codex(CodexModel::Sol)),
+            ] {
+                assert_eq!(text.matches("## Subagent model selection").count(), 1);
+                assert!(text.contains("GPT-6.1 Sol"));
+                assert!(!text.contains("Claude is enabled"));
+                assert!(!text.contains("sonnet-5.5"));
+                assert!(!text.contains("opus-5.5"));
+                assert!(!text.contains("fable-5.1"));
+            }
+        }
     }
 
     #[test]
@@ -1766,6 +1866,36 @@ mod tests {
 
         assert!(enabled.text.contains(SUBAGENT_INSTRUCTIONS));
         assert!(!disabled.text.contains(SUBAGENT_INSTRUCTIONS));
+
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        for enabled in [true, false] {
+            fs::write(&path, format!("[subagents]\nenabled = {enabled}\n")).unwrap();
+            let config = Config::load(ConfigOverrides {
+                path: Some(path.clone()),
+                workspace: Some(directory.path().to_path_buf()),
+                ..ConfigOverrides::default()
+            })
+            .unwrap();
+            for stored in [
+                None,
+                Some((
+                    format!("Saved instructions.{}", super::SUBAGENT_MODEL_INSTRUCTIONS),
+                    Some(false),
+                )),
+            ] {
+                let session = SessionInstructions::from_config(
+                    &config,
+                    Model::Codex(CodexModel::Sol),
+                    stored,
+                    false,
+                );
+                assert_eq!(
+                    session.text.contains(super::SUBAGENT_MODEL_INSTRUCTIONS),
+                    enabled
+                );
+            }
+        }
     }
 
     #[test]

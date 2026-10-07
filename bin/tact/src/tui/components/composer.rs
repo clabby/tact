@@ -9,7 +9,7 @@ use super::{
     waved_text::WavedText,
 };
 use crate::{
-    app::config::{ReasoningEffort, ReasoningMode},
+    app::config::{ReasoningEffort, ReasoningMode, Speed},
     tui::{
         context::{ContextBudget, MODEL_WINDOW_TOKENS},
         format::{
@@ -55,6 +55,7 @@ pub(crate) enum ComposerEffect {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ComposerChromeTarget {
     Effort,
+    Speed,
     Model,
     Subagents,
 }
@@ -71,7 +72,7 @@ pub(crate) enum ComposerEvent {
     SetEffort(ReasoningEffort),
     SetModel(Model),
     SetReasoningMode(ReasoningMode),
-    SetFastMode(bool),
+    SetSpeed(Speed),
     InputMode(Option<String>),
     Activity {
         active: bool,
@@ -110,7 +111,7 @@ pub(crate) struct Composer {
     thinking: ReasoningEffort,
     model: Model,
     reasoning_mode: ReasoningMode,
-    fast_mode: bool,
+    speed: Speed,
     input_mode: Option<String>,
     activity_wave: Option<WavedText>,
     activity_status: Option<String>,
@@ -120,6 +121,7 @@ pub(crate) struct Composer {
     subagent_wave: Option<WavedText>,
     turn_timers: VecDeque<TurnTimer>,
     effort_hit_area: Option<Rect>,
+    speed_hit_area: Option<Rect>,
     model_hit_area: Option<Rect>,
     subagent_hit_area: Option<Rect>,
     layout: Option<CachedLayout>,
@@ -210,7 +212,7 @@ impl Composer {
             thinking,
             model: Model::Codex(CodexModel::Sol),
             reasoning_mode: ReasoningMode::Standard,
-            fast_mode: false,
+            speed: Speed::Standard,
             input_mode: None,
             activity_wave: None,
             activity_status: None,
@@ -220,6 +222,7 @@ impl Composer {
             subagent_wave: None,
             turn_timers: VecDeque::new(),
             effort_hit_area: None,
+            speed_hit_area: None,
             model_hit_area: None,
             subagent_hit_area: None,
             layout: None,
@@ -284,11 +287,11 @@ impl Composer {
                 self.reasoning_mode = mode;
                 ComposerUpdate::changed()
             }
-            ComposerEvent::SetFastMode(enabled) => {
-                if self.fast_mode == enabled {
+            ComposerEvent::SetSpeed(speed) => {
+                if self.speed == speed {
                     return ComposerUpdate::unchanged();
                 }
-                self.fast_mode = enabled;
+                self.speed = speed;
                 ComposerUpdate::changed()
             }
             ComposerEvent::InputMode(mode) => {
@@ -398,6 +401,12 @@ impl Composer {
             .is_some_and(|area| area.contains(position))
         {
             return Some(ComposerChromeTarget::Model);
+        }
+        if self
+            .speed_hit_area
+            .is_some_and(|area| area.contains(position))
+        {
+            return Some(ComposerChromeTarget::Speed);
         }
         self.effort_hit_area
             .is_some_and(|area| area.contains(position))
@@ -584,8 +593,9 @@ impl Composer {
         self.model
     }
 
-    pub(crate) const fn fast_mode(&self) -> bool {
-        self.fast_mode
+    /// Requested speed, retained when the model uses a lower tier.
+    pub(crate) const fn speed(&self) -> Speed {
+        self.speed
     }
 
     pub(crate) const fn reasoning_mode(&self) -> ReasoningMode {
@@ -1166,6 +1176,7 @@ impl Composer {
 
     fn render_chrome(&mut self, buffer: &mut Buffer, area: Rect, theme: &Theme) {
         self.effort_hit_area = None;
+        self.speed_hit_area = None;
         self.model_hit_area = None;
         self.subagent_hit_area = None;
         let shell_mode = self.draft.starts_with('!');
@@ -1234,14 +1245,22 @@ impl Composer {
             .map(|timer| format!(" {} ", timer.label()))
             .unwrap_or_default();
         let effort = format!(" {} ", self.thinking.as_str());
-        let fast_mode = (self.fast_mode && self.model.supports_fast_mode()).then_some("⚡ ");
+
+        // Nerd Fonts: md-turtle, md-rabbit, and md-rocket.
+        let effective_speed = self.speed.for_model(self.model);
+        let speed = match effective_speed {
+            Speed::Standard => "󰳗 ",
+            Speed::Fast => "󰤇 ",
+            Speed::Ultrafast => "󰑣 ",
+        };
+
         let pro_mode = (self.reasoning_mode == ReasoningMode::Pro
             && matches!(self.model, Model::Codex(_)))
         .then_some("pro ");
         let right_width = timer.width()
             + model.width()
             + effort.width()
-            + fast_mode.map_or(0, UnicodeWidthStr::width)
+            + speed.width()
             + pro_mode.map_or(0, UnicodeWidthStr::width);
         let right_start = content_start
             + u16::try_from(content_width.saturating_sub(right_width)).unwrap_or(u16::MAX);
@@ -1342,10 +1361,9 @@ impl Composer {
                     .add_modifier(Modifier::BOLD),
             );
         }
-        let fast_mode_start = effort_start + u16::try_from(effort.width()).unwrap_or(u16::MAX);
-        let fast_mode_width =
-            u16::try_from(fast_mode.map_or(0, UnicodeWidthStr::width)).unwrap_or(u16::MAX);
-        let natural_pro_mode_start = fast_mode_start + fast_mode_width;
+        let speed_start = effort_start + u16::try_from(effort.width()).unwrap_or(u16::MAX);
+        let speed_width = u16::try_from(speed.width()).unwrap_or(u16::MAX);
+        let natural_pro_mode_start = speed_start + speed_width;
         let pro_mode_width =
             u16::try_from(pro_mode.map_or(0, UnicodeWidthStr::width)).unwrap_or(u16::MAX);
         let pro_mode_start = if pro_mode.is_some() {
@@ -1357,17 +1375,15 @@ impl Composer {
         } else {
             natural_pro_mode_start
         };
-        if let Some(fast_mode) = fast_mode
-            && fast_mode_start < content_end
-            && fast_mode_start.saturating_add(fast_mode_width) <= pro_mode_start
-        {
+        if speed_start < content_end && speed_start.saturating_add(speed_width) <= pro_mode_start {
+            self.speed_hit_area = Some(Rect::new(speed_start, top, speed_width, 1));
             buffer.set_stringn(
-                fast_mode_start,
+                speed_start,
                 top,
-                fast_mode,
-                usize::from(content_end - fast_mode_start),
+                speed,
+                usize::from(content_end - speed_start),
                 Style::default()
-                    .fg(Color::Yellow)
+                    .fg(theme.speed(effective_speed))
                     .add_modifier(Modifier::BOLD),
             );
         }
@@ -1601,10 +1617,10 @@ fn render_selection(
 mod tests {
     use super::{
         super::selection::{Selection, Surface, TextRange},
-        Composer, ComposerEffect, ComposerEvent, context_percent,
+        Composer, ComposerChromeTarget, ComposerEffect, ComposerEvent, context_percent,
     };
     use crate::{
-        app::config::{ReasoningEffort, ReasoningMode},
+        app::config::{ReasoningEffort, ReasoningMode, Speed},
         tui::theme::Theme,
     };
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
@@ -1681,7 +1697,7 @@ mod tests {
         assert_eq!(
             rows(&terminal),
             [
-                "╭─ 0%/272k ────────────────────────── gpt-6.1-sol  medium ─╮",
+                "╭─ 0%/272k ──────────────────────── gpt-6.1-sol  medium 󰳗 ─╮",
                 "│                                                          │",
                 "│                                                          │",
                 "│                                                          │",
@@ -1792,49 +1808,57 @@ mod tests {
     }
 
     #[test]
-    fn fast_mode_places_a_yellow_bolt_after_effort() {
+    fn speed_icon_displays_the_effective_tier_and_is_clickable() {
         let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
-        composer.update(ComposerEvent::SetFastMode(true));
-
-        let terminal = render(&mut composer, 60, 5);
-        let top = &terminal.backend().buffer().content[..60];
-        let rendered = top.iter().map(|cell| cell.symbol()).collect::<String>();
-        let bolt = top
-            .iter()
-            .position(|cell| cell.symbol() == "⚡")
-            .expect("fast mode should render its indicator");
-
-        assert!(rendered.contains("medium ⚡"));
-        assert_eq!(top[bolt].fg, Color::Yellow);
-        assert!(top[bolt].modifier.contains(ratatui::style::Modifier::BOLD));
+        composer.update(ComposerEvent::SetSpeed(Speed::Ultrafast));
+        for (model, effective, icon) in [
+            (Model::Codex(CodexModel::Astra), Speed::Ultrafast, "󰑣"),
+            (Model::Codex(CodexModel::Sol), Speed::Fast, "󰤇"),
+            (Model::Claude(ClaudeModel::Opus55), Speed::Fast, "󰤇"),
+            (Model::Claude(ClaudeModel::Sonnet55), Speed::Standard, "󰳗"),
+            (Model::Claude(ClaudeModel::Fable51), Speed::Standard, "󰳗"),
+        ] {
+            composer.update(ComposerEvent::SetModel(model));
+            let terminal = render(&mut composer, 72, 5);
+            assert!(rows(&terminal)[0].contains(&format!("medium {icon} ")));
+            assert_eq!(composer.speed(), Speed::Ultrafast);
+            let hit = composer
+                .speed_hit_area
+                .expect("speed should have a hit target");
+            assert_eq!(
+                composer.chrome_target(Position::new(hit.x, hit.y)),
+                Some(ComposerChromeTarget::Speed)
+            );
+            let cell = &terminal.backend().buffer()[(hit.x, hit.y)];
+            assert_eq!(cell.symbol(), icon);
+            assert_eq!(cell.fg, Theme::default().speed(effective));
+            assert!(cell.modifier.contains(ratatui::style::Modifier::BOLD));
+        }
     }
 
     #[test]
-    fn claude_models_show_only_supported_mode_indicators() {
-        for model in [
-            Model::Claude(ClaudeModel::Sonnet55),
-            Model::Claude(ClaudeModel::Opus55),
-            Model::Claude(ClaudeModel::Fable51),
+    fn claude_models_show_their_effective_speed_and_hide_pro() {
+        for (model, icon) in [
+            (Model::Claude(ClaudeModel::Sonnet55), "󰳗"),
+            (Model::Claude(ClaudeModel::Opus55), "󰤇"),
+            (Model::Claude(ClaudeModel::Fable51), "󰳗"),
         ] {
             let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Max);
             composer.update(ComposerEvent::SetModel(model));
-            composer.update(ComposerEvent::SetFastMode(true));
+            composer.update(ComposerEvent::SetSpeed(Speed::Ultrafast));
             composer.update(ComposerEvent::SetReasoningMode(ReasoningMode::Pro));
             let terminal = render(&mut composer, 72, 5);
             let top = &rows(&terminal)[0];
             assert!(top.contains(model.as_str()));
-            assert_eq!(
-                top.contains('⚡'),
-                model == Model::Claude(ClaudeModel::Opus55)
-            );
+            assert!(top.contains(&format!("max {icon} ")));
             assert!(!top.contains(" pro"));
         }
     }
 
     #[test]
-    fn pro_mode_places_a_green_badge_after_the_fast_mode_bolt() {
+    fn pro_mode_places_a_green_badge_after_speed() {
         let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
-        composer.update(ComposerEvent::SetFastMode(true));
+        composer.update(ComposerEvent::SetSpeed(Speed::Fast));
         composer.update(ComposerEvent::SetReasoningMode(ReasoningMode::Pro));
 
         let terminal = render(&mut composer, 60, 5);
@@ -1847,7 +1871,7 @@ mod tests {
             })
             .expect("Pro mode should render its badge");
 
-        assert!(rendered.contains("medium ⚡  pro"));
+        assert!(rendered.contains("medium 󰤇 pro"));
         for cell in &top[pro..pro + 3] {
             assert_eq!(cell.fg, Color::Green);
             assert!(cell.modifier.contains(ratatui::style::Modifier::BOLD));
@@ -1857,12 +1881,11 @@ mod tests {
     #[test]
     fn narrow_composer_prioritizes_the_complete_pro_badge() {
         let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
-        composer.update(ComposerEvent::SetFastMode(true));
+        composer.update(ComposerEvent::SetSpeed(Speed::Fast));
         composer.update(ComposerEvent::SetReasoningMode(ReasoningMode::Pro));
 
         let terminal = render(&mut composer, 28, 5);
         let top = &terminal.backend().buffer().content[..28];
-        let rendered = top.iter().map(|cell| cell.symbol()).collect::<String>();
         let pro = top
             .windows(3)
             .position(|cells| {
@@ -1870,7 +1893,7 @@ mod tests {
             })
             .expect("Pro mode should retain its complete badge");
 
-        assert!(!rendered.contains('⚡'));
+        assert!(composer.speed_hit_area.is_none());
         assert!((pro..pro + 3).all(|index| top[index].fg == Color::Green));
 
         let terminal = render(&mut composer, 6, 5);
@@ -1937,7 +1960,7 @@ mod tests {
             now: Instant::now(),
         });
 
-        let terminal = render(&mut composer, 60, 5);
+        let terminal = render(&mut composer, 80, 5);
 
         assert!(rows(&terminal)[0].contains("0%/272k Running exec command…"));
         assert!(

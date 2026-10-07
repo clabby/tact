@@ -50,7 +50,6 @@ const EXPANDABLE_FOCUS_HINTS: [&str; 2] =
     ["↑↓ item · Enter toggle · Esc back", "↑↓ item · Enter · Esc"];
 const NESTED_TOOL_INDENT: u16 = 4;
 const PINNED_PROMPT_MAX_HEIGHT: u16 = 3;
-const RETRY_COUNTDOWN_INTERVAL: Duration = Duration::from_millis(100);
 
 pub(crate) enum TranscriptEvent {
     Record(Arc<TranscriptRecord>),
@@ -84,7 +83,6 @@ pub(crate) struct Transcript {
     new_updates: u64,
     tool_spinner: Option<Spinner>,
     running_tool_timers: HashMap<EntryId, RunningToolTimer>,
-    retry_timer: Option<RetryTimer>,
     expandables_focused: bool,
     selected_expandable: Option<EntryId>,
     expandable_hits: Vec<ExpandableHitRegion>,
@@ -180,13 +178,6 @@ struct RunningToolTimer {
 }
 
 #[derive(Clone, Copy)]
-struct RetryTimer {
-    deadline: Instant,
-    remaining_ns: u64,
-    next_frame: Option<Instant>,
-}
-
-#[derive(Clone, Copy)]
 struct PinnedPrompt {
     entry: EntryId,
     area: Rect,
@@ -207,26 +198,6 @@ impl RunningToolTimer {
     fn elapsed(self, now: Instant) -> Duration {
         self.elapsed_at_observation
             .saturating_add(now.saturating_duration_since(self.observed_at))
-    }
-}
-
-impl RetryTimer {
-    fn new(now: Instant, delay_ns: u64) -> Self {
-        let deadline = now + Duration::from_nanos(delay_ns);
-        Self {
-            deadline,
-            remaining_ns: delay_ns,
-            next_frame: Some((now + RETRY_COUNTDOWN_INTERVAL).min(deadline)),
-        }
-    }
-
-    fn refresh(&mut self, now: Instant) -> bool {
-        let previous_tick = duration_display_tick(self.remaining_ns);
-        self.remaining_ns = u64::try_from(self.deadline.saturating_duration_since(now).as_nanos())
-            .unwrap_or(u64::MAX);
-        self.next_frame =
-            (self.remaining_ns > 0).then(|| (now + RETRY_COUNTDOWN_INTERVAL).min(self.deadline));
-        duration_display_tick(self.remaining_ns) != previous_tick
     }
 }
 
@@ -280,7 +251,6 @@ impl Transcript {
             new_updates: 0,
             tool_spinner: None,
             running_tool_timers: HashMap::new(),
-            retry_timer: None,
             expandables_focused: false,
             selected_expandable: None,
             expandable_hits: Vec::new(),
@@ -350,7 +320,6 @@ impl Transcript {
             .map(Spinner::deadline)
             .into_iter()
             .chain(empty)
-            .chain(self.retry_timer.and_then(|timer| timer.next_frame))
             .chain(self.cache.images.animation_deadline())
             .min()
     }
@@ -363,13 +332,6 @@ impl Transcript {
         let change = self.model.apply(&record);
         let activity = self.activity();
         let now = Instant::now();
-        if record.kind() == "model.attempt.retrying" {
-            if let Some(TransientStatus::Retrying(delay_ns)) = self.model.transient() {
-                self.retry_timer = Some(RetryTimer::new(now, *delay_ns));
-            }
-        } else if !matches!(self.model.transient(), Some(TransientStatus::Retrying(_))) {
-            self.retry_timer = None;
-        }
         self.sync_running_tool_timers(now);
         let tool_active = self.model.has_running_tools();
         if tool_active && self.tool_spinner.is_none() {
@@ -457,24 +419,11 @@ impl Transcript {
     fn activity(&self) -> TranscriptEffect {
         TranscriptEffect {
             active: self.model.is_active(),
-            status: self.model.transient().map(|status| match status {
-                TransientStatus::Retrying(delay_ns) => {
-                    let remaining_ns = self
-                        .retry_timer
-                        .map_or(*delay_ns, |timer| timer.remaining_ns);
-                    format!("Retrying in {}…", format_duration(remaining_ns))
-                }
-                status => transient_label(status),
-            }),
+            status: self.model.transient().map(transient_label),
         }
     }
 
     fn update_animation(&mut self, now: Instant) -> ComponentUpdate<TranscriptEffect> {
-        let previous_activity = self.activity();
-        let retry_changed = self
-            .retry_timer
-            .as_mut()
-            .is_some_and(|timer| timer.refresh(now));
         let timer_changed = self.refresh_running_tool_durations(now);
         let tool_changed = self
             .tool_spinner
@@ -482,18 +431,9 @@ impl Transcript {
             .is_some_and(|spinner| spinner.advance(now));
         let logo_changed = self.is_empty() && self.empty_logo.advance(now);
         let images_changed = self.cache.poll_images(now);
-        let activity = self.activity();
         ComponentUpdate {
-            effects: (previous_activity != activity)
-                .then_some(activity)
-                .into_iter()
-                .collect(),
-            render: if retry_changed
-                || timer_changed
-                || tool_changed
-                || logo_changed
-                || images_changed
-            {
+            effects: Vec::new(),
+            render: if timer_changed || tool_changed || logo_changed || images_changed {
                 RenderRequest::Streaming
             } else {
                 RenderRequest::None
@@ -1314,9 +1254,14 @@ fn transient_label(status: &TransientStatus) -> String {
         TransientStatus::WaitingForBackgroundWork => "Waiting for background work…".to_owned(),
         TransientStatus::Tool(tool) => format!("Running {tool}…"),
         TransientStatus::Compacting => "Compacting context…".to_owned(),
-        TransientStatus::Retrying(delay_ns) => {
-            format!("Retrying in {}…", format_duration(*delay_ns))
-        }
+        TransientStatus::Retrying {
+            delay_ns,
+            next_attempt,
+            max_attempts,
+        } => format!(
+            "Retrying in {} (attempt {next_attempt}/{max_attempts})…",
+            format_duration(*delay_ns)
+        ),
         TransientStatus::Connecting => "Connecting…".to_owned(),
         TransientStatus::Reconnecting => "Reconnecting…".to_owned(),
         TransientStatus::Error(error) => error.clone(),
@@ -1848,27 +1793,19 @@ fn render_entry(
                 Style::default().fg(theme.muted()),
             ),
         ])]),
-        EntryKind::FastModeChanged { enabled } => {
-            let status = if *enabled { "enabled" } else { "disabled" };
-            layout_without_links(vec![Line::from(vec![
-                Span::styled(
-                    "⚡ ",
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!("Fast mode {status}"),
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    " · takes effect on the next turn",
-                    Style::default().fg(theme.muted()),
-                ),
-            ])])
-        }
+        EntryKind::SpeedChanged { speed } => layout_without_links(vec![Line::from(vec![
+            Span::styled("◇ Speed changed to ", Style::default().fg(theme.muted())),
+            Span::styled(
+                speed.as_str(),
+                Style::default()
+                    .fg(theme.speed(*speed))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                " · takes effect on the next turn",
+                Style::default().fg(theme.muted()),
+            ),
+        ])]),
         EntryKind::ReflectionStarted => layout_without_links(vec![Line::from(Span::styled(
             "◇ Reflection started",
             Style::default().fg(theme.muted()),
@@ -2059,7 +1996,7 @@ mod tests {
         Transcript, TranscriptEvent, render_user, unix_milliseconds,
     };
     use crate::{
-        app::config::{ReasoningEffort, ReasoningMode, TuiConfig},
+        app::config::{ReasoningEffort, ReasoningMode, Speed, TuiConfig},
         tui::{
             theme::Theme,
             transcript::{EntryKind, LocalEvent, SessionStarted, TranscriptRecord, TurnId},
@@ -2072,7 +2009,7 @@ mod tests {
         HarnessModel as Model, Model as CodexModel,
         agent::events::{AgentEvent, AgentEventKind},
     };
-    use ratatui::{Terminal, backend::TestBackend, layout::Position, style::Color};
+    use ratatui::{Terminal, backend::TestBackend, layout::Position};
     use serde_json::{json, value::to_raw_value};
     use std::{
         fs::File,
@@ -2122,7 +2059,7 @@ mod tests {
                     model: Model::Codex(CodexModel::Luna).to_string(),
                     effort: ReasoningEffort::Medium,
                     reasoning_mode: ReasoningMode::Standard,
-                    fast_mode: false,
+                    speed: Speed::Standard,
                     workspace: "/work".into(),
                     application_version: "test".to_owned(),
                 }),
@@ -3014,9 +2951,9 @@ mod tests {
             TranscriptRecord::from_local(
                 2,
                 2,
-                LocalEvent::FastModeChanged {
-                    from: false,
-                    to: true,
+                LocalEvent::SpeedChanged {
+                    from: Speed::Standard,
+                    to: Speed::Fast,
                 },
             )
             .unwrap(),
@@ -3025,10 +2962,15 @@ mod tests {
         let backend = render(&mut transcript, 72, 6);
         let cells = backend.buffer().content();
         let rendered = cells.iter().map(|cell| cell.symbol()).collect::<String>();
-        let bolt = cells
-            .iter()
-            .find(|cell| cell.symbol() == "⚡")
-            .expect("fast-mode notification should include a bolt");
+        let fast = cells
+            .windows(4)
+            .find(|cells| {
+                cells
+                    .iter()
+                    .map(|cell| cell.symbol())
+                    .eq(["f", "a", "s", "t"])
+            })
+            .expect("speed notification should include its value");
         let high = cells
             .windows(4)
             .find(|cells| {
@@ -3040,8 +2982,8 @@ mod tests {
             .expect("effort notification should include its value");
 
         assert!(rendered.contains("Effort changed to high · takes effect on the next turn"));
-        assert!(rendered.contains("Fast mode enabled · takes effect on the next turn"));
-        assert_eq!(bolt.fg, Color::Yellow);
+        assert!(rendered.contains("Speed changed to fast · takes effect on the next turn"));
+        assert_eq!(fast[0].fg, Theme::default().speed(Speed::Fast));
         assert_eq!(high[0].fg, Theme::default().effort(ReasoningEffort::High));
     }
 
@@ -3132,28 +3074,67 @@ mod tests {
     }
 
     #[test]
-    fn retry_status_counts_down_during_backoff() {
-        let mut transcript = Transcript::new();
-        transcript.update(TranscriptEvent::Record(user(1, "hello")));
-        transcript.update(TranscriptEvent::Record(agent_with_payload(
-            2,
-            AgentEventKind::ModelAttemptRetrying,
-            json!({"delay_ns": 2_000_000_000_u64, "error": "temporary"}),
-        )));
+    fn retry_status_keeps_scheduled_delay_during_attempt() {
+        for delay_ns in [0, 200_000_000, 2_000_000_000_u64] {
+            let mut transcript = Transcript::new();
+            transcript.update(TranscriptEvent::Record(user(1, "hello")));
+            transcript.update(TranscriptEvent::Record(agent(
+                2,
+                AgentEventKind::RunStarted,
+            )));
+            transcript.update(TranscriptEvent::Record(agent_with_payload(
+                3,
+                AgentEventKind::ModelAttemptRetrying,
+                json!({"delay_ns": delay_ns, "attempt": 1, "next_attempt": 2, "max_attempts": 5, "error": "temporary"}),
+            )));
+            let initial = transcript.activity();
+            let now = Instant::now();
+            for elapsed in [Duration::from_millis(100), Duration::from_secs(3)] {
+                let update = transcript.update(TranscriptEvent::AnimationFrame(now + elapsed));
+                assert_eq!(transcript.activity(), initial);
+                assert!(update.effects.is_empty());
+            }
+            assert!(transcript.animation_deadline().is_none());
+        }
+    }
 
-        assert_eq!(
-            transcript.activity().status.as_deref(),
-            Some("Retrying in 2.0s…")
-        );
-        let deadline = transcript
-            .animation_deadline()
-            .expect("retry backoff should schedule countdown frames");
-        transcript.update(TranscriptEvent::AnimationFrame(deadline));
-
-        assert_ne!(
-            transcript.activity().status.as_deref(),
-            Some("Retrying in 2.0s…")
-        );
+    #[test]
+    fn retry_status_shows_next_attempt_and_updates_from_events() {
+        for terminal in [
+            AgentEventKind::ModelCallCompleted,
+            AgentEventKind::RunFailed,
+        ] {
+            let mut transcript = Transcript::new();
+            transcript.update(TranscriptEvent::Record(user(1, "hello")));
+            transcript.update(TranscriptEvent::Record(agent(
+                2,
+                AgentEventKind::RunStarted,
+            )));
+            transcript.update(TranscriptEvent::Record(agent_with_payload(
+                3,
+                AgentEventKind::ModelAttemptRetrying,
+                json!({"delay_ns": 2_000_000_000_u64, "attempt": 1, "next_attempt": 2, "max_attempts": 5, "error": "temporary"}),
+            )));
+            assert_eq!(
+                transcript.activity().status.as_deref(),
+                Some("Retrying in 2.0s (attempt 2/5)…")
+            );
+            transcript.update(TranscriptEvent::Record(agent_with_payload(
+                4,
+                AgentEventKind::ModelAttemptRetrying,
+                json!({"delay_ns": 400_000_000, "attempt": 2, "next_attempt": 3, "max_attempts": 5, "error": "temporary"}),
+            )));
+            assert_eq!(
+                transcript.activity().status.as_deref(),
+                Some("Retrying in 400ms (attempt 3/5)…")
+            );
+            transcript.update(TranscriptEvent::Record(agent(5, terminal)));
+            assert_eq!(
+                transcript.activity().status.as_deref(),
+                (terminal == AgentEventKind::ModelCallCompleted).then_some("Thinking…")
+            );
+            assert!(transcript.animation_deadline().is_none());
+        }
     }
 
     #[test]

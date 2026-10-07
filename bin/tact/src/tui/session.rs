@@ -537,7 +537,7 @@ mod tests {
         model, save_checkpoint,
     };
     use crate::{
-        app::config::{ReasoningEffort, ReasoningMode},
+        app::config::{ReasoningEffort, ReasoningMode, Speed},
         tui::{
             storage::{SessionStorage, database_path},
             transcript::{LocalEvent, SessionStarted, TranscriptJournal, TranscriptRecord, TurnId},
@@ -591,7 +591,7 @@ mod tests {
                     model: Model::Codex(CodexModel::Luna).to_string(),
                     effort: ReasoningEffort::Medium,
                     reasoning_mode: ReasoningMode::Standard,
-                    fast_mode: false,
+                    speed: Speed::Standard,
                     workspace: "/work".into(),
                     application_version: "test".to_owned(),
                 }),
@@ -641,7 +641,7 @@ mod tests {
                     model: selected.to_string(),
                     effort: ReasoningEffort::Medium,
                     reasoning_mode: ReasoningMode::Standard,
-                    fast_mode: false,
+                    speed: Speed::Standard,
                     workspace: "/work".into(),
                     application_version: "test".to_owned(),
                 }),
@@ -666,7 +666,7 @@ mod tests {
                     model: old_id.to_owned(),
                     effort: ReasoningEffort::Medium,
                     reasoning_mode: ReasoningMode::Standard,
-                    fast_mode: false,
+                    speed: Speed::Standard,
                     workspace: "/work".into(),
                     application_version: "test".to_owned(),
                 }),
@@ -696,7 +696,7 @@ mod tests {
                         model: "model".to_owned(),
                         effort: ReasoningEffort::Medium,
                         reasoning_mode: ReasoningMode::Standard,
-                        fast_mode: false,
+                        speed: Speed::Standard,
                         workspace: "/work".into(),
                         application_version: "test".to_owned(),
                     }),
@@ -1082,7 +1082,7 @@ mod tests {
             model: nanocodex::oai::MODEL.to_owned(),
             effort: ReasoningEffort::Medium,
             reasoning_mode: ReasoningMode::Standard,
-            fast_mode: false,
+            speed: Speed::Standard,
             workspace: "/work".into(),
             application_version: "test".to_owned(),
         });
@@ -1255,7 +1255,7 @@ mod tests {
             model: nanocodex::oai::MODEL.to_owned(),
             effort: ReasoningEffort::Medium,
             reasoning_mode: ReasoningMode::Standard,
-            fast_mode: false,
+            speed: Speed::Standard,
             workspace: "/work".into(),
             application_version: "test".to_owned(),
         });

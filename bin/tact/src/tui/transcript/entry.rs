@@ -1,4 +1,4 @@
-use crate::app::config::ReasoningEffort;
+use crate::app::config::{ReasoningEffort, Speed};
 use serde_json::Value;
 use tact_subagents::{AgentThread, MessageDeliveryState, MessageId, MessageSender};
 
@@ -23,7 +23,11 @@ pub(crate) enum TransientStatus {
     WaitingForBackgroundWork,
     Tool(String),
     Compacting,
-    Retrying(u64),
+    Retrying {
+        delay_ns: u64,
+        next_attempt: u32,
+        max_attempts: u32,
+    },
     Connecting,
     Reconnecting,
     Error(String),
@@ -48,7 +52,7 @@ pub(crate) enum EntryKind {
     DirectedMessage(DirectedMessageEntry),
     ForkedFrom { session_id: String },
     EffortChanged { to: ReasoningEffort },
-    FastModeChanged { enabled: bool },
+    SpeedChanged { speed: Speed },
     ReflectionStarted,
     Interrupted { count: usize },
     ContextCompacted { duration_ns: u64 },

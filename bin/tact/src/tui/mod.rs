@@ -23,7 +23,7 @@ mod worker;
 
 use crate::{
     app::{
-        config::{Config, ReasoningEffort, ReasoningMode},
+        config::{Config, ReasoningEffort, ReasoningMode, Speed},
         error::{Result, RuntimeError},
         herdr, hook,
     },
@@ -87,13 +87,13 @@ type EditorTask =
 
 type EffortUpdateTask = JoinHandle<Result<EffortUpdate>>;
 
-type FastModeUpdateTask = JoinHandle<Result<FastModeUpdate>>;
+type SpeedUpdateTask = JoinHandle<Result<SpeedUpdate>>;
 
 type NewSessionTask = JoinHandle<(
     PaneId,
     ReasoningEffort,
     ReasoningMode,
-    bool,
+    Speed,
     Model,
     components::DraftReset,
     Result<ConfiguredAgent>,
@@ -107,7 +107,7 @@ type ResumeSessionTask = JoinHandle<(
     PaneId,
     ReasoningEffort,
     ReasoningMode,
-    bool,
+    Speed,
     Result<RestoredSession>,
 )>;
 
@@ -178,9 +178,9 @@ struct EffortUpdate {
     preferred_reasoning_mode: ReasoningMode,
 }
 
-struct FastModeUpdate {
+struct SpeedUpdate {
     pane: PaneId,
-    enabled: bool,
+    speed: Speed,
 }
 
 struct PendingSubmission {
@@ -207,7 +207,7 @@ struct PaneSession<'a> {
 struct PaneSettings {
     effort: ReasoningEffort,
     reasoning_mode: ReasoningMode,
-    fast_mode: bool,
+    speed: Speed,
     model: Model,
 }
 
@@ -215,13 +215,13 @@ impl PaneSettings {
     const fn new(
         effort: ReasoningEffort,
         reasoning_mode: ReasoningMode,
-        fast_mode: bool,
+        speed: Speed,
         model: Model,
     ) -> Self {
         Self {
             effort,
             reasoning_mode,
-            fast_mode: fast_mode && model.supports_fast_mode(),
+            speed,
             model,
         }
     }
@@ -272,7 +272,7 @@ struct PaneRuntime {
     pending_submission: Option<PendingSubmission>,
     current_effort: ReasoningEffort,
     reasoning_mode: ReasoningMode,
-    current_fast_mode: bool,
+    current_speed: Speed,
     current_model: Model,
     active_shells: usize,
     generation: u64,
@@ -446,7 +446,7 @@ pub(crate) async fn run(
     ensure_interactive()?;
 
     let initial_effort = config.agent().thinking();
-    let initial_fast_mode = config.agent().fast_mode();
+    let initial_speed = config.agent().speed();
     let initial_max_subagents = config.agent().max_subagents();
     let preferred_reasoning_mode = config.agent().reasoning_mode();
     let open_resume_selector = matches!(&startup, StartupMode::ResumeSelector(_));
@@ -509,7 +509,6 @@ pub(crate) async fn run(
                 1,
             )
         };
-    let initial_fast_mode = initial_fast_mode && model.supports_fast_mode();
     let workspace = config.agent().workspace().to_path_buf();
     let mut terminal = TerminalSession::enter().map_err(RuntimeError::Terminal)?;
     terminal
@@ -542,7 +541,7 @@ pub(crate) async fn run(
                 PaneSession::new(&main_session_id, None, None, 1, !skills.is_empty())
             },
             &config,
-            PaneSettings::new(initial_effort, reasoning_mode, initial_fast_mode, model),
+            PaneSettings::new(initial_effort, reasoning_mode, initial_speed, model),
             instructions,
             subagent_control.clone(),
             &writer_sender,
@@ -567,7 +566,7 @@ pub(crate) async fn run(
     root.set_tui_config(*config.tui());
     root.set_claude_enabled(config.claude().enabled());
     root.set_reasoning_modes(reasoning_mode, preferred_reasoning_mode);
-    root.set_fast_mode(initial_fast_mode);
+    root.set_speed(initial_speed);
     root.set_max_subagents(initial_max_subagents);
     let mut memory_store = crate::core::configured_memory_store(&config, &workspace)?;
     root.set_memory_enabled(memory_store.is_some());
@@ -577,7 +576,7 @@ pub(crate) async fn run(
             initial_effort,
             reasoning_mode,
             preferred_reasoning_mode,
-            initial_fast_mode,
+            initial_speed,
             projection,
         );
     }
@@ -602,7 +601,7 @@ pub(crate) async fn run(
     let mut input = Some(EventStream::new());
     let mut editor_task = None::<EditorTask>;
     let mut effort_task = None::<EffortUpdateTask>;
-    let mut fast_mode_task = None::<FastModeUpdateTask>;
+    let mut speed_task = None::<SpeedUpdateTask>;
     let mut new_session_task = None::<NewSessionTask>;
     let mut session_list_task = None::<SessionListTask>;
     let mut handoff_controller = HandoffController::new();
@@ -638,7 +637,7 @@ pub(crate) async fn run(
                     input: &mut input,
                     editor_task: &mut editor_task,
                     effort_task: &mut effort_task,
-                    fast_mode_task: &mut fast_mode_task,
+                    speed_task: &mut speed_task,
                     new_session_task: &mut new_session_task,
                     session_list_task: &mut session_list_task,
                     recent_prompt_task: &mut recent_prompt_task,
@@ -724,7 +723,7 @@ pub(crate) async fn run(
                     task.abort();
                     drop(task.await);
                 }
-                if let Some(task) = fast_mode_task.take() {
+                if let Some(task) = speed_task.take() {
                     task.abort();
                     drop(task.await);
                 }
@@ -1070,10 +1069,10 @@ pub(crate) async fn run(
                             .root(pane)
                             .map(|root| root.composer().effort())
                             .unwrap_or_else(|| config.agent().thinking());
-                        let fast_mode = panes
+                        let speed = panes
                             .get(&main_pane)
                             .expect("main pane must exist")
-                            .current_fast_mode;
+                            .current_speed;
                         let reasoning_mode = panes
                             .get(&main_pane)
                             .expect("main pane must exist")
@@ -1110,7 +1109,7 @@ pub(crate) async fn run(
                                     skills_catalog_present,
                                 ),
                                 &config,
-                                PaneSettings::new(effort, reasoning_mode, fast_mode, model),
+                                PaneSettings::new(effort, reasoning_mode, speed, model),
                                 instructions,
                                 subagent_control.clone(),
                                 &writer_sender,
@@ -1161,24 +1160,24 @@ pub(crate) async fn run(
                         input = Some(EventStream::new());
                         scheduler.request_immediate(Instant::now());
                     }
-                    WorkerEvent::FastModeUpdated { pane, enabled, result } => {
+                    WorkerEvent::SpeedUpdated { pane, speed, result } => {
                         result?;
-                        let runtime = panes.get_mut(&pane).expect("fast-mode pane must exist");
-                        let previous = runtime.current_fast_mode;
+                        let runtime = panes.get_mut(&pane).expect("speed pane must exist");
+                        let previous = runtime.current_speed;
                         let journal = runtime.journal_mut()?;
                         if journal.is_empty() {
-                            journal.set_initial_fast_mode(enabled);
+                            journal.set_initial_speed(speed);
                         } else {
-                            let record = journal.append_local(LocalEvent::FastModeChanged {
+                            let record = journal.append_local(LocalEvent::SpeedChanged {
                                 from: previous,
-                                to: enabled,
+                                to: speed,
                             })?;
                             schedule(app.update(AppEvent::Transcript { pane, record }), &mut scheduler);
                         }
-                        runtime.current_fast_mode = enabled;
-                        runtime.subagent_control.set_fast_mode(enabled);
+                        runtime.current_speed = speed;
+                        runtime.subagent_control.set_speed(speed);
                         if app.main_pane() == Some(pane) {
-                            config.set_fast_mode(enabled);
+                            config.set_speed(speed);
                         }
                         input = Some(EventStream::new());
                         scheduler.request_immediate(Instant::now());
@@ -1306,17 +1305,17 @@ pub(crate) async fn run(
                     .map_err(|_| RuntimeError::AgentWorkerStopped)?;
             }
             result = async {
-                fast_mode_task
+                speed_task
                     .as_mut()
-                    .expect("fast-mode branch is disabled without a task")
+                    .expect("speed branch is disabled without a task")
                     .await
-            }, if fast_mode_task.is_some() && !stopping => {
-                fast_mode_task = None;
-                let update = result.map_err(RuntimeError::FastModeUpdateTask)??;
+            }, if speed_task.is_some() && !stopping => {
+                speed_task = None;
+                let update = result.map_err(RuntimeError::SpeedUpdateTask)??;
                 commands
-                    .send(WorkerCommand::SetFastMode {
+                    .send(WorkerCommand::SetSpeed {
                         pane: update.pane,
-                        enabled: update.enabled,
+                        speed: update.speed,
                     })
                     .map_err(|_| RuntimeError::AgentWorkerStopped)?;
             }
@@ -1342,14 +1341,14 @@ pub(crate) async fn run(
                             prompt,
                             effort,
                             reasoning_mode,
-                            fast_mode,
+                            speed,
                             model,
                             configured,
                         } = prepared;
                         let skills = install_configured_agent(
                             pane,
                             configured,
-                            PaneSettings::new(effort, reasoning_mode, fast_mode, model),
+                            PaneSettings::new(effort, reasoning_mode, speed, model),
                             &config,
                             &mut panes,
                             &commands,
@@ -1365,7 +1364,7 @@ pub(crate) async fn run(
                                 prompt,
                                 effort,
                                 reasoning_mode,
-                                fast_mode,
+                                speed,
                                 model,
                                 skills,
                             }),
@@ -1390,14 +1389,14 @@ pub(crate) async fn run(
             }, if new_session_task.is_some() && !stopping => {
                 new_session_task = None;
                 input = Some(EventStream::new());
-                let (pane, effort, reasoning_mode, fast_mode, model, draft_reset, configured) =
+                let (pane, effort, reasoning_mode, speed, model, draft_reset, configured) =
                     result.map_err(RuntimeError::NewSessionTask)?;
                 match configured {
                     Ok(configured) => {
                         let skills = install_configured_agent(
                             pane,
                             configured,
-                            PaneSettings::new(effort, reasoning_mode, fast_mode, model),
+                            PaneSettings::new(effort, reasoning_mode, speed, model),
                             &config,
                             &mut panes,
                             &commands,
@@ -1413,7 +1412,7 @@ pub(crate) async fn run(
                                 pane,
                                 effort,
                                 reasoning_mode,
-                                fast_mode,
+                                speed,
                                 model,
                                 draft_reset,
                                 skills,
@@ -1531,7 +1530,7 @@ pub(crate) async fn run(
             }, if resume_session_task.is_some() && !stopping => {
                 resume_session_task = None;
                 input = Some(EventStream::new());
-                let (pane, effort, preferred_reasoning_mode, fast_mode, restored) =
+                let (pane, effort, preferred_reasoning_mode, speed, restored) =
                     result.map_err(RuntimeError::SessionTask)?;
                 match restored {
                     Ok(RestoredSession {
@@ -1576,7 +1575,7 @@ pub(crate) async fn run(
                                     !skills.is_empty(),
                                 ),
                                 &config,
-                                PaneSettings::new(effort, reasoning_mode, fast_mode, model),
+                                PaneSettings::new(effort, reasoning_mode, speed, model),
                                 instructions,
                                 subagent_control.clone(),
                                 &writer_sender,
@@ -1609,7 +1608,7 @@ pub(crate) async fn run(
                                 effort,
                                 reasoning_mode,
                                 preferred_reasoning_mode,
-                                fast_mode,
+                                speed,
                                 model,
                                 skills,
                             }),
@@ -1760,7 +1759,7 @@ fn open_pane(
     let PaneSettings {
         effort,
         reasoning_mode,
-        fast_mode,
+        speed,
         model,
     } = settings;
     let PaneSession {
@@ -1782,7 +1781,7 @@ fn open_pane(
         model: model.to_string(),
         effort,
         reasoning_mode,
-        fast_mode,
+        speed,
         workspace: config.agent().workspace().to_path_buf(),
         application_version: env!("CARGO_PKG_VERSION").to_owned(),
     });
@@ -1818,7 +1817,7 @@ fn open_pane(
         pending_submission: None,
         current_effort: effort,
         reasoning_mode,
-        current_fast_mode: fast_mode,
+        current_speed: speed,
         current_model: model,
         active_shells: 0,
         generation,
@@ -1923,7 +1922,7 @@ struct EffectContext<'a> {
     input: &'a mut Option<EventStream>,
     editor_task: &'a mut Option<EditorTask>,
     effort_task: &'a mut Option<EffortUpdateTask>,
-    fast_mode_task: &'a mut Option<FastModeUpdateTask>,
+    speed_task: &'a mut Option<SpeedUpdateTask>,
     new_session_task: &'a mut Option<NewSessionTask>,
     session_list_task: &'a mut Option<SessionListTask>,
     recent_prompt_task: &'a mut Option<RecentPromptTask>,
@@ -2197,7 +2196,7 @@ fn apply_pane_effect(
             let root = context.app.root(pane).expect("model pane must exist");
             let effort = root.composer().effort();
             let reasoning_mode = supported_reasoning_mode(model, root.preferred_reasoning_mode());
-            let fast_mode = context.config.agent().fast_mode() && model.supports_fast_mode();
+            let speed = context.config.agent().speed();
             let config = context.config.clone();
             *context.new_session_task = Some(tokio::task::spawn_blocking(move || {
                 let configured =
@@ -2206,21 +2205,21 @@ fn apply_pane_effect(
                     pane,
                     effort,
                     reasoning_mode,
-                    fast_mode,
+                    speed,
                     model,
                     components::DraftReset::Preserve,
                     configured,
                 )
             }));
         }
-        components::RootEffect::SetFastMode(enabled) => {
+        components::RootEffect::SetSpeed(speed) => {
             *context.input = None;
             let config = (context.app.main_pane() == Some(pane)).then(|| context.config.clone());
-            *context.fast_mode_task = Some(tokio::task::spawn_blocking(move || {
+            *context.speed_task = Some(tokio::task::spawn_blocking(move || {
                 if let Some(config) = config {
-                    config.persist_fast_mode(enabled)?;
+                    config.persist_speed(speed)?;
                 }
-                Ok(FastModeUpdate { pane, enabled })
+                Ok(SpeedUpdate { pane, speed })
             }));
         }
         components::RootEffect::SetMaxSubagents(limit) => {
@@ -2343,7 +2342,7 @@ fn apply_pane_effect(
                 supported_reasoning_mode(model, context.config.agent().reasoning_mode());
             let config = context.config.clone();
             *context.new_session_task = Some(tokio::task::spawn_blocking(move || {
-                let fast_mode = config.agent().fast_mode();
+                let speed = config.agent().speed();
                 let configured = ConfiguredAgent::from_config_with_session(
                     &config,
                     effort,
@@ -2356,7 +2355,7 @@ fn apply_pane_effect(
                     pane,
                     effort,
                     reasoning_mode,
-                    fast_mode,
+                    speed,
                     model,
                     components::DraftReset::Clear,
                     configured,
@@ -2478,7 +2477,7 @@ fn apply_pane_effect(
             *context.input = None;
             let effort = context.config.agent().thinking();
             let preferred_reasoning_mode = context.config.agent().reasoning_mode();
-            let fast_mode = context.config.agent().fast_mode();
+            let speed = context.config.agent().speed();
             let config = context.config.clone();
             *context.resume_session_task = Some(tokio::spawn(async move {
                 let config_path = config.path().to_path_buf();
@@ -2517,7 +2516,7 @@ fn apply_pane_effect(
                     .map_err(RuntimeError::SessionTask)?
                 }
                 .await;
-                (pane, effort, preferred_reasoning_mode, fast_mode, restored)
+                (pane, effort, preferred_reasoning_mode, speed, restored)
             }));
         }
         components::RootEffect::Copy(text) => match copy_selection(context.terminal, &text) {
@@ -2748,7 +2747,7 @@ async fn prepare_handoff(
 
     let effort = config.agent().thinking();
     let reasoning_mode = supported_reasoning_mode(model, config.agent().reasoning_mode());
-    let fast_mode = config.agent().fast_mode();
+    let speed = config.agent().speed();
     let task = tokio::task::spawn_blocking(move || {
         ConfiguredAgent::from_config_with_session(
             &config,
@@ -2772,7 +2771,7 @@ async fn prepare_handoff(
         prompt,
         effort,
         reasoning_mode,
-        fast_mode,
+        speed,
         model,
         configured,
     })
@@ -2958,7 +2957,7 @@ mod tests {
     };
     use crate::{
         app::{
-            config::{Config, ConfigOverrides, ReasoningEffort, ReasoningMode},
+            config::{Config, ConfigOverrides, ReasoningEffort, ReasoningMode, Speed},
             error::{Error, RuntimeError},
         },
         core::configured_memory_store,
@@ -2971,7 +2970,7 @@ mod tests {
             worker::WorkerCommand,
         },
     };
-    use nanocodex::{ClaudeModel, HarnessModel as Model, Model as CodexModel};
+    use nanocodex::{HarnessModel as Model, Model as CodexModel};
     use std::{cell::Cell, collections::HashMap, fs, path::Path, sync::Arc};
     use tact_memory::{MemoryLimits, MemoryStore, SelectedMemoryStore};
     use tact_subagents::{AgentId, AgentStatus, AgentUpdate};
@@ -3001,7 +3000,7 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let observed = calls.clone();
         subagents
-            .set_agent_factory(Thinking::Max, false, move |_, _, _| {
+            .set_agent_factory(Thinking::Max, Speed::Standard, move |_, _, _| {
                 observed.fetch_add(1, Ordering::SeqCst);
                 Err(NanocodexError::InvalidRequest(
                     "test factory admitted".to_owned(),
@@ -3043,32 +3042,16 @@ mod tests {
     }
 
     #[test]
-    fn pane_fast_mode_tracks_model_support() {
-        for model in [
-            Model::Claude(ClaudeModel::Sonnet55),
-            Model::Claude(ClaudeModel::Opus55),
-            Model::Claude(ClaudeModel::Fable51),
-        ] {
+    fn panes_preserve_the_requested_speed_across_models() {
+        for model in crate::app::model::available(true) {
             let settings = super::PaneSettings::new(
                 ReasoningEffort::High,
                 ReasoningMode::Standard,
-                true,
-                model,
+                Speed::Ultrafast,
+                *model,
             );
-            assert_eq!(
-                settings.fast_mode,
-                model == Model::Claude(ClaudeModel::Opus55)
-            );
+            assert_eq!(settings.speed, Speed::Ultrafast);
         }
-        assert!(
-            super::PaneSettings::new(
-                ReasoningEffort::High,
-                ReasoningMode::Standard,
-                true,
-                Model::Codex(CodexModel::Sol)
-            )
-            .fast_mode
-        );
     }
 
     #[test]
@@ -3372,7 +3355,7 @@ mod tests {
             PaneSettings::new(
                 ReasoningEffort::Low,
                 ReasoningMode::Standard,
-                false,
+                Speed::Standard,
                 Model::Codex(CodexModel::Luna),
             ),
             Arc::from("instructions"),
@@ -3390,7 +3373,7 @@ mod tests {
             PaneSettings::new(
                 ReasoningEffort::Low,
                 ReasoningMode::Standard,
-                false,
+                Speed::Standard,
                 Model::Codex(CodexModel::Luna),
             ),
             Arc::from("instructions"),
@@ -3478,7 +3461,7 @@ mod tests {
             PaneSettings::new(
                 ReasoningEffort::Medium,
                 ReasoningMode::Standard,
-                false,
+                Speed::Standard,
                 Model::Codex(CodexModel::Sol),
             ),
             Arc::from("instructions"),
@@ -3505,7 +3488,7 @@ mod tests {
             PaneSettings::new(
                 ReasoningEffort::Medium,
                 ReasoningMode::Standard,
-                false,
+                Speed::Standard,
                 Model::Codex(CodexModel::Sol),
             ),
             Arc::from("instructions"),

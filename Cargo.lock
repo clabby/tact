@@ -461,6 +461,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "31b698c5f9a010f6573133b09e0de5408834d0c82f8d7475a89fc1867a71cd90"
 dependencies = [
  "axum-core",
+ "base64 0.22.1",
  "bytes",
  "futures-util",
  "http",
@@ -477,8 +478,10 @@ dependencies = [
  "serde_core",
  "serde_json",
  "serde_path_to_error",
+ "sha1 0.10.7",
  "sync_wrapper",
  "tokio",
+ "tokio-tungstenite 0.29.0",
  "tower",
  "tower-layer",
  "tower-service",
@@ -2812,7 +2815,7 @@ dependencies = [
 [[package]]
 name = "nanocodex"
 version = "0.6.6"
-source = "git+https://github.com/clabby/nanocodex?branch=cl%2Fclaude-integration#c0a030f24686ff82851997ac61eba0d03e177b07"
+source = "git+https://github.com/patrick-ogrady/nanocodex?rev=4292eef2b91e6bfd23d42e76ebf4b7ce4785506c#4292eef2b91e6bfd23d42e76ebf4b7ce4785506c"
 dependencies = [
  "nanocodex-agent",
  "nanocodex-claude",
@@ -2825,7 +2828,7 @@ dependencies = [
 [[package]]
 name = "nanocodex-agent"
 version = "0.6.6"
-source = "git+https://github.com/clabby/nanocodex?branch=cl%2Fclaude-integration#c0a030f24686ff82851997ac61eba0d03e177b07"
+source = "git+https://github.com/patrick-ogrady/nanocodex?rev=4292eef2b91e6bfd23d42e76ebf4b7ce4785506c#4292eef2b91e6bfd23d42e76ebf4b7ce4785506c"
 dependencies = [
  "chrono",
  "futures-util",
@@ -2847,12 +2850,14 @@ dependencies = [
 [[package]]
 name = "nanocodex-claude"
 version = "0.6.6"
-source = "git+https://github.com/clabby/nanocodex?branch=cl%2Fclaude-integration#c0a030f24686ff82851997ac61eba0d03e177b07"
+source = "git+https://github.com/patrick-ogrady/nanocodex?rev=4292eef2b91e6bfd23d42e76ebf4b7ce4785506c#4292eef2b91e6bfd23d42e76ebf4b7ce4785506c"
 dependencies = [
  "base64 0.22.1",
  "futures-util",
  "getrandom 0.4.3",
+ "httpdate",
  "nanocodex-agent",
+ "nanocodex-oai-tools",
  "regex",
  "reqwest",
  "serde",
@@ -2863,6 +2868,7 @@ dependencies = [
  "url",
  "uuid",
  "wasm-bindgen-futures",
+ "wasmtimer",
  "web-time",
  "xxhash-rust",
 ]
@@ -2870,7 +2876,7 @@ dependencies = [
 [[package]]
 name = "nanocodex-durability"
 version = "0.6.6"
-source = "git+https://github.com/clabby/nanocodex?branch=cl%2Fclaude-integration#c0a030f24686ff82851997ac61eba0d03e177b07"
+source = "git+https://github.com/patrick-ogrady/nanocodex?rev=4292eef2b91e6bfd23d42e76ebf4b7ce4785506c#4292eef2b91e6bfd23d42e76ebf4b7ce4785506c"
 dependencies = [
  "nanocodex-agent",
  "nanocodex-claude",
@@ -2886,7 +2892,7 @@ dependencies = [
 [[package]]
 name = "nanocodex-managed"
 version = "0.6.6"
-source = "git+https://github.com/clabby/nanocodex?branch=cl%2Fclaude-integration#c0a030f24686ff82851997ac61eba0d03e177b07"
+source = "git+https://github.com/patrick-ogrady/nanocodex?rev=4292eef2b91e6bfd23d42e76ebf4b7ce4785506c#4292eef2b91e6bfd23d42e76ebf4b7ce4785506c"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -2908,7 +2914,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
- "tokio-tungstenite",
+ "tokio-tungstenite 0.30.0",
  "tower",
  "url",
  "uuid",
@@ -2918,7 +2924,7 @@ dependencies = [
 [[package]]
 name = "nanocodex-oai-api"
 version = "0.6.6"
-source = "git+https://github.com/clabby/nanocodex?branch=cl%2Fclaude-integration#c0a030f24686ff82851997ac61eba0d03e177b07"
+source = "git+https://github.com/patrick-ogrady/nanocodex?rev=4292eef2b91e6bfd23d42e76ebf4b7ce4785506c#4292eef2b91e6bfd23d42e76ebf4b7ce4785506c"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -2932,13 +2938,13 @@ dependencies = [
  "rustls-platform-verifier",
  "serde",
  "serde_json",
- "sha1",
+ "sha1 0.11.0",
  "sha2 0.11.0",
  "smallvec",
  "symphonia",
  "thiserror 2.0.19",
  "tokio",
- "tokio-tungstenite",
+ "tokio-tungstenite 0.30.0",
  "tower",
  "tracing",
  "url",
@@ -2949,7 +2955,7 @@ dependencies = [
 [[package]]
 name = "nanocodex-oai-tools"
 version = "0.6.6"
-source = "git+https://github.com/clabby/nanocodex?branch=cl%2Fclaude-integration#c0a030f24686ff82851997ac61eba0d03e177b07"
+source = "git+https://github.com/patrick-ogrady/nanocodex?rev=4292eef2b91e6bfd23d42e76ebf4b7ce4785506c#4292eef2b91e6bfd23d42e76ebf4b7ce4785506c"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -2972,10 +2978,10 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
- "sha1",
+ "sha1 0.11.0",
  "thiserror 2.0.19",
  "tokio",
- "tokio-tungstenite",
+ "tokio-tungstenite 0.30.0",
  "tokio-util",
  "tracing",
  "url",
@@ -2985,7 +2991,7 @@ dependencies = [
 [[package]]
 name = "nanocodex-oai-tools-macros"
 version = "0.6.6"
-source = "git+https://github.com/clabby/nanocodex?branch=cl%2Fclaude-integration#c0a030f24686ff82851997ac61eba0d03e177b07"
+source = "git+https://github.com/patrick-ogrady/nanocodex?rev=4292eef2b91e6bfd23d42e76ebf4b7ce4785506c#4292eef2b91e6bfd23d42e76ebf4b7ce4785506c"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -3840,8 +3846,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "22f6172bdec972074665ed81ed53b71da00bfc44b65a753cfde883ec4c702a1a"
 dependencies = [
  "libc",
- "rand_chacha",
+ "rand_chacha 0.3.1",
  "rand_core 0.6.4",
+]
+
+[[package]]
+name = "rand"
+version = "0.9.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b9ef1d0d795eb7d84685bca4f72f3649f064e6641543d3a8c415898726a57b41"
+dependencies = [
+ "rand_chacha 0.9.0",
+ "rand_core 0.9.5",
 ]
 
 [[package]]
@@ -3866,12 +3882,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "rand_chacha"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3022b5f1df60f26e1ffddd6c66e8aa15de382ae63b3a0c1bfc0e4d3e3f325cb"
+dependencies = [
+ "ppv-lite86",
+ "rand_core 0.9.5",
+]
+
+[[package]]
 name = "rand_core"
 version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ec0be4795e2f6a28069bec0b5ff3e2ac9bafc99e6a9a7dc3547996c5c816922c"
 dependencies = [
  "getrandom 0.2.17",
+]
+
+[[package]]
+name = "rand_core"
+version = "0.9.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "76afc826de14238e6e8c374ddcc1fa19e374fd8dd986b0d2af0d02377261d83c"
+dependencies = [
+ "getrandom 0.3.4",
 ]
 
 [[package]]
@@ -4672,6 +4707,17 @@ dependencies = [
  "cfg-if",
  "libc",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "sha1"
+version = "0.10.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a978451301f4db1d02937a4ab3ccce137717b81826e79b7d49ffe3244a13c3b8"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.2.17",
+ "digest 0.10.7",
 ]
 
 [[package]]
@@ -5545,6 +5591,18 @@ dependencies = [
 
 [[package]]
 name = "tokio-tungstenite"
+version = "0.29.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8f72a05e828585856dacd553fba484c242c46e391fb0e58917c942ee9202915c"
+dependencies = [
+ "futures-util",
+ "log",
+ "tokio",
+ "tungstenite 0.29.0",
+]
+
+[[package]]
+name = "tokio-tungstenite"
 version = "0.30.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "17a073bfed563fa236697a068031408a93cd9522e08abf9933ead3e73411bd71"
@@ -5556,7 +5614,7 @@ dependencies = [
  "rustls-pki-types",
  "tokio",
  "tokio-rustls",
- "tungstenite",
+ "tungstenite 0.30.0",
 ]
 
 [[package]]
@@ -5756,6 +5814,22 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "tungstenite"
+version = "0.29.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c01152af293afb9c7c2a57e4b559c5620b421f6d133261c60dd2d0cdb38e6b8"
+dependencies = [
+ "bytes",
+ "data-encoding",
+ "http",
+ "httparse",
+ "log",
+ "rand 0.9.5",
+ "sha1 0.10.7",
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "tungstenite"
 version = "0.30.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e48ac77174b19c110a50ab2128b24215ac9cb40e0e12e093fb602d175c569d22"
@@ -5768,7 +5842,7 @@ dependencies = [
  "rand 0.10.2",
  "rustls",
  "rustls-pki-types",
- "sha1",
+ "sha1 0.11.0",
  "thiserror 2.0.19",
 ]
 
@@ -6077,6 +6151,19 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
+]
+
+[[package]]
+name = "wasmtimer"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1c598d6b99ea013e35844697fc4670d08339d5cda15588f193c6beedd12f644b"
+dependencies = [
+ "futures",
+ "js-sys",
+ "parking_lot",
+ "pin-utils",
+ "wasm-bindgen",
 ]
 
 [[package]]

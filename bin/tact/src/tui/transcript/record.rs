@@ -1,9 +1,9 @@
 use crate::{
-    app::config::{ReasoningEffort, ReasoningMode},
+    app::config::{ReasoningEffort, ReasoningMode, Speed},
     tui::context::ContextBudget,
 };
 use nanocodex::agent::events::{AgentEvent, AgentEventKind};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::value::{RawValue, to_raw_value};
 use std::{path::PathBuf, sync::Arc};
 
@@ -41,9 +41,28 @@ pub(crate) struct SessionStarted {
     pub(crate) model: String,
     pub(crate) effort: ReasoningEffort,
     pub(crate) reasoning_mode: ReasoningMode,
-    pub(crate) fast_mode: bool,
+    #[serde(alias = "fast_mode", deserialize_with = "deserialize_session_speed")]
+    pub(crate) speed: Speed,
     pub(crate) workspace: PathBuf,
     pub(crate) application_version: String,
+}
+
+fn deserialize_session_speed<'de, D>(deserializer: D) -> Result<Speed, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum StoredSpeed {
+        Speed(Speed),
+        FastMode(bool),
+    }
+
+    Ok(match StoredSpeed::deserialize(deserializer)? {
+        StoredSpeed::Speed(speed) => speed,
+        StoredSpeed::FastMode(true) => Speed::Fast,
+        StoredSpeed::FastMode(false) => Speed::Standard,
+    })
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -98,9 +117,9 @@ pub(crate) enum LocalEvent {
         from: ReasoningEffort,
         to: ReasoningEffort,
     },
-    FastModeChanged {
-        from: bool,
-        to: bool,
+    SpeedChanged {
+        from: Speed,
+        to: Speed,
     },
     CompactionStarted,
     CompactionFinished {
@@ -221,10 +240,9 @@ impl TranscriptRecord {
             LocalEvent::EffortChanged { from, to } => {
                 ("effort.changed", to_raw_value(&EffortChanged { from, to })?)
             }
-            LocalEvent::FastModeChanged { from, to } => (
-                "fast_mode.changed",
-                to_raw_value(&FastModeChanged { from, to })?,
-            ),
+            LocalEvent::SpeedChanged { from, to } => {
+                ("speed.changed", to_raw_value(&SpeedChanged { from, to })?)
+            }
             LocalEvent::ContextBudget(budget) => ("context.budget", to_raw_value(&budget)?),
             LocalEvent::ContextObserved {
                 prompt_cache,
@@ -368,9 +386,9 @@ struct EffortChanged {
 }
 
 #[derive(Serialize)]
-struct FastModeChanged {
-    from: bool,
-    to: bool,
+struct SpeedChanged {
+    from: Speed,
+    to: Speed,
 }
 
 #[derive(Serialize)]
@@ -453,10 +471,71 @@ const fn agent_kind(kind: AgentEventKind) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{LocalEvent, ShellId, TranscriptRecord, TurnId};
+    use super::{LocalEvent, SessionStarted, ShellId, TranscriptRecord, TurnId};
+    use crate::app::config::Speed;
     use nanocodex::agent::events::{AgentEvent, AgentEventKind};
-    use serde_json::{json, value::to_raw_value};
+    use serde_json::{Value, json, value::to_raw_value};
     use std::sync::Arc;
+
+    fn session_payload() -> Value {
+        json!({
+            "session_id": "session",
+            "model": "gpt-6-astra",
+            "effort": "medium",
+            "reasoning_mode": "standard",
+            "workspace": "/work",
+            "application_version": "test",
+        })
+    }
+
+    #[test]
+    fn session_speed_round_trips_without_a_boolean_field() {
+        for speed in Speed::ALL {
+            let mut payload = session_payload();
+            payload["speed"] = json!(speed);
+            let started: SessionStarted = serde_json::from_value(payload).unwrap();
+            let record =
+                TranscriptRecord::from_local(1, 123, LocalEvent::SessionStarted(started.clone()))
+                    .unwrap();
+            let encoded = serde_json::to_value(&record).unwrap();
+
+            assert_eq!(encoded["payload"]["speed"], json!(speed));
+            assert!(encoded["payload"].get("fast_mode").is_none());
+            let decoded: TranscriptRecord = serde_json::from_value(encoded).unwrap();
+            assert_eq!(decoded.decode_payload::<SessionStarted>().unwrap(), started);
+        }
+    }
+
+    #[test]
+    fn historical_session_booleans_decode_at_the_payload_boundary() {
+        for (enabled, expected) in [(false, Speed::Standard), (true, Speed::Fast)] {
+            let mut payload = session_payload();
+            payload["fast_mode"] = json!(enabled);
+            let started: SessionStarted = serde_json::from_value(payload.clone()).unwrap();
+            assert_eq!(started.speed, expected);
+
+            payload["speed"] = json!(Speed::Ultrafast);
+            assert!(serde_json::from_value::<SessionStarted>(payload).is_err());
+        }
+    }
+
+    #[test]
+    fn speed_change_records_keep_the_exact_preference() {
+        let record = TranscriptRecord::from_local(
+            2,
+            124,
+            LocalEvent::SpeedChanged {
+                from: Speed::Fast,
+                to: Speed::Ultrafast,
+            },
+        )
+        .unwrap();
+        assert_eq!(record.kind(), "speed.changed");
+        assert_eq!(
+            serde_json::to_value(record).unwrap()["payload"],
+            json!({"from": "fast", "to": "ultrafast"})
+        );
+    }
 
     #[test]
     fn agent_record_retains_protocol_metadata_and_raw_payload() {
