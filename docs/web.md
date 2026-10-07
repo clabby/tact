@@ -117,7 +117,8 @@ type WireEntry = { id: number; revision: number; parent: number | null } & (
   | { kind: "assistant"; text: string; complete: boolean; commentary: boolean }
   | { kind: "reasoning"; text: string }
   | { kind: "tool"; name: string; summary: string; state: "running" | "succeeded" | "failed";
-      duration_ns: number | null; substeps: string[]; child_count: number; has_detail: boolean }
+      duration_ns: number | null; elapsed_ns: number | null; // elapsed so far, while running
+      substeps: string[]; child_count: number; has_detail: boolean }
   | { kind: "directed_message"; from: string; to: string; body: string; delivery: string }
   | { kind: "forked_from"; session: string }
   | { kind: "effort_changed"; to: string }
@@ -144,7 +145,7 @@ straight into `bridge::Command`; there is no per-command route. Success is 200 `
 | Command | Body | Keyboard equivalent | Refused |
 | :-- | :-- | :-- | :-- |
 | `set_draft` | `session, text` | typing | never (last writer wins) |
-| `submit` | `session, rev` | Enter in the composer | `draft_changed` if the draft moved; `not_available_remotely` for terminal-local slash commands such as `/copy`. Queues if a turn is running or a steer is pending. |
+| `submit` | `session, rev, queue?` | Enter in the composer, or Shift+Tab with `queue: true` | `draft_changed` if the draft moved; `not_available_remotely` for terminal-local slash commands such as `/copy`. While a turn runs the prompt steers it; with `queue: true`, or while a steer is still being applied, it waits in the queue instead. |
 | `interrupt` | `session` | cancel-all | `nothing_running` |
 | `steer` / `dequeue` | `session, queue_id` | queue panel | `nothing_running` / `unknown_session` for a consumed item |
 | `compact` | `session` | Actions: Compact | `turn_running`, `queue_not_empty` |
@@ -317,6 +318,27 @@ current state (compaction and handoff wait for an idle, started session; the mod
 only before the first prompt). Esc interrupts a running turn only when pressed twice; the first
 press shows a confirmation and any other input cancels it, as in the terminal. The sidebar folds away on desktops (button in the header, Cmd/Ctrl B, remembered per browser) and is a drawer on narrower windows. The styling takes
 its palette and rhythm from the TUI theme and is mobile-first.
+
+## Remote access
+
+The server listens on `127.0.0.1` by default and speaks plain HTTP, so reaching it from a phone or
+another machine takes a tunnel that you run. The token in the login URL is the only credential.
+
+With Tailscale, keep `bind` on loopback and publish the port to your tailnet:
+
+```sh
+tailscale serve --bg 7878
+```
+
+Set `public_url` in `[web]` to the HTTPS address `tailscale serve` prints (for example
+`https://<machine>.<tailnet>.ts.net`). The terminal's QR code and copyable link then carry that
+address and the token, so scanning the code signs a phone in. The request's `Origin` must match its
+`Host`, which holds when the tunnel forwards the original host name.
+
+Share the port only with your own devices: use `tailscale serve` (tailnet only), not `tailscale
+funnel`, which publishes to the internet. An SSH forward (`ssh -L 7878:127.0.0.1:7878 host`) works the
+same way, with the login URL pointing at the local end. Every connected device sees and edits the same
+drafts, and the token grants the same access as a shell.
 
 ## Security notes
 
