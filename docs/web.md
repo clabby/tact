@@ -316,7 +316,7 @@ Pierre diffs in the transcript; shell and code calls render as terminal blocks.
 In the composer, `/` at the start of the draft lists the actions that apply to the session's
 current state (compaction and handoff wait for an idle, started session; the model and Pro mode
 only before the first prompt). Esc interrupts a running turn only when pressed twice; the first
-press shows a confirmation and any other input cancels it, as in the terminal. The sidebar folds away on desktops (button in the header, Cmd/Ctrl B, remembered per browser) and is a drawer on narrower windows. The styling takes
+press shows a confirmation and any other input cancels it, as in the terminal. The sidebar folds away on desktops (button in the header, Cmd/Ctrl B, remembered per browser; Cmd/Ctrl . switches between chat and review) and is a drawer on narrower windows. The styling takes
 its palette and rhythm from the TUI theme and is mobile-first.
 
 ## Remote access

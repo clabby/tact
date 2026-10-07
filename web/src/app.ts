@@ -368,6 +368,9 @@ class App {
       if (mod && event.key.toLowerCase() === "b") {
         event.preventDefault();
         this.dispatch({ type: "toggle-sidebar" });
+      } else if (mod && event.key === ".") {
+        event.preventDefault();
+        this.showView(this.layout.view === "review" ? "chat" : "review");
       } else if (mod && event.key.toLowerCase() === "k") {
         event.preventDefault();
         if (this.palette.isOpen) this.palette.close();
@@ -529,7 +532,7 @@ class App {
       { id: "reload", title: "Reload configuration", group: "Tact", icon: "refresh", keywords: "config", run: () => {
         void this.api.command("reload_config").then(() => toast("Configuration reloaded."), (error) => toast(describeError(error), "danger"));
       } },
-      { id: "view", title: this.layout.view === "review" ? "Show chat" : "Show review", group: "View", icon: this.layout.view === "review" ? "message" : "panel", keywords: "diff changes overview", run: () => this.showView(this.layout.view === "review" ? "chat" : "review") },
+      { id: "view", title: this.layout.view === "review" ? "Show chat" : "Show review", group: "View", icon: this.layout.view === "review" ? "message" : "panel", keywords: "diff changes overview", hint: isMac ? "⌘." : "Ctrl .", run: () => this.showView(this.layout.view === "review" ? "chat" : "review") },
       { id: "sidebar", title: "Toggle sidebar", group: "View", icon: "sidebar", hint: isMac ? "⌘B" : "Ctrl B", run: () => this.dispatch({ type: "toggle-sidebar" }) },
       { id: "composer", title: "Focus composer", group: "View", icon: "pencil", hint: "/", run: () => this.composer.focus() },
       { id: "shortcuts", title: "Keyboard shortcuts", group: "View", icon: "keyboard", hint: "?", run: () => showShortcuts() },
@@ -563,6 +566,7 @@ class App {
 const SHORTCUTS: [string, string][] = [
   [isMac ? "⌘K" : "Ctrl K", "Command palette"],
   [isMac ? "⌘B" : "Ctrl B", "Show or hide the sidebar"],
+  [isMac ? "⌘." : "Ctrl .", "Switch between chat and review"],
   ["/", "Focus the composer"],
   ["Enter", "Send, or steer while a turn runs"],
   ["Shift Tab", "Queue the prompt while a turn runs (instead of steering)"],
