@@ -3,6 +3,7 @@ import "./shell/shell.css";
 import { ApiClient, ApiError, describeError } from "./core/api-client";
 import { Transcript } from "./chat/chat";
 import { Composer } from "./chat/composer";
+import { setAttentionBadge } from "./shell/favicon";
 import { effortColor, modelColor } from "./core/format";
 import { glyph } from "./ui/glyphs";
 import { layoutReducer, loadLayout, type Layout, type LayoutAction, type View } from "./shell/layout";
@@ -266,7 +267,8 @@ class App {
     const running = this.activeRunning();
     this.shell.classList.toggle("running", running);
     const unread = this.store.state.live.filter((summary) => summary.unread).length;
-    document.title = `${running ? "● " : unread ? `(${unread}) ` : ""}${title} · Tact`;
+    document.title = `${unread ? `(${unread}) ` : ""}${title} · Tact`;
+    setAttentionBadge(unread > 0);
   }
 
   private renderConnection() {
