@@ -2766,7 +2766,10 @@ mod parity_tests {
     };
     use nanocodex::{
         ClaudeModel, HarnessModel as Model, Model as CodexModel, Thinking,
-        agent::events::{AgentEvent, AgentEventKind},
+        agent::{
+            events::{AgentEvent, AgentEventKind},
+            input::{PromptInput, UserInput},
+        },
     };
     use serde_json::{json, value::to_raw_value};
     use std::{path::PathBuf, sync::Arc};
@@ -2888,6 +2891,59 @@ mod parity_tests {
 
         harness.set_draft("never mind");
         assert_eq!(draft_images(&harness.publications()), [Vec::new()]);
+    }
+
+    #[test]
+    fn claude_sessions_refuse_image_attachments() {
+        let mut harness = Harness::new();
+        harness
+            .app
+            .pane_mut(PaneId::Main)
+            .unwrap()
+            .component_mut()
+            .set_model(Model::Claude(ClaudeModel::Sonnet55));
+        assert!(matches!(
+            harness.command(Command::AttachImage {
+                session: "main".to_owned(),
+                data_url: IMAGE.to_owned(),
+            }),
+            Err(CommandError::Invalid(_))
+        ));
+        assert_eq!(harness.app.root(PaneId::Main).unwrap().shared_draft(), "");
+    }
+
+    #[test]
+    fn submitting_a_draft_with_an_attached_image_sends_the_image() {
+        let mut harness = Harness::new();
+        harness.set_draft("look ");
+        harness
+            .command(Command::AttachImage {
+                session: "main".to_owned(),
+                data_url: IMAGE.to_owned(),
+            })
+            .unwrap();
+        harness.set_draft("look at [Image #1] closely");
+        let effects = harness
+            .command(Command::Submit {
+                session: "main".to_owned(),
+                rev: 3,
+            })
+            .unwrap();
+
+        let prompt = effects
+            .iter()
+            .find_map(|effect| match effect {
+                RootEffect::Submit(prompt) => Some(prompt.agent_prompt()),
+                _ => None,
+            })
+            .expect("the draft is submitted");
+        let PromptInput::Content(content) = prompt.instruction else {
+            panic!("a draft with an image is sent as content");
+        };
+        assert!(content.iter().any(|part| matches!(
+            part,
+            UserInput::Image { image_url, .. } if image_url == IMAGE
+        )));
     }
 
     #[test]
