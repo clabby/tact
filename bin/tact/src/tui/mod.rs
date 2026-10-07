@@ -2537,21 +2537,31 @@ fn apply_pane_effect(
         }
         components::RootEffect::Handoff => start_handoff(context, pane),
         components::RootEffect::OpenWebInterface { install } => {
-            let download = match crate::web::WebAssets::availability() {
-                Ok(crate::web::AssetAvailability::Ready(_)) => false,
-                Ok(crate::web::AssetAvailability::DownloadRequired) if !install => {
+            let home = context
+                .config
+                .path()
+                .parent()
+                .unwrap_or(Path::new("."))
+                .to_owned();
+            let download = match crate::web::WebAssets::locate(&home) {
+                Ok(crate::web::Located::Ready(_)) => false,
+                Ok(crate::web::Located::Absent)
+                    if !crate::app::installation::current().is_development() && !install =>
+                {
                     schedule(
                         context.app.update(AppEvent::ConfirmWebInstall { pane }),
                         context.scheduler,
                     );
                     return Ok(());
                 }
-                Ok(crate::web::AssetAvailability::DownloadRequired) => true,
-                Ok(crate::web::AssetAvailability::DevelopmentInstallRequired { path }) => {
-                    let error = format!(
-                        "You are running a development build of Tact, which cannot download the web interface automatically. Run `cd web/app && bun install --frozen-lockfile && just install-dev`, or set TACT_WEB_ASSETS to the absolute `web/app/dist` path. The development install path is {}.",
-                        path.display()
-                    );
+                Ok(crate::web::Located::Absent)
+                    if !crate::app::installation::current().is_development() =>
+                {
+                    true
+                }
+                Ok(crate::web::Located::Absent) => {
+                    let error = "You are running a development build of Tact, which cannot download the web interface automatically. Run `cd web/app && bun install --frozen-lockfile && just install-dev`, or set TACT_WEB_ASSETS to the absolute `web/app/dist` path."
+                        .to_owned();
                     schedule(
                         context.app.update(AppEvent::NotifyError { pane, error }),
                         context.scheduler,
@@ -2574,9 +2584,11 @@ fn apply_pane_effect(
             context.browser_open_tasks.spawn(async move {
                 let result = async {
                     if download {
-                        crate::web::WebAssets::download().await.map_err(|error| {
-                            format!("Could not install the web interface: {error}")
-                        })?;
+                        crate::web::WebAssets::download(&home)
+                            .await
+                            .map_err(|error| {
+                                format!("Could not install the web interface: {error}")
+                            })?;
                     }
                     let url = web_link(&status, enabled)?;
                     crate::app::browser::open(&url).await.map_err(|error| {

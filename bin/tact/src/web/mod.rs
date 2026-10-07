@@ -196,7 +196,6 @@ impl Server {
             },
         )?;
 
-        WebAssets::install_if_missing(settings.home.clone());
         let review = ReviewState::new(
             settings.workspace.clone(),
             hub.clone(),

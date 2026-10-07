@@ -145,23 +145,6 @@ impl WebAssets {
         }
     }
 
-    /// Installs the release bundle in the background when none is present. Development builds
-    /// never download; a failed attempt leaves the server on its installation page.
-    pub(crate) fn install_if_missing(home: PathBuf) {
-        if installation().is_development() {
-            return;
-        }
-        tokio::spawn(async move {
-            let located = {
-                let home = home.clone();
-                tokio::task::spawn_blocking(move || Self::locate(&home)).await
-            };
-            if matches!(located, Ok(Ok(Located::Absent))) {
-                drop(Self::download(&home).await);
-            }
-        });
-    }
-
     /// Downloads, verifies, and installs the bundle matching this binary's version.
     pub(crate) async fn download(home: &Path) -> Result<Self, AssetError> {
         if installation().is_development() {
