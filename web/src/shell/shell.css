@@ -397,24 +397,26 @@ diffs-container { --diffs-light-bg: var(--bg); --diffs-dark-bg: var(--bg); }
 
 .rail-layer { position: absolute; z-index: 3; top: 0; right: 0; bottom: var(--dock-height, 150px); display: flex; align-items: center; pointer-events: none; }
 .app[data-viewport="phone"] .rail-layer { display: none; }
+/* The list is open while the pointer is over the rail or keyboard focus is inside it; a mouse click
+   leaves focus on the chosen item without holding the list open. */
 .prompt-rail {
   --rail-width: 44px;
   display: flex; flex-direction: column; align-items: stretch; gap: 0; width: var(--rail-width); padding: var(--space-2) 0; margin-right: var(--space-2);
   border: 1px solid transparent; border-radius: var(--radius-lg); background: transparent; pointer-events: auto;
   transition: width var(--duration-base) var(--ease-out), background var(--duration-base), border-color var(--duration-base), box-shadow var(--duration-base), padding var(--duration-base) var(--ease-out);
 }
-.prompt-rail:hover, .prompt-rail:focus-within { --rail-width: 280px; padding: var(--space-2); border-color: var(--line-strong); background: var(--surface-raised); box-shadow: var(--shadow-2); }
+.prompt-rail:hover, .prompt-rail:has(:focus-visible) { --rail-width: 280px; padding: var(--space-2); border-color: var(--line-strong); background: var(--surface-raised); box-shadow: var(--shadow-2); }
 .rail-item, .rail-more { display: flex; align-items: center; justify-content: flex-end; gap: var(--space-3); width: 100%; height: 14px; padding: 0 var(--space-3) 0 var(--space-2); border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--muted); font-size: var(--text-sm); text-align: left; overflow: hidden; transition: height var(--duration-base) var(--ease-out), background var(--duration-fast); }
-.prompt-rail:hover .rail-item, .prompt-rail:focus-within .rail-item { height: 30px; }
-.prompt-rail:hover .rail-more, .prompt-rail:focus-within .rail-more { height: 26px; }
+.prompt-rail:hover .rail-item, .prompt-rail:has(:focus-visible) .rail-item { height: 30px; }
+.prompt-rail:hover .rail-more, .prompt-rail:has(:focus-visible) .rail-more { height: 26px; }
 .rail-more { height: 10px; color: var(--faint); font-size: var(--text-xs); }
 .rail-item:hover, .rail-more:hover { background: var(--surface-hover); color: var(--text); }
 .rail-label { display: flex; align-items: baseline; flex: 1; gap: var(--space-2); min-width: 0; opacity: 0; transform: translateX(8px); transition: opacity var(--duration-base), transform var(--duration-base) var(--ease-out); }
-.prompt-rail:hover .rail-label, .prompt-rail:focus-within .rail-label { opacity: 1; transform: none; }
+.prompt-rail:hover .rail-label, .prompt-rail:has(:focus-visible) .rail-label { opacity: 1; transform: none; }
 .rail-num { flex: none; min-width: 1.4em; color: var(--faint); font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
 .rail-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rail-line { flex: none; height: 2px; border-radius: 1px; background: var(--line-strong); transition: width var(--duration-fast) var(--ease-out), background var(--duration-fast), height var(--duration-fast); }
-.prompt-rail:not(:hover):not(:focus-within) .rail-line { background: color-mix(in srgb, var(--text) 24%, transparent); }
+.prompt-rail:not(:hover):not(:has(:focus-visible)) .rail-line { background: color-mix(in srgb, var(--text) 24%, transparent); }
 .rail-item:hover .rail-line { width: 30px !important; background: var(--text); }
 .rail-item[aria-current="true"] { color: var(--text); }
 .rail-item[aria-current="true"] .rail-line { width: 32px !important; height: 3px; background: var(--accent); }
