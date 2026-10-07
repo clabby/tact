@@ -196,6 +196,8 @@
   .comment-input:focus { box-shadow: 0 0 0 1px var(--line-strong) inset; }
   .comment-input:focus-visible { outline: 0; }
   .comment-input[hidden], .markdown-preview[hidden] { display: none; }
+  .markdown-preview { min-height: 142px; padding: 14px 15px; border-bottom: 1px solid var(--line); background: var(--bg); }
+  .markdown-preview.empty { color: var(--muted); }
   .comment-markdown p, .markdown-preview p, .thread-markdown p { margin: 0 0 .8em; }
   .comment-markdown ul, .comment-markdown ol, .markdown-preview ul, .markdown-preview ol, .thread-markdown ul, .thread-markdown ol { margin: .5em 0 .9em; padding-left: 24px; }
   .comment-markdown blockquote, .markdown-preview blockquote, .thread-markdown blockquote { margin: .8em 0; padding-left: 12px; border-left: 2px solid var(--line-strong); color: var(--muted); }
@@ -363,6 +365,15 @@
     .review-actions { display: grid; grid-template-columns: 1fr 1fr 1.5fr; margin-left: 0; }
     .review-bar .button { height: 40px; padding: 0 var(--space-2); }
     .review-bar textarea { flex: none; }
+    .diff-comment, .inline-comment-editor, .agent-thread { margin: var(--space-2); }
+    .editor-topbar { flex-wrap: wrap; align-items: center; padding: 0 var(--space-2); }
+    .editor-tabs { align-self: stretch; }
+    .editor-tabs button, .editor-footer .button { white-space: nowrap; }
+    .formatting-tools { flex: 1 0 100%; justify-content: space-between; margin-left: 0; padding-bottom: var(--space-1); }
+    .editor-shortcut { display: none; }
+    .editor-footer { padding: var(--space-2); }
+    .composer-actions { flex: 1; }
+    .composer-actions .button { flex: 1; padding: 0 var(--space-2); }
   }
 
   @media (max-width: 600px) {

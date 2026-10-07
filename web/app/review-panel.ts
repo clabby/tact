@@ -2376,7 +2376,13 @@ class ReviewPanel {
 
   private async renderPreviewElement(element: HTMLElement, body: string) {
     const preview = element.querySelector<HTMLElement>(".markdown-preview");
-    if (preview) await this.renderMarkdown(preview, body);
+    if (!preview) return;
+    preview.classList.toggle("empty", body.trim() === "");
+    if (preview.classList.contains("empty")) {
+      preview.textContent = "Nothing to preview yet.";
+      return;
+    }
+    await this.renderMarkdown(preview, body);
   }
 
   private async renderDraftPreview() {
