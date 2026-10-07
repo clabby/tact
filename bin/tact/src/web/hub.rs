@@ -19,9 +19,9 @@ use super::{
 };
 use crate::{
     app::config::{ReasoningEffort, ReasoningMode, Speed},
-    core::subagent_roster::SubagentRoster,
-    tui::{
+    core::{
         context::ContextBudget,
+        subagent_roster::SubagentRoster,
         transcript::{
             EntryKind, SessionStarted, TranscriptEntry, TranscriptModel, TranscriptRecord,
             TransientStatus,
@@ -986,7 +986,7 @@ mod tests {
     use super::{CLIENT_BUFFER, FLUSH_INTERVAL, Hub, MAX_STREAMS, Subscription, user_image};
     use crate::{
         app::config::{ReasoningEffort, ReasoningMode, Speed},
-        tui::transcript::{LocalEvent, SessionStarted, TranscriptModel, TranscriptRecord, TurnId},
+        core::transcript::{LocalEvent, SessionStarted, TranscriptModel, TranscriptRecord, TurnId},
         web::bridge::{self, Busy, Draft, LoopEnd, Origin, Publication, QueuedPrompt, SessionInfo},
     };
     use nanocodex::agent::events::{AgentEvent, AgentEventKind};
@@ -1371,7 +1371,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn context_and_subagents_are_projected_and_coalesced() {
-        use crate::{core::subagent_roster::SubagentRoster, tui::context::ContextBudget};
+        use crate::core::{context::ContextBudget, subagent_roster::SubagentRoster};
         use tact_subagents::AgentId;
 
         let fixture = fixture();

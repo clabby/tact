@@ -14,13 +14,14 @@ use crate::{
         config::{ConfigDocument, ReasoningEffort, ReasoningMode, Speed},
         model::ModelCatalog,
     },
-    core::{extensions::SkillMatches, subagent_roster::SubagentRoster},
-    search::FileMatches,
-    tui::{
+    core::{
         context::{ContextBudget, ContextDiagnostics},
+        extensions::SkillMatches,
         session::{HistoryPage, RecentPromptScope, RecentPrompts},
+        subagent_roster::SubagentRoster,
         transcript::TranscriptRecord,
     },
+    search::FileMatches,
     web::tailscale::Tailnet,
 };
 use serde::{Deserialize, Serialize};
@@ -521,7 +522,7 @@ mod tests {
     use super::{Command, CommandEnvelope, OpenSpec, Query};
     use crate::{
         app::config::{ReasoningMode, Speed},
-        tui::session::RecentPromptScope,
+        core::session::RecentPromptScope,
     };
     use serde_json::json;
     use tact_memory::MemoryKey;

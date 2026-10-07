@@ -177,8 +177,8 @@ feature is an enum variant plus its loop-side handler and never a new route:
 - **Publications** (`bridge::Publication`, stream events) carry state that changes over time.
 
 Data is computed once, in modules both front-ends call: `search` (fuzzy ranking, workspace
-paths), `core::extensions::SkillMatches`, `tui::session` (history pages, recent prompts),
-`tui::context` (diagnostics), `core::subagent_roster` (the subagent tree), `app::model` (the model
+paths), `core::extensions::SkillMatches`, `core::session` (history pages, recent prompts),
+`core::context` (diagnostics), `core::subagent_roster` (the subagent tree), `app::model` (the model
 catalog and its couplings), and `app::config::ConfigDocument`. Ranking is identical in both
 front-ends: best match first, ties in source order.
 

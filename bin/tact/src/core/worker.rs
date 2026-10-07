@@ -2,13 +2,13 @@
 
 use crate::{
     app::config::{ReasoningEffort, Speed},
-    core::{IMAGE_RENDERING_INSTRUCTIONS, MEMORY_REVIEW_CHECKPOINT, set_speed},
-    tui::{
-        components::QueueId,
+    core::{
+        IMAGE_RENDERING_INSTRUCTIONS, MEMORY_REVIEW_CHECKPOINT,
         context::ContextBudget,
         pane::PaneId,
-        prompt::Submission,
+        prompt::{QueueId, Submission},
         session::AgentSnapshot,
+        set_speed,
         transcript::{TerminalStopReason, TurnId},
     },
     web::bridge::AuxiliaryError,
@@ -1286,11 +1286,10 @@ mod tests {
     };
     use crate::{
         app::config::{ReasoningEffort, Speed},
-        core::{IMAGE_RENDERING_INSTRUCTIONS, MEMORY_REVIEW_CHECKPOINT},
-        tui::{
-            components::QueueId,
+        core::{
+            IMAGE_RENDERING_INSTRUCTIONS, MEMORY_REVIEW_CHECKPOINT,
             pane::PaneId,
-            prompt::Submission,
+            prompt::{QueueId, Submission},
             transcript::{TerminalStopReason, TurnId},
         },
     };
@@ -1389,7 +1388,7 @@ mod tests {
 
     async fn compacted(
         updates: &mut mpsc::UnboundedReceiver<WorkerEvent>,
-    ) -> Result<Box<crate::tui::session::AgentSnapshot>, String> {
+    ) -> Result<Box<crate::core::session::AgentSnapshot>, String> {
         timeout(Duration::from_secs(5), async {
             loop {
                 if let WorkerEvent::CompactionFinished { pane, result, .. } =
@@ -1499,7 +1498,7 @@ mod tests {
 
     #[tokio::test]
     async fn manual_compaction_terminal_failure_stops_followups_and_resume() {
-        use crate::tui::{
+        use crate::core::{
             session,
             transcript::{LocalEvent, TranscriptJournal},
         };
@@ -1561,7 +1560,7 @@ mod tests {
             .err()
             .expect("terminal compaction must not publish a snapshot");
         let (mut journal, writer) = TranscriptJournal::open(&config, "session").unwrap();
-        journal.defer_start(crate::tui::transcript::SessionStarted {
+        journal.defer_start(crate::core::transcript::SessionStarted {
             session_id: "session".to_owned(),
             parent_session_id: None,
             parent_sequence: None,
@@ -2049,7 +2048,7 @@ mod tests {
         })
         .await
         .unwrap();
-        let snapshot = crate::tui::session::AgentSnapshot::from_claude(
+        let snapshot = crate::core::session::AgentSnapshot::from_claude(
             probe.runtime_snapshot().await.unwrap(),
         )
         .unwrap();

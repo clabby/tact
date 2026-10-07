@@ -12,10 +12,8 @@ use super::markdown::{
 };
 use crate::{
     app::theme::Theme,
-    tui::{
-        format::{format_duration, humanize_tool},
-        transcript::{ToolEntry, ToolState},
-    },
+    core::transcript::{ToolEntry, ToolState, humanize_tool},
+    tui::format::format_duration,
 };
 use ratatui::{
     style::{Color, Modifier, Style},
@@ -662,7 +660,7 @@ mod tests {
     use super::{render, render_expanded, render_layout, render_live};
     use crate::{
         app::theme::Theme,
-        tui::transcript::{ToolEntry, ToolState},
+        core::transcript::{ToolEntry, ToolState},
     };
     use ratatui::style::{Color, Modifier};
     use serde_json::json;

@@ -1,5 +1,5 @@
 use super::{Presentation, generic};
-use crate::{app::theme::Theme, tui::transcript::ToolEntry};
+use crate::{app::theme::Theme, core::transcript::ToolEntry};
 use ratatui::{
     style::{Color, Style},
     text::Line,
@@ -107,7 +107,7 @@ impl<'a> ResultValue<'a> {
         let Some(result) = tool.result.as_ref() else {
             return Some(Self::Pending);
         };
-        if tool.state == crate::tui::transcript::ToolState::Failed
+        if tool.state == crate::core::transcript::ToolState::Failed
             && result.get("error").and_then(Value::as_str).is_some()
         {
             return Some(Self::Failed);
@@ -570,7 +570,7 @@ mod tests {
     use super::super::{render, render_expanded, render_layout};
     use crate::{
         app::theme::Theme,
-        tui::transcript::{ToolEntry, ToolState},
+        core::transcript::{ToolEntry, ToolState},
     };
     use serde_json::{Value, json};
 

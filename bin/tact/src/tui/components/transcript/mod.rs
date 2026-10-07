@@ -14,15 +14,15 @@ use super::{
 };
 use crate::{
     app::{config::ReasoningEffort, theme::Theme},
+    core::transcript::{
+        EntryId, EntryKind, TranscriptEntry, TranscriptModel, TranscriptRecord, TransientStatus,
+        UserImage,
+    },
     tui::{
         format::{
             duration_display_tick, format_duration, format_turn_duration, normalize_line_endings,
         },
         spinner::Spinner,
-        transcript::{
-            EntryId, EntryKind, TranscriptEntry, TranscriptModel, TranscriptRecord,
-            TransientStatus, UserImage,
-        },
     },
 };
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind};
@@ -1271,7 +1271,7 @@ fn transient_label(status: &TransientStatus) -> String {
 fn is_running_tool(entry: &TranscriptEntry) -> bool {
     matches!(
         &entry.kind,
-        EntryKind::Tool(tool) if tool.state == crate::tui::transcript::ToolState::Running
+        EntryKind::Tool(tool) if tool.state == crate::core::transcript::ToolState::Running
     )
 }
 
@@ -1662,7 +1662,7 @@ impl Component for Transcript {
                 if matches!(
                     &entry.kind,
                     EntryKind::Tool(tool)
-                        if tool.state == crate::tui::transcript::ToolState::Running
+                        if tool.state == crate::core::transcript::ToolState::Running
                 ) && let Some(spinner) = self.tool_spinner
                 {
                     let spinner_x = transcript_area
@@ -1858,7 +1858,7 @@ fn render_entry(
 
 fn render_live_tool_summary(
     entry: &TranscriptEntry,
-    tool: &crate::tui::transcript::ToolEntry,
+    tool: &crate::core::transcript::ToolEntry,
     duration_ns: u64,
     width: u16,
     theme: &Theme,
@@ -2145,7 +2145,7 @@ mod tests {
             config::{ReasoningEffort, ReasoningMode, Speed, TuiConfig},
             theme::Theme,
         },
-        tui::transcript::{EntryKind, LocalEvent, SessionStarted, TranscriptRecord, TurnId},
+        core::transcript::{EntryKind, LocalEvent, SessionStarted, TranscriptRecord, TurnId},
     };
     use crossterm::event::{
         Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,

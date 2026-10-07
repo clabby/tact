@@ -10,8 +10,11 @@ use super::{
 };
 use crate::{
     app::{config::DEFAULT_MAX_SUBAGENTS, model, theme::Theme},
-    core::subagent_roster::{SubagentNode, SubagentRoster},
-    tui::{format::sanitize_terminal_text_inline, transcript::TranscriptRecord},
+    core::{
+        subagent_roster::{SubagentNode, SubagentRoster},
+        transcript::TranscriptRecord,
+    },
+    tui::format::sanitize_terminal_text_inline,
 };
 use crossterm::event::{Event, KeyCode, KeyEventKind};
 use nanocodex::agent::events::AgentEvent;

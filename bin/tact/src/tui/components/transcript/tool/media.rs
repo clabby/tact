@@ -1,8 +1,5 @@
 use super::{Presentation, format_bytes};
-use crate::{
-    app::theme::Theme,
-    tui::{format::shorten_home, transcript::ToolEntry},
-};
+use crate::{app::theme::Theme, core::transcript::ToolEntry, tui::format::shorten_home};
 use ratatui::style::Style;
 use serde_json::Value;
 use std::path::Path;

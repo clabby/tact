@@ -2,10 +2,7 @@ use super::{
     DirectedMessageEntry, EntryId, EntryKind, MessageDelivery, MessagePhase, SessionStarted,
     ShellId, ToolEntry, ToolState, TranscriptEntry, TranscriptRecord, TransientStatus, UserImage,
 };
-use crate::{
-    app::config::{ReasoningEffort, Speed},
-    tui::format::humanize_tool,
-};
+use crate::app::config::{ReasoningEffort, Speed};
 use nanocodex::{
     agent::events::{
         AssistantDelta, AssistantMessage, CompactionCompleted, CompactionFailed,
@@ -1502,6 +1499,13 @@ struct ConnectionPayload {
     purpose: String,
 }
 
+/// The tool label both front-ends show while a tool runs and in its transcript entry.
+pub(crate) fn humanize_tool(name: &str) -> String {
+    name.trim_start_matches("mcp__")
+        .replace("__", " · ")
+        .replace('_', " ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1510,7 +1514,7 @@ mod tests {
     };
     use crate::{
         app::config::{ReasoningEffort, Speed},
-        tui::transcript::{
+        core::transcript::{
             LocalEvent, SessionEnded, SessionOutcome, ShellId, TranscriptRecord, TurnId,
         },
     };

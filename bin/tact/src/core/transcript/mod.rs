@@ -5,13 +5,13 @@ mod journal;
 mod model;
 mod record;
 
-use crate::tui::storage::StorageError;
+use crate::core::storage::StorageError;
 pub(crate) use entry::{
     DirectedMessageEntry, EntryId, EntryKind, MessageDelivery, MessagePhase, ToolEntry, ToolState,
     TranscriptEntry, TransientStatus, UserImage,
 };
 pub(crate) use journal::TranscriptJournal;
-pub(crate) use model::TranscriptModel;
+pub(crate) use model::{TranscriptModel, humanize_tool};
 pub(crate) use record::{
     LocalEvent, SCHEMA_VERSION, SessionEnded, SessionOutcome, SessionStarted, ShellId,
     TerminalStopReason, TranscriptRecord, TurnId,

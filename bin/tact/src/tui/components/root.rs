@@ -15,7 +15,7 @@ use super::{
     model_selector::{ModelSelector, ModelSelectorEffect, ModelSelectorEvent},
     node::{Component, ComponentUpdate, Node, RenderRequest},
     qr_code::{QrCodeEffect, QrCodeEvent, QrCodeView},
-    queue::{MessageQueue, QueueEffect, QueueEvent, QueueId},
+    queue::{MessageQueue, QueueEffect, QueueEvent},
     recent_prompt_picker::{RecentPromptPicker, RecentPromptPickerEffect, RecentPromptPickerEvent},
     selection::{Selection, Surface, TextSpan},
     session_picker::{SessionPicker, SessionPickerEffect, SessionPickerEvent, SessionPickerMode},
@@ -31,11 +31,12 @@ use crate::{
         model,
         theme::{Theme, ThemeMode},
     },
-    core::{extensions::Skill, subagent_roster::SubagentRoster},
-    tui::{
+    core::{
         context::{ContextBudget, ContextDiagnostics},
-        prompt::Submission,
+        extensions::Skill,
+        prompt::{QueueId, Submission},
         session::{RecentPrompt, SessionSummary},
+        subagent_roster::SubagentRoster,
         transcript::TranscriptRecord,
     },
     web::bridge::{Busy, CommandError},
@@ -3513,8 +3514,8 @@ mod tests {
             config::{ReasoningEffort, ReasoningMode, Speed, TuiConfig},
             theme::{Theme, ThemeMode},
         },
-        core::extensions::Skill,
-        tui::{
+        core::{
+            extensions::Skill,
             session::{RecentPrompt, SessionSummary},
             transcript::{LocalEvent, TranscriptRecord, TurnId},
         },
@@ -3702,7 +3703,7 @@ mod tests {
         let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
         root.set_model(Model::Claude(nanocodex::ClaudeModel::Opus55));
         root.update(super::RootEvent::ContextBudget(
-            crate::tui::context::ContextBudget {
+            crate::core::context::ContextBudget {
                 active_tokens: 0,
                 window_tokens: 900_000,
             },
@@ -3752,7 +3753,7 @@ mod tests {
         );
         assert_eq!(
             root.context_diagnostics.continuation,
-            Some(crate::tui::context::ContinuationMode::PreviousResponse)
+            Some(crate::core::context::ContinuationMode::PreviousResponse)
         );
 
         let completed = agent_record(

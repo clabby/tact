@@ -1,5 +1,5 @@
 use super::{super::markdown::wrap_plain, Presentation};
-use crate::{app::theme::Theme, tui::transcript::ToolEntry};
+use crate::{app::theme::Theme, core::transcript::ToolEntry};
 use ratatui::style::Style;
 use serde_json::Value;
 use std::borrow::Cow;
@@ -82,7 +82,7 @@ mod tests {
     use super::present;
     use crate::{
         app::theme::Theme,
-        tui::transcript::{ToolEntry, ToolState},
+        core::transcript::{ToolEntry, ToolState},
     };
     use serde_json::json;
 

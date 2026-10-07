@@ -3,6 +3,21 @@
 use nanocodex::agent::input::{Prompt, UserInput};
 use std::{fmt, ops::Range};
 
+/// Identifies a prompt waiting in a session's queue until it is sent or steered into the
+/// running turn.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct QueueId(u64);
+
+impl QueueId {
+    pub(crate) const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    pub(crate) const fn get(self) -> u64 {
+        self.0
+    }
+}
+
 #[derive(Clone, Eq, PartialEq)]
 pub(crate) struct Submission {
     text: String,

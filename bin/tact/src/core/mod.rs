@@ -1,7 +1,13 @@
-//! Nanocodex construction, turn execution, and graceful shutdown.
+//! The front-end-neutral session runtime.
+//!
+//! This module constructs agents, schedules their turns on the worker, persists sessions and
+//! their transcripts, and projects transcripts into structured entries. The terminal (`tui`) and
+//! browser (`web`) front-ends depend on it; it depends on neither of them.
 
+pub(crate) mod agent_events;
 mod claude;
 mod claude_context;
+pub(crate) mod context;
 pub(crate) mod extensions;
 #[cfg(test)]
 mod mixed_provider_tests;
@@ -9,7 +15,15 @@ mod mixed_provider_tests;
 mod openai_tests;
 #[cfg(feature = "harbor-evals")]
 mod orchestration;
+pub(crate) mod pane;
+pub(crate) mod prompt;
+pub(crate) mod session;
+pub(crate) mod shell;
+pub(crate) mod storage;
 pub(crate) mod subagent_roster;
+pub(crate) mod subagent_updates;
+pub(crate) mod transcript;
+pub(crate) mod worker;
 
 use crate::{
     app::{
@@ -18,11 +32,13 @@ use crate::{
         hook,
         secret::SecretString,
     },
-    core::extensions::{
-        CurrentSessionTool, Skill, SkillCatalog, mcp_provider,
-        sessions::{FindSessionsTool, ReadSessionTool},
+    core::{
+        extensions::{
+            CurrentSessionTool, Skill, SkillCatalog, mcp_provider,
+            sessions::{FindSessionsTool, ReadSessionTool},
+        },
+        session::{AgentSnapshot, ResumeState},
     },
-    tui::session::{AgentSnapshot, ResumeState},
 };
 use nanocodex::{
     AgentEvents, HarnessModel as Model, Nanocodex, NanocodexError, OpenAi, Tools, TurnControl,

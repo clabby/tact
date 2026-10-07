@@ -11,7 +11,6 @@
 use super::{
     confirmation::{Confirmation, ConfirmationEffect, ConfirmationEvent},
     node::{ComponentUpdate, Node, RenderRequest},
-    queue::QueueId,
     root::{DraftReset, PaneCommand, RestoredSessionProjection, RootEffect, RootEvent, RootNode},
     sessions::{LiveSession, SessionsEffect, SessionsEvent, SessionsOverlay},
     subagents::subagent_record,
@@ -22,11 +21,13 @@ use crate::{
         model,
         theme::{ColorScheme, Theme, ThemeMode},
     },
-    core::{extensions::Skill, subagent_roster::SubagentRoster},
-    tui::{
+    core::{
         context::ContextBudget,
+        extensions::Skill,
         pane::PaneId,
+        prompt::QueueId,
         session::{RecentPrompt, SessionSummary},
+        subagent_roster::SubagentRoster,
         transcript::TranscriptRecord,
     },
     web::bridge::{
@@ -1544,7 +1545,7 @@ mod tests {
             config::{ReasoningEffort, ReasoningMode, Speed, TuiConfig},
             theme::{ColorScheme, Theme, ThemeMode},
         },
-        tui::{
+        core::{
             pane::PaneId,
             transcript::{LocalEvent, TranscriptRecord, TurnId},
         },
@@ -1611,7 +1612,7 @@ mod tests {
             .set_model(Model::Claude(nanocodex::ClaudeModel::Opus55));
         app.update(AppEvent::ContextBudget {
             pane: PaneId::Main,
-            budget: crate::tui::context::ContextBudget {
+            budget: crate::core::context::ContextBudget {
                 active_tokens: 0,
                 window_tokens: 1_000_000,
             },
@@ -1786,7 +1787,7 @@ mod tests {
         let mut app = app();
         app.update(AppEvent::ContextBudget {
             pane: PaneId::Main,
-            budget: crate::tui::context::ContextBudget {
+            budget: crate::core::context::ContextBudget {
                 active_tokens: 136_000,
                 window_tokens: 272_000,
             },
@@ -2288,7 +2289,7 @@ mod registry_tests {
             config::{ReasoningEffort, ReasoningMode, Speed},
             theme::Theme,
         },
-        tui::{pane::PaneId, prompt::Submission},
+        core::{pane::PaneId, prompt::Submission},
         web::bridge::{self, Command, CommandError, Draft, Origin, Publication, Reply, WebEnd},
     };
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
@@ -2836,7 +2837,7 @@ mod parity_tests {
             config::{ReasoningEffort, ReasoningMode},
             theme::Theme,
         },
-        tui::{context::ContextBudget, pane::PaneId},
+        core::{context::ContextBudget, pane::PaneId},
         web::bridge::{self, Command, CommandError, DraftImage, Origin, Publication, WebEnd},
     };
     use nanocodex::{

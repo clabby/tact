@@ -1,4 +1,4 @@
-//! Stable identities for live session panes.
+//! Stable identities for the live sessions one process runs.
 //!
 //! An identity is never reused within a process, so late completions for a closed pane cannot
 //! reach a newer one.

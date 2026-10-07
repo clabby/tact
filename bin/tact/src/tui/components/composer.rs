@@ -13,13 +13,13 @@ use crate::{
         config::{ReasoningEffort, ReasoningMode, Speed},
         theme::Theme,
     },
-    tui::{
+    core::{
         context::{ContextBudget, MODEL_WINDOW_TOKENS},
-        format::{
-            format_turn_duration, normalize_line_endings, sanitize_terminal_text, shorten_home,
-            terminal_text_width,
-        },
         prompt::Submission,
+    },
+    tui::format::{
+        format_turn_duration, normalize_line_endings, sanitize_terminal_text, shorten_home,
+        terminal_text_width,
     },
 };
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};

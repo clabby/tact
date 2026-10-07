@@ -2,7 +2,7 @@
 
 use crate::{
     app::config::{ReasoningEffort, ReasoningMode, Speed},
-    tui::transcript::{SCHEMA_VERSION, SessionStarted, TerminalStopReason, TranscriptRecord},
+    core::transcript::{SCHEMA_VERSION, SessionStarted, TerminalStopReason, TranscriptRecord},
 };
 use rusqlite::{
     Connection, OpenFlags, OptionalExtension, Transaction, ffi::ErrorCode, params,
@@ -989,7 +989,7 @@ mod tests {
     use super::{SessionStorage, StorageError, database_path};
     use crate::{
         app::config::{ReasoningEffort, ReasoningMode, Speed},
-        tui::transcript::{LocalEvent, SessionStarted, TranscriptRecord, TurnId},
+        core::transcript::{LocalEvent, SessionStarted, TranscriptRecord, TurnId},
     };
     use rusqlite::Connection;
     use serde_json::{Value, json};

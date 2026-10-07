@@ -7,7 +7,7 @@ use super::{
 };
 use crate::{
     app::theme::Theme,
-    tui::session::{RecentPrompt, RecentPromptScope, rank_recent_prompts},
+    core::session::{RecentPrompt, RecentPromptScope, rank_recent_prompts},
 };
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::{
@@ -338,7 +338,7 @@ mod tests {
         Component, RecentPromptPicker, RecentPromptPickerEffect, RecentPromptPickerEvent,
         RecentPromptScope,
     };
-    use crate::{app::theme::Theme, tui::session::RecentPrompt};
+    use crate::{app::theme::Theme, core::session::RecentPrompt};
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use ratatui::{Terminal, backend::TestBackend};
     use std::path::PathBuf;

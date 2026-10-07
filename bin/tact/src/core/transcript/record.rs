@@ -1,6 +1,6 @@
 use crate::{
     app::config::{ReasoningEffort, ReasoningMode, Speed},
-    tui::context::ContextBudget,
+    core::context::ContextBudget,
 };
 use nanocodex::agent::events::{AgentEvent, AgentEventKind};
 use serde::{Deserialize, Deserializer, Serialize};

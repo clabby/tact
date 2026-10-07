@@ -1,4 +1,4 @@
-use crate::{app::config::Config, tui::session::AgentSnapshot};
+use crate::{app::config::Config, core::session::AgentSnapshot};
 use futures_util::StreamExt;
 use nanocodex::{
     AgentEvents, Claude, HarnessModel as Model, Nanocodex, NanocodexError, Thinking, Tools,
@@ -602,7 +602,7 @@ mod tests {
 
     #[tokio::test]
     async fn consecutive_claude_turns_preserve_transcript_replies() {
-        use crate::tui::transcript::{EntryKind, TranscriptModel, TranscriptRecord};
+        use crate::core::transcript::{EntryKind, TranscriptModel, TranscriptRecord};
 
         let responses = ["first reply", "second reply"]
             .into_iter()
@@ -1209,7 +1209,7 @@ mod tests {
 
     #[tokio::test]
     async fn context_usage_updates_before_code_mode_turn_finishes() {
-        use crate::tui::transcript::TranscriptRecord;
+        use crate::core::transcript::TranscriptRecord;
         use nanocodex::oai::events::ModelCallCompleted;
 
         let server = server(vec![

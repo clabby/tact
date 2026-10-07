@@ -4,10 +4,7 @@ use super::{
     floating::Floating,
     node::{Component, ComponentUpdate, RenderRequest},
 };
-use crate::{
-    app::theme::Theme,
-    tui::session::{SessionSummary, format_age},
-};
+use crate::{app::theme::Theme, core::session::SessionSummary, tui::format::format_age};
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::{
     Frame,
@@ -261,7 +258,7 @@ mod tests {
     };
     use crate::{
         app::config::{ReasoningEffort, ReasoningMode},
-        tui::session::SessionSummary,
+        core::session::SessionSummary,
     };
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use std::path::PathBuf;

@@ -1,5 +1,5 @@
 use super::Presentation;
-use crate::{app::theme::Theme, tui::transcript::ToolEntry};
+use crate::{app::theme::Theme, core::transcript::ToolEntry};
 use ratatui::style::Style;
 use serde_json::Value;
 

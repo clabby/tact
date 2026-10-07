@@ -6,11 +6,11 @@ use crate::{
         config::{ReasoningEffort, ReasoningMode},
         model,
     },
-    search::rank,
-    tui::{
+    core::{
         storage::{SessionStorage, StorageError, StoredSession, database_path},
         transcript::{SessionStarted, TerminalStopReason, TranscriptRecord},
     },
+    search::rank,
 };
 use nanocodex::{
     HarnessModel, HarnessModel as Model, Model as CodexModel, NanocodexError, Thinking,
@@ -22,7 +22,6 @@ use std::{
     fs::{self, File, TryLockError},
     path::{Path, PathBuf},
     sync::Arc,
-    time::Duration,
 };
 use thiserror::Error;
 
@@ -705,21 +704,6 @@ pub(crate) fn next_sequence(records: &[Arc<TranscriptRecord>]) -> u64 {
     maximum.saturating_add(1).max(1)
 }
 
-pub(crate) fn format_age(started_at_unix_ms: u64) -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    let started = Duration::from_millis(started_at_unix_ms);
-    let elapsed = now.saturating_sub(started);
-    let seconds = elapsed.as_secs();
-    match seconds {
-        0..=59 => "now".to_owned(),
-        60..=3_599 => format!("{}m", seconds / 60),
-        3_600..=86_399 => format!("{}h", seconds / 3_600),
-        _ => format!("{}d", seconds / 86_400),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
@@ -729,7 +713,7 @@ mod tests {
     };
     use crate::{
         app::config::{ReasoningEffort, ReasoningMode, Speed},
-        tui::{
+        core::{
             storage::{SessionStorage, database_path},
             transcript::{LocalEvent, SessionStarted, TranscriptJournal, TranscriptRecord, TurnId},
         },
@@ -875,56 +859,6 @@ mod tests {
 
         assert!(load_transcript(&config, "missing").unwrap().is_empty());
         assert!(!database_path(&config).exists());
-    }
-
-    #[tokio::test]
-    async fn resume_rejects_the_recorded_workspace_when_it_is_missing() {
-        use crate::app::config::{Config, ConfigOverrides};
-        let directory = tempdir().unwrap();
-        let config_path = directory.path().join("config.toml");
-        std::fs::write(&config_path, "").unwrap();
-        let config = Config::load(ConfigOverrides {
-            path: Some(config_path.clone()),
-            workspace: Some(directory.path().to_owned()),
-            ..ConfigOverrides::default()
-        })
-        .unwrap();
-        let missing = directory.path().join("deleted-checkout");
-        let mut start = started(1, "session", None, None)
-            .decode_payload::<SessionStarted>()
-            .unwrap();
-        start.workspace = missing.clone();
-        let record = Arc::new(
-            TranscriptRecord::from_local(1, 1, LocalEvent::SessionStarted(start)).unwrap(),
-        );
-        SessionStorage::open(&config_path)
-            .unwrap()
-            .append_records("session", &[record])
-            .unwrap();
-        save_checkpoint(
-            &config_path,
-            "session",
-            &snapshot("resume"),
-            "instructions",
-            false,
-        )
-        .unwrap();
-        let lock = super::SessionLock::acquire(&config_path, "session").unwrap();
-        let result =
-            crate::tui::restore_session(config, "session".to_owned(), ReasoningEffort::Low, lock)
-                .await;
-        let error = match result {
-            Err(error) => error,
-            Ok(_) => panic!("missing workspace must prevent resume"),
-        };
-        assert!(
-            error
-                .to_string()
-                .contains(missing.to_string_lossy().as_ref())
-        );
-        assert!(
-            matches!(error, crate::app::error::Error::Runtime(crate::app::error::RuntimeError::ResolveWorkspace {path, ..}) if path == missing)
-        );
     }
 
     #[tokio::test]

@@ -1,6 +1,6 @@
 //! Bounded discovery and read-only access to V2 session transcripts.
 
-use crate::tui::{
+use crate::core::{
     storage::{DecodedStoredRecord, SessionStorage, StorageError, StoredSession},
     transcript::TranscriptRecord,
 };
@@ -739,7 +739,7 @@ mod tests {
     };
     use crate::{
         app::config::{ReasoningEffort, ReasoningMode, Speed},
-        tui::{
+        core::{
             storage::{DecodedStoredRecord, SessionStorage},
             transcript::{LocalEvent, SessionStarted, TranscriptRecord, TurnId},
         },

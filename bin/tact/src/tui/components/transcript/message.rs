@@ -1,7 +1,7 @@
 //! Collapsible presentation for one directed-message thread.
 
 use super::markdown::{sanitize, wrap_plain, wrap_spans};
-use crate::{app::theme::Theme, tui::transcript::DirectedMessageEntry};
+use crate::{app::theme::Theme, core::transcript::DirectedMessageEntry};
 use ratatui::{
     style::{Modifier, Style},
     text::{Line, Span},
@@ -314,7 +314,7 @@ fn first_line(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::render;
-    use crate::{app::theme::Theme, tui::transcript::DirectedMessageEntry};
+    use crate::{app::theme::Theme, core::transcript::DirectedMessageEntry};
     use serde_json::json;
     use tact_subagents::{AgentMessageUpdate, MessageDeliveryState};
 
@@ -359,7 +359,7 @@ mod tests {
             }))
             .unwrap(),
             thread: update.thread,
-            deliveries: vec![crate::tui::transcript::MessageDelivery {
+            deliveries: vec![crate::core::transcript::MessageDelivery {
                 message_id: update.message_id,
                 state: update.delivery,
             }],

@@ -3,9 +3,9 @@
 
 use crate::{
     app::config::{ReasoningEffort, ReasoningMode, Speed},
-    core::subagent_roster::SubagentRoster,
-    tui::{
+    core::{
         context::ContextBudget,
+        subagent_roster::SubagentRoster,
         transcript::{
             DirectedMessageEntry, EntryKind, ToolEntry, ToolState, TranscriptEntry, TransientStatus,
         },
@@ -667,7 +667,7 @@ fn numeric(id: impl std::fmt::Display) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{MAX_STRING_BYTES, WireBody, cap, now_unix_ms, tool_summary};
-    use crate::tui::transcript::{ToolEntry, ToolState};
+    use crate::core::transcript::{ToolEntry, ToolState};
     use serde_json::{Value, json};
 
     fn tool(name: &str, arguments: Value) -> ToolEntry {

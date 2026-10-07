@@ -6,7 +6,8 @@ use super::{
 };
 use crate::{
     app::theme::Theme,
-    tui::{format::sanitize_terminal_text_inline, prompt::Submission},
+    core::prompt::{QueueId, Submission},
+    tui::format::sanitize_terminal_text_inline,
 };
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::{
@@ -21,19 +22,6 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 const STEERING_TEXT: &str = "steering";
-
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) struct QueueId(u64);
-
-impl QueueId {
-    pub(crate) const fn new(value: u64) -> Self {
-        Self(value)
-    }
-
-    pub(crate) const fn get(self) -> u64 {
-        self.0
-    }
-}
 
 #[derive(Debug, Eq, PartialEq)]
 pub(super) enum QueueEffect {
@@ -87,7 +75,7 @@ impl Default for MessageQueue {
 impl MessageQueue {
     pub(super) fn push(&mut self, prompt: impl Into<Submission>) {
         self.items.push(QueueItem {
-            id: QueueId(self.next_id),
+            id: QueueId::new(self.next_id),
             prompt: prompt.into(),
             state: QueueItemState::Queued,
         });

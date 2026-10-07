@@ -1,7 +1,6 @@
 use crate::{
     app::config::{ReasoningEffort, ReasoningMode, Speed},
-    core::ConfiguredAgent,
-    tui::pane::PaneId,
+    core::{ConfiguredAgent, pane::PaneId},
     web::bridge::AuxiliaryError,
 };
 use nanocodex::HarnessModel as Model;
@@ -102,7 +101,7 @@ impl HandoffController {
 #[cfg(test)]
 mod tests {
     use super::{HandoffCompletion, HandoffController, HandoffIdentity};
-    use crate::tui::pane::PaneId;
+    use crate::core::pane::PaneId;
 
     fn pending_handoff(
         identity: HandoffIdentity,

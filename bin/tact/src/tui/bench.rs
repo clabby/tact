@@ -47,7 +47,7 @@ mod vcs {
 }
 
 mod core {
-    pub(crate) use crate::subagent_roster;
+    pub(crate) use crate::{context, pane, prompt, session, storage, subagent_roster, transcript};
 
     pub(crate) mod extensions {
         pub(crate) use crate::skills::{Skill, SkillMatches};
@@ -77,20 +77,23 @@ mod core {
 
 #[path = "components/mod.rs"]
 mod components;
+#[path = "../core/context.rs"]
 mod context;
 mod format;
+#[path = "../core/pane.rs"]
 mod pane;
+#[path = "../core/prompt.rs"]
 mod prompt;
+#[path = "../core/session.rs"]
 mod session;
 mod spinner;
+#[path = "../core/storage.rs"]
 mod storage;
-#[path = "transcript/mod.rs"]
+#[path = "../core/transcript/mod.rs"]
 pub(crate) mod transcript;
 
-// `config.rs` uses the production module path while this benchmark compiles the
-// same internal modules directly into its private target.
 mod tui {
-    pub(crate) use crate::{context, format, pane, prompt, session, spinner, storage, transcript};
+    pub(crate) use crate::{format, spinner};
 }
 
 use components::{AppEvent, AppNode, RootNode};

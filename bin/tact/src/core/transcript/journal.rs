@@ -1,7 +1,7 @@
 use super::{TranscriptError, TranscriptRecord};
 use crate::{
     app::config::{ReasoningEffort, Speed},
-    tui::{
+    core::{
         context::outbound_context_snapshot,
         storage::{SessionStorage, database_path},
         transcript::{LocalEvent, SessionStarted},
@@ -343,7 +343,7 @@ mod tests {
     use super::TranscriptJournal;
     use crate::{
         app::config::{ReasoningEffort, ReasoningMode, Speed},
-        tui::{
+        core::{
             session,
             storage::{SessionStorage, database_path},
             transcript::{LocalEvent, SessionStarted, TurnId},

@@ -1,7 +1,7 @@
 use super::{ConfiguredAgent, set_speed};
 use crate::{
     app::config::{Config, ConfigOverrides, ReasoningMode, Speed, Transport},
-    tui::session::{load_checkpoint, save_checkpoint},
+    core::session::{load_checkpoint, save_checkpoint},
 };
 use axum::{
     Json, Router,

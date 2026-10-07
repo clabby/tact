@@ -1080,11 +1080,11 @@ mod tests {
                 session: "s1".into(),
                 agent: AgentId::new(2),
                 record: std::sync::Arc::new(
-                    crate::tui::transcript::TranscriptRecord::from_local(
+                    crate::core::transcript::TranscriptRecord::from_local(
                         1,
                         1,
-                        crate::tui::transcript::LocalEvent::UserSubmitted {
-                            id: crate::tui::transcript::TurnId::new(1),
+                        crate::core::transcript::LocalEvent::UserSubmitted {
+                            id: crate::core::transcript::TurnId::new(1),
                             text: "task".into(),
                         },
                     )

@@ -1,6 +1,6 @@
 //! Typed errors exposed by the binary's internal module boundaries.
 
-use crate::tui::{session::SessionError, transcript::TranscriptError};
+use crate::core::{session::SessionError, transcript::TranscriptError};
 use miette::Diagnostic;
 use nanocodex::{
     NanocodexError,

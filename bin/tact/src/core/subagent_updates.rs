@@ -1,4 +1,4 @@
-//! Forwarding from subagent runtimes into the TUI event loop.
+//! Forwarding from subagent runtimes into a front-end event loop.
 
 use tact_subagents::{AgentUpdate, ScopedAgentUpdate, SubagentRuntimeId};
 use tokio::sync::mpsc;

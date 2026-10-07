@@ -1,25 +1,15 @@
 //! Interactive terminal runtime.
 
-mod agent_events;
 mod clipboard;
 mod components;
-pub(crate) mod context;
 mod editor;
 mod format;
 mod handoff_controller;
-mod pane;
-mod prompt;
 mod remote;
 mod scheduler;
-pub(crate) mod session;
-mod shell;
 mod spinner;
-pub(crate) mod storage;
-mod subagent_updates;
 mod system_scheme;
 mod terminal;
-pub(crate) mod transcript;
-mod worker;
 
 use crate::{
     app::{
@@ -27,27 +17,31 @@ use crate::{
         error::{Result, RuntimeError},
         herdr, hook,
     },
-    core::{ConfiguredAgent, extensions::Skill, supported_reasoning_mode},
+    core::{
+        ConfiguredAgent,
+        agent_events::{self, ForwardedAgentEvent},
+        extensions::Skill,
+        pane::PaneId,
+        prompt::Submission,
+        session::{self, RecentPrompt, SessionLock, SessionSummary},
+        shell::{self, ShellExecution},
+        subagent_updates::{self, ForwardedSubagentUpdate},
+        supported_reasoning_mode,
+        transcript::{
+            LocalEvent, SessionEnded, SessionOutcome, SessionStarted, ShellId, TranscriptError,
+            TranscriptJournal, TranscriptRecord, TurnId,
+        },
+        worker::{self, AuxiliaryContext, ReflectionContext, WorkerCommand, WorkerEvent},
+    },
     tui::{
-        agent_events::ForwardedAgentEvent,
         components::{
             AppEffect, AppEvent, AppNode, ComponentUpdate, RecentPromptDraft, RenderRequest,
             RestoredSessionProjection, RootNode,
         },
         editor::EditorOutcome,
         handoff_controller::{HandoffCompletion, HandoffController, PreparedHandoff},
-        pane::PaneId,
-        prompt::Submission,
         scheduler::{RenderScheduler, STREAM_FRAME_INTERVAL},
-        session::{RecentPrompt, SessionLock, SessionSummary},
-        shell::ShellExecution,
-        subagent_updates::ForwardedSubagentUpdate,
         terminal::TerminalSession,
-        transcript::{
-            LocalEvent, SessionEnded, SessionOutcome, SessionStarted, ShellId, TranscriptError,
-            TranscriptJournal, TranscriptRecord, TurnId,
-        },
-        worker::{AuxiliaryContext, ReflectionContext, WorkerCommand, WorkerEvent},
     },
     web::bridge::{
         self, AuxiliaryError, AuxiliaryRequest, Command, CommandError, OpenSpec, Origin, Reply,
@@ -3298,21 +3292,92 @@ mod tests {
             config::{Config, ConfigOverrides, ReasoningEffort, ReasoningMode, Speed},
             error::{Error, RuntimeError},
         },
-        core::configured_memory_store,
-        tui::{
-            components::RecentPromptDraft,
+        core::{
+            configured_memory_store,
             pane::PaneId,
             session::{self, RecentPrompt},
             subagent_updates::ForwardedSubagentUpdate,
             transcript::{LocalEvent, TurnId},
             worker::WorkerCommand,
         },
+        tui::components::RecentPromptDraft,
     };
     use nanocodex::{HarnessModel as Model, Model as CodexModel};
     use std::{cell::Cell, collections::HashMap, fs, path::Path, sync::Arc};
     use tact_memory::{MemoryLimits, MemoryStore, SelectedMemoryStore};
     use tact_subagents::{AgentId, AgentStatus, AgentUpdate};
     use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn resume_rejects_the_recorded_workspace_when_it_is_missing() {
+        use super::restore_session;
+        use crate::core::{
+            session::{SessionLock, save_checkpoint},
+            storage::SessionStorage,
+            transcript::{SessionStarted, TranscriptRecord},
+        };
+        use nanocodex::agent::session::SessionSnapshot;
+        use serde_json::json;
+
+        let directory = tempdir().unwrap();
+        let config_path = directory.path().join("config.toml");
+        fs::write(&config_path, "").unwrap();
+        let config = Config::load(ConfigOverrides {
+            path: Some(config_path.clone()),
+            workspace: Some(directory.path().to_owned()),
+            ..ConfigOverrides::default()
+        })
+        .unwrap();
+        let missing = directory.path().join("deleted-checkout");
+        let start = SessionStarted {
+            session_id: "session".to_owned(),
+            parent_session_id: None,
+            parent_sequence: None,
+            model: Model::Codex(CodexModel::Luna).to_string(),
+            effort: ReasoningEffort::Medium,
+            reasoning_mode: ReasoningMode::Standard,
+            speed: Speed::Standard,
+            workspace: missing.clone(),
+            application_version: "test".to_owned(),
+        };
+        let record = Arc::new(
+            TranscriptRecord::from_local(1, 1, LocalEvent::SessionStarted(start)).unwrap(),
+        );
+        SessionStorage::open(&config_path)
+            .unwrap()
+            .append_records("session", &[record])
+            .unwrap();
+        let snapshot: SessionSnapshot = serde_json::from_value(json!({
+            "version": 1,
+            "model": nanocodex::oai::MODEL,
+            "lineage_id": "resume",
+            "prompt_cache_key": "cache-resume",
+            "workspace": "/work",
+            "request_prefix": [
+                {"type": "additional_tools", "role": "developer", "tools": []},
+                {"type": "message", "role": "developer", "content": []}
+            ],
+            "canonical_context": {
+                "type": "message", "role": "user",
+                "content": [{"type": "input_text", "text": "canonical"}]
+            },
+            "history": []
+        }))
+        .unwrap();
+        save_checkpoint(&config_path, "session", &snapshot, "instructions", false).unwrap();
+        let lock = SessionLock::acquire(&config_path, "session").unwrap();
+
+        let result =
+            restore_session(config, "session".to_owned(), ReasoningEffort::Low, lock).await;
+
+        let Err(error) = result else {
+            panic!("missing workspace must prevent resume");
+        };
+        assert!(matches!(
+            error,
+            Error::Runtime(RuntimeError::ResolveWorkspace { path, .. }) if path == missing
+        ));
+    }
 
     #[tokio::test]
     async fn config_reload_updates_claude_admission_in_existing_registry() {
@@ -3895,7 +3960,7 @@ mod tests {
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].kind(), "session.started");
         let started = records[0]
-            .decode_payload::<crate::tui::transcript::SessionStarted>()
+            .decode_payload::<crate::core::transcript::SessionStarted>()
             .unwrap();
         assert_eq!(started.parent_session_id.as_deref(), Some("main-session"));
         assert_eq!(started.model, Model::Codex(CodexModel::Luna).to_string());
@@ -3973,7 +4038,7 @@ mod tests {
         let ended = old_records
             .last()
             .unwrap()
-            .decode_payload::<crate::tui::transcript::SessionEnded>()
+            .decode_payload::<crate::core::transcript::SessionEnded>()
             .unwrap();
         assert_eq!(ended.outcome, super::SessionOutcome::Closed);
         assert!(

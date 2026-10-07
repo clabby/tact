@@ -6,7 +6,7 @@ use super::{
 };
 use crate::{
     app::theme::Theme,
-    tui::context::{
+    core::context::{
         CompactionDiagnostics, CompactionTrigger, ContextDiagnostics, ContinuationMode,
     },
 };
@@ -308,7 +308,7 @@ mod tests {
     use super::{Component, ContextDiagnosticsPanel, format_compaction_time};
     use crate::{
         app::theme::Theme,
-        tui::context::{
+        core::context::{
             CompactionDiagnostics, CompactionTrigger, ContextDiagnostics, ContinuationMode,
             TokenUsage,
         },
