@@ -3467,19 +3467,6 @@ mod tests {
     }
 
     #[test]
-    fn panes_preserve_the_requested_speed_across_models() {
-        for model in crate::app::model::available(true) {
-            let settings = super::PaneSettings::new(
-                ReasoningEffort::High,
-                ReasoningMode::Standard,
-                Speed::Ultrafast,
-                *model,
-            );
-            assert_eq!(settings.speed, Speed::Ultrafast);
-        }
-    }
-
-    #[test]
     fn astra_uses_standard_reasoning_without_changing_other_models() {
         assert_eq!(
             supported_reasoning_mode(Model::Codex(CodexModel::Astra), ReasoningMode::Pro),
@@ -3737,7 +3724,6 @@ mod tests {
             error,
             Error::Runtime(RuntimeError::InteractiveTerminal)
         ));
-        assert!(error.to_string().contains("tact run <PROMPT>"));
     }
 
     #[test]

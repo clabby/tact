@@ -18,7 +18,13 @@ use std::{
 use thiserror::Error;
 
 const FORMAT_VERSION: i32 = 2;
-const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long a connection waits for another connection's write lock before reporting contention.
+/// Tests use a shorter wait so that contention paths complete quickly.
+pub(super) const BUSY_TIMEOUT: Duration = if cfg!(test) {
+    Duration::from_millis(500)
+} else {
+    Duration::from_secs(5)
+};
 const STATE_COMPRESSION_LEVEL: i32 = 3;
 
 #[derive(Debug, Error)]

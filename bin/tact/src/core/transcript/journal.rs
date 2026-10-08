@@ -519,9 +519,13 @@ mod tests {
             .unwrap()
             .load_records("session")
             .unwrap();
-        assert_eq!(records.len(), 2);
-        assert_eq!(records[1].kind(), "context.observed");
-        assert!(!format!("{records:?}").contains(marker));
+        let kinds = records
+            .iter()
+            .map(|record| record.kind())
+            .collect::<Vec<_>>();
+        assert_eq!(kinds, ["session.started", "context.observed"]);
+        let observed: serde_json::Value = records[1].decode_payload().unwrap();
+        assert!(!observed.to_string().contains(marker), "{observed}");
     }
 
     #[tokio::test]

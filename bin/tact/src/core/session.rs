@@ -714,7 +714,7 @@ mod tests {
     use crate::{
         app::config::{ReasoningEffort, ReasoningMode, Speed},
         core::{
-            storage::{SessionStorage, database_path},
+            storage::{BUSY_TIMEOUT, SessionStorage, database_path},
             transcript::{LocalEvent, SessionStarted, TranscriptJournal, TranscriptRecord, TurnId},
         },
     };
@@ -723,7 +723,7 @@ mod tests {
     };
     use rusqlite::Connection;
     use serde_json::{Value, json};
-    use std::{path::PathBuf, sync::Arc, time::Duration};
+    use std::{path::PathBuf, sync::Arc};
     use tempfile::tempdir;
 
     fn summary(index: usize, preview: &str) -> SessionSummary {
@@ -1693,7 +1693,8 @@ mod tests {
             })
             .unwrap();
 
-        tokio::time::sleep(Duration::from_secs(6)).await;
+        // Outlast the writer's busy timeout so it observes contention and retries.
+        tokio::time::sleep(BUSY_TIMEOUT * 2).await;
         journal
             .append_local(LocalEvent::UserSubmitted {
                 id: TurnId::new(2),
