@@ -34,8 +34,8 @@ fn main() {
     set("TACT_BUILD_TARGET", env::var("TARGET").ok());
     set("TACT_BUILD_PROFILE", env::var("PROFILE").ok());
     println!(
-        "cargo::rustc-env=TACT_RELEASE_BUILD={}",
-        env::var("TACT_RELEASE_BUILD").is_ok_and(|value| value == "1")
+        "cargo::rustc-env=TACT_RELEASE_CHANNEL={}",
+        release_channel()
     );
     println!(
         "cargo::rustc-env=TACT_PACKAGE_MANAGER={}",
@@ -48,6 +48,27 @@ fn main() {
             &["--version"],
         ),
     );
+}
+
+/// What `TACT_RELEASE_BUILD` declares this build to be: `1` is an official release,
+/// `pre-release` is a build of a commit on `main`, and anything else is a development build.
+fn release_channel() -> &'static str {
+    match env::var("TACT_RELEASE_BUILD").as_deref() {
+        Ok("1") => "release",
+        Ok("pre-release") => {
+            let revision =
+                env_override("TACT_GIT_SHA").or_else(|| git(&["rev-parse", "--short=12", "HEAD"]));
+            assert!(
+                revision.is_some_and(|revision| revision.len() == 12
+                    && revision
+                        .bytes()
+                        .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))),
+                "a pre-release build needs a twelve-digit commit hash in TACT_GIT_SHA or a git checkout"
+            );
+            "pre-release"
+        }
+        _ => "development",
+    }
 }
 
 /// Reads `name` from the build environment, letting builds without a git

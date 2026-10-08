@@ -8,7 +8,7 @@ use semver::Version;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::{
-    env,
+    env, fmt,
     io::{self, Cursor, Read, Seek, SeekFrom, Write},
     path::{Component, Path, PathBuf},
     time::Duration,
@@ -16,8 +16,14 @@ use std::{
 use tempfile::{NamedTempFile, TempDir, tempdir};
 use thiserror::Error;
 
-const GITHUB_LATEST_RELEASE: &str = "https://api.github.com/repos/clabby/tact/releases/latest";
+const GITHUB_API: &str = "https://api.github.com/repos/clabby/tact";
+const GITHUB_DOWNLOADS: &str = "https://github.com/clabby/tact/releases/download";
 const CRATES_IO_API: &str = "https://crates.io/api/v1/crates/tact";
+
+/// Pre-release tags and asset names carry this many hexadecimal digits of the commit hash.
+const REVISION_DIGITS: usize = 12;
+/// The shortest commit abbreviation `tact update` accepts, matching Git's own minimum.
+const MIN_REVISION_DIGITS: usize = 7;
 const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_METADATA_BYTES: u64 = 1024 * 1024;
@@ -37,6 +43,31 @@ pub(crate) enum UpdateError {
         #[source]
         source: semver::Error,
     },
+    #[error("GitHub returned the unrecognized release tag `{tag}`")]
+    ReleaseTagFormat { tag: String },
+    #[error(
+        "`{revision}` is not a commit: give between 7 and 40 hexadecimal digits of a commit on main"
+    )]
+    InvalidRevision { revision: String },
+    #[error("clabby/tact has no commit `{revision}`")]
+    RevisionNotFound { revision: String },
+    #[error("GitHub returned invalid commit metadata for `{revision}`: {source}")]
+    CommitMetadata {
+        revision: String,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error(
+        "there is no pre-release build of commit {revision}: only a bounded number of the most \
+         recent merges to main keep one, and a merge's build appears when its release workflow \
+         finishes"
+    )]
+    PreReleaseNotFound { revision: String },
+    #[error(
+        "pre-release builds can only replace a tact installed from a release archive or the \
+         install script, not one managed by Cargo or a package manager or built from source"
+    )]
+    PreReleaseNeedsArchive,
     #[error("failed to create the update HTTP client: {0}")]
     Client(#[source] reqwest::Error),
     #[error("failed to {operation}: {source}")]
@@ -49,10 +80,10 @@ pub(crate) enum UpdateError {
     GithubMetadata(#[source] serde_json::Error),
     #[error("{name} exceeds the {limit}-byte download limit")]
     DownloadTooLarge { name: String, limit: u64 },
-    #[error("release v{version} is missing `{name}`")]
-    MissingAsset { version: Version, name: String },
-    #[error("release v{version} contains more than one `{name}` asset")]
-    DuplicateAsset { version: Version, name: String },
+    #[error("release {tag} is missing `{name}`")]
+    MissingAsset { tag: ReleaseTag, name: String },
+    #[error("release {tag} contains more than one `{name}` asset")]
+    DuplicateAsset { tag: ReleaseTag, name: String },
     #[error("crates.io returned invalid metadata for tact v{version}: {source}")]
     RegistryMetadata {
         version: Version,
@@ -133,10 +164,72 @@ pub(crate) enum UpdateError {
 
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum UpdateStatus {
-    UpToDate { version: Version },
-    Updated { from: Version, to: Version },
+    UpToDate { current: ReleaseTag },
+    Updated { from: ReleaseTag, to: ReleaseTag },
     UseCargo { command: String },
     UsePackageManager { manager: String },
+}
+
+/// The identity of a published build: what its GitHub Release is tagged and how its assets are
+/// named.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum ReleaseTag {
+    /// An official release, tagged `v<version>`.
+    Official(Version),
+    /// The pre-release build of one commit on `main`, tagged `dev-<revision>`. `revision` is the
+    /// first [`REVISION_DIGITS`] lowercase hexadecimal digits of the commit hash.
+    PreRelease(String),
+}
+
+impl ReleaseTag {
+    pub(crate) fn parse(tag: &str) -> Result<Self, UpdateError> {
+        if let Some(revision) = tag.strip_prefix("dev-") {
+            return match Self::pre_release(revision) {
+                Some(tag) if revision.len() == REVISION_DIGITS => Ok(tag),
+                _ => Err(UpdateError::ReleaseTagFormat {
+                    tag: tag.to_owned(),
+                }),
+            };
+        }
+        let version = tag.strip_prefix('v').unwrap_or(tag);
+        Version::parse(version)
+            .map(Self::Official)
+            .map_err(|source| UpdateError::ReleaseVersion {
+                version: tag.to_owned(),
+                source,
+            })
+    }
+
+    /// The pre-release of the commit with hash `commit`, which may be abbreviated to at least
+    /// [`REVISION_DIGITS`] digits.
+    fn pre_release(commit: &str) -> Option<Self> {
+        let revision = commit.get(..REVISION_DIGITS)?;
+        revision
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+            .then(|| Self::PreRelease(revision.to_owned()))
+    }
+
+    /// The tag of the release that published the running build.
+    pub(crate) fn running() -> Result<Self, UpdateError> {
+        Self::parse(&installation().release_tag())
+    }
+
+    pub(crate) fn name(&self) -> String {
+        match self {
+            Self::Official(version) => format!("v{version}"),
+            Self::PreRelease(revision) => format!("dev-{revision}"),
+        }
+    }
+}
+
+impl fmt::Display for ReleaseTag {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Official(version) => write!(formatter, "v{version}"),
+            Self::PreRelease(revision) => write!(formatter, "pre-release {revision}"),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -188,21 +281,14 @@ struct GithubReleaseResponse {
 
 #[derive(Debug)]
 struct Release {
-    version: Version,
+    tag: ReleaseTag,
     assets: Vec<GithubAsset>,
 }
 
 impl Release {
     fn parse(response: GithubReleaseResponse) -> Result<Self, UpdateError> {
-        let tag = response.tag_name;
-        let raw_version = tag.strip_prefix('v').unwrap_or(&tag);
-        let version =
-            Version::parse(raw_version).map_err(|source| UpdateError::ReleaseVersion {
-                version: tag,
-                source,
-            })?;
         Ok(Self {
-            version,
+            tag: ReleaseTag::parse(&response.tag_name)?,
             assets: response.assets,
         })
     }
@@ -210,26 +296,29 @@ impl Release {
     fn asset(&self, name: &str) -> Result<&GithubAsset, UpdateError> {
         let mut matches = self.assets.iter().filter(|asset| asset.name == name);
         let asset = matches.next().ok_or_else(|| UpdateError::MissingAsset {
-            version: self.version.clone(),
+            tag: self.tag.clone(),
             name: name.to_owned(),
         })?;
         if matches.next().is_some() {
             return Err(UpdateError::DuplicateAsset {
-                version: self.version.clone(),
+                tag: self.tag.clone(),
                 name: name.to_owned(),
             });
         }
         Ok(asset)
     }
 
+    /// The archive for `target` with its checksum and, for an official release, its signature.
     fn assets_for(&self, target: SupportedTarget) -> Result<ReleaseAssets<'_>, UpdateError> {
-        let archive_name = format!("tact-{}-v{}.tar.gz", target.triple(), self.version);
+        let archive_name = format!("tact-{}-{}.tar.gz", target.triple(), self.tag.name());
         let checksum_name = format!("{archive_name}.sha256");
-        let signature_name = format!("{archive_name}.sig");
         Ok(ReleaseAssets {
             archive: self.asset(&archive_name)?,
             checksum: self.asset(&checksum_name)?,
-            signature: self.asset(&signature_name)?,
+            signature: match self.tag {
+                ReleaseTag::Official(_) => Some(self.asset(&format!("{archive_name}.sig"))?),
+                ReleaseTag::PreRelease(_) => None,
+            },
         })
     }
 }
@@ -238,7 +327,12 @@ impl Release {
 struct ReleaseAssets<'a> {
     archive: &'a GithubAsset,
     checksum: &'a GithubAsset,
-    signature: &'a GithubAsset,
+    signature: Option<&'a GithubAsset>,
+}
+
+#[derive(Deserialize)]
+struct CommitResponse {
+    sha: String,
 }
 
 #[derive(Deserialize)]
@@ -278,35 +372,34 @@ struct SigningMetadata {
     pubkey: String,
 }
 
-/// Downloads a release archive for `version` and verifies its checksum and minisign signature
-/// against the signing key published in the crates.io package for the same version.
+/// Downloads an archive of release `tag` and verifies it as [`Updater::download_verified_artifact`]
+/// does.
 pub(crate) async fn download_verified_release_artifact(
-    version: &Version,
+    tag: &ReleaseTag,
     archive_name: &str,
     max_archive_bytes: u64,
 ) -> Result<NamedTempFile, UpdateError> {
-    let base = format!("https://github.com/clabby/tact/releases/download/v{version}");
+    let base = format!("{GITHUB_DOWNLOADS}/{}", tag.name());
+    let asset = |name: String| GithubAsset {
+        browser_download_url: format!("{base}/{name}"),
+        name,
+    };
     let assets = OwnedReleaseAssets {
-        archive: GithubAsset {
-            name: archive_name.to_owned(),
-            browser_download_url: format!("{base}/{archive_name}"),
-        },
-        checksum: GithubAsset {
-            name: format!("{archive_name}.sha256"),
-            browser_download_url: format!("{base}/{archive_name}.sha256"),
-        },
-        signature: GithubAsset {
-            name: format!("{archive_name}.sig"),
-            browser_download_url: format!("{base}/{archive_name}.sig"),
+        archive: asset(archive_name.to_owned()),
+        checksum: asset(format!("{archive_name}.sha256")),
+        signature: match tag {
+            ReleaseTag::Official(_) => Some(asset(format!("{archive_name}.sig"))),
+            ReleaseTag::PreRelease(_) => None,
         },
     };
     Updater::new()?
-        .download_verified_artifact(version, assets.as_borrowed(), max_archive_bytes)
+        .download_verified_artifact(tag, assets.as_borrowed(), max_archive_bytes)
         .await
 }
 
-/// The newer release this installation can update to, if any. A release archive installation
-/// only reports a release whose archive assets and signing key are available.
+/// The newer official release this installation can update to, if any. An archive installation,
+/// official or pre-release, only reports a release whose archive assets and signing key are
+/// available. A pre-release counts as its Cargo version, so only a later version notifies it.
 pub(crate) async fn check_for_update() -> Result<Option<Version>, UpdateError> {
     let installation = installation();
     if installation.is_development() {
@@ -315,15 +408,15 @@ pub(crate) async fn check_for_update() -> Result<Option<Version>, UpdateError> {
     let build_target = env!("TACT_BUILD_TARGET");
     let artifact_target = update_artifact_target(installation, build_target)?;
     let updater = Updater::new()?;
-    let release = updater.latest_release().await?;
-    if release.version <= updater.current {
+    let (version, release) = updater.latest_release().await?;
+    if version <= updater.current {
         return Ok(None);
     }
     if let Some(target) = artifact_target {
         release.assets_for(target)?;
-        updater.signing_key(&release.version).await?;
+        updater.signing_key(&version).await?;
     }
-    Ok(Some(release.version))
+    Ok(Some(version))
 }
 
 fn update_artifact_target(
@@ -331,15 +424,18 @@ fn update_artifact_target(
     target: &str,
 ) -> Result<Option<SupportedTarget>, UpdateError> {
     match installation {
-        InstallationKind::ReleaseArchive => SupportedTarget::from_triple(target).map(Some),
+        InstallationKind::ReleaseArchive | InstallationKind::PreRelease { .. } => {
+            SupportedTarget::from_triple(target).map(Some)
+        }
         InstallationKind::CratesIo { .. }
         | InstallationKind::External { .. }
         | InstallationKind::Development => Ok(None),
     }
 }
 
-/// Replaces the running executable with the latest verified release, or reports how this
-/// installation must be updated instead.
+/// Replaces the running executable with the latest verified official release, or reports how this
+/// installation must be updated instead. A pre-release build is replaced even by the release of
+/// its own version, since that returns it to the release channel.
 pub(crate) async fn install_latest() -> Result<UpdateStatus, UpdateError> {
     if let InstallationKind::CratesIo { root } = installation() {
         return Ok(UpdateStatus::UseCargo {
@@ -353,29 +449,63 @@ pub(crate) async fn install_latest() -> Result<UpdateStatus, UpdateError> {
     }
     let target = SupportedTarget::current()?;
     let updater = Updater::new()?;
-    let release = updater.latest_release().await?;
-    if release.version <= updater.current {
+    let (version, release) = updater.latest_release().await?;
+    let leaving_pre_release = matches!(installation(), InstallationKind::PreRelease { .. });
+    let newer = if leaving_pre_release {
+        version >= updater.current
+    } else {
+        version > updater.current
+    };
+    if !newer {
         return Ok(UpdateStatus::UpToDate {
-            version: updater.current,
+            current: ReleaseTag::running()?,
         });
     }
+    updater.replace_executable(target, release).await
+}
 
-    let assets = release.assets_for(target)?;
-    let archive = updater
-        .download_verified_artifact(&release.version, assets, MAX_ARCHIVE_BYTES)
-        .await?;
-    let extracted = extract_binary(&archive, &assets.archive.name, target, &release.version)?;
-    self_replace::self_replace(&extracted.path).map_err(UpdateError::Replace)?;
-    Ok(UpdateStatus::Updated {
-        from: updater.current,
-        to: release.version,
-    })
+/// Replaces the running executable with the pre-release build of the commit that `revision`
+/// abbreviates. The build is checked against its published checksum only: pre-releases have no
+/// crates.io package to hold an independent signing key, so they are exactly as trustworthy as the
+/// clabby/tact GitHub Releases they come from.
+pub(crate) async fn install_pre_release(revision: &str) -> Result<UpdateStatus, UpdateError> {
+    let revision = normalize_revision(revision)?;
+    if !matches!(
+        installation(),
+        InstallationKind::ReleaseArchive | InstallationKind::PreRelease { .. }
+    ) {
+        return Err(UpdateError::PreReleaseNeedsArchive);
+    }
+    let target = SupportedTarget::current()?;
+    let updater = Updater::new()?;
+    let commit = updater.commit(&revision).await?;
+    let tag = ReleaseTag::pre_release(&commit).ok_or(UpdateError::InvalidRevision {
+        revision: commit.clone(),
+    })?;
+    let running = ReleaseTag::running()?;
+    if tag == running {
+        return Ok(UpdateStatus::UpToDate { current: running });
+    }
+    let release = updater.pre_release(&tag).await?;
+    updater.replace_executable(target, release).await
+}
+
+/// A commit abbreviation as the GitHub commits API takes it: lowercase hexadecimal.
+fn normalize_revision(revision: &str) -> Result<String, UpdateError> {
+    let revision = revision.trim().to_ascii_lowercase();
+    let valid = (MIN_REVISION_DIGITS..=40).contains(&revision.len())
+        && revision.bytes().all(|byte| byte.is_ascii_hexdigit());
+    if valid {
+        Ok(revision)
+    } else {
+        Err(UpdateError::InvalidRevision { revision })
+    }
 }
 
 struct OwnedReleaseAssets {
     archive: GithubAsset,
     checksum: GithubAsset,
-    signature: GithubAsset,
+    signature: Option<GithubAsset>,
 }
 
 impl OwnedReleaseAssets {
@@ -383,7 +513,7 @@ impl OwnedReleaseAssets {
         ReleaseAssets {
             archive: &self.archive,
             checksum: &self.checksum,
-            signature: &self.signature,
+            signature: self.signature.as_ref(),
         }
     }
 }
@@ -431,26 +561,114 @@ impl Updater {
         Ok(Self { client, current })
     }
 
-    async fn latest_release(&self) -> Result<Release, UpdateError> {
+    /// The latest official release and its version. GitHub's latest release never includes a
+    /// pre-release.
+    async fn latest_release(&self) -> Result<(Version, Release), UpdateError> {
         let bytes = self
             .fetch_bytes(
-                GITHUB_LATEST_RELEASE,
+                &format!("{GITHUB_API}/releases/latest"),
                 "GitHub release metadata",
                 MAX_METADATA_BYTES,
             )
             .await?;
         let response = serde_json::from_slice(&bytes).map_err(UpdateError::GithubMetadata)?;
-        Release::parse(response)
+        let release = Release::parse(response)?;
+        match &release.tag {
+            ReleaseTag::Official(version) => Ok((version.clone(), release)),
+            ReleaseTag::PreRelease(_) => Err(UpdateError::ReleaseTagFormat {
+                tag: release.tag.name(),
+            }),
+        }
     }
 
-    /// Downloads the archive and its sidecars, then verifies the archive against both.
+    /// The full hash of the commit that the abbreviation `revision` names.
+    async fn commit(&self, revision: &str) -> Result<String, UpdateError> {
+        let bytes = self
+            .fetch_bytes(
+                &format!("{GITHUB_API}/commits/{revision}"),
+                "GitHub commit metadata",
+                MAX_METADATA_BYTES,
+            )
+            .await
+            .map_err(|error| match error {
+                error if is_not_found(&error) => UpdateError::RevisionNotFound {
+                    revision: revision.to_owned(),
+                },
+                error => error,
+            })?;
+        let response: CommitResponse =
+            serde_json::from_slice(&bytes).map_err(|source| UpdateError::CommitMetadata {
+                revision: revision.to_owned(),
+                source,
+            })?;
+        let commit = response.sha;
+        if commit.len() == 40 && commit.starts_with(revision) {
+            Ok(commit)
+        } else {
+            Err(UpdateError::RevisionNotFound {
+                revision: revision.to_owned(),
+            })
+        }
+    }
+
+    async fn pre_release(&self, tag: &ReleaseTag) -> Result<Release, UpdateError> {
+        let bytes = self
+            .fetch_bytes(
+                &format!("{GITHUB_API}/releases/tags/{}", tag.name()),
+                "GitHub release metadata",
+                MAX_METADATA_BYTES,
+            )
+            .await
+            .map_err(|error| match (&error, tag) {
+                (_, ReleaseTag::PreRelease(revision)) if is_not_found(&error) => {
+                    UpdateError::PreReleaseNotFound {
+                        revision: revision.clone(),
+                    }
+                }
+                _ => error,
+            })?;
+        let response = serde_json::from_slice(&bytes).map_err(UpdateError::GithubMetadata)?;
+        let release = Release::parse(response)?;
+        if release.tag == *tag {
+            Ok(release)
+        } else {
+            Err(UpdateError::ReleaseTagFormat {
+                tag: release.tag.name(),
+            })
+        }
+    }
+
+    /// Downloads, verifies, and installs `release` over the running executable.
+    async fn replace_executable(
+        &self,
+        target: SupportedTarget,
+        release: Release,
+    ) -> Result<UpdateStatus, UpdateError> {
+        let assets = release.assets_for(target)?;
+        let archive = self
+            .download_verified_artifact(&release.tag, assets, MAX_ARCHIVE_BYTES)
+            .await?;
+        let extracted = extract_binary(&archive, &assets.archive.name, target, &release.tag)?;
+        self_replace::self_replace(&extracted.path).map_err(UpdateError::Replace)?;
+        Ok(UpdateStatus::Updated {
+            from: ReleaseTag::running()?,
+            to: release.tag,
+        })
+    }
+
+    /// Downloads the archive and its sidecars, then verifies the archive against each. An
+    /// official release is also checked against the signing key in its crates.io package; a
+    /// pre-release has no such package and only its checksum is verified.
     async fn download_verified_artifact(
         &self,
-        version: &Version,
+        tag: &ReleaseTag,
         assets: ReleaseAssets<'_>,
         max_archive_bytes: u64,
     ) -> Result<NamedTempFile, UpdateError> {
-        let public_key = self.signing_key(version).await?;
+        let public_key = match tag {
+            ReleaseTag::Official(version) => Some(self.signing_key(version).await?),
+            ReleaseTag::PreRelease(_) => None,
+        };
         let archive = NamedTempFile::new().map_err(UpdateError::TemporaryStorage)?;
         let mut output = archive.reopen().map_err(UpdateError::TemporaryWrite)?;
         self.download(
@@ -469,13 +687,6 @@ impl Updater {
                 MAX_SIDECAR_BYTES,
             )
             .await?;
-        let signature = self
-            .fetch_bytes(
-                &assets.signature.browser_download_url,
-                &assets.signature.name,
-                MAX_SIDECAR_BYTES,
-            )
-            .await?;
 
         verify_archive_checksum(
             &archive,
@@ -483,13 +694,22 @@ impl Updater {
             &checksum,
             &assets.checksum.name,
         )?;
-        verify_archive_signature(
-            &archive,
-            &assets.archive.name,
-            &signature,
-            &assets.signature.name,
-            &public_key,
-        )?;
+        if let (Some(public_key), Some(signature)) = (public_key, assets.signature) {
+            let bytes = self
+                .fetch_bytes(
+                    &signature.browser_download_url,
+                    &signature.name,
+                    MAX_SIDECAR_BYTES,
+                )
+                .await?;
+            verify_archive_signature(
+                &archive,
+                &assets.archive.name,
+                &bytes,
+                &signature.name,
+                &public_key,
+            )?;
+        }
         Ok(archive)
     }
 
@@ -605,6 +825,10 @@ impl Updater {
         }
         Ok(())
     }
+}
+
+fn is_not_found(error: &UpdateError) -> bool {
+    matches!(error, UpdateError::Http { source, .. } if source.status() == Some(reqwest::StatusCode::NOT_FOUND))
 }
 
 fn default_cargo_install_root() -> Option<PathBuf> {
@@ -761,11 +985,11 @@ fn extract_binary(
     archive: &NamedTempFile,
     archive_name: &str,
     target: SupportedTarget,
-    version: &Version,
+    tag: &ReleaseTag,
 ) -> Result<ExtractedBinary, UpdateError> {
     let directory = tempdir().map_err(UpdateError::TemporaryStorage)?;
     let output = directory.path().join("tact");
-    let expected_root = PathBuf::from(format!("tact-{}-v{version}", target.triple()));
+    let expected_root = PathBuf::from(format!("tact-{}-{}", target.triple(), tag.name()));
     let expected_binary = expected_root.join("tact");
     let input = archive.reopen().map_err(UpdateError::TemporaryWrite)?;
     let mut archive = tar::Archive::new(GzDecoder::new(input));
@@ -868,9 +1092,9 @@ fn parse_hex_checksum(value: &str) -> Option<[u8; 32]> {
 #[cfg(test)]
 mod tests {
     use super::{
-        GithubAsset, GithubReleaseResponse, Release, SupportedTarget, UpdateError,
-        cargo_update_command, crate_manifest, extract_binary, parse_hex_checksum,
-        update_artifact_target, verify_archive_checksum,
+        GithubAsset, GithubReleaseResponse, Release, ReleaseTag, SupportedTarget, UpdateError,
+        cargo_update_command, crate_manifest, extract_binary, normalize_revision,
+        parse_hex_checksum, update_artifact_target, verify_archive_checksum,
     };
     use crate::app::installation::InstallationKind;
     use flate2::{Compression, write::GzEncoder};
@@ -921,9 +1145,48 @@ mod tests {
     #[test]
     fn parses_v_prefixed_semver_and_compares_by_semver() {
         let release = release("v1.2.3", &[]);
-        assert_eq!(release.version, Version::new(1, 2, 3));
-        assert!(release.version > Version::new(1, 2, 2));
-        assert!(Version::parse("1.2.3-beta.1").unwrap() < release.version);
+        let ReleaseTag::Official(version) = release.tag else {
+            panic!("a v-prefixed tag is an official release");
+        };
+        assert_eq!(version, Version::new(1, 2, 3));
+        assert!(version > Version::new(1, 2, 2));
+        assert!(Version::parse("1.2.3-beta.1").unwrap() < version);
+    }
+
+    #[test]
+    fn pre_release_tags_name_one_twelve_digit_revision() {
+        let tag = ReleaseTag::parse("dev-0123456789ab").unwrap();
+        assert_eq!(tag, ReleaseTag::PreRelease("0123456789ab".to_owned()));
+        assert_eq!(tag.name(), "dev-0123456789ab");
+        assert_eq!(tag.to_string(), "pre-release 0123456789ab");
+        assert_eq!(
+            ReleaseTag::pre_release("0123456789abcdef0123456789abcdef01234567"),
+            Some(tag),
+        );
+        for malformed in [
+            "dev-0123456789a",
+            "dev-0123456789abc",
+            "dev-0123456789AB",
+            "dev-",
+        ] {
+            assert!(matches!(
+                ReleaseTag::parse(malformed),
+                Err(UpdateError::ReleaseTagFormat { .. })
+            ));
+        }
+        assert_eq!(ReleaseTag::pre_release("0123456"), None);
+    }
+
+    #[test]
+    fn revisions_are_lowercased_hex_of_commit_length() {
+        assert_eq!(normalize_revision(" ABCDEF1 \n").unwrap(), "abcdef1");
+        assert!(normalize_revision(&"a".repeat(40)).is_ok());
+        for invalid in ["abcdef", "main", "abcdefg", &"a".repeat(41)] {
+            assert!(matches!(
+                normalize_revision(invalid),
+                Err(UpdateError::InvalidRevision { .. })
+            ));
+        }
     }
 
     #[test]
@@ -969,6 +1232,15 @@ mod tests {
             )
             .is_err()
         );
+        assert!(
+            update_artifact_target(
+                &InstallationKind::PreRelease {
+                    revision: "0123456789ab".to_owned(),
+                },
+                "x86_64-unknown-linux-musl",
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -997,6 +1269,22 @@ mod tests {
             duplicate.assets_for(SupportedTarget::MacosAarch64),
             Err(UpdateError::DuplicateAsset { .. })
         ));
+
+        let unsigned = release("v2.0.0", &[prefix, &format!("{prefix}.sha256")]);
+        assert!(matches!(
+            unsigned.assets_for(SupportedTarget::MacosAarch64),
+            Err(UpdateError::MissingAsset { .. })
+        ));
+    }
+
+    #[test]
+    fn pre_releases_need_only_an_archive_and_checksum() {
+        let prefix = "tact-aarch64-apple-darwin-dev-0123456789ab.tar.gz";
+        let pre_release = release("dev-0123456789ab", &[prefix, &format!("{prefix}.sha256")]);
+        let assets = pre_release
+            .assets_for(SupportedTarget::MacosAarch64)
+            .unwrap();
+        assert!(assets.signature.is_none());
     }
 
     #[test]
@@ -1054,7 +1342,7 @@ mod tests {
             &valid_archive,
             "tact.tar.gz",
             SupportedTarget::LinuxX86_64,
-            &Version::new(1, 0, 0),
+            &ReleaseTag::Official(Version::new(1, 0, 0)),
         )
         .unwrap();
         assert_eq!(std::fs::read(binary.path).unwrap(), b"binary");
@@ -1065,10 +1353,23 @@ mod tests {
                 &wrong_root,
                 "tact.tar.gz",
                 SupportedTarget::LinuxX86_64,
-                &Version::new(1, 0, 0)
+                &ReleaseTag::Official(Version::new(1, 0, 0))
             ),
             Err(UpdateError::UnexpectedArchivePath { .. })
         ));
+
+        let pre_release = archive(&[(
+            "tact-x86_64-unknown-linux-gnu-dev-0123456789ab/tact",
+            b"dev",
+        )]);
+        let binary = extract_binary(
+            &pre_release,
+            "tact.tar.gz",
+            SupportedTarget::LinuxX86_64,
+            &ReleaseTag::PreRelease("0123456789ab".to_owned()),
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(binary.path).unwrap(), b"dev");
     }
 
     #[test]

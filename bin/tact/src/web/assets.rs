@@ -1,10 +1,9 @@
 use crate::app::{
     installation::current as installation,
-    update::{UpdateError, download_verified_release_artifact},
+    update::{ReleaseTag, UpdateError, download_verified_release_artifact},
 };
 use flate2::read::GzDecoder;
 use fs2::FileExt;
-use semver::Version;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -77,7 +76,7 @@ impl AssetStore {
 
     /// A self-contained page that explains how to install the bundle. It needs no network.
     pub(crate) fn placeholder_html(&self) -> String {
-        let version = env!("CARGO_PKG_VERSION");
+        let tag = installation().release_tag();
         let path = install_path(&self.home);
         let path = path
             .to_string_lossy()
@@ -90,8 +89,8 @@ impl AssetStore {
              <style>body{{font:16px/1.5 system-ui;max-width:40rem;margin:4rem auto;padding:0 1rem}}\
              code{{background:#8881;padding:.1em .3em;border-radius:3px}}</style>\
              <h1>The Tact web bundle is not installed</h1>\
-             <p>This Tact (v{version}) is running, but the browser files it serves are missing.</p>\
-             <p>Download <code>tact-web-v{version}.tar.gz</code> from the Tact release, extract it, and \
+             <p>This Tact ({tag}) is running, but the browser files it serves are missing.</p>\
+             <p>Download <code>tact-web-{tag}.tar.gz</code> from the Tact release, extract it, and \
              move the extracted <code>web</code> directory to <code>{path}</code>. \
              Development builds can instead run <code>just install-dev</code> in <code>web</code>.</p>\
              <p>Reload this page afterwards; no restart is needed.</p>"
@@ -145,7 +144,7 @@ impl WebAssets {
         }
     }
 
-    /// Downloads, verifies, and installs the bundle matching this binary's version.
+    /// Downloads, verifies, and installs the bundle published with this binary's release.
     pub(crate) async fn download(home: &Path) -> Result<Self, AssetError> {
         if installation().is_development() {
             return Err(AssetError::DevelopmentDownload);
@@ -166,11 +165,10 @@ impl WebAssets {
             }
         }
 
-        let version =
-            Version::parse(env!("CARGO_PKG_VERSION")).map_err(AssetError::PackageVersion)?;
-        let archive_name = format!("tact-web-v{version}.tar.gz");
+        let tag = ReleaseTag::running()?;
+        let archive_name = format!("tact-web-{}.tar.gz", tag.name());
         let archive =
-            download_verified_release_artifact(&version, &archive_name, MAX_ARCHIVE_BYTES).await?;
+            download_verified_release_artifact(&tag, &archive_name, MAX_ARCHIVE_BYTES).await?;
         let temporary = tempdir_in(&assets_root).map_err(AssetError::TemporaryDirectory)?;
         extract(archive.path(), temporary.path())?;
         let extracted = temporary.path().join("web");
@@ -233,7 +231,7 @@ impl Drop for InstallLock {
 }
 
 async fn acquire_install_lock(assets_root: &Path) -> Result<InstallLock, AssetError> {
-    let path = assets_root.join(format!("v{}.lock", env!("CARGO_PKG_VERSION")));
+    let path = assets_root.join(format!("{}.lock", installation().release_tag()));
     tokio::task::spawn_blocking(move || {
         let file = OpenOptions::new()
             .create(true)
@@ -258,7 +256,7 @@ async fn acquire_install_lock(assets_root: &Path) -> Result<InstallLock, AssetEr
 fn install_path(home: &Path) -> PathBuf {
     home.join("web")
         .join("assets")
-        .join(format!("v{}", env!("CARGO_PKG_VERSION")))
+        .join(installation().release_tag())
 }
 
 fn quarantine(path: &Path) -> Result<(), AssetError> {
@@ -595,8 +593,6 @@ pub(crate) enum AssetError {
         "this development build cannot download release web assets; set TACT_WEB_ASSETS to an explicit development bundle"
     )]
     DevelopmentDownload,
-    #[error("the built-in package version is invalid: {0}")]
-    PackageVersion(semver::Error),
     #[error("authenticated release artifact download failed: {0}")]
     ReleaseArtifact(#[from] UpdateError),
     #[error("failed to parse web manifest {path}: {source}")]
@@ -980,5 +976,24 @@ mod tests {
             validate_directory(directory.path(), InstallKind::Managed),
             Err(AssetError::ManagedSymlink(path)) if path == chunks
         ));
+    }
+
+    /// The bundle declares the API range it was built for in `web/tools/build.ts`, which only
+    /// the Rust validator can enforce, so a protocol change must move both.
+    #[test]
+    fn bundle_build_declares_a_range_that_includes_the_rust_api() {
+        let number_after = |document: &str, marker: &str| -> u32 {
+            let (_, rest) = document.split_once(marker).expect(marker);
+            let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+            digits.parse().expect(marker)
+        };
+        let build = include_str!("../../../../web/tools/build.ts");
+        let min = number_after(build, "web_api: { min: ");
+        let max = number_after(build, "max: ");
+        assert!(
+            (min..=max).contains(&super::WEB_API_VERSION),
+            "web bundle API {min}..={max} excludes Rust API {}",
+            super::WEB_API_VERSION
+        );
     }
 }
