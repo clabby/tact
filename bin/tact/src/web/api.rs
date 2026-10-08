@@ -790,7 +790,8 @@ mod tests {
         let (status, _, body) = harness.send(request).await;
 
         assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert!(String::from_utf8(body).unwrap().contains("invalid_request"));
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["code"], "invalid_request");
     }
 
     #[tokio::test]
@@ -830,7 +831,8 @@ mod tests {
                 .unwrap()
                 .contains("default-src 'none'")
         );
-        assert!(String::from_utf8(body).unwrap().contains("not installed"));
+        assert_eq!(headers[header::CONTENT_TYPE], "text/html; charset=utf-8");
+        assert_eq!(body, harness.state.assets.placeholder_html().into_bytes());
         let missing = Request::builder()
             .uri("/app.js")
             .body(Body::empty())
@@ -1004,10 +1006,7 @@ mod tests {
         let (status, body) = harness.call(Method::GET, "/api/link", None).await;
 
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-        assert!(
-            body["message"].as_str().unwrap().contains("Tailscale"),
-            "{body}"
-        );
+        assert_eq!(body["code"], "tailscale_unavailable", "{body}");
         assert!(body.get("token").is_none());
     }
 

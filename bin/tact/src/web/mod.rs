@@ -307,7 +307,8 @@ fn reachable_host(bind: IpAddr) -> IpAddr {
 #[cfg(test)]
 mod tests {
     use super::{
-        Channels, Exposure, Server, Settings, bind, bridge, hub::Hub, registry, testing::sse_event,
+        Channels, Exposure, Server, Settings, StartError, bind, bridge, hub::Hub, registry,
+        testing::sse_event,
     };
     use std::{
         fs,
@@ -446,6 +447,6 @@ mod tests {
         )
         .await;
 
-        assert!(result.is_err());
+        assert!(matches!(result, Err(StartError::Disabled)));
     }
 }
