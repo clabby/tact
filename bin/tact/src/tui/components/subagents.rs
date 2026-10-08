@@ -1,9 +1,21 @@
 //! Camera-centered subagent hierarchy and read-only transcript inspector.
+//!
+//! [`SubagentTree`] owns the roster of delegated agents and one transcript per agent. Agent
+//! lifecycle updates, transcript records, and directed messages arrive through
+//! [`SubagentTree::apply`]; terminal input arrives through the tree and transcript update methods,
+//! which answer with [`SubagentEffect`]s for the owner to dismiss, inspect, go back, open a link,
+//! or persist a new concurrency limit.
+//!
+//! The tree shows active agents by default and every agent after the filter is toggled. Agents
+//! whose parent is hidden are promoted to roots. Exactly one visible agent is focused while any
+//! agent is visible, and the camera eases toward the focused node; finishing the animation
+//! settles it on the latest focus. A directed message is projected once into the transcript of
+//! each agent participant, from that participant's perspective.
 
 use super::{
     clock::unix_time_ms,
     fit::ellipsize,
-    floating::Floating,
+    floating::{Floating, KeyBinding},
     node::Component,
     subagent_tree_layout::{
         LayoutNode, NODE_HEIGHT, NODE_WIDTH, NodePosition, TreeLayout, VERTICAL_GAP, WorldPoint,
@@ -382,9 +394,25 @@ impl SubagentTree {
         true
     }
 
-    pub(super) fn render_tree(&mut self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
+    fn tree_keys(&self) -> [KeyBinding; 7] {
         let mut keys = TREE_KEYS;
         keys[5].1 = self.filter.helper();
+        keys
+    }
+
+    fn transcript_keys(&self, id: AgentId) -> &'static [KeyBinding] {
+        match self
+            .transcripts
+            .get(&id)
+            .is_some_and(Transcript::expandables_focused)
+        {
+            true => &FOCUSED_ENTRY_KEYS,
+            false => &TRANSCRIPT_KEYS,
+        }
+    }
+
+    pub(super) fn render_tree(&mut self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
+        let keys = self.tree_keys();
         let layout = Floating::new("Sub-agent tree", area.width, area.height, &keys)
             .render(frame, area, theme);
         if layout.body.is_empty() {
@@ -454,22 +482,12 @@ impl SubagentTree {
         area: Rect,
         theme: &Theme,
     ) {
+        let keys = self.transcript_keys(id);
         let (Some(node), Some(transcript)) = (self.roster.agent(id), self.transcripts.get_mut(&id))
         else {
             return;
         };
-        let title = format!(
-            "{} · {} ({}) · #{}",
-            node.role,
-            model::name(node.model),
-            node.thinking,
-            node.id
-        );
-        let keys: &[(&str, &str)] = if transcript.expandables_focused() {
-            &FOCUSED_ENTRY_KEYS
-        } else {
-            &TRANSCRIPT_KEYS
-        };
+        let title = transcript_title(node);
         let layout = Floating::new(&title, area.width, area.height, keys)
             .colors(theme.border(), theme.model(node.model))
             .render(frame, area, theme);
@@ -727,6 +745,16 @@ impl SubagentTree {
         ];
         frame.render_widget(Paragraph::new(lines), inner);
     }
+}
+
+fn transcript_title(node: &SubagentNode) -> String {
+    format!(
+        "{} · {} ({}) · #{}",
+        node.role,
+        model::name(node.model),
+        node.thinking,
+        node.id
+    )
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -1062,7 +1090,10 @@ pub(super) fn subagent_record(event: AgentEvent) -> Arc<TranscriptRecord> {
 
 #[cfg(test)]
 mod tests {
-    use super::{AgentFilter, SubagentEffect, SubagentTree};
+    use super::{
+        AgentFilter, DOWN, FOCUSED_ENTRY_KEYS, LEFT, RIGHT, SubagentEffect, SubagentTree,
+        TRANSCRIPT_KEYS, UP, edge_symbol, transcript_title,
+    };
     use crate::app::{config::ReasoningEffort, theme::Theme};
     use crossterm::event::{
         Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -1080,15 +1111,54 @@ mod tests {
     };
     use tact_subagents::{AgentDescriptor, AgentId, AgentMessageUpdate, AgentStatus, AgentUpdate};
 
+    const SCROLL_LINES: NonZeroU16 = NonZeroU16::new(3).unwrap();
+
+    /// The default agent: a running root researcher on Luna with low thinking.
     fn descriptor() -> AgentDescriptor {
         AgentDescriptor {
-            id: AgentId::new(1),
             session_id: "child-session".to_owned(),
             model: Model::Codex(CodexModel::Luna),
             thinking: Thinking::Low,
-            role: "researcher".to_owned(),
             task: "Trace the event lifecycle".to_owned(),
-            parent: None,
+            ..agent(1, None, "researcher")
+        }
+    }
+
+    fn second_descriptor() -> AgentDescriptor {
+        AgentDescriptor {
+            session_id: "second-session".to_owned(),
+            thinking: Thinking::High,
+            task: "Verify the event ordering".to_owned(),
+            ..agent(2, None, "reviewer")
+        }
+    }
+
+    fn agent(id: u64, parent: Option<u64>, role: &str) -> AgentDescriptor {
+        AgentDescriptor {
+            id: AgentId::new(id),
+            session_id: format!("agent-{id}"),
+            model: Model::Codex(CodexModel::Sol),
+            thinking: Thinking::Medium,
+            role: role.to_owned(),
+            task: format!("Task for {role}"),
+            parent: parent.map(AgentId::new),
+        }
+    }
+
+    fn tree_of(agents: impl IntoIterator<Item = AgentDescriptor>) -> SubagentTree {
+        let mut tree = SubagentTree::new(ReasoningEffort::Medium);
+        for agent in agents {
+            assert!(tree.apply(AgentUpdate::Added(agent)));
+        }
+        tree
+    }
+
+    fn completed(id: u64) -> AgentUpdate {
+        AgentUpdate::Status {
+            id: AgentId::new(id),
+            status: AgentStatus::Completed {
+                output: json!({ "report": "done" }),
+            },
         }
     }
 
@@ -1105,55 +1175,30 @@ mod tests {
         }
     }
 
-    fn render_transcript(tree: &mut SubagentTree) -> TestBackend {
-        render_agent_transcript(tree, AgentId::new(1))
-    }
-
-    fn render_agent_transcript(tree: &mut SubagentTree, id: AgentId) -> TestBackend {
-        let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
-        terminal
-            .draw(|frame| tree.render_transcript(id, frame, frame.area(), &Theme::default()))
-            .unwrap();
-        terminal.backend().clone()
-    }
-
     fn message_update(reply: bool) -> AgentUpdate {
-        let messages = if reply {
-            json!([
-                {
-                    "id": 1,
-                    "thread_id": 1,
-                    "from": {"kind": "agent", "agent_id": 1},
-                    "to": 2,
-                    "priority": "deferred",
-                    "purpose": "question",
-                    "body": "Can you verify the event ordering?"
-                },
-                {
-                    "id": 2,
-                    "thread_id": 1,
-                    "from": {"kind": "agent", "agent_id": 2},
-                    "to": 1,
-                    "priority": "deferred",
-                    "purpose": "reply",
-                    "in_reply_to": 1,
-                    "body": "Verified: delivery precedes projection."
-                }
-            ])
-        } else {
-            json!([
-                {
-                    "id": 1,
-                    "thread_id": 1,
-                    "from": {"kind": "agent", "agent_id": 1},
-                    "to": 2,
-                    "priority": "deferred",
-                    "purpose": "question",
-                    "body": "Can you verify the event ordering?"
-                }
-            ])
+        let question = json!({
+            "id": 1,
+            "thread_id": 1,
+            "from": {"kind": "agent", "agent_id": 1},
+            "to": 2,
+            "priority": "deferred",
+            "purpose": "question",
+            "body": "Can you verify the event ordering?"
+        });
+        let answer = json!({
+            "id": 2,
+            "thread_id": 1,
+            "from": {"kind": "agent", "agent_id": 2},
+            "to": 1,
+            "priority": "deferred",
+            "purpose": "reply",
+            "in_reply_to": 1,
+            "body": "Verified: delivery precedes projection."
+        });
+        let (message_id, messages) = match reply {
+            true => (2, json!([question, answer])),
+            false => (1, json!([question])),
         };
-        let message_id = if reply { 2 } else { 1 };
         AgentUpdate::Message(
             serde_json::from_value::<AgentMessageUpdate>(json!({
                 "message_id": message_id,
@@ -1171,22 +1216,68 @@ mod tests {
         )
     }
 
-    fn render_tree(tree: &mut SubagentTree) -> TestBackend {
-        let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+    fn key(code: KeyCode) -> Event {
+        Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
+    fn render_tree(tree: &mut SubagentTree, width: u16, height: u16) -> TestBackend {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
             .draw(|frame| tree.render_tree(frame, frame.area(), &Theme::default()))
             .unwrap();
         terminal.backend().clone()
     }
 
-    fn rendered_text(backend: &TestBackend) -> String {
-        backend
-            .buffer()
+    fn render_transcript(tree: &mut SubagentTree, id: u64) -> TestBackend {
+        let mut terminal = Terminal::new(TestBackend::new(72, 24)).unwrap();
+        terminal
+            .draw(|frame| {
+                tree.render_transcript(AgentId::new(id), frame, frame.area(), &Theme::default());
+            })
+            .unwrap();
+        terminal.backend().clone()
+    }
+
+    fn rows(backend: &TestBackend) -> Vec<String> {
+        let buffer = backend.buffer();
+        buffer
             .content
-            .chunks(100)
-            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
-            .collect::<Vec<_>>()
-            .join("\n")
+            .chunks(usize::from(buffer.area.width))
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect())
+            .collect()
+    }
+
+    fn cells_with_symbol(backend: &TestBackend, symbol: &str) -> Vec<(u16, u16)> {
+        let area = backend.buffer().area;
+        (0..area.height)
+            .flat_map(|y| (0..area.width).map(move |x| (x, y)))
+            .filter(|&position| backend.buffer()[position].symbol() == symbol)
+            .collect()
+    }
+
+    /// Edge arrows on the tree canvas, which use the border color unlike footer key glyphs.
+    fn edge_arrows(backend: &TestBackend) -> Vec<(u16, u16)> {
+        cells_with_symbol(backend, "↓")
+            .into_iter()
+            .filter(|&position| backend.buffer()[position].fg == Theme::default().border())
+            .collect()
+    }
+
+    /// Clicks the only collapsed or expanded entry marker in an agent's transcript.
+    fn click_entry(tree: &mut SubagentTree, id: u64, marker: &str) {
+        let [(_, row)] = cells_with_symbol(&render_transcript(tree, id), marker)[..] else {
+            panic!("transcript should render exactly one {marker} marker");
+        };
+        tree.update_transcript(
+            AgentId::new(id),
+            Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 20,
+                row,
+                modifiers: KeyModifiers::NONE,
+            }),
+            SCROLL_LINES,
+        );
     }
 
     fn focus_tool(tree: &mut SubagentTree) {
@@ -1198,133 +1289,90 @@ mod tests {
                 "arguments": {"cmd": "cargo test", "workdir": "/work"},
             }),
         ));
-        let backend = render_transcript(tree);
-        let row = backend
-            .buffer()
-            .content
-            .chunks(100)
-            .position(|row| row.iter().any(|cell| cell.symbol() == "▶"))
-            .expect("tool summary should render");
-        tree.update_transcript(
-            AgentId::new(1),
-            Event::Mouse(MouseEvent {
-                kind: MouseEventKind::Down(MouseButton::Left),
-                column: 20,
-                row: u16::try_from(row).unwrap(),
-                modifiers: KeyModifiers::NONE,
-            }),
-            NonZeroU16::new(3).unwrap(),
-        );
+        click_entry(tree, 1, "▶");
         assert!(tree.transcripts[&AgentId::new(1)].expandables_focused());
     }
 
-    fn second_descriptor() -> AgentDescriptor {
-        AgentDescriptor {
-            id: AgentId::new(2),
-            session_id: "second-session".to_owned(),
-            model: Model::Codex(CodexModel::Sol),
-            thinking: Thinking::High,
-            role: "reviewer".to_owned(),
-            task: "Verify the event ordering".to_owned(),
-            parent: None,
-        }
-    }
-
-    fn tree_descriptor(id: u64, parent: Option<u64>, role: &str) -> AgentDescriptor {
-        AgentDescriptor {
-            id: AgentId::new(id),
-            session_id: format!("agent-{id}"),
-            model: Model::Codex(CodexModel::Sol),
-            thinking: Thinking::Medium,
-            role: role.to_owned(),
-            task: format!("Task for {role}"),
-            parent: parent.map(AgentId::new),
-        }
-    }
-
     #[test]
-    fn changing_effort_preserves_active_subagents() {
-        let mut tree = SubagentTree::new(ReasoningEffort::Medium);
-        assert!(tree.apply(AgentUpdate::Added(descriptor())));
+    fn changing_effort_preserves_active_subagents_and_their_own_thinking() {
+        let mut tree = tree_of([descriptor()]);
 
         tree.set_effort(ReasoningEffort::High);
 
         assert_eq!(tree.effort, ReasoningEffort::High);
         assert_eq!(tree.active_count(), 1);
-        assert!(tree.contains(AgentId::new(1)));
-        assert!(rendered_text(&render_tree(&mut tree)).contains("Model  Luna (low)"));
-        assert!(
-            rendered_text(&render_transcript(&mut tree)).contains("researcher · Luna (low) · #1")
-        );
+        assert!(tree.transcripts.contains_key(&AgentId::new(1)));
+        let node = tree.roster.agent(AgentId::new(1)).unwrap();
+        assert_eq!(node.thinking, Thinking::Low);
+        assert_eq!(transcript_title(node), "researcher · Luna (low) · #1");
     }
 
     #[test]
     fn tree_nodes_do_not_write_control_characters_to_terminal_cells() {
-        let mut tree = SubagentTree::new(ReasoningEffort::Medium);
-        let mut agent = descriptor();
-        agent.role = "re\u{1b}\tsearcher".to_owned();
-        tree.apply(AgentUpdate::Added(agent));
+        let mut tree = tree_of([AgentDescriptor {
+            role: "re\u{1b}\tsearcher".to_owned(),
+            ..descriptor()
+        }]);
 
-        let backend = render_tree(&mut tree);
+        let backend = render_tree(&mut tree, 100, 40);
         assert!(
             backend
                 .buffer()
                 .content
                 .iter()
-                .all(|cell| { !cell.symbol().chars().any(char::is_control) })
+                .all(|cell| !cell.symbol().chars().any(char::is_control))
         );
     }
 
     #[test]
     fn directed_messages_are_upserted_into_both_agent_transcripts() {
-        let mut tree = SubagentTree::new(ReasoningEffort::Medium);
-        tree.apply(AgentUpdate::Added(descriptor()));
-        tree.apply(AgentUpdate::Added(second_descriptor()));
+        let mut tree = tree_of([descriptor(), second_descriptor()]);
 
         assert!(tree.apply(message_update(false)));
         assert!(tree.apply(message_update(true)));
 
-        let sender = rendered_text(&render_agent_transcript(&mut tree, AgentId::new(1)));
-        let recipient = rendered_text(&render_agent_transcript(&mut tree, AgentId::new(2)));
-        assert!(sender.contains("← Message  #2 → you"));
-        assert!(recipient.contains("→ Message  you → #1"));
-        assert!(sender.contains("2 messages"));
-        assert!(recipient.contains("2 messages"));
-        assert_eq!(sender.matches('▶').count(), 1);
-        assert_eq!(recipient.matches('▶').count(), 1);
+        for (id, summary) in [
+            (
+                1,
+                "│  ▶ ← Message  #2 → you · reply · delivered · started · 2 messages ·  │",
+            ),
+            (
+                2,
+                "│  ▶ → Message  you → #1 · reply · delivered · started · 2 messages ·  │",
+            ),
+        ] {
+            let backend = render_transcript(&mut tree, id);
+            let [(_, row)] = cells_with_symbol(&backend, "▶")[..] else {
+                panic!("agent #{id} should show one collapsed thread");
+            };
+            assert_eq!(rows(&backend)[usize::from(row)], summary);
+        }
     }
 
     #[test]
     fn directed_message_threads_share_inline_focus_and_expansion() {
-        let mut tree = SubagentTree::new(ReasoningEffort::Medium);
-        tree.apply(AgentUpdate::Added(descriptor()));
-        tree.apply(AgentUpdate::Added(second_descriptor()));
+        let mut tree = tree_of([descriptor(), second_descriptor()]);
         tree.apply(message_update(true));
-        let collapsed = render_agent_transcript(&mut tree, AgentId::new(1));
-        let row = collapsed
-            .buffer()
-            .content
-            .chunks(100)
-            .position(|row| row.iter().any(|cell| cell.symbol() == "▶"))
-            .expect("message summary should render");
 
-        tree.update_transcript(
-            AgentId::new(1),
-            Event::Mouse(MouseEvent {
-                kind: MouseEventKind::Down(MouseButton::Left),
-                column: 20,
-                row: u16::try_from(row).unwrap(),
-                modifiers: KeyModifiers::NONE,
-            }),
-            NonZeroU16::new(3).unwrap(),
-        );
+        click_entry(&mut tree, 1, "▶");
 
-        let expanded = rendered_text(&render_agent_transcript(&mut tree, AgentId::new(1)));
         assert!(tree.transcripts[&AgentId::new(1)].expandables_focused());
-        assert!(expanded.contains("▼"), "{expanded}");
-        assert!(expanded.contains("Can you verify the event ordering?"));
-        assert!(expanded.contains("thread #1 · 2 messages"));
-        assert!(expanded.contains("↑↓ item"));
+        assert_eq!(tree.transcript_keys(AgentId::new(1)), FOCUSED_ENTRY_KEYS);
+        let expanded = render_transcript(&mut tree, 1);
+        assert!(cells_with_symbol(&expanded, "▶").is_empty());
+        assert_eq!(cells_with_symbol(&expanded, "▼").len(), 1);
+        assert_eq!(
+            rows(&expanded)[14..21],
+            [
+                "│› ▼ ← Message  #2 → you · reply · delivered · started · 2 messages ·  │",
+                "│      Verified: delivery precedes projection.                         │",
+                "│    │ you → #2 · question · deferred · pending                        │",
+                "│    │ Can you verify the event ordering?                              │",
+                "│    │ #2 → you · reply · deferred · delivered · started               │",
+                "│    │ Verified: delivery precedes projection.                         │",
+                "│    └ thread #1 · 2 messages                                          │",
+            ]
+        );
     }
 
     #[test]
@@ -1332,36 +1380,37 @@ mod tests {
         let mut tree = SubagentTree::new(ReasoningEffort::Medium);
         tree.set_max_subagents(4);
 
-        assert!(rendered_text(&render_tree(&mut tree)).contains("Concurrency: 0 / 4 active"));
         assert_eq!(
-            tree.update_tree(Event::Key(KeyEvent::new(
-                KeyCode::Char('-'),
-                KeyModifiers::NONE,
-            ))),
+            rows(&render_tree(&mut tree, 64, 8)),
+            [
+                "╭─────────────────────── Sub-agent tree ───────────────────────╮",
+                "│                                                              │",
+                "│  Concurrency: 0 / 4 active. No subagents have been           │",
+                "│  delegated yet.                                              │",
+                "│                                                              │",
+                "│   ←/→ row · ↑ parent · ↓ child · enter inspect · -/+ limit   │",
+                "│                 f filter: active · esc close                 │",
+                "╰──────────────────────────────────────────────────────────────╯",
+            ]
+        );
+        assert_eq!(
+            tree.update_tree(key(KeyCode::Char('-'))),
             Some(SubagentEffect::SetMaxSubagents(3))
         );
         assert_eq!(
-            tree.update_tree(Event::Key(KeyEvent::new(
-                KeyCode::Char('+'),
-                KeyModifiers::NONE,
-            ))),
+            tree.update_tree(key(KeyCode::Char('+'))),
             Some(SubagentEffect::SetMaxSubagents(4))
         );
+        assert_eq!(tree.max_subagents(), 4);
     }
 
     #[test]
     fn lifecycle_updates_active_count_and_preserves_reusable_agent() {
-        let mut tree = SubagentTree::new(ReasoningEffort::Medium);
-        assert!(tree.apply(AgentUpdate::Added(descriptor())));
+        let mut tree = tree_of([descriptor()]);
         assert_eq!(tree.active_count(), 1);
 
         tree.apply(event(AgentEventKind::RunCompleted, json!({})));
-        tree.apply(AgentUpdate::Status {
-            id: AgentId::new(1),
-            status: AgentStatus::Completed {
-                output: json!({ "report": "done" }),
-            },
-        });
+        tree.apply(completed(1));
         assert_eq!(tree.active_count(), 0);
         assert!(matches!(
             tree.roster.agents[0].status,
@@ -1379,88 +1428,44 @@ mod tests {
 
     #[test]
     fn active_filter_hides_completed_agents_until_show_all_is_selected() {
-        let mut tree = SubagentTree::new(ReasoningEffort::Medium);
-        tree.apply(AgentUpdate::Added(descriptor()));
+        let mut tree = tree_of([descriptor()]);
         tree.apply(event(AgentEventKind::RunCompleted, json!({})));
-        tree.apply(AgentUpdate::Status {
-            id: AgentId::new(1),
-            status: AgentStatus::Completed {
-                output: json!({ "report": "done" }),
-            },
-        });
+        tree.apply(completed(1));
 
         assert_eq!(tree.filter, AgentFilter::Active);
+        assert_eq!(tree.tree_keys()[5], ("f", "filter: active"));
         assert!(tree.visible_ids().is_empty());
 
-        tree.update_tree(Event::Key(KeyEvent::new(
-            KeyCode::Char('f'),
-            KeyModifiers::NONE,
-        )));
-        let visible = tree.visible_ids();
+        tree.update_tree(key(KeyCode::Char('f')));
 
-        assert_eq!(visible.len(), 1);
-        assert_eq!(visible[0], AgentId::new(1));
-        assert!(matches!(
-            tree.update_tree(Event::Key(KeyEvent::new(
-                KeyCode::Enter,
-                KeyModifiers::NONE,
-            ))),
-            Some(SubagentEffect::Inspect(id)) if id == AgentId::new(1)
-        ));
-    }
-
-    #[test]
-    fn tree_helper_shows_the_selected_filter() {
-        let mut tree = SubagentTree::new(ReasoningEffort::Medium);
-
-        assert!(rendered_text(&render_tree(&mut tree)).contains("f filter: active"));
-
-        tree.update_tree(Event::Key(KeyEvent::new(
-            KeyCode::Char('f'),
-            KeyModifiers::NONE,
-        )));
-
-        assert!(rendered_text(&render_tree(&mut tree)).contains("f filter: all"));
+        assert_eq!(tree.filter, AgentFilter::All);
+        assert_eq!(tree.tree_keys()[5], ("f", "filter: all"));
+        assert_eq!(tree.visible_ids(), [AgentId::new(1)]);
+        assert_eq!(
+            tree.update_tree(key(KeyCode::Enter)),
+            Some(SubagentEffect::Inspect(AgentId::new(1)))
+        );
     }
 
     #[test]
     fn active_filter_promotes_children_of_completed_agents_to_roots() {
-        let mut tree = SubagentTree::new(ReasoningEffort::Medium);
-        let parent = descriptor();
-        let mut child = descriptor();
-        child.id = AgentId::new(2);
-        child.parent = Some(parent.id);
-        tree.apply(AgentUpdate::Added(parent));
-        tree.apply(AgentUpdate::Added(child));
-        tree.apply(AgentUpdate::Status {
-            id: AgentId::new(1),
-            status: AgentStatus::Completed {
-                output: json!({ "report": "done" }),
-            },
-        });
-        let visible = tree.visible_ids();
+        let mut tree = tree_of([agent(1, None, "parent"), agent(2, Some(1), "child")]);
+        tree.apply(completed(1));
 
-        assert_eq!(visible, [AgentId::new(2)]);
+        assert_eq!(tree.visible_ids(), [AgentId::new(2)]);
         assert_eq!(tree.layout().parent(AgentId::new(2)), None);
     }
 
     #[test]
     fn opening_and_switching_filters_center_the_oldest_matching_agent() {
-        let mut tree = SubagentTree::new(ReasoningEffort::Medium);
-        for (id, role) in [(1, "oldest"), (2, "older active"), (3, "newer active")] {
-            tree.apply(AgentUpdate::Added(tree_descriptor(id, None, role)));
-        }
-        tree.apply(AgentUpdate::Status {
-            id: AgentId::new(1),
-            status: AgentStatus::Completed {
-                output: json!({ "report": "done" }),
-            },
-        });
+        let mut tree = tree_of([
+            agent(1, None, "oldest"),
+            agent(2, None, "older active"),
+            agent(3, None, "newer active"),
+        ]);
+        tree.apply(completed(1));
 
-        tree.update_tree(Event::Key(KeyEvent::new(
-            KeyCode::Char('f'),
-            KeyModifiers::NONE,
-        )));
+        tree.update_tree(key(KeyCode::Char('f')));
         assert_eq!(tree.filter, AgentFilter::All);
         assert_eq!(tree.focused, Some(AgentId::new(1)));
 
@@ -1470,28 +1475,16 @@ mod tests {
         assert_eq!(tree.camera.center, tree.layout().center(AgentId::new(2)));
         assert!(tree.camera.animation.is_none());
 
-        tree.update_tree(Event::Key(KeyEvent::new(
-            KeyCode::Char('f'),
-            KeyModifiers::NONE,
-        )));
+        tree.update_tree(key(KeyCode::Char('f')));
         assert_eq!(tree.filter, AgentFilter::All);
         assert_eq!(tree.focused, Some(AgentId::new(1)));
         assert_eq!(tree.camera.center, tree.layout().center(AgentId::new(1)));
 
-        tree.update_tree(Event::Key(KeyEvent::new(
-            KeyCode::Right,
-            KeyModifiers::NONE,
-        )));
-        tree.update_tree(Event::Key(KeyEvent::new(
-            KeyCode::Right,
-            KeyModifiers::NONE,
-        )));
+        tree.update_tree(key(KeyCode::Right));
+        tree.update_tree(key(KeyCode::Right));
         assert_eq!(tree.focused, Some(AgentId::new(3)));
 
-        tree.update_tree(Event::Key(KeyEvent::new(
-            KeyCode::Char('f'),
-            KeyModifiers::NONE,
-        )));
+        tree.update_tree(key(KeyCode::Char('f')));
         assert_eq!(tree.filter, AgentFilter::Active);
         assert_eq!(tree.focused, Some(AgentId::new(2)));
         assert_eq!(tree.camera.center, tree.layout().center(AgentId::new(2)));
@@ -1499,29 +1492,35 @@ mod tests {
     }
 
     #[test]
-    fn tree_renders_a_rounded_focused_node_and_anchored_task_details() {
-        let mut tree = SubagentTree::new(ReasoningEffort::Medium);
-        tree.apply(AgentUpdate::Added(descriptor()));
-        let mut terminal = Terminal::new(TestBackend::new(90, 40)).unwrap();
+    fn focused_tree_layout_golden() {
+        let mut tree = tree_of([descriptor()]);
 
-        terminal
-            .draw(|frame| tree.render_tree(frame, frame.area(), &Theme::default()))
-            .unwrap();
-        let rendered = terminal
-            .backend()
-            .buffer()
-            .content
-            .chunks(90)
-            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
-            .collect::<Vec<_>>()
-            .join("\n");
+        let backend = render_tree(&mut tree, 64, 18);
 
-        assert!(rendered.contains("╭──────────────────────╮"));
-        assert!(rendered.contains("researcher"));
-        assert!(rendered.contains("running · 0 children"));
-        assert!(rendered.contains("Trace the event lifecycle"));
-        assert!(rendered.contains("Model  Luna (low)"));
-        let buffer = terminal.backend().buffer();
+        assert_eq!(
+            rows(&backend),
+            [
+                "╭─────────────────────── Sub-agent tree ───────────────────────╮",
+                "│                                                              │",
+                "│                                                              │",
+                "│                   ╭──────────────────────╮                   │",
+                "│                   │   ◐ #1 researcher    │                   │",
+                "│                   │ running · 0 children │                   │",
+                "│                   ╰──────────────────────╯                   │",
+                "│                                                              │",
+                "│                                                              │",
+                "│╭ ◐ #1 · researcher · running ───────────────────────────────╮│",
+                "││Task  Trace the event lifecycle                             ││",
+                "││Tree  root · 0 children    Concurrency  1 / 32 active       ││",
+                "││View  1 agents · active filter    Model  Luna (low)         ││",
+                "││Session  child-session                                      ││",
+                "│╰────────────────────────────────────────────────────────────╯│",
+                "│   ←/→ row · ↑ parent · ↓ child · enter inspect · -/+ limit   │",
+                "│                 f filter: active · esc close                 │",
+                "╰──────────────────────────────────────────────────────────────╯",
+            ]
+        );
+        let buffer = backend.buffer();
         let luna = buffer
             .content
             .windows(4)
@@ -1536,177 +1535,83 @@ mod tests {
             luna[0].fg,
             Theme::default().model(Model::Codex(CodexModel::Luna))
         );
-        assert_eq!(buffer[(0, 0)].symbol(), "╭");
-        assert_eq!(buffer[(89, 39)].symbol(), "╯");
     }
 
     #[test]
     fn tree_nests_children_beneath_their_active_parent() {
-        let mut tree = SubagentTree::new(ReasoningEffort::Medium);
-        let mut parent = descriptor();
-        parent.role = "parent".to_owned();
-        let mut child = descriptor();
-        child.id = AgentId::new(2);
-        child.role = "child".to_owned();
-        child.parent = Some(parent.id);
-        tree.apply(AgentUpdate::Added(parent));
-        tree.apply(AgentUpdate::Added(child));
+        let mut tree = tree_of([agent(1, None, "parent"), agent(2, Some(1), "child")]);
+        assert_eq!(tree.layout().parent(AgentId::new(2)), Some(AgentId::new(1)));
 
-        let layout = tree.layout();
-        assert_eq!(layout.parent(AgentId::new(2)), Some(AgentId::new(1)));
+        let backend = render_tree(&mut tree, 90, 40);
 
-        let mut terminal = Terminal::new(TestBackend::new(90, 40)).unwrap();
-        terminal
-            .draw(|frame| tree.render_tree(frame, frame.area(), &Theme::default()))
-            .unwrap();
-        let rendered = terminal
-            .backend()
-            .buffer()
-            .content
-            .chunks(90)
-            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(rendered.contains("#1 parent"));
-        assert!(rendered.contains("#2 child"));
-        assert!(rendered.contains('↓'));
-        let buffer = terminal.backend().buffer();
-        let arrow = buffer
-            .content
-            .iter()
-            .find(|cell| cell.symbol() == "↓")
-            .unwrap();
-        assert_eq!(arrow.fg, Theme::default().border());
-
-        let child_row = buffer
-            .content
-            .chunks(90)
-            .find(|row| {
-                row.iter()
-                    .map(|cell| cell.symbol())
-                    .collect::<String>()
-                    .contains("#2 child")
-            })
-            .unwrap();
-        let child_text = child_row
-            .iter()
-            .position(|cell| cell.symbol() == "#")
-            .unwrap();
-        let child_border = child_row[..child_text]
-            .iter()
-            .rposition(|cell| cell.symbol() == "│")
-            .unwrap();
-        assert_eq!(child_row[child_border].fg, Theme::default().border());
+        let [(x, y)] = edge_arrows(&backend)[..] else {
+            panic!("one edge should point at the child");
+        };
+        let child_top_border = &backend.buffer()[(x, y + 1)];
+        assert_eq!(child_top_border.symbol(), "─");
+        assert_eq!(child_top_border.fg, Theme::default().border());
     }
 
     #[test]
     fn arrows_navigate_the_hierarchy_and_remember_the_last_child() {
-        let mut tree = SubagentTree::new(ReasoningEffort::Medium);
-        tree.apply(AgentUpdate::Added(tree_descriptor(1, None, "root")));
-        tree.apply(AgentUpdate::Added(tree_descriptor(2, Some(1), "left")));
-        tree.apply(AgentUpdate::Added(tree_descriptor(3, Some(1), "right")));
+        let mut tree = tree_of([
+            agent(1, None, "root"),
+            agent(2, Some(1), "left"),
+            agent(3, Some(1), "right"),
+        ]);
         let start = Instant::now();
 
-        tree.update_tree_at(
-            Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
-            start,
-        );
-        assert_eq!(tree.focused, Some(AgentId::new(2)));
-
-        tree.update_tree_at(
-            Event::Key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)),
-            start,
-        );
-        assert_eq!(tree.focused, Some(AgentId::new(3)));
-
-        tree.update_tree_at(
-            Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)),
-            start,
-        );
-        assert_eq!(tree.focused, Some(AgentId::new(1)));
-
-        tree.update_tree_at(
-            Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
-            start,
-        );
-        assert_eq!(tree.focused, Some(AgentId::new(3)));
+        for (code, focused) in [
+            (KeyCode::Down, 2),
+            (KeyCode::Right, 3),
+            (KeyCode::Up, 1),
+            (KeyCode::Down, 3),
+        ] {
+            tree.update_tree_at(key(code), start);
+            assert_eq!(tree.focused, Some(AgentId::new(focused)));
+        }
     }
 
     #[test]
     fn horizontal_navigation_crosses_cousins_and_separate_trees() {
-        let mut tree = SubagentTree::new(ReasoningEffort::Medium);
-        tree.apply(AgentUpdate::Added(tree_descriptor(1, None, "first root")));
-        tree.apply(AgentUpdate::Added(tree_descriptor(
-            2,
-            Some(1),
-            "left branch",
-        )));
-        tree.apply(AgentUpdate::Added(tree_descriptor(
-            3,
-            Some(1),
-            "right branch",
-        )));
-        tree.apply(AgentUpdate::Added(tree_descriptor(
-            4,
-            Some(2),
-            "left cousin",
-        )));
-        tree.apply(AgentUpdate::Added(tree_descriptor(
-            5,
-            Some(3),
-            "right cousin",
-        )));
-        tree.apply(AgentUpdate::Added(tree_descriptor(10, None, "second root")));
-        tree.apply(AgentUpdate::Added(tree_descriptor(
-            11,
-            Some(10),
-            "second child",
-        )));
-        tree.apply(AgentUpdate::Added(tree_descriptor(
-            12,
-            Some(11),
-            "second leaf",
-        )));
+        let mut tree = tree_of([
+            agent(1, None, "first root"),
+            agent(2, Some(1), "left branch"),
+            agent(3, Some(1), "right branch"),
+            agent(4, Some(2), "left cousin"),
+            agent(5, Some(3), "right cousin"),
+            agent(10, None, "second root"),
+            agent(11, Some(10), "second child"),
+            agent(12, Some(11), "second leaf"),
+        ]);
         let now = Instant::now();
 
         tree.focused = Some(AgentId::new(4));
-        tree.update_tree_at(
-            Event::Key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)),
-            now,
-        );
-        assert_eq!(tree.focused, Some(AgentId::new(5)));
-        tree.update_tree_at(
-            Event::Key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)),
-            now,
-        );
-        assert_eq!(tree.focused, Some(AgentId::new(12)));
-        tree.update_tree_at(
-            Event::Key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE)),
-            now,
-        );
-        assert_eq!(tree.focused, Some(AgentId::new(5)));
+        for (code, focused) in [
+            (KeyCode::Right, 5),
+            (KeyCode::Right, 12),
+            (KeyCode::Left, 5),
+        ] {
+            tree.update_tree_at(key(code), now);
+            assert_eq!(tree.focused, Some(AgentId::new(focused)));
+        }
 
         tree.focused = Some(AgentId::new(1));
-        tree.update_tree_at(
-            Event::Key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)),
-            now,
-        );
+        tree.update_tree_at(key(KeyCode::Right), now);
         assert_eq!(tree.focused, Some(AgentId::new(10)));
     }
 
     #[test]
     fn camera_animation_is_interruptible_and_settles_on_the_latest_focus() {
-        let mut tree = SubagentTree::new(ReasoningEffort::Medium);
-        tree.apply(AgentUpdate::Added(tree_descriptor(1, None, "root")));
-        tree.apply(AgentUpdate::Added(tree_descriptor(2, Some(1), "left")));
-        tree.apply(AgentUpdate::Added(tree_descriptor(3, Some(1), "right")));
-        render_tree(&mut tree);
+        let mut tree = tree_of([
+            agent(1, None, "root"),
+            agent(2, Some(1), "left"),
+            agent(3, Some(1), "right"),
+        ]);
+        render_tree(&mut tree, 100, 40);
         let start = Instant::now();
 
-        tree.update_tree_at(
-            Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
-            start,
-        );
+        tree.update_tree_at(key(KeyCode::Down), start);
         let first_deadline = tree.animation_deadline().unwrap();
         assert!(!tree.advance(first_deadline - Duration::from_millis(1)));
 
@@ -1715,10 +1620,7 @@ mod tests {
         assert!(tree.advance(interruption));
         let interrupted_center = tree.camera.center.unwrap();
 
-        tree.update_tree_at(
-            Event::Key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)),
-            interruption,
-        );
+        tree.update_tree_at(key(KeyCode::Right), interruption);
         let retargeted = tree.camera.animation.as_ref().unwrap();
         assert_eq!(retargeted.from, interrupted_center);
         assert_eq!(tree.focused, Some(AgentId::new(3)));
@@ -1730,9 +1632,8 @@ mod tests {
 
     #[test]
     fn focused_green_border_straddles_the_usable_canvas_center() {
-        let mut tree = SubagentTree::new(ReasoningEffort::Medium);
-        tree.apply(AgentUpdate::Added(descriptor()));
-        let backend = render_tree(&mut tree);
+        let mut tree = tree_of([descriptor()]);
+        let backend = render_tree(&mut tree, 100, 40);
         let mut focused_cells = Vec::new();
         for y in 0..40 {
             for x in 0..100 {
@@ -1757,66 +1658,51 @@ mod tests {
 
     #[test]
     fn three_children_render_as_an_even_fan_out() {
-        let mut tree = SubagentTree::new(ReasoningEffort::Medium);
-        tree.apply(AgentUpdate::Added(tree_descriptor(1, None, "root")));
-        tree.apply(AgentUpdate::Added(tree_descriptor(2, Some(1), "left")));
-        tree.apply(AgentUpdate::Added(tree_descriptor(3, Some(1), "middle")));
-        tree.apply(AgentUpdate::Added(tree_descriptor(4, Some(1), "right")));
-        let mut terminal = Terminal::new(TestBackend::new(140, 50)).unwrap();
-        terminal
-            .draw(|frame| tree.render_tree(frame, frame.area(), &Theme::default()))
-            .unwrap();
-        let rendered = terminal
-            .backend()
-            .buffer()
-            .content
-            .chunks(140)
-            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
-            .collect::<Vec<_>>()
-            .join("\n");
+        let mut tree = tree_of([
+            agent(1, None, "root"),
+            agent(2, Some(1), "left"),
+            agent(3, Some(1), "middle"),
+            agent(4, Some(1), "right"),
+        ]);
+        assert_eq!(
+            tree.layout().children(AgentId::new(1)),
+            [AgentId::new(2), AgentId::new(3), AgentId::new(4)]
+        );
 
-        let arrows = (0..35)
-            .flat_map(|y| (0..140).map(move |x| (x, y)))
-            .filter(|&(x, y)| terminal.backend().buffer()[(x, y)].symbol() == "↓")
-            .count();
-        assert_eq!(arrows, 3);
-        assert!(rendered.contains('┼'));
-        assert!(rendered.contains("#2 left"));
-        assert!(rendered.contains("#3 middle"));
-        assert!(rendered.contains("#4 right"));
+        let backend = render_tree(&mut tree, 140, 50);
+
+        let arrows = edge_arrows(&backend);
+        assert_eq!(arrows.len(), 3);
+        assert!(arrows.iter().all(|&(_, y)| y == arrows[0].1));
+        let [(junction_x, _)] = cells_with_symbol(&backend, "┼")[..] else {
+            panic!("the middle child should share the parent's junction");
+        };
+        assert_eq!(junction_x, arrows[1].0);
+        assert_eq!(arrows[1].0 - arrows[0].0, arrows[2].0 - arrows[1].0);
     }
 
     #[test]
     fn connector_turns_use_rounded_unicode_corners() {
-        assert_eq!(super::edge_symbol(super::RIGHT | super::DOWN), "╭");
-        assert_eq!(super::edge_symbol(super::LEFT | super::DOWN), "╮");
-        assert_eq!(super::edge_symbol(super::RIGHT | super::UP), "╰");
-        assert_eq!(super::edge_symbol(super::LEFT | super::UP), "╯");
+        assert_eq!(edge_symbol(RIGHT | DOWN), "╭");
+        assert_eq!(edge_symbol(LEFT | DOWN), "╮");
+        assert_eq!(edge_symbol(RIGHT | UP), "╰");
+        assert_eq!(edge_symbol(LEFT | UP), "╯");
     }
 
     #[test]
     fn narrow_tree_clips_without_panicking() {
-        let mut tree = SubagentTree::new(ReasoningEffort::Medium);
-        tree.apply(AgentUpdate::Added(descriptor()));
-        let mut terminal = Terminal::new(TestBackend::new(20, 8)).unwrap();
+        let mut tree = tree_of([descriptor()]);
 
-        terminal
-            .draw(|frame| tree.render_tree(frame, frame.area(), &Theme::default()))
-            .unwrap();
+        let backend = render_tree(&mut tree, 20, 8);
 
-        assert_eq!(terminal.backend().buffer().area.width, 20);
+        assert_eq!(backend.buffer().area.width, 20);
     }
 
     #[test]
     fn hiding_the_tree_finishes_camera_motion() {
-        let mut tree = SubagentTree::new(ReasoningEffort::Medium);
-        tree.apply(AgentUpdate::Added(tree_descriptor(1, None, "root")));
-        tree.apply(AgentUpdate::Added(tree_descriptor(2, Some(1), "child")));
-        render_tree(&mut tree);
-        tree.update_tree_at(
-            Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
-            Instant::now(),
-        );
+        let mut tree = tree_of([agent(1, None, "root"), agent(2, Some(1), "child")]);
+        render_tree(&mut tree, 100, 40);
+        tree.update_tree_at(key(KeyCode::Down), Instant::now());
         assert!(tree.camera.animation.is_some());
 
         tree.finish_camera_animation();
@@ -1827,59 +1713,43 @@ mod tests {
 
     #[test]
     fn transcript_inspector_uses_the_full_screen() {
-        let mut tree = SubagentTree::new(ReasoningEffort::Medium);
-        tree.apply(AgentUpdate::Added(descriptor()));
+        let mut tree = tree_of([descriptor()]);
         tree.apply(event(
             AgentEventKind::AssistantMessage,
             json!({"model_call_index": 1, "item_id": "a", "phase": "final_answer", "text": "Report"}),
         ));
-        let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
 
-        terminal
-            .draw(|frame| {
-                tree.render_transcript(AgentId::new(1), frame, frame.area(), &Theme::default());
-            })
-            .unwrap();
-        let buffer = terminal.backend().buffer();
+        let backend = render_transcript(&mut tree, 1);
 
+        let buffer = backend.buffer();
         assert_eq!(buffer[(0, 0)].symbol(), "╭");
-        assert_eq!(buffer[(99, 39)].symbol(), "╯");
+        assert_eq!(buffer[(71, 23)].symbol(), "╯");
     }
 
     #[test]
-    fn transcript_footer_reflects_expandable_focus_without_permanent_mouse_help() {
-        let mut tree = SubagentTree::new(ReasoningEffort::Medium);
-        tree.apply(AgentUpdate::Added(descriptor()));
-
-        let unfocused = rendered_text(&render_transcript(&mut tree));
-        assert!(unfocused.contains("pgup/pgdn scroll"));
-        assert!(unfocused.contains("esc back"));
-        assert!(!unfocused.contains("click"));
+    fn transcript_footer_reflects_expandable_focus() {
+        let mut tree = tree_of([descriptor()]);
+        assert_eq!(tree.transcript_keys(AgentId::new(1)), TRANSCRIPT_KEYS);
 
         focus_tool(&mut tree);
-        let focused = rendered_text(&render_transcript(&mut tree));
-        assert!(focused.contains("↑↓ item"));
-        assert!(focused.contains("enter toggle"));
-        assert!(focused.contains("esc blur, then back"));
-        assert!(!focused.contains("pgup/pgdn scroll"));
-        assert!(!focused.contains("click"));
+
+        assert_eq!(tree.transcript_keys(AgentId::new(1)), FOCUSED_ENTRY_KEYS);
     }
 
     #[test]
     fn escape_blurs_focused_item_before_returning_to_tree() {
-        let mut tree = SubagentTree::new(ReasoningEffort::Medium);
-        tree.apply(AgentUpdate::Added(descriptor()));
+        let mut tree = tree_of([descriptor()]);
         focus_tool(&mut tree);
-        let escape = || Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
 
-        assert!(
-            tree.update_transcript(AgentId::new(1), escape(), NonZeroU16::new(3).unwrap())
-                .is_none()
+        assert_eq!(
+            tree.update_transcript(AgentId::new(1), key(KeyCode::Esc), SCROLL_LINES),
+            None
         );
         assert!(!tree.transcripts[&AgentId::new(1)].expandables_focused());
-        assert!(matches!(
-            tree.update_transcript(AgentId::new(1), escape(), NonZeroU16::new(3).unwrap()),
+        assert_eq!(
+            tree.update_transcript(AgentId::new(1), key(KeyCode::Esc), SCROLL_LINES),
             Some(SubagentEffect::Back)
-        ));
+        );
+        assert_eq!(tree.transcript_keys(AgentId::new(1)), TRANSCRIPT_KEYS);
     }
 }
