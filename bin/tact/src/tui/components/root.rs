@@ -84,7 +84,7 @@ const KEY_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(2);
 const SELECTION_SCROLL_INTERVAL: Duration = Duration::from_millis(60);
 const BREADCRUMB_DURATION: Duration = Duration::from_secs(10);
 
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ConfirmationAction {
     Interrupt,
     Exit,

@@ -90,6 +90,12 @@ fn text_column(buffer: &ratatui::buffer::Buffer, row: u16, text: &str) -> u16 {
         .expect("rendered text should be present")
 }
 
+fn pending_confirmation(root: &RootNode) -> Option<ConfirmationAction> {
+    root.key_confirmation
+        .as_ref()
+        .map(|confirmation| confirmation.action)
+}
+
 fn render_root_text(root: &mut RootNode, width: u16, height: u16) -> String {
     let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
     terminal
@@ -189,13 +195,24 @@ fn native_context_budget_updates_live_and_restored_meter() {
             window_tokens: 900_000,
         },
     ));
-    assert!(render_root_text(&mut root, 80, 12).contains("0%/900k"));
+    assert_eq!(
+        root.composer().context_budget(),
+        crate::core::context::ContextBudget {
+            active_tokens: 0,
+            window_tokens: 900_000,
+        }
+    );
     assert!(root.context_diagnostics.auto_compact_token_limit.is_none());
     root.update(super::RootEvent::Transcript(record.clone()));
     assert_eq!(root.context_diagnostics.active_tokens, Some(125_000));
     assert!(root.context_diagnostics.usage.is_none());
-    assert_eq!(root.composer().context_tokens(), 125_000);
-    assert!(render_root_text(&mut root, 80, 12).contains("13%/1m"));
+    assert_eq!(
+        root.composer().context_budget(),
+        crate::core::context::ContextBudget {
+            active_tokens: 125_000,
+            window_tokens: 1_000_000,
+        }
+    );
     root.restore_session(
         Path::new("/work"),
         ReasoningEffort::Medium,
@@ -205,8 +222,13 @@ fn native_context_budget_updates_live_and_restored_meter() {
         vec![record],
     );
     root.set_model(Model::Claude(nanocodex::ClaudeModel::Opus55));
-    assert_eq!(root.composer().context_tokens(), 125_000);
-    assert!(render_root_text(&mut root, 80, 12).contains("13%/1m"));
+    assert_eq!(
+        root.composer().context_budget(),
+        crate::core::context::ContextBudget {
+            active_tokens: 125_000,
+            window_tokens: 1_000_000,
+        }
+    );
 }
 
 #[test]
@@ -1333,10 +1355,7 @@ fn control_c_requires_confirmation_while_actions_are_open() {
 
     assert!(first.effects.is_empty());
     assert!(root.overlay.is_some());
-    let rendered = render_root_text(&mut root, 60, 12);
-    assert!(rendered.contains("Ctrl+C then"));
-    assert!(rendered.contains("Ctrl+C Quit"));
-    assert!(rendered.contains("Esc cancel"));
+    assert_eq!(pending_confirmation(&root), Some(ConfirmationAction::Exit));
 
     let second = root.update(key(KeyCode::Char('c'), KeyModifiers::CONTROL));
 
@@ -1421,7 +1440,7 @@ fn control_c_clears_the_focused_composer_before_shutting_down() {
     let confirmation = root.update(key(KeyCode::Char('c'), KeyModifiers::CONTROL));
 
     assert!(confirmation.effects.is_empty());
-    assert!(render_root_text(&mut root, 60, 12).contains("Ctrl+C Quit"));
+    assert_eq!(pending_confirmation(&root), Some(ConfirmationAction::Exit));
 
     let shutdown = root.update(key(KeyCode::Char('c'), KeyModifiers::CONTROL));
 
@@ -1510,6 +1529,11 @@ fn double_escape_interrupts_without_shutting_down() {
     let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
 
     let first = root.update(key(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(
+        pending_confirmation(&root),
+        Some(ConfirmationAction::Interrupt)
+    );
+    // The confirmation prompt's copy is the contract users read, so it is checked once here.
     let rendered = render_root_text(&mut root, 60, 12);
     let second = root.update(key(KeyCode::Esc, KeyModifiers::NONE));
 
