@@ -1,5 +1,7 @@
 //! Root layout and component event routing.
 
+mod turns;
+
 use super::{
     actions::{Action, ActionAvailability, ActionsEffect, ActionsEvent, ActionsMenu},
     composer::{Composer, ComposerChromeTarget, ComposerDraft, ComposerEffect, ComposerEvent},
@@ -59,6 +61,7 @@ use std::{
 };
 use tact_memory::{MemoryAccess, MemoryKey, MemoryRecord, MemorySource};
 use tact_subagents::{AgentId, AgentStatus, AgentUpdate, MessageSender, SubagentRoster};
+use turns::{TurnEnd, TurnLedger};
 
 const KEY_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(2);
 const SELECTION_SCROLL_INTERVAL: Duration = Duration::from_millis(60);
@@ -377,10 +380,7 @@ pub(crate) struct RootNode {
     composer_area: Rect,
     composer_content_area: Rect,
     queue_area: Rect,
-    in_flight_turns: usize,
-    unmatched_worker_turns: usize,
-    unmatched_agent_turns: usize,
-    in_flight_shells: usize,
+    turns: TurnLedger,
     blocking_task: Option<BlockingTask>,
     fork_available: bool,
     skills: Arc<[Skill]>,
@@ -422,10 +422,7 @@ impl RootNode {
             composer_area: Rect::default(),
             composer_content_area: Rect::default(),
             queue_area: Rect::default(),
-            in_flight_turns: 0,
-            unmatched_worker_turns: 0,
-            unmatched_agent_turns: 0,
-            in_flight_shells: 0,
+            turns: TurnLedger::default(),
             blocking_task: None,
             fork_available: true,
             skills: Arc::from([]),
@@ -1093,8 +1090,7 @@ impl RootNode {
             && self.composer.component().draft().is_empty()
             && is_actions_trigger(&event)
         {
-            let new_session_enabled = self.in_flight_turns == 0
-                && self.in_flight_shells == 0
+            let new_session_enabled = self.turns.is_idle()
                 && self.blocking_task.is_none()
                 && self.queue.component().is_empty();
             self.overlay = Some(Overlay::Actions(Node::new(ActionsMenu::new(
@@ -1819,10 +1815,7 @@ impl RootNode {
     }
 
     fn open_new_session(&mut self) -> ComponentUpdate<RootEffect> {
-        if self.in_flight_turns > 0
-            || self.in_flight_shells > 0
-            || !self.queue.component().is_empty()
-        {
+        if !self.turns.is_idle() || !self.queue.component().is_empty() {
             return ComponentUpdate::none();
         }
         self.overlay = None;
@@ -2392,11 +2385,11 @@ impl RootNode {
                 }
             }
             PaneCommand::Interrupt
-                if self.in_flight_turns == 0 && !self.queue.component().has_pending_steer() =>
+                if !self.turns.turn_running() && !self.queue.component().has_pending_steer() =>
             {
                 return Err(CommandError::NothingRunning);
             }
-            PaneCommand::Steer(_) if self.in_flight_turns == 0 => {
+            PaneCommand::Steer(_) if !self.turns.turn_running() => {
                 return Err(CommandError::NothingRunning);
             }
             PaneCommand::Steer(id) | PaneCommand::Dequeue(id) | PaneCommand::EditQueued(id, _)
@@ -2470,7 +2463,7 @@ impl RootNode {
     }
 
     fn compaction_allowed(&self) -> Result<(), CommandError> {
-        if self.in_flight_turns > 0 || self.in_flight_shells > 0 || self.blocking_task.is_some() {
+        if !self.turns.is_idle() || self.blocking_task.is_some() {
             return Err(CommandError::TurnRunning);
         }
         if !self.queue.component().is_empty() {
@@ -2489,10 +2482,7 @@ impl RootNode {
     }
 
     pub(crate) const fn busy(&self) -> Busy {
-        Busy {
-            turns: self.in_flight_turns,
-            shells: self.in_flight_shells,
-        }
+        self.turns.busy()
     }
 
     /// The draft as other windows see it: an inline queue edit borrows the composer, so the draft
@@ -2578,7 +2568,7 @@ impl RootNode {
     /// the composer holds a prompt.
     fn can_queue_draft(&self) -> bool {
         !self.reflection_input
-            && (self.in_flight_turns > 0 || self.queue.component().has_pending_steer())
+            && (self.turns.turn_running() || self.queue.component().has_pending_steer())
             && !self.composer.component().draft().trim().is_empty()
     }
 
@@ -2608,12 +2598,12 @@ impl RootNode {
         }
         let effects = match update.effect {
             Some(ComposerEffect::Submit(prompt))
-                if self.in_flight_turns > 0 || self.queue.component().has_pending_steer() =>
+                if self.turns.turn_running() || self.queue.component().has_pending_steer() =>
             {
                 self.queue.component_mut().push(prompt);
                 // A steer is only possible while a turn runs; while one is still being applied the
                 // prompt waits behind it.
-                if delivery == BusyDelivery::Steer && self.in_flight_turns > 0 {
+                if delivery == BusyDelivery::Steer && self.turns.turn_running() {
                     let steer = self.update_queue(Event::Key(KeyEvent::new(
                         KeyCode::Enter,
                         KeyModifiers::NONE,
@@ -2625,11 +2615,11 @@ impl RootNode {
                 }
             }
             Some(ComposerEffect::Submit(prompt)) => {
-                self.in_flight_turns = self.in_flight_turns.saturating_add(1);
+                self.turns.start_turn();
                 vec![RootEffect::Submit(prompt)]
             }
             Some(ComposerEffect::RunShell(command)) => {
-                self.in_flight_shells = self.in_flight_shells.saturating_add(1);
+                self.turns.start_shell();
                 vec![RootEffect::RunShell(command)]
             }
             Some(ComposerEffect::OpenDraftEditor) => vec![RootEffect::OpenDraftEditor],
@@ -2667,7 +2657,7 @@ impl RootNode {
         self.reflection_input = false;
         let mode = self.update_composer(ComposerEvent::InputMode(None), RenderRequest::Immediate);
         self.thread = ThreadState::Started;
-        self.in_flight_turns = self.in_flight_turns.saturating_add(1);
+        self.turns.start_turn();
         let transcript = self.update_transcript(TranscriptEvent::FollowTail);
         ComponentUpdate {
             effects: vec![RootEffect::Reflect(instructions)],
@@ -2712,30 +2702,13 @@ impl RootNode {
         ));
     }
 
-    fn turn_finished(&mut self) -> ComponentUpdate<RootEffect> {
-        self.in_flight_turns = self.in_flight_turns.saturating_sub(1);
-        self.submit_next_queued()
-    }
-
-    fn worker_turn_finished(&mut self, terminal_expected: bool) -> ComponentUpdate<RootEffect> {
-        if !terminal_expected {
-            return self.turn_finished();
+    /// Records a turn-end signal and continues the queue once the turn has finished.
+    fn turn_ended(&mut self, end: TurnEnd) -> ComponentUpdate<RootEffect> {
+        if self.turns.record_end(end) {
+            self.submit_next_queued()
+        } else {
+            ComponentUpdate::none()
         }
-        if self.unmatched_agent_turns > 0 {
-            self.unmatched_agent_turns -= 1;
-            return self.turn_finished();
-        }
-        self.unmatched_worker_turns = self.unmatched_worker_turns.saturating_add(1);
-        ComponentUpdate::none()
-    }
-
-    fn agent_turn_finished(&mut self) -> ComponentUpdate<RootEffect> {
-        if self.unmatched_worker_turns > 0 {
-            self.unmatched_worker_turns -= 1;
-            return self.turn_finished();
-        }
-        self.unmatched_agent_turns = self.unmatched_agent_turns.saturating_add(1);
-        ComponentUpdate::none()
     }
 
     fn turns_cancelled(&mut self) -> ComponentUpdate<RootEffect> {
@@ -2750,7 +2723,7 @@ impl RootNode {
 
     fn steer_promoted(&mut self, id: QueueId) -> ComponentUpdate<RootEffect> {
         let _ = self.queue.component_mut().steer_promoted(id);
-        self.in_flight_turns = self.in_flight_turns.saturating_add(1);
+        self.turns.start_turn();
         ComponentUpdate::render(RenderRequest::Immediate)
     }
 
@@ -2776,14 +2749,14 @@ impl RootNode {
     }
 
     fn submit_next_queued(&mut self) -> ComponentUpdate<RootEffect> {
-        if self.in_flight_turns > 0 || self.queue.component().has_pending_steer() {
+        if self.turns.turn_running() || self.queue.component().has_pending_steer() {
             return ComponentUpdate::render(RenderRequest::Immediate);
         }
         let prompts = self.queue.component_mut().drain_ready();
         if prompts.is_empty() {
             return ComponentUpdate::render(RenderRequest::Immediate);
         }
-        self.in_flight_turns = 1;
+        self.turns.start_turn();
         ComponentUpdate {
             effects: vec![RootEffect::Submit(Submission::join(prompts))],
             render: RenderRequest::Immediate,
@@ -2940,12 +2913,12 @@ impl RootNode {
         if let Some(id) = completion
             && subagents_changed
             && self.subagents.is_direct_child(id)
-            && self.in_flight_turns == 0
+            && !self.turns.turn_running()
             && self.blocking_task.is_none()
             && self.interactive
         {
             self.thread = ThreadState::Started;
-            self.in_flight_turns = 1;
+            self.turns.start_turn();
             result
                 .effects
                 .push(RootEffect::ContinueSubagent(subagent_completion_prompt(id)));
@@ -3042,7 +3015,7 @@ impl Component for RootNode {
                     update.render = update.render.max(applied.render);
                 }
                 if turn_finished {
-                    let finished = self.agent_turn_finished();
+                    let finished = self.turn_ended(TurnEnd::Terminal);
                     update.effects.extend(finished.effects);
                     update.render = update.render.max(finished.render);
                 }
@@ -3114,10 +3087,10 @@ impl Component for RootNode {
                 ComponentUpdate::render(RenderRequest::Immediate)
             }
             RootEvent::WorkerTurnFinished { terminal_expected } => {
-                self.worker_turn_finished(terminal_expected)
+                self.turn_ended(TurnEnd::Worker { terminal_expected })
             }
             RootEvent::ShellFinished => {
-                self.in_flight_shells = self.in_flight_shells.saturating_sub(1);
+                self.turns.finish_shell();
                 ComponentUpdate::none()
             }
             RootEvent::TurnsCancelled => self.turns_cancelled(),
