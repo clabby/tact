@@ -130,7 +130,8 @@ type WireEntry = { id: number; revision: number; parent: number | null; at_ms: n
   | { kind: "tool"; name: string; summary: string; state: "running" | "succeeded" | "failed";
       duration_ns: number | null; elapsed_ns: number | null; // elapsed so far, while running
       substeps: string[]; child_count: number; has_detail: boolean;
-      outcome: ToolOutcome | null; stats: PatchStats | null }
+      outcome: ToolOutcome | null; stats: PatchStats | null;
+      significance: "routine" | "landmark" }
   | { kind: "directed_message"; from: string; to: string; body: string; delivery: string; // the latest message
       thread: number; messages: DirectedMessage[] }
   | { kind: "forked_from"; session: string }
@@ -147,8 +148,9 @@ type ToolOutcome = { exit_code: number | null; tail: string[]; summary: string |
 type PatchStats = { files: number; additions: number; deletions: number };
 ```
 
-A tool entry's `outcome` and `stats` let a client show how a call ended without fetching its
-`ToolDetail`. The server computes them each time it projects a new revision of the entry.
+A tool entry's `outcome`, `stats`, and `significance` let a client show how a call ended without
+fetching its `ToolDetail`. The server computes them each time it projects a new revision of the
+entry.
 
 - `outcome` is set once a tool has finished and its result carries command output: an `output`
   string or an `exit_code` field. Shell commands (`exec_command`, `write_stdin`, and `!` shells
@@ -167,6 +169,15 @@ A tool entry's `outcome` and `stats` let a client show how a call ended without 
 - `stats` is set for `apply_patch` calls that have not failed. `files` counts the Add, Update, and
   Delete headers of the patch envelope; `additions` and `deletions` count its `+` and `-` lines.
   The envelope does not contain a deleted file's lines, so they are not counted.
+- `significance` says whether a call may fold into a run of routine work (`"routine"`) or should
+  keep a row of its own (`"landmark"`). A call is a landmark when it failed, when it is
+  `apply_patch`, `update_plan`, `spawn_agent`, `send_agent_message`, `close_agent`, or
+  `interrupt_agent`, when it is a `memory` call that puts or deletes, or when it is a Code Mode
+  `exec` cell with a landmark among its calls. Everything else is routine: shell commands, reads,
+  searches, web lookups, agent waits and listings, memory scans and reads, Code Mode cells that
+  only made routine calls, and unknown tools. A running call is routine unless its tool alone makes
+  it a landmark, and it becomes a landmark if it fails. A change to the name, arguments, or state
+  of one of a cell's calls is a new revision of the cell, so a cell's class follows its calls.
 
 Clients must render unknown entry kinds as a muted generic row.
 

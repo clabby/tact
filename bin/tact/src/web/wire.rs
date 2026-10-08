@@ -11,7 +11,8 @@ use crate::{
         context::ContextBudget,
         protocol::{DraftImage, Origin, QueuedPrompt},
         transcript::{
-            DirectedMessageEntry, EntryKind, ToolEntry, ToolState, TranscriptEntry, TransientStatus,
+            DirectedMessageEntry, EntryId, EntryKind, ToolEntry, ToolState, TranscriptEntry,
+            TranscriptModel, TransientStatus,
         },
     },
 };
@@ -199,6 +200,45 @@ enum WireToolState {
     Failed,
 }
 
+/// Whether a tool call may fold into a run of routine work or keeps a row of its own.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum Significance {
+    Routine,
+    Landmark,
+}
+
+impl Significance {
+    /// A call is a landmark when it failed, when it changes what the reader must follow (a patch,
+    /// the plan, another agent, a stored or deleted memory), or when it is a Code Mode cell that
+    /// made such a call. A running call is routine until it fails, unless its tool alone makes it
+    /// a landmark.
+    fn of(model: &TranscriptModel, id: EntryId, tool: &ToolEntry) -> Self {
+        let landmark = Self::is_landmark(tool)
+            || model.code_children(id).any(
+                |child| matches!(&child.kind, EntryKind::Tool(child) if Self::is_landmark(child)),
+            );
+        if landmark {
+            Self::Landmark
+        } else {
+            Self::Routine
+        }
+    }
+
+    fn is_landmark(tool: &ToolEntry) -> bool {
+        tool.state == ToolState::Failed
+            || match tool.name.as_str() {
+                "apply_patch" | "update_plan" | "spawn_agent" | "send_agent_message"
+                | "close_agent" | "interrupt_agent" => true,
+                "memory" => matches!(
+                    tool.arguments.get("operation").and_then(Value::as_str),
+                    Some("put" | "delete")
+                ),
+                _ => false,
+            }
+    }
+}
+
 #[derive(Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum WireBody {
@@ -231,6 +271,7 @@ enum WireBody {
         outcome: Option<ToolOutcome>,
         /// The size of an `apply_patch` envelope; `None` for other tools and failed patches.
         stats: Option<PatchStats>,
+        significance: Significance,
     },
     DirectedMessage {
         from: String,
@@ -270,7 +311,8 @@ enum WireBody {
 }
 
 impl WireEntry {
-    pub(super) fn new(entry: &TranscriptEntry) -> Self {
+    /// Projects one entry of `model`, which supplies the calls a Code Mode cell made.
+    pub(super) fn new(model: &TranscriptModel, entry: &TranscriptEntry) -> Self {
         let body = match &entry.kind {
             EntryKind::User { text, images } => WireBody::User {
                 text: cap(text),
@@ -282,7 +324,7 @@ impl WireEntry {
                 commentary: false,
             },
             EntryKind::Reasoning { text } => WireBody::Reasoning { text: cap(text) },
-            EntryKind::Tool(tool) => WireBody::tool(tool),
+            EntryKind::Tool(tool) => WireBody::tool(tool, Significance::of(model, entry.id, tool)),
             EntryKind::DirectedMessage(message) => WireBody::directed(message),
             EntryKind::ForkedFrom { session_id } => WireBody::ForkedFrom {
                 session: session_id.clone(),
@@ -317,7 +359,7 @@ impl WireEntry {
 }
 
 impl WireBody {
-    fn tool(tool: &ToolEntry) -> Self {
+    fn tool(tool: &ToolEntry, significance: Significance) -> Self {
         Self::Tool {
             name: tool.name.clone(),
             summary: tool_summary(tool),
@@ -341,6 +383,7 @@ impl WireBody {
             stats: (tool.name == "apply_patch" && tool.state != ToolState::Failed)
                 .then(|| PatchStats::from_patch(patch_text(&tool.arguments)))
                 .flatten(),
+            significance,
         }
     }
 
@@ -691,7 +734,9 @@ fn numeric(id: impl std::fmt::Display) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_STRING_BYTES, WireBody, WireEntry, cap, now_unix_ms, tool_summary};
+    use super::{
+        MAX_STRING_BYTES, Significance, WireBody, WireEntry, cap, now_unix_ms, tool_summary,
+    };
     use crate::core::transcript::{
         LocalEvent, ToolEntry, ToolState, TranscriptModel, TranscriptRecord, TurnId, UserSubmitted,
     };
@@ -750,7 +795,7 @@ mod tests {
         model
             .entries()
             .iter()
-            .map(|entry| serde_json::to_value(WireEntry::new(entry)).unwrap())
+            .map(|entry| serde_json::to_value(WireEntry::new(model, entry)).unwrap())
             .collect()
     }
 
@@ -839,18 +884,174 @@ mod tests {
     }
 
     #[test]
+    fn failures_edits_plans_agents_and_memory_writes_are_landmarks() {
+        let mut model = TranscriptModel::default();
+        let calls = [
+            (
+                "exec_command",
+                json!({"cmd": "ls"}),
+                Some(json!({"output": "a", "exit_code": 0})),
+            ),
+            (
+                "exec_command",
+                json!({"cmd": "false"}),
+                Some(json!({"output": "", "exit_code": 1})),
+            ),
+            ("exec_command", json!({"cmd": "sleep 9"}), None),
+            ("apply_patch", json!("*** Begin Patch"), None),
+            ("update_plan", json!({"plan": []}), Some(json!("ok"))),
+            ("spawn_agent", json!({"task": "t"}), Some(json!({}))),
+            (
+                "send_agent_message",
+                json!({"agent_id": 2}),
+                Some(json!({})),
+            ),
+            ("wait_agent", json!({"agent_ids": [2]}), Some(json!({}))),
+            (
+                "memory",
+                json!({"operation": "scan", "query": "q"}),
+                Some(json!({})),
+            ),
+            (
+                "memory",
+                json!({"operation": "put", "content": "c"}),
+                Some(json!({})),
+            ),
+            ("mystery", json!({}), Some(json!({}))),
+        ];
+        for (index, (name, arguments, result)) in calls.into_iter().enumerate() {
+            let id = format!("c{index}");
+            model.apply(&call(1, &id, name, arguments));
+            if let Some(result) = result {
+                model.apply(&finish(2, &id, name, "completed", result));
+            }
+        }
+        let classes: Vec<_> = projected(&model)
+            .iter()
+            .map(|entry| entry["significance"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(
+            classes,
+            [
+                "routine", "landmark", "routine", "landmark", "landmark", "landmark", "landmark",
+                "routine", "routine", "landmark", "routine",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_code_mode_cell_is_a_landmark_when_any_of_its_calls_is() {
+        let mut model = TranscriptModel::default();
+        let batch = |model: &mut TranscriptModel, cell: &str, second: &str| {
+            model.apply(&call(1, cell, "exec", json!("await tools.view_image()")));
+            for (child, name) in [("code-1", "view_image"), ("code-2", second)] {
+                let id = format!("{cell}/{child}");
+                model.apply(&call(2, &id, name, json!({"path": "a.png"})));
+                model.apply(&finish(3, &id, name, "completed", json!("ok")));
+            }
+            model.apply(&finish(4, cell, "exec", "completed", json!([])));
+        };
+        batch(&mut model, "reads", "view_image");
+        batch(&mut model, "spawns", "spawn_agent");
+        let class = |model: &TranscriptModel, cell: usize| {
+            let parents: Vec<_> = projected(model)
+                .into_iter()
+                .filter(|entry| entry["name"] == "exec")
+                .collect();
+            parents[cell]["significance"].clone()
+        };
+        assert_eq!(class(&model, 0), "routine");
+        assert_eq!(class(&model, 1), "landmark");
+
+        let parent = model.entries()[0].id;
+        model.apply(&call(
+            5,
+            "reads/code-3",
+            "exec_command",
+            json!({"cmd": "false"}),
+        ));
+        assert_eq!(class(&model, 0), "routine", "a running call is routine");
+        let revision = model.entry(parent).unwrap().revision;
+        model.apply(&finish(
+            6,
+            "reads/code-3",
+            "exec_command",
+            "completed",
+            json!({"output": "", "exit_code": 1}),
+        ));
+        assert!(
+            model.entry(parent).unwrap().revision > revision,
+            "a child's failure revises the finished cell"
+        );
+        assert_eq!(class(&model, 0), "landmark");
+    }
+
+    #[test]
+    fn a_running_landmark_call_makes_its_cell_a_landmark_at_once() {
+        let mut model = TranscriptModel::default();
+        model.apply(&call(1, "cell", "exec", json!("await tools.spawn_agent()")));
+        model.apply(&call(
+            2,
+            "cell/code-1",
+            "view_image",
+            json!({"path": "a.png"}),
+        ));
+        model.apply(&call(3, "cell/code-2", "spawn_agent", json!({"task": "t"})));
+        assert_eq!(projected(&model)[0]["significance"], "landmark");
+    }
+
+    #[test]
+    fn output_from_a_running_call_does_not_revise_its_cell() {
+        let mut model = TranscriptModel::default();
+        model.apply(&call(
+            1,
+            "cell",
+            "exec",
+            json!("await tools.exec_command()"),
+        ));
+        model.apply(&call(
+            2,
+            "cell/code-1",
+            "view_image",
+            json!({"path": "a.png"}),
+        ));
+        model.apply(&call(
+            3,
+            "cell/code-2",
+            "exec_command",
+            json!({"cmd": "cargo test"}),
+        ));
+        let revision = model.entries()[0].revision;
+        model.apply(&finish(
+            4,
+            "cell/code-2",
+            "exec_command",
+            "completed",
+            json!({"session_id": 7, "output": "Compiling tact"}),
+        ));
+        let entries = projected(&model);
+        let command = entries.iter().find(|entry| entry["name"] == "exec_command");
+        assert_eq!(command.unwrap()["state"], "running");
+        assert_eq!(
+            model.entries()[0].revision,
+            revision,
+            "the cell is not revised"
+        );
+    }
+
+    #[test]
     fn only_running_tools_report_elapsed_time() {
         let mut entry = tool("exec_command", json!({"cmd": "sleep 1"}));
         entry.state = ToolState::Running;
         entry.started_at_unix_ms = now_unix_ms().saturating_sub(5_000);
-        let running = serde_json::to_value(WireBody::tool(&entry)).unwrap();
+        let running = serde_json::to_value(WireBody::tool(&entry, Significance::Routine)).unwrap();
         let elapsed = running["elapsed_ns"]
             .as_u64()
             .expect("a running tool has an elapsed time");
         assert!(elapsed >= 5_000_000_000);
 
         entry.state = ToolState::Succeeded;
-        let finished = serde_json::to_value(WireBody::tool(&entry)).unwrap();
+        let finished = serde_json::to_value(WireBody::tool(&entry, Significance::Routine)).unwrap();
         assert!(finished["elapsed_ns"].is_null());
     }
 

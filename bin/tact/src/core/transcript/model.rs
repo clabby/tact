@@ -164,6 +164,15 @@ impl TranscriptModel {
         self.index_of(id).and_then(|index| self.entries.get(index))
     }
 
+    /// The calls a Code Mode cell made, in the order they started.
+    pub(crate) fn code_children(&self, parent: EntryId) -> impl Iterator<Item = &TranscriptEntry> {
+        self.code_children
+            .get(&parent)
+            .into_iter()
+            .flatten()
+            .filter_map(|child| self.entry(*child))
+    }
+
     pub(crate) fn index_of(&self, id: EntryId) -> Option<usize> {
         self.entry_indices.get(&id).copied()
     }
@@ -1240,8 +1249,23 @@ impl TranscriptModel {
         let Some(index) = self.index_of(id) else {
             return;
         };
+        let parent = self.entries[index].parent;
+        let classified = |kind: &EntryKind| match kind {
+            EntryKind::Tool(tool) => Some((tool.state, tool.name.clone(), tool.arguments.clone())),
+            _ => None,
+        };
+        let before = parent.map(|_| classified(&self.entries[index].kind));
         update(&mut self.entries[index].kind);
         self.entries[index].revision = self.entries[index].revision.saturating_add(1);
+        // Front-ends classify a Code Mode cell by its calls' names, arguments, and states, so a
+        // change to one of those revises the cell too. Output and progress leave it alone.
+        if let Some(parent) = parent
+            && before != Some(classified(&self.entries[index].kind))
+            && let Some(parent_index) = self.index_of(parent)
+        {
+            self.entries[parent_index].revision =
+                self.entries[parent_index].revision.saturating_add(1);
+        }
     }
 }
 
