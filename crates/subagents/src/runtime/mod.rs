@@ -512,8 +512,10 @@ impl Subagents {
     ///
     /// The receiver carries model events as well as lifecycle changes. Keep it alive and drain it
     /// continuously for the lifetime of the runtime. Dropping it ends event forwarding and makes
-    /// later lifecycle changes unobservable. A zero concurrency limit creates the runtime but
-    /// rejects child turns until the limit is raised.
+    /// later lifecycle changes unobservable. The channel is unbounded so a slow consumer never
+    /// stalls a child turn; a consumer that falls behind holds the backlog in memory instead.
+    /// A zero concurrency limit creates the runtime but rejects child turns until the limit is
+    /// raised.
     pub fn new(max_concurrency: usize) -> (Self, mpsc::UnboundedReceiver<ScopedAgentUpdate>) {
         let (updates, receiver) = mpsc::unbounded_channel();
         let registry = Arc::new(Registry::new(updates, max_concurrency));
