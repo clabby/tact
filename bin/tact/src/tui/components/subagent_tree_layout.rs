@@ -1,4 +1,11 @@
 //! Deterministic world-space layout for the subagent hierarchy.
+//!
+//! The layout takes the visible agents with their parent links and assigns each a node position
+//! in world coordinates; the tree view owns the camera that maps those coordinates to the screen.
+//! Positions depend only on the agent set and parent links, never on arrival order. Links to absent
+//! parents are ignored and parent cycles are broken, so every node belongs to exactly one tree.
+//! Roots and siblings are ordered by agent ID, each parent is centered over its children, every
+//! depth shares one row, and neighboring subtrees keep at least a fixed horizontal gap.
 
 use std::collections::{HashMap, HashSet};
 use tact_subagents::AgentId;
