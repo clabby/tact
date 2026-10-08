@@ -1682,15 +1682,22 @@ mod tests {
     #[test]
     fn entry_hint_keeps_file_and_session_shortcuts_visible_while_typing() {
         let mut composer = new_composer();
-        assert!(rows(&render(&mut composer, 60, 5))[4].contains("@@ sessions"));
+        assert_eq!(
+            rows(&render(&mut composer, 60, 5))[4],
+            footer("╰─ / actions · @ paths · @@ sessions ─────── ◉ dev  /work ─╯")
+        );
 
         composer.replace_draft("hello".to_owned());
-        let footer = &rows(&render(&mut composer, 60, 5))[4];
-        assert!(!footer.contains("/ actions"));
-        assert!(footer.contains("@ paths · @@ sessions"));
+        assert_eq!(
+            rows(&render(&mut composer, 60, 5))[4],
+            footer("╰─ @ paths · @@ sessions ─────────────────── ◉ dev  /work ─╯")
+        );
 
         composer.replace_draft(String::new());
-        assert!(!rows(&render(&mut composer, 20, 5))[4].contains("/ actions"));
+        assert_eq!(
+            rows(&render(&mut composer, 20, 5))[4],
+            footer("╰─── ◉ dev  /work ─╯")
+        );
     }
 
     #[test]
@@ -1764,11 +1771,19 @@ mod tests {
         let mut composer = new_composer();
         composer.replace_draft("one\ntwo\nthree\nfour\nfive\nsix\nseven".to_owned());
         let terminal = render(&mut composer, 30, 8);
-        let rows = rows(&terminal);
 
-        assert!(rows[1].contains("two"));
-        assert!(rows[6].contains("seven"));
-        assert!(!rows.iter().any(|row| row.contains("one")));
+        assert_eq!(composer.scroll, 1);
+        assert_eq!(
+            rows(&terminal)[1..7],
+            [
+                "│two                         │",
+                "│three                       │",
+                "│four                        │",
+                "│five                        │",
+                "│six                         │",
+                "│seven                       │",
+            ]
+        );
     }
 
     #[test]
@@ -1829,7 +1844,10 @@ mod tests {
         composer.update(ComposerEvent::Terminal(Event::Paste(pasted.to_owned())));
 
         let terminal = render(&mut composer, 40, 5);
-        assert!(rows(&terminal)[1].contains("one    two�three"));
+        assert_eq!(
+            rows(&terminal)[1],
+            "│one    two�three                      │"
+        );
         assert_eq!(terminal.backend().cursor_position(), Position::new(17, 1));
 
         let submission = composer.take_submission().unwrap();
@@ -2182,8 +2200,16 @@ mod tests {
         for position in [(0, 0), (79, 0), (0, 2), (79, 2), (0, 4), (79, 4)] {
             assert_eq!(buffer[position].fg, Color::Yellow);
         }
-        assert!(!rows(&terminal)[0].contains("shell"));
-        assert!(rows(&terminal)[4].starts_with("╰─ shell "));
+        assert_eq!(
+            rows(&terminal)[0],
+            "╭─ 0%/272k ──────────────────────────────────────────── gpt-6.1-sol  medium 󰳗 ─╮"
+        );
+        assert_eq!(
+            rows(&terminal)[4],
+            footer(
+                "╰─ shell s · @@ sessions ─────────────────────────────────────── ◉ dev  /work ─╯"
+            )
+        );
 
         let update = composer.update(key(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(
@@ -2275,11 +2301,11 @@ mod tests {
         let mut composer = new_composer();
         composer.replace_draft("alpha betaabcdefgh".to_owned());
         let terminal = render(&mut composer, 8, 6);
-        let rows = rows(&terminal);
 
-        assert!(rows[1].contains("alpha"));
-        assert!(rows[2].contains("betaab"));
-        assert!(rows[3].contains("cdefgh"));
+        assert_eq!(
+            rows(&terminal)[1..5],
+            ["│alpha │", "│betaab│", "│cdefgh│", "│      │"]
+        );
     }
 
     #[test]
