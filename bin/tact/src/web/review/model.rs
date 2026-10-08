@@ -1,8 +1,8 @@
 //! The review's data: snapshots, decisions, comments, and question threads, in their wire shapes.
 
+use crate::vcs::{CheckoutKind, DiffSnapshot, PatchSide, ReviewRange, ReviewTarget};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use tact_vcs::{CheckoutKind, DiffSnapshot, PatchSide, ReviewRange, ReviewTarget};
 
 /// One captured range of the review.
 #[derive(Clone, Serialize)]

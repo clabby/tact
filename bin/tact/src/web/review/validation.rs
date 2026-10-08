@@ -6,7 +6,7 @@
 use super::model::{
     AiReviewComment, CommentSide, QuestionRequest, ReviewComment, ReviewDecision, ThreadRole,
 };
-use tact_vcs::DiffSnapshot;
+use crate::vcs::DiffSnapshot;
 
 pub(super) const MAX_COMMENTS: usize = 256;
 const MAX_COMMENT_BYTES: usize = 64 * 1024;

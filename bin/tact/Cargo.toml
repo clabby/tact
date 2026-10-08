@@ -61,7 +61,6 @@ syntect.workspace = true
 tar.workspace = true
 tact-memory = { workspace = true, features = ["client", "local", "native-server", "tool"] }
 tact-subagents.workspace = true
-tact-vcs.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

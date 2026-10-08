@@ -4,7 +4,7 @@
 //! source and history around the change instead of only the patch text.
 
 use super::model::{AiReviewComment, AiReviewResult, QuestionRequest, line_label};
-use tact_vcs::{OverviewContext, OverviewRange};
+use crate::vcs::{OverviewContext, OverviewRange};
 
 const MAX_OVERVIEW_BYTES: usize = 1024 * 1024;
 const MAX_QUESTION_ANSWER_BYTES: usize = 256 * 1024;

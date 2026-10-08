@@ -43,6 +43,9 @@ mod core {
 #[path = "../src/search.rs"]
 mod search;
 
+#[path = "../src/vcs/mod.rs"]
+mod vcs;
+
 #[path = "../src/tui"]
 mod tui {
     pub(crate) mod components;

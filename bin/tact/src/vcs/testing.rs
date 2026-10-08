@@ -1,6 +1,6 @@
 //! Repository fixtures and patch summaries shared by this crate's tests.
 
-use crate::FilePatch;
+use crate::vcs::FilePatch;
 use std::{collections::BTreeMap, fs, path::Path, process::Command};
 use tempfile::TempDir;
 

@@ -1,6 +1,7 @@
 use super::{AgentPrompt, prompts::OverviewPrompt};
 use crate::{
     core::protocol::{AuxiliaryError, Busy, Publication},
+    vcs::{FilePatch, OverviewContext, OverviewRange},
     web::{
         testing::{Harness, agent, idle_agent, repository, sse_event, worktree},
         wire::PROTOCOL_VERSION,
@@ -18,7 +19,6 @@ use std::{
     },
     time::Duration,
 };
-use tact_vcs::{FilePatch, OverviewContext, OverviewRange};
 use tokio::sync::Notify;
 
 fn full_range() -> Value {

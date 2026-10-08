@@ -5,13 +5,15 @@
 //! current snapshot is still usable. The display text is the human-readable message.
 
 use super::backend::ReviewError;
-use crate::web::{api::secure_json, workspaces::WorkspaceError};
+use crate::{
+    vcs::VcsError,
+    web::{api::secure_json, workspaces::WorkspaceError},
+};
 use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
 use serde::Serialize;
-use tact_vcs::VcsError;
 
 /// A review request that could not be served.
 #[derive(Debug, thiserror::Error)]

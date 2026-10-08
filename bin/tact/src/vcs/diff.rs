@@ -4,7 +4,7 @@
 //! tree. A range resolves to one full-context patch, and a content version detects when the
 //! checkout changed underneath an open review.
 
-use crate::{Checkout, FilePatch, VcsError};
+use crate::vcs::{Checkout, FilePatch, VcsError};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -684,8 +684,9 @@ mod tests {
         DiffSnapshot, OverviewContext, OverviewRange, PATCH_HOOK, PATCH_HOOK_SERIAL, PatchHook,
         PatchHookPhase, PatchSide, ReviewContext, ReviewRange, ReviewTargetKind, WorkspaceVersion,
     };
-    use crate::{
-        Checkout, FilePatch, LineSpan, VcsError,
+    use crate::vcs::{
+        Checkout, FilePatch, VcsError,
+        patch::LineSpan,
         testing::{
             added_lines, commit_file, expected_lines, git, repository,
             repository_with_initial_branch,

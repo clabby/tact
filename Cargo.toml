@@ -61,7 +61,6 @@ syntect = { version = "5.3.0", default-features = false, features = ["default-sy
 tar = "0.4.44"
 tact-memory = { version = "0.8.3", path = "crates/memory", default-features = false }
 tact-subagents = { version = "0.8.3", path = "crates/subagents" }
-tact-vcs = { version = "0.8.3", path = "crates/vcs" }
 tempfile = "3.27.0"
 thiserror = "2.0.19"
 tokio = { version = "1.53.1", features = ["io-util", "macros", "process", "rt-multi-thread", "signal", "sync", "time"] }

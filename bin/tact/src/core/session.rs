@@ -535,7 +535,7 @@ impl SessionStore {
         workspace: &Path,
         resumable_only: bool,
     ) -> Result<Vec<SessionSummary>, SessionError> {
-        let workspaces = tact_vcs::family_paths(workspace).await;
+        let workspaces = crate::vcs::family_paths(workspace).await;
         self.run_blocking(move |store| store.list(&workspaces, resumable_only))
             .await
     }

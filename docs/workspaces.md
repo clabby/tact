@@ -56,7 +56,7 @@ A family listing is cached for 5 seconds per workspace.
 
 ## Reading a checkout
 
-Review reads every kind of checkout through git (crate `tact-vcs`):
+Review reads every kind of checkout through git (the `vcs` module):
 
 | | git repository or worktree | colocated jj | jj workspace without `.git` |
 | --- | --- | --- | --- |

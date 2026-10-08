@@ -7,10 +7,10 @@ use super::{
 };
 use crate::{
     core::protocol::AuxiliaryError,
+    vcs::{OverviewContext, ReviewContext, ReviewRange, VcsError, WorkspaceVersion},
     web::{hub::Hub, wire::PROTOCOL_VERSION, workspaces::Target},
 };
 use std::{path::PathBuf, sync::Arc};
-use tact_vcs::{OverviewContext, ReviewContext, ReviewRange, VcsError, WorkspaceVersion};
 use tokio_util::sync::CancellationToken;
 
 /// How often preparation re-reads a checkout that changed while it was being captured.

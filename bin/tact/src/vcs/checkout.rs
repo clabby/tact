@@ -5,7 +5,7 @@
 //! workspace has no `.git`, so git is pointed at the repository's git store with an explicit work
 //! tree and a throwaway index; nothing in the user's repository is written.
 
-use crate::VcsError;
+use crate::vcs::VcsError;
 use serde::Serialize;
 use std::{
     ffi::OsStr,
@@ -358,7 +358,7 @@ fn parse_worktrees(listing: &str) -> Vec<FamilyMember> {
 #[cfg(test)]
 mod tests {
     use super::{Checkout, CheckoutKind, parse_worktrees};
-    use crate::{
+    use crate::vcs::{
         ReviewContext, WorkspaceVersion,
         testing::{added_lines, commit_file, expected_lines, init_git, run},
     };

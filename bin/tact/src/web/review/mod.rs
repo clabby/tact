@@ -3,7 +3,7 @@
 //!
 //! - [`engine`] keeps one review per checkout, its snapshot generations and caches, and the agent
 //!   operations that run against a snapshot.
-//! - [`backend`] reads the checkout through `tact_vcs` and runs prompts on a session's agent.
+//! - [`backend`] reads the checkout through the `vcs` module and runs prompts on a session's agent.
 //! - [`prompts`] builds those prompts and checks the agent's replies.
 //! - [`routes`] is the HTTP surface; [`error`] is its failure body.
 //! - [`model`], [`validation`], and [`compose`] hold the wire shapes, their limits, and the

@@ -13,7 +13,7 @@ use super::{
     },
     validation::{MAX_OVERVIEW_INSTRUCTIONS_BYTES, is_valid_operation_id},
 };
-use crate::web::api::secure_json;
+use crate::{vcs::ReviewRange, web::api::secure_json};
 use axum::{
     Json, Router,
     body::Body,
@@ -24,7 +24,6 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tact_vcs::ReviewRange;
 
 type ReviewResult = Result<Response<Body>, ReviewApiError>;
 

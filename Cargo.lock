@@ -5253,7 +5253,6 @@ dependencies = [
  "syntect",
  "tact-memory",
  "tact-subagents",
- "tact-vcs",
  "tar",
  "tempfile",
  "thiserror 2.0.19",
@@ -5323,17 +5322,6 @@ dependencies = [
  "thiserror 2.0.19",
  "tokio",
  "tower",
-]
-
-[[package]]
-name = "tact-vcs"
-version = "0.8.3"
-dependencies = [
- "serde",
- "sha2 0.10.9",
- "tempfile",
- "thiserror 2.0.19",
- "tokio",
 ]
 
 [[package]]

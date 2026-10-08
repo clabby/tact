@@ -1,6 +1,6 @@
 //! Read-only access to version-controlled checkouts and their changes.
 //!
-//! This crate shells out to `git` (and `jj` for jj workspaces) and knows nothing about sessions or
+//! This module shells out to `git` (and `jj` for jj workspaces) and knows nothing about sessions or
 //! front-ends. Nothing it runs writes to the user's repository: jj runs with
 //! `--ignore-working-copy`, and a jj workspace without `.git` is read through a private,
 //! temporary git index.
@@ -19,10 +19,10 @@ mod patch;
 #[cfg(test)]
 mod testing;
 
-pub use checkout::{Checkout, CheckoutKind, FamilyMember, family_paths};
-pub use diff::{
+pub(crate) use checkout::{Checkout, CheckoutKind, FamilyMember, family_paths};
+pub(crate) use diff::{
     DiffSnapshot, OverviewContext, OverviewRange, PatchSide, ReviewContext, ReviewRange,
-    ReviewTarget, ReviewTargetKind, WorkspaceVersion,
+    ReviewTarget, WorkspaceVersion,
 };
-pub use error::VcsError;
-pub use patch::{FilePatch, Hunk, LineSpan};
+pub(crate) use error::VcsError;
+pub(crate) use patch::FilePatch;

@@ -43,7 +43,7 @@ impl ReviewDecision {
 #[cfg(test)]
 mod tests {
     use super::super::model::{CommentSide, Decision, ReviewComment, ReviewDecision};
-    use tact_vcs::ReviewRange;
+    use crate::vcs::ReviewRange;
 
     fn decision(decision: Decision, summary: &str, comments: Vec<ReviewComment>) -> ReviewDecision {
         ReviewDecision {

@@ -21,9 +21,12 @@ use super::{
     prompts::OverviewPrompt,
     validation::{MAX_COMMENTS, is_anchored},
 };
-use crate::web::{
-    hub::Hub,
-    workspaces::{Target, Workspaces},
+use crate::{
+    vcs::{ReviewContext, ReviewRange, WorkspaceVersion},
+    web::{
+        hub::Hub,
+        workspaces::{Target, Workspaces},
+    },
 };
 use serde::Serialize;
 use std::{
@@ -33,7 +36,6 @@ use std::{
     sync::{Arc, Mutex as StdMutex},
     time::Duration,
 };
-use tact_vcs::{ReviewContext, ReviewRange, WorkspaceVersion};
 use tokio::sync::{MappedMutexGuard, Mutex, MutexGuard, oneshot};
 use tokio_util::sync::CancellationToken;
 

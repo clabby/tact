@@ -1,4 +1,4 @@
-//! Parsing of the patches that [`DiffSnapshot`](crate::DiffSnapshot) captures.
+//! Parsing of the patches that [`DiffSnapshot`](crate::vcs::DiffSnapshot) captures.
 //!
 //! The parser understands what `git diff` emits: `diff --git` headers, the extended headers for
 //! renames, copies, additions, deletions and binary content, and hunks. Hunk bodies are delimited
@@ -65,6 +65,7 @@ impl<'a> FilePatch<'a> {
     }
 
     /// The path that names the file in a review: the new path, or the old one for a deletion.
+    #[cfg(test)]
     pub fn path(&self) -> Option<&str> {
         self.new_path.as_deref().or(self.old_path.as_deref())
     }
@@ -104,6 +105,7 @@ impl LineSpan {
     }
 }
 
+#[cfg(test)]
 impl<'a> Hunk<'a> {
     /// The body lines, each still carrying its leading space, `+`, `-` or `\` marker.
     pub fn lines(&self) -> impl Iterator<Item = &'a str> + use<'a> {
