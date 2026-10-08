@@ -87,6 +87,8 @@ pub(crate) struct SkillCatalog {
     #[cfg(test)]
     diagnostics: Vec<SkillDiagnostic>,
     rendered: Option<String>,
+    /// The skills the rendered catalog lists, in catalog order.
+    listed: Vec<Skill>,
 }
 
 #[derive(Debug)]
@@ -156,6 +158,7 @@ impl SkillCatalog {
                 #[cfg(test)]
                 diagnostics: Vec::new(),
                 rendered: None,
+                listed: Vec::new(),
             };
         }
 
@@ -183,7 +186,8 @@ impl SkillCatalog {
         }
 
         let skills: Vec<_> = by_name.into_values().collect();
-        let (rendered, omitted) = render(&skills);
+        let (rendered, listed) = render(&skills);
+        let omitted = skills.len() - listed.len();
         if omitted > 0 {
             diagnostics.push(SkillDiagnostic::MetadataBudget { omitted });
         }
@@ -193,6 +197,7 @@ impl SkillCatalog {
 
         Self {
             rendered: (!skills.is_empty()).then_some(rendered),
+            listed,
             #[cfg(test)]
             skills,
             #[cfg(test)]
@@ -203,6 +208,12 @@ impl SkillCatalog {
     /// Instructions safe to add to model context; skill bodies are never included here.
     pub(crate) fn rendered_instructions(&self) -> Option<&str> {
         self.rendered.as_deref()
+    }
+
+    /// The skills listed in [`Self::rendered_instructions`]; entries the metadata budget
+    /// omitted are excluded. [`Self::available_in`] recovers the same list from the text.
+    pub(crate) fn listed(&self) -> &[Skill] {
+        &self.listed
     }
 
     pub(crate) fn available_in(instructions: &str) -> Vec<Skill> {
@@ -709,10 +720,11 @@ fn metadata_error(path: &Path, message: impl Into<String>) -> SkillDiagnostic {
     }
 }
 
-fn render(skills: &[SkillMetadata]) -> (String, usize) {
+/// Renders the catalog within the metadata budget and returns the skills it lists.
+fn render(skills: &[SkillMetadata]) -> (String, Vec<Skill>) {
     let mut rendered = format!("{CATALOG_PREAMBLE}{CATALOG_START_MARKER}\n{CATALOG_RULES}");
     let epilogue = format!("{CATALOG_END_MARKER}\n");
-    let mut included = 0;
+    let mut listed = Vec::new();
     for skill in skills {
         let entry = format!(
             "- name: {}\n  description: {}\n  path: {}\n",
@@ -724,10 +736,10 @@ fn render(skills: &[SkillMetadata]) -> (String, usize) {
             continue;
         }
         rendered.push_str(&entry);
-        included += 1;
+        listed.push(Skill::new(&skill.name, &skill.description));
     }
     rendered.push_str(&epilogue);
-    (rendered, skills.len() - included)
+    (rendered, listed)
 }
 
 fn json_string(value: &str) -> String {
@@ -831,6 +843,7 @@ mod tests {
                 super::Skill::new("open-docs", "Open relevant documentation."),
             ]
         );
+        assert_eq!(catalog.listed(), skills);
         assert!(SkillCatalog::available_in("ordinary instructions").is_empty());
     }
 
@@ -963,10 +976,8 @@ mod tests {
 
         assert!(rendered.len() <= MAX_RENDERED_BYTES);
         assert!(omitted > 0);
-        assert_eq!(
-            SkillCatalog::available_in(rendered).len(),
-            catalog.len() - omitted
-        );
+        assert_eq!(catalog.listed().len(), catalog.len() - omitted);
+        assert_eq!(SkillCatalog::available_in(rendered), catalog.listed());
     }
 
     #[test]

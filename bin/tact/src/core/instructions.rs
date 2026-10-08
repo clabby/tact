@@ -384,17 +384,13 @@ impl SessionInstructions {
         if let Some(appended) = appended {
             text.push(appended);
         }
-        let skills = match catalog.rendered_instructions() {
-            Some(rendered) => {
-                text.push(rendered);
-                SkillCatalog::available_in(rendered).into()
-            }
-            None => Arc::from([]),
-        };
+        if let Some(rendered) = catalog.rendered_instructions() {
+            text.push(rendered);
+        }
         if memory_enabled {
             text.push(MEMORY_INSTRUCTIONS);
         }
-        (text, skills)
+        (text, catalog.listed().into())
     }
 
     fn restored(restored: RestoredInstructions) -> (PromptText, Arc<[Skill]>) {
