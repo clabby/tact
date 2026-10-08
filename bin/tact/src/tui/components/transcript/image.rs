@@ -1,3 +1,20 @@
+//! Terminal image preparation for transcript layouts.
+//!
+//! [Cache] turns image references into sliced terminal protocols. Decoding and
+//! encoding run on the rayon pool with a bounded number of jobs; the render
+//! thread only ever sees finished protocols, a deferred result, or a failure.
+//! Results are keyed by path and target size and revalidated against file
+//! fingerprints, and every result is tagged with a terminal generation so work
+//! started before the terminal discarded its images is dropped.
+//!
+//! The graphics protocol and cell size are properties of the controlling
+//! terminal, detected once by [initialize] after the terminal enters raw mode.
+//! They are held process-wide because every transcript (the root session,
+//! forks, and subagent panes) renders to the same terminal and is constructed
+//! independently of terminal setup. Before detection, and in tests, rendering
+//! falls back to half-block output, which is never treated as inline-image
+//! capable.
+
 use base64::{Engine, engine::general_purpose::STANDARD};
 use image::{DynamicImage, ImageReader};
 use ratatui::layout::Size;
@@ -26,6 +43,11 @@ use url::Url;
 pub(super) const MAX_IMAGE_HEIGHT: u16 = 24;
 
 static PICKER: OnceLock<Picker> = OnceLock::new();
+
+/// The detected terminal capability, or half blocks before detection.
+fn picker() -> &'static Picker {
+    PICKER.get_or_init(Picker::halfblocks)
+}
 
 pub(super) struct Cache {
     entries: BoundedCache<CacheKey, CachedProtocol, PROTOCOL_CACHE_CAPACITY>,
@@ -169,6 +191,9 @@ struct TmuxClient {
     font_size: Option<FontSize>,
 }
 
+/// Detects the terminal's image protocol and cell size, honouring tmux
+/// passthrough. Must run before the first image is requested: once a picker is
+/// in use, later detection results are discarded.
 pub(crate) fn initialize() {
     let inside_tmux = env::var_os("TMUX").is_some();
     let tmux_client = inside_tmux.then(tmux_client).flatten();
@@ -297,7 +322,7 @@ impl Default for Cache {
 
 impl Cache {
     pub(super) fn load(&mut self, destination: &str, workspace: &Path, width: u16) -> LoadResult {
-        let picker = PICKER.get_or_init(Picker::halfblocks);
+        let picker = picker();
         if !self
             .inline_images
             .unwrap_or_else(|| supports_inline_images(picker.protocol_type()))
@@ -444,7 +469,7 @@ impl Cache {
             return false;
         };
         let source = self.sources.get(&key.path).cloned();
-        let picker = PICKER.get_or_init(Picker::halfblocks).clone();
+        let picker = picker().clone();
         let known_fingerprint = self.entries.get(&key).map(CachedProtocol::fingerprint);
         let epoch = Arc::clone(&self.epoch);
         let generation = self.generation;
