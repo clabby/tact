@@ -1568,7 +1568,9 @@ mod tests {
         composer.update(ComposerEvent::SetSpeed(Speed::Ultrafast));
         for (model, effective, icon) in [
             (Model::Codex(CodexModel::Astra), Speed::Ultrafast, "󰑣"),
-            (Model::Codex(CodexModel::Sol), Speed::Fast, "󰤇"),
+            (Model::Codex(CodexModel::Sol), Speed::Ultrafast, "󰑣"),
+            (Model::Codex(CodexModel::Luna), Speed::Fast, "󰤇"),
+            (Model::Claude(ClaudeModel::Haiku55), Speed::Standard, "󰳗"),
             (Model::Claude(ClaudeModel::Opus55), Speed::Fast, "󰤇"),
             (Model::Claude(ClaudeModel::Sonnet55), Speed::Standard, "󰳗"),
             (Model::Claude(ClaudeModel::Fable51), Speed::Standard, "󰳗"),
@@ -1594,6 +1596,7 @@ mod tests {
     #[test]
     fn claude_models_show_their_effective_speed_and_hide_pro() {
         for (model, speed) in [
+            (Model::Claude(ClaudeModel::Haiku55), Speed::Standard),
             (Model::Claude(ClaudeModel::Sonnet55), Speed::Standard),
             (Model::Claude(ClaudeModel::Opus55), Speed::Fast),
             (Model::Claude(ClaudeModel::Fable51), Speed::Standard),

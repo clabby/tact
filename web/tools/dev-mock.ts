@@ -49,7 +49,8 @@ export const MOCK_CATALOG: ModelCatalog = {
   models: [
     { id: "sol", label: "Sol", ...codex, effective_speeds: ["standard", "fast", "ultrafast"] },
     { id: "luna", label: "Luna", ...codex, effective_speeds: ["standard", "fast", "fast"] },
-    { id: "astra", label: "Astra", ...codex, effective_speeds: ["standard", "fast", "fast"] },
+    { id: "astra", label: "Astra", ...codex, effective_speeds: ["standard", "fast", "ultrafast"] },
+    { id: "haiku-5.5", label: "Haiku 5.5", ...claude, effective_speeds: ["standard", "standard", "standard"] },
     { id: "opus-5.5", label: "Opus 5.5", ...claude, effective_speeds: ["standard", "fast", "fast"] },
     { id: "sonnet-5.5", label: "Sonnet 5.5", ...claude, effective_speeds: ["standard", "standard", "standard"] },
     { id: "fable-5.1", label: "Fable 5.1", ...claude, effective_speeds: ["standard", "standard", "standard"] },

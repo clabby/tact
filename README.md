@@ -127,8 +127,9 @@ Resumed sessions retain the model recorded when they were created. Sessions usin
 model IDs cannot resume; start a new session with a supported model.
 
 When no effort is configured, Sol and Astra use low effort and Luna uses medium. A configured
-effort takes precedence. Tact supports low through max effort. Sol and Luna support Pro mode;
-Astra uses standard mode.
+effort takes precedence. Tact supports low through max effort. Astra, Sol, and Luna support Pro
+mode independently of effort. Open `/effort`, press `p` to toggle the Pro checkbox, and press
+Enter to save. The Pro preference applies to new sessions.
 
 Click the speed icon or choose **Change speed** to open the Standard/Fast/Ultrafast dial.
 The Nerd Fonts turtle, rabbit, and rocket glyphs show Standard, Fast, and Ultrafast effective speeds.
@@ -137,11 +138,11 @@ fastest tier supported by each model:
 
 | Model | Effective ultrafast preference |
 | --- | --- |
-| Astra | Ultrafast |
-| Sol, Luna, Opus 5.5 | Fast |
-| Sonnet 5.5, Fable 5.1 | Standard |
+| Astra, Sol | Ultrafast |
+| Luna, Opus 5.5 | Fast |
+| Haiku 5.5, Sonnet 5.5, Fable 5.1 | Standard |
 
-Astra sends `service_tier = "ultrafast"`; access and pricing depend on the account.
+Astra and Sol send `service_tier = "ultrafast"`; access and pricing depend on the account.
 See [OpenAI ultrafast mode](https://developers.openai.com/api/docs/guides/ultrafast-mode).
 
 OpenAI models use automatic prompt caching. Tact keeps request prefixes and conversation history
@@ -158,18 +159,18 @@ enabled = true
 api_key = "sk-ant-api03-..."
 
 [agent]
-model = "sonnet-5.5" # or opus-5.5, fable-5.1
+model = "sonnet-5.5" # or haiku-5.5, opus-5.5, fable-5.1
 thinking = "medium"
 ```
 
 Type in the model picker to filter by name, provider, or model ID. Use ↑/↓ to select a model,
 Enter to apply it, and Esc to cancel. The check mark identifies the current model.
 
-With Claude enabled, `--model` and the model picker also accept `sonnet-5.5`, `opus-5.5`, and `fable-5.1`
-(native IDs `claude-sonnet-5-5`, `claude-opus-5-5`, and `claude-fable-5-1`). All support
-`low`, `medium`, `high`, `xhigh`, and `max`. Their default efforts are medium for Opus and high for Sonnet and Fable.
+With Claude enabled, `--model` and the model picker also accept `haiku-5.5`, `sonnet-5.5`, `opus-5.5`, and `fable-5.1`
+(native IDs `claude-haiku-5-5`, `claude-sonnet-5-5`, `claude-opus-5-5`, and `claude-fable-5-1`). All support
+`low`, `medium`, `high`, `xhigh`, and `max`. Their default efforts are medium for Haiku and Opus and high for Sonnet and Fable.
 Claude uses standard reasoning mode. Opus 5.5 supports accelerated processing through
-`agent.speed = "fast"` or the speed dial; Sonnet 5.5 and Fable 5.1 use standard processing.
+`agent.speed = "fast"` or the speed dial; Haiku 5.5, Sonnet 5.5, and Fable 5.1 use standard processing.
 The default speed is standard. Opus fast processing uses
 Anthropic's [premium fast-mode service](https://platform.claude.com/docs/en/build-with-claude/fast-mode),
 which requires access on the API account. Changes apply to subsequently accepted turns.
@@ -303,6 +304,7 @@ thinking_max = "magenta"
 model_luna = "reset"
 model_sol = "yellow"
 model_astra = "magenta"
+model_haiku = "blue"
 model_sonnet = "green"
 model_opus = "red"
 model_fable = "cyan"
@@ -322,6 +324,7 @@ thinking_max = "magenta"
 model_luna = "reset"
 model_sol = "yellow"
 model_astra = "magenta"
+model_haiku = "blue"
 model_sonnet = "green"
 model_opus = "red"
 model_fable = "cyan"
@@ -381,6 +384,7 @@ thinking_max = "magenta"
 model_luna = "reset"
 model_sol = "yellow"
 model_astra = "magenta"
+model_haiku = "blue"
 model_sonnet = "green"
 model_opus = "red"
 model_fable = "cyan"
@@ -419,7 +423,7 @@ when the feature is enabled; setting it does not enable or disable subagents. Se
 [subagent design](docs/subagents.md) for the tool, lifecycle, messaging, and authority contracts.
 
 Agents name a model and a `thinking` effort for every delegated task. The choices are `luna`,
-`sol`, and `astra`; enabling Claude adds `sonnet-5.5`, `opus-5.5`, and `fable-5.1`. A Codex child
+`sol`, and `astra`; enabling Claude adds `haiku-5.5`, `sonnet-5.5`, `opus-5.5`, and `fable-5.1`. A Codex child
 cannot run a higher tier than a Codex parent (Luna < Sol < Astra), and no spawn may exceed the live
 `agent.thinking` cap or, for nested children, the parent's own effort. Tact's session instructions
 include a guide for choosing models and effort.

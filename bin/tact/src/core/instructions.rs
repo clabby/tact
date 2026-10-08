@@ -94,6 +94,9 @@ const SUBAGENT_MODEL_INSTRUCTIONS: &str = r#"## Subagent model selection
 Among Codex models, start with `sol` (GPT-6.1 Sol). Use `astra` for especially deep reviews or
 unresolved reasoning that warrants it.
 
+Speed is inherited from the configured preference. `sol` supports Ultrafast at 6× its standard
+token rates; the benchmark costs below use standard speed.
+
 For document, system, and protocol reviews, request explicit assumptions, counterexamples,
 safety/liveness conditions, and proof obligations. Verify findings against source evidence.
 
@@ -102,6 +105,7 @@ DeepSWE 1.1 (Artificial Analysis, native Codex). Cost/time are averages across A
 | Model | Effort | DeepSWE | API $/task | Time/task |
 | --- | --- | --- | --- | --- |
 | `luna` | max | 64% | $0.18 | 21.4m |
+| `sol` | medium | 72% | $0.70 | 10.9m |
 | `sol` | xhigh | 73% | $1.04 | 15.5m |
 | `astra` | max | 68% | $7.47 | 29.4m |
 
@@ -122,10 +126,15 @@ for especially deep reviews, unresolved premises, or independent challenges. Pre
 for second opinions: use an eligible Codex model alongside Claude. Both providers may delegate to
 either provider within the applicable model and effort caps.
 
+Use `haiku-5.5` for narrow, well-specified work when lower cost matters; start at `medium`.
+
 DeepSWE 1.1 (Artificial Analysis, native Claude Code). Cost/time are averages across AA's coding suite.
 
 | Model | Effort | DeepSWE | API $/task | Time/task |
 | --- | --- | --- | --- | --- |
+| `haiku-5.5` | medium | 47% | $0.23 | 14.0m |
+| `haiku-5.5` | xhigh | 49% | $0.61 | 25.9m |
+| `sonnet-5.5` | xhigh | 68% | $3.33 | 27.0m |
 | `sonnet-5.5` | max | 72% | $14.19 | 1.5h |
 | `opus-5.5` | max | 68% | $13.04 | 1.1h |
 | `fable-5.1` (with fallback) | max | 64% | $12.39 | 34.8m |
@@ -134,6 +143,7 @@ FrontierCode 1.1 Main (native Claude Code; best scoring effort per model).
 
 | Model | Effort | Score / 100 | API $/rollout |
 | --- | --- | --- | --- |
+| `haiku-5.5` | max | 46.36 | $1.33 |
 | `sonnet-5.5` | xhigh | 52.09 | $1.59 |
 | `opus-5.5` | medium | 54.64 | $0.80 |
 | `fable-5.1` | medium | 50.91 | $3.28 |

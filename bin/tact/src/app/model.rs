@@ -2,7 +2,9 @@
 
 use crate::app::config::{ReasoningEffort, ReasoningMode, Speed};
 use clap::ValueEnum;
-use nanocodex::{ClaudeModel, HarnessModel as Model, Model as CodexModel};
+use nanocodex::{
+    ClaudeModel, HarnessModel as Model, Model as CodexModel, ReasoningMode as NativeReasoningMode,
+};
 use serde::{Deserialize, Deserializer, Serialize, de};
 use tact_subagents::SUPPORTED_MODELS;
 
@@ -102,7 +104,9 @@ impl ModelOption {
 /// The reasoning modes a model accepts. Pro reasoning is an OpenAI capability.
 pub(crate) const fn reasoning_modes(model: Model) -> &'static [ReasoningMode] {
     match model {
-        Model::Codex(_) => &[ReasoningMode::Standard, ReasoningMode::Pro],
+        Model::Codex(model) if model.supports_reasoning_mode(NativeReasoningMode::Pro) => {
+            &[ReasoningMode::Standard, ReasoningMode::Pro]
+        }
         _ => &[ReasoningMode::Standard],
     }
 }
@@ -121,6 +125,7 @@ pub(crate) const fn name(model: Model) -> &'static str {
         Model::Codex(CodexModel::Luna) => "Luna",
         Model::Codex(CodexModel::Sol) => "Sol",
         Model::Codex(CodexModel::Astra) => "Astra",
+        Model::Claude(ClaudeModel::Haiku55) => "Haiku 5.5",
         Model::Claude(ClaudeModel::Sonnet55) => "Sonnet 5.5",
         Model::Claude(ClaudeModel::Opus55) => "Opus 5.5",
         Model::Claude(ClaudeModel::Fable51) => "Fable 5.1",
@@ -167,6 +172,13 @@ mod tests {
         assert_eq!(astra.effective_speeds, Speed::ALL);
         assert!(!astra.effort_fixed_after_start);
 
+        let sol = catalog
+            .models
+            .iter()
+            .find(|model| model.id == Model::Codex(CodexModel::Sol).as_str())
+            .unwrap();
+        assert_eq!(sol.effective_speeds, Speed::ALL);
+
         let sonnet = catalog
             .models
             .iter()
@@ -188,6 +200,9 @@ mod tests {
             ("sol", Model::Codex(CodexModel::Sol)),
             ("gpt-6-astra", Model::Codex(CodexModel::Astra)),
             ("astra", Model::Codex(CodexModel::Astra)),
+            ("haiku", Model::Claude(ClaudeModel::Haiku55)),
+            ("haiku-5.5", Model::Claude(ClaudeModel::Haiku55)),
+            ("claude-haiku-5-5", Model::Claude(ClaudeModel::Haiku55)),
             ("sonnet-5.5", Model::Claude(ClaudeModel::Sonnet55)),
             ("claude-sonnet-5-5", Model::Claude(ClaudeModel::Sonnet55)),
             ("opus-5.5", Model::Claude(ClaudeModel::Opus55)),

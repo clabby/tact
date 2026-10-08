@@ -196,7 +196,7 @@ fn configured(config: &Config, model: Model) -> ConfiguredAgent {
     ConfiguredAgent::from_config_with_model(
         config,
         config.agent().thinking(),
-        ReasoningMode::Standard,
+        config.agent().reasoning_mode(),
         HarnessModel::Codex(model),
     )
     .unwrap()
@@ -341,7 +341,7 @@ async fn configured_api_key_and_model_tiers_reach_both_transports() {
                 (Speed::Fast, Some("priority")),
                 (
                     Speed::Ultrafast,
-                    if model == Model::Astra {
+                    if matches!(model, Model::Astra | Model::Sol) {
                         Some("ultrafast")
                     } else {
                         Some("priority")
@@ -370,79 +370,95 @@ async fn configured_api_key_and_model_tiers_reach_both_transports() {
 }
 
 #[tokio::test]
+async fn configured_pro_mode_reaches_both_transports() {
+    if run_isolated("core::openai_tests::configured_pro_mode_reaches_both_transports").await {
+        return;
+    }
+    let fixture = Fixture::start().await;
+    for transport in [Transport::Https, Transport::Websocket] {
+        for model in [Model::Astra, Model::Sol, Model::Luna] {
+            let directory = tempdir().unwrap();
+            let mut config = fixture.config(&directory, model, transport, Speed::Standard);
+            config.set_reasoning_mode(ReasoningMode::Pro);
+            let root = configured(&config, model);
+            prompt(&root.agent, "pro reasoning turn").await;
+            let requests = fixture.take_requests();
+            assert_policy(&requests, model, transport, None);
+            for request in requests {
+                assert_eq!(request.body["reasoning"]["mode"], "pro");
+            }
+            root.shutdown().await.unwrap();
+        }
+    }
+}
+
+#[tokio::test]
 async fn configured_lineage_and_effort_survive_speed_changes_children_and_restore() {
     if run_isolated("core::openai_tests::configured_lineage_and_effort_survive_speed_changes_children_and_restore").await {
         return;
     }
     let fixture = Fixture::start().await;
     for transport in [Transport::Https, Transport::Websocket] {
-        let directory = tempdir().unwrap();
-        let mut config = fixture.config(&directory, Model::Astra, transport, Speed::Ultrafast);
-        let root = configured(&config, Model::Astra);
-        prompt(&root.agent, "first root turn").await;
-        let mut lineage = fixture.take_requests();
-        prompt(&root.agent, "second root turn").await;
-        lineage.extend(fixture.take_requests());
-        assert_policy(&lineage, Model::Astra, transport, Some("ultrafast"));
+        for model in [Model::Astra, Model::Sol] {
+            let directory = tempdir().unwrap();
+            let mut config = fixture.config(&directory, model, transport, Speed::Ultrafast);
+            let root = configured(&config, model);
+            prompt(&root.agent, "first root turn").await;
+            let mut lineage = fixture.take_requests();
+            prompt(&root.agent, "second root turn").await;
+            lineage.extend(fixture.take_requests());
+            assert_policy(&lineage, model, transport, Some("ultrafast"));
 
-        let (child, child_events) = root.agent.spawn().await.unwrap();
-        prompt(&child, "clean child turn").await;
-        let child_requests = fixture.take_requests();
-        assert_policy(&child_requests, Model::Astra, transport, Some("ultrafast"));
-        lineage.extend(child_requests);
-        child.shutdown().await.unwrap();
-        drop(child_events);
+            let (child, child_events) = root.agent.spawn().await.unwrap();
+            prompt(&child, "clean child turn").await;
+            let child_requests = fixture.take_requests();
+            assert_policy(&child_requests, model, transport, Some("ultrafast"));
+            lineage.extend(child_requests);
+            child.shutdown().await.unwrap();
+            drop(child_events);
 
-        let (fork, fork_events) = root.agent.fork().await.unwrap();
-        prompt(&fork, "fork turn").await;
-        let fork_requests = fixture.take_requests();
-        assert_policy(&fork_requests, Model::Astra, transport, Some("ultrafast"));
-        lineage.extend(fork_requests);
-        fork.shutdown().await.unwrap();
-        drop(fork_events);
+            let (fork, fork_events) = root.agent.fork().await.unwrap();
+            prompt(&fork, "fork turn").await;
+            let fork_requests = fixture.take_requests();
+            assert_policy(&fork_requests, model, transport, Some("ultrafast"));
+            lineage.extend(fork_requests);
+            fork.shutdown().await.unwrap();
+            drop(fork_events);
 
-        let session_id = root.agent.session_id().to_owned();
-        let snapshot = root.agent.snapshot().await.unwrap();
-        SessionStore::new(config.path())
-            .save_checkpoint(&session_id, &snapshot, &root.instructions, true)
+            let session_id = root.agent.session_id().to_owned();
+            let snapshot = root.agent.snapshot().await.unwrap();
+            SessionStore::new(config.path())
+                .save_checkpoint(&session_id, &snapshot, &root.instructions, true)
+                .unwrap();
+            root.shutdown().await.unwrap();
+            config.set_speed(Speed::Fast);
+            let restored = ConfiguredAgent::from_config_with_session(
+                &config,
+                config.agent().thinking(),
+                ReasoningMode::Standard,
+                HarnessModel::Codex(model),
+                Some(&session_id),
+                Some(
+                    SessionStore::new(config.path())
+                        .load_checkpoint(&session_id)
+                        .unwrap(),
+                ),
+            )
             .unwrap();
-        root.shutdown().await.unwrap();
-        config.set_speed(Speed::Fast);
-        let restored = ConfiguredAgent::from_config_with_session(
-            &config,
-            config.agent().thinking(),
-            ReasoningMode::Standard,
-            HarnessModel::Codex(Model::Astra),
-            Some(&session_id),
-            Some(
-                SessionStore::new(config.path())
-                    .load_checkpoint(&session_id)
-                    .unwrap(),
-            ),
-        )
-        .unwrap();
-        prompt(&restored.agent, "restored root turn").await;
-        let restored_requests = fixture.take_requests();
-        assert_policy(
-            &restored_requests,
-            Model::Astra,
-            transport,
-            Some("priority"),
-        );
-        lineage.extend(restored_requests);
+            prompt(&restored.agent, "restored root turn").await;
+            let restored_requests = fixture.take_requests();
+            assert_policy(&restored_requests, model, transport, Some("priority"));
+            lineage.extend(restored_requests);
 
-        set_speed(
-            &restored.agent,
-            HarnessModel::Codex(Model::Astra),
-            Speed::Standard,
-        )
-        .await
-        .unwrap();
-        prompt(&restored.agent, "standard root turn").await;
-        let standard_requests = fixture.take_requests();
-        assert_policy(&standard_requests, Model::Astra, transport, None);
-        lineage.extend(standard_requests);
-        assert_cache_lineage(&lineage);
-        restored.shutdown().await.unwrap();
+            set_speed(&restored.agent, HarnessModel::Codex(model), Speed::Standard)
+                .await
+                .unwrap();
+            prompt(&restored.agent, "standard root turn").await;
+            let standard_requests = fixture.take_requests();
+            assert_policy(&standard_requests, model, transport, None);
+            lineage.extend(standard_requests);
+            assert_cache_lineage(&lineage);
+            restored.shutdown().await.unwrap();
+        }
     }
 }

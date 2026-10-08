@@ -280,6 +280,7 @@ fn build_agent(
 #[tokio::test]
 async fn claude_root_runs_codex_child_through_code_mode() {
     for model in [
+        ClaudeModel::Haiku55,
         ClaudeModel::Sonnet55,
         ClaudeModel::Opus55,
         ClaudeModel::Fable51,
@@ -297,6 +298,7 @@ async fn claude_root_runs_codex_child_through_code_mode() {
 #[tokio::test]
 async fn codex_root_runs_claude_child_through_code_mode() {
     for model in [
+        ClaudeModel::Haiku55,
         ClaudeModel::Sonnet55,
         ClaudeModel::Opus55,
         ClaudeModel::Fable51,

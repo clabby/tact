@@ -29,7 +29,7 @@ tool surface or instructions of an existing runtime. A later new or restored ses
 reloaded setting.
 
 Subagents explicitly choose `luna`, `sol`, or `astra` for each task. Setting `[claude] enabled = true`
-also exposes `sonnet-5.5`, `opus-5.5`, and `fable-5.1`. Both providers can create children using
+also exposes `haiku-5.5`, `sonnet-5.5`, `opus-5.5`, and `fable-5.1`. Both providers can create children using
 either provider. Claude is rejected at the runtime boundary unless enabled. There is no `selected`
 alias. Tact's session instructions include a self-contained model-selection guide for the enabled
 models; the `spawn_agent` schema states availability and delegation limits.
@@ -76,9 +76,10 @@ does not inherit the caller's conversation. Each child model's instructions are 
 configuration and skill catalog when the root runtime starts. This includes configured replacement
 and appended instructions. A resumed parent keeps its saved instructions; its new children use
 these freshly composed instructions. Fresh and resumed sessions include the model-selection guide
-directly in their instruction Markdown. Children inherit the configured fast-mode setting where
-the selected model supports it, including Opus 5.5 but excluding Sonnet 5.5 and
-Fable 5.1. Codex children also inherit the configured reasoning mode; Claude children use standard
+directly in their instruction Markdown. Children inherit the configured speed preference and use
+the fastest supported tier no higher than requested: Astra and Sol support ultrafast, Luna and
+Opus 5.5 support fast, and Haiku 5.5, Sonnet 5.5, and Fable 5.1 use standard speed.
+Codex children also inherit the configured reasoning mode; Claude children use standard
 reasoning mode. Their initial prompt contains:
 
 - the assigned role and task;
@@ -111,7 +112,7 @@ subsequently accepted turns; already accepted turns and active steering retain t
 Tact's session instructions contain the model-selection guide: starting models for each provider,
 how to pick an effort level, when to escalate to a stronger child, and the benchmark figures behind
 those suggestions. The guide is defined once, with the session instructions in
-`bin/tact/src/core/mod.rs`, because its figures change with each model release. The
+`bin/tact/src/core/instructions.rs`, because its figures change with each model release. The
 `spawn_agent` schema describes the effort scale again in its `thinking` field.
 
 Every `spawn_agent` call must provide `role`, `task`, `model`, `thinking`, and `output_schema`:

@@ -237,6 +237,7 @@ mod tests {
     fn claude_models_require_explicit_opt_in() {
         for (model, default_effort) in [
             ("sonnet-5.5", ReasoningEffort::High),
+            ("haiku-5.5", ReasoningEffort::Medium),
             ("opus-5.5", ReasoningEffort::Medium),
             ("fable-5.1", ReasoningEffort::High),
         ] {
