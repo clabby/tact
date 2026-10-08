@@ -2,10 +2,7 @@
 //! answer calls the module the terminal uses for the same feature; this module only gathers inputs
 //! from loop state and moves slow work off the event loop.
 
-use super::{
-    components::{AppNode, RootNode},
-    merge_recent_prompts,
-};
+use super::recent_prompts::merge_recent_prompts;
 use crate::{
     app::{config::Config, error::ConfigEditError, model::ModelCatalog},
     core::{
@@ -14,6 +11,7 @@ use crate::{
         session::{self, HistoryPage, RecentPrompt, RecentPrompts},
     },
     search::FileMatches,
+    tui::components::{AppNode, RootNode},
 };
 use std::{fmt::Display, future::Future, path::Path, pin::Pin};
 use tact_memory::{MemoryError, MemoryKey, MemoryStore, SelectedMemoryStore};
