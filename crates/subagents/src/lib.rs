@@ -10,6 +10,7 @@ mod runtime;
 mod speed;
 mod task_tree;
 mod tools;
+mod turn;
 
 pub use model::{
     AgentContext, AgentDescriptor, AgentId, AgentMessage, AgentMessageUpdate, AgentStatus,

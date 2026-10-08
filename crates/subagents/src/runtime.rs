@@ -13,6 +13,7 @@ use super::{
         ThreadId,
     },
     task_tree::TaskTree,
+    turn::TurnSlot,
 };
 use futures_util::future::join_all;
 use jsonschema::Validator;
@@ -42,12 +43,8 @@ pub(super) struct ChildSession {
     pub(super) harness: Option<HarnessHandle>,
     pub(super) harness_task: Option<JoinHandle<()>>,
     pub(super) status: AgentStatus,
-    pub(super) active: bool,
+    pub(super) turn: TurnSlot,
     pub(super) output_validator: Validator,
-    pub(super) next_turn_token: u64,
-    pub(super) active_turn_token: Option<u64>,
-    pub(super) steering: bool,
-    pub(super) submitted_output: Option<Value>,
     pub(super) last_output: Option<Value>,
 }
 
@@ -255,7 +252,6 @@ pub(super) struct DelegationChange {
 
 pub(super) struct TurnSteer {
     id: AgentId,
-    previous_token: u64,
     token: u64,
 }
 
@@ -285,29 +281,9 @@ impl RegistryState {
             .sessions
             .get_mut(&id)
             .ok_or(SubagentError::StateDisappeared(RegistryEntry::Session))?;
-        if !session.active {
-            return Err(SubagentError::NoActiveTurn);
-        }
-        if session.steering {
-            return Err(SubagentError::TurnSteering);
-        }
-        if session.active_turn_token != Some(turn_token) {
-            return Err(SubagentError::StaleTurnToken);
-        }
-        if session.submitted_output.is_some() {
-            return Err(SubagentError::AlreadySubmitted);
-        }
-        let violations = session
-            .output_validator
-            .iter_errors(&output)
-            .take(4)
-            .map(|error| error.to_string())
-            .collect::<Vec<_>>();
-        if !violations.is_empty() {
-            return Err(SubagentError::OutputMismatch { violations });
-        }
-        session.submitted_output = Some(output);
-        Ok(())
+        session
+            .turn
+            .submit(turn_token, output, &session.output_validator)
     }
 
     fn begin_turn_steer(&mut self, root_session_id: &str, id: AgentId) -> Option<TurnSteer> {
@@ -316,19 +292,8 @@ impl RegistryState {
             .get_mut(root_session_id)?
             .sessions
             .get_mut(&id)?;
-        if !session.active || session.steering || session.submitted_output.is_some() {
-            return None;
-        }
-        let previous_token = session.active_turn_token?;
-        let token = session.next_turn_token.checked_add(1)?;
-        session.next_turn_token = token;
-        session.active_turn_token = Some(token);
-        session.steering = true;
-        Some(TurnSteer {
-            id,
-            previous_token,
-            token,
-        })
+        let token = session.turn.begin_steer()?;
+        Some(TurnSteer { id, token })
     }
 
     fn finish_turn_steer(&mut self, root_session_id: &str, steer: TurnSteer, committed: bool) {
@@ -339,13 +304,7 @@ impl RegistryState {
         else {
             return;
         };
-        if session.active_turn_token != Some(steer.token) {
-            return;
-        }
-        if !committed {
-            session.active_turn_token = Some(steer.previous_token);
-        }
-        session.steering = false;
+        session.turn.finish_steer(steer.token, committed);
     }
 
     fn reserve_for(&mut self, session_id: &str) -> Result<AgentReservation, SubagentError> {
@@ -759,7 +718,7 @@ impl RegistryState {
                 .sessions
                 .get_mut(id)
                 .ok_or(SubagentError::UnknownAgent(*id))?;
-            if session.active {
+            if session.turn.is_active() {
                 return Err(SubagentError::StillRunning(*id));
             }
             session.harness = None;
@@ -787,7 +746,7 @@ impl RegistryState {
             scope
                 .sessions
                 .get(id)
-                .is_some_and(|session| !session.active)
+                .is_some_and(|session| !session.turn.is_active())
         }))
     }
 
@@ -1008,12 +967,8 @@ impl Registry {
                 harness: Some(harness),
                 harness_task: Some(harness_task),
                 status: AgentStatus::Pending,
-                active: false,
+                turn: TurnSlot::default(),
                 output_validator: validator,
-                next_turn_token: 0,
-                active_turn_token: None,
-                steering: false,
-                submitted_output: None,
                 last_output: None,
             },
         )?;
@@ -1047,15 +1002,10 @@ impl Registry {
                 .scopes
                 .get_mut(root_session_id)
                 .and_then(|scope| scope.sessions.get_mut(&id))?;
-            if !session.status.can_start_turn() || session.active {
+            if !session.status.can_start_turn() {
                 None
             } else {
-                let token = session.next_turn_token.checked_add(1)?;
-                session.next_turn_token = token;
-                session.active_turn_token = Some(token);
-                session.active = true;
-                session.steering = false;
-                session.submitted_output = None;
+                let token = session.turn.start()?;
                 session.status = AgentStatus::Running;
                 Some((
                     token,
@@ -1094,10 +1044,7 @@ impl Registry {
             else {
                 return;
             };
-            session.active = false;
-            session.active_turn_token = None;
-            session.steering = false;
-            session.submitted_output = None;
+            session.turn.finish();
             if !matches!(session.status, AgentStatus::Closing | AgentStatus::Closed) {
                 session.status = AgentStatus::Failed { error };
             }
@@ -1122,13 +1069,9 @@ impl Registry {
             else {
                 return;
             };
-            if !session.active {
+            let Some(submitted_output) = session.turn.finish() else {
                 return;
-            }
-            session.active = false;
-            session.active_turn_token = None;
-            session.steering = false;
-            let submitted_output = session.submitted_output.take();
+            };
             if matches!(session.status, AgentStatus::Closing | AgentStatus::Closed) {
                 session.status.clone()
             } else {
@@ -1160,10 +1103,7 @@ impl Registry {
             if matches!(session.status, AgentStatus::Closed) {
                 false
             } else {
-                session.active = false;
-                session.active_turn_token = None;
-                session.steering = false;
-                session.submitted_output = None;
+                session.turn.finish();
                 session.status = AgentStatus::Closed;
                 true
             }
@@ -1863,7 +1803,7 @@ fn send_update(
 mod tests {
     use super::{
         AgentDescriptor, AgentId, AgentStatus, AuthorityError, ChildSession, OutputContract,
-        Registry, RegistryState, RootAgentAuthority, Subagents, complete_session,
+        Registry, RegistryState, RootAgentAuthority, Subagents, TurnSlot, complete_session,
         completion_instructions, forward_events,
     };
     use crate::error::{DeliveryFailure, SpawnError, SubagentError};
@@ -2106,7 +2046,7 @@ mod tests {
                 .sessions
                 .get_mut(&parent.id)
                 .unwrap();
-            session.active = false;
+            session.turn.finish();
             session.status = AgentStatus::Completed { output: json!({}) };
         }
     }
@@ -2389,12 +2329,8 @@ mod tests {
             harness: None,
             harness_task: None,
             status: AgentStatus::Pending,
-            active: false,
+            turn: TurnSlot::default(),
             output_validator: test_contract().validator,
-            next_turn_token: 0,
-            active_turn_token: None,
-            steering: false,
-            submitted_output: None,
             last_output: None,
         }
     }
@@ -2404,9 +2340,7 @@ mod tests {
         let mut registry = RegistryState::default();
         let reservation = registry.reserve("main", None).unwrap();
         let mut session = test_session(reservation.id, "child-session", None);
-        session.active = true;
-        session.next_turn_token = 1;
-        session.active_turn_token = Some(1);
+        session.turn.start();
         session.status = AgentStatus::Running;
         session.output_validator = jsonschema::validator_for(&json!({
             "type": "object",
@@ -2444,7 +2378,7 @@ mod tests {
             .sessions
             .get_mut(&reservation.id)
             .unwrap();
-        let output = session.submitted_output.take();
+        let output = session.turn.finish().flatten();
         let status = complete_session(session, output);
 
         assert_eq!(
@@ -2473,78 +2407,6 @@ mod tests {
 
         assert!(matches!(status, AgentStatus::Failed { .. }));
         assert_eq!(session.last_output, None);
-    }
-
-    #[tokio::test]
-    async fn submission_from_completed_turn_cannot_satisfy_next_turn() {
-        let mut registry = RegistryState::default();
-        let reservation = registry.reserve("main", None).unwrap();
-        let mut session = test_session(reservation.id, "child-session", None);
-        session.active = true;
-        session.next_turn_token = 1;
-        session.active_turn_token = Some(1);
-        session.status = AgentStatus::Running;
-        registry
-            .insert(
-                reservation.root_session_id,
-                reservation.id,
-                session.descriptor.session_id.clone(),
-                session,
-            )
-            .unwrap();
-        let stale_output = json!({ "report": "result from the completed turn" });
-
-        let session = registry
-            .scopes
-            .get_mut("main")
-            .unwrap()
-            .sessions
-            .get_mut(&reservation.id)
-            .unwrap();
-        session.active = false;
-        session.active = true;
-        session.next_turn_token = 2;
-        session.active_turn_token = Some(2);
-        session.status = AgentStatus::Running;
-
-        assert!(
-            registry
-                .submit_result("child-session", 1, stale_output)
-                .is_err()
-        );
-    }
-
-    #[tokio::test]
-    async fn steering_rotates_the_token_and_stops_after_submission() {
-        let mut registry = RegistryState::default();
-        let reservation = registry.reserve("main", None).unwrap();
-        let mut session = test_session(reservation.id, "child-session", None);
-        session.active = true;
-        session.next_turn_token = 1;
-        session.active_turn_token = Some(1);
-        session.status = AgentStatus::Running;
-        registry
-            .insert(
-                reservation.root_session_id,
-                reservation.id,
-                session.descriptor.session_id.clone(),
-                session,
-            )
-            .unwrap();
-
-        let steer = registry.begin_turn_steer("main", reservation.id).unwrap();
-        assert_eq!(steer.token(), 2);
-        registry.finish_turn_steer("main", steer, true);
-        assert!(
-            registry
-                .submit_result("child-session", 1, json!({ "report": "stale" }))
-                .is_err()
-        );
-        registry
-            .submit_result("child-session", 2, json!({ "report": "current" }))
-            .unwrap();
-
-        assert!(registry.begin_turn_steer("main", reservation.id).is_none());
     }
 
     #[tokio::test]
