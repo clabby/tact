@@ -2,7 +2,7 @@ import { describeError, type ApiClient } from "../core/api-client";
 import { isActive, layoutAgents, NODE_HEIGHT, NODE_WIDTH } from "./agent-graph";
 import { Transcript } from "./chat";
 import { createSphere } from "../ui/dot-sphere";
-import { modelColor } from "../core/format";
+import { agentModelLabel, modelColor } from "../core/format";
 import { glyph } from "../ui/glyphs";
 import { openSheet } from "../ui/sheet";
 import { transcriptData, upsert, type SessionView } from "../core/store";
@@ -182,7 +182,7 @@ export function openSubagents(
       button.querySelector(".node-role")!.textContent = agent.role;
       button.querySelector(".node-id")!.textContent = `#${agent.id}`;
       button.querySelector<HTMLElement>(".model-dot")!.style.background = modelColor(agent.model);
-      button.querySelector(".node-model-text")!.textContent = `${agent.model} · ${agent.thinking}`;
+      button.querySelector(".node-model-text")!.textContent = agentModelLabel(agent);
       button.querySelector(".node-status")!.textContent = agent.status.state;
       button.addEventListener("click", () => void select(agent));
       return button;
@@ -206,7 +206,7 @@ export function openSubagents(
     pill.textContent = agent.status.state;
     pill.dataset.state = agent.status.state;
     head.querySelector<HTMLElement>(".model-dot")!.style.background = modelColor(agent.model);
-    head.querySelector(".agent-sub-text")!.textContent = `${agent.model} · ${agent.thinking} · #${agent.id}${agent.parent === null ? "" : ` · from #${agent.parent}`}`;
+    head.querySelector(".agent-sub-text")!.textContent = `${agentModelLabel(agent)} · #${agent.id}${agent.parent === null ? "" : ` · from #${agent.parent}`}`;
     head.querySelector(".agent-task p")!.textContent = agent.task;
     if (agent.status.state === "failed") {
       const error = document.createElement("p");

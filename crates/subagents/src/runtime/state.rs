@@ -7,12 +7,12 @@ use crate::{
     error::{RegistryEntry, SubagentError},
     harness::HarnessHandle,
     message::MessageThreads,
-    model::{AgentContext, AgentDescriptor, AgentId, AgentStatus},
+    model::{AgentContext, AgentDescriptor, AgentId, AgentStatus, serialize_reasoning_mode},
     task_tree::TaskTree,
     turn::TurnSlot,
 };
 use jsonschema::Validator;
-use nanocodex::HarnessModel as Model;
+use nanocodex::{HarnessModel as Model, ReasoningMode};
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -39,6 +39,7 @@ impl ChildSession {
         AgentSummary {
             agent_id: self.descriptor.id,
             model: self.descriptor.model,
+            reasoning_mode: self.descriptor.reasoning_mode,
             role: self.descriptor.role.clone(),
             task: self.descriptor.task.clone(),
             parent_agent_id: self.descriptor.parent,
@@ -72,6 +73,8 @@ pub(crate) struct AgentReservation {
 pub(crate) struct AgentSummary {
     pub(crate) agent_id: AgentId,
     pub(crate) model: Model,
+    #[serde(serialize_with = "serialize_reasoning_mode")]
+    pub(crate) reasoning_mode: ReasoningMode,
     pub(crate) role: String,
     pub(crate) task: String,
     pub(crate) parent_agent_id: Option<AgentId>,
@@ -84,6 +87,8 @@ pub(crate) struct AgentSummary {
 pub(crate) struct AgentDirectoryEntry {
     pub(crate) agent_id: AgentId,
     pub(crate) model: Model,
+    #[serde(serialize_with = "serialize_reasoning_mode")]
+    pub(crate) reasoning_mode: ReasoningMode,
     pub(crate) role: String,
     pub(crate) task: String,
     pub(crate) parent_agent_id: Option<AgentId>,
@@ -181,10 +186,7 @@ impl RegistryState {
             ) {
                 return Err(SubagentError::ParentClosing(parent));
             }
-            Some(AgentContext {
-                model: parent_session.descriptor.model,
-                thinking: parent_session.descriptor.thinking,
-            })
+            Some(parent_session.descriptor.context())
         } else {
             None
         };
@@ -284,6 +286,7 @@ impl RegistryState {
                 Some(AgentDirectoryEntry {
                     agent_id: id,
                     model: session.descriptor.model,
+                    reasoning_mode: session.descriptor.reasoning_mode,
                     role: bounded_summary(&session.descriptor.role),
                     task: bounded_summary(&session.descriptor.task),
                     parent_agent_id: session.descriptor.parent,

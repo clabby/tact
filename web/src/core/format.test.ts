@@ -1,5 +1,6 @@
+import type { Subagent } from "./wire";
 import { expect, test } from "bun:test";
-import { firstLine, formatAge, formatDuration, formatTokens, inputBlocked, statusLabel } from "./format";
+import { agentModelLabel, firstLine, formatAge, formatDuration, formatTokens, inputBlocked, statusLabel } from "./format";
 
 test("durations print like the TUI", () => {
   expect([840e6, 4.2e9, 42e9, 402e9, 3_900e9].map(formatDuration)).toEqual(["840ms", "4.2s", "42s", "6m 42s", "1h 05m"]);
@@ -34,4 +35,10 @@ test("input is blocked only while a manual compaction runs alone", () => {
   expect(inputBlocked(compacting, true)).toBe(false);
   expect(inputBlocked({ kind: "thinking" }, false)).toBe(false);
   expect(inputBlocked(null, false)).toBe(false);
+});
+
+test("subagent labels mark only pro reasoning", () => {
+  const agent = { model: "sol", thinking: "high", reasoning_mode: "standard" } as Subagent;
+  expect(agentModelLabel(agent)).toBe("sol · high");
+  expect(agentModelLabel({ ...agent, reasoning_mode: "pro" })).toBe("sol · high · pro");
 });

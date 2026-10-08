@@ -11,6 +11,8 @@ mod roster;
 mod runtime;
 mod speed;
 mod task_tree;
+#[cfg(test)]
+mod test_support;
 mod tools;
 mod turn;
 

@@ -131,13 +131,9 @@ impl ConfiguredAgent {
             AgentInstructions::from_config(config, model, restored_instructions, memory_enabled)?;
         let instructions = Arc::clone(&prompts.session.text);
         let skills = Arc::clone(&prompts.session.skills);
-        let context = AgentContext {
-            model,
-            thinking: thinking.into(),
-        };
+        let context = AgentContext::new(model, thinking.into(), reasoning_mode.into());
         let (agent, events) = recipe.build(AgentSpec {
             context,
-            reasoning_mode,
             speed: agent_config.speed(),
             instructions: Arc::clone(&instructions),
             session_id,
@@ -145,13 +141,13 @@ impl ConfiguredAgent {
         })?;
         subagent_control.set_agent_factory(
             context.thinking,
+            context.reasoning_mode,
             agent_config.speed(),
-            move |model, thinking, speed| {
+            move |context, speed| {
                 recipe.build(AgentSpec::clean(
-                    AgentContext { model, thinking },
-                    reasoning_mode,
+                    context,
                     speed,
-                    prompts.for_model(model),
+                    prompts.for_model(context.model),
                 ))
             },
         )?;
@@ -234,7 +230,7 @@ mod tests {
         error::{Error, RuntimeError},
     };
     use nanocodex::{
-        HarnessModel as Model, Model as CodexModel, Nanocodex, OpenAi,
+        HarnessModel as Model, Model as CodexModel, Nanocodex, OpenAi, ReasoningMode,
         oai::{
             ResponseError,
             tower::{ResponsesAttempt, ResponsesServiceConfig, ResponsesServiceResponse},
@@ -380,6 +376,7 @@ mod tests {
             context: tact_subagents::AgentContext {
                 model: Model::Codex(CodexModel::Astra),
                 thinking: nanocodex::Thinking::Low,
+                reasoning_mode: ReasoningMode::Standard,
             },
             events,
             instructions: ResponsesServiceConfig::default().system_prompt().into(),

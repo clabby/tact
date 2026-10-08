@@ -5,7 +5,8 @@
 //! a dedicated harness actor (see `crate::harness`), which reports turn starts, completions,
 //! and closes back to the registry; the registry republishes them as [`ScopedAgentUpdate`]s.
 //! `messaging` and `lifecycle` hold the multi-step flows that coordinate registry state with
-//! harnesses, and `policy` decides which models and efforts a parent may delegate to.
+//! harnesses, and `policy` decides which models, efforts, and reasoning modes a parent may
+//! delegate to.
 
 mod lifecycle;
 mod messaging;
@@ -25,8 +26,10 @@ use crate::{
     turn::TurnSlot,
 };
 pub(crate) use messaging::DelegationChange;
-use nanocodex::{AgentEvents, HarnessModel as Model, Nanocodex, NanocodexError, Thinking};
-use policy::thinking_rank;
+use nanocodex::{
+    AgentEvents, HarnessModel as Model, Nanocodex, NanocodexError, ReasoningMode, Thinking,
+};
+use policy::{reasoning_mode_exceeds, thinking_rank};
 use serde_json::Value;
 pub(crate) use state::{AgentDirectoryEntry, AgentSummary};
 use state::{AgentReservation, ChildSession, RegistryState, TurnSteer, complete_session};
@@ -58,13 +61,13 @@ struct AgentFactory {
     settings: Mutex<AgentSettings>,
 }
 
-type AgentBuilder = dyn Fn(Model, Thinking, Speed) -> Result<(Nanocodex, AgentEvents), NanocodexError>
-    + Send
-    + Sync;
+type AgentBuilder =
+    dyn Fn(AgentContext, Speed) -> Result<(Nanocodex, AgentEvents), NanocodexError> + Send + Sync;
 
 #[derive(Clone, Copy)]
 struct AgentSettings {
     max_thinking: Thinking,
+    max_reasoning_mode: ReasoningMode,
     speed: Speed,
 }
 
@@ -109,11 +112,12 @@ impl Registry {
     pub(crate) fn set_agent_factory<F>(
         &self,
         max_thinking: Thinking,
+        max_reasoning_mode: ReasoningMode,
         speed: Speed,
         factory: F,
     ) -> Result<(), NanocodexError>
     where
-        F: Fn(Model, Thinking, Speed) -> Result<(Nanocodex, AgentEvents), NanocodexError>
+        F: Fn(AgentContext, Speed) -> Result<(Nanocodex, AgentEvents), NanocodexError>
             + Send
             + Sync
             + 'static,
@@ -123,6 +127,7 @@ impl Registry {
                 build: Box::new(factory),
                 settings: Mutex::new(AgentSettings {
                     max_thinking,
+                    max_reasoning_mode,
                     speed,
                 }),
             })
@@ -131,11 +136,15 @@ impl Registry {
             })
     }
 
+    /// Builds a child after the runtime-wide caps admit it and returns the context it actually
+    /// runs. Pro is authorized against the requested mode before the target model's support
+    /// resolves it, so an over-ceiling request fails even for a model that would fall back.
     pub(super) fn spawn_agent(
         &self,
         model: Model,
         thinking: Thinking,
-    ) -> Result<(Nanocodex, AgentEvents), SubagentError> {
+        reasoning_mode: ReasoningMode,
+    ) -> Result<(Nanocodex, AgentEvents, AgentContext), SubagentError> {
         if !crate::SUPPORTED_MODELS.contains(&model) {
             return Err(SpawnError::ModelNotOffered.into());
         }
@@ -157,7 +166,16 @@ impl Registry {
             }
             .into());
         }
-        Ok((factory.build)(model, thinking, settings.speed)?)
+        if reasoning_mode_exceeds(reasoning_mode, settings.max_reasoning_mode) {
+            return Err(SpawnError::ReasoningModeExceedsMaximum {
+                requested: reasoning_mode,
+                maximum: settings.max_reasoning_mode,
+            }
+            .into());
+        }
+        let context = AgentContext::new(model, thinking, reasoning_mode);
+        let (agent, events) = (factory.build)(context, settings.speed)?;
+        Ok((agent, events, context))
     }
 
     pub(super) fn claude_enabled(&self) -> bool {
@@ -310,13 +328,7 @@ impl Registry {
             } else {
                 let token = session.turn.start()?;
                 session.status = AgentStatus::Running;
-                Some((
-                    token,
-                    AgentContext {
-                        model: session.descriptor.model,
-                        thinking: session.descriptor.thinking,
-                    },
-                ))
+                Some((token, session.descriptor.context()))
             }
         };
         if token.is_some() {
@@ -531,9 +543,11 @@ impl Subagents {
     /// Configures how clean child sessions are constructed.
     ///
     /// The factory must return a new session and its event stream on every call. The runtime
-    /// supplies the requested model and thinking effort, bounded by `max_thinking`, plus the current
-    /// speed preference. A runtime accepts exactly one factory; a second call returns
-    /// [`NanocodexError::InvalidRequest`].
+    /// supplies the child's resolved [`AgentContext`] plus the current speed preference. Effort
+    /// is bounded by the live `max_thinking` cap. `max_reasoning_mode` is the root session's
+    /// actual mode: Pro children are admitted only when it is Pro, and the context's mode is
+    /// already resolved to standard for models without Pro support. A runtime accepts exactly
+    /// one factory; a second call returns [`NanocodexError::InvalidRequest`].
     ///
     /// # Errors
     ///
@@ -541,17 +555,18 @@ impl Subagents {
     pub fn set_agent_factory<F>(
         &self,
         max_thinking: Thinking,
+        max_reasoning_mode: ReasoningMode,
         speed: Speed,
         factory: F,
     ) -> Result<(), NanocodexError>
     where
-        F: Fn(Model, Thinking, Speed) -> Result<(Nanocodex, AgentEvents), NanocodexError>
+        F: Fn(AgentContext, Speed) -> Result<(Nanocodex, AgentEvents), NanocodexError>
             + Send
             + Sync
             + 'static,
     {
         self.registry
-            .set_agent_factory(max_thinking, speed, factory)
+            .set_agent_factory(max_thinking, max_reasoning_mode, speed, factory)
     }
 
     /// Returns a root-session authority checker for application-owned tools.

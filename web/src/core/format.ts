@@ -1,4 +1,4 @@
-import type { TransientStatus } from "./wire";
+import type { Subagent, TransientStatus } from "./wire";
 
 /** Compact durations the way the TUI prints them: 840ms, 4.2s, 6m 42s, 1h 05m. */
 export function formatDuration(nanoseconds: number) {
@@ -71,4 +71,8 @@ export function formatTokens(tokens: number) {
   if (tokens < 1000) return String(tokens);
   if (tokens < 1_000_000) return `${(tokens / 1000).toFixed(tokens < 10_000 ? 1 : 0)}k`;
   return `${(tokens / 1_000_000).toFixed(1)}M`;
+}
+
+export function agentModelLabel(agent: Subagent) {
+  return [agent.model, agent.thinking, agent.reasoning_mode === "pro" ? "pro" : ""].filter(Boolean).join(" · ");
 }

@@ -303,7 +303,7 @@ type SubagentRoster = {
   max_subagents: number;
   agents: {                             // arrival order; an unlisted parent makes a root
     id: number; parent: number | null; session_id: string; role: string; task: string;
-    model: string; thinking: Effort;
+    model: string; thinking: Effort; reasoning_mode: "standard" | "pro";
     status: { state: "pending" | "running" | "interrupted" | "closing" | "closed" }
       | { state: "completed"; output: unknown } | { state: "failed"; error: string };
   }[];

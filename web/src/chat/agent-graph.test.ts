@@ -3,7 +3,7 @@ import { isActive, layoutAgents } from "./agent-graph";
 import type { Subagent } from "../core/wire";
 
 const agent = (id: number, parent: number | null, state: Subagent["status"]["state"] = "running"): Subagent => ({
-  id, parent, session_id: `s${id}`, role: `agent ${id}`, task: "", model: "sol", thinking: "high",
+  id, parent, session_id: `s${id}`, role: `agent ${id}`, task: "", model: "sol", thinking: "high", reasoning_mode: "standard",
   status: { state } as Subagent["status"],
 });
 

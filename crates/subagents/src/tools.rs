@@ -3,13 +3,13 @@ use super::{
     message::MAX_MESSAGE_BYTES,
     model::{
         AgentDescriptor, AgentId, AgentStatus, AgentUpdate, MessageId, MessagePriority,
-        MessagePurpose, agent_prompt,
+        MessagePurpose, agent_prompt, deserialize_reasoning_mode, serialize_reasoning_mode,
     },
     output::OutputContract,
     runtime::{AgentDirectoryEntry, AgentSummary, Registry, forward_events},
 };
 use nanocodex::{
-    HarnessModel as Model, Thinking, Tool,
+    HarnessModel as Model, ReasoningMode, Thinking, Tool,
     tools::{
         ToolsBuilder,
         contract::{ToolContext, ToolDefinition, ToolInput, ToolOutput, ToolResult, async_trait},
@@ -39,6 +39,8 @@ struct AgentTask {
     #[serde(deserialize_with = "crate::models::deserialize_model")]
     model: Model,
     thinking: Thinking,
+    #[serde(default, deserialize_with = "deserialize_reasoning_mode")]
+    reasoning_mode: ReasoningMode,
     output_schema: Value,
 }
 
@@ -46,6 +48,8 @@ struct AgentTask {
 struct AgentStartReport {
     agent_id: AgentId,
     model: Model,
+    #[serde(serialize_with = "serialize_reasoning_mode")]
+    reasoning_mode: ReasoningMode,
     role: String,
     status: AgentStatus,
 }
@@ -170,6 +174,12 @@ impl Tool for SpawnAgent {
                         "enum": ["low", "medium", "high", "xhigh", "max"],
                         "description": "Reasoning effort for this child, bounded by the live configured agent.thinking cap. Root agents follow that cap even after an update during an active turn; registered subagents are additionally bounded by their own assigned effort. Use low for mechanical work, medium for bounded coding or ordinary review, high for a bounded difficult proof, xhigh for interacting contracts or competing designs, and max for the hardest integrated architecture or proof. Higher effort upfront can avoid repeated weaker runs."
                     },
+                    "reasoning_mode": {
+                        "type": "string",
+                        "enum": ["standard", "pro"],
+                        "default": "standard",
+                        "description": "Reasoning mode for this child. Pro performs additional model work for harder problems at higher latency and cost. Only a spawning agent that itself runs in Pro mode may request pro. A child whose model lacks Pro support runs in standard mode, which then bounds its own children."
+                    },
                     "output_schema": {
                         "description": "The JSON Schema that every successful result from this agent must satisfy. Use an object with one string field for a free-form report."
                     }
@@ -187,6 +197,7 @@ impl Tool for SpawnAgent {
             task,
             model,
             thinking,
+            reasoning_mode,
             output_schema,
         } = input.decode_json()?;
         let contract = OutputContract::compile(&output_schema)?;
@@ -197,16 +208,18 @@ impl Tool for SpawnAgent {
         let capacity = registry.reserve_turn()?;
         let reservation = registry.reserve(context.session_id()).await?;
         reservation
-            .validate_child(context.model(), model, thinking)
+            .validate_child(context.model(), model, thinking, reasoning_mode)
             .map_err(SubagentError::from)?;
         let id = reservation.id;
-        let (child, events) = registry.spawn_agent(model, thinking)?;
+        let (child, events, child_context) =
+            registry.spawn_agent(model, thinking, reasoning_mode)?;
         let session_id = child.session_id().to_string();
         let descriptor = AgentDescriptor {
             id,
             session_id,
             model,
             thinking,
+            reasoning_mode: child_context.reasoning_mode,
             role: role.clone(),
             task: task.clone(),
             parent: reservation.parent,
@@ -243,6 +256,7 @@ impl Tool for SpawnAgent {
         json_output(&AgentStartReport {
             agent_id: id,
             model,
+            reasoning_mode: child_context.reasoning_mode,
             role,
             status: AgentStatus::Running,
         })
@@ -583,6 +597,7 @@ fn spawn_agent_output_schema() -> Value {
         "properties": {
             "agent_id": { "type": "integer" },
             "model": { "type": "string" },
+            "reasoning_mode": { "type": "string", "enum": ["standard", "pro"] },
             "role": { "type": "string" },
             "status": {
                 "type": "object",
@@ -591,7 +606,7 @@ fn spawn_agent_output_schema() -> Value {
                 "additionalProperties": false
             }
         },
-        "required": ["agent_id", "model", "role", "status"],
+        "required": ["agent_id", "model", "reasoning_mode", "role", "status"],
         "additionalProperties": false
     })
 }
@@ -607,13 +622,14 @@ fn wait_agent_output_schema() -> Value {
                     "properties": {
                         "agent_id": { "type": "integer" },
                         "model": { "type": "string" },
+                        "reasoning_mode": { "type": "string", "enum": ["standard", "pro"] },
                         "role": { "type": "string" },
                         "task": { "type": "string" },
                         "parent_agent_id": { "type": ["integer", "null"] },
                         "status": agent_status_schema(),
                         "last_output": {}
                     },
-                    "required": ["agent_id", "model", "role", "task", "parent_agent_id", "status"],
+                    "required": ["agent_id", "model", "reasoning_mode", "role", "task", "parent_agent_id", "status"],
                     "additionalProperties": false
                 }
             },
@@ -659,17 +675,21 @@ fn agent_status_schema() -> Value {
 mod tests {
     use super::{SendAgentMessage, SpawnAgent, SubmitResult, WaitAgent};
     use crate::{
-        Speed,
+        AgentContext, AgentDescriptor, AgentUpdate, ScopedAgentUpdate, Speed,
         error::{SpawnError, SubagentError},
         runtime::Registry,
+        test_support::recording_agent,
     };
     use nanocodex::{
-        HarnessModel as Model, Model as CodexModel, NanocodexError, Thinking, Tool,
-        tools::contract::{ToolContext, ToolError, ToolInput},
+        HarnessModel as Model, Model as CodexModel, NanocodexError, ReasoningMode, Thinking, Tool,
+        tools::contract::{ToolContext, ToolError, ToolInput, ToolOutput},
     };
-    use serde_json::{json, value::to_raw_value};
-    use std::sync::{Arc, Weak};
-    use tokio::sync::mpsc;
+    use serde_json::{Value, json, value::to_raw_value};
+    use std::{
+        sync::{Arc, Weak},
+        time::Duration,
+    };
+    use tokio::{sync::mpsc, time::timeout};
 
     fn subagent_error(error: &ToolError) -> &SubagentError {
         error
@@ -684,9 +704,12 @@ mod tests {
         runtime
             .set_agent_factory(
                 Thinking::Max,
+                ReasoningMode::Standard,
                 Speed::Standard,
-                move |model, thinking, speed| {
-                    captured.send((model, thinking, speed)).unwrap();
+                move |context: AgentContext, speed| {
+                    captured
+                        .send((context.model, context.thinking, speed))
+                        .unwrap();
                     Err(NanocodexError::InvalidRequest(
                         "stop after capture".to_owned(),
                     ))
@@ -745,9 +768,12 @@ mod tests {
         registry
             .set_agent_factory(
                 Thinking::Max,
+                ReasoningMode::Standard,
                 Speed::Standard,
-                move |model, thinking, speed| {
-                    captured.send((model, thinking, speed)).unwrap();
+                move |context: AgentContext, speed| {
+                    captured
+                        .send((context.model, context.thinking, speed))
+                        .unwrap();
                     Err(NanocodexError::InvalidRequest(
                         "stop after capture".to_owned(),
                     ))
@@ -870,6 +896,279 @@ mod tests {
         }
     }
 
+    /// Drives `spawn_agent` against real, never-finishing child harnesses so registered
+    /// parents carry the context the runtime actually stored for them.
+    struct ModeHarness {
+        runtime: crate::Subagents,
+        updates: mpsc::UnboundedReceiver<ScopedAgentUpdate>,
+        built: mpsc::UnboundedReceiver<AgentContext>,
+        prompts: mpsc::UnboundedReceiver<(CodexModel, Thinking, String)>,
+        tool: SpawnAgent,
+    }
+
+    /// A child registered by a successful spawn.
+    struct Spawned {
+        session_id: String,
+        report: Value,
+        descriptor: AgentDescriptor,
+    }
+
+    impl ModeHarness {
+        fn new(max_reasoning_mode: ReasoningMode) -> Self {
+            let (runtime, updates) = crate::Subagents::new(8);
+            runtime.set_claude_enabled(true);
+            let (built_sender, built) = mpsc::unbounded_channel();
+            let (prompt_sender, prompts) = mpsc::unbounded_channel();
+            runtime
+                .set_agent_factory(
+                    Thinking::Max,
+                    max_reasoning_mode,
+                    Speed::Standard,
+                    move |context, _| {
+                        built_sender.send(context).unwrap();
+                        Ok(recording_agent(prompt_sender.clone()))
+                    },
+                )
+                .unwrap();
+            let tool = SpawnAgent {
+                registry: runtime.downgrade().registry,
+            };
+            Self {
+                runtime,
+                updates,
+                built,
+                prompts,
+                tool,
+            }
+        }
+
+        async fn spawn(
+            &self,
+            caller_session: &str,
+            model: &str,
+            reasoning_mode: Option<Value>,
+        ) -> Result<ToolOutput, ToolError> {
+            let mut input = json!({
+                "role": "reviewer",
+                "task": "Review a focused change.",
+                "model": model,
+                "thinking": "medium",
+                "output_schema": { "type": "object" }
+            });
+            if let Some(reasoning_mode) = reasoning_mode {
+                input["reasoning_mode"] = reasoning_mode;
+            }
+            self.tool
+                .execute(
+                    ToolInput::Function(to_raw_value(&input).unwrap()),
+                    ToolContext::new(
+                        Model::Codex(CodexModel::Astra).as_str(),
+                        caller_session,
+                        "spawn",
+                        &[],
+                        128,
+                    ),
+                )
+                .await
+        }
+
+        /// Spawns successfully and checks that the factory, report, descriptor, and injected
+        /// turn context all carry `expected`.
+        async fn spawn_ok(
+            &mut self,
+            caller_session: &str,
+            model: &str,
+            reasoning_mode: Option<Value>,
+            expected: ReasoningMode,
+        ) -> Spawned {
+            let report = self
+                .spawn(caller_session, model, reasoning_mode)
+                .await
+                .unwrap()
+                .structured_result();
+            let built = self.built.try_recv().unwrap();
+            assert_eq!(built.model, crate::parse_model(model).unwrap());
+            assert_eq!(built.reasoning_mode, expected);
+            assert_eq!(report["reasoning_mode"], expected.as_str());
+            let descriptor = loop {
+                let update = timeout(Duration::from_secs(5), self.updates.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                if let AgentUpdate::Added(descriptor) = update.update {
+                    break descriptor;
+                }
+            };
+            assert_eq!(descriptor.reasoning_mode, expected);
+            let (_, _, prompt) = timeout(Duration::from_secs(5), self.prompts.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                prompt.contains(&format!("in {expected} reasoning mode.")),
+                "{prompt}"
+            );
+            Spawned {
+                session_id: descriptor.session_id.clone(),
+                report,
+                descriptor,
+            }
+        }
+
+        async fn spawn_rejected(
+            &mut self,
+            caller_session: &str,
+            model: &str,
+            reasoning_mode: Option<Value>,
+        ) -> SubagentError {
+            let error = self
+                .spawn(caller_session, model, reasoning_mode)
+                .await
+                .err()
+                .unwrap();
+            assert!(
+                self.built.try_recv().is_err(),
+                "rejected requests never reach the factory"
+            );
+            error
+                .downcast::<SubagentError>()
+                .map(|error| *error)
+                .expect("subagent tools should fail with a typed runtime error")
+        }
+    }
+
+    #[tokio::test]
+    async fn root_reasoning_mode_bounds_requests_before_model_fallback() {
+        let pro = || Some(json!("pro"));
+        let standard = || Some(json!("standard"));
+
+        let mut root = ModeHarness::new(ReasoningMode::Pro);
+        root.spawn_ok("root", "sol", None, ReasoningMode::Standard)
+            .await;
+        root.spawn_ok("root", "sol", standard(), ReasoningMode::Standard)
+            .await;
+        root.spawn_ok("root", "sol", pro(), ReasoningMode::Pro)
+            .await;
+        let fallback = root
+            .spawn_ok("root", "opus-5.5", pro(), ReasoningMode::Standard)
+            .await;
+        assert_eq!(fallback.report["model"], json!("claude-opus-5-5"));
+        root.runtime.close_all("root").await;
+
+        let mut root = ModeHarness::new(ReasoningMode::Standard);
+        root.spawn_ok("root", "sol", None, ReasoningMode::Standard)
+            .await;
+        for model in ["sol", "opus-5.5"] {
+            assert!(matches!(
+                root.spawn_rejected("root", model, pro()).await,
+                SubagentError::Spawn(SpawnError::ReasoningModeExceedsMaximum {
+                    requested: ReasoningMode::Pro,
+                    maximum: ReasoningMode::Standard,
+                })
+            ));
+        }
+        root.runtime.close_all("root").await;
+    }
+
+    #[tokio::test]
+    async fn registered_parents_delegate_pro_only_from_their_actual_mode() {
+        let pro = || Some(json!("pro"));
+        let mut harness = ModeHarness::new(ReasoningMode::Pro);
+        let pro_parent = harness
+            .spawn_ok("root", "sol", pro(), ReasoningMode::Pro)
+            .await;
+        let standard_parent = harness
+            .spawn_ok("root", "sol", None, ReasoningMode::Standard)
+            .await;
+        let claude_parent = harness
+            .spawn_ok("root", "opus-5.5", pro(), ReasoningMode::Standard)
+            .await;
+
+        let pro_child = harness
+            .spawn_ok(&pro_parent.session_id, "luna", pro(), ReasoningMode::Pro)
+            .await;
+        assert_eq!(pro_child.descriptor.parent, Some(pro_parent.descriptor.id));
+        harness
+            .spawn_ok(
+                &pro_parent.session_id,
+                "luna",
+                None,
+                ReasoningMode::Standard,
+            )
+            .await;
+
+        // A standard parent cannot regain Pro, including through a Claude fallback parent or a
+        // Claude target that would itself resolve to standard.
+        for parent in [&standard_parent, &claude_parent] {
+            for model in ["sol", "opus-5.5"] {
+                assert!(matches!(
+                    harness
+                        .spawn_rejected(&parent.session_id, model, pro())
+                        .await,
+                    SubagentError::Spawn(SpawnError::ReasoningModeExceedsParent {
+                        requested: ReasoningMode::Pro,
+                        parent: ReasoningMode::Standard,
+                    })
+                ));
+            }
+        }
+        let standard_grandchild = harness
+            .spawn_ok(
+                &claude_parent.session_id,
+                "sol",
+                None,
+                ReasoningMode::Standard,
+            )
+            .await;
+        assert!(matches!(
+            harness
+                .spawn_rejected(&standard_grandchild.session_id, "sol", pro())
+                .await,
+            SubagentError::Spawn(SpawnError::ReasoningModeExceedsParent { .. })
+        ));
+        harness.runtime.close_all("root").await;
+    }
+
+    #[tokio::test]
+    async fn malformed_reasoning_modes_are_rejected_before_spawning() {
+        let mut harness = ModeHarness::new(ReasoningMode::Pro);
+        let definition = harness.tool.definition();
+        let parameters = definition.parameters().unwrap().as_value();
+        assert_eq!(
+            parameters["properties"]["reasoning_mode"]["enum"],
+            json!(["standard", "pro"])
+        );
+        assert_eq!(
+            parameters["properties"]["reasoning_mode"]["default"],
+            json!("standard")
+        );
+        assert!(
+            !parameters["required"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("reasoning_mode"))
+        );
+        let validator = jsonschema::validator_for(parameters).unwrap();
+        for mode in [
+            json!(null),
+            json!("Pro"),
+            json!("PRO"),
+            json!("ultra"),
+            json!(""),
+            json!(1),
+            json!(true),
+        ] {
+            let input = json!({
+                "role": "reviewer", "task": "Review", "model": "sol", "thinking": "medium",
+                "output_schema": { "type": "object" }, "reasoning_mode": mode
+            });
+            assert!(!validator.is_valid(&input));
+            assert!(harness.spawn("root", "sol", Some(mode)).await.is_err());
+            assert!(harness.built.try_recv().is_err());
+        }
+        assert!(harness.updates.try_recv().is_err());
+    }
+
     #[test]
     fn send_message_priority_defaults_to_deferred_delivery() {
         let definition = SendAgentMessage {
@@ -905,11 +1204,17 @@ mod tests {
         let agent = &output.as_value()["properties"]["agents"]["items"];
 
         assert_eq!(agent["properties"]["model"], json!({ "type": "string" }));
-        assert!(
-            agent["required"]
-                .as_array()
-                .unwrap()
-                .contains(&json!("model"))
+        assert_eq!(
+            agent["properties"]["reasoning_mode"]["enum"],
+            json!(["standard", "pro"])
         );
+        for field in ["model", "reasoning_mode"] {
+            assert!(
+                agent["required"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!(field))
+            );
+        }
     }
 }

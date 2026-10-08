@@ -10,13 +10,15 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use nanocodex::{HarnessModel, Model, Nanocodex};
+use nanocodex::{HarnessModel, Model, Nanocodex, agent::events::AgentEventKind};
 use serde_json::{Value, json};
 use std::{
+    collections::BTreeMap,
     fs,
     sync::{Arc, Mutex},
     time::Duration,
 };
+use tact_subagents::{AgentStatus, AgentUpdate};
 use tempfile::{TempDir, tempdir};
 use tokio::{net::TcpListener, process::Command, task::JoinHandle, time::timeout};
 
@@ -30,6 +32,7 @@ struct Provider(Arc<Mutex<ProviderState>>);
 struct ProviderState {
     requests: Vec<CapturedRequest>,
     next_response_id: u64,
+    scripts: BTreeMap<String, String>,
 }
 
 struct CapturedRequest {
@@ -47,6 +50,23 @@ impl Provider {
         let mut state = self.0.lock().unwrap();
         let id = format!("resp-fixture-{}", state.next_response_id);
         state.next_response_id += 1;
+        let items = body["input"].as_array();
+        let has_result = items.is_some_and(|items| {
+            items.iter().any(|item| {
+                matches!(
+                    item["type"].as_str(),
+                    Some("custom_tool_call_output" | "function_call_output")
+                )
+            })
+        });
+        let script = if has_result {
+            None
+        } else {
+            state
+                .scripts
+                .iter()
+                .find_map(|(marker, script)| has_user_marker(&body, marker).then(|| script.clone()))
+        };
         state.requests.push(CapturedRequest {
             authorized,
             transport,
@@ -55,17 +75,31 @@ impl Provider {
         if warmup {
             return json!({"type":"response.completed", "response":{"id":id, "usage":null}});
         }
+        let output = script.map_or_else(
+            || {
+                json!([{
+                    "id": format!("msg-{id}"),
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type":"output_text", "text":"done"}]
+                }])
+            },
+            |script| {
+                json!([{
+                    "type": "custom_tool_call",
+                    "id": format!("call-{id}"),
+                    "call_id": format!("call-{id}"),
+                    "name": "exec",
+                    "input": script,
+                }])
+            },
+        );
         json!({
             "type": "response.completed",
             "response": {
                 "id": id,
                 "status": "completed",
-                "output": [{
-                    "id": format!("msg-{id}"),
-                    "type": "message",
-                    "role": "assistant",
-                    "content": [{"type":"output_text", "text":"done"}]
-                }],
+                "output": output,
                 "usage": {
                     "input_tokens": 10,
                     "output_tokens": 2,
@@ -74,6 +108,14 @@ impl Provider {
             }
         })
     }
+}
+
+fn has_user_marker(body: &Value, marker: &str) -> bool {
+    body["input"].as_array().is_some_and(|items| {
+        items
+            .iter()
+            .any(|item| item["role"] == "user" && item.to_string().contains(marker))
+    })
 }
 
 async fn http_response(
@@ -183,6 +225,15 @@ impl Fixture {
 
     fn take_requests(&self) -> Vec<CapturedRequest> {
         std::mem::take(&mut self.provider.0.lock().unwrap().requests)
+    }
+
+    fn script(&self, marker: &str, code: &str) {
+        self.provider
+            .0
+            .lock()
+            .unwrap()
+            .scripts
+            .insert(marker.to_owned(), code.to_owned());
     }
 }
 
@@ -386,6 +437,139 @@ async fn configured_pro_mode_reaches_both_transports() {
             assert_policy(&requests, model, transport, None);
             for request in requests {
                 assert_eq!(request.body["reasoning"]["mode"], "pro");
+            }
+            root.shutdown().await.unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn configured_subagent_modes_reach_both_transports() {
+    if run_isolated("core::openai_tests::configured_subagent_modes_reach_both_transports").await {
+        return;
+    }
+    let fixture = Fixture::start().await;
+    fixture.script("DELEGATE_MODES", r#"
+const options = {model:'sol',thinking:'high',output_schema:{type:'null'}};
+text(await tools.spawn_agent({...options,role:'standard child',task:'MODE_CHILD_STANDARD'}));
+try {
+  text(await tools.spawn_agent({...options,role:'pro child',task:'MODE_CHILD_PRO',reasoning_mode:'pro'}));
+} catch (error) {
+  text({blocked:String(error)});
+}
+"#);
+    fixture.script(
+        "MODE_CHILD",
+        "text(await tools.submit_result({turn_token:1,output:null}));",
+    );
+    for transport in [Transport::Https, Transport::Websocket] {
+        for mode in [ReasoningMode::Standard, ReasoningMode::Pro] {
+            let directory = tempdir().unwrap();
+            let config = fixture.config(&directory, Model::Astra, transport, Speed::Ultrafast);
+            let text = fs::read_to_string(config.path()).unwrap();
+            fs::write(
+                config.path(),
+                text.replace(
+                    "[subagents]\nenabled = false",
+                    "[subagents]\nenabled = true",
+                ),
+            )
+            .unwrap();
+            let mut config = config.reload().unwrap().into_parts().0;
+            config.set_reasoning_mode(mode);
+            let mut root = configured(&config, Model::Astra);
+            prompt(&root.agent, "DELEGATE_MODES").await;
+            let expected_children = if mode == ReasoningMode::Pro { 2 } else { 1 };
+            let mut children = BTreeMap::new();
+            timeout(Duration::from_secs(10), async {
+                let mut completed = 0;
+                while completed < expected_children {
+                    match root.subagent_updates.recv().await.unwrap().update {
+                        AgentUpdate::Added(child) => {
+                            children.insert(child.role, child.reasoning_mode);
+                        }
+                        AgentUpdate::Status {
+                            status: AgentStatus::Completed { output },
+                            ..
+                        } => {
+                            assert_eq!(output, Value::Null);
+                            completed += 1;
+                        }
+                        AgentUpdate::Status {
+                            status: AgentStatus::Failed { error },
+                            ..
+                        } => {
+                            panic!("child failed: {error}");
+                        }
+                        _ => {}
+                    }
+                }
+            })
+            .await
+            .expect("delegated children did not complete");
+            assert_eq!(children.len(), expected_children);
+            assert_eq!(children["standard child"], ReasoningMode::Standard.into());
+            if mode == ReasoningMode::Pro {
+                assert_eq!(children["pro child"], ReasoningMode::Pro.into());
+            }
+            let mut spawn_results = Vec::new();
+            while let Some(event) = root.events.try_recv_timed() {
+                if event.event.kind == AgentEventKind::ToolResult {
+                    let event: Value = serde_json::from_str(event.event.payload.get()).unwrap();
+                    if event["tool"] == "spawn_agent" {
+                        spawn_results.push(event);
+                    }
+                }
+            }
+            assert_eq!(spawn_results.len(), 2);
+            assert_eq!(
+                spawn_results[0]["structured_result"]["reasoning_mode"],
+                "standard"
+            );
+            if mode == ReasoningMode::Pro {
+                assert_eq!(
+                    spawn_results[1]["structured_result"]["reasoning_mode"],
+                    "pro"
+                );
+            } else {
+                assert_eq!(spawn_results[1]["status"], "failed");
+            }
+            let requests = fixture.take_requests();
+            let initial_children = requests
+                .iter()
+                .filter(|request| {
+                    request.body["generate"] != false
+                        && has_user_marker(&request.body, "MODE_CHILD")
+                        && !request.body["input"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .any(|item| item["type"] == "custom_tool_call_output")
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(initial_children.len(), expected_children);
+            for request in initial_children {
+                let expected_mode = if has_user_marker(&request.body, "MODE_CHILD_PRO") {
+                    ReasoningMode::Pro
+                } else {
+                    ReasoningMode::Standard
+                };
+                assert_eq!(request.body["model"], Model::Sol.as_str());
+                assert_eq!(request.body["service_tier"], "ultrafast");
+                assert_eq!(request.body["reasoning"]["effort"], "high");
+                assert_eq!(
+                    request.body["reasoning"]["mode"],
+                    if expected_mode == ReasoningMode::Pro {
+                        json!("pro")
+                    } else {
+                        Value::Null
+                    }
+                );
+                assert!(
+                    request.body["input"]
+                        .to_string()
+                        .contains(&format!("in {} reasoning mode", expected_mode.as_str()))
+                );
             }
             root.shutdown().await.unwrap();
         }

@@ -1387,7 +1387,7 @@ mod tests {
     };
     use nanocodex::{
         AgentEvents, HarnessModel as Model, Model as CodexModel, Nanocodex, NanocodexError, OpenAi,
-        Thinking,
+        ReasoningMode, Thinking,
         agent::input::{Prompt, PromptInput, UserInput},
         oai::{
             ResponseError,
@@ -1809,6 +1809,7 @@ mod tests {
         Nanocodex::builder(openai)
             .model(context.model.as_str().parse::<CodexModel>().unwrap())
             .thinking(context.thinking)
+            .reasoning_mode(context.reasoning_mode)
             .build()
             .unwrap()
     }
@@ -1833,7 +1834,7 @@ mod tests {
         let model_name = crate::app::model::name(model).to_ascii_lowercase();
         assert!(
             context.contains(&format!(
-                "This turn runs on {model_name} with {context_thinking} reasoning effort."
+                "This turn runs on {model_name} with {context_thinking} reasoning effort in standard reasoning mode."
             )),
             "{context}"
         );
@@ -1912,6 +1913,7 @@ mod tests {
             AgentContext {
                 model: Model::Claude(ClaudeModel::Opus55),
                 thinking: Thinking::Medium,
+                reasoning_mode: ReasoningMode::Standard,
             },
             MemoryReviewState::fresh(false),
             shutdown.clone(),
@@ -2011,6 +2013,7 @@ mod tests {
             AgentContext {
                 model: Model::Claude(ClaudeModel::Opus55),
                 thinking: Thinking::High,
+                reasoning_mode: ReasoningMode::Standard,
             },
             MemoryReviewState::fresh(false),
             shutdown.clone(),
@@ -2293,6 +2296,7 @@ mod tests {
         let replacement_context = AgentContext {
             model: Model::Codex(CodexModel::Sol),
             thinking: Thinking::Medium,
+            reasoning_mode: ReasoningMode::Standard,
         };
         let (replacement, mut replacement_events) = capture_agent(sender, replacement_context);
         let replacement_drain =
@@ -2422,6 +2426,7 @@ mod tests {
     const TEST_CONTEXT: AgentContext = AgentContext {
         model: Model::Codex(CodexModel::Astra),
         thinking: Thinking::Low,
+        reasoning_mode: ReasoningMode::Standard,
     };
 
     fn pending_agent(called: Arc<Notify>, calls: Arc<AtomicUsize>) -> (Nanocodex, AgentEvents) {

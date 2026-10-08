@@ -102,7 +102,9 @@ pub(super) fn build_client(
         snapshot,
         fast_mode,
     } = session;
-    let AgentContext { model, thinking } = context;
+    let AgentContext {
+        model, thinking, ..
+    } = context;
     if let Some(snapshot) = &snapshot {
         snapshot.validate_identity(model, session_id)?;
     }
@@ -514,7 +516,7 @@ mod tests {
         routing::post,
     };
     use nanocodex::{
-        ClaudeModel, Tool,
+        ClaudeModel, ReasoningMode, Tool,
         tools::contract::{ToolContext, ToolOutput, ToolResult, async_trait},
     };
     use std::{
@@ -632,6 +634,7 @@ mod tests {
             AgentContext {
                 model: Model::Claude(nanocodex::ClaudeModel::Opus55),
                 thinking: Thinking::Medium,
+                reasoning_mode: ReasoningMode::Standard,
             },
             workspace,
             Arc::from("test instructions"),
@@ -721,6 +724,7 @@ mod tests {
             AgentContext {
                 model: Model::Claude(model),
                 thinking: Thinking::Medium,
+                reasoning_mode: ReasoningMode::Standard,
             },
             workspace,
             Arc::from("test instructions"),
@@ -941,6 +945,7 @@ mod tests {
                 AgentContext {
                     model: Model::Claude(model),
                     thinking: Thinking::Medium,
+                    reasoning_mode: ReasoningMode::Standard,
                 },
                 workspace.path(),
                 Arc::from("test instructions"),
@@ -996,6 +1001,7 @@ mod tests {
             AgentContext {
                 model: Model::Claude(nanocodex::ClaudeModel::Opus55),
                 thinking: Thinking::Medium,
+                reasoning_mode: ReasoningMode::Standard,
             },
             workspace.path(),
             Arc::from("test instructions"),
@@ -1203,6 +1209,7 @@ mod tests {
             AgentContext {
                 model: Model::Claude(nanocodex::ClaudeModel::Opus55),
                 thinking: Thinking::High,
+                reasoning_mode: ReasoningMode::Standard,
             },
             workspace.path(),
             Arc::from("test instructions"),

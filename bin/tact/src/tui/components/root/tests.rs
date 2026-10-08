@@ -18,7 +18,8 @@ use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use nanocodex::{
-    ClaudeModel, HarnessModel as Model, Model as CodexModel, Thinking,
+    ClaudeModel, HarnessModel as Model, Model as CodexModel,
+    ReasoningMode as NanocodexReasoningMode, Thinking,
     agent::{
         events::{AgentEvent, AgentEventKind},
         input::{PromptInput, UserInput},
@@ -96,6 +97,7 @@ fn subagent(id: u64, task: &str) -> AgentDescriptor {
         session_id: format!("agent-{id}"),
         model: Model::Codex(CodexModel::Sol),
         thinking: Thinking::Medium,
+        reasoning_mode: NanocodexReasoningMode::Standard,
         role: "worker".to_owned(),
         task: task.to_owned(),
         parent: None,
