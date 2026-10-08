@@ -1,6 +1,7 @@
 use crate::{
     MemoryCandidate, MemoryError, MemoryKey, MemoryLimits, MemoryRecord, MemoryScan, MemoryStore,
     protocol,
+    secrets::{contains_likely_secret, reject_likely_secret},
 };
 use protocol::{
     DeleteRequest, ErrorResponse, ExportPage, ExportRequest, ListResponse, PutRequest, PutResponse,
@@ -430,7 +431,7 @@ impl RemoteMemoryClient {
             && candidate.preview.len() <= 64
             && candidate.score.is_finite()
             && candidate.score >= 0.0
-            && !crate::secrets::contains_likely_secret(&candidate.preview)
+            && !contains_likely_secret(&candidate.preview)
     }
 
     fn valid_record(memory: &MemoryRecord) -> bool {
@@ -439,7 +440,7 @@ impl RemoteMemoryClient {
             && !memory.content.trim().is_empty()
             && memory.created_at_ms >= 0
             && memory.updated_at_ms >= memory.created_at_ms
-            && !crate::secrets::contains_likely_secret(&memory.content)
+            && !contains_likely_secret(&memory.content)
     }
 
     async fn get<Response>(&self, path: &str, replay: Replay) -> Result<Response, RemoteClientError>
@@ -557,6 +558,7 @@ impl MemoryStore for RemoteMemoryClient {
             if content.trim().is_empty() {
                 return Err(MemoryError::EmptyContent);
             }
+            reject_likely_secret(content)?;
             Ok(RemoteMemoryClient::put(self, content, replacement.as_ref()).await?)
         }
     }
@@ -570,7 +572,12 @@ impl MemoryStore for RemoteMemoryClient {
         &self,
         memories: &[MemoryRecord],
     ) -> impl std::future::Future<Output = Result<SyncReport, MemoryError>> + Send {
-        async move { Ok(RemoteMemoryClient::sync(self, memories).await?) }
+        async move {
+            for memory in memories {
+                reject_likely_secret(&memory.content)?;
+            }
+            Ok(RemoteMemoryClient::sync(self, memories).await?)
+        }
     }
     fn export_page(
         &self,

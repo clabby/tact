@@ -1826,6 +1826,26 @@ async fn client_preserves_empty_content_and_exhausted_rate_limit_errors() {
 }
 
 #[tokio::test]
+async fn client_rejects_secret_content_before_sending() {
+    let client = RemoteMemoryClient::new(
+        "http://127.0.0.1:1/",
+        "alice".to_owned(),
+        RemoteToken::new(ALICE_TOKEN.to_owned()).unwrap(),
+    )
+    .unwrap();
+    let secret = "password=hunter2";
+
+    assert!(matches!(
+        client.put(secret, None).await,
+        Err(MemoryError::SecretRejected)
+    ));
+    assert!(matches!(
+        client.sync(&[record(1, 1, secret)]).await,
+        Err(MemoryError::SecretRejected)
+    ));
+}
+
+#[tokio::test]
 async fn client_reports_a_missing_versioned_session_route_as_incompatible() {
     let (endpoint, task) = live_server(Router::new()).await;
     let client = RemoteMemoryClient::new(

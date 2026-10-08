@@ -6,7 +6,7 @@ mod local;
 mod remote;
 
 #[cfg(all(feature = "client", feature = "local"))]
-use crate::{MemoryAccess, MemorySource, secrets::contains_likely_secret};
+use crate::{MemoryAccess, MemorySource};
 use crate::{
     MemoryKey, MemoryLimits, MemoryRecord, MemoryScan,
     protocol::{self, ExportCursor, ExportPage, SyncReport},
@@ -235,7 +235,6 @@ impl MemoryStore for SelectedMemoryStore {
         replacement: Option<MemoryKey>,
     ) -> impl Future<Output = Result<MemoryRecord, MemoryError>> + Send {
         async move {
-            reject_unsafe(content)?;
             match self {
                 Self::Local(store) => MemoryStore::put(store, content, replacement).await,
                 Self::Remote(client) => MemoryStore::put(client, content, replacement).await,
@@ -255,9 +254,6 @@ impl MemoryStore for SelectedMemoryStore {
         memories: &[MemoryRecord],
     ) -> impl Future<Output = Result<SyncReport, MemoryError>> + Send {
         async move {
-            for memory in memories {
-                reject_unsafe(&memory.content)?;
-            }
             match self {
                 Self::Local(store) => MemoryStore::sync(store, memories).await,
                 Self::Remote(client) => MemoryStore::sync(client, memories).await,
@@ -281,14 +277,6 @@ impl MemoryStore for SelectedMemoryStore {
             }
         }
     }
-}
-
-#[cfg(all(feature = "client", feature = "local"))]
-fn reject_unsafe(content: &str) -> Result<(), MemoryError> {
-    if contains_likely_secret(content) {
-        return Err(MemoryError::SecretRejected);
-    }
-    Ok(())
 }
 
 #[cfg(feature = "local")]

@@ -5,7 +5,7 @@ use crate::{
     MemoryImportReport, MemoryKey, MemoryLimits, MemoryRecord, MemoryScan,
     model::{StoredMemory, normalize_identity},
     protocol::{self, ExportCursor, ExportPage, SyncReport},
-    secrets::contains_likely_secret,
+    secrets::{contains_likely_secret, reject_likely_secret},
 };
 use rusqlite::{
     Connection, ErrorCode, OptionalExtension, Transaction, TransactionBehavior, params,
@@ -911,13 +911,11 @@ pub(crate) fn validate_content(content: &str, limits: &MemoryLimits) -> Result<(
     if content.trim().is_empty() {
         return Err(MemoryError::EmptyContent);
     }
+    reject_likely_secret(content)?;
     if content.len() > limits.content_bytes {
         return Err(MemoryError::ContentTooLarge {
             maximum_bytes: limits.content_bytes,
         });
-    }
-    if contains_likely_secret(content) {
-        return Err(MemoryError::SecretRejected);
     }
     Ok(())
 }
