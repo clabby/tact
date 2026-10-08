@@ -9,6 +9,7 @@ mod message;
 mod tool;
 
 use super::{
+    clock::unix_time_ms,
     node::{Component, ComponentUpdate, RenderRequest},
     selection::{TextRange, TextSpan},
 };
@@ -42,7 +43,7 @@ use std::{
     ops::Range,
     path::Path,
     sync::Arc,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 use tact_subagents::{AgentMessageUpdate, MessageSender};
 
@@ -444,7 +445,7 @@ impl Transcript {
     fn sync_running_tool_timers(&mut self, now: Instant) {
         self.running_tool_timers
             .retain(|id, _| self.model.entry(*id).is_some_and(is_running_tool));
-        let observed_at_unix_ms = unix_milliseconds();
+        let observed_at_unix_ms = unix_time_ms();
         for id in self.model.running_tool_ids() {
             let Some(started_at_unix_ms) =
                 self.model.entry(id).and_then(|entry| match &entry.kind {
@@ -1237,13 +1238,6 @@ impl Transcript {
         let _ = self.move_anchor(top, -i32::from(height), width, theme);
         let _ = self.move_anchor(top, i32::from(height.saturating_mul(2)), width, theme);
     }
-}
-
-fn unix_milliseconds() -> u64 {
-    let elapsed = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
 }
 
 fn transient_label(status: &TransientStatus) -> String {
@@ -2138,7 +2132,7 @@ fn line_width(text: &str) -> usize {
 mod tests {
     use super::{
         Anchor, Component, ExpandableCommand, RenderRequest, ScrollCommand, ScrollState,
-        Transcript, TranscriptEvent, render_user, unix_milliseconds,
+        Transcript, TranscriptEvent, render_user, unix_time_ms,
     };
     use crate::{
         app::{
@@ -3867,7 +3861,7 @@ mod tests {
         let mut transcript = Transcript::new();
         transcript.update(TranscriptEvent::Record(agent_with_payload_at(
             1,
-            unix_milliseconds().saturating_sub(10_000),
+            unix_time_ms().saturating_sub(10_000),
             AgentEventKind::ToolCall,
             json!({
                 "call_id": "call-1",
@@ -4166,7 +4160,7 @@ mod tests {
     #[test]
     fn live_timer_rebuilds_only_the_cached_summary_of_an_expanded_tool() {
         let mut transcript = Transcript::new();
-        let recorded_at = unix_milliseconds();
+        let recorded_at = unix_time_ms();
         transcript.update(TranscriptEvent::Record(agent_with_payload_at(
             1,
             recorded_at,

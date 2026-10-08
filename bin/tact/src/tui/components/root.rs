@@ -14,6 +14,7 @@ mod turns;
 
 use super::{
     actions::{Action, ActionAvailability, ActionsEffect, ActionsEvent, ActionsMenu},
+    clock::unix_time_ms,
     composer::{
         Composer, ComposerChromeTarget, ComposerDraft, ComposerEffect, ComposerEvent, InputMode,
         LiveSessions,
@@ -74,7 +75,7 @@ use semver::Version;
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 use tact_memory::{MemoryAccess, MemoryKey, MemoryRecord, MemorySource};
 use tact_subagents::{AgentId, AgentStatus, AgentUpdate, MessageSender, SubagentRoster};
@@ -2791,13 +2792,7 @@ fn turn_timer_event(record: &TranscriptRecord) -> Option<ComposerEvent> {
     }
     if record.kind() == "run.started" {
         let now = Instant::now();
-        let now_unix_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis();
-        let elapsed_ms = u64::try_from(now_unix_ms)
-            .unwrap_or(u64::MAX)
-            .saturating_sub(record.recorded_at_unix_ms());
+        let elapsed_ms = unix_time_ms().saturating_sub(record.recorded_at_unix_ms());
         return Some(ComposerEvent::TurnStarted {
             elapsed: Duration::from_millis(elapsed_ms),
             now,

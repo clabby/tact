@@ -2,6 +2,7 @@
 
 mod actions;
 mod app;
+mod clock;
 mod composer;
 mod confirmation;
 mod context_diagnostics;

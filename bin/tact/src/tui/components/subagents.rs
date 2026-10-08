@@ -1,6 +1,7 @@
 //! Camera-centered subagent hierarchy and read-only transcript inspector.
 
 use super::{
+    clock::unix_time_ms,
     fit::ellipsize,
     floating::Floating,
     node::Component,
@@ -1057,14 +1058,6 @@ pub(super) fn subagent_record(event: AgentEvent) -> Arc<TranscriptRecord> {
         unix_time_ms(),
         event,
     ))
-}
-
-fn unix_time_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |duration| {
-            u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
-        })
 }
 
 #[cfg(test)]

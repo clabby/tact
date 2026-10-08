@@ -1,6 +1,7 @@
 //! Searchable, read-only inspection and explicit deletion of stored memories.
 
 use super::{
+    clock::unix_time_ms,
     fit::ellipsize,
     floating::Floating,
     node::{Component, ComponentUpdate, RenderRequest},
@@ -15,7 +16,6 @@ use ratatui::{
     text::{Line, Span},
     widgets::{List, ListItem, ListState, Paragraph, Wrap},
 };
-use std::time::{SystemTime, UNIX_EPOCH};
 use tact_memory::{MemoryAccess, MemoryKey, MemoryRecord, MemorySource};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
@@ -1054,7 +1054,7 @@ fn probation_status(until_ms: Option<i64>) -> String {
     let Some(until_ms) = until_ms else {
         return "no probation".to_owned();
     };
-    let remaining_ms = until_ms.saturating_sub(now_unix_ms());
+    let remaining_ms = until_ms.saturating_sub(i64::try_from(unix_time_ms()).unwrap_or(i64::MAX));
     if remaining_ms <= 0 {
         return "probation elapsed".to_owned();
     }
@@ -1065,14 +1065,6 @@ fn probation_status(until_ms: Option<i64>) -> String {
         60..=1_439 => format!("probation {}h", minutes / 60),
         _ => format!("probation {}d", minutes / 1_440),
     }
-}
-
-fn now_unix_ms() -> i64 {
-    let milliseconds = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-    i64::try_from(milliseconds).unwrap_or(i64::MAX)
 }
 
 fn bounded_preview(content: &str, width: usize) -> String {
