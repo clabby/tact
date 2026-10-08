@@ -108,67 +108,11 @@ subsequently accepted turns; already accepted turns and active steering retain t
 
 ## Model selection
 
-- When Claude is enabled, use `opus-5.5` or `sonnet-5.5` as the normal starting choices for
-  implementation, analysis, and document, system, or protocol review.
-- Among Codex models, start with `sol` (GPT-6.1 Sol).
-- Bring in `astra`, `fable-5.1`, or another eligible model for especially deep reviews, unresolved
-  premises, or independent challenges. Prefer model diversity for second opinions: use an eligible
-  Codex model alongside Claude.
-
-Choose effort separately for the full reasoning obligation. Optimize total cost and time to a
-correct result, including verification and rework. Use higher effort upfront when it can avoid
-repeated weaker attempts.
-
-For document, system, and protocol reviews, request explicit assumptions, counterexamples,
-safety/liveness conditions, and proof obligations. Verify findings against source evidence.
-
-DeepSWE 1.1 (Artificial Analysis, native Codex/Claude Code). Cost/time are averages across AA's coding suite.
-
-| Model | Effort | DeepSWE | API $/task | Time/task |
-| --- | --- | --- | --- | --- |
-| `luna` | max | 64% | $0.18 | 21.4m |
-| `sol` | xhigh | 73% | $1.04 | 15.5m |
-| `astra` | max | 68% | $7.47 | 29.4m |
-| `sonnet-5.5` | max | 72% | $14.19 | 1.5h |
-| `opus-5.5` | max | 68% | $13.04 | 1.1h |
-| `fable-5.1` (with fallback) | max | 64% | $12.39 | 34.8m |
-
-FrontierCode 1.1 Main (native Codex/Claude Code; best scoring effort per model).
-
-| Model | Effort | Score / 100 | API $/rollout |
-| --- | --- | --- | --- |
-| `luna` | max | 42.42 | $0.10 |
-| `sol` | medium | 50.23 | $0.36 |
-| `astra` | max | 53.26 | $4.59 |
-| `sonnet-5.5` | xhigh | 52.09 | $1.59 |
-| `opus-5.5` | medium | 54.64 | $0.80 |
-| `fable-5.1` | medium | 50.91 | $3.28 |
-
-### Reasoning effort
-
-| Effort | Typical delegated work |
-| --- | --- |
-| `low` | Lookups, extraction, mechanical edits, prescribed checks. |
-| `medium` | Localized implementation, editorial/design work, or focused review with an established contract. |
-| `high` | Difficult but bounded correctness investigation with identifiable invariant owners and failure cases, such as tracing cancelled I/O through completion and successor reopen. |
-| `xhigh` | Derive a missing contract or reconcile interacting owners and competing designs, such as placing a durability barrier while accounting for crash safety and namespace-lock contention. Also consider it after a completed high result misses the same invariant. |
-| `max` | Own an integrated architecture or proof with several coupled invariants and potentially misleading local success: runtime-to-journal durability across pruning, publication, and repeated crashes, or a protocol redesign spanning authentication, proof retention, recovery, and replay. |
-
-Choose `xhigh` or `max` immediately when these challenges are apparent. Assign the complete proof
-and attempts to falsify it to the agent responsible for the integrated result. Repeated weaker
-local reviews do not discharge a global proof obligation. A review label, file count, difficult
-parent project, or changed requirements alone does not justify high effort for every child.
-Identify the concrete reasoning challenge in briefs for `high` or above. Higher effort still
-requires causal tests and evidence.
-
-If a completed answer is unsatisfactory, supply missing context or request focused follow-up when
-that can resolve the gap. When stronger reasoning is needed, start a child at higher effort within
-the caps, using a more capable model when appropriate. Pass the original request and constraints,
-the prior result, evidence and counterexamples, and unresolved questions or failed checks. The
-child should challenge the earlier conclusion and verify its resolution. A child that needs a
-model or effort above its own cap returns that package to a capable ancestor. Still-running work
-should be allowed to finish. If permitted escalation cannot settle the question, report what
-remains unresolved.
+Tact's session instructions contain the model-selection guide: starting models for each provider,
+how to pick an effort level, when to escalate to a stronger child, and the benchmark figures behind
+those suggestions. The guide is defined once, with the session instructions in
+`bin/tact/src/core/mod.rs`, because its figures change with each model release. The
+`spawn_agent` schema describes the effort scale again in its `thinking` field.
 
 Every `spawn_agent` call must provide `role`, `task`, `model`, `thinking`, and `output_schema`:
 
@@ -276,9 +220,13 @@ admission behavior so urgent steering cannot be trapped behind an unlimited defe
 ## Runtime and TUI boundary
 
 The registry emits typed updates for agent creation, status changes, events, and message delivery.
-Each update carries a runtime ID and root-session ID. The TUI discards updates from replaced
-runtimes, which prevents stale child events from appearing in a new session that occupies the same
-pane.
+Each update carries the ID of the root session that owns the agent. Tact tags each forwarded update
+with the producing runtime's `Subagents::runtime_id`, and the TUI discards updates from replaced
+runtimes. This keeps stale child events out of a new session that occupies the same pane.
+
+Front-ends fold updates into the crate's `SubagentRoster` to track which agents exist, their
+parents, and their latest status. Model events and directed messages go to the agent's transcript
+instead.
 
 The `/subagents` panel renders the current tree, statuses, tasks, messages, and child transcripts.
 It is an observation and control surface for the live runtime. Changing configuration does not
