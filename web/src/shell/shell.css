@@ -405,18 +405,19 @@ button.outcome-item:hover { text-decoration: underline; text-underline-offset: 3
  */
 .entry-link { display: none; color: var(--faint); font-size: var(--text-xs); font-variant-numeric: tabular-nums; text-decoration: none; }
 .entry-link .glyph { width: 12px; height: 12px; }
-/* Child entries sit indented under their parent, whose time and link stand for them. */
-.entry.nested > .entry-link { display: none; }
+/* Nested entries paint outside their own box to reach the gutter. */
+.entry.nested { content-visibility: visible; }
 @container transcript (min-width: 980px) {
   :is(.turn, .turn-log, .batch) > .entry:not(.nested), .step-group { margin-left: -84px; padding-left: 84px; }
   /* Group members are indented, so they reach further to keep their times in the same column. */
   .step-group-body > .entry:not(.nested) { margin-left: -108px; padding-left: 108px; }
-  .entry-link { position: absolute; top: 0; left: 0; display: flex; align-items: center; justify-content: flex-end; width: 64px; height: max(30px, var(--touch)); opacity: .75; }
+  .entry-link { position: absolute; top: 0; left: 0; display: flex; align-items: center; justify-content: flex-end; width: 64px; height: max(30px, var(--touch)); opacity: 0; }
+  .entry.nested > .entry-link { left: calc(-84px - var(--space-5) - 1px); }
+  :is(.entry, .step-group):hover > .entry-link, .entry-link:focus-visible { opacity: .75; }
   .entry-link .glyph { display: none; }
   .entry-assistant > .entry-link, .entry-user > .entry-link { height: 22px; }
   .entry-user > .entry-link { top: 10px; }
   .entry-link:hover, .entry-link:focus-visible { color: var(--text); text-decoration: underline; text-underline-offset: 3px; opacity: 1; }
-  :is(.entry-user, .entry-assistant.answer, [data-same-minute]):not(:hover) > .entry-link:not(:focus-visible) { opacity: 0; }
 }
 @container transcript (max-width: 979.98px) {
   :is(.turn, .turn-log, .step-group-body, .batch) > .entry:not(.nested), .step-group { margin-right: -22px; padding-right: 22px; }

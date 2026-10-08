@@ -513,22 +513,7 @@ export class Transcript {
     for (const id of turn.trailing) push(children, id);
     setChildren(view.section, children);
     view.section.classList.toggle("folded", folded);
-    this.markRepeatedMinutes(turn);
     if (above) this.scroller.scrollTop += view.section.getBoundingClientRect().height - rect!.height;
-  }
-
-  /** In the time gutter, a row whose minute matches the row before shows its time only on hover. */
-  private markRepeatedMinutes(turn: Turn) {
-    let previous = "";
-    for (const id of [turn.user, ...turn.body]) {
-      if (id === null) continue;
-      const entry = this.source?.data.entries.get(id);
-      const element = this.rendered.get(id)?.element;
-      if (!entry || !element || entry.at_ms == null) continue;
-      const minute = clockTime(entry.at_ms);
-      element.toggleAttribute("data-same-minute", minute === previous);
-      previous = minute;
-    }
   }
 
   private renderFold(fold: HTMLElement, turn: Turn, plan: TurnPlan, folded: boolean) {
