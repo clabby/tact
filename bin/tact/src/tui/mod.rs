@@ -66,7 +66,7 @@ use crate::{
             AppEffect, AppEvent, AppNode, ComponentUpdate, RecentPromptDraft, RenderRequest,
             RestoredSessionProjection, RootNode,
         },
-        editor::EditorOutcome,
+        editor::{EditorCompletion, EditorOutcome, EditorTarget},
         handoff_controller::{HandoffCompletion, HandoffController, PreparedHandoff},
         scheduler::{RenderScheduler, STREAM_FRAME_INTERVAL},
         terminal::TerminalSession,
@@ -211,21 +211,6 @@ struct RestoredSession {
     reasoning_mode: ReasoningMode,
     model: Model,
     next_sequence: u64,
-}
-
-enum EditorTarget {
-    Draft { pane: PaneId, text: String },
-    Config(PathBuf),
-    File(PathBuf),
-}
-
-enum EditorCompletion {
-    Draft {
-        pane: PaneId,
-        outcome: EditorOutcome,
-    },
-    Config,
-    File,
 }
 
 struct EffortUpdate {
@@ -2402,20 +2387,7 @@ fn apply_pane_effect(
                 _ => unreachable!("editor effect pattern is exhaustive"),
             };
             let workspace = workspace.clone();
-            *context.editor_task = Some(tokio::spawn(async move {
-                match target {
-                    EditorTarget::Draft { pane, text } => {
-                        let outcome = editor::edit(&text, &workspace).await?;
-                        Ok(EditorCompletion::Draft { pane, outcome })
-                    }
-                    EditorTarget::Config(path) => editor::edit_config(&path, &workspace)
-                        .await
-                        .map(|()| EditorCompletion::Config),
-                    EditorTarget::File(path) => editor::open_file(&path, &workspace)
-                        .await
-                        .map(|()| EditorCompletion::File),
-                }
-            }));
+            *context.editor_task = Some(tokio::spawn(async move { target.edit(&workspace).await }));
         }
         components::RootEffect::SetEffort {
             effort,
@@ -2666,7 +2638,7 @@ fn apply_pane_effect(
         }
         components::RootEffect::CopyWebLink => {
             let copied = web_link(context.web_status, context.config.web().enabled())
-                .and_then(|url| copy_selection(context.terminal, &url));
+                .and_then(|url| clipboard::copy_selection(context.terminal, &url));
             let event = match copied {
                 Ok(()) => AppEvent::NotifySuccess {
                     pane,
@@ -2724,19 +2696,21 @@ fn apply_pane_effect(
                 (pane, effort, preferred_reasoning_mode, speed, restored)
             }));
         }
-        components::RootEffect::Copy(text) => match copy_selection(context.terminal, &text) {
-            Ok(()) => schedule(
-                context.app.update(AppEvent::NotifySuccess {
-                    pane,
-                    message: "Copied to clipboard.".to_owned(),
-                }),
-                context.scheduler,
-            ),
-            Err(error) => schedule(
-                context.app.update(AppEvent::NotifyError { pane, error }),
-                context.scheduler,
-            ),
-        },
+        components::RootEffect::Copy(text) => {
+            match clipboard::copy_selection(context.terminal, &text) {
+                Ok(()) => schedule(
+                    context.app.update(AppEvent::NotifySuccess {
+                        pane,
+                        message: "Copied to clipboard.".to_owned(),
+                    }),
+                    context.scheduler,
+                ),
+                Err(error) => schedule(
+                    context.app.update(AppEvent::NotifyError { pane, error }),
+                    context.scheduler,
+                ),
+            }
+        }
         components::RootEffect::Steer { id, prompt } => {
             let runtime = context
                 .panes
@@ -2800,82 +2774,6 @@ fn apply_pane_effect(
         }
     }
     Ok(())
-}
-
-/// Copies text through the clipboard channels available to Tact.
-///
-/// On non-macOS and remote macOS sessions, Tact first tries the tmux server that
-/// directly contains it. `load-buffer -w` asks that server to forward the selection
-/// to its terminal when supported. Local macOS retains its native pasteboard-first path.
-fn copy_selection(terminal: &mut TerminalSession, text: &str) -> std::result::Result<(), String> {
-    let use_tmux = std::env::var_os("TMUX").is_some();
-    #[cfg(target_os = "macos")]
-    let use_tmux = use_tmux && is_remote_session();
-
-    copy_selection_with(
-        use_tmux,
-        || clipboard::copy_to_tmux(text).map_err(|error| error.to_string()),
-        || copy_platform_selection(terminal, text),
-    )
-}
-
-fn copy_selection_with(
-    use_tmux: bool,
-    tmux_copy: impl FnOnce() -> std::result::Result<(), String>,
-    platform_copy: impl FnOnce() -> std::result::Result<(), String>,
-) -> std::result::Result<(), String> {
-    if use_tmux {
-        match tmux_copy() {
-            Ok(()) => return Ok(()),
-            Err(tmux_error) => {
-                return platform_copy().map_err(|platform_error| {
-                    format!(
-                        "Could not copy selection to tmux: {tmux_error}; \
-                     platform fallback failed: {platform_error}"
-                    )
-                });
-            }
-        }
-    }
-
-    platform_copy()
-}
-
-#[cfg(target_os = "macos")]
-fn is_remote_session() -> bool {
-    std::env::var_os("SSH_TTY").is_some() || std::env::var_os("SSH_CONNECTION").is_some()
-}
-
-#[cfg(not(target_os = "macos"))]
-fn copy_platform_selection(
-    terminal: &mut TerminalSession,
-    text: &str,
-) -> std::result::Result<(), String> {
-    match terminal.copy_to_clipboard(text) {
-        Ok(()) => Ok(()),
-        Err(terminal_error) => clipboard::copy_text(text).map_err(|native_error| {
-            format!(
-                "Could not copy selection: terminal copy failed: {terminal_error}; \
-                 native fallback failed: {native_error}"
-            )
-        }),
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn copy_platform_selection(
-    terminal: &mut TerminalSession,
-    text: &str,
-) -> std::result::Result<(), String> {
-    match clipboard::copy_text(text) {
-        Ok(()) => Ok(()),
-        Err(native_error) => terminal.copy_to_clipboard(text).map_err(|terminal_error| {
-            format!(
-                "Could not copy selection: {native_error}; \
-                 terminal fallback failed: {terminal_error}"
-            )
-        }),
-    }
 }
 
 fn start_handoff(context: &mut EffectContext<'_>, pane: PaneId) {
@@ -3336,9 +3234,9 @@ fn request_render(request: RenderRequest, scheduler: &mut RenderScheduler) {
 mod tests {
     use super::{
         MemoryCompletion, MemoryGenerations, MemoryOperation, PaneGeneration, PaneSession,
-        PaneSettings, PendingSubmission, close_pane_journal, copy_selection_with, is_image_paste,
-        local_link_path, merge_recent_prompts, open_pane, run_memory_operation, send_submission,
-        subagent_pane, supported_reasoning_mode, validate_interactive,
+        PaneSettings, PendingSubmission, close_pane_journal, is_image_paste, local_link_path,
+        merge_recent_prompts, open_pane, run_memory_operation, send_submission, subagent_pane,
+        supported_reasoning_mode, validate_interactive,
     };
     use crate::{
         app::{
@@ -3356,7 +3254,7 @@ mod tests {
         tui::components::RecentPromptDraft,
     };
     use nanocodex::{HarnessModel as Model, Model as CodexModel};
-    use std::{cell::Cell, collections::HashMap, fs, path::Path, sync::Arc};
+    use std::{collections::HashMap, fs, path::Path, sync::Arc};
     use tact_memory::{MemoryLimits, MemoryStore, SelectedMemoryStore};
     use tact_subagents::{AgentId, AgentStatus, AgentUpdate};
     use tempfile::tempdir;
@@ -3546,50 +3444,6 @@ mod tests {
             KeyCode::Char('v'),
             KeyModifiers::NONE,
         ))));
-    }
-
-    #[test]
-    fn successful_tmux_copy_skips_platform_fallback() {
-        let tmux_calls = Cell::new(0);
-        let platform_calls = Cell::new(0);
-
-        let result = copy_selection_with(
-            true,
-            || {
-                tmux_calls.set(tmux_calls.get() + 1);
-                Ok(())
-            },
-            || {
-                platform_calls.set(platform_calls.get() + 1);
-                Err("platform failed".to_owned())
-            },
-        );
-
-        assert_eq!(result, Ok(()));
-        assert_eq!(tmux_calls.get(), 1);
-        assert_eq!(platform_calls.get(), 0);
-    }
-
-    #[test]
-    fn tmux_failure_calls_platform_fallback() {
-        let tmux_calls = Cell::new(0);
-        let platform_calls = Cell::new(0);
-
-        let result = copy_selection_with(
-            true,
-            || {
-                tmux_calls.set(tmux_calls.get() + 1);
-                Err("tmux failed".to_owned())
-            },
-            || {
-                platform_calls.set(platform_calls.get() + 1);
-                Ok(())
-            },
-        );
-
-        assert_eq!(result, Ok(()));
-        assert_eq!(tmux_calls.get(), 1);
-        assert_eq!(platform_calls.get(), 1);
     }
 
     #[test]

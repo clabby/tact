@@ -1,5 +1,6 @@
 //! Native clipboard access at the terminal boundary.
 
+use super::terminal::TerminalSession;
 use arboard::Clipboard;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use png::{BitDepth, ColorType, Encoder, EncodingError};
@@ -12,6 +13,70 @@ use thiserror::Error;
 
 pub(crate) fn copy_to_tmux(text: &str) -> Result<(), TmuxCopyError> {
     copy_with_tmux(text, Path::new("tmux"))
+}
+
+/// Copies text through the clipboard channels available to Tact.
+///
+/// On non-macOS and remote macOS sessions, Tact first tries the tmux server that
+/// directly contains it. `load-buffer -w` asks that server to forward the selection
+/// to its terminal when supported. Local macOS retains its native pasteboard-first path.
+pub(crate) fn copy_selection(terminal: &mut TerminalSession, text: &str) -> Result<(), String> {
+    let use_tmux = std::env::var_os("TMUX").is_some();
+    #[cfg(target_os = "macos")]
+    let use_tmux = use_tmux && is_remote_session();
+
+    copy_selection_with(
+        use_tmux,
+        || copy_to_tmux(text).map_err(|error| error.to_string()),
+        || copy_platform_selection(terminal, text),
+    )
+}
+
+fn copy_selection_with(
+    use_tmux: bool,
+    tmux_copy: impl FnOnce() -> Result<(), String>,
+    platform_copy: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    if !use_tmux {
+        return platform_copy();
+    }
+    tmux_copy().or_else(|tmux_error| {
+        platform_copy().map_err(|platform_error| {
+            format!(
+                "Could not copy selection to tmux: {tmux_error}; \
+                 platform fallback failed: {platform_error}"
+            )
+        })
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn is_remote_session() -> bool {
+    std::env::var_os("SSH_TTY").is_some() || std::env::var_os("SSH_CONNECTION").is_some()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn copy_platform_selection(terminal: &mut TerminalSession, text: &str) -> Result<(), String> {
+    terminal.copy_to_clipboard(text).or_else(|terminal_error| {
+        copy_text(text).map_err(|native_error| {
+            format!(
+                "Could not copy selection: terminal copy failed: {terminal_error}; \
+                 native fallback failed: {native_error}"
+            )
+        })
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn copy_platform_selection(terminal: &mut TerminalSession, text: &str) -> Result<(), String> {
+    copy_text(text).or_else(|native_error| {
+        terminal.copy_to_clipboard(text).map_err(|terminal_error| {
+            format!(
+                "Could not copy selection: {native_error}; \
+                 terminal fallback failed: {terminal_error}"
+            )
+        })
+    })
 }
 
 #[derive(Debug, Error)]
@@ -184,8 +249,52 @@ fn encode_png(width: usize, height: usize, pixels: &[u8]) -> Result<Vec<u8>, Enc
 mod tests {
     #[cfg(target_os = "macos")]
     use super::copy_with_pbcopy;
-    use super::{copy_with_tmux, encode_png};
-    use std::{fs, os::unix::fs::PermissionsExt};
+    use super::{copy_selection_with, copy_with_tmux, encode_png};
+    use std::{cell::Cell, fs, os::unix::fs::PermissionsExt};
+
+    #[test]
+    fn successful_tmux_copy_skips_platform_fallback() {
+        let tmux_calls = Cell::new(0);
+        let platform_calls = Cell::new(0);
+
+        let result = copy_selection_with(
+            true,
+            || {
+                tmux_calls.set(tmux_calls.get() + 1);
+                Ok(())
+            },
+            || {
+                platform_calls.set(platform_calls.get() + 1);
+                Err("platform failed".to_owned())
+            },
+        );
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(tmux_calls.get(), 1);
+        assert_eq!(platform_calls.get(), 0);
+    }
+
+    #[test]
+    fn tmux_failure_calls_platform_fallback() {
+        let tmux_calls = Cell::new(0);
+        let platform_calls = Cell::new(0);
+
+        let result = copy_selection_with(
+            true,
+            || {
+                tmux_calls.set(tmux_calls.get() + 1);
+                Err("tmux failed".to_owned())
+            },
+            || {
+                platform_calls.set(platform_calls.get() + 1);
+                Ok(())
+            },
+        );
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(tmux_calls.get(), 1);
+        assert_eq!(platform_calls.get(), 1);
+    }
 
     #[test]
     fn clipboard_pixels_are_encoded_as_png() {
