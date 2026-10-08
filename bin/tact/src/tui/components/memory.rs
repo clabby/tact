@@ -1,4 +1,14 @@
 //! Searchable, read-only inspection and explicit deletion of stored memories.
+//!
+//! The browser receives terminal input plus backend results (`Loaded`, `LoadFailed`,
+//! `Deleted`, `DeleteFailed`) as [`MemoryBrowserEvent`]s and asks its owner to dismiss it,
+//! reload, or delete one exact key through [`MemoryBrowserEffect`]s. It never touches the
+//! store itself.
+//!
+//! Selection follows a memory key rather than a row position, so filtering, re-sorting, and
+//! reloading keep the same memory selected while it remains visible. Deletion always needs a
+//! confirming second press, is offered only for keys the current access may delete, and a
+//! conflicting delete reloads instead of retrying a stale version.
 
 use super::{
     clock::unix_time_ms,
@@ -208,6 +218,17 @@ struct DetailView {
     scroll: u16,
     status: Option<String>,
     update_scroll: bool,
+}
+
+/// Why the list body shows a message instead of memory rows.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ListPlaceholder {
+    /// The backend returned no memories at all.
+    EmptyStore,
+    /// Memories exist, but none belong to the selected namespace scope.
+    EmptyScope,
+    /// Memories exist in scope, but none match the filter text.
+    NoQueryMatches,
 }
 
 impl MemoryBrowser {
@@ -573,6 +594,19 @@ impl MemoryBrowser {
         }
     }
 
+    fn list_placeholder(&self) -> Option<ListPlaceholder> {
+        if self.records.is_empty() {
+            return Some(ListPlaceholder::EmptyStore);
+        }
+        if !self.matches.is_empty() {
+            return None;
+        }
+        Some(match self.query.is_empty() {
+            true => ListPlaceholder::EmptyScope,
+            false => ListPlaceholder::NoQueryMatches,
+        })
+    }
+
     fn footer(&self) -> &'static [(&'static str, &'static str)] {
         match &self.state {
             BrowserState::Loading => &LOADING_KEYS,
@@ -661,29 +695,29 @@ impl MemoryBrowser {
         if area.is_empty() {
             return;
         }
-        if self.records.is_empty() {
-            frame.render_widget(
-                Paragraph::new(format!(
-                    " {} is empty. Press r to refresh.",
-                    self.context_label()
-                ))
-                .style(Style::default().fg(theme.muted())),
-                area,
-            );
-            return;
-        }
-        if self.matches.is_empty() {
-            let message = if self.query.is_empty() {
-                format!(
-                    " No memories in {}.",
-                    self.namespace_scope_label().unwrap_or_default()
+        if let Some(placeholder) = self.list_placeholder() {
+            let width = usize::from(area.width);
+            let message = match placeholder {
+                ListPlaceholder::EmptyStore => {
+                    format!(" {} is empty. Press r to refresh.", self.context_label())
+                }
+                ListPlaceholder::EmptyScope => ellipsize(
+                    format!(
+                        " No memories in {}.",
+                        self.namespace_scope_label().unwrap_or_default()
+                    )
+                    .into(),
+                    width,
                 )
-            } else {
-                format!(" No memories match “{}”.", self.query)
+                .into_owned(),
+                ListPlaceholder::NoQueryMatches => ellipsize(
+                    format!(" No memories match “{}”.", self.query).into(),
+                    width,
+                )
+                .into_owned(),
             };
             frame.render_widget(
-                Paragraph::new(ellipsize(message.as_str().into(), usize::from(area.width)))
-                    .style(Style::default().fg(theme.muted())),
+                Paragraph::new(message).style(Style::default().fg(theme.muted())),
                 area,
             );
             return;
@@ -965,61 +999,18 @@ fn detail_lines(record: &MemoryRecord, theme: &Theme) -> Vec<Line<'static>> {
     let heading = Style::default()
         .fg(theme.accent())
         .add_modifier(Modifier::BOLD);
-    let mut lines = vec![
-        Line::styled(" Memory metadata", heading),
-        fact(" ID", record.key.id.to_string(), label, value),
-        fact(
-            " Namespace",
-            record
-                .key
-                .namespace
-                .clone()
-                .unwrap_or_else(|| "local".to_owned()),
-            label,
-            value,
-        ),
-        fact(" Version", record.key.version.to_string(), label, value),
-        fact(
-            " Created",
-            format_timestamp(record.created_at_ms),
-            label,
-            value,
-        ),
-        fact(
-            " Updated",
-            format!(
-                "{} ({})",
-                format_timestamp(record.updated_at_ms),
-                timestamp_age(record.updated_at_ms)
-            ),
-            label,
-            value,
-        ),
-        fact(
-            " Last scanned",
-            optional_timestamp(record.last_scanned_at_ms),
-            label,
-            value,
-        ),
-        fact(" Scan count", record.scan_count.to_string(), label, value),
-        fact(
-            " Last used",
-            optional_timestamp(record.last_used_at_ms),
-            label,
-            value,
-        ),
-        fact(" Use count", record.use_count.to_string(), label, value),
-        fact(
-            " Probation until",
-            record
-                .probation_until_ms
-                .map_or_else(|| "none".to_owned(), format_timestamp),
-            label,
-            value,
-        ),
-        Line::default(),
-        Line::styled(" Content", heading),
-    ];
+    let mut lines = vec![Line::styled(" Memory metadata", heading)];
+    lines.extend(
+        detail_facts(record)
+            .into_iter()
+            .map(|(label_text, value_text)| {
+                Line::from(vec![
+                    Span::styled(format!(" {label_text:<17}"), label),
+                    Span::styled(value_text, value),
+                ])
+            }),
+    );
+    lines.extend([Line::default(), Line::styled(" Content", heading)]);
     lines.extend(
         sanitize_detail(&record.content)
             .split('\n')
@@ -1028,11 +1019,42 @@ fn detail_lines(record: &MemoryRecord, theme: &Theme) -> Vec<Line<'static>> {
     lines
 }
 
-fn fact(label_text: &'static str, value_text: String, label: Style, value: Style) -> Line<'static> {
-    Line::from(vec![
-        Span::styled(format!("{label_text:<18}"), label),
-        Span::styled(value_text, value),
-    ])
+/// The labelled metadata rows shown above a memory's content, in display order.
+fn detail_facts(record: &MemoryRecord) -> [(&'static str, String); 10] {
+    [
+        ("ID", record.key.id.to_string()),
+        (
+            "Namespace",
+            record
+                .key
+                .namespace
+                .clone()
+                .unwrap_or_else(|| "local".to_owned()),
+        ),
+        ("Version", record.key.version.to_string()),
+        ("Created", format_timestamp(record.created_at_ms)),
+        (
+            "Updated",
+            format!(
+                "{} ({})",
+                format_timestamp(record.updated_at_ms),
+                timestamp_age(record.updated_at_ms)
+            ),
+        ),
+        (
+            "Last scanned",
+            optional_timestamp(record.last_scanned_at_ms),
+        ),
+        ("Scan count", record.scan_count.to_string()),
+        ("Last used", optional_timestamp(record.last_used_at_ms)),
+        ("Use count", record.use_count.to_string()),
+        (
+            "Probation until",
+            record
+                .probation_until_ms
+                .map_or_else(|| "none".to_owned(), format_timestamp),
+        ),
+    ]
 }
 
 fn optional_timestamp(timestamp_ms: Option<i64>) -> String {
@@ -1181,8 +1203,10 @@ fn place_word(word_width: usize, width: usize, lines: &mut usize, used: &mut usi
 #[cfg(test)]
 mod tests {
     use super::{
-        BrowserState, Component, MemoryBrowser, MemoryBrowserEffect, MemoryBrowserEvent,
-        NamespaceScope, ReturnView, SortMode,
+        BrowserState, Component, DETAIL_KEYS, ErrorAction, LIST_KEYS, ListPlaceholder,
+        MemoryBrowser, MemoryBrowserEffect, MemoryBrowserEvent, NamespaceScope, REMOTE_DETAIL_KEYS,
+        REMOTE_LIST_KEYS, REMOTE_WRITABLE_LIST_KEYS, ReturnView, SortMode, detail_facts,
+        list_metadata, unix_time_ms,
     };
     use crate::app::theme::Theme;
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -1210,6 +1234,15 @@ mod tests {
         }
     }
 
+    /// Marks every record as updated at the same current instant, so relative ages read "now".
+    fn updated_now(mut records: Vec<MemoryRecord>) -> Vec<MemoryRecord> {
+        let now_ms = i64::try_from(unix_time_ms()).unwrap();
+        for record in &mut records {
+            record.updated_at_ms = now_ms;
+        }
+        records
+    }
+
     fn remote_record(namespace: &str, id: i64, content: &str) -> MemoryRecord {
         let mut record = record(id, 1, content);
         record.key = MemoryKey::remote(namespace.to_owned(), id, 1);
@@ -1232,12 +1265,37 @@ mod tests {
             .collect()
     }
 
+    fn selected_record(browser: &MemoryBrowser) -> &MemoryRecord {
+        let key = browser.selected_key.as_ref().unwrap();
+        browser
+            .records
+            .iter()
+            .find(|record| record.key == *key)
+            .unwrap()
+    }
+
+    fn fact<'a>(facts: &'a [(&'static str, String)], label: &str) -> &'a str {
+        facts
+            .iter()
+            .find(|(fact_label, _)| *fact_label == label)
+            .map(|(_, value)| value.as_str())
+            .unwrap()
+    }
+
     fn key(code: KeyCode) -> MemoryBrowserEvent {
-        MemoryBrowserEvent::Terminal(Event::Key(KeyEvent::new(code, KeyModifiers::NONE)))
+        modified_key(code, KeyModifiers::NONE)
     }
 
     fn modified_key(code: KeyCode, modifiers: KeyModifiers) -> MemoryBrowserEvent {
         MemoryBrowserEvent::Terminal(Event::Key(KeyEvent::new(code, modifiers)))
+    }
+
+    fn ctrl(character: char) -> MemoryBrowserEvent {
+        modified_key(KeyCode::Char(character), KeyModifiers::CONTROL)
+    }
+
+    fn paste(text: &str) -> MemoryBrowserEvent {
+        MemoryBrowserEvent::Terminal(Event::Paste(text.to_owned()))
     }
 
     fn repeat_key(code: KeyCode) -> MemoryBrowserEvent {
@@ -1258,7 +1316,8 @@ mod tests {
         browser
     }
 
-    fn render(browser: &mut MemoryBrowser, width: u16, height: u16) -> String {
+    /// Renders the browser and returns each terminal row as text.
+    fn render(browser: &mut MemoryBrowser, width: u16, height: u16) -> Vec<String> {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
             .draw(|frame| browser.render(frame, frame.area(), &Theme::default()))
@@ -1266,9 +1325,9 @@ mod tests {
         terminal
             .backend()
             .buffer()
-            .content()
-            .iter()
-            .map(|cell| cell.symbol())
+            .content
+            .chunks(usize::from(width))
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
             .collect()
     }
 
@@ -1276,9 +1335,7 @@ mod tests {
     fn filtering_and_reloads_preserve_selection_by_id() {
         let mut browser = loaded(vec![record(1, 1, "cafe moon"), record(42, 2, "cafe sun")]);
         browser.update(key(KeyCode::Down));
-        browser.update(MemoryBrowserEvent::Terminal(Event::Paste(
-            "cafe".to_owned(),
-        )));
+        browser.update(paste("cafe"));
         assert_eq!(browser.selected_key, Some(MemoryKey::local(1, 1)));
 
         browser.update(MemoryBrowserEvent::Loaded {
@@ -1306,14 +1363,11 @@ mod tests {
 
         assert_eq!(browser.sort, SortMode::MostUseful);
         assert_eq!(ordered_ids(&browser), [3, 1, 2, 4]);
-        assert!(render(&mut browser, 80, 16).contains("Sort: Most useful"));
 
-        browser.update(modified_key(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        browser.update(ctrl('s'));
         assert_eq!(browser.sort, SortMode::Newest);
         assert_eq!(ordered_ids(&browser), [2, 3, 1, 4]);
-        browser.update(MemoryBrowserEvent::Terminal(Event::Paste(
-            "memory".to_owned(),
-        )));
+        browser.update(paste("memory"));
         browser.update(MemoryBrowserEvent::Loaded {
             access: MemoryAccess::Local,
             records: vec![
@@ -1326,15 +1380,15 @@ mod tests {
         assert_eq!(browser.sort, SortMode::Newest);
         assert_eq!(ordered_ids(&browser), [2, 3, 1, 4]);
 
-        browser.update(modified_key(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        browser.update(ctrl('s'));
         assert_eq!(browser.sort, SortMode::Oldest);
         assert_eq!(ordered_ids(&browser), [4, 1, 3, 2]);
 
-        browser.update(modified_key(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        browser.update(ctrl('s'));
         assert_eq!(browser.sort, SortMode::LeastUseful);
         assert_eq!(ordered_ids(&browser), [4, 2, 1, 3]);
 
-        browser.update(modified_key(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        browser.update(ctrl('s'));
         assert_eq!(browser.sort, SortMode::MostUseful);
         assert_eq!(ordered_ids(&browser), [3, 1, 2, 4]);
     }
@@ -1347,7 +1401,7 @@ mod tests {
         browser.update(key(KeyCode::Backspace));
         assert!(browser.query.is_empty());
 
-        browser.update(MemoryBrowserEvent::Terminal(Event::Paste("42".to_owned())));
+        browser.update(paste("42"));
         assert_eq!(browser.matches, [0]);
         assert_eq!(browser.selected_key, Some(MemoryKey::local(42, 1)));
     }
@@ -1363,9 +1417,7 @@ mod tests {
         assert_eq!(browser.query, "functional");
         assert_eq!(browser.matches, [0]);
         assert_eq!(
-            browser
-                .update(modified_key(KeyCode::Char('r'), KeyModifiers::CONTROL))
-                .effects,
+            browser.update(ctrl('r')).effects,
             [MemoryBrowserEffect::Refresh]
         );
     }
@@ -1399,16 +1451,23 @@ mod tests {
     fn shared_memories_show_the_author_namespace_and_cannot_be_deleted() {
         let mut browser = loaded_with_access(
             remote_access("bob", RemoteRole::Writer),
-            vec![remote_record("alice", 7, "shared invariant")],
+            updated_now(vec![remote_record("alice", 7, "shared invariant")]),
         );
 
-        let list = render(&mut browser, 80, 16);
-        assert!(list.contains("alice#7"));
-        assert!(!list.contains("remove"));
+        assert_eq!(
+            list_metadata(selected_record(&browser)),
+            "alice#7 · v1 · updated now · used 3× · no probation"
+        );
+        assert_eq!(browser.footer(), REMOTE_LIST_KEYS);
         assert!(browser.update(key(KeyCode::Delete)).effects.is_empty());
+
         browser.update(key(KeyCode::Enter));
-        let detail = render(&mut browser, 80, 20);
-        assert!(detail.contains("alice"));
+        assert!(matches!(browser.state, BrowserState::Detail { .. }));
+        assert_eq!(
+            fact(&detail_facts(selected_record(&browser)), "Namespace"),
+            "alice"
+        );
+        assert_eq!(browser.footer(), REMOTE_DETAIL_KEYS);
         assert!(browser.update(key(KeyCode::Char('d'))).effects.is_empty());
     }
 
@@ -1423,28 +1482,25 @@ mod tests {
         );
 
         assert_eq!(browser.namespace_scope, NamespaceScope::All);
-        assert_eq!(browser.matches.len(), 2);
-        let all = render(&mut browser, 100, 16);
-        assert!(all.contains("Namespaces: All namespaces"));
-        assert!(all.contains("owned invariant"));
-        assert!(all.contains("shared convention"));
+        assert_eq!(
+            browser.namespace_scope_label().as_deref(),
+            Some("All namespaces")
+        );
+        assert_eq!(ordered_ids(&browser), [1, 2]);
 
-        browser.update(modified_key(KeyCode::Char('n'), KeyModifiers::CONTROL));
+        browser.update(ctrl('n'));
 
         assert_eq!(browser.namespace_scope, NamespaceScope::Own);
-        assert_eq!(browser.matches.len(), 1);
+        assert_eq!(browser.namespace_scope_label().as_deref(), Some("alice"));
+        assert_eq!(ordered_ids(&browser), [1]);
         assert_eq!(
             browser.records[browser.matches[0]].key.namespace.as_deref(),
             Some("alice")
         );
-        let own = render(&mut browser, 100, 16);
-        assert!(own.contains("Namespaces: alice"));
-        assert!(own.contains("owned invariant"));
-        assert!(!own.contains("shared convention"));
 
-        browser.update(modified_key(KeyCode::Char('n'), KeyModifiers::CONTROL));
+        browser.update(ctrl('n'));
         assert_eq!(browser.namespace_scope, NamespaceScope::All);
-        assert_eq!(browser.matches.len(), 2);
+        assert_eq!(ordered_ids(&browser), [1, 2]);
     }
 
     #[test]
@@ -1453,8 +1509,8 @@ mod tests {
         let mut own = record(7, 3, "owned");
         own.key = own_key.clone();
         let mut writer = loaded_with_access(remote_access("alice", RemoteRole::Writer), vec![own]);
-        assert!(render(&mut writer, 80, 16).contains("Remote memory · alice"));
-        assert!(render(&mut writer, 80, 16).contains("remove"));
+        assert_eq!(writer.context_label(), "Remote memory · alice");
+        assert_eq!(writer.footer(), REMOTE_WRITABLE_LIST_KEYS);
         writer.update(key(KeyCode::Delete));
         assert_eq!(
             writer.update(key(KeyCode::Delete)).effects,
@@ -1465,7 +1521,7 @@ mod tests {
             remote_access("alice", RemoteRole::Reader),
             vec![remote_record("alice", 7, "read only")],
         );
-        assert!(!render(&mut reader, 80, 16).contains("remove"));
+        assert_eq!(reader.footer(), REMOTE_LIST_KEYS);
         assert!(reader.update(key(KeyCode::Delete)).effects.is_empty());
     }
 
@@ -1512,15 +1568,26 @@ mod tests {
     }
 
     #[test]
-    fn list_render_distinguishes_empty_and_no_matches() {
-        let mut empty = loaded(Vec::new());
-        assert!(render(&mut empty, 60, 12).contains("Local memory is empty"));
+    fn list_placeholder_distinguishes_empty_store_scope_and_filter() {
+        assert_eq!(
+            loaded(Vec::new()).list_placeholder(),
+            Some(ListPlaceholder::EmptyStore)
+        );
 
         let mut filtered = loaded(vec![record(1, 1, "alpha")]);
-        filtered.update(MemoryBrowserEvent::Terminal(Event::Paste(
-            "missing".to_owned(),
-        )));
-        assert!(render(&mut filtered, 60, 12).contains("No memories match"));
+        assert_eq!(filtered.list_placeholder(), None);
+        filtered.update(paste("missing"));
+        assert_eq!(
+            filtered.list_placeholder(),
+            Some(ListPlaceholder::NoQueryMatches)
+        );
+
+        let mut scoped = loaded_with_access(
+            remote_access("alice", RemoteRole::Reader),
+            vec![remote_record("bob", 1, "shared")],
+        );
+        scoped.update(ctrl('n'));
+        assert_eq!(scoped.list_placeholder(), Some(ListPlaceholder::EmptyScope));
     }
 
     #[test]
@@ -1532,30 +1599,113 @@ mod tests {
             error: "unavailable".to_owned(),
         });
 
-        let rendered = render(&mut browser, 80, 16);
-        assert!(rendered.contains("Remote memory · alice"));
-        assert!(rendered.contains("Could not load memories: unavailable"));
+        assert_eq!(browser.context_label(), "Remote memory · alice");
+        assert!(matches!(
+            &browser.state,
+            BrowserState::Error(error)
+                if error.message == "unavailable" && matches!(error.action, ErrorAction::Load)
+        ));
     }
 
     #[test]
-    fn render_sanitizes_controls_and_is_safe_when_narrow() {
-        let mut browser = loaded(vec![record(1, 1, "safe\u{1b}[31m\nnext")]);
-        let rendered = render(&mut browser, 30, 8);
-        assert!(rendered.contains("safe [31m next"));
-        assert!(!rendered.contains('\u{1b}'));
-
-        let rendered = render(&mut browser, 3, 2);
-        assert!(!rendered.is_empty());
-    }
-
-    #[test]
-    fn detail_renders_full_content_and_metadata_without_emitting_an_effect() {
+    fn local_detail_offers_deletion_and_lists_every_metadata_fact() {
         let mut browser = loaded(vec![record(9, 4, "first line\nsecond line")]);
         assert!(browser.update(key(KeyCode::Tab)).effects.is_empty());
 
-        let rendered = render(&mut browser, 80, 28);
-        assert!(rendered.contains("Memory metadata"));
-        assert!(rendered.contains("first line"));
-        assert!(rendered.contains("second line"));
+        assert!(matches!(
+            &browser.state,
+            BrowserState::Detail { key, scroll: 0 } if *key == MemoryKey::local(9, 4)
+        ));
+        assert_eq!(browser.footer(), DETAIL_KEYS);
+        let facts = detail_facts(selected_record(&browser));
+        assert_eq!(
+            facts.iter().map(|(label, _)| *label).collect::<Vec<_>>(),
+            [
+                "ID",
+                "Namespace",
+                "Version",
+                "Created",
+                "Updated",
+                "Last scanned",
+                "Scan count",
+                "Last used",
+                "Use count",
+                "Probation until",
+            ]
+        );
+        assert_eq!(fact(&facts, "ID"), "9");
+        assert_eq!(fact(&facts, "Namespace"), "local");
+        assert_eq!(fact(&facts, "Version"), "4");
+        assert_eq!(fact(&facts, "Last used"), "never");
+        assert_eq!(fact(&facts, "Probation until"), "none");
+    }
+
+    #[test]
+    fn narrow_render_does_not_panic() {
+        let mut browser = loaded(vec![record(1, 1, "content")]);
+        assert_eq!(render(&mut browser, 3, 2).len(), 2);
+    }
+
+    #[test]
+    fn list_layout_golden() {
+        let mut browser = loaded(updated_now(vec![
+            record(1, 1, "safe\u{1b}[31m\nnext"),
+            record(2, 1, "second memory"),
+        ]));
+        assert_eq!(browser.footer(), LIST_KEYS);
+
+        assert_eq!(
+            render(&mut browser, 64, 9),
+            [
+                "╭──────────────────────── Local memory ────────────────────────╮",
+                "│ Filter:   Sort: Most useful                                  │",
+                "│› second memory                                               │",
+                "│  local#2 · v1 · updated now · used 3× · no probation         │",
+                "│  safe [31m next                                              │",
+                "│  local#1 · v1 · updated now · used 3× · no probation         │",
+                "│     ↑↓ move · enter inspect · ctrl+s sort · ctrl+d remove    │",
+                "│                  ctrl+r refresh · esc close                  │",
+                "╰──────────────────────────────────────────────────────────────╯",
+            ]
+        );
+    }
+
+    #[test]
+    fn detail_content_layout_golden() {
+        let mut browser = loaded(vec![record(9, 4, "first line\n\tsecond\u{7} line")]);
+        browser.update(key(KeyCode::Enter));
+
+        let rows = render(&mut browser, 64, 20);
+        assert_eq!(
+            rows[13..16],
+            [
+                "│ Content                                                      │",
+                "│first line                                                    │",
+                "│    second\u{fffd} line                                              │",
+            ]
+        );
+    }
+
+    #[test]
+    fn load_error_layout_golden() {
+        let mut browser = MemoryBrowser::new();
+        browser.update(MemoryBrowserEvent::LoadFailed {
+            source: MemorySource::Remote,
+            access: Some(remote_access("alice", RemoteRole::Reader)),
+            error: "unavailable\nretry later".to_owned(),
+        });
+
+        assert_eq!(
+            render(&mut browser, 64, 7),
+            [
+                "╭─────────────────── Remote memory · alice ────────────────────╮",
+                "│Could not load memories: unavailable retry later              │",
+                "│                                                              │",
+                "│Press r to retry or Esc to close.                             │",
+                "│                                                              │",
+                "│                      r retry · esc close                     │",
+                "╰──────────────────────────────────────────────────────────────╯",
+            ]
+        );
     }
 }
