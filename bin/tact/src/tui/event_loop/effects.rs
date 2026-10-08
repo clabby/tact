@@ -12,7 +12,10 @@ use super::{
     web::WebTaskCompletion,
 };
 use crate::{
-    app::error::{Result, RuntimeError},
+    app::{
+        config::Setting,
+        error::{Result, RuntimeError},
+    },
     core::{
         pane::PaneId,
         prompt::{QueueId, Submission},
@@ -42,7 +45,7 @@ impl EventLoop {
                     self.panes.close(pane);
                     self.worker.send(WorkerCommand::ClosePane(pane))?;
                 }
-                AppEffect::SetTheme(mode) => self.config.persist_theme_mode(mode)?,
+                AppEffect::SetTheme(mode) => self.config.persist(Setting::ThemeMode(mode))?,
                 AppEffect::Shutdown => self.shutdown.cancel(),
                 AppEffect::Pane { pane, effect } => self.apply_pane_effect(pane, effect)?,
             }

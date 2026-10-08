@@ -10,7 +10,7 @@ use super::{
 };
 use crate::{
     app::{
-        config::{Config, ReasoningEffort, ReasoningMode, Speed},
+        config::{Config, ReasoningEffort, ReasoningMode, Setting, Speed},
         error::Result,
     },
     core::{pane::PaneId, protocol::CommandError, transcript::LocalEvent, worker::WorkerCommand},
@@ -48,11 +48,11 @@ impl EventLoop {
         let is_main = self.app.main_pane() == Some(pane);
         self.tasks.spawn_blocking(TaskKind::Effort, move || {
             let persisted = if is_main {
-                config.persist_thinking(effort)
+                config.persist(Setting::Thinking(effort))
             } else {
                 Ok(())
             }
-            .and_then(|()| config.persist_reasoning_mode(reasoning_mode));
+            .and_then(|()| config.persist(Setting::ReasoningMode(reasoning_mode)));
             TaskOutput::Effort(persisted.map(|()| EffortUpdate {
                 pane,
                 to: effort,
@@ -118,7 +118,7 @@ impl EventLoop {
         self.input = None;
         let config = (self.app.main_pane() == Some(pane)).then(|| self.config.clone());
         self.tasks.spawn_blocking(TaskKind::Speed, move || {
-            let persisted = config.map_or(Ok(()), |config| config.persist_speed(speed));
+            let persisted = config.map_or(Ok(()), |config| config.persist(Setting::Speed(speed)));
             TaskOutput::Speed(persisted.map(|()| SpeedUpdate { pane, speed }))
         });
     }
@@ -156,7 +156,7 @@ impl EventLoop {
     }
 
     pub(super) fn set_max_subagents(&mut self, limit: usize) -> Result<()> {
-        self.config.persist_max_subagents(limit)?;
+        self.config.persist(Setting::MaxSubagents(limit))?;
         self.config.set_max_subagents(limit);
         self.app.set_max_subagents(limit);
         for runtime in self.panes.runtimes() {
