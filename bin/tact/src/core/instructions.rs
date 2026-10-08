@@ -25,7 +25,7 @@
 //! they never enter the system prompt.
 
 use super::{
-    claude_context,
+    claude_context::ProjectContext,
     extensions::{Skill, SkillCatalog},
 };
 use crate::app::config::{Config, SkillsConfig};
@@ -293,7 +293,8 @@ impl AgentInstructions {
             }),
         };
         if config.claude().enabled() {
-            let context = claude_context::context(config.agent().workspace(), config.codex_home())?;
+            let context =
+                ProjectContext::load(config.agent().workspace(), config.codex_home())?.render();
             for (model, text) in &mut prompts.children {
                 if matches!(model, Model::Claude(_)) {
                     *text = format!("{text}{SECTION_SEPARATOR}{context}").into();
