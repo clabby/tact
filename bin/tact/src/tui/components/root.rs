@@ -45,9 +45,7 @@ use crate::{
         transcript::TranscriptRecord,
     },
 };
-use crossterm::event::{
-    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
-};
+use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind};
 use nanocodex::HarnessModel as Model;
 use ratatui::{
     Frame,
@@ -1001,10 +999,7 @@ impl RootNode {
         }
         if is_queue_shortcut(&event) && self.can_queue_draft() {
             return self.update_composer_with(
-                ComposerEvent::Terminal(Event::Key(KeyEvent::new(
-                    KeyCode::Enter,
-                    KeyModifiers::NONE,
-                ))),
+                ComposerEvent::Submit,
                 RenderRequest::Immediate,
                 BusyDelivery::Queue,
             );
@@ -2122,6 +2117,17 @@ impl RootNode {
         result
     }
 
+    /// Starts delivering a waiting queue item into the running turn.
+    fn steer_queued(&mut self, id: QueueId) -> ComponentUpdate<RootEffect> {
+        let Some(prompt) = self.queue.steer(id) else {
+            return ComponentUpdate::none();
+        };
+        ComponentUpdate {
+            effects: vec![RootEffect::Steer { id, prompt }],
+            render: RenderRequest::Immediate,
+        }
+    }
+
     fn begin_queue_edit(&mut self, id: QueueId, text: String) -> ComponentUpdate<RootEffect> {
         let original_input_mode = self.composer.input_mode();
         let original_draft = self.composer.take_draft();
@@ -2202,10 +2208,7 @@ impl RootNode {
             }
             PaneCommand::Submit { .. } if self.reflection_input => self.submit_reflection(),
             PaneCommand::Submit { queue } => self.update_composer_with(
-                ComposerEvent::Terminal(Event::Key(KeyEvent::new(
-                    KeyCode::Enter,
-                    KeyModifiers::NONE,
-                ))),
+                ComposerEvent::Submit,
                 RenderRequest::Immediate,
                 if queue {
                     BusyDelivery::Queue
@@ -2220,15 +2223,11 @@ impl RootNode {
                     render: RenderRequest::Immediate,
                 }
             }
-            PaneCommand::Steer(id) | PaneCommand::Dequeue(id) => {
-                let selected = self.queue.select_queued(id);
-                debug_assert!(selected, "remote queue commands are checked first");
-                let key = if matches!(command, PaneCommand::Steer(_)) {
-                    KeyCode::Enter
-                } else {
-                    KeyCode::Delete
-                };
-                self.update_queue(Event::Key(KeyEvent::new(key, KeyModifiers::NONE)))
+            PaneCommand::Steer(id) => self.steer_queued(id),
+            PaneCommand::Dequeue(id) => {
+                let removed = self.queue.remove_queued(id);
+                debug_assert!(removed, "remote queue commands are checked first");
+                ComponentUpdate::render(RenderRequest::Immediate)
             }
             PaneCommand::Compact => self.start_compaction()?,
             PaneCommand::SetModel(model) if model == self.composer.model() => {
@@ -2494,14 +2493,11 @@ impl RootNode {
             Some(ComposerEffect::Submit(prompt))
                 if self.turns.turn_running() || self.queue.has_pending_steer() =>
             {
-                self.queue.push(prompt);
+                let id = self.queue.push(prompt);
                 // A steer is only possible while a turn runs; while one is still being applied the
                 // prompt waits behind it.
                 if delivery == BusyDelivery::Steer && self.turns.turn_running() {
-                    let steer = self.update_queue(Event::Key(KeyEvent::new(
-                        KeyCode::Enter,
-                        KeyModifiers::NONE,
-                    )));
+                    let steer = self.steer_queued(id);
                     render = render.max(steer.render);
                     steer.effects
                 } else {

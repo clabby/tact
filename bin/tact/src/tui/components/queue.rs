@@ -73,14 +73,46 @@ impl Default for MessageQueue {
 }
 
 impl MessageQueue {
-    pub(super) fn push(&mut self, prompt: impl Into<Submission>) {
+    /// Appends a prompt, selects it, and returns its id.
+    pub(super) fn push(&mut self, prompt: impl Into<Submission>) -> QueueId {
+        let id = QueueId::new(self.next_id);
         self.items.push(QueueItem {
-            id: QueueId::new(self.next_id),
+            id,
             prompt: prompt.into(),
             state: QueueItemState::Queued,
         });
         self.next_id = self.next_id.saturating_add(1);
         self.selected = self.items.len() - 1;
+        id
+    }
+
+    /// Moves a waiting item to the end of the steer lane and returns the prompt to deliver into
+    /// the running turn. Returns `None` when the item is gone or no longer waiting.
+    pub(super) fn steer(&mut self, id: QueueId) -> Option<Submission> {
+        let index = self.queued_index(id)?;
+        let mut item = self.items.remove(index);
+        item.state = QueueItemState::SubmittingSteer;
+        let prompt = item.prompt.clone();
+        let lane_end = self.steer_lane_len();
+        self.items.insert(lane_end, item);
+        self.selected = lane_end;
+        self.sync_steering_wave();
+        Some(prompt)
+    }
+
+    /// Removes a waiting item. Returns false when the item is gone or no longer waiting.
+    pub(super) fn remove_queued(&mut self, id: QueueId) -> bool {
+        let Some(index) = self.queued_index(id) else {
+            return false;
+        };
+        self.selected = index;
+        self.remove_selected().is_some()
+    }
+
+    fn queued_index(&self, id: QueueId) -> Option<usize> {
+        self.items
+            .iter()
+            .position(|item| item.id == id && item.state == QueueItemState::Queued)
     }
 
     pub(super) fn finish_edit(&mut self, id: QueueId, text: String) -> bool {
@@ -135,20 +167,6 @@ impl MessageQueue {
             );
             (item.id, item.prompt.display_text(), steering)
         })
-    }
-
-    /// Highlights a queued item so a keyboard action applies to it. Returns false when the item is
-    /// gone or no longer waiting in the queue.
-    pub(super) fn select_queued(&mut self, id: QueueId) -> bool {
-        let Some(index) = self
-            .items
-            .iter()
-            .position(|item| item.id == id && item.state == QueueItemState::Queued)
-        else {
-            return false;
-        };
-        self.selected = index;
-        true
     }
 
     pub(super) fn is_empty(&self) -> bool {
@@ -392,21 +410,12 @@ impl MessageQueue {
                 };
             }
             KeyCode::Enter => {
-                let Some(item) = self.items.get(self.selected) else {
+                let Some(id) = self.items.get(self.selected).map(|item| item.id) else {
                     return ComponentUpdate::none();
                 };
-                if item.state != QueueItemState::Queued {
+                let Some(prompt) = self.steer(id) else {
                     return ComponentUpdate::none();
-                }
-
-                let mut item = self.items.remove(self.selected);
-                item.state = QueueItemState::SubmittingSteer;
-                let id = item.id;
-                let prompt = item.prompt.clone();
-                let index = self.steer_lane_len();
-                self.items.insert(index, item);
-                self.selected = index;
-                self.sync_steering_wave();
+                };
                 return ComponentUpdate {
                     effects: vec![QueueEffect::Steer { id, prompt }],
                     render: RenderRequest::Immediate,

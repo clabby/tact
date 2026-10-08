@@ -112,6 +112,8 @@ pub(crate) enum ComposerEvent {
         text: String,
     },
     ReplaceDraft(String),
+    /// Submits the draft exactly as plain Enter does.
+    Submit,
     SetEffort(ReasoningEffort),
     SetModel(Model),
     SetReasoningMode(ReasoningMode),
@@ -332,6 +334,7 @@ impl Composer {
                 ComposerUpdate::changed()
             }
             ComposerEvent::Terminal(_) => ComposerUpdate::unchanged(),
+            ComposerEvent::Submit => self.submit(),
             ComposerEvent::PasteImage(data_url) => {
                 self.history.detach();
                 self.insert_image(data_url);
