@@ -1,7 +1,20 @@
 //! Multiline prompt editing and Pi-style composer rendering.
+//!
+//! [Composer] owns the draft ([draft::DraftBuffer]), prompt history recall,
+//! and the chrome drawn around the draft: workspace, context usage, turn
+//! timers, activity and task status, live sessions, and the clickable effort,
+//! speed, model, and subagent controls. It consumes [ComposerEvent]s from the
+//! terminal and the session and reports each change through [ComposerUpdate],
+//! which yields a [ComposerEffect] when the user submits a prompt, runs a shell
+//! command with a leading `!`, or asks to edit the draft externally. The chrome
+//! regions recorded during the last frame resolve clicks through
+//! [Composer::chrome_target].
 
+mod draft;
 mod history;
 mod layout;
+
+pub(crate) use draft::ComposerDraft;
 
 use super::{
     node::{Component, ComponentUpdate, RenderRequest},
@@ -17,14 +30,12 @@ use crate::{
         context::{ContextBudget, MODEL_WINDOW_TOKENS},
         prompt::Submission,
     },
-    tui::format::{
-        format_turn_duration, normalize_line_endings, sanitize_terminal_text, shorten_home,
-        terminal_text_width,
-    },
+    tui::format::{format_turn_duration, shorten_home},
 };
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use draft::{Direction, DraftBuffer};
 use history::PromptHistory;
-use layout::{VisualLayout, byte_at_column, grapheme_at_column};
+use layout::grapheme_at_column;
 use nanocodex::{HarnessModel as Model, Model as CodexModel};
 use ratatui::{
     Frame,
@@ -36,12 +47,10 @@ use ratatui::{
 use std::{
     collections::VecDeque,
     fmt::{self, Display, Formatter, Write as _},
-    mem,
     ops::Range,
     path::Path,
     time::{Duration, Instant},
 };
-use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 const MIN_CONTENT_ROWS: usize = 3;
@@ -145,12 +154,10 @@ pub(crate) enum ComposerEvent {
 }
 
 pub(crate) struct Composer {
-    draft: String,
-    images: Vec<PastedImage>,
-    next_image: u64,
-    cursor: usize,
-    preferred_column: Option<usize>,
+    draft: DraftBuffer,
+    /// The first visual line shown in the draft area.
     scroll: usize,
+    /// The draft width of the last frame, which vertical movement wraps at.
     last_width: usize,
     context_tokens: u64,
     context_window_tokens: u64,
@@ -172,45 +179,7 @@ pub(crate) struct Composer {
     speed_hit_area: Option<Rect>,
     model_hit_area: Option<Rect>,
     subagent_hit_area: Option<Rect>,
-    layout: Option<CachedLayout>,
     history: PromptHistory,
-}
-
-pub(crate) struct ComposerDraft {
-    text: String,
-    images: Vec<PastedImage>,
-    next_image: u64,
-    cursor: usize,
-}
-
-impl ComposerDraft {
-    pub(crate) fn text(&self) -> &str {
-        &self.text
-    }
-
-    pub(crate) fn images(&self) -> impl Iterator<Item = (&str, &str)> {
-        draft_images(&self.text, &self.images)
-    }
-}
-
-fn draft_images<'a>(
-    text: &'a str,
-    images: &'a [PastedImage],
-) -> impl Iterator<Item = (&'a str, &'a str)> {
-    images
-        .iter()
-        .map(|image| (&text[image.range.clone()], image.data_url.as_str()))
-}
-
-struct PastedImage {
-    range: Range<usize>,
-    data_url: String,
-}
-
-struct CachedLayout {
-    width: usize,
-    cursor: usize,
-    value: VisualLayout,
 }
 
 struct TurnTimer {
@@ -276,11 +245,7 @@ impl Composer {
 
     pub(crate) fn new(workspace: &Path, thinking: ReasoningEffort) -> Self {
         Self {
-            draft: String::new(),
-            images: Vec::new(),
-            next_image: 1,
-            cursor: 0,
-            preferred_column: None,
+            draft: DraftBuffer::default(),
             scroll: 0,
             last_width: 78,
             context_tokens: 0,
@@ -303,7 +268,6 @@ impl Composer {
             speed_hit_area: None,
             model_hit_area: None,
             subagent_hit_area: None,
-            layout: None,
             history: PromptHistory::default(),
         }
     }
@@ -321,14 +285,13 @@ impl Composer {
 
     /// The draft's images as (marker, data URL) pairs in text order.
     pub(crate) fn images(&self) -> impl Iterator<Item = (&str, &str)> {
-        draft_images(&self.draft, &self.images)
+        self.draft.images()
     }
 
     /// Appends an image marker at the end of the draft, as pasting the image there would.
     pub(crate) fn append_image(&mut self, data_url: String) {
         self.history.detach();
-        self.cursor = self.draft.len();
-        self.insert_image(data_url);
+        self.draft.append_image(data_url);
     }
 
     pub(crate) fn update(&mut self, event: ComposerEvent) -> ComposerUpdate {
@@ -336,14 +299,14 @@ impl Composer {
             ComposerEvent::Terminal(Event::Key(key)) => self.handle_key(key),
             ComposerEvent::Terminal(Event::Paste(text)) => {
                 self.history.detach();
-                self.insert(&text);
+                self.draft.insert(&text);
                 ComposerUpdate::changed()
             }
             ComposerEvent::Terminal(_) => ComposerUpdate::unchanged(),
             ComposerEvent::Submit => self.submit(),
             ComposerEvent::PasteImage(data_url) => {
                 self.history.detach();
-                self.insert_image(data_url);
+                self.draft.insert_image(data_url);
                 ComposerUpdate::changed()
             }
             ComposerEvent::ContextBudget(budget) => {
@@ -355,8 +318,8 @@ impl Composer {
             }
             ComposerEvent::ReplaceRange { range, text } => {
                 self.history.detach();
-                self.remove_range(range);
-                self.insert(&text);
+                self.draft.remove_range(range);
+                self.draft.insert(&text);
                 ComposerUpdate::changed()
             }
             ComposerEvent::ReplaceDraft(draft) => {
@@ -538,6 +501,7 @@ impl Composer {
 
         let content_width = usize::from(width.saturating_sub(2)).max(1);
         let rows = self
+            .draft
             .visual_layout(content_width)
             .lines
             .len()
@@ -578,7 +542,7 @@ impl Composer {
         let content_width = usize::from(area.width - 2).max(1);
         self.last_width = content_width;
         let (cursor_row, cursor_column, line_count) = {
-            let layout = self.visual_layout(content_width);
+            let layout = self.draft.visual_layout(content_width);
             (layout.cursor_row, layout.cursor_column, layout.lines.len())
         };
         let visible_rows = usize::from(area.height - 2);
@@ -592,6 +556,8 @@ impl Composer {
         buffer.set_style(area, Style::default().fg(theme.text()));
         self.render_chrome(buffer, area, theme);
         let border = self.border_style(theme);
+        let selected =
+            selection.and_then(|selection| selection.source_range(0, self.draft.text().len()));
 
         for row in 0..visible_rows {
             let y = area.y + 1 + u16::try_from(row).unwrap_or(u16::MAX);
@@ -599,28 +565,21 @@ impl Composer {
             draw_symbol(buffer, area.right() - 1, y, "│", border);
 
             let Some(line) = self
-                .layout
-                .as_ref()
-                .and_then(|cached| cached.value.lines.get(self.scroll + row))
+                .draft
+                .cached_layout()
+                .and_then(|layout| layout.lines.get(self.scroll + row))
             else {
                 continue;
             };
-            render_draft_line(
-                buffer,
-                Position::new(area.x + 1, y),
-                &self.draft,
-                &self.images,
-                line.start..line.end,
-                content_width,
-                theme,
-            );
-            if let Some(selection) = selection {
-                render_selection(
+            let position = Position::new(area.x + 1, y);
+            self.draft
+                .render_line(buffer, position, line.start..line.end, content_width, theme);
+            if let Some(selected) = selected.clone() {
+                self.draft.render_selection(
                     buffer,
-                    Position::new(area.x + 1, y),
-                    &self.draft,
+                    position,
                     line.start..line.end,
-                    selection,
+                    selected,
                     content_width,
                 );
             }
@@ -648,14 +607,15 @@ impl Composer {
         );
         let row = self.scroll + usize::from(position.y - area.y);
         let column = usize::from(position.x - area.x);
-        let line = self.visual_layout(width).lines.get(row)?.clone();
-        let range = grapheme_at_column(&self.draft, &line, column);
+        let line = self.draft.visual_layout(width).lines.get(row)?.clone();
+        let range = grapheme_at_column(self.draft.text(), &line, column);
         Some(TextSpan::new(0, range.start, range.end))
     }
 
     pub(super) fn selection_text(&self, selection: TextRange) -> Option<String> {
-        let range = selection.source_range(0, self.draft.len())?;
-        self.draft.get(range).map(ToOwned::to_owned)
+        let text = self.draft.text();
+        let range = selection.source_range(0, text.len())?;
+        text.get(range).map(ToOwned::to_owned)
     }
 
     pub(super) fn scroll_selection(&mut self, rows: isize, area: Rect) -> bool {
@@ -665,7 +625,7 @@ impl Composer {
 
         let width = usize::from(area.width).max(1);
         self.last_width = width;
-        let line_count = self.visual_layout(width).lines.len();
+        let line_count = self.draft.visual_layout(width).lines.len();
         let visible_rows = usize::from(area.height);
         let maximum = line_count.saturating_sub(visible_rows);
         let scroll = self.scroll.saturating_add_signed(rows).min(maximum);
@@ -677,7 +637,7 @@ impl Composer {
     }
 
     pub(crate) fn draft(&self) -> &str {
-        &self.draft
+        self.draft.text()
     }
 
     pub(crate) const fn input_mode(&self) -> InputMode {
@@ -702,97 +662,38 @@ impl Composer {
     }
 
     pub(crate) const fn cursor(&self) -> usize {
-        self.cursor
+        self.draft.cursor()
     }
 
     pub(crate) fn cursor_is_at_token_boundary(&self) -> bool {
-        self.draft[..self.cursor]
-            .chars()
-            .next_back()
-            .is_none_or(char::is_whitespace)
+        self.draft.cursor_is_at_token_boundary()
     }
 
     /// Replaces the draft text. An image survives while its marker still occurs in the new text,
     /// so an edit made elsewhere (the web interface or an external editor) keeps the images whose
     /// markers it left alone.
     pub(crate) fn replace_draft(&mut self, draft: String) {
-        let draft = if draft.contains('\r') {
-            normalize_line_endings(&draft).into_owned()
-        } else {
-            draft
-        };
-        let previous = mem::replace(&mut self.draft, draft);
-        let mut search_from = 0;
-        self.images.retain_mut(|image| {
-            let marker = &previous[image.range.clone()];
-            let Some(offset) = self.draft[search_from..].find(marker) else {
-                return false;
-            };
-            let start = search_from + offset;
-            image.range = start..start + marker.len();
-            search_from = image.range.end;
-            true
-        });
-        if self.images.is_empty() {
-            self.next_image = 1;
-        }
-        self.cursor = self.draft.len();
-        self.preferred_column = None;
+        self.draft.replace(draft);
         self.scroll = 0;
-        self.layout = None;
     }
 
     pub(crate) fn take_submission(&mut self) -> Option<Submission> {
-        let trimmed = self.draft.trim();
-        if trimmed.is_empty() {
-            return None;
-        }
-
-        let start = self.draft.len() - self.draft.trim_start().len();
-        let end = start + trimmed.len();
-        let text = trimmed.to_owned();
-        let images = self
-            .images
-            .iter()
-            .filter(|image| image.range.start >= start && image.range.end <= end)
-            .map(|image| {
-                (
-                    image.range.start - start..image.range.end - start,
-                    image.data_url.clone(),
-                )
-            });
-        let prompt = Submission::multimodal(text, images);
-        self.replace_draft(String::new());
-        Some(prompt)
+        let submission = self.draft.take_submission()?;
+        self.scroll = 0;
+        Some(submission)
     }
 
     pub(crate) fn take_draft(&mut self) -> Option<ComposerDraft> {
-        if self.draft.is_empty() {
-            return None;
-        }
-
-        let draft = ComposerDraft {
-            text: mem::take(&mut self.draft),
-            images: mem::take(&mut self.images),
-            next_image: mem::replace(&mut self.next_image, 1),
-            cursor: mem::take(&mut self.cursor),
-        };
+        let draft = self.draft.take()?;
         self.history.detach();
-        self.preferred_column = None;
         self.scroll = 0;
-        self.layout = None;
         Some(draft)
     }
 
     pub(crate) fn restore_draft(&mut self, draft: ComposerDraft) {
-        self.draft = draft.text;
-        self.images = draft.images;
-        self.next_image = draft.next_image;
-        self.cursor = draft.cursor;
+        self.draft.restore(draft);
         self.history.detach();
-        self.preferred_column = None;
         self.scroll = 0;
-        self.layout = None;
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> ComposerUpdate {
@@ -805,23 +706,35 @@ impl Composer {
                 self.history.detach();
             }
             return match key.code {
-                KeyCode::Char('a') => ComposerUpdate::from_change(self.move_to_logical_edge(false)),
-                KeyCode::Char('b') => ComposerUpdate::from_change(self.move_left()),
-                KeyCode::Char('e') => ComposerUpdate::from_change(self.move_to_logical_edge(true)),
-                KeyCode::Char('f') => ComposerUpdate::from_change(self.move_right()),
+                KeyCode::Char('a') => ComposerUpdate::from_change(
+                    self.draft.move_to_logical_edge(Direction::Backward),
+                ),
+                KeyCode::Char('b') => {
+                    ComposerUpdate::from_change(self.draft.move_grapheme(Direction::Backward))
+                }
+                KeyCode::Char('e') => {
+                    ComposerUpdate::from_change(self.draft.move_to_logical_edge(Direction::Forward))
+                }
+                KeyCode::Char('f') => {
+                    ComposerUpdate::from_change(self.draft.move_grapheme(Direction::Forward))
+                }
                 KeyCode::Char('g') => {
                     ComposerUpdate::effect(ComposerEffect::OpenDraftEditor, false)
                 }
                 KeyCode::Char('j') => {
                     self.history.detach();
-                    self.insert("\n");
+                    self.draft.insert("\n");
                     ComposerUpdate::changed()
                 }
                 KeyCode::Char('k') => {
-                    ComposerUpdate::from_change(self.delete_to_logical_line_end())
+                    ComposerUpdate::from_change(self.draft.delete_to_logical_line_end())
                 }
-                KeyCode::Char('n') => ComposerUpdate::from_change(self.move_down()),
-                KeyCode::Char('p') => ComposerUpdate::from_change(self.move_up()),
+                KeyCode::Char('n') => {
+                    ComposerUpdate::from_change(self.move_vertical(Direction::Forward))
+                }
+                KeyCode::Char('p') => {
+                    ComposerUpdate::from_change(self.move_vertical(Direction::Backward))
+                }
                 _ => ComposerUpdate::unchanged(),
             };
         }
@@ -847,42 +760,52 @@ impl Composer {
 
         match key.code {
             KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
-                self.insert("\n");
+                self.draft.insert("\n");
                 ComposerUpdate::changed()
             }
             KeyCode::Enter => self.submit(),
             KeyCode::Char('b') if key.modifiers == KeyModifiers::ALT => {
-                ComposerUpdate::from_change(self.move_by_word(false))
+                ComposerUpdate::from_change(self.draft.move_word(Direction::Backward))
             }
             KeyCode::Char('f') if key.modifiers == KeyModifiers::ALT => {
-                ComposerUpdate::from_change(self.move_by_word(true))
+                ComposerUpdate::from_change(self.draft.move_word(Direction::Forward))
             }
             KeyCode::Char(character) => {
-                self.insert(&character.to_string());
+                self.draft.insert(character.encode_utf8(&mut [0; 4]));
                 ComposerUpdate::changed()
             }
-            KeyCode::Left => ComposerUpdate::from_change(self.move_left()),
-            KeyCode::Right => ComposerUpdate::from_change(self.move_right()),
-            KeyCode::Up => ComposerUpdate::from_change(self.move_up()),
-            KeyCode::Down => ComposerUpdate::from_change(self.move_down()),
-            KeyCode::Home => ComposerUpdate::from_change(self.move_to_visual_edge(false)),
-            KeyCode::End => ComposerUpdate::from_change(self.move_to_visual_edge(true)),
-            KeyCode::Backspace if key.modifiers.contains(KeyModifiers::ALT) => {
-                ComposerUpdate::from_change(self.delete_word_before_cursor())
+            KeyCode::Left => {
+                ComposerUpdate::from_change(self.draft.move_grapheme(Direction::Backward))
             }
-            KeyCode::Backspace => ComposerUpdate::from_change(self.backspace()),
-            KeyCode::Delete => ComposerUpdate::from_change(self.delete()),
+            KeyCode::Right => {
+                ComposerUpdate::from_change(self.draft.move_grapheme(Direction::Forward))
+            }
+            KeyCode::Up => ComposerUpdate::from_change(self.move_vertical(Direction::Backward)),
+            KeyCode::Down => ComposerUpdate::from_change(self.move_vertical(Direction::Forward)),
+            KeyCode::Home => ComposerUpdate::from_change(
+                self.draft
+                    .move_to_visual_edge(Direction::Backward, self.last_width),
+            ),
+            KeyCode::End => ComposerUpdate::from_change(
+                self.draft
+                    .move_to_visual_edge(Direction::Forward, self.last_width),
+            ),
+            KeyCode::Backspace if key.modifiers.contains(KeyModifiers::ALT) => {
+                ComposerUpdate::from_change(self.draft.delete_word_before_cursor())
+            }
+            KeyCode::Backspace => ComposerUpdate::from_change(self.draft.backspace()),
+            KeyCode::Delete => ComposerUpdate::from_change(self.draft.delete()),
             _ => ComposerUpdate::unchanged(),
         }
     }
 
     fn submit(&mut self) -> ComposerUpdate {
-        let trimmed = self.draft.trim();
+        let trimmed = self.draft.text().trim();
         if trimmed.is_empty() {
             return ComposerUpdate::unchanged();
         }
 
-        if self.images.is_empty() && self.draft.starts_with('!') {
+        if !self.draft.has_images() && self.draft.text().starts_with('!') {
             let command = trimmed.trim_start_matches('!').trim().to_owned();
             if command.is_empty() {
                 return ComposerUpdate::unchanged();
@@ -899,301 +822,22 @@ impl Composer {
         ComposerUpdate::effect(ComposerEffect::Submit(prompt), true)
     }
 
-    fn move_up(&mut self) -> bool {
-        if !self.history.is_browsing() && self.move_vertical(-1) {
+    /// Moves between visual lines, or through prompt history from the first
+    /// line upward and while history is being browsed.
+    fn move_vertical(&mut self, direction: Direction) -> bool {
+        let browsing = self.history.is_browsing();
+        if !browsing && self.draft.move_vertical(direction, self.last_width) {
             return true;
         }
-
-        let Some(prompt) = self.history.previous(&self.draft) else {
+        let prompt = match direction {
+            Direction::Backward => self.history.previous(self.draft.text()),
+            Direction::Forward if browsing => self.history.next(),
+            Direction::Forward => None,
+        };
+        let Some(prompt) = prompt else {
             return false;
         };
         self.replace_draft(prompt);
-        true
-    }
-
-    fn move_down(&mut self) -> bool {
-        if !self.history.is_browsing() {
-            return self.move_vertical(1);
-        }
-
-        let Some(prompt) = self.history.next() else {
-            return false;
-        };
-        self.replace_draft(prompt);
-        true
-    }
-
-    fn insert(&mut self, text: &str) {
-        let text = normalize_line_endings(text);
-        self.move_cursor_out_of_image();
-        for image in &mut self.images {
-            if image.range.start >= self.cursor {
-                image.range.start += text.len();
-                image.range.end += text.len();
-            }
-        }
-        self.draft.insert_str(self.cursor, &text);
-        self.cursor += text.len();
-        self.preferred_column = None;
-        self.layout = None;
-    }
-
-    fn move_left(&mut self) -> bool {
-        let Some(previous) = self.draft[..self.cursor].grapheme_indices(true).next_back() else {
-            return false;
-        };
-        self.cursor = self
-            .images
-            .iter()
-            .find(|image| image.range.contains(&previous.0))
-            .map_or(previous.0, |image| image.range.start);
-        self.preferred_column = None;
-        true
-    }
-
-    fn move_right(&mut self) -> bool {
-        let Some(next) = self.draft[self.cursor..].graphemes(true).next() else {
-            return false;
-        };
-        let target = self.cursor + next.len();
-        self.cursor = self
-            .images
-            .iter()
-            .find(|image| image.range.start < target && target < image.range.end)
-            .map_or(target, |image| image.range.end);
-        self.preferred_column = None;
-        true
-    }
-
-    fn backspace(&mut self) -> bool {
-        if let Some(index) = self
-            .images
-            .iter()
-            .position(|image| image.range.start < self.cursor && self.cursor <= image.range.end)
-        {
-            let range = self.images.remove(index).range;
-            self.remove_range(range);
-            return true;
-        }
-        let Some(previous) = self.draft[..self.cursor]
-            .grapheme_indices(true)
-            .next_back()
-            .map(|(index, _)| index)
-        else {
-            return false;
-        };
-        self.remove_range(previous..self.cursor);
-        true
-    }
-
-    fn delete_word_before_cursor(&mut self) -> bool {
-        let mut start = self.cursor;
-        while let Some((index, character)) = self.draft[..start].char_indices().next_back() {
-            if !character.is_whitespace() {
-                break;
-            }
-            start = index;
-        }
-        while let Some((index, character)) = self.draft[..start].char_indices().next_back() {
-            if character.is_whitespace() {
-                break;
-            }
-            start = index;
-        }
-        let end = self.cursor;
-        if let Some(image_start) = self
-            .images
-            .iter()
-            .filter(|image| image.range.start < end && start < image.range.end)
-            .map(|image| image.range.start)
-            .min()
-        {
-            start = image_start;
-        }
-        if start == end {
-            return false;
-        }
-
-        self.images
-            .retain(|image| image.range.end <= start || image.range.start >= end);
-        self.remove_range(start..end);
-        true
-    }
-
-    fn move_by_word(&mut self, forward: bool) -> bool {
-        let is_word = |grapheme: &str| grapheme.chars().any(char::is_alphanumeric);
-        let target = if forward {
-            let mut found_word = false;
-            let mut target = self.draft.len();
-            for (offset, grapheme) in self.draft[self.cursor..].grapheme_indices(true) {
-                if is_word(grapheme) {
-                    found_word = true;
-                    target = self.cursor + offset + grapheme.len();
-                } else if found_word {
-                    break;
-                }
-            }
-            target
-        } else {
-            let mut found_word = false;
-            let mut target = 0;
-            for (offset, grapheme) in self.draft[..self.cursor].grapheme_indices(true).rev() {
-                if is_word(grapheme) {
-                    found_word = true;
-                    target = offset;
-                } else if found_word {
-                    break;
-                }
-            }
-            target
-        };
-
-        let adjust_position_out_of_image = |position: usize, prefer_start: bool| {
-            let Some(image) = self
-                .images
-                .iter()
-                .find(|image| image.range.start < position && position < image.range.end)
-            else {
-                return position;
-            };
-            if prefer_start {
-                image.range.start
-            } else {
-                image.range.end
-            }
-        };
-        let target = adjust_position_out_of_image(target, !forward);
-        if target == self.cursor {
-            return false;
-        }
-        self.cursor = target;
-        self.preferred_column = None;
-        true
-    }
-
-    fn delete(&mut self) -> bool {
-        if let Some(index) = self
-            .images
-            .iter()
-            .position(|image| image.range.start <= self.cursor && self.cursor < image.range.end)
-        {
-            let range = self.images.remove(index).range;
-            self.remove_range(range);
-            return true;
-        }
-        let Some(next) = self.draft[self.cursor..].graphemes(true).next() else {
-            return false;
-        };
-        self.remove_range(self.cursor..self.cursor + next.len());
-        true
-    }
-
-    fn delete_to_logical_line_end(&mut self) -> bool {
-        let end = self.draft[self.cursor..]
-            .find('\n')
-            .map_or(self.draft.len(), |offset| self.cursor + offset);
-        let end = if end == self.cursor && end < self.draft.len() {
-            end + '\n'.len_utf8()
-        } else {
-            end
-        };
-        if end == self.cursor {
-            return false;
-        }
-
-        self.images
-            .retain(|image| image.range.end <= self.cursor || image.range.start >= end);
-        self.remove_range(self.cursor..end);
-        true
-    }
-
-    fn insert_image(&mut self, data_url: String) {
-        self.move_cursor_out_of_image();
-        let marker = format!("[Image #{}]", self.next_image);
-        let start = self.cursor;
-        self.insert(&marker);
-        self.images.push(PastedImage {
-            range: start..self.cursor,
-            data_url,
-        });
-        self.images.sort_by_key(|image| image.range.start);
-        self.next_image = self.next_image.saturating_add(1);
-    }
-
-    fn move_cursor_out_of_image(&mut self) {
-        if let Some(image) = self
-            .images
-            .iter()
-            .find(|image| image.range.start < self.cursor && self.cursor < image.range.end)
-        {
-            self.cursor = image.range.end;
-        }
-    }
-
-    fn remove_range(&mut self, range: Range<usize>) {
-        let removed = range.len();
-        self.draft.drain(range.clone());
-        for image in &mut self.images {
-            if image.range.start >= range.end {
-                image.range.start -= removed;
-                image.range.end -= removed;
-            }
-        }
-        self.cursor = range.start;
-        self.preferred_column = None;
-        self.layout = None;
-    }
-
-    fn move_vertical(&mut self, direction: isize) -> bool {
-        let layout = VisualLayout::new(&self.draft, self.cursor, self.last_width.max(1));
-        let target_row = layout.cursor_row.saturating_add_signed(direction);
-        if target_row == layout.cursor_row || target_row >= layout.lines.len() {
-            return false;
-        }
-
-        let desired = *self.preferred_column.get_or_insert(layout.cursor_column);
-        let target = byte_at_column(&self.draft, &layout.lines[target_row], desired);
-        self.cursor = self
-            .images
-            .iter()
-            .find(|image| image.range.start < target && target < image.range.end)
-            .map_or(target, |image| {
-                if direction.is_negative() {
-                    image.range.start
-                } else {
-                    image.range.end
-                }
-            });
-        true
-    }
-
-    fn move_to_visual_edge(&mut self, end: bool) -> bool {
-        let layout = VisualLayout::new(&self.draft, self.cursor, self.last_width.max(1));
-        let line = &layout.lines[layout.cursor_row];
-        let target = if end { line.end } else { line.start };
-        if target == self.cursor {
-            return false;
-        }
-        self.cursor = target;
-        self.preferred_column = None;
-        true
-    }
-
-    fn move_to_logical_edge(&mut self, end: bool) -> bool {
-        let target = if end {
-            self.draft[self.cursor..]
-                .find('\n')
-                .map_or(self.draft.len(), |offset| self.cursor + offset)
-        } else {
-            self.draft[..self.cursor]
-                .rfind('\n')
-                .map_or(0, |offset| offset + '\n'.len_utf8())
-        };
-        if target == self.cursor {
-            return false;
-        }
-        self.cursor = target;
-        self.preferred_column = None;
         true
     }
 
@@ -1215,25 +859,6 @@ impl Composer {
         self.scroll = self.scroll.min(line_count.saturating_sub(visible));
     }
 
-    fn visual_layout(&mut self, width: usize) -> &VisualLayout {
-        let stale = self
-            .layout
-            .as_ref()
-            .is_some_and(|cached| cached.width != width || cached.cursor != self.cursor);
-        if stale {
-            self.layout = None;
-        }
-
-        let cursor = self.cursor;
-        let draft = &self.draft;
-        let cached = self.layout.get_or_insert_with(|| CachedLayout {
-            width,
-            cursor,
-            value: VisualLayout::new(draft, cursor, width),
-        });
-        &cached.value
-    }
-
     fn render_narrow(
         &mut self,
         frame: &mut Frame<'_>,
@@ -1244,7 +869,7 @@ impl Composer {
     ) {
         let width = usize::from(area.width).max(1);
         let (cursor_row, cursor_column, line_count) = {
-            let layout = self.visual_layout(width);
+            let layout = self.draft.visual_layout(width);
             (layout.cursor_row, layout.cursor_column, layout.lines.len())
         };
         if selection.is_none() {
@@ -1253,28 +878,18 @@ impl Composer {
             self.clamp_scroll(1, line_count);
         }
         let scroll = self.scroll;
-        let line = self.visual_layout(width).lines[scroll].clone();
+        let line = self.draft.visual_layout(width).lines[scroll].clone();
 
         let buffer = frame.buffer_mut();
         buffer.set_style(area, Style::default().fg(theme.text()));
-        render_draft_line(
-            buffer,
-            Position::new(area.x, area.y),
-            &self.draft,
-            &self.images,
-            line.start..line.end,
-            width,
-            theme,
-        );
-        if let Some(selection) = selection {
-            render_selection(
-                buffer,
-                Position::new(area.x, area.y),
-                &self.draft,
-                line.start..line.end,
-                selection,
-                width,
-            );
+        let position = Position::new(area.x, area.y);
+        self.draft
+            .render_line(buffer, position, line.start..line.end, width, theme);
+        if let Some(selected) =
+            selection.and_then(|selection| selection.source_range(0, self.draft.text().len()))
+        {
+            self.draft
+                .render_selection(buffer, position, line.start..line.end, selected, width);
         }
         if focused && selection.is_none() {
             let cursor_column = if cursor_row == scroll {
@@ -1294,7 +909,7 @@ impl Composer {
         self.speed_hit_area = None;
         self.model_hit_area = None;
         self.subagent_hit_area = None;
-        let shell_mode = self.draft.starts_with('!');
+        let shell_mode = self.draft.text().starts_with('!');
         let border = self.border_style(theme);
         let top = area.y;
         let bottom = area.bottom() - 1;
@@ -1533,7 +1148,7 @@ impl Composer {
         let development_start =
             directory_start.saturating_sub(u16::try_from(development_width).unwrap_or(u16::MAX));
         let hint_space = usize::from(development_start.saturating_sub(content_start));
-        let entry_hint = entry_hint(theme, self.draft.is_empty());
+        let entry_hint = entry_hint(theme, self.draft.text().is_empty());
         if entry_hint.width() <= hint_space {
             buffer.set_line(
                 content_start,
@@ -1574,7 +1189,7 @@ impl Composer {
     fn border_style(&self, theme: &Theme) -> Style {
         Style::default().fg(if self.task_wave.is_some() {
             Color::Green
-        } else if self.draft.starts_with('!') {
+        } else if self.draft.text().starts_with('!') {
             Color::Yellow
         } else {
             theme.border()
@@ -1656,79 +1271,6 @@ fn context_percent(tokens: u64, window: u64) -> u64 {
 
 fn draw_symbol(buffer: &mut Buffer, x: u16, y: u16, symbol: &str, style: Style) {
     buffer[(x, y)].set_symbol(symbol).set_style(style);
-}
-
-fn render_draft_line(
-    buffer: &mut Buffer,
-    position: Position,
-    draft: &str,
-    images: &[PastedImage],
-    range: Range<usize>,
-    width: usize,
-    theme: &Theme,
-) {
-    let rendered = sanitize_terminal_text(&draft[range.clone()]);
-    buffer.set_stringn(
-        position.x,
-        position.y,
-        rendered,
-        width,
-        Style::default().fg(theme.text()),
-    );
-    for image in images {
-        let start = image.range.start.max(range.start);
-        let end = image.range.end.min(range.end);
-        if start >= end {
-            continue;
-        }
-        let offset = terminal_text_width(&draft[range.start..start]);
-        buffer.set_stringn(
-            position
-                .x
-                .saturating_add(u16::try_from(offset).unwrap_or(u16::MAX)),
-            position.y,
-            &draft[start..end],
-            width.saturating_sub(offset),
-            Style::default().fg(Color::Blue),
-        );
-    }
-}
-
-fn render_selection(
-    buffer: &mut Buffer,
-    position: Position,
-    draft: &str,
-    line: Range<usize>,
-    selection: TextRange,
-    width: usize,
-) {
-    let Some(selected) = selection.source_range(0, draft.len()) else {
-        return;
-    };
-    let start = selected.start.max(line.start);
-    let end = selected.end.min(line.end);
-    if start >= end {
-        return;
-    }
-    let Some(prefix) = draft.get(line.start..start) else {
-        return;
-    };
-    let Some(text) = draft.get(start..end) else {
-        return;
-    };
-    let offset = terminal_text_width(prefix);
-    let selected_width = terminal_text_width(text).min(width.saturating_sub(offset));
-    if selected_width == 0 {
-        return;
-    }
-    let x = position
-        .x
-        .saturating_add(u16::try_from(offset).unwrap_or(u16::MAX));
-    let width = u16::try_from(selected_width).unwrap_or(u16::MAX);
-    buffer.set_style(
-        Rect::new(x, position.y, width, 1),
-        Style::reset().fg(Color::Black).bg(Color::Yellow),
-    );
 }
 
 #[cfg(test)]
@@ -2253,7 +1795,7 @@ mod tests {
         composer.update(key(KeyCode::Backspace, KeyModifiers::NONE));
 
         assert!(composer.draft().is_empty());
-        assert!(composer.images.is_empty());
+        assert_eq!(composer.images().count(), 0);
     }
 
     #[test]
@@ -2279,14 +1821,14 @@ mod tests {
         composer.update(key(KeyCode::Backspace, KeyModifiers::ALT));
 
         assert_eq!(composer.draft(), "inspect ");
-        assert!(composer.images.is_empty());
+        assert_eq!(composer.images().count(), 0);
     }
 
     #[test]
     fn readline_shortcuts_move_by_character_and_stay_on_the_logical_line() {
         let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
         composer.replace_draft("one\ntwo\nthree".to_owned());
-        composer.cursor = "one\nt".len();
+        composer.draft.set_cursor("one\nt".len());
 
         composer.update(key(KeyCode::Char('a'), KeyModifiers::CONTROL));
         assert_eq!(composer.cursor(), "one\n".len());
@@ -2310,7 +1852,7 @@ mod tests {
     fn ctrl_k_deletes_to_logical_line_end_then_removes_the_newline() {
         let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
         composer.replace_draft("one\ntwo three\nfour".to_owned());
-        composer.cursor = "one\ntwo".len();
+        composer.draft.set_cursor("one\ntwo".len());
 
         let update = composer.update(key(KeyCode::Char('k'), KeyModifiers::CONTROL));
         assert!(update.changed);
@@ -2320,7 +1862,7 @@ mod tests {
         composer.update(key(KeyCode::Char('k'), KeyModifiers::CONTROL));
         assert_eq!(composer.draft(), "one\ntwofour");
 
-        composer.cursor = composer.draft().len();
+        composer.draft.set_cursor(composer.draft().len());
         let update = composer.update(key(KeyCode::Char('k'), KeyModifiers::CONTROL));
         assert!(!update.changed);
         assert_eq!(composer.draft(), "one\ntwofour");
@@ -2330,14 +1872,14 @@ mod tests {
     fn ctrl_k_uses_logical_lines_in_wrapped_unicode_text() {
         let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
         composer.replace_draft("界 alpha beta gamma\nnext".to_owned());
-        composer.cursor = "界 alpha".len();
+        composer.draft.set_cursor("界 alpha".len());
         render(&mut composer, 8, 6);
 
         composer.update(key(KeyCode::Char('k'), KeyModifiers::CONTROL));
 
         assert_eq!(composer.draft(), "界 alpha\nnext");
         assert_eq!(composer.cursor(), "界 alpha".len());
-        assert!(composer.layout.is_none());
+        assert!(composer.draft.cached_layout().is_none());
     }
 
     #[test]
@@ -2354,24 +1896,26 @@ mod tests {
         composer.update(ComposerEvent::PasteImage(
             "data:image/png;base64,kept".to_owned(),
         ));
-        composer.cursor = cursor;
+        composer.draft.set_cursor(cursor);
 
         composer.update(key(KeyCode::Char('k'), KeyModifiers::CONTROL));
 
         assert_eq!(composer.draft(), "é \nkeep [Image #2]");
-        assert_eq!(composer.images.len(), 1);
         assert_eq!(
-            composer.images[0].range,
-            "é \nkeep ".len()..composer.draft().len()
+            composer.images().collect::<Vec<_>>(),
+            [("[Image #2]", "data:image/png;base64,kept")]
         );
-        assert!(composer.images[0].data_url.ends_with("kept"));
+        assert_eq!(
+            composer.draft.image_ranges().first(),
+            Some(&("é \nkeep ".len()..composer.draft().len()))
+        );
     }
 
     #[test]
     fn readline_shortcuts_require_exact_modifiers() {
         let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
         composer.replace_draft("abcd".to_owned());
-        composer.cursor = 2;
+        composer.draft.set_cursor(2);
 
         let update = composer.update(key(
             KeyCode::Char('b'),
@@ -2411,15 +1955,15 @@ mod tests {
         assert_eq!(composer.cursor(), 0);
 
         composer.replace_draft("alpha   beta".to_owned());
-        composer.cursor = "alpha ".len();
+        composer.draft.set_cursor("alpha ".len());
         composer.update(key(KeyCode::Char('f'), KeyModifiers::ALT));
         assert_eq!(composer.cursor(), composer.draft().len());
-        composer.cursor = "alpha  ".len();
+        composer.draft.set_cursor("alpha  ".len());
         composer.update(key(KeyCode::Char('b'), KeyModifiers::ALT));
         assert_eq!(composer.cursor(), 0);
 
         composer.replace_draft("你好".to_owned());
-        composer.cursor = 0;
+        composer.draft.set_cursor(0);
         composer.update(key(KeyCode::Char('f'), KeyModifiers::ALT));
         assert_eq!(composer.cursor(), composer.draft().len());
         composer.update(key(KeyCode::Char('b'), KeyModifiers::ALT));
