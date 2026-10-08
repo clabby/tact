@@ -1,4 +1,23 @@
-//! Independently scheduled Nanocodex turn worker.
+//! Multi-pane turn scheduler over Nanocodex agents.
+//!
+//! [`spawn`] starts one worker task that owns every pane's agent. Front-ends send
+//! [`WorkerCommand`]s and receive [`WorkerEvent`]s; they never call an agent directly, so each
+//! pane's agent observes commands in the order they were sent.
+//!
+//! Scheduling contract:
+//! - Each loop iteration prefers shutdown, then finished compactions, then finished turns, then new
+//!   commands. Completed work is reported before a later command can observe its pane as busy.
+//! - In-flight work is keyed by pane and [`TurnId`]. A Codex pane may run several conversation
+//!   turns and auxiliary jobs at once. A turn cancelled through [`WorkerCommand::CancelAll`],
+//!   [`WorkerCommand::ClosePane`], its auxiliary shutdown scope, or worker shutdown finishes
+//!   without an error.
+//! - Compaction is idle-only. It is rejected while the pane has active turns, and every turn,
+//!   steer, fork, or setting change for that pane is rejected until it finishes, so a checkpoint
+//!   never races a turn.
+//! - A Claude pane runs one conversation turn at a time because its native checkpoint is captured
+//!   after the turn completes, and it cannot fork.
+//! - On shutdown the worker discards queued commands, cancels every turn, shuts every agent down,
+//!   reports the remaining turn and compaction outcomes, and ends with [`WorkerEvent::Stopped`].
 
 use super::{
     IMAGE_RENDERING_INSTRUCTIONS, MEMORY_REVIEW_CHECKPOINT,
@@ -19,11 +38,13 @@ use nanocodex::{
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
+    time::Instant,
 };
 use tact_subagents::AgentContext;
+use thiserror::Error;
 use tokio::{
     sync::{mpsc, oneshot},
-    task::{Id as TaskId, JoinError, JoinSet},
+    task::{Id as TaskId, JoinError, JoinHandle, JoinSet},
 };
 use tokio_util::sync::CancellationToken;
 
@@ -111,10 +132,35 @@ impl ReflectionContext {
     }
 }
 
+/// Why the worker could not run, steer, fork, or compact a pane's conversation.
+#[derive(Debug, Error)]
+pub(crate) enum WorkerError {
+    #[error("finish active work before compacting context")]
+    PaneBusy,
+    #[error("context compaction is still running")]
+    Compacting,
+    #[error("session pane is no longer available")]
+    PaneUnavailable,
+    #[error("session pane is already open")]
+    PaneAlreadyOpen,
+    #[error("the parent session is no longer available")]
+    ParentUnavailable,
+    #[error("Claude does not support forking the current conversation")]
+    ClaudeCannotFork,
+    #[error("Claude is still finishing the current turn and its checkpoint")]
+    ClaudeCheckpointPending,
+    #[error("compaction task stopped unexpectedly: {0}")]
+    CompactionTaskStopped(JoinError),
+    #[error("turn task stopped unexpectedly: {0}")]
+    TurnTaskStopped(JoinError),
+    #[error(transparent)]
+    Agent(#[from] NanocodexError),
+}
+
 pub(crate) enum WorkerEvent {
     CompactionFinished {
         pane: PaneId,
-        result: Result<Box<AgentSnapshot>, String>,
+        result: Result<Box<AgentSnapshot>, WorkerError>,
         terminal_stop: Option<TerminalStopReason>,
         duration_ns: u64,
     },
@@ -130,9 +176,10 @@ pub(crate) enum WorkerEvent {
     TurnFinished {
         pane: PaneId,
         id: TurnId,
-        error: Option<String>,
+        error: Option<WorkerError>,
         terminal_stop: Option<TerminalStopReason>,
         snapshot: Option<Box<AgentSnapshot>>,
+        /// Whether the turn was accepted earlier, so the front-end is tracking it as running.
         terminal_expected: bool,
     },
     SteerAdmitted {
@@ -148,12 +195,12 @@ pub(crate) enum WorkerEvent {
     SteerFailed {
         pane: PaneId,
         queue_id: QueueId,
-        error: String,
+        error: WorkerError,
     },
     TurnsCancelled {
         pane: PaneId,
         count: usize,
-        error: Option<String>,
+        error: Option<NanocodexError>,
     },
     ForkOpened {
         pane: PaneId,
@@ -163,7 +210,7 @@ pub(crate) enum WorkerEvent {
     },
     ForkFailed {
         pane: PaneId,
-        error: String,
+        error: WorkerError,
     },
     ThinkingUpdated {
         pane: PaneId,
@@ -180,6 +227,39 @@ pub(crate) enum WorkerEvent {
     },
 }
 
+/// The worker's outbound event channel. A closed receiver means the front-end stopped listening,
+/// so dropped sends are intentional.
+#[derive(Clone)]
+struct Updates(mpsc::UnboundedSender<WorkerEvent>);
+
+impl Updates {
+    fn publish(&self, event: WorkerEvent) {
+        drop(self.0.send(event));
+    }
+
+    fn publish_context_budget(&self, snapshot: &AgentSnapshot, session_id: &str, pane: PaneId) {
+        if let Some(budget) = snapshot.context_budget() {
+            self.publish(WorkerEvent::ContextBudget {
+                pane,
+                session_id: session_id.to_owned(),
+                budget,
+            });
+        }
+    }
+
+    /// Claude reports its context budget before the first turn; Codex reports it with each turn.
+    async fn observe_initial_context(&self, agent: &Nanocodex, model: HarnessModel, pane: PaneId) {
+        if matches!(model, HarnessModel::Claude(_))
+            && let Ok(snapshot) = agent
+                .runtime_snapshot()
+                .await
+                .and_then(AgentSnapshot::from_claude)
+        {
+            self.publish_context_budget(&snapshot, agent.session_id(), pane);
+        }
+    }
+}
+
 type TurnResult = Result<CompletedTurn, NanocodexError>;
 
 struct CompletedCompaction {
@@ -193,13 +273,22 @@ struct CompletedTurn {
     snapshot: Option<Box<AgentSnapshot>>,
 }
 
+/// The outcome of one spawned turn task.
+struct FinishedTurn {
+    key: TurnKey,
+    purpose: TurnPurpose,
+    /// Whether the auxiliary job's own shutdown scope cancelled the turn.
+    cancelled_by_scope: bool,
+    result: TurnResult,
+}
+
 async fn complete_turn(
     agent: &Nanocodex,
     result: Result<nanocodex::agent::TurnResult, NanocodexError>,
     claude: bool,
     auxiliary: bool,
     pane: PaneId,
-    updates: &mpsc::UnboundedSender<WorkerEvent>,
+    updates: &Updates,
 ) -> TurnResult {
     let snapshot = if auxiliary {
         Ok(None)
@@ -217,7 +306,7 @@ async fn complete_turn(
             .map(|snapshot| AgentSnapshot::Codex(Box::new(snapshot))))
     };
     if let Ok(Some(snapshot)) = &snapshot {
-        publish_context_budget(snapshot, agent.session_id(), pane, updates);
+        updates.publish_context_budget(snapshot, agent.session_id(), pane);
     }
     // Failed turns may update telemetry but never replace the successful resume checkpoint.
     let result = result?;
@@ -227,39 +316,11 @@ async fn complete_turn(
     })
 }
 
-fn publish_context_budget(
-    snapshot: &AgentSnapshot,
-    session_id: &str,
-    pane: PaneId,
-    updates: &mpsc::UnboundedSender<WorkerEvent>,
-) {
-    if let Some(budget) = snapshot.context_budget() {
-        drop(updates.send(WorkerEvent::ContextBudget {
-            pane,
-            session_id: session_id.to_owned(),
-            budget,
-        }));
-    }
-}
-
-async fn observe_initial_context(
-    agent: &Nanocodex,
-    model: HarnessModel,
-    pane: PaneId,
-    updates: &mpsc::UnboundedSender<WorkerEvent>,
-) {
-    if matches!(model, HarnessModel::Claude(_))
-        && let Ok(snapshot) = agent
-            .runtime_snapshot()
-            .await
-            .and_then(AgentSnapshot::from_claude)
-    {
-        publish_context_budget(&snapshot, agent.session_id(), pane, updates);
-    }
-}
-
+/// Who receives a turn's outcome.
 enum TurnPurpose {
+    /// The pane's conversation; the outcome becomes [`WorkerEvent::TurnFinished`].
     Conversation,
+    /// A one-shot job whose final message or error goes to its requester only.
     Auxiliary(oneshot::Sender<Result<String, AuxiliaryError>>),
 }
 
@@ -461,381 +522,376 @@ struct PaneAgent {
     memory_review: MemoryReviewState,
 }
 
-pub(crate) fn spawn(
-    agent: Nanocodex,
-    context: AgentContext,
-    memory_review: MemoryReviewState,
-    shutdown: CancellationToken,
-) -> (
-    mpsc::UnboundedSender<WorkerCommand>,
-    mpsc::UnboundedReceiver<WorkerEvent>,
-) {
-    let (commands, command_rx) = mpsc::unbounded_channel();
-    let (updates, update_rx) = mpsc::unbounded_channel();
-    tokio::spawn(run(
-        agent,
-        context,
-        memory_review,
-        command_rx,
-        updates,
-        shutdown,
-    ));
-    (commands, update_rx)
+impl TurnRequest {
+    fn reject(self, error: WorkerError, updates: &Updates) {
+        match self.purpose {
+            TurnPurpose::Conversation => updates.publish(WorkerEvent::TurnFinished {
+                pane: self.pane,
+                id: self.id,
+                error: Some(error),
+                terminal_stop: None,
+                snapshot: None,
+                terminal_expected: false,
+            }),
+            TurnPurpose::Auxiliary(completion) => {
+                drop(completion.send(Err(AuxiliaryError::Failed(error.to_string()))));
+            }
+        }
+    }
+
+    /// Reports an auxiliary job whose shutdown scope ended before its turn started.
+    fn cancel(self) {
+        if let TurnPurpose::Auxiliary(completion) = self.purpose {
+            drop(completion.send(Err(AuxiliaryError::Cancelled)));
+        }
+    }
 }
 
-async fn run(
+/// An agent created for one auxiliary job, isolated from the pane's conversation.
+struct IsolatedAgent {
     agent: Nanocodex,
-    context: AgentContext,
-    memory_review: MemoryReviewState,
-    mut commands: mpsc::UnboundedReceiver<WorkerCommand>,
-    updates: mpsc::UnboundedSender<WorkerEvent>,
-    shutdown: CancellationToken,
-) {
-    observe_initial_context(&agent, context.model, PaneId::Main, &updates).await;
-    let mut agents = HashMap::from([(
-        PaneId::Main,
-        PaneAgent {
-            agent,
-            context,
-            memory_review,
-        },
-    )]);
-    let mut controls = HashMap::<TurnKey, TurnControl>::new();
-    let mut cancelled = HashSet::<TurnKey>::new();
-    let mut turns = JoinSet::<(TurnKey, TurnPurpose, bool, TurnResult)>::new();
-    let mut compactions = JoinSet::new();
-    let mut compacting = HashMap::<PaneId, TaskId>::new();
+    /// Discards the isolated agent's events; nothing presents them.
+    drain: JoinHandle<()>,
+}
 
-    loop {
-        tokio::select! {
-            biased;
-            () = shutdown.cancelled() => break,
-            Some(result) = compactions.join_next(), if !compactions.is_empty() => {
-                finish_compaction(result, &mut compacting, &updates);
-            }
-            result = turns.join_next(), if !turns.is_empty() => {
-                finish_turn(result, false, &mut controls, &mut cancelled, &updates);
-            }
-            command = commands.recv() => {
-                let Some(command) = command else {
-                    break;
+impl IsolatedAgent {
+    async fn create(parent: &Nanocodex, context: AuxiliaryContext) -> Result<Self, NanocodexError> {
+        let (agent, mut events) = match context {
+            AuxiliaryContext::Clean => parent.spawn().await?,
+            AuxiliaryContext::CurrentConversation => parent.fork().await?,
+        };
+        let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
+        Ok(Self { agent, drain })
+    }
+
+    async fn shutdown(self) {
+        let Self { agent, drain } = self;
+        drop(agent.shutdown().await);
+        // The event stream closes only after the last agent handle is dropped.
+        drop(agent);
+        drop(drain.await);
+    }
+}
+
+/// Turns and auxiliary jobs that have started and whose outcome is not yet reported.
+#[derive(Default)]
+struct ActiveTurns {
+    controls: HashMap<TurnKey, TurnControl>,
+    /// Turns the worker cancelled; their cancellation is reported as a clean finish.
+    cancelled: HashSet<TurnKey>,
+    tasks: JoinSet<FinishedTurn>,
+}
+
+impl ActiveTurns {
+    fn is_active(&self, pane: PaneId) -> bool {
+        self.controls.keys().any(|key| key.pane == pane)
+    }
+
+    /// Starts a turn on the pane's agent, or on an isolated agent for an auxiliary job. Returns
+    /// whether a conversation turn was accepted.
+    async fn start(&mut self, agent: &PaneAgent, request: TurnRequest, updates: &Updates) -> bool {
+        if request
+            .shutdown
+            .as_ref()
+            .is_some_and(CancellationToken::is_cancelled)
+        {
+            request.cancel();
+            return false;
+        }
+        let auxiliary = request.auxiliary_context.is_some();
+        let claude = matches!(agent.context.model, HarnessModel::Claude(_));
+        // A native turn owns its control entry through checkpoint capture, so the next
+        // prompt cannot change the committed conversation before it is copied.
+        if claude {
+            let rejection =
+                if request.auxiliary_context == Some(AuxiliaryContext::CurrentConversation) {
+                    Some(WorkerError::ClaudeCannotFork)
+                } else if !auxiliary && self.is_active(request.pane) {
+                    Some(WorkerError::ClaudeCheckpointPending)
+                } else {
+                    None
                 };
-                let request = match command {
-                    WorkerCommand::Compact(pane) => {
-                        let rejection = if controls.keys().any(|key| key.pane == pane) || compacting.contains_key(&pane) {
-                            Some("finish active work before compacting context")
-                        } else if !agents.contains_key(&pane) {
-                            Some("session pane is no longer available")
-                        } else { None };
-                        if let Some(error) = rejection {
-                            drop(updates.send(WorkerEvent::CompactionFinished { pane, result: Err(error.to_owned()), terminal_stop: None, duration_ns: 0 }));
-                            continue;
+            if let Some(error) = rejection {
+                request.reject(error, updates);
+                return false;
+            }
+        }
+        let isolated = match request.auxiliary_context {
+            Some(context) => {
+                let create = IsolatedAgent::create(&agent.agent, context);
+                let created = match request.shutdown.clone() {
+                    Some(scope) => tokio::select! {
+                        result = create => result,
+                        () = scope.cancelled() => {
+                            request.cancel();
+                            return false;
                         }
-                        let agent = agents.get(&pane).unwrap();
-                        let claude = matches!(agent.context.model, HarnessModel::Claude(_));
-                        let agent = agent.agent.clone();
-                        let task = compactions.spawn(async move {
-                            let started = std::time::Instant::now();
-                            let operation = async {
-                                agent.compact().await?;
-                                if claude {
-                                    agent.runtime_snapshot().await.and_then(AgentSnapshot::from_claude)
-                                } else {
-                                    agent.snapshot().await.map(|snapshot| AgentSnapshot::Codex(Box::new(snapshot)))
-                                }
-                            };
-                            let result = operation.await.map(Box::new);
-                            CompletedCompaction { pane, result, duration_ns: u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX) }
-                        });
-                        compacting.insert(pane, task.id());
-                        continue;
+                    },
+                    None => create.await,
+                };
+                match created {
+                    Ok(isolated) => Some(isolated),
+                    Err(error) => {
+                        request.reject(error.into(), updates);
+                        return false;
                     }
-                    WorkerCommand::Submit { pane, id, prompt } => TurnRequest {
-                        pane,
-                        id,
-                        prompt,
-                        purpose: TurnPurpose::Conversation,
-                        auxiliary_context: None,
-                        shutdown: None,
-                        prompt_kind: PromptKind::Conversation,
-                    },
-                    WorkerCommand::Reflect {
-                        pane,
-                        id,
-                        instructions,
-                        context,
-                    } => TurnRequest {
-                        pane,
-                        id,
-                        prompt: instructions,
-                        purpose: TurnPurpose::Conversation,
-                        auxiliary_context: None,
-                        shutdown: None,
-                        prompt_kind: PromptKind::Reflection(context),
-                    },
-                    WorkerCommand::Auxiliary {
-                        pane,
-                        id,
-                        prompt,
-                        context,
-                        shutdown,
-                        completion,
-                    } => TurnRequest {
-                        pane,
-                        id,
-                        prompt,
-                        purpose: TurnPurpose::Auxiliary(completion),
-                        auxiliary_context: Some(context),
-                        shutdown: Some(shutdown),
-                        prompt_kind: PromptKind::Auxiliary,
-                    },
-                    WorkerCommand::Steer {
+                }
+            }
+            None => None,
+        };
+        let turn_agent = isolated
+            .as_ref()
+            .map_or(&agent.agent, |isolated| &isolated.agent);
+        let agent_prompt = agent.context.prompt(
+            request
+                .prompt_kind
+                .prepare(&request.prompt, agent.memory_review),
+        );
+        let turn = match turn_agent.prompt(agent_prompt).await {
+            Ok(turn) => turn,
+            Err(error) => {
+                if let Some(isolated) = isolated {
+                    isolated.shutdown().await;
+                }
+                request.reject(error.into(), updates);
+                return false;
+            }
+        };
+        let TurnRequest {
+            pane,
+            id,
+            purpose,
+            shutdown,
+            ..
+        } = request;
+        let key = TurnKey { pane, id };
+        let control = turn.control();
+        let task_control = control.clone();
+        self.controls.insert(key, control);
+        let checkpoint_agent = agent.agent.clone();
+        let context_updates = updates.clone();
+        self.tasks.spawn(async move {
+            let mut turn = Box::pin(turn);
+            let (cancelled_by_scope, result) = match shutdown {
+                Some(shutdown) => {
+                    tokio::select! {
+                        result = turn.as_mut() => (false, result),
+                        () = shutdown.cancelled() => {
+                            drop(task_control.cancel().await);
+                            (true, turn.await)
+                        }
+                    }
+                }
+                None => (false, turn.await),
+            };
+            let result = complete_turn(
+                &checkpoint_agent,
+                result,
+                claude,
+                auxiliary,
+                pane,
+                &context_updates,
+            )
+            .await;
+            if let Some(isolated) = isolated {
+                isolated.shutdown().await;
+            }
+            FinishedTurn {
+                key,
+                purpose,
+                cancelled_by_scope,
+                result,
+            }
+        });
+        if !auxiliary {
+            updates.publish(WorkerEvent::TurnAccepted { pane, id });
+        }
+        !auxiliary
+    }
+
+    /// Steers the pane's oldest steerable turn, or starts the steer as a new turn when none
+    /// accepts it. Returns whether a new conversation turn was accepted.
+    async fn steer(&mut self, agent: &PaneAgent, request: SteerRequest, updates: &Updates) -> bool {
+        let SteerRequest {
+            pane,
+            queue_id,
+            fallback_id,
+            prompt,
+        } = request;
+        let memory_review = agent.memory_review;
+        let mut active = self
+            .controls
+            .iter()
+            .filter(|(key, _)| key.pane == pane)
+            .collect::<Vec<_>>();
+        active.sort_unstable_by_key(|(key, _)| key.id);
+        for (_, control) in active {
+            match control.steer(memory_review.steer_prompt(&prompt)).await {
+                Ok(()) => {
+                    updates.publish(WorkerEvent::SteerAdmitted { pane, queue_id });
+                    return false;
+                }
+                Err(NanocodexError::TurnNotSteerable) => {}
+                Err(error) => {
+                    updates.publish(WorkerEvent::SteerFailed {
                         pane,
                         queue_id,
-                        fallback_id,
-                        prompt,
-                    } => {
-                        if compacting.contains_key(&pane) {
-                            drop(updates.send(WorkerEvent::SteerFailed { pane, queue_id, error: "context compaction is still running".to_owned() }));
-                            continue;
-                        }
-                        let Some(agent) = agents.get(&pane) else {
-                            drop(updates.send(WorkerEvent::SteerFailed {
-                                pane,
-                                queue_id,
-                                error: "session pane is no longer available".to_owned(),
-                            }));
-                            continue;
-                        };
-                        let request = SteerRequest {
-                            pane,
-                            queue_id,
-                            fallback_id,
-                            prompt,
-                        };
-                        let memory_review = agent.memory_review;
-                        let started_turn = steer_turn(
-                            agent,
-                            memory_review,
-                            &mut controls,
-                            &mut turns,
-                            &updates,
-                            request,
-                        )
-                        .await;
-                        if started_turn {
-                            agents.get_mut(&pane).unwrap().memory_review.turn_accepted();
-                        }
-                        continue;
-                    }
-                    WorkerCommand::OpenAgent { pane, agent, context, memory_review } => {
-                        if agents.contains_key(&pane) {
-                            drop(agent.shutdown().await);
-                            debug_assert!(false, "a newly opened pane must have a unique identity");
-                            continue;
-                        }
-                        observe_initial_context(&agent, context.model, pane, &updates).await;
-                        agents.insert(pane, PaneAgent { agent, context, memory_review });
-                        continue;
-                    }
-                    WorkerCommand::ReplaceAgent { pane, agent, context, memory_review } => {
-                        debug_assert!(!controls.keys().any(|key| key.pane == pane));
-                        let Some(current) = agents.get_mut(&pane) else {
-                            drop(agent.shutdown().await);
-                            drop(updates.send(WorkerEvent::ForkFailed {
-                                pane,
-                                error: "session pane is no longer available".to_owned(),
-                            }));
-                            continue;
-                        };
-                        observe_initial_context(&agent, context.model, pane, &updates).await;
-                        let retired = std::mem::replace(current, PaneAgent { agent, context, memory_review });
-                        drop(retired.agent.shutdown().await);
-                        continue;
-                    }
-                    WorkerCommand::SetThinking { pane, effort } => {
-                        if compacting.contains_key(&pane) {
-                            drop(updates.send(WorkerEvent::ThinkingUpdated { pane, effort, result: Err(NanocodexError::InvalidRequest("context compaction is still running".to_owned())) }));
-                            continue;
-                        }
-                        let result = match agents.get_mut(&pane) {
-                            Some(agent) => {
-                                let result = agent.agent.set_thinking(effort.into()).await;
-                                if result.is_ok() {
-                                    agent.context.thinking = effort.into();
-                                }
-                                result
-                            },
-                            None => Err(NanocodexError::AgentStopped),
-                        };
-                        drop(updates.send(WorkerEvent::ThinkingUpdated {
-                            pane,
-                            effort,
-                            result,
-                        }));
-                        continue;
-                    }
-                    WorkerCommand::SetSpeed { pane, speed } => {
-                        if compacting.contains_key(&pane) {
-                            drop(updates.send(WorkerEvent::SpeedUpdated { pane, speed, result: Err(NanocodexError::InvalidRequest("context compaction is still running".to_owned())) }));
-                            continue;
-                        }
-                        let result = match agents.get(&pane) {
-                            Some(agent) => set_speed(&agent.agent, agent.context.model, speed).await,
-                            None => Err(NanocodexError::AgentStopped),
-                        };
-                        drop(updates.send(WorkerEvent::SpeedUpdated {
-                            pane,
-                            speed,
-                            result,
-                        }));
-                        continue;
-                    }
-                    WorkerCommand::CancelAll(pane) => {
-                        cancel_pane(pane, &controls, &mut cancelled, &updates).await;
-                        continue;
-                    }
-                    WorkerCommand::OpenFork {
-                        pane,
-                        parent,
-                        parent_sequence,
-                    } => {
-                        if agents.contains_key(&pane) {
-                            drop(updates.send(WorkerEvent::ForkFailed {
-                                pane,
-                                error: "session pane is already open".to_owned(),
-                            }));
-                            continue;
-                        }
-                        let Some(agent) = agents.get(&parent) else {
-                            drop(updates.send(WorkerEvent::ForkFailed {
-                                pane,
-                                error: "the parent session is no longer available".to_owned(),
-                            }));
-                            continue;
-                        };
-                        if compacting.contains_key(&parent) {
-                            drop(updates.send(WorkerEvent::ForkFailed { pane, error: "context compaction is still running".to_owned() }));
-                            continue;
-                        }
-                        let context = agent.context;
-                        if matches!(context.model, HarnessModel::Claude(_)) {
-                            drop(updates.send(WorkerEvent::ForkFailed { pane, error: "Claude does not support forking the current conversation".to_owned() }));
-                            continue;
-                        }
-                        let memory_review = agent.memory_review.forked();
-                        match agent.agent.fork().await {
-                            Ok((agent, events)) => {
-                                agents.insert(pane, PaneAgent { agent, context, memory_review });
-                                drop(updates.send(WorkerEvent::ForkOpened {
-                                    pane,
-                                    parent,
-                                    parent_sequence,
-                                    events,
-                                }));
-                            }
-                            Err(error) => drop(updates.send(WorkerEvent::ForkFailed {
-                                pane,
-                                error: error.to_string(),
-                            })),
-                        }
-                        continue;
-                    }
-                    WorkerCommand::ClosePane(pane) => {
-                        let agent = agents.remove(&pane).map(|agent| agent.agent);
-                        close_pane(pane, agent, &controls, &mut cancelled, &updates).await;
-                        continue;
-                    }
-                };
-                if compacting.contains_key(&request.pane) {
-                    reject_turn(request, "context compaction is still running".to_owned(), &updates);
-                    continue;
-                }
-                let Some(agent) = agents.get(&request.pane) else {
-                    reject_turn(request, "session pane is no longer available".to_owned(), &updates);
-                    continue;
-                };
-                let pane = request.pane;
-                let memory_review = agent.memory_review;
-                let started_conversation = start_turn(
-                    agent,
-                    request,
-                    memory_review,
-                    &mut controls,
-                    &mut turns,
-                    &updates,
-                )
-                .await;
-                if started_conversation {
-                    agents.get_mut(&pane).unwrap().memory_review.turn_accepted();
+                        error: error.into(),
+                    });
+                    return false;
                 }
             }
         }
-    }
 
-    commands.close();
-    while commands.try_recv().is_ok() {}
+        let claude = matches!(agent.context.model, HarnessModel::Claude(_));
+        if claude && self.is_active(pane) {
+            updates.publish(WorkerEvent::SteerFailed {
+                pane,
+                queue_id,
+                error: WorkerError::ClaudeCheckpointPending,
+            });
+            return false;
+        }
 
-    drop(cancel_turns(&controls, None).await);
-    let shutdown_error = join_all(
-        agents
-            .into_values()
-            .map(|agent| async move { agent.agent.shutdown().await }),
-    )
-    .await
-    .into_iter()
-    .find_map(Result::err);
-
-    while let Some(result) = turns.join_next().await {
-        finish_turn(Some(result), true, &mut controls, &mut cancelled, &updates);
-    }
-
-    while let Some(result) = compactions.join_next().await {
-        finish_compaction(result, &mut compacting, &updates);
-    }
-    drop(updates.send(WorkerEvent::Stopped {
-        error: shutdown_error,
-    }));
-}
-
-fn finish_compaction(
-    completion: Result<CompletedCompaction, JoinError>,
-    compacting: &mut HashMap<PaneId, TaskId>,
-    updates: &mpsc::UnboundedSender<WorkerEvent>,
-) {
-    let (pane, result, duration_ns, terminal_stop) = match completion {
-        Ok(CompletedCompaction {
+        let turn = match agent
+            .agent
+            .prompt(agent.context.prompt(memory_review.steer_prompt(&prompt)))
+            .await
+        {
+            Ok(turn) => turn,
+            Err(error) => {
+                updates.publish(WorkerEvent::SteerFailed {
+                    pane,
+                    queue_id,
+                    error: error.into(),
+                });
+                return false;
+            }
+        };
+        let key = TurnKey {
             pane,
+            id: fallback_id,
+        };
+        self.controls.insert(key, turn.control());
+        let checkpoint_agent = agent.agent.clone();
+        let context_updates = updates.clone();
+        self.tasks.spawn(async move {
+            let result = complete_turn(
+                &checkpoint_agent,
+                turn.await,
+                claude,
+                false,
+                pane,
+                &context_updates,
+            )
+            .await;
+            FinishedTurn {
+                key,
+                purpose: TurnPurpose::Conversation,
+                cancelled_by_scope: false,
+                result,
+            }
+        });
+        updates.publish(WorkerEvent::TurnAccepted {
+            pane,
+            id: fallback_id,
+        });
+        updates.publish(WorkerEvent::SteerPromoted {
+            pane,
+            queue_id,
+            id: fallback_id,
+            prompt,
+        });
+        true
+    }
+
+    /// Cancels the pane's turns, or every turn when `pane` is absent. Returns how many turns
+    /// accepted cancellation and the first unexpected cancellation error.
+    async fn cancel(&mut self, pane: Option<PaneId>) -> (usize, Option<NanocodexError>) {
+        let pending = self
+            .controls
+            .iter()
+            .filter(|(key, _)| pane.is_none_or(|pane| key.pane == pane))
+            .map(|(&key, control)| (key, control.clone()))
+            .collect::<Vec<_>>();
+        let mut count = 0;
+        let mut first_error = None;
+        for (key, control) in pending {
+            match control.cancel().await {
+                Ok(()) => {
+                    self.cancelled.insert(key);
+                    count += 1;
+                }
+                Err(NanocodexError::TurnNotCancellable) => {}
+                Err(error) => {
+                    first_error.get_or_insert(error);
+                }
+            }
+        }
+        (count, first_error)
+    }
+
+    /// Cancels every turn and treats each turn's eventual cancellation as requested.
+    async fn cancel_all(&mut self) {
+        drop(self.cancel(None).await);
+        self.cancelled.extend(self.controls.keys().copied());
+    }
+
+    fn finish(&mut self, joined: Result<FinishedTurn, JoinError>, updates: &Updates) {
+        let FinishedTurn {
+            key,
+            purpose,
+            cancelled_by_scope,
             result,
-            duration_ns,
-        }) => {
-            let terminal_stop = result.as_ref().err().and_then(terminal_stop_reason);
-            (
-                pane,
-                result.map_err(|error| error.to_string()),
-                duration_ns,
-                terminal_stop,
-            )
-        }
-        Err(error) => {
-            let Some((&pane, _)) = compacting.iter().find(|(_, id)| **id == error.id()) else {
+        } = match joined {
+            Ok(finished) => finished,
+            Err(error) => {
+                updates.publish(WorkerEvent::TurnFinished {
+                    pane: PaneId::Main,
+                    id: TurnId::new(0),
+                    error: Some(WorkerError::TurnTaskStopped(error)),
+                    terminal_stop: None,
+                    snapshot: None,
+                    terminal_expected: false,
+                });
                 return;
-            };
-            (
-                pane,
-                Err(format!("compaction task stopped unexpectedly: {error}")),
-                0,
-                None,
-            )
+            }
+        };
+        self.controls.remove(&key);
+        let requested_cancellation = self.cancelled.remove(&key) || cancelled_by_scope;
+        match purpose {
+            TurnPurpose::Conversation => {
+                let (error, snapshot, terminal_stop) = match result {
+                    Ok(completed) => (None, completed.snapshot, None),
+                    Err(NanocodexError::TurnCancelled) if requested_cancellation => {
+                        (None, None, None)
+                    }
+                    Err(error) => {
+                        let terminal_stop = terminal_stop_reason(&error);
+                        (Some(error.into()), None, terminal_stop)
+                    }
+                };
+                updates.publish(WorkerEvent::TurnFinished {
+                    pane: key.pane,
+                    id: key.id,
+                    error,
+                    snapshot,
+                    terminal_stop,
+                    terminal_expected: true,
+                });
+            }
+            TurnPurpose::Auxiliary(completion) => {
+                let result = match result {
+                    Ok(completed) => Ok(completed.final_message),
+                    Err(NanocodexError::TurnCancelled) if requested_cancellation => {
+                        Err(AuxiliaryError::Cancelled)
+                    }
+                    Err(error) => Err(AuxiliaryError::Failed(error.to_string())),
+                };
+                drop(completion.send(result));
+            }
         }
-    };
-    compacting.remove(&pane);
-    drop(updates.send(WorkerEvent::CompactionFinished {
-        pane,
-        result,
-        terminal_stop,
-        duration_ns,
-    }));
+    }
 }
 
 fn terminal_stop_reason(error: &NanocodexError) -> Option<TerminalStopReason> {
@@ -854,433 +910,471 @@ fn terminal_stop_reason(error: &NanocodexError) -> Option<TerminalStopReason> {
     .then_some(TerminalStopReason::MisalignmentPolicyViolation)
 }
 
-async fn start_turn(
-    agent: &PaneAgent,
-    request: TurnRequest,
+pub(crate) fn spawn(
+    agent: Nanocodex,
+    context: AgentContext,
     memory_review: MemoryReviewState,
-    controls: &mut HashMap<TurnKey, TurnControl>,
-    turns: &mut JoinSet<(TurnKey, TurnPurpose, bool, TurnResult)>,
-    updates: &mpsc::UnboundedSender<WorkerEvent>,
-) -> bool {
-    if request
-        .shutdown
-        .as_ref()
-        .is_some_and(CancellationToken::is_cancelled)
-    {
-        reject_cancelled_turn(request);
-        return false;
-    }
-    let TurnRequest {
-        pane,
-        id,
-        prompt,
-        purpose,
-        auxiliary_context,
+    shutdown: CancellationToken,
+) -> (
+    mpsc::UnboundedSender<WorkerCommand>,
+    mpsc::UnboundedReceiver<WorkerEvent>,
+) {
+    let (commands, command_rx) = mpsc::unbounded_channel();
+    let (updates, update_rx) = mpsc::unbounded_channel();
+    let worker = Worker {
+        panes: PaneAgents::default(),
+        turns: ActiveTurns::default(),
+        compactions: JoinSet::new(),
+        updates: Updates(updates),
+    };
+    tokio::spawn(worker.run(
+        PaneAgent {
+            agent,
+            context,
+            memory_review,
+        },
+        command_rx,
         shutdown,
-        prompt_kind,
-    } = request;
-    let auxiliary = auxiliary_context.is_some();
-    // A native turn owns its control entry through checkpoint capture, so the next
-    // prompt cannot change the committed conversation before it is copied.
-    if matches!(agent.context.model, HarnessModel::Claude(_)) {
-        let reason = if matches!(
-            auxiliary_context,
-            Some(AuxiliaryContext::CurrentConversation)
-        ) {
-            Some("Claude does not support forking the current conversation")
-        } else if !auxiliary && controls.keys().any(|key| key.pane == pane) {
-            Some("Claude is still finishing the current turn and its checkpoint")
-        } else {
-            None
-        };
-        if let Some(reason) = reason {
-            reject_turn(
-                TurnRequest {
-                    pane,
-                    id,
-                    prompt,
-                    purpose,
-                    auxiliary_context,
-                    shutdown,
-                    prompt_kind,
-                },
-                reason.to_owned(),
-                updates,
-            );
-            return false;
+    ));
+    (commands, update_rx)
+}
+
+/// State owned by the worker task. See the module documentation for the scheduling contract.
+struct Worker {
+    panes: PaneAgents,
+    turns: ActiveTurns,
+    compactions: JoinSet<CompletedCompaction>,
+    updates: Updates,
+}
+
+/// Each open pane's agent and whether it is compacting.
+#[derive(Default)]
+struct PaneAgents {
+    agents: HashMap<PaneId, PaneAgent>,
+    /// The compaction task running for each pane, used to attribute a failed task to its pane.
+    compacting: HashMap<PaneId, TaskId>,
+}
+
+impl PaneAgents {
+    /// The pane's agent when it can accept work that must not race a compaction checkpoint.
+    fn idle_agent(&mut self, pane: PaneId) -> Result<&mut PaneAgent, WorkerError> {
+        if self.compacting.contains_key(&pane) {
+            return Err(WorkerError::Compacting);
         }
+        self.agents
+            .get_mut(&pane)
+            .ok_or(WorkerError::PaneUnavailable)
     }
-    let (isolated_agent, event_drain) = if let Some(context) = auxiliary_context {
-        let create_agent = async {
-            match context {
-                AuxiliaryContext::Clean => agent.agent.spawn().await,
-                AuxiliaryContext::CurrentConversation => agent.agent.fork().await,
-            }
-        };
-        let spawned = if let Some(scope) = shutdown.clone() {
+}
+
+impl Worker {
+    async fn run(
+        mut self,
+        main: PaneAgent,
+        mut commands: mpsc::UnboundedReceiver<WorkerCommand>,
+        shutdown: CancellationToken,
+    ) {
+        self.updates
+            .observe_initial_context(&main.agent, main.context.model, PaneId::Main)
+            .await;
+        self.panes.agents.insert(PaneId::Main, main);
+        loop {
             tokio::select! {
-                result = create_agent => result,
-                () = scope.cancelled() => {
-                    reject_cancelled_turn(TurnRequest {
-                        pane,
-                        id,
-                        prompt,
-                        purpose,
-                        auxiliary_context: Some(context),
-                        shutdown,
-                        prompt_kind,
-                    });
-                    return false;
+                biased;
+                () = shutdown.cancelled() => break,
+                Some(joined) = self.compactions.join_next(), if !self.compactions.is_empty() => {
+                    self.finish_compaction(joined);
                 }
+                Some(joined) = self.turns.tasks.join_next(), if !self.turns.tasks.is_empty() => {
+                    self.turns.finish(joined, &self.updates);
+                }
+                command = commands.recv() => match command {
+                    Some(command) => self.handle(command).await,
+                    None => break,
+                },
             }
-        } else {
-            create_agent.await
-        };
-        let (agent, mut events) = match spawned {
-            Ok(spawned) => spawned,
-            Err(error) => {
-                reject_turn(
-                    TurnRequest {
-                        pane,
-                        id,
-                        prompt,
-                        purpose,
-                        auxiliary_context: Some(context),
-                        shutdown,
-                        prompt_kind,
-                    },
-                    error.to_string(),
-                    updates,
-                );
-                return false;
-            }
-        };
-        let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
-        (Some(agent), Some(drain))
-    } else {
-        (None, None)
-    };
-    let turn_agent = isolated_agent.as_ref().unwrap_or(&agent.agent);
-    let agent_prompt = agent
-        .context
-        .prompt(prompt_kind.prepare(&prompt, memory_review));
-    let turn = match turn_agent.prompt(agent_prompt).await {
-        Ok(turn) => turn,
-        Err(error) => {
-            if let Some(agent) = isolated_agent {
-                drop(agent.shutdown().await);
-            }
-            if let Some(drain) = event_drain {
-                drop(drain.await);
-            }
-            reject_turn(
-                TurnRequest {
+        }
+        commands.close();
+        while commands.try_recv().is_ok() {}
+        self.shutdown().await;
+    }
+
+    async fn handle(&mut self, command: WorkerCommand) {
+        match command {
+            WorkerCommand::Compact(pane) => self.compact(pane),
+            WorkerCommand::Submit { pane, id, prompt } => {
+                self.submit(TurnRequest {
                     pane,
                     id,
                     prompt,
-                    purpose,
-                    auxiliary_context,
-                    shutdown,
-                    prompt_kind,
-                },
-                error.to_string(),
-                updates,
-            );
-            return false;
-        }
-    };
-    let key = TurnKey { pane, id };
-    let control = turn.control();
-    let task_control = control.clone();
-    controls.insert(key, control);
-    let checkpoint_agent = agent.agent.clone();
-    let claude = matches!(agent.context.model, HarnessModel::Claude(_));
-    let context_updates = updates.clone();
-    turns.spawn(async move {
-        let mut turn = Box::pin(turn);
-        let (cancelled_by_scope, result) = match shutdown {
-            Some(shutdown) => {
-                tokio::select! {
-                    result = turn.as_mut() => (false, result),
-                    () = shutdown.cancelled() => {
-                        drop(task_control.cancel().await);
-                        (true, turn.await)
-                    }
-                }
+                    purpose: TurnPurpose::Conversation,
+                    auxiliary_context: None,
+                    shutdown: None,
+                    prompt_kind: PromptKind::Conversation,
+                })
+                .await;
             }
-            None => (false, turn.await),
-        };
-        let result = complete_turn(
-            &checkpoint_agent,
-            result,
-            claude,
-            auxiliary,
-            pane,
-            &context_updates,
-        )
-        .await;
-        if let Some(agent) = isolated_agent {
-            drop(agent.shutdown().await);
-        }
-        if let Some(drain) = event_drain {
-            drop(drain.await);
-        }
-        (key, purpose, cancelled_by_scope, result)
-    });
-    if !auxiliary {
-        drop(updates.send(WorkerEvent::TurnAccepted { pane, id }));
-    }
-    !auxiliary
-}
-
-fn reject_turn(request: TurnRequest, error: String, updates: &mpsc::UnboundedSender<WorkerEvent>) {
-    match request.purpose {
-        TurnPurpose::Conversation => drop(updates.send(WorkerEvent::TurnFinished {
-            pane: request.pane,
-            id: request.id,
-            error: Some(error),
-            terminal_stop: None,
-            snapshot: None,
-            terminal_expected: false,
-        })),
-        TurnPurpose::Auxiliary(completion) => {
-            drop(completion.send(Err(AuxiliaryError::Failed(error))));
-        }
-    }
-}
-
-fn reject_cancelled_turn(request: TurnRequest) {
-    if let TurnPurpose::Auxiliary(completion) = request.purpose {
-        drop(completion.send(Err(AuxiliaryError::Cancelled)));
-    }
-}
-
-async fn steer_turn(
-    agent: &PaneAgent,
-    memory_review: MemoryReviewState,
-    controls: &mut HashMap<TurnKey, TurnControl>,
-    turns: &mut JoinSet<(TurnKey, TurnPurpose, bool, TurnResult)>,
-    updates: &mpsc::UnboundedSender<WorkerEvent>,
-    request: SteerRequest,
-) -> bool {
-    let SteerRequest {
-        pane,
-        queue_id,
-        fallback_id,
-        prompt,
-    } = request;
-    let mut active = controls
-        .iter()
-        .filter(|(key, _)| key.pane == pane)
-        .collect::<Vec<_>>();
-    active.sort_unstable_by_key(|(key, _)| key.id);
-    for (_, control) in active {
-        match control.steer(memory_review.steer_prompt(&prompt)).await {
-            Ok(()) => {
-                drop(updates.send(WorkerEvent::SteerAdmitted { pane, queue_id }));
-                return false;
+            WorkerCommand::Reflect {
+                pane,
+                id,
+                instructions,
+                context,
+            } => {
+                self.submit(TurnRequest {
+                    pane,
+                    id,
+                    prompt: instructions,
+                    purpose: TurnPurpose::Conversation,
+                    auxiliary_context: None,
+                    shutdown: None,
+                    prompt_kind: PromptKind::Reflection(context),
+                })
+                .await;
             }
-            Err(NanocodexError::TurnNotSteerable) => {}
-            Err(error) => {
-                drop(updates.send(WorkerEvent::SteerFailed {
+            WorkerCommand::Auxiliary {
+                pane,
+                id,
+                prompt,
+                context,
+                shutdown,
+                completion,
+            } => {
+                self.submit(TurnRequest {
+                    pane,
+                    id,
+                    prompt,
+                    purpose: TurnPurpose::Auxiliary(completion),
+                    auxiliary_context: Some(context),
+                    shutdown: Some(shutdown),
+                    prompt_kind: PromptKind::Auxiliary,
+                })
+                .await;
+            }
+            WorkerCommand::Steer {
+                pane,
+                queue_id,
+                fallback_id,
+                prompt,
+            } => {
+                self.steer(SteerRequest {
                     pane,
                     queue_id,
-                    error: error.to_string(),
-                }));
-                return false;
+                    fallback_id,
+                    prompt,
+                })
+                .await;
             }
-        }
-    }
-
-    if matches!(agent.context.model, HarnessModel::Claude(_))
-        && controls.keys().any(|key| key.pane == pane)
-    {
-        drop(updates.send(WorkerEvent::SteerFailed {
-            pane,
-            queue_id,
-            error: "Claude is still finishing the current turn and its checkpoint".to_owned(),
-        }));
-        return false;
-    }
-
-    match agent
-        .agent
-        .prompt(agent.context.prompt(memory_review.steer_prompt(&prompt)))
-        .await
-    {
-        Ok(turn) => {
-            let control = turn.control();
-            let key = TurnKey {
+            WorkerCommand::OpenAgent {
                 pane,
-                id: fallback_id,
-            };
-            let checkpoint_agent = agent.agent.clone();
-            let claude = matches!(agent.context.model, HarnessModel::Claude(_));
-            let context_updates = updates.clone();
-            turns.spawn(async move {
-                let result = complete_turn(
-                    &checkpoint_agent,
-                    turn.await,
-                    claude,
-                    false,
+                agent,
+                context,
+                memory_review,
+            } => {
+                self.open_agent(
                     pane,
-                    &context_updates,
+                    PaneAgent {
+                        agent,
+                        context,
+                        memory_review,
+                    },
                 )
                 .await;
-                (key, TurnPurpose::Conversation, false, result)
-            });
-            controls.insert(key, control);
-            drop(updates.send(WorkerEvent::TurnAccepted {
+            }
+            WorkerCommand::ReplaceAgent {
                 pane,
-                id: fallback_id,
-            }));
-            drop(updates.send(WorkerEvent::SteerPromoted {
+                agent,
+                context,
+                memory_review,
+            } => {
+                self.replace_agent(
+                    pane,
+                    PaneAgent {
+                        agent,
+                        context,
+                        memory_review,
+                    },
+                )
+                .await;
+            }
+            WorkerCommand::SetThinking { pane, effort } => self.set_thinking(pane, effort).await,
+            WorkerCommand::SetSpeed { pane, speed } => self.set_speed(pane, speed).await,
+            WorkerCommand::CancelAll(pane) => {
+                let (count, error) = self.turns.cancel(Some(pane)).await;
+                self.updates
+                    .publish(WorkerEvent::TurnsCancelled { pane, count, error });
+            }
+            WorkerCommand::OpenFork {
                 pane,
-                queue_id,
-                id: fallback_id,
-                prompt,
-            }));
-            true
-        }
-        Err(error) => {
-            drop(updates.send(WorkerEvent::SteerFailed {
-                pane,
-                queue_id,
-                error: error.to_string(),
-            }));
-            false
-        }
-    }
-}
-
-async fn cancel_turns(
-    controls: &HashMap<TurnKey, TurnControl>,
-    pane: Option<PaneId>,
-) -> (Vec<TurnKey>, Option<String>) {
-    let pending = controls
-        .iter()
-        .filter(|(key, _)| pane.is_none_or(|pane| key.pane == pane))
-        .map(|(&key, control)| (key, control.clone()))
-        .collect::<Vec<_>>();
-    let mut cancelled = Vec::with_capacity(pending.len());
-    let mut first_error = None;
-    for (key, control) in pending {
-        match control.cancel().await {
-            Ok(()) => cancelled.push(key),
-            Err(NanocodexError::TurnNotCancellable) => {}
-            Err(error) if first_error.is_none() => first_error = Some(error.to_string()),
-            Err(_) => {}
+                parent,
+                parent_sequence,
+            } => self.open_fork(pane, parent, parent_sequence).await,
+            WorkerCommand::ClosePane(pane) => self.close_pane(pane).await,
         }
     }
-    (cancelled, first_error)
-}
 
-fn finish_turn(
-    result: Option<Result<(TurnKey, TurnPurpose, bool, TurnResult), JoinError>>,
-    shutting_down: bool,
-    controls: &mut HashMap<TurnKey, TurnControl>,
-    cancelled: &mut HashSet<TurnKey>,
-    updates: &mpsc::UnboundedSender<WorkerEvent>,
-) {
-    let Some(result) = result else {
-        return;
-    };
-    let (key, purpose, cancelled_by_scope, result) = match result {
-        Ok(result) => result,
-        Err(error) => {
-            drop(updates.send(WorkerEvent::TurnFinished {
-                pane: PaneId::Main,
-                id: TurnId::new(0),
-                error: Some(format!("turn task stopped unexpectedly: {error}")),
-                terminal_stop: None,
-                snapshot: None,
-                terminal_expected: false,
-            }));
+    fn compact(&mut self, pane: PaneId) {
+        let agent = if self.turns.is_active(pane) || self.panes.compacting.contains_key(&pane) {
+            Err(WorkerError::PaneBusy)
+        } else {
+            self.panes
+                .agents
+                .get(&pane)
+                .ok_or(WorkerError::PaneUnavailable)
+        };
+        let agent = match agent {
+            Ok(agent) => agent,
+            Err(error) => {
+                self.updates.publish(WorkerEvent::CompactionFinished {
+                    pane,
+                    result: Err(error),
+                    terminal_stop: None,
+                    duration_ns: 0,
+                });
+                return;
+            }
+        };
+        let claude = matches!(agent.context.model, HarnessModel::Claude(_));
+        let agent = agent.agent.clone();
+        let task = self.compactions.spawn(async move {
+            let started = Instant::now();
+            let operation = async {
+                agent.compact().await?;
+                if claude {
+                    agent
+                        .runtime_snapshot()
+                        .await
+                        .and_then(AgentSnapshot::from_claude)
+                } else {
+                    agent
+                        .snapshot()
+                        .await
+                        .map(|snapshot| AgentSnapshot::Codex(Box::new(snapshot)))
+                }
+            };
+            let result = operation.await.map(Box::new);
+            CompletedCompaction {
+                pane,
+                result,
+                duration_ns: u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+            }
+        });
+        self.panes.compacting.insert(pane, task.id());
+    }
+
+    fn finish_compaction(&mut self, joined: Result<CompletedCompaction, JoinError>) {
+        let (pane, result, duration_ns, terminal_stop) = match joined {
+            Ok(CompletedCompaction {
+                pane,
+                result,
+                duration_ns,
+            }) => {
+                let terminal_stop = result.as_ref().err().and_then(terminal_stop_reason);
+                (
+                    pane,
+                    result.map_err(WorkerError::from),
+                    duration_ns,
+                    terminal_stop,
+                )
+            }
+            Err(error) => {
+                let Some((&pane, _)) = self
+                    .panes
+                    .compacting
+                    .iter()
+                    .find(|(_, id)| **id == error.id())
+                else {
+                    return;
+                };
+                (
+                    pane,
+                    Err(WorkerError::CompactionTaskStopped(error)),
+                    0,
+                    None,
+                )
+            }
+        };
+        self.panes.compacting.remove(&pane);
+        self.updates.publish(WorkerEvent::CompactionFinished {
+            pane,
+            result,
+            terminal_stop,
+            duration_ns,
+        });
+    }
+
+    async fn submit(&mut self, request: TurnRequest) {
+        match self.panes.idle_agent(request.pane) {
+            Ok(agent) => {
+                if self.turns.start(agent, request, &self.updates).await {
+                    agent.memory_review.turn_accepted();
+                }
+            }
+            Err(error) => request.reject(error, &self.updates),
+        }
+    }
+
+    async fn steer(&mut self, request: SteerRequest) {
+        match self.panes.idle_agent(request.pane) {
+            Ok(agent) => {
+                if self.turns.steer(agent, request, &self.updates).await {
+                    agent.memory_review.turn_accepted();
+                }
+            }
+            Err(error) => self.updates.publish(WorkerEvent::SteerFailed {
+                pane: request.pane,
+                queue_id: request.queue_id,
+                error,
+            }),
+        }
+    }
+
+    async fn open_agent(&mut self, pane: PaneId, agent: PaneAgent) {
+        if self.panes.agents.contains_key(&pane) {
+            drop(agent.agent.shutdown().await);
+            debug_assert!(false, "a newly opened pane must have a unique identity");
             return;
         }
-    };
-    controls.remove(&key);
-    let was_cancelled = cancelled.remove(&key);
-    match purpose {
-        TurnPurpose::Conversation => {
-            let (error, snapshot, terminal_stop) = match result {
-                Ok(completed) => (None, completed.snapshot, None),
-                Err(NanocodexError::TurnCancelled)
-                    if shutting_down || was_cancelled || cancelled_by_scope =>
-                {
-                    (None, None, None)
+        self.updates
+            .observe_initial_context(&agent.agent, agent.context.model, pane)
+            .await;
+        self.panes.agents.insert(pane, agent);
+    }
+
+    async fn replace_agent(&mut self, pane: PaneId, agent: PaneAgent) {
+        debug_assert!(!self.turns.is_active(pane));
+        let Some(current) = self.panes.agents.get_mut(&pane) else {
+            drop(agent.agent.shutdown().await);
+            self.updates.publish(WorkerEvent::ForkFailed {
+                pane,
+                error: WorkerError::PaneUnavailable,
+            });
+            return;
+        };
+        self.updates
+            .observe_initial_context(&agent.agent, agent.context.model, pane)
+            .await;
+        let retired = std::mem::replace(current, agent);
+        drop(retired.agent.shutdown().await);
+    }
+
+    async fn set_thinking(&mut self, pane: PaneId, effort: ReasoningEffort) {
+        let result = match self.panes.idle_agent(pane) {
+            Ok(agent) => {
+                let result = agent.agent.set_thinking(effort.into()).await;
+                if result.is_ok() {
+                    agent.context.thinking = effort.into();
                 }
-                Err(error) => {
-                    let terminal_stop = terminal_stop_reason(&error);
-                    (Some(error.to_string()), None, terminal_stop)
-                }
-            };
-            drop(updates.send(WorkerEvent::TurnFinished {
-                pane: key.pane,
-                id: key.id,
-                error,
-                snapshot,
-                terminal_stop,
-                terminal_expected: true,
-            }));
-        }
-        TurnPurpose::Auxiliary(completion) => {
-            let result = match result {
-                Ok(completed) => Ok(completed.final_message),
-                Err(NanocodexError::TurnCancelled)
-                    if shutting_down || was_cancelled || cancelled_by_scope =>
-                {
-                    Err(AuxiliaryError::Cancelled)
-                }
-                Err(error) => Err(AuxiliaryError::Failed(error.to_string())),
-            };
-            drop(completion.send(result));
+                result
+            }
+            Err(error) => Err(Self::setting_error(error)),
+        };
+        self.updates.publish(WorkerEvent::ThinkingUpdated {
+            pane,
+            effort,
+            result,
+        });
+    }
+
+    async fn set_speed(&mut self, pane: PaneId, speed: Speed) {
+        let result = match self.panes.idle_agent(pane) {
+            Ok(agent) => set_speed(&agent.agent, agent.context.model, speed).await,
+            Err(error) => Err(Self::setting_error(error)),
+        };
+        self.updates.publish(WorkerEvent::SpeedUpdated {
+            pane,
+            speed,
+            result,
+        });
+    }
+
+    /// Setting changes report agent errors, so worker rejections use the agent's equivalents.
+    fn setting_error(error: WorkerError) -> NanocodexError {
+        match error {
+            WorkerError::PaneUnavailable => NanocodexError::AgentStopped,
+            error => NanocodexError::InvalidRequest(error.to_string()),
         }
     }
-}
 
-async fn cancel_pane(
-    pane: PaneId,
-    controls: &HashMap<TurnKey, TurnControl>,
-    cancelled: &mut HashSet<TurnKey>,
-    updates: &mpsc::UnboundedSender<WorkerEvent>,
-) {
-    let (keys, error) = cancel_turns(controls, Some(pane)).await;
-    let count = keys.len();
-    cancelled.extend(keys);
-    drop(updates.send(WorkerEvent::TurnsCancelled { pane, count, error }));
-}
-
-async fn close_pane(
-    pane: PaneId,
-    agent: Option<Nanocodex>,
-    controls: &HashMap<TurnKey, TurnControl>,
-    cancelled: &mut HashSet<TurnKey>,
-    updates: &mpsc::UnboundedSender<WorkerEvent>,
-) {
-    let (keys, mut error) = cancel_turns(controls, Some(pane)).await;
-    let count = keys.len();
-    cancelled.extend(keys);
-    if let Err(shutdown_error) = shutdown_agent(agent).await
-        && error.is_none()
-    {
-        error = Some(shutdown_error.to_string());
+    async fn open_fork(&mut self, pane: PaneId, parent: PaneId, parent_sequence: u64) {
+        let opened = if self.panes.agents.contains_key(&pane) {
+            Err(WorkerError::PaneAlreadyOpen)
+        } else {
+            match self.panes.idle_agent(parent) {
+                Ok(agent) => Self::fork(agent).await,
+                Err(WorkerError::PaneUnavailable) => Err(WorkerError::ParentUnavailable),
+                Err(error) => Err(error),
+            }
+        };
+        match opened {
+            Ok((agent, events)) => {
+                self.panes.agents.insert(pane, agent);
+                self.updates.publish(WorkerEvent::ForkOpened {
+                    pane,
+                    parent,
+                    parent_sequence,
+                    events,
+                });
+            }
+            Err(error) => self
+                .updates
+                .publish(WorkerEvent::ForkFailed { pane, error }),
+        }
     }
-    drop(updates.send(WorkerEvent::TurnsCancelled { pane, count, error }));
-}
 
-async fn shutdown_agent(agent: Option<Nanocodex>) -> Result<(), NanocodexError> {
-    let Some(agent) = agent else {
-        return Ok(());
-    };
-    agent.shutdown().await
+    async fn fork(parent: &PaneAgent) -> Result<(PaneAgent, AgentEvents), WorkerError> {
+        if matches!(parent.context.model, HarnessModel::Claude(_)) {
+            return Err(WorkerError::ClaudeCannotFork);
+        }
+        let (agent, events) = parent.agent.fork().await?;
+        let agent = PaneAgent {
+            agent,
+            context: parent.context,
+            memory_review: parent.memory_review.forked(),
+        };
+        Ok((agent, events))
+    }
+
+    async fn close_pane(&mut self, pane: PaneId) {
+        let agent = self.panes.agents.remove(&pane);
+        let (count, mut error) = self.turns.cancel(Some(pane)).await;
+        if let Some(agent) = agent
+            && let Err(shutdown_error) = agent.agent.shutdown().await
+        {
+            error.get_or_insert(shutdown_error);
+        }
+        self.updates
+            .publish(WorkerEvent::TurnsCancelled { pane, count, error });
+    }
+
+    async fn shutdown(mut self) {
+        self.turns.cancel_all().await;
+        let agents = std::mem::take(&mut self.panes.agents);
+        let shutdown_error = join_all(
+            agents
+                .into_values()
+                .map(|agent| async move { agent.agent.shutdown().await }),
+        )
+        .await
+        .into_iter()
+        .find_map(Result::err);
+        while let Some(joined) = self.turns.tasks.join_next().await {
+            self.turns.finish(joined, &self.updates);
+        }
+        while let Some(joined) = self.compactions.join_next().await {
+            self.finish_compaction(joined);
+        }
+        self.updates.publish(WorkerEvent::Stopped {
+            error: shutdown_error,
+        });
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        MemoryReviewState, ReflectionContext, TurnKey, TurnPurpose, WorkerCommand, WorkerEvent,
-        finish_turn, reflection_prompt, spawn,
+        ActiveTurns, CompletedCompaction, FinishedTurn, MemoryReviewState, PaneAgents,
+        ReflectionContext, TurnKey, TurnPurpose, Updates, Worker, WorkerCommand, WorkerError,
+        WorkerEvent, reflection_prompt, spawn,
     };
     use crate::{
         app::config::{ReasoningEffort, Speed},
@@ -1305,7 +1399,6 @@ mod tests {
         },
     };
     use std::{
-        collections::{HashMap, HashSet},
         future::{Pending, pending},
         path::Path,
         result::Result as StdResult,
@@ -1386,7 +1479,7 @@ mod tests {
 
     async fn compacted(
         updates: &mut mpsc::UnboundedReceiver<WorkerEvent>,
-    ) -> Result<Box<crate::core::session::AgentSnapshot>, String> {
+    ) -> Result<Box<crate::core::session::AgentSnapshot>, WorkerError> {
         timeout(Duration::from_secs(5), async {
             loop {
                 if let WorkerEvent::CompactionFinished { pane, result, .. } =
@@ -1403,23 +1496,26 @@ mod tests {
 
     #[tokio::test]
     async fn manual_compaction_task_failure_releases_its_pane_and_reports_error() {
-        let mut tasks = tokio::task::JoinSet::new();
-        let task = tasks.spawn(async {
-            pending::<()>().await;
-            unreachable!()
-        });
-        let mut compacting = std::collections::HashMap::from([(PaneId::Main, task.id())]);
         let (updates, mut receive) = mpsc::unbounded_channel();
+        let mut worker = Worker {
+            panes: PaneAgents::default(),
+            turns: ActiveTurns::default(),
+            compactions: tokio::task::JoinSet::new(),
+            updates: Updates(updates),
+        };
+        let task = worker.compactions.spawn(async {
+            pending::<()>().await;
+            unreachable!() as CompletedCompaction
+        });
+        worker.panes.compacting.insert(PaneId::Main, task.id());
         task.abort();
-        super::finish_compaction(tasks.join_next().await.unwrap(), &mut compacting, &updates);
-        assert!(compacting.is_empty());
-        assert!(
-            compacted(&mut receive)
-                .await
-                .err()
-                .unwrap()
-                .contains("task stopped unexpectedly")
-        );
+        let joined = worker.compactions.join_next().await.unwrap();
+        worker.finish_compaction(joined);
+        assert!(worker.panes.compacting.is_empty());
+        assert!(matches!(
+            compacted(&mut receive).await,
+            Err(WorkerError::CompactionTaskStopped(_))
+        ));
     }
 
     #[tokio::test]
@@ -1461,7 +1557,7 @@ mod tests {
                 error: Some(error),
                 snapshot: None,
                 ..
-            } => assert!(error.contains("compaction")),
+            } => assert!(matches!(error, WorkerError::Compacting)),
             _ => panic!("prompt must be rejected while compacting"),
         }
         release.send(Ok(())).unwrap();
@@ -1482,13 +1578,10 @@ mod tests {
                 retry_after: None,
             }))
             .unwrap();
-        assert!(
-            compacted(&mut updates)
-                .await
-                .err()
-                .unwrap()
-                .contains("synthetic compaction failure")
-        );
+        assert!(matches!(
+            compacted(&mut updates).await,
+            Err(WorkerError::Agent(_))
+        ));
         shutdown.cancel();
         stopped(&mut updates).await;
         drain.await.unwrap();
@@ -1556,7 +1649,8 @@ mod tests {
         );
         let error = result
             .err()
-            .expect("terminal compaction must not publish a snapshot");
+            .expect("terminal compaction must not publish a snapshot")
+            .to_string();
         let (mut journal, writer) = TranscriptJournal::open(&config, "session").unwrap();
         journal.defer_start(crate::core::transcript::SessionStarted {
             session_id: "session".to_owned(),
@@ -1632,13 +1726,10 @@ mod tests {
                 .await
                 .unwrap();
             commands.send(WorkerCommand::Compact(PaneId::Main)).unwrap();
-            assert!(
-                compacted(&mut updates)
-                    .await
-                    .err()
-                    .unwrap()
-                    .contains("finish active work")
-            );
+            assert!(matches!(
+                compacted(&mut updates).await,
+                Err(WorkerError::PaneBusy)
+            ));
             assert_eq!(calls.load(Ordering::Relaxed), 1);
             commands
                 .send(WorkerCommand::CancelAll(PaneId::Main))
@@ -1848,13 +1939,10 @@ mod tests {
             .unwrap()
             .send(None)
             .unwrap();
-        assert!(
-            compacted(&mut updates)
-                .await
-                .err()
-                .unwrap()
-                .contains("synthetic compaction failure")
-        );
+        assert!(matches!(
+            compacted(&mut updates).await,
+            Err(WorkerError::Agent(_))
+        ));
         let actual =
             super::AgentSnapshot::from_claude(probe.runtime_snapshot().await.unwrap()).unwrap();
         assert_eq!(serde_json::to_value(actual).unwrap(), expected);
@@ -2003,7 +2091,7 @@ mod tests {
         timeout(Duration::from_secs(5), async {
             loop {
                 if let Some(WorkerEvent::ForkFailed { error, .. }) = updates.recv().await {
-                    assert!(error.contains("Claude does not support forking"));
+                    assert!(matches!(error, WorkerError::ClaudeCannotFork));
                     break;
                 }
             }
@@ -2279,20 +2367,17 @@ mod tests {
             let error =
                 NanocodexError::Response(ResponseError::from(ResponsesServiceError::from(source)));
             let (updates, mut received) = mpsc::unbounded_channel();
-            finish_turn(
-                Some(Ok((
-                    TurnKey {
+            ActiveTurns::default().finish(
+                Ok(FinishedTurn {
+                    key: TurnKey {
                         pane: PaneId::Main,
                         id: TurnId::new(1),
                     },
-                    TurnPurpose::Conversation,
-                    false,
-                    Err(error),
-                ))),
-                false,
-                &mut HashMap::new(),
-                &mut HashSet::new(),
-                &updates,
+                    purpose: TurnPurpose::Conversation,
+                    cancelled_by_scope: false,
+                    result: Err(error),
+                }),
+                &Updates(updates),
             );
             let WorkerEvent::TurnFinished {
                 error,
@@ -2947,17 +3032,17 @@ mod tests {
             .unwrap();
         // A fresh agent has no completed turn to fork from, so a request that reaches its parent's
         // agent fails there; a request for a missing parent fails before any agent is involved.
+        let fork_unavailable: fn(&WorkerError) -> bool = |error| {
+            matches!(
+                error,
+                WorkerError::Agent(NanocodexError::ForkBeforeCompletedTurn)
+            )
+        };
+        let parent_unavailable: fn(&WorkerError) -> bool =
+            |error| matches!(error, WorkerError::ParentUnavailable);
         for (pane, parent, expected) in [
-            (
-                PaneId::Fork(2),
-                PaneId::Opened(1),
-                "safe conversation boundary",
-            ),
-            (
-                PaneId::Fork(3),
-                PaneId::Fork(9),
-                "parent session is no longer available",
-            ),
+            (PaneId::Fork(2), PaneId::Opened(1), fork_unavailable),
+            (PaneId::Fork(3), PaneId::Fork(9), parent_unavailable),
         ] {
             commands
                 .send(WorkerCommand::OpenFork {
@@ -2978,7 +3063,7 @@ mod tests {
                 }
             };
             assert_eq!(failed.0, pane);
-            assert!(failed.1.contains(expected), "{}", failed.1);
+            assert!(expected(&failed.1), "{:?}", failed.1);
         }
         shutdown.cancel();
         stopped(&mut updates).await;

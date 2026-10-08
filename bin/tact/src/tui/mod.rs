@@ -1134,7 +1134,7 @@ pub(crate) async fn run(
                             Ok(snapshot) => (Some(snapshot), None),
                             Err(error) => (None, Some(error)),
                         };
-                        let event = LocalEvent::CompactionFinished { error, duration_ns, terminal_stop };
+                        let event = LocalEvent::CompactionFinished { error: error.map(|error| error.to_string()), duration_ns, terminal_stop };
                         let record = match snapshot.as_ref() {
                             Some(snapshot) => {
                                 let state = session::encode_checkpoint(snapshot, &runtime.instructions, runtime.skills_catalog_present)?;
@@ -1178,7 +1178,7 @@ pub(crate) async fn run(
                                 )
                             })
                             .transpose()?;
-                        let event = LocalEvent::WorkerTurnFinished { id, error, terminal_stop };
+                        let event = LocalEvent::WorkerTurnFinished { id, error: error.map(|error| error.to_string()), terminal_stop };
                         let record = match resume_state {
                             Some(resume_state) => runtime
                                 .journal_mut()?
@@ -1225,7 +1225,7 @@ pub(crate) async fn run(
                             continue;
                         };
                         let record = runtime.journal_mut()?.append_local(LocalEvent::WorkerSteerFailed {
-                            error,
+                            error: error.to_string(),
                         })?;
                         schedule(app.update(AppEvent::Transcript { pane, record }), &mut scheduler);
                         apply_app_update!(app.update(AppEvent::SteerFailed { pane, id: queue_id }));
@@ -1236,7 +1236,7 @@ pub(crate) async fn run(
                         };
                         if count > 0 || error.is_some() {
                             let record = runtime.journal_mut()?.append_local(
-                                LocalEvent::WorkerTurnsInterrupted { count, error },
+                                LocalEvent::WorkerTurnsInterrupted { count, error: error.map(|error| error.to_string()) },
                             )?;
                             schedule(
                                 app.update(AppEvent::Transcript { pane, record }),
@@ -1313,6 +1313,7 @@ pub(crate) async fn run(
                         }
                     }
                     WorkerEvent::ForkFailed { pane, error } => {
+                        let error = error.to_string();
                         if let Some(reply) = open_replies.remove(&pane) {
                             drop(reply.send(Err(CommandError::Failed(error.clone()))));
                         }
