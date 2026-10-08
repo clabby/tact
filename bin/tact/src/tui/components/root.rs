@@ -2194,22 +2194,17 @@ impl RootNode {
 
     fn update_queue(&mut self, event: Event) -> ComponentUpdate<RootEffect> {
         let update = self.queue.update(QueueEvent::Terminal(event));
-        let mut effects = Vec::new();
-        let mut render = update.render;
+        let mut result = ComponentUpdate::render(update.render);
         for effect in update.effects {
             match effect {
                 QueueEffect::Blur => {}
-                QueueEffect::Edit { id, text } => {
-                    let edit = self.begin_queue_edit(id, text);
-                    effects.extend(edit.effects);
-                    render = render.max(edit.render);
-                }
+                QueueEffect::Edit { id, text } => result.merge(self.begin_queue_edit(id, text)),
                 QueueEffect::Steer { id, prompt } => {
-                    effects.push(RootEffect::Steer { id, prompt });
+                    result.effects.push(RootEffect::Steer { id, prompt });
                 }
             }
         }
-        ComponentUpdate { effects, render }
+        result
     }
 
     fn begin_queue_edit(&mut self, id: QueueId, text: String) -> ComponentUpdate<RootEffect> {
@@ -2368,8 +2363,7 @@ impl RootNode {
             }
             PaneCommand::Handoff => self.start_handoff(),
         };
-        update.effects.extend(applied.effects);
-        update.render = update.render.max(applied.render);
+        update.merge(applied);
         Ok(update)
     }
 
@@ -2995,8 +2989,7 @@ impl Component for RootNode {
                 let mut update = self.update_transcript(TranscriptEvent::Record(record));
                 if let Some(event) = turn_timer {
                     let timer = self.update_composer(event, RenderRequest::Streaming);
-                    update.effects.extend(timer.effects);
-                    update.render = update.render.max(timer.render);
+                    update.merge(timer);
                 }
                 if let Some(tokens) = observation.completed_tokens {
                     let context = self.update_composer(
@@ -3006,18 +2999,15 @@ impl Component for RootNode {
                         }),
                         RenderRequest::Streaming,
                     );
-                    update.effects.extend(context.effects);
-                    update.render = update.render.max(context.render);
+                    update.merge(context);
                 }
                 if steer_applied {
                     let applied = self.steer_applied();
-                    update.effects.extend(applied.effects);
-                    update.render = update.render.max(applied.render);
+                    update.merge(applied);
                 }
                 if turn_finished {
                     let finished = self.turn_ended(TurnEnd::Terminal);
-                    update.effects.extend(finished.effects);
-                    update.render = update.render.max(finished.render);
+                    update.merge(finished);
                 }
                 update
             }
@@ -3025,8 +3015,7 @@ impl Component for RootNode {
                 let mut update = self.update_transcript(TranscriptEvent::AgentStreamClosed);
                 let timer =
                     self.update_composer(ComposerEvent::TurnsCleared, RenderRequest::Immediate);
-                update.effects.extend(timer.effects);
-                update.render = update.render.max(timer.render);
+                update.merge(timer);
                 update
             }
             RootEvent::Subagent(update) => self.apply_subagent_update(update),
@@ -3053,8 +3042,7 @@ impl Component for RootNode {
                     ComposerEvent::ReplaceDraft(prompt),
                     RenderRequest::Immediate,
                 );
-                draft.effects.extend(waiting.effects);
-                draft.render = draft.render.max(waiting.render);
+                draft.merge(waiting);
                 draft
             }
             RootEvent::HandoffCancelled => {

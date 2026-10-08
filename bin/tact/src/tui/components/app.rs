@@ -920,9 +920,7 @@ impl AppNode {
     ) -> ComponentUpdate<AppEffect> {
         let mut merged = ComponentUpdate::none();
         for &pane in panes {
-            let mut update = self.update_root(pane, event());
-            merged.effects.append(&mut update.effects);
-            merged.render = merged.render.max(update.render);
+            merged.merge(self.update_root(pane, event()));
         }
         merged
     }

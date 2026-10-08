@@ -30,6 +30,12 @@ impl<E> ComponentUpdate<E> {
             render,
         }
     }
+
+    /// Appends another update's effects after this one's and keeps the more urgent render request.
+    pub(crate) fn merge(&mut self, other: Self) {
+        self.effects.extend(other.effects);
+        self.render = self.render.max(other.render);
+    }
 }
 
 pub(crate) trait Component {
