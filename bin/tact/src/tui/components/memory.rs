@@ -1,6 +1,7 @@
 //! Searchable, read-only inspection and explicit deletion of stored memories.
 
 use super::{
+    fit::ellipsize,
     floating::Floating,
     node::{Component, ComponentUpdate, RenderRequest},
 };
@@ -619,8 +620,11 @@ impl MemoryBrowser {
             }
             let status_area = Rect { height: 1, ..list };
             frame.render_widget(
-                Paragraph::new(fit_width(&status, usize::from(status_area.width)))
-                    .style(Style::default().fg(theme.accent())),
+                Paragraph::new(ellipsize(
+                    status.as_str().into(),
+                    usize::from(status_area.width),
+                ))
+                .style(Style::default().fg(theme.accent())),
                 status_area,
             );
             list.y = list.y.saturating_add(1);
@@ -678,7 +682,7 @@ impl MemoryBrowser {
                 format!(" No memories match “{}”.", self.query)
             };
             frame.render_widget(
-                Paragraph::new(fit_width(&message, usize::from(area.width)))
+                Paragraph::new(ellipsize(message.as_str().into(), usize::from(area.width)))
                     .style(Style::default().fg(theme.muted())),
                 area,
             );
@@ -689,7 +693,7 @@ impl MemoryBrowser {
         let items = self.matches.iter().map(|index| {
             let record = &self.records[*index];
             let preview = bounded_preview(&record.content, width);
-            let metadata = fit_width(&list_metadata(record), width);
+            let metadata = ellipsize(list_metadata(record).into(), width).into_owned();
             ListItem::new(vec![
                 Line::from(Span::styled(
                     preview,
@@ -726,8 +730,11 @@ impl MemoryBrowser {
         if let Some(status) = status {
             let status_area = Rect { height: 1, ..area };
             frame.render_widget(
-                Paragraph::new(fit_width(&status, usize::from(status_area.width)))
-                    .style(Style::default().fg(theme.accent())),
+                Paragraph::new(ellipsize(
+                    status.as_str().into(),
+                    usize::from(status_area.width),
+                ))
+                .style(Style::default().fg(theme.accent())),
                 status_area,
             );
             area.y = area.y.saturating_add(1);
@@ -1082,7 +1089,7 @@ fn bounded_preview(content: &str, width: usize) -> String {
         })
         .collect::<String>();
     let collapsed = single_line.split_whitespace().collect::<Vec<_>>().join(" ");
-    fit_width(&collapsed, width)
+    ellipsize(collapsed.into(), width).into_owned()
 }
 
 fn sanitize_detail(content: &str) -> String {
@@ -1110,30 +1117,7 @@ fn sanitize_single_line(text: &str, width: usize) -> String {
         })
         .collect::<String>();
     let collapsed = sanitized.split_whitespace().collect::<Vec<_>>().join(" ");
-    fit_width(&collapsed, width)
-}
-
-fn fit_width(text: &str, width: usize) -> String {
-    if text.width() <= width {
-        return text.to_owned();
-    }
-    if width == 0 {
-        return String::new();
-    }
-
-    let content_width = width.saturating_sub(1);
-    let mut result = String::new();
-    let mut used: usize = 0;
-    for grapheme in text.graphemes(true) {
-        let grapheme_width = grapheme.width();
-        if used.saturating_add(grapheme_width) > content_width {
-            break;
-        }
-        result.push_str(grapheme);
-        used = used.saturating_add(grapheme_width);
-    }
-    result.push('…');
-    result
+    ellipsize(collapsed.into(), width).into_owned()
 }
 
 fn visible_tail(query: &str, width: usize) -> &str {

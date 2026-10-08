@@ -1,6 +1,7 @@
 //! Pending-message stack shown while a turn is active.
 
 use super::{
+    fit::ellipsize,
     node::{Component, ComponentUpdate, RenderRequest},
     waved_text::WavedText,
 };
@@ -17,8 +18,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, BorderType, Borders},
 };
-use std::{borrow::Cow, time::Instant};
-use unicode_segmentation::UnicodeSegmentation;
+use std::time::Instant;
 use unicode_width::UnicodeWidthStr;
 
 const STEERING_TEXT: &str = "steering";
@@ -559,7 +559,10 @@ impl Component for MessageQueue {
             frame.buffer_mut().set_stringn(
                 area.x + 2,
                 row_y,
-                truncate(item.prompt.display_text(), content_width),
+                ellipsize(
+                    sanitize_terminal_text_inline(item.prompt.display_text()),
+                    content_width,
+                ),
                 content_width,
                 style,
             );
@@ -567,32 +570,10 @@ impl Component for MessageQueue {
     }
 }
 
-fn truncate(text: &str, width: usize) -> Cow<'_, str> {
-    let text = sanitize_terminal_text_inline(text);
-    if UnicodeWidthStr::width(text.as_ref()) <= width {
-        return text;
-    }
-    if width == 0 {
-        return Cow::Borrowed("");
-    }
-
-    let mut result = String::new();
-    let available = width.saturating_sub(1);
-    for grapheme in text.graphemes(true) {
-        if UnicodeWidthStr::width(result.as_str()) + UnicodeWidthStr::width(grapheme) > available {
-            break;
-        }
-        result.push_str(grapheme);
-    }
-    result.push('…');
-    Cow::Owned(result)
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
         Component, MessageQueue, QueueEffect, QueueEvent, QueueId, STEERING_TEXT, Submission,
-        truncate,
     };
     use crate::app::theme::Theme;
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
@@ -952,6 +933,5 @@ mod tests {
         assert_eq!(buffer[(0, 2)].symbol(), "├");
         assert_eq!(buffer[(19, 2)].symbol(), "┤");
         assert_eq!(buffer[(19, 4)].symbol(), "╯");
-        assert_eq!(truncate("hello\nworld", 8), "hello w…");
     }
 }

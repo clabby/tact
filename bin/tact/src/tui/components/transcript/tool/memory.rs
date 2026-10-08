@@ -1,5 +1,5 @@
 use super::{Presentation, generic};
-use crate::{app::theme::Theme, core::transcript::ToolEntry};
+use crate::{app::theme::Theme, core::transcript::ToolEntry, tui::components::fit::clip_to_width};
 use ratatui::{
     style::{Color, Style},
     text::Line,
@@ -314,9 +314,9 @@ fn scan(
         );
         presentation =
             presentation.selectable_plain(&label, width, Style::default().fg(theme.accent()));
-        let preview = super::truncate(candidate.preview, MAX_PREVIEW_WIDTH);
+        let preview = clip_to_width(candidate.preview, usize::from(MAX_PREVIEW_WIDTH));
         presentation =
-            presentation.selectable_plain(&preview, width, Style::default().fg(theme.text()));
+            presentation.selectable_plain(preview, width, Style::default().fg(theme.text()));
     }
     let footer = if abstained {
         "memory scan abstained".to_owned()

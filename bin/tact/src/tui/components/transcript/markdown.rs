@@ -1,4 +1,7 @@
-use crate::{app::theme::Theme, tui::format::sanitize_terminal_text};
+use crate::{
+    app::theme::Theme,
+    tui::{components::fit::clip_to_width, format::sanitize_terminal_text},
+};
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use ratatui::{
     style::{Modifier, Style},
@@ -1360,7 +1363,7 @@ fn code_block_header(language: Option<&str>, width: u16, theme: &Theme) -> Line<
         ));
     };
     let available = width.saturating_sub(5);
-    let language = truncate_graphemes(language, available);
+    let language = clip_to_width(language, usize::from(available)).to_owned();
     let language_width =
         u16::try_from(UnicodeWidthStr::width(language.as_str())).unwrap_or(u16::MAX);
     let fill = width.saturating_sub(language_width.saturating_add(5));
@@ -1374,20 +1377,6 @@ fn code_block_header(language: Option<&str>, width: u16, theme: &Theme) -> Line<
         ),
         Span::styled(format!(" {}╮", "─".repeat(usize::from(fill))), border),
     ])
-}
-
-fn truncate_graphemes(text: &str, width: u16) -> String {
-    let mut rendered = String::new();
-    let mut used = 0_u16;
-    for grapheme in text.graphemes(true) {
-        let grapheme_width = u16::try_from(UnicodeWidthStr::width(grapheme)).unwrap_or(u16::MAX);
-        if used.saturating_add(grapheme_width) > width {
-            break;
-        }
-        rendered.push_str(grapheme);
-        used = used.saturating_add(grapheme_width);
-    }
-    rendered
 }
 
 fn render_table(

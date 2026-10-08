@@ -1,6 +1,7 @@
 //! Camera-centered subagent hierarchy and read-only transcript inspector.
 
 use super::{
+    fit::ellipsize,
     floating::Floating,
     node::Component,
     subagent_tree_layout::{
@@ -675,7 +676,11 @@ impl SubagentTree {
             .parent(focused)
             .map_or_else(|| "root".to_owned(), |id| format!("parent #{id}"));
         let children = layout.children(focused).len();
-        let task = truncate_with_ellipsis(&node.task, inner.width.saturating_sub(6));
+        let task = ellipsize(
+            sanitize_terminal_text_inline(&node.task),
+            usize::from(inner.width.saturating_sub(6)),
+        )
+        .into_owned();
         let lines = vec![
             Line::from(vec![
                 Span::styled("Task  ", Style::default().fg(theme.muted())),
@@ -710,10 +715,13 @@ impl SubagentTree {
             ]),
             Line::from(vec![
                 Span::styled("Session  ", Style::default().fg(theme.muted())),
-                Span::raw(truncate_with_ellipsis(
-                    &node.session_id,
-                    inner.width.saturating_sub(9),
-                )),
+                Span::raw(
+                    ellipsize(
+                        sanitize_terminal_text_inline(&node.session_id),
+                        usize::from(inner.width.saturating_sub(9)),
+                    )
+                    .into_owned(),
+                ),
             ]),
         ];
         frame.render_widget(Paragraph::new(lines), inner);
@@ -802,7 +810,10 @@ fn render_node(
     let (symbol, status_color, status) = state_style(&node.status);
     let detail_style = Style::default().fg(status_color);
     let role_width = u16::try_from(NODE_WIDTH.saturating_sub(4)).unwrap_or_default();
-    let role = truncate_with_ellipsis(&node.role, role_width);
+    let role = ellipsize(
+        sanitize_terminal_text_inline(&node.role),
+        usize::from(role_width),
+    );
     let title = centered_text(&format!("{symbol} #{} {role}", node.id), NODE_WIDTH - 2);
     let detail = centered_text(
         &format!("{status} · {child_count} children"),
@@ -1002,8 +1013,8 @@ fn draw_world_string(
 
 fn centered_text(text: &str, width: i32) -> String {
     let width = u16::try_from(width).unwrap_or_default();
-    let text = truncate_with_ellipsis(text, width);
-    let text_width = u16::try_from(UnicodeWidthStr::width(text.as_str())).unwrap_or(u16::MAX);
+    let text = ellipsize(sanitize_terminal_text_inline(text), usize::from(width));
+    let text_width = u16::try_from(UnicodeWidthStr::width(text.as_ref())).unwrap_or(u16::MAX);
     let padding = width.saturating_sub(text_width);
     let left = padding / 2;
     let right = padding - left;
@@ -1033,30 +1044,6 @@ fn inset(area: Rect, horizontal: u16, vertical: u16) -> Rect {
         area.width.saturating_sub(horizontal.saturating_mul(2)),
         area.height.saturating_sub(vertical.saturating_mul(2)),
     )
-}
-
-fn truncate_with_ellipsis(text: &str, width: u16) -> String {
-    let text = sanitize_terminal_text_inline(text);
-    let text = text.as_ref();
-    if UnicodeWidthStr::width(text) <= usize::from(width) {
-        return text.to_owned();
-    }
-    if width == 0 {
-        return String::new();
-    }
-    let target = width.saturating_sub(1);
-    let mut rendered = String::new();
-    let mut used = 0_u16;
-    for grapheme in text.graphemes(true) {
-        let grapheme_width = u16::try_from(UnicodeWidthStr::width(grapheme)).unwrap_or(u16::MAX);
-        if used.saturating_add(grapheme_width) > target {
-            break;
-        }
-        rendered.push_str(grapheme);
-        used = used.saturating_add(grapheme_width);
-    }
-    rendered.push('…');
-    rendered
 }
 
 fn distance(from: WorldPoint, to: WorldPoint) -> f64 {

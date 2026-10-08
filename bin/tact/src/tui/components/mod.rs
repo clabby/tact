@@ -8,6 +8,7 @@ mod context_diagnostics;
 mod dial;
 mod effort;
 mod file_finder;
+mod fit;
 mod floating;
 mod keybindings;
 mod memory;

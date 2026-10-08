@@ -13,7 +13,7 @@ use super::markdown::{
 use crate::{
     app::theme::Theme,
     core::transcript::{ToolEntry, ToolState, humanize_tool},
-    tui::format::format_duration,
+    tui::{components::fit::clip_to_width, format::format_duration},
 };
 use ratatui::{
     style::{Color, Modifier, Style},
@@ -21,7 +21,6 @@ use ratatui::{
 };
 use serde_json::Value;
 use std::ops::Range;
-use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 #[cfg(test)]
@@ -428,7 +427,7 @@ fn truncate_spans_with_ellipsis(
     for span in spans {
         let line_end = span.content.find(['\n', '\r']);
         let content = line_end.map_or(span.content.as_ref(), |end| &span.content[..end]);
-        let shortened = truncate(content, remaining);
+        let shortened = clip_to_width(content, usize::from(remaining)).to_owned();
         let fully_rendered = shortened == content;
         let used = u16::try_from(UnicodeWidthStr::width(shortened.as_str())).unwrap_or(u16::MAX);
         remaining = remaining.saturating_sub(used);
@@ -481,7 +480,7 @@ fn append_details(
         lines.extend(details.into_iter().map(|line| truncate_line(line, width)));
         if let Some(footer) = footer {
             lines.push(Line::from(Span::styled(
-                truncate(&sanitize(&footer), width),
+                clip_to_width(&sanitize(&footer), usize::from(width)).to_owned(),
                 Style::default().fg(theme.muted()),
             )));
         }
@@ -495,7 +494,7 @@ fn append_details(
         ));
     }
     let footer = footer.unwrap_or_else(|| "details".to_owned());
-    let footer = truncate(&sanitize(&footer), width.saturating_sub(6));
+    let footer = clip_to_width(&sanitize(&footer), usize::from(width.saturating_sub(6))).to_owned();
     lines.push(Line::from(vec![
         Span::styled("    └ ", rail),
         Span::styled(footer, Style::default().fg(theme.muted())),
@@ -615,27 +614,12 @@ fn push_span(spans: &mut Vec<Span<'static>>, remaining: &mut u16, text: &str, st
     if *remaining == 0 {
         return;
     }
-    let rendered = truncate(text, *remaining);
+    let rendered = clip_to_width(text, usize::from(*remaining)).to_owned();
     let used = u16::try_from(UnicodeWidthStr::width(rendered.as_str())).unwrap_or(u16::MAX);
     *remaining = remaining.saturating_sub(used);
     if !rendered.is_empty() {
         spans.push(Span::styled(rendered, style));
     }
-}
-
-fn truncate(text: &str, width: u16) -> String {
-    let mut rendered = String::new();
-    let mut used = 0_u16;
-    for grapheme in text.graphemes(true) {
-        let next = used
-            .saturating_add(u16::try_from(UnicodeWidthStr::width(grapheme)).unwrap_or(u16::MAX));
-        if next > width {
-            break;
-        }
-        rendered.push_str(grapheme);
-        used = next;
-    }
-    rendered
 }
 
 fn status_symbol(state: ToolState) -> &'static str {
