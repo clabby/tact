@@ -84,7 +84,9 @@ Its composer footer shows a blue `◉ pre-release` badge, and `tact --version` r
 - **Retention.** Only the fifty most recent pre-releases are kept. A commit older than that, or
   one whose release workflow has not finished, reports that it has no build.
 - **Where it works.** Pre-releases replace a tact installed from a release archive or the install
-  script. Builds owned by Cargo or a package manager, and builds from source, are not replaced.
+  script, and a build from source, which makes them easy to try from a checkout. The binary that
+  runs `tact update` is the one replaced, so `target/` holds the download until the next
+  `cargo build`. Builds owned by Cargo or a package manager are not replaced.
 - **Container images.** `ghcr.io/clabby/tact:dev` follows the latest pre-release, and
   `ghcr.io/clabby/tact:dev-<commit>` pins one. `latest` and version tags stay official.
 
@@ -568,7 +570,9 @@ server serves the bundle installed at `~/.tact/web/assets/v<version>` (it is re-
 while missing, so installing it needs no restart). Until it is installed the server answers with a
 page that explains how to install it. Official releases and pre-releases download and verify the
 matching bundle in the background on first start; a pre-release's is named
-`tact-web-dev-<commit>.tar.gz` and installed at `~/.tact/web/assets/dev-<commit>`.
+`tact-web-dev-<commit>.tar.gz` and installed at `~/.tact/web/assets/dev-<commit>`. A build from
+source reads `~/.tact/web/assets/development` instead, so replacing it with a download never
+touches a bundle linked by `just install-dev`.
 
 #### Developing the web interface
 

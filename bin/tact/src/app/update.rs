@@ -64,10 +64,10 @@ pub(crate) enum UpdateError {
     )]
     PreReleaseNotFound { revision: String },
     #[error(
-        "pre-release builds can only replace a tact installed from a release archive or the \
-         install script, not one managed by Cargo or a package manager or built from source"
+        "pre-release builds cannot replace a tact managed by Cargo or a package manager; \
+         install tact from a release archive or build it from source instead"
     )]
-    PreReleaseNeedsArchive,
+    PreReleaseManaged,
     #[error("failed to create the update HTTP client: {0}")]
     Client(#[source] reqwest::Error),
     #[error("failed to {operation}: {source}")]
@@ -470,12 +470,7 @@ pub(crate) async fn install_latest() -> Result<UpdateStatus, UpdateError> {
 /// clabby/tact GitHub Releases they come from.
 pub(crate) async fn install_pre_release(revision: &str) -> Result<UpdateStatus, UpdateError> {
     let revision = normalize_revision(revision)?;
-    if !matches!(
-        installation(),
-        InstallationKind::ReleaseArchive | InstallationKind::PreRelease { .. }
-    ) {
-        return Err(UpdateError::PreReleaseNeedsArchive);
-    }
+    ensure_pre_release_installable(installation())?;
     let target = SupportedTarget::current()?;
     let updater = Updater::new()?;
     let commit = updater.commit(&revision).await?;
@@ -488,6 +483,20 @@ pub(crate) async fn install_pre_release(revision: &str) -> Result<UpdateStatus, 
     }
     let release = updater.pre_release(&tag).await?;
     updater.replace_executable(target, release).await
+}
+
+/// Whether a pre-release may replace this installation. Cargo and package managers own their
+/// binaries and keep records that a replacement would leave stale; every other build, including
+/// one built from source, is replaced the same way `tact update` replaces it with a release.
+fn ensure_pre_release_installable(installation: &InstallationKind) -> Result<(), UpdateError> {
+    match installation {
+        InstallationKind::CratesIo { .. } | InstallationKind::External { .. } => {
+            Err(UpdateError::PreReleaseManaged)
+        }
+        InstallationKind::ReleaseArchive
+        | InstallationKind::PreRelease { .. }
+        | InstallationKind::Development => Ok(()),
+    }
 }
 
 /// A commit abbreviation as the GitHub commits API takes it: lowercase hexadecimal.
@@ -1093,8 +1102,8 @@ fn parse_hex_checksum(value: &str) -> Option<[u8; 32]> {
 mod tests {
     use super::{
         GithubAsset, GithubReleaseResponse, Release, ReleaseTag, SupportedTarget, UpdateError,
-        cargo_update_command, crate_manifest, extract_binary, normalize_revision,
-        parse_hex_checksum, update_artifact_target, verify_archive_checksum,
+        cargo_update_command, crate_manifest, ensure_pre_release_installable, extract_binary,
+        normalize_revision, parse_hex_checksum, update_artifact_target, verify_archive_checksum,
     };
     use crate::app::installation::InstallationKind;
     use flate2::{Compression, write::GzEncoder};
@@ -1175,6 +1184,32 @@ mod tests {
             ));
         }
         assert_eq!(ReleaseTag::pre_release("0123456"), None);
+    }
+
+    #[test]
+    fn only_cargo_and_package_manager_installs_refuse_pre_releases() {
+        for installation in [
+            InstallationKind::ReleaseArchive,
+            InstallationKind::PreRelease {
+                revision: "0123456789ab".to_owned(),
+            },
+            InstallationKind::Development,
+        ] {
+            assert!(ensure_pre_release_installable(&installation).is_ok());
+        }
+        for installation in [
+            InstallationKind::CratesIo {
+                root: "/opt/tact".into(),
+            },
+            InstallationKind::External {
+                manager: "nix".to_owned(),
+            },
+        ] {
+            assert!(matches!(
+                ensure_pre_release_installable(&installation),
+                Err(UpdateError::PreReleaseManaged)
+            ));
+        }
     }
 
     #[test]

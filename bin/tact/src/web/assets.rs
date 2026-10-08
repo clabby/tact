@@ -256,7 +256,7 @@ async fn acquire_install_lock(assets_root: &Path) -> Result<InstallLock, AssetEr
 fn install_path(home: &Path) -> PathBuf {
     home.join("web")
         .join("assets")
-        .join(installation().release_tag())
+        .join(installation().web_bundle_directory())
 }
 
 fn quarantine(path: &Path) -> Result<(), AssetError> {
