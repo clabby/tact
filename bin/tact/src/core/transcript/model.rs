@@ -1,3 +1,10 @@
+//! Projects transcript records into the entries both front-ends render.
+//!
+//! [`TranscriptModel`] is a deterministic reducer: replaying the same records and message updates
+//! in the same order yields the same entries, which is how a resumed session rebuilds its view.
+//! A payload that fails to decode becomes an error entry when its event would have been visible,
+//! and otherwise becomes the pending error that a failed turn reports.
+
 use super::{
     CompactionFinished, DirectedMessageEntry, EffortChanged, EntryId, EntryKind, FastModeChanged,
     LocalKind, MessageDelivery, MessagePhase, ReflectionStarted, SessionEnded, SessionOutcome,

@@ -1,3 +1,14 @@
+//! The durable transcript record and the payloads Tact writes into it.
+//!
+//! A record is either an agent runtime event, whose payload stays the raw JSON the runtime
+//! produced, or a local event serialized from one of the payload types defined here. The same
+//! payload types decode local records wherever they are read, so each payload shape has one
+//! definition. The record's JSON layout, including the `source` and `type` strings, is the stored
+//! format; kinds this build does not know survive a read and re-encode unchanged.
+//!
+//! Records stream through the live session on every model delta, so they are shared as
+//! `Arc<TranscriptRecord>` and their kinds are plain enums rather than owned strings.
+
 use crate::{
     app::config::{ReasoningEffort, ReasoningMode, Speed},
     core::context::ContextBudget,

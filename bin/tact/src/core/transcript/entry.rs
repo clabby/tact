@@ -1,3 +1,8 @@
+//! The rendered transcript entries that [`super::TranscriptModel`] produces.
+//!
+//! Entries carry stable identifiers and a revision that increases whenever an entry changes, so
+//! front-ends can cache layout per entry and redraw only what moved.
+
 use crate::app::config::{ReasoningEffort, Speed};
 use serde_json::Value;
 use std::ops::Range;
