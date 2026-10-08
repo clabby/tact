@@ -31,7 +31,7 @@ use ratatui::{
     style::{Color, Modifier},
 };
 use semver::Version;
-use serde_json::{json, value::to_raw_value};
+use serde_json::{Value, json, value::to_raw_value};
 use std::{
     fs,
     num::NonZeroU16,
@@ -88,6 +88,40 @@ fn text_column(buffer: &ratatui::buffer::Buffer, row: u16, text: &str) -> u16 {
             })
         })
         .expect("rendered text should be present")
+}
+
+fn subagent(id: u64, task: &str) -> AgentDescriptor {
+    AgentDescriptor {
+        id: AgentId::new(id),
+        session_id: format!("agent-{id}"),
+        model: Model::Codex(CodexModel::Sol),
+        thinking: Thinking::Medium,
+        role: "worker".to_owned(),
+        task: task.to_owned(),
+        parent: None,
+    }
+}
+
+/// A coordination message from `from` to agent `to` that has been delivered.
+fn delivered_message(from: Value, to: u64, body: &str) -> AgentMessageUpdate {
+    serde_json::from_value(json!({
+        "message_id": 1,
+        "thread": {
+            "id": 1,
+            "participants": [from, {"kind": "agent", "agent_id": to}],
+            "messages": [{
+                "id": 1,
+                "thread_id": 1,
+                "from": from,
+                "to": to,
+                "priority": "deferred",
+                "purpose": "coordinate",
+                "body": body
+            }]
+        },
+        "delivery": {"state": "delivered", "disposition": "started"}
+    }))
+    .unwrap()
 }
 
 fn pending_confirmation(root: &RootNode) -> Option<ConfirmationAction> {
@@ -399,17 +433,9 @@ fn clicking_composer_chrome_opens_model_effort_speed_and_subagents() {
     assert!(matches!(root.overlay, Some(Overlay::Speed(_))));
 
     root.overlay = None;
-    root.update(super::RootEvent::Subagent(AgentUpdate::Added(
-        AgentDescriptor {
-            id: AgentId::new(1),
-            session_id: "child".to_owned(),
-            model: Model::Codex(CodexModel::Sol),
-            thinking: Thinking::Medium,
-            role: "worker".to_owned(),
-            task: "work".to_owned(),
-            parent: None,
-        },
-    )));
+    root.update(super::RootEvent::Subagent(AgentUpdate::Added(subagent(
+        1, "work",
+    ))));
     terminal
         .draw(|frame| root.render(frame, frame.area(), &Theme::default()))
         .unwrap();
@@ -429,15 +455,10 @@ fn clicking_composer_chrome_opens_model_effort_speed_and_subagents() {
 #[test]
 fn root_messages_render_once_in_main_and_are_projected_into_child_transcripts() {
     let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
-    root.update(RootEvent::Subagent(AgentUpdate::Added(AgentDescriptor {
-        id: AgentId::new(1),
-        session_id: "child".to_owned(),
-        model: Model::Codex(CodexModel::Sol),
-        thinking: Thinking::Medium,
-        role: "worker".to_owned(),
-        task: "verify ordering".to_owned(),
-        parent: None,
-    })));
+    root.update(RootEvent::Subagent(AgentUpdate::Added(subagent(
+        1,
+        "verify ordering",
+    ))));
     root.update(RootEvent::Transcript(Arc::new(
         TranscriptRecord::from_agent(
             1,
@@ -462,27 +483,7 @@ fn root_messages_render_once_in_main_and_are_projected_into_child_transcripts() 
             },
         ),
     )));
-    let message = serde_json::from_value::<AgentMessageUpdate>(json!({
-        "message_id": 1,
-        "thread": {
-            "id": 1,
-            "participants": [
-                {"kind": "root"},
-                {"kind": "agent", "agent_id": 1}
-            ],
-            "messages": [{
-                "id": 1,
-                "thread_id": 1,
-                "from": {"kind": "root"},
-                "to": 1,
-                "priority": "deferred",
-                "purpose": "coordinate",
-                "body": "Please verify the ordering."
-            }]
-        },
-        "delivery": {"state": "delivered", "disposition": "started"}
-    }))
-    .unwrap();
+    let message = delivered_message(json!({"kind": "root"}), 1, "Please verify the ordering.");
     root.update(RootEvent::Subagent(AgentUpdate::Message(message)));
 
     let main = render_root_text(&mut root, 100, 20);
@@ -518,36 +519,15 @@ fn peer_messages_are_projected_into_the_main_transcript() {
     let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
     for (id, role) in [(1, "sender"), (2, "recipient")] {
         root.update(RootEvent::Subagent(AgentUpdate::Added(AgentDescriptor {
-            id: AgentId::new(id),
-            session_id: format!("child-{id}"),
-            model: Model::Codex(CodexModel::Sol),
-            thinking: Thinking::Medium,
             role: role.to_owned(),
-            task: "coordinate with a peer".to_owned(),
-            parent: None,
+            ..subagent(id, "coordinate with a peer")
         })));
     }
-    let message = serde_json::from_value::<AgentMessageUpdate>(json!({
-        "message_id": 1,
-        "thread": {
-            "id": 1,
-            "participants": [
-                {"kind": "agent", "agent_id": 1},
-                {"kind": "agent", "agent_id": 2}
-            ],
-            "messages": [{
-                "id": 1,
-                "thread_id": 1,
-                "from": {"kind": "agent", "agent_id": 1},
-                "to": 2,
-                "priority": "deferred",
-                "purpose": "coordinate",
-                "body": "Peer coordination is visible."
-            }]
-        },
-        "delivery": {"state": "delivered", "disposition": "started"}
-    }))
-    .unwrap();
+    let message = delivered_message(
+        json!({"kind": "agent", "agent_id": 1}),
+        2,
+        "Peer coordination is visible.",
+    );
 
     root.update(RootEvent::Subagent(AgentUpdate::Message(message)));
 
@@ -560,17 +540,9 @@ fn peer_messages_are_projected_into_the_main_transcript() {
 fn composer_hides_subagents_after_they_stop_running() {
     let mut terminal = Terminal::new(TestBackend::new(100, 16)).unwrap();
     let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
-    root.update(super::RootEvent::Subagent(AgentUpdate::Added(
-        AgentDescriptor {
-            id: AgentId::new(1),
-            session_id: "child".to_owned(),
-            model: Model::Codex(CodexModel::Sol),
-            thinking: Thinking::Medium,
-            role: "worker".to_owned(),
-            task: "work".to_owned(),
-            parent: None,
-        },
-    )));
+    root.update(super::RootEvent::Subagent(AgentUpdate::Added(subagent(
+        1, "work",
+    ))));
     root.update(super::RootEvent::Subagent(AgentUpdate::Status {
         id: AgentId::new(1),
         status: AgentStatus::Completed {
@@ -595,17 +567,10 @@ fn composer_hides_subagents_after_they_stop_running() {
 #[test]
 fn completed_direct_subagent_starts_a_continuation_when_idle() {
     let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
-    root.update(super::RootEvent::Subagent(AgentUpdate::Added(
-        AgentDescriptor {
-            id: AgentId::new(1),
-            session_id: "child".to_owned(),
-            model: Model::Codex(CodexModel::Sol),
-            thinking: Thinking::Medium,
-            role: "worker".to_owned(),
-            task: "inspect the queue".to_owned(),
-            parent: None,
-        },
-    )));
+    root.update(super::RootEvent::Subagent(AgentUpdate::Added(subagent(
+        1,
+        "inspect the queue",
+    ))));
 
     let update = root.update(super::RootEvent::Subagent(AgentUpdate::Status {
         id: AgentId::new(1),
@@ -628,17 +593,10 @@ fn completed_direct_subagent_starts_a_continuation_when_idle() {
 fn completed_subagent_does_not_start_a_competing_active_turn() {
     let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
     root.turns.start_turn();
-    root.update(super::RootEvent::Subagent(AgentUpdate::Added(
-        AgentDescriptor {
-            id: AgentId::new(1),
-            session_id: "child".to_owned(),
-            model: Model::Codex(CodexModel::Sol),
-            thinking: Thinking::Medium,
-            role: "worker".to_owned(),
-            task: "inspect the queue".to_owned(),
-            parent: None,
-        },
-    )));
+    root.update(super::RootEvent::Subagent(AgentUpdate::Added(subagent(
+        1,
+        "inspect the queue",
+    ))));
 
     let update = root.update(super::RootEvent::Subagent(AgentUpdate::Status {
         id: AgentId::new(1),
@@ -656,13 +614,8 @@ fn completed_nested_subagent_does_not_bypass_its_parent() {
     let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
     root.update(super::RootEvent::Subagent(AgentUpdate::Added(
         AgentDescriptor {
-            id: AgentId::new(2),
-            session_id: "grandchild".to_owned(),
-            model: Model::Codex(CodexModel::Sol),
-            thinking: Thinking::Medium,
-            role: "worker".to_owned(),
-            task: "inspect the queue".to_owned(),
             parent: Some(AgentId::new(1)),
+            ..subagent(2, "inspect the queue")
         },
     )));
 
@@ -3033,13 +2986,8 @@ fn subagents_action_reopens_the_active_filter_on_the_oldest_active_agent() {
     let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
     for (id, role) in [(1, "completed"), (2, "active")] {
         root.update(RootEvent::Subagent(AgentUpdate::Added(AgentDescriptor {
-            id: AgentId::new(id),
-            session_id: format!("agent-{id}"),
-            model: Model::Codex(CodexModel::Sol),
-            thinking: Thinking::Medium,
             role: role.to_owned(),
-            task: role.to_owned(),
-            parent: None,
+            ..subagent(id, role)
         })));
     }
     root.update(RootEvent::Subagent(AgentUpdate::Status {
