@@ -23,6 +23,21 @@ pub(super) struct Layout {
     pub(super) image_state: ImageState,
 }
 
+impl Layout {
+    /// A layout of plain rows without links, images, or selectable text.
+    pub(super) fn plain(lines: Vec<Line<'static>>) -> Self {
+        Self {
+            links: vec![Vec::new(); lines.len()],
+            selections: vec![Vec::new(); lines.len()],
+            lines,
+            images: Vec::new(),
+            envelopes: Vec::new(),
+            selection_source: None,
+            image_state: ImageState::None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Default, Eq, PartialEq)]
 pub(super) enum ImageState {
     #[default]
