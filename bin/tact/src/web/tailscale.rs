@@ -276,7 +276,11 @@ fn parse_status(json: &[u8]) -> Result<String, TailscaleError> {
 #[cfg(all(test, unix))]
 mod tests {
     use super::{Duration, Tailnet, TailscaleError, https_port_in_use, parse_status};
-    use std::{fs, os::unix::fs::PermissionsExt, path::Path, path::PathBuf};
+    use std::{
+        fs,
+        os::unix::fs::PermissionsExt,
+        path::{Path, PathBuf},
+    };
 
     const GRACE: Duration = Duration::from_millis(300);
     const RUNNING: &str = r#"{"BackendState":"Running","CertDomains":["box.tail1234.ts.net."]}"#;

@@ -678,12 +678,14 @@ pub(super) fn secure(response: &mut Response<Body>) {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{
-        bridge::{self, Command, CommandError, Publication, Query, Reply},
-        tailscale::Tailnet,
-        testing::{self, Harness},
+    use super::{
+        super::{
+            bridge::{self, Command, CommandError, Publication, Query, Reply},
+            tailscale::Tailnet,
+            testing::{self, Harness},
+        },
+        PublicOrigin,
     };
-    use super::PublicOrigin;
     use axum::{
         body::Body,
         http::{Method, Request, StatusCode, header},
