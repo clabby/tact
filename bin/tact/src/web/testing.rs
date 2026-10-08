@@ -5,14 +5,15 @@ use super::{
     assets::AssetStore,
     bridge::{self, LoopEnd},
     hub::Hub,
-    review::{self, ReviewAgent, ReviewRegistry},
+    review::{self, AgentPrompt, ReviewAgent, ReviewRegistry},
     token::MachineToken,
     workspaces::Workspaces,
 };
 use crate::{
     app::config::{ReasoningEffort, ReasoningMode, Speed},
     core::protocol::{
-        Busy, CommandError, Draft, Publication, Reply, Request as LoopRequest, SessionInfo,
+        AuxiliaryError, Busy, CommandError, Draft, Publication, Reply, Request as LoopRequest,
+        SessionInfo,
     },
 };
 use axum::{
@@ -20,7 +21,8 @@ use axum::{
     body::Body,
     http::{HeaderMap, Method, Request, StatusCode, header},
 };
-use std::{fs, path::Path, process::Command, sync::Arc};
+use futures_util::future::BoxFuture;
+use std::{fs, future::Future, path::Path, process::Command, sync::Arc};
 use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt as _;
@@ -36,8 +38,29 @@ pub(super) struct Harness {
     _home: TempDir,
 }
 
-pub(super) fn idle_agent() -> ReviewAgent {
-    Arc::new(|_, _, _| Box::pin(async { Ok("<p>Overview</p>".to_owned()) }))
+/// A review agent backed by a closure.
+struct FnAgent<F>(F);
+
+impl<F, Answer> ReviewAgent for FnAgent<F>
+where
+    F: Fn(AgentPrompt) -> Answer + Send + Sync + 'static,
+    Answer: Future<Output = Result<String, AuxiliaryError>> + Send + 'static,
+{
+    fn run(&self, prompt: AgentPrompt) -> BoxFuture<'static, Result<String, AuxiliaryError>> {
+        Box::pin((self.0)(prompt))
+    }
+}
+
+pub(super) fn agent<F, Answer>(respond: F) -> Arc<dyn ReviewAgent>
+where
+    F: Fn(AgentPrompt) -> Answer + Send + Sync + 'static,
+    Answer: Future<Output = Result<String, AuxiliaryError>> + Send + 'static,
+{
+    Arc::new(FnAgent(respond))
+}
+
+pub(super) fn idle_agent() -> Arc<dyn ReviewAgent> {
+    agent(|_| async { Ok("<p>Overview</p>".to_owned()) })
 }
 
 impl Harness {
@@ -45,13 +68,13 @@ impl Harness {
         Self::with(repository(), idle_agent())
     }
 
-    pub(super) fn with(workspace: TempDir, agent: ReviewAgent) -> Self {
+    pub(super) fn with(workspace: TempDir, agent: Arc<dyn ReviewAgent>) -> Self {
         Self::with_origin(workspace, agent, PublicOrigin::None)
     }
 
     pub(super) fn with_origin(
         workspace: TempDir,
-        agent: ReviewAgent,
+        agent: Arc<dyn ReviewAgent>,
         public_origin: PublicOrigin,
     ) -> Self {
         crate::install_tls_provider();

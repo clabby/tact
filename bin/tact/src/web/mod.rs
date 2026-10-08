@@ -26,7 +26,7 @@ use assets::AssetStore;
 pub(crate) use assets::{Located, WebAssets};
 use hub::Hub;
 use registry::{InstanceRecord, Registration, RegistryError};
-use review::{ReviewRegistry, bridge_agent};
+use review::{BridgeAgent, ReviewRegistry};
 use std::{
     io,
     net::{IpAddr, SocketAddr},
@@ -230,7 +230,7 @@ impl Server {
         let review = ReviewRegistry::new(
             Arc::clone(&workspaces),
             hub.clone(),
-            bridge_agent(channels.auxiliary),
+            Arc::new(BridgeAgent::new(channels.auxiliary)),
             shutdown.clone(),
         );
         let state = Arc::new(AppState {
