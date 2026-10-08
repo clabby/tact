@@ -1,4 +1,17 @@
 //! Searchable modal menu for actions exposed by the TUI.
+//!
+//! [ActionsMenu] consumes terminal key and paste events through
+//! [ActionsEvent::Terminal] and keeps the search query, the indices of matching
+//! [Action]s, the highlighted row, and the host-supplied [ActionAvailability].
+//! The query matches each action's label and alias case-insensitively.
+//!
+//! - Enter or Tab emits [ActionsEffect::Trigger] for the highlighted action, or
+//!   [ActionsEffect::Copy] for [Action::Copy]. A query of the form `copy <text>`
+//!   keeps the copy action listed and carries `<text>` as its argument; the
+//!   argument is empty when the query only names the action.
+//! - Esc, or Backspace on an empty query, emits [ActionsEffect::Dismiss].
+//! - Unavailable actions stay listed with a label explaining what enables them,
+//!   but selecting one emits nothing.
 
 use super::{
     floating::Floating,

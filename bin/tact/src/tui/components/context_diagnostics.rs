@@ -1,4 +1,12 @@
 //! Read-only context telemetry overlay.
+//!
+//! [ContextDiagnosticsPanel] renders one [ContextDiagnostics] snapshot: the
+//! context budget, the latest server usage, generation settings, and compaction
+//! history. Fields the snapshot lacks render as "unavailable" rather than as
+//! zero. The panel never gathers telemetry itself: `r` emits
+//! [ContextDiagnosticsEffect::Refresh] and the host answers with a new snapshot
+//! through [ContextDiagnosticsPanel::replace]. Esc emits
+//! [ContextDiagnosticsEffect::Dismiss].
 
 use super::{
     floating::Floating,

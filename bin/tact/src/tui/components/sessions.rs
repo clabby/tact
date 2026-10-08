@@ -1,4 +1,19 @@
 //! Overlay listing the live sessions (panes) of this Tact process.
+//!
+//! [SessionsOverlay] keeps a host-supplied [LiveSession] snapshot, whether a new
+//! session may start, its own search query, the visible rows, and the highlighted
+//! row. It consumes typed characters, pastes, and keys through
+//! [SessionsEvent::Terminal], and the host refreshes the snapshot in place with
+//! [SessionsOverlay::set_sessions].
+//!
+//! - Enter or Tab emits [SessionsEffect::Activate] for a session row, or
+//!   [SessionsEffect::New] for the "New session" row when starting one is
+//!   allowed.
+//! - Ctrl+D or Delete emits [SessionsEffect::Close] for the highlighted session,
+//!   and Esc emits [SessionsEffect::Cancel].
+//! - The "New session" row always leads the list, even when the query filters
+//!   out every session. When starting a session is not allowed, the row stays
+//!   visible with the reason and selecting it emits nothing.
 
 use super::{
     fit::ellipsize,

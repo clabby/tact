@@ -1,4 +1,14 @@
 //! Animated selector for the speed preference.
+//!
+//! [SpeedSelector] keeps the highlighted [Speed] in an [AnimatedDial] and the
+//! session's model. It consumes key presses through [SpeedEvent::Terminal] and
+//! animation ticks through [SpeedEvent::AnimationFrame]; the host schedules
+//! ticks from [SpeedSelector::animation_deadline]. Arrow keys move the dial,
+//! Enter emits [SpeedEffect::Apply] with the selected preference, and Esc or
+//! Backspace emits [SpeedEffect::Dismiss].
+//!
+//! The applied value is the preference, not the speed the model will use; when
+//! the model maps the preference to a different speed, the popup says so.
 
 use super::{
     dial::AnimatedDial,

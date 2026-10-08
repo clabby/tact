@@ -1,3 +1,25 @@
+//! Markdown rendering into terminal rows for transcript entries.
+//!
+//! [render_cached] turns Markdown source into a [Layout] for a given width:
+//!
+//! - `lines`: styled rows wrapped to the width. A zero width yields an empty
+//!   layout, and trailing blank rows are dropped.
+//! - `links` and `selections`: one list per row. A [LinkSpan] maps a column
+//!   range to its destination; a [SourceSpan] maps the columns of one rendered
+//!   grapheme to the byte range of the source that produced it.
+//! - `images`: an [ImagePlacement] for each image drawn inline, anchored at the
+//!   first of the blank rows reserved for it. `image_state` records whether the
+//!   source references images and whether any of them is still loading
+//!   ([ImageState::Pending]); a pending layout shows fallback links and must be
+//!   rebuilt once the images are ready.
+//! - `envelopes`: a [SourceEnvelope] for each construct, pairing the source range
+//!   of its content with the range that includes its markup, so a selection that
+//!   covers the content can widen to the full construct.
+//!
+//! Decorations such as list markers, quote bars, code-block borders, and
+//! language labels have no source span and are never copied. Source offsets
+//! index the Markdown text unless `selection_source` names a different string.
+
 use crate::{
     app::theme::Theme,
     tui::{components::fit::clip_to_width, format::sanitize_terminal_text},

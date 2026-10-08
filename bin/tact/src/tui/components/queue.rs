@@ -1,4 +1,20 @@
 //! Pending-message stack shown while a turn is active.
+//!
+//! [MessageQueue] owns prompts submitted while the agent is busy. The host
+//! pushes prompts, drains ready ones when a turn ends, and reports the progress
+//! of steers through `steer_admitted`, `steer_applied`, `steer_promoted`,
+//! `steer_failed`, and `cancel_steers`. Key presses arrive through
+//! [QueueEvent::Terminal] while the stack is focused, and
+//! [QueueEvent::AnimationFrame] drives the "steering" title wave.
+//!
+//! - Enter emits [QueueEffect::Steer] to deliver the highlighted prompt into the
+//!   running turn, `e` emits [QueueEffect::Edit] to hand its text to the
+//!   composer, and Esc emits [QueueEffect::Blur].
+//! - Items being steered form a lane at the front of the stack, ahead of waiting
+//!   items. Only waiting items can be edited, deleted, reordered, or steered.
+//! - The runtime may report a steer as applied before it acknowledges admission;
+//!   the queue counts those early reports so the matching item is removed once
+//!   its admission arrives.
 
 use super::{
     fit::ellipsize,

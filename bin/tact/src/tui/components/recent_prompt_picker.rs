@@ -1,4 +1,14 @@
 //! Picker for prompts from the current session or all persisted sessions.
+//!
+//! [RecentPromptPicker] keeps the loaded [RecentPrompt]s, the active
+//! [RecentPromptScope] (global by default), its own search query, the ranked
+//! visible indices, the highlighted row, and the preview scroll offset. It
+//! consumes typed characters, pastes, and keys through
+//! [RecentPromptPickerEvent::Terminal]; Ctrl+F toggles the scope and Page Up or
+//! Page Down scrolls the preview. Enter or Tab emits
+//! [RecentPromptPickerEffect::Insert] with the full prompt text, and Esc or
+//! Backspace on an empty query emits [RecentPromptPickerEffect::Dismiss].
+//! Changing the query, scope, or highlighted row resets the preview to its top.
 
 use super::{
     file_finder::visible_query_tail,

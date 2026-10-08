@@ -1,4 +1,12 @@
 //! Searchable model menu for a new session.
+//!
+//! [ModelSelector] lists the models available to this configuration, marks the
+//! session's current model, and keeps its own search query, the matching
+//! indices, and the highlighted row. It consumes typed characters, pastes, and
+//! navigation keys through [ModelSelectorEvent::Terminal]. The query matches the
+//! display name, model id, and provider. Enter emits [ModelSelectorEffect::Apply]
+//! with the highlighted model and Esc emits [ModelSelectorEffect::Dismiss]; Enter
+//! with no match emits nothing.
 
 use super::{
     file_finder::visible_query_tail,

@@ -1,4 +1,10 @@
 //! Selector for automatic, light, and dark color modes.
+//!
+//! [ThemeSelector] keeps only the highlighted [ThemeMode]. It consumes key
+//! presses through [ThemeSelectorEvent::Terminal]: arrow keys move the highlight
+//! without wrapping, Enter emits [ThemeSelectorEffect::Apply] with the
+//! highlighted mode, and Esc or Backspace emits [ThemeSelectorEffect::Dismiss].
+//! The host applies or discards the mode; the selector does not preview it.
 
 use super::{
     floating::Floating,
