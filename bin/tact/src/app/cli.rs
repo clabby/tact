@@ -354,23 +354,15 @@ impl Drop for McpCommand {
 impl ZeroizeOnDrop for McpCommand {}
 
 impl Cli {
-    pub(crate) async fn run(self) -> Result<()> {
+    pub(crate) async fn run(mut self) -> Result<()> {
         if self.resume.is_some() && self.command.is_some() {
             return Err(RuntimeError::ResumeWithCommand.into());
         }
         if matches!(&self.command, None | Some(Command::Resume)) {
             tui::ensure_interactive()?;
         }
-        if self
-            .command
-            .as_ref()
-            .is_some_and(|command| !command.requires_config())
-        {
-            return self
-                .command
-                .expect("a config-independent command was checked above")
-                .run_without_config()
-                .await;
+        if let Some(command) = self.command.take_if(|command| !command.requires_config()) {
+            return command.run_without_config().await;
         }
 
         let overrides = ConfigOverrides {
@@ -417,18 +409,7 @@ impl Cli {
     async fn run_tui(config: Config, startup: tui::StartupMode) -> Result<()> {
         let shutdown = CancellationToken::new();
         let run = tui::run(config, startup, shutdown.clone());
-        tokio::pin!(run);
-
-        let result = tokio::select! {
-            result = &mut run => result,
-            signal = shutdown::signal() => {
-                shutdown.cancel();
-                let result = run.await;
-                signal.map_err(RuntimeError::ShutdownSignal)?;
-                result
-            }
-        };
-        if let Some(session_id) = result? {
+        if let Some(session_id) = shutdown::run_until_complete(shutdown, run).await? {
             print_resume_hint(&session_id);
         }
         Ok(())
@@ -524,17 +505,7 @@ impl Command {
             #[cfg(feature = "harbor-evals")]
             orchestration_log,
         );
-        tokio::pin!(run);
-
-        tokio::select! {
-            result = &mut run => result,
-            signal = shutdown::signal() => {
-                shutdown.cancel();
-                let result = run.await;
-                signal.map_err(RuntimeError::ShutdownSignal)?;
-                result
-            }
-        }
+        shutdown::run_until_complete(shutdown, run).await
     }
 }
 
