@@ -113,7 +113,7 @@ export class Transcript {
   private readonly openGroups = new Set<number>();
 
   private seen: Seen | null = null;
-  private newSince: { id: number; label: string } | null = null;
+  private newSince: { id: number; seenAt: number } | null = null;
   private readonly newSinceMarker: HTMLElement;
   private observing = false;
   private seenTimer = 0;
@@ -981,7 +981,6 @@ export class Transcript {
       return;
     }
     for (const time of this.list.querySelectorAll<HTMLElement>("[data-at]")) time.textContent = ago(Number(time.dataset.at));
-    if (this.newSince && this.seen) this.newSince.label = newSinceLabel(this.seen.at);
     this.placeNewSince();
   };
 
@@ -1035,7 +1034,7 @@ export class Transcript {
       return;
     }
     const id = firstUnseen(data, this.seen);
-    this.newSince = id === null ? null : { id, label: newSinceLabel(this.seen.at) };
+    this.newSince = id === null ? null : { id, seenAt: this.seen.at };
   }
 
   private recordSeen(force = false) {
@@ -1048,7 +1047,7 @@ export class Transcript {
     writeSeen(storage, this.source.key, this.seen);
   }
 
-  /** Puts the marker above the first unseen entry, or above the fold or group that hides it. */
+  /** Puts the marker above the first unseen entry, or above the fold or group that holds it. */
   private placeNewSince() {
     const marker = this.newSinceMarker;
     const target = this.newSince && this.rendered.get(this.newSince.id)?.element;
@@ -1060,10 +1059,10 @@ export class Transcript {
     const turn = this.turnOf.get(this.newSince.id);
     const view = turn && this.views.get(turn.key);
     const group = anchor.parentElement?.closest<HTMLElement>(".step-group");
-    if (group && !group.classList.contains("open")) anchor = group;
+    if (group) anchor = group;
     if (view && anchor.closest(".turn-log") === view.log && view.log.hidden) anchor = view.fold;
     if (view && turn?.user === this.newSince.id) anchor = view.section;
-    marker.textContent = this.newSince.label;
+    marker.textContent = newSinceLabel(this.newSince.seenAt);
     if (marker.nextElementSibling !== anchor) anchor.before(marker);
   }
 

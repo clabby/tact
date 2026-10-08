@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { firstUnseen, latestEntry, newSinceLabel, readSeen, writeSeen } from "./seen";
+import { AWAY_AFTER_MS, firstUnseen, latestEntry, newSinceLabel, readSeen, writeSeen } from "./seen";
 import { transcript } from "./test-entries";
 
 test("the first unseen entry is the first top-level one after the last seen", () => {
@@ -27,4 +27,13 @@ test("the marker says how long ago the reader last looked", () => {
   const now = Date.UTC(2026, 9, 8, 12);
   expect(newSinceLabel(now - 12 * 60_000, now)).toBe("New since 12m ago");
   expect(newSinceLabel(now - 10_000, now)).toBe("New since moments ago");
+});
+
+test("a short glance away does not mark anything as new", () => {
+  const t = transcript();
+  t.user("a");
+  t.say("b");
+  const now = 1_000_000;
+  expect(firstUnseen(t.data(), { id: 1, at: now - AWAY_AFTER_MS + 1 }, now)).toBeNull();
+  expect(firstUnseen(t.data(), { id: 1, at: now - AWAY_AFTER_MS }, now)).toBe(2);
 });

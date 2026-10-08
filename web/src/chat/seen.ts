@@ -25,8 +25,16 @@ export function writeSeen(storage: SeenStorage, transcript: string, seen: Seen) 
   }
 }
 
-/** The first top-level entry after the last one seen, or null when nothing is new. */
-export function firstUnseen(data: TranscriptData, seen: Seen): number | null {
+/**
+ * How long the reader must have been away for what arrived meanwhile to count as new. A shorter
+ * glance elsewhere, such as into a terminal beside the page, would otherwise mark output that
+ * streamed in while the reader was still following along.
+ */
+export const AWAY_AFTER_MS = 30_000;
+
+/** The first top-level entry after the last one seen, or null when nothing is new or the reader has barely left. */
+export function firstUnseen(data: TranscriptData, seen: Seen, now = Date.now()): number | null {
+  if (now - seen.at < AWAY_AFTER_MS) return null;
   for (const id of data.order) {
     if (id <= seen.id) continue;
     if (data.entries.get(id)?.parent === null) return id;
