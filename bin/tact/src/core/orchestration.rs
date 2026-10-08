@@ -1,5 +1,6 @@
 //! Structured child-agent evidence for headless runs.
 
+use super::headless::RunOutcome;
 use crate::app::error::RuntimeError;
 use nanocodex::{
     HarnessModel as Model,
@@ -28,14 +29,6 @@ const PROTOCOL_VERSION: u32 = 1;
 #[serde(rename_all = "snake_case")]
 enum AgentOrigin {
     Spawn,
-}
-
-#[derive(Clone, Copy, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(super) enum RunOutcome {
-    Completed,
-    Cancelled,
-    Failed,
 }
 
 pub(super) struct OrchestrationRecorder {

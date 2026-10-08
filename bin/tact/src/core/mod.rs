@@ -9,6 +9,7 @@ mod claude;
 mod claude_context;
 pub(crate) mod context;
 pub(crate) mod extensions;
+mod headless;
 mod instructions;
 #[cfg(test)]
 mod mixed_provider_tests;
@@ -34,7 +35,6 @@ use crate::{
     app::{
         config::{Config, ReasoningEffort, ReasoningMode, Speed},
         error::{ConfigError, Result, RuntimeError},
-        hook,
     },
     core::{
         extensions::{Skill, mcp_provider},
@@ -43,21 +43,14 @@ use crate::{
         session::ResumeState,
     },
 };
-use nanocodex::{
-    AgentEvents, HarnessModel as Model, Nanocodex, NanocodexError, Tools, TurnControl,
-};
-#[cfg(feature = "harbor-evals")]
-use orchestration::{OrchestrationRecorder, RunOutcome};
+use nanocodex::{AgentEvents, HarnessModel as Model, Nanocodex, NanocodexError, Tools};
 use std::{
-    io,
-    io::Write,
     path::{Path, PathBuf},
     sync::Arc,
 };
 use tact_memory::{RemoteMemoryClient, RemoteToken, SelectedMemoryStore};
 use tact_subagents::{AgentContext, ScopedAgentUpdate, Subagents};
 use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
 
 /// A root agent built from the configuration, with everything a front-end needs to drive it.
 ///
@@ -76,12 +69,6 @@ pub(crate) struct ConfiguredAgent {
     pub(crate) subagent_control: Subagents,
 }
 
-enum Cancellation {
-    NotRequested,
-    Requested,
-    Failed(NanocodexError),
-}
-
 pub(crate) fn supported_reasoning_mode(model: Model, preferred: ReasoningMode) -> ReasoningMode {
     if matches!(model, Model::Codex(model) if model.supports_reasoning_mode(preferred.into())) {
         preferred
@@ -91,30 +78,6 @@ pub(crate) fn supported_reasoning_mode(model: Model, preferred: ReasoningMode) -
 }
 
 impl ConfiguredAgent {
-    pub(crate) async fn run_from_config(
-        config: &Config,
-        model: Model,
-        prompt: String,
-        shutdown: CancellationToken,
-        #[cfg(feature = "harbor-evals")] orchestration_log: Option<PathBuf>,
-    ) -> Result<()> {
-        let reasoning_mode = supported_reasoning_mode(model, config.agent().reasoning_mode());
-        let result =
-            Self::from_config_with_model(config, config.agent().thinking(), reasoning_mode, model)?
-                .run(
-                    prompt,
-                    shutdown,
-                    io::stdout(),
-                    #[cfg(feature = "harbor-evals")]
-                    orchestration_log,
-                )
-                .await;
-        if let Some(command) = config.agent().completion_hook() {
-            drop(hook::execute(command, config.agent().workspace()).await);
-        }
-        result
-    }
-
     pub(crate) fn from_config_with_model(
         config: &Config,
         thinking: ReasoningEffort,
@@ -207,107 +170,6 @@ impl ConfiguredAgent {
         })
     }
 
-    async fn run(
-        mut self,
-        prompt: String,
-        shutdown: CancellationToken,
-        mut output: impl Write,
-        #[cfg(feature = "harbor-evals")] orchestration_log: Option<PathBuf>,
-    ) -> Result<()> {
-        let (_unused_sender, empty_updates) = mpsc::unbounded_channel();
-        let subagent_updates = std::mem::replace(&mut self.subagent_updates, empty_updates);
-        #[cfg(feature = "harbor-evals")]
-        let recorder = OrchestrationRecorder::start(subagent_updates, orchestration_log)?;
-        #[cfg(not(feature = "harbor-evals"))]
-        let mut subagent_updates = subagent_updates;
-        #[cfg(not(feature = "harbor-evals"))]
-        let subagent_drain =
-            tokio::spawn(async move { while subagent_updates.recv().await.is_some() {} });
-        let root_session_id = self.agent.session_id().to_string();
-        if shutdown.is_cancelled() {
-            let shutdown_result = self.shutdown().await;
-            #[cfg(feature = "harbor-evals")]
-            recorder
-                .finish(&root_session_id, RunOutcome::Cancelled)
-                .await?;
-            #[cfg(not(feature = "harbor-evals"))]
-            subagent_drain.abort();
-            shutdown_result?;
-            return Ok(());
-        }
-
-        let turn = match self.agent.prompt(self.context.prompt(prompt)).await {
-            Ok(turn) => turn,
-            Err(error) => {
-                let shutdown_result = self.shutdown().await;
-                #[cfg(feature = "harbor-evals")]
-                recorder
-                    .finish(&root_session_id, RunOutcome::Failed)
-                    .await?;
-                #[cfg(not(feature = "harbor-evals"))]
-                subagent_drain.abort();
-                shutdown_result?;
-                return Err(error.into());
-            }
-        };
-        let control = turn.control();
-        let mut cancellation = Cancellation::NotRequested;
-        let event_result = tokio::select! {
-            biased;
-            result = self.events.write_turn_jsonl(&mut output) => result,
-            () = shutdown.cancelled() => {
-                cancellation = Cancellation::request(&control).await;
-                self.subagent_control
-                    .cancel_all(&root_session_id)
-                    .await;
-                self.events.write_turn_jsonl(&mut output).await
-            }
-        };
-
-        if event_result.is_err() && matches!(cancellation, Cancellation::NotRequested) {
-            cancellation = Cancellation::request(&control).await;
-            self.subagent_control.cancel_all(&root_session_id).await;
-        }
-
-        let turn_result = turn.await;
-        let was_cancelled = matches!(cancellation, Cancellation::Requested);
-        drop(control);
-        self.subagent_control.close_all(&root_session_id).await;
-        let shutdown_result = self.shutdown().await;
-        #[cfg(feature = "harbor-evals")]
-        {
-            let outcome = if was_cancelled {
-                RunOutcome::Cancelled
-            } else if event_result.is_err() || turn_result.is_err() {
-                RunOutcome::Failed
-            } else {
-                RunOutcome::Completed
-            };
-            recorder.finish(&root_session_id, outcome).await?;
-        }
-        #[cfg(not(feature = "harbor-evals"))]
-        subagent_drain.abort();
-
-        event_result?;
-        if let Cancellation::Failed(error) = cancellation {
-            return Err(error.into());
-        }
-        match turn_result {
-            Err(NanocodexError::TurnCancelled) if was_cancelled => {}
-            Err(error) => return Err(error.into()),
-            Ok(_) => {}
-        }
-        shutdown_result?;
-        Ok(())
-    }
-
-    async fn shutdown(mut self) -> nanocodex::agent::Result<()> {
-        let result = self.agent.shutdown().await;
-        drop(self.agent);
-        while self.events.recv().await.is_some() {}
-        result
-    }
-
     fn resolve_workspace(path: &Path) -> Result<PathBuf> {
         let workspace = path
             .canonicalize()
@@ -364,16 +226,6 @@ pub(crate) fn configured_memory_store(
     let client = RemoteMemoryClient::new(remote.endpoint(), remote.namespace().to_owned(), token)
         .map_err(RuntimeError::RemoteMemory)?;
     Ok(Some(SelectedMemoryStore::remote(client)))
-}
-
-impl Cancellation {
-    async fn request(control: &TurnControl) -> Self {
-        match control.cancel().await {
-            Ok(()) => Self::Requested,
-            Err(NanocodexError::TurnNotCancellable) => Self::NotRequested,
-            Err(error) => Self::Failed(error),
-        }
-    }
 }
 
 #[cfg(test)]
