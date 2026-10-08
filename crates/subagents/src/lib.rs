@@ -5,6 +5,7 @@ mod error;
 mod harness;
 mod message;
 mod model;
+mod output;
 mod roster;
 mod runtime;
 mod speed;

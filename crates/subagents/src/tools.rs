@@ -5,7 +5,8 @@ use super::{
         AgentDescriptor, AgentId, AgentStatus, AgentUpdate, MessageId, MessagePriority,
         MessagePurpose, agent_prompt,
     },
-    runtime::{AgentDirectoryEntry, AgentSummary, OutputContract, Registry, forward_events},
+    output::OutputContract,
+    runtime::{AgentDirectoryEntry, AgentSummary, Registry, forward_events},
 };
 use nanocodex::{
     HarnessModel as Model, Thinking, Tool,

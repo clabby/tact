@@ -4,7 +4,8 @@ use super::{
     capacity::{Capacity, TurnCapacity},
     error::{DeliveryFailure, SubagentError},
     model::{AgentId, AgentMessage, MessageDisposition, MessageId, MessagePriority},
-    runtime::{DelegationChange, Registry, completion_instructions},
+    output::completion_instructions,
+    runtime::{DelegationChange, Registry},
 };
 use nanocodex::{Nanocodex, NanocodexError, TurnControl};
 use std::{collections::VecDeque, sync::Weak};
