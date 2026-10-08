@@ -1,3 +1,10 @@
+//! Presenter for `send_agent_message`.
+//!
+//! The summary names the recipient and lists the message purpose, any non-default priority, and
+//! the delivery disposition from the receipt. Expanded details show the message body and delivery
+//! disposition, with the receipt's message and thread ids in the footer. Receipts may arrive as
+//! JSON objects or as JSON-encoded strings.
+
 use super::{super::markdown::wrap_plain, Presentation};
 use crate::{app::theme::Theme, core::transcript::ToolEntry};
 use ratatui::style::Style;

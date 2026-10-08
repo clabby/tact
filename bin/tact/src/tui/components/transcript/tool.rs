@@ -1,3 +1,16 @@
+//! Tool-call rendering for the transcript.
+//!
+//! Each first-party tool has a presenter submodule that turns a [`ToolEntry`] into a
+//! [`Presentation`]: a title, subject, and optional outcome for the summary row, plus detail
+//! lines, a footer, and the plain-text source that expanded details expose for selection. Unknown
+//! tools and calls a presenter cannot parse fall back to a generic argument and result view.
+//!
+//! This module owns the frame shared by every presentation: the disclosure marker, status symbol,
+//! first error line of a failed call, and elapsed duration on the summary row, and the rail and
+//! footer around expanded details. Collapsed output is only the summary row, which wraps unless
+//! the presenter asks for single-line truncation; detail lines appear only when expanded. Every
+//! rendered line fits the requested width.
+
 mod code;
 mod media;
 mod memory;

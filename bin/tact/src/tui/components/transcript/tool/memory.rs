@@ -1,3 +1,16 @@
+//! Presenter for the `memory` tool's scan, read, put, and delete operations.
+//!
+//! The presenter parses the call's arguments and result into typed operations and outcomes, and
+//! falls back to the generic tool view when either has an unrecognized shape. Results that report
+//! their backend title the row with the operation, backend, and key or query; results without a
+//! backend and calls still in flight use the plain operation title with the subject beside it.
+//!
+//! Memory content never appears in the collapsed summary. Expanded scans show at most the
+//! production scan limit of candidates, each limited to its key, score, and clipped preview.
+//! Expanded reads and stores show each record's key, content, and a fixed set of metadata fields;
+//! an overwrite that reports its previous content shows a line diff instead. Expanded details of
+//! completed results are selectable text.
+
 use super::{Presentation, generic};
 use crate::{app::theme::Theme, core::transcript::ToolEntry, tui::components::fit::clip_to_width};
 use ratatui::{

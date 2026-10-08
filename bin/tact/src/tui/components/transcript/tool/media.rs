@@ -1,3 +1,9 @@
+//! Presenter for image tools: `view_image` and `image_gen__imagegen`.
+//!
+//! Image payloads are never rendered. Expanded viewed images report only that an image was
+//! returned and its encoded size; expanded generations show the prompt, the number of reference
+//! images, and whether an image was returned.
+
 use super::{Presentation, format_bytes};
 use crate::{app::theme::Theme, core::transcript::ToolEntry, tui::format::shorten_home};
 use ratatui::style::Style;

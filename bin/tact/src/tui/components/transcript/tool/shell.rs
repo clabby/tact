@@ -1,3 +1,11 @@
+//! Presenter for shell tools: `exec_command` and `write_stdin`.
+//!
+//! Shell summaries show the syntax-highlighted command behind a `$ ` prompt, with the exit code,
+//! error, or running session as the outcome. They truncate to a single line so the outcome and
+//! duration stay visible. Expanded commands show the working directory, the command (selectable
+//! without its prompt), substeps, and captured output. `write_stdin` summarizes the characters
+//! sent, or a poll when none were sent.
+
 use super::{Presentation, format_bytes};
 use crate::{app::theme::Theme, core::transcript::ToolEntry, tui::format::shorten_home};
 use ratatui::{
