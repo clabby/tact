@@ -19,6 +19,7 @@ mod orchestration;
 pub(crate) mod pane;
 pub(crate) mod prompt;
 pub(crate) mod protocol;
+mod recipe;
 pub(crate) mod session;
 pub(crate) mod shell;
 pub(crate) mod storage;
@@ -32,44 +33,37 @@ pub(crate) use instructions::{IMAGE_RENDERING_INSTRUCTIONS, MEMORY_REVIEW_CHECKP
 use crate::{
     app::{
         config::{Config, ReasoningEffort, ReasoningMode, Speed},
-        error::{AuthError, ConfigError, Result, RuntimeError, SecretError},
+        error::{ConfigError, Result, RuntimeError},
         hook,
-        secret::SecretString,
     },
     core::{
-        extensions::{
-            CurrentSessionTool, Skill, mcp_provider,
-            sessions::{FindSessionsTool, ReadSessionTool},
-        },
+        extensions::{Skill, mcp_provider},
         instructions::{AgentInstructions, RestoredInstructions},
-        session::{AgentSnapshot, ResumeState},
+        recipe::{AgentRecipe, AgentSpec},
+        session::ResumeState,
     },
 };
 use nanocodex::{
-    AgentEvents, HarnessModel as Model, Nanocodex, NanocodexError, OpenAi, Tools, TurnControl,
-    agent::session::SessionId, claude::ClaudeClient,
+    AgentEvents, HarnessModel as Model, Nanocodex, NanocodexError, Tools, TurnControl,
 };
 #[cfg(feature = "harbor-evals")]
 use orchestration::{OrchestrationRecorder, RunOutcome};
-use reqwest::header::{HeaderMap, HeaderValue};
 use std::{
     io,
     io::Write,
-    num::NonZeroU32,
     path::{Path, PathBuf},
     sync::Arc,
 };
-use tact_memory::{
-    MemoryTool, MutationAuthorizer, RemoteMemoryClient, RemoteToken, SelectedMemoryStore,
-};
-use tact_subagents::{
-    AgentContext, RootAgentAuthority, ScopedAgentUpdate, Subagents, WeakSubagents,
-};
+use tact_memory::{RemoteMemoryClient, RemoteToken, SelectedMemoryStore};
+use tact_subagents::{AgentContext, ScopedAgentUpdate, Subagents};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-const RESPONSE_MAX_ATTEMPTS: NonZeroU32 = NonZeroU32::new(2_000).unwrap();
-
+/// A root agent built from the configuration, with everything a front-end needs to drive it.
+///
+/// The front-end owns the agent and its event stream, persists the session using
+/// `instructions` (the exact system prompt to restore later), offers `skills` for completion,
+/// and forwards `subagent_updates` from the session tree that `subagent_control` manages.
 pub(crate) struct ConfiguredAgent {
     pub(crate) workspace: PathBuf,
     pub(crate) agent: Nanocodex,
@@ -127,16 +121,12 @@ impl ConfiguredAgent {
         reasoning_mode: ReasoningMode,
         model: Model,
     ) -> Result<Self> {
-        Self::from_config_with_session_and_model(
-            config,
-            thinking,
-            reasoning_mode,
-            model,
-            None,
-            None,
-        )
+        Self::from_config_with_session(config, thinking, reasoning_mode, model, None, None)
     }
 
+    /// Builds the root agent and its subagent registry. A `session_id` without `resume` starts
+    /// a new session under that identifier; `resume` restores the persisted conversation and
+    /// system prompt.
     pub(crate) fn from_config_with_session(
         config: &Config,
         thinking: ReasoningEffort,
@@ -145,33 +135,10 @@ impl ConfiguredAgent {
         session_id: Option<&str>,
         resume: Option<ResumeState>,
     ) -> Result<Self> {
-        Self::from_config_with_session_and_model(
-            config,
-            thinking,
-            reasoning_mode,
-            model,
-            session_id,
-            resume,
-        )
-    }
-
-    fn from_config_with_session_and_model(
-        config: &Config,
-        thinking: ReasoningEffort,
-        reasoning_mode: ReasoningMode,
-        model: Model,
-        session_id: Option<&str>,
-        resume: Option<ResumeState>,
-    ) -> Result<Self> {
         crate::app::model::parse(model.as_str()).map_err(NanocodexError::InvalidRequest)?;
+        config.claude().ensure_model_enabled(model)?;
         let agent_config = config.agent();
         let workspace = Self::resolve_workspace(agent_config.workspace())?;
-        if matches!(model, Model::Claude(_)) && !config.claude().enabled() {
-            return Err(NanocodexError::InvalidRequest(
-                "Claude requires [claude] enabled = true".into(),
-            )
-            .into());
-        }
         let mut tools = Tools::builder()
             .web_search(agent_config.web_search())
             .image_generation(agent_config.image_generation());
@@ -203,38 +170,34 @@ impl ConfiguredAgent {
             AgentInstructions::from_config(config, model, restored_instructions, memory_enabled)?;
         let instructions = Arc::clone(&prompts.session.text);
         let skills = Arc::clone(&prompts.session.skills);
-        let (agent, events) = recipe.build(
-            AgentContext {
-                model,
-                thinking: thinking.into(),
-            },
+        let context = AgentContext {
+            model,
+            thinking: thinking.into(),
+        };
+        let (agent, events) = recipe.build(AgentSpec {
+            context,
             reasoning_mode,
-            agent_config.speed(),
-            Arc::clone(&instructions),
+            speed: agent_config.speed(),
+            instructions: Arc::clone(&instructions),
             session_id,
             snapshot,
-        )?;
+        })?;
         subagent_control.set_agent_factory(
-            thinking.into(),
+            context.thinking,
             agent_config.speed(),
             move |model, thinking, speed| {
-                recipe.build(
+                recipe.build(AgentSpec::clean(
                     AgentContext { model, thinking },
-                    supported_reasoning_mode(model, reasoning_mode),
+                    reasoning_mode,
                     speed,
                     prompts.for_model(model),
-                    None,
-                    None,
-                )
+                ))
             },
         )?;
         Ok(Self {
             workspace,
             agent,
-            context: AgentContext {
-                model,
-                thinking: thinking.into(),
-            },
+            context,
             events,
             instructions,
             skills,
@@ -372,202 +335,6 @@ pub(crate) async fn set_speed(
     }
 }
 
-struct AgentRecipe {
-    config: Config,
-    workspace: PathBuf,
-    tools: Tools,
-    memory: Option<SelectedMemoryStore>,
-    subagents: WeakSubagents,
-}
-
-impl AgentRecipe {
-    fn build(
-        self: &Arc<Self>,
-        context: AgentContext,
-        reasoning_mode: ReasoningMode,
-        speed: Speed,
-        instructions: Arc<str>,
-        session_id: Option<&str>,
-        snapshot: Option<AgentSnapshot>,
-    ) -> nanocodex::agent::Result<(Nanocodex, AgentEvents)> {
-        let AgentContext { model, thinking } = context;
-        let speed = speed.for_model(model);
-        if let Some(snapshot) = &snapshot {
-            snapshot.validate_identity(model, session_id)?;
-        }
-        let config = &self.config;
-        let agent = config.agent();
-        let tools = self.tools.clone();
-        let subagents = self.subagents.clone();
-        let memory = self.memory.clone();
-        let subagents_enabled = config.subagents().enabled();
-        let session_config_path = config.path().to_path_buf();
-        let tool_factory = move || {
-            install_agent_tools(
-                tools.clone(),
-                &subagents,
-                memory.clone(),
-                subagents_enabled,
-                session_config_path.clone(),
-            )
-        };
-        if let Model::Codex(codex_model) = model {
-            let auth = config
-                .auth()
-                .load()
-                .map_err(|error| NanocodexError::InvalidRequest(error.to_string()))?;
-            let mut openai = OpenAi::builder(auth)
-                .max_attempts(RESPONSE_MAX_ATTEMPTS)
-                .transport(agent.transport().into());
-            if let Some(url) = agent.websocket_url() {
-                openai = openai.websocket_url(url);
-            }
-            if let Some(url) = agent.api_base_url() {
-                openai = openai.api_base_url(url);
-            }
-            let openai = openai
-                .build()
-                .map_err(|error| NanocodexError::InvalidRequest(error.to_string()))?;
-            let mut builder = Nanocodex::builder(openai)
-                .model(codex_model)
-                .workspace(&self.workspace)
-                .thinking(thinking)
-                .reasoning_mode(reasoning_mode.into())
-                .instructions(instructions)
-                .tools_factory(move |_| tool_factory());
-            if let Some(home) = config.codex_home() {
-                builder = builder.codex_home(home);
-            }
-            if let Some(id) = session_id {
-                builder = builder.session_id(
-                    id.parse::<SessionId>()
-                        .map_err(|error| NanocodexError::InvalidRequest(error.to_string()))?,
-                );
-            }
-            if let Some(snapshot) = snapshot {
-                builder = builder.resume(snapshot.into_codex()?);
-            }
-            builder.service_tier(speed.into()).build()
-        } else {
-            if !config.claude().enabled() {
-                return Err(NanocodexError::InvalidRequest(
-                    "Claude requires [claude] enabled = true".into(),
-                ));
-            }
-            let client =
-                self.claude_client(|| SecretString::from_environment("ANTHROPIC_API_KEY"))?;
-            let runtime = claude::tool_runtime(config, &self.workspace, &tool_factory()?)?;
-            let recipe = Arc::clone(self);
-            let clean_instructions = Arc::clone(&instructions);
-            let spawn: claude::CleanAgentFactory = Arc::new(move |context, fast_mode| {
-                recipe.build(
-                    context,
-                    supported_reasoning_mode(context.model, reasoning_mode),
-                    if fast_mode {
-                        Speed::Fast
-                    } else {
-                        Speed::Standard
-                    },
-                    Arc::clone(&clean_instructions),
-                    None,
-                    None,
-                )
-            });
-            claude::build_client(
-                client,
-                context,
-                &self.workspace,
-                instructions,
-                claude::ClaudeSession {
-                    session_id,
-                    snapshot,
-                    fast_mode: speed != Speed::Standard,
-                },
-                runtime,
-                Some(spawn),
-            )
-        }
-    }
-
-    fn claude_client(
-        &self,
-        read_key: impl FnOnce() -> std::result::Result<Option<SecretString>, SecretError>,
-    ) -> nanocodex::agent::Result<ClaudeClient> {
-        let config = self.config.claude();
-        config
-            .ensure_enabled()
-            .map_err(|error| NanocodexError::InvalidRequest(error.to_string()))?;
-        let endpoint = config
-            .api_base_url()
-            .map(|base| format!("{}/messages", base.trim_end_matches('/')));
-        let key = config
-            .resolve_api_key(read_key)
-            .map_err(|error| NanocodexError::InvalidRequest(error.to_string()))?
-            .ok_or_else(|| {
-                NanocodexError::InvalidRequest(AuthError::ClaudeApiKeyUnavailable.to_string())
-            })?;
-        let mut headers = HeaderMap::new();
-        if let Some(workspace_id) = config.workspace_id() {
-            let value = HeaderValue::from_str(workspace_id).map_err(|_| {
-                NanocodexError::InvalidRequest(
-                    "claude.workspace_id is not a valid HTTP header value".into(),
-                )
-            })?;
-            headers.insert("anthropic-workspace-id", value);
-        }
-        let http = reqwest::Client::builder()
-            .default_headers(headers)
-            .redirect(reqwest::redirect::Policy::none())
-            .retry(reqwest::retry::never())
-            .build()
-            .map_err(|error| NanocodexError::InvalidRequest(error.to_string()))?;
-        // The native client owns a non-zeroizing copy after this boundary.
-        Ok(match endpoint {
-            Some(endpoint) => ClaudeClient::new(http, endpoint, key.key().expose_secret()),
-            None => ClaudeClient::official(http, key.key().expose_secret()),
-        })
-    }
-}
-
-#[derive(Clone)]
-struct RootMemoryAuthorizer(RootAgentAuthority);
-
-#[nanocodex::tools::contract::async_trait]
-impl MutationAuthorizer for RootMemoryAuthorizer {
-    async fn authorize_memory_mutation(&self, session_id: &str) -> std::io::Result<()> {
-        self.0
-            .require_root(session_id)
-            .await
-            .map_err(std::io::Error::other)
-    }
-}
-
-fn install_agent_tools(
-    tools: Tools,
-    subagents: &WeakSubagents,
-    memory: Option<SelectedMemoryStore>,
-    subagents_enabled: bool,
-    session_config_path: PathBuf,
-) -> std::result::Result<Tools, nanocodex::tools::ToolsBuildError> {
-    let mut tools = tools
-        .into_builder()
-        .tool(CurrentSessionTool)
-        .tool(FindSessionsTool::new(session_config_path.clone()))
-        .tool(ReadSessionTool::new(session_config_path));
-    if let Some(store) = memory {
-        tools = tools.tool(MemoryTool::new(
-            store,
-            RootMemoryAuthorizer(subagents.root_agent_authority()),
-        ));
-    }
-    let tools = if subagents_enabled {
-        subagents.install_tools(tools)
-    } else {
-        tools
-    };
-    tools.build()
-}
-
 pub(crate) fn configured_memory_store(
     config: &Config,
     workspace: &Path,
@@ -640,90 +407,6 @@ mod tests {
     #[derive(Clone)]
     struct PendingService {
         called: Arc<Notify>,
-    }
-
-    #[test]
-    fn claude_requires_opt_in_and_api_key() {
-        let _ = rustls::crypto::ring::default_provider().install_default();
-        use super::AgentRecipe;
-        use crate::app::secret::SecretString;
-        use nanocodex::Tools;
-        use std::cell::Cell;
-        use tact_subagents::Subagents;
-
-        for enabled in [false, true] {
-            let directory = tempdir().unwrap();
-            let config_path = directory.path().join("config.toml");
-            fs::write(&config_path, format!("[claude]\nenabled = {enabled}\n")).unwrap();
-            let config = Config::load(ConfigOverrides {
-                path: Some(config_path),
-                model: Some(Model::Codex(CodexModel::Sol)),
-                ..Default::default()
-            })
-            .unwrap();
-            let (subagents, _) = Subagents::new(1);
-            let recipe = AgentRecipe {
-                config,
-                workspace: directory.path().to_path_buf(),
-                tools: Tools::builder()
-                    .web_search(false)
-                    .image_generation(false)
-                    .build()
-                    .unwrap(),
-                memory: None,
-                subagents: subagents.downgrade(),
-            };
-            let reads = Cell::new(0);
-            let result = recipe.claude_client(|| {
-                reads.set(reads.get() + 1);
-                Ok(None)
-            });
-            assert_eq!(reads.get(), usize::from(enabled));
-            assert!(result.is_err());
-            if enabled {
-                let token = "sk-ant-oat01-subscription-sentinel";
-                let rejected = recipe
-                    .claude_client(|| Ok(Some(SecretString::new(token.into()))))
-                    .err()
-                    .expect(
-                        "subscription credentials must be rejected before constructing a client",
-                    );
-                assert!(!rejected.to_string().contains(token));
-                assert!(
-                    result
-                        .err()
-                        .unwrap()
-                        .to_string()
-                        .contains("ANTHROPIC_API_KEY")
-                );
-                assert!(
-                    recipe
-                        .claude_client(|| Ok(Some(SecretString::new(
-                            "sk-ant-api03-synthetic-api-key".into()
-                        ))))
-                        .is_ok()
-                );
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-
-                    let path = recipe.config.path();
-                    fs::write(
-                        path,
-                        "[claude]\nenabled = true\napi_key = 'sk-ant-api03-configured-sentinel'\n",
-                    )
-                    .unwrap();
-                    fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
-                    let config = Config::load(ConfigOverrides {
-                        path: Some(path.to_path_buf()),
-                        ..Default::default()
-                    })
-                    .unwrap();
-                    let recipe = AgentRecipe { config, ..recipe };
-                    assert!(recipe.claude_client(|| Ok(None)).is_ok());
-                }
-            }
-        }
     }
 
     #[test]
