@@ -9,9 +9,9 @@
 //! each live session with what was last published and sends only real changes.
 
 use super::{
+    composer::LiveSessions,
     confirmation::{Confirmation, ConfirmationEffect, ConfirmationEvent},
-    node::{ComponentUpdate, Node, RenderRequest},
-    queue::QueueId,
+    node::{Component, ComponentUpdate, RenderRequest},
     root::{DraftReset, PaneCommand, RestoredSessionProjection, RootEffect, RootEvent, RootNode},
     sessions::{LiveSession, SessionsEffect, SessionsEvent, SessionsOverlay},
     subagents::subagent_record,
@@ -20,18 +20,19 @@ use crate::{
     app::{
         config::{ReasoningEffort, ReasoningMode, Speed, TuiConfig},
         model,
-    },
-    core::{extensions::Skill, subagent_roster::SubagentRoster},
-    tui::{
-        context::ContextBudget,
-        pane::PaneId,
-        session::{RecentPrompt, SessionSummary},
         theme::{ColorScheme, Theme, ThemeMode},
-        transcript::TranscriptRecord,
     },
-    web::bridge::{
-        Busy, Command, CommandError, Draft, DraftImage, Origin, Publication, Publisher,
-        QueuedPrompt, SessionInfo,
+    core::{
+        context::ContextBudget,
+        extensions::Skill,
+        pane::PaneId,
+        prompt::QueueId,
+        protocol::{
+            Busy, Command, CommandError, Draft, DraftImage, Origin, Publication, Publisher,
+            QueuedPrompt, SessionInfo,
+        },
+        session::{RecentPrompt, SessionSummary},
+        transcript::TranscriptRecord,
     },
 };
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
@@ -45,7 +46,7 @@ use ratatui::{
 use semver::Version;
 use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Instant};
 use tact_memory::{MemoryAccess, MemoryKey, MemoryRecord, MemorySource};
-use tact_subagents::AgentUpdate;
+use tact_subagents::{AgentUpdate, SubagentRoster};
 use unicode_width::UnicodeWidthStr;
 
 const SPLIT_HINT: &str = " mouse: focus · Ctrl+C: clear · Ctrl+C×2: close ";
@@ -235,13 +236,13 @@ pub(crate) enum AppEffect {
 }
 
 enum AppOverlay {
-    Sessions(Node<SessionsOverlay>),
-    Quit(Node<Confirmation>),
+    Sessions(SessionsOverlay),
+    Quit(Confirmation),
 }
 
 #[derive(Clone, Debug, PartialEq)]
 struct Settings {
-    model: String,
+    model: Model,
     effort: ReasoningEffort,
     reasoning_mode: ReasoningMode,
     speed: Speed,
@@ -251,7 +252,7 @@ impl Settings {
     fn of(root: &RootNode) -> Self {
         let composer = root.composer();
         Self {
-            model: composer.model().to_string(),
+            model: composer.model(),
             effort: composer.effort(),
             reasoning_mode: composer.reasoning_mode(),
             speed: composer.speed(),
@@ -272,7 +273,7 @@ struct Published {
 }
 
 struct Pane {
-    root: Node<RootNode>,
+    root: RootNode,
     /// Orders panes by when they were opened.
     sequence: u64,
     /// Absent while the pane's session is still opening.
@@ -312,7 +313,7 @@ impl AppNode {
             panes: HashMap::from([(
                 PaneId::Main,
                 Pane {
-                    root: Node::new(root),
+                    root,
                     sequence: 0,
                     published: None,
                     unread: false,
@@ -349,7 +350,7 @@ impl AppNode {
         let Some(entry) = self.panes.get_mut(&pane) else {
             return ComponentUpdate::none();
         };
-        let update = entry.root.component_mut().load_sessions();
+        let update = entry.root.load_sessions();
         self.map_root_update(pane, update)
     }
 
@@ -630,7 +631,6 @@ impl AppNode {
         let Some(root) = self.pane_mut(pane) else {
             return;
         };
-        let root = root.component_mut();
         let workspace = root.workspace().to_owned();
         let preferred_reasoning_mode = root.preferred_reasoning_mode();
         root.reset_session(
@@ -677,12 +677,9 @@ impl AppNode {
                         ..pane_area
                     };
                     if let Some(entry) = self.panes.get_mut(&pane) {
-                        entry.root.component_mut().render_focused(
-                            frame,
-                            content,
-                            &self.theme,
-                            focus == pane,
-                        );
+                        entry
+                            .root
+                            .render_focused(frame, content, &self.theme, focus == pane);
                     }
                 }
                 frame.render_widget(
@@ -697,12 +694,9 @@ impl AppNode {
                 self.main_area = area;
                 self.fork_area = Rect::default();
                 if let Some(entry) = primary.and_then(|pane| self.panes.get_mut(&pane)) {
-                    entry.root.component_mut().render_focused(
-                        frame,
-                        area,
-                        &self.theme,
-                        primary == Some(focus),
-                    );
+                    entry
+                        .root
+                        .render_focused(frame, area, &self.theme, primary == Some(focus));
                 }
             }
         }
@@ -714,7 +708,7 @@ impl AppNode {
     }
 
     pub(crate) fn root(&self, pane: PaneId) -> Option<&RootNode> {
-        self.pane(pane).map(Node::component)
+        self.panes.get(&pane).map(|entry| &entry.root)
     }
 
     pub(crate) fn animation_deadline(&self) -> Option<Instant> {
@@ -841,14 +835,14 @@ impl AppNode {
 
     fn open_sessions_overlay(&mut self) {
         let overlay = SessionsOverlay::new(self.live_sessions(), self.new_session_availability());
-        self.overlay = Some(AppOverlay::Sessions(Node::new(overlay)));
+        self.overlay = Some(AppOverlay::Sessions(overlay));
     }
 
     fn refresh_sessions_overlay(&mut self) {
         let sessions = self.live_sessions();
         let availability = self.new_session_availability();
         if let Some(AppOverlay::Sessions(overlay)) = &mut self.overlay {
-            overlay.component_mut().set_sessions(sessions, availability);
+            overlay.set_sessions(sessions, availability);
         }
     }
 
@@ -864,7 +858,7 @@ impl AppNode {
         panes
             .into_iter()
             .map(|(&pane, entry)| {
-                let root = entry.root.component();
+                let root = &entry.root;
                 let busy = root.busy();
                 LiveSession {
                     pane,
@@ -920,9 +914,7 @@ impl AppNode {
     ) -> ComponentUpdate<AppEffect> {
         let mut merged = ComponentUpdate::none();
         for &pane in panes {
-            let mut update = self.update_root(pane, event());
-            merged.effects.append(&mut update.effects);
-            merged.render = merged.render.max(update.render);
+            merged.merge(self.update_root(pane, event()));
         }
         merged
     }
@@ -961,9 +953,9 @@ impl AppNode {
                     if running == 0 {
                         effects.push(AppEffect::Shutdown);
                     } else {
-                        self.overlay = Some(AppOverlay::Quit(Node::new(
+                        self.overlay = Some(AppOverlay::Quit(
                             Confirmation::quit_with_running_sessions(running),
-                        )));
+                        ));
                         render = RenderRequest::Immediate;
                     }
                 }
@@ -982,16 +974,14 @@ impl AppNode {
         self.panes
             .iter()
             .filter(|(pane, entry)| {
-                let busy = entry.root.component().busy();
+                let busy = entry.root.busy();
                 !displayed.contains(pane) && (busy.turns > 0 || busy.shells > 0)
             })
             .count()
     }
 
     fn roots_mut(&mut self) -> impl Iterator<Item = &mut RootNode> {
-        self.panes
-            .values_mut()
-            .map(|entry| entry.root.component_mut())
+        self.panes.values_mut().map(|entry| &mut entry.root)
     }
 
     fn set_theme_mode(&mut self, mode: ThemeMode) {
@@ -1038,7 +1028,7 @@ impl AppNode {
         self.panes.insert(
             pane,
             Pane {
-                root: Node::new(root),
+                root,
                 sequence,
                 published: None,
                 unread: false,
@@ -1076,7 +1066,7 @@ impl AppNode {
 
     pub(crate) fn set_pane_workspace(&mut self, pane: PaneId, workspace: PathBuf) {
         if let Some(root) = self.pane_mut(pane) {
-            root.component_mut().set_workspace(workspace);
+            root.set_workspace(workspace);
         }
     }
 
@@ -1197,7 +1187,6 @@ impl AppNode {
         for (&pane, entry) in &mut self.panes {
             entry
                 .root
-                .component_mut()
                 .set_fork_available(can_split && primary == Some(pane));
         }
         self.refresh_sessions_overlay();
@@ -1222,11 +1211,7 @@ impl AppNode {
         })
     }
 
-    fn pane(&self, pane: PaneId) -> Option<&Node<RootNode>> {
-        self.panes.get(&pane).map(|entry| &entry.root)
-    }
-
-    fn pane_mut(&mut self, pane: PaneId) -> Option<&mut Node<RootNode>> {
+    fn pane_mut(&mut self, pane: PaneId) -> Option<&mut RootNode> {
         self.panes.get_mut(&pane).map(|entry| &mut entry.root)
     }
 
@@ -1243,7 +1228,7 @@ impl AppNode {
             return;
         };
         let previous = entry.published.take();
-        let root = entry.root.component();
+        let root = &entry.root;
         let settings = Settings::of(root);
         let published = Published {
             session,
@@ -1268,7 +1253,7 @@ impl AppNode {
                 info: SessionInfo {
                     id: published.session.clone(),
                     workspace: root.workspace().to_owned(),
-                    model: settings.model,
+                    model: settings.model.to_string(),
                     effort: settings.effort,
                     reasoning_mode: settings.reasoning_mode,
                     speed: settings.speed,
@@ -1300,7 +1285,7 @@ impl AppNode {
         };
         let mut running = 0;
         for (&pane, entry) in panes.iter_mut() {
-            let root = entry.root.component();
+            let root = &entry.root;
             let busy = root.busy();
             let is_running = busy.turns > 0 || busy.shells > 0;
             running += usize::from(is_running);
@@ -1308,10 +1293,13 @@ impl AppNode {
                 continue;
             };
             let draft = root.shared_draft();
-            if published.draft.text != draft || !images_match(&published.draft.images, root) {
+            let images_changed = !images_match(&published.draft.images, root);
+            if published.draft.text != draft || images_changed {
                 published.draft.rev = published.draft.rev.saturating_add(1);
                 draft.clone_into(&mut published.draft.text);
-                published.draft.images = draft_images(root);
+                if images_changed {
+                    published.draft.images = draft_images(root);
+                }
                 publish(Publication::Draft {
                     session: published.session.clone(),
                     draft: published.draft.clone(),
@@ -1329,7 +1317,7 @@ impl AppNode {
             if published.settings != settings {
                 publish(Publication::Settings {
                     session: published.session.clone(),
-                    model: settings.model.clone(),
+                    model: settings.model.to_string(),
                     effort: settings.effort,
                     reasoning_mode: settings.reasoning_mode,
                     speed: settings.speed,
@@ -1375,18 +1363,13 @@ impl AppNode {
                 session: session.clone(),
             });
         }
-        let summary = (panes.len() > 1).then(|| {
-            let live = panes.len();
-            format!("{live} sessions, {running} running")
+        let summary = (panes.len() > 1).then_some(LiveSessions {
+            live: panes.len(),
+            running,
         });
         let mut render = RenderRequest::None;
         for entry in panes.values_mut() {
-            render = render.max(
-                entry
-                    .root
-                    .component_mut()
-                    .set_live_sessions(summary.clone()),
-            );
+            render = render.max(entry.root.set_live_sessions(summary));
         }
         render
     }
@@ -1471,10 +1454,7 @@ impl AppNode {
             }
         };
         let pane = self.live_pane(&session)?;
-        let root = self
-            .pane_mut(pane)
-            .expect("live panes have a root")
-            .component_mut();
+        let root = self.pane_mut(pane).expect("live panes have a root");
         let update = root.remote_command(command)?;
         Ok(self.map_root_update(pane, update))
     }
@@ -1487,10 +1467,10 @@ impl AppNode {
 
 fn queued_prompts(root: &RootNode) -> Vec<QueuedPrompt> {
     root.queued_prompts()
-        .map(|(id, text, steering)| QueuedPrompt {
-            id: id.get(),
-            text: text.to_owned(),
-            steering,
+        .map(|entry| QueuedPrompt {
+            id: entry.id.get(),
+            text: entry.text.to_owned(),
+            steering: entry.steering,
         })
         .collect()
 }
@@ -1499,7 +1479,7 @@ fn draft_images(root: &RootNode) -> Vec<DraftImage> {
     root.shared_draft_images()
         .map(|(marker, data_url)| DraftImage {
             marker: marker.to_owned(),
-            data_url: data_url.to_owned(),
+            data_url: Arc::from(data_url),
         })
         .collect()
 }
@@ -1518,8 +1498,8 @@ fn images_match(published: &[DraftImage], root: &RootNode) -> bool {
 fn queue_matches(published: &[QueuedPrompt], root: &RootNode) -> bool {
     let mut current = root.queued_prompts();
     published.iter().all(|item| {
-        current.next().is_some_and(|(id, text, steering)| {
-            item.id == id.get() && item.text == text && item.steering == steering
+        current.next().is_some_and(|entry| {
+            item.id == entry.id.get() && item.text == entry.text && item.steering == entry.steering
         })
     }) && current.next().is_none()
 }
@@ -1540,11 +1520,13 @@ mod tests {
         RootNode, SPLIT_HINT,
     };
     use crate::{
-        app::config::{ReasoningEffort, ReasoningMode, Speed, TuiConfig},
-        tui::{
-            pane::PaneId,
+        app::{
+            config::{ReasoningEffort, ReasoningMode, Speed, TuiConfig},
             theme::{ColorScheme, Theme, ThemeMode},
-            transcript::{LocalEvent, TranscriptRecord, TurnId},
+        },
+        core::{
+            pane::PaneId,
+            transcript::{LocalEvent, TranscriptRecord, TurnId, UserSubmitted},
         },
     };
     use crossterm::event::{
@@ -1554,15 +1536,7 @@ mod tests {
     use ratatui::{Terminal, backend::TestBackend};
     use semver::Version;
     use std::{num::NonZeroU16, path::PathBuf, sync::Arc};
-    use tact_memory::{MemoryAccess, MemoryKey, MemoryRecord, MemorySource};
-
-    fn local_memory_access() -> MemoryAccess {
-        MemoryAccess {
-            source: MemorySource::Local,
-            namespace: None,
-            role: None,
-        }
-    }
+    use tact_memory::{MemoryAccess, MemoryKey, MemoryRecord};
 
     fn app() -> AppNode {
         let workspace = PathBuf::from("/workspace");
@@ -1605,11 +1579,10 @@ mod tests {
         let mut app = app();
         app.pane_mut(PaneId::Main)
             .unwrap()
-            .component_mut()
             .set_model(Model::Claude(nanocodex::ClaudeModel::Opus55));
         app.update(AppEvent::ContextBudget {
             pane: PaneId::Main,
-            budget: crate::tui::context::ContextBudget {
+            budget: crate::core::context::ContextBudget {
                 active_tokens: 0,
                 window_tokens: 1_000_000,
             },
@@ -1746,10 +1719,10 @@ mod tests {
         let record = TranscriptRecord::from_local(
             1,
             1,
-            LocalEvent::UserSubmitted {
+            LocalEvent::UserSubmitted(UserSubmitted {
                 id: TurnId::new(1),
                 text: "inherited history".to_owned(),
-            },
+            }),
         )
         .unwrap();
         app.update(AppEvent::Transcript {
@@ -1784,7 +1757,7 @@ mod tests {
         let mut app = app();
         app.update(AppEvent::ContextBudget {
             pane: PaneId::Main,
-            budget: crate::tui::context::ContextBudget {
+            budget: crate::core::context::ContextBudget {
                 active_tokens: 136_000,
                 window_tokens: 272_000,
             },
@@ -2175,12 +2148,12 @@ mod tests {
 
         app.update(AppEvent::MemoriesLoaded {
             pane: PaneId::Main,
-            access: local_memory_access(),
+            access: MemoryAccess::Local,
             records: vec![memory_record(1, "main pane memory")],
         });
         app.update(AppEvent::MemoriesLoaded {
             pane: PaneId::Fork(1),
-            access: local_memory_access(),
+            access: MemoryAccess::Local,
             records: vec![memory_record(2, "fork pane memory")],
         });
         let output = rendered(&mut app, 120, 24);
@@ -2196,10 +2169,10 @@ mod tests {
             let record = TranscriptRecord::from_local(
                 sequence,
                 sequence,
-                LocalEvent::UserSubmitted {
+                LocalEvent::UserSubmitted(UserSubmitted {
                     id: TurnId::new(sequence),
                     text: format!("scroll line {sequence:02}"),
-                },
+                }),
             )
             .unwrap();
             app.update(AppEvent::Transcript {
@@ -2282,9 +2255,16 @@ mod tests {
 mod registry_tests {
     use super::{AppEffect, AppEvent, AppNode, DraftReset, RootEffect, RootNode};
     use crate::{
-        app::config::{ReasoningEffort, ReasoningMode, Speed},
-        tui::{pane::PaneId, prompt::Submission, theme::Theme},
-        web::bridge::{self, Command, CommandError, Draft, Origin, Publication, Reply, WebEnd},
+        app::{
+            config::{ReasoningEffort, ReasoningMode, Speed},
+            theme::Theme,
+        },
+        core::{
+            pane::PaneId,
+            prompt::Submission,
+            protocol::{Command, CommandError, Draft, OpenSpec, Origin, Publication, Reply},
+        },
+        web::bridge::{self, WebEnd},
     };
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use nanocodex::{HarnessModel as Model, Model as CodexModel};
@@ -2811,7 +2791,7 @@ mod registry_tests {
             ] if info.id == "new" && info.effort == ReasoningEffort::High && session == "new"
         ));
         assert_eq!(
-            harness.command(Command::Open(bridge::OpenSpec::New {
+            harness.command(Command::Open(OpenSpec::New {
                 model: None,
                 workspace: None
             })),
@@ -2827,9 +2807,16 @@ mod registry_tests {
 mod parity_tests {
     use super::{AppEffect, AppEvent, AppNode, RootEffect, RootNode};
     use crate::{
-        app::config::{ReasoningEffort, ReasoningMode},
-        tui::{context::ContextBudget, pane::PaneId, theme::Theme},
-        web::bridge::{self, Command, CommandError, DraftImage, Origin, Publication, WebEnd},
+        app::{
+            config::{ReasoningEffort, ReasoningMode},
+            theme::Theme,
+        },
+        core::{
+            context::ContextBudget,
+            pane::PaneId,
+            protocol::{Command, CommandError, DraftImage, Origin, Publication},
+        },
+        web::bridge::{self, WebEnd},
     };
     use nanocodex::{
         ClaudeModel, HarnessModel as Model, Model as CodexModel, Thinking,
@@ -2942,7 +2929,7 @@ mod parity_tests {
             .unwrap();
         let marker = DraftImage {
             marker: "[Image #1]".to_owned(),
-            data_url: IMAGE.to_owned(),
+            data_url: Arc::from(IMAGE),
         };
         assert_eq!(
             harness.app.root(PaneId::Main).unwrap().shared_draft(),
@@ -3049,7 +3036,7 @@ mod parity_tests {
                 queue_id: id + 1,
                 text: "missing".to_owned(),
             }),
-            Err(CommandError::UnknownSession)
+            Err(CommandError::UnknownQueueItem)
         );
 
         let mut idle = Harness::new();
@@ -3091,7 +3078,6 @@ mod parity_tests {
             .app
             .pane_mut(PaneId::Main)
             .unwrap()
-            .component_mut()
             .set_model(Model::Claude(ClaudeModel::Sonnet55));
         assert!(matches!(
             harness.command(Command::SetReasoningMode {

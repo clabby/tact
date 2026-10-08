@@ -4,10 +4,8 @@
 //! request names a checkout by path, and the path must resolve to one of those checkouts, so a
 //! client cannot point the review at an arbitrary directory.
 
-use super::{
-    checkout::{Checkout, CheckoutKind, FamilyMember},
-    hub::Hub,
-};
+use super::hub::Hub;
+use crate::vcs::{Checkout, CheckoutKind, FamilyMember};
 use futures_util::future::join_all;
 use serde::Serialize;
 use std::{

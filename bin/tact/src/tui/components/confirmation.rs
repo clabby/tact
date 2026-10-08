@@ -1,10 +1,17 @@
 //! A yes/no confirmation popup.
+//!
+//! [Confirmation] holds the fixed wording of one question, chosen by its
+//! constructor, and no other state. It consumes key presses through
+//! [ConfirmationEvent::Terminal]: Enter or `y` emits [ConfirmationEffect::Confirm],
+//! Esc or `n` emits [ConfirmationEffect::Dismiss], and every other input is
+//! ignored. The host owns the guarded action and closes the popup on either
+//! effect.
 
 use super::{
     floating::Floating,
     node::{Component, ComponentUpdate, RenderRequest},
 };
-use crate::tui::theme::Theme;
+use crate::app::theme::Theme;
 use crossterm::event::{Event, KeyCode, KeyEventKind};
 use ratatui::{
     Frame,
@@ -100,7 +107,7 @@ impl Component for Confirmation {
 #[cfg(test)]
 mod tests {
     use super::{Component, Confirmation, ConfirmationEffect, ConfirmationEvent, HEIGHT, WIDTH};
-    use crate::tui::theme::Theme;
+    use crate::app::theme::Theme;
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use ratatui::{Terminal, backend::TestBackend};
 

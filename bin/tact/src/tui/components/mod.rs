@@ -2,12 +2,14 @@
 
 mod actions;
 mod app;
+mod clock;
 mod composer;
 mod confirmation;
 mod context_diagnostics;
 mod dial;
 mod effort;
 mod file_finder;
+mod fit;
 mod floating;
 mod keybindings;
 mod memory;
@@ -30,7 +32,6 @@ mod waved_text;
 
 pub(crate) use app::{AppEffect, AppEvent, AppNode};
 pub(crate) use node::{ComponentUpdate, RenderRequest};
-pub(crate) use queue::QueueId;
 pub(crate) use root::{
     DraftReset, RecentPromptDraft, RestoredSessionProjection, RootEffect, RootNode, SessionListKind,
 };

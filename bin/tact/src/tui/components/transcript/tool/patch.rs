@@ -1,5 +1,10 @@
+//! Presenter for `apply_patch`.
+//!
+//! The summary counts touched files and added and removed lines, colored like a diff. Expanded
+//! details render the patch as a highlighted diff with a section per file and hunk.
+
 use super::Presentation;
-use crate::tui::{theme::Theme, transcript::ToolEntry};
+use crate::{app::theme::Theme, core::transcript::ToolEntry};
 use ratatui::{
     style::{Color, Style},
     text::Span,

@@ -6,10 +6,10 @@ mod local;
 mod remote;
 
 #[cfg(all(feature = "client", feature = "local"))]
-use crate::{MemoryAccess, MemorySource, secrets::contains_likely_secret};
+use crate::{MemoryAccess, MemorySource};
 use crate::{
     MemoryKey, MemoryLimits, MemoryRecord, MemoryScan,
-    server::protocol::{self, ExportCursor, SyncReport},
+    protocol::{self, ExportCursor, ExportPage, SyncReport},
 };
 #[cfg(feature = "local")]
 pub use local::LocalMemoryStore;
@@ -82,7 +82,7 @@ pub trait MemoryStore: Clone + Send + Sync + 'static {
         namespaces: Option<&[String]>,
         cursor: Option<&ExportCursor>,
         limit: usize,
-    ) -> impl Future<Output = Result<(Vec<MemoryRecord>, Option<ExportCursor>), MemoryError>> + Send;
+    ) -> impl Future<Output = Result<ExportPage, MemoryError>> + Send;
 
     /// Collects a complete export through the paginated storage contract within caller-provided
     /// record-count, per-record, and aggregate-content bounds.
@@ -99,7 +99,10 @@ pub trait MemoryStore: Clone + Send + Sync + 'static {
             let mut records = Vec::new();
             let mut content_bytes = 0usize;
             loop {
-                let (page, next_cursor) = self
+                let ExportPage {
+                    memories: page,
+                    next_cursor,
+                } = self
                     .export_page(
                         namespaces,
                         cursor.as_ref(),
@@ -183,15 +186,10 @@ impl SelectedMemoryStore {
     /// Returns backend provenance and negotiated remote authorization.
     pub async fn access(&self) -> Result<MemoryAccess, MemoryError> {
         match self {
-            Self::Local(_) => Ok(MemoryAccess {
-                source: MemorySource::Local,
-                namespace: None,
-                role: None,
-            }),
-            Self::Remote(client) => Ok(MemoryAccess {
-                source: MemorySource::Remote,
-                namespace: Some(client.namespace().to_owned()),
-                role: Some(client.session().await?),
+            Self::Local(_) => Ok(MemoryAccess::Local),
+            Self::Remote(client) => Ok(MemoryAccess::Remote {
+                namespace: client.namespace().to_owned(),
+                role: client.session().await?,
             }),
         }
     }
@@ -237,7 +235,6 @@ impl MemoryStore for SelectedMemoryStore {
         replacement: Option<MemoryKey>,
     ) -> impl Future<Output = Result<MemoryRecord, MemoryError>> + Send {
         async move {
-            reject_unsafe(content)?;
             match self {
                 Self::Local(store) => MemoryStore::put(store, content, replacement).await,
                 Self::Remote(client) => MemoryStore::put(client, content, replacement).await,
@@ -257,9 +254,6 @@ impl MemoryStore for SelectedMemoryStore {
         memories: &[MemoryRecord],
     ) -> impl Future<Output = Result<SyncReport, MemoryError>> + Send {
         async move {
-            for memory in memories {
-                reject_unsafe(&memory.content)?;
-            }
             match self {
                 Self::Local(store) => MemoryStore::sync(store, memories).await,
                 Self::Remote(client) => MemoryStore::sync(client, memories).await,
@@ -271,8 +265,7 @@ impl MemoryStore for SelectedMemoryStore {
         namespaces: Option<&[String]>,
         cursor: Option<&ExportCursor>,
         limit: usize,
-    ) -> impl Future<Output = Result<(Vec<MemoryRecord>, Option<ExportCursor>), MemoryError>> + Send
-    {
+    ) -> impl Future<Output = Result<ExportPage, MemoryError>> + Send {
         async move {
             match self {
                 Self::Local(store) => {
@@ -284,14 +277,6 @@ impl MemoryStore for SelectedMemoryStore {
             }
         }
     }
-}
-
-#[cfg(all(feature = "client", feature = "local"))]
-fn reject_unsafe(content: &str) -> Result<(), MemoryError> {
-    if contains_likely_secret(content) {
-        return Err(MemoryError::SecretRejected);
-    }
-    Ok(())
 }
 
 #[cfg(feature = "local")]

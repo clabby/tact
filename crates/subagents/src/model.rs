@@ -476,15 +476,12 @@ mod tests {
     }
 
     #[test]
-    fn agent_prompt_explains_peer_coordination_and_queued_delivery() {
-        let prompt = agent_prompt(AgentId::new(1), "coordinate with a peer");
+    fn agent_prompt_names_the_agent_and_ends_with_the_verbatim_task() {
+        let task = "Review {this}\n  - keep indentation";
+        let prompt = agent_prompt(AgentId::new(17), task);
 
-        assert!(prompt.contains("Other agents may be working concurrently"));
-        assert!(prompt.contains("list_agents"));
-        assert!(prompt.contains("prevents duplicated work"));
-        assert!(prompt.contains("avoid overwriting them"));
-        assert!(prompt.contains("If a send is queued"));
-        assert!(prompt.contains("finish the turn"));
+        assert!(prompt.ends_with(task));
+        assert!(prompt.contains(" 17."));
     }
 
     #[test]

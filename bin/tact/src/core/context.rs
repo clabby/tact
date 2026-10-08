@@ -1,0 +1,549 @@
+//! Content-free context diagnostics projected from transcript telemetry.
+
+use crate::core::transcript::{CompactionFinished, ContextObserved, LocalKind, TranscriptRecord};
+use nanocodex::{
+    agent::events::AgentEventKind,
+    oai::{
+        self,
+        events::{CompactionStarted, ModelCallCompleted},
+        responses::Usage,
+    },
+};
+use serde::{Deserialize, Serialize};
+use serde_json::value::RawValue;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ContinuationMode {
+    FullContext,
+    PreviousResponse,
+}
+
+pub(crate) const MODEL_WINDOW_TOKENS: u64 = oai::CONTEXT_WINDOW_TOKENS;
+pub(crate) const AUTO_COMPACT_TOKEN_LIMIT: u64 = 244_800;
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct ContextBudget {
+    pub(crate) active_tokens: u64,
+    pub(crate) window_tokens: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
+pub(crate) struct TokenUsage {
+    pub(crate) input: u64,
+    pub(crate) cached_input: u64,
+    pub(crate) uncached_input: u64,
+    pub(crate) output: u64,
+    pub(crate) total: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub(crate) struct CompactionDiagnostics {
+    pub(crate) trigger: CompactionTrigger,
+    pub(crate) started_at_unix_ms: u64,
+    pub(crate) completed_at_unix_ms: Option<u64>,
+    pub(crate) before_tokens: Option<u64>,
+    pub(crate) after_tokens: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CompactionTrigger {
+    Automatic,
+    Manual,
+}
+
+/// A count-only projection that never retains request content or opaque identifiers.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub(crate) struct ContextDiagnostics {
+    pub(crate) model_window_tokens: u64,
+    pub(crate) auto_compact_token_limit: Option<u64>,
+    pub(crate) active_tokens: Option<u64>,
+    pub(crate) usage: Option<TokenUsage>,
+    pub(crate) continuation: Option<ContinuationMode>,
+    pub(crate) prompt_cache: Option<bool>,
+    pub(crate) compactions_started: u64,
+    pub(crate) compactions_completed: u64,
+    pub(crate) last_compaction: Option<CompactionDiagnostics>,
+    #[serde(skip)]
+    awaiting_post_compaction_usage: bool,
+    #[serde(skip)]
+    manual_compaction: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct ContextObservation {
+    pub(crate) completed_tokens: Option<u64>,
+}
+
+impl Default for ContextDiagnostics {
+    fn default() -> Self {
+        Self {
+            model_window_tokens: MODEL_WINDOW_TOKENS,
+            auto_compact_token_limit: Some(AUTO_COMPACT_TOKEN_LIMIT),
+            active_tokens: None,
+            usage: None,
+            continuation: None,
+            prompt_cache: None,
+            compactions_started: 0,
+            compactions_completed: 0,
+            last_compaction: None,
+            awaiting_post_compaction_usage: false,
+            manual_compaction: false,
+        }
+    }
+}
+
+impl ContextDiagnostics {
+    #[cfg(test)]
+    fn rebuild<'a>(records: impl IntoIterator<Item = &'a TranscriptRecord>) -> Self {
+        let mut diagnostics = Self::default();
+        for record in records {
+            diagnostics.observe(record);
+        }
+        diagnostics
+    }
+
+    pub(crate) fn observe(&mut self, record: &TranscriptRecord) -> ContextObservation {
+        if let Some(kind) = record.agent_kind() {
+            return self.observe_agent(kind, record);
+        }
+        match record.local_kind() {
+            Some(LocalKind::CompactionStarted) => {
+                self.manual_compaction = true;
+                self.compactions_started = self.compactions_started.saturating_add(1);
+                self.last_compaction = Some(CompactionDiagnostics {
+                    trigger: CompactionTrigger::Manual,
+                    started_at_unix_ms: record.recorded_at_unix_ms(),
+                    completed_at_unix_ms: None,
+                    before_tokens: self.active_tokens,
+                    after_tokens: None,
+                });
+                self.awaiting_post_compaction_usage = false;
+                ContextObservation::default()
+            }
+            Some(LocalKind::CompactionFinished) => {
+                if let Ok(CompactionFinished { error: None, .. }) = record.decode_payload() {
+                    self.observe_compaction_completed(record);
+                }
+                ContextObservation::default()
+            }
+            Some(LocalKind::ContextBudget) => {
+                let Ok(budget) = record.decode_payload::<ContextBudget>() else {
+                    return ContextObservation::default();
+                };
+                if budget.window_tokens == 0 {
+                    return ContextObservation::default();
+                }
+                self.set_native_budget(budget);
+                ContextObservation {
+                    completed_tokens: Some(budget.active_tokens),
+                }
+            }
+            Some(LocalKind::ContextObserved) => {
+                self.observe_context_snapshot(record);
+                ContextObservation::default()
+            }
+            _ => ContextObservation::default(),
+        }
+    }
+
+    fn observe_agent(
+        &mut self,
+        kind: AgentEventKind,
+        record: &TranscriptRecord,
+    ) -> ContextObservation {
+        match kind {
+            AgentEventKind::ApiEvent => self.observe_api_event(record),
+            AgentEventKind::ModelCallCompleted => self.observe_model_call_completed(record),
+            AgentEventKind::RunStarted => {
+                self.manual_compaction = false;
+                ContextObservation::default()
+            }
+            AgentEventKind::ModelCompactionStarted | AgentEventKind::ModelCompactionCompleted
+                if self.manual_compaction =>
+            {
+                ContextObservation::default()
+            }
+            AgentEventKind::ModelCompactionStarted => {
+                self.observe_compaction_started(record);
+                ContextObservation::default()
+            }
+            AgentEventKind::ModelCompactionCompleted => {
+                self.observe_compaction_completed(record);
+                ContextObservation::default()
+            }
+            _ => ContextObservation::default(),
+        }
+    }
+
+    pub(crate) fn set_native_budget(&mut self, budget: ContextBudget) {
+        self.model_window_tokens = budget.window_tokens;
+        self.active_tokens = Some(budget.active_tokens);
+        self.auto_compact_token_limit = None;
+        if self.awaiting_post_compaction_usage {
+            if let Some(compaction) = &mut self.last_compaction {
+                compaction.after_tokens = Some(budget.active_tokens);
+            }
+            self.awaiting_post_compaction_usage = false;
+        }
+    }
+
+    fn observe_api_event(&mut self, record: &TranscriptRecord) -> ContextObservation {
+        let Ok(payload) = record.decode_payload::<ApiEvent>() else {
+            return ContextObservation::default();
+        };
+        if payload.phase != "generation" {
+            return ContextObservation::default();
+        }
+        match payload.direction {
+            "outbound" => {
+                self.observe_request(payload.event);
+                ContextObservation::default()
+            }
+            "inbound" => self.observe_response_event(payload.event),
+            _ => ContextObservation::default(),
+        }
+    }
+
+    fn observe_request(&mut self, request: &RawValue) {
+        let Ok(request) = serde_json::from_str::<ApiRequest>(request.get()) else {
+            return;
+        };
+        self.prompt_cache = Some(request.prompt_cache_key.is_some_and(raw_value_is_string));
+        self.continuation = Some(
+            if request
+                .previous_response_id
+                .is_some_and(raw_value_is_string)
+            {
+                ContinuationMode::PreviousResponse
+            } else {
+                ContinuationMode::FullContext
+            },
+        );
+    }
+
+    fn observe_response_event(&mut self, event: &RawValue) -> ContextObservation {
+        let Ok(event) = serde_json::from_str::<ResponseEvent>(event.get()) else {
+            return ContextObservation::default();
+        };
+        if event.kind != "response.completed" {
+            return ContextObservation::default();
+        }
+        let usage = event
+            .response
+            .and_then(|response| response.usage)
+            .map(usage_into_tokens);
+        let completed_tokens = usage.map(|usage| usage.total);
+        self.set_usage(usage);
+        ContextObservation { completed_tokens }
+    }
+
+    fn observe_model_call_completed(&mut self, record: &TranscriptRecord) -> ContextObservation {
+        let Ok(payload) = record.decode_payload::<ModelCallCompleted>() else {
+            return ContextObservation::default();
+        };
+        let usage = payload.usage.map(usage_into_tokens);
+        let completed_tokens = usage.map(|usage| usage.total);
+        self.set_usage(usage);
+        ContextObservation { completed_tokens }
+    }
+
+    fn observe_context_snapshot(&mut self, record: &TranscriptRecord) {
+        let Ok(snapshot) = record.decode_payload::<ContextObserved>() else {
+            return;
+        };
+        self.prompt_cache = Some(snapshot.prompt_cache);
+        self.continuation = Some(if snapshot.previous_response {
+            ContinuationMode::PreviousResponse
+        } else {
+            ContinuationMode::FullContext
+        });
+    }
+
+    fn set_usage(&mut self, usage: Option<TokenUsage>) {
+        let Some(usage) = usage else {
+            return;
+        };
+        self.active_tokens = Some(usage.total);
+        self.usage = Some(usage);
+        if self.awaiting_post_compaction_usage {
+            if let Some(compaction) = &mut self.last_compaction {
+                compaction.after_tokens = Some(usage.input);
+            }
+            self.awaiting_post_compaction_usage = false;
+        }
+    }
+
+    fn observe_compaction_started(&mut self, record: &TranscriptRecord) {
+        let payload = record.decode_payload::<CompactionStarted>().ok();
+        let before_tokens = payload
+            .as_ref()
+            .map(|payload| payload.active_context_tokens);
+        if let Some(payload) = payload {
+            self.auto_compact_token_limit = Some(payload.auto_compact_token_limit);
+        }
+        self.compactions_started = self.compactions_started.saturating_add(1);
+        self.last_compaction = Some(CompactionDiagnostics {
+            trigger: CompactionTrigger::Automatic,
+            started_at_unix_ms: record.recorded_at_unix_ms(),
+            completed_at_unix_ms: None,
+            before_tokens,
+            after_tokens: None,
+        });
+        self.awaiting_post_compaction_usage = false;
+    }
+
+    fn observe_compaction_completed(&mut self, record: &TranscriptRecord) {
+        self.compactions_completed = self.compactions_completed.saturating_add(1);
+        if let Some(compaction) = &mut self.last_compaction {
+            compaction.completed_at_unix_ms = Some(record.recorded_at_unix_ms());
+            self.awaiting_post_compaction_usage = true;
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct ApiEvent<'a> {
+    direction: &'a str,
+    phase: &'a str,
+    #[serde(borrow)]
+    event: &'a RawValue,
+}
+
+#[derive(Deserialize)]
+struct ApiRequest<'a> {
+    #[serde(borrow)]
+    prompt_cache_key: Option<&'a RawValue>,
+    #[serde(borrow)]
+    previous_response_id: Option<&'a RawValue>,
+}
+
+#[derive(Deserialize)]
+struct ResponseEvent<'a> {
+    #[serde(rename = "type")]
+    kind: &'a str,
+    response: Option<Response>,
+}
+
+#[derive(Deserialize)]
+struct Response {
+    usage: Option<Usage>,
+}
+
+fn usage_into_tokens(usage: Usage) -> TokenUsage {
+    let cached_input = usage
+        .input_tokens_details
+        .map_or(0, |details| details.cached_tokens);
+    TokenUsage {
+        input: usage.input_tokens,
+        cached_input,
+        uncached_input: usage.input_tokens.saturating_sub(cached_input),
+        output: usage.output_tokens,
+        total: usage.total_tokens,
+    }
+}
+
+fn raw_value_is_string(value: &RawValue) -> bool {
+    value.get().trim_start().starts_with('"')
+}
+
+/// The content-free facts a durable transcript keeps from an outbound raw API request.
+pub(crate) fn outbound_context_snapshot(record: &TranscriptRecord) -> Option<ContextObserved> {
+    let payload = record.decode_payload::<ApiEvent>().ok()?;
+    if payload.direction != "outbound" || payload.phase != "generation" {
+        return None;
+    }
+    let request = serde_json::from_str::<ApiRequest>(payload.event.get()).ok()?;
+    Some(ContextObserved {
+        prompt_cache: request.prompt_cache_key.is_some_and(raw_value_is_string),
+        previous_response: request
+            .previous_response_id
+            .is_some_and(raw_value_is_string),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        CompactionDiagnostics, CompactionTrigger, ContextDiagnostics, ContinuationMode, TokenUsage,
+    };
+    use crate::core::transcript::TranscriptRecord;
+    use nanocodex::agent::events::{AgentEvent, AgentEventKind};
+    use serde_json::{Value, json, value::to_raw_value};
+    use std::sync::Arc;
+
+    fn agent(sequence: u64, at: u64, kind: AgentEventKind, payload: Value) -> TranscriptRecord {
+        TranscriptRecord::from_agent(
+            sequence,
+            at,
+            AgentEvent {
+                protocol_version: 1,
+                request_id: Arc::from("secret-request-id"),
+                seq: sequence,
+                kind,
+                payload: to_raw_value(&payload).unwrap().into(),
+            },
+        )
+    }
+
+    fn api(direction: &str, event: Value) -> Value {
+        json!({"direction": direction, "phase": "generation", "event": event})
+    }
+
+    fn model_call_completed(usage: Value) -> Value {
+        json!({
+            "call_index": 1,
+            "model": "gpt-6.1-sol",
+            "response_id": "secret-continuation-token",
+            "attempt": 1,
+            "connection_generation": 1,
+            "status": "completed",
+            "duration_ns": 1,
+            "time_to_first_event_ns": 1,
+            "time_to_first_output_ns": 1,
+            "tool_calls": 0,
+            "usage": usage
+        })
+    }
+
+    #[test]
+    fn complete_telemetry_projects_only_safe_facts_and_counts() {
+        let records = [
+            agent(
+                1,
+                1,
+                AgentEventKind::ApiEvent,
+                api(
+                    "outbound",
+                    json!({
+                        "prompt_cache_key": "secret-cache-key",
+                        "previous_response_id": "secret-response-id",
+                        "input": [{"role":"user", "content":"secret prompt"}]
+                    }),
+                ),
+            ),
+            agent(
+                2,
+                2,
+                AgentEventKind::ModelCallCompleted,
+                model_call_completed(json!({
+                        "input_tokens": 1_000,
+                        "input_tokens_details": {"cached_tokens": 750},
+                        "output_tokens": 80,
+                        "total_tokens": 1_080
+                })),
+            ),
+            agent(
+                3,
+                100,
+                AgentEventKind::ModelCompactionStarted,
+                json!({
+                    "after_model_call_index": 1,
+                    "active_context_tokens": 900,
+                    "auto_compact_token_limit": 200_000,
+                    "previous_response_id": "secret-response-id"
+                }),
+            ),
+            agent(
+                4,
+                110,
+                AgentEventKind::ModelCompactionCompleted,
+                json!({
+                    "response_id": "secret-compaction-id"
+                }),
+            ),
+            agent(
+                5,
+                120,
+                AgentEventKind::ModelCallCompleted,
+                model_call_completed(
+                    json!({"input_tokens": 400, "output_tokens": 20, "total_tokens": 420}),
+                ),
+            ),
+        ];
+        // Comparing the complete value accounts for every field; each is a count, flag, or mode,
+        // so no request content can be retained.
+        assert_eq!(
+            ContextDiagnostics::rebuild(records.iter()),
+            ContextDiagnostics {
+                model_window_tokens: nanocodex::oai::CONTEXT_WINDOW_TOKENS,
+                auto_compact_token_limit: Some(200_000),
+                active_tokens: Some(420),
+                usage: Some(TokenUsage {
+                    input: 400,
+                    cached_input: 0,
+                    uncached_input: 400,
+                    output: 20,
+                    total: 420,
+                }),
+                continuation: Some(ContinuationMode::PreviousResponse),
+                prompt_cache: Some(true),
+                compactions_started: 1,
+                compactions_completed: 1,
+                last_compaction: Some(CompactionDiagnostics {
+                    trigger: CompactionTrigger::Automatic,
+                    started_at_unix_ms: 100,
+                    completed_at_unix_ms: Some(110),
+                    before_tokens: Some(900),
+                    after_tokens: Some(400),
+                }),
+                awaiting_post_compaction_usage: false,
+                manual_compaction: false,
+            }
+        );
+    }
+
+    #[test]
+    fn partial_and_unavailable_telemetry_remain_explicit() {
+        let mut diagnostics = ContextDiagnostics::default();
+        diagnostics.observe(&agent(
+            1,
+            10,
+            AgentEventKind::ModelCompactionStarted,
+            json!({}),
+        ));
+        diagnostics.observe(&agent(
+            2,
+            20,
+            AgentEventKind::ModelCompactionCompleted,
+            json!({}),
+        ));
+        diagnostics.observe(&agent(
+            3,
+            30,
+            AgentEventKind::ApiEvent,
+            api("outbound", json!({})),
+        ));
+
+        assert!(diagnostics.usage.is_none());
+        assert_eq!(
+            diagnostics.continuation,
+            Some(ContinuationMode::FullContext)
+        );
+        assert_eq!(diagnostics.prompt_cache, Some(false));
+        assert_eq!(diagnostics.last_compaction.unwrap().before_tokens, None);
+        assert_eq!(diagnostics.last_compaction.unwrap().after_tokens, None);
+    }
+
+    #[test]
+    fn completed_response_total_remains_available_to_the_composer() {
+        let record = agent(
+            1,
+            1,
+            AgentEventKind::ApiEvent,
+            api(
+                "inbound",
+                json!({
+                    "type": "response.completed",
+                    "response": {"usage": {"total_tokens": 136_000}}
+                }),
+            ),
+        );
+        let mut diagnostics = ContextDiagnostics::default();
+        let observation = diagnostics.observe(&record);
+
+        assert_eq!(observation.completed_tokens, Some(136_000));
+        assert_eq!(diagnostics.usage.unwrap().total, 136_000);
+    }
+}

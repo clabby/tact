@@ -7,6 +7,7 @@
 pub const VERSION: u32 = 1;
 
 mod model;
+pub mod protocol;
 mod retrieval;
 #[cfg(any(feature = "client", feature = "local"))]
 mod secrets;
@@ -14,12 +15,14 @@ pub mod server;
 mod store;
 #[cfg(feature = "tool")]
 mod tool;
+#[cfg(all(feature = "client", feature = "local"))]
+pub mod transfer;
 
 pub use model::{
     MemoryAccess, MemoryCandidate, MemoryImportReport, MemoryKey, MemoryLimits, MemoryRecord,
     MemoryScan, MemorySource, normalize_identity,
 };
-pub use server::protocol::RemoteRole;
+pub use protocol::RemoteRole;
 #[cfg(feature = "local")]
 pub use store::LocalMemoryStore;
 #[cfg(all(feature = "client", feature = "local"))]
@@ -30,5 +33,7 @@ pub use store::{RemoteClientError, RemoteMemoryClient, RemoteToken};
 #[cfg(feature = "tool")]
 pub use tool::{MemoryTool, MutationAuthorizer};
 
+#[cfg(all(test, feature = "client"))]
+mod test_support;
 #[cfg(test)]
 mod tests;

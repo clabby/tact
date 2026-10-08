@@ -1,5 +1,16 @@
 //! Multiline prompt editing and Pi-style composer rendering.
+//!
+//! [Composer] owns the draft ([draft::DraftBuffer]), prompt history recall,
+//! and the chrome drawn around the draft: workspace, context usage, turn
+//! timers, activity and task status, live sessions, and the clickable effort,
+//! speed, model, and subagent controls. It consumes [ComposerEvent]s from the
+//! terminal and the session and reports each change through [ComposerUpdate],
+//! which yields a [ComposerEffect] when the user submits a prompt, runs a shell
+//! command with a leading `!`, or asks to edit the draft externally. The chrome
+//! regions recorded during the last frame resolve clicks through
+//! [Composer::chrome_target].
 
+mod draft;
 mod history;
 mod layout;
 
@@ -9,20 +20,21 @@ use super::{
     waved_text::WavedText,
 };
 use crate::{
-    app::config::{ReasoningEffort, ReasoningMode, Speed},
-    tui::{
-        context::{ContextBudget, MODEL_WINDOW_TOKENS},
-        format::{
-            format_turn_duration, normalize_line_endings, sanitize_terminal_text, shorten_home,
-            terminal_text_width,
-        },
-        prompt::Submission,
+    app::{
+        config::{ReasoningEffort, ReasoningMode, Speed},
         theme::Theme,
     },
+    core::{
+        context::{ContextBudget, MODEL_WINDOW_TOKENS},
+        prompt::Submission,
+    },
+    tui::format::{format_turn_duration, shorten_home},
 };
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+pub(crate) use draft::ComposerDraft;
+use draft::{Direction, DraftBuffer};
 use history::PromptHistory;
-use layout::{VisualLayout, byte_at_column, grapheme_at_column};
+use layout::grapheme_at_column;
 use nanocodex::{HarnessModel as Model, Model as CodexModel};
 use ratatui::{
     Frame,
@@ -33,12 +45,11 @@ use ratatui::{
 };
 use std::{
     collections::VecDeque,
-    mem,
+    fmt::{self, Display, Formatter, Write as _},
     ops::Range,
     path::Path,
     time::{Duration, Instant},
 };
-use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 const MIN_CONTENT_ROWS: usize = 3;
@@ -60,6 +71,46 @@ pub(super) enum ComposerChromeTarget {
     Subagents,
 }
 
+/// What the draft in the composer is for. Modes other than [`InputMode::Prompt`] show their keys
+/// in the status line.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum InputMode {
+    /// A prompt for the agent.
+    #[default]
+    Prompt,
+    /// Optional guidance for a reflection, which starts when the draft is submitted.
+    Reflection,
+    /// A queued message being edited in place.
+    EditingQueued,
+}
+
+impl InputMode {
+    const fn hint(self) -> Option<&'static str> {
+        match self {
+            Self::Prompt => None,
+            Self::Reflection => Some("Reflection instructions · enter start · esc cancel"),
+            Self::EditingQueued => Some("editing queued message · enter save · esc cancel"),
+        }
+    }
+}
+
+/// The sessions hosted by this process, of which `running` have a turn or shell command in flight.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct LiveSessions {
+    pub(crate) live: usize,
+    pub(crate) running: usize,
+}
+
+impl Display for LiveSessions {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "{} sessions, {} running",
+            self.live, self.running
+        )
+    }
+}
+
 pub(crate) enum ComposerEvent {
     Terminal(Event),
     PasteImage(String),
@@ -69,11 +120,13 @@ pub(crate) enum ComposerEvent {
         text: String,
     },
     ReplaceDraft(String),
+    /// Submits the draft exactly as plain Enter does.
+    Submit,
     SetEffort(ReasoningEffort),
     SetModel(Model),
     SetReasoningMode(ReasoningMode),
     SetSpeed(Speed),
-    InputMode(Option<String>),
+    InputMode(InputMode),
     Activity {
         active: bool,
         status: Option<String>,
@@ -85,7 +138,7 @@ pub(crate) enum ComposerEvent {
         now: Instant,
     },
     /// Summarizes this process's live sessions when there is more than one.
-    LiveSessions(Option<String>),
+    LiveSessions(Option<LiveSessions>),
     ActiveSubagents {
         count: usize,
         now: Instant,
@@ -100,12 +153,10 @@ pub(crate) enum ComposerEvent {
 }
 
 pub(crate) struct Composer {
-    draft: String,
-    images: Vec<PastedImage>,
-    next_image: u64,
-    cursor: usize,
-    preferred_column: Option<usize>,
+    draft: DraftBuffer,
+    /// The first visual line shown in the draft area.
     scroll: usize,
+    /// The draft width of the last frame, which vertical movement wraps at.
     last_width: usize,
     context_tokens: u64,
     context_window_tokens: u64,
@@ -114,58 +165,18 @@ pub(crate) struct Composer {
     model: Model,
     reasoning_mode: ReasoningMode,
     speed: Speed,
-    input_mode: Option<String>,
+    input_mode: InputMode,
+    /// The transient status of the running turn.
     activity_wave: Option<WavedText>,
-    activity_status: Option<String>,
+    /// The status of a task that blocks the composer.
     task_wave: Option<WavedText>,
-    task_status: Option<String>,
-    live_sessions: Option<String>,
+    live_sessions: Option<LiveSessions>,
     active_subagents: usize,
     subagent_wave: Option<WavedText>,
     turn_timers: VecDeque<TurnTimer>,
-    effort_hit_area: Option<Rect>,
-    speed_hit_area: Option<Rect>,
-    model_hit_area: Option<Rect>,
-    subagent_hit_area: Option<Rect>,
-    layout: Option<CachedLayout>,
+    /// The clickable chrome controls drawn in the last frame.
+    chrome_hits: Vec<(ComposerChromeTarget, Rect)>,
     history: PromptHistory,
-}
-
-pub(crate) struct ComposerDraft {
-    text: String,
-    images: Vec<PastedImage>,
-    next_image: u64,
-    cursor: usize,
-}
-
-impl ComposerDraft {
-    pub(crate) fn text(&self) -> &str {
-        &self.text
-    }
-
-    pub(crate) fn images(&self) -> impl Iterator<Item = (&str, &str)> {
-        draft_images(&self.text, &self.images)
-    }
-}
-
-fn draft_images<'a>(
-    text: &'a str,
-    images: &'a [PastedImage],
-) -> impl Iterator<Item = (&'a str, &'a str)> {
-    images
-        .iter()
-        .map(|image| (&text[image.range.clone()], image.data_url.as_str()))
-}
-
-struct PastedImage {
-    range: Range<usize>,
-    data_url: String,
-}
-
-struct CachedLayout {
-    width: usize,
-    cursor: usize,
-    value: VisualLayout,
 }
 
 struct TurnTimer {
@@ -213,6 +224,35 @@ impl TurnTimer {
     }
 }
 
+/// The content of the composer's top border, which [`Composer::render_chrome`] lays out:
+/// status text from the left, and the turn timer and clickable controls from the right.
+#[derive(Debug, Eq, PartialEq)]
+struct StatusLine {
+    /// Context usage as a rounded percentage of the window, such as `12%/272k`.
+    context: String,
+    input_mode: Option<&'static str>,
+    /// The status of a task that blocks the composer.
+    task: Option<String>,
+    /// The transient status of the running turn.
+    activity: Option<String>,
+    subagents: usize,
+    live_sessions: Option<LiveSessions>,
+    /// The elapsed time of the oldest running turn.
+    turn_timer: Option<String>,
+    model: Model,
+    effort: ReasoningEffort,
+    /// The speed the model runs at, which is lower than requested when the model lacks that tier.
+    speed: Speed,
+    /// Whether the pro badge is shown; only Codex models have a pro reasoning mode.
+    pro: bool,
+}
+
+/// The result of a composer update.
+///
+/// Unlike [`ComponentUpdate`](super::node::ComponentUpdate), the composer reports whether it
+/// changed rather than how urgently to redraw: the same change, such as a new context budget, is
+/// urgent when it answers a keypress and can wait for the next frame when it arrives with streamed
+/// output, and only the caller knows which applies. An update yields at most one effect.
 pub(crate) struct ComposerUpdate {
     pub(crate) effect: Option<ComposerEffect>,
     pub(crate) changed: bool,
@@ -225,11 +265,7 @@ impl Composer {
 
     pub(crate) fn new(workspace: &Path, thinking: ReasoningEffort) -> Self {
         Self {
-            draft: String::new(),
-            images: Vec::new(),
-            next_image: 1,
-            cursor: 0,
-            preferred_column: None,
+            draft: DraftBuffer::default(),
             scroll: 0,
             last_width: 78,
             context_tokens: 0,
@@ -239,20 +275,14 @@ impl Composer {
             model: Model::Codex(CodexModel::Sol),
             reasoning_mode: ReasoningMode::Standard,
             speed: Speed::Standard,
-            input_mode: None,
+            input_mode: InputMode::Prompt,
             activity_wave: None,
-            activity_status: None,
             task_wave: None,
-            task_status: None,
             live_sessions: None,
             active_subagents: 0,
             subagent_wave: None,
             turn_timers: VecDeque::new(),
-            effort_hit_area: None,
-            speed_hit_area: None,
-            model_hit_area: None,
-            subagent_hit_area: None,
-            layout: None,
+            chrome_hits: Vec::new(),
             history: PromptHistory::default(),
         }
     }
@@ -270,14 +300,13 @@ impl Composer {
 
     /// The draft's images as (marker, data URL) pairs in text order.
     pub(crate) fn images(&self) -> impl Iterator<Item = (&str, &str)> {
-        draft_images(&self.draft, &self.images)
+        self.draft.images()
     }
 
     /// Appends an image marker at the end of the draft, as pasting the image there would.
     pub(crate) fn append_image(&mut self, data_url: String) {
         self.history.detach();
-        self.cursor = self.draft.len();
-        self.insert_image(data_url);
+        self.draft.append_image(data_url);
     }
 
     pub(crate) fn update(&mut self, event: ComposerEvent) -> ComposerUpdate {
@@ -285,13 +314,14 @@ impl Composer {
             ComposerEvent::Terminal(Event::Key(key)) => self.handle_key(key),
             ComposerEvent::Terminal(Event::Paste(text)) => {
                 self.history.detach();
-                self.insert(&text);
+                self.draft.insert(&text);
                 ComposerUpdate::changed()
             }
             ComposerEvent::Terminal(_) => ComposerUpdate::unchanged(),
+            ComposerEvent::Submit => self.submit(),
             ComposerEvent::PasteImage(data_url) => {
                 self.history.detach();
-                self.insert_image(data_url);
+                self.draft.insert_image(data_url);
                 ComposerUpdate::changed()
             }
             ComposerEvent::ContextBudget(budget) => {
@@ -303,8 +333,8 @@ impl Composer {
             }
             ComposerEvent::ReplaceRange { range, text } => {
                 self.history.detach();
-                self.remove_range(range);
-                self.insert(&text);
+                self.draft.remove_range(range);
+                self.draft.insert(&text);
                 ComposerUpdate::changed()
             }
             ComposerEvent::ReplaceDraft(draft) => {
@@ -353,29 +383,19 @@ impl Composer {
                 now,
             } => {
                 let status = if active { status } else { None };
-                if self.activity_status == status {
-                    return ComposerUpdate::unchanged();
-                }
-                self.activity_wave = status.as_ref().map(|status| {
-                    let mut wave = WavedText::new(status, Color::Cyan);
-                    wave.set_active(true, now);
-                    wave
-                });
-                self.activity_status = status;
-                ComposerUpdate::changed()
+                ComposerUpdate::from_change(replace_wave(
+                    &mut self.activity_wave,
+                    status,
+                    Color::Cyan,
+                    now,
+                ))
             }
-            ComposerEvent::TaskStatus { status, now } => {
-                if self.task_status == status {
-                    return ComposerUpdate::unchanged();
-                }
-                self.task_wave = status.as_ref().map(|status| {
-                    let mut wave = WavedText::new(status, Color::Green);
-                    wave.set_active(true, now);
-                    wave
-                });
-                self.task_status = status;
-                ComposerUpdate::changed()
-            }
+            ComposerEvent::TaskStatus { status, now } => ComposerUpdate::from_change(replace_wave(
+                &mut self.task_wave,
+                status,
+                Color::Green,
+                now,
+            )),
             ComposerEvent::LiveSessions(summary) => {
                 if self.live_sessions == summary {
                     return ComposerUpdate::unchanged();
@@ -437,27 +457,18 @@ impl Composer {
     }
 
     pub(super) fn chrome_target(&self, position: Position) -> Option<ComposerChromeTarget> {
-        if self
-            .subagent_hit_area
-            .is_some_and(|area| area.contains(position))
-        {
-            return Some(ComposerChromeTarget::Subagents);
-        }
-        if self
-            .model_hit_area
-            .is_some_and(|area| area.contains(position))
-        {
-            return Some(ComposerChromeTarget::Model);
-        }
-        if self
-            .speed_hit_area
-            .is_some_and(|area| area.contains(position))
-        {
-            return Some(ComposerChromeTarget::Speed);
-        }
-        self.effort_hit_area
-            .is_some_and(|area| area.contains(position))
-            .then_some(ComposerChromeTarget::Effort)
+        self.chrome_hits
+            .iter()
+            .find(|(_, area)| area.contains(position))
+            .map(|(target, _)| *target)
+    }
+
+    #[cfg(test)]
+    fn chrome_area(&self, target: ComposerChromeTarget) -> Option<Rect> {
+        self.chrome_hits
+            .iter()
+            .find(|(hit, _)| *hit == target)
+            .map(|(_, area)| *area)
     }
 
     pub(crate) fn animation_deadline(&self) -> Option<Instant> {
@@ -486,6 +497,7 @@ impl Composer {
 
         let content_width = usize::from(width.saturating_sub(2)).max(1);
         let rows = self
+            .draft
             .visual_layout(content_width)
             .lines
             .len()
@@ -526,7 +538,7 @@ impl Composer {
         let content_width = usize::from(area.width - 2).max(1);
         self.last_width = content_width;
         let (cursor_row, cursor_column, line_count) = {
-            let layout = self.visual_layout(content_width);
+            let layout = self.draft.visual_layout(content_width);
             (layout.cursor_row, layout.cursor_column, layout.lines.len())
         };
         let visible_rows = usize::from(area.height - 2);
@@ -540,6 +552,8 @@ impl Composer {
         buffer.set_style(area, Style::default().fg(theme.text()));
         self.render_chrome(buffer, area, theme);
         let border = self.border_style(theme);
+        let selected =
+            selection.and_then(|selection| selection.source_range(0, self.draft.text().len()));
 
         for row in 0..visible_rows {
             let y = area.y + 1 + u16::try_from(row).unwrap_or(u16::MAX);
@@ -547,28 +561,21 @@ impl Composer {
             draw_symbol(buffer, area.right() - 1, y, "│", border);
 
             let Some(line) = self
-                .layout
-                .as_ref()
-                .and_then(|cached| cached.value.lines.get(self.scroll + row))
+                .draft
+                .cached_layout()
+                .and_then(|layout| layout.lines.get(self.scroll + row))
             else {
                 continue;
             };
-            render_draft_line(
-                buffer,
-                Position::new(area.x + 1, y),
-                &self.draft,
-                &self.images,
-                line.start..line.end,
-                content_width,
-                theme,
-            );
-            if let Some(selection) = selection {
-                render_selection(
+            let position = Position::new(area.x + 1, y);
+            self.draft
+                .render_line(buffer, position, line.start..line.end, content_width, theme);
+            if let Some(selected) = selected.clone() {
+                self.draft.render_selection(
                     buffer,
-                    Position::new(area.x + 1, y),
-                    &self.draft,
+                    position,
                     line.start..line.end,
-                    selection,
+                    selected,
                     content_width,
                 );
             }
@@ -596,14 +603,15 @@ impl Composer {
         );
         let row = self.scroll + usize::from(position.y - area.y);
         let column = usize::from(position.x - area.x);
-        let line = self.visual_layout(width).lines.get(row)?.clone();
-        let range = grapheme_at_column(&self.draft, &line, column);
+        let line = self.draft.visual_layout(width).lines.get(row)?.clone();
+        let range = grapheme_at_column(self.draft.text(), &line, column);
         Some(TextSpan::new(0, range.start, range.end))
     }
 
     pub(super) fn selection_text(&self, selection: TextRange) -> Option<String> {
-        let range = selection.source_range(0, self.draft.len())?;
-        self.draft.get(range).map(ToOwned::to_owned)
+        let text = self.draft.text();
+        let range = selection.source_range(0, text.len())?;
+        text.get(range).map(ToOwned::to_owned)
     }
 
     pub(super) fn scroll_selection(&mut self, rows: isize, area: Rect) -> bool {
@@ -613,7 +621,7 @@ impl Composer {
 
         let width = usize::from(area.width).max(1);
         self.last_width = width;
-        let line_count = self.visual_layout(width).lines.len();
+        let line_count = self.draft.visual_layout(width).lines.len();
         let visible_rows = usize::from(area.height);
         let maximum = line_count.saturating_sub(visible_rows);
         let scroll = self.scroll.saturating_add_signed(rows).min(maximum);
@@ -625,11 +633,11 @@ impl Composer {
     }
 
     pub(crate) fn draft(&self) -> &str {
-        &self.draft
+        self.draft.text()
     }
 
-    pub(crate) fn input_mode(&self) -> Option<&str> {
-        self.input_mode.as_deref()
+    pub(crate) const fn input_mode(&self) -> InputMode {
+        self.input_mode
     }
 
     pub(crate) const fn effort(&self) -> ReasoningEffort {
@@ -650,97 +658,38 @@ impl Composer {
     }
 
     pub(crate) const fn cursor(&self) -> usize {
-        self.cursor
+        self.draft.cursor()
     }
 
     pub(crate) fn cursor_is_at_token_boundary(&self) -> bool {
-        self.draft[..self.cursor]
-            .chars()
-            .next_back()
-            .is_none_or(char::is_whitespace)
+        self.draft.cursor_is_at_token_boundary()
     }
 
     /// Replaces the draft text. An image survives while its marker still occurs in the new text,
     /// so an edit made elsewhere (the web interface or an external editor) keeps the images whose
     /// markers it left alone.
     pub(crate) fn replace_draft(&mut self, draft: String) {
-        let draft = if draft.contains('\r') {
-            normalize_line_endings(&draft).into_owned()
-        } else {
-            draft
-        };
-        let previous = mem::replace(&mut self.draft, draft);
-        let mut search_from = 0;
-        self.images.retain_mut(|image| {
-            let marker = &previous[image.range.clone()];
-            let Some(offset) = self.draft[search_from..].find(marker) else {
-                return false;
-            };
-            let start = search_from + offset;
-            image.range = start..start + marker.len();
-            search_from = image.range.end;
-            true
-        });
-        if self.images.is_empty() {
-            self.next_image = 1;
-        }
-        self.cursor = self.draft.len();
-        self.preferred_column = None;
+        self.draft.replace(draft);
         self.scroll = 0;
-        self.layout = None;
     }
 
     pub(crate) fn take_submission(&mut self) -> Option<Submission> {
-        let trimmed = self.draft.trim();
-        if trimmed.is_empty() {
-            return None;
-        }
-
-        let start = self.draft.len() - self.draft.trim_start().len();
-        let end = start + trimmed.len();
-        let text = trimmed.to_owned();
-        let images = self
-            .images
-            .iter()
-            .filter(|image| image.range.start >= start && image.range.end <= end)
-            .map(|image| {
-                (
-                    image.range.start - start..image.range.end - start,
-                    image.data_url.clone(),
-                )
-            });
-        let prompt = Submission::multimodal(text, images);
-        self.replace_draft(String::new());
-        Some(prompt)
+        let submission = self.draft.take_submission()?;
+        self.scroll = 0;
+        Some(submission)
     }
 
     pub(crate) fn take_draft(&mut self) -> Option<ComposerDraft> {
-        if self.draft.is_empty() {
-            return None;
-        }
-
-        let draft = ComposerDraft {
-            text: mem::take(&mut self.draft),
-            images: mem::take(&mut self.images),
-            next_image: mem::replace(&mut self.next_image, 1),
-            cursor: mem::take(&mut self.cursor),
-        };
+        let draft = self.draft.take()?;
         self.history.detach();
-        self.preferred_column = None;
         self.scroll = 0;
-        self.layout = None;
         Some(draft)
     }
 
     pub(crate) fn restore_draft(&mut self, draft: ComposerDraft) {
-        self.draft = draft.text;
-        self.images = draft.images;
-        self.next_image = draft.next_image;
-        self.cursor = draft.cursor;
+        self.draft.restore(draft);
         self.history.detach();
-        self.preferred_column = None;
         self.scroll = 0;
-        self.layout = None;
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> ComposerUpdate {
@@ -753,23 +702,35 @@ impl Composer {
                 self.history.detach();
             }
             return match key.code {
-                KeyCode::Char('a') => ComposerUpdate::from_change(self.move_to_logical_edge(false)),
-                KeyCode::Char('b') => ComposerUpdate::from_change(self.move_left()),
-                KeyCode::Char('e') => ComposerUpdate::from_change(self.move_to_logical_edge(true)),
-                KeyCode::Char('f') => ComposerUpdate::from_change(self.move_right()),
+                KeyCode::Char('a') => ComposerUpdate::from_change(
+                    self.draft.move_to_logical_edge(Direction::Backward),
+                ),
+                KeyCode::Char('b') => {
+                    ComposerUpdate::from_change(self.draft.move_grapheme(Direction::Backward))
+                }
+                KeyCode::Char('e') => {
+                    ComposerUpdate::from_change(self.draft.move_to_logical_edge(Direction::Forward))
+                }
+                KeyCode::Char('f') => {
+                    ComposerUpdate::from_change(self.draft.move_grapheme(Direction::Forward))
+                }
                 KeyCode::Char('g') => {
                     ComposerUpdate::effect(ComposerEffect::OpenDraftEditor, false)
                 }
                 KeyCode::Char('j') => {
                     self.history.detach();
-                    self.insert("\n");
+                    self.draft.insert("\n");
                     ComposerUpdate::changed()
                 }
                 KeyCode::Char('k') => {
-                    ComposerUpdate::from_change(self.delete_to_logical_line_end())
+                    ComposerUpdate::from_change(self.draft.delete_to_logical_line_end())
                 }
-                KeyCode::Char('n') => ComposerUpdate::from_change(self.move_down()),
-                KeyCode::Char('p') => ComposerUpdate::from_change(self.move_up()),
+                KeyCode::Char('n') => {
+                    ComposerUpdate::from_change(self.move_vertical(Direction::Forward))
+                }
+                KeyCode::Char('p') => {
+                    ComposerUpdate::from_change(self.move_vertical(Direction::Backward))
+                }
                 _ => ComposerUpdate::unchanged(),
             };
         }
@@ -795,42 +756,52 @@ impl Composer {
 
         match key.code {
             KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
-                self.insert("\n");
+                self.draft.insert("\n");
                 ComposerUpdate::changed()
             }
             KeyCode::Enter => self.submit(),
             KeyCode::Char('b') if key.modifiers == KeyModifiers::ALT => {
-                ComposerUpdate::from_change(self.move_by_word(false))
+                ComposerUpdate::from_change(self.draft.move_word(Direction::Backward))
             }
             KeyCode::Char('f') if key.modifiers == KeyModifiers::ALT => {
-                ComposerUpdate::from_change(self.move_by_word(true))
+                ComposerUpdate::from_change(self.draft.move_word(Direction::Forward))
             }
             KeyCode::Char(character) => {
-                self.insert(&character.to_string());
+                self.draft.insert(character.encode_utf8(&mut [0; 4]));
                 ComposerUpdate::changed()
             }
-            KeyCode::Left => ComposerUpdate::from_change(self.move_left()),
-            KeyCode::Right => ComposerUpdate::from_change(self.move_right()),
-            KeyCode::Up => ComposerUpdate::from_change(self.move_up()),
-            KeyCode::Down => ComposerUpdate::from_change(self.move_down()),
-            KeyCode::Home => ComposerUpdate::from_change(self.move_to_visual_edge(false)),
-            KeyCode::End => ComposerUpdate::from_change(self.move_to_visual_edge(true)),
-            KeyCode::Backspace if key.modifiers.contains(KeyModifiers::ALT) => {
-                ComposerUpdate::from_change(self.delete_word_before_cursor())
+            KeyCode::Left => {
+                ComposerUpdate::from_change(self.draft.move_grapheme(Direction::Backward))
             }
-            KeyCode::Backspace => ComposerUpdate::from_change(self.backspace()),
-            KeyCode::Delete => ComposerUpdate::from_change(self.delete()),
+            KeyCode::Right => {
+                ComposerUpdate::from_change(self.draft.move_grapheme(Direction::Forward))
+            }
+            KeyCode::Up => ComposerUpdate::from_change(self.move_vertical(Direction::Backward)),
+            KeyCode::Down => ComposerUpdate::from_change(self.move_vertical(Direction::Forward)),
+            KeyCode::Home => ComposerUpdate::from_change(
+                self.draft
+                    .move_to_visual_edge(Direction::Backward, self.last_width),
+            ),
+            KeyCode::End => ComposerUpdate::from_change(
+                self.draft
+                    .move_to_visual_edge(Direction::Forward, self.last_width),
+            ),
+            KeyCode::Backspace if key.modifiers.contains(KeyModifiers::ALT) => {
+                ComposerUpdate::from_change(self.draft.delete_word_before_cursor())
+            }
+            KeyCode::Backspace => ComposerUpdate::from_change(self.draft.backspace()),
+            KeyCode::Delete => ComposerUpdate::from_change(self.draft.delete()),
             _ => ComposerUpdate::unchanged(),
         }
     }
 
     fn submit(&mut self) -> ComposerUpdate {
-        let trimmed = self.draft.trim();
+        let trimmed = self.draft.text().trim();
         if trimmed.is_empty() {
             return ComposerUpdate::unchanged();
         }
 
-        if self.images.is_empty() && self.draft.starts_with('!') {
+        if !self.draft.has_images() && self.draft.text().starts_with('!') {
             let command = trimmed.trim_start_matches('!').trim().to_owned();
             if command.is_empty() {
                 return ComposerUpdate::unchanged();
@@ -847,301 +818,22 @@ impl Composer {
         ComposerUpdate::effect(ComposerEffect::Submit(prompt), true)
     }
 
-    fn move_up(&mut self) -> bool {
-        if !self.history.is_browsing() && self.move_vertical(-1) {
+    /// Moves between visual lines, or through prompt history from the first
+    /// line upward and while history is being browsed.
+    fn move_vertical(&mut self, direction: Direction) -> bool {
+        let browsing = self.history.is_browsing();
+        if !browsing && self.draft.move_vertical(direction, self.last_width) {
             return true;
         }
-
-        let Some(prompt) = self.history.previous(&self.draft) else {
+        let prompt = match direction {
+            Direction::Backward => self.history.previous(self.draft.text()),
+            Direction::Forward if browsing => self.history.next(),
+            Direction::Forward => None,
+        };
+        let Some(prompt) = prompt else {
             return false;
         };
         self.replace_draft(prompt);
-        true
-    }
-
-    fn move_down(&mut self) -> bool {
-        if !self.history.is_browsing() {
-            return self.move_vertical(1);
-        }
-
-        let Some(prompt) = self.history.next() else {
-            return false;
-        };
-        self.replace_draft(prompt);
-        true
-    }
-
-    fn insert(&mut self, text: &str) {
-        let text = normalize_line_endings(text);
-        self.move_cursor_out_of_image();
-        for image in &mut self.images {
-            if image.range.start >= self.cursor {
-                image.range.start += text.len();
-                image.range.end += text.len();
-            }
-        }
-        self.draft.insert_str(self.cursor, &text);
-        self.cursor += text.len();
-        self.preferred_column = None;
-        self.layout = None;
-    }
-
-    fn move_left(&mut self) -> bool {
-        let Some(previous) = self.draft[..self.cursor].grapheme_indices(true).next_back() else {
-            return false;
-        };
-        self.cursor = self
-            .images
-            .iter()
-            .find(|image| image.range.contains(&previous.0))
-            .map_or(previous.0, |image| image.range.start);
-        self.preferred_column = None;
-        true
-    }
-
-    fn move_right(&mut self) -> bool {
-        let Some(next) = self.draft[self.cursor..].graphemes(true).next() else {
-            return false;
-        };
-        let target = self.cursor + next.len();
-        self.cursor = self
-            .images
-            .iter()
-            .find(|image| image.range.start < target && target < image.range.end)
-            .map_or(target, |image| image.range.end);
-        self.preferred_column = None;
-        true
-    }
-
-    fn backspace(&mut self) -> bool {
-        if let Some(index) = self
-            .images
-            .iter()
-            .position(|image| image.range.start < self.cursor && self.cursor <= image.range.end)
-        {
-            let range = self.images.remove(index).range;
-            self.remove_range(range);
-            return true;
-        }
-        let Some(previous) = self.draft[..self.cursor]
-            .grapheme_indices(true)
-            .next_back()
-            .map(|(index, _)| index)
-        else {
-            return false;
-        };
-        self.remove_range(previous..self.cursor);
-        true
-    }
-
-    fn delete_word_before_cursor(&mut self) -> bool {
-        let mut start = self.cursor;
-        while let Some((index, character)) = self.draft[..start].char_indices().next_back() {
-            if !character.is_whitespace() {
-                break;
-            }
-            start = index;
-        }
-        while let Some((index, character)) = self.draft[..start].char_indices().next_back() {
-            if character.is_whitespace() {
-                break;
-            }
-            start = index;
-        }
-        let end = self.cursor;
-        if let Some(image_start) = self
-            .images
-            .iter()
-            .filter(|image| image.range.start < end && start < image.range.end)
-            .map(|image| image.range.start)
-            .min()
-        {
-            start = image_start;
-        }
-        if start == end {
-            return false;
-        }
-
-        self.images
-            .retain(|image| image.range.end <= start || image.range.start >= end);
-        self.remove_range(start..end);
-        true
-    }
-
-    fn move_by_word(&mut self, forward: bool) -> bool {
-        let is_word = |grapheme: &str| grapheme.chars().any(char::is_alphanumeric);
-        let target = if forward {
-            let mut found_word = false;
-            let mut target = self.draft.len();
-            for (offset, grapheme) in self.draft[self.cursor..].grapheme_indices(true) {
-                if is_word(grapheme) {
-                    found_word = true;
-                    target = self.cursor + offset + grapheme.len();
-                } else if found_word {
-                    break;
-                }
-            }
-            target
-        } else {
-            let mut found_word = false;
-            let mut target = 0;
-            for (offset, grapheme) in self.draft[..self.cursor].grapheme_indices(true).rev() {
-                if is_word(grapheme) {
-                    found_word = true;
-                    target = offset;
-                } else if found_word {
-                    break;
-                }
-            }
-            target
-        };
-
-        let adjust_position_out_of_image = |position: usize, prefer_start: bool| {
-            let Some(image) = self
-                .images
-                .iter()
-                .find(|image| image.range.start < position && position < image.range.end)
-            else {
-                return position;
-            };
-            if prefer_start {
-                image.range.start
-            } else {
-                image.range.end
-            }
-        };
-        let target = adjust_position_out_of_image(target, !forward);
-        if target == self.cursor {
-            return false;
-        }
-        self.cursor = target;
-        self.preferred_column = None;
-        true
-    }
-
-    fn delete(&mut self) -> bool {
-        if let Some(index) = self
-            .images
-            .iter()
-            .position(|image| image.range.start <= self.cursor && self.cursor < image.range.end)
-        {
-            let range = self.images.remove(index).range;
-            self.remove_range(range);
-            return true;
-        }
-        let Some(next) = self.draft[self.cursor..].graphemes(true).next() else {
-            return false;
-        };
-        self.remove_range(self.cursor..self.cursor + next.len());
-        true
-    }
-
-    fn delete_to_logical_line_end(&mut self) -> bool {
-        let end = self.draft[self.cursor..]
-            .find('\n')
-            .map_or(self.draft.len(), |offset| self.cursor + offset);
-        let end = if end == self.cursor && end < self.draft.len() {
-            end + '\n'.len_utf8()
-        } else {
-            end
-        };
-        if end == self.cursor {
-            return false;
-        }
-
-        self.images
-            .retain(|image| image.range.end <= self.cursor || image.range.start >= end);
-        self.remove_range(self.cursor..end);
-        true
-    }
-
-    fn insert_image(&mut self, data_url: String) {
-        self.move_cursor_out_of_image();
-        let marker = format!("[Image #{}]", self.next_image);
-        let start = self.cursor;
-        self.insert(&marker);
-        self.images.push(PastedImage {
-            range: start..self.cursor,
-            data_url,
-        });
-        self.images.sort_by_key(|image| image.range.start);
-        self.next_image = self.next_image.saturating_add(1);
-    }
-
-    fn move_cursor_out_of_image(&mut self) {
-        if let Some(image) = self
-            .images
-            .iter()
-            .find(|image| image.range.start < self.cursor && self.cursor < image.range.end)
-        {
-            self.cursor = image.range.end;
-        }
-    }
-
-    fn remove_range(&mut self, range: Range<usize>) {
-        let removed = range.len();
-        self.draft.drain(range.clone());
-        for image in &mut self.images {
-            if image.range.start >= range.end {
-                image.range.start -= removed;
-                image.range.end -= removed;
-            }
-        }
-        self.cursor = range.start;
-        self.preferred_column = None;
-        self.layout = None;
-    }
-
-    fn move_vertical(&mut self, direction: isize) -> bool {
-        let layout = VisualLayout::new(&self.draft, self.cursor, self.last_width.max(1));
-        let target_row = layout.cursor_row.saturating_add_signed(direction);
-        if target_row == layout.cursor_row || target_row >= layout.lines.len() {
-            return false;
-        }
-
-        let desired = *self.preferred_column.get_or_insert(layout.cursor_column);
-        let target = byte_at_column(&self.draft, &layout.lines[target_row], desired);
-        self.cursor = self
-            .images
-            .iter()
-            .find(|image| image.range.start < target && target < image.range.end)
-            .map_or(target, |image| {
-                if direction.is_negative() {
-                    image.range.start
-                } else {
-                    image.range.end
-                }
-            });
-        true
-    }
-
-    fn move_to_visual_edge(&mut self, end: bool) -> bool {
-        let layout = VisualLayout::new(&self.draft, self.cursor, self.last_width.max(1));
-        let line = &layout.lines[layout.cursor_row];
-        let target = if end { line.end } else { line.start };
-        if target == self.cursor {
-            return false;
-        }
-        self.cursor = target;
-        self.preferred_column = None;
-        true
-    }
-
-    fn move_to_logical_edge(&mut self, end: bool) -> bool {
-        let target = if end {
-            self.draft[self.cursor..]
-                .find('\n')
-                .map_or(self.draft.len(), |offset| self.cursor + offset)
-        } else {
-            self.draft[..self.cursor]
-                .rfind('\n')
-                .map_or(0, |offset| offset + '\n'.len_utf8())
-        };
-        if target == self.cursor {
-            return false;
-        }
-        self.cursor = target;
-        self.preferred_column = None;
         true
     }
 
@@ -1163,25 +855,6 @@ impl Composer {
         self.scroll = self.scroll.min(line_count.saturating_sub(visible));
     }
 
-    fn visual_layout(&mut self, width: usize) -> &VisualLayout {
-        let stale = self
-            .layout
-            .as_ref()
-            .is_some_and(|cached| cached.width != width || cached.cursor != self.cursor);
-        if stale {
-            self.layout = None;
-        }
-
-        let cursor = self.cursor;
-        let draft = &self.draft;
-        let cached = self.layout.get_or_insert_with(|| CachedLayout {
-            width,
-            cursor,
-            value: VisualLayout::new(draft, cursor, width),
-        });
-        &cached.value
-    }
-
     fn render_narrow(
         &mut self,
         frame: &mut Frame<'_>,
@@ -1192,7 +865,7 @@ impl Composer {
     ) {
         let width = usize::from(area.width).max(1);
         let (cursor_row, cursor_column, line_count) = {
-            let layout = self.visual_layout(width);
+            let layout = self.draft.visual_layout(width);
             (layout.cursor_row, layout.cursor_column, layout.lines.len())
         };
         if selection.is_none() {
@@ -1201,28 +874,18 @@ impl Composer {
             self.clamp_scroll(1, line_count);
         }
         let scroll = self.scroll;
-        let line = self.visual_layout(width).lines[scroll].clone();
+        let line = self.draft.visual_layout(width).lines[scroll].clone();
 
         let buffer = frame.buffer_mut();
         buffer.set_style(area, Style::default().fg(theme.text()));
-        render_draft_line(
-            buffer,
-            Position::new(area.x, area.y),
-            &self.draft,
-            &self.images,
-            line.start..line.end,
-            width,
-            theme,
-        );
-        if let Some(selection) = selection {
-            render_selection(
-                buffer,
-                Position::new(area.x, area.y),
-                &self.draft,
-                line.start..line.end,
-                selection,
-                width,
-            );
+        let position = Position::new(area.x, area.y);
+        self.draft
+            .render_line(buffer, position, line.start..line.end, width, theme);
+        if let Some(selected) =
+            selection.and_then(|selection| selection.source_range(0, self.draft.text().len()))
+        {
+            self.draft
+                .render_selection(buffer, position, line.start..line.end, selected, width);
         }
         if focused && selection.is_none() {
             let cursor_column = if cursor_row == scroll {
@@ -1237,12 +900,39 @@ impl Composer {
         }
     }
 
+    fn status_line(&self) -> StatusLine {
+        let window = self.context_window_tokens;
+        let capacity = if window.is_multiple_of(1_000_000) {
+            format!("{}m", window / 1_000_000)
+        } else if window.is_multiple_of(1_000) {
+            format!("{}k", window / 1_000)
+        } else {
+            window.to_string()
+        };
+        StatusLine {
+            context: format!(
+                "{}%/{capacity}",
+                context_percent(self.context_tokens, window)
+            ),
+            input_mode: self.input_mode.hint(),
+            task: self.task_wave.as_ref().map(|wave| wave.text().to_owned()),
+            activity: self
+                .activity_wave
+                .as_ref()
+                .map(|wave| wave.text().to_owned()),
+            subagents: self.active_subagents,
+            live_sessions: self.live_sessions,
+            turn_timer: self.turn_timers.front().map(TurnTimer::label),
+            model: self.model,
+            effort: self.thinking,
+            speed: self.speed.for_model(self.model),
+            pro: self.reasoning_mode == ReasoningMode::Pro && matches!(self.model, Model::Codex(_)),
+        }
+    }
+
     fn render_chrome(&mut self, buffer: &mut Buffer, area: Rect, theme: &Theme) {
-        self.effort_hit_area = None;
-        self.speed_hit_area = None;
-        self.model_hit_area = None;
-        self.subagent_hit_area = None;
-        let shell_mode = self.draft.starts_with('!');
+        self.chrome_hits.clear();
+        let shell_mode = self.draft.text().starts_with('!');
         let border = self.border_style(theme);
         let top = area.y;
         let bottom = area.bottom() - 1;
@@ -1263,67 +953,42 @@ impl Composer {
         let content_start = area.x + 2;
         let content_width = usize::from(area.width - 4);
         let content_end = content_start + u16::try_from(content_width).unwrap_or(u16::MAX);
-        let window = self.context_window_tokens;
-        let capacity = if window.is_multiple_of(1_000_000) {
-            format!("{}m", window / 1_000_000)
-        } else if window.is_multiple_of(1_000) {
-            format!("{}k", window / 1_000)
-        } else {
-            window.to_string()
-        };
-        let usage_prefix = format!(
-            " {}%/{capacity} ",
-            context_percent(self.context_tokens, window)
-        );
-        let input_mode_segment = self
-            .input_mode
-            .as_ref()
-            .map(|mode| format!("{mode} "))
-            .unwrap_or_default();
-        let task_segment = self
-            .task_status
-            .as_ref()
-            .map(|status| format!("{status} "))
-            .unwrap_or_default();
-        let status_segment = self.activity_status.clone().unwrap_or_default();
-        let subagent_segment = if self.active_subagents > 0 {
-            format!(" {} subagents", self.active_subagents)
-        } else {
-            String::new()
-        };
-        let usage_before_activity = format!("{usage_prefix}{input_mode_segment}{task_segment}");
-        let usage_before_subagents = self.activity_wave.as_ref().map_or_else(
-            || usage_before_activity.clone(),
-            |_| format!("{usage_before_activity}{status_segment} "),
-        );
-        let mut usage = if subagent_segment.is_empty() {
-            usage_before_subagents.clone()
-        } else {
-            format!("{usage_before_subagents}{} ", subagent_segment.trim_start())
-        };
-        if let Some(sessions) = &self.live_sessions {
-            usage.push_str(sessions);
-            usage.push(' ');
+        let status = self.status_line();
+        let usage_prefix = format!(" {} ", status.context);
+        let mut usage_before_activity = usage_prefix.clone();
+        if let Some(hint) = status.input_mode {
+            write!(usage_before_activity, "{hint} ").expect("writing to a String cannot fail");
         }
-        let model = format!(" {} ", self.model);
-        let timer = self
-            .turn_timers
-            .front()
-            .map(|timer| format!(" {} ", timer.label()))
+        if let Some(task) = &status.task {
+            write!(usage_before_activity, "{task} ").expect("writing to a String cannot fail");
+        }
+        let mut usage_before_subagents = usage_before_activity.clone();
+        if let Some(activity) = &status.activity {
+            write!(usage_before_subagents, "{activity} ").expect("writing to a String cannot fail");
+        }
+        let mut usage = usage_before_subagents.clone();
+        if status.subagents > 0 {
+            write!(usage, "{} subagents ", status.subagents)
+                .expect("writing to a String cannot fail");
+        }
+        if let Some(sessions) = status.live_sessions {
+            write!(usage, "{sessions} ").expect("writing to a String cannot fail");
+        }
+        let model = format!(" {} ", status.model);
+        let timer = status
+            .turn_timer
+            .as_deref()
+            .map(|label| format!(" {label} "))
             .unwrap_or_default();
-        let effort = format!(" {} ", self.thinking.as_str());
+        let effort = format!(" {} ", status.effort.as_str());
 
         // Nerd Fonts: md-turtle, md-rabbit, and md-rocket.
-        let effective_speed = self.speed.for_model(self.model);
-        let speed = match effective_speed {
+        let speed = match status.speed {
             Speed::Standard => "󰳗 ",
             Speed::Fast => "󰤇 ",
             Speed::Ultrafast => "󰑣 ",
         };
-
-        let pro_mode = (self.reasoning_mode == ReasoningMode::Pro
-            && matches!(self.model, Model::Codex(_)))
-        .then_some("pro ");
+        let pro_mode = status.pro.then_some("pro ");
         let right_width = timer.width()
             + model.width()
             + effort.width()
@@ -1341,47 +1006,27 @@ impl Composer {
             Style::default().fg(theme.muted()),
         );
         if let Some(wave) = &self.task_wave {
-            let mut x = content_start + u16::try_from(usage_prefix.width()).unwrap_or(u16::MAX);
-            for span in wave.spans() {
-                if x >= right_start {
-                    break;
-                }
-                let width = u16::try_from(span.width()).unwrap_or(u16::MAX);
-                buffer.set_span(x, top, &span, right_start.saturating_sub(x));
-                x = x.saturating_add(width);
-            }
+            let x = content_start + u16::try_from(usage_prefix.width()).unwrap_or(u16::MAX);
+            wave.draw(buffer, x, top, right_start);
         }
         if let Some(wave) = &self.activity_wave {
-            let mut x =
+            let x =
                 content_start + u16::try_from(usage_before_activity.width()).unwrap_or(u16::MAX);
-            for span in wave.spans() {
-                if x >= right_start {
-                    break;
-                }
-                let width = u16::try_from(span.width()).unwrap_or(u16::MAX);
-                buffer.set_span(x, top, &span, right_start.saturating_sub(x));
-                x = x.saturating_add(width);
-            }
+            wave.draw(buffer, x, top, right_start);
         }
         if let Some(wave) = &self.subagent_wave {
             let wave_x =
                 content_start + u16::try_from(usage_before_subagents.width()).unwrap_or(u16::MAX);
-            let wave_width =
-                u16::try_from(wave.spans().iter().map(|span| span.width()).sum::<usize>())
-                    .unwrap_or(u16::MAX)
-                    .min(right_start.saturating_sub(wave_x));
+            let wave_width = u16::try_from(wave.width())
+                .unwrap_or(u16::MAX)
+                .min(right_start.saturating_sub(wave_x));
             if wave_width > 0 {
-                self.subagent_hit_area = Some(Rect::new(wave_x, top, wave_width, 1));
+                self.chrome_hits.push((
+                    ComposerChromeTarget::Subagents,
+                    Rect::new(wave_x, top, wave_width, 1),
+                ));
             }
-            let mut x = wave_x;
-            for span in wave.spans() {
-                if x >= right_start {
-                    break;
-                }
-                let width = u16::try_from(span.width()).unwrap_or(u16::MAX);
-                buffer.set_span(x, top, &span, right_start.saturating_sub(x));
-                x = x.saturating_add(width);
-            }
+            wave.draw(buffer, wave_x, top, right_start);
         }
         buffer.set_stringn(
             right_start,
@@ -1392,13 +1037,12 @@ impl Composer {
         );
         let model_start = right_start + u16::try_from(timer.width()).unwrap_or(u16::MAX);
         if model_start < content_end {
-            self.model_hit_area = Some(Rect::new(
-                model_start,
-                top,
-                u16::try_from(model.width())
-                    .unwrap_or(u16::MAX)
-                    .min(content_end.saturating_sub(model_start)),
-                1,
+            let width = u16::try_from(model.width())
+                .unwrap_or(u16::MAX)
+                .min(content_end.saturating_sub(model_start));
+            self.chrome_hits.push((
+                ComposerChromeTarget::Model,
+                Rect::new(model_start, top, width, 1),
             ));
         }
         buffer.set_stringn(
@@ -1406,17 +1050,16 @@ impl Composer {
             top,
             &model,
             usize::from(content_end.saturating_sub(model_start)),
-            Style::default().fg(theme.model(self.model)),
+            Style::default().fg(theme.model(status.model)),
         );
         let effort_start = model_start + u16::try_from(model.width()).unwrap_or(u16::MAX);
         if effort_start < content_end {
-            self.effort_hit_area = Some(Rect::new(
-                effort_start,
-                top,
-                u16::try_from(effort.width())
-                    .unwrap_or(u16::MAX)
-                    .min(content_end.saturating_sub(effort_start)),
-                1,
+            let width = u16::try_from(effort.width())
+                .unwrap_or(u16::MAX)
+                .min(content_end.saturating_sub(effort_start));
+            self.chrome_hits.push((
+                ComposerChromeTarget::Effort,
+                Rect::new(effort_start, top, width, 1),
             ));
             buffer.set_stringn(
                 effort_start,
@@ -1424,7 +1067,7 @@ impl Composer {
                 &effort,
                 usize::from(content_end - effort_start),
                 Style::default()
-                    .fg(theme.effort(self.thinking))
+                    .fg(theme.effort(status.effort))
                     .add_modifier(Modifier::BOLD),
             );
         }
@@ -1443,14 +1086,17 @@ impl Composer {
             natural_pro_mode_start
         };
         if speed_start < content_end && speed_start.saturating_add(speed_width) <= pro_mode_start {
-            self.speed_hit_area = Some(Rect::new(speed_start, top, speed_width, 1));
+            self.chrome_hits.push((
+                ComposerChromeTarget::Speed,
+                Rect::new(speed_start, top, speed_width, 1),
+            ));
             buffer.set_stringn(
                 speed_start,
                 top,
                 speed,
                 usize::from(content_end - speed_start),
                 Style::default()
-                    .fg(theme.speed(effective_speed))
+                    .fg(theme.speed(status.speed))
                     .add_modifier(Modifier::BOLD),
             );
         }
@@ -1482,7 +1128,7 @@ impl Composer {
         let development_start =
             directory_start.saturating_sub(u16::try_from(development_width).unwrap_or(u16::MAX));
         let hint_space = usize::from(development_start.saturating_sub(content_start));
-        let entry_hint = entry_hint(theme, self.draft.is_empty());
+        let entry_hint = entry_hint(theme, self.draft.text().is_empty());
         if entry_hint.width() <= hint_space {
             buffer.set_line(
                 content_start,
@@ -1523,7 +1169,7 @@ impl Composer {
     fn border_style(&self, theme: &Theme) -> Style {
         Style::default().fg(if self.task_wave.is_some() {
             Color::Green
-        } else if self.draft.starts_with('!') {
+        } else if self.draft.text().starts_with('!') {
             Color::Yellow
         } else {
             theme.border()
@@ -1603,92 +1249,43 @@ fn context_percent(tokens: u64, window: u64) -> u64 {
     tokens.saturating_mul(100).saturating_add(window / 2) / window.max(1)
 }
 
+/// Replaces a status wave when its text changes, starting the new wave
+/// immediately. Returns whether the status changed.
+fn replace_wave(
+    wave: &mut Option<WavedText>,
+    status: Option<String>,
+    color: Color,
+    now: Instant,
+) -> bool {
+    if wave.as_ref().map(WavedText::text) == status.as_deref() {
+        return false;
+    }
+    *wave = status.map(|status| {
+        let mut replacement = WavedText::new(status, color);
+        replacement.set_active(true, now);
+        replacement
+    });
+    true
+}
+
 fn draw_symbol(buffer: &mut Buffer, x: u16, y: u16, symbol: &str, style: Style) {
     buffer[(x, y)].set_symbol(symbol).set_style(style);
-}
-
-fn render_draft_line(
-    buffer: &mut Buffer,
-    position: Position,
-    draft: &str,
-    images: &[PastedImage],
-    range: Range<usize>,
-    width: usize,
-    theme: &Theme,
-) {
-    let rendered = sanitize_terminal_text(&draft[range.clone()]);
-    buffer.set_stringn(
-        position.x,
-        position.y,
-        rendered,
-        width,
-        Style::default().fg(theme.text()),
-    );
-    for image in images {
-        let start = image.range.start.max(range.start);
-        let end = image.range.end.min(range.end);
-        if start >= end {
-            continue;
-        }
-        let offset = terminal_text_width(&draft[range.start..start]);
-        buffer.set_stringn(
-            position
-                .x
-                .saturating_add(u16::try_from(offset).unwrap_or(u16::MAX)),
-            position.y,
-            &draft[start..end],
-            width.saturating_sub(offset),
-            Style::default().fg(Color::Blue),
-        );
-    }
-}
-
-fn render_selection(
-    buffer: &mut Buffer,
-    position: Position,
-    draft: &str,
-    line: Range<usize>,
-    selection: TextRange,
-    width: usize,
-) {
-    let Some(selected) = selection.source_range(0, draft.len()) else {
-        return;
-    };
-    let start = selected.start.max(line.start);
-    let end = selected.end.min(line.end);
-    if start >= end {
-        return;
-    }
-    let Some(prefix) = draft.get(line.start..start) else {
-        return;
-    };
-    let Some(text) = draft.get(start..end) else {
-        return;
-    };
-    let offset = terminal_text_width(prefix);
-    let selected_width = terminal_text_width(text).min(width.saturating_sub(offset));
-    if selected_width == 0 {
-        return;
-    }
-    let x = position
-        .x
-        .saturating_add(u16::try_from(offset).unwrap_or(u16::MAX));
-    let width = u16::try_from(selected_width).unwrap_or(u16::MAX);
-    buffer.set_style(
-        Rect::new(x, position.y, width, 1),
-        Style::reset().fg(Color::Black).bg(Color::Yellow),
-    );
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         super::selection::{Selection, Surface, TextRange},
-        Composer, ComposerChromeTarget, ComposerEffect, ComposerEvent, context_percent,
+        Composer, ComposerChromeTarget, ComposerEffect, ComposerEvent, InputMode, LiveSessions,
+        StatusLine, context_percent,
     };
     use crate::{
-        app::config::{ReasoningEffort, ReasoningMode, Speed},
-        tui::theme::Theme,
+        app::{
+            config::{ReasoningEffort, ReasoningMode, Speed},
+            installation,
+            theme::Theme,
+        },
+        core::context::ContextBudget,
     };
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use nanocodex::{
@@ -1698,14 +1295,36 @@ mod tests {
     use ratatui::{
         Terminal,
         backend::TestBackend,
+        buffer::Cell,
         layout::{Position, Rect},
-        style::Color,
+        style::{Color, Modifier},
     };
     use std::{
         path::Path,
         time::{Duration, Instant},
     };
     use unicode_width::UnicodeWidthStr;
+
+    fn new_composer() -> Composer {
+        Composer::new(Path::new("/work"), ReasoningEffort::Medium)
+    }
+
+    /// The status line of [`new_composer`].
+    fn idle_status() -> StatusLine {
+        StatusLine {
+            context: "0%/272k".to_owned(),
+            input_mode: None,
+            task: None,
+            activity: None,
+            subagents: 0,
+            live_sessions: None,
+            turn_timer: None,
+            model: Model::Codex(CodexModel::Sol),
+            effort: ReasoningEffort::Medium,
+            speed: Speed::Standard,
+            pro: false,
+        }
+    }
 
     fn key(code: KeyCode, modifiers: KeyModifiers) -> ComposerEvent {
         ComposerEvent::Terminal(Event::Key(KeyEvent::new(code, modifiers)))
@@ -1751,110 +1370,181 @@ mod tests {
             .collect()
     }
 
+    /// The cells on row `y` that display the first occurrence of `text`, which must follow only
+    /// single-width symbols on that row.
+    fn cells_of<'a>(terminal: &'a Terminal<TestBackend>, y: u16, text: &str) -> &'a [Cell] {
+        let buffer = terminal.backend().buffer();
+        let row = &rows(terminal)[usize::from(y)];
+        let x = row[..row.find(text).expect("text should be rendered")].width();
+        let start = usize::from(y) * usize::from(buffer.area.width) + x;
+        &buffer.content[start..start + text.width()]
+    }
+
+    /// A footer row for `/work` written as development builds render it; other builds draw border
+    /// in place of the development badge.
+    fn footer(development: &str) -> String {
+        if installation::current().is_development() {
+            development.to_owned()
+        } else {
+            development.replace(" ◉ dev ", "───────")
+        }
+    }
+
     #[test]
     fn empty_composer_matches_the_pi_chrome() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
-        let terminal = render(&mut composer, 60, 5);
-        let footer = if crate::app::installation::current().is_development() {
-            "╰─ / actions · @ paths · @@ sessions ─────── ◉ dev  /work ─╯"
-        } else {
-            "╰─ / actions · @ paths · @@ sessions ───────────────── /work ─╯"
-        };
+        let mut composer = new_composer();
+        assert_eq!(composer.status_line(), idle_status());
 
+        let terminal = render(&mut composer, 60, 5);
         assert_eq!(
             rows(&terminal),
             [
-                "╭─ 0%/272k ──────────────────────── gpt-6.1-sol  medium 󰳗 ─╮",
-                "│                                                          │",
-                "│                                                          │",
-                "│                                                          │",
-                footer,
+                "╭─ 0%/272k ──────────────────────── gpt-6.1-sol  medium 󰳗 ─╮".to_owned(),
+                "│                                                          │".to_owned(),
+                "│                                                          │".to_owned(),
+                "│                                                          │".to_owned(),
+                footer("╰─ / actions · @ paths · @@ sessions ─────── ◉ dev  /work ─╯"),
             ]
         );
 
-        let buffer = terminal.backend().buffer();
-        let footer = &rows(&terminal)[4];
-        let action_key =
-            u16::try_from(footer[..footer.find("/ actions").unwrap()].width()).unwrap();
-        let action_help = action_key + 2;
-        assert_eq!(buffer[(action_key, 4)].fg, Color::Reset);
-        assert_eq!(buffer[(action_help, 4)].fg, Theme::default().muted());
+        let actions = cells_of(&terminal, 4, "/ actions");
+        assert_eq!(actions[0].fg, Color::Reset);
+        assert_eq!(actions[2].fg, Theme::default().muted());
+    }
+
+    #[test]
+    fn top_border_lays_out_status_then_timer_and_controls() {
+        let mut composer = new_composer();
+        let now = Instant::now();
+        for event in [
+            ComposerEvent::ContextBudget(ContextBudget {
+                active_tokens: 34_000,
+                window_tokens: 1_000_000,
+            }),
+            ComposerEvent::TaskStatus {
+                status: Some("Preparing handoff…".to_owned()),
+                now,
+            },
+            ComposerEvent::Activity {
+                active: true,
+                status: Some("Thinking…".to_owned()),
+                now,
+            },
+            ComposerEvent::ActiveSubagents { count: 2, now },
+            ComposerEvent::LiveSessions(Some(LiveSessions {
+                live: 3,
+                running: 1,
+            })),
+            ComposerEvent::TurnStarted {
+                elapsed: Duration::from_secs(65),
+                now,
+            },
+            ComposerEvent::SetSpeed(Speed::Fast),
+            ComposerEvent::SetReasoningMode(ReasoningMode::Pro),
+        ] {
+            composer.update(event);
+        }
+
+        assert_eq!(
+            composer.status_line(),
+            StatusLine {
+                context: "3%/1m".to_owned(),
+                task: Some("Preparing handoff…".to_owned()),
+                activity: Some("Thinking…".to_owned()),
+                subagents: 2,
+                live_sessions: Some(LiveSessions {
+                    live: 3,
+                    running: 1
+                }),
+                turn_timer: Some("1m 5s".to_owned()),
+                speed: Speed::Fast,
+                pro: true,
+                ..idle_status()
+            }
+        );
+        assert_eq!(
+            rows(&render(&mut composer, 120, 5))[0],
+            "╭─ 3%/1m Preparing handoff… Thinking… 2 subagents 3 sessions, 1 running ──────────── 1m 5s  gpt-6.1-sol  medium 󰤇 pro ─╮"
+        );
+    }
+
+    #[test]
+    fn input_mode_hint_follows_context_usage() {
+        let mut composer = new_composer();
+        composer.update(ComposerEvent::InputMode(InputMode::Reflection));
+
+        assert_eq!(
+            composer.status_line(),
+            StatusLine {
+                input_mode: Some("Reflection instructions · enter start · esc cancel"),
+                ..idle_status()
+            }
+        );
+        assert_eq!(
+            rows(&render(&mut composer, 90, 5))[0],
+            "╭─ 0%/272k Reflection instructions · enter start · esc cancel ─── gpt-6.1-sol  medium 󰳗 ─╮"
+        );
     }
 
     #[test]
     fn composer_chrome_uses_the_model_palette() {
-        for (model, color) in [
-            (
-                Model::Codex(CodexModel::Luna),
-                Theme::default().model(Model::Codex(CodexModel::Luna)),
-            ),
-            (
-                Model::Codex(CodexModel::Sol),
-                Theme::default().model(Model::Codex(CodexModel::Sol)),
-            ),
-            (
-                Model::Codex(CodexModel::Astra),
-                Theme::default().model(Model::Codex(CodexModel::Astra)),
-            ),
-        ] {
-            let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        for model in [CodexModel::Luna, CodexModel::Sol, CodexModel::Astra].map(Model::Codex) {
+            let mut composer = new_composer();
             composer.update(ComposerEvent::SetModel(model));
-            let terminal = render(&mut composer, 60, 5);
-            let label = model.to_string().chars().collect::<Vec<_>>();
-            let line = rows(&terminal)[0].chars().collect::<Vec<_>>();
-            let start = line
-                .windows(label.len())
-                .position(|window| window == label)
-                .unwrap();
+            assert_eq!(composer.status_line().model, model);
 
-            assert_eq!(
-                terminal.backend().buffer()[(u16::try_from(start).unwrap(), 0)].fg,
-                color
+            let terminal = render(&mut composer, 60, 5);
+            let label = cells_of(&terminal, 0, model.as_str());
+            assert!(
+                label
+                    .iter()
+                    .all(|cell| cell.fg == Theme::default().model(model))
             );
         }
     }
 
     #[test]
-    fn task_status_uses_green_chrome_next_to_context() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+    fn task_status_turns_the_border_green() {
+        let mut composer = new_composer();
         composer.update(ComposerEvent::TaskStatus {
             status: Some("Preparing handoff…".to_owned()),
             now: Instant::now(),
         });
 
+        assert_eq!(
+            composer.status_line(),
+            StatusLine {
+                task: Some("Preparing handoff…".to_owned()),
+                ..idle_status()
+            }
+        );
         let terminal = render(&mut composer, 80, 5);
-
-        assert!(rows(&terminal)[0].contains("0%/272k Preparing handoff…"));
         assert_eq!(terminal.backend().buffer()[(0, 0)].fg, Color::Green);
     }
 
     #[test]
-    fn turn_timer_is_rendered_immediately_before_the_model() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+    fn turn_timer_advances_each_second_until_the_turn_finishes() {
+        let mut composer = new_composer();
         let started_at = Instant::now();
         composer.update(ComposerEvent::TurnStarted {
             elapsed: Duration::from_secs(65),
             now: started_at,
         });
-
-        let terminal = render(&mut composer, 72, 5);
-        assert!(rows(&terminal)[0].contains(" 1m 5s  gpt-6.1-sol "));
+        assert_eq!(composer.status_line().turn_timer.as_deref(), Some("1m 5s"));
 
         let update = composer.update(ComposerEvent::AnimationFrame(
             started_at + Duration::from_secs(2),
         ));
         assert!(update.changed);
-        let terminal = render(&mut composer, 72, 5);
-        assert!(rows(&terminal)[0].contains(" 1m 7s  gpt-6.1-sol "));
+        assert_eq!(composer.status_line().turn_timer.as_deref(), Some("1m 7s"));
 
         composer.update(ComposerEvent::TurnFinished);
-        let terminal = render(&mut composer, 72, 5);
-        assert!(!rows(&terminal)[0].contains("1m 7s"));
+        assert_eq!(composer.status_line().turn_timer, None);
     }
 
     #[test]
     fn completing_one_run_keeps_the_next_active_run_timed() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         let now = Instant::now();
         composer.update(ComposerEvent::TurnStarted {
             elapsed: Duration::from_secs(65),
@@ -1868,14 +1558,13 @@ mod tests {
 
         composer.update(ComposerEvent::TurnFinished);
 
-        let terminal = render(&mut composer, 72, 5);
-        assert!(rows(&terminal)[0].contains(" 7s  gpt-6.1-sol "));
+        assert_eq!(composer.status_line().turn_timer.as_deref(), Some("7s"));
         assert!(composer.animation_deadline().is_some());
     }
 
     #[test]
     fn speed_icon_displays_the_effective_tier_and_is_clickable() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         composer.update(ComposerEvent::SetSpeed(Speed::Ultrafast));
         for (model, effective, icon) in [
             (Model::Codex(CodexModel::Astra), Speed::Ultrafast, "󰑣"),
@@ -1885,11 +1574,11 @@ mod tests {
             (Model::Claude(ClaudeModel::Fable51), Speed::Standard, "󰳗"),
         ] {
             composer.update(ComposerEvent::SetModel(model));
-            let terminal = render(&mut composer, 72, 5);
-            assert!(rows(&terminal)[0].contains(&format!("medium {icon} ")));
+            assert_eq!(composer.status_line().speed, effective);
             assert_eq!(composer.speed(), Speed::Ultrafast);
+            let terminal = render(&mut composer, 72, 5);
             let hit = composer
-                .speed_hit_area
+                .chrome_area(ComposerChromeTarget::Speed)
                 .expect("speed should have a hit target");
             assert_eq!(
                 composer.chrome_target(Position::new(hit.x, hit.y)),
@@ -1898,144 +1587,138 @@ mod tests {
             let cell = &terminal.backend().buffer()[(hit.x, hit.y)];
             assert_eq!(cell.symbol(), icon);
             assert_eq!(cell.fg, Theme::default().speed(effective));
-            assert!(cell.modifier.contains(ratatui::style::Modifier::BOLD));
+            assert!(cell.modifier.contains(Modifier::BOLD));
         }
     }
 
     #[test]
     fn claude_models_show_their_effective_speed_and_hide_pro() {
-        for (model, icon) in [
-            (Model::Claude(ClaudeModel::Sonnet55), "󰳗"),
-            (Model::Claude(ClaudeModel::Opus55), "󰤇"),
-            (Model::Claude(ClaudeModel::Fable51), "󰳗"),
+        for (model, speed) in [
+            (Model::Claude(ClaudeModel::Sonnet55), Speed::Standard),
+            (Model::Claude(ClaudeModel::Opus55), Speed::Fast),
+            (Model::Claude(ClaudeModel::Fable51), Speed::Standard),
         ] {
             let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Max);
             composer.update(ComposerEvent::SetModel(model));
             composer.update(ComposerEvent::SetSpeed(Speed::Ultrafast));
             composer.update(ComposerEvent::SetReasoningMode(ReasoningMode::Pro));
-            let terminal = render(&mut composer, 72, 5);
-            let top = &rows(&terminal)[0];
-            assert!(top.contains(model.as_str()));
-            assert!(top.contains(&format!("max {icon} ")));
-            assert!(!top.contains(" pro"));
+
+            assert_eq!(
+                composer.status_line(),
+                StatusLine {
+                    model,
+                    effort: ReasoningEffort::Max,
+                    speed,
+                    ..idle_status()
+                }
+            );
         }
     }
 
     #[test]
     fn pro_mode_places_a_green_badge_after_speed() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         composer.update(ComposerEvent::SetSpeed(Speed::Fast));
         composer.update(ComposerEvent::SetReasoningMode(ReasoningMode::Pro));
+        assert!(composer.status_line().pro);
 
         let terminal = render(&mut composer, 60, 5);
-        let top = &terminal.backend().buffer().content[..60];
-        let rendered = top.iter().map(|cell| cell.symbol()).collect::<String>();
-        let pro = top
-            .windows(3)
-            .position(|cells| {
-                cells[0].symbol() == "p" && cells[1].symbol() == "r" && cells[2].symbol() == "o"
-            })
-            .expect("Pro mode should render its badge");
-
-        assert!(rendered.contains("medium 󰤇 pro"));
-        for cell in &top[pro..pro + 3] {
+        assert_eq!(
+            rows(&terminal)[0],
+            "╭─ 0%/272k ──────────────────── gpt-6.1-sol  medium 󰤇 pro ─╮"
+        );
+        for cell in cells_of(&terminal, 0, "pro") {
             assert_eq!(cell.fg, Color::Green);
-            assert!(cell.modifier.contains(ratatui::style::Modifier::BOLD));
+            assert!(cell.modifier.contains(Modifier::BOLD));
         }
     }
 
     #[test]
     fn narrow_composer_prioritizes_the_complete_pro_badge() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         composer.update(ComposerEvent::SetSpeed(Speed::Fast));
         composer.update(ComposerEvent::SetReasoningMode(ReasoningMode::Pro));
 
         let terminal = render(&mut composer, 28, 5);
-        let top = &terminal.backend().buffer().content[..28];
-        let pro = top
-            .windows(3)
-            .position(|cells| {
-                cells[0].symbol() == "p" && cells[1].symbol() == "r" && cells[2].symbol() == "o"
-            })
-            .expect("Pro mode should retain its complete badge");
+        assert_eq!(rows(&terminal)[0], "╭─ gpt-6.1-sol  mediumpro ─╮");
+        assert!(composer.chrome_area(ComposerChromeTarget::Speed).is_none());
+        assert!(
+            cells_of(&terminal, 0, "pro")
+                .iter()
+                .all(|cell| cell.fg == Color::Green)
+        );
 
-        assert!(composer.speed_hit_area.is_none());
-        assert!((pro..pro + 3).all(|index| top[index].fg == Color::Green));
-
-        let terminal = render(&mut composer, 6, 5);
-        let top = &terminal.backend().buffer().content[..6];
-        assert_eq!(top[0].symbol(), "╭");
-        assert_eq!(top[5].symbol(), "╮");
+        assert_eq!(rows(&render(&mut composer, 6, 5))[0], "╭─pr─╮");
     }
 
     #[test]
-    fn standard_mode_does_not_render_the_pro_badge() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+    fn pro_badge_follows_the_reasoning_mode() {
+        let mut composer = new_composer();
+        composer.update(ComposerEvent::SetReasoningMode(ReasoningMode::Pro));
+        assert!(composer.status_line().pro);
 
-        let terminal = render(&mut composer, 60, 5);
-        let rendered = terminal.backend().buffer().content[..60]
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect::<String>();
-
-        assert!(!rendered.contains("pro"));
+        composer.update(ComposerEvent::SetReasoningMode(ReasoningMode::Standard));
+        assert_eq!(composer.status_line(), idle_status());
     }
 
     #[test]
     fn development_badge_matches_the_installation_kind() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         let terminal = render(&mut composer, 60, 5);
-        let row = &terminal.backend().buffer().content[4 * 60..5 * 60];
-        let rendered = row.iter().map(|cell| cell.symbol()).collect::<String>();
-        let badge_start = row.iter().position(|cell| cell.symbol() == "◉");
+        assert_eq!(
+            rows(&terminal)[4],
+            footer("╰─ / actions · @ paths · @@ sessions ─────── ◉ dev  /work ─╯")
+        );
 
-        if !crate::app::installation::current().is_development() {
-            assert!(badge_start.is_none());
-            assert!(!rendered.contains("dev"));
-            return;
-        }
-
-        let badge_start = badge_start.unwrap();
-        assert!(rendered.contains("◉ dev  /work"));
-        for cell in &row[badge_start..badge_start + 5] {
-            assert_eq!(cell.fg, Color::Red);
-            assert!(cell.modifier.contains(ratatui::style::Modifier::BOLD));
+        if installation::current().is_development() {
+            for cell in cells_of(&terminal, 4, "◉ dev") {
+                assert_eq!(cell.fg, Color::Red);
+                assert!(cell.modifier.contains(Modifier::BOLD));
+            }
         }
     }
 
     #[test]
     fn entry_hint_keeps_file_and_session_shortcuts_visible_while_typing() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
-        assert!(rows(&render(&mut composer, 60, 5))[4].contains("@@ sessions"));
+        let mut composer = new_composer();
+        assert_eq!(
+            rows(&render(&mut composer, 60, 5))[4],
+            footer("╰─ / actions · @ paths · @@ sessions ─────── ◉ dev  /work ─╯")
+        );
 
         composer.replace_draft("hello".to_owned());
-        let footer = &rows(&render(&mut composer, 60, 5))[4];
-        assert!(!footer.contains("/ actions"));
-        assert!(footer.contains("@ paths · @@ sessions"));
+        assert_eq!(
+            rows(&render(&mut composer, 60, 5))[4],
+            footer("╰─ @ paths · @@ sessions ─────────────────── ◉ dev  /work ─╯")
+        );
 
         composer.replace_draft(String::new());
-        assert!(!rows(&render(&mut composer, 20, 5))[4].contains("/ actions"));
+        assert_eq!(
+            rows(&render(&mut composer, 20, 5))[4],
+            footer("╰─── ◉ dev  /work ─╯")
+        );
     }
 
     #[test]
     fn active_turn_waves_the_transient_status_after_context_usage() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         composer.update(ComposerEvent::Activity {
             active: true,
             status: Some("Running exec command…".to_owned()),
             now: Instant::now(),
         });
 
+        assert_eq!(
+            composer.status_line(),
+            StatusLine {
+                activity: Some("Running exec command…".to_owned()),
+                ..idle_status()
+            }
+        );
         let terminal = render(&mut composer, 80, 5);
-
-        assert!(rows(&terminal)[0].contains("0%/272k Running exec command…"));
         assert!(
-            terminal
-                .backend()
-                .buffer()
-                .content
+            cells_of(&terminal, 0, "Running exec command…")
                 .iter()
-                .filter(|cell| "Runningexeccommand…".contains(cell.symbol()))
                 .any(|cell| cell.fg == Color::Cyan)
         );
         assert!(composer.animation_deadline().is_some());
@@ -2043,7 +1726,7 @@ mod tests {
 
     #[test]
     fn active_subagents_wave_after_the_transient_status() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         let now = Instant::now();
         composer.update(ComposerEvent::Activity {
             active: true,
@@ -2052,25 +1735,27 @@ mod tests {
         });
         composer.update(ComposerEvent::ActiveSubagents { count: 2, now });
 
-        let terminal = render(&mut composer, 72, 5);
-        let top = rows(&terminal)[0].clone();
-
-        assert!(top.contains("Thinking… 2 subagents"));
-        assert!(
-            terminal
-                .backend()
-                .buffer()
-                .content
-                .iter()
-                .filter(|cell| "2subagents".contains(cell.symbol()))
-                .any(|cell| cell.fg == Color::Yellow)
+        assert_eq!(
+            composer.status_line(),
+            StatusLine {
+                activity: Some("Thinking…".to_owned()),
+                subagents: 2,
+                ..idle_status()
+            }
         );
+        let terminal = render(&mut composer, 72, 5);
+        let subagents = cells_of(&terminal, 0, "2 subagents");
+        assert!(subagents.iter().any(|cell| cell.fg == Color::Yellow));
+        let hit = composer
+            .chrome_area(ComposerChromeTarget::Subagents)
+            .expect("subagents should have a hit target");
+        assert_eq!(usize::from(hit.width), subagents.len());
         assert!(composer.animation_deadline().is_some());
     }
 
     #[test]
     fn composer_grows_from_three_through_six_rows() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         assert_eq!(composer.desired_height(20), 5);
 
         composer.replace_draft("1\n2\n3\n4\n5\n6".to_owned());
@@ -2082,19 +1767,27 @@ mod tests {
 
     #[test]
     fn overflow_scrolls_to_keep_the_cursor_visible() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         composer.replace_draft("one\ntwo\nthree\nfour\nfive\nsix\nseven".to_owned());
         let terminal = render(&mut composer, 30, 8);
-        let rows = rows(&terminal);
 
-        assert!(rows[1].contains("two"));
-        assert!(rows[6].contains("seven"));
-        assert!(!rows.iter().any(|row| row.contains("one")));
+        assert_eq!(composer.scroll, 1);
+        assert_eq!(
+            rows(&terminal)[1..7],
+            [
+                "│two                         │",
+                "│three                       │",
+                "│four                        │",
+                "│five                        │",
+                "│six                         │",
+                "│seven                       │",
+            ]
+        );
     }
 
     #[test]
     fn resize_reflows_wrapped_text() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         composer.replace_draft("alpha beta gamma delta".to_owned());
 
         render(&mut composer, 14, 5);
@@ -2108,7 +1801,7 @@ mod tests {
 
     #[test]
     fn cursor_movement_respects_graphemes_and_display_width() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         composer.replace_draft("a界e\u{301}".to_owned());
         composer.update(key(KeyCode::Left, KeyModifiers::NONE));
         assert_eq!(composer.cursor(), 4);
@@ -2121,7 +1814,7 @@ mod tests {
 
     #[test]
     fn paste_and_editor_replacement_preserve_multiline_text() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         composer.update(ComposerEvent::Terminal(Event::Paste("one\ntwo".to_owned())));
         assert_eq!(composer.draft(), "one\ntwo");
 
@@ -2132,7 +1825,7 @@ mod tests {
 
     #[test]
     fn paste_and_editor_replacement_normalize_carriage_returns() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         composer.update(ComposerEvent::Terminal(Event::Paste(
             "one\r\ntwo\rthree".to_owned(),
         )));
@@ -2145,12 +1838,15 @@ mod tests {
 
     #[test]
     fn pasted_controls_are_visible_without_changing_the_submission() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         let pasted = "one\ttwo\u{1b}three";
         composer.update(ComposerEvent::Terminal(Event::Paste(pasted.to_owned())));
 
         let terminal = render(&mut composer, 40, 5);
-        assert!(rows(&terminal)[1].contains("one    two�three"));
+        assert_eq!(
+            rows(&terminal)[1],
+            "│one    two�three                      │"
+        );
         assert_eq!(terminal.backend().cursor_position(), Position::new(17, 1));
 
         let submission = composer.take_submission().unwrap();
@@ -2159,7 +1855,7 @@ mod tests {
 
     #[test]
     fn pasted_images_render_as_numbered_blue_tokens_and_submit_as_images() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         composer.update(ComposerEvent::Terminal(Event::Paste("inspect ".to_owned())));
         composer.update(ComposerEvent::PasteImage(
             "data:image/png;base64,first".to_owned(),
@@ -2194,7 +1890,7 @@ mod tests {
 
     #[test]
     fn deleting_an_image_token_removes_its_attachment_atomically() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         composer.update(ComposerEvent::PasteImage(
             "data:image/png;base64,removed".to_owned(),
         ));
@@ -2202,12 +1898,12 @@ mod tests {
         composer.update(key(KeyCode::Backspace, KeyModifiers::NONE));
 
         assert!(composer.draft().is_empty());
-        assert!(composer.images.is_empty());
+        assert_eq!(composer.images().count(), 0);
     }
 
     #[test]
     fn option_backspace_deletes_the_previous_word() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         composer.replace_draft("one two  ".to_owned());
 
         let update = composer.update(key(KeyCode::Backspace, KeyModifiers::ALT));
@@ -2219,7 +1915,7 @@ mod tests {
 
     #[test]
     fn option_backspace_removes_an_image_attachment_with_its_token() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         composer.update(ComposerEvent::Terminal(Event::Paste("inspect ".to_owned())));
         composer.update(ComposerEvent::PasteImage(
             "data:image/png;base64,removed".to_owned(),
@@ -2228,14 +1924,14 @@ mod tests {
         composer.update(key(KeyCode::Backspace, KeyModifiers::ALT));
 
         assert_eq!(composer.draft(), "inspect ");
-        assert!(composer.images.is_empty());
+        assert_eq!(composer.images().count(), 0);
     }
 
     #[test]
     fn readline_shortcuts_move_by_character_and_stay_on_the_logical_line() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         composer.replace_draft("one\ntwo\nthree".to_owned());
-        composer.cursor = "one\nt".len();
+        composer.draft.set_cursor("one\nt".len());
 
         composer.update(key(KeyCode::Char('a'), KeyModifiers::CONTROL));
         assert_eq!(composer.cursor(), "one\n".len());
@@ -2257,9 +1953,9 @@ mod tests {
 
     #[test]
     fn ctrl_k_deletes_to_logical_line_end_then_removes_the_newline() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         composer.replace_draft("one\ntwo three\nfour".to_owned());
-        composer.cursor = "one\ntwo".len();
+        composer.draft.set_cursor("one\ntwo".len());
 
         let update = composer.update(key(KeyCode::Char('k'), KeyModifiers::CONTROL));
         assert!(update.changed);
@@ -2269,7 +1965,7 @@ mod tests {
         composer.update(key(KeyCode::Char('k'), KeyModifiers::CONTROL));
         assert_eq!(composer.draft(), "one\ntwofour");
 
-        composer.cursor = composer.draft().len();
+        composer.draft.set_cursor(composer.draft().len());
         let update = composer.update(key(KeyCode::Char('k'), KeyModifiers::CONTROL));
         assert!(!update.changed);
         assert_eq!(composer.draft(), "one\ntwofour");
@@ -2277,21 +1973,21 @@ mod tests {
 
     #[test]
     fn ctrl_k_uses_logical_lines_in_wrapped_unicode_text() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         composer.replace_draft("界 alpha beta gamma\nnext".to_owned());
-        composer.cursor = "界 alpha".len();
+        composer.draft.set_cursor("界 alpha".len());
         render(&mut composer, 8, 6);
 
         composer.update(key(KeyCode::Char('k'), KeyModifiers::CONTROL));
 
         assert_eq!(composer.draft(), "界 alpha\nnext");
         assert_eq!(composer.cursor(), "界 alpha".len());
-        assert!(composer.layout.is_none());
+        assert!(composer.draft.cached_layout().is_none());
     }
 
     #[test]
     fn ctrl_k_removes_images_and_shifts_later_attachments() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         composer.update(ComposerEvent::Terminal(Event::Paste("é ".to_owned())));
         let cursor = composer.cursor();
         composer.update(ComposerEvent::PasteImage(
@@ -2303,24 +1999,26 @@ mod tests {
         composer.update(ComposerEvent::PasteImage(
             "data:image/png;base64,kept".to_owned(),
         ));
-        composer.cursor = cursor;
+        composer.draft.set_cursor(cursor);
 
         composer.update(key(KeyCode::Char('k'), KeyModifiers::CONTROL));
 
         assert_eq!(composer.draft(), "é \nkeep [Image #2]");
-        assert_eq!(composer.images.len(), 1);
         assert_eq!(
-            composer.images[0].range,
-            "é \nkeep ".len()..composer.draft().len()
+            composer.images().collect::<Vec<_>>(),
+            [("[Image #2]", "data:image/png;base64,kept")]
         );
-        assert!(composer.images[0].data_url.ends_with("kept"));
+        assert_eq!(
+            composer.draft.image_ranges().first(),
+            Some(&("é \nkeep ".len()..composer.draft().len()))
+        );
     }
 
     #[test]
     fn readline_shortcuts_require_exact_modifiers() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         composer.replace_draft("abcd".to_owned());
-        composer.cursor = 2;
+        composer.draft.set_cursor(2);
 
         let update = composer.update(key(
             KeyCode::Char('b'),
@@ -2340,7 +2038,7 @@ mod tests {
 
     #[test]
     fn readline_word_movement_skips_delimiters_between_alphanumeric_words() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         composer.replace_draft("foo...bar".to_owned());
 
         composer.update(key(KeyCode::Char('b'), KeyModifiers::ALT));
@@ -2360,15 +2058,15 @@ mod tests {
         assert_eq!(composer.cursor(), 0);
 
         composer.replace_draft("alpha   beta".to_owned());
-        composer.cursor = "alpha ".len();
+        composer.draft.set_cursor("alpha ".len());
         composer.update(key(KeyCode::Char('f'), KeyModifiers::ALT));
         assert_eq!(composer.cursor(), composer.draft().len());
-        composer.cursor = "alpha  ".len();
+        composer.draft.set_cursor("alpha  ".len());
         composer.update(key(KeyCode::Char('b'), KeyModifiers::ALT));
         assert_eq!(composer.cursor(), 0);
 
         composer.replace_draft("你好".to_owned());
-        composer.cursor = 0;
+        composer.draft.set_cursor(0);
         composer.update(key(KeyCode::Char('f'), KeyModifiers::ALT));
         assert_eq!(composer.cursor(), composer.draft().len());
         composer.update(key(KeyCode::Char('b'), KeyModifiers::ALT));
@@ -2377,7 +2075,7 @@ mod tests {
 
     #[test]
     fn readline_word_movement_treats_images_as_atomic() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         composer.update(ComposerEvent::Terminal(Event::Paste("inspect ".to_owned())));
         composer.update(ComposerEvent::PasteImage(
             "data:image/png;base64,attached".to_owned(),
@@ -2391,7 +2089,7 @@ mod tests {
 
     #[test]
     fn readline_vertical_movement_treats_images_as_atomic() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         composer.update(ComposerEvent::PasteImage(
             "data:image/png;base64,attached".to_owned(),
         ));
@@ -2403,7 +2101,7 @@ mod tests {
         composer.update(key(KeyCode::Char('p'), KeyModifiers::CONTROL));
         assert_eq!(composer.cursor(), 0);
 
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         composer.update(ComposerEvent::Terminal(Event::Paste("a".to_owned())));
         composer.update(ComposerEvent::PasteImage(
             "data:image/png;base64,attached".to_owned(),
@@ -2415,7 +2113,7 @@ mod tests {
         composer.update(key(KeyCode::Char('n'), KeyModifiers::CONTROL));
         assert_eq!(composer.cursor(), composer.draft().len());
 
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         composer.update(ComposerEvent::Terminal(Event::Paste(
             "123456789\na".to_owned(),
         )));
@@ -2432,7 +2130,7 @@ mod tests {
 
     #[test]
     fn readline_vertical_shortcuts_restore_the_unsent_draft_after_history() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         composer.replace_draft("older".to_owned());
         composer.update(key(KeyCode::Enter, KeyModifiers::NONE));
         composer.replace_draft("newer".to_owned());
@@ -2461,7 +2159,7 @@ mod tests {
             (KeyCode::Char('k'), KeyModifiers::CONTROL),
             (KeyCode::Char('b'), KeyModifiers::ALT),
         ] {
-            let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+            let mut composer = new_composer();
             composer.replace_draft("previous".to_owned());
             composer.update(key(KeyCode::Enter, KeyModifiers::NONE));
             composer.update(key(KeyCode::Up, KeyModifiers::NONE));
@@ -2475,7 +2173,7 @@ mod tests {
 
     #[test]
     fn submission_trims_nonempty_prompts_and_preserves_empty_drafts() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         composer.replace_draft("  inspect this  \n".to_owned());
         let update = composer.update(key(KeyCode::Enter, KeyModifiers::NONE));
 
@@ -2493,7 +2191,7 @@ mod tests {
 
     #[test]
     fn leading_bang_uses_yellow_shell_chrome_and_submits_only_the_command() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         composer.replace_draft("!  printf hello  ".to_owned());
 
         let terminal = render(&mut composer, 80, 5);
@@ -2501,8 +2199,16 @@ mod tests {
         for position in [(0, 0), (79, 0), (0, 2), (79, 2), (0, 4), (79, 4)] {
             assert_eq!(buffer[position].fg, Color::Yellow);
         }
-        assert!(!rows(&terminal)[0].contains("shell"));
-        assert!(rows(&terminal)[4].starts_with("╰─ shell "));
+        assert_eq!(
+            rows(&terminal)[0],
+            "╭─ 0%/272k ──────────────────────────────────────────── gpt-6.1-sol  medium 󰳗 ─╮"
+        );
+        assert_eq!(
+            rows(&terminal)[4],
+            footer(
+                "╰─ shell s · @@ sessions ─────────────────────────────────────── ◉ dev  /work ─╯"
+            )
+        );
 
         let update = composer.update(key(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(
@@ -2514,7 +2220,7 @@ mod tests {
 
     #[test]
     fn bang_without_a_command_is_not_submitted() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         composer.replace_draft("!   ".to_owned());
 
         let update = composer.update(key(KeyCode::Enter, KeyModifiers::NONE));
@@ -2525,7 +2231,7 @@ mod tests {
 
     #[test]
     fn arrows_cycle_submitted_prompts_and_restore_the_unsent_draft() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         for prompt in ["first", "second"] {
             composer.replace_draft(prompt.to_owned());
             composer.update(key(KeyCode::Enter, KeyModifiers::NONE));
@@ -2546,7 +2252,7 @@ mod tests {
 
     #[test]
     fn editing_a_recalled_prompt_detaches_it_from_history() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         composer.replace_draft("previous".to_owned());
         composer.update(key(KeyCode::Enter, KeyModifiers::NONE));
 
@@ -2559,7 +2265,7 @@ mod tests {
 
     #[test]
     fn multiline_and_control_effect_keys_are_distinct() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         composer.update(key(KeyCode::Enter, KeyModifiers::SHIFT));
         composer.update(key(KeyCode::Char('j'), KeyModifiers::CONTROL));
         assert_eq!(composer.draft(), "\n\n");
@@ -2574,7 +2280,7 @@ mod tests {
 
     #[test]
     fn editing_keys_follow_visual_lines_and_grapheme_boundaries() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         composer.replace_draft("abc\ndef".to_owned());
         render(&mut composer, 20, 5);
 
@@ -2591,19 +2297,19 @@ mod tests {
 
     #[test]
     fn wrapping_prefers_words_and_hard_wraps_long_words() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         composer.replace_draft("alpha betaabcdefgh".to_owned());
         let terminal = render(&mut composer, 8, 6);
-        let rows = rows(&terminal);
 
-        assert!(rows[1].contains("alpha"));
-        assert!(rows[2].contains("betaab"));
-        assert!(rows[3].contains("cdefgh"));
+        assert_eq!(
+            rows(&terminal)[1..5],
+            ["│alpha │", "│betaab│", "│cdefgh│", "│      │"]
+        );
     }
 
     #[test]
     fn semantic_selection_preserves_source_across_soft_and_hard_wraps() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         composer.replace_draft("abcdef\ngh".to_owned());
         let area = Rect::new(10, 5, 3, 3);
         let anchor = composer.selection_span(Position::new(11, 5), area).unwrap();
@@ -2622,7 +2328,7 @@ mod tests {
 
     #[test]
     fn selection_scrolling_keeps_the_semantic_range_visible_without_cursor_follow() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         composer.replace_draft("line 1\nline 2\nline 3\nline 4".to_owned());
         render(&mut composer, 12, 4);
         assert_eq!(composer.scroll, 2);
@@ -2654,7 +2360,7 @@ mod tests {
 
     #[test]
     fn narrow_selection_matches_the_visible_draft_text() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         composer.replace_draft("first\nsecond\nthird".to_owned());
         render(&mut composer, 12, 4);
 
@@ -2683,7 +2389,7 @@ mod tests {
 
     #[test]
     fn narrow_rendering_truncates_without_panicking() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         composer.replace_draft("abcdef".to_owned());
 
         let terminal = render(&mut composer, 3, 2);

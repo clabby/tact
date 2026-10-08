@@ -891,7 +891,10 @@ mod tests {
         write_valid_assets(directory.path());
         fs::write(directory.path().join("chunks/app.js"), "corrupted").unwrap();
 
-        assert!(validate_directory(directory.path(), InstallKind::Managed).is_err());
+        assert!(matches!(
+            validate_directory(directory.path(), InstallKind::Managed),
+            Err(AssetError::AssetSize { .. } | AssetError::AssetDigest(_))
+        ));
     }
 
     #[test]

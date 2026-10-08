@@ -1,5 +1,10 @@
+//! Presenter for `update_plan`.
+//!
+//! The summary reports completed steps out of the total and names the step in progress, if any.
+//! Expanded details show the explanation and every step with a status marker.
+
 use super::Presentation;
-use crate::tui::{theme::Theme, transcript::ToolEntry};
+use crate::{app::theme::Theme, core::transcript::ToolEntry};
 use ratatui::style::Style;
 use serde_json::Value;
 

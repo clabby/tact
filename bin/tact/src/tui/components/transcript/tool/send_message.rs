@@ -1,5 +1,12 @@
+//! Presenter for `send_agent_message`.
+//!
+//! The summary names the recipient and lists the message purpose, any non-default priority, and
+//! the delivery disposition from the receipt. Expanded details show the message body and delivery
+//! disposition, with the receipt's message and thread ids in the footer. Receipts may arrive as
+//! JSON objects or as JSON-encoded strings.
+
 use super::{super::markdown::wrap_plain, Presentation};
-use crate::tui::{theme::Theme, transcript::ToolEntry};
+use crate::{app::theme::Theme, core::transcript::ToolEntry};
 use ratatui::style::Style;
 use serde_json::Value;
 use std::borrow::Cow;
@@ -79,52 +86,40 @@ fn decoded_result(value: &Value) -> Option<Cow<'_, Value>> {
 
 #[cfg(test)]
 mod tests {
-    use super::present;
-    use crate::tui::{
-        theme::Theme,
-        transcript::{ToolEntry, ToolState},
-    };
+    use super::super::fixtures::{collapsed, entry, expanded, rendered};
+    use crate::core::transcript::ToolEntry;
     use serde_json::json;
 
     #[test]
     fn presents_recipient_intent_and_body() {
         let tool = ToolEntry {
-            name: "send_agent_message".to_owned(),
-            arguments: json!({
-                "agent_id": 7,
-                "message": "Please verify the ordering.",
-                "priority": "urgent",
-                "purpose": "question"
-            }),
-            started_at_unix_ms: 0,
-            state: ToolState::Succeeded,
-            duration_ns: None,
             result: Some(json!({
                 "message_id": 9,
                 "thread_id": 4,
                 "disposition": "steered"
             })),
-            metadata: None,
-            substeps: Vec::new(),
-            child_count: 0,
+            ..entry(
+                "send_agent_message",
+                json!({
+                    "agent_id": 7,
+                    "message": "Please verify the ordering.",
+                    "priority": "urgent",
+                    "purpose": "question"
+                }),
+            )
         };
 
-        let collapsed = present(&tool, 80, &Theme::default(), false);
-        let expanded = present(&tool, 80, &Theme::default(), true);
+        let collapsed = collapsed(&tool);
+        let expanded = expanded(&tool, 80);
 
         assert_eq!(collapsed.title, "Message");
         assert_eq!(
             collapsed.outcome.as_deref(),
             Some("question · urgent · steered")
         );
-        assert!(expanded.details[0].to_string().contains("Please verify"));
-        assert!(
-            expanded
-                .details
-                .last()
-                .unwrap()
-                .to_string()
-                .contains("steered")
+        assert_eq!(
+            rendered(&expanded.details),
+            ["Please verify the ordering.", "Delivery: steered"]
         );
         assert_eq!(expanded.footer.as_deref(), Some("message #9 · thread #4"));
     }

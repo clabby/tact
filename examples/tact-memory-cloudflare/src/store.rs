@@ -20,7 +20,7 @@ use std::{
 use tact_memory::{
     MemoryError, MemoryKey, MemoryLimits, MemoryRecord, MemoryScan, MemoryStore,
     normalize_identity,
-    server::protocol::{self, ExportCursor, SyncReport},
+    protocol::{self, ExportCursor, ExportPage, SyncReport},
 };
 use thiserror::Error;
 use unicode_general_category::{GeneralCategory, get_general_category};
@@ -376,8 +376,7 @@ impl MemoryStore for CloudflareMemoryStore {
         namespaces: Option<&[String]>,
         cursor: Option<&ExportCursor>,
         limit: usize,
-    ) -> impl Future<Output = Result<(Vec<MemoryRecord>, Option<ExportCursor>), MemoryError>> + Send
-    {
+    ) -> impl Future<Output = Result<ExportPage, MemoryError>> + Send {
         let store = self.clone();
         let namespaces = namespaces.map(<[String]>::to_vec);
         let cursor = cursor.cloned();
@@ -418,7 +417,10 @@ impl MemoryStore for CloudflareMemoryStore {
                     id: key.id,
                 }
             });
-            Ok((records, next))
+            Ok(ExportPage {
+                memories: records,
+                next_cursor: next,
+            })
         })
     }
 }
@@ -695,8 +697,7 @@ fn validate_snapshot(memories: &[MemoryRecord], limits: MemoryLimits) -> Result<
     let mut bytes = 0usize;
     for memory in memories {
         if !memory.key.is_local()
-            || memory.key.id <= 0
-            || memory.key.version == 0
+            || !memory.key.is_well_formed()
             || memory.key.version > i64::MAX as u64
             || memory.scan_count > i64::MAX as u64
             || memory.use_count > i64::MAX as u64

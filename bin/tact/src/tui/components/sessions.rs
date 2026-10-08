@@ -1,10 +1,26 @@
 //! Overlay listing the live sessions (panes) of this Tact process.
+//!
+//! [SessionsOverlay] keeps a host-supplied [LiveSession] snapshot, whether a new
+//! session may start, its own search query, the visible rows, and the highlighted
+//! row. It consumes typed characters, pastes, and keys through
+//! [SessionsEvent::Terminal], and the host refreshes the snapshot in place with
+//! [SessionsOverlay::set_sessions].
+//!
+//! - Enter or Tab emits [SessionsEffect::Activate] for a session row, or
+//!   [SessionsEffect::New] for the "New session" row when starting one is
+//!   allowed.
+//! - Ctrl+D or Delete emits [SessionsEffect::Close] for the highlighted session,
+//!   and Esc emits [SessionsEffect::Cancel].
+//! - The "New session" row always leads the list, even when the query filters
+//!   out every session. When starting a session is not allowed, the row stays
+//!   visible with the reason and selecting it emits nothing.
 
 use super::{
+    fit::ellipsize,
     floating::Floating,
     node::{Component, ComponentUpdate, RenderRequest},
 };
-use crate::tui::{format::sanitize_terminal_text_inline, pane::PaneId, theme::Theme};
+use crate::{app::theme::Theme, core::pane::PaneId, tui::format::sanitize_terminal_text_inline};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::{
     Frame,
@@ -296,7 +312,7 @@ impl LiveSession {
             Span::styled(glyph, glyph_style),
             Span::raw(" "),
             Span::styled(
-                truncate(&self.title, title_width),
+                ellipsize(sanitize_terminal_text_inline(&self.title), title_width).into_owned(),
                 Style::default()
                     .fg(theme.text())
                     .add_modifier(if self.unread {
@@ -353,33 +369,10 @@ fn visible_tail(query: &str, width: usize) -> &str {
     query
 }
 
-/// Reduces `text` to a single line of at most `width` columns, ending in an
-/// ellipsis when it was cut.
-fn truncate(text: &str, width: usize) -> String {
-    let text = sanitize_terminal_text_inline(text);
-    if text.width() <= width {
-        return text.into_owned();
-    }
-    if width == 0 {
-        return String::new();
-    }
-    let mut result = String::new();
-    let mut used = 0;
-    for grapheme in text.graphemes(true) {
-        used += grapheme.width();
-        if used > width - 1 {
-            break;
-        }
-        result.push_str(grapheme);
-    }
-    result.push('…');
-    result
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{Component, LiveSession, SessionsEffect, SessionsEvent, SessionsOverlay, truncate};
-    use crate::tui::{pane::PaneId, theme::Theme};
+    use super::{Component, LiveSession, SessionsEffect, SessionsEvent, SessionsOverlay};
+    use crate::{app::theme::Theme, core::pane::PaneId};
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use ratatui::{Terminal, backend::TestBackend};
 
@@ -469,8 +462,6 @@ mod tests {
         assert!(rendered.contains("…"));
         assert!(!rendered.contains("second line"));
         assert!(rendered.contains("· gpt · unread"));
-        assert_eq!(truncate("abcdef", 4), "abc…");
-        assert_eq!(truncate("abc", 3), "abc");
     }
 
     #[test]

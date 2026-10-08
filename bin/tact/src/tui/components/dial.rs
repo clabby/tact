@@ -1,6 +1,6 @@
 //! Shared animation and geometry for circular selectors.
 
-use crate::tui::theme::Theme;
+use crate::app::theme::Theme;
 use ratatui::{
     Frame,
     buffer::Buffer,

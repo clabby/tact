@@ -1,5 +1,6 @@
 //! Demand-driven frame scheduling.
 
+use super::components::RenderRequest;
 use std::time::{Duration, Instant};
 
 /// Maximum frame rate for streaming agent updates.
@@ -35,6 +36,15 @@ impl RenderScheduler {
     pub(crate) fn request_immediate(&mut self, now: Instant) {
         let deadline = self.deadline.map_or(now, |deadline| deadline.min(now));
         self.deadline = Some(deadline);
+    }
+
+    /// Schedules the frame that a component update asked for.
+    pub(crate) fn request(&mut self, request: RenderRequest, now: Instant) {
+        match request {
+            RenderRequest::None => {}
+            RenderRequest::Streaming => self.request_streaming(now),
+            RenderRequest::Immediate => self.request_immediate(now),
+        }
     }
 
     pub(crate) const fn deadline(&self) -> Option<Instant> {

@@ -12,9 +12,10 @@ use nanocodex::{
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Value, json};
 use std::{
-    io,
+    error::Error,
     sync::atomic::{AtomicBool, Ordering},
 };
+use thiserror::Error;
 use zeroize::Zeroizing;
 
 #[derive(Deserialize)]
@@ -96,12 +97,30 @@ struct DeleteOutput {
 /// Authorizes mutations for one agent session.
 #[async_trait]
 pub trait MutationAuthorizer: Send + Sync {
+    /// Reason a session may not mutate memory, reported to the calling agent unchanged.
+    type Error: Error + Send + Sync + 'static;
+
     /// Returns success only when `session_id` may mutate memory.
     #[allow(
         clippy::double_must_use,
         reason = "async_trait adds must_use to the boxed future"
     )]
-    async fn authorize_memory_mutation(&self, session_id: &str) -> io::Result<()>;
+    async fn authorize_memory_mutation(&self, session_id: &str) -> Result<(), Self::Error>;
+}
+
+/// Tool call rejected before it reached the memory store.
+#[derive(Debug, Error, Eq, PartialEq)]
+enum MemoryToolError {
+    #[error("memory scan query is empty")]
+    EmptyQuery,
+    #[error("memory scan limit must be between 1 and {maximum}")]
+    ScanLimit { maximum: usize },
+    #[error("memory read requires at least one key")]
+    NoReadKeys,
+    /// Each put must follow a fresh scan through the same tool, so agents check for duplicates
+    /// and contradictions before writing.
+    #[error("scan memory before storing a conclusion")]
+    ScanRequired,
 }
 
 /// Nanocodex tool exposing bounded memory operations.
@@ -126,15 +145,12 @@ where
 
     async fn scan(&self, query: String, limit: Option<usize>) -> ToolResult {
         if query.trim().is_empty() {
-            return Err(io::Error::other("memory scan query is empty").into());
+            return Err(MemoryToolError::EmptyQuery.into());
         }
         let maximum = MemoryLimits::PRODUCTION.scan_results;
         let limit = limit.unwrap_or(maximum);
         if !(1..=maximum).contains(&limit) {
-            return Err(io::Error::other(format!(
-                "memory scan limit must be between 1 and {maximum}"
-            ))
-            .into());
+            return Err(MemoryToolError::ScanLimit { maximum }.into());
         }
         let backend = self.store.access().await?;
         let scan = self.store.scan(&query, limit).await?;
@@ -157,7 +173,7 @@ where
 
     async fn read(&self, keys: Vec<MemoryKey>) -> ToolResult {
         if keys.is_empty() {
-            return Err(io::Error::other("memory read requires at least one key").into());
+            return Err(MemoryToolError::NoReadKeys.into());
         }
         let backend = self.store.access().await?;
         let memories = self.store.read(&[], &keys).await?;
@@ -179,7 +195,7 @@ where
             .authorize_memory_mutation(session_id)
             .await?;
         if !self.searched.swap(false, Ordering::AcqRel) {
-            return Err(io::Error::other("scan memory before storing a conclusion").into());
+            return Err(MemoryToolError::ScanRequired.into());
         }
         let backend = self.store.access().await?;
         let replaced = replace.is_some();
@@ -428,30 +444,41 @@ fn memory_record_schema() -> Value {
 
 #[cfg(test)]
 mod tests {
-    use super::{MemoryOperation, MemoryTool, MutationAuthorizer};
-    use crate::{MemoryLimits, MemoryStore, SelectedMemoryStore};
+    use super::{MemoryOperation, MemoryTool, MemoryToolError, MutationAuthorizer};
+    use crate::{MemoryError, MemoryLimits, MemoryStore, SelectedMemoryStore};
     use nanocodex::{
         Tool,
         tools::contract::{
-            DEFAULT_TOOL_OUTPUT_TOKENS, ToolContext, ToolInput, ToolOutputBody, async_trait,
+            DEFAULT_TOOL_OUTPUT_TOKENS, ToolContext, ToolError, ToolInput, ToolOutputBody,
+            async_trait,
         },
     };
     use serde_json::{json, value::to_raw_value};
-    use std::io;
     use tempfile::tempdir;
+    use thiserror::Error;
 
     struct TestAuthorizer;
 
+    #[derive(Debug, Error)]
+    #[error("memory mutation is only available to root agents")]
+    struct NotRoot;
+
     #[async_trait]
     impl MutationAuthorizer for TestAuthorizer {
-        async fn authorize_memory_mutation(&self, session_id: &str) -> io::Result<()> {
+        type Error = NotRoot;
+
+        async fn authorize_memory_mutation(&self, session_id: &str) -> Result<(), NotRoot> {
             if session_id == "root" {
                 return Ok(());
             }
-            Err(io::Error::other(
-                "memory mutation is only available to root agents",
-            ))
+            Err(NotRoot)
         }
+    }
+
+    fn tool_error(error: &ToolError) -> &MemoryToolError {
+        error
+            .downcast_ref()
+            .expect("tool should reject the call before reaching the store")
     }
 
     fn input(value: serde_json::Value) -> ToolInput {
@@ -571,8 +598,10 @@ mod tests {
                 panic!("out-of-range scan limit unexpectedly succeeded");
             };
             assert_eq!(
-                error.to_string(),
-                "memory scan limit must be between 1 and 10"
+                tool_error(&error),
+                &MemoryToolError::ScanLimit {
+                    maximum: MemoryLimits::PRODUCTION.scan_results
+                }
             );
         }
     }
@@ -709,7 +738,7 @@ mod tests {
         let Err(error) = tool.execute(put(), context("root")).await else {
             panic!("put without a scan unexpectedly succeeded");
         };
-        assert_eq!(error.to_string(), "scan memory before storing a conclusion");
+        assert_eq!(tool_error(&error), &MemoryToolError::ScanRequired);
         let Err(error) = tool
             .execute(
                 input(json!({
@@ -724,16 +753,15 @@ mod tests {
             panic!("zero-result scan unexpectedly succeeded");
         };
         assert_eq!(
-            error.to_string(),
-            format!(
-                "memory scan limit must be between 1 and {}",
-                MemoryLimits::PRODUCTION.scan_results
-            )
+            tool_error(&error),
+            &MemoryToolError::ScanLimit {
+                maximum: MemoryLimits::PRODUCTION.scan_results
+            }
         );
         let Err(error) = tool.execute(put(), context("root")).await else {
             panic!("invalid scan armed a put");
         };
-        assert_eq!(error.to_string(), "scan memory before storing a conclusion");
+        assert_eq!(tool_error(&error), &MemoryToolError::ScanRequired);
         assert!(
             tool.execute(
                 input(json!({ "operation": "scan", "query": "durable preference" })),
@@ -748,7 +776,7 @@ mod tests {
         let Err(error) = tool.execute(put(), context("root")).await else {
             panic!("put reused an earlier scan");
         };
-        assert_eq!(error.to_string(), "scan memory before storing a conclusion");
+        assert_eq!(tool_error(&error), &MemoryToolError::ScanRequired);
     }
 
     #[tokio::test]
@@ -803,10 +831,10 @@ mod tests {
             panic!("secret-bearing memory unexpectedly reached storage");
         };
 
-        assert_eq!(
-            error.to_string(),
-            "memory content was rejected as a likely secret"
-        );
+        assert!(matches!(
+            error.downcast_ref::<MemoryError>(),
+            Some(MemoryError::SecretRejected)
+        ));
         assert!(store.list().await.unwrap().is_empty());
     }
 

@@ -4,8 +4,8 @@ use super::{MemoryError, MemoryStore, current_time_ms};
 use crate::{
     MemoryImportReport, MemoryKey, MemoryLimits, MemoryRecord, MemoryScan,
     model::{StoredMemory, normalize_identity},
-    secrets::contains_likely_secret,
-    server::protocol::{self, ExportCursor, SyncReport},
+    protocol::{self, ExportCursor, ExportPage, SyncReport},
+    secrets::{contains_likely_secret, reject_likely_secret},
 };
 use rusqlite::{
     Connection, ErrorCode, OptionalExtension, Transaction, TransactionBehavior, params,
@@ -295,10 +295,7 @@ impl LocalMemoryStore {
                 .namespace
                 .as_deref()
                 .ok_or(MemoryError::Conflict)?;
-            if !protocol::is_valid_namespace(namespace)
-                || memory.key.id <= 0
-                || memory.key.version == 0
-            {
+            if !protocol::is_valid_namespace(namespace) || !memory.key.is_well_formed() {
                 return Err(MemoryError::Conflict);
             }
             validate_content(&memory.content, &self.limits)?;
@@ -577,10 +574,7 @@ impl LocalMemoryStore {
         let mut identities = HashSet::new();
         let mut ids = HashSet::new();
         let content_bytes = memories.iter().try_fold(0usize, |total, memory| {
-            if !memory.key.is_local()
-                || memory.key.id <= 0
-                || memory.key.version == 0
-                || !ids.insert(memory.key.id)
+            if !memory.key.is_local() || !memory.key.is_well_formed() || !ids.insert(memory.key.id)
             {
                 return Err(MemoryError::Conflict);
             }
@@ -657,7 +651,7 @@ impl LocalMemoryStore {
         cursor: Option<ExportCursor>,
         limit: usize,
         now_ms: i64,
-    ) -> Result<(Vec<MemoryRecord>, Option<ExportCursor>), MemoryError> {
+    ) -> Result<ExportPage, MemoryError> {
         let mut records = self.list(now_ms).await?;
         let after = cursor.map_or(0, |cursor| cursor.id);
         records.retain(|record| record.key.id > after);
@@ -668,7 +662,10 @@ impl LocalMemoryStore {
             namespace: String::new(),
             id: records.last().expect("non-empty limited page").key.id,
         });
-        Ok((records, next))
+        Ok(ExportPage {
+            memories: records,
+            next_cursor: next,
+        })
     }
 }
 
@@ -714,8 +711,7 @@ impl MemoryStore for LocalMemoryStore {
         _namespaces: Option<&[String]>,
         cursor: Option<&ExportCursor>,
         limit: usize,
-    ) -> impl Future<Output = Result<(Vec<MemoryRecord>, Option<ExportCursor>), MemoryError>> + Send
-    {
+    ) -> impl Future<Output = Result<ExportPage, MemoryError>> + Send {
         let store = self.clone();
         let cursor = cursor.cloned();
         let now_ms = current_time_ms();
@@ -915,13 +911,11 @@ pub(crate) fn validate_content(content: &str, limits: &MemoryLimits) -> Result<(
     if content.trim().is_empty() {
         return Err(MemoryError::EmptyContent);
     }
+    reject_likely_secret(content)?;
     if content.len() > limits.content_bytes {
         return Err(MemoryError::ContentTooLarge {
             maximum_bytes: limits.content_bytes,
         });
-    }
-    if contains_likely_secret(content) {
-        return Err(MemoryError::SecretRejected);
     }
     Ok(())
 }

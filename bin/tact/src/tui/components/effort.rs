@@ -1,11 +1,22 @@
 //! Animated circular selector for reasoning effort.
+//!
+//! [EffortSelector] keeps the highlighted [ReasoningEffort] in an
+//! [AnimatedDial] plus the pro-mode toggle. It consumes key presses through
+//! [EffortEvent::Terminal] and animation ticks through
+//! [EffortEvent::AnimationFrame]; the host schedules ticks from
+//! [EffortSelector::animation_deadline]. Arrow keys move the dial, Enter emits
+//! [EffortEffect::Apply] with the effort and pro flag, and Esc or Backspace emits
+//! [EffortEffect::Dismiss].
+//!
+//! Pro mode is only shown and toggleable (`p`) when the model offers it, and it
+//! is forced off otherwise, so an applied pro flag is always supported.
 
 use super::{
     dial::AnimatedDial,
     floating::Floating,
     node::{Component, ComponentUpdate, RenderRequest},
 };
-use crate::{app::config::ReasoningEffort, tui::theme::Theme};
+use crate::app::{config::ReasoningEffort, theme::Theme};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind};
 use ratatui::{
     Frame,
@@ -168,7 +179,7 @@ mod tests {
         super::dial::{ANIMATION_DURATION, ANIMATION_FRAME_INTERVAL},
         Component, EffortEffect, EffortEvent, EffortSelector,
     };
-    use crate::{app::config::ReasoningEffort, tui::theme::Theme};
+    use crate::app::{config::ReasoningEffort, theme::Theme};
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use ratatui::{Terminal, backend::TestBackend, style::Color};
     use std::time::{Duration, Instant};

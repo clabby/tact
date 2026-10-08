@@ -89,5 +89,4 @@ harbor-evals = []
 
 [[bench]]
 name = "tui"
-path = "src/tui/bench.rs"
 harness = false

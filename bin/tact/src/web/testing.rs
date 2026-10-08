@@ -3,19 +3,26 @@
 use super::{
     api::{self, AppState, PublicOrigin},
     assets::AssetStore,
-    bridge::{self, Busy, Draft, LoopEnd, Publication, SessionInfo},
+    bridge::{self, LoopEnd},
     hub::Hub,
-    review::{self, ReviewAgent, ReviewRegistry},
+    review::{self, AgentPrompt, ReviewAgent, ReviewRegistry},
     token::MachineToken,
     workspaces::Workspaces,
 };
-use crate::app::config::{ReasoningEffort, ReasoningMode, Speed};
+use crate::{
+    app::config::{ReasoningEffort, ReasoningMode, Speed},
+    core::protocol::{
+        AuxiliaryError, Busy, CommandError, Draft, Publication, Reply, Request as LoopRequest,
+        SessionInfo,
+    },
+};
 use axum::{
     Router,
     body::Body,
     http::{HeaderMap, Method, Request, StatusCode, header},
 };
-use std::{fs, path::Path, process::Command, sync::Arc};
+use futures_util::future::BoxFuture;
+use std::{fs, future::Future, path::Path, process::Command, sync::Arc};
 use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt as _;
@@ -31,8 +38,29 @@ pub(super) struct Harness {
     _home: TempDir,
 }
 
-pub(super) fn idle_agent() -> ReviewAgent {
-    Arc::new(|_, _, _| Box::pin(async { Ok("<p>Overview</p>".to_owned()) }))
+/// A review agent backed by a closure.
+struct FnAgent<F>(F);
+
+impl<F, Answer> ReviewAgent for FnAgent<F>
+where
+    F: Fn(AgentPrompt) -> Answer + Send + Sync + 'static,
+    Answer: Future<Output = Result<String, AuxiliaryError>> + Send + 'static,
+{
+    fn run(&self, prompt: AgentPrompt) -> BoxFuture<'static, Result<String, AuxiliaryError>> {
+        Box::pin((self.0)(prompt))
+    }
+}
+
+pub(super) fn agent<F, Answer>(respond: F) -> Arc<dyn ReviewAgent>
+where
+    F: Fn(AgentPrompt) -> Answer + Send + Sync + 'static,
+    Answer: Future<Output = Result<String, AuxiliaryError>> + Send + 'static,
+{
+    Arc::new(FnAgent(respond))
+}
+
+pub(super) fn idle_agent() -> Arc<dyn ReviewAgent> {
+    agent(|_| async { Ok("<p>Overview</p>".to_owned()) })
 }
 
 impl Harness {
@@ -40,13 +68,13 @@ impl Harness {
         Self::with(repository(), idle_agent())
     }
 
-    pub(super) fn with(workspace: TempDir, agent: ReviewAgent) -> Self {
+    pub(super) fn with(workspace: TempDir, agent: Arc<dyn ReviewAgent>) -> Self {
         Self::with_origin(workspace, agent, PublicOrigin::None)
     }
 
     pub(super) fn with_origin(
         workspace: TempDir,
-        agent: ReviewAgent,
+        agent: Arc<dyn ReviewAgent>,
         public_origin: PublicOrigin,
     ) -> Self {
         crate::install_tls_provider();
@@ -128,8 +156,8 @@ impl Harness {
     pub(super) async fn command(
         &mut self,
         body: serde_json::Value,
-        answer: Result<bridge::Reply, bridge::CommandError>,
-    ) -> (StatusCode, serde_json::Value, bridge::Request) {
+        answer: Result<Reply, CommandError>,
+    ) -> (StatusCode, serde_json::Value, LoopRequest) {
         let request = Request::builder()
             .method(Method::POST)
             .uri("/api/cmd")
@@ -176,6 +204,19 @@ impl Harness {
             tokio::task::yield_now().await;
         }
     }
+}
+
+/// The event name and JSON data of one Server-Sent Events message.
+pub(super) fn sse_event(message: &[u8]) -> (String, serde_json::Value) {
+    let message = std::str::from_utf8(message).expect("events are UTF-8");
+    let (name, data) = message
+        .strip_prefix("event: ")
+        .and_then(|message| message.split_once("\ndata: "))
+        .expect("messages are SSE events");
+    let data = data
+        .strip_suffix("\n\n")
+        .expect("events end with a blank line");
+    (name.to_owned(), serde_json::from_str(data).unwrap())
 }
 
 pub(super) fn repository() -> TempDir {

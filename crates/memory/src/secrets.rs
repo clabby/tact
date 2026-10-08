@@ -1,5 +1,6 @@
 //! Conservative checks that keep likely credentials out of persistent memory.
 
+use crate::MemoryError;
 use zeroize::Zeroizing;
 
 const SECRET_PREFIXES: &[&str] = &[
@@ -29,7 +30,15 @@ const ASSIGNMENT_NAMES: &[&str] = &[
     "apikey",
 ];
 
-pub(super) fn contains_likely_secret(content: &str) -> bool {
+/// Rejects content before a client-side store persists or transmits it.
+pub(crate) fn reject_likely_secret(content: &str) -> Result<(), MemoryError> {
+    if contains_likely_secret(content) {
+        return Err(MemoryError::SecretRejected);
+    }
+    Ok(())
+}
+
+pub(crate) fn contains_likely_secret(content: &str) -> bool {
     let lowercase = Zeroizing::new(content.to_ascii_lowercase());
 
     contains_private_key(&lowercase)

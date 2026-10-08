@@ -1,10 +1,16 @@
 //! Selector for automatic, light, and dark color modes.
+//!
+//! [ThemeSelector] keeps only the highlighted [ThemeMode]. It consumes key
+//! presses through [ThemeSelectorEvent::Terminal]: arrow keys move the highlight
+//! without wrapping, Enter emits [ThemeSelectorEffect::Apply] with the
+//! highlighted mode, and Esc or Backspace emits [ThemeSelectorEffect::Dismiss].
+//! The host applies or discards the mode; the selector does not preview it.
 
 use super::{
     floating::Floating,
     node::{Component, ComponentUpdate, RenderRequest},
 };
-use crate::tui::theme::{Theme, ThemeMode};
+use crate::app::theme::{Theme, ThemeMode};
 use crossterm::event::{Event, KeyCode, KeyEventKind};
 use ratatui::{
     Frame,
@@ -116,7 +122,7 @@ impl Component for ThemeSelector {
 #[cfg(test)]
 mod tests {
     use super::{Component, ThemeSelector, ThemeSelectorEffect, ThemeSelectorEvent};
-    use crate::tui::theme::ThemeMode;
+    use crate::app::theme::ThemeMode;
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 
     fn key(code: KeyCode) -> ThemeSelectorEvent {

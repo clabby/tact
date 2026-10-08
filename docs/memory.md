@@ -166,11 +166,11 @@ client, the runtime-selected backend, and server-side backends implement that co
 `tact_memory::server::MemoryServer<S>` is the generic Axum wrapper. It authenticates a request,
 passes its namespace to a factory, and uses the resulting namespace-bound store.
 
-Tact uses one shared secret-content detector at its client-side storage boundaries. The selected
-store rejects unsafe puts and snapshots before they reach either backend; local and remote clients
-also suppress unsafe records that predate or bypass that check. Server-side `MemoryStore`
-implementations remain content-policy agnostic and enforce storage invariants, not Tact's agent
-policy.
+Tact uses one secret-content detector on the client side. The local store and the remote client
+each reject puts and snapshots that look like they contain a credential, so unsafe content is not
+written locally or sent to a server. Neither returns stored records that fail the same check.
+Server-side `MemoryStore` implementations do not inspect content; they enforce storage
+invariants, not Tact's agent policy.
 
 The server wrapper owns bearer authentication, namespace and role checks, request validation and
 bounds, protocol errors, and operation tracing that excludes tokens and memory content. A store
@@ -184,8 +184,8 @@ Backends return semantic `MemoryError` variants for conflicts, bounds, and valid
 backend wraps implementation-specific failures with `MemoryError::backend` or
 `MemoryError::unavailable`; concrete database error types are not part of the shared contract.
 
-The HTTP wrapper limits the router to 64 in-flight requests, times out store operations after 30
-seconds, and keeps operation futures attached to request tasks. The hosting executable owns signal
+With the `native-server` feature, the HTTP wrapper limits the router to 64 in-flight requests and
+times out store operations after 30 seconds. Operation futures stay attached to request tasks. The hosting executable owns signal
 handling and graceful shutdown. Backend implementations own their connection, task, and durability
 lifecycle.
 
@@ -248,17 +248,17 @@ records together with the requested namespace selection.
 
 ## Local server walkthrough
 
-The example runs the production-shaped Cloudflare Worker and D1 backend locally through Wrangler.
-Install its build dependencies and start it from the repository root:
+The example runs the Cloudflare Worker and D1 backend locally through Wrangler. Its scripts use
+Bun. Install the build dependencies and start it from the repository root:
 
 ```console
 cargo install worker-build --version 0.8.5 --locked
 cd examples/tact-memory-cloudflare
-npm ci
+bun ci
 cp credentials.example.toml credentials.toml
 chmod 600 credentials.toml
-npm run migrate:local
-npm run dev
+bun run migrate:local
+bun run dev
 ```
 
 Set independent tokens for Alice, Bob, and a read-only observer in the ignored `credentials.toml`

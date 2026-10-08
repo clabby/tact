@@ -1,10 +1,31 @@
 //! Pending-message stack shown while a turn is active.
+//!
+//! [MessageQueue] owns prompts submitted while the agent is busy. The host
+//! pushes prompts, drains ready ones when a turn ends, and reports the progress
+//! of steers through `steer_admitted`, `steer_applied`, `steer_promoted`,
+//! `steer_failed`, and `cancel_steers`. Key presses arrive through
+//! [QueueEvent::Terminal] while the stack is focused, and
+//! [QueueEvent::AnimationFrame] drives the "steering" title wave.
+//!
+//! - Enter emits [QueueEffect::Steer] to deliver the highlighted prompt into the
+//!   running turn, `e` emits [QueueEffect::Edit] to hand its text to the
+//!   composer, and Esc emits [QueueEffect::Blur].
+//! - Items being steered form a lane at the front of the stack, ahead of waiting
+//!   items. Only waiting items can be edited, deleted, reordered, or steered.
+//! - The runtime may report a steer as applied before it acknowledges admission;
+//!   the queue counts those early reports so the matching item is removed once
+//!   its admission arrives.
 
 use super::{
+    fit::ellipsize,
     node::{Component, ComponentUpdate, RenderRequest},
     waved_text::WavedText,
 };
-use crate::tui::{format::sanitize_terminal_text_inline, prompt::Submission, theme::Theme};
+use crate::{
+    app::theme::Theme,
+    core::prompt::{QueueId, Submission},
+    tui::format::sanitize_terminal_text_inline,
+};
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::{
     Frame,
@@ -13,24 +34,10 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, BorderType, Borders},
 };
-use std::{borrow::Cow, time::Instant};
-use unicode_segmentation::UnicodeSegmentation;
+use std::time::Instant;
 use unicode_width::UnicodeWidthStr;
 
 const STEERING_TEXT: &str = "steering";
-
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) struct QueueId(u64);
-
-impl QueueId {
-    pub(crate) const fn new(value: u64) -> Self {
-        Self(value)
-    }
-
-    pub(crate) const fn get(self) -> u64 {
-        self.0
-    }
-}
 
 #[derive(Debug, Eq, PartialEq)]
 pub(super) enum QueueEffect {
@@ -42,6 +49,15 @@ pub(super) enum QueueEffect {
 pub(super) enum QueueEvent {
     Terminal(Event),
     AnimationFrame(Instant),
+}
+
+/// A read-only view of one queue item.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct QueueEntry<'a> {
+    pub(super) id: QueueId,
+    pub(super) text: &'a str,
+    /// The item is being delivered into the running turn and can no longer be edited or removed.
+    pub(super) steering: bool,
 }
 
 struct QueueItem {
@@ -82,14 +98,46 @@ impl Default for MessageQueue {
 }
 
 impl MessageQueue {
-    pub(super) fn push(&mut self, prompt: impl Into<Submission>) {
+    /// Appends a prompt, selects it, and returns its id.
+    pub(super) fn push(&mut self, prompt: impl Into<Submission>) -> QueueId {
+        let id = QueueId::new(self.next_id);
         self.items.push(QueueItem {
-            id: QueueId(self.next_id),
+            id,
             prompt: prompt.into(),
             state: QueueItemState::Queued,
         });
         self.next_id = self.next_id.saturating_add(1);
         self.selected = self.items.len() - 1;
+        id
+    }
+
+    /// Moves a waiting item to the end of the steer lane and returns the prompt to deliver into
+    /// the running turn. Returns `None` when the item is gone or no longer waiting.
+    pub(super) fn steer(&mut self, id: QueueId) -> Option<Submission> {
+        let index = self.queued_index(id)?;
+        let mut item = self.items.remove(index);
+        item.state = QueueItemState::SubmittingSteer;
+        let prompt = item.prompt.clone();
+        let lane_end = self.steer_lane_len();
+        self.items.insert(lane_end, item);
+        self.selected = lane_end;
+        self.sync_steering_wave();
+        Some(prompt)
+    }
+
+    /// Removes a waiting item. Returns false when the item is gone or no longer waiting.
+    pub(super) fn remove_queued(&mut self, id: QueueId) -> bool {
+        let Some(index) = self.queued_index(id) else {
+            return false;
+        };
+        self.selected = index;
+        self.remove_selected().is_some()
+    }
+
+    fn queued_index(&self, id: QueueId) -> Option<usize> {
+        self.items
+            .iter()
+            .position(|item| item.id == id && item.state == QueueItemState::Queued)
     }
 
     pub(super) fn finish_edit(&mut self, id: QueueId, text: String) -> bool {
@@ -134,30 +182,16 @@ impl MessageQueue {
         drained
     }
 
-    /// Every item in display order as `(id, text, steering)`; steering items are being delivered
-    /// into the running turn.
-    pub(super) fn items(&self) -> impl Iterator<Item = (QueueId, &str, bool)> {
-        self.items.iter().map(|item| {
-            let steering = matches!(
+    /// Every item in display order.
+    pub(super) fn entries(&self) -> impl Iterator<Item = QueueEntry<'_>> {
+        self.items.iter().map(|item| QueueEntry {
+            id: item.id,
+            text: item.prompt.display_text(),
+            steering: matches!(
                 item.state,
                 QueueItemState::SubmittingSteer | QueueItemState::AdmittedSteer
-            );
-            (item.id, item.prompt.display_text(), steering)
+            ),
         })
-    }
-
-    /// Highlights a queued item so a keyboard action applies to it. Returns false when the item is
-    /// gone or no longer waiting in the queue.
-    pub(super) fn select_queued(&mut self, id: QueueId) -> bool {
-        let Some(index) = self
-            .items
-            .iter()
-            .position(|item| item.id == id && item.state == QueueItemState::Queued)
-        else {
-            return false;
-        };
-        self.selected = index;
-        true
     }
 
     pub(super) fn is_empty(&self) -> bool {
@@ -401,21 +435,12 @@ impl MessageQueue {
                 };
             }
             KeyCode::Enter => {
-                let Some(item) = self.items.get(self.selected) else {
+                let Some(id) = self.items.get(self.selected).map(|item| item.id) else {
                     return ComponentUpdate::none();
                 };
-                if item.state != QueueItemState::Queued {
+                let Some(prompt) = self.steer(id) else {
                     return ComponentUpdate::none();
-                }
-
-                let mut item = self.items.remove(self.selected);
-                item.state = QueueItemState::SubmittingSteer;
-                let id = item.id;
-                let prompt = item.prompt.clone();
-                let index = self.steer_lane_len();
-                self.items.insert(index, item);
-                self.selected = index;
-                self.sync_steering_wave();
+                };
                 return ComponentUpdate {
                     effects: vec![QueueEffect::Steer { id, prompt }],
                     render: RenderRequest::Immediate,
@@ -550,7 +575,10 @@ impl Component for MessageQueue {
             frame.buffer_mut().set_stringn(
                 area.x + 2,
                 row_y,
-                truncate(item.prompt.display_text(), content_width),
+                ellipsize(
+                    sanitize_terminal_text_inline(item.prompt.display_text()),
+                    content_width,
+                ),
                 content_width,
                 style,
             );
@@ -558,34 +586,12 @@ impl Component for MessageQueue {
     }
 }
 
-fn truncate(text: &str, width: usize) -> Cow<'_, str> {
-    let text = sanitize_terminal_text_inline(text);
-    if UnicodeWidthStr::width(text.as_ref()) <= width {
-        return text;
-    }
-    if width == 0 {
-        return Cow::Borrowed("");
-    }
-
-    let mut result = String::new();
-    let available = width.saturating_sub(1);
-    for grapheme in text.graphemes(true) {
-        if UnicodeWidthStr::width(result.as_str()) + UnicodeWidthStr::width(grapheme) > available {
-            break;
-        }
-        result.push_str(grapheme);
-    }
-    result.push('…');
-    Cow::Owned(result)
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
         Component, MessageQueue, QueueEffect, QueueEvent, QueueId, STEERING_TEXT, Submission,
-        truncate,
     };
-    use crate::tui::theme::Theme;
+    use crate::app::theme::Theme;
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use ratatui::{Terminal, backend::TestBackend, style::Color};
 
@@ -943,6 +949,5 @@ mod tests {
         assert_eq!(buffer[(0, 2)].symbol(), "├");
         assert_eq!(buffer[(19, 2)].symbol(), "┤");
         assert_eq!(buffer[(19, 4)].symbol(), "╯");
-        assert_eq!(truncate("hello\nworld", 8), "hello w…");
     }
 }

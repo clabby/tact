@@ -1,13 +1,18 @@
 //! Searchable picker for resumable persisted sessions.
+//!
+//! [SessionPicker] keeps the [SessionSummary] list, its own search query, the
+//! matching indices, the highlighted row, and a [SessionPickerMode] that decides
+//! what selection means. It consumes typed characters, pastes, and keys through
+//! [SessionPickerEvent::Terminal]. Enter or Tab emits
+//! [SessionPickerEffect::Resume] or [SessionPickerEffect::Mention] with the
+//! highlighted session id, depending on the mode. Esc, or Backspace on an empty
+//! query, emits [SessionPickerEffect::Dismiss].
 
 use super::{
     floating::Floating,
     node::{Component, ComponentUpdate, RenderRequest},
 };
-use crate::tui::{
-    session::{SessionSummary, format_age},
-    theme::Theme,
-};
+use crate::{app::theme::Theme, core::session::SessionSummary, tui::format::format_age};
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::{
     Frame,
@@ -261,7 +266,7 @@ mod tests {
     };
     use crate::{
         app::config::{ReasoningEffort, ReasoningMode},
-        tui::session::SessionSummary,
+        core::session::SessionSummary,
     };
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use std::path::PathBuf;

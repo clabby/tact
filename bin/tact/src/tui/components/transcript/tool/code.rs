@@ -1,5 +1,12 @@
+//! Presenter for code-mode `exec` cells and their `wait` continuations.
+//!
+//! An `exec` summary counts the nested tool calls the cell made, or the items it emitted when it
+//! made none; cells with nested calls are titled as batches. Expanded cells show the highlighted
+//! source followed by the emitted text items, or the raw result, as selectable text. `wait` calls
+//! summarize as background work and expand to their arguments and result.
+
 use super::{Presentation, format_bytes};
-use crate::tui::{theme::Theme, transcript::ToolEntry};
+use crate::{app::theme::Theme, core::transcript::ToolEntry};
 use ratatui::style::Style;
 use serde_json::Value;
 

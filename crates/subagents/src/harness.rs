@@ -2,8 +2,10 @@
 
 use super::{
     capacity::{Capacity, TurnCapacity},
+    error::{DeliveryFailure, SubagentError},
     model::{AgentId, AgentMessage, MessageDisposition, MessageId, MessagePriority},
-    runtime::{DelegationChange, Registry, completion_instructions},
+    output::completion_instructions,
+    runtime::{DelegationChange, Registry},
 };
 use nanocodex::{Nanocodex, NanocodexError, TurnControl};
 use std::{collections::VecDeque, sync::Weak};
@@ -26,7 +28,7 @@ pub(super) struct HarnessHandle {
 struct DeliveryCommand {
     message: AgentMessage,
     committed: Option<oneshot::Receiver<()>>,
-    response: oneshot::Sender<std::io::Result<MessageDisposition>>,
+    response: oneshot::Sender<Result<MessageDisposition, SubagentError>>,
 }
 
 impl DeliveryCommand {
@@ -40,17 +42,17 @@ impl DeliveryCommand {
 
 pub(super) struct EnqueuedDelivery {
     committed: oneshot::Sender<()>,
-    response: oneshot::Receiver<std::io::Result<MessageDisposition>>,
+    response: oneshot::Receiver<Result<MessageDisposition, SubagentError>>,
 }
 
 impl EnqueuedDelivery {
-    pub(super) async fn release(self) -> std::io::Result<MessageDisposition> {
+    pub(super) async fn release(self) -> Result<MessageDisposition, SubagentError> {
         self.committed
             .send(())
-            .map_err(|_| std::io::Error::other("subagent harness stopped before delivery"))?;
+            .map_err(|()| SubagentError::HarnessStopped)?;
         self.response
             .await
-            .map_err(|_| std::io::Error::other("subagent harness stopped before responding"))?
+            .map_err(|_| SubagentError::HarnessStopped)?
     }
 }
 
@@ -58,13 +60,13 @@ enum HarnessCommand {
     Start {
         prompt: String,
         capacity: TurnCapacity,
-        response: oneshot::Sender<std::io::Result<()>>,
+        response: oneshot::Sender<Result<(), SubagentError>>,
     },
     Interrupt {
-        response: oneshot::Sender<std::io::Result<()>>,
+        response: oneshot::Sender<Result<(), SubagentError>>,
     },
     Close {
-        response: oneshot::Sender<std::io::Result<()>>,
+        response: oneshot::Sender<Result<(), SubagentError>>,
     },
 }
 
@@ -103,7 +105,7 @@ impl HarnessHandle {
         &self,
         prompt: String,
         capacity: TurnCapacity,
-    ) -> std::io::Result<()> {
+    ) -> Result<(), SubagentError> {
         self.request(|response| HarnessCommand::Start {
             prompt,
             capacity,
@@ -112,12 +114,12 @@ impl HarnessHandle {
         .await
     }
 
-    pub(super) async fn interrupt(&self) -> std::io::Result<()> {
+    pub(super) async fn interrupt(&self) -> Result<(), SubagentError> {
         self.request(|response| HarnessCommand::Interrupt { response })
             .await
     }
 
-    pub(super) async fn close(&self) -> std::io::Result<()> {
+    pub(super) async fn close(&self) -> Result<(), SubagentError> {
         self.request(|response| HarnessCommand::Close { response })
             .await
     }
@@ -125,7 +127,7 @@ impl HarnessHandle {
     pub(super) fn enqueue_delivery(
         &self,
         message: AgentMessage,
-    ) -> std::io::Result<EnqueuedDelivery> {
+    ) -> Result<EnqueuedDelivery, SubagentError> {
         let id = message.id;
         let (response, result) = oneshot::channel();
         let (committed, wait_for_commit) = oneshot::channel();
@@ -139,12 +141,8 @@ impl HarnessHandle {
             MessagePriority::Urgent => &self.urgent,
         };
         sender.try_send(command).map_err(|error| match error {
-            mpsc::error::TrySendError::Full(_) => {
-                std::io::Error::other(format!("agent message mailbox is full for message {id}"))
-            }
-            mpsc::error::TrySendError::Closed(_) => {
-                std::io::Error::other("subagent harness is closed")
-            }
+            mpsc::error::TrySendError::Full(_) => SubagentError::MailboxFull(id),
+            mpsc::error::TrySendError::Closed(_) => SubagentError::HarnessClosed,
         })?;
         Ok(EnqueuedDelivery {
             committed,
@@ -154,16 +152,14 @@ impl HarnessHandle {
 
     async fn request(
         &self,
-        command: impl FnOnce(oneshot::Sender<std::io::Result<()>>) -> HarnessCommand,
-    ) -> std::io::Result<()> {
+        command: impl FnOnce(oneshot::Sender<Result<(), SubagentError>>) -> HarnessCommand,
+    ) -> Result<(), SubagentError> {
         let (response, result) = oneshot::channel();
         self.commands
             .send(command(response))
             .await
-            .map_err(|_| std::io::Error::other("subagent harness is closed"))?;
-        result
-            .await
-            .map_err(|_| std::io::Error::other("subagent harness stopped before responding"))?
+            .map_err(|_| SubagentError::HarnessClosed)?;
+        result.await.map_err(|_| SubagentError::HarnessStopped)?
     }
 }
 
@@ -215,7 +211,7 @@ impl Harness {
                     }
                 }
                 HarnessEvent::Command(None) => {
-                    self.fail_pending("subagent harness stopped").await;
+                    self.fail_pending(DeliveryFailure::HarnessStopped).await;
                     drop(self.close().await);
                     return;
                 }
@@ -271,22 +267,17 @@ impl Harness {
                 false
             }
             HarnessCommand::Interrupt { response } => {
-                {
-                    self.reject_waiting_deliveries("message rejected by agent interruption")
-                        .await;
-                    self.fail_pending("message cancelled by agent interruption")
-                        .await;
-                }
+                self.reject_waiting_deliveries(DeliveryFailure::RejectedByInterrupt)
+                    .await;
+                self.fail_pending(DeliveryFailure::CancelledByInterrupt)
+                    .await;
                 let _ = response.send(self.stop_active().await);
                 false
             }
             HarnessCommand::Close { response } => {
-                {
-                    self.reject_waiting_deliveries("message rejected because the agent closed")
-                        .await;
-                    self.fail_pending("message cancelled because the agent closed")
-                        .await;
-                }
+                self.reject_waiting_deliveries(DeliveryFailure::RejectedByClose)
+                    .await;
+                self.fail_pending(DeliveryFailure::CancelledByClose).await;
                 let result = self.close().await;
                 let _ = response.send(result);
                 true
@@ -342,11 +333,14 @@ impl Harness {
                 Err(NanocodexError::TurnNotSteerable | NanocodexError::TurnStopped) => {
                     self.rollback_delegation(delegation).await;
                 }
-                Err(error) => {
+                Err(source) => {
                     self.rollback_delegation(delegation).await;
                     self.reject(
                         command,
-                        format!("could not urgently message agent {}: {error}", self.id),
+                        SubagentError::Steer {
+                            agent: self.id,
+                            source,
+                        },
                     )
                     .await;
                     return;
@@ -362,7 +356,7 @@ impl Harness {
             let delegation = self.begin_delegation(command.message.id).await;
             if let Err(error) = self.start_turn(command.message.prompt(), capacity).await {
                 self.rollback_delegation(delegation).await;
-                self.reject(command, error.to_string()).await;
+                self.reject(command, error).await;
                 return;
             }
             self.admit(
@@ -389,7 +383,11 @@ impl Harness {
         if queue.len() >= limit {
             self.reject(
                 command,
-                format!("{priority:?} mailbox for agent {} is full", self.id),
+                DeliveryFailure::QueueFull {
+                    priority,
+                    agent: self.id,
+                }
+                .into(),
             )
             .await;
             return;
@@ -440,7 +438,7 @@ impl Harness {
         }
     }
 
-    async fn fail_pending(&mut self, reason: &str) {
+    async fn fail_pending(&mut self, reason: DeliveryFailure) {
         let pending = self
             .pending_urgent
             .drain(..)
@@ -448,20 +446,20 @@ impl Harness {
             .map(|message| message.id)
             .collect::<Vec<_>>();
         for id in pending {
-            self.publish_message_failure(id, reason.to_owned()).await;
+            self.publish_message_failure(id, reason.to_string()).await;
         }
     }
 
-    async fn reject_waiting_deliveries(&mut self, reason: &str) {
+    async fn reject_waiting_deliveries(&mut self, reason: DeliveryFailure) {
         while let Ok(command) = self.urgent.try_recv() {
-            self.reject(command, reason.to_owned()).await;
+            self.reject(command, reason.into()).await;
         }
         while let Ok(command) = self.deferred.try_recv() {
-            self.reject(command, reason.to_owned()).await;
+            self.reject(command, reason.into()).await;
         }
     }
 
-    async fn reject(&self, mut command: DeliveryCommand, reason: String) {
+    async fn reject(&self, mut command: DeliveryCommand, error: SubagentError) {
         if !command.wait_for_commit().await {
             return;
         }
@@ -470,7 +468,7 @@ impl Harness {
                 .message_rejected(&self.root_session_id, command.message.id)
                 .await;
         }
-        let _ = command.response.send(Err(std::io::Error::other(reason)));
+        let _ = command.response.send(Err(error));
     }
 
     async fn publish_message_failure(&self, id: MessageId, error: String) {
@@ -484,13 +482,11 @@ impl Harness {
     async fn admit(
         &self,
         id: MessageId,
-        response: oneshot::Sender<std::io::Result<MessageDisposition>>,
+        response: oneshot::Sender<Result<MessageDisposition, SubagentError>>,
         disposition: MessageDisposition,
     ) {
         let Some(registry) = self.registry.upgrade() else {
-            let _ = response.send(Err(std::io::Error::other(
-                "subagent runtime stopped before admitting the message",
-            )));
+            let _ = response.send(Err(SubagentError::AdmissionAbandoned));
             return;
         };
         registry
@@ -515,29 +511,27 @@ impl Harness {
             .await;
     }
 
-    async fn start_turn(&mut self, prompt: String, capacity: TurnCapacity) -> std::io::Result<()> {
+    async fn start_turn(
+        &mut self,
+        prompt: String,
+        capacity: TurnCapacity,
+    ) -> Result<(), SubagentError> {
         if self.active.is_some() {
-            return Err(std::io::Error::other(format!(
-                "agent {} is not idle",
-                self.id
-            )));
+            return Err(SubagentError::NotIdle(self.id));
         }
         let registry = self
             .registry
             .upgrade()
-            .ok_or_else(|| std::io::Error::other("subagent runtime is closed"))?;
+            .ok_or(SubagentError::RuntimeClosed)?;
         let agent = self
             .agent
             .as_ref()
-            .ok_or_else(|| std::io::Error::other(format!("agent {} is closed", self.id)))?;
+            .ok_or(SubagentError::AgentClosed(self.id))?;
         let Some((turn_token, context)) = registry
             .harness_turn_started(&self.root_session_id, self.id)
             .await
         else {
-            return Err(std::io::Error::other(format!(
-                "agent {} cannot start another turn",
-                self.id
-            )));
+            return Err(SubagentError::CannotStartTurn(self.id));
         };
         let prompt = format!(
             "{prompt}\n\n{}",
@@ -545,12 +539,15 @@ impl Harness {
         );
         let turn = match agent.prompt(context.prompt(prompt)).await {
             Ok(turn) => turn,
-            Err(error) => {
-                let error = format!("could not start agent {}: {error}", self.id);
+            Err(source) => {
+                let error = SubagentError::StartTurn {
+                    agent: self.id,
+                    source,
+                };
                 registry
-                    .harness_turn_start_failed(&self.root_session_id, self.id, error.clone())
+                    .harness_turn_start_failed(&self.root_session_id, self.id, error.to_string())
                     .await;
-                return Err(std::io::Error::other(error));
+                return Err(error);
             }
         };
         let control = turn.control();
@@ -563,7 +560,7 @@ impl Harness {
         Ok(())
     }
 
-    async fn stop_active(&mut self) -> std::io::Result<()> {
+    async fn stop_active(&mut self) -> Result<(), SubagentError> {
         let Some(active) = self.active.as_ref() else {
             return Ok(());
         };
@@ -571,10 +568,10 @@ impl Harness {
         self.finish_active().await;
         match cancellation {
             Ok(()) | Err(NanocodexError::TurnNotCancellable) => Ok(()),
-            Err(error) => Err(std::io::Error::other(format!(
-                "could not stop agent {}: {error}",
-                self.id
-            ))),
+            Err(source) => Err(SubagentError::StopTurn {
+                agent: self.id,
+                source,
+            }),
         }
     }
 
@@ -610,11 +607,15 @@ impl Harness {
         }
     }
 
-    async fn close(&mut self) -> std::io::Result<()> {
+    async fn close(&mut self) -> Result<(), SubagentError> {
         let shutdown_result = match self.agent.take() {
-            Some(agent) => agent.shutdown().await.map_err(|error| {
-                std::io::Error::other(format!("could not close agent {}: {error}", self.id))
-            }),
+            Some(agent) => agent
+                .shutdown()
+                .await
+                .map_err(|source| SubagentError::CloseAgent {
+                    agent: self.id,
+                    source,
+                }),
             None => Ok(()),
         };
         self.finish_active().await;

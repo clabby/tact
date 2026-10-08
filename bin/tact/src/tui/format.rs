@@ -1,6 +1,6 @@
 //! Shared formatting for terminal-facing values.
 
-use std::{borrow::Cow, env, path::Path};
+use std::{borrow::Cow, env, path::Path, time::Duration};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -107,12 +107,6 @@ pub(crate) fn duration_display_tick(nanoseconds: u64) -> u64 {
     1_000_u64.saturating_add(nanoseconds.saturating_add(50_000_000) / 100_000_000)
 }
 
-pub(crate) fn humanize_tool(name: &str) -> String {
-    name.trim_start_matches("mcp__")
-        .replace("__", " · ")
-        .replace('_', " ")
-}
-
 pub(crate) fn shorten_home(path: &Path) -> String {
     let home = env::var_os("HOME")
         .or_else(|| env::var_os("USERPROFILE"))
@@ -127,6 +121,21 @@ pub(crate) fn shorten_home(path: &Path) -> String {
         return path.display().to_string();
     };
     format!("~/{}", relative.display())
+}
+
+pub(crate) fn format_age(started_at_unix_ms: u64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let started = Duration::from_millis(started_at_unix_ms);
+    let elapsed = now.saturating_sub(started);
+    let seconds = elapsed.as_secs();
+    match seconds {
+        0..=59 => "now".to_owned(),
+        60..=3_599 => format!("{}m", seconds / 60),
+        3_600..=86_399 => format!("{}h", seconds / 3_600),
+        _ => format!("{}d", seconds / 86_400),
+    }
 }
 
 #[cfg(test)]

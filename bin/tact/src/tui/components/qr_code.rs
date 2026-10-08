@@ -4,7 +4,7 @@ use super::{
     floating::Floating,
     node::{Component, ComponentUpdate, RenderRequest},
 };
-use crate::tui::theme::Theme;
+use crate::app::theme::Theme;
 use crossterm::event::{Event, KeyCode, KeyEventKind};
 use qrcode::{Color as Module, EcLevel, QrCode};
 use ratatui::{
@@ -194,7 +194,7 @@ fn wrap_words(text: &str, width: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{Component, QrCodeEffect, QrCodeEvent, QrCodeView};
-    use crate::tui::theme::Theme;
+    use crate::app::theme::Theme;
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use ratatui::{Terminal, backend::TestBackend, style::Color};
 

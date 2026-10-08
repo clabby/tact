@@ -5,33 +5,75 @@
 [![Crates.io MSRV](https://img.shields.io/crates/msrv/tact-subagents?style=for-the-badge)](https://crates.io/crates/tact-subagents)
 [![Crates.io Version](https://img.shields.io/crates/v/tact-subagents?style=for-the-badge)](https://crates.io/crates/tact-subagents)
 
-`tact-subagents` provides structured child-agent orchestration for Nanocodex applications. It owns
-clean child sessions, a scoped task tree, bounded concurrent turns, directed messages, structured
-result validation, and lifecycle tools.
+`tact-subagents` lets a Nanocodex agent delegate work to clean child sessions. It owns the child
+sessions, a task tree for each root session, bounded concurrent turns, directed messages between
+agents, structured-result validation, and the lifecycle tools that expose all of this to models.
 
-The crate exposes three integration boundaries:
+The crate has four integration points:
 
-- `Subagents` owns one in-process runtime. Its weak handle installs Nanocodex tools without
-  creating an ownership cycle.
-- `ScopedAgentUpdate` is the observation stream for lifecycle, model, and message events.
-- `RootAgentAuthority` lets an application restrict its own tools to coordinating root sessions.
+- `Subagents` owns one in-process runtime. Its weak handle, `WeakSubagents`, installs the
+  Nanocodex tools without creating an ownership cycle.
+- `ScopedAgentUpdate` is the stream of lifecycle, model-event, and message updates.
+  `SubagentRoster` folds that stream into the tree a front-end displays.
+- `RootAgentAuthority` lets an application restrict its own tools to root sessions.
+- `SUPPORTED_MODELS` and `parse_model` define the models a child may run.
 
-Create one runtime for each root agent configuration. Drain its update receiver continuously,
-configure a factory that creates a fresh Nanocodex session for each child, and call
-`Subagents::downgrade` before capturing the handle in the root builder's tool factory. Call
-`WeakSubagents::install_tools` there. The same tool factory is inherited by child sessions, which
-permits nested delegation while the runtime enforces task-tree authority.
+One runtime can serve several root sessions. Each root session owns an isolated task tree, keyed by
+its Nanocodex session ID, and agent IDs are local to that tree. Tact creates one runtime per root
+agent so that replacing a session also discards its children.
 
-Each spawn explicitly names its model and reasoning effort using Nanocodex's `HarnessModel` and
-`Thinking` types. Codex children cannot exceed a Codex parent's model (Luna < Sol < Astra).
-Call `Subagents::set_claude_enabled(true)` to allow Sonnet 5.5, Opus 5.5, and Fable 5.1. Cross-provider
-selection and delegation between Claude models are allowed. Choose model and effort independently
-using the current reasoning obligation, cost, latency, and expected rework. Tact includes a
-self-contained model-selection guide in its session instructions. The tool description states
-availability and delegation limits. The runtime bounds new spawns by the live configured effort
-cap. Registered children also cannot spawn above their own assigned effort. Applications can use
-`AgentContext::prompt` to include the executing turn's model and effort in a root prompt; the
-runtime supplies that context on every child turn.
+## Usage
+
+Create the runtime, give it a factory that builds a fresh child session on every call, and install
+its tools through the weak handle. The same tool factory is inherited by child sessions, which lets
+children delegate further while the runtime enforces task-tree authority. Drain the update receiver
+for as long as the runtime lives; dropping it stops event forwarding.
+
+```rust,no_run
+use nanocodex::{AgentEvents, HarnessModel, Nanocodex, NanocodexError, Thinking};
+use nanocodex::tools::ToolsBuilder;
+use tact_subagents::{Speed, SubagentRoster, Subagents};
+
+fn build_child(
+    model: HarnessModel,
+    thinking: Thinking,
+    speed: Speed,
+) -> Result<(Nanocodex, AgentEvents), NanocodexError> {
+    // Build a clean session with the requested model, effort, and speed.
+    # let _ = (model, thinking, speed);
+    # unimplemented!()
+}
+
+# async fn run() -> Result<(), NanocodexError> {
+let (subagents, mut updates) = Subagents::new(8);
+subagents.set_agent_factory(Thinking::High, Speed::Standard, build_child)?;
+
+// Capture only the weak handle in tool factories.
+let weak = subagents.downgrade();
+let install_tools = move |tools: ToolsBuilder| weak.install_tools(tools);
+# let _ = install_tools;
+
+let mut roster = SubagentRoster::new(8);
+tokio::spawn(async move {
+    while let Some(scoped) = updates.recv().await {
+        roster.apply(&scoped.update);
+    }
+});
+# Ok(())
+# }
+```
+
+## Models and effort
+
+Each spawn names its model and reasoning effort with Nanocodex's `HarnessModel` and `Thinking`
+types. A Codex child cannot run a higher tier than a Codex parent (Luna < Sol < Astra). Claude models
+(Sonnet 5.5, Opus 5.5, and Fable 5.1) are rejected until `Subagents::set_claude_enabled(true)`;
+once enabled, any model may delegate to them and they may delegate to any model. Every spawn is
+bounded by the runtime's live effort cap, and a registered child cannot spawn above its own
+effort. `AgentContext::prompt` appends the executing turn's model and effort to a root prompt; the
+runtime does the same on every child turn.
+
+## Limits
 
 The runtime is process-local. It does not persist live child sessions, isolate filesystem access,
 or provide a distributed job queue. Root and child sessions use the process and tool authority

@@ -1,6 +1,6 @@
 //! Synchronous subagent topology and descendant authorization.
 
-use super::model::AgentId;
+use super::{error::SubagentError, model::AgentId};
 use std::collections::HashMap;
 
 #[derive(Default)]
@@ -15,13 +15,11 @@ struct TaskNode {
 }
 
 impl TaskTree {
-    pub(super) fn reserve(&mut self, parent: Option<AgentId>) -> std::io::Result<AgentId> {
+    pub(super) fn reserve(&mut self, parent: Option<AgentId>) -> Result<AgentId, SubagentError> {
         if let Some(parent) = parent
             && !self.nodes.contains_key(&parent)
         {
-            return Err(std::io::Error::other(format!(
-                "unknown parent_agent_id {parent}"
-            )));
+            return Err(SubagentError::UnknownParent(parent));
         }
 
         Ok(AgentId::next(&mut self.next_id))
@@ -32,13 +30,11 @@ impl TaskTree {
         id: AgentId,
         session_id: String,
         parent: Option<AgentId>,
-    ) -> std::io::Result<()> {
+    ) -> Result<(), SubagentError> {
         if let Some(parent) = parent
             && !self.nodes.contains_key(&parent)
         {
-            return Err(std::io::Error::other(format!(
-                "unknown parent agent {parent}"
-            )));
+            return Err(SubagentError::UnknownParent(parent));
         }
 
         self.nodes.insert(id, TaskNode { session_id, parent });
@@ -55,17 +51,15 @@ impl TaskTree {
             .find_map(|(&id, node)| (node.session_id == session_id).then_some(id))
     }
 
-    pub(super) fn authorize(&self, session_id: &str, id: AgentId) -> std::io::Result<()> {
+    pub(super) fn authorize(&self, session_id: &str, id: AgentId) -> Result<(), SubagentError> {
         if !self.contains(id) {
-            return Err(std::io::Error::other(format!("unknown agent_id {id}")));
+            return Err(SubagentError::UnknownAgent(id));
         }
 
         if let Some(caller) = self.agent_for_session(session_id)
             && !self.is_descendant(id, caller)
         {
-            return Err(std::io::Error::other(format!(
-                "agent {caller} may only manage its descendants"
-            )));
+            return Err(SubagentError::NotDescendant { caller });
         }
 
         Ok(())
@@ -75,9 +69,9 @@ impl TaskTree {
         self.nodes.keys().copied().collect()
     }
 
-    pub(super) fn subtree_postorder(&self, id: AgentId) -> std::io::Result<Vec<AgentId>> {
+    pub(super) fn subtree_postorder(&self, id: AgentId) -> Result<Vec<AgentId>, SubagentError> {
         if !self.contains(id) {
-            return Err(std::io::Error::other(format!("unknown agent_id {id}")));
+            return Err(SubagentError::UnknownAgent(id));
         }
 
         let mut order = Vec::new();

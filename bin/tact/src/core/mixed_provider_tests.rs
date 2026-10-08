@@ -1,4 +1,4 @@
-use super::{AgentRecipe, claude, install_agent_tools};
+use super::{claude, recipe::AgentRecipe};
 use crate::app::{
     config::{Config, ConfigOverrides, Speed},
     secret::SecretString,
@@ -232,13 +232,7 @@ fn build_agent(
 ) -> Result<(Nanocodex, AgentEvents), NanocodexError> {
     let AgentContext { model, thinking } = context;
     let speed = speed.for_model(model);
-    let tools = install_agent_tools(
-        recipe.tools.clone(),
-        &recipe.subagents,
-        None,
-        recipe.config.subagents().enabled(),
-        recipe.config.path().to_path_buf(),
-    )?;
+    let tools = recipe.tools_factory()()?;
     if let HarnessModel::Codex(model) = model {
         let service = codex.clone();
         let openai = OpenAi::builder("fixture-token")

@@ -1,6 +1,6 @@
 //! Bounded discovery and read-only access to V2 session transcripts.
 
-use crate::tui::{
+use crate::core::{
     storage::{DecodedStoredRecord, SessionStorage, StorageError, StoredSession},
     transcript::TranscriptRecord,
 };
@@ -417,8 +417,11 @@ fn bounded_output(
             output.scanned_records = output.scanned_records.saturating_add(1);
             scanned_bytes = scanned_bytes.saturating_add(stored.encoded_bytes);
             let records_remain = index.saturating_add(1) < page_records || storage_has_more;
-            let matches_kind =
-                kinds.is_none_or(|kinds| kinds.iter().any(|kind| kind == stored.record.kind()));
+            let matches_kind = kinds.is_none_or(|kinds| {
+                kinds
+                    .iter()
+                    .any(|kind| kind == stored.record.kind().as_str())
+            });
             let text_match = contains_any.and_then(|patterns| {
                 patterns.iter().find_map(|pattern| {
                     find_ignore_ascii_case(stored.record.payload_json(), pattern)
@@ -739,9 +742,9 @@ mod tests {
     };
     use crate::{
         app::config::{ReasoningEffort, ReasoningMode, Speed},
-        tui::{
+        core::{
             storage::{DecodedStoredRecord, SessionStorage},
-            transcript::{LocalEvent, SessionStarted, TranscriptRecord, TurnId},
+            transcript::{LocalEvent, SessionStarted, TranscriptRecord, TurnId, UserSubmitted},
         },
     };
     use nanocodex::{
@@ -847,10 +850,10 @@ mod tests {
             record: TranscriptRecord::from_local(
                 1,
                 1,
-                LocalEvent::UserSubmitted {
+                LocalEvent::UserSubmitted(UserSubmitted {
                     id: TurnId::new(1),
                     text,
-                },
+                }),
             )
             .unwrap(),
         };
@@ -994,10 +997,10 @@ mod tests {
                 TranscriptRecord::from_local(
                     2,
                     2,
-                    LocalEvent::UserSubmitted {
+                    LocalEvent::UserSubmitted(UserSubmitted {
                         id: TurnId::new(1),
                         text: "x".repeat(10_000),
-                    },
+                    }),
                 )
                 .unwrap(),
             ),
@@ -1064,10 +1067,10 @@ mod tests {
                 TranscriptRecord::from_local(
                     sequence,
                     sequence,
-                    LocalEvent::UserSubmitted {
+                    LocalEvent::UserSubmitted(UserSubmitted {
                         id: TurnId::new(sequence),
                         text: text.to_owned(),
-                    },
+                    }),
                 )
                 .unwrap(),
             ));
@@ -1107,10 +1110,10 @@ mod tests {
                 TranscriptRecord::from_local(
                     2,
                     2,
-                    LocalEvent::UserSubmitted {
+                    LocalEvent::UserSubmitted(UserSubmitted {
                         id: TurnId::new(1),
                         text: "validation needle".to_owned(),
-                    },
+                    }),
                 )
                 .unwrap(),
             ),
@@ -1177,10 +1180,10 @@ mod tests {
                 TranscriptRecord::from_local(
                     2,
                     2,
-                    LocalEvent::UserSubmitted {
+                    LocalEvent::UserSubmitted(UserSubmitted {
                         id: TurnId::new(2),
                         text: format!("match first {}", "x".repeat(600)),
-                    },
+                    }),
                 )
                 .unwrap(),
             ),
@@ -1188,10 +1191,10 @@ mod tests {
                 TranscriptRecord::from_local(
                     3,
                     3,
-                    LocalEvent::UserSubmitted {
+                    LocalEvent::UserSubmitted(UserSubmitted {
                         id: TurnId::new(3),
                         text: format!("match second {}", "x".repeat(600)),
-                    },
+                    }),
                 )
                 .unwrap(),
             ),
@@ -1298,10 +1301,10 @@ mod tests {
                 TranscriptRecord::from_local(
                     2,
                     at,
-                    LocalEvent::UserSubmitted {
+                    LocalEvent::UserSubmitted(UserSubmitted {
                         id: TurnId::new(1),
                         text: prompt.to_owned(),
-                    },
+                    }),
                 )
                 .unwrap(),
             ),

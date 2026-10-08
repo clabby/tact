@@ -2,8 +2,11 @@
 
 use crate::{
     app::{
-        config::{AuthMode, Config, ConfigOverrides, ReasoningEffort, ReasoningMode, Transport},
-        error::{Error, Result, RuntimeError},
+        config::{
+            AuthMode, Config, ConfigOverrides, ReasoningEffort, ReasoningMode, RemoteMemoryConfig,
+            Transport,
+        },
+        error::{CliError, ConfigError, Result},
         model,
         secret::SecretString,
         shutdown, update,
@@ -15,6 +18,10 @@ use clap::{ArgAction, Parser, Subcommand, builder::NonEmptyStringValueParser};
 use crossterm::style::{Color, Stylize};
 use nanocodex::{HarnessFamily, HarnessModel as Model};
 use std::{env, env::VarError, fmt, path::PathBuf};
+use tact_memory::{
+    LocalMemoryStore, RemoteClientError, RemoteMemoryClient, RemoteToken,
+    transfer::{self, TransferError},
+};
 use tokio_util::sync::CancellationToken;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
@@ -354,26 +361,57 @@ impl Drop for McpCommand {
 impl ZeroizeOnDrop for McpCommand {}
 
 impl Cli {
-    pub(crate) async fn run(self) -> Result<()> {
+    /// Dispatches the invocation. Each command loads configuration only if it uses it, so
+    /// `update` works even when the configuration file is invalid.
+    pub(crate) async fn run(mut self) -> Result<()> {
         if self.resume.is_some() && self.command.is_some() {
-            return Err(RuntimeError::ResumeWithCommand.into());
+            return Err(CliError::ResumeWithCommand.into());
         }
-        if matches!(&self.command, None | Some(Command::Resume)) {
-            tui::ensure_interactive()?;
+        let command = self.command.take();
+        let resume = self.resume.take();
+        let overrides = self.into_overrides();
+        match command {
+            None => {
+                tui::ensure_interactive()?;
+                let config = Config::load(overrides)?;
+                let startup = resume.map_or_else(
+                    || tui::StartupMode::NewSession(config.agent().model()),
+                    tui::StartupMode::ResumeSession,
+                );
+                Self::run_tui(config, startup).await
+            }
+            Some(Command::Resume) => {
+                tui::ensure_interactive()?;
+                let config = Config::load(overrides)?;
+                let startup = tui::StartupMode::ResumeSelector(config.agent().model());
+                Self::run_tui(config, startup).await
+            }
+            Some(Command::Update) => run_update().await,
+            // Adding a server creates the selected file when it does not exist yet.
+            Some(Command::Mcp { command }) => command.run(&Config::load_for_edit(overrides)?),
+            Some(Command::Auth { provider, command }) => {
+                command.run(&Config::load(overrides)?, provider).await
+            }
+            Some(Command::Config { command }) => command.run(&Config::load(overrides)?),
+            Some(Command::Memory { command }) => command.run(&Config::load(overrides)?).await,
+            Some(Command::Run {
+                prompt,
+                #[cfg(feature = "harbor-evals")]
+                orchestration_log,
+            }) => {
+                Self::run_agent(
+                    &Config::load(overrides)?,
+                    prompt,
+                    #[cfg(feature = "harbor-evals")]
+                    orchestration_log,
+                )
+                .await
+            }
         }
-        if self
-            .command
-            .as_ref()
-            .is_some_and(|command| !command.requires_config())
-        {
-            return self
-                .command
-                .expect("a config-independent command was checked above")
-                .run_without_config()
-                .await;
-        }
+    }
 
-        let overrides = ConfigOverrides {
+    fn into_overrides(self) -> ConfigOverrides {
+        ConfigOverrides {
             path: self.config,
             auth_mode: self.auth,
             auth_file: self.auth_file,
@@ -390,48 +428,33 @@ impl Cli {
             websocket_url: self.websocket_url,
             api_base_url: self.api_base_url,
             transport: self.responses_transport,
-        };
-        let config = if matches!(&self.command, Some(Command::Mcp { .. })) {
-            Config::load_for_update(overrides)?
-        } else {
-            Config::load(overrides)?
-        };
-        let model = config.agent().model();
-
-        match self.command {
-            Some(Command::Resume) => {
-                Self::run_tui(config, tui::StartupMode::ResumeSelector(model)).await
-            }
-            Some(command) => command.run_with_config(&config, model).await,
-            None => {
-                let startup = self
-                    .resume
-                    .map_or(tui::StartupMode::NewSession(model), |session_id| {
-                        tui::StartupMode::ResumeSession(session_id)
-                    });
-                Self::run_tui(config, startup).await
-            }
         }
     }
 
     async fn run_tui(config: Config, startup: tui::StartupMode) -> Result<()> {
         let shutdown = CancellationToken::new();
         let run = tui::run(config, startup, shutdown.clone());
-        tokio::pin!(run);
-
-        let result = tokio::select! {
-            result = &mut run => result,
-            signal = shutdown::signal() => {
-                shutdown.cancel();
-                let result = run.await;
-                signal.map_err(RuntimeError::ShutdownSignal)?;
-                result
-            }
-        };
-        if let Some(session_id) = result? {
+        if let Some(session_id) = shutdown::run_until_complete(shutdown, run).await? {
             print_resume_hint(&session_id);
         }
         Ok(())
+    }
+
+    async fn run_agent(
+        config: &Config,
+        prompt: String,
+        #[cfg(feature = "harbor-evals")] orchestration_log: Option<PathBuf>,
+    ) -> Result<()> {
+        let shutdown = CancellationToken::new();
+        let run = ConfiguredAgent::run_from_config(
+            config,
+            config.agent().model(),
+            prompt,
+            shutdown.clone(),
+            #[cfg(feature = "harbor-evals")]
+            orchestration_log,
+        );
+        shutdown::run_until_complete(shutdown, run).await
     }
 }
 
@@ -456,86 +479,24 @@ fn resume_command(session_id: &str) -> String {
     format!("tact --resume {session_id}")
 }
 
-impl Command {
-    const fn requires_config(&self) -> bool {
-        !matches!(self, Self::Update)
-    }
-
-    async fn run_without_config(self) -> Result<()> {
-        let Self::Update = self else {
-            unreachable!("only update is config-independent");
-        };
-        match update::install_latest().await.map_err(Error::update)? {
-            update::UpdateStatus::UpToDate { version } => {
-                println!("tact v{version} is already up to date.");
-            }
-            update::UpdateStatus::Updated { from, to } => {
-                println!("Updated tact from v{from} to v{to}.");
-            }
-            update::UpdateStatus::UseCargo { command } => {
-                println!("This tact binary is managed by Cargo. Update it with `{command}`.");
-            }
-            update::UpdateStatus::UsePackageManager { manager } => {
-                println!(
-                    "This tact binary is managed by {manager}. Update it with your package manager."
-                );
-            }
+async fn run_update() -> Result<()> {
+    match update::install_latest().await.map_err(CliError::Update)? {
+        update::UpdateStatus::UpToDate { version } => {
+            println!("tact v{version} is already up to date.");
         }
-        Ok(())
-    }
-
-    async fn run_with_config(self, config: &Config, model: Model) -> Result<()> {
-        match self {
-            Self::Auth { provider, command } => command.run(config, provider).await,
-            Self::Config { command } => command.run(config),
-            Self::Mcp { command } => command.run(config),
-            Self::Run {
-                prompt,
-                #[cfg(feature = "harbor-evals")]
-                orchestration_log,
-            } => {
-                Self::run_agent(
-                    config,
-                    model,
-                    prompt,
-                    #[cfg(feature = "harbor-evals")]
-                    orchestration_log,
-                )
-                .await
-            }
-            Self::Resume => unreachable!("resume is dispatched to the TUI"),
-            Self::Memory { command } => command.run(config).await,
-            Self::Update => unreachable!("update is dispatched before configuration is loaded"),
+        update::UpdateStatus::Updated { from, to } => {
+            println!("Updated tact from v{from} to v{to}.");
+        }
+        update::UpdateStatus::UseCargo { command } => {
+            println!("This tact binary is managed by Cargo. Update it with `{command}`.");
+        }
+        update::UpdateStatus::UsePackageManager { manager } => {
+            println!(
+                "This tact binary is managed by {manager}. Update it with your package manager."
+            );
         }
     }
-
-    async fn run_agent(
-        config: &Config,
-        model: Model,
-        prompt: String,
-        #[cfg(feature = "harbor-evals")] orchestration_log: Option<PathBuf>,
-    ) -> Result<()> {
-        let shutdown = CancellationToken::new();
-        let run = ConfiguredAgent::run_from_config(
-            config,
-            model,
-            prompt,
-            shutdown.clone(),
-            #[cfg(feature = "harbor-evals")]
-            orchestration_log,
-        );
-        tokio::pin!(run);
-
-        tokio::select! {
-            result = &mut run => result,
-            signal = shutdown::signal() => {
-                shutdown.cancel();
-                let result = run.await;
-                signal.map_err(RuntimeError::ShutdownSignal)?;
-                result
-            }
-        }
-    }
+    Ok(())
 }
 
 impl MemoryCommand {
@@ -548,24 +509,20 @@ impl MemoryCommand {
 }
 
 async fn push_memories(config: &Config, dry_run: bool) -> Result<()> {
-    use crate::app::error::MemoryTransferError;
-    use tact_memory::{
-        MemoryStore, RemoteMemoryClient, RemoteRole, RemoteToken, SelectedMemoryStore,
-    };
-
     let remote = config
         .memory()
         .remote()
-        .ok_or(MemoryTransferError::RemoteNotConfigured)?;
-
+        .ok_or(ConfigError::RemoteMemoryNotConfigured)?;
     let limits = config.memory().local().limits();
-    let store = SelectedMemoryStore::local(config.memory_path(), limits);
-    let mut memories = export_memories(store.clone(), limits).await?;
-    let content_bytes = memories
-        .iter()
-        .map(|memory| memory.content.len())
-        .sum::<usize>();
+    let local = LocalMemoryStore::new(config.memory_path(), limits);
     if dry_run {
+        let memories = transfer::local_snapshot(&local, limits)
+            .await
+            .map_err(CliError::MemoryTransfer)?;
+        let content_bytes = memories
+            .iter()
+            .map(|memory| memory.content.len())
+            .sum::<usize>();
         println!(
             "Would push {} memories ({} content bytes) as the complete snapshot for namespace `{}`; remote-only rows may be deleted.",
             memories.len(),
@@ -575,95 +532,53 @@ async fn push_memories(config: &Config, dry_run: bool) -> Result<()> {
         return Ok(());
     }
 
-    let token =
-        RemoteToken::new(remote.bearer_token().to_owned()).map_err(MemoryTransferError::Push)?;
-    let client = RemoteMemoryClient::new(remote.endpoint(), remote.namespace().to_owned(), token)
-        .map_err(MemoryTransferError::Push)?;
-    if client.session().await.map_err(MemoryTransferError::Push)? != RemoteRole::Writer {
-        return Err(MemoryTransferError::Push(tact_memory::RemoteClientError::ReadOnly).into());
-    }
-    let remote_store = SelectedMemoryStore::remote(client);
-    for _ in 0..3 {
-        let report = remote_store
-            .sync(&memories)
-            .await
-            .map_err(MemoryTransferError::PushStore)?;
-
-        let current = export_memories(store.clone(), limits).await?;
-        if same_replication_snapshot(&memories, &current) {
-            println!(
-                "Pushed {} memories to namespace `{}`: {} inserted, {} replaced, {} unchanged, {} deleted.",
-                memories.len(),
-                remote.namespace(),
-                report.inserted,
-                report.replaced,
-                report.unchanged,
-                report.deleted
-            );
-            return Ok(());
-        }
-        memories = current;
-    }
-    Err(MemoryTransferError::LocalChanged.into())
+    let client = remote_client(remote)
+        .map_err(|source| CliError::MemoryTransfer(TransferError::Push(source)))?;
+    let report = transfer::push(&local, client, limits)
+        .await
+        .map_err(CliError::MemoryTransfer)?;
+    println!(
+        "Pushed {} memories to namespace `{}`: {} inserted, {} replaced, {} unchanged, {} deleted.",
+        report.memories,
+        remote.namespace(),
+        report.sync.inserted,
+        report.sync.replaced,
+        report.sync.unchanged,
+        report.sync.deleted
+    );
+    Ok(())
 }
 
 async fn pull_memories(config: &Config, all: bool, namespaces: Vec<String>) -> Result<()> {
-    use crate::app::error::MemoryTransferError;
-    use tact_memory::{
-        LocalMemoryStore, MemoryStore, RemoteMemoryClient, RemoteToken, SelectedMemoryStore,
-    };
-
     let remote = config
         .memory()
         .remote()
-        .ok_or(MemoryTransferError::RemoteNotConfigured)?;
-    let token =
-        RemoteToken::new(remote.bearer_token().to_owned()).map_err(MemoryTransferError::Pull)?;
-    let client = RemoteMemoryClient::new(remote.endpoint(), remote.namespace().to_owned(), token)
-        .map_err(MemoryTransferError::Pull)?;
-    client.session().await.map_err(MemoryTransferError::Pull)?;
+        .ok_or(ConfigError::RemoteMemoryNotConfigured)?;
+    let client = remote_client(remote)
+        .map_err(|source| CliError::MemoryTransfer(TransferError::Pull(source)))?;
+    let limits = config.memory().local().limits();
+    let local = LocalMemoryStore::new(config.memory_path(), limits);
     let selection = (!all).then_some(namespaces.as_slice());
-    let memories = SelectedMemoryStore::remote(client)
-        .export_all(selection, config.memory().local().limits())
+    let report = transfer::pull(client, &local, selection, limits)
         .await
-        .map_err(MemoryTransferError::PullStore)?;
-    let fetched = memories.len();
-    let report = LocalMemoryStore::new(config.memory_path(), config.memory().local().limits())
-        .merge_remote_export(memories)
-        .await
-        .map_err(MemoryTransferError::Merge)?;
+        .map_err(CliError::MemoryTransfer)?;
     let selected = if all {
         "all namespaces".to_owned()
     } else {
         format!("namespaces `{}`", namespaces.join("`, `"))
     };
     println!(
-        "Pulled {selected}: {fetched} fetched, {} inserted, {} skipped.",
-        report.inserted, report.skipped
+        "Pulled {selected}: {} fetched, {} inserted, {} skipped.",
+        report.fetched, report.import.inserted, report.import.skipped
     );
     Ok(())
 }
 
-async fn export_memories(
-    store: tact_memory::SelectedMemoryStore,
-    limits: tact_memory::MemoryLimits,
-) -> std::result::Result<Vec<tact_memory::MemoryRecord>, crate::app::error::MemoryTransferError> {
-    use crate::app::error::MemoryTransferError;
-    use tact_memory::MemoryStore;
-
-    let mut memories = store
-        .export_all(None, limits)
-        .await
-        .map_err(MemoryTransferError::Local)?;
-    memories.sort_unstable_by_key(|memory| memory.key.id);
-    Ok(memories)
-}
-
-fn same_replication_snapshot(
-    left: &[tact_memory::MemoryRecord],
-    right: &[tact_memory::MemoryRecord],
-) -> bool {
-    left == right
+fn remote_client(
+    remote: &RemoteMemoryConfig,
+) -> std::result::Result<RemoteMemoryClient, RemoteClientError> {
+    let token = RemoteToken::new(remote.bearer_token().to_owned())?;
+    RemoteMemoryClient::new(remote.endpoint(), remote.namespace().to_owned(), token)
 }
 
 impl AuthCommand {
@@ -776,17 +691,13 @@ fn parse_header_env(value: &str) -> std::result::Result<(String, String), String
 fn read_mcp_environment(
     name: String,
     read: impl FnOnce(&str) -> std::result::Result<String, VarError>,
-) -> std::result::Result<(String, Zeroizing<String>), crate::app::error::ConfigError> {
+) -> std::result::Result<(String, Zeroizing<String>), ConfigError> {
     match read(&name) {
         Ok(value) => Ok((name, Zeroizing::new(value))),
-        Err(VarError::NotPresent) => {
-            Err(crate::app::error::ConfigError::McpEnvironmentNotPresent { name })
-        }
+        Err(VarError::NotPresent) => Err(ConfigError::McpEnvironmentNotPresent { name }),
         // VarError owns and renders the non-Unicode value, so discard it before constructing the
         // diagnostic. The process environment retains the original outside tact's ownership.
-        Err(VarError::NotUnicode(_)) => {
-            Err(crate::app::error::ConfigError::McpEnvironmentNotUnicode { name })
-        }
+        Err(VarError::NotUnicode(_)) => Err(ConfigError::McpEnvironmentNotUnicode { name }),
     }
 }
 
@@ -794,12 +705,11 @@ fn read_mcp_environment(
 mod tests {
     use super::{
         Cli, McpCommand, MemoryCommand, push_memories, read_mcp_environment, resume_command,
-        same_replication_snapshot,
     };
     use crate::app::{
         cli::Command,
         config::{AuthMode, Config, ConfigOverrides},
-        error::{ConfigError, Error},
+        error::{CliError, ConfigError, Error},
     };
     use clap::{CommandFactory, Parser, error::ErrorKind};
     use nanocodex::{HarnessModel as Model, Model as CodexModel};
@@ -814,29 +724,6 @@ mod tests {
         },
     };
     use tempfile::tempdir;
-
-    #[test]
-    fn replication_snapshot_includes_memory_telemetry() {
-        let original = tact_memory::MemoryRecord {
-            key: tact_memory::MemoryKey::local(1, 1),
-            content: "telemetry".to_owned(),
-            created_at_ms: 1,
-            updated_at_ms: 1,
-            last_scanned_at_ms: None,
-            scan_count: 0,
-            last_used_at_ms: None,
-            use_count: 0,
-            probation_until_ms: Some(10),
-        };
-        let mut current = original.clone();
-        current.last_scanned_at_ms = Some(2);
-        current.scan_count = 1;
-        current.last_used_at_ms = Some(3);
-        current.use_count = 1;
-        current.probation_until_ms = None;
-
-        assert!(!same_replication_snapshot(&[original], &[current]));
-    }
 
     #[test]
     fn clap_definition_is_valid() {
@@ -1278,12 +1165,10 @@ mod tests {
     }
 
     #[test]
-    fn update_is_config_independent() {
+    fn update_takes_no_arguments() {
         let cli = Cli::try_parse_from(["tact", "update"]).unwrap();
-        let command = cli.command.expect("missing update command");
-
-        assert!(matches!(&command, Command::Update));
-        assert!(!command.requires_config());
+        assert!(matches!(cli.command, Some(Command::Update)));
+        assert!(Cli::try_parse_from(["tact", "update", "now"]).is_err());
     }
 
     #[test]
@@ -1299,7 +1184,6 @@ mod tests {
                 command: MemoryCommand::Push { dry_run: true }
             }
         ));
-        assert!(command.requires_config());
         assert!(Cli::try_parse_from(["tact", "memory", "upload"]).is_err());
         assert!(Cli::try_parse_from(["tact", "sync-memories"]).is_err());
     }
@@ -1376,7 +1260,10 @@ mod tests {
 
         let result = push_memories(&config, false).await;
 
-        assert!(matches!(result, Err(Error::MemoryTransfer(_))));
+        assert!(matches!(
+            result,
+            Err(Error::Cli(CliError::MemoryTransfer(_)))
+        ));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1388,7 +1275,7 @@ mod tests {
         };
         use tact_memory::{
             LocalMemoryStore, MemoryStore, VERSION,
-            server::protocol::{
+            protocol::{
                 RemoteRole, SESSION_PATH, SYNC_PATH, SessionResponse, SyncReport, SyncRequest,
             },
         };

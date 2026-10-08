@@ -1,26 +1,24 @@
 //! JSON shapes of the web protocol (see `docs/web.md`) and the projection of
 //! transcript entries onto them.
 
+use super::hub::now_unix_ms;
 use crate::{
     app::config::{ReasoningEffort, ReasoningMode, Speed},
-    core::subagent_roster::SubagentRoster,
-    tui::{
+    core::{
         context::ContextBudget,
+        protocol::{DraftImage, Origin, QueuedPrompt},
         transcript::{
             DirectedMessageEntry, EntryKind, ToolEntry, ToolState, TranscriptEntry, TransientStatus,
         },
     },
-    web::{
-        bridge::{DraftImage, Origin, QueuedPrompt},
-        hub::now_unix_ms,
-    },
 };
+use axum::body::Bytes;
 use serde::Serialize;
 use serde_json::Value;
 use std::sync::Arc;
 use tact_subagents::{
     AgentMessage, MessageDeliveryState, MessageDisposition, MessagePriority, MessagePurpose,
-    MessageSender,
+    MessageSender, SubagentRoster,
 };
 
 /// Version of the browser protocol. Bundles declare the range they speak in their manifest.
@@ -29,12 +27,19 @@ pub(super) const PROTOCOL_VERSION: u32 = 9;
 const MAX_STRING_BYTES: usize = 256 * 1024;
 const MAX_SUMMARY_CHARS: usize = 200;
 
-/// One complete Server-Sent Events message, serialized once and shared by every client.
-pub(super) type Frame = Arc<str>;
+/// One complete Server-Sent Events message. Clones share one buffer, so sending a frame to every
+/// client copies no bytes.
+pub(super) type Frame = Bytes;
 
+/// Serializes one event as a Server-Sent Events message.
 pub(super) fn frame(event: &str, data: &impl Serialize) -> Frame {
-    let data = serde_json::to_string(data).expect("wire types serialize to JSON");
-    format!("event: {event}\ndata: {data}\n\n").into()
+    let mut message = Vec::with_capacity(64);
+    message.extend_from_slice(b"event: ");
+    message.extend_from_slice(event.as_bytes());
+    message.extend_from_slice(b"\ndata: ");
+    serde_json::to_writer(&mut message, data).expect("wire types serialize to JSON");
+    message.extend_from_slice(b"\n\n");
+    Bytes::from(message)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -85,14 +90,14 @@ pub(super) struct WireDraft {
 #[derive(Serialize)]
 pub(super) struct WireImage {
     marker: String,
-    data_url: String,
+    data_url: Arc<str>,
 }
 
 impl From<&DraftImage> for WireImage {
     fn from(image: &DraftImage) -> Self {
         Self {
             marker: image.marker.clone(),
-            data_url: image.data_url.clone(),
+            data_url: Arc::clone(&image.data_url),
         }
     }
 }
@@ -667,7 +672,7 @@ fn numeric(id: impl std::fmt::Display) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{MAX_STRING_BYTES, WireBody, cap, now_unix_ms, tool_summary};
-    use crate::tui::transcript::{ToolEntry, ToolState};
+    use crate::core::transcript::{ToolEntry, ToolState};
     use serde_json::{Value, json};
 
     fn tool(name: &str, arguments: Value) -> ToolEntry {

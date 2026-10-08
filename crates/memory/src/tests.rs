@@ -1,21 +1,19 @@
-use super::{
-    LocalMemoryStore as ProductionMemoryStore, MemoryError, MemoryKey, MemoryLimits, MemoryRecord,
-    MemoryStore as _,
-};
+use super::{LocalMemoryStore, MemoryError, MemoryKey, MemoryLimits, MemoryRecord, MemoryStore};
 use rusqlite::{Connection, params};
 use std::{ops::Deref, path::PathBuf, sync::Barrier, thread};
 use tempfile::TempDir;
 
+/// Synchronous view of a local store whose operations run at caller-chosen times.
 #[derive(Clone)]
-struct MemoryStore(ProductionMemoryStore);
+struct LocalHarness(LocalMemoryStore);
 
-impl MemoryStore {
+impl LocalHarness {
     fn new(path: impl Into<PathBuf>) -> Self {
-        Self(ProductionMemoryStore::new(path, MemoryLimits::PRODUCTION))
+        Self(LocalMemoryStore::new(path, MemoryLimits::PRODUCTION))
     }
 
     fn with_limits(path: impl Into<PathBuf>, limits: MemoryLimits) -> Self {
-        Self(ProductionMemoryStore::new(path, limits))
+        Self(LocalMemoryStore::new(path, limits))
     }
 
     fn scan(
@@ -32,7 +30,7 @@ impl MemoryStore {
         content: &str,
         replacement: Option<MemoryKey>,
         now_ms: i64,
-    ) -> Result<super::MemoryRecord, MemoryError> {
+    ) -> Result<MemoryRecord, MemoryError> {
         self.0.put_local(content, replacement, now_ms)
     }
 
@@ -45,28 +43,22 @@ impl MemoryStore {
         self.0.read_local(&references, now_ms)
     }
 
-    fn list(&self, now_ms: i64) -> Result<Vec<super::MemoryRecord>, MemoryError> {
+    fn list(&self, now_ms: i64) -> Result<Vec<MemoryRecord>, MemoryError> {
         self.0.list_local(now_ms)
     }
 }
 
-impl Deref for MemoryStore {
-    type Target = ProductionMemoryStore;
+impl Deref for LocalHarness {
+    type Target = LocalMemoryStore;
 
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
 
-impl MemoryStore {
-    fn local(&self) -> &ProductionMemoryStore {
-        &self.0
-    }
-}
-
-fn store() -> (TempDir, MemoryStore) {
+fn store() -> (TempDir, LocalHarness) {
     let directory = tempfile::tempdir().unwrap();
-    let store = MemoryStore::new(directory.path().join("memory/v1.sqlite3"));
+    let store = LocalHarness::new(directory.path().join("memory/v1.sqlite3"));
     (directory, store)
 }
 
@@ -84,33 +76,31 @@ fn tiny_limits() -> MemoryLimits {
 #[tokio::test]
 async fn local_sync_preserves_complete_state_and_the_id_high_water_mark() {
     let directory = tempfile::tempdir().unwrap();
-    let store = ProductionMemoryStore::new(
+    let store = LocalMemoryStore::new(
         directory.path().join("memory.sqlite3"),
         MemoryLimits::PRODUCTION,
     );
-    let first = super::MemoryStore::put(&store, "first", None)
-        .await
-        .unwrap();
+    let first = MemoryStore::put(&store, "first", None).await.unwrap();
     let mut used = first.clone();
     used.last_used_at_ms = Some(first.updated_at_ms.saturating_add(1));
     used.use_count = 1;
     used.probation_until_ms = None;
 
-    let report = super::MemoryStore::sync(&store, std::slice::from_ref(&used))
+    let report = MemoryStore::sync(&store, std::slice::from_ref(&used))
         .await
         .unwrap();
     assert_eq!((report.replaced, report.unchanged), (1, 0));
-    assert_eq!(super::MemoryStore::list(&store).await.unwrap(), [used]);
+    assert_eq!(MemoryStore::list(&store).await.unwrap(), [used]);
 
     let mut duplicate = first.clone();
     duplicate.content = "duplicate id".to_owned();
     assert!(matches!(
-        super::MemoryStore::sync(&store, &[first.clone(), duplicate]).await,
+        MemoryStore::sync(&store, &[first.clone(), duplicate]).await,
         Err(MemoryError::Conflict)
     ));
 
-    super::MemoryStore::sync(&store, &[]).await.unwrap();
-    let next = super::MemoryStore::put(&store, "next", None).await.unwrap();
+    MemoryStore::sync(&store, &[]).await.unwrap();
+    let next = MemoryStore::put(&store, "next", None).await.unwrap();
     assert!(next.key.id > first.key.id);
 }
 
@@ -119,7 +109,7 @@ async fn export_collector_honors_explicit_capacity() {
     let directory = tempfile::tempdir().unwrap();
     let mut store_limits = MemoryLimits::PRODUCTION;
     store_limits.records = 3;
-    let store = ProductionMemoryStore::new(directory.path().join("memory.sqlite3"), store_limits);
+    let store = LocalMemoryStore::new(directory.path().join("memory.sqlite3"), store_limits);
     for content in ["one", "two", "three"] {
         store.put(content, None).await.unwrap();
     }
@@ -179,7 +169,7 @@ async fn explicit_record_capacity_can_exceed_production_defaults() {
         .sum::<usize>();
     assert!(total_content_bytes > 256 * 1_024);
     assert!(total_content_bytes <= limits.total_content_bytes);
-    let store = ProductionMemoryStore::new(directory.path().join("memory.sqlite3"), limits);
+    let store = LocalMemoryStore::new(directory.path().join("memory.sqlite3"), limits);
 
     store.sync(&records).await.unwrap();
     assert_eq!(store.list().await.unwrap().len(), limits.records);
@@ -198,7 +188,7 @@ fn enforces_exact_ascii_and_unicode_byte_bounds() {
         query_bytes: 8,
         ..tiny_limits()
     };
-    let store = MemoryStore::with_limits(directory.path().join("memory.sqlite3"), limits);
+    let store = LocalHarness::with_limits(directory.path().join("memory.sqlite3"), limits);
 
     store.put("12345678", None, 0).unwrap();
     assert!(matches!(
@@ -233,7 +223,7 @@ async fn configured_content_capacity_can_exceed_four_mebibytes() {
         ..MemoryLimits::PRODUCTION
     };
     let path = directory.path().join("memory.sqlite3");
-    let store = ProductionMemoryStore::new(&path, limits);
+    let store = LocalMemoryStore::new(&path, limits);
     let first = store
         .put(&"a".repeat(limits.content_bytes), None)
         .await
@@ -248,7 +238,7 @@ async fn configured_content_capacity_can_exceed_four_mebibytes() {
         Err(MemoryError::ContentCapacity { maximum_bytes })
             if maximum_bytes == limits.total_content_bytes
     ));
-    let reopened = ProductionMemoryStore::new(path, limits);
+    let reopened = LocalMemoryStore::new(path, limits);
     assert_eq!(reopened.list().await.unwrap(), [first, second]);
 }
 
@@ -271,7 +261,7 @@ fn replacement_preserves_id_checks_version_and_adjusts_accounting() {
         total_content_bytes: 10,
         ..tiny_limits()
     };
-    let store = MemoryStore::with_limits(directory.path().join("memory.sqlite3"), limits);
+    let store = LocalHarness::with_limits(directory.path().join("memory.sqlite3"), limits);
     let original = store.put("123456", None, 1).unwrap();
     store.scan("123456", 1, 2).unwrap();
     store.read(&[original.key.id], 3).unwrap();
@@ -306,7 +296,7 @@ fn record_capacity_is_derived_from_live_rows() {
         records: 2,
         ..tiny_limits()
     };
-    let store = MemoryStore::with_limits(directory.path().join("memory.sqlite3"), limits);
+    let store = LocalHarness::with_limits(directory.path().join("memory.sqlite3"), limits);
     let first = store.put("one", None, 0).unwrap();
     store.put("two", None, 0).unwrap();
     assert!(matches!(
@@ -334,7 +324,7 @@ fn delete_requires_the_current_version() {
 #[test]
 fn probation_prunes_at_the_exact_deadline() {
     let directory = tempfile::tempdir().unwrap();
-    let store = MemoryStore::with_limits(directory.path().join("memory.sqlite3"), tiny_limits());
+    let store = LocalHarness::with_limits(directory.path().join("memory.sqlite3"), tiny_limits());
     store.put("expires", None, 100).unwrap();
 
     assert_eq!(store.list(109).unwrap().len(), 1);
@@ -344,7 +334,7 @@ fn probation_prunes_at_the_exact_deadline() {
 #[test]
 fn pre_expiry_read_clears_probation() {
     let directory = tempfile::tempdir().unwrap();
-    let store = MemoryStore::with_limits(directory.path().join("memory.sqlite3"), tiny_limits());
+    let store = LocalHarness::with_limits(directory.path().join("memory.sqlite3"), tiny_limits());
     let record = store.put("keep this", None, 100).unwrap();
 
     let read = store.read(&[record.key.id], 109).unwrap();
@@ -544,7 +534,7 @@ fn newer_database_schema_versions_are_rejected_without_relabeling_them() {
     let connection = Connection::open(&path).unwrap();
     connection.pragma_update(None, "user_version", 2).unwrap();
     drop(connection);
-    let store = MemoryStore::new(path.clone());
+    let store = LocalHarness::new(path.clone());
 
     assert!(matches!(
         store.list(0),
@@ -565,8 +555,8 @@ fn newer_database_schema_versions_are_rejected_without_relabeling_them() {
 fn stores_opening_the_same_global_path_share_the_corpus() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("global/memory/v1.sqlite3");
-    let first = MemoryStore::new(path.clone());
-    let second = MemoryStore::new(path);
+    let first = LocalHarness::new(path.clone());
+    let second = LocalHarness::new(path);
 
     let record = first.put("shared globally", None, 0).unwrap();
 
@@ -577,7 +567,7 @@ fn stores_opening_the_same_global_path_share_the_corpus() {
 fn replacement_of_a_legacy_row_does_not_require_reading_its_content() {
     let (_directory, store) = store();
     store.list(0).unwrap();
-    let connection = Connection::open(store.local().path.as_path()).unwrap();
+    let connection = Connection::open(store.path.as_path()).unwrap();
     connection
         .execute(
             "INSERT INTO memories (
@@ -605,7 +595,7 @@ fn creates_a_private_database_directory() {
 
     let directory = tempfile::tempdir().unwrap();
     let parent = directory.path().join("memory");
-    let store = MemoryStore::new(parent.join("v1.sqlite3"));
+    let store = LocalHarness::new(parent.join("v1.sqlite3"));
     store.list(0).unwrap();
 
     let mode = std::fs::metadata(parent).unwrap().permissions().mode() & 0o777;
@@ -644,7 +634,7 @@ fn remote_record(namespace: &str, id: i64, content: &str) -> MemoryRecord {
 async fn pulling_remote_memories_merges_atomically_without_changing_schema_v1() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("memory/v1.sqlite3");
-    let store = ProductionMemoryStore::new(path.clone(), MemoryLimits::PRODUCTION);
+    let store = LocalMemoryStore::new(path.clone(), MemoryLimits::PRODUCTION);
     store.put("existing conclusion", None).await.unwrap();
 
     let report = store
@@ -673,7 +663,7 @@ async fn failed_remote_merge_preserves_the_existing_local_corpus() {
     let directory = tempfile::tempdir().unwrap();
     let mut limits = MemoryLimits::PRODUCTION;
     limits.records = 1;
-    let store = ProductionMemoryStore::new(directory.path().join("memory/v1.sqlite3"), limits);
+    let store = LocalMemoryStore::new(directory.path().join("memory/v1.sqlite3"), limits);
     let existing = store.put("existing conclusion", None).await.unwrap();
 
     assert!(matches!(

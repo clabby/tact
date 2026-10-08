@@ -1,6 +1,6 @@
 //! Credential loading from one encrypted Worker secret.
 
-use tact_memory::server::{Credential, protocol::RemoteRole};
+use tact_memory::{RemoteRole, server::Credential};
 use thiserror::Error;
 use zeroize::Zeroizing;
 

@@ -1,10 +1,11 @@
 use crate::{
     MemoryCandidate, MemoryError, MemoryKey, MemoryLimits, MemoryRecord, MemoryScan, MemoryStore,
-    server::protocol,
+    protocol,
+    secrets::{contains_likely_secret, reject_likely_secret},
 };
 use protocol::{
-    DeleteRequest, ErrorResponse, ExportRequest, ExportResponse, ListResponse, PutRequest,
-    PutResponse, ReadRequest, ReadResponse, RemoteErrorCode, RemoteRole, ScanRequest, ScanResponse,
+    DeleteRequest, ErrorResponse, ExportPage, ExportRequest, ListResponse, PutRequest, PutResponse,
+    ReadRequest, ReadResponse, RemoteErrorCode, RemoteRole, ScanRequest, ScanResponse,
     SessionResponse, SyncReport, SyncRequest,
 };
 use reqwest::{Client, Response, StatusCode, Url};
@@ -246,7 +247,7 @@ impl RemoteMemoryClient {
     ) -> Result<Vec<MemoryRecord>, RemoteClientError> {
         let keys = keys
             .iter()
-            .filter(|key| Self::valid_key(key) && key.namespace.is_some())
+            .filter(|key| key.is_well_formed() && key.namespace.is_some())
             .cloned()
             .collect::<Vec<_>>();
         let ids = ids.iter().copied().filter(|id| *id > 0).collect::<Vec<_>>();
@@ -387,7 +388,7 @@ impl RemoteMemoryClient {
     fn validate_export_page(
         namespaces: Option<&[String]>,
         cursor: Option<&protocol::ExportCursor>,
-        response: &ExportResponse,
+        response: &ExportPage,
     ) -> Result<(), RemoteClientError> {
         if response.memories.len() > protocol::MAX_EXPORT_PAGE_RECORDS {
             return Err(RemoteClientError::InvalidResponse);
@@ -424,30 +425,22 @@ impl RemoteMemoryClient {
         Ok(())
     }
 
-    fn valid_key(key: &MemoryKey) -> bool {
-        key.namespace
-            .as_deref()
-            .is_none_or(protocol::is_valid_namespace)
-            && key.id > 0
-            && key.version > 0
-    }
-
     fn valid_candidate(&self, candidate: &MemoryCandidate) -> bool {
-        Self::valid_key(&candidate.key)
+        candidate.key.is_well_formed()
             && candidate.key.namespace.is_some()
             && candidate.preview.len() <= 64
             && candidate.score.is_finite()
             && candidate.score >= 0.0
-            && !crate::secrets::contains_likely_secret(&candidate.preview)
+            && !contains_likely_secret(&candidate.preview)
     }
 
     fn valid_record(memory: &MemoryRecord) -> bool {
-        Self::valid_key(&memory.key)
+        memory.key.is_well_formed()
             && memory.key.namespace.is_some()
             && !memory.content.trim().is_empty()
             && memory.created_at_ms >= 0
             && memory.updated_at_ms >= memory.created_at_ms
-            && !crate::secrets::contains_likely_secret(&memory.content)
+            && !contains_likely_secret(&memory.content)
     }
 
     async fn get<Response>(&self, path: &str, replay: Replay) -> Result<Response, RemoteClientError>
@@ -565,6 +558,7 @@ impl MemoryStore for RemoteMemoryClient {
             if content.trim().is_empty() {
                 return Err(MemoryError::EmptyContent);
             }
+            reject_likely_secret(content)?;
             Ok(RemoteMemoryClient::put(self, content, replacement.as_ref()).await?)
         }
     }
@@ -578,21 +572,24 @@ impl MemoryStore for RemoteMemoryClient {
         &self,
         memories: &[MemoryRecord],
     ) -> impl std::future::Future<Output = Result<SyncReport, MemoryError>> + Send {
-        async move { Ok(RemoteMemoryClient::sync(self, memories).await?) }
+        async move {
+            for memory in memories {
+                reject_likely_secret(&memory.content)?;
+            }
+            Ok(RemoteMemoryClient::sync(self, memories).await?)
+        }
     }
     fn export_page(
         &self,
         namespaces: Option<&[String]>,
         cursor: Option<&protocol::ExportCursor>,
         limit: usize,
-    ) -> impl std::future::Future<
-        Output = Result<(Vec<MemoryRecord>, Option<protocol::ExportCursor>), MemoryError>,
-    > + Send {
+    ) -> impl std::future::Future<Output = Result<ExportPage, MemoryError>> + Send {
         let namespaces = namespaces.map(<[String]>::to_vec);
         let cursor = cursor.cloned();
         async move {
             let mut limit = limit.clamp(1, protocol::MAX_EXPORT_PAGE_RECORDS);
-            let response: ExportResponse = loop {
+            let response: ExportPage = loop {
                 match self
                     .post(
                         protocol::EXPORT_PATH,
@@ -615,7 +612,7 @@ impl MemoryStore for RemoteMemoryClient {
                 return Err(RemoteClientError::InvalidResponse.into());
             }
             Self::validate_export_page(namespaces.as_deref(), cursor.as_ref(), &response)?;
-            Ok((response.memories, response.next_cursor))
+            Ok(response)
         }
     }
 }
@@ -732,8 +729,8 @@ mod tests {
         }
     }
 
-    fn response(memories: Vec<MemoryRecord>, next: Option<(&str, i64)>) -> ExportResponse {
-        ExportResponse {
+    fn response(memories: Vec<MemoryRecord>, next: Option<(&str, i64)>) -> ExportPage {
+        ExportPage {
             memories,
             next_cursor: next.map(|(namespace, id)| ExportCursor {
                 namespace: namespace.to_owned(),

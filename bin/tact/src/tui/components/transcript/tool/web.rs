@@ -1,5 +1,11 @@
+//! Presenter for `web__run`.
+//!
+//! The summary describes a single operation by its main argument and several operations by count.
+//! Expanded details list each requested operation and show the result as selectable text with
+//! citation markers and word-limit annotations removed.
+
 use super::{Presentation, format_bytes};
-use crate::tui::{theme::Theme, transcript::ToolEntry};
+use crate::{app::theme::Theme, core::transcript::ToolEntry};
 use ratatui::style::Style;
 use serde_json::Value;
 

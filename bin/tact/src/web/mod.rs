@@ -7,8 +7,6 @@
 mod api;
 mod assets;
 pub(crate) mod bridge;
-pub(crate) mod checkout;
-mod diff;
 mod hub;
 mod registry;
 mod review;
@@ -19,13 +17,16 @@ mod token;
 mod wire;
 mod workspaces;
 
-use crate::app::config::Config;
+use crate::{
+    app::config::Config,
+    core::protocol::{AuxiliaryRequest, QueryRequest, Request},
+};
 use api::{AppState, PublicOrigin};
 use assets::AssetStore;
 pub(crate) use assets::{Located, WebAssets};
 use hub::Hub;
 use registry::{InstanceRecord, Registration, RegistryError};
-use review::{ReviewRegistry, bridge_agent};
+use review::{BridgeAgent, ReviewRegistry};
 use std::{
     io,
     net::{IpAddr, SocketAddr},
@@ -151,9 +152,9 @@ impl Settings {
 
 /// The command, query, and auxiliary-work senders of the bridge.
 struct Channels {
-    requests: UnboundedSender<bridge::Request>,
-    queries: UnboundedSender<bridge::QueryRequest>,
-    auxiliary: UnboundedSender<bridge::AuxiliaryRequest>,
+    requests: UnboundedSender<Request>,
+    queries: UnboundedSender<QueryRequest>,
+    auxiliary: UnboundedSender<AuxiliaryRequest>,
 }
 
 struct Server {
@@ -229,7 +230,7 @@ impl Server {
         let review = ReviewRegistry::new(
             Arc::clone(&workspaces),
             hub.clone(),
-            bridge_agent(channels.auxiliary),
+            Arc::new(BridgeAgent::new(channels.auxiliary)),
             shutdown.clone(),
         );
         let state = Arc::new(AppState {
@@ -305,7 +306,10 @@ fn reachable_host(bind: IpAddr) -> IpAddr {
 
 #[cfg(test)]
 mod tests {
-    use super::{Channels, Exposure, Server, Settings, bind, bridge, hub::Hub, registry};
+    use super::{
+        Channels, Exposure, Server, Settings, StartError, bind, bridge, hub::Hub, registry,
+        testing::sse_event,
+    };
     use std::{
         fs,
         net::{IpAddr, Ipv4Addr},
@@ -375,9 +379,9 @@ mod tests {
         assert_eq!(stream.status(), reqwest::StatusCode::OK);
         assert_eq!(stream.headers()["content-type"], "text/event-stream");
         let first = stream.chunk().await.unwrap().unwrap();
-        assert!(String::from_utf8_lossy(&first).starts_with("event: hello\n"));
+        assert_eq!(sse_event(&first).0, "hello");
         let live = stream.chunk().await.unwrap().unwrap();
-        assert!(String::from_utf8_lossy(&live).starts_with("event: live\n"));
+        assert_eq!(sse_event(&live).0, "live");
 
         shutdown.cancel();
         tokio::time::timeout(Duration::from_secs(10), task)
@@ -443,6 +447,6 @@ mod tests {
         )
         .await;
 
-        assert!(result.is_err());
+        assert!(matches!(result, Err(StartError::Disabled)));
     }
 }

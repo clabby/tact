@@ -1,12 +1,20 @@
 //! Searchable workspace file picker opened from the composer.
+//!
+//! [FileFinder] discovers workspace paths once when it opens and keeps them with
+//! the ranked match indices and the highlighted row. The composer owns the query
+//! text and forwards every change as [FileFinderEvent::Query]; navigation keys
+//! arrive as [FileFinderEvent::Terminal]. Enter or Tab emits
+//! [FileFinderEffect::Insert] with the highlighted path, and Esc emits
+//! [FileFinderEffect::Dismiss]. Each query change ranks the paths anew and moves
+//! the highlight to the best match.
 
 use super::{
     floating::Floating,
     node::{Component, ComponentUpdate, RenderRequest},
 };
 use crate::{
+    app::theme::Theme,
     search::{discover_paths, rank},
-    tui::theme::Theme,
 };
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind};
 use ratatui::{
@@ -203,7 +211,7 @@ pub(super) fn visible_query_tail(query: &str, width: usize) -> &str {
 #[cfg(test)]
 mod tests {
     use super::{Component, FileFinder, FileFinderEffect, FileFinderEvent};
-    use crate::tui::theme::Theme;
+    use crate::app::theme::Theme;
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use ratatui::{Terminal, backend::TestBackend};
     use std::fs;

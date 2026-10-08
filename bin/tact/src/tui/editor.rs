@@ -1,9 +1,9 @@
 //! Asynchronous external-editor handoff.
 
-use crate::app::error::ExternalEditorError;
+use crate::{app::error::ExternalEditorError, core::pane::PaneId};
 use std::{
     env, fs,
-    path::Path,
+    path::{Path, PathBuf},
     process::{ExitStatus, Stdio},
 };
 use tempfile::Builder;
@@ -15,20 +15,59 @@ pub(crate) enum EditorOutcome {
     Unchanged,
 }
 
-pub(crate) async fn edit(
-    seed: &str,
-    workspace: &Path,
-) -> Result<EditorOutcome, ExternalEditorError> {
+/// What the external editor is opened on while it owns the terminal.
+pub(crate) enum EditorTarget {
+    /// A pane's composer draft, seeded with its current text.
+    Draft {
+        pane: PaneId,
+        text: String,
+    },
+    Config(PathBuf),
+    File(PathBuf),
+}
+
+/// What an external editor session produced once the editor exited.
+pub(crate) enum EditorCompletion {
+    Draft {
+        pane: PaneId,
+        outcome: EditorOutcome,
+    },
+    Config,
+    File,
+}
+
+impl EditorTarget {
+    /// Runs the editor on the target in `workspace` until it exits.
+    pub(crate) async fn edit(
+        self,
+        workspace: &Path,
+    ) -> Result<EditorCompletion, ExternalEditorError> {
+        match self {
+            Self::Draft { pane, text } => {
+                let outcome = edit(&text, workspace).await?;
+                Ok(EditorCompletion::Draft { pane, outcome })
+            }
+            Self::Config(path) => edit_config(&path, workspace)
+                .await
+                .map(|()| EditorCompletion::Config),
+            Self::File(path) => open_file(&path, workspace)
+                .await
+                .map(|()| EditorCompletion::File),
+        }
+    }
+}
+
+async fn edit(seed: &str, workspace: &Path) -> Result<EditorOutcome, ExternalEditorError> {
     let editor = resolve_editor_command()?;
     edit_with(seed, workspace, &editor).await
 }
 
-pub(crate) async fn edit_config(path: &Path, workspace: &Path) -> Result<(), ExternalEditorError> {
+async fn edit_config(path: &Path, workspace: &Path) -> Result<(), ExternalEditorError> {
     let editor = resolve_editor_command()?;
     edit_config_with(path, workspace, &editor).await
 }
 
-pub(crate) async fn open_file(path: &Path, workspace: &Path) -> Result<(), ExternalEditorError> {
+async fn open_file(path: &Path, workspace: &Path) -> Result<(), ExternalEditorError> {
     let editor = resolve_editor_command()?;
     let _ = launch(&editor, path, workspace).await?;
     Ok(())

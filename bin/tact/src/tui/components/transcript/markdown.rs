@@ -1,4 +1,29 @@
-use crate::tui::{format::sanitize_terminal_text, theme::Theme};
+//! Markdown rendering into terminal rows for transcript entries.
+//!
+//! [render_cached] turns Markdown source into a [Layout] for a given width:
+//!
+//! - `lines`: styled rows wrapped to the width. A zero width yields an empty
+//!   layout, and trailing blank rows are dropped.
+//! - `links` and `selections`: one list per row. A [LinkSpan] maps a column
+//!   range to its destination; a [SourceSpan] maps the columns of one rendered
+//!   grapheme to the byte range of the source that produced it.
+//! - `images`: an [ImagePlacement] for each image drawn inline, anchored at the
+//!   first of the blank rows reserved for it. `image_state` records whether the
+//!   source references images and whether any of them is still loading
+//!   ([ImageState::Pending]); a pending layout shows fallback links and must be
+//!   rebuilt once the images are ready.
+//! - `envelopes`: a [SourceEnvelope] for each construct, pairing the source range
+//!   of its content with the range that includes its markup, so a selection that
+//!   covers the content can widen to the full construct.
+//!
+//! Decorations such as list markers, quote bars, code-block borders, and
+//! language labels have no source span and are never copied. Source offsets
+//! index the Markdown text unless `selection_source` names a different string.
+
+use crate::{
+    app::theme::Theme,
+    tui::{components::fit::clip_to_width, format::sanitize_terminal_text},
+};
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use ratatui::{
     style::{Modifier, Style},
@@ -18,6 +43,21 @@ pub(super) struct Layout {
     pub(super) envelopes: Vec<SourceEnvelope>,
     pub(super) selection_source: Option<String>,
     pub(super) image_state: ImageState,
+}
+
+impl Layout {
+    /// A layout of plain rows without links, images, or selectable text.
+    pub(super) fn plain(lines: Vec<Line<'static>>) -> Self {
+        Self {
+            links: vec![Vec::new(); lines.len()],
+            selections: vec![Vec::new(); lines.len()],
+            lines,
+            images: Vec::new(),
+            envelopes: Vec::new(),
+            selection_source: None,
+            image_state: ImageState::None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Default, Eq, PartialEq)]
@@ -1360,7 +1400,7 @@ fn code_block_header(language: Option<&str>, width: u16, theme: &Theme) -> Line<
         ));
     };
     let available = width.saturating_sub(5);
-    let language = truncate_graphemes(language, available);
+    let language = clip_to_width(language, usize::from(available)).to_owned();
     let language_width =
         u16::try_from(UnicodeWidthStr::width(language.as_str())).unwrap_or(u16::MAX);
     let fill = width.saturating_sub(language_width.saturating_add(5));
@@ -1374,20 +1414,6 @@ fn code_block_header(language: Option<&str>, width: u16, theme: &Theme) -> Line<
         ),
         Span::styled(format!(" {}╮", "─".repeat(usize::from(fill))), border),
     ])
-}
-
-fn truncate_graphemes(text: &str, width: u16) -> String {
-    let mut rendered = String::new();
-    let mut used = 0_u16;
-    for grapheme in text.graphemes(true) {
-        let grapheme_width = u16::try_from(UnicodeWidthStr::width(grapheme)).unwrap_or(u16::MAX);
-        if used.saturating_add(grapheme_width) > width {
-            break;
-        }
-        rendered.push_str(grapheme);
-        used = used.saturating_add(grapheme_width);
-    }
-    rendered
 }
 
 fn render_table(
@@ -1528,7 +1554,7 @@ mod tests {
         super::image::{Cache, MAX_IMAGE_HEIGHT},
         ImageState, Layout, render, render_cached,
     };
-    use crate::tui::theme::Theme;
+    use crate::app::theme::Theme;
     use ratatui::style::{Color, Modifier};
     use std::{fs::File, path::Path, sync::Arc, time::Instant};
 

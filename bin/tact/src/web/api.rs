@@ -3,15 +3,15 @@
 
 use super::{
     assets::AssetStore,
-    bridge::{
-        Command, CommandEnvelope, CommandError, OpenSpec, Query, QueryReply, QueryRequest, Request,
-    },
     hub::Hub,
     registry::{self, InstanceRecord},
     tailscale::Tailnet,
     token::MachineToken,
     wire::PROTOCOL_VERSION,
     workspaces::{WorkspaceError, Workspaces},
+};
+use crate::core::protocol::{
+    Command, CommandEnvelope, CommandError, OpenSpec, Query, QueryReply, QueryRequest, Request,
 };
 use axum::{
     Json, Router,
@@ -589,7 +589,7 @@ async fn stream_events(State(state): State<Arc<AppState>>) -> ApiResult<ApiError
         (subscription, keep_alive, shutdown),
         |(mut subscription, mut keep_alive, shutdown)| async move {
             let chunk = tokio::select! {
-                frame = subscription.frames.recv() => Bytes::copy_from_slice(frame?.as_bytes()),
+                frame = subscription.frames.recv() => frame?,
                 _ = keep_alive.tick() => Bytes::from_static(b": keep-alive\n\n"),
                 () = shutdown.cancelled() => return None,
             };
@@ -680,12 +680,12 @@ pub(super) fn secure(response: &mut Response<Body>) {
 mod tests {
     use super::{
         super::{
-            bridge::{self, Command, CommandError, Publication, Query, Reply},
             tailscale::Tailnet,
             testing::{self, Harness},
         },
         PublicOrigin,
     };
+    use crate::core::protocol::{Command, CommandError, OpenSpec, Publication, Query, Reply};
     use axum::{
         body::Body,
         http::{Method, Request, StatusCode, header},
@@ -790,7 +790,8 @@ mod tests {
         let (status, _, body) = harness.send(request).await;
 
         assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert!(String::from_utf8(body).unwrap().contains("invalid_request"));
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["code"], "invalid_request");
     }
 
     #[tokio::test]
@@ -830,7 +831,8 @@ mod tests {
                 .unwrap()
                 .contains("default-src 'none'")
         );
-        assert!(String::from_utf8(body).unwrap().contains("not installed"));
+        assert_eq!(headers[header::CONTENT_TYPE], "text/html; charset=utf-8");
+        assert_eq!(body, harness.state.assets.placeholder_html().into_bytes());
         let missing = Request::builder()
             .uri("/app.js")
             .body(Body::empty())
@@ -1004,10 +1006,7 @@ mod tests {
         let (status, body) = harness.call(Method::GET, "/api/link", None).await;
 
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-        assert!(
-            body["message"].as_str().unwrap().contains("Tailscale"),
-            "{body}"
-        );
+        assert_eq!(body["code"], "tailscale_unavailable", "{body}");
         assert!(body.get("token").is_none());
     }
 
@@ -1017,7 +1016,7 @@ mod tests {
         harness.open_session("s1").await;
         harness.terminal.publisher.publish(Publication::Busy {
             session: "s1".into(),
-            busy: crate::web::bridge::Busy {
+            busy: crate::core::protocol::Busy {
                 turns: 1,
                 shells: 0,
             },
@@ -1080,13 +1079,15 @@ mod tests {
                 session: "s1".into(),
                 agent: AgentId::new(2),
                 record: std::sync::Arc::new(
-                    crate::tui::transcript::TranscriptRecord::from_local(
+                    crate::core::transcript::TranscriptRecord::from_local(
                         1,
                         1,
-                        crate::tui::transcript::LocalEvent::UserSubmitted {
-                            id: crate::tui::transcript::TurnId::new(1),
-                            text: "task".into(),
-                        },
+                        crate::core::transcript::LocalEvent::UserSubmitted(
+                            crate::core::transcript::UserSubmitted {
+                                id: crate::core::transcript::TurnId::new(1),
+                                text: "task".into(),
+                            },
+                        ),
                     )
                     .unwrap(),
                 ),
@@ -1193,7 +1194,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert!(matches!(
             request.command,
-            Command::Open(bridge::OpenSpec::New { workspace: Some(ref path), .. })
+            Command::Open(OpenSpec::New { workspace: Some(ref path), .. })
                 if std::path::Path::new(path) == worktree
         ));
     }

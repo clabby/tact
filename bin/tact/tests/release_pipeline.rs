@@ -73,7 +73,7 @@ fn just_recipes_forward_command_arguments() {
 fn harbor_context_contains_every_workspace_member() {
     assert_contains(
         JUSTFILE,
-        "for source_tree in bin/tact/src crates/memory/src crates/subagents/src examples/tact-memory-cloudflare/src; do",
+        "for source_tree in bin/tact/src crates/memory/src crates/subagents/src crates/vcs/src examples/tact-memory-cloudflare/src; do",
     );
     assert_contains(
         JUSTFILE,
@@ -86,6 +86,14 @@ fn harbor_context_contains_every_workspace_member() {
     assert_contains(
         JUSTFILE,
         "cp -R crates/subagents/src \"$build_context/crates/subagents/src\"",
+    );
+    assert_contains(
+        JUSTFILE,
+        "cp crates/vcs/Cargo.toml crates/vcs/README.md \"$build_context/crates/vcs/\"",
+    );
+    assert_contains(
+        JUSTFILE,
+        "cp -R crates/vcs/src \"$build_context/crates/vcs/src\"",
     );
     assert_contains(
         JUSTFILE,

@@ -1,11 +1,19 @@
 //! Searchable picker for skills available to the active session.
+//!
+//! [SkillPicker] keeps the session's [Skill]s, the ranked match indices, and the
+//! highlighted row. The composer owns the query text and forwards every change as
+//! [SkillPickerEvent::Query]; navigation keys arrive as
+//! [SkillPickerEvent::Terminal]. Enter or Tab emits [SkillPickerEffect::Insert]
+//! with the highlighted skill's name, and Esc emits [SkillPickerEffect::Dismiss].
+//! Each query change ranks the skills anew and moves the highlight to the best
+//! match.
 
 use super::{
     file_finder::visible_query_tail,
     floating::Floating,
     node::{Component, ComponentUpdate, RenderRequest},
 };
-use crate::{core::extensions::Skill, search::rank, tui::theme::Theme};
+use crate::{app::theme::Theme, core::extensions::Skill, search::rank};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind};
 use ratatui::{
     Frame,
