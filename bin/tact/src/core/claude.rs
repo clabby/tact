@@ -28,7 +28,6 @@ use std::{
 use tact_subagents::AgentContext;
 use tokio::sync::Notify;
 
-#[path = "claude_lifecycle.rs"]
 mod lifecycle;
 
 fn invalid(error: impl std::fmt::Display) -> NanocodexError {

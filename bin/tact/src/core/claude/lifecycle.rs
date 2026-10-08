@@ -1,3 +1,12 @@
+//! Adapts the native Claude agent to Nanocodex's lifecycle backend.
+//!
+//! The native Claude agent runs one turn at a time and emits its own event stream. This driver
+//! admits a single active turn, mirrors its events through the bridge so code-mode nested calls
+//! interleave in order, publishes the terminal event and clears the active turn under one lock,
+//! and implements cancellation, steering, clean spawns, and shutdown on top of the native
+//! handle. Forks are unsupported. A panicking turn task stops the agent rather than leaving it
+//! half-admitted.
+
 use super::*;
 use futures_util::{FutureExt, Stream};
 use nanocodex::{
