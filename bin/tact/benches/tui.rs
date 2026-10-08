@@ -64,7 +64,7 @@ use crate::{
     core::{
         pane::PaneId,
         session, storage,
-        transcript::{LocalEvent, SessionStarted, TranscriptRecord, TurnId},
+        transcript::{LocalEvent, SessionStarted, TranscriptRecord, TurnId, UserSubmitted},
     },
     tui::components::{AppEvent, AppNode, RootNode},
 };
@@ -164,10 +164,10 @@ fn mixed_projection_records(turns: u64) -> Vec<Arc<TranscriptRecord>> {
     for turn in 0..turns {
         records.push(local_record(
             sequence,
-            LocalEvent::UserSubmitted {
+            LocalEvent::UserSubmitted(UserSubmitted {
                 id: TurnId::new(turn.saturating_add(1)),
                 text: format!("inspect subsystem {turn} and summarize the relevant behavior"),
-            },
+            }),
         ));
         sequence = sequence.saturating_add(1);
         records.push(agent_record(
@@ -273,10 +273,10 @@ impl Harness {
         for sequence in 1..=entries {
             harness.apply_record(local_record(
                 sequence,
-                LocalEvent::UserSubmitted {
+                LocalEvent::UserSubmitted(UserSubmitted {
                     id: TurnId::new(sequence),
                     text: format!("transcript entry {sequence} with enough text to wrap"),
-                },
+                }),
             ));
         }
         harness.render();

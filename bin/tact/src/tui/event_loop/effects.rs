@@ -21,7 +21,7 @@ use crate::{
         prompt::{QueueId, Submission},
         session::RecentPrompt,
         shell,
-        transcript::LocalEvent,
+        transcript::{LocalEvent, ReflectionStarted, UserSteered, UserSubmitted},
         worker::{ReflectionContext, WorkerCommand},
     },
     tui::{
@@ -139,10 +139,10 @@ impl EventLoop {
         let runtime = self.panes.runtime(pane)?;
         let id = runtime.next_turn_id();
         let text = prompt.display_text().to_owned();
-        let record = runtime.record(LocalEvent::UserSubmitted {
+        let record = runtime.record(LocalEvent::UserSubmitted(UserSubmitted {
             id,
             text: text.clone(),
-        })?;
+        }))?;
         self.recent_prompts.remember(RecentPrompt {
             text,
             recorded_at_unix_ms: record.recorded_at_unix_ms(),
@@ -168,7 +168,7 @@ impl EventLoop {
         let runtime = self.panes.runtime(pane)?;
         debug_assert!(!runtime.has_active_shells());
         let id = runtime.next_turn_id();
-        let record = runtime.record(LocalEvent::ReflectionStarted { id })?;
+        let record = runtime.record(LocalEvent::ReflectionStarted(ReflectionStarted { id }))?;
         self.show(AppEvent::Transcript { pane, record });
         self.worker.send(WorkerCommand::Reflect {
             pane,
@@ -236,7 +236,7 @@ impl EventLoop {
 
     fn persist_steer(&mut self, pane: PaneId, text: String, workspace: &Path) -> Result<()> {
         let runtime = self.panes.runtime(pane)?;
-        let record = runtime.record(LocalEvent::UserSteered { text: text.clone() })?;
+        let record = runtime.record(LocalEvent::UserSteered(UserSteered { text: text.clone() }))?;
         self.recent_prompts.remember(RecentPrompt {
             text,
             recorded_at_unix_ms: record.recorded_at_unix_ms(),

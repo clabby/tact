@@ -8,7 +8,10 @@ use crate::{
         config::{ReasoningEffort, ReasoningMode, Speed, TuiConfig},
         theme::Theme,
     },
-    core::transcript::{EntryId, EntryKind, LocalEvent, SessionStarted, TranscriptRecord, TurnId},
+    core::transcript::{
+        EffortChanged, EntryId, EntryKind, LocalEvent, ReflectionStarted, SessionStarted,
+        SpeedChanged, TranscriptRecord, TurnId, UserSubmitted,
+    },
 };
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -37,10 +40,10 @@ fn local(sequence: u64, event: LocalEvent) -> Arc<TranscriptRecord> {
 fn user(sequence: u64, text: impl Into<String>) -> Arc<TranscriptRecord> {
     local(
         sequence,
-        LocalEvent::UserSubmitted {
+        LocalEvent::UserSubmitted(UserSubmitted {
             id: TurnId::new(sequence),
             text: text.into(),
-        },
+        }),
     )
 }
 
@@ -688,17 +691,17 @@ fn milestones_and_setting_changes_render_as_markers() {
         (
             vec![local(
                 1,
-                LocalEvent::ReflectionStarted { id: TurnId::new(1) },
+                LocalEvent::ReflectionStarted(ReflectionStarted { id: TurnId::new(1) }),
             )],
             vec!["◇ Reflection started", ""],
         ),
         (
             vec![local(
                 1,
-                LocalEvent::EffortChanged {
+                LocalEvent::EffortChanged(EffortChanged {
                     from: ReasoningEffort::Medium,
                     to: ReasoningEffort::High,
-                },
+                }),
             )],
             vec![
                 "◇ Effort changed to high · takes effect on the next turn",
@@ -708,10 +711,10 @@ fn milestones_and_setting_changes_render_as_markers() {
         (
             vec![local(
                 1,
-                LocalEvent::SpeedChanged {
+                LocalEvent::SpeedChanged(SpeedChanged {
                     from: Speed::Standard,
                     to: Speed::Fast,
-                },
+                }),
             )],
             vec![
                 "◇ Speed changed to fast · takes effect on the next turn",
@@ -735,17 +738,17 @@ fn session_setting_notifications_color_their_new_value() {
     let mut transcript = transcript_of([
         local(
             1,
-            LocalEvent::EffortChanged {
+            LocalEvent::EffortChanged(EffortChanged {
                 from: ReasoningEffort::Medium,
                 to: ReasoningEffort::High,
-            },
+            }),
         ),
         local(
             2,
-            LocalEvent::SpeedChanged {
+            LocalEvent::SpeedChanged(SpeedChanged {
                 from: Speed::Standard,
                 to: Speed::Fast,
-            },
+            }),
         ),
     ]);
     render(&mut transcript, 72, 6);

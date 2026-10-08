@@ -1526,7 +1526,7 @@ mod tests {
         },
         core::{
             pane::PaneId,
-            transcript::{LocalEvent, TranscriptRecord, TurnId},
+            transcript::{LocalEvent, TranscriptRecord, TurnId, UserSubmitted},
         },
     };
     use crossterm::event::{
@@ -1719,10 +1719,10 @@ mod tests {
         let record = TranscriptRecord::from_local(
             1,
             1,
-            LocalEvent::UserSubmitted {
+            LocalEvent::UserSubmitted(UserSubmitted {
                 id: TurnId::new(1),
                 text: "inherited history".to_owned(),
-            },
+            }),
         )
         .unwrap();
         app.update(AppEvent::Transcript {
@@ -2169,10 +2169,10 @@ mod tests {
             let record = TranscriptRecord::from_local(
                 sequence,
                 sequence,
-                LocalEvent::UserSubmitted {
+                LocalEvent::UserSubmitted(UserSubmitted {
                     id: TurnId::new(sequence),
                     text: format!("scroll line {sequence:02}"),
-                },
+                }),
             )
             .unwrap();
             app.update(AppEvent::Transcript {

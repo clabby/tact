@@ -705,7 +705,8 @@ mod tests {
         core::{
             storage::{BUSY_TIMEOUT, SessionStorage, database_path},
             transcript::{
-                LocalEvent, LocalKind, SessionStarted, TranscriptJournal, TranscriptRecord, TurnId,
+                CompactionFinished, LocalEvent, LocalKind, SessionStarted, TranscriptJournal,
+                TranscriptRecord, TurnId, UserSubmitted, WorkerTurnFinished,
             },
         },
     };
@@ -834,10 +835,10 @@ mod tests {
             TranscriptRecord::from_local(
                 sequence,
                 sequence,
-                LocalEvent::UserSubmitted {
+                LocalEvent::UserSubmitted(UserSubmitted {
                     id: TurnId::new(sequence),
                     text: text.to_owned(),
-                },
+                }),
             )
             .unwrap(),
         )
@@ -1030,10 +1031,10 @@ mod tests {
                 TranscriptRecord::from_local(
                     2,
                     2,
-                    LocalEvent::UserSubmitted {
+                    LocalEvent::UserSubmitted(UserSubmitted {
                         id: TurnId::new(1),
                         text: "inspect storage".to_owned(),
-                    },
+                    }),
                 )
                 .unwrap(),
             ),
@@ -1410,11 +1411,11 @@ mod tests {
             application_version: "test".to_owned(),
         });
         journal
-            .append_local(LocalEvent::WorkerTurnFinished {
+            .append_local(LocalEvent::WorkerTurnFinished(WorkerTurnFinished {
                 id: TurnId::new(2),
                 error: Some("API failed".to_owned()),
                 terminal_stop: None,
-            })
+            }))
             .unwrap();
         drop(journal);
         writer.into_task().await.unwrap().unwrap();
@@ -1458,11 +1459,11 @@ mod tests {
         let later_failure = TranscriptRecord::from_local(
             3,
             3,
-            LocalEvent::WorkerTurnFinished {
+            LocalEvent::WorkerTurnFinished(WorkerTurnFinished {
                 id: TurnId::new(3),
                 error: Some("agent stopped".to_owned()),
                 terminal_stop: None,
-            },
+            }),
         )
         .unwrap();
         SessionStorage::open(&config)
@@ -1492,11 +1493,11 @@ mod tests {
         journal.defer_start(start.decode_payload::<SessionStarted>().unwrap());
         let reason = TerminalStopReason::MisalignmentPolicyViolation;
         journal
-            .append_local(LocalEvent::WorkerTurnFinished {
+            .append_local(LocalEvent::WorkerTurnFinished(WorkerTurnFinished {
                 id: TurnId::new(2),
                 error: Some("provider stopped conversation".to_owned()),
                 terminal_stop: Some(reason),
-            })
+            }))
             .unwrap();
         journal.flush().await.unwrap();
 
@@ -1528,11 +1529,11 @@ mod tests {
         let record = TranscriptRecord::from_local(
             2,
             2,
-            LocalEvent::WorkerTurnFinished {
+            LocalEvent::WorkerTurnFinished(WorkerTurnFinished {
                 id: TurnId::new(2),
                 error: Some("provider stopped conversation".to_owned()),
                 terminal_stop: Some(TerminalStopReason::MisalignmentPolicyViolation),
-            },
+            }),
         )
         .unwrap();
         let mut encoded = serde_json::to_value(record).unwrap();
@@ -1587,11 +1588,11 @@ mod tests {
         });
         journal
             .append_local_with_resume_state(
-                LocalEvent::WorkerTurnFinished {
+                LocalEvent::WorkerTurnFinished(WorkerTurnFinished {
                     id: TurnId::new(1),
                     error: None,
                     terminal_stop: None,
-                },
+                }),
                 resume_state,
             )
             .unwrap();
@@ -1628,11 +1629,11 @@ mod tests {
         let expected = super::AgentSnapshot::Codex(Box::new(snapshot("compacted")));
         journal
             .append_local_with_resume_state(
-                LocalEvent::CompactionFinished {
+                LocalEvent::CompactionFinished(CompactionFinished {
                     terminal_stop: None,
                     error: None,
                     duration_ns: 1,
-                },
+                }),
                 encode_checkpoint(&expected, instructions, true).unwrap(),
             )
             .unwrap();
@@ -1653,11 +1654,11 @@ mod tests {
         assert!(records.last().unwrap().decode_payload::<Value>().unwrap()["error"].is_null());
         journal.append_local(LocalEvent::CompactionStarted).unwrap();
         journal
-            .append_local(LocalEvent::CompactionFinished {
+            .append_local(LocalEvent::CompactionFinished(CompactionFinished {
                 terminal_stop: None,
                 error: Some("synthetic failure".to_owned()),
                 duration_ns: 1,
-            })
+            }))
             .unwrap();
         journal.flush().await.unwrap();
         let (actual, actual_instructions, _) =
@@ -1687,19 +1688,19 @@ mod tests {
         lock.execute_batch("BEGIN IMMEDIATE").unwrap();
         let (mut journal, writer) = TranscriptJournal::open_at(&config, "session", 2).unwrap();
         journal
-            .append_local(LocalEvent::UserSubmitted {
+            .append_local(LocalEvent::UserSubmitted(UserSubmitted {
                 id: TurnId::new(1),
                 text: "first tail".to_owned(),
-            })
+            }))
             .unwrap();
 
         // Outlast the writer's busy timeout so it observes contention and retries.
         tokio::time::sleep(BUSY_TIMEOUT * 2).await;
         journal
-            .append_local(LocalEvent::UserSubmitted {
+            .append_local(LocalEvent::UserSubmitted(UserSubmitted {
                 id: TurnId::new(2),
                 text: "second tail".to_owned(),
-            })
+            }))
             .unwrap();
 
         lock.execute_batch("COMMIT").unwrap();

@@ -13,7 +13,12 @@ use crate::{
         config::{Config, ReasoningEffort, ReasoningMode, Setting, Speed},
         error::Result,
     },
-    core::{pane::PaneId, protocol::CommandError, transcript::LocalEvent, worker::WorkerCommand},
+    core::{
+        pane::PaneId,
+        protocol::CommandError,
+        transcript::{EffortChanged, LocalEvent, SpeedChanged},
+        worker::WorkerCommand,
+    },
     tui::components::AppEvent,
 };
 use crossterm::event::EventStream;
@@ -101,10 +106,10 @@ impl EventLoop {
         if journal.is_empty() {
             journal.set_initial_effort(effort);
         } else {
-            let record = journal.append_local(LocalEvent::EffortChanged {
+            let record = journal.append_local(LocalEvent::EffortChanged(EffortChanged {
                 from: previous,
                 to: effort,
-            })?;
+            }))?;
             self.show(AppEvent::Transcript { pane, record });
         }
         self.panes.runtime(pane)?.settings.effort = effort;
@@ -138,10 +143,10 @@ impl EventLoop {
         if journal.is_empty() {
             journal.set_initial_speed(speed);
         } else {
-            let record = journal.append_local(LocalEvent::SpeedChanged {
+            let record = journal.append_local(LocalEvent::SpeedChanged(SpeedChanged {
                 from: previous,
                 to: speed,
-            })?;
+            }))?;
             self.show(AppEvent::Transcript { pane, record });
         }
         let runtime = self.panes.runtime(pane)?;

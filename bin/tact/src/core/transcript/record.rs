@@ -236,70 +236,168 @@ pub(crate) struct SessionEnded {
     pub(crate) error: Option<String>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// A record Tact writes about its own activity.
+///
+/// Each variant wraps the payload stored in the record, so the same types encode records and
+/// decode them for projection. A local event serializes as its bare payload; the record carries
+/// its kind separately.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(untagged)]
 pub(crate) enum LocalEvent {
     SessionStarted(SessionStarted),
-    UserSubmitted {
-        id: TurnId,
-        text: String,
-    },
-    UserSteered {
-        text: String,
-    },
-    ReflectionStarted {
-        id: TurnId,
-    },
-    ShellStarted {
-        id: ShellId,
-        command: String,
-        workspace: PathBuf,
-    },
-    ShellFinished {
-        id: ShellId,
-        output: String,
-        exit_code: Option<i32>,
-        duration_ns: u64,
-        truncated: bool,
-        error: Option<String>,
-    },
-    EffortChanged {
-        from: ReasoningEffort,
-        to: ReasoningEffort,
-    },
-    SpeedChanged {
-        from: Speed,
-        to: Speed,
-    },
+    UserSubmitted(UserSubmitted),
+    UserSteered(UserSteered),
+    ReflectionStarted(ReflectionStarted),
+    ShellStarted(ShellStarted),
+    ShellFinished(ShellFinished),
+    EffortChanged(EffortChanged),
+    SpeedChanged(SpeedChanged),
     CompactionStarted,
-    CompactionFinished {
-        terminal_stop: Option<TerminalStopReason>,
-        error: Option<String>,
-        duration_ns: u64,
-    },
+    CompactionFinished(CompactionFinished),
     ContextBudget(ContextBudget),
-    ContextObserved {
-        prompt_cache: bool,
-        previous_response: bool,
-    },
-    WorkerTurnAccepted {
-        id: TurnId,
-    },
-    WorkerTurnFinished {
-        id: TurnId,
-        error: Option<String>,
-        terminal_stop: Option<TerminalStopReason>,
-    },
-    WorkerTurnsInterrupted {
-        count: usize,
-        error: Option<String>,
-    },
-    WorkerSteerFailed {
-        error: String,
-    },
-    WorkerStopped {
-        error: Option<String>,
-    },
+    ContextObserved(ContextObserved),
+    WorkerTurnAccepted(WorkerTurnAccepted),
+    WorkerTurnFinished(WorkerTurnFinished),
+    WorkerTurnsInterrupted(WorkerTurnsInterrupted),
+    WorkerSteerFailed(WorkerSteerFailed),
+    WorkerStopped(WorkerStopped),
     SessionEnded(SessionEnded),
+}
+
+impl LocalEvent {
+    pub(crate) const fn kind(&self) -> LocalKind {
+        match self {
+            Self::SessionStarted(_) => LocalKind::SessionStarted,
+            Self::UserSubmitted(_) => LocalKind::UserSubmitted,
+            Self::UserSteered(_) => LocalKind::UserSteered,
+            Self::ReflectionStarted(_) => LocalKind::ReflectionStarted,
+            Self::ShellStarted(_) => LocalKind::ShellStarted,
+            Self::ShellFinished(_) => LocalKind::ShellFinished,
+            Self::EffortChanged(_) => LocalKind::EffortChanged,
+            Self::SpeedChanged(_) => LocalKind::SpeedChanged,
+            Self::CompactionStarted => LocalKind::CompactionStarted,
+            Self::CompactionFinished(_) => LocalKind::CompactionFinished,
+            Self::ContextBudget(_) => LocalKind::ContextBudget,
+            Self::ContextObserved(_) => LocalKind::ContextObserved,
+            Self::WorkerTurnAccepted(_) => LocalKind::WorkerTurnAccepted,
+            Self::WorkerTurnFinished(_) => LocalKind::WorkerTurnFinished,
+            Self::WorkerTurnsInterrupted(_) => LocalKind::WorkerTurnsInterrupted,
+            Self::WorkerSteerFailed(_) => LocalKind::WorkerSteerFailed,
+            Self::WorkerStopped(_) => LocalKind::WorkerStopped,
+            Self::SessionEnded(_) => LocalKind::SessionEnded,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct UserSubmitted {
+    pub(crate) id: TurnId,
+    pub(crate) text: String,
+}
+
+/// A prompt delivered into a running turn.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct UserSteered {
+    pub(crate) text: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct ReflectionStarted {
+    pub(crate) id: TurnId,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct ShellStarted {
+    pub(crate) id: ShellId,
+    pub(crate) command: String,
+    pub(crate) workspace: PathBuf,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct ShellFinished {
+    pub(crate) id: ShellId,
+    pub(crate) output: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) exit_code: Option<i32>,
+    pub(crate) duration_ns: u64,
+    pub(crate) truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) error: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct EffortChanged {
+    pub(crate) from: ReasoningEffort,
+    pub(crate) to: ReasoningEffort,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct SpeedChanged {
+    pub(crate) from: Speed,
+    pub(crate) to: Speed,
+}
+
+/// The historical `fast_mode.changed` payload, which stored the speed as an on/off toggle.
+#[derive(Clone, Copy, Debug, Deserialize)]
+pub(crate) struct FastModeChanged {
+    to: bool,
+}
+
+impl FastModeChanged {
+    pub(crate) const fn speed(self) -> Speed {
+        if self.to {
+            Speed::Fast
+        } else {
+            Speed::Standard
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct CompactionFinished {
+    pub(crate) error: Option<String>,
+    pub(crate) duration_ns: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) terminal_stop: Option<TerminalStopReason>,
+}
+
+/// Content-free facts about an outbound model request.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct ContextObserved {
+    pub(crate) prompt_cache: bool,
+    pub(crate) previous_response: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct WorkerTurnAccepted {
+    pub(crate) id: TurnId,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct WorkerTurnFinished {
+    pub(crate) id: TurnId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) terminal_stop: Option<TerminalStopReason>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct WorkerTurnsInterrupted {
+    pub(crate) count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) error: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct WorkerSteerFailed {
+    pub(crate) error: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct WorkerStopped {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) error: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -344,121 +442,24 @@ impl TranscriptRecord {
         recorded_at_unix_ms: u64,
         event: LocalEvent,
     ) -> Result<Self, serde_json::Error> {
-        let (kind, payload) = match event {
-            LocalEvent::SessionStarted(payload) => {
-                (LocalKind::SessionStarted, to_raw_value(&payload)?)
-            }
-            LocalEvent::UserSubmitted { id, text } => (
-                LocalKind::UserSubmitted,
-                to_raw_value(&UserSubmitted { id, text })?,
-            ),
-            LocalEvent::UserSteered { text } => {
-                (LocalKind::UserSteered, to_raw_value(&UserSteered { text })?)
-            }
-            LocalEvent::ReflectionStarted { id } => (
-                LocalKind::ReflectionStarted,
-                to_raw_value(&ReflectionStarted { id })?,
-            ),
-            LocalEvent::ShellStarted {
-                id,
-                command,
-                workspace,
-            } => (
-                LocalKind::ShellStarted,
-                to_raw_value(&ShellStarted {
-                    id,
-                    command,
-                    workspace,
-                })?,
-            ),
-            LocalEvent::ShellFinished {
-                id,
-                output,
-                exit_code,
-                duration_ns,
-                truncated,
-                error,
-            } => (
-                LocalKind::ShellFinished,
-                to_raw_value(&ShellFinished {
-                    id,
-                    output,
-                    exit_code,
-                    duration_ns,
-                    truncated,
-                    error,
-                })?,
-            ),
-            LocalEvent::EffortChanged { from, to } => (
-                LocalKind::EffortChanged,
-                to_raw_value(&EffortChanged { from, to })?,
-            ),
-            LocalEvent::SpeedChanged { from, to } => (
-                LocalKind::SpeedChanged,
-                to_raw_value(&SpeedChanged { from, to })?,
-            ),
-            LocalEvent::ContextBudget(budget) => (LocalKind::ContextBudget, to_raw_value(&budget)?),
-            LocalEvent::ContextObserved {
-                prompt_cache,
-                previous_response,
-            } => (
-                LocalKind::ContextObserved,
-                to_raw_value(&ContextObserved {
-                    prompt_cache,
-                    previous_response,
-                })?,
-            ),
-            LocalEvent::CompactionStarted => (LocalKind::CompactionStarted, to_raw_value(&())?),
-            LocalEvent::CompactionFinished {
-                error,
-                duration_ns,
-                terminal_stop,
-            } => (
-                LocalKind::CompactionFinished,
-                to_raw_value(&CompactionFinished {
-                    error,
-                    duration_ns,
-                    terminal_stop,
-                })?,
-            ),
-            LocalEvent::WorkerTurnAccepted { id } => (
-                LocalKind::WorkerTurnAccepted,
-                to_raw_value(&WorkerTurn { id })?,
-            ),
-            LocalEvent::WorkerTurnFinished {
-                id,
-                error,
-                terminal_stop,
-            } => (
-                LocalKind::WorkerTurnFinished,
-                to_raw_value(&WorkerTurnFinished {
-                    id,
-                    error,
-                    terminal_stop,
-                })?,
-            ),
-            LocalEvent::WorkerTurnsInterrupted { count, error } => (
-                LocalKind::WorkerTurnsInterrupted,
-                to_raw_value(&WorkerTurnsInterrupted { count, error })?,
-            ),
-            LocalEvent::WorkerSteerFailed { error } => (
-                LocalKind::WorkerSteerFailed,
-                to_raw_value(&WorkerSteerFailed { error })?,
-            ),
-            LocalEvent::WorkerStopped { error } => (
-                LocalKind::WorkerStopped,
-                to_raw_value(&WorkerStopped { error })?,
-            ),
-            LocalEvent::SessionEnded(payload) => (LocalKind::SessionEnded, to_raw_value(&payload)?),
-        };
+        let payload = to_raw_value(&event)?;
         Ok(Self {
             schema_version: SCHEMA_VERSION,
             sequence,
             recorded_at_unix_ms,
             source: RecordSource::Tact,
-            kind: RecordKind::Local(kind),
+            kind: RecordKind::Local(event.kind()),
             agent: None,
             payload: payload.into(),
+        })
+    }
+
+    /// The text of a submitted or steered user prompt.
+    pub(crate) fn prompt_text(&self) -> Result<Option<String>, serde_json::Error> {
+        Ok(match self.local_kind() {
+            Some(LocalKind::UserSubmitted) => Some(self.decode_payload::<UserSubmitted>()?.text),
+            Some(LocalKind::UserSteered) => Some(self.decode_payload::<UserSteered>()?.text),
+            _ => None,
         })
     }
 
@@ -524,99 +525,6 @@ impl TranscriptRecord {
     }
 }
 
-#[derive(Serialize)]
-struct UserSubmitted {
-    id: TurnId,
-    text: String,
-}
-
-#[derive(Serialize)]
-struct UserSteered {
-    text: String,
-}
-
-#[derive(Serialize)]
-struct ReflectionStarted {
-    id: TurnId,
-}
-
-#[derive(Serialize)]
-struct ShellStarted {
-    id: ShellId,
-    command: String,
-    workspace: PathBuf,
-}
-
-#[derive(Serialize)]
-struct ShellFinished {
-    id: ShellId,
-    output: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    exit_code: Option<i32>,
-    duration_ns: u64,
-    truncated: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
-}
-
-#[derive(Serialize)]
-struct EffortChanged {
-    from: ReasoningEffort,
-    to: ReasoningEffort,
-}
-
-#[derive(Serialize)]
-struct SpeedChanged {
-    from: Speed,
-    to: Speed,
-}
-
-#[derive(Serialize)]
-struct ContextObserved {
-    prompt_cache: bool,
-    previous_response: bool,
-}
-
-#[derive(Serialize)]
-struct CompactionFinished {
-    error: Option<String>,
-    duration_ns: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    terminal_stop: Option<TerminalStopReason>,
-}
-
-#[derive(Serialize)]
-struct WorkerTurn {
-    id: TurnId,
-}
-
-#[derive(Serialize)]
-struct WorkerTurnFinished {
-    id: TurnId,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    terminal_stop: Option<TerminalStopReason>,
-}
-
-#[derive(Serialize)]
-struct WorkerTurnsInterrupted {
-    count: usize,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
-}
-
-#[derive(Serialize)]
-struct WorkerSteerFailed {
-    error: String,
-}
-
-#[derive(Serialize)]
-struct WorkerStopped {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
-}
-
 const fn agent_kind_name(kind: AgentEventKind) -> &'static str {
     match kind {
         AgentEventKind::ApiEvent => "api.event",
@@ -652,7 +560,9 @@ const fn agent_kind_name(kind: AgentEventKind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        LocalEvent, LocalKind, RecordKind, SessionStarted, ShellId, TranscriptRecord, TurnId,
+        CompactionFinished, LocalEvent, LocalKind, RecordKind, ReflectionStarted, SessionStarted,
+        ShellFinished, ShellId, ShellStarted, SpeedChanged, TerminalStopReason, TranscriptRecord,
+        TurnId, UserSteered, UserSubmitted, WorkerTurnFinished,
     };
     use crate::app::config::Speed;
     use nanocodex::agent::events::{AgentEvent, AgentEventKind};
@@ -825,10 +735,10 @@ mod tests {
         let record = TranscriptRecord::from_local(
             2,
             124,
-            LocalEvent::SpeedChanged {
+            LocalEvent::SpeedChanged(SpeedChanged {
                 from: Speed::Fast,
                 to: Speed::Ultrafast,
-            },
+            }),
         )
         .unwrap();
         assert_eq!(record.local_kind(), Some(LocalKind::SpeedChanged));
@@ -869,10 +779,10 @@ mod tests {
         let record = TranscriptRecord::from_local(
             1,
             123,
-            LocalEvent::UserSubmitted {
+            LocalEvent::UserSubmitted(UserSubmitted {
                 id: TurnId::new(9),
                 text: "hello".to_owned(),
-            },
+            }),
         )
         .unwrap();
         let encoded = serde_json::to_value(record).unwrap();
@@ -887,24 +797,24 @@ mod tests {
         let started = TranscriptRecord::from_local(
             1,
             123,
-            LocalEvent::ShellStarted {
+            LocalEvent::ShellStarted(ShellStarted {
                 id: ShellId::new(4),
                 command: "pwd".to_owned(),
                 workspace: "/work".into(),
-            },
+            }),
         )
         .unwrap();
         let finished = TranscriptRecord::from_local(
             2,
             124,
-            LocalEvent::ShellFinished {
+            LocalEvent::ShellFinished(ShellFinished {
                 id: ShellId::new(4),
                 output: "/work\n".to_owned(),
                 exit_code: Some(0),
                 duration_ns: 10,
                 truncated: false,
                 error: None,
-            },
+            }),
         )
         .unwrap();
 
@@ -923,13 +833,46 @@ mod tests {
     }
 
     #[test]
+    fn local_payloads_decode_into_the_types_that_encoded_them() {
+        let finished = WorkerTurnFinished {
+            id: TurnId::new(3),
+            error: None,
+            terminal_stop: Some(TerminalStopReason::MisalignmentPolicyViolation),
+        };
+        let record =
+            TranscriptRecord::from_local(1, 1, LocalEvent::WorkerTurnFinished(finished.clone()))
+                .unwrap();
+        assert_eq!(
+            record.decode_payload::<WorkerTurnFinished>().unwrap(),
+            finished
+        );
+
+        let compaction = CompactionFinished {
+            error: None,
+            duration_ns: 5,
+            terminal_stop: None,
+        };
+        let record =
+            TranscriptRecord::from_local(2, 2, LocalEvent::CompactionFinished(compaction.clone()))
+                .unwrap();
+        assert_eq!(
+            serde_json::to_value(&record).unwrap()["payload"],
+            json!({"error": null, "duration_ns": 5})
+        );
+        assert_eq!(
+            record.decode_payload::<CompactionFinished>().unwrap(),
+            compaction
+        );
+    }
+
+    #[test]
     fn applied_steer_has_a_distinct_local_record() {
         let record = TranscriptRecord::from_local(
             1,
             123,
-            LocalEvent::UserSteered {
+            LocalEvent::UserSteered(UserSteered {
                 text: "change direction".to_owned(),
-            },
+            }),
         )
         .unwrap();
         let encoded = serde_json::to_value(record).unwrap();
@@ -943,7 +886,7 @@ mod tests {
         let record = TranscriptRecord::from_local(
             1,
             123,
-            LocalEvent::ReflectionStarted { id: TurnId::new(9) },
+            LocalEvent::ReflectionStarted(ReflectionStarted { id: TurnId::new(9) }),
         )
         .unwrap();
         let encoded = serde_json::to_value(record).unwrap();

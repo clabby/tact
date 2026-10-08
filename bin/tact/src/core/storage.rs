@@ -3,7 +3,8 @@
 use crate::{
     app::config::{ReasoningEffort, ReasoningMode, Speed},
     core::transcript::{
-        LocalKind, SCHEMA_VERSION, SessionStarted, TerminalStopReason, TranscriptRecord,
+        EffortChanged, FastModeChanged, LocalKind, SCHEMA_VERSION, SessionStarted, SpeedChanged,
+        TerminalStopReason, TranscriptRecord, TurnId, WorkerTurnAccepted,
     },
 };
 use nanocodex::agent::events::AgentEventKind;
@@ -142,7 +143,7 @@ pub(crate) struct StoredRecordPage {
 pub(crate) struct SessionStorage {
     path: PathBuf,
     connection: Connection,
-    active_turns: HashMap<String, u64>,
+    active_turns: HashMap<String, TurnId>,
 }
 
 pub(crate) struct RecordPrefix {
@@ -239,11 +240,7 @@ impl SessionStorage {
         let mut encoded = Vec::new();
         for record in records {
             if record.local_kind() == Some(LocalKind::WorkerTurnAccepted) {
-                #[derive(serde::Deserialize)]
-                struct AcceptedTurn {
-                    id: u64,
-                }
-                active_turn = Some(record.decode_payload::<AcceptedTurn>()?.id);
+                active_turn = Some(record.decode_payload::<WorkerTurnAccepted>()?.id);
             }
             encoded.clear();
             serde_json::to_writer(&mut encoded, record.as_ref())?;
@@ -753,7 +750,7 @@ fn append_record(
     transaction: &Transaction<'_>,
     path: &Path,
     session_id: &str,
-    active_turn: Option<u64>,
+    active_turn: Option<TurnId>,
     record: &TranscriptRecord,
     encoded: &[u8],
 ) -> Result<(), StorageError> {
@@ -761,7 +758,7 @@ fn append_record(
         let started = record.decode_payload::<SessionStarted>()?;
         upsert_session(transaction, path, record, &started)?;
     }
-    let prompt_text = prompt_text(record)?;
+    let prompt_text = record.prompt_text()?;
     let assistant_stream = assistant_stream(active_turn, record)?;
     if record.agent_kind() == Some(AgentEventKind::AssistantMessage)
         && let Some(stream) = &assistant_stream
@@ -847,22 +844,8 @@ fn upsert_session(
     Ok(())
 }
 
-fn prompt_text(record: &TranscriptRecord) -> Result<Option<String>, serde_json::Error> {
-    #[derive(serde::Deserialize)]
-    struct Prompt {
-        text: String,
-    }
-    if !matches!(
-        record.local_kind(),
-        Some(LocalKind::UserSubmitted | LocalKind::UserSteered)
-    ) {
-        return Ok(None);
-    }
-    Ok(Some(record.decode_payload::<Prompt>()?.text))
-}
-
 fn assistant_stream(
-    active_turn: Option<u64>,
+    active_turn: Option<TurnId>,
     record: &TranscriptRecord,
 ) -> Result<Option<String>, serde_json::Error> {
     #[derive(serde::Deserialize, serde::Serialize)]
@@ -886,19 +869,7 @@ fn update_settings(
     session_id: &str,
     record: &TranscriptRecord,
 ) -> Result<(), StorageError> {
-    #[derive(serde::Deserialize)]
-    struct EffortChanged {
-        to: ReasoningEffort,
-    }
-    #[derive(serde::Deserialize)]
-    struct SpeedChanged {
-        to: Speed,
-    }
-    #[derive(serde::Deserialize)]
-    struct FastModeChanged {
-        to: bool,
-    }
-    match record.local_kind() {
+    let speed = match record.local_kind() {
         Some(LocalKind::EffortChanged) => {
             let effort = serde_json::to_string(&record.decode_payload::<EffortChanged>()?.to)?;
             transaction
@@ -907,22 +878,18 @@ fn update_settings(
                     params![session_id, effort],
                 )
                 .map_err(|source| query(path, source))?;
+            return Ok(());
         }
-        Some(LocalKind::SpeedChanged | LocalKind::FastModeChanged) => {
-            let enabled = if record.local_kind() == Some(LocalKind::SpeedChanged) {
-                record.decode_payload::<SpeedChanged>()?.to != Speed::Standard
-            } else {
-                record.decode_payload::<FastModeChanged>()?.to
-            };
-            transaction
-                .execute(
-                    "UPDATE sessions SET fast_mode=?2 WHERE session_id=?1",
-                    params![session_id, enabled],
-                )
-                .map_err(|source| query(path, source))?;
-        }
-        _ => {}
-    }
+        Some(LocalKind::SpeedChanged) => record.decode_payload::<SpeedChanged>()?.to,
+        Some(LocalKind::FastModeChanged) => record.decode_payload::<FastModeChanged>()?.speed(),
+        _ => return Ok(()),
+    };
+    transaction
+        .execute(
+            "UPDATE sessions SET fast_mode=?2 WHERE session_id=?1",
+            params![session_id, speed != Speed::Standard],
+        )
+        .map_err(|source| query(path, source))?;
     Ok(())
 }
 
@@ -1004,7 +971,10 @@ mod tests {
     use super::{SessionStorage, StorageError, database_path};
     use crate::{
         app::config::{ReasoningEffort, ReasoningMode, Speed},
-        core::transcript::{LocalEvent, LocalKind, SessionStarted, TranscriptRecord, TurnId},
+        core::transcript::{
+            LocalEvent, LocalKind, SessionStarted, SpeedChanged, TranscriptRecord, TurnId,
+            UserSubmitted,
+        },
     };
     use rusqlite::Connection;
     use serde_json::{Value, json};
@@ -1027,7 +997,7 @@ mod tests {
                 TranscriptRecord::from_local(
                     index + 3,
                     index + 101,
-                    LocalEvent::SpeedChanged { from, to },
+                    LocalEvent::SpeedChanged(SpeedChanged { from, to }),
                 )
                 .unwrap(),
             );
@@ -1124,10 +1094,10 @@ mod tests {
             TranscriptRecord::from_local(
                 3,
                 102,
-                LocalEvent::SpeedChanged {
+                LocalEvent::SpeedChanged(SpeedChanged {
                     from: Speed::Standard,
                     to: Speed::Ultrafast,
-                },
+                }),
             )
             .unwrap(),
         );
@@ -1380,10 +1350,10 @@ mod tests {
                 TranscriptRecord::from_local(
                     2,
                     at,
-                    LocalEvent::UserSubmitted {
+                    LocalEvent::UserSubmitted(UserSubmitted {
                         id: TurnId::new(1),
                         text: text.to_owned(),
-                    },
+                    }),
                 )
                 .unwrap(),
             ),
@@ -1402,10 +1372,10 @@ mod tests {
             TranscriptRecord::from_local(
                 sequence,
                 at,
-                LocalEvent::UserSubmitted {
+                LocalEvent::UserSubmitted(UserSubmitted {
                     id: TurnId::new(sequence),
                     text: text.to_owned(),
-                },
+                }),
             )
             .unwrap(),
         );

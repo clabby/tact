@@ -744,7 +744,7 @@ mod tests {
         app::config::{ReasoningEffort, ReasoningMode, Speed},
         core::{
             storage::{DecodedStoredRecord, SessionStorage},
-            transcript::{LocalEvent, SessionStarted, TranscriptRecord, TurnId},
+            transcript::{LocalEvent, SessionStarted, TranscriptRecord, TurnId, UserSubmitted},
         },
     };
     use nanocodex::{
@@ -850,10 +850,10 @@ mod tests {
             record: TranscriptRecord::from_local(
                 1,
                 1,
-                LocalEvent::UserSubmitted {
+                LocalEvent::UserSubmitted(UserSubmitted {
                     id: TurnId::new(1),
                     text,
-                },
+                }),
             )
             .unwrap(),
         };
@@ -997,10 +997,10 @@ mod tests {
                 TranscriptRecord::from_local(
                     2,
                     2,
-                    LocalEvent::UserSubmitted {
+                    LocalEvent::UserSubmitted(UserSubmitted {
                         id: TurnId::new(1),
                         text: "x".repeat(10_000),
-                    },
+                    }),
                 )
                 .unwrap(),
             ),
@@ -1067,10 +1067,10 @@ mod tests {
                 TranscriptRecord::from_local(
                     sequence,
                     sequence,
-                    LocalEvent::UserSubmitted {
+                    LocalEvent::UserSubmitted(UserSubmitted {
                         id: TurnId::new(sequence),
                         text: text.to_owned(),
-                    },
+                    }),
                 )
                 .unwrap(),
             ));
@@ -1110,10 +1110,10 @@ mod tests {
                 TranscriptRecord::from_local(
                     2,
                     2,
-                    LocalEvent::UserSubmitted {
+                    LocalEvent::UserSubmitted(UserSubmitted {
                         id: TurnId::new(1),
                         text: "validation needle".to_owned(),
-                    },
+                    }),
                 )
                 .unwrap(),
             ),
@@ -1180,10 +1180,10 @@ mod tests {
                 TranscriptRecord::from_local(
                     2,
                     2,
-                    LocalEvent::UserSubmitted {
+                    LocalEvent::UserSubmitted(UserSubmitted {
                         id: TurnId::new(2),
                         text: format!("match first {}", "x".repeat(600)),
-                    },
+                    }),
                 )
                 .unwrap(),
             ),
@@ -1191,10 +1191,10 @@ mod tests {
                 TranscriptRecord::from_local(
                     3,
                     3,
-                    LocalEvent::UserSubmitted {
+                    LocalEvent::UserSubmitted(UserSubmitted {
                         id: TurnId::new(3),
                         text: format!("match second {}", "x".repeat(600)),
-                    },
+                    }),
                 )
                 .unwrap(),
             ),
@@ -1301,10 +1301,10 @@ mod tests {
                 TranscriptRecord::from_local(
                     2,
                     at,
-                    LocalEvent::UserSubmitted {
+                    LocalEvent::UserSubmitted(UserSubmitted {
                         id: TurnId::new(1),
                         text: prompt.to_owned(),
-                    },
+                    }),
                 )
                 .unwrap(),
             ),

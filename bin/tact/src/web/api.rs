@@ -1082,10 +1082,12 @@ mod tests {
                     crate::core::transcript::TranscriptRecord::from_local(
                         1,
                         1,
-                        crate::core::transcript::LocalEvent::UserSubmitted {
-                            id: crate::core::transcript::TurnId::new(1),
-                            text: "task".into(),
-                        },
+                        crate::core::transcript::LocalEvent::UserSubmitted(
+                            crate::core::transcript::UserSubmitted {
+                                id: crate::core::transcript::TurnId::new(1),
+                                text: "task".into(),
+                            },
+                        ),
                     )
                     .unwrap(),
                 ),

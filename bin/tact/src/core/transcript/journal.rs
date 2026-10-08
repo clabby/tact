@@ -159,11 +159,8 @@ impl TranscriptJournal {
         let record = TranscriptRecord::from_agent(self.next_sequence, unix_milliseconds(), event);
         self.next_sequence = self.next_sequence.saturating_add(1);
         if record.agent_kind() == Some(AgentEventKind::ApiEvent) {
-            if let Some((prompt_cache, previous_response)) = outbound_context_snapshot(&record) {
-                self.append_local_record(LocalEvent::ContextObserved {
-                    prompt_cache,
-                    previous_response,
-                })?;
+            if let Some(observed) = outbound_context_snapshot(&record) {
+                self.append_local_record(LocalEvent::ContextObserved(observed))?;
             }
             return Ok(Arc::new(record));
         }
@@ -346,7 +343,10 @@ mod tests {
         core::{
             session,
             storage::{SessionStorage, database_path},
-            transcript::{LocalEvent, LocalKind, SessionStarted, TurnId},
+            transcript::{
+                LocalEvent, LocalKind, SessionStarted, SpeedChanged, TurnId, UserSubmitted,
+                WorkerTurnAccepted, WorkerTurnFinished,
+            },
         },
     };
     use nanocodex::agent::events::{AgentEvent, AgentEventKind};
@@ -377,17 +377,17 @@ mod tests {
         journal.defer_start(started("session"));
         journal.set_initial_speed(Speed::Ultrafast);
         journal
-            .append_local(LocalEvent::UserSubmitted {
+            .append_local(LocalEvent::UserSubmitted(UserSubmitted {
                 id: TurnId::new(1),
                 text: "hello".to_owned(),
-            })
+            }))
             .unwrap();
         journal.set_initial_speed(Speed::Fast);
         journal
-            .append_local(LocalEvent::SpeedChanged {
+            .append_local(LocalEvent::SpeedChanged(SpeedChanged {
                 from: Speed::Ultrafast,
                 to: Speed::Fast,
-            })
+            }))
             .unwrap();
         drop(journal);
         writer.into_task().await.unwrap().unwrap();
@@ -438,10 +438,10 @@ mod tests {
         let (mut parent, parent_writer) = TranscriptJournal::open(&config, "parent").unwrap();
         parent.defer_start(started("parent"));
         parent
-            .append_local(LocalEvent::UserSubmitted {
+            .append_local(LocalEvent::UserSubmitted(UserSubmitted {
                 id: TurnId::new(1),
                 text: "parent prompt".to_owned(),
-            })
+            }))
             .unwrap();
         parent.flush().await.unwrap();
 
@@ -459,10 +459,10 @@ mod tests {
         grandchild_start.parent_sequence = Some(fork.last_sequence());
         grandchild.defer_start(grandchild_start);
         grandchild
-            .append_local(LocalEvent::UserSubmitted {
+            .append_local(LocalEvent::UserSubmitted(UserSubmitted {
                 id: TurnId::new(1),
                 text: "grandchild prompt".to_owned(),
-            })
+            }))
             .unwrap();
         grandchild.flush().await.unwrap();
 
@@ -593,7 +593,9 @@ mod tests {
         let (mut journal, writer) = TranscriptJournal::open(&config, "session").unwrap();
         journal.defer_start(started("session"));
         journal
-            .append_local(LocalEvent::WorkerTurnAccepted { id: TurnId::new(1) })
+            .append_local(LocalEvent::WorkerTurnAccepted(WorkerTurnAccepted {
+                id: TurnId::new(1),
+            }))
             .unwrap();
         append_assistant(
             &mut journal,
@@ -602,14 +604,16 @@ mod tests {
             "failed draft",
         );
         journal
-            .append_local(LocalEvent::WorkerTurnFinished {
+            .append_local(LocalEvent::WorkerTurnFinished(WorkerTurnFinished {
                 id: TurnId::new(1),
                 error: Some("failed".to_owned()),
                 terminal_stop: None,
-            })
+            }))
             .unwrap();
         journal
-            .append_local(LocalEvent::WorkerTurnAccepted { id: TurnId::new(2) })
+            .append_local(LocalEvent::WorkerTurnAccepted(WorkerTurnAccepted {
+                id: TurnId::new(2),
+            }))
             .unwrap();
         append_assistant(&mut journal, AgentEventKind::AssistantDelta, 2, "complete");
         append_assistant(
@@ -689,10 +693,10 @@ mod tests {
         let (mut journal, writer) = TranscriptJournal::open(&config, "session").unwrap();
         journal.defer_start(started("session"));
         journal
-            .append_local(LocalEvent::UserSubmitted {
+            .append_local(LocalEvent::UserSubmitted(UserSubmitted {
                 id: TurnId::new(1),
                 text: "first".to_owned(),
-            })
+            }))
             .unwrap();
         let writer_error = writer.into_task().await.unwrap().unwrap_err();
         assert!(
@@ -702,10 +706,10 @@ mod tests {
         );
 
         let append_error = journal
-            .append_local(LocalEvent::UserSubmitted {
+            .append_local(LocalEvent::UserSubmitted(UserSubmitted {
                 id: TurnId::new(2),
                 text: "second".to_owned(),
-            })
+            }))
             .unwrap_err();
 
         assert!(
@@ -726,10 +730,10 @@ mod tests {
             let (mut journal, writer) = TranscriptJournal::open(&config, session_id).unwrap();
             journal.defer_start(started(session_id));
             journal
-                .append_local(LocalEvent::UserSubmitted {
+                .append_local(LocalEvent::UserSubmitted(UserSubmitted {
                     id: TurnId::new(1),
                     text: prompt.to_owned(),
-                })
+                }))
                 .unwrap();
             drop(journal);
             writer.into_task().await.unwrap().unwrap();

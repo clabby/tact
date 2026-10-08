@@ -1,6 +1,6 @@
 //! Content-free context diagnostics projected from transcript telemetry.
 
-use crate::core::transcript::{LocalKind, TranscriptRecord};
+use crate::core::transcript::{CompactionFinished, ContextObserved, LocalKind, TranscriptRecord};
 use nanocodex::agent::events::AgentEventKind;
 use nanocodex::oai::{
     self,
@@ -121,11 +121,7 @@ impl ContextDiagnostics {
                 ContextObservation::default()
             }
             Some(LocalKind::CompactionFinished) => {
-                #[derive(Deserialize)]
-                struct Finished {
-                    error: Option<String>,
-                }
-                if let Ok(Finished { error: None }) = record.decode_payload::<Finished>() {
+                if let Ok(CompactionFinished { error: None, .. }) = record.decode_payload() {
                     self.observe_compaction_completed(record);
                 }
                 ContextObservation::default()
@@ -252,7 +248,7 @@ impl ContextDiagnostics {
     }
 
     fn observe_context_snapshot(&mut self, record: &TranscriptRecord) {
-        let Ok(snapshot) = record.decode_payload::<ContextSnapshot>() else {
+        let Ok(snapshot) = record.decode_payload::<ContextObserved>() else {
             return;
         };
         self.prompt_cache = Some(snapshot.prompt_cache);
@@ -333,12 +329,6 @@ struct Response {
     usage: Option<Usage>,
 }
 
-#[derive(Deserialize)]
-struct ContextSnapshot {
-    prompt_cache: bool,
-    previous_response: bool,
-}
-
 fn usage_into_tokens(usage: Usage) -> TokenUsage {
     let cached_input = usage
         .input_tokens_details
@@ -356,18 +346,19 @@ fn raw_value_is_string(value: &RawValue) -> bool {
     value.get().trim_start().starts_with('"')
 }
 
-pub(crate) fn outbound_context_snapshot(record: &TranscriptRecord) -> Option<(bool, bool)> {
+/// The content-free facts a durable transcript keeps from an outbound raw API request.
+pub(crate) fn outbound_context_snapshot(record: &TranscriptRecord) -> Option<ContextObserved> {
     let payload = record.decode_payload::<ApiEvent>().ok()?;
     if payload.direction != "outbound" || payload.phase != "generation" {
         return None;
     }
     let request = serde_json::from_str::<ApiRequest>(payload.event.get()).ok()?;
-    Some((
-        request.prompt_cache_key.is_some_and(raw_value_is_string),
-        request
+    Some(ContextObserved {
+        prompt_cache: request.prompt_cache_key.is_some_and(raw_value_is_string),
+        previous_response: request
             .previous_response_id
             .is_some_and(raw_value_is_string),
-    ))
+    })
 }
 
 #[cfg(test)]

@@ -11,7 +11,11 @@ use crate::{
         pane::PaneId,
         prompt::{QueueId, Submission},
         session::AgentSnapshot,
-        transcript::{LocalEvent, TerminalStopReason, TurnId},
+        transcript::{
+            CompactionFinished, LocalEvent, TerminalStopReason, TurnId, UserSubmitted,
+            WorkerSteerFailed, WorkerStopped, WorkerTurnAccepted, WorkerTurnFinished,
+            WorkerTurnsInterrupted,
+        },
         worker::{WorkerCommand, WorkerError, WorkerEvent},
     },
     tui::components::AppEvent,
@@ -197,9 +201,9 @@ impl EventLoop {
             if runtime.journal_mut()?.is_empty() {
                 continue;
             }
-            let record = runtime.record(LocalEvent::WorkerStopped {
+            let record = runtime.record(LocalEvent::WorkerStopped(WorkerStopped {
                 error: error.as_ref().map(ToString::to_string),
-            })?;
+            }))?;
             self.show(AppEvent::Transcript { pane, record });
         }
         self.worker.state = WorkerState::Stopped(error);
@@ -240,7 +244,7 @@ impl EventLoop {
         let Some(runtime) = self.panes.get_mut(pane) else {
             return Ok(());
         };
-        let record = runtime.record(LocalEvent::WorkerTurnAccepted { id })?;
+        let record = runtime.record(LocalEvent::WorkerTurnAccepted(WorkerTurnAccepted { id }))?;
         self.show(AppEvent::Transcript { pane, record });
         Ok(())
     }
@@ -259,11 +263,11 @@ impl EventLoop {
             Ok(snapshot) => (Some(snapshot), None),
             Err(error) => (None, Some(error.to_string())),
         };
-        let event = LocalEvent::CompactionFinished {
+        let event = LocalEvent::CompactionFinished(CompactionFinished {
             error,
             duration_ns,
             terminal_stop,
-        };
+        });
         let record = match snapshot.as_deref() {
             Some(snapshot) => runtime.record_checkpoint(event, snapshot)?,
             None => runtime.record(event)?,
@@ -289,11 +293,11 @@ impl EventLoop {
         let Some(runtime) = self.panes.get_mut(pane) else {
             return Ok(());
         };
-        let event = LocalEvent::WorkerTurnFinished {
+        let event = LocalEvent::WorkerTurnFinished(WorkerTurnFinished {
             id: turn.id,
             error: turn.error.map(|error| error.to_string()),
             terminal_stop: turn.terminal_stop,
-        };
+        });
         let record = match turn.snapshot.as_deref() {
             Some(snapshot) => runtime.record_checkpoint(event, snapshot)?,
             None => runtime.record(event)?,
@@ -332,10 +336,10 @@ impl EventLoop {
         let Some(runtime) = self.panes.get_mut(pane) else {
             return Ok(());
         };
-        let record = runtime.record(LocalEvent::UserSubmitted {
+        let record = runtime.record(LocalEvent::UserSubmitted(UserSubmitted {
             id,
             text: prompt.display_text().to_owned(),
-        })?;
+        }))?;
         self.show(AppEvent::Transcript { pane, record });
         self.show(AppEvent::SteerPromoted { pane, id: queue_id });
         Ok(())
@@ -350,9 +354,9 @@ impl EventLoop {
         let Some(runtime) = self.panes.get_mut(pane) else {
             return Ok(());
         };
-        let record = runtime.record(LocalEvent::WorkerSteerFailed {
+        let record = runtime.record(LocalEvent::WorkerSteerFailed(WorkerSteerFailed {
             error: error.to_string(),
-        })?;
+        }))?;
         self.show(AppEvent::Transcript { pane, record });
         self.apply(AppEvent::SteerFailed { pane, id: queue_id })
             .await
@@ -368,10 +372,11 @@ impl EventLoop {
             return Ok(());
         };
         if count > 0 || error.is_some() {
-            let record = runtime.record(LocalEvent::WorkerTurnsInterrupted {
-                count,
-                error: error.map(|error| error.to_string()),
-            })?;
+            let record =
+                runtime.record(LocalEvent::WorkerTurnsInterrupted(WorkerTurnsInterrupted {
+                    count,
+                    error: error.map(|error| error.to_string()),
+                }))?;
             self.show(AppEvent::Transcript { pane, record });
         }
         self.show(AppEvent::TurnsCancelled(pane));

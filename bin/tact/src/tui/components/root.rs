@@ -52,7 +52,7 @@ use crate::{
         prompt::{QueueId, Submission},
         protocol::{Busy, CommandError},
         session::{RecentPrompt, SessionSummary},
-        transcript::{LocalKind, TranscriptRecord},
+        transcript::TranscriptRecord,
     },
 };
 use crossterm::event::{Event, MouseButton, MouseEventKind};
@@ -2815,20 +2815,8 @@ fn turn_timer_event(record: &TranscriptRecord) -> Option<ComposerEvent> {
 }
 
 fn recent_prompt(record: &TranscriptRecord) -> Option<RecentPromptDraft> {
-    #[derive(serde::Deserialize)]
-    struct UserPrompt {
-        text: String,
-    }
-
-    if !matches!(
-        record.local_kind(),
-        Some(LocalKind::UserSubmitted | LocalKind::UserSteered)
-    ) {
-        return None;
-    }
-    let prompt = record.decode_payload::<UserPrompt>().ok()?;
     Some(RecentPromptDraft {
-        text: prompt.text,
+        text: record.prompt_text().ok()??,
         recorded_at_unix_ms: record.recorded_at_unix_ms(),
     })
 }

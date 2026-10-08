@@ -987,7 +987,10 @@ mod tests {
         app::config::{ReasoningEffort, ReasoningMode, Speed},
         core::{
             protocol::{Busy, Draft, Origin, Publication, QueuedPrompt, SessionInfo},
-            transcript::{LocalEvent, SessionStarted, TranscriptModel, TranscriptRecord, TurnId},
+            transcript::{
+                LocalEvent, SessionStarted, TranscriptModel, TranscriptRecord, TurnId,
+                UserSubmitted,
+            },
         },
         web::{
             bridge::{self, LoopEnd},
@@ -1053,10 +1056,10 @@ mod tests {
             TranscriptRecord::from_local(
                 sequence,
                 1_000 + sequence,
-                LocalEvent::UserSubmitted {
+                LocalEvent::UserSubmitted(UserSubmitted {
                     id: TurnId::new(sequence),
                     text: text.to_owned(),
-                },
+                }),
             )
             .unwrap(),
         )

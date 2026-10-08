@@ -1591,7 +1591,7 @@ mod tests {
     async fn manual_compaction_terminal_failure_stops_followups_and_resume() {
         use crate::core::{
             session,
-            transcript::{LocalEvent, TranscriptJournal},
+            transcript::{CompactionFinished, LocalEvent, TranscriptJournal},
         };
         let (requests, mut receive) = mpsc::unbounded_channel();
         let openai = OpenAi::builder("test-key")
@@ -1664,11 +1664,11 @@ mod tests {
             application_version: "test".to_owned(),
         });
         journal
-            .append_local(LocalEvent::CompactionFinished {
+            .append_local(LocalEvent::CompactionFinished(CompactionFinished {
                 error: Some(error),
                 terminal_stop,
                 duration_ns,
-            })
+            }))
             .unwrap();
         journal.flush().await.unwrap();
         assert!(matches!(

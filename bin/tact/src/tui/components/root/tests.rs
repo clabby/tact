@@ -11,7 +11,7 @@ use crate::{
     core::{
         extensions::Skill,
         session::{RecentPrompt, SessionSummary},
-        transcript::{LocalEvent, TranscriptRecord, TurnId},
+        transcript::{CompactionFinished, LocalEvent, TranscriptRecord, TurnId, UserSubmitted},
     },
 };
 use crossterm::event::{
@@ -638,10 +638,10 @@ fn transcript_uses_the_space_above_the_composer() {
     let record = TranscriptRecord::from_local(
         1,
         1,
-        LocalEvent::UserSubmitted {
+        LocalEvent::UserSubmitted(UserSubmitted {
             id: TurnId::new(1),
             text: "hello transcript".to_owned(),
-        },
+        }),
     )
     .unwrap();
     root.update(super::RootEvent::Transcript(Arc::new(record)));
@@ -662,10 +662,10 @@ fn clicking_a_pinned_prompt_reveals_its_transcript_entry() {
     let prompt = TranscriptRecord::from_local(
         1,
         1,
-        LocalEvent::UserSubmitted {
+        LocalEvent::UserSubmitted(UserSubmitted {
             id: TurnId::new(1),
             text: "jump to this prompt".to_owned(),
-        },
+        }),
     )
     .unwrap();
     root.update(super::RootEvent::Transcript(Arc::new(prompt)));
@@ -717,10 +717,10 @@ fn clicking_the_updates_banner_returns_to_the_transcript_tail() {
         let record = TranscriptRecord::from_local(
             sequence,
             sequence,
-            LocalEvent::UserSubmitted {
+            LocalEvent::UserSubmitted(UserSubmitted {
                 id: TurnId::new(sequence),
                 text: format!("prompt {sequence}"),
-            },
+            }),
         )
         .unwrap();
         root.update(super::RootEvent::Transcript(Arc::new(record)));
@@ -735,10 +735,10 @@ fn clicking_the_updates_banner_returns_to_the_transcript_tail() {
     let latest = TranscriptRecord::from_local(
         21,
         21,
-        LocalEvent::UserSubmitted {
+        LocalEvent::UserSubmitted(UserSubmitted {
             id: TurnId::new(21),
             text: "latest prompt".to_owned(),
-        },
+        }),
     )
     .unwrap();
     root.update(super::RootEvent::Transcript(Arc::new(latest)));
@@ -914,10 +914,10 @@ fn submitting_a_prompt_returns_the_transcript_to_the_tail() {
         let record = TranscriptRecord::from_local(
             sequence,
             sequence,
-            LocalEvent::UserSubmitted {
+            LocalEvent::UserSubmitted(UserSubmitted {
                 id: TurnId::new(sequence),
                 text: format!("old prompt {sequence}"),
-            },
+            }),
         )
         .unwrap();
         root.update(super::RootEvent::Transcript(Arc::new(record)));
@@ -941,10 +941,10 @@ fn submitting_a_prompt_returns_the_transcript_to_the_tail() {
     let record = TranscriptRecord::from_local(
         21,
         21,
-        LocalEvent::UserSubmitted {
+        LocalEvent::UserSubmitted(UserSubmitted {
             id: TurnId::new(21),
             text: "new prompt".to_owned(),
-        },
+        }),
     )
     .unwrap();
     root.update(super::RootEvent::Transcript(Arc::new(record)));
@@ -2087,10 +2087,10 @@ fn dragging_over_the_transcript_copies_visible_text() {
     let record = TranscriptRecord::from_local(
         1,
         1,
-        LocalEvent::UserSubmitted {
+        LocalEvent::UserSubmitted(UserSubmitted {
             id: TurnId::new(1),
             text: "hello transcript".to_owned(),
-        },
+        }),
     )
     .unwrap();
     root.update(super::RootEvent::Transcript(Arc::new(record)));
@@ -2537,10 +2537,10 @@ fn transcript_selection_survives_scrolling_beyond_the_viewport() {
         let record = TranscriptRecord::from_local(
             sequence,
             sequence,
-            LocalEvent::UserSubmitted {
+            LocalEvent::UserSubmitted(UserSubmitted {
                 id: TurnId::new(sequence),
                 text: format!("prompt {sequence}"),
-            },
+            }),
         )
         .unwrap();
         root.update(super::RootEvent::Transcript(Arc::new(record)));
@@ -2598,10 +2598,10 @@ fn dragging_at_the_viewport_edge_keeps_extending_the_selection() {
         let record = TranscriptRecord::from_local(
             sequence,
             sequence,
-            LocalEvent::UserSubmitted {
+            LocalEvent::UserSubmitted(UserSubmitted {
                 id: TurnId::new(sequence),
                 text: format!("prompt {sequence}"),
-            },
+            }),
         )
         .unwrap();
         root.update(super::RootEvent::Transcript(Arc::new(record)));
@@ -2703,10 +2703,10 @@ fn transcript_selection_excludes_the_top_right_hint() {
     let record = TranscriptRecord::from_local(
         1,
         1,
-        LocalEvent::UserSubmitted {
+        LocalEvent::UserSubmitted(UserSubmitted {
             id: TurnId::new(1),
             text: ["copy this prompt"; 8].join("\n"),
-        },
+        }),
     )
     .unwrap();
     root.update(super::RootEvent::Transcript(Arc::new(record)));
@@ -3171,10 +3171,10 @@ fn control_r_includes_the_in_memory_prompt_before_loading_disk_history() {
     let prompt = TranscriptRecord::from_local(
         1,
         42,
-        LocalEvent::UserSubmitted {
+        LocalEvent::UserSubmitted(UserSubmitted {
             id: TurnId::new(1),
             text: "just submitted".to_owned(),
-        },
+        }),
     )
     .unwrap();
     root.update(RootEvent::Transcript(Arc::new(prompt)));
@@ -3306,11 +3306,11 @@ fn manual_compaction_uses_composer_activity_and_clears_success_and_failure() {
             TranscriptRecord::from_local(
                 2,
                 2,
-                LocalEvent::CompactionFinished {
+                LocalEvent::CompactionFinished(CompactionFinished {
                     terminal_stop: None,
                     error: error.clone(),
                     duration_ns: 1_000_000,
-                },
+                }),
             )
             .unwrap(),
         )));

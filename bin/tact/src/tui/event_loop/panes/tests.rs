@@ -11,7 +11,7 @@ use crate::{
         subagent_updates::ForwardedSubagentUpdate,
         transcript::{
             LocalEvent, LocalKind, SessionEnded, SessionOutcome, SessionStarted, TranscriptRecord,
-            TurnId,
+            TurnId, UserSubmitted,
         },
         worker::WorkerCommand,
     },
@@ -103,10 +103,10 @@ impl Harness {
 }
 
 fn submitted(id: u64, text: &str) -> LocalEvent {
-    LocalEvent::UserSubmitted {
+    LocalEvent::UserSubmitted(UserSubmitted {
         id: TurnId::new(id),
         text: text.to_owned(),
-    }
+    })
 }
 
 fn closed_subagent_update(control: &Subagents, root_session_id: &str) -> ForwardedSubagentUpdate {

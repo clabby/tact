@@ -1,9 +1,10 @@
 use super::{
-    DirectedMessageEntry, EntryId, EntryKind, LocalKind, MessageDelivery, MessagePhase,
-    SessionStarted, ShellId, ToolEntry, ToolState, TranscriptEntry, TranscriptRecord,
-    TransientStatus, UserImage,
+    CompactionFinished, DirectedMessageEntry, EffortChanged, EntryId, EntryKind, FastModeChanged,
+    LocalKind, MessageDelivery, MessagePhase, ReflectionStarted, SessionEnded, SessionOutcome,
+    SessionStarted, ShellFinished, ShellId, ShellStarted, SpeedChanged, ToolEntry, ToolState,
+    TranscriptEntry, TranscriptRecord, TransientStatus, UserImage, UserSteered, UserSubmitted,
+    WorkerSteerFailed, WorkerStopped, WorkerTurnFinished, WorkerTurnsInterrupted,
 };
-use crate::app::config::{ReasoningEffort, Speed};
 use nanocodex::{
     agent::events::{
         AgentEventKind, AssistantDelta, AssistantMessage, CompactionCompleted, CompactionFailed,
@@ -15,7 +16,6 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    path::PathBuf,
     sync::Arc,
 };
 use tact_subagents::{
@@ -75,12 +75,6 @@ pub(crate) struct TranscriptModel {
 enum ManualCompaction {
     Running,
     Finished,
-}
-
-#[derive(Deserialize)]
-struct ManualCompactionFinished {
-    error: Option<String>,
-    duration_ns: u64,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -266,21 +260,19 @@ impl TranscriptModel {
 
     fn apply_local(&mut self, kind: LocalKind, record: &TranscriptRecord) -> ModelChange {
         let changed = match kind {
-            LocalKind::SessionStarted => {
-                self.decode_local::<SessionStarted>(record).map(|payload| {
-                    if let Some(session_id) = payload.parent_session_id {
-                        *self = self.fork_snapshot();
-                        self.push(EntryKind::ForkedFrom { session_id });
-                    }
-                })
-            }
-            LocalKind::UserSubmitted => self.decode_local::<UserSubmitted>(record).map(|payload| {
+            LocalKind::SessionStarted => record.decode_payload::<SessionStarted>().map(|payload| {
+                if let Some(session_id) = payload.parent_session_id {
+                    *self = self.fork_snapshot();
+                    self.push(EntryKind::ForkedFrom { session_id });
+                }
+            }),
+            LocalKind::UserSubmitted => record.decode_payload::<UserSubmitted>().map(|payload| {
                 self.push(EntryKind::User {
                     text: payload.text,
                     images: Vec::new(),
                 });
             }),
-            LocalKind::UserSteered => self.decode_local::<UserSteered>(record).map(|payload| {
+            LocalKind::UserSteered => record.decode_payload::<UserSteered>().map(|payload| {
                 self.push(EntryKind::User {
                     text: payload.text,
                     images: Vec::new(),
@@ -291,54 +283,53 @@ impl TranscriptModel {
                 self.transient = Some(TransientStatus::Compacting);
                 Ok(())
             }
-            LocalKind::CompactionFinished => self
-                .decode_local::<ManualCompactionFinished>(record)
-                .map(|payload| {
-                    self.manual_compaction = Some(ManualCompaction::Finished);
-                    self.transient = None;
-                    self.pending_compaction_error = None;
-                    self.pending_error = None;
-                    match payload.error {
-                        Some(message) => {
-                            self.push(EntryKind::ContextCompactionFailed { message });
+            LocalKind::CompactionFinished => {
+                record
+                    .decode_payload::<CompactionFinished>()
+                    .map(|payload| {
+                        self.manual_compaction = Some(ManualCompaction::Finished);
+                        self.transient = None;
+                        self.pending_compaction_error = None;
+                        self.pending_error = None;
+                        match payload.error {
+                            Some(message) => {
+                                self.push(EntryKind::ContextCompactionFailed { message });
+                            }
+                            None => {
+                                self.push(EntryKind::ContextCompacted {
+                                    duration_ns: payload.duration_ns,
+                                });
+                            }
                         }
-                        None => {
-                            self.push(EntryKind::ContextCompacted {
-                                duration_ns: payload.duration_ns,
-                            });
-                        }
-                    }
-                }),
+                    })
+            }
             LocalKind::ReflectionStarted => {
-                self.decode_local::<ReflectionStarted>(record).map(|_| {
+                record.decode_payload::<ReflectionStarted>().map(|_| {
                     self.push(EntryKind::ReflectionStarted);
                 })
             }
-            LocalKind::ShellStarted => self
-                .decode_local::<ShellStarted>(record)
+            LocalKind::ShellStarted => record
+                .decode_payload::<ShellStarted>()
                 .map(|payload| self.shell_started(payload, record.recorded_at_unix_ms())),
-            LocalKind::ShellFinished => self
-                .decode_local::<ShellFinished>(record)
+            LocalKind::ShellFinished => record
+                .decode_payload::<ShellFinished>()
                 .map(|payload| self.shell_finished(payload)),
-            LocalKind::EffortChanged => self.decode_local::<EffortChanged>(record).map(|payload| {
+            LocalKind::EffortChanged => record.decode_payload::<EffortChanged>().map(|payload| {
                 self.push(EntryKind::EffortChanged { to: payload.to });
             }),
-            LocalKind::SpeedChanged => self.decode_local::<SpeedChanged>(record).map(|payload| {
+            LocalKind::SpeedChanged => record.decode_payload::<SpeedChanged>().map(|payload| {
                 self.push(EntryKind::SpeedChanged { speed: payload.to });
             }),
             LocalKind::FastModeChanged => {
-                self.decode_local::<FastModeChanged>(record).map(|payload| {
+                record.decode_payload::<FastModeChanged>().map(|payload| {
                     self.push(EntryKind::SpeedChanged {
-                        speed: if payload.to {
-                            Speed::Fast
-                        } else {
-                            Speed::Standard
-                        },
+                        speed: payload.speed(),
                     });
                 })
             }
             LocalKind::WorkerTurnFinished => {
-                self.decode_local::<WorkerTurnFinished>(record)
+                record
+                    .decode_payload::<WorkerTurnFinished>()
                     .map(|payload| {
                         if let Some(error) = payload.error {
                             self.pending_error = Some(error);
@@ -347,20 +338,19 @@ impl TranscriptModel {
             }
             LocalKind::WorkerTurnsInterrupted => return self.apply_interruption(record),
             LocalKind::WorkerSteerFailed => {
-                self.decode_local::<WorkerSteerFailed>(record)
-                    .map(|payload| {
-                        self.push(EntryKind::Error {
-                            message: format!("Could not steer response: {}", payload.error),
-                        });
-                    })
+                record.decode_payload::<WorkerSteerFailed>().map(|payload| {
+                    self.push(EntryKind::Error {
+                        message: format!("Could not steer response: {}", payload.error),
+                    });
+                })
             }
-            LocalKind::WorkerStopped => self.decode_local::<WorkerStopped>(record).map(|payload| {
+            LocalKind::WorkerStopped => record.decode_payload::<WorkerStopped>().map(|payload| {
                 if let Some(error) = payload.error {
                     self.pending_error = Some(error);
                 }
             }),
-            LocalKind::SessionEnded => self.decode_local::<SessionEnded>(record).map(|payload| {
-                if payload.outcome == "failed" {
+            LocalKind::SessionEnded => record.decode_payload::<SessionEnded>().map(|payload| {
+                if payload.outcome == SessionOutcome::Failed {
                     self.finish_failed(payload.error);
                 }
                 self.agent_stream_closed();
@@ -379,7 +369,7 @@ impl TranscriptModel {
     }
 
     fn apply_interruption(&mut self, record: &TranscriptRecord) -> ModelChange {
-        let payload = match self.decode_local::<WorkerTurnsInterrupted>(record) {
+        let payload = match record.decode_payload::<WorkerTurnsInterrupted>() {
             Ok(payload) => payload,
             Err(error) => return self.projection_error(record, error, true),
         };
@@ -475,7 +465,7 @@ impl TranscriptModel {
                 self.transient = Some(TransientStatus::Thinking);
                 Ok(true)
             }
-            AgentEventKind::RunError => self.decode_local::<RunError>(record).map(|payload| {
+            AgentEventKind::RunError => record.decode_payload::<RunError>().map(|payload| {
                 self.pending_error = Some(payload.message.clone());
                 self.transient = Some(TransientStatus::Error(payload.message));
                 true
@@ -1074,13 +1064,6 @@ impl TranscriptModel {
         }
     }
 
-    fn decode_local<T: serde::de::DeserializeOwned>(
-        &self,
-        record: &TranscriptRecord,
-    ) -> Result<T, serde_json::Error> {
-        record.decode_payload()
-    }
-
     fn push(&mut self, kind: EntryKind) -> EntryId {
         self.push_with_visibility(kind, false)
     }
@@ -1385,81 +1368,6 @@ fn merge_shell_result(current: Option<Value>, next: Value) -> Value {
 }
 
 #[derive(Deserialize)]
-struct UserSubmitted {
-    text: String,
-}
-
-#[derive(Deserialize)]
-struct UserSteered {
-    text: String,
-}
-
-#[derive(Deserialize)]
-struct ReflectionStarted {
-    #[serde(rename = "id")]
-    _id: u64,
-}
-
-#[derive(Deserialize)]
-struct ShellStarted {
-    id: ShellId,
-    command: String,
-    workspace: PathBuf,
-}
-
-#[derive(Deserialize)]
-struct ShellFinished {
-    id: ShellId,
-    output: String,
-    exit_code: Option<i32>,
-    duration_ns: u64,
-    truncated: bool,
-    error: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct EffortChanged {
-    to: ReasoningEffort,
-}
-
-#[derive(Deserialize)]
-struct SpeedChanged {
-    to: Speed,
-}
-
-#[derive(Deserialize)]
-struct FastModeChanged {
-    to: bool,
-}
-
-#[derive(Deserialize)]
-struct WorkerTurnFinished {
-    error: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct WorkerTurnsInterrupted {
-    count: usize,
-    error: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct WorkerSteerFailed {
-    error: String,
-}
-
-#[derive(Deserialize)]
-struct WorkerStopped {
-    error: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct SessionEnded {
-    outcome: String,
-    error: Option<String>,
-}
-
-#[derive(Deserialize)]
 struct ToolCallPayload {
     call_id: String,
     tool: String,
@@ -1517,7 +1425,9 @@ mod tests {
     use crate::{
         app::config::{ReasoningEffort, Speed},
         core::transcript::{
-            LocalEvent, SessionEnded, SessionOutcome, ShellId, TranscriptRecord, TurnId,
+            EffortChanged, LocalEvent, ReflectionStarted, SessionEnded, SessionOutcome,
+            ShellFinished, ShellId, ShellStarted, SpeedChanged, TranscriptRecord, TurnId,
+            UserSteered, UserSubmitted, WorkerTurnsInterrupted,
         },
     };
     use nanocodex::agent::events::{AgentEvent, AgentEventKind};
@@ -1664,10 +1574,10 @@ mod tests {
         let record = TranscriptRecord::from_local(
             1,
             1,
-            LocalEvent::WorkerTurnsInterrupted {
+            LocalEvent::WorkerTurnsInterrupted(WorkerTurnsInterrupted {
                 count: 0,
                 error: None,
-            },
+            }),
         )
         .unwrap();
 
@@ -1878,10 +1788,10 @@ mod tests {
                     TranscriptRecord::from_local(
                         1,
                         turn,
-                        LocalEvent::UserSubmitted {
+                        LocalEvent::UserSubmitted(UserSubmitted {
                             id: TurnId::new(turn),
                             text: request.to_owned(),
-                        },
+                        }),
                     )
                     .unwrap(),
                 );
@@ -2341,10 +2251,10 @@ mod tests {
         let submitted = TranscriptRecord::from_local(
             1,
             1,
-            LocalEvent::UserSubmitted {
+            LocalEvent::UserSubmitted(UserSubmitted {
                 id: TurnId::new(3),
                 text: text.to_owned(),
-            },
+            }),
         )
         .unwrap();
         let accepted = agent(
@@ -2394,10 +2304,10 @@ mod tests {
             &TranscriptRecord::from_local(
                 1,
                 1,
-                LocalEvent::UserSubmitted {
+                LocalEvent::UserSubmitted(UserSubmitted {
                     id: TurnId::new(3),
                     text: "hello".to_owned(),
-                },
+                }),
             )
             .unwrap(),
         );
@@ -2420,10 +2330,10 @@ mod tests {
         let record = TranscriptRecord::from_local(
             1,
             1,
-            LocalEvent::UserSubmitted {
+            LocalEvent::UserSubmitted(UserSubmitted {
                 id: TurnId::new(3),
                 text: "hello".to_owned(),
-            },
+            }),
         )
         .unwrap();
         model.apply(&record);
@@ -2439,7 +2349,7 @@ mod tests {
         let record = TranscriptRecord::from_local(
             1,
             1,
-            LocalEvent::ReflectionStarted { id: TurnId::new(3) },
+            LocalEvent::ReflectionStarted(ReflectionStarted { id: TurnId::new(3) }),
         )
         .unwrap();
 
@@ -2458,10 +2368,10 @@ mod tests {
             &TranscriptRecord::from_local(
                 1,
                 1,
-                LocalEvent::EffortChanged {
+                LocalEvent::EffortChanged(EffortChanged {
                     from: ReasoningEffort::Medium,
                     to: ReasoningEffort::High,
-                },
+                }),
             )
             .unwrap(),
         );
@@ -2469,10 +2379,10 @@ mod tests {
             &TranscriptRecord::from_local(
                 2,
                 2,
-                LocalEvent::SpeedChanged {
+                LocalEvent::SpeedChanged(SpeedChanged {
                     from: Speed::Standard,
                     to: Speed::Ultrafast,
-                },
+                }),
             )
             .unwrap(),
         );
@@ -2525,10 +2435,10 @@ mod tests {
                 &TranscriptRecord::from_local(
                     sequence,
                     sequence,
-                    LocalEvent::UserSubmitted {
+                    LocalEvent::UserSubmitted(UserSubmitted {
                         id: TurnId::new(sequence),
                         text: text.to_owned(),
-                    },
+                    }),
                 )
                 .unwrap(),
             );
@@ -2553,24 +2463,24 @@ mod tests {
         let started = TranscriptRecord::from_local(
             1,
             1,
-            LocalEvent::ShellStarted {
+            LocalEvent::ShellStarted(ShellStarted {
                 id: ShellId::new(7),
                 command: "printf hello".to_owned(),
                 workspace: "/work".into(),
-            },
+            }),
         )
         .unwrap();
         let finished = TranscriptRecord::from_local(
             2,
             2,
-            LocalEvent::ShellFinished {
+            LocalEvent::ShellFinished(ShellFinished {
                 id: ShellId::new(7),
                 output: "hello".to_owned(),
                 exit_code: Some(0),
                 duration_ns: 10,
                 truncated: false,
                 error: None,
-            },
+            }),
         )
         .unwrap();
 
@@ -2595,24 +2505,24 @@ mod tests {
             TranscriptRecord::from_local(
                 1,
                 1,
-                LocalEvent::ShellStarted {
+                LocalEvent::ShellStarted(ShellStarted {
                     id: ShellId::new(7),
                     command: "sleep 100".to_owned(),
                     workspace: "/work".into(),
-                },
+                }),
             )
             .unwrap(),
             TranscriptRecord::from_local(
                 2,
                 2,
-                LocalEvent::ShellFinished {
+                LocalEvent::ShellFinished(ShellFinished {
                     id: ShellId::new(7),
                     output: String::new(),
                     exit_code: None,
                     duration_ns: 10,
                     truncated: false,
                     error: None,
-                },
+                }),
             )
             .unwrap(),
         ] {
@@ -2632,9 +2542,9 @@ mod tests {
         let record = TranscriptRecord::from_local(
             1,
             1,
-            LocalEvent::UserSteered {
+            LocalEvent::UserSteered(UserSteered {
                 text: "narrow the scope".to_owned(),
-            },
+            }),
         )
         .unwrap();
 

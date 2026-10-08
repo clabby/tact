@@ -25,8 +25,8 @@ use crate::{
         shell::ShellExecution,
         subagent_updates::{self, ForwardedSubagentUpdate},
         transcript::{
-            LocalEvent, SessionEnded, SessionOutcome, SessionStarted, ShellId, TranscriptError,
-            TranscriptJournal, TranscriptRecord, TurnId,
+            LocalEvent, SessionEnded, SessionOutcome, SessionStarted, ShellFinished, ShellId,
+            ShellStarted, TranscriptError, TranscriptJournal, TranscriptRecord, TurnId,
         },
         worker::{self, WorkerCommand},
     },
@@ -260,11 +260,11 @@ impl PaneRuntime {
         let id = ShellId::new(self.next_shell);
         self.next_shell = self.next_shell.saturating_add(1);
         self.active_shells = self.active_shells.saturating_add(1);
-        let record = self.record(LocalEvent::ShellStarted {
+        let record = self.record(LocalEvent::ShellStarted(ShellStarted {
             id,
             command,
             workspace: workspace.to_path_buf(),
-        })?;
+        }))?;
         Ok((id, record))
     }
 
@@ -276,14 +276,14 @@ impl PaneRuntime {
     ) -> Result<(Arc<TranscriptRecord>, Option<PendingSubmission>)> {
         self.active_shells = self.active_shells.saturating_sub(1);
         self.shell_context.push(execution.model_context());
-        let record = self.record(LocalEvent::ShellFinished {
+        let record = self.record(LocalEvent::ShellFinished(ShellFinished {
             id: execution.id,
             output: execution.output,
             exit_code: execution.exit_code,
             duration_ns: execution.duration_ns,
             truncated: execution.truncated,
             error: execution.error,
-        })?;
+        }))?;
         let submission = if self.active_shells == 0 {
             self.pending_submission.take()
         } else {
