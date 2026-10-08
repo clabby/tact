@@ -33,7 +33,7 @@ use nanocodex::{
 use reqwest::header::{HeaderMap, HeaderValue, InvalidHeaderValue};
 use std::{num::NonZeroU32, path::PathBuf, sync::Arc};
 use tact_memory::{MemoryTool, MutationAuthorizer, SelectedMemoryStore};
-use tact_subagents::{AgentContext, RootAgentAuthority, WeakSubagents};
+use tact_subagents::{AgentContext, AuthorityError, RootAgentAuthority, WeakSubagents};
 use thiserror::Error;
 
 const RESPONSE_MAX_ATTEMPTS: NonZeroU32 = NonZeroU32::new(2_000).unwrap();
@@ -260,11 +260,10 @@ struct RootMemoryAuthorizer(RootAgentAuthority);
 
 #[nanocodex::tools::contract::async_trait]
 impl MutationAuthorizer for RootMemoryAuthorizer {
-    async fn authorize_memory_mutation(&self, session_id: &str) -> std::io::Result<()> {
-        self.0
-            .require_root(session_id)
-            .await
-            .map_err(std::io::Error::other)
+    type Error = AuthorityError;
+
+    async fn authorize_memory_mutation(&self, session_id: &str) -> Result<(), AuthorityError> {
+        self.0.require_root(session_id).await
     }
 }
 
