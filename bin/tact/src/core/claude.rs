@@ -151,7 +151,7 @@ pub(super) fn build_client(
 struct TurnEvents {
     sink: EventSink,
     started: HashSet<String>,
-    outputs: HashMap<String, ToolOutputBody>,
+    outputs: HashMap<String, Value>,
 }
 
 struct Bridge {
@@ -185,15 +185,24 @@ impl Bridge {
                 .and_then(Value::as_str)
                 .and_then(|id| events.outputs.remove(id))
         {
-            payload["result"] = serde_json::to_value(output).map_err(invalid)?;
+            payload["result"] = output;
         }
         events.sink.emit(kind, payload).map_err(invalid)
     }
 
-    fn retain_output(&self, call_id: &str, output: &ToolOutputBody) {
+    /// Keeps the full tool output for the matching ToolResult event, which the native driver
+    /// emits without it. The output is serialized here so large bodies such as images are not
+    /// copied.
+    fn retain_output(
+        &self,
+        call_id: &str,
+        output: &ToolOutputBody,
+    ) -> std::result::Result<(), String> {
         if let Some(events) = self.events.lock().unwrap().as_mut() {
-            events.outputs.insert(call_id.to_owned(), output.clone());
+            let output = serde_json::to_value(output).map_err(|error| error.to_string())?;
+            events.outputs.insert(call_id.to_owned(), output);
         }
+        Ok(())
     }
 
     async fn wait_started(&self, call_id: &str) {
@@ -222,17 +231,23 @@ impl Bridge {
     }
 
     fn tools(self: &Arc<Self>, session: &str) -> Result<ClaudeTools> {
-        let mut definitions = Vec::new();
+        let mut flattened = Vec::new();
         for definition in self.runtime.model_specs(session) {
-            flatten(definition, None, &mut definitions)?;
+            flatten(definition, None, &mut flattened)?;
         }
         let mut tools = ClaudeTools::new();
-        for (definition, name, freeform) in definitions {
+        for FlatTool {
+            definition,
+            name,
+            kind,
+        } in flattened
+        {
             let bridge = self.clone();
+            let name: Arc<str> = name.into();
             tools = tools.tool_with_context(definition, move |input, invocation| {
                 let bridge = bridge.clone();
-                let name = name.clone();
-                async move { bridge.call(&name, freeform, input, invocation).await }
+                let name = Arc::clone(&name);
+                async move { bridge.call(&name, kind, input, invocation).await }
             });
         }
         Ok(tools)
@@ -241,74 +256,37 @@ impl Bridge {
     async fn call(
         &self,
         name: &str,
-        freeform: bool,
+        kind: ToolKind,
         input: Value,
         invocation: ClaudeToolInvocation,
     ) -> std::result::Result<ClaudeToolReply, String> {
         // Nested calls must follow the native parent ToolCall in the combined stream.
         self.wait_started(&invocation.call_id).await;
+        let call_id = invocation.call_id.clone();
         let context = OwnedToolContext::new(
             invocation.model,
             invocation.session_id,
-            invocation.call_id.clone(),
+            invocation.call_id,
             Arc::new(Vec::new()),
             DEFAULT_TOOL_OUTPUT_TOKENS,
         )
         .with_turn_id(Some(Arc::from(invocation.turn_id)))
         .with_instruction_revision(invocation.instruction_revision)
         .with_host_context(invocation.host_context);
-        if matches!(name, "exec" | "wait") {
-            let mut observer = Observer {
-                bridge: self,
-                error: None,
-            };
-            let execution = if name == "exec" {
-                let source = input
-                    .get("code")
-                    .and_then(Value::as_str)
-                    .ok_or("exec requires a code string")?;
-                self.runtime
-                    .execute_code_owned_with_updates(source, context, &mut observer)
-                    .await
-            } else {
-                self.runtime
-                    .wait_for_code_with_updates(
-                        &input.to_string(),
-                        context.as_context(),
-                        &mut observer,
-                    )
-                    .await
+        let input = match kind {
+            ToolKind::CodeExec | ToolKind::CodeWait => {
+                return self.call_code(kind, input, context, &call_id).await;
             }
-            .map_err(|error| error.to_string())?;
-            if let Some(error) = observer.error {
-                return Err(error);
-            }
-            let structured = execution.output.structured_result();
-            self.retain_output(&invocation.call_id, &execution.output);
-            let mut reply = tool_reply(execution.output, execution.success, None, structured);
-            for notification in execution.notifications {
-                match &mut reply.content {
-                    ToolResultContent::Text(text) => {
-                        text.push('\n');
-                        text.push_str(&notification.text);
-                    }
-                    ToolResultContent::Blocks(blocks) => {
-                        blocks.push(json!({"type":"text","text":notification.text}))
-                    }
-                }
-            }
-            return Ok(reply);
-        }
-        let input = if freeform {
-            ToolInput::Freeform(
+            ToolKind::Freeform => ToolInput::Freeform(
                 input
                     .get("code")
                     .and_then(Value::as_str)
                     .ok_or("tool requires a code string")?
                     .to_owned(),
-            )
-        } else {
-            ToolInput::Function(to_raw_value(&input).map_err(|error| error.to_string())?)
+            ),
+            ToolKind::Function => {
+                ToolInput::Function(to_raw_value(&input).map_err(|error| error.to_string())?)
+            }
         };
         let mut output = self
             .runtime
@@ -316,7 +294,7 @@ impl Bridge {
             .await
             .map_err(|error| error.to_string())?;
         let structured = output.take_structured_result();
-        self.retain_output(&invocation.call_id, &output.output);
+        self.retain_output(&call_id, &output.output)?;
         let metadata = output
             .metadata
             .map(|value| serde_json::from_str(value.get()))
@@ -328,6 +306,52 @@ impl Bridge {
             metadata,
             structured,
         ))
+    }
+
+    /// Runs a code-mode cell, mirroring its nested tool calls into the turn's event stream.
+    async fn call_code(
+        &self,
+        kind: ToolKind,
+        input: Value,
+        context: OwnedToolContext,
+        call_id: &str,
+    ) -> std::result::Result<ClaudeToolReply, String> {
+        let mut observer = Observer {
+            bridge: self,
+            error: None,
+        };
+        let execution = if kind == ToolKind::CodeExec {
+            let source = input
+                .get("code")
+                .and_then(Value::as_str)
+                .ok_or("exec requires a code string")?;
+            self.runtime
+                .execute_code_owned_with_updates(source, context, &mut observer)
+                .await
+        } else {
+            self.runtime
+                .wait_for_code_with_updates(&input.to_string(), context.as_context(), &mut observer)
+                .await
+        }
+        .map_err(|error| error.to_string())?;
+        if let Some(error) = observer.error {
+            return Err(error);
+        }
+        let structured = execution.output.structured_result();
+        self.retain_output(call_id, &execution.output)?;
+        let mut reply = tool_reply(execution.output, execution.success, None, structured);
+        for notification in execution.notifications {
+            match &mut reply.content {
+                ToolResultContent::Text(text) => {
+                    text.push('\n');
+                    text.push_str(&notification.text);
+                }
+                ToolResultContent::Blocks(blocks) => {
+                    blocks.push(json!({"type":"text","text":notification.text}))
+                }
+            }
+        }
+        Ok(reply)
     }
 }
 
@@ -352,10 +376,30 @@ fn tool_reply(
     }
 }
 
+/// How the bridge dispatches a Claude tool call to the shared tool runtime.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ToolKind {
+    /// The code-mode `exec` tool, whose nested calls are mirrored into the event stream.
+    CodeExec,
+    /// The code-mode `wait` tool, which resumes a yielded `exec` cell.
+    CodeWait,
+    /// A raw-text tool; Claude passes its source in a JSON `code` field.
+    Freeform,
+    /// A JSON-argument tool.
+    Function,
+}
+
+/// A runtime tool exposed to Claude under a flat, namespace-qualified name.
+struct FlatTool {
+    definition: NativeDefinition,
+    name: String,
+    kind: ToolKind,
+}
+
 fn flatten(
     definition: ToolDefinition,
     namespace: Option<&str>,
-    result: &mut Vec<(NativeDefinition, String, bool)>,
+    result: &mut Vec<FlatTool>,
 ) -> Result<()> {
     if let ToolDefinition::Namespace { name, tools, .. } = definition {
         for tool in tools {
@@ -380,8 +424,14 @@ fn flatten(
             |schema| schema.as_value().clone(),
         )
     };
-    result.push((
-        NativeDefinition {
+    let kind = match name.as_str() {
+        "exec" => ToolKind::CodeExec,
+        "wait" => ToolKind::CodeWait,
+        _ if freeform => ToolKind::Freeform,
+        _ => ToolKind::Function,
+    };
+    result.push(FlatTool {
+        definition: NativeDefinition {
             name: name.clone(),
             description,
             input_schema: schema,
@@ -389,8 +439,8 @@ fn flatten(
             defer_loading: false,
         },
         name,
-        freeform,
-    ));
+        kind,
+    });
     Ok(())
 }
 
