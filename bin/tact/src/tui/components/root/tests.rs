@@ -349,15 +349,11 @@ fn clicking_composer_chrome_opens_model_effort_speed_and_subagents() {
     let effort_x = text_column(terminal.backend().buffer(), top, "medium");
     let speed_x = text_column(terminal.backend().buffer(), top, "󰳗");
     assert_eq!(
-        root.composer
-            .component()
-            .chrome_target(Position::new(model_x, top)),
+        root.composer.chrome_target(Position::new(model_x, top)),
         Some(ComposerChromeTarget::Model)
     );
     assert_eq!(
-        root.composer
-            .component()
-            .chrome_target(Position::new(effort_x, top)),
+        root.composer.chrome_target(Position::new(effort_x, top)),
         Some(ComposerChromeTarget::Effort)
     );
 
@@ -819,8 +815,8 @@ fn clicking_a_transcript_link_requests_that_it_be_opened() {
         },
     );
     root.update(super::RootEvent::Transcript(Arc::new(record)));
-    root.queue.component_mut().push("queued".to_owned());
-    root.queue.component_mut().set_focused(true);
+    root.queue.push("queued".to_owned());
+    root.queue.set_focused(true);
     terminal
         .draw(|frame| root.render(frame, frame.area(), &Theme::default()))
         .unwrap();
@@ -844,7 +840,7 @@ fn clicking_a_transcript_link_requests_that_it_be_opened() {
         up.effects,
         [RootEffect::OpenLink("https://example.com".to_owned())]
     );
-    assert!(!root.queue.component().focused());
+    assert!(!root.queue.focused());
 }
 
 fn copy_test_root() -> RootNode {
@@ -893,7 +889,7 @@ fn slash_copy_selects_completed_messages_without_submitting_a_turn() {
                 "{command}, paste={paste}"
             );
             assert_eq!(root.busy().turns, 1);
-            assert!(!root.queue.component().has_pending_steer());
+            assert!(!root.queue.has_pending_steer());
         }
     }
 }
@@ -1045,7 +1041,7 @@ fn dollar_is_literal_without_available_skills_or_inside_a_token() {
     assert!(root.overlay.is_none());
     assert_eq!(root.composer().draft(), "$");
 
-    root.composer.component_mut().replace_draft(String::new());
+    root.composer.replace_draft(String::new());
     root.set_skills(vec![Skill::new("autofix", "Repair a pull request.")].into());
     for character in "price$5".chars() {
         root.update(key(KeyCode::Char(character), KeyModifiers::NONE));
@@ -1563,12 +1559,12 @@ fn tab_swaps_between_the_queue_and_composer() {
         .unwrap();
 
     root.update(key(KeyCode::Tab, KeyModifiers::NONE));
-    assert!(root.queue.component().focused());
+    assert!(root.queue.focused());
     root.update(key(KeyCode::Char('x'), KeyModifiers::NONE));
     assert!(root.composer().draft().is_empty());
 
     root.update(key(KeyCode::Tab, KeyModifiers::NONE));
-    assert!(!root.queue.component().focused());
+    assert!(!root.queue.focused());
     root.update(key(KeyCode::Char('x'), KeyModifiers::NONE));
 
     assert_eq!(root.composer().draft(), "x");
@@ -1578,7 +1574,7 @@ fn tab_swaps_between_the_queue_and_composer() {
 fn enter_steers_a_prompt_submitted_while_a_turn_runs() {
     let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
     root.turns.start_turn();
-    root.queue.component_mut().push("later".to_owned());
+    root.queue.push("later".to_owned());
     root.update(super::RootEvent::ReplaceDraft("steer now".to_owned()));
 
     let update = root.update(key(KeyCode::Enter, KeyModifiers::NONE));
@@ -1587,7 +1583,7 @@ fn enter_steers_a_prompt_submitted_while_a_turn_runs() {
         update.effects.as_slice(),
         [RootEffect::Steer { prompt, .. }] if prompt.display_text() == "steer now"
     ));
-    assert!(!root.queue.component().focused());
+    assert!(!root.queue.focused());
     assert!(root.composer().draft().is_empty());
 }
 
@@ -1595,12 +1591,12 @@ fn enter_steers_a_prompt_submitted_while_a_turn_runs() {
 fn enter_in_an_empty_composer_leaves_the_queue_alone() {
     let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
     root.turns.start_turn();
-    root.queue.component_mut().push("later".to_owned());
+    root.queue.push("later".to_owned());
 
     let update = root.update(key(KeyCode::Enter, KeyModifiers::NONE));
 
     assert!(update.effects.is_empty());
-    assert_eq!(root.queue.component().len(), 1);
+    assert_eq!(root.queue.len(), 1);
 }
 
 #[test]
@@ -1612,7 +1608,7 @@ fn shift_tab_queues_a_draft_without_steering() {
     let update = root.update(key(KeyCode::BackTab, KeyModifiers::SHIFT));
 
     assert!(update.effects.is_empty());
-    assert_eq!(root.queue.component().len(), 1);
+    assert_eq!(root.queue.len(), 1);
     assert!(root.composer().draft().is_empty());
 }
 
@@ -1622,17 +1618,17 @@ fn clicking_the_composer_returns_focus_to_it() {
     let mut terminal = Terminal::new(backend).unwrap();
     let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
     root.turns.start_turn();
-    root.queue.component_mut().push("queued".to_owned());
+    root.queue.push("queued".to_owned());
     terminal
         .draw(|frame| root.render(frame, frame.area(), &Theme::default()))
         .unwrap();
     root.update(key(KeyCode::Tab, KeyModifiers::NONE));
-    assert!(root.queue.component().focused());
+    assert!(root.queue.focused());
 
     let down = root.update(mouse(MouseEventKind::Down(MouseButton::Left), 10, 9));
     let up = root.update(mouse(MouseEventKind::Up(MouseButton::Left), 10, 9));
 
-    assert!(!root.queue.component().focused());
+    assert!(!root.queue.focused());
     assert_eq!(down.render.max(up.render), super::RenderRequest::Immediate);
 }
 
@@ -1641,7 +1637,7 @@ fn clicking_the_queue_keeps_focus_on_the_queue() {
     let backend = TestBackend::new(60, 12);
     let mut terminal = Terminal::new(backend).unwrap();
     let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
-    root.queue.component_mut().push("queued".to_owned());
+    root.queue.push("queued".to_owned());
     terminal
         .draw(|frame| root.render(frame, frame.area(), &Theme::default()))
         .unwrap();
@@ -1652,7 +1648,7 @@ fn clicking_the_queue_keeps_focus_on_the_queue() {
         root.queue_area.y + 1,
     ));
 
-    assert!(root.queue.component().focused());
+    assert!(root.queue.focused());
     assert_eq!(update.render, super::RenderRequest::Immediate);
 }
 
@@ -1662,16 +1658,16 @@ fn clicking_empty_transcript_space_returns_focus_to_the_composer() {
     let mut terminal = Terminal::new(backend).unwrap();
     let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
     root.turns.start_turn();
-    root.queue.component_mut().push("queued".to_owned());
+    root.queue.push("queued".to_owned());
     terminal
         .draw(|frame| root.render(frame, frame.area(), &Theme::default()))
         .unwrap();
     root.update(key(KeyCode::Tab, KeyModifiers::NONE));
-    assert!(root.queue.component().focused());
+    assert!(root.queue.focused());
 
     let update = root.update(mouse(MouseEventKind::Down(MouseButton::Left), 10, 2));
 
-    assert!(!root.queue.component().focused());
+    assert!(!root.queue.focused());
     assert_eq!(update.render, super::RenderRequest::Immediate);
 }
 
@@ -1687,9 +1683,9 @@ fn active_turn_submissions_can_grow_the_queue_without_restoring_the_draft() {
         assert!(update.effects.is_empty());
     }
 
-    assert_eq!(root.queue.component().len(), 5);
+    assert_eq!(root.queue.len(), 5);
     assert!(root.composer().draft().is_empty());
-    assert!(!root.queue.component().focused());
+    assert!(!root.queue.focused());
     assert!(root.notification.is_none());
 
     let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
@@ -1709,7 +1705,7 @@ fn shell_commands_bypass_the_agent_message_queue() {
     let submitted = root.update(key(KeyCode::Enter, KeyModifiers::NONE));
 
     assert_eq!(submitted.effects, [RootEffect::RunShell("pwd".to_owned())]);
-    assert!(root.queue.component().is_empty());
+    assert!(root.queue.is_empty());
     assert_eq!(root.busy().turns, 1);
 }
 
@@ -1717,8 +1713,8 @@ fn shell_commands_bypass_the_agent_message_queue() {
 fn finished_turns_batch_ready_queued_messages_in_order() {
     let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
     root.turns.start_turn();
-    root.queue.component_mut().push("first".to_owned());
-    root.queue.component_mut().push("second".to_owned());
+    root.queue.push("first".to_owned());
+    root.queue.push("second".to_owned());
 
     let update = root.update(super::RootEvent::WorkerTurnFinished {
         terminal_expected: false,
@@ -1728,7 +1724,7 @@ fn finished_turns_batch_ready_queued_messages_in_order() {
         [RootEffect::Submit("first\n\nsecond".to_owned().into())]
     );
     assert_eq!(root.busy().turns, 1);
-    assert!(root.queue.component().is_empty());
+    assert!(root.queue.is_empty());
 }
 
 #[test]
@@ -1738,35 +1734,35 @@ fn queue_edit_uses_the_composer_and_restores_its_draft_after_saving() {
     root.update(super::RootEvent::ReplaceDraft(
         "unfinished draft".to_owned(),
     ));
-    root.queue.component_mut().push("original".to_owned());
-    root.queue.component_mut().set_focused(true);
+    root.queue.push("original".to_owned());
+    root.queue.set_focused(true);
 
     let edit = root.update(key(KeyCode::Char('e'), KeyModifiers::NONE));
     assert!(edit.effects.is_empty());
-    assert_eq!(root.composer.component().draft(), "original");
+    assert_eq!(root.composer.draft(), "original");
     assert!(root.queue_edit.is_some());
-    assert_eq!(root.queue.component().len(), 1);
+    assert_eq!(root.queue.len(), 1);
 
     root.update(super::RootEvent::ReplaceDraft("edited".to_owned()));
     let saved = root.update(key(KeyCode::Enter, KeyModifiers::NONE));
 
     assert!(saved.effects.is_empty());
-    assert_eq!(root.composer.component().draft(), "unfinished draft");
+    assert_eq!(root.composer.draft(), "unfinished draft");
     assert!(root.queue_edit.is_none());
-    assert_eq!(root.queue.component().len(), 1);
+    assert_eq!(root.queue.len(), 1);
 }
 
 #[test]
 fn editing_blocks_queue_dequeue_until_the_inline_edit_is_saved() {
     let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
     root.turns.start_turn();
-    root.queue.component_mut().push("edit me".to_owned());
-    root.queue.component_mut().push("later".to_owned());
-    root.queue.component_mut().set_focused(true);
+    root.queue.push("edit me".to_owned());
+    root.queue.push("later".to_owned());
+    root.queue.set_focused(true);
     root.update(key(KeyCode::Up, KeyModifiers::NONE));
 
     root.update(key(KeyCode::Char('e'), KeyModifiers::NONE));
-    assert_eq!(root.composer.component().draft(), "edit me");
+    assert_eq!(root.composer.draft(), "edit me");
 
     let finished = root.update(super::RootEvent::WorkerTurnFinished {
         terminal_expected: false,
@@ -1781,16 +1777,16 @@ fn editing_blocks_queue_dequeue_until_the_inline_edit_is_saved() {
         [RootEffect::Submit("edited\n\nlater".to_owned().into())]
     );
     assert_eq!(root.busy().turns, 1);
-    assert!(root.queue.component().is_empty());
+    assert!(root.queue.is_empty());
 }
 
 #[test]
 fn blank_queue_edit_discards_the_item_and_releases_later_messages() {
     let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
     root.turns.start_turn();
-    root.queue.component_mut().push("discard me".to_owned());
-    root.queue.component_mut().push("later".to_owned());
-    root.queue.component_mut().set_focused(true);
+    root.queue.push("discard me".to_owned());
+    root.queue.push("later".to_owned());
+    root.queue.set_focused(true);
     root.update(key(KeyCode::Up, KeyModifiers::NONE));
 
     root.update(key(KeyCode::Char('e'), KeyModifiers::NONE));
@@ -1806,7 +1802,7 @@ fn blank_queue_edit_discards_the_item_and_releases_later_messages() {
         [RootEffect::Submit("later".to_owned().into())]
     );
     assert_eq!(root.busy().turns, 1);
-    assert!(root.queue.component().is_empty());
+    assert!(root.queue.is_empty());
 }
 
 #[test]
@@ -1814,8 +1810,8 @@ fn escape_cancels_a_queue_edit_and_releases_the_original_message() {
     let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
     root.turns.start_turn();
     root.update(super::RootEvent::ReplaceDraft("keep this draft".to_owned()));
-    root.queue.component_mut().push("keep original".to_owned());
-    root.queue.component_mut().set_focused(true);
+    root.queue.push("keep original".to_owned());
+    root.queue.set_focused(true);
     root.update(key(KeyCode::Char('e'), KeyModifiers::NONE));
     root.update(super::RootEvent::ReplaceDraft(
         "discard this edit".to_owned(),
@@ -1832,7 +1828,7 @@ fn escape_cancels_a_queue_edit_and_releases_the_original_message() {
         cancelled.effects,
         [RootEffect::Submit("keep original".to_owned().into())]
     );
-    assert_eq!(root.composer.component().draft(), "keep this draft");
+    assert_eq!(root.composer.draft(), "keep this draft");
     assert!(root.queue_edit.is_none());
 }
 
@@ -1840,14 +1836,14 @@ fn escape_cancels_a_queue_edit_and_releases_the_original_message() {
 fn shift_enter_in_a_queue_edit_inserts_a_newline() {
     let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
     root.turns.start_turn();
-    root.queue.component_mut().push("first line".to_owned());
-    root.queue.component_mut().set_focused(true);
+    root.queue.push("first line".to_owned());
+    root.queue.set_focused(true);
     root.update(key(KeyCode::Char('e'), KeyModifiers::NONE));
 
     let newline = root.update(key(KeyCode::Enter, KeyModifiers::SHIFT));
 
     assert!(newline.effects.is_empty());
-    assert_eq!(root.composer.component().draft(), "first line\n");
+    assert_eq!(root.composer.draft(), "first line\n");
     assert!(root.queue_edit.is_some());
 }
 
@@ -1855,9 +1851,9 @@ fn shift_enter_in_a_queue_edit_inserts_a_newline() {
 fn steer_completion_race_does_not_release_another_queued_message() {
     let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
     root.turns.start_turn();
-    root.queue.component_mut().push("later".to_owned());
-    root.queue.component_mut().push("steer now".to_owned());
-    root.queue.component_mut().set_focused(true);
+    root.queue.push("later".to_owned());
+    root.queue.push("steer now".to_owned());
+    root.queue.set_focused(true);
 
     let steer = root.update(key(KeyCode::Enter, KeyModifiers::NONE));
     let RootEffect::Steer { id, .. } = &steer.effects[0] else {
@@ -1868,7 +1864,7 @@ fn steer_completion_race_does_not_release_another_queued_message() {
         terminal_expected: false,
     });
     assert!(finished.effects.is_empty());
-    assert_eq!(root.queue.component().len(), 2);
+    assert_eq!(root.queue.len(), 2);
 
     root.update(super::RootEvent::SteerPromoted(id));
     let promoted_finished = root.update(super::RootEvent::WorkerTurnFinished {
@@ -1884,11 +1880,11 @@ fn steer_completion_race_does_not_release_another_queued_message() {
 fn interrupt_drains_a_pending_steer_before_regular_queue_items() {
     let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
     root.turns.start_turn();
-    root.queue.component_mut().push("regular".to_owned());
-    root.queue.component_mut().push("priority steer".to_owned());
-    root.queue.component_mut().set_focused(true);
+    root.queue.push("regular".to_owned());
+    root.queue.push("priority steer".to_owned());
+    root.queue.set_focused(true);
     root.update(key(KeyCode::Enter, KeyModifiers::NONE));
-    root.queue.component_mut().set_focused(false);
+    root.queue.set_focused(false);
 
     root.update(key(KeyCode::Esc, KeyModifiers::NONE));
     let interrupt = root.update(key(KeyCode::Esc, KeyModifiers::NONE));
@@ -1910,9 +1906,9 @@ fn interrupt_drains_a_pending_steer_before_regular_queue_items() {
 fn applied_steer_after_interrupt_ack_is_not_submitted_again() {
     let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
     root.turns.start_turn();
-    root.queue.component_mut().push("later".to_owned());
-    root.queue.component_mut().push("priority steer".to_owned());
-    root.queue.component_mut().set_focused(true);
+    root.queue.push("later".to_owned());
+    root.queue.push("priority steer".to_owned());
+    root.queue.set_focused(true);
     let steer = root.update(key(KeyCode::Enter, KeyModifiers::NONE));
     let RootEffect::Steer { id, .. } = &steer.effects[0] else {
         panic!("enter should issue a steer");
@@ -1940,8 +1936,8 @@ fn applied_steer_after_interrupt_ack_is_not_submitted_again() {
 fn steer_stays_queued_until_the_model_boundary_event() {
     let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
     root.turns.start_turn();
-    root.queue.component_mut().push("steer".to_owned());
-    root.queue.component_mut().set_focused(true);
+    root.queue.push("steer".to_owned());
+    root.queue.set_focused(true);
     let steer = root.update(key(KeyCode::Enter, KeyModifiers::NONE));
     let RootEffect::Steer { id, .. } = &steer.effects[0] else {
         panic!("enter should issue a steer");
@@ -1950,22 +1946,22 @@ fn steer_stays_queued_until_the_model_boundary_event() {
 
     let admitted = root.update(super::RootEvent::SteerAdmitted(id));
     assert!(admitted.effects.is_empty());
-    assert_eq!(root.queue.component().len(), 1);
+    assert_eq!(root.queue.len(), 1);
 
     let applied = root.update(run_steered());
     assert_eq!(
         applied.effects,
         [RootEffect::PersistSteer("steer".to_owned())]
     );
-    assert!(root.queue.component().is_empty());
+    assert!(root.queue.is_empty());
 }
 
 #[test]
 fn model_boundary_before_worker_ack_is_reconciled_once() {
     let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
     root.turns.start_turn();
-    root.queue.component_mut().push("steer".to_owned());
-    root.queue.component_mut().set_focused(true);
+    root.queue.push("steer".to_owned());
+    root.queue.set_focused(true);
     let steer = root.update(key(KeyCode::Enter, KeyModifiers::NONE));
     let RootEffect::Steer { id, .. } = &steer.effects[0] else {
         panic!("enter should issue a steer");
@@ -1974,14 +1970,14 @@ fn model_boundary_before_worker_ack_is_reconciled_once() {
 
     let early_boundary = root.update(run_steered());
     assert!(early_boundary.effects.is_empty());
-    assert_eq!(root.queue.component().len(), 1);
+    assert_eq!(root.queue.len(), 1);
 
     let admitted = root.update(super::RootEvent::SteerAdmitted(id));
     assert_eq!(
         admitted.effects,
         [RootEffect::PersistSteer("steer".to_owned())]
     );
-    assert!(root.queue.component().is_empty());
+    assert!(root.queue.is_empty());
 }
 
 #[test]
@@ -2737,7 +2733,7 @@ fn transcript_selection_excludes_the_top_right_hint() {
     )
     .unwrap();
     root.update(super::RootEvent::Transcript(Arc::new(record)));
-    root.transcript.component_mut().focus_expandables();
+    root.transcript.focus_expandables();
     terminal
         .draw(|frame| root.render(frame, frame.area(), &Theme::default()))
         .unwrap();
@@ -3250,12 +3246,12 @@ fn control_o_does_not_change_the_hidden_transcript_behind_an_overlay() {
 #[test]
 fn escape_that_blurs_expandable_items_does_not_start_the_interrupt_chord() {
     let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
-    root.transcript.component_mut().focus_expandables();
+    root.transcript.focus_expandables();
 
     let blurred = root.update(key(KeyCode::Esc, KeyModifiers::NONE));
 
     assert!(blurred.effects.is_empty());
-    assert!(!root.transcript.component().expandables_focused());
+    assert!(!root.transcript.expandables_focused());
     assert!(root.key_confirmation.is_none());
 
     let chord_started = root.update(key(KeyCode::Esc, KeyModifiers::NONE));

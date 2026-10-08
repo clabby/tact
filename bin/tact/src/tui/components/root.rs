@@ -15,7 +15,7 @@ use super::{
     keybindings::{KeybindingsEffect, KeybindingsEvent, KeybindingsHelp},
     memory::{MemoryBrowser, MemoryBrowserEffect, MemoryBrowserEvent},
     model_selector::{ModelSelector, ModelSelectorEffect, ModelSelectorEvent},
-    node::{Component, ComponentUpdate, Node, RenderRequest},
+    node::{Component, ComponentUpdate, RenderRequest},
     qr_code::{QrCodeEffect, QrCodeEvent, QrCodeView},
     queue::{MessageQueue, QueueEffect, QueueEvent},
     recent_prompt_picker::{RecentPromptPicker, RecentPromptPickerEffect, RecentPromptPickerEvent},
@@ -302,20 +302,20 @@ pub(crate) enum RootEffect {
 }
 
 enum Overlay {
-    Actions(Node<ActionsMenu>),
-    ContextDiagnostics(Node<ContextDiagnosticsPanel>),
-    Effort(Node<EffortSelector>),
-    Speed(Node<SpeedSelector>),
-    Model(Node<ModelSelector>),
-    Theme(Node<ThemeSelector>),
+    Actions(ActionsMenu),
+    ContextDiagnostics(ContextDiagnosticsPanel),
+    Effort(EffortSelector),
+    Speed(SpeedSelector),
+    Model(ModelSelector),
+    Theme(ThemeSelector),
     FileFinder(FileMention),
     Skills(SkillMention),
-    Keybindings(Node<KeybindingsHelp>),
-    QrCode(Node<QrCodeView>),
-    Memory(Node<MemoryBrowser>),
-    RecentPrompts(Node<RecentPromptPicker>),
-    Sessions(Node<SessionPicker>),
-    WebInstall(Node<Confirmation>),
+    Keybindings(KeybindingsHelp),
+    QrCode(QrCodeView),
+    Memory(MemoryBrowser),
+    RecentPrompts(RecentPromptPicker),
+    Sessions(SessionPicker),
+    WebInstall(Confirmation),
     Subagents(SubagentOverlay),
 }
 
@@ -326,12 +326,12 @@ enum BlockingTask {
 }
 
 struct FileMention {
-    finder: Node<FileFinder>,
+    finder: FileFinder,
     start: usize,
 }
 
 struct SkillMention {
-    picker: Node<SkillPicker>,
+    picker: SkillPicker,
     start: usize,
 }
 
@@ -364,9 +364,9 @@ pub(crate) enum DraftReset {
 
 /// Owns layout and routing so future screen components do not widen the event loop.
 pub(crate) struct RootNode {
-    transcript: Node<Transcript>,
-    composer: Node<Composer>,
-    queue: Node<MessageQueue>,
+    transcript: Transcript,
+    composer: Composer,
+    queue: MessageQueue,
     workspace: PathBuf,
     overlay: Option<Overlay>,
     thread: ThreadState,
@@ -406,9 +406,9 @@ impl RootNode {
         let mut subagents = SubagentTree::new(thinking);
         subagents.set_workspace(workspace);
         Self {
-            transcript: Node::new(transcript),
-            composer: Node::new(Composer::new(workspace, thinking)),
-            queue: Node::new(MessageQueue::default()),
+            transcript,
+            composer: Composer::new(workspace, thinking),
+            queue: MessageQueue::default(),
             workspace: workspace.to_path_buf(),
             overlay: None,
             thread: ThreadState::New,
@@ -446,25 +446,24 @@ impl RootNode {
     }
 
     pub(super) fn set_workspace(&mut self, workspace: PathBuf) {
-        self.transcript.component_mut().set_workspace(&workspace);
+        self.transcript.set_workspace(&workspace);
         self.subagents.set_workspace(&workspace);
-        self.composer.component_mut().set_workspace(&workspace);
+        self.composer.set_workspace(&workspace);
         self.workspace = workspace;
     }
 
     pub(crate) fn fork(&self, workspace: &Path, thinking: ReasoningEffort) -> Self {
         let mut root = Self::new(workspace, thinking);
-        root.transcript = Node::new(self.transcript.component().fork_snapshot());
+        root.transcript = self.transcript.fork_snapshot();
         root.composer
-            .component_mut()
             .update(ComposerEvent::ContextBudget(ContextBudget {
-                active_tokens: self.composer.component().context_tokens(),
+                active_tokens: self.composer.context_tokens(),
                 window_tokens: self.context_diagnostics.model_window_tokens,
             }));
-        root.set_speed(self.composer.component().speed());
-        root.set_model(self.composer.component().model());
+        root.set_speed(self.composer.speed());
+        root.set_model(self.composer.model());
         root.set_reasoning_modes(
-            self.composer.component().reasoning_mode(),
+            self.composer.reasoning_mode(),
             self.preferred_reasoning_mode,
         );
         root.set_max_subagents(self.subagents.max_subagents());
@@ -478,21 +477,19 @@ impl RootNode {
         root.context_diagnostics = self.context_diagnostics.clone();
         root.title.clone_from(&self.title);
         root.interactive = false;
-        root.composer
-            .component_mut()
-            .update(ComposerEvent::Activity {
-                active: true,
-                status: Some("Forking session…".to_owned()),
-                now: Instant::now(),
-            });
+        root.composer.update(ComposerEvent::Activity {
+            active: true,
+            status: Some("Forking session…".to_owned()),
+            now: Instant::now(),
+        });
         root
     }
 
     /// A pane for an unrelated session that shares this pane's process-wide preferences.
     pub(crate) fn sibling(&self, workspace: &Path) -> Self {
-        let mut root = self.sibling_with_effort(workspace, self.composer.component().effort());
+        let mut root = self.sibling_with_effort(workspace, self.composer.effort());
         root.set_reasoning_modes(
-            self.composer.component().reasoning_mode(),
+            self.composer.reasoning_mode(),
             self.preferred_reasoning_mode,
         );
         root
@@ -511,21 +508,18 @@ impl RootNode {
     /// Blocks input and shows `status` until the pane's session is installed.
     pub(crate) fn begin_opening(&mut self, status: &str) {
         self.interactive = false;
-        let _ = self
-            .composer
-            .component_mut()
-            .update(ComposerEvent::Activity {
-                active: true,
-                status: Some(status.to_owned()),
-                now: Instant::now(),
-            });
+        let _ = self.composer.update(ComposerEvent::Activity {
+            active: true,
+            status: Some(status.to_owned()),
+            now: Instant::now(),
+        });
     }
 
     pub(crate) fn set_fork_available(&mut self, available: bool) {
         self.fork_available = available;
         let can_fork = self.can_fork();
         if let Some(Overlay::Actions(actions)) = &mut self.overlay {
-            actions.component_mut().set_fork_available(can_fork);
+            actions.set_fork_available(can_fork);
         }
     }
 
@@ -559,24 +553,17 @@ impl RootNode {
     }
 
     pub(crate) fn set_speed(&mut self, speed: Speed) {
-        let _ = self
-            .composer
-            .component_mut()
-            .update(ComposerEvent::SetSpeed(speed));
+        let _ = self.composer.update(ComposerEvent::SetSpeed(speed));
     }
 
     pub(crate) fn set_model(&mut self, model: Model) {
-        let _ = self
-            .composer
-            .component_mut()
-            .update(ComposerEvent::SetModel(model));
+        let _ = self.composer.update(ComposerEvent::SetModel(model));
     }
 
     pub(crate) fn set_reasoning_modes(&mut self, actual: ReasoningMode, preferred: ReasoningMode) {
         self.preferred_reasoning_mode = preferred;
         let _ = self
             .composer
-            .component_mut()
             .update(ComposerEvent::SetReasoningMode(actual));
     }
 
@@ -600,7 +587,7 @@ impl RootNode {
         preferred_reasoning_mode: ReasoningMode,
         draft_reset: DraftReset,
     ) {
-        let current_draft = self.composer.component_mut().take_draft();
+        let current_draft = self.composer.take_draft();
         let previous_discarded_draft = self.discarded_draft.take();
         let replaced_draft = current_draft.is_some() && matches!(draft_reset, DraftReset::Clear);
         let (preserved_draft, discarded_draft) = match draft_reset {
@@ -613,7 +600,7 @@ impl RootNode {
         self.discarded_draft = discarded_draft;
         self.fork_available = fork_available;
         if let Some(draft) = preserved_draft {
-            self.composer.component_mut().restore_draft(draft);
+            self.composer.restore_draft(draft);
         }
         if replaced_draft {
             self.show_draft_saved();
@@ -686,7 +673,7 @@ impl RootNode {
         );
         self.set_speed(speed);
         projection.transcript.set_workspace(workspace);
-        self.transcript = Node::new(projection.transcript);
+        self.transcript = projection.transcript;
         self.context_diagnostics = projection.context_diagnostics;
         self.recent_prompts = projection.recent_prompts;
         self.title = self
@@ -696,7 +683,6 @@ impl RootNode {
         if let Some(tokens) = projection.context_tokens {
             let _ = self
                 .composer
-                .component_mut()
                 .update(ComposerEvent::ContextBudget(ContextBudget {
                     active_tokens: tokens,
                     window_tokens: self.context_diagnostics.model_window_tokens,
@@ -706,7 +692,7 @@ impl RootNode {
     }
 
     pub(crate) const fn composer(&self) -> &Composer {
-        self.composer.component()
+        &self.composer
     }
 
     pub(crate) const fn skills(&self) -> &Arc<[Skill]> {
@@ -738,15 +724,15 @@ impl RootNode {
 
     pub(crate) fn animation_deadline(&self) -> Option<Instant> {
         let selector = match &self.overlay {
-            Some(Overlay::Effort(selector)) => selector.component().animation_deadline(),
-            Some(Overlay::Speed(selector)) => selector.component().animation_deadline(),
+            Some(Overlay::Effort(selector)) => selector.animation_deadline(),
+            Some(Overlay::Speed(selector)) => selector.animation_deadline(),
             _ => None,
         };
         [
             selector,
-            self.transcript.component().animation_deadline(),
-            self.composer.component().animation_deadline(),
-            self.queue.component().animation_deadline(),
+            self.transcript.animation_deadline(),
+            self.composer.animation_deadline(),
+            self.queue.animation_deadline(),
             self.key_confirmation
                 .as_ref()
                 .map(|confirmation| confirmation.deadline),
@@ -762,11 +748,7 @@ impl RootNode {
     }
 
     fn render_root(&mut self, frame: &mut Frame<'_>, area: Rect, theme: &Theme, focused: bool) {
-        let height = self
-            .composer
-            .component_mut()
-            .desired_height(area.width)
-            .min(area.height);
+        let height = self.composer.desired_height(area.width).min(area.height);
         let composer_area = Rect {
             y: area.bottom().saturating_sub(height),
             height,
@@ -775,7 +757,6 @@ impl RootNode {
         self.composer_area = composer_area;
         let queue_height = self
             .queue
-            .component()
             .desired_height()
             .min(area.height.saturating_sub(height));
         let queue_width = area.width.saturating_mul(95) / 100;
@@ -812,26 +793,22 @@ impl RootNode {
         let composer_selection = (self.selection.surface() == Some(Surface::Composer))
             .then(|| self.selection.range())
             .flatten();
-        self.composer.component_mut().render_focused_with_selection(
+        self.composer.render_focused_with_selection(
             frame,
             composer_area,
             theme,
             focused
                 && self.blocking_task.is_none()
-                && !self.transcript.component().expandables_focused()
-                && (!self.queue.component().focused() || self.queue_edit.is_some()),
+                && !self.transcript.expandables_focused()
+                && (!self.queue.focused() || self.queue_edit.is_some()),
             composer_selection,
         );
         if self.selection.surface() == Some(Surface::Transcript)
             && let Some(range) = self.selection.range()
         {
-            self.transcript
-                .component()
-                .render_selection(frame.buffer_mut(), range);
+            self.transcript.render_selection(frame.buffer_mut(), range);
         }
-        self.transcript
-            .component_mut()
-            .render_chrome(frame, transcript_area, theme);
+        self.transcript.render_chrome(frame, transcript_area, theme);
         if let Some(overlay) = &mut self.overlay {
             match overlay {
                 Overlay::Actions(actions) => actions.render(frame, area, theme),
@@ -892,9 +869,9 @@ impl RootNode {
         }
         if is_control_c(&event) {
             if self.overlay.is_none()
-                && !self.queue.component().focused()
-                && !self.transcript.component().expandables_focused()
-                && !self.composer.component().draft().is_empty()
+                && !self.queue.focused()
+                && !self.transcript.expandables_focused()
+                && !self.composer.draft().is_empty()
             {
                 self.key_confirmation = None;
                 return self.discard_draft();
@@ -920,7 +897,7 @@ impl RootNode {
     }
 
     pub(crate) fn refresh_terminal_images(&mut self) {
-        self.transcript.component_mut().refresh_terminal_images();
+        self.transcript.refresh_terminal_images();
         self.subagents.refresh_terminal_images();
     }
 
@@ -951,8 +928,8 @@ impl RootNode {
             return self.update_overlay(event, Instant::now());
         }
         if is_control_key(&event, 'z')
-            && !self.queue.component().focused()
-            && !self.transcript.component().expandables_focused()
+            && !self.queue.focused()
+            && !self.transcript.expandables_focused()
         {
             return self.restore_discarded_draft();
         }
@@ -977,26 +954,26 @@ impl RootNode {
                 self.key_confirmation = None;
                 return ComponentUpdate::render(RenderRequest::Immediate);
             }
-            if self.queue.component().focused() {
+            if self.queue.focused() {
                 self.key_confirmation = None;
                 return self.update_queue(event);
             }
-            if self.transcript.component().expandables_focused() {
+            if self.transcript.expandables_focused() {
                 self.key_confirmation = None;
                 return self.update_transcript(TranscriptEvent::BlurExpandables);
             }
             return self.update_key_confirmation(ConfirmationAction::Interrupt, Instant::now());
         }
-        if self.transcript.component().pinned_prompt_clicked(&event) {
+        if self.transcript.pinned_prompt_clicked(&event) {
             return self.update_transcript(TranscriptEvent::JumpToPinnedPrompt);
         }
-        if self.transcript.component().updates_banner_clicked(&event) {
+        if self.transcript.updates_banner_clicked(&event) {
             return self.update_transcript(TranscriptEvent::FollowTail);
         }
         if let Some(update) = self.update_selection_mouse(&mut event) {
             return update;
         }
-        if let Some(destination) = self.transcript.component().link_destination(&event) {
+        if let Some(destination) = self.transcript.link_destination(&event) {
             self.focus_composer();
             return ComponentUpdate {
                 effects: vec![RootEffect::OpenLink(destination.to_string())],
@@ -1007,7 +984,7 @@ impl RootNode {
             && mouse.kind == MouseEventKind::Down(MouseButton::Left)
         {
             let position = Position::new(mouse.column, mouse.row);
-            match self.composer.component().chrome_target(position) {
+            match self.composer.chrome_target(position) {
                 Some(ComposerChromeTarget::Effort) => return self.open_effort(),
                 Some(ComposerChromeTarget::Speed) => return self.open_speed(),
                 Some(ComposerChromeTarget::Model) => return self.open_model(),
@@ -1036,76 +1013,63 @@ impl RootNode {
             let Event::Mouse(mouse) = &event else {
                 unreachable!("left click helper only accepts mouse events");
             };
-            let _ = self
-                .queue
-                .component_mut()
-                .focus_row(mouse.row, self.queue_area);
-            let _ = self
-                .transcript
-                .component_mut()
-                .update(TranscriptEvent::BlurExpandables);
+            let _ = self.queue.focus_row(mouse.row, self.queue_area);
+            let _ = self.transcript.update(TranscriptEvent::BlurExpandables);
             return ComponentUpdate::render(RenderRequest::Immediate);
         }
         if is_left_click_in(&event, self.composer_area) {
             self.focus_composer();
             return ComponentUpdate::render(RenderRequest::Immediate);
         }
-        if let Some(command) = self.transcript.component().expandable_command(&event) {
-            self.queue.component_mut().set_focused(false);
+        if let Some(command) = self.transcript.expandable_command(&event) {
+            self.queue.set_focused(false);
             return self.update_transcript(TranscriptEvent::Expandable(command));
         }
         if is_left_click(&event) {
             self.focus_composer();
             return ComponentUpdate::render(RenderRequest::Immediate);
         }
-        if self.queue.component().focused() {
+        if self.queue.focused() {
             return self.update_queue(event);
         }
         if !self.skills.is_empty()
-            && !self.composer.component().draft().starts_with('!')
+            && !self.composer.draft().starts_with('!')
             && is_skill_picker_trigger(&event)
-            && self.composer.component().cursor_is_at_token_boundary()
+            && self.composer.cursor_is_at_token_boundary()
         {
-            let start = self.composer.component().cursor();
+            let start = self.composer.cursor();
             let update =
                 self.update_composer(ComposerEvent::Terminal(event), RenderRequest::Immediate);
             self.overlay = Some(Overlay::Skills(SkillMention {
-                picker: Node::new(SkillPicker::new(Arc::clone(&self.skills))),
+                picker: SkillPicker::new(Arc::clone(&self.skills)),
                 start,
             }));
             return update;
         }
-        if is_file_finder_trigger(&event) && self.composer.component().cursor_is_at_token_boundary()
-        {
-            let start = self.composer.component().cursor();
+        if is_file_finder_trigger(&event) && self.composer.cursor_is_at_token_boundary() {
+            let start = self.composer.cursor();
             let update =
                 self.update_composer(ComposerEvent::Terminal(event), RenderRequest::Immediate);
             self.overlay = Some(Overlay::FileFinder(FileMention {
-                finder: Node::new(FileFinder::new(&self.workspace)),
+                finder: FileFinder::new(&self.workspace),
                 start,
             }));
             return update;
         }
-        if !self.reflection_input
-            && self.composer.component().draft().is_empty()
-            && is_actions_trigger(&event)
+        if !self.reflection_input && self.composer.draft().is_empty() && is_actions_trigger(&event)
         {
-            let new_session_enabled = self.turns.is_idle()
-                && self.blocking_task.is_none()
-                && self.queue.component().is_empty();
-            self.overlay = Some(Overlay::Actions(Node::new(ActionsMenu::new(
-                ActionAvailability {
-                    new_session: new_session_enabled,
-                    fork: self.can_fork(),
-                    memory: self.memory_enabled,
-                    model: self.thread == ThreadState::New,
-                },
-            ))));
+            let new_session_enabled =
+                self.turns.is_idle() && self.blocking_task.is_none() && self.queue.is_empty();
+            self.overlay = Some(Overlay::Actions(ActionsMenu::new(ActionAvailability {
+                new_session: new_session_enabled,
+                fork: self.can_fork(),
+                memory: self.memory_enabled,
+                model: self.thread == ThreadState::New,
+            })));
             return ComponentUpdate::render(RenderRequest::Immediate);
         }
         if let Some(command) = self
             .transcript
-            .component()
             .scroll_command(&event, self.tui.mouse_scroll_lines)
         {
             let transcript = self.transcript.update(TranscriptEvent::Scroll(command));
@@ -1114,7 +1078,7 @@ impl RootNode {
                 render: transcript.render,
             };
         }
-        if self.transcript.component().expandables_focused() {
+        if self.transcript.expandables_focused() {
             return ComponentUpdate::none();
         }
         self.update_composer(ComposerEvent::Terminal(event), RenderRequest::Immediate)
@@ -1175,7 +1139,6 @@ impl RootNode {
                     Surface::Composer => {
                         let changed = self
                             .composer
-                            .component_mut()
                             .scroll_selection(rows as isize, self.composer_content_area);
                         if changed {
                             RenderRequest::Immediate
@@ -1198,8 +1161,8 @@ impl RootNode {
                 }
                 let range = self.selection.take_range()?;
                 let text = match surface {
-                    Surface::Transcript => self.transcript.component().selection_text(range),
-                    Surface::Composer => self.composer.component().selection_text(range),
+                    Surface::Transcript => self.transcript.selection_text(range),
+                    Surface::Composer => self.composer.selection_text(range),
                 };
                 Some(ComponentUpdate {
                     effects: text.map(RootEffect::Copy).into_iter().collect(),
@@ -1214,14 +1177,13 @@ impl RootNode {
         if self.composer_content_area.contains(position) {
             let span = self
                 .composer
-                .component_mut()
                 .selection_span(position, self.composer_content_area)?;
             return Some((Surface::Composer, span));
         }
         if !self.transcript_area.contains(position) {
             return None;
         }
-        let span = self.transcript.component().selection_span(position)?;
+        let span = self.transcript.selection_span(position)?;
         Some((Surface::Transcript, span))
     }
 
@@ -1231,13 +1193,11 @@ impl RootNode {
                 let position = clamp_to(position, self.transcript_area);
                 let anchor = self.selection.anchor()?;
                 self.transcript
-                    .component()
                     .selection_span_nearest_from(position, anchor)
             }
             Surface::Composer => {
                 let position = clamp_to(position, self.composer_content_area);
                 self.composer
-                    .component_mut()
                     .selection_span(position, self.composer_content_area)
             }
         }
@@ -1278,7 +1238,6 @@ impl RootNode {
             }
             Surface::Composer => self
                 .composer
-                .component_mut()
                 .scroll_selection(rows, self.composer_content_area),
         }
     }
@@ -1438,7 +1397,7 @@ impl RootNode {
             FileFinderEffect::Dismiss => ComponentUpdate::render(RenderRequest::Immediate),
             FileFinderEffect::Insert(path) => self.update_composer(
                 ComposerEvent::ReplaceRange {
-                    range: start..self.composer.component().cursor(),
+                    range: start..self.composer.cursor(),
                     text: format!("@{path} "),
                 },
                 RenderRequest::Immediate,
@@ -1502,7 +1461,7 @@ impl RootNode {
             SkillPickerEffect::Dismiss => ComponentUpdate::render(RenderRequest::Immediate),
             SkillPickerEffect::Insert(name) => self.update_composer(
                 ComposerEvent::ReplaceRange {
-                    range: start..self.composer.component().cursor(),
+                    range: start..self.composer.cursor(),
                     text: format!("${name} "),
                 },
                 RenderRequest::Immediate,
@@ -1511,7 +1470,7 @@ impl RootNode {
     }
 
     fn mention_query(&self, start: usize, prefix: char) -> Option<String> {
-        let composer = self.composer.component();
+        let composer = &self.composer;
         composer
             .draft()
             .get(start..composer.cursor())?
@@ -1546,9 +1505,7 @@ impl RootNode {
             }
             Some(ActionsEffect::Trigger(Action::Speed)) => return self.open_speed(),
             Some(ActionsEffect::Trigger(Action::Theme)) => {
-                self.overlay = Some(Overlay::Theme(Node::new(ThemeSelector::new(
-                    self.theme_mode,
-                ))));
+                self.overlay = Some(Overlay::Theme(ThemeSelector::new(self.theme_mode)));
             }
             Some(ActionsEffect::Trigger(Action::NewSession)) => {
                 return self.open_new_session();
@@ -1558,7 +1515,7 @@ impl RootNode {
             }
             Some(ActionsEffect::Trigger(Action::Fork)) => return self.open_fork(),
             Some(ActionsEffect::Trigger(Action::Keybindings)) => {
-                self.overlay = Some(Overlay::Keybindings(Node::new(KeybindingsHelp::default())));
+                self.overlay = Some(Overlay::Keybindings(KeybindingsHelp::default()));
             }
             Some(ActionsEffect::Trigger(Action::ReloadConfig)) => {
                 self.overlay = None;
@@ -1581,15 +1538,15 @@ impl RootNode {
                         render: update.render,
                     };
                 }
-                self.overlay = Some(Overlay::Memory(Node::new(MemoryBrowser::new())));
+                self.overlay = Some(Overlay::Memory(MemoryBrowser::new()));
                 return ComponentUpdate {
                     effects: vec![RootEffect::LoadMemories],
                     render: RenderRequest::Immediate,
                 };
             }
             Some(ActionsEffect::Trigger(Action::DebugContext)) => {
-                self.overlay = Some(Overlay::ContextDiagnostics(Node::new(
-                    ContextDiagnosticsPanel::new(self.context_diagnostics.clone()),
+                self.overlay = Some(Overlay::ContextDiagnostics(ContextDiagnosticsPanel::new(
+                    self.context_diagnostics.clone(),
                 )));
             }
             Some(ActionsEffect::Trigger(Action::Compact)) => {
@@ -1647,9 +1604,7 @@ impl RootNode {
             Some(ContextDiagnosticsEffect::Dismiss) => self.overlay = None,
             Some(ContextDiagnosticsEffect::Refresh) => {
                 if let Some(Overlay::ContextDiagnostics(panel)) = &mut self.overlay {
-                    panel
-                        .component_mut()
-                        .replace(self.context_diagnostics.clone());
+                    panel.replace(self.context_diagnostics.clone());
                 }
             }
             None => {}
@@ -1711,8 +1666,7 @@ impl RootNode {
 
     /// Claude fixes effort when its session starts.
     fn effort_locked(&self) -> bool {
-        self.thread == ThreadState::Started
-            && matches!(self.composer.component().model(), Model::Claude(_))
+        self.thread == ThreadState::Started && matches!(self.composer.model(), Model::Claude(_))
     }
 
     fn open_effort(&mut self) -> ComponentUpdate<RootEffect> {
@@ -1725,19 +1679,19 @@ impl RootNode {
             ));
             return ComponentUpdate::render(RenderRequest::Immediate);
         }
-        self.overlay = Some(Overlay::Effort(Node::new(EffortSelector::new(
-            self.composer.component().effort(),
+        self.overlay = Some(Overlay::Effort(EffortSelector::new(
+            self.composer.effort(),
             self.preferred_reasoning_mode == ReasoningMode::Pro,
-            model::reasoning_modes(self.composer.component().model()).contains(&ReasoningMode::Pro),
-        ))));
+            model::reasoning_modes(self.composer.model()).contains(&ReasoningMode::Pro),
+        )));
         ComponentUpdate::render(RenderRequest::Immediate)
     }
 
     fn open_speed(&mut self) -> ComponentUpdate<RootEffect> {
-        self.overlay = Some(Overlay::Speed(Node::new(SpeedSelector::new(
-            self.composer.component().speed(),
-            self.composer.component().model(),
-        ))));
+        self.overlay = Some(Overlay::Speed(SpeedSelector::new(
+            self.composer.speed(),
+            self.composer.model(),
+        )));
         ComponentUpdate::render(RenderRequest::Immediate)
     }
 
@@ -1771,10 +1725,10 @@ impl RootNode {
         if self.thread != ThreadState::New {
             return ComponentUpdate::none();
         }
-        self.overlay = Some(Overlay::Model(Node::new(ModelSelector::new(
-            self.composer.component().model(),
+        self.overlay = Some(Overlay::Model(ModelSelector::new(
+            self.composer.model(),
             self.claude_enabled,
-        ))));
+        )));
         ComponentUpdate::render(RenderRequest::Immediate)
     }
 
@@ -1815,21 +1769,18 @@ impl RootNode {
     }
 
     fn open_new_session(&mut self) -> ComponentUpdate<RootEffect> {
-        if !self.turns.is_idle() || !self.queue.component().is_empty() {
+        if !self.turns.is_idle() || !self.queue.is_empty() {
             return ComponentUpdate::none();
         }
         self.overlay = None;
         self.interactive = false;
-        let _ = self
-            .composer
-            .component_mut()
-            .update(ComposerEvent::Activity {
-                active: true,
-                status: Some("Starting new session…".to_owned()),
-                now: Instant::now(),
-            });
+        let _ = self.composer.update(ComposerEvent::Activity {
+            active: true,
+            status: Some("Starting new session…".to_owned()),
+            now: Instant::now(),
+        });
         ComponentUpdate {
-            effects: vec![RootEffect::NewSession(self.composer.component().model())],
+            effects: vec![RootEffect::NewSession(self.composer.model())],
             render: RenderRequest::Immediate,
         }
     }
@@ -1838,14 +1789,11 @@ impl RootNode {
         self.overlay = None;
         self.pending_session_mention = None;
         self.interactive = false;
-        let _ = self
-            .composer
-            .component_mut()
-            .update(ComposerEvent::Activity {
-                active: true,
-                status: Some("Loading sessions…".to_owned()),
-                now: Instant::now(),
-            });
+        let _ = self.composer.update(ComposerEvent::Activity {
+            active: true,
+            status: Some("Loading sessions…".to_owned()),
+            now: Instant::now(),
+        });
         ComponentUpdate {
             effects: vec![RootEffect::LoadSessions(SessionListKind::Resume)],
             render: RenderRequest::Immediate,
@@ -1856,14 +1804,11 @@ impl RootNode {
         self.overlay = None;
         self.pending_session_mention = Some(start);
         self.interactive = false;
-        let _ = self
-            .composer
-            .component_mut()
-            .update(ComposerEvent::Activity {
-                active: true,
-                status: Some("Loading sessions…".to_owned()),
-                now: Instant::now(),
-            });
+        let _ = self.composer.update(ComposerEvent::Activity {
+            active: true,
+            status: Some("Loading sessions…".to_owned()),
+            now: Instant::now(),
+        });
         ComponentUpdate {
             effects: vec![RootEffect::LoadSessions(SessionListKind::Mention)],
             render: RenderRequest::Immediate,
@@ -1873,14 +1818,11 @@ impl RootNode {
     fn load_recent_prompts(&mut self) -> ComponentUpdate<RootEffect> {
         self.overlay = None;
         self.interactive = false;
-        let _ = self
-            .composer
-            .component_mut()
-            .update(ComposerEvent::Activity {
-                active: true,
-                status: Some("Loading recent prompts…".to_owned()),
-                now: Instant::now(),
-            });
+        let _ = self.composer.update(ComposerEvent::Activity {
+            active: true,
+            status: Some("Loading recent prompts…".to_owned()),
+            now: Instant::now(),
+        });
         ComponentUpdate {
             effects: vec![RootEffect::LoadRecentPrompts(self.recent_prompts.clone())],
             render: RenderRequest::Immediate,
@@ -1893,17 +1835,14 @@ impl RootNode {
         prompts: Vec<RecentPrompt>,
     ) -> ComponentUpdate<RootEffect> {
         self.interactive = true;
-        let _ = self
-            .composer
-            .component_mut()
-            .update(ComposerEvent::Activity {
-                active: false,
-                status: None,
-                now: Instant::now(),
-            });
-        self.overlay = Some(Overlay::RecentPrompts(Node::new(RecentPromptPicker::new(
+        let _ = self.composer.update(ComposerEvent::Activity {
+            active: false,
+            status: None,
+            now: Instant::now(),
+        });
+        self.overlay = Some(Overlay::RecentPrompts(RecentPromptPicker::new(
             prompts, session_id,
-        ))));
+        )));
         ComponentUpdate::render(RenderRequest::Immediate)
     }
 
@@ -1946,22 +1885,17 @@ impl RootNode {
 
     fn sessions_loaded(&mut self, sessions: Vec<SessionSummary>) -> ComponentUpdate<RootEffect> {
         self.interactive = true;
-        let _ = self
-            .composer
-            .component_mut()
-            .update(ComposerEvent::Activity {
-                active: false,
-                status: None,
-                now: Instant::now(),
-            });
+        let _ = self.composer.update(ComposerEvent::Activity {
+            active: false,
+            status: None,
+            now: Instant::now(),
+        });
         let mode = if self.pending_session_mention.is_some() {
             SessionPickerMode::Mention
         } else {
             SessionPickerMode::Resume
         };
-        self.overlay = Some(Overlay::Sessions(Node::new(SessionPicker::new(
-            sessions, mode,
-        ))));
+        self.overlay = Some(Overlay::Sessions(SessionPicker::new(sessions, mode)));
         ComponentUpdate::render(RenderRequest::Immediate)
     }
 
@@ -1979,14 +1913,11 @@ impl RootNode {
             Some(SessionPickerEffect::Resume(session_id)) => {
                 self.overlay = None;
                 self.interactive = false;
-                let _ = self
-                    .composer
-                    .component_mut()
-                    .update(ComposerEvent::Activity {
-                        active: true,
-                        status: Some("Resuming session…".to_owned()),
-                        now: Instant::now(),
-                    });
+                let _ = self.composer.update(ComposerEvent::Activity {
+                    active: true,
+                    status: Some("Resuming session…".to_owned()),
+                    now: Instant::now(),
+                });
                 ComponentUpdate {
                     effects: vec![RootEffect::ResumeSession(session_id)],
                     render: RenderRequest::Immediate,
@@ -1999,7 +1930,7 @@ impl RootNode {
                 };
                 self.update_composer(
                     ComposerEvent::ReplaceRange {
-                        range: start..self.composer.component().cursor(),
+                        range: start..self.composer.cursor(),
                         text: format!("@@{session_id} "),
                     },
                     RenderRequest::Immediate,
@@ -2015,28 +1946,22 @@ impl RootNode {
     fn session_load_failed(&mut self, message: String) -> ComponentUpdate<RootEffect> {
         self.pending_session_mention = None;
         self.interactive = true;
-        let _ = self
-            .composer
-            .component_mut()
-            .update(ComposerEvent::Activity {
-                active: false,
-                status: None,
-                now: Instant::now(),
-            });
+        let _ = self.composer.update(ComposerEvent::Activity {
+            active: false,
+            status: None,
+            now: Instant::now(),
+        });
         self.notification = Some(Notification::plain(message, Color::Red));
         ComponentUpdate::render(RenderRequest::Immediate)
     }
 
     fn new_session_failed(&mut self, message: String) -> ComponentUpdate<RootEffect> {
         self.interactive = true;
-        let _ = self
-            .composer
-            .component_mut()
-            .update(ComposerEvent::Activity {
-                active: false,
-                status: None,
-                now: Instant::now(),
-            });
+        let _ = self.composer.update(ComposerEvent::Activity {
+            active: false,
+            status: None,
+            now: Instant::now(),
+        });
         self.notification = Some(Notification::plain(
             format!("Could not start a new session: {message}"),
             Color::Red,
@@ -2046,14 +1971,11 @@ impl RootNode {
 
     fn fork_ready(&mut self) -> ComponentUpdate<RootEffect> {
         self.interactive = true;
-        let update = self
-            .composer
-            .component_mut()
-            .update(ComposerEvent::Activity {
-                active: false,
-                status: None,
-                now: Instant::now(),
-            });
+        let update = self.composer.update(ComposerEvent::Activity {
+            active: false,
+            status: None,
+            now: Instant::now(),
+        });
         debug_assert!(update.changed);
         ComponentUpdate::render(RenderRequest::Immediate)
     }
@@ -2081,11 +2003,9 @@ impl RootNode {
     }
 
     fn set_effort(&mut self, effort: ReasoningEffort) {
-        self.transcript.component_mut().set_effort(effort);
+        self.transcript.set_effort(effort);
         self.subagents.set_effort(effort);
-        self.composer
-            .component_mut()
-            .update(ComposerEvent::SetEffort(effort));
+        self.composer.update(ComposerEvent::SetEffort(effort));
     }
 
     fn update_effort(&mut self, event: EffortEvent) -> ComponentUpdate<RootEffect> {
@@ -2117,7 +2037,7 @@ impl RootNode {
         self.preferred_reasoning_mode = reasoning_mode;
         if reasoning_mode != previous_reasoning_mode {
             let state = if pro { "enabled" } else { "disabled" };
-            let suffix = if self.composer.component().reasoning_mode() != reasoning_mode {
+            let suffix = if self.composer.reasoning_mode() != reasoning_mode {
                 " · start a new session to apply."
             } else {
                 "."
@@ -2150,7 +2070,7 @@ impl RootNode {
         self.overlay = None;
         match effect {
             ModelSelectorEffect::Dismiss => ComponentUpdate::render(RenderRequest::Immediate),
-            ModelSelectorEffect::Apply(model) if model == self.composer.component().model() => {
+            ModelSelectorEffect::Apply(model) if model == self.composer.model() => {
                 ComponentUpdate::render(RenderRequest::Immediate)
             }
             ModelSelectorEffect::Apply(model) => self.apply_model(model),
@@ -2159,14 +2079,11 @@ impl RootNode {
 
     fn apply_model(&mut self, model: Model) -> ComponentUpdate<RootEffect> {
         self.interactive = false;
-        let _ = self
-            .composer
-            .component_mut()
-            .update(ComposerEvent::Activity {
-                active: true,
-                status: Some(format!("Starting {} session…", model::name(model))),
-                now: Instant::now(),
-            });
+        let _ = self.composer.update(ComposerEvent::Activity {
+            active: true,
+            status: Some(format!("Starting {} session…", model::name(model))),
+            now: Instant::now(),
+        });
         ComponentUpdate {
             effects: vec![RootEffect::SetModel(model)],
             render: RenderRequest::Immediate,
@@ -2174,8 +2091,8 @@ impl RootNode {
     }
 
     fn update_focus(&mut self) -> ComponentUpdate<RootEffect> {
-        let focus_queue = !self.queue.component().focused() && !self.queue.component().is_empty();
-        self.queue.component_mut().set_focused(focus_queue);
+        let focus_queue = !self.queue.focused() && !self.queue.is_empty();
+        self.queue.set_focused(focus_queue);
         let transcript = self.transcript.update(TranscriptEvent::BlurExpandables);
         ComponentUpdate::render(if focus_queue || transcript.render != RenderRequest::None {
             RenderRequest::Immediate
@@ -2185,11 +2102,8 @@ impl RootNode {
     }
 
     fn focus_composer(&mut self) {
-        self.queue.component_mut().set_focused(false);
-        let _ = self
-            .transcript
-            .component_mut()
-            .update(TranscriptEvent::BlurExpandables);
+        self.queue.set_focused(false);
+        let _ = self.transcript.update(TranscriptEvent::BlurExpandables);
     }
 
     fn update_queue(&mut self, event: Event) -> ComponentUpdate<RootEffect> {
@@ -2208,19 +2122,12 @@ impl RootNode {
     }
 
     fn begin_queue_edit(&mut self, id: QueueId, text: String) -> ComponentUpdate<RootEffect> {
-        let original_input_mode = self
-            .composer
-            .component()
-            .input_mode()
-            .map(ToOwned::to_owned);
-        let original_draft = self.composer.component_mut().take_draft();
-        self.composer.component_mut().replace_draft(text);
-        let _ = self
-            .composer
-            .component_mut()
-            .update(ComposerEvent::InputMode(Some(
-                "editing queued message · enter save · esc cancel".to_owned(),
-            )));
+        let original_input_mode = self.composer.input_mode().map(ToOwned::to_owned);
+        let original_draft = self.composer.take_draft();
+        self.composer.replace_draft(text);
+        let _ = self.composer.update(ComposerEvent::InputMode(Some(
+            "editing queued message · enter save · esc cancel".to_owned(),
+        )));
         self.queue_edit = Some(QueueEdit {
             id,
             original_draft,
@@ -2243,19 +2150,18 @@ impl RootNode {
         let Some(edit) = self.queue_edit.take() else {
             return ComponentUpdate::none();
         };
-        let text = save.then(|| self.composer.component().draft().to_owned());
-        self.composer.component_mut().replace_draft(String::new());
+        let text = save.then(|| self.composer.draft().to_owned());
+        self.composer.replace_draft(String::new());
         if let Some(draft) = edit.original_draft {
-            self.composer.component_mut().restore_draft(draft);
+            self.composer.restore_draft(draft);
         }
         let _ = self
             .composer
-            .component_mut()
             .update(ComposerEvent::InputMode(edit.original_input_mode));
 
         let restored = match text {
-            Some(text) => self.queue.component_mut().finish_edit(edit.id, text),
-            None => self.queue.component_mut().cancel_edit(edit.id),
+            Some(text) => self.queue.finish_edit(edit.id, text),
+            None => self.queue.cancel_edit(edit.id),
         };
         if !restored {
             return ComponentUpdate::render(RenderRequest::Immediate);
@@ -2314,7 +2220,7 @@ impl RootNode {
                 }
             }
             PaneCommand::Steer(id) | PaneCommand::Dequeue(id) => {
-                let selected = self.queue.component_mut().select_queued(id);
+                let selected = self.queue.select_queued(id);
                 debug_assert!(selected, "remote queue commands are checked first");
                 let key = if matches!(command, PaneCommand::Steer(_)) {
                     KeyCode::Enter
@@ -2324,7 +2230,7 @@ impl RootNode {
                 self.update_queue(Event::Key(KeyEvent::new(key, KeyModifiers::NONE)))
             }
             PaneCommand::Compact => self.start_compaction()?,
-            PaneCommand::SetModel(model) if model == self.composer.component().model() => {
+            PaneCommand::SetModel(model) if model == self.composer.model() => {
                 ComponentUpdate::none()
             }
             PaneCommand::SetModel(model) => self.apply_model(model),
@@ -2332,30 +2238,28 @@ impl RootNode {
                 self.apply_effort(effort, self.preferred_reasoning_mode == ReasoningMode::Pro)
             }
             PaneCommand::SetReasoningMode(mode) => {
-                let mut update = self.apply_effort(
-                    self.composer.component().effort(),
-                    mode == ReasoningMode::Pro,
-                );
+                let mut update =
+                    self.apply_effort(self.composer.effort(), mode == ReasoningMode::Pro);
                 // A session's reasoning mode is fixed when it is created, so a new thread is
                 // recreated to apply the choice immediately.
-                if self.composer.component().reasoning_mode() != mode {
+                if self.composer.reasoning_mode() != mode {
                     update
                         .effects
-                        .push(RootEffect::SetModel(self.composer.component().model()));
+                        .push(RootEffect::SetModel(self.composer.model()));
                 }
                 update
             }
-            PaneCommand::SetSpeed(speed) if speed == self.composer.component().speed() => {
+            PaneCommand::SetSpeed(speed) if speed == self.composer.speed() => {
                 ComponentUpdate::none()
             }
             PaneCommand::SetSpeed(speed) => self.apply_speed(speed),
             PaneCommand::EditQueued(id, text) => {
-                let edited = self.queue.component_mut().finish_edit(id, text);
+                let edited = self.queue.finish_edit(id, text);
                 debug_assert!(edited, "remote queue commands are checked first");
                 self.submit_next_queued()
             }
             PaneCommand::AttachImage(data_url) => {
-                self.composer.component_mut().append_image(data_url);
+                self.composer.append_image(data_url);
                 ComponentUpdate::render(RenderRequest::Immediate)
             }
             PaneCommand::Reflect(instructions) => {
@@ -2379,7 +2283,7 @@ impl RootNode {
                 }
             }
             PaneCommand::Interrupt
-                if !self.turns.turn_running() && !self.queue.component().has_pending_steer() =>
+                if !self.turns.turn_running() && !self.queue.has_pending_steer() =>
             {
                 return Err(CommandError::NothingRunning);
             }
@@ -2389,7 +2293,6 @@ impl RootNode {
             PaneCommand::Steer(id) | PaneCommand::Dequeue(id) | PaneCommand::EditQueued(id, _)
                 if !self
                     .queue
-                    .component()
                     .items()
                     .any(|(item, _, steering)| item == *id && !steering) =>
             {
@@ -2406,11 +2309,11 @@ impl RootNode {
                 ));
             }
             PaneCommand::SetReasoningMode(mode)
-                if !model::reasoning_modes(self.composer.component().model()).contains(mode) =>
+                if !model::reasoning_modes(self.composer.model()).contains(mode) =>
             {
                 return Err(CommandError::Invalid(format!(
                     "{} does not support {} reasoning",
-                    model::name(self.composer.component().model()),
+                    model::name(self.composer.model()),
                     mode.as_str()
                 )));
             }
@@ -2460,7 +2363,7 @@ impl RootNode {
         if !self.turns.is_idle() || self.blocking_task.is_some() {
             return Err(CommandError::TurnRunning);
         }
-        if !self.queue.component().is_empty() {
+        if !self.queue.is_empty() {
             return Err(CommandError::QueueNotEmpty);
         }
         Ok(())
@@ -2484,7 +2387,7 @@ impl RootNode {
     pub(crate) fn shared_draft(&self) -> &str {
         match &self.queue_edit {
             Some(edit) => edit.original_draft.as_ref().map_or("", ComposerDraft::text),
-            None => self.composer.component().draft(),
+            None => self.composer.draft(),
         }
     }
 
@@ -2495,12 +2398,12 @@ impl RootNode {
                 Some(draft) => Box::new(draft.images()),
                 None => Box::new(std::iter::empty()),
             },
-            None => Box::new(self.composer.component().images()),
+            None => Box::new(self.composer.images()),
         }
     }
 
     pub(super) fn queued_prompts(&self) -> impl Iterator<Item = (QueueId, &str, bool)> {
-        self.queue.component().items()
+        self.queue.items()
     }
 
     /// The session's first prompt, which names it in session lists.
@@ -2509,10 +2412,7 @@ impl RootNode {
     }
 
     pub(super) fn set_live_sessions(&mut self, summary: Option<String>) -> RenderRequest {
-        let update = self
-            .composer
-            .component_mut()
-            .update(ComposerEvent::LiveSessions(summary));
+        let update = self.composer.update(ComposerEvent::LiveSessions(summary));
         if update.changed {
             RenderRequest::Immediate
         } else {
@@ -2532,7 +2432,6 @@ impl RootNode {
         let result = match index {
             Some(index) => self
                 .transcript
-                .component()
                 .assistant_response(index)
                 .map(|text| RootEffect::Copy(text.to_owned()))
                 .ok_or_else(|| format!("No completed assistant response at position {index}.")),
@@ -2562,8 +2461,8 @@ impl RootNode {
     /// the composer holds a prompt.
     fn can_queue_draft(&self) -> bool {
         !self.reflection_input
-            && (self.turns.turn_running() || self.queue.component().has_pending_steer())
-            && !self.composer.component().draft().trim().is_empty()
+            && (self.turns.turn_running() || self.queue.has_pending_steer())
+            && !self.composer.draft().trim().is_empty()
     }
 
     fn update_composer_with(
@@ -2572,7 +2471,7 @@ impl RootNode {
         priority: RenderRequest,
         delivery: BusyDelivery,
     ) -> ComponentUpdate<RootEffect> {
-        let update = self.composer.component_mut().update(event);
+        let update = self.composer.update(event);
         if let Some(ComposerEffect::Submit(prompt)) = &update.effect
             && let Some(argument) = copy_command_argument(prompt.display_text().trim())
         {
@@ -2592,9 +2491,9 @@ impl RootNode {
         }
         let effects = match update.effect {
             Some(ComposerEffect::Submit(prompt))
-                if self.turns.turn_running() || self.queue.component().has_pending_steer() =>
+                if self.turns.turn_running() || self.queue.has_pending_steer() =>
             {
-                self.queue.component_mut().push(prompt);
+                self.queue.push(prompt);
                 // A steer is only possible while a turn runs; while one is still being applied the
                 // prompt waits behind it.
                 if delivery == BusyDelivery::Steer && self.turns.turn_running() {
@@ -2641,7 +2540,6 @@ impl RootNode {
     fn submit_reflection(&mut self) -> ComponentUpdate<RootEffect> {
         let instructions = self
             .composer
-            .component_mut()
             .take_submission()
             .unwrap_or_else(|| Submission::text(String::new()));
         self.start_reflection(instructions)
@@ -2661,12 +2559,12 @@ impl RootNode {
 
     fn cancel_reflection(&mut self) -> ComponentUpdate<RootEffect> {
         self.reflection_input = false;
-        self.composer.component_mut().replace_draft(String::new());
+        self.composer.replace_draft(String::new());
         self.update_composer(ComposerEvent::InputMode(None), RenderRequest::Immediate)
     }
 
     fn discard_draft(&mut self) -> ComponentUpdate<RootEffect> {
-        let Some(draft) = self.composer.component_mut().take_draft() else {
+        let Some(draft) = self.composer.take_draft() else {
             return ComponentUpdate::none();
         };
         self.discarded_draft = Some(draft);
@@ -2675,13 +2573,13 @@ impl RootNode {
     }
 
     fn restore_discarded_draft(&mut self) -> ComponentUpdate<RootEffect> {
-        if !self.composer.component().draft().is_empty() {
+        if !self.composer.draft().is_empty() {
             return ComponentUpdate::none();
         }
         let Some(draft) = self.discarded_draft.take() else {
             return ComponentUpdate::none();
         };
-        self.composer.component_mut().restore_draft(draft);
+        self.composer.restore_draft(draft);
         self.notification = Some(Notification::plain(
             "Draft restored.".to_owned(),
             Color::Green,
@@ -2706,28 +2604,28 @@ impl RootNode {
     }
 
     fn turns_cancelled(&mut self) -> ComponentUpdate<RootEffect> {
-        self.queue.component_mut().cancel_steers();
+        self.queue.cancel_steers();
         ComponentUpdate::render(RenderRequest::Immediate)
     }
 
     fn steer_admitted(&mut self, id: QueueId) -> ComponentUpdate<RootEffect> {
-        let applied = self.queue.component_mut().steer_admitted(id);
+        let applied = self.queue.steer_admitted(id);
         self.finish_applied_steer(applied)
     }
 
     fn steer_promoted(&mut self, id: QueueId) -> ComponentUpdate<RootEffect> {
-        let _ = self.queue.component_mut().steer_promoted(id);
+        let _ = self.queue.steer_promoted(id);
         self.turns.start_turn();
         ComponentUpdate::render(RenderRequest::Immediate)
     }
 
     fn steer_failed(&mut self, id: QueueId) -> ComponentUpdate<RootEffect> {
-        self.queue.component_mut().steer_failed(id);
+        self.queue.steer_failed(id);
         self.submit_next_queued()
     }
 
     fn steer_applied(&mut self) -> ComponentUpdate<RootEffect> {
-        let applied = self.queue.component_mut().steer_applied();
+        let applied = self.queue.steer_applied();
         self.finish_applied_steer(applied)
     }
 
@@ -2743,10 +2641,10 @@ impl RootNode {
     }
 
     fn submit_next_queued(&mut self) -> ComponentUpdate<RootEffect> {
-        if self.turns.turn_running() || self.queue.component().has_pending_steer() {
+        if self.turns.turn_running() || self.queue.has_pending_steer() {
             return ComponentUpdate::render(RenderRequest::Immediate);
         }
-        let prompts = self.queue.component_mut().drain_ready();
+        let prompts = self.queue.drain_ready();
         if prompts.is_empty() {
             return ComponentUpdate::render(RenderRequest::Immediate);
         }
@@ -2761,14 +2659,11 @@ impl RootNode {
         let update = self.transcript.update(event);
         let mut render = update.render;
         for effect in update.effects {
-            let composer = self
-                .composer
-                .component_mut()
-                .update(ComposerEvent::Activity {
-                    active: effect.active,
-                    status: effect.status,
-                    now: Instant::now(),
-                });
+            let composer = self.composer.update(ComposerEvent::Activity {
+                active: effect.active,
+                status: effect.status,
+                now: Instant::now(),
+            });
             if composer.changed {
                 render = render.max(RenderRequest::Streaming);
             }
@@ -2893,13 +2788,10 @@ impl RootNode {
         }
         let active = self.subagents.active_count();
         if active != previous_active {
-            let _ = self
-                .composer
-                .component_mut()
-                .update(ComposerEvent::ActiveSubagents {
-                    count: active,
-                    now: Instant::now(),
-                });
+            let _ = self.composer.update(ComposerEvent::ActiveSubagents {
+                count: active,
+                now: Instant::now(),
+            });
         }
         if subagents_changed {
             result.render = result.render.max(RenderRequest::Immediate);
@@ -2946,10 +2838,7 @@ impl Component for RootNode {
         match event {
             RootEvent::Terminal(event) => self.update_terminal(event),
             RootEvent::PasteImage(data_url) => {
-                if self.blocking_task.is_some()
-                    || self.overlay.is_some()
-                    || self.queue.component().focused()
-                {
+                if self.blocking_task.is_some() || self.overlay.is_some() || self.queue.focused() {
                     ComponentUpdate::none()
                 } else {
                     self.update_composer(
@@ -2961,9 +2850,7 @@ impl Component for RootNode {
             RootEvent::ContextBudget(budget) => {
                 self.context_diagnostics.set_native_budget(budget);
                 if let Some(Overlay::ContextDiagnostics(panel)) = &mut self.overlay {
-                    panel
-                        .component_mut()
-                        .replace(self.context_diagnostics.clone());
+                    panel.replace(self.context_diagnostics.clone());
                 }
                 self.update_composer(
                     ComposerEvent::ContextBudget(budget),
@@ -2982,9 +2869,7 @@ impl Component for RootNode {
                 let turn_timer = turn_timer_event(&record);
                 let observation = self.context_diagnostics.observe(&record);
                 if let Some(Overlay::ContextDiagnostics(panel)) = &mut self.overlay {
-                    panel
-                        .component_mut()
-                        .replace(self.context_diagnostics.clone());
+                    panel.replace(self.context_diagnostics.clone());
                 }
                 let mut update = self.update_transcript(TranscriptEvent::Record(record));
                 if let Some(event) = turn_timer {
@@ -3146,15 +3031,13 @@ impl Component for RootNode {
             }
             RootEvent::ShowQrCode(link) => {
                 match QrCodeView::new(&link) {
-                    Ok(view) => self.overlay = Some(Overlay::QrCode(Node::new(view))),
+                    Ok(view) => self.overlay = Some(Overlay::QrCode(view)),
                     Err(error) => self.notification = Some(Notification::plain(error, Color::Red)),
                 }
                 ComponentUpdate::render(RenderRequest::Immediate)
             }
             RootEvent::ConfirmWebInstall => {
-                self.overlay = Some(Overlay::WebInstall(Node::new(
-                    Confirmation::install_web_interface(),
-                )));
+                self.overlay = Some(Overlay::WebInstall(Confirmation::install_web_interface()));
                 ComponentUpdate::render(RenderRequest::Immediate)
             }
             RootEvent::UpdateAvailable(version) => {

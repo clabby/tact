@@ -10,7 +10,7 @@
 
 use super::{
     confirmation::{Confirmation, ConfirmationEffect, ConfirmationEvent},
-    node::{ComponentUpdate, Node, RenderRequest},
+    node::{Component, ComponentUpdate, RenderRequest},
     root::{DraftReset, PaneCommand, RestoredSessionProjection, RootEffect, RootEvent, RootNode},
     sessions::{LiveSession, SessionsEffect, SessionsEvent, SessionsOverlay},
     subagents::subagent_record,
@@ -235,8 +235,8 @@ pub(crate) enum AppEffect {
 }
 
 enum AppOverlay {
-    Sessions(Node<SessionsOverlay>),
-    Quit(Node<Confirmation>),
+    Sessions(SessionsOverlay),
+    Quit(Confirmation),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -272,7 +272,7 @@ struct Published {
 }
 
 struct Pane {
-    root: Node<RootNode>,
+    root: RootNode,
     /// Orders panes by when they were opened.
     sequence: u64,
     /// Absent while the pane's session is still opening.
@@ -312,7 +312,7 @@ impl AppNode {
             panes: HashMap::from([(
                 PaneId::Main,
                 Pane {
-                    root: Node::new(root),
+                    root,
                     sequence: 0,
                     published: None,
                     unread: false,
@@ -349,7 +349,7 @@ impl AppNode {
         let Some(entry) = self.panes.get_mut(&pane) else {
             return ComponentUpdate::none();
         };
-        let update = entry.root.component_mut().load_sessions();
+        let update = entry.root.load_sessions();
         self.map_root_update(pane, update)
     }
 
@@ -630,7 +630,6 @@ impl AppNode {
         let Some(root) = self.pane_mut(pane) else {
             return;
         };
-        let root = root.component_mut();
         let workspace = root.workspace().to_owned();
         let preferred_reasoning_mode = root.preferred_reasoning_mode();
         root.reset_session(
@@ -677,12 +676,9 @@ impl AppNode {
                         ..pane_area
                     };
                     if let Some(entry) = self.panes.get_mut(&pane) {
-                        entry.root.component_mut().render_focused(
-                            frame,
-                            content,
-                            &self.theme,
-                            focus == pane,
-                        );
+                        entry
+                            .root
+                            .render_focused(frame, content, &self.theme, focus == pane);
                     }
                 }
                 frame.render_widget(
@@ -697,12 +693,9 @@ impl AppNode {
                 self.main_area = area;
                 self.fork_area = Rect::default();
                 if let Some(entry) = primary.and_then(|pane| self.panes.get_mut(&pane)) {
-                    entry.root.component_mut().render_focused(
-                        frame,
-                        area,
-                        &self.theme,
-                        primary == Some(focus),
-                    );
+                    entry
+                        .root
+                        .render_focused(frame, area, &self.theme, primary == Some(focus));
                 }
             }
         }
@@ -714,7 +707,7 @@ impl AppNode {
     }
 
     pub(crate) fn root(&self, pane: PaneId) -> Option<&RootNode> {
-        self.pane(pane).map(Node::component)
+        self.panes.get(&pane).map(|entry| &entry.root)
     }
 
     pub(crate) fn animation_deadline(&self) -> Option<Instant> {
@@ -841,14 +834,14 @@ impl AppNode {
 
     fn open_sessions_overlay(&mut self) {
         let overlay = SessionsOverlay::new(self.live_sessions(), self.new_session_availability());
-        self.overlay = Some(AppOverlay::Sessions(Node::new(overlay)));
+        self.overlay = Some(AppOverlay::Sessions(overlay));
     }
 
     fn refresh_sessions_overlay(&mut self) {
         let sessions = self.live_sessions();
         let availability = self.new_session_availability();
         if let Some(AppOverlay::Sessions(overlay)) = &mut self.overlay {
-            overlay.component_mut().set_sessions(sessions, availability);
+            overlay.set_sessions(sessions, availability);
         }
     }
 
@@ -864,7 +857,7 @@ impl AppNode {
         panes
             .into_iter()
             .map(|(&pane, entry)| {
-                let root = entry.root.component();
+                let root = &entry.root;
                 let busy = root.busy();
                 LiveSession {
                     pane,
@@ -959,9 +952,9 @@ impl AppNode {
                     if running == 0 {
                         effects.push(AppEffect::Shutdown);
                     } else {
-                        self.overlay = Some(AppOverlay::Quit(Node::new(
+                        self.overlay = Some(AppOverlay::Quit(
                             Confirmation::quit_with_running_sessions(running),
-                        )));
+                        ));
                         render = RenderRequest::Immediate;
                     }
                 }
@@ -980,16 +973,14 @@ impl AppNode {
         self.panes
             .iter()
             .filter(|(pane, entry)| {
-                let busy = entry.root.component().busy();
+                let busy = entry.root.busy();
                 !displayed.contains(pane) && (busy.turns > 0 || busy.shells > 0)
             })
             .count()
     }
 
     fn roots_mut(&mut self) -> impl Iterator<Item = &mut RootNode> {
-        self.panes
-            .values_mut()
-            .map(|entry| entry.root.component_mut())
+        self.panes.values_mut().map(|entry| &mut entry.root)
     }
 
     fn set_theme_mode(&mut self, mode: ThemeMode) {
@@ -1036,7 +1027,7 @@ impl AppNode {
         self.panes.insert(
             pane,
             Pane {
-                root: Node::new(root),
+                root,
                 sequence,
                 published: None,
                 unread: false,
@@ -1074,7 +1065,7 @@ impl AppNode {
 
     pub(crate) fn set_pane_workspace(&mut self, pane: PaneId, workspace: PathBuf) {
         if let Some(root) = self.pane_mut(pane) {
-            root.component_mut().set_workspace(workspace);
+            root.set_workspace(workspace);
         }
     }
 
@@ -1195,7 +1186,6 @@ impl AppNode {
         for (&pane, entry) in &mut self.panes {
             entry
                 .root
-                .component_mut()
                 .set_fork_available(can_split && primary == Some(pane));
         }
         self.refresh_sessions_overlay();
@@ -1220,11 +1210,7 @@ impl AppNode {
         })
     }
 
-    fn pane(&self, pane: PaneId) -> Option<&Node<RootNode>> {
-        self.panes.get(&pane).map(|entry| &entry.root)
-    }
-
-    fn pane_mut(&mut self, pane: PaneId) -> Option<&mut Node<RootNode>> {
+    fn pane_mut(&mut self, pane: PaneId) -> Option<&mut RootNode> {
         self.panes.get_mut(&pane).map(|entry| &mut entry.root)
     }
 
@@ -1241,7 +1227,7 @@ impl AppNode {
             return;
         };
         let previous = entry.published.take();
-        let root = entry.root.component();
+        let root = &entry.root;
         let settings = Settings::of(root);
         let published = Published {
             session,
@@ -1298,7 +1284,7 @@ impl AppNode {
         };
         let mut running = 0;
         for (&pane, entry) in panes.iter_mut() {
-            let root = entry.root.component();
+            let root = &entry.root;
             let busy = root.busy();
             let is_running = busy.turns > 0 || busy.shells > 0;
             running += usize::from(is_running);
@@ -1379,12 +1365,7 @@ impl AppNode {
         });
         let mut render = RenderRequest::None;
         for entry in panes.values_mut() {
-            render = render.max(
-                entry
-                    .root
-                    .component_mut()
-                    .set_live_sessions(summary.clone()),
-            );
+            render = render.max(entry.root.set_live_sessions(summary.clone()));
         }
         render
     }
@@ -1469,10 +1450,7 @@ impl AppNode {
             }
         };
         let pane = self.live_pane(&session)?;
-        let root = self
-            .pane_mut(pane)
-            .expect("live panes have a root")
-            .component_mut();
+        let root = self.pane_mut(pane).expect("live panes have a root");
         let update = root.remote_command(command)?;
         Ok(self.map_root_update(pane, update))
     }
@@ -1597,7 +1575,6 @@ mod tests {
         let mut app = app();
         app.pane_mut(PaneId::Main)
             .unwrap()
-            .component_mut()
             .set_model(Model::Claude(nanocodex::ClaudeModel::Opus55));
         app.update(AppEvent::ContextBudget {
             pane: PaneId::Main,
@@ -3097,7 +3074,6 @@ mod parity_tests {
             .app
             .pane_mut(PaneId::Main)
             .unwrap()
-            .component_mut()
             .set_model(Model::Claude(ClaudeModel::Sonnet55));
         assert!(matches!(
             harness.command(Command::SetReasoningMode {

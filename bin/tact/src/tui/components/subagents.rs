@@ -2,7 +2,7 @@
 
 use super::{
     floating::Floating,
-    node::Node,
+    node::Component,
     subagent_tree_layout::{
         LayoutNode, NODE_HEIGHT, NODE_WIDTH, NodePosition, TreeLayout, VERTICAL_GAP, WorldPoint,
     },
@@ -126,7 +126,7 @@ struct Camera {
 
 pub(super) struct SubagentTree {
     roster: SubagentRoster,
-    transcripts: HashMap<AgentId, Node<Transcript>>,
+    transcripts: HashMap<AgentId, Transcript>,
     focused: Option<AgentId>,
     remembered_children: HashMap<AgentId, AgentId>,
     camera: Camera,
@@ -152,13 +152,13 @@ impl SubagentTree {
     pub(super) fn set_workspace(&mut self, workspace: &std::path::Path) {
         self.workspace = workspace.to_path_buf();
         for transcript in self.transcripts.values_mut() {
-            transcript.component_mut().set_workspace(workspace);
+            transcript.set_workspace(workspace);
         }
     }
 
     pub(super) fn refresh_terminal_images(&mut self) {
         for transcript in self.transcripts.values_mut() {
-            transcript.component_mut().refresh_terminal_images();
+            transcript.refresh_terminal_images();
         }
     }
 
@@ -175,7 +175,7 @@ impl SubagentTree {
                 self.transcripts.entry(id).or_insert_with(|| {
                     let mut transcript = Transcript::with_effort(self.effort);
                     transcript.set_workspace(&self.workspace);
-                    Node::new(transcript)
+                    transcript
                 });
                 self.focused.get_or_insert(id);
                 roster_changed
@@ -223,7 +223,7 @@ impl SubagentTree {
     pub(super) fn set_effort(&mut self, effort: crate::app::config::ReasoningEffort) {
         self.effort = effort;
         for transcript in self.transcripts.values_mut() {
-            transcript.component_mut().set_effort(effort);
+            transcript.set_effort(effort);
         }
     }
 
@@ -248,7 +248,7 @@ impl SubagentTree {
     pub(super) fn animation_deadline(&self) -> Option<Instant> {
         self.transcripts
             .values()
-            .filter_map(|transcript| transcript.component().animation_deadline())
+            .filter_map(|transcript| transcript.animation_deadline())
             .chain(
                 self.camera
                     .animation
@@ -352,7 +352,7 @@ impl SubagentTree {
             let Some(transcript) = self.transcripts.get_mut(&id) else {
                 return Some(SubagentEffect::Back);
             };
-            if transcript.component().expandables_focused() {
+            if transcript.expandables_focused() {
                 transcript.update(TranscriptEvent::BlurExpandables);
                 return None;
             }
@@ -361,15 +361,12 @@ impl SubagentTree {
         let Some(transcript) = self.transcripts.get_mut(&id) else {
             return Some(SubagentEffect::Back);
         };
-        if let Some(destination) = transcript.component().link_destination(&event) {
+        if let Some(destination) = transcript.link_destination(&event) {
             return Some(SubagentEffect::OpenLink(destination.to_string()));
         }
-        if let Some(command) = transcript
-            .component()
-            .scroll_command(&event, mouse_scroll_lines)
-        {
+        if let Some(command) = transcript.scroll_command(&event, mouse_scroll_lines) {
             transcript.update(TranscriptEvent::Scroll(command));
-        } else if let Some(command) = transcript.component().expandable_command(&event) {
+        } else if let Some(command) = transcript.expandable_command(&event) {
             transcript.update(TranscriptEvent::Expandable(command));
         }
         None
@@ -466,7 +463,7 @@ impl SubagentTree {
             node.thinking,
             node.id
         );
-        let keys: &[(&str, &str)] = if transcript.component().expandables_focused() {
+        let keys: &[(&str, &str)] = if transcript.expandables_focused() {
             &FOCUSED_ENTRY_KEYS
         } else {
             &TRANSCRIPT_KEYS
@@ -1238,11 +1235,7 @@ mod tests {
             }),
             NonZeroU16::new(3).unwrap(),
         );
-        assert!(
-            tree.transcripts[&AgentId::new(1)]
-                .component()
-                .expandables_focused()
-        );
+        assert!(tree.transcripts[&AgentId::new(1)].expandables_focused());
     }
 
     fn second_descriptor() -> AgentDescriptor {
@@ -1347,11 +1340,7 @@ mod tests {
         );
 
         let expanded = rendered_text(&render_agent_transcript(&mut tree, AgentId::new(1)));
-        assert!(
-            tree.transcripts[&AgentId::new(1)]
-                .component()
-                .expandables_focused()
-        );
+        assert!(tree.transcripts[&AgentId::new(1)].expandables_focused());
         assert!(expanded.contains("▼"), "{expanded}");
         assert!(expanded.contains("Can you verify the event ordering?"));
         assert!(expanded.contains("thread #1 · 2 messages"));
@@ -1907,11 +1896,7 @@ mod tests {
             tree.update_transcript(AgentId::new(1), escape(), NonZeroU16::new(3).unwrap())
                 .is_none()
         );
-        assert!(
-            !tree.transcripts[&AgentId::new(1)]
-                .component()
-                .expandables_focused()
-        );
+        assert!(!tree.transcripts[&AgentId::new(1)].expandables_focused());
         assert!(matches!(
             tree.update_transcript(AgentId::new(1), escape(), NonZeroU16::new(3).unwrap()),
             Some(SubagentEffect::Back)
