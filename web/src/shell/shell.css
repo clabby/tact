@@ -322,7 +322,7 @@ diffs-container { --diffs-light-bg: var(--bg); --diffs-dark-bg: var(--bg); }
 .tool-state { position: relative; width: 14px; height: 14px; flex: none; display: grid; place-items: center; }
 .tool-state::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--success); }
 .entry-tool[data-state="failed"] .tool-state::before, .turn-fold[data-state="failed"] .tool-state::before { background: var(--danger); }
-:is(.entry-tool, .step-group, .agent-line)[data-state="running"] .tool-state { color: var(--accent); }
+:is(.entry-tool, .agent-line)[data-state="running"] .tool-state, .step-group[data-state="running"] > .group-row .tool-state { color: var(--accent); }
 /* A failure that a later identical call made good is history, not a problem. */
 .entry-tool[data-recovered] .tool-state::before { background: var(--faint); }
 .tool-name { flex: none; width: 64px; overflow: hidden; color: var(--text); font: 600 var(--text-sm)/1.4 var(--font-ui); text-overflow: ellipsis; white-space: nowrap; }
@@ -955,7 +955,7 @@ button.outcome-item:hover { text-decoration: underline; text-underline-offset: 3
   75%   { --c1: .2;  --c2: .2;  --c3: .45; --c4: 1; }
   100%  { --c1: 1;   --c2: .2;  --c3: .2;  --c4: .45; }
 }
-.spinner, :is(.entry-tool, .step-group, .agent-line)[data-state="running"] .tool-state::before, .review-panel .activity-spinner {
+.spinner, :is(.entry-tool, .agent-line)[data-state="running"] .tool-state::before, .step-group[data-state="running"] > .group-row .tool-state::before, .review-panel .activity-spinner {
   display: inline-block; flex: none; box-sizing: border-box; width: 12px; height: 12px; margin: 0; border: 0; border-radius: 0;
   background:
     radial-gradient(circle at 24% 24%, color-mix(in srgb, currentColor calc(var(--c1) * 100%), transparent) 0, color-mix(in srgb, currentColor calc(var(--c1) * 100%), transparent) 17%, transparent 19%),

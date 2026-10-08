@@ -10,7 +10,7 @@ import type { Theme } from "../core/theme";
 import { promptParts } from "./user-prompt";
 import { presentDetail, TOOL_DEFAULT_OPEN, toolLabel } from "./tool-detail";
 import { renderThread, type Participants } from "./directed";
-import { runLabel, runOpen, type ToolEntry } from "./routine";
+import { runLabel, runSpan, type ToolEntry } from "./routine";
 import { resultText, turnMarkdown, turnOutcome, type TurnOutcome } from "./outcome";
 import { planTurn, segmentTurns, type LogItem, type Turn, type TurnPlan } from "./turns";
 import { firstUnseen, latestEntry, newSinceLabel, readSeen, writeSeen, type Seen } from "./seen";
@@ -109,8 +109,8 @@ export class Transcript {
   private readonly signatures = new Map<number, string>();
   /** The reader's fold choice per turn, which outlives re-renders; absent turns use the default. */
   private readonly folds = new Map<number, boolean>();
-  /** Groups, by key, whose open state the reader flipped from the default. */
-  private readonly toggledGroups = new Set<number>();
+  /** Groups, by key, the reader has opened; every group starts closed and stays as the reader left it. */
+  private readonly openGroups = new Set<number>();
 
   private seen: Seen | null = null;
   private newSince: { id: number; label: string } | null = null;
@@ -211,7 +211,7 @@ export class Transcript {
       this.lazy.disconnect();
       this.turns = [];
       for (const map of [this.turnOf, this.turnByKey, this.shapes, this.plans, this.views, this.contexts, this.signatures, this.folds]) map.clear();
-      this.toggledGroups.clear();
+      this.openGroups.clear();
       this.dirtyTurns.clear();
       this.relayoutAll = true;
       this.list.replaceChildren();
@@ -286,7 +286,7 @@ export class Transcript {
     for (let parent = this.source.data.entries.get(row)?.parent; parent != null && turn.body.includes(parent); parent = this.source.data.entries.get(row)?.parent) row = parent;
     const group = plan.log.find((item): item is Extract<LogItem, { kind: "group" }> => item.kind === "group" && item.members.includes(row));
     if (group && !this.groupOpen(group)) {
-      if (!this.toggledGroups.delete(group.key)) this.toggledGroups.add(group.key);
+      if (!this.openGroups.delete(group.key)) this.openGroups.add(group.key);
       changed = true;
     }
     if (changed) {
@@ -540,7 +540,7 @@ export class Transcript {
     }
     const entries = this.source!.data.entries;
     const calls = this.groupCalls(item);
-    const open = runOpen(calls, this.toggledGroups.has(item.key));
+    const open = this.openGroups.has(item.key);
     group.dataset.key = String(item.key);
     group.dataset.state = calls.some((call) => call.state === "running") ? "running" : "succeeded";
     group.classList.toggle("open", open);
@@ -548,8 +548,14 @@ export class Transcript {
     const label = runLabel(calls);
     group.querySelector(".tool-name")!.textContent = label.verb;
     group.querySelector(".tool-summary")!.textContent = label.summary;
-    const total = calls.reduce((sum, call) => sum + (call.duration_ns ?? 0), 0);
-    group.querySelector(".tool-meta")!.textContent = total ? formatDuration(total) : "";
+    const span = runSpan(calls);
+    group.querySelector(".tool-meta")!.textContent = span ? formatDuration(span.ns) : "";
+    if (span?.live) {
+      group.dataset.since = String(performance.now() - span.ns / 1e6);
+      if (!this.clockTimer) this.clockTimer = window.setInterval(this.tickClocks, 1000);
+    } else {
+      delete group.dataset.since;
+    }
     const first = entries.get(item.key);
     group.querySelector(".entry-link")?.remove();
     if (first) {
@@ -568,7 +574,7 @@ export class Transcript {
   }
 
   private groupOpen(item: Extract<LogItem, { kind: "group" }>) {
-    return runOpen(this.groupCalls(item), this.toggledGroups.has(item.key));
+    return this.openGroups.has(item.key);
   }
 
   private entryOf(node: HTMLElement) {
@@ -862,9 +868,9 @@ export class Transcript {
   /** Refreshes every running tool call's clock; the timer stops once none remain. */
   private tickClocks = () => {
     const now = performance.now();
-    const running = this.list.querySelectorAll<HTMLElement>(".entry-tool[data-since]");
+    const running = this.list.querySelectorAll<HTMLElement>(":is(.entry-tool, .step-group)[data-since]");
     for (const element of running) {
-      const clock = element.querySelector(".tool-clock");
+      const clock = element.classList.contains("step-group") ? element.querySelector(".group-row .tool-meta") : element.querySelector(".tool-clock");
       if (clock) clock.textContent = formatDuration((now - Number(element.dataset.since)) * 1e6);
     }
     if (!running.length) {
@@ -1103,7 +1109,7 @@ export class Transcript {
     const groupRow = target.closest<HTMLElement>(".group-row");
     if (groupRow) {
       const key = Number(groupRow.closest<HTMLElement>(".step-group")!.dataset.key);
-      if (!this.toggledGroups.delete(key)) this.toggledGroups.add(key);
+      if (!this.openGroups.delete(key)) this.openGroups.add(key);
       const turn = this.turnOf.get(key);
       if (turn) this.relayout(turn.key);
       return;

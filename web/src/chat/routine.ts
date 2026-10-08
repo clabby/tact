@@ -62,9 +62,17 @@ export function runLabel(calls: readonly ToolEntry[]): { verb: string; summary: 
 }
 
 /**
- * Whether a folded run shows its calls. A run with a running call opens by default so the live
- * call stays in sight; the reader's toggle inverts the default.
+ * How long a folded run has taken: from its earliest call's start to now while a call runs, else to
+ * the end of its latest call. Everything is measured on the server's clock, anchored at a running
+ * call's reported elapsed time, so the browser's clock cannot skew it. `live` marks a span that is
+ * still growing; `null` means the server sent no start times.
  */
-export function runOpen(calls: readonly ToolEntry[], toggled: boolean) {
-  return calls.some((call) => call.state === "running") !== toggled;
+export function runSpan(calls: readonly ToolEntry[]): { ns: number; live: boolean } | null {
+  const starts = calls.flatMap((call) => (call.at_ms == null ? [] : [call.at_ms]));
+  if (starts.length !== calls.length || !calls.length) return null;
+  const first = Math.min(...starts);
+  const running = calls.find((call) => call.state === "running" && call.elapsed_ns != null);
+  if (running) return { ns: running.elapsed_ns! + (running.at_ms! - first) * 1e6, live: true };
+  const end = Math.max(...calls.map((call) => call.at_ms! + (call.duration_ns ?? 0) / 1e6));
+  return { ns: (end - first) * 1e6, live: false };
 }

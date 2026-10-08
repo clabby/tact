@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { isRoutine, runLabel, runOpen, type ToolEntry } from "./routine";
+import { isRoutine, runLabel, runSpan, type ToolEntry } from "./routine";
 import { transcript } from "./test-entries";
 
 test("only routine calls with rows of their own can fold", () => {
@@ -53,14 +53,25 @@ test("while a call runs, the run's header names it", () => {
   expect(runLabel(u.entries as ToolEntry[])).toEqual({ verb: "Exploring", summary: "rust select" });
 });
 
-test("a run with a running call is open unless the reader closed it", () => {
+test("a settled run spans its first start to its latest end", () => {
   const t = transcript();
-  t.tool("exec_command", "ls");
-  const running = t.tool("exec_command", "cargo test", { state: "running" });
+  t.tool("exec_command", "a", { at_ms: 10_000, duration: 2_000_000_000 });
+  t.tool("exec_command", "b", { at_ms: 11_000, duration: 5_000_000_000 });
+  t.tool("exec_command", "c", { at_ms: 15_000, duration: 1_000_000_000 });
+  expect(runSpan(t.entries as ToolEntry[])).toEqual({ ns: 6_000_000_000, live: false });
+});
+
+test("a running run spans its first start to now, as the running call reports it", () => {
+  const t = transcript();
+  t.tool("exec_command", "a", { at_ms: 10_000, duration: 2_000_000_000 });
+  const running = t.tool("exec_command", "b", { state: "running", at_ms: 14_000 });
   const calls = t.entries as ToolEntry[];
-  expect(runOpen(calls, false)).toBe(true);
-  expect(runOpen(calls, true)).toBe(false);
-  Object.assign(calls[running - 1]!, { state: "succeeded" });
-  expect(runOpen(calls, false)).toBe(false);
-  expect(runOpen(calls, true)).toBe(true);
+  Object.assign(calls[running - 1]!, { elapsed_ns: 3_000_000_000, duration_ns: null });
+  expect(runSpan(calls)).toEqual({ ns: 7_000_000_000, live: true });
+});
+
+test("a run without start times has no span", () => {
+  const t = transcript();
+  t.tool("exec_command", "a");
+  expect(runSpan(t.entries as ToolEntry[])).toBeNull();
 });
