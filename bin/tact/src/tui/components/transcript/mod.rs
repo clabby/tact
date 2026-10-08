@@ -38,8 +38,8 @@ use super::{
 use crate::{
     app::{config::ReasoningEffort, theme::Theme},
     core::transcript::{
-        EntryId, EntryKind, ToolState, TranscriptEntry, TranscriptModel, TranscriptRecord,
-        TransientStatus,
+        EntryId, EntryKind, RecordSource, ToolState, TranscriptEntry, TranscriptModel,
+        TranscriptRecord, TransientStatus,
     },
     tui::{format::format_duration, spinner::Spinner},
 };
@@ -274,7 +274,7 @@ impl Transcript {
             .collect();
         let render = if !change.changed {
             RenderRequest::None
-        } else if record.source() == "tact" {
+        } else if record.source() == RecordSource::Tact {
             RenderRequest::Immediate
         } else {
             RenderRequest::Streaming

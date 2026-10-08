@@ -7,7 +7,7 @@ use crate::{
         transcript::{LocalEvent, SessionStarted},
     },
 };
-use nanocodex::agent::events::AgentEvent;
+use nanocodex::agent::events::{AgentEvent, AgentEventKind};
 use std::{
     path::{Path, PathBuf},
     sync::{
@@ -158,7 +158,7 @@ impl TranscriptJournal {
         drop(self.start_if_needed()?);
         let record = TranscriptRecord::from_agent(self.next_sequence, unix_milliseconds(), event);
         self.next_sequence = self.next_sequence.saturating_add(1);
-        if record.kind() == "api.event" {
+        if record.agent_kind() == Some(AgentEventKind::ApiEvent) {
             if let Some((prompt_cache, previous_response)) = outbound_context_snapshot(&record) {
                 self.append_local_record(LocalEvent::ContextObserved {
                     prompt_cache,
@@ -346,7 +346,7 @@ mod tests {
         core::{
             session,
             storage::{SessionStorage, database_path},
-            transcript::{LocalEvent, SessionStarted, TurnId},
+            transcript::{LocalEvent, LocalKind, SessionStarted, TurnId},
         },
     };
     use nanocodex::agent::events::{AgentEvent, AgentEventKind};
@@ -394,13 +394,13 @@ mod tests {
 
         let records = session::load_transcript(&config, "session").unwrap();
         assert_eq!(records.len(), 3);
-        assert_eq!(records[0].kind(), "session.started");
+        assert_eq!(records[0].local_kind(), Some(LocalKind::SessionStarted));
         assert_eq!(
             records[0].decode_payload::<SessionStarted>().unwrap().speed,
             Speed::Ultrafast
         );
-        assert_eq!(records[1].kind(), "user.submitted");
-        assert_eq!(records[2].kind(), "speed.changed");
+        assert_eq!(records[1].local_kind(), Some(LocalKind::UserSubmitted));
+        assert_eq!(records[2].local_kind(), Some(LocalKind::SpeedChanged));
         assert_eq!(
             records[2].decode_payload::<Value>().unwrap(),
             json!({"from": "ultrafast", "to": "fast"})
@@ -426,7 +426,7 @@ mod tests {
             .load_records("fork")
             .unwrap();
         assert_eq!(records.len(), 1);
-        assert_eq!(records[0].kind(), "session.started");
+        assert_eq!(records[0].local_kind(), Some(LocalKind::SessionStarted));
         drop(journal);
         writer.into_task().await.unwrap().unwrap();
     }
@@ -470,14 +470,14 @@ mod tests {
         assert_eq!(
             records
                 .iter()
-                .filter(|record| record.kind() == "session.started")
+                .filter(|record| record.local_kind() == Some(LocalKind::SessionStarted))
                 .count(),
             3
         );
         assert_eq!(
             records
                 .iter()
-                .filter(|record| record.kind() == "user.submitted")
+                .filter(|record| record.local_kind() == Some(LocalKind::UserSubmitted))
                 .count(),
             2
         );
@@ -511,7 +511,7 @@ mod tests {
                 .into(),
             })
             .unwrap();
-        assert_eq!(live.kind(), "api.event");
+        assert_eq!(live.agent_kind(), Some(AgentEventKind::ApiEvent));
         drop(journal);
         writer.into_task().await.unwrap().unwrap();
 
@@ -521,9 +521,15 @@ mod tests {
             .unwrap();
         let kinds = records
             .iter()
-            .map(|record| record.kind())
+            .map(|record| record.local_kind())
             .collect::<Vec<_>>();
-        assert_eq!(kinds, ["session.started", "context.observed"]);
+        assert_eq!(
+            kinds,
+            [
+                Some(LocalKind::SessionStarted),
+                Some(LocalKind::ContextObserved)
+            ]
+        );
         let observed: serde_json::Value = records[1].decode_payload().unwrap();
         assert!(!observed.to_string().contains(marker), "{observed}");
     }
@@ -573,8 +579,11 @@ mod tests {
 
         let records = session::load_transcript(&config, "session").unwrap();
         assert_eq!(records.len(), 2);
-        assert_eq!(records[0].kind(), "session.started");
-        assert_eq!(records[1].kind(), "assistant.message");
+        assert_eq!(records[0].local_kind(), Some(LocalKind::SessionStarted));
+        assert_eq!(
+            records[1].agent_kind(),
+            Some(AgentEventKind::AssistantMessage)
+        );
     }
 
     #[tokio::test]
@@ -616,14 +625,14 @@ mod tests {
         assert_eq!(
             records
                 .iter()
-                .filter(|record| record.kind() == "assistant.delta")
+                .filter(|record| record.agent_kind() == Some(AgentEventKind::AssistantDelta))
                 .count(),
             1
         );
         assert_eq!(
             records
                 .iter()
-                .filter(|record| record.kind() == "assistant.message")
+                .filter(|record| record.agent_kind() == Some(AgentEventKind::AssistantMessage))
                 .count(),
             1
         );

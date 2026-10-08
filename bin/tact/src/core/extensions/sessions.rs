@@ -417,8 +417,11 @@ fn bounded_output(
             output.scanned_records = output.scanned_records.saturating_add(1);
             scanned_bytes = scanned_bytes.saturating_add(stored.encoded_bytes);
             let records_remain = index.saturating_add(1) < page_records || storage_has_more;
-            let matches_kind =
-                kinds.is_none_or(|kinds| kinds.iter().any(|kind| kind == stored.record.kind()));
+            let matches_kind = kinds.is_none_or(|kinds| {
+                kinds
+                    .iter()
+                    .any(|kind| kind == stored.record.kind().as_str())
+            });
             let text_match = contains_any.and_then(|patterns| {
                 patterns.iter().find_map(|pattern| {
                     find_ignore_ascii_case(stored.record.payload_json(), pattern)

@@ -10,7 +10,8 @@ use crate::{
         shell::ShellExecution,
         subagent_updates::ForwardedSubagentUpdate,
         transcript::{
-            LocalEvent, SessionEnded, SessionOutcome, SessionStarted, TranscriptRecord, TurnId,
+            LocalEvent, LocalKind, SessionEnded, SessionOutcome, SessionStarted, TranscriptRecord,
+            TurnId,
         },
         worker::WorkerCommand,
     },
@@ -89,10 +90,10 @@ impl Harness {
         }
     }
 
-    fn transcript_kinds(&self, session_id: &str) -> Vec<String> {
+    fn transcript_kinds(&self, session_id: &str) -> Vec<Option<LocalKind>> {
         self.transcript(session_id)
             .iter()
-            .map(|record| record.kind().to_owned())
+            .map(|record| record.local_kind())
             .collect()
     }
 
@@ -160,7 +161,11 @@ async fn fork_pane_has_an_independent_session_and_persisted_transcript() {
     assert!(harness.transcript("main-session").is_empty());
     assert_eq!(
         harness.transcript_kinds("fork-session"),
-        ["session.started", "user.submitted", "session.ended"]
+        [
+            Some(LocalKind::SessionStarted),
+            Some(LocalKind::UserSubmitted),
+            Some(LocalKind::SessionEnded)
+        ]
     );
     let started = harness.transcript("fork-session")[0]
         .decode_payload::<SessionStarted>()
@@ -227,7 +232,11 @@ async fn closing_a_pane_while_a_shell_runs_removes_it_once_its_agent_stream_ends
     harness.drain_writers(1).await;
     assert_eq!(
         harness.transcript_kinds("session"),
-        ["session.started", "shell.started", "session.ended"]
+        [
+            Some(LocalKind::SessionStarted),
+            Some(LocalKind::ShellStarted),
+            Some(LocalKind::SessionEnded)
+        ]
     );
 }
 

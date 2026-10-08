@@ -2,8 +2,11 @@
 
 use crate::{
     app::config::{ReasoningEffort, ReasoningMode, Speed},
-    core::transcript::{SCHEMA_VERSION, SessionStarted, TerminalStopReason, TranscriptRecord},
+    core::transcript::{
+        LocalKind, SCHEMA_VERSION, SessionStarted, TerminalStopReason, TranscriptRecord,
+    },
 };
+use nanocodex::agent::events::AgentEventKind;
 use rusqlite::{
     Connection, OpenFlags, OptionalExtension, Transaction, ffi::ErrorCode, params,
     params_from_iter, types::Value,
@@ -235,7 +238,7 @@ impl SessionStorage {
         let mut active_turn = self.active_turns.get(session_id).copied();
         let mut encoded = Vec::new();
         for record in records {
-            if record.source() == "tact" && record.kind() == "worker.turn_accepted" {
+            if record.local_kind() == Some(LocalKind::WorkerTurnAccepted) {
                 #[derive(serde::Deserialize)]
                 struct AcceptedTurn {
                     id: u64,
@@ -754,13 +757,13 @@ fn append_record(
     record: &TranscriptRecord,
     encoded: &[u8],
 ) -> Result<(), StorageError> {
-    if record.source() == "tact" && record.kind() == "session.started" {
+    if record.local_kind() == Some(LocalKind::SessionStarted) {
         let started = record.decode_payload::<SessionStarted>()?;
         upsert_session(transaction, path, record, &started)?;
     }
     let prompt_text = prompt_text(record)?;
     let assistant_stream = assistant_stream(active_turn, record)?;
-    if record.kind() == "assistant.message"
+    if record.agent_kind() == Some(AgentEventKind::AssistantMessage)
         && let Some(stream) = &assistant_stream
     {
         transaction
@@ -782,7 +785,7 @@ fn append_record(
                 prompt_text
                     .as_ref()
                     .map(|_| to_sql_u64(record.recorded_at_unix_ms())),
-                (record.kind() == "assistant.delta")
+                (record.agent_kind() == Some(AgentEventKind::AssistantDelta))
                     .then_some(assistant_stream)
                     .flatten()
             ],
@@ -849,7 +852,10 @@ fn prompt_text(record: &TranscriptRecord) -> Result<Option<String>, serde_json::
     struct Prompt {
         text: String,
     }
-    if record.source() != "tact" || !matches!(record.kind(), "user.submitted" | "user.steered") {
+    if !matches!(
+        record.local_kind(),
+        Some(LocalKind::UserSubmitted | LocalKind::UserSteered)
+    ) {
         return Ok(None);
     }
     Ok(Some(record.decode_payload::<Prompt>()?.text))
@@ -864,7 +870,10 @@ fn assistant_stream(
         model_call_index: u32,
         phase: Option<serde_json::Value>,
     }
-    if !matches!(record.kind(), "assistant.delta" | "assistant.message") {
+    if !matches!(
+        record.agent_kind(),
+        Some(AgentEventKind::AssistantDelta | AgentEventKind::AssistantMessage)
+    ) {
         return Ok(None);
     }
     let assistant = record.decode_payload::<AssistantRecord>()?;
@@ -889,8 +898,8 @@ fn update_settings(
     struct FastModeChanged {
         to: bool,
     }
-    match (record.source(), record.kind()) {
-        ("tact", "effort.changed") => {
+    match record.local_kind() {
+        Some(LocalKind::EffortChanged) => {
             let effort = serde_json::to_string(&record.decode_payload::<EffortChanged>()?.to)?;
             transaction
                 .execute(
@@ -899,8 +908,8 @@ fn update_settings(
                 )
                 .map_err(|source| query(path, source))?;
         }
-        ("tact", "speed.changed" | "fast_mode.changed") => {
-            let enabled = if record.kind() == "speed.changed" {
+        Some(LocalKind::SpeedChanged | LocalKind::FastModeChanged) => {
+            let enabled = if record.local_kind() == Some(LocalKind::SpeedChanged) {
                 record.decode_payload::<SpeedChanged>()?.to != Speed::Standard
             } else {
                 record.decode_payload::<FastModeChanged>()?.to
@@ -995,7 +1004,7 @@ mod tests {
     use super::{SessionStorage, StorageError, database_path};
     use crate::{
         app::config::{ReasoningEffort, ReasoningMode, Speed},
-        core::transcript::{LocalEvent, SessionStarted, TranscriptRecord, TurnId},
+        core::transcript::{LocalEvent, LocalKind, SessionStarted, TranscriptRecord, TurnId},
     };
     use rusqlite::Connection;
     use serde_json::{Value, json};
@@ -1047,7 +1056,7 @@ mod tests {
                 .iter()
                 .zip([Speed::Ultrafast, Speed::Fast, Speed::Standard])
         {
-            assert_eq!(record.kind(), "speed.changed");
+            assert_eq!(record.local_kind(), Some(LocalKind::SpeedChanged));
             assert_eq!(record.decode_payload::<Value>().unwrap()["to"], json!(to));
         }
     }

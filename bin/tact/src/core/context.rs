@@ -1,6 +1,7 @@
 //! Content-free context diagnostics projected from transcript telemetry.
 
-use crate::core::transcript::TranscriptRecord;
+use crate::core::transcript::{LocalKind, TranscriptRecord};
+use nanocodex::agent::events::AgentEventKind;
 use nanocodex::oai::{
     self,
     events::{CompactionStarted, ModelCallCompleted},
@@ -102,14 +103,11 @@ impl ContextDiagnostics {
     }
 
     pub(crate) fn observe(&mut self, record: &TranscriptRecord) -> ContextObservation {
-        match (record.source(), record.kind()) {
-            ("agent", "api.event") => self.observe_api_event(record),
-            ("agent", "model.call.completed") => self.observe_model_call_completed(record),
-            ("agent", "run.started") => {
-                self.manual_compaction = false;
-                ContextObservation::default()
-            }
-            ("tact", "compaction.started") => {
+        if let Some(kind) = record.agent_kind() {
+            return self.observe_agent(kind, record);
+        }
+        match record.local_kind() {
+            Some(LocalKind::CompactionStarted) => {
                 self.manual_compaction = true;
                 self.compactions_started = self.compactions_started.saturating_add(1);
                 self.last_compaction = Some(CompactionDiagnostics {
@@ -122,7 +120,7 @@ impl ContextDiagnostics {
                 self.awaiting_post_compaction_usage = false;
                 ContextObservation::default()
             }
-            ("tact", "compaction.finished") => {
+            Some(LocalKind::CompactionFinished) => {
                 #[derive(Deserialize)]
                 struct Finished {
                     error: Option<String>,
@@ -132,20 +130,7 @@ impl ContextDiagnostics {
                 }
                 ContextObservation::default()
             }
-            ("agent", "model.compaction.started" | "model.compaction.completed")
-                if self.manual_compaction =>
-            {
-                ContextObservation::default()
-            }
-            ("agent", "model.compaction.started") => {
-                self.observe_compaction_started(record);
-                ContextObservation::default()
-            }
-            ("agent", "model.compaction.completed") => {
-                self.observe_compaction_completed(record);
-                ContextObservation::default()
-            }
-            ("tact", "context.budget") => {
+            Some(LocalKind::ContextBudget) => {
                 let Ok(budget) = record.decode_payload::<ContextBudget>() else {
                     return ContextObservation::default();
                 };
@@ -157,8 +142,37 @@ impl ContextDiagnostics {
                     completed_tokens: Some(budget.active_tokens),
                 }
             }
-            ("tact", "context.observed") => {
+            Some(LocalKind::ContextObserved) => {
                 self.observe_context_snapshot(record);
+                ContextObservation::default()
+            }
+            _ => ContextObservation::default(),
+        }
+    }
+
+    fn observe_agent(
+        &mut self,
+        kind: AgentEventKind,
+        record: &TranscriptRecord,
+    ) -> ContextObservation {
+        match kind {
+            AgentEventKind::ApiEvent => self.observe_api_event(record),
+            AgentEventKind::ModelCallCompleted => self.observe_model_call_completed(record),
+            AgentEventKind::RunStarted => {
+                self.manual_compaction = false;
+                ContextObservation::default()
+            }
+            AgentEventKind::ModelCompactionStarted | AgentEventKind::ModelCompactionCompleted
+                if self.manual_compaction =>
+            {
+                ContextObservation::default()
+            }
+            AgentEventKind::ModelCompactionStarted => {
+                self.observe_compaction_started(record);
+                ContextObservation::default()
+            }
+            AgentEventKind::ModelCompactionCompleted => {
+                self.observe_compaction_completed(record);
                 ContextObservation::default()
             }
             _ => ContextObservation::default(),

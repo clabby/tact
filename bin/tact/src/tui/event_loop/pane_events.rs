@@ -13,6 +13,7 @@ use crate::{
     },
     tui::components::AppEvent,
 };
+use nanocodex::agent::events::AgentEventKind;
 
 impl EventLoop {
     /// Journals an agent event of a pane's current session and shows it.
@@ -39,7 +40,7 @@ impl EventLoop {
                 let record = runtime.journal_mut()?.append_agent(event)?;
                 // `tool.result` is the canonical completion event for every agent tool, and a tool
                 // may have changed the directory the terminal should report.
-                let tool_finished = record.kind() == "tool.result";
+                let tool_finished = record.agent_kind() == Some(AgentEventKind::ToolResult);
                 self.apply(AppEvent::Transcript { pane, record }).await?;
                 if tool_finished {
                     self.rereport_active_workspace()?;

@@ -13,8 +13,8 @@ pub(crate) use entry::{
 pub(crate) use journal::TranscriptJournal;
 pub(crate) use model::{TranscriptModel, humanize_tool};
 pub(crate) use record::{
-    LocalEvent, SCHEMA_VERSION, SessionEnded, SessionOutcome, SessionStarted, ShellId,
-    TerminalStopReason, TranscriptRecord, TurnId,
+    LocalEvent, LocalKind, RecordSource, SCHEMA_VERSION, SessionEnded, SessionOutcome,
+    SessionStarted, ShellId, TerminalStopReason, TranscriptRecord, TurnId,
 };
 use std::path::PathBuf;
 use thiserror::Error;

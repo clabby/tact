@@ -8,7 +8,7 @@ use crate::{
     },
     core::{
         storage::{SessionStorage, StorageError, StoredSession, database_path},
-        transcript::{SessionStarted, TerminalStopReason, TranscriptRecord},
+        transcript::{LocalKind, TerminalStopReason, TranscriptRecord},
     },
     search::rank,
 };
@@ -613,10 +613,7 @@ fn load_lineage(
             sequence,
         });
     }
-    let started = local
-        .iter()
-        .find(|record| record.source() == "tact" && record.kind() == "session.started")
-        .and_then(|record| record.decode_payload::<SessionStarted>().ok());
+    let started = local.iter().find_map(|record| record.session_started());
     if through_sequence.is_some()
         && !started
             .as_ref()
@@ -650,8 +647,7 @@ pub(crate) fn reasoning_mode(records: &[Arc<TranscriptRecord>]) -> ReasoningMode
     records
         .iter()
         .rev()
-        .find(|record| record.source() == "tact" && record.kind() == "session.started")
-        .and_then(|record| record.decode_payload::<SessionStarted>().ok())
+        .find_map(|record| record.session_started())
         .map_or(ReasoningMode::Standard, |started| started.reasoning_mode)
 }
 
@@ -659,8 +655,7 @@ pub(crate) fn workspace(records: &[Arc<TranscriptRecord>]) -> Result<PathBuf, Se
     records
         .iter()
         .rev()
-        .find(|record| record.source() == "tact" && record.kind() == "session.started")
-        .and_then(|record| record.decode_payload::<SessionStarted>().ok())
+        .find_map(|record| record.session_started())
         .map(|started| started.workspace)
         .ok_or(SessionError::MissingWorkspace)
 }
@@ -669,8 +664,7 @@ pub(crate) fn model(records: &[Arc<TranscriptRecord>]) -> Result<Model, SessionE
     let stored = records
         .iter()
         .rev()
-        .find(|record| record.source() == "tact" && record.kind() == "session.started")
-        .and_then(|record| record.decode_payload::<SessionStarted>().ok())
+        .find_map(|record| record.session_started())
         .map_or_else(
             || Model::Codex(CodexModel::Sol).to_string(),
             |started| started.model,
@@ -679,23 +673,18 @@ pub(crate) fn model(records: &[Arc<TranscriptRecord>]) -> Result<Model, SessionE
 }
 
 pub(crate) fn next_sequence(records: &[Arc<TranscriptRecord>]) -> u64 {
-    let current_session_id = records.iter().rev().find_map(|record| {
-        (record.source() == "tact" && record.kind() == "session.started")
-            .then(|| record.decode_payload::<SessionStarted>().ok())
-            .flatten()
-            .map(|started| started.session_id)
-    });
+    let current_session_id = records
+        .iter()
+        .rev()
+        .find_map(|record| record.session_started().map(|started| started.session_id));
     let Some(current_session_id) = current_session_id else {
         return 1;
     };
     let mut segment = None::<String>;
     let mut maximum = 0;
     for record in records {
-        if record.source() == "tact" && record.kind() == "session.started" {
-            segment = record
-                .decode_payload::<SessionStarted>()
-                .ok()
-                .map(|started| started.session_id);
+        if record.local_kind() == Some(LocalKind::SessionStarted) {
+            segment = record.session_started().map(|started| started.session_id);
         }
         if segment.as_deref() == Some(&current_session_id) {
             maximum = maximum.max(record.sequence());
@@ -715,7 +704,9 @@ mod tests {
         app::config::{ReasoningEffort, ReasoningMode, Speed},
         core::{
             storage::{BUSY_TIMEOUT, SessionStorage, database_path},
-            transcript::{LocalEvent, SessionStarted, TranscriptJournal, TranscriptRecord, TurnId},
+            transcript::{
+                LocalEvent, LocalKind, SessionStarted, TranscriptJournal, TranscriptRecord, TurnId,
+            },
         },
     };
     use nanocodex::{
@@ -1057,8 +1048,8 @@ mod tests {
         let loaded = load_transcript(&config, "session").unwrap();
 
         assert_eq!(loaded.len(), 2);
-        assert_eq!(loaded[0].kind(), "session.started");
-        assert_eq!(loaded[1].kind(), "user.submitted");
+        assert_eq!(loaded[0].local_kind(), Some(LocalKind::SessionStarted));
+        assert_eq!(loaded[1].local_kind(), Some(LocalKind::UserSubmitted));
     }
 
     #[test]
@@ -1099,7 +1090,7 @@ mod tests {
         let loaded = load_transcript(&config, "grandchild").unwrap();
         let prompts = loaded
             .iter()
-            .filter(|record| record.kind() == "user.submitted")
+            .filter(|record| record.local_kind() == Some(LocalKind::UserSubmitted))
             .map(|record| record.payload_json().to_owned())
             .collect::<Vec<_>>();
 
@@ -1114,7 +1105,7 @@ mod tests {
         assert_eq!(
             loaded
                 .iter()
-                .filter(|record| record.kind() == "session.started")
+                .filter(|record| record.local_kind() == Some(LocalKind::SessionStarted))
                 .count(),
             3
         );
@@ -1435,7 +1426,10 @@ mod tests {
             serde_json::to_value(expected).unwrap()
         );
         let records = super::load_transcript(&config, "session").unwrap();
-        assert_eq!(records.last().unwrap().kind(), "worker.turn_finished");
+        assert_eq!(
+            records.last().unwrap().local_kind(),
+            Some(LocalKind::WorkerTurnFinished)
+        );
     }
 
     #[test]
@@ -1605,7 +1599,10 @@ mod tests {
         writer.into_task().await.unwrap().unwrap();
 
         let records = super::load_transcript(&config, "session").unwrap();
-        assert_eq!(records.last().unwrap().kind(), "worker.turn_finished");
+        assert_eq!(
+            records.last().unwrap().local_kind(),
+            Some(LocalKind::WorkerTurnFinished)
+        );
         let (actual, instructions, catalog) =
             load_checkpoint(&config, "session").unwrap().into_parts();
         assert_eq!(
@@ -1649,7 +1646,10 @@ mod tests {
         assert_eq!(actual_instructions, instructions);
         assert_eq!(catalog, Some(true));
         let records = load_transcript(&config, "session").unwrap();
-        assert_eq!(records.last().unwrap().kind(), "compaction.finished");
+        assert_eq!(
+            records.last().unwrap().local_kind(),
+            Some(LocalKind::CompactionFinished)
+        );
         assert!(records.last().unwrap().decode_payload::<Value>().unwrap()["error"].is_null());
         journal.append_local(LocalEvent::CompactionStarted).unwrap();
         journal
@@ -1713,7 +1713,7 @@ mod tests {
         );
         let records = load_transcript(&config, "session").unwrap();
         assert_eq!(records.len(), 3);
-        assert_eq!(records[1].kind(), "user.submitted");
-        assert_eq!(records[2].kind(), "user.submitted");
+        assert_eq!(records[1].local_kind(), Some(LocalKind::UserSubmitted));
+        assert_eq!(records[2].local_kind(), Some(LocalKind::UserSubmitted));
     }
 }

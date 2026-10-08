@@ -3,13 +3,162 @@ use crate::{
     core::context::ContextBudget,
 };
 use nanocodex::agent::events::{AgentEvent, AgentEventKind};
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{
+    Deserialize, Deserializer, Serialize, Serializer,
+    de::{self, Visitor, value::StrDeserializer},
+};
 use serde_json::value::{RawValue, to_raw_value};
-use std::{path::PathBuf, sync::Arc};
+use std::{fmt, path::PathBuf, sync::Arc};
 
 pub(crate) const SCHEMA_VERSION: u32 = 2;
-pub(super) const AGENT_SOURCE: &str = "agent";
-pub(super) const TACT_SOURCE: &str = "tact";
+
+/// The component that produced a transcript record.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum RecordSource {
+    /// The agent runtime's event stream.
+    Agent,
+    /// Tact itself: prompts, settings, shells, and worker lifecycle.
+    Tact,
+}
+
+/// Local record kinds Tact writes, plus historical kinds it still reads.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum LocalKind {
+    SessionStarted,
+    UserSubmitted,
+    UserSteered,
+    ReflectionStarted,
+    ShellStarted,
+    ShellFinished,
+    EffortChanged,
+    SpeedChanged,
+    /// Historical speed toggle stored as a boolean; read but never written.
+    FastModeChanged,
+    CompactionStarted,
+    CompactionFinished,
+    ContextBudget,
+    ContextObserved,
+    WorkerTurnAccepted,
+    WorkerTurnFinished,
+    WorkerTurnsInterrupted,
+    WorkerSteerFailed,
+    WorkerStopped,
+    SessionEnded,
+}
+
+impl LocalKind {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::SessionStarted => "session.started",
+            Self::UserSubmitted => "user.submitted",
+            Self::UserSteered => "user.steered",
+            Self::ReflectionStarted => "reflection.started",
+            Self::ShellStarted => "shell.started",
+            Self::ShellFinished => "shell.finished",
+            Self::EffortChanged => "effort.changed",
+            Self::SpeedChanged => "speed.changed",
+            Self::FastModeChanged => "fast_mode.changed",
+            Self::CompactionStarted => "compaction.started",
+            Self::CompactionFinished => "compaction.finished",
+            Self::ContextBudget => "context.budget",
+            Self::ContextObserved => "context.observed",
+            Self::WorkerTurnAccepted => "worker.turn_accepted",
+            Self::WorkerTurnFinished => "worker.turn_finished",
+            Self::WorkerTurnsInterrupted => "worker.turns_interrupted",
+            Self::WorkerSteerFailed => "worker.steer_failed",
+            Self::WorkerStopped => "worker.stopped",
+            Self::SessionEnded => "session.ended",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "session.started" => Self::SessionStarted,
+            "user.submitted" => Self::UserSubmitted,
+            "user.steered" => Self::UserSteered,
+            "reflection.started" => Self::ReflectionStarted,
+            "shell.started" => Self::ShellStarted,
+            "shell.finished" => Self::ShellFinished,
+            "effort.changed" => Self::EffortChanged,
+            "speed.changed" => Self::SpeedChanged,
+            "fast_mode.changed" => Self::FastModeChanged,
+            "compaction.started" => Self::CompactionStarted,
+            "compaction.finished" => Self::CompactionFinished,
+            "context.budget" => Self::ContextBudget,
+            "context.observed" => Self::ContextObserved,
+            "worker.turn_accepted" => Self::WorkerTurnAccepted,
+            "worker.turn_finished" => Self::WorkerTurnFinished,
+            "worker.turns_interrupted" => Self::WorkerTurnsInterrupted,
+            "worker.steer_failed" => Self::WorkerSteerFailed,
+            "worker.stopped" => Self::WorkerStopped,
+            "session.ended" => Self::SessionEnded,
+            _ => return None,
+        })
+    }
+}
+
+/// The stored `type` of a transcript record.
+///
+/// Serializes as the same dotted string the record has always carried. Kinds this build does not
+/// know are kept verbatim so that reading and re-encoding a record never changes it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum RecordKind {
+    Agent(AgentEventKind),
+    Local(LocalKind),
+    Unrecognized(Box<str>),
+}
+
+impl RecordKind {
+    pub(crate) fn as_str(&self) -> &str {
+        match self {
+            Self::Agent(kind) => agent_kind_name(*kind),
+            Self::Local(kind) => kind.as_str(),
+            Self::Unrecognized(kind) => kind,
+        }
+    }
+
+    fn parse(value: &str) -> Self {
+        if let Some(kind) = LocalKind::parse(value) {
+            return Self::Local(kind);
+        }
+        let agent =
+            AgentEventKind::deserialize(StrDeserializer::<serde::de::value::Error>::new(value));
+        agent.map_or_else(|_| Self::Unrecognized(value.into()), Self::Agent)
+    }
+}
+
+impl fmt::Display for RecordKind {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl Serialize for RecordKind {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for RecordKind {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct KindVisitor;
+
+        impl Visitor<'_> for KindVisitor {
+            type Value = RecordKind;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a transcript record type")
+            }
+
+            fn visit_str<E: de::Error>(self, value: &str) -> Result<RecordKind, E> {
+                Ok(RecordKind::parse(value))
+            }
+        }
+
+        deserializer.deserialize_str(KindVisitor)
+    }
+}
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(transparent)]
@@ -158,9 +307,9 @@ pub(crate) struct TranscriptRecord {
     schema_version: u32,
     sequence: u64,
     recorded_at_unix_ms: u64,
-    source: String,
+    source: RecordSource,
     #[serde(rename = "type")]
-    kind: String,
+    kind: RecordKind,
     #[serde(skip_serializing_if = "Option::is_none")]
     agent: Option<AgentMetadata>,
     payload: Arc<RawValue>,
@@ -179,8 +328,8 @@ impl TranscriptRecord {
             schema_version: SCHEMA_VERSION,
             sequence,
             recorded_at_unix_ms,
-            source: AGENT_SOURCE.to_owned(),
-            kind: agent_kind(event.kind).to_owned(),
+            source: RecordSource::Agent,
+            kind: RecordKind::Agent(event.kind),
             agent: Some(AgentMetadata {
                 protocol_version: event.protocol_version,
                 request_id: event.request_id,
@@ -196,15 +345,18 @@ impl TranscriptRecord {
         event: LocalEvent,
     ) -> Result<Self, serde_json::Error> {
         let (kind, payload) = match event {
-            LocalEvent::SessionStarted(payload) => ("session.started", to_raw_value(&payload)?),
-            LocalEvent::UserSubmitted { id, text } => {
-                ("user.submitted", to_raw_value(&UserSubmitted { id, text })?)
+            LocalEvent::SessionStarted(payload) => {
+                (LocalKind::SessionStarted, to_raw_value(&payload)?)
             }
+            LocalEvent::UserSubmitted { id, text } => (
+                LocalKind::UserSubmitted,
+                to_raw_value(&UserSubmitted { id, text })?,
+            ),
             LocalEvent::UserSteered { text } => {
-                ("user.steered", to_raw_value(&UserSteered { text })?)
+                (LocalKind::UserSteered, to_raw_value(&UserSteered { text })?)
             }
             LocalEvent::ReflectionStarted { id } => (
-                "reflection.started",
+                LocalKind::ReflectionStarted,
                 to_raw_value(&ReflectionStarted { id })?,
             ),
             LocalEvent::ShellStarted {
@@ -212,7 +364,7 @@ impl TranscriptRecord {
                 command,
                 workspace,
             } => (
-                "shell.started",
+                LocalKind::ShellStarted,
                 to_raw_value(&ShellStarted {
                     id,
                     command,
@@ -227,7 +379,7 @@ impl TranscriptRecord {
                 truncated,
                 error,
             } => (
-                "shell.finished",
+                LocalKind::ShellFinished,
                 to_raw_value(&ShellFinished {
                     id,
                     output,
@@ -237,45 +389,48 @@ impl TranscriptRecord {
                     error,
                 })?,
             ),
-            LocalEvent::EffortChanged { from, to } => {
-                ("effort.changed", to_raw_value(&EffortChanged { from, to })?)
-            }
-            LocalEvent::SpeedChanged { from, to } => {
-                ("speed.changed", to_raw_value(&SpeedChanged { from, to })?)
-            }
-            LocalEvent::ContextBudget(budget) => ("context.budget", to_raw_value(&budget)?),
+            LocalEvent::EffortChanged { from, to } => (
+                LocalKind::EffortChanged,
+                to_raw_value(&EffortChanged { from, to })?,
+            ),
+            LocalEvent::SpeedChanged { from, to } => (
+                LocalKind::SpeedChanged,
+                to_raw_value(&SpeedChanged { from, to })?,
+            ),
+            LocalEvent::ContextBudget(budget) => (LocalKind::ContextBudget, to_raw_value(&budget)?),
             LocalEvent::ContextObserved {
                 prompt_cache,
                 previous_response,
             } => (
-                "context.observed",
+                LocalKind::ContextObserved,
                 to_raw_value(&ContextObserved {
                     prompt_cache,
                     previous_response,
                 })?,
             ),
-            LocalEvent::CompactionStarted => ("compaction.started", to_raw_value(&())?),
+            LocalEvent::CompactionStarted => (LocalKind::CompactionStarted, to_raw_value(&())?),
             LocalEvent::CompactionFinished {
                 error,
                 duration_ns,
                 terminal_stop,
             } => (
-                "compaction.finished",
+                LocalKind::CompactionFinished,
                 to_raw_value(&CompactionFinished {
                     error,
                     duration_ns,
                     terminal_stop,
                 })?,
             ),
-            LocalEvent::WorkerTurnAccepted { id } => {
-                ("worker.turn_accepted", to_raw_value(&WorkerTurn { id })?)
-            }
+            LocalEvent::WorkerTurnAccepted { id } => (
+                LocalKind::WorkerTurnAccepted,
+                to_raw_value(&WorkerTurn { id })?,
+            ),
             LocalEvent::WorkerTurnFinished {
                 id,
                 error,
                 terminal_stop,
             } => (
-                "worker.turn_finished",
+                LocalKind::WorkerTurnFinished,
                 to_raw_value(&WorkerTurnFinished {
                     id,
                     error,
@@ -283,24 +438,25 @@ impl TranscriptRecord {
                 })?,
             ),
             LocalEvent::WorkerTurnsInterrupted { count, error } => (
-                "worker.turns_interrupted",
+                LocalKind::WorkerTurnsInterrupted,
                 to_raw_value(&WorkerTurnsInterrupted { count, error })?,
             ),
             LocalEvent::WorkerSteerFailed { error } => (
-                "worker.steer_failed",
+                LocalKind::WorkerSteerFailed,
                 to_raw_value(&WorkerSteerFailed { error })?,
             ),
-            LocalEvent::WorkerStopped { error } => {
-                ("worker.stopped", to_raw_value(&WorkerStopped { error })?)
-            }
-            LocalEvent::SessionEnded(payload) => ("session.ended", to_raw_value(&payload)?),
+            LocalEvent::WorkerStopped { error } => (
+                LocalKind::WorkerStopped,
+                to_raw_value(&WorkerStopped { error })?,
+            ),
+            LocalEvent::SessionEnded(payload) => (LocalKind::SessionEnded, to_raw_value(&payload)?),
         };
         Ok(Self {
             schema_version: SCHEMA_VERSION,
             sequence,
             recorded_at_unix_ms,
-            source: TACT_SOURCE.to_owned(),
-            kind: kind.to_owned(),
+            source: RecordSource::Tact,
+            kind: RecordKind::Local(kind),
             agent: None,
             payload: payload.into(),
         })
@@ -318,12 +474,36 @@ impl TranscriptRecord {
         self.sequence
     }
 
-    pub(crate) fn kind(&self) -> &str {
+    pub(crate) fn kind(&self) -> &RecordKind {
         &self.kind
     }
 
-    pub(crate) fn source(&self) -> &str {
-        &self.source
+    pub(crate) const fn source(&self) -> RecordSource {
+        self.source
+    }
+
+    /// The kind of a record Tact wrote, or `None` for agent and unrecognized records.
+    pub(crate) const fn local_kind(&self) -> Option<LocalKind> {
+        match (self.source, &self.kind) {
+            (RecordSource::Tact, RecordKind::Local(kind)) => Some(*kind),
+            _ => None,
+        }
+    }
+
+    /// The kind of an agent runtime event, or `None` for local and unrecognized records.
+    pub(crate) const fn agent_kind(&self) -> Option<AgentEventKind> {
+        match (self.source, &self.kind) {
+            (RecordSource::Agent, RecordKind::Agent(kind)) => Some(*kind),
+            _ => None,
+        }
+    }
+
+    /// The session metadata carried by a well-formed `session.started` record.
+    pub(crate) fn session_started(&self) -> Option<SessionStarted> {
+        if self.local_kind() != Some(LocalKind::SessionStarted) {
+            return None;
+        }
+        self.decode_payload().ok()
     }
 
     pub(crate) fn agent_request_id(&self) -> Option<Arc<str>> {
@@ -437,7 +617,7 @@ struct WorkerStopped {
     error: Option<String>,
 }
 
-const fn agent_kind(kind: AgentEventKind) -> &'static str {
+const fn agent_kind_name(kind: AgentEventKind) -> &'static str {
     match kind {
         AgentEventKind::ApiEvent => "api.event",
         AgentEventKind::AssistantDelta => "assistant.delta",
@@ -471,11 +651,132 @@ const fn agent_kind(kind: AgentEventKind) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{LocalEvent, SessionStarted, ShellId, TranscriptRecord, TurnId};
+    use super::{
+        LocalEvent, LocalKind, RecordKind, SessionStarted, ShellId, TranscriptRecord, TurnId,
+    };
     use crate::app::config::Speed;
     use nanocodex::agent::events::{AgentEvent, AgentEventKind};
     use serde_json::{Value, json, value::to_raw_value};
     use std::sync::Arc;
+
+    const AGENT_KINDS: [AgentEventKind; 27] = [
+        AgentEventKind::ApiEvent,
+        AgentEventKind::AssistantDelta,
+        AgentEventKind::AssistantMessage,
+        AgentEventKind::ReasoningSummaryDelta,
+        AgentEventKind::InputAccepted,
+        AgentEventKind::RunStarted,
+        AgentEventKind::RunSteered,
+        AgentEventKind::RunError,
+        AgentEventKind::RunCompleted,
+        AgentEventKind::RunFailed,
+        AgentEventKind::ToolCall,
+        AgentEventKind::ToolResult,
+        AgentEventKind::ModelWarmupStarted,
+        AgentEventKind::ModelWarmupCompleted,
+        AgentEventKind::ModelWarmupFailed,
+        AgentEventKind::ModelCallStarted,
+        AgentEventKind::ModelCallCompleted,
+        AgentEventKind::ModelCallFailed,
+        AgentEventKind::ModelCompactionStarted,
+        AgentEventKind::ModelCompactionCompleted,
+        AgentEventKind::ModelCompactionFailed,
+        AgentEventKind::ModelAttemptStarted,
+        AgentEventKind::ModelAttemptFailed,
+        AgentEventKind::ModelAttemptRetrying,
+        AgentEventKind::ModelConnectionStarted,
+        AgentEventKind::ModelConnectionCompleted,
+        AgentEventKind::ModelConnectionFailed,
+    ];
+
+    const LOCAL_KINDS: [LocalKind; 19] = [
+        LocalKind::SessionStarted,
+        LocalKind::UserSubmitted,
+        LocalKind::UserSteered,
+        LocalKind::ReflectionStarted,
+        LocalKind::ShellStarted,
+        LocalKind::ShellFinished,
+        LocalKind::EffortChanged,
+        LocalKind::SpeedChanged,
+        LocalKind::FastModeChanged,
+        LocalKind::CompactionStarted,
+        LocalKind::CompactionFinished,
+        LocalKind::ContextBudget,
+        LocalKind::ContextObserved,
+        LocalKind::WorkerTurnAccepted,
+        LocalKind::WorkerTurnFinished,
+        LocalKind::WorkerTurnsInterrupted,
+        LocalKind::WorkerSteerFailed,
+        LocalKind::WorkerStopped,
+        LocalKind::SessionEnded,
+    ];
+
+    #[test]
+    fn agent_kinds_keep_the_runtime_event_names() {
+        for kind in AGENT_KINDS {
+            let record = TranscriptRecord::from_agent(
+                1,
+                1,
+                AgentEvent {
+                    protocol_version: 1,
+                    request_id: Arc::from("request"),
+                    seq: 1,
+                    kind,
+                    payload: to_raw_value(&json!({})).unwrap().into(),
+                },
+            );
+            let encoded = serde_json::to_value(&record).unwrap();
+            assert_eq!(encoded["type"], serde_json::to_value(kind).unwrap());
+
+            let decoded: TranscriptRecord = serde_json::from_value(encoded).unwrap();
+            assert_eq!(decoded.agent_kind(), Some(kind));
+            assert_eq!(decoded.local_kind(), None);
+        }
+    }
+
+    #[test]
+    fn local_kinds_parse_from_their_stored_names() {
+        for kind in LOCAL_KINDS {
+            let decoded: RecordKind = serde_json::from_value(json!(kind.as_str())).unwrap();
+            assert_eq!(decoded, RecordKind::Local(kind));
+        }
+    }
+
+    #[test]
+    fn unrecognized_kinds_round_trip_verbatim() {
+        let encoded = json!({
+            "schema_version": 2,
+            "sequence": 1,
+            "recorded_at_unix_ms": 1,
+            "source": "tact",
+            "type": "future.event",
+            "payload": {"value": 1},
+        });
+        let record: TranscriptRecord = serde_json::from_value(encoded.clone()).unwrap();
+
+        assert_eq!(
+            record.kind(),
+            &RecordKind::Unrecognized("future.event".into())
+        );
+        assert_eq!(record.local_kind(), None);
+        assert_eq!(serde_json::to_value(record).unwrap(), encoded);
+    }
+
+    #[test]
+    fn kinds_require_a_matching_source() {
+        let record: TranscriptRecord = serde_json::from_value(json!({
+            "schema_version": 2,
+            "sequence": 1,
+            "recorded_at_unix_ms": 1,
+            "source": "agent",
+            "type": "session.started",
+            "payload": {},
+        }))
+        .unwrap();
+
+        assert_eq!(record.local_kind(), None);
+        assert_eq!(record.agent_kind(), None);
+    }
 
     fn session_payload() -> Value {
         json!({
@@ -530,7 +831,7 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(record.kind(), "speed.changed");
+        assert_eq!(record.local_kind(), Some(LocalKind::SpeedChanged));
         assert_eq!(
             serde_json::to_value(record).unwrap()["payload"],
             json!({"from": "fast", "to": "ultrafast"})
@@ -607,8 +908,8 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(started.kind(), "shell.started");
-        assert_eq!(finished.kind(), "shell.finished");
+        assert_eq!(started.local_kind(), Some(LocalKind::ShellStarted));
+        assert_eq!(finished.local_kind(), Some(LocalKind::ShellFinished));
         assert_eq!(
             serde_json::to_value(finished).unwrap()["payload"],
             json!({

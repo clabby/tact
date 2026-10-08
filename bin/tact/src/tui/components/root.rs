@@ -52,7 +52,7 @@ use crate::{
         prompt::{QueueId, Submission},
         protocol::{Busy, CommandError},
         session::{RecentPrompt, SessionSummary},
-        transcript::TranscriptRecord,
+        transcript::{LocalKind, TranscriptRecord},
     },
 };
 use crossterm::event::{Event, MouseButton, MouseEventKind};
@@ -63,7 +63,7 @@ use input::{
     is_queue_shortcut, is_skill_picker_trigger, is_skill_query_character,
     mention_edit_continues_query,
 };
-use nanocodex::HarnessModel as Model;
+use nanocodex::{HarnessModel as Model, agent::events::AgentEventKind};
 use ratatui::{
     Frame,
     layout::{Position, Rect},
@@ -2602,8 +2602,11 @@ impl Component for RootNode {
                     }
                     self.recent_prompts.push(prompt);
                 }
-                let steer_applied = record.kind() == "run.steered";
-                let turn_finished = matches!(record.kind(), "run.completed" | "run.failed");
+                let steer_applied = record.agent_kind() == Some(AgentEventKind::RunSteered);
+                let turn_finished = matches!(
+                    record.agent_kind(),
+                    Some(AgentEventKind::RunCompleted | AgentEventKind::RunFailed)
+                );
                 let turn_timer = turn_timer_event(&record);
                 let observation = self.context_diagnostics.observe(&record);
                 if let Some(Overlay::ContextDiagnostics(panel)) = &mut self.overlay {
@@ -2795,10 +2798,8 @@ impl Component for RootNode {
 }
 
 fn turn_timer_event(record: &TranscriptRecord) -> Option<ComposerEvent> {
-    if record.source() != "agent" {
-        return None;
-    }
-    if record.kind() == "run.started" {
+    let kind = record.agent_kind()?;
+    if kind == AgentEventKind::RunStarted {
         let now = Instant::now();
         let elapsed_ms = unix_time_ms().saturating_sub(record.recorded_at_unix_ms());
         return Some(ComposerEvent::TurnStarted {
@@ -2806,7 +2807,11 @@ fn turn_timer_event(record: &TranscriptRecord) -> Option<ComposerEvent> {
             now,
         });
     }
-    matches!(record.kind(), "run.completed" | "run.failed").then_some(ComposerEvent::TurnFinished)
+    matches!(
+        kind,
+        AgentEventKind::RunCompleted | AgentEventKind::RunFailed
+    )
+    .then_some(ComposerEvent::TurnFinished)
 }
 
 fn recent_prompt(record: &TranscriptRecord) -> Option<RecentPromptDraft> {
@@ -2815,7 +2820,10 @@ fn recent_prompt(record: &TranscriptRecord) -> Option<RecentPromptDraft> {
         text: String,
     }
 
-    if record.source() != "tact" || !matches!(record.kind(), "user.submitted" | "user.steered") {
+    if !matches!(
+        record.local_kind(),
+        Some(LocalKind::UserSubmitted | LocalKind::UserSteered)
+    ) {
         return None;
     }
     let prompt = record.decode_payload::<UserPrompt>().ok()?;

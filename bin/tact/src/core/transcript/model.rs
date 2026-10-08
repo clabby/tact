@@ -1,11 +1,12 @@
 use super::{
-    DirectedMessageEntry, EntryId, EntryKind, MessageDelivery, MessagePhase, SessionStarted,
-    ShellId, ToolEntry, ToolState, TranscriptEntry, TranscriptRecord, TransientStatus, UserImage,
+    DirectedMessageEntry, EntryId, EntryKind, LocalKind, MessageDelivery, MessagePhase,
+    SessionStarted, ShellId, ToolEntry, ToolState, TranscriptEntry, TranscriptRecord,
+    TransientStatus, UserImage,
 };
 use crate::app::config::{ReasoningEffort, Speed};
 use nanocodex::{
     agent::events::{
-        AssistantDelta, AssistantMessage, CompactionCompleted, CompactionFailed,
+        AgentEventKind, AssistantDelta, AssistantMessage, CompactionCompleted, CompactionFailed,
         ReasoningSummaryDelta, RunError,
     },
     oai::{PromptInput, UserInput, responses::MessagePhase as AgentMessagePhase},
@@ -181,13 +182,13 @@ impl TranscriptModel {
     }
 
     pub(crate) fn apply(&mut self, record: &TranscriptRecord) -> ModelChange {
-        if record.source() == "tact" {
-            return self.apply_local(record);
+        if let Some(kind) = record.local_kind() {
+            return self.apply_local(kind, record);
         }
-        if record.source() != "agent" {
-            return ModelChange::default();
+        if let Some(kind) = record.agent_kind() {
+            return self.apply_agent(kind, record);
         }
-        self.apply_agent(record)
+        ModelChange::default()
     }
 
     pub(crate) fn apply_message(
@@ -263,75 +264,80 @@ impl TranscriptModel {
         }
     }
 
-    fn apply_local(&mut self, record: &TranscriptRecord) -> ModelChange {
-        let changed = match record.kind() {
-            "session.started" => self.decode_local::<SessionStarted>(record).map(|payload| {
-                if let Some(session_id) = payload.parent_session_id {
-                    *self = self.fork_snapshot();
-                    self.push(EntryKind::ForkedFrom { session_id });
-                }
-            }),
-            "user.submitted" => self.decode_local::<UserSubmitted>(record).map(|payload| {
+    fn apply_local(&mut self, kind: LocalKind, record: &TranscriptRecord) -> ModelChange {
+        let changed = match kind {
+            LocalKind::SessionStarted => {
+                self.decode_local::<SessionStarted>(record).map(|payload| {
+                    if let Some(session_id) = payload.parent_session_id {
+                        *self = self.fork_snapshot();
+                        self.push(EntryKind::ForkedFrom { session_id });
+                    }
+                })
+            }
+            LocalKind::UserSubmitted => self.decode_local::<UserSubmitted>(record).map(|payload| {
                 self.push(EntryKind::User {
                     text: payload.text,
                     images: Vec::new(),
                 });
             }),
-            "user.steered" => self.decode_local::<UserSteered>(record).map(|payload| {
+            LocalKind::UserSteered => self.decode_local::<UserSteered>(record).map(|payload| {
                 self.push(EntryKind::User {
                     text: payload.text,
                     images: Vec::new(),
                 });
             }),
-            "compaction.started" => {
+            LocalKind::CompactionStarted => {
                 self.manual_compaction = Some(ManualCompaction::Running);
                 self.transient = Some(TransientStatus::Compacting);
                 Ok(())
             }
-            "compaction.finished" => {
-                self.decode_local::<ManualCompactionFinished>(record)
-                    .map(|payload| {
-                        self.manual_compaction = Some(ManualCompaction::Finished);
-                        self.transient = None;
-                        self.pending_compaction_error = None;
-                        self.pending_error = None;
-                        match payload.error {
-                            Some(message) => {
-                                self.push(EntryKind::ContextCompactionFailed { message });
-                            }
-                            None => {
-                                self.push(EntryKind::ContextCompacted {
-                                    duration_ns: payload.duration_ns,
-                                });
-                            }
+            LocalKind::CompactionFinished => self
+                .decode_local::<ManualCompactionFinished>(record)
+                .map(|payload| {
+                    self.manual_compaction = Some(ManualCompaction::Finished);
+                    self.transient = None;
+                    self.pending_compaction_error = None;
+                    self.pending_error = None;
+                    match payload.error {
+                        Some(message) => {
+                            self.push(EntryKind::ContextCompactionFailed { message });
                         }
-                    })
+                        None => {
+                            self.push(EntryKind::ContextCompacted {
+                                duration_ns: payload.duration_ns,
+                            });
+                        }
+                    }
+                }),
+            LocalKind::ReflectionStarted => {
+                self.decode_local::<ReflectionStarted>(record).map(|_| {
+                    self.push(EntryKind::ReflectionStarted);
+                })
             }
-            "reflection.started" => self.decode_local::<ReflectionStarted>(record).map(|_| {
-                self.push(EntryKind::ReflectionStarted);
-            }),
-            "shell.started" => self
+            LocalKind::ShellStarted => self
                 .decode_local::<ShellStarted>(record)
                 .map(|payload| self.shell_started(payload, record.recorded_at_unix_ms())),
-            "shell.finished" => self
+            LocalKind::ShellFinished => self
                 .decode_local::<ShellFinished>(record)
                 .map(|payload| self.shell_finished(payload)),
-            "effort.changed" => self.decode_local::<EffortChanged>(record).map(|payload| {
+            LocalKind::EffortChanged => self.decode_local::<EffortChanged>(record).map(|payload| {
                 self.push(EntryKind::EffortChanged { to: payload.to });
             }),
-            "speed.changed" => self.decode_local::<SpeedChanged>(record).map(|payload| {
+            LocalKind::SpeedChanged => self.decode_local::<SpeedChanged>(record).map(|payload| {
                 self.push(EntryKind::SpeedChanged { speed: payload.to });
             }),
-            "fast_mode.changed" => self.decode_local::<FastModeChanged>(record).map(|payload| {
-                self.push(EntryKind::SpeedChanged {
-                    speed: if payload.to {
-                        Speed::Fast
-                    } else {
-                        Speed::Standard
-                    },
-                });
-            }),
-            "worker.turn_finished" => {
+            LocalKind::FastModeChanged => {
+                self.decode_local::<FastModeChanged>(record).map(|payload| {
+                    self.push(EntryKind::SpeedChanged {
+                        speed: if payload.to {
+                            Speed::Fast
+                        } else {
+                            Speed::Standard
+                        },
+                    });
+                })
+            }
+            LocalKind::WorkerTurnFinished => {
                 self.decode_local::<WorkerTurnFinished>(record)
                     .map(|payload| {
                         if let Some(error) = payload.error {
@@ -339,8 +345,8 @@ impl TranscriptModel {
                         }
                     })
             }
-            "worker.turns_interrupted" => return self.apply_interruption(record),
-            "worker.steer_failed" => {
+            LocalKind::WorkerTurnsInterrupted => return self.apply_interruption(record),
+            LocalKind::WorkerSteerFailed => {
                 self.decode_local::<WorkerSteerFailed>(record)
                     .map(|payload| {
                         self.push(EntryKind::Error {
@@ -348,18 +354,20 @@ impl TranscriptModel {
                         });
                     })
             }
-            "worker.stopped" => self.decode_local::<WorkerStopped>(record).map(|payload| {
+            LocalKind::WorkerStopped => self.decode_local::<WorkerStopped>(record).map(|payload| {
                 if let Some(error) = payload.error {
                     self.pending_error = Some(error);
                 }
             }),
-            "session.ended" => self.decode_local::<SessionEnded>(record).map(|payload| {
+            LocalKind::SessionEnded => self.decode_local::<SessionEnded>(record).map(|payload| {
                 if payload.outcome == "failed" {
                     self.finish_failed(payload.error);
                 }
                 self.agent_stream_closed();
             }),
-            _ => return ModelChange::default(),
+            LocalKind::ContextBudget
+            | LocalKind::ContextObserved
+            | LocalKind::WorkerTurnAccepted => return ModelChange::default(),
         };
         match changed {
             Ok(()) => ModelChange {
@@ -440,26 +448,26 @@ impl TranscriptModel {
         self.running_tools.remove(&id);
     }
 
-    fn apply_agent(&mut self, record: &TranscriptRecord) -> ModelChange {
+    fn apply_agent(&mut self, kind: AgentEventKind, record: &TranscriptRecord) -> ModelChange {
         let previous_activity = self.transient.clone();
         if matches!(
-            record.kind(),
-            "assistant.delta"
-                | "assistant.message"
-                | "run.started"
-                | "run.completed"
-                | "run.failed"
-                | "tool.call"
-                | "tool.result"
+            kind,
+            AgentEventKind::AssistantDelta
+                | AgentEventKind::AssistantMessage
+                | AgentEventKind::RunStarted
+                | AgentEventKind::RunCompleted
+                | AgentEventKind::RunFailed
+                | AgentEventKind::ToolCall
+                | AgentEventKind::ToolResult
         ) {
             self.reasoning.clear();
         }
-        let result = match record.kind() {
-            "input.accepted" => self.input_accepted(record),
-            "assistant.delta" => self.assistant_delta(record),
-            "assistant.message" => self.assistant_message(record),
-            "reasoning.summary.delta" => self.reasoning_delta(record),
-            "run.started" => {
+        let result = match kind {
+            AgentEventKind::InputAccepted => self.input_accepted(record),
+            AgentEventKind::AssistantDelta => self.assistant_delta(record),
+            AgentEventKind::AssistantMessage => self.assistant_message(record),
+            AgentEventKind::ReasoningSummaryDelta => self.reasoning_delta(record),
+            AgentEventKind::RunStarted => {
                 self.manual_compaction = None;
                 self.active_runs = self.active_runs.saturating_add(1);
                 self.run_started_at_unix_ms
@@ -467,64 +475,66 @@ impl TranscriptModel {
                 self.transient = Some(TransientStatus::Thinking);
                 Ok(true)
             }
-            "run.error" => self.decode_local::<RunError>(record).map(|payload| {
+            AgentEventKind::RunError => self.decode_local::<RunError>(record).map(|payload| {
                 self.pending_error = Some(payload.message.clone());
                 self.transient = Some(TransientStatus::Error(payload.message));
                 true
             }),
-            "run.completed" => {
+            AgentEventKind::RunCompleted => {
                 self.complete_turn(record);
                 Ok(true)
             }
-            "run.failed" => {
+            AgentEventKind::RunFailed => {
                 self.run_started_at_unix_ms.pop_front();
                 self.finish_failed(None);
                 Ok(true)
             }
-            "tool.call" => self.tool_call(record),
-            "tool.result" => self.tool_result(record),
-            "model.warmup.started" => {
+            AgentEventKind::ToolCall => self.tool_call(record),
+            AgentEventKind::ToolResult => self.tool_result(record),
+            AgentEventKind::ModelWarmupStarted => {
                 self.transient = Some(TransientStatus::Warming);
                 Ok(true)
             }
-            "model.warmup.completed" => {
+            AgentEventKind::ModelWarmupCompleted => {
                 self.transient = self.is_active().then_some(TransientStatus::Thinking);
                 Ok(true)
             }
-            "model.warmup.failed"
-            | "model.call.failed"
-            | "model.attempt.failed"
-            | "model.connection.failed" => self.capture_error(record),
-            "model.call.started" => {
+            AgentEventKind::ModelWarmupFailed
+            | AgentEventKind::ModelCallFailed
+            | AgentEventKind::ModelAttemptFailed
+            | AgentEventKind::ModelConnectionFailed => self.capture_error(record),
+            AgentEventKind::ModelCallStarted => {
                 self.materialize_compaction_failure();
                 self.transient = Some(TransientStatus::Thinking);
                 Ok(true)
             }
-            "model.call.completed" => {
+            AgentEventKind::ModelCallCompleted => {
                 self.transient = self.is_active().then_some(TransientStatus::Thinking);
                 Ok(true)
             }
-            "model.compaction.started"
-            | "model.compaction.completed"
-            | "model.compaction.failed"
+            AgentEventKind::ModelCompactionStarted
+            | AgentEventKind::ModelCompactionCompleted
+            | AgentEventKind::ModelCompactionFailed
                 if self.manual_compaction.is_some() =>
             {
                 Ok(false)
             }
-            "model.compaction.started" => {
+            AgentEventKind::ModelCompactionStarted => {
                 self.transient = Some(TransientStatus::Compacting);
                 Ok(true)
             }
-            "model.compaction.completed" => self.compaction_completed(record),
-            "model.compaction.failed" => self.compaction_failed(record),
-            "model.attempt.retrying" => self.retrying(record),
-            "model.connection.started" => self.connection_started(record),
-            "model.connection.completed" => {
+            AgentEventKind::ModelCompactionCompleted => self.compaction_completed(record),
+            AgentEventKind::ModelCompactionFailed => self.compaction_failed(record),
+            AgentEventKind::ModelAttemptRetrying => self.retrying(record),
+            AgentEventKind::ModelConnectionStarted => self.connection_started(record),
+            AgentEventKind::ModelConnectionCompleted => {
                 self.transient = self.is_active().then_some(TransientStatus::Thinking);
                 self.pending_error = None;
                 Ok(true)
             }
-            _ => Ok(false),
+            AgentEventKind::ApiEvent
+            | AgentEventKind::RunSteered
+            | AgentEventKind::ModelAttemptStarted => Ok(false),
         };
         let activity_changed = previous_activity != self.transient;
         match result {
@@ -535,7 +545,7 @@ impl TranscriptModel {
             Err(error) => self.projection_error(
                 record,
                 error,
-                visibility(record.source(), record.kind()) == EventVisibility::Persistent,
+                visibility(kind) == EventVisibility::Persistent,
             ),
         }
     }
@@ -1250,44 +1260,36 @@ fn message_phase(phase: Option<AgentMessagePhase>) -> MessagePhase {
     }
 }
 
-fn visibility(source: &str, kind: &str) -> EventVisibility {
-    if source == "tact" {
-        return match kind {
-            "user.submitted"
-            | "reflection.started"
-            | "worker.turns_interrupted"
-            | "effort.changed"
-            | "speed.changed"
-            | "fast_mode.changed" => EventVisibility::Persistent,
-            "compaction.finished" => EventVisibility::Persistent,
-            "compaction.started" => EventVisibility::Transient,
-            "worker.turn_finished" | "worker.stopped" | "session.ended" => {
-                EventVisibility::ErrorFallback
-            }
-            _ => EventVisibility::StateOnly,
-        };
-    }
+/// How an agent event surfaces when its payload cannot be projected.
+const fn visibility(kind: AgentEventKind) -> EventVisibility {
     match kind {
-        "assistant.delta"
-        | "assistant.message"
-        | "reasoning.summary.delta"
-        | "tool.call"
-        | "tool.result"
-        | "model.compaction.completed"
-        | "model.compaction.failed" => EventVisibility::Persistent,
-        "run.started"
-        | "model.warmup.started"
-        | "model.call.started"
-        | "model.compaction.started"
-        | "model.attempt.retrying"
-        | "model.connection.started" => EventVisibility::Transient,
-        "run.error"
-        | "run.failed"
-        | "model.warmup.failed"
-        | "model.call.failed"
-        | "model.attempt.failed"
-        | "model.connection.failed" => EventVisibility::ErrorFallback,
-        _ => EventVisibility::StateOnly,
+        AgentEventKind::AssistantDelta
+        | AgentEventKind::AssistantMessage
+        | AgentEventKind::ReasoningSummaryDelta
+        | AgentEventKind::ToolCall
+        | AgentEventKind::ToolResult
+        | AgentEventKind::ModelCompactionCompleted
+        | AgentEventKind::ModelCompactionFailed => EventVisibility::Persistent,
+        AgentEventKind::RunStarted
+        | AgentEventKind::ModelWarmupStarted
+        | AgentEventKind::ModelCallStarted
+        | AgentEventKind::ModelCompactionStarted
+        | AgentEventKind::ModelAttemptRetrying
+        | AgentEventKind::ModelConnectionStarted => EventVisibility::Transient,
+        AgentEventKind::RunError
+        | AgentEventKind::RunFailed
+        | AgentEventKind::ModelWarmupFailed
+        | AgentEventKind::ModelCallFailed
+        | AgentEventKind::ModelAttemptFailed
+        | AgentEventKind::ModelConnectionFailed => EventVisibility::ErrorFallback,
+        AgentEventKind::ApiEvent
+        | AgentEventKind::InputAccepted
+        | AgentEventKind::RunSteered
+        | AgentEventKind::RunCompleted
+        | AgentEventKind::ModelWarmupCompleted
+        | AgentEventKind::ModelCallCompleted
+        | AgentEventKind::ModelAttemptStarted
+        | AgentEventKind::ModelConnectionCompleted => EventVisibility::StateOnly,
     }
 }
 
@@ -1742,59 +1744,86 @@ mod tests {
     }
 
     #[test]
-    fn successful_internal_events_are_deliberately_omitted() {
-        let state_only = [
-            "api.event",
-            "run.steered",
-            "run.completed",
-            "model.warmup.completed",
-            "model.call.completed",
-            "model.attempt.started",
-            "model.connection.completed",
-        ];
-        for kind in state_only {
-            assert_eq!(
-                visibility("agent", kind),
-                EventVisibility::StateOnly,
-                "{kind}"
-            );
-        }
-    }
-
-    #[test]
     fn every_stable_agent_event_has_an_explicit_visibility() {
         let cases = [
-            ("api.event", EventVisibility::StateOnly),
-            ("assistant.delta", EventVisibility::Persistent),
-            ("assistant.message", EventVisibility::Persistent),
-            ("reasoning.summary.delta", EventVisibility::Persistent),
-            ("run.started", EventVisibility::Transient),
-            ("run.steered", EventVisibility::StateOnly),
-            ("run.error", EventVisibility::ErrorFallback),
-            ("run.completed", EventVisibility::StateOnly),
-            ("run.failed", EventVisibility::ErrorFallback),
-            ("tool.call", EventVisibility::Persistent),
-            ("tool.result", EventVisibility::Persistent),
-            ("model.warmup.started", EventVisibility::Transient),
-            ("model.warmup.completed", EventVisibility::StateOnly),
-            ("model.warmup.failed", EventVisibility::ErrorFallback),
-            ("model.call.started", EventVisibility::Transient),
-            ("model.call.completed", EventVisibility::StateOnly),
-            ("model.call.failed", EventVisibility::ErrorFallback),
-            ("model.compaction.started", EventVisibility::Transient),
-            ("model.compaction.completed", EventVisibility::Persistent),
-            ("model.compaction.failed", EventVisibility::Persistent),
-            ("model.attempt.started", EventVisibility::StateOnly),
-            ("model.attempt.failed", EventVisibility::ErrorFallback),
-            ("model.attempt.retrying", EventVisibility::Transient),
-            ("model.connection.started", EventVisibility::Transient),
-            ("model.connection.completed", EventVisibility::StateOnly),
-            ("model.connection.failed", EventVisibility::ErrorFallback),
+            (AgentEventKind::ApiEvent, EventVisibility::StateOnly),
+            (AgentEventKind::AssistantDelta, EventVisibility::Persistent),
+            (
+                AgentEventKind::AssistantMessage,
+                EventVisibility::Persistent,
+            ),
+            (
+                AgentEventKind::ReasoningSummaryDelta,
+                EventVisibility::Persistent,
+            ),
+            (AgentEventKind::RunStarted, EventVisibility::Transient),
+            (AgentEventKind::RunSteered, EventVisibility::StateOnly),
+            (AgentEventKind::RunError, EventVisibility::ErrorFallback),
+            (AgentEventKind::RunCompleted, EventVisibility::StateOnly),
+            (AgentEventKind::RunFailed, EventVisibility::ErrorFallback),
+            (AgentEventKind::ToolCall, EventVisibility::Persistent),
+            (AgentEventKind::ToolResult, EventVisibility::Persistent),
+            (
+                AgentEventKind::ModelWarmupStarted,
+                EventVisibility::Transient,
+            ),
+            (
+                AgentEventKind::ModelWarmupCompleted,
+                EventVisibility::StateOnly,
+            ),
+            (
+                AgentEventKind::ModelWarmupFailed,
+                EventVisibility::ErrorFallback,
+            ),
+            (AgentEventKind::ModelCallStarted, EventVisibility::Transient),
+            (
+                AgentEventKind::ModelCallCompleted,
+                EventVisibility::StateOnly,
+            ),
+            (
+                AgentEventKind::ModelCallFailed,
+                EventVisibility::ErrorFallback,
+            ),
+            (
+                AgentEventKind::ModelCompactionStarted,
+                EventVisibility::Transient,
+            ),
+            (
+                AgentEventKind::ModelCompactionCompleted,
+                EventVisibility::Persistent,
+            ),
+            (
+                AgentEventKind::ModelCompactionFailed,
+                EventVisibility::Persistent,
+            ),
+            (
+                AgentEventKind::ModelAttemptStarted,
+                EventVisibility::StateOnly,
+            ),
+            (
+                AgentEventKind::ModelAttemptFailed,
+                EventVisibility::ErrorFallback,
+            ),
+            (
+                AgentEventKind::ModelAttemptRetrying,
+                EventVisibility::Transient,
+            ),
+            (
+                AgentEventKind::ModelConnectionStarted,
+                EventVisibility::Transient,
+            ),
+            (
+                AgentEventKind::ModelConnectionCompleted,
+                EventVisibility::StateOnly,
+            ),
+            (
+                AgentEventKind::ModelConnectionFailed,
+                EventVisibility::ErrorFallback,
+            ),
         ];
 
-        assert_eq!(cases.len(), 26);
         for (kind, expected) in cases {
-            assert_eq!(visibility("agent", kind), expected, "{kind}");
+            assert_eq!(visibility(kind), expected, "{kind:?}");
         }
     }
 
@@ -1900,7 +1929,7 @@ mod tests {
             let mut replay = TranscriptModel::default();
             for record in records {
                 model.apply(&record);
-                if record.kind() != "assistant.delta" {
+                if record.agent_kind() != Some(AgentEventKind::AssistantDelta) {
                     let persisted = serde_json::to_string(&record).unwrap();
                     replay.apply(&serde_json::from_str(&persisted).unwrap());
                 }

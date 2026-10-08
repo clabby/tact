@@ -29,8 +29,7 @@ use crate::{
         context::ContextBudget,
         protocol::{Busy, Draft, Origin, Publication, QueuedPrompt, SessionInfo},
         transcript::{
-            EntryKind, SessionStarted, TranscriptEntry, TranscriptModel, TranscriptRecord,
-            TransientStatus,
+            EntryKind, TranscriptEntry, TranscriptModel, TranscriptRecord, TransientStatus,
         },
     },
 };
@@ -785,13 +784,7 @@ impl State {
 
 /// The parent named by a fork's `session.started` record.
 fn fork_parent(record: &TranscriptRecord) -> Option<String> {
-    if record.source() != "tact" || record.kind() != "session.started" {
-        return None;
-    }
-    record
-        .decode_payload::<SessionStarted>()
-        .ok()?
-        .parent_session_id
+    record.session_started()?.parent_session_id
 }
 
 /// Applies a directed-message update the way the terminal does: the session's own transcript shows
