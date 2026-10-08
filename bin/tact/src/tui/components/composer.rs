@@ -175,10 +175,8 @@ pub(crate) struct Composer {
     active_subagents: usize,
     subagent_wave: Option<WavedText>,
     turn_timers: VecDeque<TurnTimer>,
-    effort_hit_area: Option<Rect>,
-    speed_hit_area: Option<Rect>,
-    model_hit_area: Option<Rect>,
-    subagent_hit_area: Option<Rect>,
+    /// The clickable chrome controls drawn in the last frame.
+    chrome_hits: Vec<(ComposerChromeTarget, Rect)>,
     history: PromptHistory,
 }
 
@@ -264,10 +262,7 @@ impl Composer {
             active_subagents: 0,
             subagent_wave: None,
             turn_timers: VecDeque::new(),
-            effort_hit_area: None,
-            speed_hit_area: None,
-            model_hit_area: None,
-            subagent_hit_area: None,
+            chrome_hits: Vec::new(),
             history: PromptHistory::default(),
         }
     }
@@ -452,27 +447,18 @@ impl Composer {
     }
 
     pub(super) fn chrome_target(&self, position: Position) -> Option<ComposerChromeTarget> {
-        if self
-            .subagent_hit_area
-            .is_some_and(|area| area.contains(position))
-        {
-            return Some(ComposerChromeTarget::Subagents);
-        }
-        if self
-            .model_hit_area
-            .is_some_and(|area| area.contains(position))
-        {
-            return Some(ComposerChromeTarget::Model);
-        }
-        if self
-            .speed_hit_area
-            .is_some_and(|area| area.contains(position))
-        {
-            return Some(ComposerChromeTarget::Speed);
-        }
-        self.effort_hit_area
-            .is_some_and(|area| area.contains(position))
-            .then_some(ComposerChromeTarget::Effort)
+        self.chrome_hits
+            .iter()
+            .find(|(_, area)| area.contains(position))
+            .map(|(target, _)| *target)
+    }
+
+    #[cfg(test)]
+    fn chrome_area(&self, target: ComposerChromeTarget) -> Option<Rect> {
+        self.chrome_hits
+            .iter()
+            .find(|(hit, _)| *hit == target)
+            .map(|(_, area)| *area)
     }
 
     pub(crate) fn animation_deadline(&self) -> Option<Instant> {
@@ -905,10 +891,7 @@ impl Composer {
     }
 
     fn render_chrome(&mut self, buffer: &mut Buffer, area: Rect, theme: &Theme) {
-        self.effort_hit_area = None;
-        self.speed_hit_area = None;
-        self.model_hit_area = None;
-        self.subagent_hit_area = None;
+        self.chrome_hits.clear();
         let shell_mode = self.draft.text().starts_with('!');
         let border = self.border_style(theme);
         let top = area.y;
@@ -1037,7 +1020,10 @@ impl Composer {
                     .unwrap_or(u16::MAX)
                     .min(right_start.saturating_sub(wave_x));
             if wave_width > 0 {
-                self.subagent_hit_area = Some(Rect::new(wave_x, top, wave_width, 1));
+                self.chrome_hits.push((
+                    ComposerChromeTarget::Subagents,
+                    Rect::new(wave_x, top, wave_width, 1),
+                ));
             }
             let mut x = wave_x;
             for span in wave.spans() {
@@ -1058,13 +1044,12 @@ impl Composer {
         );
         let model_start = right_start + u16::try_from(timer.width()).unwrap_or(u16::MAX);
         if model_start < content_end {
-            self.model_hit_area = Some(Rect::new(
-                model_start,
-                top,
-                u16::try_from(model.width())
-                    .unwrap_or(u16::MAX)
-                    .min(content_end.saturating_sub(model_start)),
-                1,
+            let width = u16::try_from(model.width())
+                .unwrap_or(u16::MAX)
+                .min(content_end.saturating_sub(model_start));
+            self.chrome_hits.push((
+                ComposerChromeTarget::Model,
+                Rect::new(model_start, top, width, 1),
             ));
         }
         buffer.set_stringn(
@@ -1076,13 +1061,12 @@ impl Composer {
         );
         let effort_start = model_start + u16::try_from(model.width()).unwrap_or(u16::MAX);
         if effort_start < content_end {
-            self.effort_hit_area = Some(Rect::new(
-                effort_start,
-                top,
-                u16::try_from(effort.width())
-                    .unwrap_or(u16::MAX)
-                    .min(content_end.saturating_sub(effort_start)),
-                1,
+            let width = u16::try_from(effort.width())
+                .unwrap_or(u16::MAX)
+                .min(content_end.saturating_sub(effort_start));
+            self.chrome_hits.push((
+                ComposerChromeTarget::Effort,
+                Rect::new(effort_start, top, width, 1),
             ));
             buffer.set_stringn(
                 effort_start,
@@ -1109,7 +1093,10 @@ impl Composer {
             natural_pro_mode_start
         };
         if speed_start < content_end && speed_start.saturating_add(speed_width) <= pro_mode_start {
-            self.speed_hit_area = Some(Rect::new(speed_start, top, speed_width, 1));
+            self.chrome_hits.push((
+                ComposerChromeTarget::Speed,
+                Rect::new(speed_start, top, speed_width, 1),
+            ));
             buffer.set_stringn(
                 speed_start,
                 top,
@@ -1482,7 +1469,7 @@ mod tests {
             assert!(rows(&terminal)[0].contains(&format!("medium {icon} ")));
             assert_eq!(composer.speed(), Speed::Ultrafast);
             let hit = composer
-                .speed_hit_area
+                .chrome_area(ComposerChromeTarget::Speed)
                 .expect("speed should have a hit target");
             assert_eq!(
                 composer.chrome_target(Position::new(hit.x, hit.y)),
@@ -1552,7 +1539,7 @@ mod tests {
             })
             .expect("Pro mode should retain its complete badge");
 
-        assert!(composer.speed_hit_area.is_none());
+        assert!(composer.chrome_area(ComposerChromeTarget::Speed).is_none());
         assert!((pro..pro + 3).all(|index| top[index].fg == Color::Green));
 
         let terminal = render(&mut composer, 6, 5);
