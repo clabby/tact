@@ -73,6 +73,8 @@ pub(crate) struct TranscriptModel {
     // The next run starts a new telemetry scope for automatic compaction.
     manual_compaction: Option<ManualCompaction>,
     run_started_at_unix_ms: VecDeque<u64>,
+    /// The timestamp of the record being applied, stamped on every entry it creates.
+    applying_at_unix_ms: Option<u64>,
     transient: Option<TransientStatus>,
     pending_error: Option<String>,
     pending_compaction_error: Option<String>,
@@ -162,6 +164,15 @@ impl TranscriptModel {
         self.index_of(id).and_then(|index| self.entries.get(index))
     }
 
+    /// The calls a Code Mode cell made, in the order they started.
+    pub(crate) fn code_children(&self, parent: EntryId) -> impl Iterator<Item = &TranscriptEntry> {
+        self.code_children
+            .get(&parent)
+            .into_iter()
+            .flatten()
+            .filter_map(|child| self.entry(*child))
+    }
+
     pub(crate) fn index_of(&self, id: EntryId) -> Option<usize> {
         self.entry_indices.get(&id).copied()
     }
@@ -183,13 +194,16 @@ impl TranscriptModel {
     }
 
     pub(crate) fn apply(&mut self, record: &TranscriptRecord) -> ModelChange {
-        if let Some(kind) = record.local_kind() {
-            return self.apply_local(kind, record);
-        }
-        if let Some(kind) = record.agent_kind() {
-            return self.apply_agent(kind, record);
-        }
-        ModelChange::default()
+        self.applying_at_unix_ms = Some(record.recorded_at_unix_ms()).filter(|at| *at > 0);
+        let change = if let Some(kind) = record.local_kind() {
+            self.apply_local(kind, record)
+        } else if let Some(kind) = record.agent_kind() {
+            self.apply_agent(kind, record)
+        } else {
+            ModelChange::default()
+        };
+        self.applying_at_unix_ms = None;
+        change
     }
 
     pub(crate) fn apply_message(
@@ -1098,6 +1112,7 @@ impl TranscriptModel {
             hidden,
             parent,
             trailing_spacer: true,
+            recorded_at_unix_ms: self.applying_at_unix_ms,
         });
         id
     }
@@ -1234,8 +1249,23 @@ impl TranscriptModel {
         let Some(index) = self.index_of(id) else {
             return;
         };
+        let parent = self.entries[index].parent;
+        let classified = |kind: &EntryKind| match kind {
+            EntryKind::Tool(tool) => Some((tool.state, tool.name.clone(), tool.arguments.clone())),
+            _ => None,
+        };
+        let before = parent.map(|_| classified(&self.entries[index].kind));
         update(&mut self.entries[index].kind);
         self.entries[index].revision = self.entries[index].revision.saturating_add(1);
+        // Front-ends classify a Code Mode cell by its calls' names, arguments, and states, so a
+        // change to one of those revises the cell too. Output and progress leave it alone.
+        if let Some(parent) = parent
+            && before != Some(classified(&self.entries[index].kind))
+            && let Some(parent_index) = self.index_of(parent)
+        {
+            self.entries[parent_index].revision =
+                self.entries[parent_index].revision.saturating_add(1);
+        }
     }
 }
 

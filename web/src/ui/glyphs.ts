@@ -34,6 +34,7 @@ const paths = {
   steer: "M5 12h10M11 6l6 6-6 6M19 5v14",
   compact: "M8 4v4H4M16 4v4h4M8 20v-4H4M16 20v-4h4",
   copy: "M8 8h11v12H8zM5 16V4h11",
+  link: "M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1",
   circle: "M12 20a8 8 0 1 0 0-16 8 8 0 0 0 0 16z",
   code: "M8 8l-4 4 4 4M16 8l4 4-4 4",
   diff: "M12 4v6M9 7h6M9 17h6M5 3h14v18H5z",

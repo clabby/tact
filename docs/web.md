@@ -121,13 +121,17 @@ type TransientStatus =
   | { kind: "retrying"; delay_ns: number; next_attempt: number; max_attempts: number }
   | { kind: "error"; message: string };
 // Hidden entries are omitted. `id` is stable; `revision` increases on each change.
-type WireEntry = { id: number; revision: number; parent: number | null } & (
+// `at_ms` is the Unix time in milliseconds of the record that created the entry, or null when
+// no record created it (agent message threads).
+type WireEntry = { id: number; revision: number; parent: number | null; at_ms: number | null } & (
   | { kind: "user"; text: string; images: number } // the i-th image replaces the i-th "[Image #N]" marker
   | { kind: "assistant"; text: string; complete: boolean; commentary: boolean }
   | { kind: "reasoning"; text: string }
   | { kind: "tool"; name: string; summary: string; state: "running" | "succeeded" | "failed";
       duration_ns: number | null; elapsed_ns: number | null; // elapsed so far, while running
-      substeps: string[]; child_count: number; has_detail: boolean }
+      substeps: string[]; child_count: number; has_detail: boolean;
+      outcome: ToolOutcome | null; stats: PatchStats | null;
+      significance: "routine" | "landmark" }
   | { kind: "directed_message"; from: string; to: string; body: string; delivery: string; // the latest message
       thread: number; messages: DirectedMessage[] }
   | { kind: "forked_from"; session: string }
@@ -140,7 +144,40 @@ type WireEntry = { id: number; revision: number; parent: number | null } & (
   | { kind: "compaction_failed"; message: string }
   | { kind: "error"; message: string });
 type ToolDetail = { arguments: unknown; result: unknown | null; metadata: unknown | null };
+type ToolOutcome = { exit_code: number | null; tail: string[]; summary: string | null };
+type PatchStats = { files: number; additions: number; deletions: number };
 ```
+
+A tool entry's `outcome`, `stats`, and `significance` let a client show how a call ended without
+fetching its `ToolDetail`. The server computes them each time it projects a new revision of the
+entry.
+
+- `outcome` is set once a tool has finished and its result carries command output: an `output`
+  string or an `exit_code` field. Shell commands (`exec_command`, `write_stdin`, and `!` shells
+  from the terminal) report this way. It is null while the tool runs and for tools without
+  command output.
+  - `exit_code` is the process exit code, or null when the process has not exited or was killed.
+  - `tail` holds the last 8 output lines that contain visible text. ANSI escapes and control
+    characters are removed, a line rewritten with carriage returns keeps only its final text, and
+    each line is cut to 200 characters (ending in `…` when cut).
+  - `summary` is a short test or build result when the output contains one, such as
+    `"17 passed, 1 failed, 2 skipped"`. The server recognises cargo test (summed over every test
+    binary), nextest, pytest, Jest, bun test, and go test (`"1 packages passed, 1 failed"` when
+    only package lines are present). Without test results, cargo and tsc compiler errors and
+    warnings give `"3 errors, 2 warnings"`. Otherwise it is null. Failed counts include errors,
+    and skipped counts include ignored and todo tests.
+- `stats` is set for `apply_patch` calls that have not failed. `files` counts the Add, Update, and
+  Delete headers of the patch envelope; `additions` and `deletions` count its `+` and `-` lines.
+  The envelope does not contain a deleted file's lines, so they are not counted.
+- `significance` says whether a call may fold into a run of routine work (`"routine"`) or should
+  keep a row of its own (`"landmark"`). A call is a landmark when it failed, when it is
+  `apply_patch`, `update_plan`, `spawn_agent`, `send_agent_message`, `close_agent`, or
+  `interrupt_agent`, when it is a `memory` call that puts or deletes, or when it is a Code Mode
+  `exec` cell with a landmark among its calls. Everything else is routine: shell commands, reads,
+  searches, web lookups, agent waits and listings, memory scans and reads, Code Mode cells that
+  only made routine calls, and unknown tools. A running call is routine unless its tool alone makes
+  it a landmark, and it becomes a landmark if it fails. A change to the name, arguments, or state
+  of one of a cell's calls is a new revision of the cell, so a cell's class follows its calls.
 
 Clients must render unknown entry kinds as a muted generic row.
 
@@ -400,7 +437,13 @@ mobile-first.
 - **Tabs.** **Chat** holds the transcript and the shared composer. **Review** holds the Pierre
   diffs, live while the agent edits, and an **Overview** sub-tab. Cmd/Ctrl . switches between them.
 - **Transcript.** Apply-patch calls render as truncated Pierre diffs; shell and code calls render
-  as terminal blocks.
+  as terminal blocks. Routine work that succeeded is folded; failures, edits, plans, and agents
+  always get their own row. Two or more consecutive routine calls (see `significance`) fold into
+  one row, with the thoughts between them. The row reads **Ran** when the run includes a shell
+  command or Code Mode cell and **Explored** otherwise, and counts what the run covered ("4
+  commands, 1 code cell"). While one of its calls runs, the row names that call, as **Running**
+  for a command or cell and **Exploring** otherwise, and the row is open so the live call stays in
+  sight. Toggling a row inverts that default, and the choice stays with the row as the run grows.
 - **Prompt minimap.** One tick per prompt on the chat's right edge; longer prompts draw longer
   ticks and the current one is highlighted. Pointing at it lists prompt previews, choosing one
   scrolls there, and sessions with more than 12 prompts page through them.

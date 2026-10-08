@@ -47,6 +47,9 @@ pub(crate) struct TranscriptEntry {
     pub(crate) hidden: bool,
     pub(crate) parent: Option<EntryId>,
     pub(crate) trailing_spacer: bool,
+    /// When the record that created this entry was written, or `None` for entries that no
+    /// timestamped record created (such as agent message threads).
+    pub(crate) recorded_at_unix_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug)]

@@ -1,7 +1,10 @@
 import { activeIndex, lineLength, MAX_LINES, promptLabel, windowFor } from "./prompt-rail";
 import type { TranscriptData } from "../core/store";
 
-type Prompt = { id: number; text: string };
+type Prompt = { id: number; text: string; marks: string };
+
+/** What a prompt's turn did that the rail marks beside its tick. */
+export type RailMarks = (prompt: number) => { edits: boolean; failures: boolean };
 
 /** Pixels below the transcript's top edge that count as "where the reader is". */
 const READING_LINE = 96;
@@ -20,7 +23,12 @@ export class PromptRail {
   private chosen: number | null = null;
   private frame = 0;
 
-  constructor(host: HTMLElement, private readonly scroller: HTMLElement, private readonly data: () => TranscriptData | null) {
+  constructor(
+    host: HTMLElement,
+    private readonly scroller: HTMLElement,
+    private readonly data: () => TranscriptData | null,
+    private readonly marks: RailMarks = () => ({ edits: false, failures: false }),
+  ) {
     const layer = document.createElement("div");
     layer.className = "rail-layer";
     this.nav = document.createElement("nav");
@@ -51,9 +59,14 @@ export class PromptRail {
     const data = this.data();
     const prompts = (data?.order ?? []).flatMap((id) => {
       const entry = data!.entries.get(id);
-      return entry?.kind === "user" && entry.parent === null ? [{ id, text: entry.text }] : [];
+      if (entry?.kind !== "user" || entry.parent !== null) return [];
+      const { edits, failures } = this.marks(id);
+      return [{ id, text: entry.text, marks: `${edits ? "e" : ""}${failures ? "f" : ""}` }];
     });
-    const changed = prompts.length !== this.prompts.length || prompts.some((prompt, index) => prompt.id !== this.prompts[index]!.id || prompt.text !== this.prompts[index]!.text);
+    const changed = prompts.length !== this.prompts.length || prompts.some((prompt, index) => {
+      const shown = this.prompts[index]!;
+      return prompt.id !== shown.id || prompt.text !== shown.text || prompt.marks !== shown.marks;
+    });
     this.prompts = prompts;
     const active = this.measureActive();
     const activeMoved = active !== this.active;
@@ -89,11 +102,17 @@ export class PromptRail {
       item.type = "button";
       item.className = "rail-item";
       item.dataset.index = String(index);
-      item.innerHTML = `<span class="rail-label"><span class="rail-num"></span><span class="rail-text"></span></span><span class="rail-line"></span>`;
+      // Marks beside the tick: the turn edited files, or ended with failures nothing made good.
+      const marks = [
+        prompt.marks.includes("e") ? `<i class="rail-mark" data-mark="edit"></i>` : "",
+        prompt.marks.includes("f") ? `<i class="rail-mark" data-mark="failure"></i>` : "",
+      ].join("");
+      item.innerHTML = `<span class="rail-label"><span class="rail-num"></span><span class="rail-text"></span></span><span class="rail-marks" aria-hidden="true">${marks}</span><span class="rail-line"></span>`;
       item.querySelector(".rail-num")!.textContent = String(index + 1);
       item.querySelector(".rail-text")!.textContent = promptLabel(prompt.text);
       item.querySelector<HTMLElement>(".rail-line")!.style.width = `${lineLength(prompt.text)}px`;
-      item.setAttribute("aria-label", `Prompt ${index + 1}: ${promptLabel(prompt.text)}`);
+      const notes = [prompt.marks.includes("e") ? "edited files" : "", prompt.marks.includes("f") ? "has failures" : ""].filter(Boolean).join(", ");
+      item.setAttribute("aria-label", `Prompt ${index + 1}: ${promptLabel(prompt.text)}${notes ? `, ${notes}` : ""}`);
       items.push(item);
     }
     if (end < this.prompts.length) items.push(this.more(1, `${this.prompts.length - end} later`));
