@@ -87,8 +87,7 @@ list remains a bounded window; use export to retrieve every record.
 D1 selects scan results through a maintained FTS5 index. Prepared SQL performs literal matching,
 visibility filtering, BM25 scoring, the authenticated caller's 1.25 weight, and the final limit.
 Only the requested candidates, at most ten, reach the Worker. Queries remain bounded to 512 UTF-8
-bytes and previews to 64 bytes. Scans no longer load the shared corpus or impose a shared record or
-content budget. Per-namespace storage and request limits still apply.
+bytes and previews to 64 bytes. Scans do not load the shared corpus into the Worker or impose a shared record or content budget. Per-namespace storage and request limits still apply.
 
 The [retrieval contract](../../docs/memory.md#record-and-retrieval-contract) defines score direction,
 ties, tokenization, and the effect of expired records on index statistics. SQL orders all matching
