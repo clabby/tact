@@ -20,7 +20,7 @@ use super::{
     model_selector::{ModelSelector, ModelSelectorEffect, ModelSelectorEvent},
     node::{Component, ComponentUpdate, RenderRequest},
     qr_code::{QrCodeEffect, QrCodeEvent, QrCodeView},
-    queue::{MessageQueue, QueueEffect, QueueEvent},
+    queue::{MessageQueue, QueueEffect, QueueEntry, QueueEvent},
     recent_prompt_picker::{RecentPromptPicker, RecentPromptPickerEffect, RecentPromptPickerEvent},
     selection::{Selection, Surface, TextSpan},
     session_picker::{SessionPicker, SessionPickerEffect, SessionPickerEvent, SessionPickerMode},
@@ -2293,8 +2293,8 @@ impl RootNode {
             PaneCommand::Steer(id) | PaneCommand::Dequeue(id) | PaneCommand::EditQueued(id, _)
                 if !self
                     .queue
-                    .items()
-                    .any(|(item, _, steering)| item == *id && !steering) =>
+                    .entries()
+                    .any(|entry| entry.id == *id && !entry.steering) =>
             {
                 return Err(CommandError::UnknownQueueItem);
             }
@@ -2402,8 +2402,8 @@ impl RootNode {
         }
     }
 
-    pub(super) fn queued_prompts(&self) -> impl Iterator<Item = (QueueId, &str, bool)> {
-        self.queue.items()
+    pub(super) fn queued_prompts(&self) -> impl Iterator<Item = QueueEntry<'_>> {
+        self.queue.entries()
     }
 
     /// The session's first prompt, which names it in session lists.

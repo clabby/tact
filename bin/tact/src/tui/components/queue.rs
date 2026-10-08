@@ -35,6 +35,15 @@ pub(super) enum QueueEvent {
     AnimationFrame(Instant),
 }
 
+/// A read-only view of one queue item.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct QueueEntry<'a> {
+    pub(super) id: QueueId,
+    pub(super) text: &'a str,
+    /// The item is being delivered into the running turn and can no longer be edited or removed.
+    pub(super) steering: bool,
+}
+
 struct QueueItem {
     id: QueueId,
     prompt: Submission,
@@ -157,15 +166,15 @@ impl MessageQueue {
         drained
     }
 
-    /// Every item in display order as `(id, text, steering)`; steering items are being delivered
-    /// into the running turn.
-    pub(super) fn items(&self) -> impl Iterator<Item = (QueueId, &str, bool)> {
-        self.items.iter().map(|item| {
-            let steering = matches!(
+    /// Every item in display order.
+    pub(super) fn entries(&self) -> impl Iterator<Item = QueueEntry<'_>> {
+        self.items.iter().map(|item| QueueEntry {
+            id: item.id,
+            text: item.prompt.display_text(),
+            steering: matches!(
                 item.state,
                 QueueItemState::SubmittingSteer | QueueItemState::AdmittedSteer
-            );
-            (item.id, item.prompt.display_text(), steering)
+            ),
         })
     }
 

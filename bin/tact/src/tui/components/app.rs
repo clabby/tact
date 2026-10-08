@@ -1464,10 +1464,10 @@ impl AppNode {
 
 fn queued_prompts(root: &RootNode) -> Vec<QueuedPrompt> {
     root.queued_prompts()
-        .map(|(id, text, steering)| QueuedPrompt {
-            id: id.get(),
-            text: text.to_owned(),
-            steering,
+        .map(|entry| QueuedPrompt {
+            id: entry.id.get(),
+            text: entry.text.to_owned(),
+            steering: entry.steering,
         })
         .collect()
 }
@@ -1495,8 +1495,8 @@ fn images_match(published: &[DraftImage], root: &RootNode) -> bool {
 fn queue_matches(published: &[QueuedPrompt], root: &RootNode) -> bool {
     let mut current = root.queued_prompts();
     published.iter().all(|item| {
-        current.next().is_some_and(|(id, text, steering)| {
-            item.id == id.get() && item.text == text && item.steering == steering
+        current.next().is_some_and(|entry| {
+            item.id == entry.id.get() && item.text == entry.text && item.steering == entry.steering
         })
     }) && current.next().is_none()
 }
