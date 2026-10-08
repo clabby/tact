@@ -28,7 +28,7 @@ use super::{
     claude_context::ProjectContext,
     extensions::{Skill, SkillCatalog},
 };
-use crate::app::config::{Config, SkillsConfig};
+use crate::app::config::Config;
 use nanocodex::{HarnessModel as Model, oai::tower::ResponsesServiceConfig};
 use std::sync::Arc;
 use tact_subagents::SUPPORTED_MODELS;
@@ -283,13 +283,20 @@ impl AgentInstructions {
         memory_enabled: bool,
     ) -> nanocodex::agent::Result<Self> {
         let fresh = restored.is_none();
+        // Discovery walks the skill roots, so every fresh prompt shares one catalog.
+        let catalog = SkillCatalog::load(config.skills());
         let mut prompts = Self {
-            session: SessionInstructions::from_config(config, model, restored, memory_enabled),
+            session: SessionInstructions::from_config(
+                config,
+                &catalog,
+                model,
+                restored,
+                memory_enabled,
+            ),
             children: SUPPORTED_MODELS.map(|model| {
-                (
-                    model,
-                    SessionInstructions::from_config(config, model, None, memory_enabled).text,
-                )
+                let session =
+                    SessionInstructions::from_config(config, &catalog, model, None, memory_enabled);
+                (model, session.text)
             }),
         };
         if config.claude().enabled() {
@@ -321,6 +328,7 @@ impl AgentInstructions {
 impl SessionInstructions {
     fn from_config(
         config: &Config,
+        catalog: &SkillCatalog,
         model: Model,
         restored: Option<RestoredInstructions>,
         memory_enabled: bool,
@@ -336,7 +344,7 @@ impl SessionInstructions {
                 Self::fresh(
                     &base,
                     agent.append_instructions(),
-                    config.skills(),
+                    catalog,
                     subagents_enabled,
                     memory_enabled,
                 )
@@ -364,11 +372,10 @@ impl SessionInstructions {
     fn fresh(
         base: &str,
         appended: Option<&str>,
-        skills: &SkillsConfig,
+        catalog: &SkillCatalog,
         subagents_enabled: bool,
         memory_enabled: bool,
     ) -> (PromptText, Arc<[Skill]>) {
-        let catalog = SkillCatalog::load(skills);
         let mut text = PromptText::with_tact_identity(base);
         for section in [
             TACT_INSTRUCTIONS,
@@ -485,7 +492,7 @@ mod tests {
     };
     use crate::{
         app::config::{Config, ConfigOverrides, SkillsConfig},
-        core::extensions::Skill,
+        core::extensions::{Skill, SkillCatalog},
     };
     use nanocodex::{HarnessModel as Model, Model as CodexModel};
     use std::{fs, path::Path, sync::Arc};
@@ -523,8 +530,13 @@ mod tests {
         subagents_enabled: bool,
         memory_enabled: bool,
     ) -> SessionInstructions {
-        let (text, skills) =
-            SessionInstructions::fresh(base, appended, skills, subagents_enabled, memory_enabled);
+        let (text, skills) = SessionInstructions::fresh(
+            base,
+            appended,
+            &SkillCatalog::load(skills),
+            subagents_enabled,
+            memory_enabled,
+        );
         SessionInstructions {
             text: text.0.into(),
             skills,
@@ -731,7 +743,13 @@ mod tests {
                 },
             );
             for model in CODEX_MODELS {
-                let session = SessionInstructions::from_config(&config, model, None, true);
+                let session = SessionInstructions::from_config(
+                    &config,
+                    &SkillCatalog::load(config.skills()),
+                    model,
+                    None,
+                    true,
+                );
                 let base = custom.map_or_else(|| default_base(model), str::to_owned);
                 assert!(
                     session
@@ -750,6 +768,7 @@ mod tests {
                 let stored = "You are Codex.\n\nStored instructions.\n";
                 let resumed = SessionInstructions::from_config(
                     &config,
+                    &SkillCatalog::load(config.skills()),
                     model,
                     Some(RestoredInstructions::new(stored.to_owned(), Some(false))),
                     true,
@@ -791,7 +810,13 @@ mod tests {
                 format!("{stored}{}", separated(SUBAGENT_MODEL_INSTRUCTIONS))
             );
             for model in CODEX_MODELS {
-                let expected = SessionInstructions::from_config(&config, model, None, true);
+                let expected = SessionInstructions::from_config(
+                    &config,
+                    &SkillCatalog::load(config.skills()),
+                    model,
+                    None,
+                    true,
+                );
                 assert_eq!(instructions.for_model(model), expected.text, "{model:?}");
             }
         }
@@ -835,6 +860,7 @@ mod tests {
             let resume = |text: &str| {
                 SessionInstructions::from_config(
                     &config,
+                    &SkillCatalog::load(config.skills()),
                     model,
                     Some(RestoredInstructions::new(text.to_owned(), Some(false))),
                     true,
@@ -894,7 +920,13 @@ mod tests {
                 )),
             ] {
                 let fresh = restored.is_none();
-                let session = SessionInstructions::from_config(&config, model, restored, false);
+                let session = SessionInstructions::from_config(
+                    &config,
+                    &SkillCatalog::load(config.skills()),
+                    model,
+                    restored,
+                    false,
+                );
                 assert_eq!(
                     count(&session.text, SUBAGENT_MODEL_INSTRUCTIONS),
                     usize::from(enabled)
