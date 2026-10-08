@@ -278,6 +278,8 @@ struct SigningMetadata {
     pubkey: String,
 }
 
+/// Downloads a release archive for `version` and verifies its checksum and minisign signature
+/// against the signing key published in the crates.io package for the same version.
 pub(crate) async fn download_verified_release_artifact(
     version: &Version,
     archive_name: &str,
@@ -298,10 +300,13 @@ pub(crate) async fn download_verified_release_artifact(
             browser_download_url: format!("{base}/{archive_name}.sig"),
         },
     };
-    let client = http_client()?;
-    download_verified_artifact(&client, version, assets.as_borrowed(), max_archive_bytes).await
+    Updater::new()?
+        .download_verified_artifact(version, assets.as_borrowed(), max_archive_bytes)
+        .await
 }
 
+/// The newer release this installation can update to, if any. A release archive installation
+/// only reports a release whose archive assets and signing key are available.
 pub(crate) async fn check_for_update() -> Result<Option<Version>, UpdateError> {
     let installation = installation();
     if installation.is_development() {
@@ -309,16 +314,14 @@ pub(crate) async fn check_for_update() -> Result<Option<Version>, UpdateError> {
     }
     let build_target = env!("TACT_BUILD_TARGET");
     let artifact_target = update_artifact_target(installation, build_target)?;
-    let current = current_version()?;
-
-    let client = http_client()?;
-    let release = latest_release(&client).await?;
-    if release.version <= current {
+    let updater = Updater::new()?;
+    let release = updater.latest_release().await?;
+    if release.version <= updater.current {
         return Ok(None);
     }
     if let Some(target) = artifact_target {
         release.assets_for(target)?;
-        fetch_signing_key(&client, &release.version).await?;
+        updater.signing_key(&release.version).await?;
     }
     Ok(Some(release.version))
 }
@@ -335,6 +338,8 @@ fn update_artifact_target(
     }
 }
 
+/// Replaces the running executable with the latest verified release, or reports how this
+/// installation must be updated instead.
 pub(crate) async fn install_latest() -> Result<UpdateStatus, UpdateError> {
     if let InstallationKind::CratesIo { root } = installation() {
         return Ok(UpdateStatus::UseCargo {
@@ -347,20 +352,22 @@ pub(crate) async fn install_latest() -> Result<UpdateStatus, UpdateError> {
         });
     }
     let target = SupportedTarget::current()?;
-    let current = current_version()?;
-    let client = http_client()?;
-    let release = latest_release(&client).await?;
-    if release.version <= current {
-        return Ok(UpdateStatus::UpToDate { version: current });
+    let updater = Updater::new()?;
+    let release = updater.latest_release().await?;
+    if release.version <= updater.current {
+        return Ok(UpdateStatus::UpToDate {
+            version: updater.current,
+        });
     }
 
     let assets = release.assets_for(target)?;
-    let archive =
-        download_verified_artifact(&client, &release.version, assets, MAX_ARCHIVE_BYTES).await?;
+    let archive = updater
+        .download_verified_artifact(&release.version, assets, MAX_ARCHIVE_BYTES)
+        .await?;
     let extracted = extract_binary(&archive, &assets.archive.name, target, &release.version)?;
     self_replace::self_replace(&extracted.path).map_err(UpdateError::Replace)?;
     Ok(UpdateStatus::Updated {
-        from: current,
+        from: updater.current,
         to: release.version,
     })
 }
@@ -381,51 +388,223 @@ impl OwnedReleaseAssets {
     }
 }
 
-async fn download_verified_artifact(
-    client: &Client,
-    version: &Version,
-    assets: ReleaseAssets<'_>,
-    max_archive_bytes: u64,
-) -> Result<NamedTempFile, UpdateError> {
-    let public_key = fetch_signing_key(client, version).await?;
-    let archive = NamedTempFile::new().map_err(UpdateError::TemporaryStorage)?;
-    download_to_file(
-        client,
-        &assets.archive.browser_download_url,
-        &assets.archive.name,
-        max_archive_bytes,
-        &archive,
-    )
-    .await?;
-    let checksum = fetch_bytes(
-        client,
-        &assets.checksum.browser_download_url,
-        &assets.checksum.name,
-        MAX_SIDECAR_BYTES,
-    )
-    .await?;
-    let signature = fetch_bytes(
-        client,
-        &assets.signature.browser_download_url,
-        &assets.signature.name,
-        MAX_SIDECAR_BYTES,
-    )
-    .await?;
+/// One update operation's HTTP client and the version of the running build. Every download is
+/// bounded by a byte limit enforced both on the advertised length and while streaming.
+struct Updater {
+    client: Client,
+    current: Version,
+}
 
-    verify_archive_checksum(
-        &archive,
-        &assets.archive.name,
-        &checksum,
-        &assets.checksum.name,
-    )?;
-    verify_archive_signature(
-        &archive,
-        &assets.archive.name,
-        &signature,
-        &assets.signature.name,
-        &public_key,
-    )?;
-    Ok(archive)
+/// What a download fetches, which names the operation in HTTP errors.
+#[derive(Clone, Copy)]
+enum Download {
+    Metadata,
+    Archive,
+}
+
+impl Download {
+    const fn request_operation(self) -> &'static str {
+        match self {
+            Self::Metadata => "download update data",
+            Self::Archive => "download the release archive",
+        }
+    }
+
+    const fn read_operation(self) -> &'static str {
+        match self {
+            Self::Metadata => "read update data",
+            Self::Archive => "read the release archive",
+        }
+    }
+}
+
+impl Updater {
+    fn new() -> Result<Self, UpdateError> {
+        let current =
+            Version::parse(env!("CARGO_PKG_VERSION")).map_err(UpdateError::CurrentVersion)?;
+        let client = Client::builder()
+            .user_agent(concat!("tact/", env!("CARGO_PKG_VERSION")))
+            .connect_timeout(CONNECT_TIMEOUT)
+            .timeout(HTTP_TIMEOUT)
+            .build()
+            .map_err(UpdateError::Client)?;
+        Ok(Self { client, current })
+    }
+
+    async fn latest_release(&self) -> Result<Release, UpdateError> {
+        let bytes = self
+            .fetch_bytes(
+                GITHUB_LATEST_RELEASE,
+                "GitHub release metadata",
+                MAX_METADATA_BYTES,
+            )
+            .await?;
+        let response = serde_json::from_slice(&bytes).map_err(UpdateError::GithubMetadata)?;
+        Release::parse(response)
+    }
+
+    /// Downloads the archive and its sidecars, then verifies the archive against both.
+    async fn download_verified_artifact(
+        &self,
+        version: &Version,
+        assets: ReleaseAssets<'_>,
+        max_archive_bytes: u64,
+    ) -> Result<NamedTempFile, UpdateError> {
+        let public_key = self.signing_key(version).await?;
+        let archive = NamedTempFile::new().map_err(UpdateError::TemporaryStorage)?;
+        let mut output = archive.reopen().map_err(UpdateError::TemporaryWrite)?;
+        self.download(
+            Download::Archive,
+            &assets.archive.browser_download_url,
+            &assets.archive.name,
+            max_archive_bytes,
+            |chunk| output.write_all(chunk).map_err(UpdateError::TemporaryWrite),
+        )
+        .await?;
+        output.flush().map_err(UpdateError::TemporaryWrite)?;
+        let checksum = self
+            .fetch_bytes(
+                &assets.checksum.browser_download_url,
+                &assets.checksum.name,
+                MAX_SIDECAR_BYTES,
+            )
+            .await?;
+        let signature = self
+            .fetch_bytes(
+                &assets.signature.browser_download_url,
+                &assets.signature.name,
+                MAX_SIDECAR_BYTES,
+            )
+            .await?;
+
+        verify_archive_checksum(
+            &archive,
+            &assets.archive.name,
+            &checksum,
+            &assets.checksum.name,
+        )?;
+        verify_archive_signature(
+            &archive,
+            &assets.archive.name,
+            &signature,
+            &assets.signature.name,
+            &public_key,
+        )?;
+        Ok(archive)
+    }
+
+    /// The minisign key that signs `version`'s release archives. It is read from the
+    /// cargo-binstall metadata of the crates.io package, whose bytes must match the checksum the
+    /// registry reports.
+    async fn signing_key(&self, version: &Version) -> Result<PublicKey, UpdateError> {
+        let metadata_url = format!("{CRATES_IO_API}/{version}");
+        let metadata = self
+            .fetch_bytes(
+                &metadata_url,
+                "crates.io version metadata",
+                MAX_METADATA_BYTES,
+            )
+            .await?;
+        let response: RegistryResponse =
+            serde_json::from_slice(&metadata).map_err(|source| UpdateError::RegistryMetadata {
+                version: version.clone(),
+                source,
+            })?;
+        let expected_checksum =
+            parse_hex_checksum(&response.version.checksum).ok_or_else(|| {
+                UpdateError::RegistryChecksumFormat {
+                    version: version.clone(),
+                }
+            })?;
+        let crate_url = format!("{CRATES_IO_API}/{version}/download");
+        let crate_bytes = self
+            .fetch_bytes(&crate_url, "crates.io package", MAX_CRATE_BYTES)
+            .await?;
+        let actual_checksum: [u8; 32] = Sha256::digest(&crate_bytes).into();
+        if actual_checksum != expected_checksum {
+            return Err(UpdateError::RegistryChecksumMismatch {
+                version: version.clone(),
+            });
+        }
+        let manifest = crate_manifest(&crate_bytes, version)?;
+        let manifest: CrateManifest =
+            toml::from_str(&manifest).map_err(|source| UpdateError::SigningMetadata {
+                version: version.clone(),
+                source: Box::new(source),
+            })?;
+        let signing = manifest
+            .package
+            .metadata
+            .binstall
+            .and_then(|metadata| metadata.signing)
+            .ok_or_else(|| UpdateError::MissingSigningMetadata {
+                version: version.clone(),
+            })?;
+        if signing.algorithm != "minisign" {
+            return Err(UpdateError::UnsupportedSigningAlgorithm {
+                version: version.clone(),
+                algorithm: signing.algorithm,
+            });
+        }
+        PublicKey::from_base64(signing.pubkey.trim()).map_err(|source| UpdateError::PublicKey {
+            version: version.clone(),
+            source,
+        })
+    }
+
+    async fn fetch_bytes(&self, url: &str, name: &str, limit: u64) -> Result<Vec<u8>, UpdateError> {
+        let mut bytes = Vec::new();
+        self.download(Download::Metadata, url, name, limit, |chunk| {
+            bytes.extend_from_slice(chunk);
+            Ok(())
+        })
+        .await?;
+        Ok(bytes)
+    }
+
+    /// Streams `url` into `sink`, failing once more than `limit` bytes are advertised or
+    /// received.
+    async fn download(
+        &self,
+        kind: Download,
+        url: &str,
+        name: &str,
+        limit: u64,
+        mut sink: impl FnMut(&[u8]) -> Result<(), UpdateError>,
+    ) -> Result<(), UpdateError> {
+        let too_large = || UpdateError::DownloadTooLarge {
+            name: name.to_owned(),
+            limit,
+        };
+        let mut response = self
+            .client
+            .get(url)
+            .send()
+            .await
+            .and_then(reqwest::Response::error_for_status)
+            .map_err(|source| UpdateError::Http {
+                operation: kind.request_operation(),
+                source,
+            })?;
+        if response
+            .content_length()
+            .is_some_and(|length| length > limit)
+        {
+            return Err(too_large());
+        }
+        let mut received = 0_u64;
+        while let Some(chunk) = response.chunk().await.map_err(|source| UpdateError::Http {
+            operation: kind.read_operation(),
+            source,
+        })? {
+            received = received.saturating_add(chunk.len() as u64);
+            if received > limit {
+                return Err(too_large());
+            }
+            sink(&chunk)?;
+        }
+        Ok(())
+    }
 }
 
 fn default_cargo_install_root() -> Option<PathBuf> {
@@ -446,171 +625,6 @@ fn cargo_update_command(root: &Path, default_root: Option<&Path>) -> String {
         );
     }
     command
-}
-
-fn current_version() -> Result<Version, UpdateError> {
-    Version::parse(env!("CARGO_PKG_VERSION")).map_err(UpdateError::CurrentVersion)
-}
-
-fn http_client() -> Result<Client, UpdateError> {
-    Client::builder()
-        .user_agent(concat!("tact/", env!("CARGO_PKG_VERSION")))
-        .connect_timeout(CONNECT_TIMEOUT)
-        .timeout(HTTP_TIMEOUT)
-        .build()
-        .map_err(UpdateError::Client)
-}
-
-async fn latest_release(client: &Client) -> Result<Release, UpdateError> {
-    let bytes = fetch_bytes(
-        client,
-        GITHUB_LATEST_RELEASE,
-        "GitHub release metadata",
-        MAX_METADATA_BYTES,
-    )
-    .await?;
-    let response = serde_json::from_slice(&bytes).map_err(UpdateError::GithubMetadata)?;
-    Release::parse(response)
-}
-
-async fn fetch_signing_key(client: &Client, version: &Version) -> Result<PublicKey, UpdateError> {
-    let metadata_url = format!("{CRATES_IO_API}/{version}");
-    let metadata = fetch_bytes(
-        client,
-        &metadata_url,
-        "crates.io version metadata",
-        MAX_METADATA_BYTES,
-    )
-    .await?;
-    let response: RegistryResponse =
-        serde_json::from_slice(&metadata).map_err(|source| UpdateError::RegistryMetadata {
-            version: version.clone(),
-            source,
-        })?;
-    let expected_checksum = parse_hex_checksum(&response.version.checksum).ok_or_else(|| {
-        UpdateError::RegistryChecksumFormat {
-            version: version.clone(),
-        }
-    })?;
-    let crate_url = format!("{CRATES_IO_API}/{version}/download");
-    let crate_bytes = fetch_bytes(client, &crate_url, "crates.io package", MAX_CRATE_BYTES).await?;
-    let actual_checksum: [u8; 32] = Sha256::digest(&crate_bytes).into();
-    if actual_checksum != expected_checksum {
-        return Err(UpdateError::RegistryChecksumMismatch {
-            version: version.clone(),
-        });
-    }
-    let manifest = crate_manifest(&crate_bytes, version)?;
-    let manifest: CrateManifest =
-        toml::from_str(&manifest).map_err(|source| UpdateError::SigningMetadata {
-            version: version.clone(),
-            source: Box::new(source),
-        })?;
-    let signing = manifest
-        .package
-        .metadata
-        .binstall
-        .and_then(|metadata| metadata.signing)
-        .ok_or_else(|| UpdateError::MissingSigningMetadata {
-            version: version.clone(),
-        })?;
-    if signing.algorithm != "minisign" {
-        return Err(UpdateError::UnsupportedSigningAlgorithm {
-            version: version.clone(),
-            algorithm: signing.algorithm,
-        });
-    }
-    PublicKey::from_base64(signing.pubkey.trim()).map_err(|source| UpdateError::PublicKey {
-        version: version.clone(),
-        source,
-    })
-}
-
-async fn fetch_bytes(
-    client: &Client,
-    url: &str,
-    name: &str,
-    limit: u64,
-) -> Result<Vec<u8>, UpdateError> {
-    let mut response = client
-        .get(url)
-        .send()
-        .await
-        .and_then(reqwest::Response::error_for_status)
-        .map_err(|source| UpdateError::Http {
-            operation: "download update data",
-            source,
-        })?;
-    enforce_content_length(&response, name, limit)?;
-    let mut bytes = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(|source| UpdateError::Http {
-        operation: "read update data",
-        source,
-    })? {
-        let length = (bytes.len() as u64).saturating_add(chunk.len() as u64);
-        if length > limit {
-            return Err(UpdateError::DownloadTooLarge {
-                name: name.to_owned(),
-                limit,
-            });
-        }
-        bytes.extend_from_slice(&chunk);
-    }
-    Ok(bytes)
-}
-
-async fn download_to_file(
-    client: &Client,
-    url: &str,
-    name: &str,
-    limit: u64,
-    file: &NamedTempFile,
-) -> Result<(), UpdateError> {
-    let mut response = client
-        .get(url)
-        .send()
-        .await
-        .and_then(reqwest::Response::error_for_status)
-        .map_err(|source| UpdateError::Http {
-            operation: "download the release archive",
-            source,
-        })?;
-    enforce_content_length(&response, name, limit)?;
-    let mut written = 0_u64;
-    let mut output = file.reopen().map_err(UpdateError::TemporaryWrite)?;
-    while let Some(chunk) = response.chunk().await.map_err(|source| UpdateError::Http {
-        operation: "read the release archive",
-        source,
-    })? {
-        written = written.saturating_add(chunk.len() as u64);
-        if written > limit {
-            return Err(UpdateError::DownloadTooLarge {
-                name: name.to_owned(),
-                limit,
-            });
-        }
-        output
-            .write_all(&chunk)
-            .map_err(UpdateError::TemporaryWrite)?;
-    }
-    output.flush().map_err(UpdateError::TemporaryWrite)
-}
-
-fn enforce_content_length(
-    response: &reqwest::Response,
-    name: &str,
-    limit: u64,
-) -> Result<(), UpdateError> {
-    if response
-        .content_length()
-        .is_some_and(|length| length > limit)
-    {
-        return Err(UpdateError::DownloadTooLarge {
-            name: name.to_owned(),
-            limit,
-        });
-    }
-    Ok(())
 }
 
 fn crate_manifest(bytes: &[u8], version: &Version) -> Result<String, UpdateError> {
