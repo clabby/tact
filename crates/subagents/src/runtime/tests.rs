@@ -38,6 +38,12 @@ use tower::Service;
 async fn descendants_can_switch_providers_with_local_model_and_shared_effort_caps() {
     let (updates, _receiver) = mpsc::unbounded_channel();
     let registry = Registry::new(updates, 1);
+    let codex = |model| Model::Codex(model);
+    let denied = [
+        (codex(CodexModel::Luna), codex(CodexModel::Sol)),
+        (codex(CodexModel::Luna), codex(CodexModel::Astra)),
+        (codex(CodexModel::Sol), codex(CodexModel::Astra)),
+    ];
     for parent_model in crate::SUPPORTED_MODELS {
         let parent = registry.reserve("root").await.unwrap();
         let session_id = format!("parent-{parent_model}");
@@ -56,21 +62,11 @@ async fn descendants_can_switch_providers_with_local_model_and_shared_effort_cap
         }
         let child = registry.reserve(&session_id).await.unwrap();
         for child_model in crate::SUPPORTED_MODELS {
-            let denied = matches!(
-                (parent_model, child_model),
-                (
-                    Model::Codex(CodexModel::Luna),
-                    Model::Codex(CodexModel::Sol) | Model::Codex(CodexModel::Astra)
-                ) | (
-                    Model::Codex(CodexModel::Sol),
-                    Model::Codex(CodexModel::Astra)
-                )
-            );
             assert_eq!(
                 child
                     .validate_child("ignored", child_model, Thinking::Medium)
                     .is_ok(),
-                !denied
+                !denied.contains(&(parent_model, child_model))
             );
             assert!(
                 child
