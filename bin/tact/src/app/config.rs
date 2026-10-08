@@ -2,7 +2,10 @@
 
 use crate::{
     app::{
-        error::{ConfigError, ConfigSyntaxError, McpUrlError, RemoteMemoryConfigError, Result},
+        error::{
+            ConfigEditError, ConfigError, ConfigSyntaxError, McpUrlError, RemoteMemoryConfigError,
+            Result,
+        },
         model,
         secret::SecretString,
     },
@@ -13,14 +16,17 @@ use nanocodex::{
     HarnessModel as Model, Model as CodexModel, Thinking, oai::transport::ResponsesTransport,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     env,
     ffi::OsString,
     fmt, fs,
-    io::{ErrorKind, Write},
+    io::{self, ErrorKind, Write},
+    net::{IpAddr, Ipv4Addr},
     num::{NonZeroU16, NonZeroUsize},
     path::{Path, PathBuf},
+    result::Result as StdResult,
     sync::Arc,
 };
 use tact_memory::MemoryLimits;
@@ -110,6 +116,9 @@ pub(crate) struct Config {
     path: PathBuf,
     #[serde(skip)]
     codex_home: Option<PathBuf>,
+    /// The process workspace selects the shared memory backend.
+    #[serde(skip)]
+    memory_workspace: PathBuf,
     auth: AuthConfig,
     openai: OpenAiConfig,
     claude: ClaudeConfig,
@@ -118,6 +127,7 @@ pub(crate) struct Config {
     skills: SkillsConfig,
     memory: MemoryConfig,
     subagents: SubagentsConfig,
+    web: WebConfig,
     tui: TuiConfig,
     theme: Theme,
     #[serde(skip)]
@@ -298,6 +308,20 @@ pub(crate) struct SubagentsConfig {
     enabled: bool,
 }
 
+/// Effective web interface configuration.
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct WebConfig {
+    enabled: bool,
+    bind: IpAddr,
+    port: u16,
+    /// Empty when unset, so the materialized defaults list every key.
+    public_url: String,
+    /// Publishes the server to the tailnet with `tailscale serve` while this process runs.
+    /// Mutually exclusive with `public_url`.
+    tailscale: bool,
+    max_live_sessions: NonZeroUsize,
+}
+
 /// Effective terminal interface configuration.
 #[derive(Clone, Copy, Debug, Serialize)]
 pub(crate) struct TuiConfig {
@@ -314,6 +338,7 @@ pub(crate) struct ConfigOverrides {
     pub(crate) thinking: Option<ReasoningEffort>,
     pub(crate) reasoning_mode: Option<ReasoningMode>,
     pub(crate) max_subagents: Option<usize>,
+    pub(crate) web: Option<bool>,
     pub(crate) instructions: Option<String>,
     pub(crate) append_instructions: Option<String>,
     pub(crate) web_search: Option<bool>,
@@ -336,6 +361,27 @@ pub(crate) struct ConfigReload {
     workspace_changed: bool,
 }
 
+/// The configuration file as a remote editor sees it. Only files without credentials are offered:
+/// credentials never leave the terminal.
+#[derive(Debug, Eq, PartialEq, Serialize)]
+pub(crate) struct ConfigDocument {
+    pub(crate) path: PathBuf,
+    /// The file's text; empty when the file does not exist yet.
+    pub(crate) text: String,
+    /// A digest of `text`. A write must name the revision it replaces so it cannot silently
+    /// discard a concurrent edit.
+    pub(crate) revision: String,
+}
+
+impl ConfigDocument {
+    fn revision_of(text: &str) -> String {
+        Sha256::digest(text.as_bytes())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }
+}
+
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct ConfigFile {
@@ -347,6 +393,7 @@ struct ConfigFile {
     skills: SkillsConfigFile,
     memory: MemoryConfigFile,
     subagents: SubagentsConfigFile,
+    web: WebConfigFile,
     tui: TuiConfigFile,
     theme: Theme,
 }
@@ -403,6 +450,17 @@ impl fmt::Debug for RemoteMemoryTokenFile {
 #[serde(default, deny_unknown_fields)]
 struct SubagentsConfigFile {
     enabled: Option<bool>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct WebConfigFile {
+    enabled: Option<bool>,
+    bind: Option<IpAddr>,
+    port: Option<u16>,
+    public_url: Option<String>,
+    tailscale: Option<bool>,
+    max_live_sessions: Option<NonZeroUsize>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -555,6 +613,7 @@ impl Config {
         Ok(Self {
             path,
             codex_home,
+            memory_workspace: workspace.clone(),
             auth: AuthConfig::new(
                 overrides.auth_mode.or(file.auth.mode).unwrap_or_default(),
                 auth_file,
@@ -611,6 +670,7 @@ impl Config {
             subagents: SubagentsConfig {
                 enabled: file.subagents.enabled.unwrap_or(true),
             },
+            web: WebConfig::new(file.web, overrides.web)?,
             tui: TuiConfig::new(file.tui),
             theme: file.theme,
             reload,
@@ -626,6 +686,7 @@ impl Config {
         )?;
         let workspace_changed = config.agent.workspace != self.agent.workspace;
         config.agent.workspace.clone_from(&self.agent.workspace);
+        config.memory_workspace.clone_from(&self.memory_workspace);
         Ok(ConfigReload {
             config,
             workspace_changed,
@@ -664,6 +725,16 @@ impl Config {
         &self.claude
     }
 
+    pub(crate) fn with_workspace(&self, workspace: PathBuf) -> Self {
+        let mut config = self.clone();
+        config.agent.workspace = workspace;
+        config
+    }
+
+    pub(crate) fn memory_workspace(&self) -> &Path {
+        &self.memory_workspace
+    }
+
     pub(crate) fn agent(&self) -> &AgentConfig {
         &self.agent
     }
@@ -682,6 +753,10 @@ impl Config {
 
     pub(crate) const fn subagents(&self) -> &SubagentsConfig {
         &self.subagents
+    }
+
+    pub(crate) const fn web(&self) -> &WebConfig {
+        &self.web
     }
 
     pub(crate) const fn tui(&self) -> &TuiConfig {
@@ -723,6 +798,102 @@ impl Config {
 
     pub(crate) fn persist_theme_mode(&self, mode: ThemeMode) -> Result<()> {
         Self::persist_setting(&self.path, "theme", "mode", mode.as_str())
+    }
+
+    /// Reads the configuration file for a remote editor.
+    pub(crate) fn document(&self) -> StdResult<ConfigDocument, ConfigEditError> {
+        let text = Self::read_editable(&self.path)?;
+        Ok(ConfigDocument {
+            path: self.path.clone(),
+            revision: ConfigDocument::revision_of(&text),
+            text: text.to_string(),
+        })
+    }
+
+    /// Replaces the configuration file with `text` if the file still has `revision` and `text`
+    /// loads as a valid configuration under this process's overrides and environment. The file
+    /// is replaced atomically and is untouched on refusal. The caller reloads afterwards.
+    pub(crate) fn replace_document(
+        &self,
+        text: &str,
+        revision: &str,
+    ) -> StdResult<(), ConfigEditError> {
+        let current = Self::read_editable(&self.path)?;
+        if ConfigDocument::revision_of(&current) != revision {
+            return Err(ConfigEditError::Stale);
+        }
+        let parsed = toml::from_str::<ConfigFile>(text).map_err(|mut source| {
+            source.set_input(None);
+            ConfigEditError::Invalid(
+                ConfigError::Parse {
+                    path: self.path.clone(),
+                    source,
+                }
+                .into(),
+            )
+        })?;
+        if parsed.has_credentials() {
+            return Err(ConfigEditError::HoldsCredentials);
+        }
+        let write_error = |source| {
+            ConfigEditError::Io(ConfigError::Write {
+                path: self.path.clone(),
+                source,
+            })
+        };
+        let parent = self
+            .path
+            .parent()
+            .ok_or_else(|| write_error(io::Error::other("configuration path has no parent")))?;
+        fs::create_dir_all(parent).map_err(write_error)?;
+        let mut candidate = NamedTempFile::new_in(parent).map_err(write_error)?;
+        candidate
+            .write_all(text.as_bytes())
+            .and_then(|()| candidate.as_file().sync_all())
+            .map_err(write_error)?;
+        let overrides = ConfigOverrides {
+            path: Some(candidate.path().to_path_buf()),
+            ..self.reload.overrides.clone()
+        };
+        Self::load_with(
+            overrides,
+            self.reload.environment.clone(),
+            &self.reload.current_dir,
+        )
+        .map_err(ConfigEditError::Invalid)?;
+        candidate
+            .persist(&self.path)
+            .map_err(|error| write_error(error.error))?;
+        Ok(())
+    }
+
+    /// Reads the file's text, refusing a file that holds credentials.
+    fn read_editable(path: &Path) -> StdResult<Zeroizing<String>, ConfigEditError> {
+        let text = match fs::read_to_string(path) {
+            Ok(text) => Zeroizing::new(text),
+            Err(source) if source.kind() == ErrorKind::NotFound => Zeroizing::new(String::new()),
+            Err(source) => {
+                return Err(ConfigEditError::Io(ConfigError::Read {
+                    path: path.to_path_buf(),
+                    source,
+                }));
+            }
+        };
+        // A file that does not parse may still hold credentials, so it is not offered either.
+        let file = toml::from_str::<ConfigFile>(&text).map_err(|mut source| {
+            source.set_input(None);
+            ConfigEditError::Invalid(
+                ConfigError::Parse {
+                    path: path.to_path_buf(),
+                    source,
+                }
+                .into(),
+            )
+        })?;
+        if file.has_credentials() {
+            return Err(ConfigEditError::HoldsCredentials);
+        }
+        Ok(text)
     }
 
     pub(crate) fn add_mcp_server<'a>(
@@ -1459,6 +1630,54 @@ impl SubagentsConfig {
     }
 }
 
+impl WebConfig {
+    fn new(file: WebConfigFile, enabled_override: Option<bool>) -> Result<Self> {
+        let public_url = file.public_url.unwrap_or_default().trim().to_owned();
+        let tailscale = file.tailscale.unwrap_or(false);
+        if tailscale && !public_url.is_empty() {
+            return Err(ConfigError::WebExposureConflict.into());
+        }
+        Ok(Self {
+            enabled: enabled_override.or(file.enabled).unwrap_or(true),
+            bind: file.bind.unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+            port: file.port.unwrap_or(7878),
+            public_url,
+            tailscale,
+            max_live_sessions: file
+                .max_live_sessions
+                .unwrap_or(NonZeroUsize::new(8).expect("8 is non-zero")),
+        })
+    }
+
+    pub(crate) const fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    pub(crate) const fn bind(&self) -> IpAddr {
+        self.bind
+    }
+
+    /// The first port the server tries.
+    pub(crate) const fn port(&self) -> u16 {
+        self.port
+    }
+
+    /// The externally reachable origin used only to build copyable links.
+    pub(crate) fn public_url(&self) -> Option<&str> {
+        Some(self.public_url.as_str()).filter(|url| !url.is_empty())
+    }
+
+    /// Whether the server publishes itself to the tailnet while this process runs.
+    pub(crate) const fn tailscale(&self) -> bool {
+        self.tailscale
+    }
+
+    /// The most live sessions one process may host, across the terminal and the web interface.
+    pub(crate) const fn max_live_sessions(&self) -> usize {
+        self.max_live_sessions.get()
+    }
+}
+
 impl TuiConfig {
     fn new(file: TuiConfigFile) -> Self {
         Self {
@@ -1578,14 +1797,17 @@ impl ConfigFile {
         })
     }
 
+    fn has_credentials(&self) -> bool {
+        !self.memory.remote.bearer_token.is_empty()
+            || self.openai.api_key.is_some()
+            || self.claude.api_key.is_some()
+    }
+
     #[cfg(unix)]
     fn validate_secret_permissions(&mut self, path: &Path) -> Result<()> {
         use std::os::unix::fs::PermissionsExt;
 
-        if self.memory.remote.bearer_token.is_empty()
-            && self.openai.api_key.is_none()
-            && self.claude.api_key.is_none()
-        {
+        if !self.has_credentials() {
             return Ok(());
         }
         let metadata = match fs::metadata(path) {
@@ -1617,10 +1839,7 @@ impl ConfigFile {
 
     #[cfg(not(unix))]
     fn validate_secret_permissions(&mut self, path: &Path) -> Result<()> {
-        if self.memory.remote.bearer_token.is_empty()
-            && self.openai.api_key.is_none()
-            && self.claude.api_key.is_none()
-        {
+        if !self.has_credentials() {
             return Ok(());
         }
         self.memory.remote.bearer_token.zeroize();
@@ -1687,7 +1906,9 @@ mod tests {
         McpServerConfig, ReasoningEffort, ReasoningMode, RemoteMemoryConfigFile,
         RemoteMemoryTokenFile, Speed, ThemeMode, Transport, validate_mcp_url,
     };
-    use crate::app::error::{ConfigError, Error, McpUrlError, RemoteMemoryConfigError};
+    use crate::app::error::{
+        ConfigEditError, ConfigError, Error, McpUrlError, RemoteMemoryConfigError,
+    };
     use nanocodex::{ClaudeModel, HarnessModel as Model, Model as CodexModel};
     use ratatui::style::Color;
     use std::{
@@ -1980,6 +2201,7 @@ mod tests {
                 "skills",
                 "memory",
                 "subagents",
+                "web",
                 "tui",
                 "theme",
             ],
@@ -2025,6 +2247,17 @@ mod tests {
             &["endpoint", "namespace", "bearer_token", "workspace_roots"],
         );
         assert_table_fields(&rendered["subagents"], &["enabled"]);
+        assert_table_fields(
+            &rendered["web"],
+            &[
+                "enabled",
+                "bind",
+                "port",
+                "public_url",
+                "tailscale",
+                "max_live_sessions",
+            ],
+        );
         assert_table_fields(&rendered["tui"], &["mouse_scroll_lines"]);
         assert_table_fields(&rendered["theme"], &["mode", "light", "dark"]);
         let palette_fields = [
@@ -2744,6 +2977,44 @@ mod tests {
     }
 
     #[test]
+    fn web_interface_is_enabled_on_loopback_by_default() {
+        let config = load_config("").unwrap();
+        assert!(config.web().enabled());
+        assert!(config.web().bind().is_loopback());
+        assert_eq!(config.web().port(), 7878);
+        assert_eq!(config.web().public_url(), None);
+        assert!(!config.web().tailscale());
+        assert_eq!(config.web().max_live_sessions(), 8);
+
+        let config = load_config(
+            "[web]\nenabled = false\nport = 9000\npublic_url = \"https://host.ts.net\"\nmax_live_sessions = 3\n",
+        )
+        .unwrap();
+        assert!(!config.web().enabled());
+        assert_eq!(config.web().port(), 9000);
+        assert_eq!(config.web().public_url(), Some("https://host.ts.net"));
+        assert_eq!(config.web().max_live_sessions(), 3);
+        assert!(load_config("[web]\nmax_live_sessions = 0\n").is_err());
+    }
+
+    #[test]
+    fn web_tailscale_and_public_url_are_mutually_exclusive() {
+        let config = load_config("[web]\ntailscale = true\n").unwrap();
+        assert!(config.web().tailscale());
+        assert_eq!(config.web().public_url(), None);
+
+        let config = load_config("[web]\npublic_url = \"https://host.example\"\n").unwrap();
+        assert!(!config.web().tailscale());
+
+        // A blank public_url is unset, so it does not conflict.
+        assert!(load_config("[web]\ntailscale = true\npublic_url = \" \"\n").is_ok());
+        assert!(matches!(
+            load_config("[web]\ntailscale = true\npublic_url = \"https://host.example\"\n"),
+            Err(Error::Config(ConfigError::WebExposureConflict))
+        ));
+    }
+
+    #[test]
     fn subagents_are_enabled_by_default() {
         for contents in ["", "[subagents]\n"] {
             let config = load_config(contents).unwrap();
@@ -2979,6 +3250,79 @@ mod tests {
         let rendered: toml::Value = toml::from_str(&config.to_toml().unwrap()).unwrap();
         assert_eq!(rendered["skills"]["enabled"].as_bool(), Some(true));
         assert_eq!(rendered["skills"]["roots"].as_array().unwrap().len(), 3);
+    }
+
+    fn editable_config(text: &str) -> (tempfile::TempDir, Config) {
+        let directory = tempdir().unwrap();
+        let config_path = directory.path().join("config.toml");
+        fs::write(&config_path, text).unwrap();
+        let config = Config::load_with(
+            ConfigOverrides {
+                path: Some(config_path),
+                ..ConfigOverrides::default()
+            },
+            Environment {
+                codex_home: Some(directory.path().join("codex")),
+                ..Environment::default()
+            },
+            directory.path(),
+        )
+        .unwrap();
+        (directory, config)
+    }
+
+    #[test]
+    fn remote_config_edits_replace_a_current_valid_file() {
+        let (_directory, config) = editable_config("[skills]\nenabled = false\n");
+        let document = config.document().unwrap();
+        assert_eq!(document.text, "[skills]\nenabled = false\n");
+
+        let replacement = "[skills]\nenabled = true\n";
+        config
+            .replace_document(replacement, &document.revision)
+            .unwrap();
+        assert_eq!(fs::read_to_string(config.path()).unwrap(), replacement);
+        assert!(matches!(
+            config.replace_document("", &document.revision),
+            Err(ConfigEditError::Stale)
+        ));
+    }
+
+    #[test]
+    fn remote_config_edits_refuse_invalid_text_and_leave_the_file_alone() {
+        let original = "[skills]\nenabled = false\n";
+        let (directory, config) = editable_config(original);
+        let revision = config.document().unwrap().revision;
+
+        for invalid in ["[skills\n", "[agent]\nno_such_setting = 1\n"] {
+            assert!(matches!(
+                config.replace_document(invalid, &revision),
+                Err(ConfigEditError::Invalid(_))
+            ));
+        }
+        assert_eq!(fs::read_to_string(config.path()).unwrap(), original);
+        assert_eq!(
+            fs::read_dir(directory.path()).unwrap().count(),
+            1,
+            "a refused candidate leaves no file behind"
+        );
+    }
+
+    #[test]
+    fn remote_config_edits_never_carry_credentials() {
+        let (_directory, config) = editable_config("");
+        let revision = config.document().unwrap().revision;
+        assert!(matches!(
+            config.replace_document("[openai]\napi_key = \"sk-test\"\n", &revision),
+            Err(ConfigEditError::HoldsCredentials)
+        ));
+
+        let (_directory, config) = editable_config("");
+        fs::write(config.path(), "[claude]\napi_key = \"sk-test\"\n").unwrap();
+        assert!(matches!(
+            config.document(),
+            Err(ConfigEditError::HoldsCredentials)
+        ));
     }
 
     #[test]

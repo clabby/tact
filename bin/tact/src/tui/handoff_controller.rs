@@ -1,7 +1,8 @@
 use crate::{
     app::config::{ReasoningEffort, ReasoningMode, Speed},
     core::ConfiguredAgent,
-    tui::{pane::PaneId, worker::AuxiliaryError},
+    tui::pane::PaneId,
+    web::bridge::AuxiliaryError,
 };
 use nanocodex::HarnessModel as Model;
 use tokio::task::JoinHandle;
@@ -111,7 +112,7 @@ mod tests {
             std::future::pending::<()>().await;
             HandoffCompletion {
                 identity,
-                result: Err(crate::tui::worker::AuxiliaryError::Cancelled),
+                result: Err(crate::web::bridge::AuxiliaryError::Cancelled),
             }
         })
     }

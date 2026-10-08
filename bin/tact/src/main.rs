@@ -4,8 +4,9 @@
 
 mod app;
 mod core;
-mod review;
+mod search;
 mod tui;
+mod web;
 
 use app::Cli;
 use clap::Parser;

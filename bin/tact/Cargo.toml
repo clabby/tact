@@ -25,7 +25,7 @@ pkg-fmt = "tgz"
 
 [dependencies]
 arboard.workspace = true
-axum = { workspace = true, features = ["http1", "tokio"] }
+axum = { workspace = true, features = ["http1", "query", "tokio"] }
 base64.workspace = true
 chrono.workspace = true
 clap.workspace = true
@@ -34,6 +34,7 @@ dark-light.workspace = true
 flate2.workspace = true
 fs2.workspace = true
 futures-util.workspace = true
+getrandom.workspace = true
 image.workspace = true
 jsonschema.workspace = true
 miette.workspace = true
@@ -55,6 +56,7 @@ serde_json.workspace = true
 serde_yaml.workspace = true
 sha2.workspace = true
 shlex.workspace = true
+subtle.workspace = true
 syntect.workspace = true
 tar.workspace = true
 tact-memory = { workspace = true, features = ["client", "local", "native-server", "tool"] }
@@ -67,6 +69,7 @@ toml.workspace = true
 toml_edit.workspace = true
 unicode-segmentation.workspace = true
 unicode-width.workspace = true
+qrcode.workspace = true
 url.workspace = true
 zeroize.workspace = true
 zstd.workspace = true
@@ -75,6 +78,7 @@ zstd.workspace = true
 axum = { workspace = true, features = ["ws"] }
 criterion.workspace = true
 rstest.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
 tower.workspace = true
 
 [build-dependencies]

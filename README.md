@@ -518,42 +518,57 @@ recommends whether each lesson belongs in memory, always-on configuration, or no
 instructions can narrow the topic or expand the workspace and task-family scope. The report states
 the coverage and uncertainty of its evidence; it does not apply its recommendations.
 
-### Review
+### Web Interface
 
-Enter `/review` while no agent work is active to open a browser-based human review tool for
-workspace changes. Tact shows the full branch from trunk by default; you can narrow the range,
-inspect the diff, leave overall or inline feedback, and approve or request changes. Tact converts
-your review to Markdown and inserts it into the composer so you can edit it before passing it to the
-agent. Inline selections can also open a private question thread with the agent; those conversations
-help you understand the code but are not included in the rendered review feedback. The browser can
-also generate an agent-authored visual overview of the selected range on demand.
+Every running Tact serves a web interface in the background. It is a second front-end onto the
+sessions that process runs: the terminal and the browser share the active session and each
+session's draft, queue, settings, and transcript, and either can start, switch, fork, and close
+sessions. The terminal must stay open (there is no headless mode). The interface binds to
+`127.0.0.1:7878` by default (the next free port is used when that one is taken); put it behind
+Tailscale, an SSH forward, or similar to reach it from elsewhere. For Tailscale, set
+`tailscale = true` under `[web]` and Tact publishes the interface to your tailnet with
+`tailscale serve` the first time you ask for a QR code (Tact checks that Tailscale is online each
+time, and the local interface works regardless); for any other tunnel, set `public_url` to its
+address. The two settings are mutually exclusive.
 
-Reloading or closing the browser does not cancel the review. Agent question threads remain available,
-and an answer already in progress continues in the background. Reopen the live URL shown by Tact,
-or cancel explicitly from the browser or Tact.
+Open the login URL Tact shows for the web interface. Its fragment carries the machine token, which
+is stored in `~/.tact/web/token` (mode 0600) and shared by every Tact instance of your user. The
+token grants the same access as a shell, so treat the URL like a password. Configure the server in
+the `[web]` section (`enabled`, `bind`, `port`, `public_url`, `tailscale`, `max_live_sessions`) or pass
+`--web=false` (`TACT_WEB`) to turn it off. The design is described in [docs/web.md](docs/web.md).
 
-The review tool requires a separate browser bundle. The first `/review` from each official Tact
-version asks for confirmation, then lazily downloads and verifies the matching release artifact.
-The bundle is downloaded once per Tact version and stored under `~/.tact/review` by default.
+The review tool lives in the interface's side panel. It shows the full branch from trunk by
+default; you can narrow the range, inspect the live diff, leave overall or inline feedback, and
+**Send to chat**, which writes the review as Markdown into the active session's draft so you can
+edit it before sending. Inline selections can open a private question thread with the agent, and an
+agent-authored visual overview of the selected range can be generated on demand. Overviews,
+AI reviews, and question threads belong to a session, run as clean-context prompts on that
+session's worker, and stop when the session closes.
 
-#### Developing the review interface
+The browser files are a separate bundle. Official releases publish `tact-web-v<version>.tar.gz`; the
+server serves the bundle installed at `~/.tact/web/assets/v<version>` (it is re-checked on request
+while missing, so installing it needs no restart). Until it is installed the server answers with a
+page that explains how to install it. Official releases download and verify the matching bundle
+in the background on first start.
+
+#### Developing the web interface
 
 Development builds do not download browser assets. Install Bun, then build and link the assets into
 the development Tact directory:
 
 ```sh
-cd web/review
+cd web
 bun install --frozen-lockfile
 just install-dev
 ```
 
-To work on the interface in a browser with sample review data, run:
+To work on the interface in a browser with sample data, run:
 
 ```sh
 just dev
 ```
 
-`TACT_REVIEW_ASSETS=/absolute/path/to/web/review/dist` remains available as a manual override. The
+`TACT_WEB_ASSETS=/absolute/path/to/web/dist` remains available as a manual override. The
 development server watches browser sources, rebuilds them, and reloads connected pages.
 
 ### Copying Responses

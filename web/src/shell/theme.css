@@ -1,0 +1,143 @@
+/*
+ * Design tokens for the whole web app, including the review panel. Colours follow the Tact
+ * terminal theme: a neutral ground, one blue accent, muted greys for secondary text, and the
+ * per-model and per-effort hues the TUI uses. Light and dark are selected by <html data-theme>,
+ * which theme.ts keeps in step with the system or the user's choice.
+ */
+:root {
+  --font-ui: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI", system-ui, Roboto, "Helvetica Neue", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, "JetBrains Mono", "Cascadia Code", Menlo, Consolas, monospace;
+
+  --text-xs: 11px;
+  --text-sm: 12px;
+  --text-md: 13px;
+  --text-base: 14px;
+  --text-lg: 16px;
+  --text-xl: 20px;
+  --leading-tight: 1.3;
+  --leading: 1.55;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-7: 28px;
+  --space-8: 32px;
+
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 12px;
+  --radius-pill: 999px;
+
+  --ease-out: cubic-bezier(.2, .8, .2, 1);
+  --duration-fast: 120ms;
+  --duration-base: 180ms;
+
+  --touch: 32px;
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-top: env(safe-area-inset-top, 0px);
+}
+
+:root, :root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #fbfbfa;
+  --surface: #ffffff;
+  --surface-raised: #ffffff;
+  --surface-sunken: #f3f3f1;
+  --sidebar-bg: #f6f6f4;
+  --surface-hover: rgb(20 22 28 / .045);
+  --surface-active: rgb(20 22 28 / .075);
+  --line: rgb(20 22 28 / .085);
+  --line-strong: rgb(20 22 28 / .15);
+  --text: #1b1c1f;
+  --muted: #62656c;
+  --faint: #8f9198;
+  --accent: #2f62e8;
+  --accent-strong: #2453d3;
+  --accent-soft: rgb(47 98 232 / .1);
+  --on-accent: #ffffff;
+  --success: #1f8a4c;
+  --success-soft: rgb(31 138 76 / .1);
+  --danger: #c4372f;
+  --danger-soft: rgb(196 55 47 / .09);
+  --warning: #9a6700;
+  --warning-soft: rgb(154 103 0 / .1);
+  --info: #2f62e8;
+  --info-soft: rgb(47 98 232 / .09);
+  --add: #1f8a4c;
+  --del: #c4372f;
+  --code-bg: #f3f3f1;
+  --code-text: #262626;
+  --focus-ring: rgb(47 98 232 / .45);
+  --shadow-1: 0 1px 2px rgb(16 18 24 / .06);
+  --shadow-2: 0 2px 6px rgb(16 18 24 / .06), 0 8px 24px rgb(16 18 24 / .07);
+  --shadow-3: 0 12px 28px rgb(16 18 24 / .12), 0 32px 64px rgb(16 18 24 / .12);
+  --scrim: rgb(16 18 24 / .28);
+
+  --effort-low: #8f9198;
+  --effort-medium: #007878;
+  --effort-high: #9a6700;
+  --effort-xhigh: #c4372f;
+  --effort-max: #a3329f;
+  --model-luna: #62656c;
+  --model-sol: #b7860b;
+  --model-astra: #a3329f;
+  --model-sonnet: #2f8a3e;
+  --model-opus: #c4372f;
+  --model-fable: #0b7f93;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #111214;
+  --surface: #17181b;
+  --surface-raised: #1d1e22;
+  --surface-sunken: #0c0d0f;
+  --sidebar-bg: #0c0d0f;
+  --surface-hover: rgb(255 255 255 / .05);
+  --surface-active: rgb(255 255 255 / .085);
+  --line: rgb(255 255 255 / .075);
+  --line-strong: rgb(255 255 255 / .14);
+  --text: #ececee;
+  --muted: #9c9ea6;
+  --faint: #6c6f77;
+  --accent: #7ea6ff;
+  --accent-strong: #5b8cff;
+  --accent-soft: rgb(126 166 255 / .14);
+  --on-accent: #0b1020;
+  --success: #5fc98a;
+  --success-soft: rgb(95 201 138 / .12);
+  --danger: #f2837a;
+  --danger-soft: rgb(242 131 122 / .12);
+  --warning: #e5b65a;
+  --warning-soft: rgb(229 182 90 / .12);
+  --info: #7ea6ff;
+  --info-soft: rgb(126 166 255 / .12);
+  --add: #5fc98a;
+  --del: #f2837a;
+  --code-bg: #1d1e22;
+  --code-text: #d7d7d7;
+  --focus-ring: rgb(126 166 255 / .55);
+  --shadow-1: 0 1px 2px rgb(0 0 0 / .4);
+  --shadow-2: 0 2px 8px rgb(0 0 0 / .35), 0 10px 28px rgb(0 0 0 / .3);
+  --shadow-3: 0 16px 36px rgb(0 0 0 / .5), 0 40px 80px rgb(0 0 0 / .4);
+  --scrim: rgb(0 0 0 / .5);
+
+  --effort-low: #9c9ea6;
+  --effort-medium: #5ccfd6;
+  --effort-high: #e5b65a;
+  --effort-xhigh: #f2837a;
+  --effort-max: #d68be0;
+  --model-luna: #c9cbd1;
+  --model-sol: #f0c24b;
+  --model-astra: #d68be0;
+  --model-sonnet: #6fcf7f;
+  --model-opus: #f2837a;
+  --model-fable: #5ccfd6;
+}
+
+@media (pointer: coarse) {
+  :root { --touch: 44px; }
+}

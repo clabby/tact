@@ -1,10 +1,10 @@
 /target
 /.tact
 /dist
-/web/review/dist
-/web/review/.dev
-/web/review/test-results
-/web/review/node_modules
+/web/dist
+/web/.dev
+/web/test-results
+/web/node_modules
 /evals/.venv
 __pycache__/
 *.pyc

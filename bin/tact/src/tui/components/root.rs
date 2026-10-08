@@ -3,6 +3,7 @@
 use super::{
     actions::{Action, ActionAvailability, ActionsEffect, ActionsEvent, ActionsMenu},
     composer::{Composer, ComposerChromeTarget, ComposerDraft, ComposerEffect, ComposerEvent},
+    confirmation::{Confirmation, ConfirmationEffect, ConfirmationEvent},
     context_diagnostics::{
         ContextDiagnosticsEffect, ContextDiagnosticsEvent, ContextDiagnosticsPanel,
     },
@@ -13,11 +14,9 @@ use super::{
     memory::{MemoryBrowser, MemoryBrowserEffect, MemoryBrowserEvent},
     model_selector::{ModelSelector, ModelSelectorEffect, ModelSelectorEvent},
     node::{Component, ComponentUpdate, Node, RenderRequest},
+    qr_code::{QrCodeEffect, QrCodeEvent, QrCodeView},
     queue::{MessageQueue, QueueEffect, QueueEvent, QueueId},
     recent_prompt_picker::{RecentPromptPicker, RecentPromptPickerEffect, RecentPromptPickerEvent},
-    review_confirmation::{
-        ReviewConfirmationEffect, ReviewConfirmationEvent, ReviewDownloadConfirmation,
-    },
     selection::{Selection, Surface, TextSpan},
     session_picker::{SessionPicker, SessionPickerEffect, SessionPickerEvent, SessionPickerMode},
     skill_picker::{SkillPicker, SkillPickerEffect, SkillPickerEvent},
@@ -31,7 +30,7 @@ use crate::{
         config::{ReasoningEffort, ReasoningMode, Speed, TuiConfig},
         model,
     },
-    core::extensions::Skill,
+    core::{extensions::Skill, subagent_roster::SubagentRoster},
     tui::{
         context::{ContextBudget, ContextDiagnostics},
         prompt::Submission,
@@ -39,8 +38,11 @@ use crate::{
         theme::{Theme, ThemeMode},
         transcript::TranscriptRecord,
     },
+    web::bridge::{Busy, CommandError},
 };
-use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind};
+use crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
+};
 use nanocodex::HarnessModel as Model;
 use ratatui::{
     Frame,
@@ -65,7 +67,6 @@ const BREADCRUMB_DURATION: Duration = Duration::from_secs(10);
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum ConfirmationAction {
     Interrupt,
-    CancelReview,
     Exit,
 }
 
@@ -73,7 +74,6 @@ impl ConfirmationAction {
     const fn title_key(self) -> &'static str {
         match self {
             Self::Interrupt => "Esc",
-            Self::CancelReview => "Esc",
             Self::Exit => "Ctrl+C",
         }
     }
@@ -81,7 +81,6 @@ impl ConfirmationAction {
     const fn action_label(self) -> &'static str {
         match self {
             Self::Interrupt => "Interrupt",
-            Self::CancelReview => "Cancel review",
             Self::Exit => "Quit",
         }
     }
@@ -89,7 +88,6 @@ impl ConfirmationAction {
     const fn effect(self) -> RootEffect {
         match self {
             Self::Interrupt => RootEffect::CancelTurns,
-            Self::CancelReview => RootEffect::CancelReview,
             Self::Exit => RootEffect::Shutdown,
         }
     }
@@ -146,15 +144,15 @@ pub(crate) enum RootEvent {
     Transcript(Arc<TranscriptRecord>),
     AgentStreamClosed,
     Subagent(AgentUpdate),
+    /// A subagent transcript record, built once so every front-end shares it.
+    SubagentRecord {
+        id: AgentId,
+        record: Arc<TranscriptRecord>,
+    },
     ReplaceDraft(String),
     HandoffFinished(String),
     HandoffCancelled,
     HandoffFailed(String),
-    ReviewStarted,
-    ReviewReady(String),
-    ReviewCancelled,
-    ReviewFinished(String),
-    ReviewFailed(String),
     CompactionFinished,
     WorkerTurnFinished {
         terminal_expected: bool,
@@ -201,7 +199,9 @@ pub(crate) enum RootEvent {
     },
     NotifyError(String),
     NotifySuccess(String),
-    ConfirmReviewDownload,
+    /// Shows the QR code for a web sign-in link.
+    ShowQrCode(String),
+    ConfirmWebInstall,
     UpdateAvailable(Version),
     SteerAdmitted(QueueId),
     SteerPromoted(QueueId),
@@ -209,6 +209,28 @@ pub(crate) enum RootEvent {
         id: QueueId,
     },
     AnimationFrame(Instant),
+}
+
+/// A web command that applies to one pane.
+#[derive(Debug)]
+pub(crate) enum PaneCommand {
+    SetDraft(String),
+    /// Sends the draft, or queues it instead of steering when a turn is running and `queue` is set.
+    Submit {
+        queue: bool,
+    },
+    Interrupt,
+    Steer(QueueId),
+    Dequeue(QueueId),
+    Compact,
+    SetModel(Model),
+    SetEffort(ReasoningEffort),
+    SetReasoningMode(ReasoningMode),
+    SetSpeed(Speed),
+    EditQueued(QueueId, String),
+    AttachImage(String),
+    Reflect(String),
+    Handoff,
 }
 
 pub(crate) struct RestoredSessionProjection {
@@ -254,9 +276,14 @@ pub(crate) enum RootEffect {
     PersistSteer(String),
     Copy(String),
     Handoff,
-    Review {
-        download_assets: bool,
+    /// Opens the web interface, installing its assets first when `install` is set.
+    OpenWebInterface {
+        install: bool,
     },
+    CopyWebLink,
+    /// Shows the web sign-in link as a QR code for a phone to scan.
+    ShowWebQr,
+    OpenSessions,
     SetEffort {
         effort: ReasoningEffort,
         reasoning_mode: ReasoningMode,
@@ -267,7 +294,6 @@ pub(crate) enum RootEffect {
     SetTheme(ThemeMode),
     Fork,
     CancelTurns,
-    CancelReview,
     CancelHandoff,
     Shutdown,
 }
@@ -282,10 +308,11 @@ enum Overlay {
     FileFinder(FileMention),
     Skills(SkillMention),
     Keybindings(Node<KeybindingsHelp>),
+    QrCode(Node<QrCodeView>),
     Memory(Node<MemoryBrowser>),
     RecentPrompts(Node<RecentPromptPicker>),
     Sessions(Node<SessionPicker>),
-    ReviewDownload(Node<ReviewDownloadConfirmation>),
+    WebInstall(Node<Confirmation>),
     Subagents(SubagentOverlay),
 }
 
@@ -293,7 +320,6 @@ enum Overlay {
 enum BlockingTask {
     Compaction,
     Handoff,
-    Review,
 }
 
 struct FileMention {
@@ -316,6 +342,15 @@ struct QueueEdit {
 enum ThreadState {
     New,
     Started,
+}
+
+/// How a prompt submitted while a turn is running reaches the agent.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum BusyDelivery {
+    /// Joins the running turn at its next opportunity.
+    Steer,
+    /// Waits in the queue until the turn finishes.
+    Queue,
 }
 
 #[derive(Clone, Copy)]
@@ -347,7 +382,6 @@ pub(crate) struct RootNode {
     unmatched_agent_turns: usize,
     in_flight_shells: usize,
     blocking_task: Option<BlockingTask>,
-    review_url: Option<String>,
     fork_available: bool,
     skills: Arc<[Skill]>,
     memory_enabled: bool,
@@ -359,6 +393,8 @@ pub(crate) struct RootNode {
     subagents: SubagentTree,
     context_diagnostics: ContextDiagnostics,
     recent_prompts: Vec<RecentPromptDraft>,
+    /// The first prompt of the conversation, inherited by forks.
+    title: Option<String>,
     pending_session_mention: Option<usize>,
     reflection_input: bool,
 }
@@ -391,7 +427,6 @@ impl RootNode {
             unmatched_agent_turns: 0,
             in_flight_shells: 0,
             blocking_task: None,
-            review_url: None,
             fork_available: true,
             skills: Arc::from([]),
             memory_enabled: false,
@@ -403,9 +438,21 @@ impl RootNode {
             subagents,
             context_diagnostics: ContextDiagnostics::default(),
             recent_prompts: Vec::new(),
+            title: None,
             pending_session_mention: None,
             reflection_input: false,
         }
+    }
+
+    pub(crate) fn workspace(&self) -> &Path {
+        &self.workspace
+    }
+
+    pub(super) fn set_workspace(&mut self, workspace: PathBuf) {
+        self.transcript.component_mut().set_workspace(&workspace);
+        self.subagents.set_workspace(&workspace);
+        self.composer.component_mut().set_workspace(&workspace);
+        self.workspace = workspace;
     }
 
     pub(crate) fn fork(&self, workspace: &Path, thinking: ReasoningEffort) -> Self {
@@ -432,6 +479,7 @@ impl RootNode {
         root.theme_mode = self.theme_mode;
         root.tui = self.tui;
         root.context_diagnostics = self.context_diagnostics.clone();
+        root.title.clone_from(&self.title);
         root.interactive = false;
         root.composer
             .component_mut()
@@ -443,16 +491,45 @@ impl RootNode {
         root
     }
 
+    /// A pane for an unrelated session that shares this pane's process-wide preferences.
+    pub(crate) fn sibling(&self, workspace: &Path) -> Self {
+        let mut root = self.sibling_with_effort(workspace, self.composer.component().effort());
+        root.set_reasoning_modes(
+            self.composer.component().reasoning_mode(),
+            self.preferred_reasoning_mode,
+        );
+        root
+    }
+
+    fn sibling_with_effort(&self, workspace: &Path, thinking: ReasoningEffort) -> Self {
+        let mut root = Self::new(workspace, thinking);
+        root.memory_enabled = self.memory_enabled;
+        root.claude_enabled = self.claude_enabled;
+        root.theme_mode = self.theme_mode;
+        root.tui = self.tui;
+        root.set_max_subagents(self.subagents.max_subagents());
+        root
+    }
+
+    /// Blocks input and shows `status` until the pane's session is installed.
+    pub(crate) fn begin_opening(&mut self, status: &str) {
+        self.interactive = false;
+        let _ = self
+            .composer
+            .component_mut()
+            .update(ComposerEvent::Activity {
+                active: true,
+                status: Some(status.to_owned()),
+                now: Instant::now(),
+            });
+    }
+
     pub(crate) fn set_fork_available(&mut self, available: bool) {
         self.fork_available = available;
         let can_fork = self.can_fork();
         if let Some(Overlay::Actions(actions)) = &mut self.overlay {
             actions.component_mut().set_fork_available(can_fork);
         }
-    }
-
-    pub(crate) fn has_in_flight_turn(&self) -> bool {
-        self.in_flight_turns > 0
     }
 
     pub(crate) fn set_skills(&mut self, skills: Arc<[Skill]>) {
@@ -534,20 +611,10 @@ impl RootNode {
             DraftReset::Preserve => (current_draft, previous_discarded_draft),
         };
         let fork_available = self.fork_available;
-        let memory_enabled = self.memory_enabled;
-        let claude_enabled = self.claude_enabled;
-        let theme_mode = self.theme_mode;
-        let tui = self.tui;
-        let max_subagents = self.subagents.max_subagents();
-        *self = Self::new(workspace, thinking);
+        *self = self.sibling_with_effort(workspace, thinking);
         self.set_reasoning_modes(reasoning_mode, preferred_reasoning_mode);
         self.discarded_draft = discarded_draft;
         self.fork_available = fork_available;
-        self.memory_enabled = memory_enabled;
-        self.claude_enabled = claude_enabled;
-        self.theme_mode = theme_mode;
-        self.tui = tui;
-        self.set_max_subagents(max_subagents);
         if let Some(draft) = preserved_draft {
             self.composer.component_mut().restore_draft(draft);
         }
@@ -625,6 +692,10 @@ impl RootNode {
         self.transcript = Node::new(projection.transcript);
         self.context_diagnostics = projection.context_diagnostics;
         self.recent_prompts = projection.recent_prompts;
+        self.title = self
+            .recent_prompts
+            .first()
+            .map(|prompt| prompt.text.clone());
         if let Some(tokens) = projection.context_tokens {
             let _ = self
                 .composer
@@ -639,6 +710,23 @@ impl RootNode {
 
     pub(crate) const fn composer(&self) -> &Composer {
         self.composer.component()
+    }
+
+    pub(crate) const fn skills(&self) -> &Arc<[Skill]> {
+        &self.skills
+    }
+
+    pub(crate) const fn context_diagnostics(&self) -> &ContextDiagnostics {
+        &self.context_diagnostics
+    }
+
+    /// Prompts submitted in this session, oldest first, for the recent-prompt picker.
+    pub(crate) fn recent_prompts(&self) -> &[RecentPromptDraft] {
+        &self.recent_prompts
+    }
+
+    pub(crate) const fn subagent_roster(&self) -> &SubagentRoster {
+        self.subagents.roster()
     }
 
     pub(crate) fn render_focused(
@@ -758,12 +846,11 @@ impl RootNode {
                 Overlay::FileFinder(mention) => mention.finder.render(frame, area, theme),
                 Overlay::Skills(mention) => mention.picker.render(frame, area, theme),
                 Overlay::Keybindings(help) => help.render(frame, area, theme),
+                Overlay::QrCode(view) => view.render(frame, area, theme),
                 Overlay::Memory(browser) => browser.render(frame, area, theme),
                 Overlay::RecentPrompts(picker) => picker.render(frame, area, theme),
                 Overlay::Sessions(picker) => picker.render(frame, area, theme),
-                Overlay::ReviewDownload(confirmation) => {
-                    confirmation.render(frame, area, theme);
-                }
+                Overlay::WebInstall(confirmation) => confirmation.render(frame, area, theme),
                 Overlay::Subagents(SubagentOverlay::Tree) => {
                     self.subagents.render_tree(frame, area, theme);
                 }
@@ -803,7 +890,6 @@ impl RootNode {
         }
         match self.blocking_task {
             Some(BlockingTask::Compaction) => return ComponentUpdate::none(),
-            Some(BlockingTask::Review) => return self.update_review_input(event),
             Some(BlockingTask::Handoff) => return self.update_handoff_input(event),
             None => {}
         }
@@ -936,6 +1022,16 @@ impl RootNode {
                 None => {}
             }
         }
+        if is_queue_shortcut(&event) && self.can_queue_draft() {
+            return self.update_composer_with(
+                ComposerEvent::Terminal(Event::Key(KeyEvent::new(
+                    KeyCode::Enter,
+                    KeyModifiers::NONE,
+                ))),
+                RenderRequest::Immediate,
+                BusyDelivery::Queue,
+            );
+        }
         if is_focus_toggle(&event) {
             return self.update_focus();
         }
@@ -966,14 +1062,6 @@ impl RootNode {
             return ComponentUpdate::render(RenderRequest::Immediate);
         }
         if self.queue.component().focused() {
-            return self.update_queue(event);
-        }
-        if self.in_flight_turns > 0
-            && self.composer.component().draft().is_empty()
-            && !self.queue.component().is_empty()
-            && !self.queue.component().has_pending_steer()
-            && is_plain_enter(&event)
-        {
             return self.update_queue(event);
         }
         if !self.skills.is_empty()
@@ -1012,7 +1100,6 @@ impl RootNode {
             self.overlay = Some(Overlay::Actions(Node::new(ActionsMenu::new(
                 ActionAvailability {
                     new_session: new_session_enabled,
-                    review: self.blocking_task.is_none(),
                     fork: self.can_fork(),
                     memory: self.memory_enabled,
                     model: self.thread == ThreadState::New,
@@ -1035,43 +1122,6 @@ impl RootNode {
             return ComponentUpdate::none();
         }
         self.update_composer(ComposerEvent::Terminal(event), RenderRequest::Immediate)
-    }
-
-    fn update_review_input(&mut self, event: Event) -> ComponentUpdate<RootEffect> {
-        if is_control_key(&event, 't') {
-            self.key_confirmation = None;
-            return self.open_fork();
-        }
-        if is_plain_key(&event, 'o')
-            && let Some(url) = &self.review_url
-        {
-            self.key_confirmation = None;
-            return ComponentUpdate {
-                effects: vec![RootEffect::OpenLink(url.clone())],
-                render: RenderRequest::None,
-            };
-        }
-        if is_plain_key(&event, 'c')
-            && let Some(url) = &self.review_url
-        {
-            self.key_confirmation = None;
-            return ComponentUpdate {
-                effects: vec![RootEffect::Copy(url.clone())],
-                render: RenderRequest::None,
-            };
-        }
-        if is_escape(&event) {
-            return self.update_key_confirmation(ConfirmationAction::CancelReview, Instant::now());
-        }
-        if is_key_release(&event) {
-            return ComponentUpdate::none();
-        }
-        let confirmation_cleared = self.key_confirmation.take().is_some();
-        ComponentUpdate::render(if confirmation_cleared {
-            RenderRequest::Immediate
-        } else {
-            RenderRequest::None
-        })
     }
 
     fn update_handoff_input(&mut self, event: Event) -> ComponentUpdate<RootEffect> {
@@ -1272,10 +1322,11 @@ impl RootNode {
             Some(Overlay::FileFinder(_)) => self.update_file_finder(event),
             Some(Overlay::Skills(_)) => self.update_skill_picker(event),
             Some(Overlay::Keybindings(_)) => self.update_keybindings(event),
+            Some(Overlay::QrCode(_)) => self.update_qr_code(event),
             Some(Overlay::Memory(_)) => self.update_memory(MemoryBrowserEvent::Terminal(event)),
             Some(Overlay::RecentPrompts(_)) => self.update_recent_prompt_picker(event),
             Some(Overlay::Sessions(_)) => self.update_session_picker(event),
-            Some(Overlay::ReviewDownload(_)) => self.update_review_confirmation(event),
+            Some(Overlay::WebInstall(_)) => self.update_web_install(event),
             Some(Overlay::Subagents(SubagentOverlay::Tree)) => {
                 let effect = self.subagents.update_tree(event);
                 self.apply_subagent_effect(effect)
@@ -1547,18 +1598,9 @@ impl RootNode {
             }
             Some(ActionsEffect::Trigger(Action::Compact)) => {
                 self.overlay = None;
-                if self.in_flight_turns > 0
-                    || self.in_flight_shells > 0
-                    || self.blocking_task.is_some()
-                    || !self.queue.component().is_empty()
-                {
-                    return ComponentUpdate::none();
-                }
-                self.blocking_task = Some(BlockingTask::Compaction);
-                return ComponentUpdate {
-                    effects: vec![RootEffect::Compact],
-                    render: RenderRequest::Immediate,
-                };
+                return self
+                    .start_compaction()
+                    .unwrap_or_else(|_| ComponentUpdate::none());
             }
             Some(ActionsEffect::Trigger(Action::Reflection)) => {
                 self.overlay = None;
@@ -1570,30 +1612,27 @@ impl RootNode {
                     RenderRequest::Immediate,
                 );
             }
-            Some(ActionsEffect::Trigger(Action::Review)) => {
+            Some(ActionsEffect::Trigger(
+                action @ (Action::OpenInBrowser
+                | Action::CopyWebLink
+                | Action::ShowQrCode
+                | Action::Sessions),
+            )) => {
                 self.overlay = None;
+                let effect = match action {
+                    Action::OpenInBrowser => RootEffect::OpenWebInterface { install: false },
+                    Action::CopyWebLink => RootEffect::CopyWebLink,
+                    Action::ShowQrCode => RootEffect::ShowWebQr,
+                    _ => RootEffect::OpenSessions,
+                };
                 return ComponentUpdate {
-                    effects: vec![RootEffect::Review {
-                        download_assets: false,
-                    }],
+                    effects: vec![effect],
                     render: RenderRequest::Immediate,
                 };
             }
             Some(ActionsEffect::Trigger(Action::Handoff)) => {
                 self.overlay = None;
-                self.blocking_task = Some(BlockingTask::Handoff);
-                let waiting = self.update_composer(
-                    ComposerEvent::ReviewWaiting {
-                        waiting: true,
-                        status: Some("Preparing handoff…".to_owned()),
-                        now: Instant::now(),
-                    },
-                    RenderRequest::Immediate,
-                );
-                return ComponentUpdate {
-                    effects: vec![RootEffect::Handoff],
-                    render: waiting.render.max(RenderRequest::Immediate),
-                };
+                return self.start_handoff();
             }
             None => {}
         }
@@ -1625,11 +1664,11 @@ impl RootNode {
         }
     }
 
-    fn update_review_confirmation(&mut self, event: Event) -> ComponentUpdate<RootEffect> {
-        let Some(Overlay::ReviewDownload(confirmation)) = &mut self.overlay else {
+    fn update_web_install(&mut self, event: Event) -> ComponentUpdate<RootEffect> {
+        let Some(Overlay::WebInstall(confirmation)) = &mut self.overlay else {
             return ComponentUpdate::none();
         };
-        let update = confirmation.update(ReviewConfirmationEvent::Terminal(event));
+        let update = confirmation.update(ConfirmationEvent::Terminal(event));
         let Some(effect) = update.effects.into_iter().next() else {
             return ComponentUpdate {
                 effects: Vec::new(),
@@ -1638,13 +1677,11 @@ impl RootNode {
         };
         self.overlay = None;
         match effect {
-            ReviewConfirmationEffect::Confirm => ComponentUpdate {
-                effects: vec![RootEffect::Review {
-                    download_assets: true,
-                }],
+            ConfirmationEffect::Confirm => ComponentUpdate {
+                effects: vec![RootEffect::OpenWebInterface { install: true }],
                 render: RenderRequest::Immediate,
             },
-            ReviewConfirmationEffect::Dismiss => ComponentUpdate::render(RenderRequest::Immediate),
+            ConfirmationEffect::Dismiss => ComponentUpdate::render(RenderRequest::Immediate),
         }
     }
 
@@ -1676,10 +1713,14 @@ impl RootNode {
         }
     }
 
-    fn open_effort(&mut self) -> ComponentUpdate<RootEffect> {
-        if self.thread == ThreadState::Started
+    /// Claude fixes effort when its session starts.
+    fn effort_locked(&self) -> bool {
+        self.thread == ThreadState::Started
             && matches!(self.composer.component().model(), Model::Claude(_))
-        {
+    }
+
+    fn open_effort(&mut self) -> ComponentUpdate<RootEffect> {
+        if self.effort_locked() {
             self.overlay = None;
             self.notification = Some(Notification::plain(
                 "Effort is fixed for this Claude session; start a new session to change it."
@@ -1691,7 +1732,7 @@ impl RootNode {
         self.overlay = Some(Overlay::Effort(Node::new(EffortSelector::new(
             self.composer.component().effort(),
             self.preferred_reasoning_mode == ReasoningMode::Pro,
-            matches!(self.composer.component().model(), Model::Codex(_)),
+            model::reasoning_modes(self.composer.component().model()).contains(&ReasoningMode::Pro),
         ))));
         ComponentUpdate::render(RenderRequest::Immediate)
     }
@@ -1718,13 +1759,15 @@ impl RootNode {
         self.overlay = None;
         match effect {
             SpeedEffect::Dismiss => ComponentUpdate::render(RenderRequest::Immediate),
-            SpeedEffect::Apply(speed) => {
-                self.set_speed(speed);
-                ComponentUpdate {
-                    effects: vec![RootEffect::SetSpeed(speed)],
-                    render: RenderRequest::Immediate,
-                }
-            }
+            SpeedEffect::Apply(speed) => self.apply_speed(speed),
+        }
+    }
+
+    fn apply_speed(&mut self, speed: Speed) -> ComponentUpdate<RootEffect> {
+        self.set_speed(speed);
+        ComponentUpdate {
+            effects: vec![RootEffect::SetSpeed(speed)],
+            render: RenderRequest::Immediate,
         }
     }
 
@@ -2022,6 +2065,17 @@ impl RootNode {
         ComponentUpdate::render(RenderRequest::Immediate)
     }
 
+    fn update_qr_code(&mut self, event: Event) -> ComponentUpdate<RootEffect> {
+        let Some(Overlay::QrCode(view)) = &mut self.overlay else {
+            return ComponentUpdate::none();
+        };
+        let update = view.update(QrCodeEvent::Terminal(event));
+        if matches!(update.effects.as_slice(), [QrCodeEffect::Dismiss]) {
+            self.overlay = None;
+        }
+        ComponentUpdate::render(update.render)
+    }
+
     fn update_keybindings(&mut self, event: Event) -> ComponentUpdate<RootEffect> {
         let Some(Overlay::Keybindings(help)) = &mut self.overlay else {
             return ComponentUpdate::none();
@@ -2056,33 +2110,35 @@ impl RootNode {
         self.overlay = None;
         match effect {
             EffortEffect::Dismiss => ComponentUpdate::render(RenderRequest::Immediate),
-            EffortEffect::Apply(effort, pro) => {
-                let reasoning_mode = if pro {
-                    ReasoningMode::Pro
-                } else {
-                    ReasoningMode::Standard
-                };
-                let previous_reasoning_mode = self.preferred_reasoning_mode;
-                self.preferred_reasoning_mode = reasoning_mode;
-                if reasoning_mode != previous_reasoning_mode {
-                    let state = if pro { "enabled" } else { "disabled" };
-                    let suffix = if self.composer.component().reasoning_mode() != reasoning_mode {
-                        " · start a new session to apply."
-                    } else {
-                        "."
-                    };
-                    let message = format!("Pro {state} for new sessions{suffix}");
-                    self.notification = Some(Notification::plain(message, Color::Green));
-                }
-                self.set_effort(effort);
-                ComponentUpdate {
-                    effects: vec![RootEffect::SetEffort {
-                        effort,
-                        reasoning_mode,
-                    }],
-                    render: RenderRequest::Immediate,
-                }
-            }
+            EffortEffect::Apply(effort, pro) => self.apply_effort(effort, pro),
+        }
+    }
+
+    fn apply_effort(&mut self, effort: ReasoningEffort, pro: bool) -> ComponentUpdate<RootEffect> {
+        let reasoning_mode = if pro {
+            ReasoningMode::Pro
+        } else {
+            ReasoningMode::Standard
+        };
+        let previous_reasoning_mode = self.preferred_reasoning_mode;
+        self.preferred_reasoning_mode = reasoning_mode;
+        if reasoning_mode != previous_reasoning_mode {
+            let state = if pro { "enabled" } else { "disabled" };
+            let suffix = if self.composer.component().reasoning_mode() != reasoning_mode {
+                " · start a new session to apply."
+            } else {
+                "."
+            };
+            let message = format!("Pro {state} for new sessions{suffix}");
+            self.notification = Some(Notification::plain(message, Color::Green));
+        }
+        self.set_effort(effort);
+        ComponentUpdate {
+            effects: vec![RootEffect::SetEffort {
+                effort,
+                reasoning_mode,
+            }],
+            render: RenderRequest::Immediate,
         }
     }
 
@@ -2104,21 +2160,23 @@ impl RootNode {
             ModelSelectorEffect::Apply(model) if model == self.composer.component().model() => {
                 ComponentUpdate::render(RenderRequest::Immediate)
             }
-            ModelSelectorEffect::Apply(model) => {
-                self.interactive = false;
-                let _ = self
-                    .composer
-                    .component_mut()
-                    .update(ComposerEvent::Activity {
-                        active: true,
-                        status: Some(format!("Starting {} session…", model::name(model))),
-                        now: Instant::now(),
-                    });
-                ComponentUpdate {
-                    effects: vec![RootEffect::SetModel(model)],
-                    render: RenderRequest::Immediate,
-                }
-            }
+            ModelSelectorEffect::Apply(model) => self.apply_model(model),
+        }
+    }
+
+    fn apply_model(&mut self, model: Model) -> ComponentUpdate<RootEffect> {
+        self.interactive = false;
+        let _ = self
+            .composer
+            .component_mut()
+            .update(ComposerEvent::Activity {
+                active: true,
+                status: Some(format!("Starting {} session…", model::name(model))),
+                now: Instant::now(),
+            });
+        ComponentUpdate {
+            effects: vec![RootEffect::SetModel(model)],
+            render: RenderRequest::Immediate,
         }
     }
 
@@ -2217,6 +2275,267 @@ impl RootNode {
         self.submit_next_queued()
     }
 
+    /// Applies a web command to this pane through the same effects and preconditions as the
+    /// equivalent keypress. Local interactions that the command would invalidate (an open overlay,
+    /// an inline queue edit) end the way their own cancellation ends them.
+    pub(crate) fn remote_command(
+        &mut self,
+        command: PaneCommand,
+    ) -> Result<ComponentUpdate<RootEffect>, CommandError> {
+        if !self.interactive {
+            return Err(CommandError::Failed(
+                "the session is still starting".to_owned(),
+            ));
+        }
+        if self.blocking_task == Some(BlockingTask::Handoff)
+            && matches!(command, PaneCommand::Interrupt)
+        {
+            self.key_confirmation = None;
+            return Ok(ComponentUpdate {
+                effects: vec![RootEffect::CancelHandoff],
+                render: RenderRequest::Immediate,
+            });
+        }
+        if self.blocking_task.is_some() {
+            return Err(CommandError::TurnRunning);
+        }
+        self.check_remote_command(&command)?;
+        let mut update = self.end_local_interaction();
+        let applied = match command {
+            PaneCommand::SetDraft(text) => {
+                self.update_composer(ComposerEvent::ReplaceDraft(text), RenderRequest::Immediate)
+            }
+            PaneCommand::Submit { .. } if self.reflection_input => self.submit_reflection(),
+            PaneCommand::Submit { queue } => self.update_composer_with(
+                ComposerEvent::Terminal(Event::Key(KeyEvent::new(
+                    KeyCode::Enter,
+                    KeyModifiers::NONE,
+                ))),
+                RenderRequest::Immediate,
+                if queue {
+                    BusyDelivery::Queue
+                } else {
+                    BusyDelivery::Steer
+                },
+            ),
+            PaneCommand::Interrupt => {
+                self.key_confirmation = None;
+                ComponentUpdate {
+                    effects: vec![RootEffect::CancelTurns],
+                    render: RenderRequest::Immediate,
+                }
+            }
+            PaneCommand::Steer(id) | PaneCommand::Dequeue(id) => {
+                let selected = self.queue.component_mut().select_queued(id);
+                debug_assert!(selected, "remote queue commands are checked first");
+                let key = if matches!(command, PaneCommand::Steer(_)) {
+                    KeyCode::Enter
+                } else {
+                    KeyCode::Delete
+                };
+                self.update_queue(Event::Key(KeyEvent::new(key, KeyModifiers::NONE)))
+            }
+            PaneCommand::Compact => self.start_compaction()?,
+            PaneCommand::SetModel(model) if model == self.composer.component().model() => {
+                ComponentUpdate::none()
+            }
+            PaneCommand::SetModel(model) => self.apply_model(model),
+            PaneCommand::SetEffort(effort) => {
+                self.apply_effort(effort, self.preferred_reasoning_mode == ReasoningMode::Pro)
+            }
+            PaneCommand::SetReasoningMode(mode) => {
+                let mut update = self.apply_effort(
+                    self.composer.component().effort(),
+                    mode == ReasoningMode::Pro,
+                );
+                // A session's reasoning mode is fixed when it is created, so a new thread is
+                // recreated to apply the choice immediately.
+                if self.composer.component().reasoning_mode() != mode {
+                    update
+                        .effects
+                        .push(RootEffect::SetModel(self.composer.component().model()));
+                }
+                update
+            }
+            PaneCommand::SetSpeed(speed) if speed == self.composer.component().speed() => {
+                ComponentUpdate::none()
+            }
+            PaneCommand::SetSpeed(speed) => self.apply_speed(speed),
+            PaneCommand::EditQueued(id, text) => {
+                let edited = self.queue.component_mut().finish_edit(id, text);
+                debug_assert!(edited, "remote queue commands are checked first");
+                self.submit_next_queued()
+            }
+            PaneCommand::AttachImage(data_url) => {
+                self.composer.component_mut().append_image(data_url);
+                ComponentUpdate::render(RenderRequest::Immediate)
+            }
+            PaneCommand::Reflect(instructions) => {
+                self.start_reflection(Submission::text(instructions))
+            }
+            PaneCommand::Handoff => self.start_handoff(),
+        };
+        update.effects.extend(applied.effects);
+        update.render = update.render.max(applied.render);
+        Ok(update)
+    }
+
+    fn check_remote_command(&self, command: &PaneCommand) -> Result<(), CommandError> {
+        match command {
+            PaneCommand::Submit { .. } => {
+                let draft = self.shared_draft().trim();
+                if draft.is_empty() {
+                    return Err(CommandError::Invalid("the draft is empty".to_owned()));
+                }
+                if !self.reflection_input && copy_command_argument(draft).is_some() {
+                    return Err(CommandError::NotAvailableRemotely);
+                }
+            }
+            PaneCommand::Interrupt
+                if self.in_flight_turns == 0 && !self.queue.component().has_pending_steer() =>
+            {
+                return Err(CommandError::NothingRunning);
+            }
+            PaneCommand::Steer(_) if self.in_flight_turns == 0 => {
+                return Err(CommandError::NothingRunning);
+            }
+            PaneCommand::Steer(id) | PaneCommand::Dequeue(id) | PaneCommand::EditQueued(id, _)
+                if !self
+                    .queue
+                    .component()
+                    .items()
+                    .any(|(item, _, steering)| item == *id && !steering) =>
+            {
+                return Err(CommandError::UnknownSession);
+            }
+            PaneCommand::Compact | PaneCommand::Reflect(_) | PaneCommand::Handoff => {
+                self.compaction_allowed()?;
+            }
+            PaneCommand::AttachImage(data_url)
+                if !(data_url.starts_with("data:image/") && data_url.contains(";base64,")) =>
+            {
+                return Err(CommandError::Invalid(
+                    "an attachment must be a base64 image data URL".to_owned(),
+                ));
+            }
+            PaneCommand::SetReasoningMode(mode)
+                if !model::reasoning_modes(self.composer.component().model()).contains(mode) =>
+            {
+                return Err(CommandError::Invalid(format!(
+                    "{} does not support {} reasoning",
+                    model::name(self.composer.component().model()),
+                    mode.as_str()
+                )));
+            }
+            PaneCommand::SetModel(_) if self.thread != ThreadState::New => {
+                return Err(CommandError::Invalid(
+                    "the model can only change before the first prompt".to_owned(),
+                ));
+            }
+            PaneCommand::SetModel(model)
+                if !model::available(self.claude_enabled).contains(model) =>
+            {
+                return Err(CommandError::Invalid(format!("{model} is not available")));
+            }
+            PaneCommand::SetReasoningMode(_) if self.thread != ThreadState::New => {
+                return Err(CommandError::Invalid(
+                    "the reasoning mode can only change before the first prompt".to_owned(),
+                ));
+            }
+            PaneCommand::SetEffort(_) | PaneCommand::SetReasoningMode(_)
+                if self.effort_locked() =>
+            {
+                return Err(CommandError::Invalid(
+                    "effort is fixed for this Claude session".to_owned(),
+                ));
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Closes overlays and cancels an inline queue edit, restoring the draft it displaced.
+    fn end_local_interaction(&mut self) -> ComponentUpdate<RootEffect> {
+        let overlay_closed = self.overlay.take().is_some();
+        self.pending_session_mention = None;
+        let mut update = if self.queue_edit.is_some() {
+            self.finish_queue_edit(false)
+        } else {
+            ComponentUpdate::none()
+        };
+        if overlay_closed {
+            update.render = update.render.max(RenderRequest::Immediate);
+        }
+        update
+    }
+
+    fn compaction_allowed(&self) -> Result<(), CommandError> {
+        if self.in_flight_turns > 0 || self.in_flight_shells > 0 || self.blocking_task.is_some() {
+            return Err(CommandError::TurnRunning);
+        }
+        if !self.queue.component().is_empty() {
+            return Err(CommandError::QueueNotEmpty);
+        }
+        Ok(())
+    }
+
+    fn start_compaction(&mut self) -> Result<ComponentUpdate<RootEffect>, CommandError> {
+        self.compaction_allowed()?;
+        self.blocking_task = Some(BlockingTask::Compaction);
+        Ok(ComponentUpdate {
+            effects: vec![RootEffect::Compact],
+            render: RenderRequest::Immediate,
+        })
+    }
+
+    pub(crate) const fn busy(&self) -> Busy {
+        Busy {
+            turns: self.in_flight_turns,
+            shells: self.in_flight_shells,
+        }
+    }
+
+    /// The draft as other windows see it: an inline queue edit borrows the composer, so the draft
+    /// it displaced is the one shared.
+    pub(crate) fn shared_draft(&self) -> &str {
+        match &self.queue_edit {
+            Some(edit) => edit.original_draft.as_ref().map_or("", ComposerDraft::text),
+            None => self.composer.component().draft(),
+        }
+    }
+
+    /// The images of [`Self::shared_draft`] as (marker, data URL) pairs.
+    pub(crate) fn shared_draft_images(&self) -> Box<dyn Iterator<Item = (&str, &str)> + '_> {
+        match &self.queue_edit {
+            Some(edit) => match &edit.original_draft {
+                Some(draft) => Box::new(draft.images()),
+                None => Box::new(std::iter::empty()),
+            },
+            None => Box::new(self.composer.component().images()),
+        }
+    }
+
+    pub(super) fn queued_prompts(&self) -> impl Iterator<Item = (QueueId, &str, bool)> {
+        self.queue.component().items()
+    }
+
+    /// The session's first prompt, which names it in session lists.
+    pub(crate) fn title(&self) -> Option<&str> {
+        self.title.as_deref()
+    }
+
+    pub(super) fn set_live_sessions(&mut self, summary: Option<String>) -> RenderRequest {
+        let update = self
+            .composer
+            .component_mut()
+            .update(ComposerEvent::LiveSessions(summary));
+        if update.changed {
+            RenderRequest::Immediate
+        } else {
+            RenderRequest::None
+        }
+    }
+
     fn copy_response(&mut self, argument: &str) -> ComponentUpdate<RootEffect> {
         let argument = argument.trim();
         let index = if argument.is_empty() {
@@ -2252,13 +2571,28 @@ impl RootNode {
         event: ComposerEvent,
         priority: RenderRequest,
     ) -> ComponentUpdate<RootEffect> {
+        self.update_composer_with(event, priority, BusyDelivery::Steer)
+    }
+
+    /// Whether shift+tab has a draft to queue: a turn (or a steer still being applied) is busy and
+    /// the composer holds a prompt.
+    fn can_queue_draft(&self) -> bool {
+        !self.reflection_input
+            && (self.in_flight_turns > 0 || self.queue.component().has_pending_steer())
+            && !self.composer.component().draft().trim().is_empty()
+    }
+
+    fn update_composer_with(
+        &mut self,
+        event: ComposerEvent,
+        priority: RenderRequest,
+        delivery: BusyDelivery,
+    ) -> ComponentUpdate<RootEffect> {
         let update = self.composer.component_mut().update(event);
-        if let Some(ComposerEffect::Submit(prompt)) = &update.effect {
-            let text = prompt.display_text().trim();
-            let (command, argument) = text.split_once(char::is_whitespace).unwrap_or((text, ""));
-            if command.eq_ignore_ascii_case("/copy") {
-                return self.copy_response(argument);
-            }
+        if let Some(ComposerEffect::Submit(prompt)) = &update.effect
+            && let Some(argument) = copy_command_argument(prompt.display_text().trim())
+        {
+            return self.copy_response(argument);
         }
         let submitted = matches!(&update.effect, Some(ComposerEffect::Submit(_)));
         if submitted {
@@ -2277,7 +2611,18 @@ impl RootNode {
                 if self.in_flight_turns > 0 || self.queue.component().has_pending_steer() =>
             {
                 self.queue.component_mut().push(prompt);
-                Vec::new()
+                // A steer is only possible while a turn runs; while one is still being applied the
+                // prompt waits behind it.
+                if delivery == BusyDelivery::Steer && self.in_flight_turns > 0 {
+                    let steer = self.update_queue(Event::Key(KeyEvent::new(
+                        KeyCode::Enter,
+                        KeyModifiers::NONE,
+                    )));
+                    render = render.max(steer.render);
+                    steer.effects
+                } else {
+                    Vec::new()
+                }
             }
             Some(ComposerEffect::Submit(prompt)) => {
                 self.in_flight_turns = self.in_flight_turns.saturating_add(1);
@@ -2294,12 +2639,31 @@ impl RootNode {
         ComponentUpdate { effects, render }
     }
 
+    fn start_handoff(&mut self) -> ComponentUpdate<RootEffect> {
+        self.blocking_task = Some(BlockingTask::Handoff);
+        let waiting = self.update_composer(
+            ComposerEvent::TaskStatus {
+                status: Some("Preparing handoff…".to_owned()),
+                now: Instant::now(),
+            },
+            RenderRequest::Immediate,
+        );
+        ComponentUpdate {
+            effects: vec![RootEffect::Handoff],
+            render: waiting.render.max(RenderRequest::Immediate),
+        }
+    }
+
     fn submit_reflection(&mut self) -> ComponentUpdate<RootEffect> {
         let instructions = self
             .composer
             .component_mut()
             .take_submission()
             .unwrap_or_else(|| Submission::text(String::new()));
+        self.start_reflection(instructions)
+    }
+
+    fn start_reflection(&mut self, instructions: Submission) -> ComponentUpdate<RootEffect> {
         self.reflection_input = false;
         let mode = self.update_composer(ComposerEvent::InputMode(None), RenderRequest::Immediate);
         self.thread = ThreadState::Started;
@@ -2590,6 +2954,12 @@ impl RootNode {
     }
 }
 
+/// The argument of a `/copy` command, which copies a response to this terminal's clipboard.
+fn copy_command_argument(text: &str) -> Option<&str> {
+    let (command, argument) = text.split_once(char::is_whitespace).unwrap_or((text, ""));
+    command.eq_ignore_ascii_case("/copy").then_some(argument)
+}
+
 fn subagent_completion_prompt(id: AgentId) -> Submission {
     Submission::text(format!(
         "A subagent completed after the previous turn ended. Continue the current task by \
@@ -2635,6 +3005,9 @@ impl Component for RootNode {
             }
             RootEvent::Transcript(record) => {
                 if let Some(prompt) = recent_prompt(&record) {
+                    if self.title.is_none() {
+                        self.title = Some(prompt.text.clone());
+                    }
                     self.recent_prompts.push(prompt);
                 }
                 let steer_applied = record.kind() == "run.steered";
@@ -2684,14 +3057,20 @@ impl Component for RootNode {
                 update
             }
             RootEvent::Subagent(update) => self.apply_subagent_update(update),
+            RootEvent::SubagentRecord { id, record } => {
+                if self.subagents.apply_record(id, record) {
+                    ComponentUpdate::render(RenderRequest::Immediate)
+                } else {
+                    ComponentUpdate::none()
+                }
+            }
             RootEvent::ReplaceDraft(draft) => {
                 self.update_composer(ComposerEvent::ReplaceDraft(draft), RenderRequest::Immediate)
             }
             RootEvent::HandoffFinished(prompt) => {
                 self.blocking_task = None;
                 let waiting = self.update_composer(
-                    ComposerEvent::ReviewWaiting {
-                        waiting: false,
+                    ComposerEvent::TaskStatus {
                         status: None,
                         now: Instant::now(),
                     },
@@ -2712,8 +3091,7 @@ impl Component for RootNode {
                     Color::Yellow,
                 ));
                 self.update_composer(
-                    ComposerEvent::ReviewWaiting {
-                        waiting: false,
+                    ComposerEvent::TaskStatus {
                         status: None,
                         now: Instant::now(),
                     },
@@ -2724,94 +3102,7 @@ impl Component for RootNode {
                 self.blocking_task = None;
                 self.notification = Some(Notification::plain(message, Color::Red));
                 self.update_composer(
-                    ComposerEvent::ReviewWaiting {
-                        waiting: false,
-                        status: None,
-                        now: Instant::now(),
-                    },
-                    RenderRequest::Immediate,
-                )
-            }
-            RootEvent::ReviewStarted => {
-                self.blocking_task = Some(BlockingTask::Review);
-                self.review_url = None;
-                self.update_composer(
-                    ComposerEvent::ReviewWaiting {
-                        waiting: true,
-                        status: None,
-                        now: Instant::now(),
-                    },
-                    RenderRequest::Immediate,
-                )
-            }
-            RootEvent::ReviewReady(url) => {
-                self.review_url = Some(url.clone());
-                self.update_composer(
-                    ComposerEvent::ReviewWaiting {
-                        waiting: true,
-                        status: Some("Review ready · O reopen · C copy link".to_owned()),
-                        now: Instant::now(),
-                    },
-                    RenderRequest::Immediate,
-                )
-            }
-            RootEvent::ReviewFinished(markdown) => {
-                self.blocking_task = None;
-                self.review_url = None;
-                let waiting = self.update_composer(
-                    ComposerEvent::ReviewWaiting {
-                        waiting: false,
-                        status: None,
-                        now: Instant::now(),
-                    },
-                    RenderRequest::Immediate,
-                );
-                let cursor = self.composer.component().cursor();
-                let draft = self.composer.component().draft();
-                let before = if draft[..cursor].is_empty() {
-                    ""
-                } else {
-                    "\n\n"
-                };
-                let after = if draft[cursor..].is_empty() {
-                    ""
-                } else {
-                    "\n\n"
-                };
-                let mut update = self.update_composer(
-                    ComposerEvent::ReplaceRange {
-                        range: cursor..cursor,
-                        text: format!("{before}{markdown}{after}"),
-                    },
-                    RenderRequest::Immediate,
-                );
-                update.effects.extend(waiting.effects);
-                update.render = update.render.max(waiting.render);
-                update
-            }
-            RootEvent::ReviewCancelled => {
-                self.blocking_task = None;
-                self.review_url = None;
-                self.notification = Some(Notification::plain(
-                    "Review cancelled.".to_owned(),
-                    Color::Yellow,
-                ));
-                self.update_composer(
-                    ComposerEvent::ReviewWaiting {
-                        waiting: false,
-                        status: None,
-                        now: Instant::now(),
-                    },
-                    RenderRequest::Immediate,
-                )
-            }
-            RootEvent::ReviewFailed(message) => {
-                self.blocking_task = None;
-                self.review_url = None;
-                self.notification = Some(Notification::plain(message, Color::Red));
-                self.update_composer(
-                    ComposerEvent::ReviewWaiting {
-                        waiting: false,
+                    ComposerEvent::TaskStatus {
                         status: None,
                         now: Instant::now(),
                     },
@@ -2892,9 +3183,16 @@ impl Component for RootNode {
                 self.notification = Some(Notification::plain(message, Color::Green));
                 ComponentUpdate::render(RenderRequest::Immediate)
             }
-            RootEvent::ConfirmReviewDownload => {
-                self.overlay = Some(Overlay::ReviewDownload(Node::new(
-                    ReviewDownloadConfirmation,
+            RootEvent::ShowQrCode(link) => {
+                match QrCodeView::new(&link) {
+                    Ok(view) => self.overlay = Some(Overlay::QrCode(Node::new(view))),
+                    Err(error) => self.notification = Some(Notification::plain(error, Color::Red)),
+                }
+                ComponentUpdate::render(RenderRequest::Immediate)
+            }
+            RootEvent::ConfirmWebInstall => {
+                self.overlay = Some(Overlay::WebInstall(Node::new(
+                    Confirmation::install_web_interface(),
                 )));
                 ComponentUpdate::render(RenderRequest::Immediate)
             }
@@ -3126,6 +3424,13 @@ fn is_skill_query_character(character: char) -> bool {
     character.is_ascii_alphanumeric() || character == '-'
 }
 
+fn is_queue_shortcut(event: &Event) -> bool {
+    let Event::Key(key) = event else {
+        return false;
+    };
+    matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) && key.code == KeyCode::BackTab
+}
+
 fn is_focus_toggle(event: &Event) -> bool {
     let Event::Key(key) = event else {
         return false;
@@ -3193,15 +3498,6 @@ fn is_plain_enter(event: &Event) -> bool {
     };
     matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
         && key.code == KeyCode::Enter
-        && key.modifiers.is_empty()
-}
-
-fn is_plain_key(event: &Event, character: char) -> bool {
-    let Event::Key(key) = event else {
-        return false;
-    };
-    matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
-        && key.code == KeyCode::Char(character)
         && key.modifiers.is_empty()
 }
 
@@ -4795,11 +5091,11 @@ mod tests {
     }
 
     #[test]
-    fn enter_in_an_empty_composer_steers_the_selected_queued_message() {
+    fn enter_steers_a_prompt_submitted_while_a_turn_runs() {
         let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
         root.in_flight_turns = 1;
         root.queue.component_mut().push("later".to_owned());
-        root.queue.component_mut().push("steer now".to_owned());
+        root.update(super::RootEvent::ReplaceDraft("steer now".to_owned()));
 
         let update = root.update(key(KeyCode::Enter, KeyModifiers::NONE));
 
@@ -4808,6 +5104,31 @@ mod tests {
             [RootEffect::Steer { prompt, .. }] if prompt.display_text() == "steer now"
         ));
         assert!(!root.queue.component().focused());
+        assert!(root.composer().draft().is_empty());
+    }
+
+    #[test]
+    fn enter_in_an_empty_composer_leaves_the_queue_alone() {
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        root.in_flight_turns = 1;
+        root.queue.component_mut().push("later".to_owned());
+
+        let update = root.update(key(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(update.effects.is_empty());
+        assert_eq!(root.queue.component().len(), 1);
+    }
+
+    #[test]
+    fn shift_tab_queues_a_draft_without_steering() {
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        root.in_flight_turns = 1;
+        root.update(super::RootEvent::ReplaceDraft("later".to_owned()));
+
+        let update = root.update(key(KeyCode::BackTab, KeyModifiers::SHIFT));
+
+        assert!(update.effects.is_empty());
+        assert_eq!(root.queue.component().len(), 1);
         assert!(root.composer().draft().is_empty());
     }
 
@@ -4878,7 +5199,7 @@ mod tests {
             for character in prompt.chars() {
                 root.update(key(KeyCode::Char(character), KeyModifiers::NONE));
             }
-            let update = root.update(key(KeyCode::Enter, KeyModifiers::NONE));
+            let update = root.update(key(KeyCode::BackTab, KeyModifiers::SHIFT));
             assert!(update.effects.is_empty());
         }
 
@@ -6852,134 +7173,6 @@ mod tests {
     }
 
     #[test]
-    fn review_feedback_is_inserted_without_replacing_the_draft() {
-        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
-        root.update(super::RootEvent::ReplaceDraft("existing draft".to_owned()));
-        root.update(super::RootEvent::ReviewStarted);
-
-        root.update(super::RootEvent::ReviewFinished(
-            "## Review: Approved".to_owned(),
-        ));
-
-        assert_eq!(
-            root.composer().draft(),
-            "existing draft\n\n## Review: Approved"
-        );
-        assert!(root.blocking_task.is_none());
-    }
-
-    #[test]
-    fn review_failure_uses_the_red_notification() {
-        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
-        root.update(RootEvent::ReviewStarted);
-
-        root.update(RootEvent::ReviewFailed(
-            "The folder must be a git repository.".to_owned(),
-        ));
-
-        let notification = root.notification.as_ref().unwrap();
-        let message = notification
-            .message
-            .spans
-            .iter()
-            .map(|span| span.content.as_ref())
-            .collect::<String>();
-        assert_eq!(message, "The folder must be a git repository.");
-        assert_eq!(notification.color, Color::Red);
-        assert!(root.blocking_task.is_none());
-    }
-
-    #[test]
-    fn review_waiting_is_shown_in_the_composer_instead_of_the_transcript() {
-        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
-        root.update(RootEvent::ReviewStarted);
-        root.update(RootEvent::Transcript(agent_record(
-            1,
-            AgentEventKind::RunStarted,
-            json!({}),
-        )));
-        root.update(RootEvent::Transcript(agent_record(
-            2,
-            AgentEventKind::RunCompleted,
-            json!({}),
-        )));
-
-        let rendered = render_root_text(&mut root, 100, 20);
-        assert!(rendered.contains("Waiting for review"));
-        assert!(!rendered.contains("Waiting for browser review"));
-        assert!(!rendered.contains("Preparing review overview"));
-
-        root.update(RootEvent::ReviewCancelled);
-        assert!(!render_root_text(&mut root, 100, 20).contains("Waiting for review"));
-    }
-
-    #[test]
-    fn review_suspends_composer_input_without_clearing_the_draft() {
-        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
-        root.update(RootEvent::ReplaceDraft("keep this draft".to_owned()));
-        root.update(RootEvent::ReviewStarted);
-
-        let typed = root.update(key(KeyCode::Char('x'), KeyModifiers::NONE));
-        let submitted = root.update(key(KeyCode::Enter, KeyModifiers::NONE));
-        let quit = root.update(key(KeyCode::Char('c'), KeyModifiers::CONTROL));
-        let pasted = root.update(RootEvent::PasteImage(
-            "data:image/png;base64,abc".to_owned(),
-        ));
-
-        assert!(typed.effects.is_empty());
-        assert!(submitted.effects.is_empty());
-        assert!(quit.effects.is_empty());
-        assert!(pasted.effects.is_empty());
-        assert_eq!(root.composer().draft(), "keep this draft");
-    }
-
-    #[test]
-    fn review_opens_during_a_turn_and_keeps_its_shortcuts() {
-        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
-        for character in "active prompt".chars() {
-            root.update(key(KeyCode::Char(character), KeyModifiers::NONE));
-        }
-        assert_eq!(
-            root.update(key(KeyCode::Enter, KeyModifiers::NONE))
-                .effects
-                .len(),
-            1
-        );
-        assert!(root.has_in_flight_turn());
-
-        root.update(key(KeyCode::Char('/'), KeyModifiers::NONE));
-        for character in "review".chars() {
-            root.update(key(KeyCode::Char(character), KeyModifiers::NONE));
-        }
-        assert_eq!(
-            root.update(key(KeyCode::Enter, KeyModifiers::NONE)).effects,
-            [RootEffect::Review {
-                download_assets: false
-            }]
-        );
-        root.update(RootEvent::ReviewStarted);
-        root.update(RootEvent::ReviewReady(
-            "http://127.0.0.1:4321/review".to_owned(),
-        ));
-        assert_eq!(
-            root.update(key(KeyCode::Char('o'), KeyModifiers::NONE))
-                .effects,
-            [RootEffect::OpenLink(
-                "http://127.0.0.1:4321/review".to_owned()
-            )]
-        );
-        assert_eq!(
-            root.update(key(KeyCode::Char('c'), KeyModifiers::NONE))
-                .effects,
-            [RootEffect::Copy("http://127.0.0.1:4321/review".to_owned())]
-        );
-        assert!(root.has_in_flight_turn());
-        root.update(RootEvent::ReviewFinished("review feedback".to_owned()));
-        assert!(root.has_in_flight_turn());
-        assert_eq!(root.composer().draft(), "review feedback");
-    }
-
-    #[test]
     fn handoff_blocks_input_until_the_continuation_prompt_is_ready() {
         let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
         root.update(key(KeyCode::Char('/'), KeyModifiers::NONE));
@@ -7023,69 +7216,6 @@ mod tests {
     }
 
     #[test]
-    fn review_ready_exposes_a_reopen_action_without_unlocking_input() {
-        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
-        root.update(RootEvent::ReviewStarted);
-        root.update(RootEvent::ReviewReady(
-            "http://127.0.0.1:4321/review".to_owned(),
-        ));
-
-        let rendered = render_root_text(&mut root, 100, 20);
-        let update = root.update(key(KeyCode::Char('o'), KeyModifiers::NONE));
-        let copy = root.update(key(KeyCode::Char('c'), KeyModifiers::NONE));
-
-        assert!(rendered.contains("Review ready"));
-        assert!(rendered.contains("O reopen"));
-        assert!(rendered.contains("C copy link"));
-        assert!(!rendered.contains("http://127.0.0.1:4321/review"));
-        assert_eq!(
-            update.effects,
-            [RootEffect::OpenLink(
-                "http://127.0.0.1:4321/review".to_owned()
-            )]
-        );
-        assert_eq!(
-            copy.effects,
-            [RootEffect::Copy("http://127.0.0.1:4321/review".to_owned())]
-        );
-        assert_eq!(root.blocking_task, Some(super::BlockingTask::Review));
-    }
-
-    #[test]
-    fn escape_twice_cancels_an_active_review() {
-        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
-        root.update(RootEvent::ReviewStarted);
-
-        let first = root.update(key(KeyCode::Esc, KeyModifiers::NONE));
-        let second = root.update(key(KeyCode::Esc, KeyModifiers::NONE));
-
-        assert!(first.effects.is_empty());
-        assert_eq!(second.effects, [RootEffect::CancelReview]);
-    }
-
-    #[test]
-    fn control_c_twice_exits_during_an_active_review() {
-        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
-        root.update(RootEvent::ReviewStarted);
-
-        let first = root.update(key(KeyCode::Char('c'), KeyModifiers::CONTROL));
-        let second = root.update(key(KeyCode::Char('c'), KeyModifiers::CONTROL));
-
-        assert!(first.effects.is_empty());
-        assert_eq!(second.effects, [RootEffect::Shutdown]);
-    }
-
-    #[test]
-    fn control_t_can_fork_during_an_active_review() {
-        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
-        root.update(RootEvent::ReviewStarted);
-
-        let update = root.update(key(KeyCode::Char('t'), KeyModifiers::CONTROL));
-
-        assert_eq!(update.effects, [RootEffect::Fork]);
-    }
-
-    #[test]
     fn active_turn_can_fork_from_the_latest_safe_boundary() {
         let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
         root.in_flight_turns = 1;
@@ -7100,16 +7230,5 @@ mod tests {
                 .effects,
             [RootEffect::Fork]
         );
-    }
-
-    #[test]
-    fn fork_does_not_inherit_the_active_review() {
-        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
-        root.update(RootEvent::ReviewStarted);
-
-        let mut fork = root.fork(Path::new("/work"), ReasoningEffort::Medium);
-
-        assert!(fork.blocking_task.is_none());
-        assert!(!render_root_text(&mut fork, 100, 20).contains("Waiting for review"));
     }
 }

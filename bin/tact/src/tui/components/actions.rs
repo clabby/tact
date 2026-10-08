@@ -16,7 +16,7 @@ use ratatui::{
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-const ACTIONS: [Action; 18] = [
+const ACTIONS: [Action; 21] = [
     Action::Effort,
     Action::Speed,
     Action::Theme,
@@ -32,9 +32,12 @@ const ACTIONS: [Action; 18] = [
     Action::Copy,
     Action::Reflection,
     Action::Handoff,
-    Action::Review,
+    Action::OpenInBrowser,
+    Action::CopyWebLink,
+    Action::ShowQrCode,
     Action::Model,
     Action::Compact,
+    Action::Sessions,
 ];
 const KEY_BINDINGS: [(&str, &str); 3] = [("↑↓", "move"), ("enter/tab", "open"), ("esc", "close")];
 const SEARCH_LABEL: &str = "Search: ";
@@ -46,7 +49,6 @@ pub(super) enum ActionsEvent {
 
 pub(super) struct ActionAvailability {
     pub(super) new_session: bool,
-    pub(super) review: bool,
     pub(super) fork: bool,
     pub(super) memory: bool,
     pub(super) model: bool,
@@ -55,7 +57,10 @@ pub(super) struct ActionAvailability {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Action {
     Handoff,
-    Review,
+    OpenInBrowser,
+    CopyWebLink,
+    ShowQrCode,
+    Sessions,
     Subagents,
     Effort,
     Model,
@@ -286,7 +291,9 @@ impl ActionsMenu {
     const fn is_enabled(&self, action: Action) -> bool {
         match action {
             Action::Handoff | Action::Reflection | Action::Compact => self.availability.new_session,
-            Action::Review => self.availability.review,
+            Action::OpenInBrowser | Action::CopyWebLink | Action::ShowQrCode | Action::Sessions => {
+                true
+            }
             Action::Subagents => true,
             Action::Effort => true,
             Action::Model => self.availability.model,
@@ -312,8 +319,7 @@ impl ActionsMenu {
             Action::ResumeSession if !self.availability.new_session => {
                 "Resume session · finish active work first"
             }
-            Action::Fork if !self.availability.fork => "Fork session · one fork at a time",
-            Action::Review if !self.availability.review => "Review changes · close the open review",
+            Action::Fork if !self.availability.fork => "Fork session · close a pane first",
             Action::Handoff if !self.availability.new_session => {
                 "Prepare handoff · finish active work first"
             }
@@ -336,7 +342,10 @@ impl Action {
     const fn label(self) -> &'static str {
         match self {
             Self::Handoff => "Prepare handoff",
-            Self::Review => "Review changes",
+            Self::OpenInBrowser => "Open in browser",
+            Self::CopyWebLink => "Copy web link",
+            Self::ShowQrCode => "Show QR code",
+            Self::Sessions => "Sessions",
             Self::Subagents => "Subagents",
             Self::Effort => "Change effort",
             Self::Model => "Select model",
@@ -359,7 +368,10 @@ impl Action {
     const fn alias(self) -> Option<&'static str> {
         match self {
             Self::Handoff => Some("handoff"),
-            Self::Review => Some("review"),
+            Self::OpenInBrowser => Some("web/review"),
+            Self::CopyWebLink => Some("url"),
+            Self::ShowQrCode => Some("phone/scan"),
+            Self::Sessions => Some("switch/chats"),
             Self::Subagents => Some("agents"),
             Self::Effort => Some("thinking"),
             Self::Model => Some("intelligence"),
@@ -469,7 +481,6 @@ mod tests {
     fn available() -> ActionAvailability {
         ActionAvailability {
             new_session: true,
-            review: true,
             fork: true,
             memory: true,
             model: true,
@@ -492,18 +503,24 @@ mod tests {
     }
 
     #[test]
-    fn review_remains_enabled_while_a_turn_runs() {
+    fn web_and_session_actions_remain_enabled_while_a_turn_runs() {
         let mut availability = available();
         availability.new_session = false;
-        let mut menu = ActionsMenu::new(availability);
-        assert_eq!(menu.display_label(Action::Review), "Review changes");
-        for character in "review".chars() {
-            menu.update(key(KeyCode::Char(character)));
+        for (query, action) in [
+            ("browser", Action::OpenInBrowser),
+            ("web link", Action::CopyWebLink),
+            ("switch", Action::Sessions),
+        ] {
+            let mut menu = ActionsMenu::new(ActionAvailability { ..availability });
+            assert_eq!(menu.display_label(action), action.label());
+            for character in query.chars() {
+                menu.update(key(KeyCode::Char(character)));
+            }
+            assert_eq!(
+                menu.update(key(KeyCode::Enter)).effects,
+                [ActionsEffect::Trigger(action)]
+            );
         }
-        assert_eq!(
-            menu.update(key(KeyCode::Enter)).effects,
-            [ActionsEffect::Trigger(Action::Review)]
-        );
     }
 
     #[test]
@@ -581,11 +598,11 @@ mod tests {
         );
         assert_eq!(
             row_segment(&terminal, 17, 1, 58),
-            "│  Review changes (alias: review)                        │"
+            "│  Open in browser (alias: web/review)                   │"
         );
         assert_eq!(
             row_segment(&terminal, 18, 1, 58),
-            "│  Select model (alias: intelligence)                    │"
+            "│  Copy web link (alias: url)                            │"
         );
         assert_eq!(
             row_segment(&terminal, 19, 1, 58),
@@ -765,7 +782,7 @@ mod tests {
     }
 
     #[test]
-    fn review_action_is_searchable() {
+    fn open_in_browser_keeps_the_review_alias() {
         let mut menu = ActionsMenu::new(available());
         for character in "review".chars() {
             menu.update(key(KeyCode::Char(character)));
@@ -773,7 +790,7 @@ mod tests {
 
         assert_eq!(
             menu.update(key(KeyCode::Enter)).effects,
-            [ActionsEffect::Trigger(Action::Review)]
+            [ActionsEffect::Trigger(Action::OpenInBrowser)]
         );
     }
 

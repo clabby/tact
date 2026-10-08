@@ -3,13 +3,13 @@
 mod agent_events;
 mod clipboard;
 mod components;
-mod context;
+pub(crate) mod context;
 mod editor;
 mod format;
 mod handoff_controller;
 mod pane;
 mod prompt;
-mod review_controller;
+mod remote;
 mod scheduler;
 pub(crate) mod session;
 mod shell;
@@ -38,17 +38,20 @@ use crate::{
         handoff_controller::{HandoffCompletion, HandoffController, PreparedHandoff},
         pane::PaneId,
         prompt::Submission,
-        review_controller::{ReviewCompletion, ReviewController, ReviewIdentity, ReviewTask},
         scheduler::{RenderScheduler, STREAM_FRAME_INTERVAL},
-        session::{RecentPrompt, SessionSummary},
+        session::{RecentPrompt, SessionLock, SessionSummary},
         shell::ShellExecution,
         subagent_updates::ForwardedSubagentUpdate,
         terminal::TerminalSession,
         transcript::{
             LocalEvent, SessionEnded, SessionOutcome, SessionStarted, ShellId, TranscriptError,
-            TranscriptJournal, TurnId,
+            TranscriptJournal, TranscriptRecord, TurnId,
         },
-        worker::{AuxiliaryContext, AuxiliaryError, ReflectionContext, WorkerCommand, WorkerEvent},
+        worker::{AuxiliaryContext, ReflectionContext, WorkerCommand, WorkerEvent},
+    },
+    web::bridge::{
+        self, AuxiliaryError, AuxiliaryRequest, Command, CommandError, OpenSpec, Origin, Reply,
+        Request, WebStatus,
     },
 };
 use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
@@ -70,7 +73,7 @@ use tact_memory::{
 };
 use tact_subagents::Subagents;
 use tokio::{
-    sync::mpsc,
+    sync::{mpsc, oneshot, watch},
     task::{JoinHandle, JoinSet},
     time::sleep_until,
 };
@@ -114,23 +117,31 @@ type ResumeSessionTask = JoinHandle<(
 type UpdateCheckTask =
     JoinHandle<std::result::Result<Option<semver::Version>, crate::app::update::UpdateError>>;
 
-struct BrowserOpenCompletion {
+struct WebTaskCompletion {
     pane: PaneId,
-    review: Option<ReviewIdentity>,
-    result: io::Result<()>,
+    /// A sign-in link to show as a QR code, when the task was a QR request; otherwise a user-facing
+    /// failure message is the only thing worth reporting.
+    result: std::result::Result<Option<String>, String>,
 }
 
-struct AuxiliaryJobRequest {
-    review: ReviewIdentity,
-    prompt: String,
-    shutdown: CancellationToken,
-    completion: tokio::sync::oneshot::Sender<std::result::Result<String, AuxiliaryError>>,
+type CommandReply = oneshot::Sender<std::result::Result<Reply, CommandError>>;
+
+/// A session being started for a pane that was opened beside the others.
+enum OpenedSession {
+    Fresh {
+        configured: Box<ConfiguredAgent>,
+        settings: PaneSettings,
+    },
+    Restored {
+        restored: Box<RestoredSession>,
+        settings: PaneSettings,
+        preferred_reasoning_mode: ReasoningMode,
+    },
 }
 
-struct ReviewReady {
-    identity: ReviewIdentity,
-    url: String,
-}
+type OpenTask = (PaneId, Result<OpenedSession>);
+
+const WEB_SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 
 const HANDOFF_PROMPT: &str = concat!(
     "Prepare a self-contained continuation prompt for a new coding agent that will take over this ",
@@ -151,6 +162,8 @@ fn spawn_update_check() -> Option<UpdateCheckTask> {
 
 struct RestoredSession {
     configured: ConfiguredAgent,
+    lock: SessionLock,
+    records: Vec<Arc<TranscriptRecord>>,
     projection: RestoredSessionProjection,
     reasoning_mode: ReasoningMode,
     model: Model,
@@ -277,6 +290,9 @@ struct PaneRuntime {
     active_shells: usize,
     generation: u64,
     subagent_control: Subagents,
+    /// The pane was closed; the runtime ends when its agent event stream does.
+    closing: bool,
+    _lock: SessionLock,
 }
 
 struct WriterCompletion {
@@ -455,7 +471,11 @@ pub(crate) async fn run(
         StartupMode::ResumeSession(session_id) => (Some(session_id), None),
     };
     let resuming = resume_session_id.is_some();
-    let (configured, restored_projection, reasoning_mode, model, next_sequence) =
+    let resume_lock = resume_session_id
+        .as_deref()
+        .map(|session_id| SessionLock::acquire(config.path(), session_id))
+        .transpose()?;
+    let (configured, restored, reasoning_mode, model, next_sequence) =
         if let Some(session_id) = resume_session_id {
             let restored_config = config.clone();
             let config_path = restored_config.path().to_path_buf();
@@ -471,10 +491,11 @@ pub(crate) async fn run(
             let snapshot = snapshot.map_err(RuntimeError::SessionTask)??;
             let records = records?;
             tokio::task::spawn_blocking(move || -> Result<_> {
+                let restored_config = restored_config.with_workspace(session::workspace(&records)?);
                 let reasoning_mode = session::reasoning_mode(&records);
                 let model = session::model(&records)?;
                 let next_sequence = session::next_sequence(&records);
-                let projection = RootNode::project_session(initial_effort, records);
+                let projection = RootNode::project_session(initial_effort, records.clone());
                 let configured = ConfiguredAgent::from_config_with_session(
                     &restored_config,
                     initial_effort,
@@ -485,7 +506,7 @@ pub(crate) async fn run(
                 )?;
                 Ok((
                     configured,
-                    Some(projection),
+                    Some((projection, records)),
                     reasoning_mode,
                     model,
                     next_sequence,
@@ -511,10 +532,8 @@ pub(crate) async fn run(
         };
     let workspace = config.agent().workspace().to_path_buf();
     let mut terminal = TerminalSession::enter().map_err(RuntimeError::Terminal)?;
-    terminal
-        .report_working_directory(&workspace)
-        .map_err(RuntimeError::Terminal)?;
     let ConfiguredAgent {
+        workspace: initial_workspace,
         agent,
         context,
         events,
@@ -524,7 +543,15 @@ pub(crate) async fn run(
         subagent_updates,
         subagent_control,
     } = configured;
+    terminal
+        .report_working_directory(&initial_workspace)
+        .map_err(RuntimeError::Terminal)?;
+    let initial_config = config.with_workspace(initial_workspace.clone());
     let main_session_id = agent.session_id().to_string();
+    let main_lock = match resume_lock {
+        Some(lock) => lock,
+        None => SessionLock::acquire(config.path(), &main_session_id)?,
+    };
     let mut herdr = herdr::Reporter::from_env(&main_session_id);
     let (writer_sender, mut writer_updates) = mpsc::unbounded_channel();
     let mut panes = HashMap::new();
@@ -540,11 +567,12 @@ pub(crate) async fn run(
             } else {
                 PaneSession::new(&main_session_id, None, None, 1, !skills.is_empty())
             },
-            &config,
+            &initial_config,
             PaneSettings::new(initial_effort, reasoning_mode, initial_speed, model),
             instructions,
             subagent_control.clone(),
             &writer_sender,
+            main_lock,
         )?,
     );
     let memory_review = if resuming {
@@ -562,7 +590,7 @@ pub(crate) async fn run(
         subagent_updates,
         subagent_sender.clone(),
     );
-    let mut root = RootNode::new(&workspace, initial_effort);
+    let mut root = RootNode::new(&initial_workspace, initial_effort);
     root.set_tui_config(*config.tui());
     root.set_claude_enabled(config.claude().enabled());
     root.set_reasoning_modes(reasoning_mode, preferred_reasoning_mode);
@@ -570,16 +598,17 @@ pub(crate) async fn run(
     root.set_max_subagents(initial_max_subagents);
     let mut memory_store = crate::core::configured_memory_store(&config, &workspace)?;
     root.set_memory_enabled(memory_store.is_some());
-    if let Some(projection) = restored_projection {
+    let restored_records = restored.map(|(projection, records)| {
         root.install_session_projection(
-            &workspace,
+            &initial_workspace,
             initial_effort,
             reasoning_mode,
             preferred_reasoning_mode,
             initial_speed,
             projection,
         );
-    }
+        records
+    });
     root.set_model(model);
     root.set_skills(skills);
     let mut theme = config.theme().clone();
@@ -587,6 +616,28 @@ pub(crate) async fn run(
         theme.set_system_scheme(scheme);
     }
     let mut app = AppNode::new(theme, workspace.clone(), root);
+    app.set_max_live_sessions(config.web().max_live_sessions());
+    let (loop_end, web_end) = bridge::bridge();
+    let bridge::LoopEnd {
+        publisher,
+        requests: mut web_requests,
+        queries: mut web_queries,
+        auxiliary: mut auxiliary_requests,
+        status: web_status,
+    } = loop_end;
+    app.attach_publisher(publisher);
+    app.session_opened(
+        PaneId::Main,
+        main_session_id.clone(),
+        restored_records.unwrap_or_default(),
+    );
+    // The server runs beside the terminal and never stops it: its failure only changes the
+    // status that "Open in browser" reports.
+    let web_shutdown = shutdown.child_token();
+    let web_server = config
+        .web()
+        .enabled()
+        .then(|| crate::web::spawn(&config, &workspace, web_end, web_shutdown.clone()));
     let prompt_warmup_config = config.path().to_path_buf();
     let mut recent_prompt_task = Some(tokio::spawn(async move {
         session::load_recent_prompts_async(prompt_warmup_config)
@@ -605,10 +656,8 @@ pub(crate) async fn run(
     let mut new_session_task = None::<NewSessionTask>;
     let mut session_list_task = None::<SessionListTask>;
     let mut handoff_controller = HandoffController::new();
-    let mut review_controller = ReviewController::new();
-    let review_turn_active = Arc::new(AtomicBool::new(false));
-    let (auxiliary_sender, mut auxiliary_jobs) = mpsc::unbounded_channel();
-    let (review_ready_sender, mut review_ready_updates) = mpsc::unbounded_channel();
+    let mut open_tasks = JoinSet::<OpenTask>::new();
+    let mut open_replies = HashMap::<PaneId, CommandReply>::new();
     let mut resume_session_task = None::<ResumeSessionTask>;
     let mut scheduler = RenderScheduler::new(STREAM_FRAME_INTERVAL, Instant::now());
     let mut stopping = false;
@@ -618,69 +667,93 @@ pub(crate) async fn run(
     let mut writer_error = None::<TranscriptError>;
     let mut writers_open = 1_usize;
     let mut shell_tasks = JoinSet::<(PaneId, ShellExecution)>::new();
-    let mut browser_open_tasks = JoinSet::<BrowserOpenCompletion>::new();
+    let mut web_tasks = JoinSet::<WebTaskCompletion>::new();
     let mut memory_tasks = JoinSet::<MemoryCompletion>::new();
     let mut memory_generations = HashMap::<PaneId, u64>::new();
     let mut subagent_shutdowns = JoinSet::<()>::new();
     let mut subagents_stopping = false;
 
+    macro_rules! effect_context {
+        () => {
+            EffectContext {
+                app: &mut app,
+                commands: &commands,
+                workspace: &workspace,
+                config: &mut config,
+                shutdown: &shutdown,
+                input: &mut input,
+                editor_task: &mut editor_task,
+                effort_task: &mut effort_task,
+                speed_task: &mut speed_task,
+                new_session_task: &mut new_session_task,
+                session_list_task: &mut session_list_task,
+                recent_prompt_task: &mut recent_prompt_task,
+                recent_prompt_cache: &mut recent_prompt_cache,
+                recent_prompt_request: &mut recent_prompt_request,
+                handoff_controller: &mut handoff_controller,
+                web_status: &web_status,
+                open_tasks: &mut open_tasks,
+                resume_session_task: &mut resume_session_task,
+                terminal: &mut terminal,
+                scheduler: &mut scheduler,
+                panes: &mut panes,
+                shell_tasks: &mut shell_tasks,
+                web_tasks: &mut web_tasks,
+                memory_store: &mut memory_store,
+                memory_tasks: &mut memory_tasks,
+                memory_generations: &mut memory_generations,
+                subagent_shutdowns: &mut subagent_shutdowns,
+            }
+        };
+    }
+
     macro_rules! apply_app_update {
         ($update:expr) => {
-            apply_update(
-                $update,
-                EffectContext {
-                    app: &mut app,
-                    commands: &commands,
-                    workspace: &workspace,
-                    config: &mut config,
-                    shutdown: &shutdown,
-                    input: &mut input,
-                    editor_task: &mut editor_task,
-                    effort_task: &mut effort_task,
-                    speed_task: &mut speed_task,
-                    new_session_task: &mut new_session_task,
-                    session_list_task: &mut session_list_task,
-                    recent_prompt_task: &mut recent_prompt_task,
-                    recent_prompt_cache: &mut recent_prompt_cache,
-                    recent_prompt_request: &mut recent_prompt_request,
-                    handoff_controller: &mut handoff_controller,
-                    review_controller: &mut review_controller,
-                    review_turn_active: &review_turn_active,
-                    auxiliary_sender: &auxiliary_sender,
-                    review_ready_sender: &review_ready_sender,
-                    resume_session_task: &mut resume_session_task,
-                    terminal: &mut terminal,
-                    scheduler: &mut scheduler,
-                    panes: &mut panes,
-                    shell_tasks: &mut shell_tasks,
-                    browser_open_tasks: &mut browser_open_tasks,
-                    memory_store: &mut memory_store,
-                    memory_tasks: &mut memory_tasks,
-                    memory_generations: &mut memory_generations,
-                    subagent_shutdowns: &mut subagent_shutdowns,
-                },
-            )
-            .await?;
-            review_turn_active.store(
-                panes
-                    .keys()
-                    .any(|pane| app.root(*pane).is_some_and(RootNode::has_in_flight_turn)),
-                Ordering::Release,
-            );
+            apply_update($update, effect_context!()).await?;
         };
+    }
+
+    macro_rules! install_agent {
+        ($pane:expr, $configured:expr, $history:expr, $settings:expr) => {{
+            let configured = $configured;
+            app.set_pane_workspace($pane, configured.workspace.clone());
+            install_agent(
+                $pane,
+                configured,
+                $history,
+                $settings,
+                &config,
+                &mut panes,
+                &commands,
+                &agent_event_sender,
+                &subagent_sender,
+                &writer_sender,
+                &mut writers_open,
+                &mut subagent_shutdowns,
+            )?
+        }};
     }
 
     if open_resume_selector {
         apply_app_update!(app.open_resume_selector());
     }
 
+    let mut reported_workspace = initial_workspace;
     loop {
+        if let Some(root) = app.root(app.active_pane())
+            && root.workspace() != reported_workspace
+        {
+            terminal
+                .report_working_directory(root.workspace())
+                .map_err(RuntimeError::Terminal)?;
+            reported_workspace = root.workspace().to_owned();
+        }
         if stopping && let Some(task) = update_check_task.take() {
             task.abort();
         }
         if stopping {
             shell_tasks.abort_all();
-            review_controller.cancel();
+            open_tasks.abort_all();
             handoff_controller.cancel();
             memory_tasks.abort_all();
         }
@@ -702,6 +775,7 @@ pub(crate) async fn run(
             }
         }
 
+        request_render(app.publish_changes(Origin::Terminal), &mut scheduler);
         if editor_task.is_none() && !stopping && scheduler.is_due(Instant::now()) {
             terminal
                 .draw(|frame| app.render(frame))
@@ -804,7 +878,7 @@ pub(crate) async fn run(
                         apply_app_update!(app.update(AppEvent::Transcript { pane, record }));
                         if tool_finished {
                             terminal
-                                .report_working_directory(&workspace)
+                                .report_working_directory(app.root(app.active_pane()).map_or(&workspace, RootNode::workspace))
                                 .map_err(RuntimeError::Terminal)?;
                         }
                     }
@@ -816,6 +890,11 @@ pub(crate) async fn run(
                         {
                             runtime.event_streams_open = runtime.event_streams_open.saturating_sub(1);
                             stream_closed = runtime.event_streams_open == 0;
+                        }
+                        if stream_closed && panes.get(&pane).is_some_and(|runtime| runtime.closing) {
+                            let mut runtime = panes.remove(&pane).expect("the closing runtime exists");
+                            close_pane_journal(&mut runtime, SessionOutcome::Closed, None)?;
+                            continue;
                         }
                         if stream_closed {
                             schedule(app.update(AppEvent::AgentStreamClosed(pane)), &mut scheduler);
@@ -831,55 +910,98 @@ pub(crate) async fn run(
                     }));
                 }
             }
-            Some(ready) = review_ready_updates.recv(), if !stopping => {
-                if review_controller.identity() != Some(ready.identity) {
-                    continue;
-                }
-                review_controller.set_url(ready.identity, ready.url.clone());
-                let url = review_controller
-                    .url(ready.identity.pane)
-                    .expect("the active review just stored its URL")
-                    .to_owned();
-                schedule(
-                    app.update(AppEvent::ReviewReady {
-                        pane: ready.identity.pane,
-                        url: url.clone(),
-                    }),
-                    &mut scheduler,
-                );
-                browser_open_tasks.spawn(async move {
-                    BrowserOpenCompletion {
-                        pane: ready.identity.pane,
-                        review: Some(ready.identity),
-                        result: crate::app::browser::open(&url).await,
+            Some(request) = web_requests.recv(),
+                if !stopping
+                    && effort_task.is_none()
+                    && speed_task.is_none()
+                    && new_session_task.is_none()
+                    && resume_session_task.is_none() =>
+            {
+                let Request { command, client, reply } = request;
+                let active = app.active_pane();
+                match command {
+                    Command::DeleteMemory { key } => {
+                        remote::delete_memory(memory_store.as_ref(), key).deliver(reply);
                     }
-                });
+                    Command::ReloadConfig => {
+                        let result = reload_config(&mut effect_context!(), active);
+                        request_render(app.publish_changes(Origin::Web(client)), &mut scheduler);
+                        drop(reply.send(result.map(|()| Reply::Done)));
+                    }
+                    Command::WriteConfig { text, revision } => {
+                        let result = config
+                            .replace_document(&text, &revision)
+                            .map_err(remote::config_edit_error)
+                            .and_then(|()| reload_config(&mut effect_context!(), active));
+                        request_render(app.publish_changes(Origin::Web(client)), &mut scheduler);
+                        drop(reply.send(result.map(|()| Reply::Done)));
+                    }
+                    Command::SetMaxSubagents { limit } => {
+                        let result = apply_pane_effect(
+                            active,
+                            components::RootEffect::SetMaxSubagents(limit),
+                            &mut effect_context!(),
+                        )
+                        .map_err(|error| CommandError::Failed(error.to_string()));
+                        request_render(app.publish_changes(Origin::Web(client)), &mut scheduler);
+                        drop(reply.send(result.map(|()| Reply::Done)));
+                    }
+                    Command::Open(spec) => {
+                        match open_session(spec, &mut app, &config, &mut panes, &commands, &mut open_tasks).await {
+                            Ok(OpenStarted::Pending(pane)) => {
+                                open_replies.insert(pane, reply);
+                            }
+                            Ok(OpenStarted::Activated(session)) => {
+                                drop(reply.send(Ok(Reply::Opened { session })));
+                            }
+                            Err(error) => drop(reply.send(Err(error))),
+                        }
+                        request_render(RenderRequest::Immediate, &mut scheduler);
+                    }
+                    command => {
+                        let result = app.remote_command(command);
+                        let result = match result {
+                            Ok(update) => {
+                                apply_app_update!(update);
+                                Ok(Reply::Done)
+                            }
+                            Err(error) => Err(error),
+                        };
+                        request_render(app.publish_changes(Origin::Web(client)), &mut scheduler);
+                        drop(reply.send(result));
+                    }
+                }
             }
-            Some(request) = auxiliary_jobs.recv(), if !stopping => {
-                let AuxiliaryJobRequest {
-                    review,
+            Some(request) = web_queries.recv(), if !stopping => {
+                let state = remote::QueryState {
+                    app: &app,
+                    config: &config,
+                    workspace: app.root(app.active_pane()).map_or(&workspace, RootNode::workspace),
+                    memory_store: memory_store.as_ref(),
+                    recent_prompts: recent_prompt_cache.as_deref(),
+                };
+                remote::answer(request.query, &state).deliver(request.reply);
+            }
+            Some(request) = auxiliary_requests.recv(), if !stopping => {
+                let AuxiliaryRequest {
+                    session,
                     prompt,
                     shutdown,
                     completion,
                 } = request;
-                if !review_controller.accepts(review, &shutdown) {
-                    drop(completion.send(Err(AuxiliaryError::Cancelled)));
-                    continue;
-                }
-                let pane = review.pane;
-                let Some(runtime) = panes
-                    .get_mut(&pane)
-                    .filter(|runtime| runtime.generation == review.pane_generation)
-                else {
-                    drop(completion.send(Err(AuxiliaryError::Failed(
-                        "auxiliary job pane is no longer available".to_owned(),
-                    ))));
-                    continue;
-                };
                 if shutdown.is_cancelled() {
                     drop(completion.send(Err(AuxiliaryError::Cancelled)));
                     continue;
                 }
+                let Some((pane, runtime)) = app
+                    .pane_for_session(&session)
+                    .and_then(|pane| Some((pane, panes.get_mut(&pane)?)))
+                else {
+                    drop(completion.send(Err(AuxiliaryError::Failed(
+                        "unknown session".to_owned(),
+                    ))));
+                    continue;
+                };
                 let id = TurnId::new(runtime.next_turn);
                 runtime.next_turn = runtime.next_turn.saturating_add(1);
                 commands
@@ -892,6 +1014,78 @@ pub(crate) async fn run(
                         completion,
                     })
                     .map_err(|_| RuntimeError::AgentWorkerStopped)?;
+            }
+            Some(result) = open_tasks.join_next(), if !stopping => {
+                let (pane, opened) = result.map_err(RuntimeError::SessionTask)?;
+                let reply = open_replies.remove(&pane);
+                let opened = match opened {
+                    Ok(opened) if app.root(pane).is_some() => opened,
+                    Ok(_) => {
+                        if let Some(reply) = reply {
+                            drop(reply.send(Err(CommandError::Failed(
+                                "the session was closed while it opened".to_owned(),
+                            ))));
+                        }
+                        continue;
+                    }
+                    Err(error) => {
+                        let error = error.to_string();
+                        apply_app_update!(app.update(AppEvent::OpenFailed {
+                            pane,
+                            error: error.clone(),
+                        }));
+                        if let Some(reply) = reply {
+                            drop(reply.send(Err(CommandError::Failed(error))));
+                        }
+                        continue;
+                    }
+                };
+                let records = match opened {
+                    OpenedSession::Fresh { configured, settings } => {
+                        let skills = install_agent!(pane, *configured, InstalledSession::Fresh, settings);
+                        schedule(
+                            app.update(AppEvent::NewSessionReady {
+                                pane,
+                                effort: settings.effort,
+                                reasoning_mode: settings.reasoning_mode,
+                                speed: settings.speed,
+                                model: settings.model,
+                                draft_reset: components::DraftReset::Clear,
+                                skills,
+                            }),
+                            &mut scheduler,
+                        );
+                        Vec::new()
+                    }
+                    OpenedSession::Restored { restored, settings, preferred_reasoning_mode } => {
+                        let RestoredSession { configured, lock, records, projection, next_sequence, .. } = *restored;
+                        let skills = install_agent!(
+                            pane,
+                            configured,
+                            InstalledSession::Restored { next_sequence, lock },
+                            settings
+                        );
+                        schedule(
+                            app.update(AppEvent::SessionRestored {
+                                pane,
+                                projection: Box::new(projection),
+                                effort: settings.effort,
+                                reasoning_mode: settings.reasoning_mode,
+                                preferred_reasoning_mode,
+                                speed: settings.speed,
+                                model: settings.model,
+                                skills,
+                            }),
+                            &mut scheduler,
+                        );
+                        records
+                    }
+                };
+                let session = panes[&pane].session_id.clone();
+                app.session_opened(pane, session.clone(), records);
+                if let Some(reply) = reply {
+                    drop(reply.send(Ok(Reply::Opened { session })));
+                }
             }
             update = worker_updates.recv(), if !worker_stopped => {
                 let Some(update) = update else {
@@ -926,7 +1120,6 @@ pub(crate) async fn run(
                         schedule(update, &mut scheduler);
                     }
                     WorkerEvent::TurnAccepted { pane, id } => {
-                        review_turn_active.store(true, Ordering::Release);
                         if herdr_turns.insert((pane, id)) && herdr_turns.len() == 1 {
                             let session_id = app
                                 .main_pane()
@@ -934,8 +1127,10 @@ pub(crate) async fn run(
                                 .map(|runtime| runtime.session_id.as_str());
                             herdr.working(session_id);
                         }
-                        let record = panes.get_mut(&pane).expect("worker pane must exist")
-                            .journal_mut()?.append_local(LocalEvent::WorkerTurnAccepted { id })?;
+                        let Some(runtime) = panes.get_mut(&pane) else {
+                            continue;
+                        };
+                        let record = runtime.journal_mut()?.append_local(LocalEvent::WorkerTurnAccepted { id })?;
                         schedule(app.update(AppEvent::Transcript { pane, record }), &mut scheduler);
                     }
                     WorkerEvent::CompactionFinished { pane, result, terminal_stop, duration_ns } => {
@@ -1002,7 +1197,7 @@ pub(crate) async fn run(
                         schedule(app.update(AppEvent::Transcript { pane, record }), &mut scheduler);
                         if let Some(command) = config.agent().completion_hook() {
                             let command = command.to_owned();
-                            let workspace = workspace.clone();
+                            let workspace = app.root(pane).expect("hook pane exists").workspace().to_owned();
                             tokio::spawn(async move {
                                 drop(hook::execute(&command, &workspace).await);
                             });
@@ -1057,63 +1252,53 @@ pub(crate) async fn run(
                     }
                     WorkerEvent::ForkOpened {
                         pane,
-                        parent: main_pane,
+                        parent,
                         parent_sequence,
                         events,
                     } => {
                         let session_id = events.request_id().to_owned();
-                        let parent_session_id = panes
-                            .get(&main_pane)
-                            .map(|runtime| runtime.session_id.clone());
+                        let Some(parent_runtime) = panes
+                            .get(&parent)
+                            .filter(|_| app.root(pane).is_some())
+                        else {
+                            // The fork or its parent closed while the worker forked.
+                            commands
+                                .send(WorkerCommand::ClosePane(pane))
+                                .map_err(|_| RuntimeError::AgentWorkerStopped)?;
+                            let error = "the session closed while it was being forked".to_owned();
+                            if let Some(reply) = open_replies.remove(&pane) {
+                                drop(reply.send(Err(CommandError::Failed(error.clone()))));
+                            }
+                            apply_app_update!(app.update(AppEvent::ForkFailed { pane, error }));
+                            continue;
+                        };
                         let effort = app
                             .root(pane)
-                            .map(|root| root.composer().effort())
-                            .unwrap_or_else(|| config.agent().thinking());
-                        let speed = panes
-                            .get(&main_pane)
-                            .expect("main pane must exist")
-                            .current_speed;
-                        let reasoning_mode = panes
-                            .get(&main_pane)
-                            .expect("main pane must exist")
-                            .reasoning_mode;
-                        let model = panes
-                            .get(&main_pane)
-                            .expect("main pane must exist")
-                            .current_model;
-                        let subagent_control = panes
-                            .get(&main_pane)
-                            .expect("main pane must exist")
-                            .subagent_control
-                            .clone();
-                        let instructions = Arc::clone(
-                            &panes
-                                .get(&main_pane)
-                                .expect("main pane must exist")
-                                .instructions,
-                        );
-                        let skills_catalog_present = panes
-                            .get(&main_pane)
-                            .expect("main pane must exist")
-                            .skills_catalog_present;
+                            .map_or_else(|| config.agent().thinking(), |root| root.composer().effort());
                         let mut runtime = open_pane(
-                                PaneGeneration {
-                                    pane,
-                                    generation: 0,
-                                },
-                                PaneSession::new(
-                                    &session_id,
-                                    parent_session_id.as_deref(),
-                                    Some(parent_sequence),
-                                    1,
-                                    skills_catalog_present,
-                                ),
-                                &config,
-                                PaneSettings::new(effort, reasoning_mode, speed, model),
-                                instructions,
-                                subagent_control.clone(),
-                                &writer_sender,
-                            )?;
+                            PaneGeneration {
+                                pane,
+                                generation: 0,
+                            },
+                            PaneSession::new(
+                                &session_id,
+                                Some(&parent_runtime.session_id),
+                                Some(parent_sequence),
+                                1,
+                                parent_runtime.skills_catalog_present,
+                            ),
+                            &config.with_workspace(app.root(pane).expect("fork pane exists").workspace().to_owned()),
+                            PaneSettings::new(
+                                effort,
+                                parent_runtime.reasoning_mode,
+                                parent_runtime.current_speed,
+                                parent_runtime.current_model,
+                            ),
+                            Arc::clone(&parent_runtime.instructions),
+                            parent_runtime.subagent_control.clone(),
+                            &writer_sender,
+                            SessionLock::acquire(config.path(), &session_id)?,
+                        )?;
                         let started = runtime
                             .journal_mut()?
                             .persist_start()
@@ -1122,13 +1307,20 @@ pub(crate) async fn run(
                         panes.insert(pane, runtime);
                         writers_open = writers_open.saturating_add(1);
                         agent_events::forward(pane, 0, events, agent_event_sender.clone());
+                        app.session_opened(pane, session_id.clone(), Vec::new());
                         apply_app_update!(app.update(AppEvent::Transcript {
                             pane,
                             record: started,
                         }));
                         apply_app_update!(app.update(AppEvent::ForkReady { pane }));
+                        if let Some(reply) = open_replies.remove(&pane) {
+                            drop(reply.send(Ok(Reply::Opened { session: session_id })));
+                        }
                     }
                     WorkerEvent::ForkFailed { pane, error } => {
+                        if let Some(reply) = open_replies.remove(&pane) {
+                            drop(reply.send(Err(CommandError::Failed(error.clone()))));
+                        }
                         apply_app_update!(app.update(AppEvent::ForkFailed { pane, error }));
                     }
                     WorkerEvent::ThinkingUpdated {
@@ -1139,7 +1331,7 @@ pub(crate) async fn run(
                         let runtime = panes.get_mut(&pane).expect("effort pane must exist");
                         if let Err(error) = result {
                             let effort = runtime.current_effort;
-                            input = Some(EventStream::new());
+                            input.get_or_insert_with(EventStream::new);
                             apply_app_update!(app.update(AppEvent::EffortUpdateFailed {
                                 pane, effort, error: format!("Could not change effort: {error}"),
                             }));
@@ -1157,7 +1349,7 @@ pub(crate) async fn run(
                             schedule(app.update(AppEvent::Transcript { pane, record }), &mut scheduler);
                         }
                         runtime.current_effort = effort;
-                        input = Some(EventStream::new());
+                        input.get_or_insert_with(EventStream::new);
                         scheduler.request_immediate(Instant::now());
                     }
                     WorkerEvent::SpeedUpdated { pane, speed, result } => {
@@ -1179,7 +1371,7 @@ pub(crate) async fn run(
                         if app.main_pane() == Some(pane) {
                             config.set_speed(speed);
                         }
-                        input = Some(EventStream::new());
+                        input.get_or_insert_with(EventStream::new);
                         scheduler.request_immediate(Instant::now());
                     }
                 }
@@ -1221,28 +1413,19 @@ pub(crate) async fn run(
                     )?;
                 }
             }
-            result = browser_open_tasks.join_next(), if !browser_open_tasks.is_empty() => {
+            result = web_tasks.join_next(), if !web_tasks.is_empty() => {
                 let Some(Ok(completion)) = result else {
                     continue;
                 };
-                if let Some(identity) = completion.review
-                    && review_controller.identity() != Some(identity)
-                {
-                    continue;
-                }
-                if let Err(error) = completion.result {
-                    let message = if completion.review.is_some() {
-                        format!("Could not open the browser: {error}. Press C to copy the review link.")
-                    } else {
-                        format!("Could not open link: {error}")
-                    };
-                    schedule(
-                        app.update(AppEvent::NotifyError {
-                            pane: completion.pane,
-                            error: message,
-                        }),
-                        &mut scheduler,
-                    );
+                let pane = completion.pane;
+                match completion.result {
+                    Ok(Some(link)) => {
+                        schedule(app.update(AppEvent::ShowWebQr { pane, link }), &mut scheduler);
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        schedule(app.update(AppEvent::NotifyError { pane, error }), &mut scheduler);
+                    }
                 }
             }
             result = memory_tasks.join_next(), if !memory_tasks.is_empty() && !stopping => {
@@ -1267,10 +1450,10 @@ pub(crate) async fn run(
                 editor_task = None;
                 terminal.resume().map_err(RuntimeError::Terminal)?;
                 terminal
-                    .report_working_directory(&workspace)
+                    .report_working_directory(app.root(app.active_pane()).map_or(&workspace, RootNode::workspace))
                     .map_err(RuntimeError::Terminal)?;
                 app.refresh_terminal_images();
-                input = Some(EventStream::new());
+                input.get_or_insert_with(EventStream::new);
                 match result.map_err(RuntimeError::ExternalEditorTask)?? {
                     EditorCompletion::Draft { pane, outcome: EditorOutcome::Updated(draft) } => {
                         schedule(app.update(AppEvent::EditorDraft { pane, draft }), &mut scheduler);
@@ -1345,19 +1528,13 @@ pub(crate) async fn run(
                             model,
                             configured,
                         } = prepared;
-                        let skills = install_configured_agent(
+                        let skills = install_agent!(
                             pane,
                             configured,
-                            PaneSettings::new(effort, reasoning_mode, speed, model),
-                            &config,
-                            &mut panes,
-                            &commands,
-                            &agent_event_sender,
-                            &subagent_sender,
-                            &writer_sender,
-                            &mut writers_open,
-                            &mut subagent_shutdowns,
-                        )?;
+                            InstalledSession::Fresh,
+                            PaneSettings::new(effort, reasoning_mode, speed, model)
+                        );
+                        app.session_opened(pane, panes[&pane].session_id.clone(), Vec::new());
                         schedule(
                             app.update(AppEvent::HandoffReady {
                                 pane,
@@ -1388,25 +1565,19 @@ pub(crate) async fn run(
                     .await
             }, if new_session_task.is_some() && !stopping => {
                 new_session_task = None;
-                input = Some(EventStream::new());
+                input.get_or_insert_with(EventStream::new);
                 let (pane, effort, reasoning_mode, speed, model, draft_reset, configured) =
                     result.map_err(RuntimeError::NewSessionTask)?;
                 match configured {
+                    Ok(_) if app.root(pane).is_none() => {}
                     Ok(configured) => {
-                        let skills = install_configured_agent(
+                        let skills = install_agent!(
                             pane,
                             configured,
-                            PaneSettings::new(effort, reasoning_mode, speed, model),
-                            &config,
-                            &mut panes,
-                            &commands,
-                            &agent_event_sender,
-                            &subagent_sender,
-                            &writer_sender,
-                            &mut writers_open,
-                            &mut subagent_shutdowns,
+                            InstalledSession::Fresh,
+                            PaneSettings::new(effort, reasoning_mode, speed, model)
                         );
-                        let skills = skills?;
+                        app.session_opened(pane, panes[&pane].session_id.clone(), Vec::new());
                         schedule(
                             app.update(AppEvent::NewSessionReady {
                                 pane,
@@ -1437,7 +1608,7 @@ pub(crate) async fn run(
                     .await
             }, if session_list_task.is_some() && !stopping => {
                 session_list_task = None;
-                input = Some(EventStream::new());
+                input.get_or_insert_with(EventStream::new);
                 let (pane, sessions) = result.map_err(RuntimeError::SessionTask)?;
                 match sessions {
                     Ok(sessions) => schedule(
@@ -1465,7 +1636,7 @@ pub(crate) async fn run(
                 match (prompts, recent_prompt_request.take()) {
                     (Ok(prompts), Some(request)) => {
                         recent_prompt_cache = Some(prompts.clone());
-                        input = Some(EventStream::new());
+                        input.get_or_insert_with(EventStream::new);
                         schedule(
                             app.update(recent_prompts_loaded_event(prompts, request)),
                             &mut scheduler,
@@ -1473,7 +1644,7 @@ pub(crate) async fn run(
                     }
                     (Ok(prompts), None) => recent_prompt_cache = Some(prompts),
                     (Err(error), Some(request)) => {
-                        input = Some(EventStream::new());
+                        input.get_or_insert_with(EventStream::new);
                         schedule(
                             app.update(AppEvent::RecentPromptLoadFailed {
                                 pane: request.pane,
@@ -1487,120 +1658,33 @@ pub(crate) async fn run(
                 scheduler.request_immediate(Instant::now());
             }
             result = async {
-                review_controller
-                    .task_mut()
-                    .expect("review branch is disabled without a task")
-                    .await
-            }, if review_controller.is_active() && !stopping => {
-                let completion = result.map_err(RuntimeError::SessionTask)?;
-                if !review_controller.complete(completion.identity) {
-                    continue;
-                }
-                let pane = completion.identity.pane;
-                if !panes
-                    .get(&pane)
-                    .is_some_and(|runtime| runtime.generation == completion.identity.pane_generation)
-                {
-                    continue;
-                }
-                match completion.result {
-                    Ok(Some(markdown)) => schedule(
-                        app.update(AppEvent::ReviewFinished { pane, markdown }),
-                        &mut scheduler,
-                    ),
-                    Ok(None) => schedule(
-                        app.update(AppEvent::ReviewCancelled(pane)),
-                        &mut scheduler,
-                    ),
-                    Err(error) => schedule(
-                        app.update(AppEvent::ReviewFailed {
-                            pane,
-                            error: error.user_message(),
-                        }),
-                        &mut scheduler,
-                    ),
-                }
-                scheduler.request_immediate(Instant::now());
-            }
-            result = async {
                 resume_session_task
                     .as_mut()
                     .expect("resume-session branch is disabled without a task")
                     .await
             }, if resume_session_task.is_some() && !stopping => {
                 resume_session_task = None;
-                input = Some(EventStream::new());
+                input.get_or_insert_with(EventStream::new);
                 let (pane, effort, preferred_reasoning_mode, speed, restored) =
                     result.map_err(RuntimeError::SessionTask)?;
                 match restored {
+                    Ok(_) if app.root(pane).is_none() => {}
                     Ok(RestoredSession {
                         configured,
+                        lock,
+                        records,
                         projection,
                         reasoning_mode,
                         model,
                         next_sequence,
                     }) => {
-                        let ConfiguredAgent {
-                            agent,
-                            context,
-                            events,
-                            instructions,
-                            skills,
-                            memory_enabled,
-                            subagent_updates,
-                            subagent_control,
-                        } = configured;
-                        let session_id = events.request_id().to_owned();
-                        let generation = panes
-                            .get(&pane)
-                            .expect("resumed pane must exist")
-                            .generation
-                            .saturating_add(1);
-                        schedule_subagent_shutdown(
-                            panes.get(&pane).expect("resumed pane must exist"),
-                            &mut subagent_shutdowns,
-                        );
-                        close_pane_journal(
-                            panes.get_mut(&pane).expect("resumed pane must exist"),
-                            SessionOutcome::Closed,
-                            None,
-                        )?;
-                        panes.insert(
+                        let skills = install_agent!(
                             pane,
-                            open_pane(
-                                PaneGeneration { pane, generation },
-                                PaneSession::persisted(
-                                    &session_id,
-                                    next_sequence,
-                                    !skills.is_empty(),
-                                ),
-                                &config,
-                                PaneSettings::new(effort, reasoning_mode, speed, model),
-                                instructions,
-                                subagent_control.clone(),
-                                &writer_sender,
-                            )?,
+                            configured,
+                            InstalledSession::Restored { next_sequence, lock },
+                            PaneSettings::new(effort, reasoning_mode, speed, model)
                         );
-                        writers_open = writers_open.saturating_add(1);
-                        agent_events::forward(
-                            pane,
-                            generation,
-                            events,
-                            agent_event_sender.clone(),
-                        );
-                        subagent_updates::forward(
-                            subagent_control.runtime_id(),
-                            subagent_updates,
-                            subagent_sender.clone(),
-                        );
-                        commands
-                            .send(WorkerCommand::ReplaceAgent {
-                                pane,
-                                agent,
-                                context,
-                                memory_review: worker::MemoryReviewState::restored(memory_enabled),
-                            })
-                            .map_err(|_| RuntimeError::AgentWorkerStopped)?;
+                        app.session_opened(pane, panes[&pane].session_id.clone(), records);
                         schedule(
                             app.update(AppEvent::SessionRestored {
                                 pane,
@@ -1660,6 +1744,11 @@ pub(crate) async fn run(
         .and_then(|pane| panes.get(&pane))
         .and_then(PaneRuntime::exit_session_id);
     drop(terminal);
+    web_shutdown.cancel();
+    if let Some(server) = web_server {
+        // A server that does not stop promptly must not hold the terminal's exit.
+        drop(tokio::time::timeout(WEB_SHUTDOWN_GRACE, server).await);
+    }
     if let Some(error) = writer_error {
         return Err(error.into());
     }
@@ -1670,10 +1759,22 @@ pub(crate) fn ensure_interactive() -> Result<()> {
     validate_interactive(io::stdin().is_terminal(), io::stdout().is_terminal())
 }
 
+/// How a pane's newly configured agent relates to stored history.
+enum InstalledSession {
+    Fresh,
+    Restored {
+        next_sequence: u64,
+        lock: SessionLock,
+    },
+}
+
+/// Installs `configured` as `pane`'s agent, replacing and closing the pane's previous session if it
+/// has one.
 #[allow(clippy::too_many_arguments)]
-fn install_configured_agent(
+fn install_agent(
     pane: PaneId,
     configured: ConfiguredAgent,
+    history: InstalledSession,
     settings: PaneSettings,
     config: &Config,
     panes: &mut HashMap<PaneId, PaneRuntime>,
@@ -1684,7 +1785,9 @@ fn install_configured_agent(
     writers_open: &mut usize,
     subagent_shutdowns: &mut JoinSet<()>,
 ) -> Result<Arc<[Skill]>> {
+    let config = &config.with_workspace(configured.workspace.clone());
     let ConfiguredAgent {
+        workspace: _,
         agent,
         context,
         events,
@@ -1695,30 +1798,43 @@ fn install_configured_agent(
         subagent_control,
     } = configured;
     let session_id = events.request_id().to_owned();
-    let generation = panes
-        .get(&pane)
-        .expect("replacement pane must exist")
-        .generation
-        .saturating_add(1);
-    schedule_subagent_shutdown(
-        panes.get(&pane).expect("replacement pane must exist"),
-        subagent_shutdowns,
-    );
-    close_pane_journal(
-        panes.get_mut(&pane).expect("replacement pane must exist"),
-        SessionOutcome::Closed,
-        None,
-    )?;
+    let previous = panes.get_mut(&pane);
+    let replacing = previous.is_some();
+    let generation = match previous {
+        Some(runtime) => {
+            schedule_subagent_shutdown(runtime, subagent_shutdowns);
+            close_pane_journal(runtime, SessionOutcome::Closed, None)?;
+            runtime.generation.saturating_add(1)
+        }
+        None => 0,
+    };
+    let skills_catalog_present = !skills.is_empty();
+    let (session, lock, memory_review) = match history {
+        InstalledSession::Fresh => (
+            PaneSession::new(&session_id, None, None, 1, skills_catalog_present),
+            SessionLock::acquire(config.path(), &session_id)?,
+            worker::MemoryReviewState::fresh(memory_enabled),
+        ),
+        InstalledSession::Restored {
+            next_sequence,
+            lock,
+        } => (
+            PaneSession::persisted(&session_id, next_sequence, skills_catalog_present),
+            lock,
+            worker::MemoryReviewState::restored(memory_enabled),
+        ),
+    };
     panes.insert(
         pane,
         open_pane(
             PaneGeneration { pane, generation },
-            PaneSession::new(&session_id, None, None, 1, !skills.is_empty()),
+            session,
             config,
             settings,
             instructions,
             subagent_control.clone(),
             writer_sender,
+            lock,
         )?,
     );
     *writers_open = writers_open.saturating_add(1);
@@ -1728,13 +1844,23 @@ fn install_configured_agent(
         subagent_updates,
         subagent_sender.clone(),
     );
-    commands
-        .send(WorkerCommand::ReplaceAgent {
+    let command = if replacing {
+        WorkerCommand::ReplaceAgent {
             pane,
             agent,
             context,
-            memory_review: worker::MemoryReviewState::fresh(memory_enabled),
-        })
+            memory_review,
+        }
+    } else {
+        WorkerCommand::OpenAgent {
+            pane,
+            agent,
+            context,
+            memory_review,
+        }
+    };
+    commands
+        .send(command)
         .map_err(|_| RuntimeError::AgentWorkerStopped)?;
     Ok(skills)
 }
@@ -1746,6 +1872,7 @@ fn validate_interactive(stdin: bool, stdout: bool) -> Result<()> {
     Err(RuntimeError::InteractiveTerminal.into())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn open_pane(
     identity: PaneGeneration,
     session: PaneSession<'_>,
@@ -1754,6 +1881,7 @@ fn open_pane(
     instructions: Arc<str>,
     subagent_control: Subagents,
     writer_updates: &mpsc::UnboundedSender<WriterCompletion>,
+    lock: SessionLock,
 ) -> Result<PaneRuntime> {
     let PaneGeneration { pane, generation } = identity;
     let PaneSettings {
@@ -1822,6 +1950,8 @@ fn open_pane(
         active_shells: 0,
         generation,
         subagent_control,
+        closing: false,
+        _lock: lock,
     })
 }
 
@@ -1929,16 +2059,14 @@ struct EffectContext<'a> {
     recent_prompt_cache: &'a mut Option<Vec<RecentPrompt>>,
     recent_prompt_request: &'a mut Option<RecentPromptRequest>,
     handoff_controller: &'a mut HandoffController,
-    review_controller: &'a mut ReviewController,
-    review_turn_active: &'a Arc<AtomicBool>,
-    auxiliary_sender: &'a mpsc::UnboundedSender<AuxiliaryJobRequest>,
-    review_ready_sender: &'a mpsc::UnboundedSender<ReviewReady>,
+    web_status: &'a watch::Receiver<WebStatus>,
+    open_tasks: &'a mut JoinSet<OpenTask>,
     resume_session_task: &'a mut Option<ResumeSessionTask>,
     terminal: &'a mut TerminalSession,
     scheduler: &'a mut RenderScheduler,
     panes: &'a mut HashMap<PaneId, PaneRuntime>,
     shell_tasks: &'a mut JoinSet<(PaneId, ShellExecution)>,
-    browser_open_tasks: &'a mut JoinSet<BrowserOpenCompletion>,
+    web_tasks: &'a mut JoinSet<WebTaskCompletion>,
     memory_store: &'a mut Option<SelectedMemoryStore>,
     memory_tasks: &'a mut JoinSet<MemoryCompletion>,
     memory_generations: &'a mut HashMap<PaneId, u64>,
@@ -1952,26 +2080,18 @@ async fn apply_update(
     for effect in update.effects {
         match effect {
             AppEffect::OpenFork { pane, parent } => {
-                let parent_sequence = {
-                    let journal = context
-                        .panes
-                        .get_mut(&parent)
-                        .expect("fork parent pane must have a runtime")
-                        .journal_mut()?;
-                    journal.flush().await?;
-                    journal.last_sequence()
-                };
+                request_fork(context.panes, context.commands, pane, parent).await?;
+            }
+            AppEffect::StartSession { pane, model } => {
+                let settings = fresh_settings(context.config, model);
                 context
-                    .commands
-                    .send(WorkerCommand::OpenFork {
-                        pane,
-                        parent_sequence,
-                    })
-                    .map_err(|_| RuntimeError::AgentWorkerStopped)?;
+                    .open_tasks
+                    .spawn(configure_fresh(context.config.clone(), pane, settings));
             }
             AppEffect::ClosePane(pane) => {
-                if let Some(runtime) = context.panes.get(&pane) {
+                if let Some(runtime) = context.panes.get_mut(&pane) {
                     schedule_subagent_shutdown(runtime, context.subagent_shutdowns);
+                    runtime.closing = true;
                 }
                 context
                     .commands
@@ -1989,11 +2109,98 @@ async fn apply_update(
     Ok(())
 }
 
+/// Reloads the configuration and applies what can change in-process. The outcome is shown in the
+/// terminal as a notification on `pane` and returned to a web caller.
+fn reload_config(
+    context: &mut EffectContext<'_>,
+    pane: PaneId,
+) -> std::result::Result<(), CommandError> {
+    fn refuse(
+        context: &mut EffectContext<'_>,
+        pane: PaneId,
+        error: String,
+    ) -> std::result::Result<(), CommandError> {
+        schedule(
+            context.app.update(AppEvent::ConfigReloadFailed {
+                pane,
+                error: error.clone(),
+            }),
+            context.scheduler,
+        );
+        Err(CommandError::Failed(error))
+    }
+
+    let reload = match context.config.reload() {
+        Ok(reload) => reload,
+        Err(error) => return refuse(context, pane, format!("Could not reload config: {error}")),
+    };
+    let (config, workspace_changed) = reload.into_parts();
+    if let Err(error) = context
+        .panes
+        .values()
+        .try_for_each(|runtime| config.claude().ensure_model_enabled(runtime.current_model))
+    {
+        return refuse(
+            context,
+            pane,
+            format!("Could not reload config while a Claude session is open: {error}"),
+        );
+    }
+    let selected_memory_store =
+        match crate::core::configured_memory_store(&config, context.workspace) {
+            Ok(store) => store,
+            Err(error) => {
+                return refuse(
+                    context,
+                    pane,
+                    format!("Could not apply memory configuration: {error}"),
+                );
+            }
+        };
+    let theme = config.theme().clone();
+    let tui = *config.tui();
+    let preferred_reasoning_mode = config.agent().reasoning_mode();
+    let memory_enabled = config.memory().enabled();
+    invalidate_memory_generations(context.memory_generations);
+    *context.memory_store = selected_memory_store;
+    context
+        .app
+        .set_max_subagents(config.agent().max_subagents());
+    context.app.set_claude_enabled(config.claude().enabled());
+    for runtime in context.panes.values() {
+        apply_subagent_config(&runtime.subagent_control, &config);
+    }
+    *context.config = config;
+    let message = if workspace_changed {
+        "Reloaded config · theme, UI, memory browser, and subagent limits applied · agent/auth/tool settings apply to new sessions · workspace requires restart"
+    } else {
+        "Reloaded config · theme, UI, memory browser, and subagent limits applied · agent/auth/tool settings apply to new sessions"
+    };
+    schedule(
+        context.app.update(AppEvent::ConfigReloaded {
+            pane,
+            theme,
+            tui,
+            preferred_reasoning_mode,
+            memory_enabled,
+            message: message.to_owned(),
+        }),
+        context.scheduler,
+    );
+    Ok(())
+}
+
 fn apply_pane_effect(
     pane: PaneId,
     effect: components::RootEffect,
     context: &mut EffectContext<'_>,
 ) -> Result<()> {
+    let workspace = context
+        .app
+        .root(pane)
+        .expect("effect pane exists")
+        .workspace()
+        .to_owned();
     match effect {
         components::RootEffect::Submit(prompt) => {
             let runtime = context
@@ -2014,7 +2221,7 @@ fn apply_pane_effect(
                     text: prompt.display_text().to_owned(),
                     recorded_at_unix_ms: record.recorded_at_unix_ms(),
                     session_id: runtime.session_id.clone(),
-                    workspace: context.workspace.to_path_buf(),
+                    workspace: workspace.clone(),
                 },
             );
             schedule(
@@ -2092,7 +2299,7 @@ fn apply_pane_effect(
                     pane,
                     id,
                     instructions,
-                    context: ReflectionContext::new(context.config.path(), context.workspace),
+                    context: ReflectionContext::new(context.config.path(), &workspace),
                 })
                 .map_err(|_| RuntimeError::AgentWorkerStopped)?;
         }
@@ -2109,26 +2316,25 @@ fn apply_pane_effect(
                 .append_local(LocalEvent::ShellStarted {
                     id,
                     command: command.clone(),
-                    workspace: context.workspace.to_path_buf(),
+                    workspace: workspace.clone(),
                 })?;
             schedule(
                 context.app.update(AppEvent::Transcript { pane, record }),
                 context.scheduler,
             );
-            let workspace = context.workspace.to_path_buf();
+            let workspace = workspace.clone();
             context
                 .shell_tasks
                 .spawn(async move { (pane, shell::execute(id, command, workspace).await) });
         }
         components::RootEffect::OpenLink(destination) if is_web_link(&destination) => {
-            let review = context.review_controller.identity().filter(|identity| {
-                identity.pane == pane && context.review_controller.url(pane) == Some(&destination)
-            });
-            context.browser_open_tasks.spawn(async move {
-                BrowserOpenCompletion {
+            context.web_tasks.spawn(async move {
+                WebTaskCompletion {
                     pane,
-                    review,
-                    result: crate::app::browser::open(&destination).await,
+                    result: crate::app::browser::open(&destination)
+                        .await
+                        .map(|()| None)
+                        .map_err(|error| format!("Could not open link: {error}")),
                 }
             });
         }
@@ -2152,11 +2358,11 @@ fn apply_pane_effect(
                     EditorTarget::Config(context.config.path().to_path_buf())
                 }
                 components::RootEffect::OpenLink(destination) => {
-                    EditorTarget::File(local_link_path(&destination, context.workspace))
+                    EditorTarget::File(local_link_path(&destination, &workspace))
                 }
                 _ => unreachable!("editor effect pattern is exhaustive"),
             };
-            let workspace = context.workspace.to_path_buf();
+            let workspace = workspace.clone();
             *context.editor_task = Some(tokio::spawn(async move {
                 match target {
                     EditorTarget::Draft { pane, text } => {
@@ -2197,7 +2403,7 @@ fn apply_pane_effect(
             let effort = root.composer().effort();
             let reasoning_mode = supported_reasoning_mode(model, root.preferred_reasoning_mode());
             let speed = context.config.agent().speed();
-            let config = context.config.clone();
+            let config = context.config.with_workspace(workspace.clone());
             *context.new_session_task = Some(tokio::task::spawn_blocking(move || {
                 let configured =
                     ConfiguredAgent::from_config_with_model(&config, effort, reasoning_mode, model);
@@ -2266,83 +2472,20 @@ fn apply_pane_effect(
                 run_memory_operation(pane, generation, &store, MemoryOperation::Delete(key)).await
             });
         }
-        components::RootEffect::ReloadConfig => match context.config.reload() {
-            Ok(reload) => {
-                let (config, workspace_changed) = reload.into_parts();
-                if let Err(error) = context.panes.values().try_for_each(|runtime| {
-                    config.claude().ensure_model_enabled(runtime.current_model)
-                }) {
-                    schedule(
-                        context.app.update(AppEvent::ConfigReloadFailed {
-                            pane,
-                            error: format!(
-                                "Could not reload config while a Claude session is open: {error}"
-                            ),
-                        }),
-                        context.scheduler,
-                    );
-                    return Ok(());
-                }
-                let theme = config.theme().clone();
-                let tui = *config.tui();
-                let max_subagents = config.agent().max_subagents();
-                let preferred_reasoning_mode = config.agent().reasoning_mode();
-                let memory_enabled = config.memory().enabled();
-                let selected_memory_store =
-                    match crate::core::configured_memory_store(&config, context.workspace) {
-                        Ok(store) => store,
-                        Err(error) => {
-                            schedule(
-                                context.app.update(AppEvent::ConfigReloadFailed {
-                                    pane,
-                                    error: format!("Could not apply memory configuration: {error}"),
-                                }),
-                                context.scheduler,
-                            );
-                            return Ok(());
-                        }
-                    };
-                invalidate_memory_generations(context.memory_generations);
-                *context.memory_store = selected_memory_store;
-                context.app.set_max_subagents(max_subagents);
-                context.app.set_claude_enabled(config.claude().enabled());
-                for runtime in context.panes.values() {
-                    apply_subagent_config(&runtime.subagent_control, &config);
-                }
-                *context.config = config;
-                let message = if workspace_changed {
-                    "Reloaded config · theme, UI, memory browser, and subagent limits applied · agent/auth/tool settings apply to new sessions · workspace requires restart"
-                } else {
-                    "Reloaded config · theme, UI, memory browser, and subagent limits applied · agent/auth/tool settings apply to new sessions"
-                };
-                schedule(
-                    context.app.update(AppEvent::ConfigReloaded {
-                        pane,
-                        theme,
-                        tui,
-                        preferred_reasoning_mode,
-                        memory_enabled,
-                        message: message.to_owned(),
-                    }),
-                    context.scheduler,
-                );
-            }
-            Err(error) => schedule(
-                context.app.update(AppEvent::ConfigReloadFailed {
-                    pane,
-                    error: format!("Could not reload config: {error}"),
-                }),
-                context.scheduler,
-            ),
-        },
+        components::RootEffect::ReloadConfig => {
+            // The terminal reports the outcome through the notification reload_config schedules.
+            let _ = reload_config(context, pane);
+        }
         components::RootEffect::NewSession(model) => {
             *context.input = None;
-            let effort = context.config.agent().thinking();
-            let reasoning_mode =
-                supported_reasoning_mode(model, context.config.agent().reasoning_mode());
-            let config = context.config.clone();
+            let PaneSettings {
+                effort,
+                reasoning_mode,
+                speed,
+                model,
+            } = fresh_settings(context.config, model);
+            let config = context.config.with_workspace(workspace.clone());
             *context.new_session_task = Some(tokio::task::spawn_blocking(move || {
-                let speed = config.agent().speed();
                 let configured = ConfiguredAgent::from_config_with_session(
                     &config,
                     effort,
@@ -2365,7 +2508,7 @@ fn apply_pane_effect(
         components::RootEffect::LoadSessions(kind) => {
             *context.input = None;
             let config_path = context.config.path().to_path_buf();
-            let workspace = context.workspace.to_path_buf();
+            let workspace = workspace.clone();
             let active_session_id = context
                 .panes
                 .get(&pane)
@@ -2393,7 +2536,7 @@ fn apply_pane_effect(
             let request = RecentPromptRequest {
                 pane,
                 session_id,
-                workspace: context.workspace.to_path_buf(),
+                workspace: workspace.clone(),
                 current_prompts,
             };
             if let Some(prompts) = context.recent_prompt_cache.clone() {
@@ -2418,41 +2561,34 @@ fn apply_pane_effect(
             }
         }
         components::RootEffect::Handoff => start_handoff(context, pane),
-        components::RootEffect::Review { download_assets } => {
-            if context.review_controller.is_active() {
-                schedule(
-                    context.app.update(AppEvent::NotifyError {
-                        pane,
-                        error: "A review is already open.".to_owned(),
-                    }),
-                    context.scheduler,
-                );
-                return Ok(());
-            }
-
-            match crate::review::ReviewAssets::availability() {
-                Ok(crate::review::AssetAvailability::Ready(assets)) => {
-                    start_review(context, pane, Some(assets));
-                }
-                Ok(crate::review::AssetAvailability::DownloadRequired) if !download_assets => {
+        components::RootEffect::OpenWebInterface { install } => {
+            let home = context
+                .config
+                .path()
+                .parent()
+                .unwrap_or(Path::new("."))
+                .to_owned();
+            let download = match crate::web::WebAssets::locate(&home) {
+                Ok(crate::web::Located::Ready(_)) => false,
+                Ok(crate::web::Located::Absent)
+                    if !crate::app::installation::current().is_development() && !install =>
+                {
                     schedule(
-                        context.app.update(AppEvent::ConfirmReviewDownload { pane }),
+                        context.app.update(AppEvent::ConfirmWebInstall { pane }),
                         context.scheduler,
                     );
                     return Ok(());
                 }
-                Ok(crate::review::AssetAvailability::DownloadRequired) => {
-                    start_review(context, pane, None);
+                Ok(crate::web::Located::Absent)
+                    if !crate::app::installation::current().is_development() =>
+                {
+                    true
                 }
-                Ok(crate::review::AssetAvailability::DevelopmentInstallRequired { path }) => {
+                Ok(crate::web::Located::Absent) => {
+                    let error = "You are running a development build of Tact, which cannot download the web interface automatically. Run `cd web && bun install --frozen-lockfile && just install-dev`, or set TACT_WEB_ASSETS to the absolute `web/dist` path."
+                        .to_owned();
                     schedule(
-                        context.app.update(AppEvent::NotifyError {
-                            pane,
-                            error: format!(
-                                "You are running a development build of Tact, which cannot download review assets automatically. Run `cd web/review && bun install --frozen-lockfile && just install-dev`, or set TACT_REVIEW_ASSETS to the absolute `web/review/dist` path. The development install path is {}.",
-                                path.display()
-                            ),
-                        }),
+                        context.app.update(AppEvent::NotifyError { pane, error }),
                         context.scheduler,
                     );
                     return Ok(());
@@ -2461,61 +2597,91 @@ fn apply_pane_effect(
                     schedule(
                         context.app.update(AppEvent::NotifyError {
                             pane,
-                            error: format!("Could not load review assets: {error}"),
+                            error: format!("Could not load the web interface: {error}"),
                         }),
                         context.scheduler,
                     );
                     return Ok(());
                 }
-            }
-            schedule(
-                context.app.update(AppEvent::ReviewStarted(pane)),
-                context.scheduler,
-            );
+            };
+            let status = context.web_status.clone();
+            let enabled = context.config.web().enabled();
+            context.web_tasks.spawn(async move {
+                let result = async {
+                    if download {
+                        crate::web::WebAssets::download(&home)
+                            .await
+                            .map_err(|error| {
+                                format!("Could not install the web interface: {error}")
+                            })?;
+                    }
+                    let url = web_link(&status, enabled)?;
+                    crate::app::browser::open(&url).await.map_err(|error| {
+                        format!("Could not open the browser: {error}. Use Copy web link instead.")
+                    })?;
+                    Ok(None)
+                }
+                .await;
+                WebTaskCompletion { pane, result }
+            });
+        }
+        components::RootEffect::CopyWebLink => {
+            let copied = web_link(context.web_status, context.config.web().enabled())
+                .and_then(|url| copy_selection(context.terminal, &url));
+            let event = match copied {
+                Ok(()) => AppEvent::NotifySuccess {
+                    pane,
+                    message: "Copied the web link. It signs in to Tact; share it carefully."
+                        .to_owned(),
+                },
+                Err(error) => AppEvent::NotifyError { pane, error },
+            };
+            schedule(context.app.update(event), context.scheduler);
+        }
+        components::RootEffect::ShowWebQr => {
+            let status = context.web_status.clone();
+            let enabled = context.config.web().enabled();
+            context.web_tasks.spawn(async move {
+                let result = async {
+                    let link = web_link(&status, enabled)?;
+                    phone_link(link, &status).await.map(Some)
+                }
+                .await;
+                WebTaskCompletion { pane, result }
+            });
         }
         components::RootEffect::ResumeSession(session_id) => {
+            if let Some(live) = context.app.pane_for_session(&session_id) {
+                schedule(
+                    context.app.update(AppEvent::SessionLoadFailed {
+                        pane,
+                        error: "That session is already open here.".to_owned(),
+                    }),
+                    context.scheduler,
+                );
+                context.app.activate(live);
+                return Ok(());
+            }
+            let lock = match SessionLock::acquire(context.config.path(), &session_id) {
+                Ok(lock) => lock,
+                Err(error) => {
+                    schedule(
+                        context.app.update(AppEvent::SessionLoadFailed {
+                            pane,
+                            error: format!("Could not resume session: {error}"),
+                        }),
+                        context.scheduler,
+                    );
+                    return Ok(());
+                }
+            };
             *context.input = None;
             let effort = context.config.agent().thinking();
             let preferred_reasoning_mode = context.config.agent().reasoning_mode();
             let speed = context.config.agent().speed();
             let config = context.config.clone();
             *context.resume_session_task = Some(tokio::spawn(async move {
-                let config_path = config.path().to_path_buf();
-                let checkpoint_session_id = session_id.clone();
-                let checkpoint = tokio::task::spawn_blocking(move || {
-                    session::load_checkpoint(&config_path, &checkpoint_session_id)
-                });
-                let transcript =
-                    session::load_transcript_async(config.path().to_path_buf(), session_id.clone());
-                let restored = async {
-                    let (snapshot, records) = tokio::join!(checkpoint, transcript);
-                    let snapshot = snapshot.map_err(RuntimeError::SessionTask)??;
-                    let records = records?;
-                    tokio::task::spawn_blocking(move || -> Result<_> {
-                        let reasoning_mode = session::reasoning_mode(&records);
-                        let model = session::model(&records)?;
-                        let next_sequence = session::next_sequence(&records);
-                        let projection = RootNode::project_session(effort, records);
-                        let configured = ConfiguredAgent::from_config_with_session(
-                            &config,
-                            effort,
-                            reasoning_mode,
-                            model,
-                            Some(&session_id),
-                            Some(snapshot),
-                        )?;
-                        Ok(RestoredSession {
-                            configured,
-                            projection,
-                            reasoning_mode,
-                            model,
-                            next_sequence,
-                        })
-                    })
-                    .await
-                    .map_err(RuntimeError::SessionTask)?
-                }
-                .await;
+                let restored = restore_session(config, session_id, effort, lock).await;
                 (pane, effort, preferred_reasoning_mode, speed, restored)
             }));
         }
@@ -2557,7 +2723,7 @@ fn apply_pane_effect(
                     text,
                     recorded_at_unix_ms: record.recorded_at_unix_ms(),
                     session_id: runtime.session_id.clone(),
-                    workspace: context.workspace.to_path_buf(),
+                    workspace: workspace.clone(),
                 },
             );
             schedule(
@@ -2575,17 +2741,11 @@ fn apply_pane_effect(
                 .send(WorkerCommand::CancelAll(pane))
                 .map_err(|_| RuntimeError::AgentWorkerStopped)?;
         }
-        components::RootEffect::CancelReview => {
-            context.review_controller.cancel();
-            schedule(
-                context.app.update(AppEvent::ReviewCancelled(pane)),
-                context.scheduler,
-            );
-        }
         components::RootEffect::CancelHandoff => {
             context.handoff_controller.cancel();
         }
         components::RootEffect::Fork
+        | components::RootEffect::OpenSessions
         | components::RootEffect::SetTheme(_)
         | components::RootEffect::Shutdown => {
             unreachable!("application effects are handled before pane dispatch")
@@ -2686,7 +2846,14 @@ fn start_handoff(context: &mut EffectContext<'_>, pane: PaneId) {
     runtime.next_turn = runtime.next_turn.saturating_add(1);
     let model = runtime.current_model;
     let commands = context.commands.clone();
-    let config = context.config.clone();
+    let config = context.config.with_workspace(
+        context
+            .app
+            .root(pane)
+            .expect("handoff pane exists")
+            .workspace()
+            .to_owned(),
+    );
     let started =
         context
             .handoff_controller
@@ -2777,97 +2944,268 @@ async fn prepare_handoff(
     })
 }
 
-fn start_review(
-    context: &mut EffectContext<'_>,
-    pane: PaneId,
-    assets: Option<crate::review::ReviewAssets>,
-) {
-    let pane_generation = context
-        .panes
-        .get(&pane)
-        .expect("review pane must exist")
-        .generation;
-    let auxiliary_jobs = context.auxiliary_sender.clone();
-    let ready_updates = context.review_ready_sender.clone();
-    let workspace = context.workspace.to_path_buf();
-    let turn_active = context.review_turn_active.clone();
-    context
-        .review_controller
-        .start(pane, pane_generation, move |identity, cancellation| {
-            spawn_review(
-                identity,
-                cancellation,
-                auxiliary_jobs,
-                ready_updates,
-                workspace,
-                assets,
-                turn_active,
-            )
-        });
+/// The login link of the web interface. It embeds the credential, so it is only opened or
+/// copied on the user's request and never displayed or logged.
+fn web_link(
+    status: &watch::Receiver<WebStatus>,
+    enabled: bool,
+) -> std::result::Result<String, String> {
+    if !enabled {
+        return Err("The web interface is disabled; set web.enabled = true.".to_owned());
+    }
+    match &*status.borrow() {
+        WebStatus::Ready { url, .. } => Ok(url.clone()),
+        WebStatus::Starting => Err("The web interface is still starting.".to_owned()),
+        WebStatus::Unavailable { reason } => {
+            Err(format!("The web interface is unavailable: {reason}"))
+        }
+    }
 }
 
-fn spawn_review(
-    identity: ReviewIdentity,
-    cancellation: CancellationToken,
-    auxiliary_jobs: mpsc::UnboundedSender<AuxiliaryJobRequest>,
-    ready_updates: mpsc::UnboundedSender<ReviewReady>,
-    workspace: PathBuf,
-    assets: Option<crate::review::ReviewAssets>,
-    turn_active: Arc<AtomicBool>,
-) -> ReviewTask {
-    tokio::spawn(async move {
-        let result = async {
-            let assets = match assets {
-                Some(assets) => assets,
-                None => crate::review::ReviewAssets::download().await?,
-            };
-            let review_agent: crate::review::ReviewAgent = Arc::new(move |prompt, shutdown| {
-                let auxiliary_jobs = auxiliary_jobs.clone();
-                let cancellation = cancellation.clone();
-                Box::pin(async move {
-                    if cancellation.is_cancelled() || shutdown.is_cancelled() {
-                        return Err(crate::review::ReviewAgentError::Cancelled);
-                    }
-                    let (completion, result) = tokio::sync::oneshot::channel();
-                    auxiliary_jobs
-                        .send(AuxiliaryJobRequest {
-                            review: identity,
-                            prompt,
-                            shutdown,
-                            completion,
-                        })
-                        .map_err(|_| {
-                            crate::review::ReviewAgentError::Failed(
-                                "review agent worker stopped".to_owned(),
-                            )
-                        })?;
-                    match result.await.map_err(|_| {
-                        crate::review::ReviewAgentError::Failed(
-                            "review agent worker stopped".to_owned(),
-                        )
-                    })? {
-                        Ok(response) => Ok(response),
-                        Err(AuxiliaryError::Cancelled) => {
-                            Err(crate::review::ReviewAgentError::Cancelled)
-                        }
-                        Err(AuxiliaryError::Failed(error)) => {
-                            Err(crate::review::ReviewAgentError::Failed(error))
-                        }
-                    }
-                })
-            });
-            let handle =
-                crate::review::ReviewService::start(review_agent, &workspace, assets, turn_active)
-                    .await?;
-            drop(ready_updates.send(ReviewReady {
-                identity,
-                url: handle.url(),
-            }));
-            handle.wait().await
-        }
-        .await;
-        ReviewCompletion { identity, result }
+/// A sign-in link that a phone can use.
+///
+/// With `web.tailscale`, the server is published to the tailnet now, and Tailscale is checked again
+/// on every call, so a client that was switched on after an earlier refusal is picked up.
+async fn phone_link(
+    link: String,
+    status: &watch::Receiver<WebStatus>,
+) -> std::result::Result<String, String> {
+    let tailnet = match &*status.borrow() {
+        WebStatus::Ready { tailnet, .. } => tailnet.clone(),
+        _ => None,
+    };
+    let Some(tailnet) = tailnet else {
+        return reachable_link(link);
+    };
+    let origin = tailnet
+        .origin()
+        .await
+        .map_err(|error| format!("Cannot share over Tailscale: {error}"))?;
+    let (_, credential) = link
+        .split_once('#')
+        .ok_or_else(|| "The web link has no sign-in credential.".to_owned())?;
+    Ok(format!("{origin}/#{credential}"))
+}
+
+/// Refuses a link whose address is this computer's own (the default when neither `web.tailscale`
+/// nor `web.public_url` is set) rather than encoding it into a code that cannot work.
+fn reachable_link(link: String) -> std::result::Result<String, String> {
+    use url::Host;
+    let reachable = url::Url::parse(&link)
+        .ok()
+        .and_then(|url| {
+            url.host().map(|host| match host {
+                Host::Domain(domain) => domain != "localhost" && !domain.ends_with(".localhost"),
+                Host::Ipv4(address) => !address.is_loopback() && !address.is_unspecified(),
+                Host::Ipv6(address) => !address.is_loopback() && !address.is_unspecified(),
+            })
+        })
+        .unwrap_or(false);
+    if reachable {
+        Ok(link)
+    } else {
+        Err("The web link points at this computer, so a phone cannot use it. Set web.tailscale = true, or web.public_url to your tunnel's address.".to_owned())
+    }
+}
+
+/// The settings a fresh session starts with: the configured defaults for `model`.
+fn fresh_settings(config: &Config, model: Model) -> PaneSettings {
+    let agent = config.agent();
+    PaneSettings::new(
+        agent.thinking(),
+        supported_reasoning_mode(model, agent.reasoning_mode()),
+        agent.speed(),
+        model,
+    )
+}
+
+async fn configure_fresh(config: Config, pane: PaneId, settings: PaneSettings) -> OpenTask {
+    let configured = tokio::task::spawn_blocking(move || {
+        ConfiguredAgent::from_config_with_session(
+            &config,
+            settings.effort,
+            settings.reasoning_mode,
+            settings.model,
+            None,
+            None,
+        )
     })
+    .await
+    .map_err(|error| RuntimeError::SessionTask(error).into())
+    .and_then(|configured| configured);
+    (
+        pane,
+        configured.map(|configured| OpenedSession::Fresh {
+            configured: Box::new(configured),
+            settings,
+        }),
+    )
+}
+
+/// Loads a persisted session and configures an agent that continues it.
+async fn restore_session(
+    config: Config,
+    session_id: String,
+    effort: ReasoningEffort,
+    lock: SessionLock,
+) -> Result<RestoredSession> {
+    let config_path = config.path().to_path_buf();
+    let checkpoint_session_id = session_id.clone();
+    let checkpoint = tokio::task::spawn_blocking(move || {
+        session::load_checkpoint(&config_path, &checkpoint_session_id)
+    });
+    let transcript =
+        session::load_transcript_async(config.path().to_path_buf(), session_id.clone());
+    let (snapshot, records) = tokio::join!(checkpoint, transcript);
+    let snapshot = snapshot.map_err(RuntimeError::SessionTask)??;
+    let records = records?;
+    let config = config.with_workspace(session::workspace(&records)?);
+    tokio::task::spawn_blocking(move || -> Result<_> {
+        let reasoning_mode = session::reasoning_mode(&records);
+        let model = session::model(&records)?;
+        let next_sequence = session::next_sequence(&records);
+        let projection = RootNode::project_session(effort, records.clone());
+        let configured = ConfiguredAgent::from_config_with_session(
+            &config,
+            effort,
+            reasoning_mode,
+            model,
+            Some(&session_id),
+            Some(snapshot),
+        )?;
+        Ok(RestoredSession {
+            configured,
+            lock,
+            records,
+            projection,
+            reasoning_mode,
+            model,
+            next_sequence,
+        })
+    })
+    .await
+    .map_err(RuntimeError::SessionTask)?
+}
+
+/// Asks the worker to fork `parent` into `pane` at the parent's last persisted record.
+async fn request_fork(
+    panes: &mut HashMap<PaneId, PaneRuntime>,
+    commands: &mpsc::UnboundedSender<WorkerCommand>,
+    pane: PaneId,
+    parent: PaneId,
+) -> Result<()> {
+    let journal = panes
+        .get_mut(&parent)
+        .expect("fork parent pane must have a runtime")
+        .journal_mut()?;
+    journal.flush().await?;
+    let parent_sequence = journal.last_sequence();
+    commands
+        .send(WorkerCommand::OpenFork {
+            pane,
+            parent,
+            parent_sequence,
+        })
+        .map_err(|_| RuntimeError::AgentWorkerStopped)?;
+    Ok(())
+}
+
+enum OpenStarted {
+    /// The session is opening in this pane; the reply follows when it is live.
+    Pending(PaneId),
+    /// The session was already live here and is now active.
+    Activated(String),
+}
+
+/// Starts opening a session for the web interface with the preconditions of the Sessions action.
+async fn open_session(
+    spec: OpenSpec,
+    app: &mut AppNode,
+    config: &Config,
+    panes: &mut HashMap<PaneId, PaneRuntime>,
+    commands: &mpsc::UnboundedSender<WorkerCommand>,
+    open_tasks: &mut JoinSet<OpenTask>,
+) -> std::result::Result<OpenStarted, CommandError> {
+    match spec {
+        OpenSpec::New { model, workspace } => {
+            let config = match workspace {
+                Some(path) => config.with_workspace(open_workspace(&path)?),
+                None => config.clone(),
+            };
+            let model = match model {
+                Some(model) => crate::app::model::parse(&model).map_err(CommandError::Invalid)?,
+                None => app
+                    .root(app.active_pane())
+                    .map(|root| root.composer().model())
+                    .ok_or(CommandError::UnknownSession)?,
+            };
+            let pane = app.begin_open("Starting new session…")?;
+            open_tasks.spawn(configure_fresh(
+                config.clone(),
+                pane,
+                fresh_settings(&config, model),
+            ));
+            Ok(OpenStarted::Pending(pane))
+        }
+        OpenSpec::Resume { session } => {
+            if let Some(pane) = app.pane_for_session(&session) {
+                app.activate(pane);
+                return Ok(OpenStarted::Activated(session));
+            }
+            app.can_open()?;
+            let lock =
+                SessionLock::acquire(config.path(), &session).map_err(|error| match error {
+                    session::SessionError::Locked { .. } => CommandError::SessionLocked,
+                    error => CommandError::Failed(error.to_string()),
+                })?;
+            let pane = app.begin_open("Resuming session…")?;
+            let agent = config.agent();
+            let (effort, speed) = (agent.thinking(), agent.speed());
+            let preferred_reasoning_mode = agent.reasoning_mode();
+            let config = config.clone();
+            open_tasks.spawn(async move {
+                let restored = restore_session(config, session, effort, lock).await;
+                let opened = restored.map(|restored| OpenedSession::Restored {
+                    settings: PaneSettings::new(
+                        effort,
+                        restored.reasoning_mode,
+                        speed,
+                        restored.model,
+                    ),
+                    restored: Box::new(restored),
+                    preferred_reasoning_mode,
+                });
+                (pane, opened)
+            });
+            Ok(OpenStarted::Pending(pane))
+        }
+        OpenSpec::Fork { session } => {
+            let parent = app
+                .pane_for_session(&session)
+                .ok_or(CommandError::UnknownSession)?;
+            let pane = app.begin_fork(parent)?;
+            request_fork(panes, commands, pane, parent)
+                .await
+                .map_err(|error| CommandError::Failed(error.to_string()))?;
+            Ok(OpenStarted::Pending(pane))
+        }
+    }
+}
+
+fn open_workspace(path: &str) -> std::result::Result<PathBuf, CommandError> {
+    let directory = Path::new(path);
+    if !directory.is_absolute() {
+        return Err(CommandError::Invalid(format!(
+            "workspace must be an absolute directory: {path}"
+        )));
+    }
+    directory
+        .canonicalize()
+        .ok()
+        .filter(|directory| directory.is_dir())
+        .ok_or_else(|| {
+            CommandError::Invalid(format!("workspace is not an existing directory: {path}"))
+        })
 }
 
 fn is_web_link(destination: &str) -> bool {
@@ -3067,6 +3405,27 @@ mod tests {
     }
 
     #[test]
+    fn a_phone_cannot_use_a_link_to_this_computer() {
+        for local in [
+            "http://127.0.0.1:7878/#k=t",
+            "http://localhost:7878/#k=t",
+            "http://[::1]:7878/#k=t",
+            "http://0.0.0.0:7878/#k=t",
+        ] {
+            assert!(super::reachable_link(local.to_owned()).is_err(), "{local}");
+        }
+        for reachable in [
+            "https://laptop.tail1234.ts.net/#k=t",
+            "http://100.64.0.7:7878/#k=t",
+        ] {
+            assert_eq!(
+                super::reachable_link(reachable.to_owned()).as_deref(),
+                Ok(reachable)
+            );
+        }
+    }
+
+    #[test]
     fn control_or_super_v_requests_an_image_paste() {
         use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 
@@ -3164,6 +3523,109 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["just submitted", "other", "first"]
         );
+    }
+
+    fn workspace_config(directory: &Path) -> Config {
+        let path = directory.join("config.toml");
+        fs::write(&path, "[auth]\nmode = 'api-key'\n[openai]\napi_key = 'workspace-fixture'\n[agent]\nweb_search = false\nimage_generation = false\n[skills]\nenabled = false\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        Config::load(ConfigOverrides {
+            path: Some(path),
+            auth_file: Some(directory.join("unused-auth.json")),
+            workspace: Some(directory.to_owned()),
+            ..ConfigOverrides::default()
+        })
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn web_open_builds_the_agent_and_pane_in_the_selected_workspace() {
+        use crate::{
+            tui::components::{AppNode, RootNode},
+            web::bridge::OpenSpec,
+        };
+        let directory = tempdir().unwrap();
+        let selected = tempdir().unwrap();
+        let selected = selected.path().canonicalize().unwrap();
+        let config = workspace_config(directory.path());
+        let mut app = AppNode::new(
+            config.theme().clone(),
+            directory.path().to_owned(),
+            RootNode::new(directory.path(), ReasoningEffort::Low),
+        );
+        let (commands, _) = tokio::sync::mpsc::unbounded_channel();
+        let mut tasks = tokio::task::JoinSet::new();
+        let opened = super::open_session(
+            OpenSpec::New {
+                model: Some("sol".to_owned()),
+                workspace: Some(selected.to_string_lossy().into_owned()),
+            },
+            &mut app,
+            &config,
+            &mut HashMap::new(),
+            &commands,
+            &mut tasks,
+        )
+        .await
+        .unwrap();
+        let super::OpenStarted::Pending(pane) = opened else {
+            panic!("expected pending session")
+        };
+        let (_, opened) = tasks.join_next().await.unwrap().unwrap();
+        let super::OpenedSession::Fresh { configured, .. } = opened.unwrap() else {
+            panic!("expected fresh session")
+        };
+        assert_eq!(configured.workspace, selected);
+        app.set_pane_workspace(pane, configured.workspace.clone());
+        assert_eq!(app.root(pane).unwrap().workspace(), selected);
+        assert_eq!(
+            super::local_link_path("file.txt", app.root(pane).unwrap().workspace()),
+            selected.join("file.txt")
+        );
+        assert_eq!(config.agent().workspace(), directory.path());
+        assert_eq!(
+            config.with_workspace(selected).memory_workspace(),
+            directory.path()
+        );
+        configured.agent.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn web_open_rejects_a_workspace_that_is_a_file() {
+        use crate::{
+            tui::components::{AppNode, RootNode},
+            web::bridge::{CommandError, OpenSpec},
+        };
+        let directory = tempdir().unwrap();
+        let file = directory.path().join("file");
+        fs::write(&file, "text").unwrap();
+        let config = workspace_config(directory.path());
+        let mut app = AppNode::new(
+            config.theme().clone(),
+            directory.path().to_owned(),
+            RootNode::new(directory.path(), ReasoningEffort::Low),
+        );
+        let (commands, _) = tokio::sync::mpsc::unbounded_channel();
+        let result = super::open_session(
+            OpenSpec::New {
+                model: None,
+                workspace: Some(file.to_string_lossy().into_owned()),
+            },
+            &mut app,
+            &config,
+            &mut HashMap::new(),
+            &commands,
+            &mut tokio::task::JoinSet::new(),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(CommandError::Invalid(message)) if message.contains(file.to_string_lossy().as_ref()))
+        );
+        assert!(super::open_workspace("relative").is_err());
     }
 
     #[test]
@@ -3361,6 +3823,7 @@ mod tests {
             Arc::from("instructions"),
             subagent_control.clone(),
             &sender,
+            super::SessionLock::acquire(config.path(), "main-session").unwrap(),
         )
         .unwrap();
         let fork = open_pane(
@@ -3379,6 +3842,7 @@ mod tests {
             Arc::from("instructions"),
             subagent_control.clone(),
             &sender,
+            super::SessionLock::acquire(config.path(), "fork-session").unwrap(),
         )
         .unwrap();
         let mut panes = HashMap::from([(PaneId::Main, main), (PaneId::Fork(1), fork)]);
@@ -3467,6 +3931,7 @@ mod tests {
             Arc::from("instructions"),
             subagent_control.clone(),
             &sender,
+            super::SessionLock::acquire(config.path(), "old-session").unwrap(),
         )
         .unwrap();
         old.journal_mut()
@@ -3494,6 +3959,7 @@ mod tests {
             Arc::from("instructions"),
             subagent_control,
             &sender,
+            super::SessionLock::acquire(config.path(), "new-session").unwrap(),
         )
         .unwrap();
         drop(new.journal.take());

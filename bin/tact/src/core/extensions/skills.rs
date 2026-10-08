@@ -1,7 +1,7 @@
 //! Bounded discovery and model-facing metadata for local filesystem skills.
 
-use crate::app::config::SkillsConfig;
-use serde::Deserialize;
+use crate::{app::config::SkillsConfig, search::rank};
+use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     fs::{self, File},
@@ -96,7 +96,7 @@ struct SkillMetadata {
     path: PathBuf,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub(crate) struct Skill {
     name: String,
     description: String,
@@ -116,6 +116,22 @@ impl Skill {
 
     pub(crate) fn description(&self) -> &str {
         &self.description
+    }
+}
+
+/// Skills matching a `$` mention query, best first.
+#[derive(Debug, Eq, PartialEq, Serialize)]
+pub(crate) struct SkillMatches {
+    pub(crate) skills: Vec<Skill>,
+}
+
+impl SkillMatches {
+    pub(crate) fn new(skills: &[Skill], query: &str) -> Self {
+        let skills = rank(skills, query, Skill::name)
+            .into_iter()
+            .map(|index| skills[index].clone())
+            .collect();
+        Self { skills }
     }
 }
 
@@ -722,11 +738,29 @@ fn json_string(value: &str) -> String {
 mod tests {
     use super::{
         CATALOG_END_MARKER, CATALOG_START_MARKER, DiagnosticCollector, MAX_DIAGNOSTICS,
-        MAX_RENDERED_BYTES, SkillCatalog, SkillDiagnostic, contains_catalog,
+        MAX_RENDERED_BYTES, Skill, SkillCatalog, SkillDiagnostic, SkillMatches, contains_catalog,
     };
     use crate::app::config::SkillsConfig;
     use std::{fs, path::Path};
     use tempfile::tempdir;
+
+    #[test]
+    fn skill_matches_rank_by_name_and_serialize_for_the_web() {
+        let skills = [
+            Skill::new("review-agent", "Review a change"),
+            Skill::new("jujutsu", "Version control"),
+            Skill::new("autofix", "Fix a branch"),
+        ];
+        let matches = SkillMatches::new(&skills, "u");
+        assert_eq!(
+            matches.skills.iter().map(Skill::name).collect::<Vec<_>>(),
+            ["jujutsu", "autofix"]
+        );
+        assert_eq!(
+            serde_json::to_value(SkillMatches::new(&skills, "auto")).unwrap(),
+            serde_json::json!({ "skills": [{ "name": "autofix", "description": "Fix a branch" }] })
+        );
+    }
 
     #[test]
     fn disabled_catalog_does_not_scan_configured_roots() {

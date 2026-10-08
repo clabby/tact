@@ -101,15 +101,15 @@ jobs:
             ${{ env.BINARY_NAME }}-${{ matrix.target }}-${{ github.ref_name }}.${{ matrix.archive_ext }}.sha256
           if-no-files-found: error
 
-  review_assets:
-    name: Build Review Assets
+  web_assets:
+    name: Build Web Assets
     needs: validate
     runs-on: ubuntu-latest
     permissions:
       contents: read
     defaults:
       run:
-        working-directory: web/review
+        working-directory: web
     steps:
       - name: Checkout sources
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -121,33 +121,33 @@ jobs:
           bun-version: 1.3.14
       - name: Install dependencies
         run: bun install --frozen-lockfile
-      - name: Build review assets
+      - name: Build web assets
         shell: bash
         run: TACT_VERSION="${GITHUB_REF_NAME#v}" bun run build
-      - name: Typecheck review app
+      - name: Typecheck web app
         run: bun run typecheck
-      - name: Package review assets
+      - name: Package web assets
         shell: bash
         run: |
           set -euo pipefail
 
-          archive="tact-review-${GITHUB_REF_NAME}.tar.gz"
-          mkdir review
-          cp -R dist/. review/
-          tar -czf "$archive" review
+          archive="tact-web-${GITHUB_REF_NAME}.tar.gz"
+          mkdir web
+          cp -R dist/. web/
+          tar -czf "$archive" web
           shasum -a 256 "$archive" > "${archive}.sha256"
-      - name: Upload packaged review assets
+      - name: Upload packaged web assets
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: review-assets
+          name: web-assets
           path: |
-            web/review/tact-review-${{ github.ref_name }}.tar.gz
-            web/review/tact-review-${{ github.ref_name }}.tar.gz.sha256
+            web/tact-web-${{ github.ref_name }}.tar.gz
+            web/tact-web-${{ github.ref_name }}.tar.gz.sha256
           if-no-files-found: error
 
   sign:
     name: Sign Release Assets
-    needs: [build, review_assets]
+    needs: [build, web_assets]
     runs-on: ubuntu-latest
     permissions:
       contents: read

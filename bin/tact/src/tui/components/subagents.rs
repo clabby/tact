@@ -10,9 +10,11 @@ use super::{
 };
 use crate::{
     app::{config::DEFAULT_MAX_SUBAGENTS, model},
+    core::subagent_roster::{SubagentNode, SubagentRoster},
     tui::{format::sanitize_terminal_text_inline, theme::Theme, transcript::TranscriptRecord},
 };
 use crossterm::event::{Event, KeyCode, KeyEventKind};
+use nanocodex::agent::events::AgentEvent;
 use ratatui::{
     Frame,
     layout::Rect,
@@ -26,7 +28,7 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-use tact_subagents::{AgentDescriptor, AgentId, AgentStatus, AgentUpdate, MessageSender};
+use tact_subagents::{AgentId, AgentStatus, AgentUpdate, MessageSender};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -54,12 +56,6 @@ const CAMERA_FRAME_INTERVAL: Duration = Duration::from_millis(16);
 const CAMERA_MIN_DURATION: Duration = Duration::from_millis(120);
 const CAMERA_MAX_DURATION: Duration = Duration::from_millis(240);
 const INSPECTOR_HEIGHT: u16 = 6;
-
-struct AgentNode {
-    descriptor: AgentDescriptor,
-    status: AgentStatus,
-    transcript: Node<Transcript>,
-}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum AgentFilter {
@@ -127,80 +123,63 @@ struct Camera {
 }
 
 pub(super) struct SubagentTree {
-    nodes: Vec<AgentNode>,
+    roster: SubagentRoster,
+    transcripts: HashMap<AgentId, Node<Transcript>>,
     focused: Option<AgentId>,
     remembered_children: HashMap<AgentId, AgentId>,
     camera: Camera,
     filter: AgentFilter,
     effort: crate::app::config::ReasoningEffort,
-    max_subagents: usize,
     workspace: std::path::PathBuf,
 }
 
 impl SubagentTree {
     pub(super) fn new(effort: crate::app::config::ReasoningEffort) -> Self {
         Self {
-            nodes: Vec::new(),
+            roster: SubagentRoster::new(DEFAULT_MAX_SUBAGENTS),
+            transcripts: HashMap::new(),
             focused: None,
             remembered_children: HashMap::new(),
             camera: Camera::default(),
             filter: AgentFilter::Active,
             effort,
-            max_subagents: DEFAULT_MAX_SUBAGENTS,
             workspace: std::env::current_dir().unwrap_or_default(),
         }
     }
 
     pub(super) fn set_workspace(&mut self, workspace: &std::path::Path) {
         self.workspace = workspace.to_path_buf();
-        for node in &mut self.nodes {
-            node.transcript.component_mut().set_workspace(workspace);
+        for transcript in self.transcripts.values_mut() {
+            transcript.component_mut().set_workspace(workspace);
         }
     }
 
     pub(super) fn refresh_terminal_images(&mut self) {
-        for node in &mut self.nodes {
-            node.transcript.component_mut().refresh_terminal_images();
+        for transcript in self.transcripts.values_mut() {
+            transcript.component_mut().refresh_terminal_images();
         }
     }
 
+    /// The tree as every front-end presents it.
+    pub(super) const fn roster(&self) -> &SubagentRoster {
+        &self.roster
+    }
+
     pub(super) fn apply(&mut self, update: AgentUpdate) -> bool {
+        let roster_changed = self.roster.apply(&update);
         match update {
             AgentUpdate::Added(descriptor) => {
-                if let Some(node) = self.node_mut(descriptor.id) {
-                    node.descriptor = descriptor;
-                } else {
-                    let id = descriptor.id;
+                let id = descriptor.id;
+                self.transcripts.entry(id).or_insert_with(|| {
                     let mut transcript = Transcript::with_effort(self.effort);
                     transcript.set_workspace(&self.workspace);
-                    self.nodes.push(AgentNode {
-                        descriptor,
-                        status: AgentStatus::Running,
-                        transcript: Node::new(transcript),
-                    });
-                    self.focused.get_or_insert(id);
-                }
-                true
+                    Node::new(transcript)
+                });
+                self.focused.get_or_insert(id);
+                roster_changed
             }
-            AgentUpdate::Event { id, event } => {
-                let Some(node) = self.node_mut(id) else {
-                    return false;
-                };
-                let record = TranscriptRecord::from_agent(event.seq, unix_time_ms(), event);
-                node.transcript
-                    .update(TranscriptEvent::Record(Arc::new(record)));
-                true
-            }
-            AgentUpdate::Status { id, status } => {
-                let Some(node) = self.node_mut(id) else {
-                    return false;
-                };
-                if node.status == status {
-                    return false;
-                }
-                node.status = status;
-                true
-            }
+            AgentUpdate::Event { id, event } => self.apply_record(id, subagent_record(event)),
+            AgentUpdate::Status { .. } => roster_changed,
             AgentUpdate::Message(update) => {
                 let mut projected = false;
                 let mut previous = None;
@@ -212,10 +191,10 @@ impl SubagentTree {
                         continue;
                     }
                     previous = Some(agent_id);
-                    let Some(node) = self.node_mut(agent_id) else {
+                    let Some(transcript) = self.transcripts.get_mut(&agent_id) else {
                         continue;
                     };
-                    node.transcript.update(TranscriptEvent::DirectedMessage {
+                    transcript.update(TranscriptEvent::DirectedMessage {
                         perspective: participant,
                         update: update.clone(),
                     });
@@ -226,41 +205,48 @@ impl SubagentTree {
         }
     }
 
+    /// Appends a record to an agent's transcript and reports whether the agent is known.
+    pub(super) fn apply_record(&mut self, id: AgentId, record: Arc<TranscriptRecord>) -> bool {
+        let Some(transcript) = self.transcripts.get_mut(&id) else {
+            return false;
+        };
+        transcript.update(TranscriptEvent::Record(record));
+        true
+    }
+
     pub(super) fn active_count(&self) -> usize {
-        self.nodes
-            .iter()
-            .filter(|node| node.status.is_active())
-            .count()
+        self.roster.active_count()
     }
 
     pub(super) fn set_effort(&mut self, effort: crate::app::config::ReasoningEffort) {
         self.effort = effort;
-        for node in &mut self.nodes {
-            node.transcript.component_mut().set_effort(effort);
+        for transcript in self.transcripts.values_mut() {
+            transcript.component_mut().set_effort(effort);
         }
     }
 
     pub(super) fn set_max_subagents(&mut self, limit: usize) {
-        self.max_subagents = limit;
+        self.roster.max_subagents = limit;
     }
 
     pub(super) const fn max_subagents(&self) -> usize {
-        self.max_subagents
+        self.roster.max_subagents
     }
 
     pub(super) fn contains(&self, id: AgentId) -> bool {
-        self.nodes.iter().any(|node| node.descriptor.id == id)
+        self.roster.agent(id).is_some()
     }
 
     pub(super) fn is_direct_child(&self, id: AgentId) -> bool {
-        self.node(id)
-            .is_some_and(|node| node.descriptor.parent.is_none())
+        self.roster
+            .agent(id)
+            .is_some_and(|node| node.parent.is_none())
     }
 
     pub(super) fn animation_deadline(&self) -> Option<Instant> {
-        self.nodes
-            .iter()
-            .filter_map(|node| node.transcript.component().animation_deadline())
+        self.transcripts
+            .values()
+            .filter_map(|transcript| transcript.component().animation_deadline())
             .chain(
                 self.camera
                     .animation
@@ -272,14 +258,15 @@ impl SubagentTree {
 
     pub(super) fn advance(&mut self, now: Instant) -> bool {
         let camera_changed = self.advance_camera(now);
-        self.nodes.iter_mut().fold(camera_changed, |changed, node| {
-            let node_changed = node
-                .transcript
-                .update(TranscriptEvent::AnimationFrame(now))
-                .render
-                != super::node::RenderRequest::None;
-            changed || node_changed
-        })
+        self.transcripts
+            .values_mut()
+            .fold(camera_changed, |changed, transcript| {
+                let node_changed = transcript
+                    .update(TranscriptEvent::AnimationFrame(now))
+                    .render
+                    != super::node::RenderRequest::None;
+                changed || node_changed
+            })
     }
 
     pub(super) fn finish_camera_animation(&mut self) {
@@ -336,12 +323,12 @@ impl SubagentTree {
                 None
             }
             KeyCode::Char('-') if key.modifiers.is_empty() => {
-                self.max_subagents = self.max_subagents.saturating_sub(1);
-                Some(SubagentEffect::SetMaxSubagents(self.max_subagents))
+                self.roster.max_subagents = self.roster.max_subagents.saturating_sub(1);
+                Some(SubagentEffect::SetMaxSubagents(self.roster.max_subagents))
             }
             KeyCode::Char('+') | KeyCode::Char('=') if key.modifiers.is_empty() => {
-                self.max_subagents = self.max_subagents.saturating_add(1);
-                Some(SubagentEffect::SetMaxSubagents(self.max_subagents))
+                self.roster.max_subagents = self.roster.max_subagents.saturating_add(1);
+                Some(SubagentEffect::SetMaxSubagents(self.roster.max_subagents))
             }
             KeyCode::Enter => self.focused.map(SubagentEffect::Inspect),
             _ => None,
@@ -360,38 +347,37 @@ impl SubagentTree {
                 if key.code == KeyCode::Esc
                     && matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
         ) {
-            let Some(node) = self.node_mut(id) else {
+            let Some(transcript) = self.transcripts.get_mut(&id) else {
                 return Some(SubagentEffect::Back);
             };
-            if node.transcript.component().expandables_focused() {
-                node.transcript.update(TranscriptEvent::BlurExpandables);
+            if transcript.component().expandables_focused() {
+                transcript.update(TranscriptEvent::BlurExpandables);
                 return None;
             }
             return Some(SubagentEffect::Back);
         }
-        let Some(node) = self.node_mut(id) else {
+        let Some(transcript) = self.transcripts.get_mut(&id) else {
             return Some(SubagentEffect::Back);
         };
-        if let Some(destination) = node.transcript.component().link_destination(&event) {
+        if let Some(destination) = transcript.component().link_destination(&event) {
             return Some(SubagentEffect::OpenLink(destination.to_string()));
         }
-        if let Some(command) = node
-            .transcript
+        if let Some(command) = transcript
             .component()
             .scroll_command(&event, mouse_scroll_lines)
         {
-            node.transcript.update(TranscriptEvent::Scroll(command));
-        } else if let Some(command) = node.transcript.component().expandable_command(&event) {
-            node.transcript.update(TranscriptEvent::Expandable(command));
+            transcript.update(TranscriptEvent::Scroll(command));
+        } else if let Some(command) = transcript.component().expandable_command(&event) {
+            transcript.update(TranscriptEvent::Expandable(command));
         }
         None
     }
 
     pub(super) fn toggle_expand_all(&mut self, id: AgentId) -> bool {
-        let Some(node) = self.node_mut(id) else {
+        let Some(transcript) = self.transcripts.get_mut(&id) else {
             return false;
         };
-        node.transcript.update(TranscriptEvent::ToggleExpandAll);
+        transcript.update(TranscriptEvent::ToggleExpandAll);
         true
     }
 
@@ -407,17 +393,17 @@ impl SubagentTree {
         let tree_layout = self.layout();
         self.ensure_focus(&tree_layout);
         let Some(focused) = self.focused else {
-            let message = if self.nodes.is_empty() {
+            let message = if self.roster.agents.is_empty() {
                 format!(
                     "Concurrency: {} / {} active. No subagents have been delegated yet.",
                     self.active_count(),
-                    self.max_subagents
+                    self.roster.max_subagents
                 )
             } else {
                 format!(
                     "Concurrency: {} / {} active. No subagents are currently running. Press f to show all.",
                     self.active_count(),
-                    self.max_subagents
+                    self.roster.max_subagents
                 )
             };
             frame.render_widget(
@@ -441,7 +427,7 @@ impl SubagentTree {
 
         render_edges(frame, canvas, theme, &tree_layout, camera_center);
         for (id, position) in tree_layout.positioned_nodes() {
-            let Some(node) = self.node(id) else {
+            let Some(node) = self.roster.agent(id) else {
                 continue;
             };
             render_node(
@@ -467,46 +453,49 @@ impl SubagentTree {
         area: Rect,
         theme: &Theme,
     ) {
-        let Some(node) = self.node_mut(id) else {
+        let (Some(node), Some(transcript)) = (self.roster.agent(id), self.transcripts.get_mut(&id))
+        else {
             return;
         };
         let title = format!(
             "{} · {} ({}) · #{}",
-            node.descriptor.role,
-            model::name(node.descriptor.model),
-            node.descriptor.thinking,
-            node.descriptor.id
+            node.role,
+            model::name(node.model),
+            node.thinking,
+            node.id
         );
-        let keys: &[(&str, &str)] = if node.transcript.component().expandables_focused() {
+        let keys: &[(&str, &str)] = if transcript.component().expandables_focused() {
             &FOCUSED_ENTRY_KEYS
         } else {
             &TRANSCRIPT_KEYS
         };
         let layout = Floating::new(&title, area.width, area.height, keys)
-            .colors(theme.border(), theme.model(node.descriptor.model))
+            .colors(theme.border(), theme.model(node.model))
             .render(frame, area, theme);
-        node.transcript.render(frame, layout.body, theme);
+        transcript.render(frame, layout.body, theme);
     }
 
     fn layout(&self) -> TreeLayout {
         let visible = self.visible_ids();
         let nodes = self
-            .nodes
+            .roster
+            .agents
             .iter()
-            .filter(|node| visible.contains(&node.descriptor.id))
+            .filter(|node| visible.contains(&node.id))
             .map(|node| LayoutNode {
-                id: node.descriptor.id,
-                parent: node.descriptor.parent,
+                id: node.id,
+                parent: node.parent,
             })
             .collect::<Vec<_>>();
         TreeLayout::new(&nodes)
     }
 
     fn visible_ids(&self) -> Vec<AgentId> {
-        self.nodes
+        self.roster
+            .agents
             .iter()
             .filter(|node| self.filter.includes(&node.status))
-            .map(|node| node.descriptor.id)
+            .map(|node| node.id)
             .collect()
     }
 
@@ -524,10 +513,11 @@ impl SubagentTree {
 
     fn focus_oldest(&mut self, layout: &TreeLayout) {
         self.focused = self
-            .nodes
+            .roster
+            .agents
             .iter()
             .filter(|node| self.filter.includes(&node.status))
-            .map(|node| node.descriptor.id)
+            .map(|node| node.id)
             .filter(|id| layout.position(*id).is_some())
             .min();
         self.camera.center = self.focused.and_then(|id| layout.center(id));
@@ -665,14 +655,11 @@ impl SubagentTree {
         if area.is_empty() {
             return;
         }
-        let Some(node) = self.node(focused) else {
+        let Some(node) = self.roster.agent(focused) else {
             return;
         };
         let (symbol, color, status) = state_style(&node.status);
-        let title = format!(
-            " {symbol} #{} · {} · {status} ",
-            focused, node.descriptor.role
-        );
+        let title = format!(" {symbol} #{} · {} · {status} ", focused, node.role);
         let block = Block::new()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
@@ -689,7 +676,7 @@ impl SubagentTree {
             .parent(focused)
             .map_or_else(|| "root".to_owned(), |id| format!("parent #{id}"));
         let children = layout.children(focused).len();
-        let task = truncate_with_ellipsis(&node.descriptor.task, inner.width.saturating_sub(6));
+        let task = truncate_with_ellipsis(&node.task, inner.width.saturating_sub(6));
         let lines = vec![
             Line::from(vec![
                 Span::styled("Task  ", Style::default().fg(theme.muted())),
@@ -702,7 +689,7 @@ impl SubagentTree {
                     format!(
                         "    Concurrency  {} / {} active",
                         self.active_count(),
-                        self.max_subagents
+                        self.roster.max_subagents
                     ),
                     Style::default().fg(theme.muted()),
                 ),
@@ -711,38 +698,26 @@ impl SubagentTree {
                 Span::styled("View  ", Style::default().fg(theme.muted())),
                 Span::raw(format!(
                     "{} agents · {} filter",
-                    self.nodes.len(),
+                    self.roster.agents.len(),
                     self.filter.label()
                 )),
                 Span::styled("    Model  ", Style::default().fg(theme.muted())),
                 Span::styled(
-                    format!(
-                        "{} ({})",
-                        model::name(node.descriptor.model),
-                        node.descriptor.thinking
-                    ),
+                    format!("{} ({})", model::name(node.model), node.thinking),
                     Style::default()
-                        .fg(theme.model(node.descriptor.model))
+                        .fg(theme.model(node.model))
                         .add_modifier(Modifier::BOLD),
                 ),
             ]),
             Line::from(vec![
                 Span::styled("Session  ", Style::default().fg(theme.muted())),
                 Span::raw(truncate_with_ellipsis(
-                    &node.descriptor.session_id,
+                    &node.session_id,
                     inner.width.saturating_sub(9),
                 )),
             ]),
         ];
         frame.render_widget(Paragraph::new(lines), inner);
-    }
-
-    fn node(&self, id: AgentId) -> Option<&AgentNode> {
-        self.nodes.iter().find(|node| node.descriptor.id == id)
-    }
-
-    fn node_mut(&mut self, id: AgentId) -> Option<&mut AgentNode> {
-        self.nodes.iter_mut().find(|node| node.descriptor.id == id)
     }
 }
 
@@ -797,7 +772,7 @@ fn split_inspector(area: Rect) -> (Rect, Rect) {
 }
 
 struct NodeRender<'a> {
-    node: &'a AgentNode,
+    node: &'a SubagentNode,
     position: NodePosition,
     focused: bool,
     child_count: usize,
@@ -828,11 +803,8 @@ fn render_node(
     let (symbol, status_color, status) = state_style(&node.status);
     let detail_style = Style::default().fg(status_color);
     let role_width = u16::try_from(NODE_WIDTH.saturating_sub(4)).unwrap_or_default();
-    let role = truncate_with_ellipsis(&node.descriptor.role, role_width);
-    let title = centered_text(
-        &format!("{symbol} #{} {role}", node.descriptor.id),
-        NODE_WIDTH - 2,
-    );
+    let role = truncate_with_ellipsis(&node.role, role_width);
+    let title = centered_text(&format!("{symbol} #{} {role}", node.id), NODE_WIDTH - 2);
     let detail = centered_text(
         &format!("{status} · {child_count} children"),
         NODE_WIDTH - 2,
@@ -1092,6 +1064,15 @@ fn distance(from: WorldPoint, to: WorldPoint) -> f64 {
     (to.x - from.x).hypot(to.y - from.y)
 }
 
+/// The transcript record of one subagent event, stamped with its arrival time.
+pub(super) fn subagent_record(event: AgentEvent) -> Arc<TranscriptRecord> {
+    Arc::new(TranscriptRecord::from_agent(
+        event.seq,
+        unix_time_ms(),
+        event,
+    ))
+}
+
 fn unix_time_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1255,7 +1236,11 @@ mod tests {
             }),
             NonZeroU16::new(3).unwrap(),
         );
-        assert!(tree.nodes[0].transcript.component().expandables_focused());
+        assert!(
+            tree.transcripts[&AgentId::new(1)]
+                .component()
+                .expandables_focused()
+        );
     }
 
     fn second_descriptor() -> AgentDescriptor {
@@ -1360,7 +1345,11 @@ mod tests {
         );
 
         let expanded = rendered_text(&render_agent_transcript(&mut tree, AgentId::new(1)));
-        assert!(tree.nodes[0].transcript.component().expandables_focused());
+        assert!(
+            tree.transcripts[&AgentId::new(1)]
+                .component()
+                .expandables_focused()
+        );
         assert!(expanded.contains("▼"), "{expanded}");
         assert!(expanded.contains("Can you verify the event ordering?"));
         assert!(expanded.contains("thread #1 · 2 messages"));
@@ -1404,7 +1393,7 @@ mod tests {
         });
         assert_eq!(tree.active_count(), 0);
         assert!(matches!(
-            tree.nodes[0].status,
+            tree.roster.agents[0].status,
             AgentStatus::Completed { .. }
         ));
 
@@ -1414,7 +1403,7 @@ mod tests {
             status: AgentStatus::Running,
         });
         assert_eq!(tree.active_count(), 1);
-        assert_eq!(tree.nodes.len(), 1);
+        assert_eq!(tree.roster.agents.len(), 1);
     }
 
     #[test]
@@ -1916,7 +1905,11 @@ mod tests {
             tree.update_transcript(AgentId::new(1), escape(), NonZeroU16::new(3).unwrap())
                 .is_none()
         );
-        assert!(!tree.nodes[0].transcript.component().expandables_focused());
+        assert!(
+            !tree.transcripts[&AgentId::new(1)]
+                .component()
+                .expandables_focused()
+        );
         assert!(matches!(
             tree.update_transcript(AgentId::new(1), escape(), NonZeroU16::new(3).unwrap()),
             Some(SubagentEffect::Back)

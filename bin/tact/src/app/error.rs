@@ -120,6 +120,8 @@ pub(crate) enum AuthError {
 
 #[derive(Debug, Error)]
 pub(crate) enum ConfigError {
+    #[error("[web] public_url and tailscale are mutually exclusive; set only one of them")]
+    WebExposureConflict,
     #[error("Claude models require [claude] enabled = true in the configuration")]
     ClaudeDisabled,
     #[error("could not determine the config directory; set TACT_HOME or pass --config")]
@@ -180,6 +182,19 @@ pub(crate) enum ConfigError {
         #[source]
         source: io::Error,
     },
+}
+
+/// Why a remote edit of the configuration file was refused.
+#[derive(Debug, Error)]
+pub(crate) enum ConfigEditError {
+    #[error("the configuration file changed since it was read")]
+    Stale,
+    #[error("the configuration file holds credentials and can only be edited in the terminal")]
+    HoldsCredentials,
+    #[error(transparent)]
+    Invalid(Error),
+    #[error(transparent)]
+    Io(ConfigError),
 }
 
 /// A syntax diagnostic that excludes the parser's retained source document.

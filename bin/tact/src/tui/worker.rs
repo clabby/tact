@@ -11,7 +11,9 @@ use crate::{
         session::AgentSnapshot,
         transcript::{TerminalStopReason, TurnId},
     },
+    web::bridge::AuxiliaryError,
 };
+use futures_util::future::join_all;
 use nanocodex::{
     AgentEvents, HarnessModel, Nanocodex, NanocodexError, TurnControl,
     agent::input::{Prompt, PromptInput, UserInput},
@@ -54,6 +56,12 @@ pub(crate) enum WorkerCommand {
         fallback_id: TurnId,
         prompt: Submission,
     },
+    OpenAgent {
+        pane: PaneId,
+        agent: Nanocodex,
+        context: AgentContext,
+        memory_review: MemoryReviewState,
+    },
     ReplaceAgent {
         pane: PaneId,
         agent: Nanocodex,
@@ -71,6 +79,7 @@ pub(crate) enum WorkerCommand {
     CancelAll(PaneId),
     OpenFork {
         pane: PaneId,
+        parent: PaneId,
         parent_sequence: u64,
     },
     ClosePane(PaneId),
@@ -102,12 +111,6 @@ impl ReflectionContext {
         });
         format!("<reflection_context>\n{context}\n</reflection_context>")
     }
-}
-
-#[derive(Debug, Eq, PartialEq)]
-pub(crate) enum AuxiliaryError {
-    Cancelled,
-    Failed(String),
 }
 
 pub(crate) enum WorkerEvent {
@@ -457,6 +460,7 @@ struct SteerRequest {
 struct PaneAgent {
     agent: Nanocodex,
     context: AgentContext,
+    memory_review: MemoryReviewState,
 }
 
 pub(crate) fn spawn(
@@ -490,10 +494,15 @@ async fn run(
     shutdown: CancellationToken,
 ) {
     observe_initial_context(&agent, context.model, PaneId::Main, &updates).await;
-    let mut main = Some((PaneId::Main, PaneAgent { agent, context }));
-    let mut fork = None::<(PaneId, PaneAgent)>;
+    let mut agents = HashMap::from([(
+        PaneId::Main,
+        PaneAgent {
+            agent,
+            context,
+            memory_review,
+        },
+    )]);
     let mut controls = HashMap::<TurnKey, TurnControl>::new();
-    let mut memory_reviews = HashMap::from([(PaneId::Main, memory_review)]);
     let mut cancelled = HashSet::<TurnKey>::new();
     let mut turns = JoinSet::<(TurnKey, TurnPurpose, bool, TurnResult)>::new();
     let mut compactions = JoinSet::new();
@@ -517,14 +526,14 @@ async fn run(
                     WorkerCommand::Compact(pane) => {
                         let rejection = if controls.keys().any(|key| key.pane == pane) || compacting.contains_key(&pane) {
                             Some("finish active work before compacting context")
-                        } else if agent_for(pane, main.as_ref(), fork.as_ref()).is_none() {
+                        } else if !agents.contains_key(&pane) {
                             Some("session pane is no longer available")
                         } else { None };
                         if let Some(error) = rejection {
                             drop(updates.send(WorkerEvent::CompactionFinished { pane, result: Err(error.to_owned()), terminal_stop: None, duration_ns: 0 }));
                             continue;
                         }
-                        let agent = agent_for(pane, main.as_ref(), fork.as_ref()).unwrap();
+                        let agent = agents.get(&pane).unwrap();
                         let claude = matches!(agent.context.model, HarnessModel::Claude(_));
                         let agent = agent.agent.clone();
                         let task = compactions.spawn(async move {
@@ -592,7 +601,7 @@ async fn run(
                             drop(updates.send(WorkerEvent::SteerFailed { pane, queue_id, error: "context compaction is still running".to_owned() }));
                             continue;
                         }
-                        let Some(agent) = agent_for(pane, main.as_ref(), fork.as_ref()) else {
+                        let Some(agent) = agents.get(&pane) else {
                             drop(updates.send(WorkerEvent::SteerFailed {
                                 pane,
                                 queue_id,
@@ -606,9 +615,7 @@ async fn run(
                             fallback_id,
                             prompt,
                         };
-                        let memory_review = *memory_reviews
-                            .get(&pane)
-                            .expect("an available pane must have memory-review state");
+                        let memory_review = agent.memory_review;
                         let started_turn = steer_turn(
                             agent,
                             memory_review,
@@ -619,37 +626,33 @@ async fn run(
                         )
                         .await;
                         if started_turn {
-                            memory_reviews
-                                .get_mut(&pane)
-                                .expect("an available pane must have memory-review state")
-                                .turn_accepted();
+                            agents.get_mut(&pane).unwrap().memory_review.turn_accepted();
                         }
                         continue;
                     }
-                    WorkerCommand::ReplaceAgent {
-                        pane,
-                        agent,
-                        context,
-                        memory_review,
-                    } => {
-                        debug_assert!(!controls.keys().any(|key| key.pane == pane));
+                    WorkerCommand::OpenAgent { pane, agent, context, memory_review } => {
+                        if agents.contains_key(&pane) {
+                            drop(agent.shutdown().await);
+                            debug_assert!(false, "a newly opened pane must have a unique identity");
+                            continue;
+                        }
                         observe_initial_context(&agent, context.model, pane, &updates).await;
-                        let retired = if main.as_ref().is_some_and(|(id, _)| *id == pane) {
-                            memory_reviews.insert(pane, memory_review);
-                            main.replace((pane, PaneAgent { agent, context })).map(|(_, agent)| agent.agent)
-                        } else if fork.as_ref().is_some_and(|(id, _)| *id == pane) {
-                            memory_reviews.insert(pane, memory_review);
-                            fork.replace((pane, PaneAgent { agent, context })).map(|(_, agent)| agent.agent)
-                        } else {
+                        agents.insert(pane, PaneAgent { agent, context, memory_review });
+                        continue;
+                    }
+                    WorkerCommand::ReplaceAgent { pane, agent, context, memory_review } => {
+                        debug_assert!(!controls.keys().any(|key| key.pane == pane));
+                        let Some(current) = agents.get_mut(&pane) else {
+                            drop(agent.shutdown().await);
                             drop(updates.send(WorkerEvent::ForkFailed {
                                 pane,
                                 error: "session pane is no longer available".to_owned(),
                             }));
-                            Some(agent)
+                            continue;
                         };
-                        if let Some(retired) = retired {
-                            drop(retired.shutdown().await);
-                        }
+                        observe_initial_context(&agent, context.model, pane, &updates).await;
+                        let retired = std::mem::replace(current, PaneAgent { agent, context, memory_review });
+                        drop(retired.agent.shutdown().await);
                         continue;
                     }
                     WorkerCommand::SetThinking { pane, effort } => {
@@ -657,8 +660,8 @@ async fn run(
                             drop(updates.send(WorkerEvent::ThinkingUpdated { pane, effort, result: Err(NanocodexError::InvalidRequest("context compaction is still running".to_owned())) }));
                             continue;
                         }
-                        let result = match main.iter_mut().chain(fork.iter_mut()).find(|(id, _)| *id == pane) {
-                            Some((_, agent)) => {
+                        let result = match agents.get_mut(&pane) {
+                            Some(agent) => {
                                 let result = agent.agent.set_thinking(effort.into()).await;
                                 if result.is_ok() {
                                     agent.context.thinking = effort.into();
@@ -679,7 +682,7 @@ async fn run(
                             drop(updates.send(WorkerEvent::SpeedUpdated { pane, speed, result: Err(NanocodexError::InvalidRequest("context compaction is still running".to_owned())) }));
                             continue;
                         }
-                        let result = match agent_for(pane, main.as_ref(), fork.as_ref()) {
+                        let result = match agents.get(&pane) {
                             Some(agent) => set_speed(&agent.agent, agent.context.model, speed).await,
                             None => Err(NanocodexError::AgentStopped),
                         };
@@ -696,23 +699,24 @@ async fn run(
                     }
                     WorkerCommand::OpenFork {
                         pane,
+                        parent,
                         parent_sequence,
                     } => {
-                        if fork.is_some() {
+                        if agents.contains_key(&pane) {
                             drop(updates.send(WorkerEvent::ForkFailed {
                                 pane,
-                                error: "a forked session is already open".to_owned(),
+                                error: "session pane is already open".to_owned(),
                             }));
                             continue;
                         }
-                        let Some((main_pane, agent)) = main.as_ref() else {
+                        let Some(agent) = agents.get(&parent) else {
                             drop(updates.send(WorkerEvent::ForkFailed {
                                 pane,
-                                error: "the primary session is no longer available".to_owned(),
+                                error: "the parent session is no longer available".to_owned(),
                             }));
                             continue;
                         };
-                        if compacting.contains_key(main_pane) {
+                        if compacting.contains_key(&parent) {
                             drop(updates.send(WorkerEvent::ForkFailed { pane, error: "context compaction is still running".to_owned() }));
                             continue;
                         }
@@ -721,17 +725,13 @@ async fn run(
                             drop(updates.send(WorkerEvent::ForkFailed { pane, error: "Claude does not support forking the current conversation".to_owned() }));
                             continue;
                         }
+                        let memory_review = agent.memory_review.forked();
                         match agent.agent.fork().await {
                             Ok((agent, events)) => {
-                                let memory_review = *memory_reviews
-                                    .get(main_pane)
-                                    .expect("the primary pane must have memory-review state");
-                                let memory_review = memory_review.forked();
-                                memory_reviews.insert(pane, memory_review);
-                                fork = Some((pane, PaneAgent { agent, context }));
+                                agents.insert(pane, PaneAgent { agent, context, memory_review });
                                 drop(updates.send(WorkerEvent::ForkOpened {
                                     pane,
-                                    parent: *main_pane,
+                                    parent,
                                     parent_sequence,
                                     events,
                                 }));
@@ -744,16 +744,7 @@ async fn run(
                         continue;
                     }
                     WorkerCommand::ClosePane(pane) => {
-                        let agent = if main.as_ref().is_some_and(|(id, _)| *id == pane) {
-                            let agent = main.take().map(|(_, agent)| agent.agent);
-                            main = fork.take();
-                            agent
-                        } else if fork.as_ref().is_some_and(|(id, _)| *id == pane) {
-                            fork.take().map(|(_, agent)| agent.agent)
-                        } else {
-                            None
-                        };
-                        memory_reviews.remove(&pane);
+                        let agent = agents.remove(&pane).map(|agent| agent.agent);
                         close_pane(pane, agent, &controls, &mut cancelled, &updates).await;
                         continue;
                     }
@@ -762,14 +753,12 @@ async fn run(
                     reject_turn(request, "context compaction is still running".to_owned(), &updates);
                     continue;
                 }
-                let Some(agent) = agent_for(request.pane, main.as_ref(), fork.as_ref()) else {
+                let Some(agent) = agents.get(&request.pane) else {
                     reject_turn(request, "session pane is no longer available".to_owned(), &updates);
                     continue;
                 };
                 let pane = request.pane;
-                let memory_review = *memory_reviews
-                    .get(&pane)
-                    .expect("an available pane must have memory-review state");
+                let memory_review = agent.memory_review;
                 let started_conversation = start_turn(
                     agent,
                     request,
@@ -780,10 +769,7 @@ async fn run(
                 )
                 .await;
                 if started_conversation {
-                    memory_reviews
-                        .get_mut(&pane)
-                        .expect("an available pane must have memory-review state")
-                        .turn_accepted();
+                    agents.get_mut(&pane).unwrap().memory_review.turn_accepted();
                 }
             }
         }
@@ -793,11 +779,14 @@ async fn run(
     while commands.try_recv().is_ok() {}
 
     drop(cancel_turns(&controls, None).await);
-    let (main_shutdown, fork_shutdown) = tokio::join!(
-        shutdown_agent(main.take().map(|(_, agent)| agent.agent)),
-        shutdown_agent(fork.take().map(|(_, agent)| agent.agent)),
-    );
-    let shutdown_error = main_shutdown.err().or_else(|| fork_shutdown.err());
+    let shutdown_error = join_all(
+        agents
+            .into_values()
+            .map(|agent| async move { agent.agent.shutdown().await }),
+    )
+    .await
+    .into_iter()
+    .find_map(Result::err);
 
     while let Some(result) = turns.join_next().await {
         finish_turn(Some(result), true, &mut controls, &mut cancelled, &updates);
@@ -1250,16 +1239,6 @@ fn finish_turn(
             drop(completion.send(result));
         }
     }
-}
-
-fn agent_for<'a>(
-    pane: PaneId,
-    main: Option<&'a (PaneId, PaneAgent)>,
-    fork: Option<&'a (PaneId, PaneAgent)>,
-) -> Option<&'a PaneAgent> {
-    main.filter(|(main_pane, _)| *main_pane == pane)
-        .or_else(|| fork.filter(|(fork_pane, _)| *fork_pane == pane))
-        .map(|(_, agent)| agent)
 }
 
 async fn cancel_pane(
@@ -1750,6 +1729,7 @@ mod tests {
         receiver: &mut mpsc::UnboundedReceiver<CapturedRequest>,
         model: Model,
         thinking: Thinking,
+        context_thinking: Thinking,
     ) -> CapturedRequest {
         let request = timeout(Duration::from_secs(5), receiver.recv())
             .await
@@ -1765,7 +1745,7 @@ mod tests {
         let model_name = crate::app::model::name(model).to_ascii_lowercase();
         assert!(
             context.contains(&format!(
-                "This turn runs on {model_name} with {thinking} reasoning effort."
+                "This turn runs on {model_name} with {context_thinking} reasoning effort."
             )),
             "{context}"
         );
@@ -2018,6 +1998,7 @@ mod tests {
         assert!(payload.contains("done"));
         commands
             .send(WorkerCommand::OpenFork {
+                parent: PaneId::Main,
                 pane: PaneId::Fork(1),
                 parent_sequence: 1,
             })
@@ -2105,6 +2086,7 @@ mod tests {
             &mut requests,
             Model::Codex(CodexModel::Astra),
             Thinking::Low,
+            Thinking::Low,
         )
         .await;
         commands
@@ -2131,14 +2113,18 @@ mod tests {
             &mut requests,
             Model::Codex(CodexModel::Astra),
             Thinking::Low,
+            Thinking::Low,
         )
         .await
         .release
         .send(())
         .unwrap();
+        // The provider request keeps the context window's pinned effort so its prompt cache stays
+        // valid; the new effort reaches the model through the turn context asserted below.
         captured(
             &mut requests,
             Model::Codex(CodexModel::Astra),
+            Thinking::Low,
             Thinking::High,
         )
         .await
@@ -2162,9 +2148,15 @@ mod tests {
                     completion,
                 })
                 .unwrap();
+            // A fork of the current conversation keeps that conversation's pinned request effort.
+            let requested = match context {
+                super::AuxiliaryContext::Clean => Thinking::High,
+                super::AuxiliaryContext::CurrentConversation => Thinking::Low,
+            };
             captured(
                 &mut requests,
                 Model::Codex(CodexModel::Astra),
+                requested,
                 Thinking::High,
             )
             .await
@@ -2181,6 +2173,7 @@ mod tests {
         }
         commands
             .send(WorkerCommand::OpenFork {
+                parent: PaneId::Main,
                 pane: PaneId::Fork(1),
                 parent_sequence: 0,
             })
@@ -2203,6 +2196,7 @@ mod tests {
         captured(
             &mut requests,
             Model::Codex(CodexModel::Astra),
+            Thinking::Low,
             Thinking::High,
         )
         .await
@@ -2238,6 +2232,7 @@ mod tests {
             &mut requests,
             Model::Codex(CodexModel::Sol),
             Thinking::Medium,
+            Thinking::Medium,
         )
         .await
         .release
@@ -2262,6 +2257,7 @@ mod tests {
             (
                 ResponsesError::Api {
                     event: violation.to_owned(),
+                    retry_after: None,
                 },
                 true,
             ),
@@ -2276,6 +2272,7 @@ mod tests {
             (
                 ResponsesError::Api {
                     event: ordinary.to_owned(),
+                    retry_after: None,
                 },
                 false,
             ),
@@ -2924,6 +2921,212 @@ mod tests {
             .await
             .expect("the event stream should drain")
             .expect("the drain task should not panic");
+    }
+
+    #[tokio::test]
+    async fn forks_route_to_their_requested_parent() {
+        let (agent, mut events) =
+            pending_agent(Arc::new(Notify::new()), Arc::new(AtomicUsize::new(0)));
+        let (opened, mut opened_events) =
+            pending_agent(Arc::new(Notify::new()), Arc::new(AtomicUsize::new(0)));
+        let shutdown = CancellationToken::new();
+        let (commands, mut updates) = spawn(
+            agent,
+            TEST_CONTEXT,
+            MemoryReviewState::fresh(false),
+            shutdown.clone(),
+        );
+        let drains = [
+            tokio::spawn(async move { while events.recv().await.is_some() {} }),
+            tokio::spawn(async move { while opened_events.recv().await.is_some() {} }),
+        ];
+        commands
+            .send(WorkerCommand::OpenAgent {
+                pane: PaneId::Opened(1),
+                agent: opened,
+                context: TEST_CONTEXT,
+                memory_review: MemoryReviewState::fresh(false),
+            })
+            .unwrap();
+        // A fresh agent has no completed turn to fork from, so a request that reaches its parent's
+        // agent fails there; a request for a missing parent fails before any agent is involved.
+        for (pane, parent, expected) in [
+            (
+                PaneId::Fork(2),
+                PaneId::Opened(1),
+                "safe conversation boundary",
+            ),
+            (
+                PaneId::Fork(3),
+                PaneId::Fork(9),
+                "parent session is no longer available",
+            ),
+        ] {
+            commands
+                .send(WorkerCommand::OpenFork {
+                    pane,
+                    parent,
+                    parent_sequence: 0,
+                })
+                .unwrap();
+            let failed = loop {
+                match timeout(Duration::from_secs(5), updates.recv())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                {
+                    WorkerEvent::ForkFailed { pane, error } => break (pane, error),
+                    WorkerEvent::ContextBudget { .. } => {}
+                    _ => panic!("only the fork outcome is expected"),
+                }
+            };
+            assert_eq!(failed.0, pane);
+            assert!(failed.1.contains(expected), "{}", failed.1);
+        }
+        shutdown.cancel();
+        stopped(&mut updates).await;
+        for drain in drains {
+            timeout(Duration::from_secs(5), drain)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn opened_agent_routes_turn_events_and_survives_another_pane_closing() {
+        let (main, mut main_events) =
+            pending_agent(Arc::new(Notify::new()), Arc::new(AtomicUsize::new(0)));
+        let called = Arc::new(Notify::new());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (additional, mut additional_events) =
+            pending_agent(Arc::clone(&called), Arc::clone(&calls));
+        let shutdown = CancellationToken::new();
+        let (commands, mut updates) = spawn(
+            main,
+            TEST_CONTEXT,
+            MemoryReviewState::fresh(false),
+            shutdown.clone(),
+        );
+        let drains = [
+            tokio::spawn(async move { while main_events.recv().await.is_some() {} }),
+            tokio::spawn(async move { while additional_events.recv().await.is_some() {} }),
+        ];
+        let pane = PaneId::Fork(4);
+        commands
+            .send(WorkerCommand::OpenAgent {
+                pane,
+                agent: additional,
+                context: TEST_CONTEXT,
+                memory_review: MemoryReviewState::restored(false),
+            })
+            .unwrap();
+        for id in [1, 2] {
+            if id == 2 {
+                commands
+                    .send(WorkerCommand::ClosePane(PaneId::Main))
+                    .unwrap();
+                assert!(matches!(
+                    timeout(Duration::from_secs(5), updates.recv())
+                        .await
+                        .unwrap(),
+                    Some(WorkerEvent::TurnsCancelled {
+                        pane: PaneId::Main,
+                        count: 0,
+                        error: None
+                    })
+                ));
+            }
+            commands
+                .send(WorkerCommand::Submit {
+                    pane,
+                    id: TurnId::new(id),
+                    prompt: "additional session".to_owned().into(),
+                })
+                .unwrap();
+            timeout(Duration::from_secs(5), called.notified())
+                .await
+                .unwrap();
+            assert!(
+                matches!(timeout(Duration::from_secs(5), updates.recv()).await.unwrap(),
+                Some(WorkerEvent::TurnAccepted { pane: reported, id: reported_id })
+                if reported == pane && reported_id == TurnId::new(id))
+            );
+            commands.send(WorkerCommand::CancelAll(pane)).unwrap();
+            assert!(matches!(
+                timeout(Duration::from_secs(5), updates.recv()).await.unwrap(),
+                Some(WorkerEvent::TurnsCancelled { pane: reported, count: 1, error: None })
+                    if reported == pane
+            ));
+            assert!(matches!(
+                timeout(Duration::from_secs(5), updates.recv()).await.unwrap(),
+                Some(WorkerEvent::TurnFinished { pane: reported, id: reported_id, error: None, .. })
+                    if reported == pane && reported_id == TurnId::new(id)
+            ));
+        }
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+        shutdown.cancel();
+        stopped(&mut updates).await;
+        for drain in drains {
+            timeout(Duration::from_secs(5), drain)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn closing_a_pane_cancels_its_in_flight_auxiliary_job() {
+        let called = Arc::new(Notify::new());
+        let (agent, mut events) = pending_agent(Arc::clone(&called), Arc::new(AtomicUsize::new(0)));
+        let shutdown = CancellationToken::new();
+        let (commands, mut updates) = spawn(
+            agent,
+            TEST_CONTEXT,
+            MemoryReviewState::fresh(false),
+            shutdown.clone(),
+        );
+        let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
+        let (completion, result) = oneshot::channel();
+        commands
+            .send(WorkerCommand::Auxiliary {
+                pane: PaneId::Main,
+                id: TurnId::new(1),
+                prompt: "auxiliary".to_owned().into(),
+                context: super::AuxiliaryContext::Clean,
+                shutdown: CancellationToken::new(),
+                completion,
+            })
+            .unwrap();
+        timeout(Duration::from_secs(5), called.notified())
+            .await
+            .unwrap();
+        commands
+            .send(WorkerCommand::ClosePane(PaneId::Main))
+            .unwrap();
+        assert_eq!(
+            timeout(Duration::from_secs(5), result)
+                .await
+                .unwrap()
+                .unwrap(),
+            Err(super::AuxiliaryError::Cancelled)
+        );
+        assert!(matches!(
+            timeout(Duration::from_secs(5), updates.recv())
+                .await
+                .unwrap(),
+            Some(WorkerEvent::TurnsCancelled {
+                pane: PaneId::Main,
+                count: 1,
+                error: None
+            })
+        ));
+        timeout(Duration::from_secs(5), drain)
+            .await
+            .unwrap()
+            .unwrap();
+        shutdown.cancel();
+        stopped(&mut updates).await;
     }
 
     #[tokio::test]

@@ -1,0 +1,58 @@
+// Stroke icons for the app shell, drawn on a 24px grid so they share one weight and optical size.
+
+const paths = {
+  plus: "M12 5v14M5 12h14",
+  menu: "M4 7h16M4 12h16M4 17h16",
+  close: "M6 6l12 12M18 6L6 18",
+  "arrow-up": "M12 19V5M6 11l6-6 6 6",
+  "arrow-left": "M19 12H5M11 6l-6 6 6 6",
+  "arrow-down": "M12 5v14M6 13l6 6 6-6",
+  stop: "M7 7h10v10H7z",
+  "chevron-down": "M6 9l6 6 6-6",
+  "chevron-right": "M9 6l6 6-6 6",
+  search: "M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14zM20 20l-4-4",
+  panel: "M4 5h16v14H4zM14 5v14",
+  sidebar: "M4 5h16v14H4zM10 5v14",
+  more: "M6 12h.01M12 12h.01M18 12h.01",
+  pin: "M12 17v5M9 3h6l-1 6 3 3H7l3-3-1-6z",
+  pencil: "M4 20h4L19 9l-4-4L4 16v4zM13.5 6.5l4 4",
+  sun: "M12 16a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4",
+  moon: "M20 14.5A8 8 0 0 1 9.5 4 8 8 0 1 0 20 14.5z",
+  monitor: "M3 5h18v11H3zM8 20h8M12 16v4",
+  terminal: "M4 5h16v14H4zM8 10l3 2-3 2M13 15h3",
+  check: "M5 12.5l4.5 4.5L19 7",
+  alert: "M12 9v4M12 17h.01M10.3 4.3L2.6 18a2 2 0 0 0 1.7 3h15.4a2 2 0 0 0 1.7-3L13.7 4.3a2 2 0 0 0-3.4 0z",
+  bolt: "M13 3L5 14h6l-1 7 8-11h-6l1-7z",
+  brain: "M9 4a3 3 0 0 0-3 3 3 3 0 0 0-2 5 3 3 0 0 0 2 5 3 3 0 0 0 6 1V5a2 2 0 0 0-3-1zM15 4a3 3 0 0 1 3 3 3 3 0 0 1 2 5 3 3 0 0 1-2 5 3 3 0 0 1-6 1",
+  tool: "M14.5 6.5a4 4 0 0 0 5 5L12 19a2.1 2.1 0 0 1-3-3l7.5-7.5a4 4 0 0 0-2-2z",
+  fork: "M7 4v6a4 4 0 0 0 4 4h2a4 4 0 0 1 4 4v2M17 4v6M7 20v-2",
+  "git-branch": "M6 3v12M18 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM6 21a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM18 9a9 9 0 0 1-9 9",
+  trash: "M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3",
+  history: "M3 12a9 9 0 1 0 3-6.7L3 8M3 3v5h5M12 7v5l3 2",
+  layers: "M12 3l9 5-9 5-9-5 9-5zM3 13l9 5 9-5",
+  message: "M4 5h16v11H9l-5 4V5z",
+  steer: "M5 12h10M11 6l6 6-6 6M19 5v14",
+  compact: "M8 4v4H4M16 4v4h4M8 20v-4H4M16 20v-4h4",
+  copy: "M8 8h11v12H8zM5 16V4h11",
+  circle: "M12 20a8 8 0 1 0 0-16 8 8 0 0 0 0 16z",
+  code: "M8 8l-4 4 4 4M16 8l4 4-4 4",
+  diff: "M12 4v6M9 7h6M9 17h6M5 3h14v18H5z",
+  keyboard: "M3 6h18v12H3zM7 10h.01M11 10h.01M15 10h.01M7 14h10",
+  user: "M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM4 21a8 8 0 0 1 16 0",
+  image: "M4 5h16v14H4zM4 16l5-5 4 4 2-2 5 5M15 9.5h.01",
+  database: "M4 6c0-1.7 3.6-3 8-3s8 1.3 8 3-3.6 3-8 3-8-1.3-8-3zM4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3",
+  settings: "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z",
+  gauge: "M12 14l4-4M3.5 18a10 10 0 1 1 17 0",
+  agents: "M12 8a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM5 22a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM19 22a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM12 8v4M12 12l-6 4M12 12l6 4",
+  refresh: "M20 11a8 8 0 0 0-14.9-3M4 4v4h4M4 13a8 8 0 0 0 14.9 3M20 20v-4h-4",
+  handoff: "M4 12h12M12 6l6 6-6 6M20 4v16",
+  reflect: "M12 3v18M5 8l-2 4 2 4M19 8l2 4-2 4",
+  sparkles: "M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8L12 3zM19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8L19 15z",
+} as const;
+
+export type GlyphName = keyof typeof paths;
+
+/** Inline SVG markup for an icon; decorative unless the caller labels its container. */
+export function glyph(name: GlyphName, className = "glyph") {
+  return `<svg class="${className}" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="${paths[name]}"/></svg>`;
+}

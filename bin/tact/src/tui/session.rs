@@ -6,8 +6,9 @@ use crate::{
         config::{ReasoningEffort, ReasoningMode},
         model,
     },
+    search::rank,
     tui::{
-        storage::{SessionStorage, StorageError},
+        storage::{SessionStorage, StorageError, StoredSession, database_path},
         transcript::{SessionStarted, TerminalStopReason, TranscriptRecord},
     },
 };
@@ -18,6 +19,7 @@ use nanocodex::{
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashSet,
+    fs::{self, File, TryLockError},
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -26,6 +28,8 @@ use thiserror::Error;
 
 const RESUME_STATE_FORMAT_VERSION: u32 = 2;
 pub(crate) const MAX_RECENT_PROMPTS: usize = 100;
+/// The most persisted sessions one history page holds.
+const HISTORY_PAGE_SIZE: usize = 50;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct SessionSummary {
@@ -38,12 +42,138 @@ pub(crate) struct SessionSummary {
     pub(crate) preview: String,
 }
 
+impl From<StoredSession> for SessionSummary {
+    fn from(session: StoredSession) -> Self {
+        Self {
+            session_id: session.session_id,
+            started_at_unix_ms: session.started_at_unix_ms,
+            model: session.model,
+            effort: session.effort,
+            reasoning_mode: session.reasoning_mode,
+            workspace: session.workspace,
+            preview: session.preview,
+        }
+    }
+}
+
+impl SessionSummary {
+    /// Whether a session-picker search matches. `query` must already be lowercase.
+    pub(crate) fn matches(&self, query: &str) -> bool {
+        query.is_empty()
+            || self.session_id.to_ascii_lowercase().contains(query)
+            || self.preview.to_ascii_lowercase().contains(query)
+            || self.model.to_ascii_lowercase().contains(query)
+            || self
+                .workspace
+                .to_string_lossy()
+                .to_ascii_lowercase()
+                .contains(query)
+    }
+}
+
+/// One page of persisted sessions matching a search, in listing order (newest first).
+#[derive(Debug, Serialize)]
+pub(crate) struct HistoryPage {
+    pub(crate) sessions: Vec<SessionSummary>,
+    /// Passed back as `cursor` to read the next page; `None` on the last page.
+    pub(crate) next_cursor: Option<String>,
+}
+
+impl HistoryPage {
+    /// Pages through `sessions` filtered by `query`. The cursor is opaque to clients; an
+    /// unparsable one is a client error.
+    pub(crate) fn new(
+        sessions: Vec<SessionSummary>,
+        query: &str,
+        cursor: Option<&str>,
+    ) -> Result<Self, String> {
+        let skip = cursor
+            .map(|cursor| {
+                cursor
+                    .parse::<usize>()
+                    .map_err(|_| format!("invalid history cursor {cursor:?}"))
+            })
+            .transpose()?
+            .unwrap_or(0);
+        let query = query.to_ascii_lowercase();
+        let mut matching = sessions
+            .into_iter()
+            .filter(|session| session.matches(&query))
+            .skip(skip);
+        let sessions = matching
+            .by_ref()
+            .take(HISTORY_PAGE_SIZE)
+            .collect::<Vec<_>>();
+        let next_cursor = matching.next().map(|_| (skip + sessions.len()).to_string());
+        Ok(Self {
+            sessions,
+            next_cursor,
+        })
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 pub(crate) struct RecentPrompt {
     pub(crate) text: String,
     pub(crate) recorded_at_unix_ms: u64,
     pub(crate) session_id: String,
     pub(crate) workspace: PathBuf,
+}
+
+/// Which prompts the recent-prompt picker offers.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RecentPromptScope {
+    #[default]
+    Global,
+    CurrentSession,
+}
+
+impl RecentPromptScope {
+    pub(crate) const fn toggled(self) -> Self {
+        match self {
+            Self::Global => Self::CurrentSession,
+            Self::CurrentSession => Self::Global,
+        }
+    }
+}
+
+/// Indices of the `prompts` within `scope` that match `query`, best first. Ties keep the order of
+/// `prompts`, which the loader sorts newest first.
+pub(crate) fn rank_recent_prompts(
+    prompts: &[RecentPrompt],
+    current_session_id: &str,
+    scope: RecentPromptScope,
+    query: &str,
+) -> Vec<usize> {
+    let mut ranked = rank(prompts, query, |prompt| prompt.text.as_str());
+    if scope == RecentPromptScope::CurrentSession {
+        ranked.retain(|&index| prompts[index].session_id == current_session_id);
+    }
+    ranked
+}
+
+/// Recent prompts matching a picker query, best first.
+#[derive(Debug, Serialize)]
+pub(crate) struct RecentPrompts {
+    pub(crate) prompts: Vec<RecentPrompt>,
+}
+
+impl RecentPrompts {
+    pub(crate) fn new(
+        prompts: Vec<RecentPrompt>,
+        current_session_id: &str,
+        scope: RecentPromptScope,
+        query: &str,
+    ) -> Self {
+        let ranked = rank_recent_prompts(&prompts, current_session_id, scope, query);
+        let mut slots = prompts.into_iter().map(Some).collect::<Vec<_>>();
+        let prompts = ranked
+            .into_iter()
+            .filter_map(|index| slots[index].take())
+            .collect();
+        Self { prompts }
+    }
 }
 
 /// Provider-owned checkpoints retain their native payload without translating conversation items.
@@ -225,6 +355,8 @@ pub(crate) enum SessionError {
         "session {session_id} uses resume-state format {found}; expected {RESUME_STATE_FORMAT_VERSION}"
     )]
     IncompatibleCheckpoint { session_id: String, found: u32 },
+    #[error("session transcript has no workspace metadata")]
+    MissingWorkspace,
     #[error("session lineage contains a cycle at {session_id}")]
     LineageCycle { session_id: String },
     #[error("session lineage references missing ancestor {session_id}")]
@@ -237,6 +369,48 @@ pub(crate) enum SessionError {
     StorageTask(#[source] tokio::task::JoinError),
     #[error("stored session uses unsupported model {model:?}")]
     UnsupportedModel { model: String },
+    #[error("session {session_id} is open in another Tact")]
+    Locked { session_id: String },
+    #[error("failed to lock session file {path}: {source}")]
+    Lock {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+/// Exclusive ownership of a live session across Tact processes, released on drop.
+///
+/// A session's journal has one writer, so a session is live in at most one pane of one process.
+/// The lock is an advisory file lock that the operating system releases if the process exits.
+#[derive(Debug)]
+pub(crate) struct SessionLock {
+    _file: File,
+}
+
+impl SessionLock {
+    pub(crate) fn acquire(config_path: &Path, session_id: &str) -> Result<Self, SessionError> {
+        let directory = database_path(config_path).with_file_name("locks");
+        let path = directory.join(format!("{session_id}.lock"));
+        let lock_error = |source| SessionError::Lock {
+            path: path.clone(),
+            source,
+        };
+        fs::create_dir_all(&directory).map_err(lock_error)?;
+        let file = File::options()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)
+            .map_err(lock_error)?;
+        match file.try_lock() {
+            Ok(()) => Ok(Self { _file: file }),
+            Err(TryLockError::WouldBlock) => Err(SessionError::Locked {
+                session_id: session_id.to_owned(),
+            }),
+            Err(TryLockError::Error(source)) => Err(lock_error(source)),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -318,21 +492,11 @@ pub(crate) fn list(
     let Some(storage) = SessionStorage::open_read_only(config_path)? else {
         return Ok(Vec::new());
     };
-    storage
+    Ok(storage
         .list_sessions(workspace, resumable_only)?
         .into_iter()
-        .map(|session| {
-            Ok(SessionSummary {
-                session_id: session.session_id,
-                started_at_unix_ms: session.started_at_unix_ms,
-                model: session.model,
-                effort: session.effort,
-                reasoning_mode: session.reasoning_mode,
-                workspace: session.workspace,
-                preview: session.preview,
-            })
-        })
-        .collect()
+        .map(SessionSummary::from)
+        .collect())
 }
 
 pub(crate) async fn list_async(
@@ -340,9 +504,25 @@ pub(crate) async fn list_async(
     workspace: PathBuf,
     resumable_only: bool,
 ) -> Result<Vec<SessionSummary>, SessionError> {
-    tokio::task::spawn_blocking(move || list(&config_path, &workspace, resumable_only))
-        .await
-        .map_err(SessionError::StorageTask)?
+    let workspaces = crate::web::checkout::family_paths(&workspace).await;
+    tokio::task::spawn_blocking(move || {
+        let Some(storage) = SessionStorage::open_read_only(&config_path)? else {
+            return Ok(Vec::new());
+        };
+        let mut sessions = Vec::new();
+        for workspace in workspaces {
+            sessions.extend(storage.list_sessions(&workspace, resumable_only)?);
+        }
+        sessions.sort_by(|left, right| {
+            right
+                .updated_at_unix_ms
+                .cmp(&left.updated_at_unix_ms)
+                .then_with(|| left.session_id.cmp(&right.session_id))
+        });
+        Ok(sessions.into_iter().map(SessionSummary::from).collect())
+    })
+    .await
+    .map_err(SessionError::StorageTask)?
 }
 
 pub(crate) async fn load_recent_prompts_async(
@@ -476,6 +656,16 @@ pub(crate) fn reasoning_mode(records: &[Arc<TranscriptRecord>]) -> ReasoningMode
         .map_or(ReasoningMode::Standard, |started| started.reasoning_mode)
 }
 
+pub(crate) fn workspace(records: &[Arc<TranscriptRecord>]) -> Result<PathBuf, SessionError> {
+    records
+        .iter()
+        .rev()
+        .find(|record| record.source() == "tact" && record.kind() == "session.started")
+        .and_then(|record| record.decode_payload::<SessionStarted>().ok())
+        .map(|started| started.workspace)
+        .ok_or(SessionError::MissingWorkspace)
+}
+
 pub(crate) fn model(records: &[Arc<TranscriptRecord>]) -> Result<Model, SessionError> {
     let stored = records
         .iter()
@@ -533,8 +723,9 @@ pub(crate) fn format_age(started_at_unix_ms: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        SessionError, TerminalStopReason, encode_checkpoint, load_checkpoint, load_transcript,
-        model, save_checkpoint,
+        HistoryPage, RecentPrompt, RecentPromptScope, RecentPrompts, SessionError, SessionSummary,
+        TerminalStopReason, encode_checkpoint, load_checkpoint, load_transcript, model,
+        save_checkpoint,
     };
     use crate::{
         app::config::{ReasoningEffort, ReasoningMode, Speed},
@@ -548,8 +739,71 @@ mod tests {
     };
     use rusqlite::Connection;
     use serde_json::{Value, json};
-    use std::{sync::Arc, time::Duration};
+    use std::{path::PathBuf, sync::Arc, time::Duration};
     use tempfile::tempdir;
+
+    fn summary(index: usize, preview: &str) -> SessionSummary {
+        SessionSummary {
+            session_id: format!("session-{index}"),
+            started_at_unix_ms: 0,
+            model: "gpt-6.1-sol".to_owned(),
+            effort: ReasoningEffort::Medium,
+            reasoning_mode: ReasoningMode::Standard,
+            workspace: PathBuf::from("/work"),
+            preview: preview.to_owned(),
+        }
+    }
+
+    #[test]
+    fn history_pages_filter_like_the_resume_picker() {
+        let sessions = (0..120)
+            .map(|index| summary(index, if index % 2 == 0 { "Fix Parser" } else { "docs" }))
+            .collect::<Vec<_>>();
+
+        let first = HistoryPage::new(sessions.clone(), "PARSER", None).unwrap();
+        assert_eq!(first.sessions.len(), 50);
+        assert_eq!(first.sessions[1].session_id, "session-2");
+        let cursor = first.next_cursor.unwrap();
+        let second = HistoryPage::new(sessions.clone(), "parser", Some(&cursor)).unwrap();
+        assert_eq!(second.sessions.len(), 10);
+        assert_eq!(second.sessions[0].session_id, "session-100");
+        assert_eq!(second.next_cursor, None);
+
+        let by_id = HistoryPage::new(sessions.clone(), "session-7", None).unwrap();
+        assert_eq!(by_id.sessions.len(), 11, "session-7 and session-70..79");
+        assert!(HistoryPage::new(sessions, "", Some("not a cursor")).is_err());
+    }
+
+    #[test]
+    fn recent_prompts_rank_within_the_requested_scope() {
+        let prompt = |text: &str, session_id: &str| RecentPrompt {
+            text: text.to_owned(),
+            recorded_at_unix_ms: 0,
+            session_id: session_id.to_owned(),
+            workspace: PathBuf::from("/work"),
+        };
+        let prompts = vec![
+            prompt("deploy the review app", "other"),
+            prompt("review the diff", "current"),
+            prompt("write docs", "current"),
+        ];
+        let texts = |scope, query| {
+            RecentPrompts::new(prompts.clone(), "current", scope, query)
+                .prompts
+                .into_iter()
+                .map(|prompt| prompt.text)
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            texts(RecentPromptScope::Global, "review"),
+            ["review the diff", "deploy the review app"]
+        );
+        assert_eq!(
+            texts(RecentPromptScope::CurrentSession, ""),
+            ["review the diff", "write docs"]
+        );
+    }
 
     fn snapshot(lineage: &str) -> SessionSnapshot {
         serde_json::from_value(json!({
@@ -621,6 +875,150 @@ mod tests {
 
         assert!(load_transcript(&config, "missing").unwrap().is_empty());
         assert!(!database_path(&config).exists());
+    }
+
+    #[tokio::test]
+    async fn resume_rejects_the_recorded_workspace_when_it_is_missing() {
+        use crate::app::config::{Config, ConfigOverrides};
+        let directory = tempdir().unwrap();
+        let config_path = directory.path().join("config.toml");
+        std::fs::write(&config_path, "").unwrap();
+        let config = Config::load(ConfigOverrides {
+            path: Some(config_path.clone()),
+            workspace: Some(directory.path().to_owned()),
+            ..ConfigOverrides::default()
+        })
+        .unwrap();
+        let missing = directory.path().join("deleted-checkout");
+        let mut start = started(1, "session", None, None)
+            .decode_payload::<SessionStarted>()
+            .unwrap();
+        start.workspace = missing.clone();
+        let record = Arc::new(
+            TranscriptRecord::from_local(1, 1, LocalEvent::SessionStarted(start)).unwrap(),
+        );
+        SessionStorage::open(&config_path)
+            .unwrap()
+            .append_records("session", &[record])
+            .unwrap();
+        save_checkpoint(
+            &config_path,
+            "session",
+            &snapshot("resume"),
+            "instructions",
+            false,
+        )
+        .unwrap();
+        let lock = super::SessionLock::acquire(&config_path, "session").unwrap();
+        let result =
+            crate::tui::restore_session(config, "session".to_owned(), ReasoningEffort::Low, lock)
+                .await;
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("missing workspace must prevent resume"),
+        };
+        assert!(
+            error
+                .to_string()
+                .contains(missing.to_string_lossy().as_ref())
+        );
+        assert!(
+            matches!(error, crate::app::error::Error::Runtime(crate::app::error::RuntimeError::ResolveWorkspace {path, ..}) if path == missing)
+        );
+    }
+
+    #[tokio::test]
+    async fn history_lists_the_repository_family_and_excludes_unrelated_sessions() {
+        use std::process::Command;
+        let directory = tempdir().unwrap();
+        let repository = directory.path().join("repository");
+        let checkout = directory.path().join("checkout");
+        std::fs::create_dir(&repository).unwrap();
+        let run = |args: &[&str]| {
+            let output = Command::new("git")
+                .args([
+                    "-c",
+                    "commit.gpgsign=false",
+                    "-c",
+                    "core.hooksPath=/dev/null",
+                ])
+                .current_dir(&repository)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        run(&["init", "--quiet"]);
+        run(&[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.test",
+            "commit",
+            "--quiet",
+            "--allow-empty",
+            "-m",
+            "fixture",
+        ]);
+        run(&[
+            "worktree",
+            "add",
+            "--quiet",
+            "--detach",
+            checkout.to_str().unwrap(),
+        ]);
+        let repository = repository.canonicalize().unwrap();
+        let checkout = checkout.canonicalize().unwrap();
+        let config_path = directory.path().join("config.toml");
+        let mut storage = SessionStorage::open(&config_path).unwrap();
+        for (index, workspace) in [
+            repository.clone(),
+            checkout.clone(),
+            directory.path().join("unrelated"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let id = format!("session-{index}");
+            let mut start = started(1, &id, None, None)
+                .decode_payload::<SessionStarted>()
+                .unwrap();
+            start.workspace = workspace;
+            let record = Arc::new(
+                TranscriptRecord::from_local(
+                    1,
+                    index as u64 + 1,
+                    LocalEvent::SessionStarted(start),
+                )
+                .unwrap(),
+            );
+            storage.append_records(&id, &[record]).unwrap();
+        }
+        storage
+            .append_records("session-0", &[prompt(2, "recent activity")])
+            .unwrap();
+        drop(storage);
+        let sessions = super::list_async(config_path.clone(), checkout, false)
+            .await
+            .unwrap();
+        assert_eq!(
+            sessions
+                .iter()
+                .map(|session| session.session_id.as_str())
+                .collect::<Vec<_>>(),
+            ["session-0", "session-1"]
+        );
+        assert_eq!(
+            super::list_async(config_path, repository, false)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
     }
 
     #[test]

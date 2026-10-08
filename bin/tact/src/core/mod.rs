@@ -9,6 +9,7 @@ mod mixed_provider_tests;
 mod openai_tests;
 #[cfg(feature = "harbor-evals")]
 mod orchestration;
+pub(crate) mod subagent_roster;
 
 use crate::{
     app::{
@@ -261,6 +262,7 @@ pub(crate) const MEMORY_REVIEW_CHECKPOINT: &str = concat!(
 );
 
 pub(crate) struct ConfiguredAgent {
+    pub(crate) workspace: PathBuf,
     pub(crate) agent: Nanocodex,
     pub(crate) context: AgentContext,
     pub(crate) events: AgentEvents,
@@ -476,13 +478,13 @@ impl ConfiguredAgent {
             tools = tools.provider(mcp);
         }
         let tools = tools.build().map_err(NanocodexError::from)?;
-        let memory = configured_memory_store(config, &workspace)?;
+        let memory = configured_memory_store(config, config.memory_workspace())?;
         let memory_enabled = memory.is_some();
         let (subagent_control, subagent_updates) = Subagents::new(agent_config.max_subagents());
         subagent_control.set_claude_enabled(config.claude().enabled());
         let recipe = Arc::new(AgentRecipe {
             config: config.clone(),
-            workspace,
+            workspace: workspace.clone(),
             tools,
             memory,
             subagents: subagent_control.downgrade(),
@@ -523,6 +525,7 @@ impl ConfiguredAgent {
             },
         )?;
         Ok(Self {
+            workspace,
             agent,
             context: AgentContext {
                 model,
@@ -1943,6 +1946,7 @@ mod tests {
         let (agent, events) = Nanocodex::builder(openai).build().unwrap();
         let (subagent_control, subagent_updates) = tact_subagents::Subagents::new(32);
         let configured = ConfiguredAgent {
+            workspace: std::env::current_dir().unwrap(),
             agent,
             context: tact_subagents::AgentContext {
                 model: Model::Codex(CodexModel::Astra),

@@ -2,7 +2,7 @@ use crate::tui::pane::PaneId;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-pub(crate) type ReviewResult = std::result::Result<Option<String>, crate::review::ReviewError>;
+pub(crate) type ReviewResult = std::result::Result<Option<String>, crate::web::ReviewError>;
 pub(crate) type ReviewTask = JoinHandle<ReviewCompletion>;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

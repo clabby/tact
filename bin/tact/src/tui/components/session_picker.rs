@@ -208,20 +208,6 @@ impl SessionPicker {
     }
 }
 
-impl SessionSummary {
-    fn matches(&self, query: &str) -> bool {
-        query.is_empty()
-            || self.session_id.to_ascii_lowercase().contains(query)
-            || self.preview.to_ascii_lowercase().contains(query)
-            || self.model.to_ascii_lowercase().contains(query)
-            || self
-                .workspace
-                .to_string_lossy()
-                .to_ascii_lowercase()
-                .contains(query)
-    }
-}
-
 impl Component for SessionPicker {
     type Event = SessionPickerEvent;
     type Effect = SessionPickerEffect;

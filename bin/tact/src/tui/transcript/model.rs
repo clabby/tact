@@ -1,6 +1,6 @@
 use super::{
     DirectedMessageEntry, EntryId, EntryKind, MessageDelivery, MessagePhase, SessionStarted,
-    ShellId, ToolEntry, ToolState, TranscriptEntry, TranscriptRecord, TransientStatus,
+    ShellId, ToolEntry, ToolState, TranscriptEntry, TranscriptRecord, TransientStatus, UserImage,
 };
 use crate::{
     app::config::{ReasoningEffort, Speed},
@@ -11,7 +11,7 @@ use nanocodex::{
         AssistantDelta, AssistantMessage, CompactionCompleted, CompactionFailed,
         ReasoningSummaryDelta, RunError,
     },
-    oai::responses::MessagePhase as AgentMessagePhase,
+    oai::{PromptInput, UserInput, responses::MessagePhase as AgentMessagePhase},
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -275,10 +275,16 @@ impl TranscriptModel {
                 }
             }),
             "user.submitted" => self.decode_local::<UserSubmitted>(record).map(|payload| {
-                self.push(EntryKind::User { text: payload.text });
+                self.push(EntryKind::User {
+                    text: payload.text,
+                    images: Vec::new(),
+                });
             }),
             "user.steered" => self.decode_local::<UserSteered>(record).map(|payload| {
-                self.push(EntryKind::User { text: payload.text });
+                self.push(EntryKind::User {
+                    text: payload.text,
+                    images: Vec::new(),
+                });
             }),
             "compaction.started" => {
                 self.manual_compaction = Some(ManualCompaction::Running);
@@ -452,6 +458,7 @@ impl TranscriptModel {
             self.reasoning.clear();
         }
         let result = match record.kind() {
+            "input.accepted" => self.input_accepted(record),
             "assistant.delta" => self.assistant_delta(record),
             "assistant.message" => self.assistant_message(record),
             "reasoning.summary.delta" => self.reasoning_delta(record),
@@ -534,6 +541,49 @@ impl TranscriptModel {
                 visibility(record.source(), record.kind()) == EventVisibility::Persistent,
             ),
         }
+    }
+
+    fn input_accepted(&mut self, record: &TranscriptRecord) -> Result<bool, serde_json::Error> {
+        #[derive(Deserialize)]
+        struct InputAccepted {
+            input: PromptInput,
+        }
+        let payload = record.decode_payload::<InputAccepted>()?;
+        let PromptInput::Content(input) = payload.input else {
+            return Ok(false);
+        };
+        let Some(entry) = self
+            .entries
+            .iter_mut()
+            .rev()
+            .find(|entry| matches!(entry.kind, EntryKind::User { .. }))
+        else {
+            return Ok(false);
+        };
+        let EntryKind::User { text, images } = &mut entry.kind else {
+            return Ok(false);
+        };
+        let markers = text.match_indices("[Image #").filter_map(|(start, _)| {
+            let suffix = &text[start + "[Image #".len()..];
+            let digits = suffix.bytes().take_while(u8::is_ascii_digit).count();
+            (digits > 0 && suffix.as_bytes().get(digits) == Some(&b']'))
+                .then_some(start..start + "[Image #".len() + digits + 1)
+        });
+        let attached = input
+            .into_iter()
+            .filter_map(|part| match part {
+                UserInput::Image { image_url, .. } => Some(image_url),
+                _ => None,
+            })
+            .zip(markers)
+            .map(|(data_url, range)| UserImage { range, data_url })
+            .collect::<Vec<_>>();
+        if *images == attached {
+            return Ok(false);
+        }
+        *images = attached;
+        entry.revision = entry.revision.saturating_add(1);
+        Ok(true)
     }
 
     fn assistant_delta(&mut self, record: &TranscriptRecord) -> Result<bool, serde_json::Error> {
@@ -2253,6 +2303,85 @@ mod tests {
     }
 
     #[test]
+    fn accepted_images_attach_to_user_markers_and_replay_identically() {
+        let text = "é [Image #7] text [Image #21] [Image #bad]";
+        let submitted = TranscriptRecord::from_local(
+            1,
+            1,
+            LocalEvent::UserSubmitted {
+                id: TurnId::new(3),
+                text: text.to_owned(),
+            },
+        )
+        .unwrap();
+        let accepted = agent(
+            AgentEventKind::InputAccepted,
+            json!({
+                "input": [
+                    {"type": "text", "text": "prompt"},
+                    {"type": "image", "image_url": "data:image/png;base64,first"},
+                    {"type": "image", "image_url": "data:image/png;base64,second"},
+                    {"type": "image", "image_url": "data:image/png;base64,extra"}
+                ]
+            }),
+        );
+        let mut model = TranscriptModel::default();
+        model.apply(&submitted);
+        let revision = model.entries()[0].revision;
+        assert!(model.apply(&accepted).changed);
+        assert!(model.entries()[0].revision > revision);
+        let EntryKind::User { images, .. } = &model.entries()[0].kind else {
+            panic!("user entry missing")
+        };
+        assert_eq!(images.len(), 2);
+        assert_eq!(images[0].range, 3..13);
+        assert_eq!(images[1].range, 19..30);
+        assert_eq!(&text[images[0].range.clone()], "[Image #7]");
+        assert_eq!(images[1].data_url, "data:image/png;base64,second");
+        let mut replay = TranscriptModel::default();
+        for record in [&submitted, &accepted] {
+            let encoded = serde_json::to_string(record).unwrap();
+            let restored = serde_json::from_str::<TranscriptRecord>(&encoded).unwrap();
+            replay.apply(&restored);
+        }
+        let EntryKind::User {
+            images: replayed, ..
+        } = &replay.entries()[0].kind
+        else {
+            panic!("user entry missing")
+        };
+        assert_eq!(images, replayed);
+        assert!(!model.apply(&accepted).changed);
+    }
+
+    #[test]
+    fn accepted_plain_text_does_not_change_the_user_entry() {
+        let mut model = TranscriptModel::default();
+        model.apply(
+            &TranscriptRecord::from_local(
+                1,
+                1,
+                LocalEvent::UserSubmitted {
+                    id: TurnId::new(3),
+                    text: "hello".to_owned(),
+                },
+            )
+            .unwrap(),
+        );
+        let revision = model.entries()[0].revision;
+        assert!(
+            !model
+                .apply(&agent(
+                    AgentEventKind::InputAccepted,
+                    json!({"input": "hello"})
+                ))
+                .changed
+        );
+        assert_eq!(model.entries().len(), 1);
+        assert_eq!(model.entries()[0].revision, revision);
+    }
+
+    #[test]
     fn local_user_event_is_persistent() {
         let mut model = TranscriptModel::default();
         let record = TranscriptRecord::from_local(
@@ -2378,7 +2507,7 @@ mod tests {
         assert_eq!(snapshot.entries().len(), 1);
         assert!(matches!(
             &snapshot.entries()[0].kind,
-            EntryKind::User { text } if text == "completed"
+            EntryKind::User { text, .. } if text == "completed"
         ));
         assert!(!snapshot.is_active());
         assert!(!snapshot.has_running_tools());
