@@ -50,8 +50,9 @@ Static assets are public. Every `/api/*` route except `POST /api/login` requires
 - Errors are JSON `{ "code": string, "message": string }`. Codes: `unauthorized` (401),
   `invalid_request` (400), `turn_running`, `queue_not_empty`, `nothing_running`, `draft_changed`,
   `session_locked`, `unknown_session`, `too_many_sessions`, `not_available_remotely`, `stale`,
-  `disabled` (409/404), `failed` (500), plus the review codes in `web/protocol.ts`. Commands
-  and queries share one mapping (`protocol::CommandError::code`).
+  `disabled` (409/404), `failed` (500). Commands and queries share one mapping
+  (`protocol::CommandError::code`). The review routes use their own error body; see "Review
+  errors".
 
 ## Reads
 
@@ -70,8 +71,10 @@ Static assets are public. Every `/api/*` route except `POST /api/login` requires
 
 One SSE stream per tab, following the shared active session. On connect it emits `hello`, `live`,
 `active`, and a `snapshot` of the active session; reconnect repeats this (no replay). Each event is
-`event: <name>` with a JSON `data`. Keep-alive comment every 15 s. Entry events are coalesced to
-the TUI's frame interval.
+`event: <name>` with a JSON `data`, serialized once and shared by every stream. Keep-alive comment
+every 15 s. Entry events are coalesced to the TUI's frame interval. A tab that connects between
+two coalesced deliveries can receive an `entry` its snapshot already holds; the upsert rule makes
+that harmless.
 
 | Event | Data |
 | :-- | :-- |
@@ -307,43 +310,112 @@ type SubagentRoster = {
 };
 ```
 
-## Review (diff and overview)
+## Review
 
-The review engine keeps its existing payloads (`web/protocol.ts`) with these changes:
+The review routes (`bin/tact/src/web/review`) diff a checkout and run agent operations on the
+selected range. The browser types live in `web/src/review/protocol.ts`.
 
-- The diff context is per checkout and prepared lazily by `GET /api/review`, then cached by
-  generation. Every review request may name a `checkout` (an absolute path); without one it is the
-  session's workspace. A checkout must be a member of the session's repository (a git worktree or a
-  jj workspace, found with `git worktree list` and `jj workspace list`), or of the default workspace's
-  or another live session's; anything else is `invalid_checkout` (400). The review payload carries
-  `checkout: { path, name, label, kind }`. The server keeps the four most recently used checkouts
-  and watches each only while kept. `POST /api/refresh`, `/api/range` also accept `session`.
-- Overviews, AI reviews, and inline question threads belong to a session. Their requests gain
-  `session`; they run through that session's worker as a clean-context auxiliary prompt, and are
-  cancelled when the session closes.
-  `GET /api/review?session=<id>` and `POST /api/refresh` (optional `session`) include that session's
-  selected overview and question threads; `POST /api/questions` requires `session`.
-- `/api/status` polling is replaced by the `workspace` stream event. The server watches the
-  workspace version while any stream is connected and emits it when it changes. "Agent running" for
-  staleness means any live session is busy.
-- `/api/decision` and `/api/cancel` are gone. `POST /api/review/compose` with the former decision
-  body returns `{ markdown }`, the canonical review text; the client writes it into the active
-  session's draft (**Send to chat**). When the reviewed checkout is not the session's workspace the
-  text names it (`**Checkout:** `path``) so the agent knows where the comments apply.
+A review is kept per checkout. `GET /api/review` prepares it on first use. Every capture of the
+checkout is a **generation**; `POST /api/refresh` captures it again as the next generation, which
+cancels work started for the old one and makes requests that name the old generation fail with
+`stale_snapshot`. A **range** is `{ from, to }`, indices into `range_targets` (trunk merge base,
+each commit, then the working tree), with `from < to`.
+
+Every request may name a `checkout` (an absolute path); without one the target is the session's
+workspace, or the default workspace without a session. See [workspaces.md](workspaces.md) for which
+checkouts are accepted. Overviews, AI reviews, and question threads belong to a live `session`.
+They run on that session's worker as clean-context prompts, are refused while any session has a
+turn running (`turn_running`), and are cancelled when the session closes.
+
+| Endpoint | Body | Response |
+| :-- | :-- | :-- |
+| `GET /api/review?session=&checkout=` | none | `Review` |
+| `POST /api/refresh` | `generation, session?, checkout?` | `Review` for the next generation |
+| `POST /api/range` | `generation, range, session?, checkout?` | `ReviewPage` |
+| `POST /api/overview` | `session, generation, range, instructions?, checkout?` | `{ generation, selected_range, overview_mdx, instructions }` |
+| `POST /api/ai-review` | `session, generation, range, checkout?` | `{ generation, selected_range, comments: AiComment[] }` |
+| `POST /api/question` | `QuestionRequest` | `{ generation, selected_range, answer }` |
+| `POST /api/questions` | `generation, session, checkout?` | `{ generation, questions: Question[] }` |
+| `POST /api/question/cancel` | `operation_id, generation, range, session?` | 204 |
+| `POST /api/review/compose` | `generation, range, decision, summary?, comments?, session?, checkout?` | `{ markdown }` |
+
+`Review` is `{ protocol_version, generation, title, repository, checkout: { path, name, label,
+kind }, trunk, range_targets, default_range, page: ReviewPage, overview, questions, turn_running }`.
+A `ReviewPage` is `{ generation, selected_range, full_context, patch, repository, scope, base }`;
+`patch` is a git patch with full file context. `overview` and `questions` are the named session's
+selected overview and question threads.
+
+Requests for the same overview (session, generation, range, and instructions) share one agent run,
+and a finished overview is cached. Instructions are trimmed and limited to 8 KiB. AI review
+comments are `{ path, side, start_line, end_line, body }`, where `side` is `additions` or
+`deletions` and `body` starts with a severity label `[P0]` through `[P3]`; a reply with an
+unanchored comment fails as `ai_review_failed`. A question names its thread and operation ids and
+an anchor (`path`, `side`, `start_line`, `end_line`), and carries the whole thread, alternating
+`reviewer` and `agent` messages and ending with the reviewer.
+
+`compose` turns a decision (`approve` or `request_changes`) into the Markdown the browser writes
+into the session's draft (**Send to chat**). Every comment must lie inside a hunk of the reviewed
+patch. When the reviewed checkout is not the session's workspace the text names it in a
+`**Checkout:**` line.
+
+The `workspace` stream event reports that a checkout's content changed. The server polls each
+kept checkout while any stream is connected.
+
+### Review errors
+
+Review failures are JSON `{ code, error, retryable, snapshot_valid }`. `retryable` says whether
+repeating the request can succeed; `snapshot_valid` says whether the client's current generation
+and range are still usable.
+
+| Code | Status | Retryable | Snapshot valid | Meaning |
+| :-- | :-- | :-- | :-- | :-- |
+| `stale_snapshot` | 409 | yes | no | The generation or range is gone, or the checkout changed; reload |
+| `workspace_changed` | 422 | yes | no | The checkout could not be captured |
+| `workspace_changed` | 422 | no | no | The directory is not a git or jj checkout |
+| `workspace_changed` | 503 | yes | no | The checkout's version could not be read |
+| `invalid_range` | 422 | no | yes | The range cannot be captured |
+| `invalid_overview_instructions` | 400 | yes | yes | Instructions exceed 8 KiB |
+| `overview_failed` | 422 | yes | yes | The agent failed or returned an empty or oversized overview |
+| `ai_review_failed` | 422 | yes | yes | The agent failed or returned invalid or unanchored comments |
+| `question_failed` | 422 | yes | yes | The agent failed or returned an empty or oversized answer |
+| `invalid_thread` | 422 | no | yes | Malformed, unanchored, or out-of-order question thread |
+| `invalid_comment_anchor` | 422 | no | yes | A composed comment is malformed or outside the patch |
+| `turn_running` | 409 | yes | yes | A session has a turn running |
+| `operation_cancelled` | 409 | yes | yes | The operation was cancelled or superseded |
+| `session_cancelled` | 409 | no | yes | The operation's session closed |
+| `unknown_session` | 404 | no | yes | The session is not live |
+| `invalid_checkout` | 400 | no | yes | The checkout is not in an accepted repository family |
+| `failed` | 500 | yes | yes | The server failed independently of the request |
 
 ## UI
 
-Chat first. Left sidebar: **+ New chat**, **Live** sessions with state markers (pulsing running,
-idle, accent unread, pencil draft), **History** with search; an instance switcher. The main area has
-two full-width tabs: **Chat** (the transcript and the shared composer) and **Review** (Pierre diffs,
-live while the agent edits, plus an **Overview** sub-tab). A prompt minimap on the chat's right edge shows one tick per prompt (longer prompts draw longer ticks, the current one is highlighted); pointing at it unfolds a list of prompt previews, choosing one scrolls there, and sessions with more than 12 prompts page through them. The terminal's Actions menu has **Show QR code**, which draws the sign-in link as a Unicode QR code (black on white, whatever the theme) for a phone to scan; like the web version it refuses an address that only this computer can reach, so set web.tailscale or web.public_url first. The credential is only inside the code, never shown as text. Live sessions are ordered by recent activity; Pin to top in a row's menu keeps a session above the rest (remembered per browser). Subagents appear as a hierarchy graph (Active or All, active by default as in the terminal) that fills the popup; selecting an agent opens its transcript beside the graph (same renderer as the chat), and the back button returns to the full graph; a chip above the composer reports running subagents and opens the popup. Apply-patch calls render as truncated
-Pierre diffs in the transcript; shell and code calls render as terminal blocks.
+The web UI is chat first. Its styling takes the palette and rhythm of the TUI theme and is
+mobile-first.
 
-In the composer, `/` at the start of the draft lists the actions that apply to the session's
-current state (compaction and handoff wait for an idle, started session; the model and Pro mode
-only before the first prompt). Esc interrupts a running turn only when pressed twice; the first
-press shows a confirmation and any other input cancels it, as in the terminal. The sidebar folds away on desktops (button in the header, Cmd/Ctrl B, remembered per browser; Cmd/Ctrl . switches between chat and review) and is a drawer on narrower windows. The styling takes
-its palette and rhythm from the TUI theme and is mobile-first.
+- **Sidebar.** **+ New chat**, **Live** sessions with state markers (pulsing running, idle, accent
+  unread, pencil draft), **History** with search, and an instance switcher. Live sessions are
+  ordered by recent activity; **Pin to top** in a row's menu keeps a session above the rest
+  (remembered per browser). On desktops the sidebar folds away (header button or Cmd/Ctrl B,
+  remembered per browser); on narrower windows it is a drawer.
+- **Tabs.** **Chat** holds the transcript and the shared composer. **Review** holds the Pierre
+  diffs, live while the agent edits, and an **Overview** sub-tab. Cmd/Ctrl . switches between them.
+- **Transcript.** Apply-patch calls render as truncated Pierre diffs; shell and code calls render
+  as terminal blocks.
+- **Prompt minimap.** One tick per prompt on the chat's right edge; longer prompts draw longer
+  ticks and the current one is highlighted. Pointing at it lists prompt previews, choosing one
+  scrolls there, and sessions with more than 12 prompts page through them.
+- **Subagents.** A hierarchy graph (Active or All, Active by default) fills a popup. Selecting an
+  agent opens its transcript beside the graph with the chat's renderer; the back button returns to
+  the full graph. A chip above the composer reports running subagents and opens the popup.
+- **Composer.** `/` at the start of the draft lists the actions that apply to the session's current
+  state: compaction and handoff need an idle, started session; the model and Pro mode are offered
+  only before the first prompt. Esc interrupts a running turn only when pressed twice; the first
+  press asks for confirmation and any other input cancels it, as in the terminal.
+
+The terminal's Actions menu has **Show QR code**, which draws the sign-in link as a Unicode QR code
+(black on white, whatever the theme) for a phone to scan. Like the web version it refuses an
+address that only this computer can reach, so set `web.tailscale` or `web.public_url` first. The
+credential is only inside the code and is never shown as text.
 
 ## Remote access
 
