@@ -225,6 +225,29 @@ impl TurnTimer {
     }
 }
 
+/// The content of the composer's top border, which [`Composer::render_chrome`] lays out:
+/// status text from the left, and the turn timer and clickable controls from the right.
+#[derive(Debug, Eq, PartialEq)]
+struct StatusLine {
+    /// Context usage as a rounded percentage of the window, such as `12%/272k`.
+    context: String,
+    input_mode: Option<&'static str>,
+    /// The status of a task that blocks the composer.
+    task: Option<String>,
+    /// The transient status of the running turn.
+    activity: Option<String>,
+    subagents: usize,
+    live_sessions: Option<LiveSessions>,
+    /// The elapsed time of the oldest running turn.
+    turn_timer: Option<String>,
+    model: Model,
+    effort: ReasoningEffort,
+    /// The speed the model runs at, which is lower than requested when the model lacks that tier.
+    speed: Speed,
+    /// Whether the pro badge is shown; only Codex models have a pro reasoning mode.
+    pro: bool,
+}
+
 /// The result of a composer update.
 ///
 /// Unlike [`ComponentUpdate`](super::node::ComponentUpdate), the composer reports whether it
@@ -878,6 +901,36 @@ impl Composer {
         }
     }
 
+    fn status_line(&self) -> StatusLine {
+        let window = self.context_window_tokens;
+        let capacity = if window.is_multiple_of(1_000_000) {
+            format!("{}m", window / 1_000_000)
+        } else if window.is_multiple_of(1_000) {
+            format!("{}k", window / 1_000)
+        } else {
+            window.to_string()
+        };
+        StatusLine {
+            context: format!(
+                "{}%/{capacity}",
+                context_percent(self.context_tokens, window)
+            ),
+            input_mode: self.input_mode.hint(),
+            task: self.task_wave.as_ref().map(|wave| wave.text().to_owned()),
+            activity: self
+                .activity_wave
+                .as_ref()
+                .map(|wave| wave.text().to_owned()),
+            subagents: self.active_subagents,
+            live_sessions: self.live_sessions,
+            turn_timer: self.turn_timers.front().map(TurnTimer::label),
+            model: self.model,
+            effort: self.thinking,
+            speed: self.speed.for_model(self.model),
+            pro: self.reasoning_mode == ReasoningMode::Pro && matches!(self.model, Model::Codex(_)),
+        }
+    }
+
     fn render_chrome(&mut self, buffer: &mut Buffer, area: Rect, theme: &Theme) {
         self.chrome_hits.clear();
         let shell_mode = self.draft.text().starts_with('!');
@@ -901,65 +954,42 @@ impl Composer {
         let content_start = area.x + 2;
         let content_width = usize::from(area.width - 4);
         let content_end = content_start + u16::try_from(content_width).unwrap_or(u16::MAX);
-        let window = self.context_window_tokens;
-        let capacity = if window.is_multiple_of(1_000_000) {
-            format!("{}m", window / 1_000_000)
-        } else if window.is_multiple_of(1_000) {
-            format!("{}k", window / 1_000)
-        } else {
-            window.to_string()
-        };
-        let usage_prefix = format!(
-            " {}%/{capacity} ",
-            context_percent(self.context_tokens, window)
-        );
-        let input_mode_segment = self
-            .input_mode
-            .hint()
-            .map(|hint| format!("{hint} "))
-            .unwrap_or_default();
-        let task_segment = self
-            .task_wave
-            .as_ref()
-            .map(|wave| format!("{} ", wave.text()))
-            .unwrap_or_default();
-        let subagent_segment = if self.active_subagents > 0 {
-            format!(" {} subagents", self.active_subagents)
-        } else {
-            String::new()
-        };
-        let usage_before_activity = format!("{usage_prefix}{input_mode_segment}{task_segment}");
-        let usage_before_subagents = self.activity_wave.as_ref().map_or_else(
-            || usage_before_activity.clone(),
-            |wave| format!("{usage_before_activity}{} ", wave.text()),
-        );
-        let mut usage = if subagent_segment.is_empty() {
-            usage_before_subagents.clone()
-        } else {
-            format!("{usage_before_subagents}{} ", subagent_segment.trim_start())
-        };
-        if let Some(sessions) = self.live_sessions {
+        let status = self.status_line();
+        let usage_prefix = format!(" {} ", status.context);
+        let mut usage_before_activity = usage_prefix.clone();
+        if let Some(hint) = status.input_mode {
+            write!(usage_before_activity, "{hint} ").expect("writing to a String cannot fail");
+        }
+        if let Some(task) = &status.task {
+            write!(usage_before_activity, "{task} ").expect("writing to a String cannot fail");
+        }
+        let mut usage_before_subagents = usage_before_activity.clone();
+        if let Some(activity) = &status.activity {
+            write!(usage_before_subagents, "{activity} ").expect("writing to a String cannot fail");
+        }
+        let mut usage = usage_before_subagents.clone();
+        if status.subagents > 0 {
+            write!(usage, "{} subagents ", status.subagents)
+                .expect("writing to a String cannot fail");
+        }
+        if let Some(sessions) = status.live_sessions {
             write!(usage, "{sessions} ").expect("writing to a String cannot fail");
         }
-        let model = format!(" {} ", self.model);
-        let timer = self
-            .turn_timers
-            .front()
-            .map(|timer| format!(" {} ", timer.label()))
+        let model = format!(" {} ", status.model);
+        let timer = status
+            .turn_timer
+            .as_deref()
+            .map(|label| format!(" {label} "))
             .unwrap_or_default();
-        let effort = format!(" {} ", self.thinking.as_str());
+        let effort = format!(" {} ", status.effort.as_str());
 
         // Nerd Fonts: md-turtle, md-rabbit, and md-rocket.
-        let effective_speed = self.speed.for_model(self.model);
-        let speed = match effective_speed {
+        let speed = match status.speed {
             Speed::Standard => "󰳗 ",
             Speed::Fast => "󰤇 ",
             Speed::Ultrafast => "󰑣 ",
         };
-
-        let pro_mode = (self.reasoning_mode == ReasoningMode::Pro
-            && matches!(self.model, Model::Codex(_)))
-        .then_some("pro ");
+        let pro_mode = status.pro.then_some("pro ");
         let right_width = timer.width()
             + model.width()
             + effort.width()
@@ -1021,7 +1051,7 @@ impl Composer {
             top,
             &model,
             usize::from(content_end.saturating_sub(model_start)),
-            Style::default().fg(theme.model(self.model)),
+            Style::default().fg(theme.model(status.model)),
         );
         let effort_start = model_start + u16::try_from(model.width()).unwrap_or(u16::MAX);
         if effort_start < content_end {
@@ -1038,7 +1068,7 @@ impl Composer {
                 &effort,
                 usize::from(content_end - effort_start),
                 Style::default()
-                    .fg(theme.effort(self.thinking))
+                    .fg(theme.effort(status.effort))
                     .add_modifier(Modifier::BOLD),
             );
         }
@@ -1067,7 +1097,7 @@ impl Composer {
                 speed,
                 usize::from(content_end - speed_start),
                 Style::default()
-                    .fg(theme.speed(effective_speed))
+                    .fg(theme.speed(status.speed))
                     .add_modifier(Modifier::BOLD),
             );
         }
@@ -1247,11 +1277,16 @@ fn draw_symbol(buffer: &mut Buffer, x: u16, y: u16, symbol: &str, style: Style) 
 mod tests {
     use super::{
         super::selection::{Selection, Surface, TextRange},
-        Composer, ComposerChromeTarget, ComposerEffect, ComposerEvent, context_percent,
+        Composer, ComposerChromeTarget, ComposerEffect, ComposerEvent, InputMode, LiveSessions,
+        StatusLine, context_percent,
     };
-    use crate::app::{
-        config::{ReasoningEffort, ReasoningMode, Speed},
-        theme::Theme,
+    use crate::{
+        app::{
+            config::{ReasoningEffort, ReasoningMode, Speed},
+            installation,
+            theme::Theme,
+        },
+        core::context::ContextBudget,
     };
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use nanocodex::{
@@ -1261,8 +1296,9 @@ mod tests {
     use ratatui::{
         Terminal,
         backend::TestBackend,
+        buffer::Cell,
         layout::{Position, Rect},
-        style::Color,
+        style::{Color, Modifier},
     };
     use std::{
         path::Path,
@@ -1272,6 +1308,23 @@ mod tests {
 
     fn new_composer() -> Composer {
         Composer::new(Path::new("/work"), ReasoningEffort::Medium)
+    }
+
+    /// The status line of [`new_composer`].
+    fn idle_status() -> StatusLine {
+        StatusLine {
+            context: "0%/272k".to_owned(),
+            input_mode: None,
+            task: None,
+            activity: None,
+            subagents: 0,
+            live_sessions: None,
+            turn_timer: None,
+            model: Model::Codex(CodexModel::Sol),
+            effort: ReasoningEffort::Medium,
+            speed: Speed::Standard,
+            pro: false,
+        }
     }
 
     fn key(code: KeyCode, modifiers: KeyModifiers) -> ComposerEvent {
@@ -1318,105 +1371,176 @@ mod tests {
             .collect()
     }
 
+    /// The cells on row `y` that display the first occurrence of `text`, which must follow only
+    /// single-width symbols on that row.
+    fn cells_of<'a>(terminal: &'a Terminal<TestBackend>, y: u16, text: &str) -> &'a [Cell] {
+        let buffer = terminal.backend().buffer();
+        let row = &rows(terminal)[usize::from(y)];
+        let x = row[..row.find(text).expect("text should be rendered")].width();
+        let start = usize::from(y) * usize::from(buffer.area.width) + x;
+        &buffer.content[start..start + text.width()]
+    }
+
+    /// A footer row for `/work` written as development builds render it; other builds draw border
+    /// in place of the development badge.
+    fn footer(development: &str) -> String {
+        if installation::current().is_development() {
+            development.to_owned()
+        } else {
+            development.replace(" ◉ dev ", "───────")
+        }
+    }
+
     #[test]
     fn empty_composer_matches_the_pi_chrome() {
         let mut composer = new_composer();
-        let terminal = render(&mut composer, 60, 5);
-        let footer = if crate::app::installation::current().is_development() {
-            "╰─ / actions · @ paths · @@ sessions ─────── ◉ dev  /work ─╯"
-        } else {
-            "╰─ / actions · @ paths · @@ sessions ───────────────── /work ─╯"
-        };
+        assert_eq!(composer.status_line(), idle_status());
 
+        let terminal = render(&mut composer, 60, 5);
         assert_eq!(
             rows(&terminal),
             [
-                "╭─ 0%/272k ──────────────────────── gpt-6.1-sol  medium 󰳗 ─╮",
-                "│                                                          │",
-                "│                                                          │",
-                "│                                                          │",
-                footer,
+                "╭─ 0%/272k ──────────────────────── gpt-6.1-sol  medium 󰳗 ─╮".to_owned(),
+                "│                                                          │".to_owned(),
+                "│                                                          │".to_owned(),
+                "│                                                          │".to_owned(),
+                footer("╰─ / actions · @ paths · @@ sessions ─────── ◉ dev  /work ─╯"),
             ]
         );
 
-        let buffer = terminal.backend().buffer();
-        let footer = &rows(&terminal)[4];
-        let action_key =
-            u16::try_from(footer[..footer.find("/ actions").unwrap()].width()).unwrap();
-        let action_help = action_key + 2;
-        assert_eq!(buffer[(action_key, 4)].fg, Color::Reset);
-        assert_eq!(buffer[(action_help, 4)].fg, Theme::default().muted());
+        let actions = cells_of(&terminal, 4, "/ actions");
+        assert_eq!(actions[0].fg, Color::Reset);
+        assert_eq!(actions[2].fg, Theme::default().muted());
+    }
+
+    #[test]
+    fn top_border_lays_out_status_then_timer_and_controls() {
+        let mut composer = new_composer();
+        let now = Instant::now();
+        for event in [
+            ComposerEvent::ContextBudget(ContextBudget {
+                active_tokens: 34_000,
+                window_tokens: 1_000_000,
+            }),
+            ComposerEvent::TaskStatus {
+                status: Some("Preparing handoff…".to_owned()),
+                now,
+            },
+            ComposerEvent::Activity {
+                active: true,
+                status: Some("Thinking…".to_owned()),
+                now,
+            },
+            ComposerEvent::ActiveSubagents { count: 2, now },
+            ComposerEvent::LiveSessions(Some(LiveSessions {
+                live: 3,
+                running: 1,
+            })),
+            ComposerEvent::TurnStarted {
+                elapsed: Duration::from_secs(65),
+                now,
+            },
+            ComposerEvent::SetSpeed(Speed::Fast),
+            ComposerEvent::SetReasoningMode(ReasoningMode::Pro),
+        ] {
+            composer.update(event);
+        }
+
+        assert_eq!(
+            composer.status_line(),
+            StatusLine {
+                context: "3%/1m".to_owned(),
+                task: Some("Preparing handoff…".to_owned()),
+                activity: Some("Thinking…".to_owned()),
+                subagents: 2,
+                live_sessions: Some(LiveSessions {
+                    live: 3,
+                    running: 1
+                }),
+                turn_timer: Some("1m 5s".to_owned()),
+                speed: Speed::Fast,
+                pro: true,
+                ..idle_status()
+            }
+        );
+        assert_eq!(
+            rows(&render(&mut composer, 120, 5))[0],
+            "╭─ 3%/1m Preparing handoff… Thinking… 2 subagents 3 sessions, 1 running ──────────── 1m 5s  gpt-6.1-sol  medium 󰤇 pro ─╮"
+        );
+    }
+
+    #[test]
+    fn input_mode_hint_follows_context_usage() {
+        let mut composer = new_composer();
+        composer.update(ComposerEvent::InputMode(InputMode::Reflection));
+
+        assert_eq!(
+            composer.status_line(),
+            StatusLine {
+                input_mode: Some("Reflection instructions · enter start · esc cancel"),
+                ..idle_status()
+            }
+        );
+        assert_eq!(
+            rows(&render(&mut composer, 90, 5))[0],
+            "╭─ 0%/272k Reflection instructions · enter start · esc cancel ─── gpt-6.1-sol  medium 󰳗 ─╮"
+        );
     }
 
     #[test]
     fn composer_chrome_uses_the_model_palette() {
-        for (model, color) in [
-            (
-                Model::Codex(CodexModel::Luna),
-                Theme::default().model(Model::Codex(CodexModel::Luna)),
-            ),
-            (
-                Model::Codex(CodexModel::Sol),
-                Theme::default().model(Model::Codex(CodexModel::Sol)),
-            ),
-            (
-                Model::Codex(CodexModel::Astra),
-                Theme::default().model(Model::Codex(CodexModel::Astra)),
-            ),
-        ] {
+        for model in [CodexModel::Luna, CodexModel::Sol, CodexModel::Astra].map(Model::Codex) {
             let mut composer = new_composer();
             composer.update(ComposerEvent::SetModel(model));
-            let terminal = render(&mut composer, 60, 5);
-            let label = model.to_string().chars().collect::<Vec<_>>();
-            let line = rows(&terminal)[0].chars().collect::<Vec<_>>();
-            let start = line
-                .windows(label.len())
-                .position(|window| window == label)
-                .unwrap();
+            assert_eq!(composer.status_line().model, model);
 
-            assert_eq!(
-                terminal.backend().buffer()[(u16::try_from(start).unwrap(), 0)].fg,
-                color
+            let terminal = render(&mut composer, 60, 5);
+            let label = cells_of(&terminal, 0, model.as_str());
+            assert!(
+                label
+                    .iter()
+                    .all(|cell| cell.fg == Theme::default().model(model))
             );
         }
     }
 
     #[test]
-    fn task_status_uses_green_chrome_next_to_context() {
+    fn task_status_turns_the_border_green() {
         let mut composer = new_composer();
         composer.update(ComposerEvent::TaskStatus {
             status: Some("Preparing handoff…".to_owned()),
             now: Instant::now(),
         });
 
+        assert_eq!(
+            composer.status_line(),
+            StatusLine {
+                task: Some("Preparing handoff…".to_owned()),
+                ..idle_status()
+            }
+        );
         let terminal = render(&mut composer, 80, 5);
-
-        assert!(rows(&terminal)[0].contains("0%/272k Preparing handoff…"));
         assert_eq!(terminal.backend().buffer()[(0, 0)].fg, Color::Green);
     }
 
     #[test]
-    fn turn_timer_is_rendered_immediately_before_the_model() {
+    fn turn_timer_advances_each_second_until_the_turn_finishes() {
         let mut composer = new_composer();
         let started_at = Instant::now();
         composer.update(ComposerEvent::TurnStarted {
             elapsed: Duration::from_secs(65),
             now: started_at,
         });
-
-        let terminal = render(&mut composer, 72, 5);
-        assert!(rows(&terminal)[0].contains(" 1m 5s  gpt-6.1-sol "));
+        assert_eq!(composer.status_line().turn_timer.as_deref(), Some("1m 5s"));
 
         let update = composer.update(ComposerEvent::AnimationFrame(
             started_at + Duration::from_secs(2),
         ));
         assert!(update.changed);
-        let terminal = render(&mut composer, 72, 5);
-        assert!(rows(&terminal)[0].contains(" 1m 7s  gpt-6.1-sol "));
+        assert_eq!(composer.status_line().turn_timer.as_deref(), Some("1m 7s"));
 
         composer.update(ComposerEvent::TurnFinished);
-        let terminal = render(&mut composer, 72, 5);
-        assert!(!rows(&terminal)[0].contains("1m 7s"));
+        assert_eq!(composer.status_line().turn_timer, None);
     }
 
     #[test]
@@ -1435,8 +1559,7 @@ mod tests {
 
         composer.update(ComposerEvent::TurnFinished);
 
-        let terminal = render(&mut composer, 72, 5);
-        assert!(rows(&terminal)[0].contains(" 7s  gpt-6.1-sol "));
+        assert_eq!(composer.status_line().turn_timer.as_deref(), Some("7s"));
         assert!(composer.animation_deadline().is_some());
     }
 
@@ -1452,9 +1575,9 @@ mod tests {
             (Model::Claude(ClaudeModel::Fable51), Speed::Standard, "󰳗"),
         ] {
             composer.update(ComposerEvent::SetModel(model));
-            let terminal = render(&mut composer, 72, 5);
-            assert!(rows(&terminal)[0].contains(&format!("medium {icon} ")));
+            assert_eq!(composer.status_line().speed, effective);
             assert_eq!(composer.speed(), Speed::Ultrafast);
+            let terminal = render(&mut composer, 72, 5);
             let hit = composer
                 .chrome_area(ComposerChromeTarget::Speed)
                 .expect("speed should have a hit target");
@@ -1465,26 +1588,31 @@ mod tests {
             let cell = &terminal.backend().buffer()[(hit.x, hit.y)];
             assert_eq!(cell.symbol(), icon);
             assert_eq!(cell.fg, Theme::default().speed(effective));
-            assert!(cell.modifier.contains(ratatui::style::Modifier::BOLD));
+            assert!(cell.modifier.contains(Modifier::BOLD));
         }
     }
 
     #[test]
     fn claude_models_show_their_effective_speed_and_hide_pro() {
-        for (model, icon) in [
-            (Model::Claude(ClaudeModel::Sonnet55), "󰳗"),
-            (Model::Claude(ClaudeModel::Opus55), "󰤇"),
-            (Model::Claude(ClaudeModel::Fable51), "󰳗"),
+        for (model, speed) in [
+            (Model::Claude(ClaudeModel::Sonnet55), Speed::Standard),
+            (Model::Claude(ClaudeModel::Opus55), Speed::Fast),
+            (Model::Claude(ClaudeModel::Fable51), Speed::Standard),
         ] {
             let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Max);
             composer.update(ComposerEvent::SetModel(model));
             composer.update(ComposerEvent::SetSpeed(Speed::Ultrafast));
             composer.update(ComposerEvent::SetReasoningMode(ReasoningMode::Pro));
-            let terminal = render(&mut composer, 72, 5);
-            let top = &rows(&terminal)[0];
-            assert!(top.contains(model.as_str()));
-            assert!(top.contains(&format!("max {icon} ")));
-            assert!(!top.contains(" pro"));
+
+            assert_eq!(
+                composer.status_line(),
+                StatusLine {
+                    model,
+                    effort: ReasoningEffort::Max,
+                    speed,
+                    ..idle_status()
+                }
+            );
         }
     }
 
@@ -1493,21 +1621,16 @@ mod tests {
         let mut composer = new_composer();
         composer.update(ComposerEvent::SetSpeed(Speed::Fast));
         composer.update(ComposerEvent::SetReasoningMode(ReasoningMode::Pro));
+        assert!(composer.status_line().pro);
 
         let terminal = render(&mut composer, 60, 5);
-        let top = &terminal.backend().buffer().content[..60];
-        let rendered = top.iter().map(|cell| cell.symbol()).collect::<String>();
-        let pro = top
-            .windows(3)
-            .position(|cells| {
-                cells[0].symbol() == "p" && cells[1].symbol() == "r" && cells[2].symbol() == "o"
-            })
-            .expect("Pro mode should render its badge");
-
-        assert!(rendered.contains("medium 󰤇 pro"));
-        for cell in &top[pro..pro + 3] {
+        assert_eq!(
+            rows(&terminal)[0],
+            "╭─ 0%/272k ──────────────────── gpt-6.1-sol  medium 󰤇 pro ─╮"
+        );
+        for cell in cells_of(&terminal, 0, "pro") {
             assert_eq!(cell.fg, Color::Green);
-            assert!(cell.modifier.contains(ratatui::style::Modifier::BOLD));
+            assert!(cell.modifier.contains(Modifier::BOLD));
         }
     }
 
@@ -1518,55 +1641,41 @@ mod tests {
         composer.update(ComposerEvent::SetReasoningMode(ReasoningMode::Pro));
 
         let terminal = render(&mut composer, 28, 5);
-        let top = &terminal.backend().buffer().content[..28];
-        let pro = top
-            .windows(3)
-            .position(|cells| {
-                cells[0].symbol() == "p" && cells[1].symbol() == "r" && cells[2].symbol() == "o"
-            })
-            .expect("Pro mode should retain its complete badge");
-
+        assert_eq!(rows(&terminal)[0], "╭─ gpt-6.1-sol  mediumpro ─╮");
         assert!(composer.chrome_area(ComposerChromeTarget::Speed).is_none());
-        assert!((pro..pro + 3).all(|index| top[index].fg == Color::Green));
+        assert!(
+            cells_of(&terminal, 0, "pro")
+                .iter()
+                .all(|cell| cell.fg == Color::Green)
+        );
 
-        let terminal = render(&mut composer, 6, 5);
-        let top = &terminal.backend().buffer().content[..6];
-        assert_eq!(top[0].symbol(), "╭");
-        assert_eq!(top[5].symbol(), "╮");
+        assert_eq!(rows(&render(&mut composer, 6, 5))[0], "╭─pr─╮");
     }
 
     #[test]
-    fn standard_mode_does_not_render_the_pro_badge() {
+    fn pro_badge_follows_the_reasoning_mode() {
         let mut composer = new_composer();
+        composer.update(ComposerEvent::SetReasoningMode(ReasoningMode::Pro));
+        assert!(composer.status_line().pro);
 
-        let terminal = render(&mut composer, 60, 5);
-        let rendered = terminal.backend().buffer().content[..60]
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect::<String>();
-
-        assert!(!rendered.contains("pro"));
+        composer.update(ComposerEvent::SetReasoningMode(ReasoningMode::Standard));
+        assert_eq!(composer.status_line(), idle_status());
     }
 
     #[test]
     fn development_badge_matches_the_installation_kind() {
         let mut composer = new_composer();
         let terminal = render(&mut composer, 60, 5);
-        let row = &terminal.backend().buffer().content[4 * 60..5 * 60];
-        let rendered = row.iter().map(|cell| cell.symbol()).collect::<String>();
-        let badge_start = row.iter().position(|cell| cell.symbol() == "◉");
+        assert_eq!(
+            rows(&terminal)[4],
+            footer("╰─ / actions · @ paths · @@ sessions ─────── ◉ dev  /work ─╯")
+        );
 
-        if !crate::app::installation::current().is_development() {
-            assert!(badge_start.is_none());
-            assert!(!rendered.contains("dev"));
-            return;
-        }
-
-        let badge_start = badge_start.unwrap();
-        assert!(rendered.contains("◉ dev  /work"));
-        for cell in &row[badge_start..badge_start + 5] {
-            assert_eq!(cell.fg, Color::Red);
-            assert!(cell.modifier.contains(ratatui::style::Modifier::BOLD));
+        if installation::current().is_development() {
+            for cell in cells_of(&terminal, 4, "◉ dev") {
+                assert_eq!(cell.fg, Color::Red);
+                assert!(cell.modifier.contains(Modifier::BOLD));
+            }
         }
     }
 
@@ -1593,16 +1702,17 @@ mod tests {
             now: Instant::now(),
         });
 
+        assert_eq!(
+            composer.status_line(),
+            StatusLine {
+                activity: Some("Running exec command…".to_owned()),
+                ..idle_status()
+            }
+        );
         let terminal = render(&mut composer, 80, 5);
-
-        assert!(rows(&terminal)[0].contains("0%/272k Running exec command…"));
         assert!(
-            terminal
-                .backend()
-                .buffer()
-                .content
+            cells_of(&terminal, 0, "Running exec command…")
                 .iter()
-                .filter(|cell| "Runningexeccommand…".contains(cell.symbol()))
                 .any(|cell| cell.fg == Color::Cyan)
         );
         assert!(composer.animation_deadline().is_some());
@@ -1619,19 +1729,21 @@ mod tests {
         });
         composer.update(ComposerEvent::ActiveSubagents { count: 2, now });
 
-        let terminal = render(&mut composer, 72, 5);
-        let top = rows(&terminal)[0].clone();
-
-        assert!(top.contains("Thinking… 2 subagents"));
-        assert!(
-            terminal
-                .backend()
-                .buffer()
-                .content
-                .iter()
-                .filter(|cell| "2subagents".contains(cell.symbol()))
-                .any(|cell| cell.fg == Color::Yellow)
+        assert_eq!(
+            composer.status_line(),
+            StatusLine {
+                activity: Some("Thinking…".to_owned()),
+                subagents: 2,
+                ..idle_status()
+            }
         );
+        let terminal = render(&mut composer, 72, 5);
+        let subagents = cells_of(&terminal, 0, "2 subagents");
+        assert!(subagents.iter().any(|cell| cell.fg == Color::Yellow));
+        let hit = composer
+            .chrome_area(ComposerChromeTarget::Subagents)
+            .expect("subagents should have a hit target");
+        assert_eq!(usize::from(hit.width), subagents.len());
         assert!(composer.animation_deadline().is_some());
     }
 
