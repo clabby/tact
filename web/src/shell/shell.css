@@ -474,6 +474,7 @@ diffs-container { --diffs-light-bg: var(--bg); --diffs-dark-bg: var(--bg); }
 .status-line { display: flex; align-items: center; gap: 10px; height: 28px; margin: 0 0 var(--space-1); font-size: var(--text-md); font-weight: 550; }
 .status-pulse { display: grid; place-items: center; width: 16px; height: 16px; flex: none; margin: 0 -1px; color: var(--accent); }
 .status-pulse .sphere { display: block; }
+.status-pulse[hidden] { display: none; }
 .status-text {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   background: linear-gradient(90deg, var(--muted) 0%, var(--muted) 40%, var(--text) 50%, var(--muted) 60%, var(--muted) 100%);
@@ -498,6 +499,7 @@ diffs-container { --diffs-light-bg: var(--bg); --diffs-dark-bg: var(--bg); }
 .agents-sphere { display: grid; width: 14px; height: 14px; }
 .agents-sphere .sphere { display: block; }
 .status-line.agents-only .agents-chip { margin-left: 0; }
+.status-line.agents-only .status-text { display: none; }
 
 .queue { display: flex; flex-direction: column; gap: 2px; margin: 0 0 var(--space-2); padding: var(--space-1); list-style: none; border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--surface); }
 .queue-item { display: flex; align-items: center; gap: var(--space-2); min-height: 34px; padding: 0 var(--space-1) 0 var(--space-2); border-radius: var(--radius-md); font-size: var(--text-md); }
