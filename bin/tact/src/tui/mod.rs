@@ -1,4 +1,28 @@
 //! Interactive terminal runtime.
+//!
+//! [`run`] owns a single event loop that serves the terminal and the web front-end. Terminal
+//! input, web commands, queries, and auxiliary requests from the bridge, worker updates, agent and
+//! subagent events, and background task completions all arrive as `tokio::select!` branches. Each
+//! branch runs to completion before the next event is taken, so handlers mutate the app tree and
+//! pane runtimes without locks. Before waiting, every iteration advances shutdown, publishes
+//! changed state to web clients, and draws the terminal when the render scheduler is due.
+//!
+//! Ownership: the turn worker owns every agent; the loop owns each pane's [`PaneRuntime`], which
+//! holds the session lock and the transcript journal that records the pane's agent events and
+//! local events. Each journal has a writer task whose completion the loop awaits.
+//!
+//! Shutdown runs in this order (see [`Lifecycle`]):
+//! 1. The shutdown token is cancelled or a journal writer fails. The loop drops terminal input and
+//!    disables every branch that would start new work.
+//! 2. Shell, open, handoff, and memory tasks and the update check are aborted, and each pane's
+//!    subagents are asked to close.
+//! 3. The worker observes the same token, cancels its turns, and reports
+//!    [`WorkerEvent::Stopped`]. Until then the loop keeps journaling worker updates and agent events,
+//!    so in-flight turns are recorded.
+//! 4. Once the worker has stopped, every agent event stream has ended, and shells and subagent
+//!    shutdowns have finished, each journal records how its session ended and is closed.
+//! 5. The loop exits after every journal writer has drained. The terminal is restored, the web
+//!    server gets a short grace period, and the main session's ID is returned when it is resumable.
 
 mod clipboard;
 mod components;
@@ -137,6 +161,30 @@ enum OpenedSession {
 type OpenTask = (PaneId, Result<OpenedSession>);
 
 const WEB_SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Shutdown progress of the event loop.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Lifecycle {
+    /// Serving input, web requests, and background tasks.
+    Running,
+    /// Shutdown was requested; subagent shutdown has not started yet.
+    Stopping,
+    /// No new work is accepted; the loop drains the worker, agent streams, shells, subagents, and
+    /// journal writers.
+    Draining,
+}
+
+impl Lifecycle {
+    fn is_running(self) -> bool {
+        self == Self::Running
+    }
+
+    fn stop(&mut self) {
+        if self.is_running() {
+            *self = Self::Stopping;
+        }
+    }
+}
 
 const HANDOFF_PROMPT: &str = concat!(
     "Prepare a self-contained continuation prompt for a new coding agent that will take over this ",
@@ -689,7 +737,7 @@ pub(crate) async fn run(
     let mut open_replies = HashMap::<PaneId, CommandReply>::new();
     let mut resume_session_task = None::<ResumeSessionTask>;
     let mut scheduler = RenderScheduler::new(STREAM_FRAME_INTERVAL, Instant::now());
-    let mut stopping = false;
+    let mut lifecycle = Lifecycle::Running;
     let mut worker_stopped = false;
     let mut herdr_turns = HashSet::new();
     let mut worker_error = None::<nanocodex::NanocodexError>;
@@ -700,7 +748,6 @@ pub(crate) async fn run(
     let mut memory_tasks = JoinSet::<MemoryCompletion>::new();
     let mut memory_generations = MemoryGenerations::default();
     let mut subagent_shutdowns = JoinSet::<()>::new();
-    let mut subagents_stopping = false;
 
     macro_rules! effect_context {
         () => {
@@ -777,22 +824,22 @@ pub(crate) async fn run(
                 .map_err(RuntimeError::Terminal)?;
             reported_workspace = root.workspace().to_owned();
         }
-        if stopping && let Some(task) = update_check_task.take() {
-            task.abort();
-        }
-        if stopping {
+        if !lifecycle.is_running() {
+            if let Some(task) = update_check_task.take() {
+                task.abort();
+            }
             shell_tasks.abort_all();
             open_tasks.abort_all();
             handoff_controller.cancel();
             memory_tasks.abort_all();
         }
-        if stopping && !subagents_stopping {
+        if lifecycle == Lifecycle::Stopping {
             for runtime in panes.values() {
                 schedule_subagent_shutdown(runtime, &mut subagent_shutdowns);
             }
-            subagents_stopping = true;
+            lifecycle = Lifecycle::Draining;
         }
-        if stopping
+        if lifecycle == Lifecycle::Draining
             && worker_stopped
             && panes.values().all(|pane| pane.agent == AgentState::Stopped)
             && shell_tasks.is_empty()
@@ -805,7 +852,7 @@ pub(crate) async fn run(
         }
 
         request_render(app.publish_changes(Origin::Terminal), &mut scheduler);
-        if editor_task.is_none() && !stopping && scheduler.is_due(Instant::now()) {
+        if editor_task.is_none() && lifecycle.is_running() && scheduler.is_due(Instant::now()) {
             terminal
                 .draw(|frame| app.render(frame))
                 .map_err(RuntimeError::Terminal)?;
@@ -815,8 +862,8 @@ pub(crate) async fn run(
         let render_deadline = scheduler.deadline();
         let animation_deadline = app.animation_deadline();
         tokio::select! {
-            () = shutdown.cancelled(), if !stopping => {
-                stopping = true;
+            () = shutdown.cancelled(), if lifecycle.is_running() => {
+                lifecycle.stop();
                 input = None;
                 if let Some(task) = editor_task.take() {
                     task.abort();
@@ -841,7 +888,7 @@ pub(crate) async fn run(
                     .expect("input branch is disabled without an event stream")
                     .next()
                     .await
-            }, if input.is_some() && !stopping => {
+            }, if input.is_some() && lifecycle.is_running() => {
                 let event = event
                     .transpose()
                     .map_err(RuntimeError::Terminal)?
@@ -869,7 +916,7 @@ pub(crate) async fn run(
                 }
                 apply_app_update!(update);
             }
-            Some(scheme) = system_theme_updates.recv(), if !stopping => {
+            Some(scheme) = system_theme_updates.recv(), if lifecycle.is_running() => {
                 schedule(app.update(AppEvent::SystemThemeChanged(scheme)), &mut scheduler);
             }
             result = async {
@@ -877,7 +924,7 @@ pub(crate) async fn run(
                     .as_mut()
                     .expect("update-check branch is disabled without a task")
                     .await
-            }, if update_check_task.is_some() && !stopping => {
+            }, if update_check_task.is_some() && lifecycle.is_running() => {
                 update_check_task = None;
                 if let Ok(Ok(Some(version))) = result {
                     schedule(app.update(AppEvent::UpdateAvailable(version)), &mut scheduler);
@@ -928,7 +975,7 @@ pub(crate) async fn run(
                     }
                 }
             }
-            Some(event) = subagent_events.recv(), if !stopping => {
+            Some(event) = subagent_events.recv(), if lifecycle.is_running() => {
                 if let Some(pane) = subagent_pane(&panes, &event) {
                     apply_app_update!(app.update(AppEvent::Subagent {
                         pane,
@@ -937,7 +984,7 @@ pub(crate) async fn run(
                 }
             }
             Some(request) = web_requests.recv(),
-                if !stopping
+                if lifecycle.is_running()
                     && effort_task.is_none()
                     && speed_task.is_none()
                     && new_session_task.is_none()
@@ -998,7 +1045,7 @@ pub(crate) async fn run(
                     }
                 }
             }
-            Some(request) = web_queries.recv(), if !stopping => {
+            Some(request) = web_queries.recv(), if lifecycle.is_running() => {
                 let state = remote::QueryState {
                     app: &app,
                     config: &config,
@@ -1008,7 +1055,7 @@ pub(crate) async fn run(
                 };
                 remote::answer(request.query, &state).deliver(request.reply);
             }
-            Some(request) = auxiliary_requests.recv(), if !stopping => {
+            Some(request) = auxiliary_requests.recv(), if lifecycle.is_running() => {
                 let AuxiliaryRequest {
                     session,
                     prompt,
@@ -1041,7 +1088,7 @@ pub(crate) async fn run(
                     })
                     .map_err(|_| RuntimeError::AgentWorkerStopped)?;
             }
-            Some(result) = open_tasks.join_next(), if !stopping => {
+            Some(result) = open_tasks.join_next(), if lifecycle.is_running() => {
                 let (pane, opened) = result.map_err(RuntimeError::SessionTask)?;
                 let reply = open_replies.remove(&pane);
                 let opened = match opened {
@@ -1453,7 +1500,7 @@ pub(crate) async fn run(
                     }
                 }
             }
-            result = memory_tasks.join_next(), if !memory_tasks.is_empty() && !stopping => {
+            result = memory_tasks.join_next(), if !memory_tasks.is_empty() && lifecycle.is_running() => {
                 let Some(Ok(completion)) = result else {
                     continue;
                 };
@@ -1471,7 +1518,7 @@ pub(crate) async fn run(
                     .as_mut()
                     .expect("editor branch is disabled without an editor task")
                     .await
-            }, if editor_task.is_some() && !stopping => {
+            }, if editor_task.is_some() && lifecycle.is_running() => {
                 editor_task = None;
                 terminal.resume().map_err(RuntimeError::Terminal)?;
                 terminal
@@ -1494,7 +1541,7 @@ pub(crate) async fn run(
                     .as_mut()
                     .expect("effort branch is disabled without an effort task")
                     .await
-            }, if effort_task.is_some() && !stopping => {
+            }, if effort_task.is_some() && lifecycle.is_running() => {
                 effort_task = None;
                 let update = result.map_err(RuntimeError::EffortUpdateTask)??;
                 config.set_reasoning_mode(update.preferred_reasoning_mode);
@@ -1517,7 +1564,7 @@ pub(crate) async fn run(
                     .as_mut()
                     .expect("speed branch is disabled without a task")
                     .await
-            }, if speed_task.is_some() && !stopping => {
+            }, if speed_task.is_some() && lifecycle.is_running() => {
                 speed_task = None;
                 let update = result.map_err(RuntimeError::SpeedUpdateTask)??;
                 commands
@@ -1532,7 +1579,7 @@ pub(crate) async fn run(
                     .task_mut()
                     .expect("handoff branch is disabled without a task")
                     .await
-            }, if handoff_controller.task_mut().is_some() && !stopping => {
+            }, if handoff_controller.task_mut().is_some() && lifecycle.is_running() => {
                 let completion = result.map_err(RuntimeError::HandoffTask)?;
                 if !handoff_controller.complete(completion.identity) {
                     continue;
@@ -1588,7 +1635,7 @@ pub(crate) async fn run(
                     .as_mut()
                     .expect("new-session branch is disabled without a task")
                     .await
-            }, if new_session_task.is_some() && !stopping => {
+            }, if new_session_task.is_some() && lifecycle.is_running() => {
                 new_session_task = None;
                 input.get_or_insert_with(EventStream::new);
                 let (pane, effort, reasoning_mode, speed, model, draft_reset, configured) =
@@ -1631,7 +1678,7 @@ pub(crate) async fn run(
                     .as_mut()
                     .expect("session-list branch is disabled without a task")
                     .await
-            }, if session_list_task.is_some() && !stopping => {
+            }, if session_list_task.is_some() && lifecycle.is_running() => {
                 session_list_task = None;
                 input.get_or_insert_with(EventStream::new);
                 let (pane, sessions) = result.map_err(RuntimeError::SessionTask)?;
@@ -1655,7 +1702,7 @@ pub(crate) async fn run(
                     .as_mut()
                     .expect("recent-prompt branch is disabled without a task")
                     .await
-            }, if recent_prompt_task.is_some() && !stopping => {
+            }, if recent_prompt_task.is_some() && lifecycle.is_running() => {
                 recent_prompt_task = None;
                 let prompts = result.map_err(RuntimeError::SessionTask)?;
                 match (prompts, recent_prompt_request.take()) {
@@ -1687,7 +1734,7 @@ pub(crate) async fn run(
                     .as_mut()
                     .expect("resume-session branch is disabled without a task")
                     .await
-            }, if resume_session_task.is_some() && !stopping => {
+            }, if resume_session_task.is_some() && lifecycle.is_running() => {
                 resume_session_task = None;
                 input.get_or_insert_with(EventStream::new);
                 let (pane, effort, preferred_reasoning_mode, speed, restored) =
@@ -1742,7 +1789,7 @@ pub(crate) async fn run(
                 writers_open = writers_open.saturating_sub(1);
                 if let Err(error) = completion.result {
                     writer_error = Some(error);
-                    stopping = true;
+                    lifecycle.stop();
                     input = None;
                     shutdown.cancel();
                 }
@@ -1755,12 +1802,12 @@ pub(crate) async fn run(
             }
             () = async {
                 sleep_until(animation_deadline.expect("animation branch is disabled without a deadline").into()).await;
-            }, if animation_deadline.is_some() && editor_task.is_none() && !stopping => {
+            }, if animation_deadline.is_some() && editor_task.is_none() && lifecycle.is_running() => {
                 schedule(app.update(AppEvent::AnimationFrame(Instant::now())), &mut scheduler);
             }
             () = async {
                 sleep_until(render_deadline.expect("deadline branch is disabled without a deadline").into()).await;
-            }, if render_deadline.is_some() && editor_task.is_none() && !stopping => {}
+            }, if render_deadline.is_some() && editor_task.is_none() && lifecycle.is_running() => {}
         }
     }
 
