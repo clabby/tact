@@ -4,7 +4,7 @@ use super::{
     floating::Floating,
     node::{Component, ComponentUpdate, RenderRequest},
 };
-use crate::app::theme::Theme;
+use crate::{app::theme::Theme, tui::spinner::Spinner};
 use crossterm::event::{Event, KeyCode, KeyEventKind};
 use qrcode::{Color as Module, EcLevel, QrCode};
 use ratatui::{
@@ -14,12 +14,15 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Paragraph, Wrap},
 };
+use std::time::Instant;
 
 const FOOTER: [(&str, &str); 1] = [("esc", "close")];
 /// Blank modules around the code that scanners need to find its edges.
 const QUIET_ZONE: usize = 2;
 const CAPTION: &str = "Scan with your phone's camera. It signs the phone in to Tact, so treat the code like a password.";
 const MIN_WIDTH: u16 = 46;
+/// Body rows of the waiting popup: the message sits in the middle one.
+const PREPARING_ROWS: u16 = 3;
 /// Border, title, and footer rows that surround the popup's body.
 const CHROME_ROWS: u16 = 3;
 /// Columns the popup's border takes from its width.
@@ -32,6 +35,100 @@ pub(super) enum QrCodeEvent {
 #[derive(Debug, Eq, PartialEq)]
 pub(super) enum QrCodeEffect {
     Dismiss,
+}
+
+/// What the QR overlay shows: a wait while the link is prepared, then the code for it.
+///
+/// Preparing a link can take seconds (Tailscale may have to publish the server first), so the
+/// overlay opens at once with a spinner and the code replaces it when the link is ready.
+pub(super) enum QrCodeOverlay {
+    Preparing(Spinner),
+    Ready(QrCodeView),
+}
+
+impl QrCodeOverlay {
+    pub(super) fn preparing(now: Instant) -> Self {
+        Self::Preparing(Spinner::new(now))
+    }
+
+    pub(super) fn ready(link: &str) -> Result<Self, String> {
+        QrCodeView::new(link).map(Self::Ready)
+    }
+
+    pub(super) const fn is_preparing(&self) -> bool {
+        matches!(self, Self::Preparing(_))
+    }
+
+    /// Advances the spinner; returns whether the frame changed.
+    pub(super) fn advance(&mut self, now: Instant) -> bool {
+        match self {
+            Self::Preparing(spinner) => spinner.advance(now),
+            Self::Ready(_) => false,
+        }
+    }
+
+    pub(super) fn animation_deadline(&self) -> Option<Instant> {
+        match self {
+            Self::Preparing(spinner) => Some(spinner.deadline()),
+            Self::Ready(_) => None,
+        }
+    }
+}
+
+impl Component for QrCodeOverlay {
+    type Event = QrCodeEvent;
+    type Effect = QrCodeEffect;
+
+    fn update(&mut self, event: Self::Event) -> ComponentUpdate<Self::Effect> {
+        match self {
+            Self::Preparing(_) => dismiss_on_escape(event),
+            Self::Ready(view) => view.update(event),
+        }
+    }
+
+    fn render(&mut self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
+        match self {
+            Self::Ready(view) => view.render(frame, area, theme),
+            Self::Preparing(spinner) => {
+                let layout = Floating::new(
+                    "Open on your phone",
+                    MIN_WIDTH,
+                    CHROME_ROWS + PREPARING_ROWS,
+                    &FOOTER,
+                )
+                .render(frame, area, theme);
+                let line = Line::from(vec![
+                    Span::styled(spinner.symbol(), Style::default().fg(theme.accent())),
+                    Span::styled(
+                        " Preparing the sign-in link…",
+                        Style::default().fg(theme.muted()),
+                    ),
+                ]);
+                let [_, middle, _] = Layout::vertical([
+                    Constraint::Fill(1),
+                    Constraint::Length(1),
+                    Constraint::Fill(1),
+                ])
+                .areas(layout.body);
+                frame.render_widget(Paragraph::new(line.centered()), middle);
+            }
+        }
+    }
+}
+
+fn dismiss_on_escape(event: QrCodeEvent) -> ComponentUpdate<QrCodeEffect> {
+    match event {
+        QrCodeEvent::Terminal(Event::Key(key))
+            if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
+                && key.code == KeyCode::Esc =>
+        {
+            ComponentUpdate {
+                effects: vec![QrCodeEffect::Dismiss],
+                render: RenderRequest::Immediate,
+            }
+        }
+        QrCodeEvent::Terminal(_) => ComponentUpdate::none(),
+    }
 }
 
 /// The code for one sign-in link. The link carries the credential, so only its origin is ever shown
@@ -116,18 +213,7 @@ impl Component for QrCodeView {
     type Effect = QrCodeEffect;
 
     fn update(&mut self, event: Self::Event) -> ComponentUpdate<Self::Effect> {
-        match event {
-            QrCodeEvent::Terminal(Event::Key(key))
-                if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
-                    && key.code == KeyCode::Esc =>
-            {
-                ComponentUpdate {
-                    effects: vec![QrCodeEffect::Dismiss],
-                    render: RenderRequest::Immediate,
-                }
-            }
-            QrCodeEvent::Terminal(_) => ComponentUpdate::none(),
-        }
+        dismiss_on_escape(event)
     }
 
     fn render(&mut self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
@@ -303,6 +389,63 @@ mod tests {
     fn escape_dismisses_the_popup() {
         let mut view = QrCodeView::new(LINK).unwrap();
         let update = view.update(QrCodeEvent::Terminal(Event::Key(KeyEvent::new(
+            KeyCode::Esc,
+            KeyModifiers::NONE,
+        ))));
+        assert_eq!(update.effects, [QrCodeEffect::Dismiss]);
+    }
+
+    #[test]
+    fn the_waiting_overlay_can_be_dismissed_and_draws_the_spinner() {
+        let mut overlay = super::QrCodeOverlay::preparing(std::time::Instant::now());
+        let mut terminal = Terminal::new(TestBackend::new(90, 20)).unwrap();
+        terminal
+            .draw(|frame| overlay.render(frame, frame.area(), &Theme::default()))
+            .unwrap();
+        assert!(text(&terminal).contains('\u{280b}'), "first spinner frame");
+
+        // The message is centred in the popup both ways.
+        let buffer = terminal.backend().buffer();
+        let width = usize::from(buffer.area.width);
+        let rows = buffer
+            .content()
+            .chunks(width)
+            .enumerate()
+            .filter(|(_, row)| row.iter().any(|cell| cell.symbol() == "\u{280b}"))
+            .collect::<Vec<_>>();
+        let [(message_row, row)] = rows.as_slice() else {
+            panic!("the spinner is drawn once");
+        };
+        let first = row
+            .iter()
+            .position(|cell| cell.symbol() == "\u{280b}")
+            .unwrap();
+        let last = row
+            .iter()
+            .rposition(|cell| !cell.symbol().trim().is_empty() && cell.symbol() != "\u{2502}")
+            .unwrap();
+        let popup = (0..width)
+            .filter(|column| row[*column].symbol() == "\u{2502}")
+            .collect::<Vec<_>>();
+        let (left, right) = (popup[0], popup[popup.len() - 1]);
+        assert!(
+            (first - left).abs_diff(right - last) <= 1,
+            "message spans {first}..={last} in a popup spanning {left}..={right}"
+        );
+        let borders = buffer
+            .content()
+            .chunks(width)
+            .enumerate()
+            .filter(|(_, row)| row[left].symbol() == "\u{2502}")
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        let (top, bottom) = (borders[0], borders[borders.len() - 1]);
+        assert!(
+            (message_row - top).abs_diff(bottom - message_row) <= 2,
+            "message row {message_row} in a popup spanning rows {top}..={bottom}"
+        );
+
+        let update = overlay.update(QrCodeEvent::Terminal(Event::Key(KeyEvent::new(
             KeyCode::Esc,
             KeyModifiers::NONE,
         ))));

@@ -29,7 +29,7 @@ use super::{
     memory::{MemoryBrowser, MemoryBrowserEffect, MemoryBrowserEvent},
     model_selector::{ModelSelector, ModelSelectorEffect, ModelSelectorEvent},
     node::{Component, ComponentUpdate, RenderRequest},
-    qr_code::{QrCodeEffect, QrCodeEvent, QrCodeView},
+    qr_code::{QrCodeEffect, QrCodeEvent, QrCodeOverlay},
     queue::{MessageQueue, QueueEffect, QueueEntry, QueueEvent},
     recent_prompt_picker::{RecentPromptPicker, RecentPromptPickerEffect, RecentPromptPickerEvent},
     selection::{Selection, Surface, TextSpan},
@@ -313,7 +313,7 @@ enum Overlay {
     FileFinder(FileMention),
     Skills(SkillMention),
     Keybindings(KeybindingsHelp),
-    QrCode(QrCodeView),
+    QrCode(QrCodeOverlay),
     Memory(MemoryBrowser),
     RecentPrompts(RecentPromptPicker),
     Sessions(SessionPicker),
@@ -730,6 +730,7 @@ impl RootNode {
         let selector = match &self.overlay {
             Some(Overlay::Effort(selector)) => selector.animation_deadline(),
             Some(Overlay::Speed(selector)) => selector.animation_deadline(),
+            Some(Overlay::QrCode(overlay)) => overlay.animation_deadline(),
             _ => None,
         };
         [
@@ -1474,7 +1475,11 @@ impl RootNode {
                 let effect = match action {
                     Action::OpenInBrowser => RootEffect::OpenWebInterface { install: false },
                     Action::CopyWebLink => RootEffect::CopyWebLink,
-                    Action::ShowQrCode => RootEffect::ShowWebQr,
+                    Action::ShowQrCode => {
+                        self.overlay =
+                            Some(Overlay::QrCode(QrCodeOverlay::preparing(Instant::now())));
+                        RootEffect::ShowWebQr
+                    }
                     _ => RootEffect::OpenSessions,
                 };
                 return ComponentUpdate {
@@ -1877,6 +1882,12 @@ impl RootNode {
         });
         debug_assert!(update.changed);
         ComponentUpdate::render(RenderRequest::Immediate)
+    }
+
+    fn close_preparing_qr_code(&mut self) {
+        if matches!(&self.overlay, Some(Overlay::QrCode(overlay)) if overlay.is_preparing()) {
+            self.overlay = None;
+        }
     }
 
     fn update_qr_code(&mut self, event: Event) -> ComponentUpdate<RootEffect> {
@@ -2435,6 +2446,16 @@ impl RootNode {
         } else {
             RenderRequest::None
         };
+        let qr_code = match &mut self.overlay {
+            Some(Overlay::QrCode(overlay)) => {
+                if overlay.advance(now) {
+                    RenderRequest::Streaming
+                } else {
+                    RenderRequest::None
+                }
+            }
+            _ => RenderRequest::None,
+        };
         let selection = self.update_selection_auto_scroll(now);
         let notification = if self
             .notification
@@ -2460,6 +2481,7 @@ impl RootNode {
                 .max(composer.render)
                 .max(queue.render)
                 .max(subagents)
+                .max(qr_code)
                 .max(selection)
                 .max(confirmation)
                 .max(notification),
@@ -2763,6 +2785,7 @@ impl Component for RootNode {
                 ComponentUpdate::render(RenderRequest::Immediate)
             }
             RootEvent::NotifyError(message) => {
+                self.close_preparing_qr_code();
                 self.notification = Some(Notification::plain(message, Color::Red));
                 ComponentUpdate::render(RenderRequest::Immediate)
             }
@@ -2771,9 +2794,16 @@ impl Component for RootNode {
                 ComponentUpdate::render(RenderRequest::Immediate)
             }
             RootEvent::ShowQrCode(link) => {
-                match QrCodeView::new(&link) {
-                    Ok(view) => self.overlay = Some(Overlay::QrCode(view)),
-                    Err(error) => self.notification = Some(Notification::plain(error, Color::Red)),
+                // A link that arrives after the user closed the waiting overlay is not wanted.
+                if matches!(&self.overlay, Some(Overlay::QrCode(overlay)) if overlay.is_preparing())
+                {
+                    match QrCodeOverlay::ready(&link) {
+                        Ok(view) => self.overlay = Some(Overlay::QrCode(view)),
+                        Err(error) => {
+                            self.overlay = None;
+                            self.notification = Some(Notification::plain(error, Color::Red));
+                        }
+                    }
                 }
                 ComponentUpdate::render(RenderRequest::Immediate)
             }
