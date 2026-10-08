@@ -3684,3 +3684,58 @@ fn active_turn_can_fork_from_the_latest_safe_boundary() {
         [RootEffect::Fork]
     );
 }
+
+mod qr_code_overlay {
+    use super::{Component, Overlay, RootEvent, RootNode};
+    use crate::{app::config::ReasoningEffort, tui::components::qr_code::QrCodeOverlay};
+    use std::{path::Path, time::Instant};
+
+    const LINK: &str = "https://laptop.tail1234.ts.net/#k=secret";
+
+    fn root_preparing() -> RootNode {
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        root.overlay = Some(Overlay::QrCode(QrCodeOverlay::preparing(Instant::now())));
+        root
+    }
+
+    fn preparing(root: &RootNode) -> Option<bool> {
+        match &root.overlay {
+            Some(Overlay::QrCode(overlay)) => Some(overlay.is_preparing()),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn the_code_replaces_the_waiting_overlay_when_the_link_is_ready() {
+        let mut root = root_preparing();
+        root.update(RootEvent::ShowQrCode(LINK.to_owned()));
+        assert_eq!(preparing(&root), Some(false));
+    }
+
+    #[test]
+    fn a_link_that_arrives_after_the_overlay_was_closed_is_dropped() {
+        let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+        root.update(RootEvent::ShowQrCode(LINK.to_owned()));
+        assert_eq!(preparing(&root), None);
+    }
+
+    #[test]
+    fn a_failure_closes_the_waiting_overlay_and_reports_the_error() {
+        let mut root = root_preparing();
+        root.update(RootEvent::NotifyError(
+            "Cannot share over Tailscale".to_owned(),
+        ));
+        assert_eq!(preparing(&root), None);
+        assert!(root.notification.is_some());
+    }
+
+    #[test]
+    fn the_waiting_overlay_animates_until_it_is_replaced() {
+        let mut root = root_preparing();
+        assert!(root.animation_deadline().is_some());
+        root.update(RootEvent::ShowQrCode(LINK.to_owned()));
+        assert!(
+            !matches!(&root.overlay, Some(Overlay::QrCode(overlay)) if overlay.animation_deadline().is_some())
+        );
+    }
+}
