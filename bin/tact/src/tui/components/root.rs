@@ -175,6 +175,9 @@ pub(crate) enum RootEvent {
     HandoffCancelled,
     HandoffFailed(String),
     CompactionFinished,
+    /// The worker finished a turn. When `terminal_expected` is set, the agent stream also reports
+    /// the end of the turn with a terminal transcript record, which may arrive before or after this
+    /// event; the turn counts as finished once both have arrived.
     WorkerTurnFinished {
         terminal_expected: bool,
     },
@@ -297,6 +300,9 @@ pub(crate) enum RootEffect {
     Shutdown,
 }
 
+/// The overlay that has input focus; at most one is open, and opening another replaces it. Once
+/// pane-wide handling such as the Ctrl+C confirmation has run, terminal events go to the overlay
+/// instead of the transcript, queue, or composer.
 enum Overlay {
     Actions(ActionsMenu),
     ContextDiagnostics(ContextDiagnosticsPanel),
@@ -315,6 +321,8 @@ enum Overlay {
     Subagents(SubagentOverlay),
 }
 
+/// Pane-wide work that suspends normal input until it finishes. No turn, shell command, or queued
+/// prompt may run alongside it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum BlockingTask {
     Compaction,

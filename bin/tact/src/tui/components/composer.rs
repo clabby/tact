@@ -258,6 +258,12 @@ impl TurnTimer {
     }
 }
 
+/// The result of a composer update.
+///
+/// Unlike [`ComponentUpdate`](super::node::ComponentUpdate), the composer reports whether it
+/// changed rather than how urgently to redraw: the same change, such as a new context budget, is
+/// urgent when it answers a keypress and can wait for the next frame when it arrives with streamed
+/// output, and only the caller knows which applies. An update yields at most one effect.
 pub(crate) struct ComposerUpdate {
     pub(crate) effect: Option<ComposerEffect>,
     pub(crate) changed: bool,
