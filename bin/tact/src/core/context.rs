@@ -363,7 +363,9 @@ pub(crate) fn outbound_context_snapshot(record: &TranscriptRecord) -> Option<Con
 
 #[cfg(test)]
 mod tests {
-    use super::{ContextDiagnostics, ContinuationMode};
+    use super::{
+        CompactionDiagnostics, CompactionTrigger, ContextDiagnostics, ContinuationMode, TokenUsage,
+    };
     use crate::core::transcript::TranscriptRecord;
     use nanocodex::agent::events::{AgentEvent, AgentEventKind};
     use serde_json::{Value, json, value::to_raw_value};
@@ -458,35 +460,36 @@ mod tests {
                 ),
             ),
         ];
-        let diagnostics = ContextDiagnostics::rebuild(records.iter());
-
+        // Comparing the complete value accounts for every field; each is a count, flag, or mode,
+        // so no request content can be retained.
         assert_eq!(
-            diagnostics.continuation,
-            Some(ContinuationMode::PreviousResponse)
+            ContextDiagnostics::rebuild(records.iter()),
+            ContextDiagnostics {
+                model_window_tokens: nanocodex::oai::CONTEXT_WINDOW_TOKENS,
+                auto_compact_token_limit: Some(200_000),
+                active_tokens: Some(420),
+                usage: Some(TokenUsage {
+                    input: 400,
+                    cached_input: 0,
+                    uncached_input: 400,
+                    output: 20,
+                    total: 420,
+                }),
+                continuation: Some(ContinuationMode::PreviousResponse),
+                prompt_cache: Some(true),
+                compactions_started: 1,
+                compactions_completed: 1,
+                last_compaction: Some(CompactionDiagnostics {
+                    trigger: CompactionTrigger::Automatic,
+                    started_at_unix_ms: 100,
+                    completed_at_unix_ms: Some(110),
+                    before_tokens: Some(900),
+                    after_tokens: Some(400),
+                }),
+                awaiting_post_compaction_usage: false,
+                manual_compaction: false,
+            }
         );
-        assert_eq!(diagnostics.prompt_cache, Some(true));
-        assert_eq!(diagnostics.usage.unwrap().total, 420);
-        assert_eq!(diagnostics.compactions_started, 1);
-        assert_eq!(diagnostics.compactions_completed, 1);
-        assert_eq!(
-            diagnostics.model_window_tokens,
-            nanocodex::oai::CONTEXT_WINDOW_TOKENS
-        );
-        assert_eq!(diagnostics.auto_compact_token_limit, Some(200_000));
-        assert_eq!(
-            diagnostics.last_compaction.unwrap().before_tokens,
-            Some(900)
-        );
-        assert_eq!(diagnostics.last_compaction.unwrap().after_tokens, Some(400));
-        let debug = format!("{diagnostics:?}");
-        for secret in [
-            "secret-cache-key",
-            "secret prompt",
-            "secret-response-id",
-            "secret-continuation-token",
-        ] {
-            assert!(!debug.contains(secret));
-        }
     }
 
     #[test]
