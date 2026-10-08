@@ -6,11 +6,31 @@ use nanocodex::{ClaudeModel, HarnessModel as Model, Model as CodexModel};
 use serde::{Deserialize, Deserializer, Serialize, de};
 use tact_subagents::SUPPORTED_MODELS;
 
+/// The number of OpenAI models in [`SUPPORTED_MODELS`]. The roster lists every OpenAI model
+/// before any Claude model, so the OpenAI-only roster is a prefix of the full one; the
+/// assertion below rejects a roster that breaks this ordering at compile time.
+const OPENAI_MODEL_COUNT: usize = {
+    let mut count = 0;
+    while count < SUPPORTED_MODELS.len() && matches!(SUPPORTED_MODELS[count], Model::Codex(_)) {
+        count += 1;
+    }
+    let mut rest = count;
+    while rest < SUPPORTED_MODELS.len() {
+        assert!(
+            !matches!(SUPPORTED_MODELS[rest], Model::Codex(_)),
+            "OpenAI models must precede Claude models in SUPPORTED_MODELS"
+        );
+        rest += 1;
+    }
+    count
+};
+
+/// The selectable models: the full roster when Claude is enabled, otherwise only OpenAI models.
 pub(crate) fn available(claude_enabled: bool) -> &'static [Model] {
     if claude_enabled {
         &SUPPORTED_MODELS
     } else {
-        &SUPPORTED_MODELS[..3]
+        &SUPPORTED_MODELS[..OPENAI_MODEL_COUNT]
     }
 }
 
@@ -113,6 +133,7 @@ mod tests {
     use super::{ModelCatalog, Provider, parse};
     use crate::app::config::{ReasoningMode, Speed};
     use nanocodex::{ClaudeModel, HarnessModel as Model, Model as CodexModel};
+    use tact_subagents::SUPPORTED_MODELS;
 
     #[test]
     fn catalog_lists_the_enabled_roster_with_its_setting_couplings() {
@@ -122,6 +143,13 @@ mod tests {
                 .models
                 .iter()
                 .all(|model| model.provider == Provider::Openai)
+        );
+        assert_eq!(
+            openai_only.models.len(),
+            SUPPORTED_MODELS
+                .iter()
+                .filter(|model| matches!(model, Model::Codex(_)))
+                .count()
         );
         let catalog = ModelCatalog::new(true);
         assert_eq!(catalog.speeds, Speed::ALL);
