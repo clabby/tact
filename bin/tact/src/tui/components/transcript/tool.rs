@@ -640,8 +640,76 @@ fn status_style(state: ToolState, theme: &Theme) -> Style {
 }
 
 #[cfg(test)]
+impl Presentation {
+    fn subject_text(&self) -> String {
+        match &self.subject {
+            Subject::Plain(subject) => subject.clone(),
+            Subject::Styled(spans) => spans.iter().map(|span| span.content.as_ref()).collect(),
+        }
+    }
+}
+
+/// Fixtures shared by the tool presenter tests in this module and its submodules.
+#[cfg(test)]
+mod fixtures {
+    use super::{Presentation, present};
+    use crate::{
+        app::theme::Theme,
+        core::transcript::{ToolEntry, ToolState},
+    };
+    use ratatui::text::Line;
+    use serde_json::Value;
+
+    /// A completed call with no result, duration, metadata, or substeps.
+    pub(super) fn entry(name: &str, arguments: Value) -> ToolEntry {
+        ToolEntry {
+            name: name.to_owned(),
+            arguments,
+            started_at_unix_ms: 0,
+            state: ToolState::Succeeded,
+            duration_ns: None,
+            result: None,
+            metadata: None,
+            substeps: Vec::new(),
+            child_count: 0,
+        }
+    }
+
+    pub(super) fn collapsed(tool: &ToolEntry) -> Presentation {
+        present(tool, 100, &Theme::default(), false)
+    }
+
+    pub(super) fn expanded(tool: &ToolEntry, width: u16) -> Presentation {
+        present(tool, width, &Theme::default(), true)
+    }
+
+    /// Asserts the presenter-owned summary parts: title, subject, and outcome.
+    #[track_caller]
+    pub(super) fn assert_summary(tool: &ToolEntry, expected: (&str, &str, Option<&str>)) {
+        let presentation = collapsed(tool);
+        assert_eq!(
+            (
+                presentation.title.as_str(),
+                presentation.subject_text().as_str(),
+                presentation.outcome.as_deref(),
+            ),
+            expected,
+            "{}",
+            tool.name
+        );
+    }
+
+    pub(super) fn rendered(lines: &[Line<'_>]) -> Vec<String> {
+        lines.iter().map(ToString::to_string).collect()
+    }
+}
+
+#[cfg(test)]
 mod tests {
-    use super::{render, render_expanded, render_layout, render_live};
+    use super::{
+        fixtures::{assert_summary, entry, expanded, rendered},
+        render, render_expanded, render_layout, render_live,
+    };
     use crate::{
         app::theme::Theme,
         core::transcript::{ToolEntry, ToolState},
@@ -651,15 +719,8 @@ mod tests {
 
     fn tool(name: &str, arguments: serde_json::Value) -> ToolEntry {
         ToolEntry {
-            name: name.to_owned(),
-            arguments,
-            started_at_unix_ms: 0,
-            state: ToolState::Succeeded,
             duration_ns: Some(1_200_000_000),
-            result: None,
-            metadata: None,
-            substeps: Vec::new(),
-            child_count: 0,
+            ..entry(name, arguments)
         }
     }
 
@@ -677,10 +738,9 @@ mod tests {
 
         let lines = render(&shell, 80, &Theme::default());
 
-        assert_eq!(lines.len(), 1);
         assert_eq!(
-            lines[0].to_string(),
-            "  ▶ ✓ Shell  $ cargo test · exit 0 · 1.2s"
+            rendered(&lines),
+            ["  ▶ ✓ Shell  $ cargo test · exit 0 · 1.2s"]
         );
         let checkmark = lines[0]
             .spans
@@ -712,7 +772,7 @@ mod tests {
                 .collect::<Vec<_>>();
             let keywords = spans
                 .iter()
-                .filter(|span| span.content.contains("if"))
+                .filter(|span| span.content == "if")
                 .collect::<Vec<_>>();
 
             assert_eq!(prompts.len(), expected_commands);
@@ -739,8 +799,7 @@ mod tests {
 
         let lines = render(&workflow, 80, &Theme::default());
 
-        assert_eq!(lines[0].to_string(), "  ▶ ✓ Batch  2 tools · 1.2s");
-        assert!(lines.iter().all(|line| line.width() <= 80));
+        assert_eq!(rendered(&lines), ["  ▶ ✓ Batch  2 tools · 1.2s"]);
     }
 
     #[test]
@@ -751,25 +810,16 @@ mod tests {
         );
 
         let lines = render(&operation, 32, &Theme::default());
-        let rendered = lines
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join(" ");
-        let rendered = rendered.split_whitespace().collect::<Vec<_>>().join(" ");
 
-        assert!(lines.len() > 1);
-        assert!(lines.iter().all(|line| line.width() <= 32));
-        assert!(
-            lines
-                .iter()
-                .skip(1)
-                .all(|line| line.to_string().starts_with("      "))
+        assert_eq!(
+            rendered(&lines),
+            [
+                "  ▶ ✓ Custom operation  inspect",
+                "      every target without",
+                "      failing fast across the",
+                "      workspace · 1.2s",
+            ]
         );
-        assert!(
-            rendered.contains("inspect every target without failing fast across the workspace")
-        );
-        assert!(rendered.contains("1.2s"));
     }
 
     #[test]
@@ -784,16 +834,19 @@ mod tests {
             json!({"chars": "send a long interaction to the running process"}),
         );
 
-        let shell_line = render(&shell, 36, &Theme::default()).remove(0);
-        let live_shell_line =
-            render_live(&shell, 2_500_000_000, 36, &Theme::default(), false).remove(0);
-        let stdin_line = render(&stdin, 32, &Theme::default()).remove(0);
+        let shell_lines = render(&shell, 36, &Theme::default());
+        let live_shell_lines = render_live(&shell, 2_500_000_000, 36, &Theme::default(), false);
+        let stdin_lines = render(&stdin, 32, &Theme::default());
 
-        assert_eq!(shell_line.width(), 36);
-        assert!(shell_line.to_string().ends_with(" … · exit 0 · 1.2s"));
-        assert!(live_shell_line.to_string().ends_with(" … · exit 0 · 2.5s"));
-        assert_eq!(stdin_line.width(), 32);
-        assert!(stdin_line.to_string().ends_with(" … · 1.2s"));
+        assert_eq!(
+            rendered(&shell_lines),
+            ["  ▶ ✓ Shell  $ car … · exit 0 · 1.2s"]
+        );
+        assert_eq!(
+            rendered(&live_shell_lines),
+            ["  ▶ ✓ Shell  $ car … · exit 0 · 2.5s"]
+        );
+        assert_eq!(rendered(&stdin_lines), ["  ▶ ✓ Shell input  send … · 1.2s"]);
     }
 
     #[test]
@@ -802,8 +855,7 @@ mod tests {
 
         let lines = render(&shell, 80, &Theme::default());
 
-        assert_eq!(lines.len(), 1);
-        assert_eq!(lines[0].to_string(), "  ▶ ✓ Shell  $ printf one … · 1.2s");
+        assert_eq!(rendered(&lines), ["  ▶ ✓ Shell  $ printf one … · 1.2s"]);
     }
 
     #[test]
@@ -812,11 +864,11 @@ mod tests {
         web.result = Some(json!("large result body\n".repeat(1_000)));
 
         let lines = render(&web, 80, &Theme::default());
-        let rendered = lines.iter().map(ToString::to_string).collect::<String>();
 
-        assert_eq!(lines.len(), 1);
-        assert!(rendered.contains("search \"rust ratatui\""));
-        assert!(!rendered.contains("large result body"));
+        assert_eq!(
+            rendered(&lines),
+            ["  ▶ ✓ Web  search \"rust ratatui\" · 1.2s"]
+        );
     }
 
     #[test]
@@ -830,9 +882,10 @@ mod tests {
 
         let lines = render(&shell, 80, &Theme::default());
 
-        assert_eq!(lines.len(), 1);
-        assert!(lines[0].to_string().contains("compilation failed"));
-        assert!(!lines[0].to_string().contains("more diagnostics"));
+        assert_eq!(
+            rendered(&lines),
+            ["  ▶ × Shell  $ cargo test · exit 101 · compilation failed · 1.2s"]
+        );
     }
 
     #[test]
@@ -841,11 +894,11 @@ mod tests {
         shell.state = ToolState::Failed;
         shell.result = Some(json!({"output": "", "exit_code": null}));
 
-        let rendered = render(&shell, 80, &Theme::default())[0].to_string();
-
-        assert!(rendered.contains("× Shell"));
-        assert!(rendered.contains("terminated"));
-        assert!(!rendered.contains('✓'));
+        assert_summary(&shell, ("Shell", "$ sleep 100", Some("terminated")));
+        assert_eq!(
+            rendered(&render(&shell, 80, &Theme::default())),
+            ["  ▶ × Shell  $ sleep 100 · terminated · 1.2s"]
+        );
     }
 
     #[test]
@@ -853,13 +906,13 @@ mod tests {
         let mut shell = tool("exec_command", json!({"cmd": "cargo test"}));
         shell.result = Some(json!({"output": "all tests passed", "exit_code": 0}));
 
-        let rendered = render_expanded(&shell, 80, &Theme::default())
-            .into_iter()
-            .map(|line| line.to_string())
-            .collect::<String>();
+        let presentation = expanded(&shell, 80);
 
-        assert!(rendered.contains("all tests passed"));
-        assert!(rendered.contains("└ 1 line · 16 B"));
+        assert_eq!(
+            presentation.selection_source,
+            "cargo test\nall tests passed"
+        );
+        assert_eq!(presentation.footer.as_deref(), Some("1 line · 16 B"));
     }
 
     #[test]
@@ -867,55 +920,60 @@ mod tests {
         let mut image = tool("view_image", json!({"path": "image.png"}));
         image.result = Some(json!({"image_url": "data:image/png;base64,AAAA"}));
 
-        let rendered = render_expanded(&image, 40, &Theme::default())
-            .into_iter()
-            .map(|line| line.to_string())
-            .collect::<String>();
+        let presentation = expanded(&image, 40);
 
-        assert!(!rendered.contains("base64"));
-        assert!(rendered.contains("image returned"));
+        assert_eq!(rendered(&presentation.details), ["image returned · 42 B"]);
+        assert_eq!(presentation.footer.as_deref(), Some("binary data hidden"));
+        assert!(presentation.selection_source.is_empty());
     }
 
     #[test]
     fn every_first_party_tool_has_a_semantic_summary() {
         let cases = [
-            ("exec", json!("text(true)"), "Code  0 emitted items"),
+            (
+                "exec",
+                json!("text(true)"),
+                ("Code", "0 emitted items", None),
+            ),
             (
                 "update_plan",
                 json!({"plan": [{"step": "done", "status": "completed"}]}),
-                "Plan  1/1 complete",
+                ("Plan", "1/1 complete", None),
             ),
             (
                 "apply_patch",
                 json!("*** Begin Patch\n*** Update File: src/main.rs\n+new\n-old\n*** End Patch"),
-                "Patch  1 file · +1 −1",
+                ("Patch", "1 file · +1 −1", None),
             ),
             (
                 "view_image",
                 json!({"path": "/tmp/image.png", "detail": "original"}),
-                "Image  /tmp/image.png · original",
+                ("Image", "/tmp/image.png · original", None),
             ),
             (
                 "image_gen__imagegen",
                 json!({"prompt": "a compact terminal"}),
-                "Image generation  a compact terminal",
+                ("Image generation", "a compact terminal", None),
             ),
-            ("wait", json!({"cell_id": "12"}), "Wait  background work"),
+            (
+                "wait",
+                json!({"cell_id": "12"}),
+                ("Wait", "background work", None),
+            ),
             (
                 "mcp__files__read",
                 json!({"path": "/tmp/file"}),
-                "Files · read  /tmp/file",
+                ("Files · read", "/tmp/file", None),
             ),
             (
                 "spawn_agent",
                 json!({"role": "reviewer"}),
-                "Spawn agent  1 arguments",
+                ("Spawn agent", "1 arguments", None),
             ),
         ];
 
         for (name, arguments, expected) in cases {
-            let rendered = render(&tool(name, arguments), 100, &Theme::default())[0].to_string();
-            assert!(rendered.contains(expected), "{name}: {rendered}");
+            assert_summary(&tool(name, arguments), expected);
         }
     }
 
@@ -974,14 +1032,20 @@ mod tests {
             ),
         );
 
-        let rendered = render_expanded(&patch, 80, &Theme::default())
-            .iter()
-            .map(ToString::to_string)
-            .collect::<String>();
+        let lines = render_expanded(&patch, 80, &Theme::default());
 
-        assert!(rendered.contains("src/main.rs"));
-        assert!(rendered.contains("fn main()"));
-        assert!(rendered.contains("+1 −1"));
+        assert_eq!(
+            rendered(&lines),
+            [
+                "  ▼ ✓ Patch  1 file · +1 −1 · 1.2s",
+                "    │ ╭─ src/main.rs · +1 −1 ──────────────────────────────────────────────────╮",
+                "    │ ├─ fn main() · relative lines · +1 −1 ───────────────────────────────────┤",
+                "    │ │ 1   │- old();                                                          │",
+                "    │ │   1 │+ new();                                                          │",
+                "    │ ╰────────────────────────────────────────────────────────────────────────╯",
+                "    └ patch details",
+            ]
+        );
     }
 
     #[test]
@@ -995,28 +1059,26 @@ mod tests {
             }),
         );
 
-        let rendered = render(&web, 100, &Theme::default())[0].to_string();
-
-        assert!(rendered.contains("search 2 · open 1 · weather 1"));
+        assert_summary(&web, ("Web", "search 2 · open 1 · weather 1", None));
     }
 
     #[test]
     fn expanded_web_results_hide_protocol_annotations() {
         let mut web = tool("web__run", json!({"open": [{"ref_id": "turn0search0"}]}));
         web.result = Some(json!(
-            "citeturn0view0 Useful content [wordlim: 200]\nSecond line"
+            "\u{e200}cite\u{e202}turn0view0\u{e201} Useful content [wordlim: 200]\nSecond line"
         ));
 
-        let rendered = render_expanded(&web, 80, &Theme::default())
-            .into_iter()
-            .map(|line| line.to_string())
-            .collect::<String>();
+        let presentation = expanded(&web, 74);
 
-        assert!(rendered.contains("Useful content"));
-        assert!(rendered.contains("Second line"));
-        assert!(!rendered.contains("cite"));
-        assert!(!rendered.contains("wordlim"));
-
+        assert_eq!(
+            rendered(&presentation.details),
+            [
+                "open {\"ref_id\":\"turn0search0\"}",
+                "Useful content",
+                "Second line"
+            ]
+        );
         let source = render_layout(&web, None, 80, &Theme::default(), true)
             .selection_source
             .expect("expanded web results should be selectable");
