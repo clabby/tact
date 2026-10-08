@@ -1,6 +1,6 @@
 //! Typed errors exposed by the binary's internal module boundaries.
 
-use crate::core::{session::SessionError, transcript::TranscriptError};
+use crate::core::{pane::PaneId, session::SessionError, transcript::TranscriptError};
 use miette::Diagnostic;
 use nanocodex::{
     NanocodexError,
@@ -268,6 +268,8 @@ pub(crate) enum RuntimeError {
     SessionTask(#[source] tokio::task::JoinError),
     #[error("the Nanocodex worker stopped before accepting a command")]
     AgentWorkerStopped,
+    #[error("pane {0:?} has no open session")]
+    PaneUnavailable(PaneId),
     #[error("failed to resolve workspace {path}: {source}")]
     ResolveWorkspace {
         path: PathBuf,

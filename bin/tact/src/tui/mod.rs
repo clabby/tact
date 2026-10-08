@@ -2262,7 +2262,7 @@ fn apply_pane_effect(
     let workspace = context
         .app
         .root(pane)
-        .expect("effect pane exists")
+        .ok_or(RuntimeError::PaneUnavailable(pane))?
         .workspace()
         .to_owned();
     match effect {
@@ -2270,7 +2270,7 @@ fn apply_pane_effect(
             let runtime = context
                 .panes
                 .get_mut(&pane)
-                .expect("UI pane must have a runtime");
+                .ok_or(RuntimeError::PaneUnavailable(pane))?;
             let id = TurnId::new(runtime.next_turn);
             runtime.next_turn = runtime.next_turn.saturating_add(1);
             let record = runtime
@@ -2309,7 +2309,7 @@ fn apply_pane_effect(
             let runtime = context
                 .panes
                 .get_mut(&pane)
-                .expect("UI pane must have a runtime");
+                .ok_or(RuntimeError::PaneUnavailable(pane))?;
             let id = TurnId::new(runtime.next_turn);
             runtime.next_turn = runtime.next_turn.saturating_add(1);
             let submission = PendingSubmission { id, prompt };
@@ -2329,7 +2329,7 @@ fn apply_pane_effect(
             let runtime = context
                 .panes
                 .get_mut(&pane)
-                .expect("UI pane must have a runtime");
+                .ok_or(RuntimeError::PaneUnavailable(pane))?;
             let record = runtime
                 .journal_mut()?
                 .append_local(LocalEvent::CompactionStarted)?;
@@ -2346,7 +2346,7 @@ fn apply_pane_effect(
             let runtime = context
                 .panes
                 .get_mut(&pane)
-                .expect("UI pane must have a runtime");
+                .ok_or(RuntimeError::PaneUnavailable(pane))?;
             debug_assert_eq!(runtime.active_shells, 0);
             let id = TurnId::new(runtime.next_turn);
             runtime.next_turn = runtime.next_turn.saturating_add(1);
@@ -2371,7 +2371,7 @@ fn apply_pane_effect(
             let runtime = context
                 .panes
                 .get_mut(&pane)
-                .expect("UI pane must have a runtime");
+                .ok_or(RuntimeError::PaneUnavailable(pane))?;
             let id = ShellId::new(runtime.next_shell);
             runtime.next_shell = runtime.next_shell.saturating_add(1);
             runtime.active_shells = runtime.active_shells.saturating_add(1);
@@ -2763,7 +2763,10 @@ fn apply_pane_effect(
             ),
         },
         components::RootEffect::Steer { id, prompt } => {
-            let runtime = context.panes.get_mut(&pane).expect("steer pane must exist");
+            let runtime = context
+                .panes
+                .get_mut(&pane)
+                .ok_or(RuntimeError::PaneUnavailable(pane))?;
             let fallback_id = TurnId::new(runtime.next_turn);
             runtime.next_turn = runtime.next_turn.saturating_add(1);
             context
@@ -2777,7 +2780,10 @@ fn apply_pane_effect(
                 .map_err(|_| RuntimeError::AgentWorkerStopped)?;
         }
         components::RootEffect::PersistSteer(text) => {
-            let runtime = context.panes.get_mut(&pane).expect("steer pane must exist");
+            let runtime = context
+                .panes
+                .get_mut(&pane)
+                .ok_or(RuntimeError::PaneUnavailable(pane))?;
             let record = runtime
                 .journal_mut()?
                 .append_local(LocalEvent::UserSteered { text: text.clone() })?;
@@ -2796,7 +2802,10 @@ fn apply_pane_effect(
             );
         }
         components::RootEffect::CancelTurns => {
-            let runtime = context.panes.get(&pane).expect("cancelled pane must exist");
+            let runtime = context
+                .panes
+                .get(&pane)
+                .ok_or(RuntimeError::PaneUnavailable(pane))?;
             let subagents = runtime.subagent_control.clone();
             let root_session_id = runtime.session_id.clone();
             tokio::spawn(async move { subagents.cancel_all(&root_session_id).await });
