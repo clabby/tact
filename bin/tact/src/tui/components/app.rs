@@ -3033,7 +3033,7 @@ mod parity_tests {
                 queue_id: id + 1,
                 text: "missing".to_owned(),
             }),
-            Err(CommandError::UnknownSession)
+            Err(CommandError::UnknownQueueItem)
         );
 
         let mut idle = Harness::new();

@@ -49,10 +49,10 @@ Static assets are public. Every `/api/*` route except `POST /api/login` requires
   must have it match `Host`. The SSE request is checked the same way. No CORS headers.
 - Errors are JSON `{ "code": string, "message": string }`. Codes: `unauthorized` (401),
   `invalid_request` (400), `turn_running`, `queue_not_empty`, `nothing_running`, `draft_changed`,
-  `session_locked`, `unknown_session`, `too_many_sessions`, `not_available_remotely`, `stale`,
-  `disabled` (409/404), `failed` (500). Commands and queries share one mapping
-  (`protocol::CommandError::code`). The review routes use their own error body; see "Review
-  errors".
+  `session_locked`, `unknown_session`, `unknown_queue_item`, `too_many_sessions`,
+  `not_available_remotely`, `stale`, `disabled` (409/404), `failed` (500). Commands and queries
+  share one mapping (`protocol::CommandError::code`). The review routes use their own error body;
+  see "Review errors".
 
 ## Reads
 
@@ -157,7 +157,7 @@ straight into `protocol::Command`; there is no per-command route. Success is 200
 | `set_draft` | `session, text` | typing | never (last writer wins) |
 | `submit` | `session, rev, queue?` | Enter in the composer, or Shift+Tab or the Queue button with `queue: true` | `draft_changed` if the draft moved; `not_available_remotely` for terminal-local slash commands such as `/copy`. While a turn runs the prompt steers it; with `queue: true`, or while a steer is still being applied, it waits in the queue instead. |
 | `interrupt` | `session` | cancel-all | `nothing_running` |
-| `steer` / `dequeue` | `session, queue_id` | queue panel | `nothing_running` / `unknown_session` for a consumed item |
+| `steer` / `dequeue` | `session, queue_id` | queue panel | `nothing_running` / `unknown_queue_item` (409) for a consumed item |
 | `compact` | `session` | Actions: Compact | `turn_running`, `queue_not_empty` |
 | `set_model` / `set_effort` / `set_reasoning_mode` / `set_speed` | `session, model\|effort\|mode\|speed` | pickers | see Feature parity |
 | `activate` | `session` | focus / Sessions action | `unknown_session` |
@@ -228,7 +228,7 @@ In addition to the commands above:
 | :-- | :-- | :-- |
 | `set_reasoning_mode` | `session, mode: "standard" \| "pro"` | `invalid_request` if the model does not list the mode, or after the first prompt: a session's mode is fixed when it is created, so a new thread is recreated to apply the choice |
 | `set_speed` | `session, speed: Speed` | never; the model may run a lower tier |
-| `edit_queued` | `session, queue_id, text` | `unknown_session` for a consumed item |
+| `edit_queued` | `session, queue_id, text` | `unknown_queue_item` (409) for a consumed item |
 | `attach_image` | `session, data_url` (a `data:image/...;base64` URL) | `invalid_request` for a non-image |
 | `reflect` | `session, instructions?` | `turn_running`, `queue_not_empty` |
 | `handoff` | `session` | `turn_running`, `queue_not_empty` |

@@ -2296,7 +2296,7 @@ impl RootNode {
                     .items()
                     .any(|(item, _, steering)| item == *id && !steering) =>
             {
-                return Err(CommandError::UnknownSession);
+                return Err(CommandError::UnknownQueueItem);
             }
             PaneCommand::Compact | PaneCommand::Reflect(_) | PaneCommand::Handoff => {
                 self.compaction_allowed()?;

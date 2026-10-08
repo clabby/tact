@@ -404,6 +404,9 @@ pub(crate) enum CommandError {
     SessionLocked,
     #[error("unknown session")]
     UnknownSession,
+    /// The queued message no longer exists or is already being delivered.
+    #[error("the queued message is no longer waiting")]
+    UnknownQueueItem,
     #[error("too many live sessions")]
     TooManySessions,
     #[error("not available from the web interface")]
@@ -430,6 +433,7 @@ impl CommandError {
             Self::DraftChanged => "draft_changed",
             Self::SessionLocked => "session_locked",
             Self::UnknownSession => "unknown_session",
+            Self::UnknownQueueItem => "unknown_queue_item",
             Self::TooManySessions => "too_many_sessions",
             Self::NotAvailableRemotely => "not_available_remotely",
             Self::Stale => "stale",
