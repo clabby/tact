@@ -1,10 +1,12 @@
 //! Reusable demand-driven text wave for compact status labels.
 
 use ratatui::{
+    buffer::Buffer,
     style::{Color, Modifier, Style},
     text::Span,
 };
 use std::time::{Duration, Instant};
+use unicode_width::UnicodeWidthStr;
 
 const FRAME_INTERVAL: Duration = Duration::from_millis(140);
 const SHADE_PERCENTAGES: [u16; 8] = [100, 85, 70, 55, 40, 48, 62, 80];
@@ -41,6 +43,18 @@ impl WavedText {
         self.frame = 0;
     }
 
+    pub(super) fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// The display width of the text as drawn, one character per cell group.
+    pub(super) fn width(&self) -> usize {
+        self.text
+            .chars()
+            .map(|character| character.encode_utf8(&mut [0; 4]).width())
+            .sum()
+    }
+
     pub(super) const fn is_active(&self) -> bool {
         self.active
     }
@@ -69,17 +83,36 @@ impl WavedText {
         self.text
             .chars()
             .enumerate()
-            .map(|(index, character)| {
-                let style = if self.active {
-                    let percentage =
-                        SHADE_PERCENTAGES[(index + self.frame) % SHADE_PERCENTAGES.len()];
-                    shade(self.base_color, percentage)
-                } else {
-                    Style::default().fg(self.base_color)
-                };
-                Span::styled(character.to_string(), style)
-            })
+            .map(|(index, character)| Span::styled(character.to_string(), self.style_at(index)))
             .collect()
+    }
+
+    /// Draws the text from column `x` of row `y`, clipped before column `right`.
+    pub(super) fn draw(&self, buffer: &mut Buffer, mut x: u16, y: u16, right: u16) {
+        let mut encoded = [0; 4];
+        for (index, character) in self.text.chars().enumerate() {
+            if x >= right {
+                break;
+            }
+            let symbol = character.encode_utf8(&mut encoded);
+            let width = u16::try_from(symbol.width()).unwrap_or(u16::MAX);
+            buffer.set_stringn(
+                x,
+                y,
+                symbol,
+                usize::from(right.saturating_sub(x)),
+                self.style_at(index),
+            );
+            x = x.saturating_add(width);
+        }
+    }
+
+    fn style_at(&self, index: usize) -> Style {
+        if !self.active {
+            return Style::default().fg(self.base_color);
+        }
+        let percentage = SHADE_PERCENTAGES[(index + self.frame) % SHADE_PERCENTAGES.len()];
+        shade(self.base_color, percentage)
     }
 }
 

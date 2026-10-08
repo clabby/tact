@@ -167,10 +167,10 @@ pub(crate) struct Composer {
     reasoning_mode: ReasoningMode,
     speed: Speed,
     input_mode: InputMode,
+    /// The transient status of the running turn.
     activity_wave: Option<WavedText>,
-    activity_status: Option<String>,
+    /// The status of a task that blocks the composer.
     task_wave: Option<WavedText>,
-    task_status: Option<String>,
     live_sessions: Option<LiveSessions>,
     active_subagents: usize,
     subagent_wave: Option<WavedText>,
@@ -255,9 +255,7 @@ impl Composer {
             speed: Speed::Standard,
             input_mode: InputMode::Prompt,
             activity_wave: None,
-            activity_status: None,
             task_wave: None,
-            task_status: None,
             live_sessions: None,
             active_subagents: 0,
             subagent_wave: None,
@@ -363,29 +361,19 @@ impl Composer {
                 now,
             } => {
                 let status = if active { status } else { None };
-                if self.activity_status == status {
-                    return ComposerUpdate::unchanged();
-                }
-                self.activity_wave = status.as_ref().map(|status| {
-                    let mut wave = WavedText::new(status, Color::Cyan);
-                    wave.set_active(true, now);
-                    wave
-                });
-                self.activity_status = status;
-                ComposerUpdate::changed()
+                ComposerUpdate::from_change(replace_wave(
+                    &mut self.activity_wave,
+                    status,
+                    Color::Cyan,
+                    now,
+                ))
             }
-            ComposerEvent::TaskStatus { status, now } => {
-                if self.task_status == status {
-                    return ComposerUpdate::unchanged();
-                }
-                self.task_wave = status.as_ref().map(|status| {
-                    let mut wave = WavedText::new(status, Color::Green);
-                    wave.set_active(true, now);
-                    wave
-                });
-                self.task_status = status;
-                ComposerUpdate::changed()
-            }
+            ComposerEvent::TaskStatus { status, now } => ComposerUpdate::from_change(replace_wave(
+                &mut self.task_wave,
+                status,
+                Color::Green,
+                now,
+            )),
             ComposerEvent::LiveSessions(summary) => {
                 if self.live_sessions == summary {
                     return ComposerUpdate::unchanged();
@@ -931,11 +919,10 @@ impl Composer {
             .map(|hint| format!("{hint} "))
             .unwrap_or_default();
         let task_segment = self
-            .task_status
+            .task_wave
             .as_ref()
-            .map(|status| format!("{status} "))
+            .map(|wave| format!("{} ", wave.text()))
             .unwrap_or_default();
-        let status_segment = self.activity_status.clone().unwrap_or_default();
         let subagent_segment = if self.active_subagents > 0 {
             format!(" {} subagents", self.active_subagents)
         } else {
@@ -944,7 +931,7 @@ impl Composer {
         let usage_before_activity = format!("{usage_prefix}{input_mode_segment}{task_segment}");
         let usage_before_subagents = self.activity_wave.as_ref().map_or_else(
             || usage_before_activity.clone(),
-            |_| format!("{usage_before_activity}{status_segment} "),
+            |wave| format!("{usage_before_activity}{} ", wave.text()),
         );
         let mut usage = if subagent_segment.is_empty() {
             usage_before_subagents.clone()
@@ -990,50 +977,27 @@ impl Composer {
             Style::default().fg(theme.muted()),
         );
         if let Some(wave) = &self.task_wave {
-            let mut x = content_start + u16::try_from(usage_prefix.width()).unwrap_or(u16::MAX);
-            for span in wave.spans() {
-                if x >= right_start {
-                    break;
-                }
-                let width = u16::try_from(span.width()).unwrap_or(u16::MAX);
-                buffer.set_span(x, top, &span, right_start.saturating_sub(x));
-                x = x.saturating_add(width);
-            }
+            let x = content_start + u16::try_from(usage_prefix.width()).unwrap_or(u16::MAX);
+            wave.draw(buffer, x, top, right_start);
         }
         if let Some(wave) = &self.activity_wave {
-            let mut x =
+            let x =
                 content_start + u16::try_from(usage_before_activity.width()).unwrap_or(u16::MAX);
-            for span in wave.spans() {
-                if x >= right_start {
-                    break;
-                }
-                let width = u16::try_from(span.width()).unwrap_or(u16::MAX);
-                buffer.set_span(x, top, &span, right_start.saturating_sub(x));
-                x = x.saturating_add(width);
-            }
+            wave.draw(buffer, x, top, right_start);
         }
         if let Some(wave) = &self.subagent_wave {
             let wave_x =
                 content_start + u16::try_from(usage_before_subagents.width()).unwrap_or(u16::MAX);
-            let wave_width =
-                u16::try_from(wave.spans().iter().map(|span| span.width()).sum::<usize>())
-                    .unwrap_or(u16::MAX)
-                    .min(right_start.saturating_sub(wave_x));
+            let wave_width = u16::try_from(wave.width())
+                .unwrap_or(u16::MAX)
+                .min(right_start.saturating_sub(wave_x));
             if wave_width > 0 {
                 self.chrome_hits.push((
                     ComposerChromeTarget::Subagents,
                     Rect::new(wave_x, top, wave_width, 1),
                 ));
             }
-            let mut x = wave_x;
-            for span in wave.spans() {
-                if x >= right_start {
-                    break;
-                }
-                let width = u16::try_from(span.width()).unwrap_or(u16::MAX);
-                buffer.set_span(x, top, &span, right_start.saturating_sub(x));
-                x = x.saturating_add(width);
-            }
+            wave.draw(buffer, wave_x, top, right_start);
         }
         buffer.set_stringn(
             right_start,
@@ -1254,6 +1218,25 @@ impl ComposerUpdate {
 
 fn context_percent(tokens: u64, window: u64) -> u64 {
     tokens.saturating_mul(100).saturating_add(window / 2) / window.max(1)
+}
+
+/// Replaces a status wave when its text changes, starting the new wave
+/// immediately. Returns whether the status changed.
+fn replace_wave(
+    wave: &mut Option<WavedText>,
+    status: Option<String>,
+    color: Color,
+    now: Instant,
+) -> bool {
+    if wave.as_ref().map(WavedText::text) == status.as_deref() {
+        return false;
+    }
+    *wave = status.map(|status| {
+        let mut replacement = WavedText::new(status, color);
+        replacement.set_active(true, now);
+        replacement
+    });
+    true
 }
 
 fn draw_symbol(buffer: &mut Buffer, x: u16, y: u16, symbol: &str, style: Style) {
