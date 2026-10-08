@@ -567,33 +567,23 @@ fn format_score(score: f64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{render, render_expanded, render_layout};
+    use super::super::{
+        fixtures::{assert_summary, collapsed, entry, expanded, rendered},
+        render, render_expanded,
+    };
     use crate::{
         app::theme::Theme,
         core::transcript::{ToolEntry, ToolState},
     };
+    use ratatui::style::Color;
     use serde_json::{Value, json};
 
     fn memory(arguments: Value, state: ToolState, result: Option<Value>) -> ToolEntry {
         ToolEntry {
-            name: "memory".to_owned(),
-            arguments,
-            started_at_unix_ms: 0,
             state,
-            duration_ns: None,
             result,
-            metadata: None,
-            substeps: Vec::new(),
-            child_count: 0,
+            ..entry("memory", arguments)
         }
-    }
-
-    fn text(lines: &[ratatui::text::Line<'_>]) -> String {
-        lines
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join("\n")
     }
 
     fn record(id: i64, version: u64, content: &str) -> Value {
@@ -610,6 +600,8 @@ mod tests {
         })
     }
 
+    const RECORD_METADATA: &str = "created 10 · updated 20 · scans 2 · last used 30 · uses 1";
+
     #[test]
     fn summaries_cover_operations_states_and_results() {
         let cases = [
@@ -619,7 +611,7 @@ mod tests {
                     ToolState::Running,
                     None,
                 ),
-                "Memory scan  Rust style",
+                ("Memory scan", "Rust style", None),
             ),
             (
                 memory(
@@ -627,7 +619,7 @@ mod tests {
                     ToolState::Succeeded,
                     Some(json!({"operation": "scan", "abstained": true, "candidates": []})),
                 ),
-                "Memory scan  Rust style · abstained",
+                ("Memory scan", "Rust style", Some("abstained")),
             ),
             (
                 memory(
@@ -637,7 +629,7 @@ mod tests {
                         json!({"operation": "read", "memories": [record(7, 2, "Use early returns.")]}),
                     ),
                 ),
-                "Memory read  7@v2 · 1 memory",
+                ("Memory read", "7@v2", Some("1 memory")),
             ),
             (
                 memory(
@@ -656,7 +648,7 @@ mod tests {
                         ]
                     })),
                 ),
-                "Memory read  7@v1, 8@v1, 9@v1 · 3 memories",
+                ("Memory read", "7@v1, 8@v1, 9@v1", Some("3 memories")),
             ),
             (
                 memory(
@@ -666,7 +658,7 @@ mod tests {
                         json!({"operation": "put", "memory": record(7, 1, "Use early returns."), "replaced": null}),
                     ),
                 ),
-                "Memory stored  7@v1",
+                ("Memory stored", "7@v1", None),
             ),
             (
                 memory(
@@ -676,7 +668,7 @@ mod tests {
                         json!({"operation": "put", "memory": record(7, 2, "Use explicit flow."), "replaced": {"id": 7, "version": 1}}),
                     ),
                 ),
-                "Memory replaced  7@v2",
+                ("Memory replaced", "7@v2", None),
             ),
             (
                 memory(
@@ -687,25 +679,28 @@ mod tests {
                         "key": {"id": 7, "version": 2}
                     })),
                 ),
-                "Memory deleted  7@v2",
-            ),
-            (
-                memory(
-                    json!({"operation": "delete", "key": {"id": 7, "version": 2}}),
-                    ToolState::Failed,
-                    Some(json!({"error": "version conflict"})),
-                ),
-                "Memory delete  7@v2 · version conflict",
+                ("Memory deleted", "7@v2", None),
             ),
         ];
 
         for (tool, expected) in cases {
-            let rendered = text(&render(&tool, 100, &Theme::default()));
-            assert!(
-                rendered.contains(expected),
-                "expected {expected:?} in {rendered:?}"
-            );
+            assert_summary(&tool, expected);
         }
+    }
+
+    #[test]
+    fn failed_calls_keep_the_requested_operation_and_show_the_error() {
+        let tool = memory(
+            json!({"operation": "delete", "key": {"id": 7, "version": 2}}),
+            ToolState::Failed,
+            Some(json!({"error": "version conflict"})),
+        );
+
+        assert_summary(&tool, ("Memory delete", "7@v2", None));
+        assert_eq!(
+            rendered(&render(&tool, 100, &Theme::default())),
+            ["  ▶ × Memory delete  7@v2 · version conflict"]
+        );
     }
 
     #[test]
@@ -732,8 +727,7 @@ mod tests {
             })),
         );
 
-        let rendered = text(&render(&tool, 100, &Theme::default()));
-        assert!(rendered.contains("alice:7@v2"));
+        assert_summary(&tool, ("Memory read", "alice:7@v2", Some("1 memory")));
     }
 
     #[test]
@@ -750,7 +744,7 @@ mod tests {
                         "candidates": []
                     })),
                 ),
-                "Memory scan · local · style · abstained",
+                ("Memory scan · local · style", "", Some("abstained")),
             ),
             (
                 memory(
@@ -762,13 +756,12 @@ mod tests {
                         "memories": []
                     })),
                 ),
-                "Memory read · remote · alice:7@v2 · 0 memories",
+                ("Memory read · remote · alice:7@v2", "", Some("0 memories")),
             ),
         ];
 
         for (tool, expected) in cases {
-            let rendered = text(&render(&tool, 100, &Theme::default()));
-            assert!(rendered.contains(expected), "{rendered}");
+            assert_summary(&tool, expected);
         }
     }
 
@@ -795,9 +788,7 @@ mod tests {
             })),
         );
 
-        let rendered = text(&render(&tool, 100, &Theme::default()));
-        assert!(rendered.contains("Memory store · remote · ben:1@v1"));
-        assert!(!rendered.contains("Remote memory store"));
+        assert_summary(&tool, ("Memory store · remote · ben:1@v1", "", None));
     }
 
     #[test]
@@ -813,46 +804,50 @@ mod tests {
             None,
         );
 
-        assert!(text(&render(&legacy, 100, &Theme::default())).contains("Memory scan  style"));
-        assert!(text(&render(&pending, 100, &Theme::default())).contains("Memory scan  style"));
+        assert_summary(&legacy, ("Memory scan", "style", Some("0 candidates")));
+        assert_summary(&pending, ("Memory scan", "style", None));
     }
 
     #[test]
     fn legacy_exact_operation_arguments_remain_renderable() {
-        let cases = [
-            memory(
-                json!({"operation": "read", "ids": [7]}),
-                ToolState::Running,
-                None,
-            ),
-            memory(
-                json!({"operation": "delete", "id": 7, "version": 2}),
-                ToolState::Running,
-                None,
-            ),
-        ];
+        let read = memory(
+            json!({"operation": "read", "ids": [7]}),
+            ToolState::Running,
+            None,
+        );
+        let delete = memory(
+            json!({"operation": "delete", "id": 7, "version": 2}),
+            ToolState::Running,
+            None,
+        );
 
-        assert!(text(&render(&cases[0], 100, &Theme::default())).contains("Memory read  7"));
-        assert!(text(&render(&cases[1], 100, &Theme::default())).contains("Memory delete  7@v2"));
+        assert_summary(&read, ("Memory read", "7", None));
+        assert_summary(&delete, ("Memory delete", "7@v2", None));
     }
 
     #[test]
     fn delete_results_accept_remote_flat_and_nested_keys() {
         let cases = [
-            json!({
-                "operation": "delete",
-                "backend": {"source": "remote", "namespace": "alice", "role": "writer"},
-                "namespace": "alice",
-                "id": 7
-            }),
-            json!({
-                "operation": "delete",
-                "backend": {"source": "remote", "namespace": "alice", "role": "writer"},
-                "key": {"namespace": "alice", "id": 7, "version": 2}
-            }),
+            (
+                json!({
+                    "operation": "delete",
+                    "backend": {"source": "remote", "namespace": "alice", "role": "writer"},
+                    "namespace": "alice",
+                    "id": 7
+                }),
+                "Memory delete · remote · alice:7",
+            ),
+            (
+                json!({
+                    "operation": "delete",
+                    "backend": {"source": "remote", "namespace": "alice", "role": "writer"},
+                    "key": {"namespace": "alice", "id": 7, "version": 2}
+                }),
+                "Memory delete · remote · alice:7@v2",
+            ),
         ];
 
-        for result in cases {
+        for (result, title) in cases {
             let tool = memory(
                 json!({
                     "operation": "delete",
@@ -861,11 +856,7 @@ mod tests {
                 ToolState::Succeeded,
                 Some(result),
             );
-            let rendered = text(&render(&tool, 100, &Theme::default()));
-            assert!(
-                rendered.contains("Memory delete · remote · alice:7"),
-                "{rendered}"
-            );
+            assert_summary(&tool, (title, "", None));
         }
     }
 
@@ -886,8 +877,12 @@ mod tests {
         ];
 
         for tool in cases {
-            let rendered = text(&render_expanded(&tool, 80, &Theme::default()));
-            assert!(rendered.contains("arguments and result"), "{rendered}");
+            assert_eq!(
+                expanded(&tool, 74).footer.as_deref(),
+                Some("arguments and result"),
+                "{}",
+                tool.arguments
+            );
         }
     }
 
@@ -895,28 +890,39 @@ mod tests {
     fn collapsed_put_and_read_never_reveal_memory_content() {
         let secret = "private atomic memory contents";
         let cases = [
-            memory(
-                json!({"operation": "put", "content": secret}),
-                ToolState::Running,
-                None,
-            ),
-            memory(
-                json!({"operation": "put", "content": secret}),
-                ToolState::Succeeded,
-                Some(
-                    json!({"operation": "put", "memory": record(1, 1, secret), "replaced": false}),
+            (
+                memory(
+                    json!({"operation": "put", "content": secret}),
+                    ToolState::Running,
+                    None,
                 ),
+                ("Memory store", "", None),
             ),
-            memory(
-                json!({"operation": "read", "keys": [{"id": 1, "version": 1}]}),
-                ToolState::Succeeded,
-                Some(json!({"operation": "read", "memories": [record(1, 1, secret)]})),
+            (
+                memory(
+                    json!({"operation": "put", "content": secret}),
+                    ToolState::Succeeded,
+                    Some(
+                        json!({"operation": "put", "memory": record(1, 1, secret), "replaced": false}),
+                    ),
+                ),
+                ("Memory stored", "1@v1", None),
+            ),
+            (
+                memory(
+                    json!({"operation": "read", "keys": [{"id": 1, "version": 1}]}),
+                    ToolState::Succeeded,
+                    Some(json!({"operation": "read", "memories": [record(1, 1, secret)]})),
+                ),
+                ("Memory read", "1@v1", Some("1 memory")),
             ),
         ];
 
-        for tool in cases {
-            let rendered = text(&render(&tool, 100, &Theme::default()));
-            assert!(!rendered.contains(secret), "{rendered}");
+        for (tool, expected) in cases {
+            assert_summary(&tool, expected);
+            let presentation = collapsed(&tool);
+            assert!(presentation.details.is_empty());
+            assert!(presentation.selection_source.is_empty());
         }
     }
 
@@ -938,56 +944,58 @@ mod tests {
             Some(json!({"operation": "scan", "abstained": false, "candidates": candidates})),
         );
 
-        let rendered = text(&render_expanded(&tool, 80, &Theme::default()));
+        let presentation = expanded(&tool, 74);
 
-        assert!(rendered.contains("0@v3 · score 0.875"));
-        assert!(rendered.contains("9@v3 · score 0.875"));
-        assert!(!rendered.contains("10@v3 · score"));
-        assert!(!rendered.contains("must not be shown"));
-        assert!(rendered.contains("10 of 12 candidates"));
-        assert!(!rendered.contains(&"x".repeat(241)));
-
-        let source = render_layout(&tool, None, 80, &Theme::default(), true)
-            .selection_source
-            .expect("scan results should be selectable");
-        assert!(source.contains("0@v3 · score 0.875"));
-        assert!(source.contains("preview-0"));
-        assert!(!source.contains("10@v3 · score"));
-        assert!(!source.contains("must not be shown"));
-        assert!(!source.contains(&"x".repeat(241)));
+        let expected = (0..10)
+            .flat_map(|id| {
+                [
+                    format!("{id}@v3 · score 0.875"),
+                    format!("preview-{id} {}", "x".repeat(230)),
+                ]
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            presentation
+                .selection_source
+                .split('\n')
+                .collect::<Vec<_>>(),
+            expected
+        );
+        assert_eq!(presentation.footer.as_deref(), Some("10 of 12 candidates"));
     }
 
     #[test]
     fn expanded_read_and_put_show_atomic_content_and_selected_metadata() {
         let cases = [
-            memory(
-                json!({"operation": "read", "keys": [{"id": 9, "version": 4}]}),
-                ToolState::Succeeded,
-                Some(
-                    json!({"operation": "read", "memories": [record(9, 4, "Use explicit data flow.")]}),
+            (
+                memory(
+                    json!({"operation": "read", "keys": [{"id": 9, "version": 4}]}),
+                    ToolState::Succeeded,
+                    Some(
+                        json!({"operation": "read", "memories": [record(9, 4, "Use explicit data flow.")]}),
+                    ),
                 ),
+                "1 memory",
             ),
-            memory(
-                json!({"operation": "put", "content": "Use explicit data flow."}),
-                ToolState::Succeeded,
-                Some(
-                    json!({"operation": "put", "memory": record(9, 4, "Use explicit data flow."), "replaced": false}),
+            (
+                memory(
+                    json!({"operation": "put", "content": "Use explicit data flow."}),
+                    ToolState::Succeeded,
+                    Some(
+                        json!({"operation": "put", "memory": record(9, 4, "Use explicit data flow."), "replaced": false}),
+                    ),
                 ),
+                "memory record",
             ),
         ];
 
-        for tool in cases {
-            let rendered = text(&render_expanded(&tool, 100, &Theme::default()));
-            assert!(rendered.contains("Use explicit data flow."), "{rendered}");
-            assert!(rendered.contains("created 10 · updated 20"), "{rendered}");
-            assert!(rendered.contains("scans 2"), "{rendered}");
-            assert!(rendered.contains("uses 1"), "{rendered}");
-
-            let source = render_layout(&tool, None, 100, &Theme::default(), true)
-                .selection_source
-                .expect("memory records should be selectable");
-            assert!(source.contains("Use explicit data flow."));
-            assert!(source.contains("created 10 · updated 20"));
+        for (tool, footer) in cases {
+            let presentation = expanded(&tool, 94);
+            assert_eq!(
+                presentation.selection_source,
+                format!("9@v4\nUse explicit data flow.\n{RECORD_METADATA}")
+            );
+            assert_eq!(presentation.footer.as_deref(), Some(footer));
         }
     }
 
@@ -1004,42 +1012,44 @@ mod tests {
                 "previous_content": "Use early returns.\nKeep context."
             })),
         );
-        let collapsed = text(&render(&tool, 80, &Theme::default()));
-        assert!(
-            collapsed.contains("Memory replace · local · 7@v2"),
-            "{collapsed}"
-        );
-        assert!(!collapsed.contains("Use early returns."));
-        assert!(!collapsed.contains("Use explicit flow."));
+        let theme = Theme::default();
 
-        let layout = render_layout(&tool, None, 80, &Theme::default(), true);
-        let expanded = text(&layout.lines);
-        assert!(expanded.contains("- Use early returns."), "{expanded}");
-        assert!(expanded.contains("+ Use explicit flow."), "{expanded}");
-        assert_eq!(expanded.matches("Keep context.").count(), 1, "{expanded}");
-        let source = layout.selection_source.unwrap();
-        assert!(source.contains("- Use early returns."));
-        assert!(source.contains("+ Use explicit flow."));
-        assert_eq!(source.matches("  Keep context.").count(), 1);
-        assert!(
-            layout
-                .lines
-                .iter()
-                .flat_map(|line| &line.spans)
-                .any(|span| span.content.contains("- Use early returns.")
-                    && span.style.fg == Some(ratatui::style::Color::Red))
+        assert_summary(&tool, ("Memory replace · local · 7@v2", "", None));
+        assert!(collapsed(&tool).details.is_empty());
+
+        let presentation = expanded(&tool, 74);
+        assert_eq!(
+            presentation.selection_source,
+            "7@v2\n- Use early returns.\n+ Use explicit flow.\n  Keep context."
         );
-        assert!(
-            layout
-                .lines
-                .iter()
-                .flat_map(|line| &line.spans)
-                .any(|span| span.content.contains("+ Use explicit flow.")
-                    && span.style.fg == Some(ratatui::style::Color::Green))
+        let colors = presentation
+            .details
+            .iter()
+            .map(|line| line.spans.first().and_then(|span| span.style.fg))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            colors,
+            [
+                Some(theme.accent()),
+                Some(Color::Red),
+                Some(Color::Green),
+                Some(theme.text()),
+            ]
+        );
+        assert_eq!(
+            rendered(&render_expanded(&tool, 80, &theme)),
+            [
+                "  ▼ ✓ Memory replace · local · 7@v2",
+                "    │ 7@v2",
+                "    │ - Use early returns.",
+                "    │ + Use explicit flow.",
+                "    │ Keep context.",
+                "    └ details",
+            ]
         );
         for width in 1..=12 {
             assert!(
-                render_expanded(&tool, width, &Theme::default())
+                render_expanded(&tool, width, &theme)
                     .iter()
                     .all(|line| line.width() <= usize::from(width))
             );
@@ -1047,7 +1057,7 @@ mod tests {
     }
 
     #[test]
-    fn expansion_controls_and_delete_details_are_semantic() {
+    fn delete_details_show_only_the_key_when_expanded() {
         let tool = memory(
             json!({"operation": "delete", "key": {"id": 3, "version": 8}}),
             ToolState::Succeeded,
@@ -1056,14 +1066,19 @@ mod tests {
                 "key": {"id": 3, "version": 8}
             })),
         );
-        let collapsed = text(&render(&tool, 80, &Theme::default()));
-        let expanded = text(&render_expanded(&tool, 80, &Theme::default()));
 
-        assert!(collapsed.contains("▶"));
-        assert!(!collapsed.contains("memory key"));
-        assert!(expanded.contains("▼"));
-        assert!(expanded.contains("└ memory key"));
-        assert!(!expanded.contains("content"));
+        assert_eq!(
+            rendered(&render(&tool, 80, &Theme::default())),
+            ["  ▶ ✓ Memory deleted  3@v8"]
+        );
+        assert_eq!(
+            rendered(&render_expanded(&tool, 80, &Theme::default())),
+            [
+                "  ▼ ✓ Memory deleted  3@v8",
+                "    │ 3@v8",
+                "    └ memory key"
+            ]
+        );
     }
 
     #[test]
