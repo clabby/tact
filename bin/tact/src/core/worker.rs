@@ -1619,14 +1619,14 @@ mod tests {
             .send(Ok(()))
             .unwrap();
         let snapshot = compacted(&mut updates).await.unwrap();
-        session::save_checkpoint(
-            &config,
-            "session",
-            &snapshot.into_codex().unwrap(),
-            "instructions",
-            false,
-        )
-        .unwrap();
+        session::SessionStore::new(&config)
+            .save_checkpoint(
+                "session",
+                &snapshot.into_codex().unwrap(),
+                "instructions",
+                false,
+            )
+            .unwrap();
         commands.send(WorkerCommand::Compact(PaneId::Main)).unwrap();
         timeout(Duration::from_secs(5), receive.recv()).await.unwrap().unwrap().send(Err(ResponsesError::HttpRejected {
             status: 403, body: r#"{"error":{"code":"misalignment_policy_violation","message":"conversation stopped"}}"#.to_owned(), retry_after: None,
@@ -1672,7 +1672,7 @@ mod tests {
             .unwrap();
         journal.flush().await.unwrap();
         assert!(matches!(
-            session::load_checkpoint(&config, "session"),
+            session::SessionStore::new(&config).load_checkpoint("session"),
             Err(session::SessionError::TerminalStop { .. })
         ));
         commands

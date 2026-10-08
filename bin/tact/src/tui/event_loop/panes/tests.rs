@@ -6,7 +6,7 @@ use crate::{
     app::config::{Config, ConfigOverrides, ReasoningEffort, ReasoningMode, Speed},
     core::{
         pane::PaneId,
-        session::{self, SessionLock},
+        session::{SessionLock, SessionStore},
         shell::ShellExecution,
         subagent_updates::ForwardedSubagentUpdate,
         transcript::{
@@ -98,7 +98,10 @@ impl Harness {
     }
 
     fn transcript(&self, session_id: &str) -> Vec<Arc<TranscriptRecord>> {
-        session::load_transcript(self.config.path(), session_id).unwrap()
+        SessionStore::new(self.config.path())
+            .load_transcript(session_id)
+            .unwrap()
+            .into_records()
     }
 }
 

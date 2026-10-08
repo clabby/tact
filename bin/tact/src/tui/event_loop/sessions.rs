@@ -17,7 +17,7 @@ use crate::{
     core::{
         ConfiguredAgent,
         pane::PaneId,
-        session::{self, SessionLock, SessionSummary},
+        session::{SessionLock, SessionStore, SessionSummary},
         supported_reasoning_mode,
         transcript::TranscriptRecord,
     },
@@ -73,21 +73,20 @@ pub(super) async fn restore_session(
     effort: ReasoningEffort,
     lock: SessionLock,
 ) -> Result<RestoredSession> {
-    let config_path = config.path().to_path_buf();
+    let store = SessionStore::new(config.path());
     let checkpoint_session_id = session_id.clone();
-    let checkpoint = tokio::task::spawn_blocking(move || {
-        session::load_checkpoint(&config_path, &checkpoint_session_id)
-    });
-    let transcript =
-        session::load_transcript_async(config.path().to_path_buf(), session_id.clone());
-    let (snapshot, records) = tokio::join!(checkpoint, transcript);
-    let snapshot = snapshot.map_err(RuntimeError::SessionTask)??;
-    let records = records?;
-    let config = config.with_workspace(session::workspace(&records)?);
+    let checkpoint = store.run_blocking(move |store| store.load_checkpoint(&checkpoint_session_id));
+    let transcript_session_id = session_id.clone();
+    let transcript = store.run_blocking(move |store| store.load_transcript(&transcript_session_id));
+    let (snapshot, transcript) = tokio::join!(checkpoint, transcript);
+    let snapshot = snapshot?;
+    let transcript = transcript?;
+    let config = config.with_workspace(transcript.workspace()?);
     tokio::task::spawn_blocking(move || -> Result<_> {
-        let reasoning_mode = session::reasoning_mode(&records);
-        let model = session::model(&records)?;
-        let next_sequence = session::next_sequence(&records);
+        let reasoning_mode = transcript.reasoning_mode();
+        let model = transcript.model()?;
+        let next_sequence = transcript.next_sequence();
+        let records = transcript.into_records();
         let projection = RootNode::project_session(effort, records.clone());
         let configured = ConfiguredAgent::from_config_with_session(
             &config,
@@ -222,7 +221,7 @@ impl EventLoop {
     /// Lists stored sessions in `workspace` for a picker, leaving out the pane's own session.
     pub(super) fn load_sessions(&mut self, pane: PaneId, kind: SessionListKind, workspace: &Path) {
         self.input = None;
-        let config_path = self.config.path().to_path_buf();
+        let store = SessionStore::new(self.config.path());
         let workspace = workspace.to_path_buf();
         let active_session_id = self
             .panes
@@ -231,7 +230,8 @@ impl EventLoop {
             .to_owned();
         self.tasks.spawn(TaskKind::SessionList, async move {
             let resumable_only = matches!(kind, SessionListKind::Resume);
-            let sessions = session::list_async(config_path, workspace, resumable_only)
+            let sessions = store
+                .list_workspace_family(&workspace, resumable_only)
                 .await
                 .map(|mut sessions| {
                     sessions.retain(|session| session.session_id != active_session_id);
@@ -358,7 +358,7 @@ mod tests {
             error::{Error, RuntimeError},
         },
         core::{
-            session::{SessionLock, save_checkpoint},
+            session::{SessionLock, SessionStore},
             storage::SessionStorage,
             transcript::{LocalEvent, SessionStarted, TranscriptRecord},
         },
@@ -434,7 +434,9 @@ mod tests {
             "history": []
         }))
         .unwrap();
-        save_checkpoint(&config_path, "session", &snapshot, "instructions", false).unwrap();
+        SessionStore::new(&config_path)
+            .save_checkpoint("session", &snapshot, "instructions", false)
+            .unwrap();
         let lock = SessionLock::acquire(&config_path, "session").unwrap();
 
         let result =

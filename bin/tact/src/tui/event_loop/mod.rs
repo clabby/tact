@@ -64,7 +64,7 @@ use crate::{
         ConfiguredAgent,
         pane::PaneId,
         protocol::{AuxiliaryRequest, Origin, QueryRequest, Request},
-        session::SessionLock,
+        session::{SessionLock, SessionStore},
         shell::ShellExecution,
         supported_reasoning_mode,
         transcript::TranscriptError,
@@ -286,7 +286,7 @@ impl EventLoop {
         let mut tasks = BackgroundTasks::default();
         tasks.spawn(
             TaskKind::RecentPrompts,
-            recent_prompts::load(config.path().to_path_buf()),
+            recent_prompts::load(SessionStore::new(config.path())),
         );
         if !crate::app::installation::current().is_development() {
             tasks.spawn(TaskKind::UpdateCheck, async {

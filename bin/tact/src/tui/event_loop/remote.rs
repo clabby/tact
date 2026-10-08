@@ -8,7 +8,7 @@ use crate::{
     core::{
         extensions::SkillMatches,
         protocol::{CommandError, ListedMemory, Query, QueryReply, Reply},
-        session::{self, HistoryPage, RecentPrompt, RecentPrompts},
+        session::{HistoryPage, RecentPrompt, RecentPrompts, SessionStore},
     },
     search::FileMatches,
     tui::components::{AppNode, RootNode},
@@ -61,10 +61,11 @@ fn prepare(query: Query, state: &QueryState<'_>) -> Result<Answer<QueryReply>, C
             state.config.claude().enabled(),
         )))),
         Query::History { query, cursor } => {
-            let config_path = state.config.path().to_path_buf();
+            let store = SessionStore::new(state.config.path());
             let workspace = state.workspace.to_path_buf();
             Answer::pending(async move {
-                let sessions = session::list_async(config_path, workspace, true)
+                let sessions = store
+                    .list_workspace_family(&workspace, true)
                     .await
                     .map_err(failed)?;
                 HistoryPage::new(sessions, &query, cursor.as_deref())
@@ -105,9 +106,10 @@ fn prepare(query: Query, state: &QueryState<'_>) -> Result<Answer<QueryReply>, C
             match state.recent_prompts {
                 Some(persisted) => Answer::Ready(Ok(rank(persisted.to_vec()))),
                 None => {
-                    let config_path = state.config.path().to_path_buf();
+                    let store = SessionStore::new(state.config.path());
                     Answer::pending(async move {
-                        let persisted = session::load_recent_prompts_async(config_path)
+                        let persisted = store
+                            .run_blocking(SessionStore::recent_prompts)
                             .await
                             .map_err(failed)?;
                         Ok(rank(persisted))

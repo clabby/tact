@@ -154,7 +154,10 @@ impl PersistenceFixture {
     }
 
     fn load_transcript(&self) -> Vec<Arc<TranscriptRecord>> {
-        session::load_transcript(&self.config_path, &self.session_id).unwrap()
+        session::SessionStore::new(&self.config_path)
+            .load_transcript(&self.session_id)
+            .unwrap()
+            .into_records()
     }
 }
 
@@ -659,7 +662,11 @@ fn benchmarks(criterion: &mut Criterion) {
 
     sessions.bench_function("catalog_semantic_archive", |bencher| {
         bencher.iter(|| {
-            black_box(session::list(&fixture.config_path, &fixture.workspace, true).unwrap());
+            black_box(
+                session::SessionStore::new(&fixture.config_path)
+                    .list(std::slice::from_ref(&fixture.workspace), true)
+                    .unwrap(),
+            );
         });
     });
 

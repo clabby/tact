@@ -8,7 +8,7 @@ use crate::{
     },
     core::{
         storage::{SessionStorage, StorageError, StoredSession, database_path},
-        transcript::{LocalKind, TerminalStopReason, TranscriptRecord},
+        transcript::{LocalKind, SessionStarted, TerminalStopReason, TranscriptRecord},
     },
     search::rank,
 };
@@ -412,24 +412,6 @@ impl SessionLock {
     }
 }
 
-#[cfg(test)]
-pub(crate) fn save_checkpoint(
-    config_path: &Path,
-    session_id: &str,
-    snapshot: &SessionSnapshot,
-    instructions: &str,
-    skills_catalog_present: bool,
-) -> Result<(), SessionError> {
-    let encoded = encode_checkpoint(
-        &AgentSnapshot::Codex(Box::new(snapshot.clone())),
-        instructions,
-        skills_catalog_present,
-    )?;
-    SessionStorage::open(config_path)?
-        .save_resume_state(session_id, &encoded)
-        .map_err(Into::into)
-}
-
 pub(crate) fn encode_checkpoint(
     snapshot: &AgentSnapshot,
     instructions: &str,
@@ -446,71 +428,97 @@ pub(crate) fn encode_checkpoint(
         .map_err(Into::into)
 }
 
-pub(crate) fn load_checkpoint(
-    config_path: &Path,
-    session_id: &str,
-) -> Result<ResumeState, SessionError> {
-    let storage = SessionStorage::open_read_only(config_path)?.ok_or_else(|| {
-        SessionError::MissingCheckpoint {
-            session_id: session_id.to_owned(),
+/// Read access to the sessions persisted beside one configuration file.
+///
+/// Each query opens its own read-only connection, so a store holds no database handle between
+/// queries and is cheap to clone. Queries block on SQLite; async callers run them through
+/// [`SessionStore::run_blocking`].
+#[derive(Clone, Debug)]
+pub(crate) struct SessionStore {
+    config_path: Arc<Path>,
+}
+
+impl SessionStore {
+    pub(crate) fn new(config_path: &Path) -> Self {
+        Self {
+            config_path: config_path.into(),
         }
-    })?;
-    if let Some(reason) = storage.terminal_stop(session_id)? {
-        return Err(SessionError::TerminalStop {
-            session_id: session_id.to_owned(),
-            reason,
-        });
     }
-    let encoded =
-        storage
-            .load_resume_state(session_id)?
-            .ok_or_else(|| SessionError::MissingCheckpoint {
+
+    /// Runs a blocking store query on the blocking thread pool.
+    pub(crate) async fn run_blocking<T, F>(&self, query: F) -> Result<T, SessionError>
+    where
+        T: Send + 'static,
+        F: FnOnce(&Self) -> Result<T, SessionError> + Send + 'static,
+    {
+        let store = self.clone();
+        tokio::task::spawn_blocking(move || query(&store))
+            .await
+            .map_err(SessionError::StorageTask)?
+    }
+
+    /// Opens the database for reading, or `None` when no session has been persisted yet.
+    fn open(&self) -> Result<Option<SessionStorage>, SessionError> {
+        Ok(SessionStorage::open_read_only(&self.config_path)?)
+    }
+
+    pub(crate) fn load_checkpoint(&self, session_id: &str) -> Result<ResumeState, SessionError> {
+        let missing = || SessionError::MissingCheckpoint {
+            session_id: session_id.to_owned(),
+        };
+        let storage = self.open()?.ok_or_else(missing)?;
+        if let Some(reason) = storage.terminal_stop(session_id)? {
+            return Err(SessionError::TerminalStop {
                 session_id: session_id.to_owned(),
-            })?;
-    let stored =
-        serde_json::from_slice::<StoredResumeState>(&encoded).map_err(StorageError::from)?;
-    if stored.format_version != RESUME_STATE_FORMAT_VERSION {
-        return Err(SessionError::IncompatibleCheckpoint {
-            session_id: session_id.to_owned(),
-            found: stored.format_version,
-        });
+                reason,
+            });
+        }
+        let encoded = storage.load_resume_state(session_id)?.ok_or_else(missing)?;
+        let stored =
+            serde_json::from_slice::<StoredResumeState>(&encoded).map_err(StorageError::from)?;
+        if stored.format_version != RESUME_STATE_FORMAT_VERSION {
+            return Err(SessionError::IncompatibleCheckpoint {
+                session_id: session_id.to_owned(),
+                found: stored.format_version,
+            });
+        }
+        Ok(ResumeState::new(
+            stored.snapshot,
+            stored.instructions,
+            stored.skills_catalog_present,
+        ))
     }
-    Ok(ResumeState::new(
-        stored.snapshot,
-        stored.instructions,
-        stored.skills_catalog_present,
-    ))
-}
 
-#[allow(dead_code, reason = "used by session benchmarks")]
-pub(crate) fn list(
-    config_path: &Path,
-    workspace: &Path,
-    resumable_only: bool,
-) -> Result<Vec<SessionSummary>, SessionError> {
-    let Some(storage) = SessionStorage::open_read_only(config_path)? else {
-        return Ok(Vec::new());
-    };
-    Ok(storage
-        .list_sessions(workspace, resumable_only)?
-        .into_iter()
-        .map(SessionSummary::from)
-        .collect())
-}
+    #[cfg(test)]
+    pub(crate) fn save_checkpoint(
+        &self,
+        session_id: &str,
+        snapshot: &SessionSnapshot,
+        instructions: &str,
+        skills_catalog_present: bool,
+    ) -> Result<(), SessionError> {
+        let encoded = encode_checkpoint(
+            &AgentSnapshot::Codex(Box::new(snapshot.clone())),
+            instructions,
+            skills_catalog_present,
+        )?;
+        SessionStorage::open(&self.config_path)?
+            .save_resume_state(session_id, &encoded)
+            .map_err(Into::into)
+    }
 
-pub(crate) async fn list_async(
-    config_path: PathBuf,
-    workspace: PathBuf,
-    resumable_only: bool,
-) -> Result<Vec<SessionSummary>, SessionError> {
-    let workspaces = tact_vcs::family_paths(&workspace).await;
-    tokio::task::spawn_blocking(move || {
-        let Some(storage) = SessionStorage::open_read_only(&config_path)? else {
+    /// Sessions recorded in any of `workspaces`, most recently updated first.
+    pub(crate) fn list(
+        &self,
+        workspaces: &[PathBuf],
+        resumable_only: bool,
+    ) -> Result<Vec<SessionSummary>, SessionError> {
+        let Some(storage) = self.open()? else {
             return Ok(Vec::new());
         };
         let mut sessions = Vec::new();
         for workspace in workspaces {
-            sessions.extend(storage.list_sessions(&workspace, resumable_only)?);
+            sessions.extend(storage.list_sessions(workspace, resumable_only)?);
         }
         sessions.sort_by(|left, right| {
             right
@@ -519,16 +527,22 @@ pub(crate) async fn list_async(
                 .then_with(|| left.session_id.cmp(&right.session_id))
         });
         Ok(sessions.into_iter().map(SessionSummary::from).collect())
-    })
-    .await
-    .map_err(SessionError::StorageTask)?
-}
+    }
 
-pub(crate) async fn load_recent_prompts_async(
-    config_path: PathBuf,
-) -> Result<Vec<RecentPrompt>, SessionError> {
-    tokio::task::spawn_blocking(move || {
-        let Some(storage) = SessionStorage::open_read_only(&config_path)? else {
+    /// Sessions recorded in `workspace` or any other checkout of the same repository.
+    pub(crate) async fn list_workspace_family(
+        &self,
+        workspace: &Path,
+        resumable_only: bool,
+    ) -> Result<Vec<SessionSummary>, SessionError> {
+        let workspaces = tact_vcs::family_paths(workspace).await;
+        self.run_blocking(move |store| store.list(&workspaces, resumable_only))
+            .await
+    }
+
+    /// The most recent prompts across every session, newest first.
+    pub(crate) fn recent_prompts(&self) -> Result<Vec<RecentPrompt>, SessionError> {
+        let Some(storage) = self.open()? else {
             return Ok(Vec::new());
         };
         let prompts = storage.recent_prompts(MAX_RECENT_PROMPTS)?;
@@ -541,164 +555,175 @@ pub(crate) async fn load_recent_prompts_async(
                 workspace: prompt.workspace,
             })
             .collect())
-    })
-    .await
-    .map_err(SessionError::StorageTask)?
+    }
+
+    /// The session's records preceded by the prefixes it inherited from the sessions it forked.
+    pub(crate) fn load_transcript(
+        &self,
+        session_id: &str,
+    ) -> Result<LoadedTranscript, SessionError> {
+        let Some(storage) = self.open()? else {
+            return Ok(LoadedTranscript::default());
+        };
+        let mut lineage = LineageLoader {
+            storage: &storage,
+            loading: HashSet::new(),
+            records: Vec::new(),
+        };
+        lineage.load(session_id, None)?;
+        Ok(LoadedTranscript {
+            records: lineage.records,
+        })
+    }
 }
 
-#[allow(dead_code, reason = "used by session benchmarks")]
-pub(crate) fn load_transcript(
-    config_path: &Path,
-    session_id: &str,
-) -> Result<Vec<Arc<TranscriptRecord>>, SessionError> {
-    let Some(storage) = SessionStorage::open_read_only(config_path)? else {
-        return Ok(Vec::new());
-    };
-    let mut records = Vec::new();
-    load_lineage(
-        &storage,
-        session_id,
-        None,
-        &mut HashSet::new(),
-        &mut records,
-    )?;
-    Ok(records)
+/// Collects a fork lineage's records, ancestors first.
+///
+/// A fork's `session.started` names its parent and the last parent sequence it inherited, so each
+/// ancestor contributes only the prefix through that boundary. `loading` holds the sessions on the
+/// current path to detect cycles.
+struct LineageLoader<'a> {
+    storage: &'a SessionStorage,
+    loading: HashSet<String>,
+    records: Vec<Arc<TranscriptRecord>>,
 }
 
-fn load_lineage(
-    storage: &SessionStorage,
-    session_id: &str,
-    through_sequence: Option<u64>,
-    loading: &mut HashSet<String>,
-    records: &mut Vec<Arc<TranscriptRecord>>,
-) -> Result<(), SessionError> {
-    if through_sequence == Some(0) {
-        return Ok(());
-    }
-    if !loading.insert(session_id.to_owned()) {
-        return Err(SessionError::LineageCycle {
-            session_id: session_id.to_owned(),
-        });
-    }
-    let (local, boundary_found, session_found) = match through_sequence {
-        Some(sequence) => {
-            let prefix = storage.load_records_through(session_id, sequence)?;
-            (prefix.records, prefix.boundary_found, prefix.session_found)
+impl LineageLoader<'_> {
+    fn load(
+        &mut self,
+        session_id: &str,
+        through_sequence: Option<u64>,
+    ) -> Result<(), SessionError> {
+        if through_sequence == Some(0) {
+            return Ok(());
         }
-        None => (storage.load_records(session_id)?, true, true),
-    };
-    if local.is_empty() {
-        loading.remove(session_id);
-        if through_sequence.is_some() && !session_found {
-            return Err(SessionError::MissingAncestor {
+        if !self.loading.insert(session_id.to_owned()) {
+            return Err(SessionError::LineageCycle {
                 session_id: session_id.to_owned(),
             });
+        }
+        let (local, boundary_found, session_found) = match through_sequence {
+            Some(sequence) => {
+                let prefix = self.storage.load_records_through(session_id, sequence)?;
+                (prefix.records, prefix.boundary_found, prefix.session_found)
+            }
+            None => (self.storage.load_records(session_id)?, true, true),
+        };
+        if local.is_empty() {
+            self.loading.remove(session_id);
+            if through_sequence.is_some() && !session_found {
+                return Err(SessionError::MissingAncestor {
+                    session_id: session_id.to_owned(),
+                });
+            }
+            if let Some(sequence) = through_sequence
+                && !boundary_found
+            {
+                return Err(SessionError::InvalidLineageBoundary {
+                    session_id: session_id.to_owned(),
+                    sequence,
+                });
+            }
+            return Ok(());
         }
         if let Some(sequence) = through_sequence
             && !boundary_found
         {
+            self.loading.remove(session_id);
             return Err(SessionError::InvalidLineageBoundary {
                 session_id: session_id.to_owned(),
                 sequence,
             });
         }
-        return Ok(());
+        let started = local
+            .iter()
+            .find(|record| record.local_kind() == Some(LocalKind::SessionStarted))
+            .and_then(|record| record.session_started());
+        if through_sequence.is_some()
+            && !started
+                .as_ref()
+                .is_some_and(|started| started.session_id == session_id)
+        {
+            return Err(SessionError::InvalidLineageStart {
+                session_id: session_id.to_owned(),
+            });
+        }
+        if let Some(started) = started
+            && let (Some(parent), Some(parent_sequence)) =
+                (started.parent_session_id, started.parent_sequence)
+        {
+            self.load(&parent, Some(parent_sequence))?;
+        }
+        self.records.extend(local);
+        self.loading.remove(session_id);
+        Ok(())
     }
-    if let Some(sequence) = through_sequence
-        && !boundary_found
-    {
-        loading.remove(session_id);
-        return Err(SessionError::InvalidLineageBoundary {
-            session_id: session_id.to_owned(),
-            sequence,
-        });
-    }
-    let started = local.iter().find_map(|record| record.session_started());
-    if through_sequence.is_some()
-        && !started
-            .as_ref()
-            .is_some_and(|started| started.session_id == session_id)
-    {
-        return Err(SessionError::InvalidLineageStart {
-            session_id: session_id.to_owned(),
-        });
-    }
-    if let Some(started) = started
-        && let (Some(parent), Some(parent_sequence)) =
-            (started.parent_session_id, started.parent_sequence)
-    {
-        load_lineage(storage, &parent, Some(parent_sequence), loading, records)?;
-    }
-    records.extend(local);
-    loading.remove(session_id);
-    Ok(())
 }
 
-pub(crate) async fn load_transcript_async(
-    config_path: PathBuf,
-    session_id: String,
-) -> Result<Vec<Arc<TranscriptRecord>>, SessionError> {
-    tokio::task::spawn_blocking(move || load_transcript(&config_path, &session_id))
-        .await
-        .map_err(SessionError::StorageTask)?
+/// A restored session's records in replay order, with the settings its latest start recorded.
+#[derive(Debug, Default)]
+pub(crate) struct LoadedTranscript {
+    records: Vec<Arc<TranscriptRecord>>,
 }
 
-pub(crate) fn reasoning_mode(records: &[Arc<TranscriptRecord>]) -> ReasoningMode {
-    records
-        .iter()
-        .rev()
-        .find_map(|record| record.session_started())
-        .map_or(ReasoningMode::Standard, |started| started.reasoning_mode)
-}
+impl LoadedTranscript {
+    pub(crate) fn into_records(self) -> Vec<Arc<TranscriptRecord>> {
+        self.records
+    }
 
-pub(crate) fn workspace(records: &[Arc<TranscriptRecord>]) -> Result<PathBuf, SessionError> {
-    records
-        .iter()
-        .rev()
-        .find_map(|record| record.session_started())
-        .map(|started| started.workspace)
-        .ok_or(SessionError::MissingWorkspace)
-}
+    /// The start of the newest segment, which describes the session being resumed.
+    fn latest_start(&self) -> Option<SessionStarted> {
+        self.records
+            .iter()
+            .rev()
+            .find(|record| record.local_kind() == Some(LocalKind::SessionStarted))
+            .and_then(|record| record.session_started())
+    }
 
-pub(crate) fn model(records: &[Arc<TranscriptRecord>]) -> Result<Model, SessionError> {
-    let stored = records
-        .iter()
-        .rev()
-        .find_map(|record| record.session_started())
-        .map_or_else(
+    pub(crate) fn reasoning_mode(&self) -> ReasoningMode {
+        self.latest_start()
+            .map_or(ReasoningMode::Standard, |started| started.reasoning_mode)
+    }
+
+    pub(crate) fn workspace(&self) -> Result<PathBuf, SessionError> {
+        self.latest_start()
+            .map(|started| started.workspace)
+            .ok_or(SessionError::MissingWorkspace)
+    }
+
+    pub(crate) fn model(&self) -> Result<Model, SessionError> {
+        let stored = self.latest_start().map_or_else(
             || Model::Codex(CodexModel::Sol).to_string(),
             |started| started.model,
         );
-    model::parse(&stored).map_err(|_| SessionError::UnsupportedModel { model: stored })
-}
-
-pub(crate) fn next_sequence(records: &[Arc<TranscriptRecord>]) -> u64 {
-    let current_session_id = records
-        .iter()
-        .rev()
-        .find_map(|record| record.session_started().map(|started| started.session_id));
-    let Some(current_session_id) = current_session_id else {
-        return 1;
-    };
-    let mut segment = None::<String>;
-    let mut maximum = 0;
-    for record in records {
-        if record.local_kind() == Some(LocalKind::SessionStarted) {
-            segment = record.session_started().map(|started| started.session_id);
-        }
-        if segment.as_deref() == Some(&current_session_id) {
-            maximum = maximum.max(record.sequence());
-        }
+        model::parse(&stored).map_err(|_| SessionError::UnsupportedModel { model: stored })
     }
-    maximum.saturating_add(1).max(1)
+
+    /// The sequence the resumed session's next record takes: one past the largest sequence in its
+    /// own segments, ignoring inherited ancestor prefixes.
+    pub(crate) fn next_sequence(&self) -> u64 {
+        let Some(current_session_id) = self.latest_start().map(|started| started.session_id) else {
+            return 1;
+        };
+        let mut segment = None::<String>;
+        let mut maximum = 0;
+        for record in &self.records {
+            if record.local_kind() == Some(LocalKind::SessionStarted) {
+                segment = record.session_started().map(|started| started.session_id);
+            }
+            if segment.as_deref() == Some(&current_session_id) {
+                maximum = maximum.max(record.sequence());
+            }
+        }
+        maximum.saturating_add(1).max(1)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        HistoryPage, RecentPrompt, RecentPromptScope, RecentPrompts, SessionError, SessionSummary,
-        TerminalStopReason, encode_checkpoint, load_checkpoint, load_transcript, model,
-        save_checkpoint,
+        HistoryPage, LoadedTranscript, RecentPrompt, RecentPromptScope, RecentPrompts,
+        SessionError, SessionStore, SessionSummary, TerminalStopReason, encode_checkpoint,
     };
     use crate::{
         app::config::{ReasoningEffort, ReasoningMode, Speed},
@@ -849,7 +874,13 @@ mod tests {
         let directory = tempdir().unwrap();
         let config = directory.path().join("config.toml");
 
-        assert!(load_transcript(&config, "missing").unwrap().is_empty());
+        assert!(
+            SessionStore::new(&config)
+                .load_transcript("missing")
+                .unwrap()
+                .into_records()
+                .is_empty()
+        );
         assert!(!database_path(&config).exists());
     }
 
@@ -928,9 +959,8 @@ mod tests {
             .append_records("session-0", &[prompt(2, "recent activity")])
             .unwrap();
         drop(storage);
-        let sessions = super::list_async(config_path.clone(), checkout, false)
-            .await
-            .unwrap();
+        let store = SessionStore::new(&config_path);
+        let sessions = store.list_workspace_family(&checkout, false).await.unwrap();
         assert_eq!(
             sessions
                 .iter()
@@ -939,7 +969,8 @@ mod tests {
             ["session-0", "session-1"]
         );
         assert_eq!(
-            super::list_async(config_path, repository, false)
+            store
+                .list_workspace_family(&repository, false)
                 .await
                 .unwrap()
                 .len(),
@@ -972,9 +1003,15 @@ mod tests {
             )
             .unwrap();
 
-            assert_eq!(model(&[Arc::new(record)]).unwrap(), selected);
+            let transcript = LoadedTranscript {
+                records: vec![Arc::new(record)],
+            };
+            assert_eq!(transcript.model().unwrap(), selected);
         }
-        assert_eq!(model(&[]).unwrap(), Model::Codex(CodexModel::Sol));
+        assert_eq!(
+            LoadedTranscript::default().model().unwrap(),
+            Model::Codex(CodexModel::Sol)
+        );
     }
 
     #[test]
@@ -997,8 +1034,11 @@ mod tests {
             )
             .unwrap();
 
+            let transcript = LoadedTranscript {
+                records: vec![Arc::new(record)],
+            };
             assert!(matches!(
-                model(&[Arc::new(record)]),
+                transcript.model(),
                 Err(SessionError::UnsupportedModel { model }) if model == old_id
             ));
         }
@@ -1046,7 +1086,10 @@ mod tests {
         let writer = Connection::open(database_path(&config)).unwrap();
         writer.execute_batch("BEGIN IMMEDIATE").unwrap();
 
-        let loaded = load_transcript(&config, "session").unwrap();
+        let loaded = SessionStore::new(&config)
+            .load_transcript("session")
+            .unwrap()
+            .into_records();
 
         assert_eq!(loaded.len(), 2);
         assert_eq!(loaded[0].local_kind(), Some(LocalKind::SessionStarted));
@@ -1088,7 +1131,10 @@ mod tests {
             )
             .unwrap();
 
-        let loaded = load_transcript(&config, "grandchild").unwrap();
+        let loaded = SessionStore::new(&config)
+            .load_transcript("grandchild")
+            .unwrap()
+            .into_records();
         let prompts = loaded
             .iter()
             .filter(|record| record.local_kind() == Some(LocalKind::UserSubmitted))
@@ -1114,16 +1160,18 @@ mod tests {
 
     #[test]
     fn resumed_session_sequences_continue_after_every_existing_segment() {
-        let records = [
-            started(1, "parent", None, None),
-            prompt(8, "parent prompt"),
-            started(1, "fork", None, None),
-            prompt(2, "first fork segment"),
-            started(3, "fork", None, None),
-            prompt(4, "second fork segment"),
-        ];
+        let transcript = LoadedTranscript {
+            records: vec![
+                started(1, "parent", None, None),
+                prompt(8, "parent prompt"),
+                started(1, "fork", None, None),
+                prompt(2, "first fork segment"),
+                started(3, "fork", None, None),
+                prompt(4, "second fork segment"),
+            ],
+        };
 
-        assert_eq!(super::next_sequence(&records), 5);
+        assert_eq!(transcript.next_sequence(), 5);
     }
 
     #[test]
@@ -1136,7 +1184,9 @@ mod tests {
             .append_records("fork", &[started])
             .unwrap();
 
-        let error = load_transcript(&config, "fork").unwrap_err();
+        let error = SessionStore::new(&config)
+            .load_transcript("fork")
+            .unwrap_err();
 
         assert!(matches!(
             error,
@@ -1156,7 +1206,9 @@ mod tests {
             .append_records("two", &[started(1, "two", Some("one"), Some(1))])
             .unwrap();
 
-        let error = load_transcript(&config, "one").unwrap_err();
+        let error = SessionStore::new(&config)
+            .load_transcript("one")
+            .unwrap_err();
 
         assert!(matches!(
             error,
@@ -1180,7 +1232,10 @@ mod tests {
             .append_records("fork", &[started(1, "fork", Some("parent"), Some(2))])
             .unwrap();
 
-        let loaded = load_transcript(&config, "fork").unwrap();
+        let loaded = SessionStore::new(&config)
+            .load_transcript("fork")
+            .unwrap()
+            .into_records();
 
         assert_eq!(loaded.len(), 3);
         assert_eq!(loaded[1].payload_json(), r#"{"id":2,"text":"inherited"}"#);
@@ -1201,7 +1256,7 @@ mod tests {
             .append_records("fork", &[started(1, "fork", Some("parent"), Some(2))])
             .unwrap();
 
-        assert!(load_transcript(&config, "fork").is_err());
+        assert!(SessionStore::new(&config).load_transcript("fork").is_err());
     }
 
     #[test]
@@ -1247,7 +1302,8 @@ mod tests {
             .unwrap()
             .save_resume_state("native-session", &encoded)
             .unwrap();
-        let (actual, instructions, catalog) = load_checkpoint(&config, "native-session")
+        let (actual, instructions, catalog) = SessionStore::new(&config)
+            .load_checkpoint("native-session")
             .unwrap()
             .into_parts();
         assert_eq!(
@@ -1292,7 +1348,10 @@ mod tests {
             .unwrap()
             .save_resume_state("legacy", &encoded)
             .unwrap();
-        let (actual, instructions, _) = load_checkpoint(&config, "legacy").unwrap().into_parts();
+        let (actual, instructions, _) = SessionStore::new(&config)
+            .load_checkpoint("legacy")
+            .unwrap()
+            .into_parts();
         assert!(actual.clone().into_claude().is_err());
         assert_eq!(
             serde_json::to_value(actual.into_codex().unwrap()).unwrap(),
@@ -1360,9 +1419,13 @@ mod tests {
         let directory = tempdir().unwrap();
         let config = directory.path().join("config.toml");
         let expected = snapshot("lineage");
-        save_checkpoint(&config, "session", &expected, "exact instructions", true).unwrap();
+        SessionStore::new(&config)
+            .save_checkpoint("session", &expected, "exact instructions", true)
+            .unwrap();
 
-        let restored = load_checkpoint(&config, "session").unwrap();
+        let restored = SessionStore::new(&config)
+            .load_checkpoint("session")
+            .unwrap();
         let (actual, instructions, catalog) = restored.into_parts();
 
         assert_eq!(
@@ -1379,10 +1442,16 @@ mod tests {
     fn newer_successful_snapshot_atomically_replaces_the_previous_state() {
         let directory = tempdir().unwrap();
         let config = directory.path().join("config.toml");
-        save_checkpoint(&config, "session", &snapshot("first"), "first", false).unwrap();
-        save_checkpoint(&config, "session", &snapshot("second"), "second", true).unwrap();
+        SessionStore::new(&config)
+            .save_checkpoint("session", &snapshot("first"), "first", false)
+            .unwrap();
+        SessionStore::new(&config)
+            .save_checkpoint("session", &snapshot("second"), "second", true)
+            .unwrap();
 
-        let restored = load_checkpoint(&config, "session").unwrap();
+        let restored = SessionStore::new(&config)
+            .load_checkpoint("session")
+            .unwrap();
         let (snapshot, instructions, catalog) = restored.into_parts();
         let snapshot = serde_json::to_value(snapshot).unwrap();
 
@@ -1396,7 +1465,9 @@ mod tests {
         let directory = tempdir().unwrap();
         let config = directory.path().join("config.toml");
         let expected = snapshot("successful");
-        save_checkpoint(&config, "session", &expected, "instructions", true).unwrap();
+        SessionStore::new(&config)
+            .save_checkpoint("session", &expected, "instructions", true)
+            .unwrap();
 
         let (mut journal, writer) = TranscriptJournal::open(&config, "session").unwrap();
         journal.defer_start(SessionStarted {
@@ -1420,13 +1491,18 @@ mod tests {
         drop(journal);
         writer.into_task().await.unwrap().unwrap();
 
-        let restored = load_checkpoint(&config, "session").unwrap();
+        let restored = SessionStore::new(&config)
+            .load_checkpoint("session")
+            .unwrap();
         let (actual, _, _) = restored.into_parts();
         assert_eq!(
             serde_json::to_value(actual).unwrap(),
             serde_json::to_value(expected).unwrap()
         );
-        let records = super::load_transcript(&config, "session").unwrap();
+        let records = SessionStore::new(&config)
+            .load_transcript("session")
+            .unwrap()
+            .into_records();
         assert_eq!(
             records.last().unwrap().local_kind(),
             Some(LocalKind::WorkerTurnFinished)
@@ -1438,7 +1514,9 @@ mod tests {
         let directory = tempdir().unwrap();
         let config = directory.path().join("config.toml");
         let expected = snapshot("successful");
-        save_checkpoint(&config, "session", &expected, "instructions", true).unwrap();
+        SessionStore::new(&config)
+            .save_checkpoint("session", &expected, "instructions", true)
+            .unwrap();
 
         let terminal_stop = serde_json::from_str::<TranscriptRecord>(
             &json!({
@@ -1479,7 +1557,9 @@ mod tests {
             .unwrap();
 
         assert!(
-            load_checkpoint(&config, "session").is_err(),
+            SessionStore::new(&config)
+                .load_checkpoint("session")
+                .is_err(),
             "a terminal provider stop must block the retained checkpoint even after a later failure"
         );
     }
@@ -1501,9 +1581,14 @@ mod tests {
             .unwrap();
         journal.flush().await.unwrap();
 
-        assert!(matches!(load_checkpoint(&config, "session"),
-            Err(SessionError::TerminalStop { reason: actual, .. }) if actual == reason));
-        let records = load_transcript(&config, "session").unwrap();
+        assert!(
+            matches!(SessionStore::new(&config).load_checkpoint("session"),
+            Err(SessionError::TerminalStop { reason: actual, .. }) if actual == reason)
+        );
+        let records = SessionStore::new(&config)
+            .load_transcript("session")
+            .unwrap()
+            .into_records();
         let payload = records.last().unwrap().decode_payload::<Value>().unwrap();
         assert_eq!(payload["terminal_stop"], "misalignment_policy_violation");
         assert_eq!(
@@ -1518,14 +1603,9 @@ mod tests {
     fn unknown_terminal_stop_classification_fails_closed() {
         let directory = tempdir().unwrap();
         let config = directory.path().join("config.toml");
-        save_checkpoint(
-            &config,
-            "session",
-            &snapshot("successful"),
-            "instructions",
-            true,
-        )
-        .unwrap();
+        SessionStore::new(&config)
+            .save_checkpoint("session", &snapshot("successful"), "instructions", true)
+            .unwrap();
         let record = TranscriptRecord::from_local(
             2,
             2,
@@ -1550,7 +1630,7 @@ mod tests {
         drop(storage);
 
         assert!(matches!(
-            load_checkpoint(&config, "session"),
+            SessionStore::new(&config).load_checkpoint("session"),
             Err(SessionError::Storage(_))
         ));
         assert_eq!(
@@ -1599,13 +1679,18 @@ mod tests {
         drop(journal);
         writer.into_task().await.unwrap().unwrap();
 
-        let records = super::load_transcript(&config, "session").unwrap();
+        let records = SessionStore::new(&config)
+            .load_transcript("session")
+            .unwrap()
+            .into_records();
         assert_eq!(
             records.last().unwrap().local_kind(),
             Some(LocalKind::WorkerTurnFinished)
         );
-        let (actual, instructions, catalog) =
-            load_checkpoint(&config, "session").unwrap().into_parts();
+        let (actual, instructions, catalog) = SessionStore::new(&config)
+            .load_checkpoint("session")
+            .unwrap()
+            .into_parts();
         assert_eq!(
             serde_json::to_value(actual).unwrap(),
             serde_json::to_value(expected).unwrap()
@@ -1619,7 +1704,9 @@ mod tests {
         let directory = tempdir().unwrap();
         let config = directory.path().join("config.toml");
         let instructions = "exact instructions\r\n  including whitespace\n";
-        save_checkpoint(&config, "session", &snapshot("before"), instructions, true).unwrap();
+        SessionStore::new(&config)
+            .save_checkpoint("session", &snapshot("before"), instructions, true)
+            .unwrap();
         SessionStorage::open(&config)
             .unwrap()
             .append_records("session", &[started(1, "session", None, None)])
@@ -1638,15 +1725,20 @@ mod tests {
             )
             .unwrap();
         journal.flush().await.unwrap();
-        let (actual, actual_instructions, catalog) =
-            load_checkpoint(&config, "session").unwrap().into_parts();
+        let (actual, actual_instructions, catalog) = SessionStore::new(&config)
+            .load_checkpoint("session")
+            .unwrap()
+            .into_parts();
         assert_eq!(
             serde_json::to_value(actual).unwrap(),
             serde_json::to_value(&expected).unwrap()
         );
         assert_eq!(actual_instructions, instructions);
         assert_eq!(catalog, Some(true));
-        let records = load_transcript(&config, "session").unwrap();
+        let records = SessionStore::new(&config)
+            .load_transcript("session")
+            .unwrap()
+            .into_records();
         assert_eq!(
             records.last().unwrap().local_kind(),
             Some(LocalKind::CompactionFinished)
@@ -1661,8 +1753,10 @@ mod tests {
             }))
             .unwrap();
         journal.flush().await.unwrap();
-        let (actual, actual_instructions, _) =
-            load_checkpoint(&config, "session").unwrap().into_parts();
+        let (actual, actual_instructions, _) = SessionStore::new(&config)
+            .load_checkpoint("session")
+            .unwrap()
+            .into_parts();
         assert_eq!(
             serde_json::to_value(actual).unwrap(),
             serde_json::to_value(expected).unwrap()
@@ -1682,7 +1776,9 @@ mod tests {
             .append_records("session", &initial_records)
             .unwrap();
         let expected = snapshot("before-lock");
-        save_checkpoint(&config, "session", &expected, "instructions", true).unwrap();
+        SessionStore::new(&config)
+            .save_checkpoint("session", &expected, "instructions", true)
+            .unwrap();
 
         let lock = Connection::open(database_path(&config)).unwrap();
         lock.execute_batch("BEGIN IMMEDIATE").unwrap();
@@ -1707,12 +1803,18 @@ mod tests {
         drop(journal);
         writer.into_task().await.unwrap().unwrap();
 
-        let (restored, _, _) = load_checkpoint(&config, "session").unwrap().into_parts();
+        let (restored, _, _) = SessionStore::new(&config)
+            .load_checkpoint("session")
+            .unwrap()
+            .into_parts();
         assert_eq!(
             serde_json::to_value(restored).unwrap(),
             serde_json::to_value(expected).unwrap()
         );
-        let records = load_transcript(&config, "session").unwrap();
+        let records = SessionStore::new(&config)
+            .load_transcript("session")
+            .unwrap()
+            .into_records();
         assert_eq!(records.len(), 3);
         assert_eq!(records[1].local_kind(), Some(LocalKind::UserSubmitted));
         assert_eq!(records[2].local_kind(), Some(LocalKind::UserSubmitted));

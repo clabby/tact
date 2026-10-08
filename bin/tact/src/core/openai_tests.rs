@@ -1,7 +1,7 @@
 use super::{ConfiguredAgent, set_speed};
 use crate::{
     app::config::{Config, ConfigOverrides, ReasoningMode, Speed, Transport},
-    core::session::{load_checkpoint, save_checkpoint},
+    core::session::SessionStore,
 };
 use axum::{
     Json, Router,
@@ -403,14 +403,9 @@ async fn configured_lineage_and_effort_survive_speed_changes_children_and_restor
 
         let session_id = root.agent.session_id().to_owned();
         let snapshot = root.agent.snapshot().await.unwrap();
-        save_checkpoint(
-            config.path(),
-            &session_id,
-            &snapshot,
-            &root.instructions,
-            true,
-        )
-        .unwrap();
+        SessionStore::new(config.path())
+            .save_checkpoint(&session_id, &snapshot, &root.instructions, true)
+            .unwrap();
         root.shutdown().await.unwrap();
         config.set_speed(Speed::Fast);
         let restored = ConfiguredAgent::from_config_with_session(
@@ -419,7 +414,11 @@ async fn configured_lineage_and_effort_survive_speed_changes_children_and_restor
             ReasoningMode::Standard,
             HarnessModel::Codex(Model::Astra),
             Some(&session_id),
-            Some(load_checkpoint(config.path(), &session_id).unwrap()),
+            Some(
+                SessionStore::new(config.path())
+                    .load_checkpoint(&session_id)
+                    .unwrap(),
+            ),
         )
         .unwrap();
         prompt(&restored.agent, "restored root turn").await;

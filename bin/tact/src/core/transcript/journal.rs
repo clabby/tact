@@ -341,7 +341,7 @@ mod tests {
     use crate::{
         app::config::{ReasoningEffort, ReasoningMode, Speed},
         core::{
-            session,
+            session::SessionStore,
             storage::{SessionStorage, database_path},
             transcript::{
                 LocalEvent, LocalKind, SessionStarted, SpeedChanged, TurnId, UserSubmitted,
@@ -392,7 +392,10 @@ mod tests {
         drop(journal);
         writer.into_task().await.unwrap().unwrap();
 
-        let records = session::load_transcript(&config, "session").unwrap();
+        let records = SessionStore::new(&config)
+            .load_transcript("session")
+            .unwrap()
+            .into_records();
         assert_eq!(records.len(), 3);
         assert_eq!(records[0].local_kind(), Some(LocalKind::SessionStarted));
         assert_eq!(
@@ -466,7 +469,10 @@ mod tests {
             .unwrap();
         grandchild.flush().await.unwrap();
 
-        let records = session::load_transcript(&config, "grandchild").unwrap();
+        let records = SessionStore::new(&config)
+            .load_transcript("grandchild")
+            .unwrap()
+            .into_records();
         assert_eq!(
             records
                 .iter()
@@ -577,7 +583,10 @@ mod tests {
         drop(journal);
         writer.into_task().await.unwrap().unwrap();
 
-        let records = session::load_transcript(&config, "session").unwrap();
+        let records = SessionStore::new(&config)
+            .load_transcript("session")
+            .unwrap()
+            .into_records();
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].local_kind(), Some(LocalKind::SessionStarted));
         assert_eq!(
@@ -625,7 +634,10 @@ mod tests {
         drop(journal);
         writer.into_task().await.unwrap().unwrap();
 
-        let records = session::load_transcript(&config, "session").unwrap();
+        let records = SessionStore::new(&config)
+            .load_transcript("session")
+            .unwrap()
+            .into_records();
         assert_eq!(
             records
                 .iter()
@@ -739,7 +751,10 @@ mod tests {
             writer.into_task().await.unwrap().unwrap();
         }
 
-        let prompts = session::load_recent_prompts_async(config).await.unwrap();
+        let prompts = SessionStore::new(&config)
+            .run_blocking(SessionStore::recent_prompts)
+            .await
+            .unwrap();
         assert_eq!(prompts.len(), 2);
         assert_eq!(prompts[0].text, "newest prompt");
         assert_eq!(prompts[1].text, "  preserve\n  this spacing  ");

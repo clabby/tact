@@ -12,7 +12,7 @@ use crate::{
     app::error::Result,
     core::{
         pane::PaneId,
-        session::{self, RecentPrompt},
+        session::{self, RecentPrompt, SessionStore},
     },
     tui::components::{AppEvent, RecentPromptDraft},
 };
@@ -25,10 +25,11 @@ use std::{
 };
 
 /// Loads the recent prompts of every stored session.
-pub(super) fn load(config_path: PathBuf) -> impl Future<Output = TaskOutput> {
+pub(super) fn load(store: SessionStore) -> impl Future<Output = TaskOutput> {
     async move {
         TaskOutput::RecentPrompts(
-            session::load_recent_prompts_async(config_path)
+            store
+                .run_blocking(SessionStore::recent_prompts)
                 .await
                 .map_err(Into::into),
         )
@@ -137,7 +138,7 @@ impl EventLoop {
         if !self.tasks.is_active(TaskKind::RecentPrompts) {
             self.tasks.spawn(
                 TaskKind::RecentPrompts,
-                load(self.config.path().to_path_buf()),
+                load(SessionStore::new(self.config.path())),
             );
         }
     }
