@@ -196,10 +196,21 @@ struct PendingSubmission {
     prompt: Submission,
 }
 
+/// A pane and the incarnation of its runtime. Replacing a pane's agent starts a new generation,
+/// so events and writer completions from the replaced session can be recognised and ignored.
 #[derive(Clone, Copy)]
 struct PaneGeneration {
     pane: PaneId,
     generation: u64,
+}
+
+/// Whether a pane's session already had a stored transcript when the pane opened it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SessionOrigin {
+    /// A fresh session or fork, stored only once its transcript receives a record.
+    New,
+    /// A resumed session that is already listed in storage.
+    Resumed,
 }
 
 struct PaneSession<'a> {
@@ -207,7 +218,7 @@ struct PaneSession<'a> {
     parent_id: Option<&'a str>,
     parent_sequence: Option<u64>,
     next_sequence: u64,
-    previously_persisted: bool,
+    origin: SessionOrigin,
     skills_catalog_present: bool,
 }
 
@@ -248,46 +259,57 @@ impl<'a> PaneSession<'a> {
             parent_id,
             parent_sequence,
             next_sequence,
-            previously_persisted: false,
+            origin: SessionOrigin::New,
             skills_catalog_present,
         }
     }
 
-    const fn persisted(id: &'a str, next_sequence: u64, skills_catalog_present: bool) -> Self {
+    const fn resumed(id: &'a str, next_sequence: u64, skills_catalog_present: bool) -> Self {
         Self {
             id,
             parent_id: None,
             parent_sequence: None,
             next_sequence,
-            previously_persisted: true,
+            origin: SessionOrigin::Resumed,
             skills_catalog_present,
         }
     }
 }
 
+/// Everything the event loop owns for one open pane's session.
 struct PaneRuntime {
     session_id: String,
     instructions: Arc<str>,
     skills_catalog_present: bool,
-    previously_persisted: bool,
+    origin: SessionOrigin,
+    /// The transcript journal; absent once the pane's journal has been closed.
     journal: Option<TranscriptJournal>,
     writer_path: PathBuf,
+    /// Set by the journal writer once a record of this session reaches storage.
     persisted_transcript: Arc<AtomicBool>,
-    event_streams_open: usize,
+    agent: AgentState,
     next_turn: u64,
     next_shell: u64,
     pending_shell_context: Vec<String>,
     pending_submission: Option<PendingSubmission>,
-    current_effort: ReasoningEffort,
-    reasoning_mode: ReasoningMode,
-    current_speed: Speed,
-    current_model: Model,
+    /// The settings the pane's agent is currently running with.
+    settings: PaneSettings,
     active_shells: usize,
+    /// See [`PaneGeneration`].
     generation: u64,
     subagent_control: Subagents,
-    /// The pane was closed; the runtime ends when its agent event stream does.
-    closing: bool,
     _lock: SessionLock,
+}
+
+/// Where a pane's agent is in its lifetime, as observed through its event stream.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AgentState {
+    /// The agent's event stream is forwarding into the pane.
+    Running,
+    /// The pane was closed; its runtime is removed once the agent's event stream ends.
+    Closing,
+    /// The agent's event stream ended while the pane stayed open.
+    Stopped,
 }
 
 struct WriterCompletion {
@@ -413,15 +435,27 @@ async fn run_memory_operation(
     }
 }
 
-fn next_memory_generation(generations: &mut HashMap<PaneId, u64>, pane: PaneId) -> u64 {
-    let generation = generations.entry(pane).or_default();
-    *generation = generation.wrapping_add(1).max(1);
-    *generation
-}
+/// Per-pane request counters for memory operations. Only the completion of a pane's newest
+/// request is presented; a configuration reload makes every outstanding completion stale.
+#[derive(Default)]
+struct MemoryGenerations(HashMap<PaneId, u64>);
 
-fn invalidate_memory_generations(generations: &mut HashMap<PaneId, u64>) {
-    for generation in generations.values_mut() {
+impl MemoryGenerations {
+    /// Starts a new request for the pane and returns its generation.
+    fn next(&mut self, pane: PaneId) -> u64 {
+        let generation = self.0.entry(pane).or_default();
         *generation = generation.wrapping_add(1).max(1);
+        *generation
+    }
+
+    fn invalidate_all(&mut self) {
+        for generation in self.0.values_mut() {
+            *generation = generation.wrapping_add(1).max(1);
+        }
+    }
+
+    fn is_current(&self, pane: PaneId, generation: u64) -> bool {
+        self.0.get(&pane) == Some(&generation)
     }
 }
 
@@ -433,7 +467,7 @@ impl PaneRuntime {
     }
 
     fn exit_session_id(&self) -> Option<String> {
-        (self.previously_persisted || self.persisted_transcript.load(Ordering::Acquire))
+        (self.origin == SessionOrigin::Resumed || self.persisted_transcript.load(Ordering::Acquire))
             .then(|| self.session_id.clone())
     }
 }
@@ -558,7 +592,7 @@ pub(crate) async fn run(
                 generation: 0,
             },
             if resuming {
-                PaneSession::persisted(&main_session_id, next_sequence, !skills.is_empty())
+                PaneSession::resumed(&main_session_id, next_sequence, !skills.is_empty())
             } else {
                 PaneSession::new(&main_session_id, None, None, 1, !skills.is_empty())
             },
@@ -664,7 +698,7 @@ pub(crate) async fn run(
     let mut shell_tasks = JoinSet::<(PaneId, ShellExecution)>::new();
     let mut web_tasks = JoinSet::<WebTaskCompletion>::new();
     let mut memory_tasks = JoinSet::<MemoryCompletion>::new();
-    let mut memory_generations = HashMap::<PaneId, u64>::new();
+    let mut memory_generations = MemoryGenerations::default();
     let mut subagent_shutdowns = JoinSet::<()>::new();
     let mut subagents_stopping = false;
 
@@ -760,7 +794,7 @@ pub(crate) async fn run(
         }
         if stopping
             && worker_stopped
-            && panes.values().all(|pane| pane.event_streams_open == 0)
+            && panes.values().all(|pane| pane.agent == AgentState::Stopped)
             && shell_tasks.is_empty()
             && subagent_shutdowns.is_empty()
         {
@@ -849,11 +883,11 @@ pub(crate) async fn run(
                     schedule(app.update(AppEvent::UpdateAvailable(version)), &mut scheduler);
                 }
             }
-            event = agent_events.recv(), if panes.values().any(|pane| pane.event_streams_open > 0) => {
+            event = agent_events.recv(), if panes.values().any(|pane| pane.agent != AgentState::Stopped) => {
                 let Some(event) = event else {
                     for (&pane, runtime) in &mut panes {
-                        if runtime.event_streams_open > 0 {
-                            runtime.event_streams_open = 0;
+                        if runtime.agent != AgentState::Stopped {
+                            runtime.agent = AgentState::Stopped;
                             schedule(app.update(AppEvent::AgentStreamClosed(pane)), &mut scheduler);
                         }
                     }
@@ -878,22 +912,19 @@ pub(crate) async fn run(
                         }
                     }
                     ForwardedAgentEvent::Closed { pane, session_id, generation } => {
-                        let mut stream_closed = false;
-                        if let Some(runtime) = panes.get_mut(&pane)
-                            && runtime.session_id == session_id
-                            && runtime.generation == generation
-                        {
-                            runtime.event_streams_open = runtime.event_streams_open.saturating_sub(1);
-                            stream_closed = runtime.event_streams_open == 0;
-                        }
-                        if stream_closed && panes.get(&pane).is_some_and(|runtime| runtime.closing) {
-                            let mut runtime = panes.remove(&pane).expect("the closing runtime exists");
-                            close_pane_journal(&mut runtime, SessionOutcome::Closed, None)?;
+                        let Some(runtime) = panes
+                            .get_mut(&pane)
+                            .filter(|runtime| runtime.session_id == session_id && runtime.generation == generation)
+                        else {
+                            continue;
+                        };
+                        if std::mem::replace(&mut runtime.agent, AgentState::Stopped) == AgentState::Closing {
+                            if let Some(mut runtime) = panes.remove(&pane) {
+                                close_pane_journal(&mut runtime, SessionOutcome::Closed, None)?;
+                            }
                             continue;
                         }
-                        if stream_closed {
-                            schedule(app.update(AppEvent::AgentStreamClosed(pane)), &mut scheduler);
-                        }
+                        schedule(app.update(AppEvent::AgentStreamClosed(pane)), &mut scheduler);
                     }
                 }
             }
@@ -1283,12 +1314,10 @@ pub(crate) async fn run(
                                 parent_runtime.skills_catalog_present,
                             ),
                             &config.with_workspace(app.root(pane).expect("fork pane exists").workspace().to_owned()),
-                            PaneSettings::new(
+                            PaneSettings {
                                 effort,
-                                parent_runtime.reasoning_mode,
-                                parent_runtime.current_speed,
-                                parent_runtime.current_model,
-                            ),
+                                ..parent_runtime.settings
+                            },
                             Arc::clone(&parent_runtime.instructions),
                             parent_runtime.subagent_control.clone(),
                             &writer_sender,
@@ -1326,14 +1355,14 @@ pub(crate) async fn run(
                     } => {
                         let runtime = panes.get_mut(&pane).expect("effort pane must exist");
                         if let Err(error) = result {
-                            let effort = runtime.current_effort;
+                            let effort = runtime.settings.effort;
                             input.get_or_insert_with(EventStream::new);
                             apply_app_update!(app.update(AppEvent::EffortUpdateFailed {
                                 pane, effort, error: format!("Could not change effort: {error}"),
                             }));
                             continue;
                         }
-                        let previous_effort = runtime.current_effort;
+                        let previous_effort = runtime.settings.effort;
                         let journal = runtime.journal_mut()?;
                         if journal.is_empty() {
                             journal.set_initial_effort(effort);
@@ -1344,14 +1373,14 @@ pub(crate) async fn run(
                             })?;
                             schedule(app.update(AppEvent::Transcript { pane, record }), &mut scheduler);
                         }
-                        runtime.current_effort = effort;
+                        runtime.settings.effort = effort;
                         input.get_or_insert_with(EventStream::new);
                         scheduler.request_immediate(Instant::now());
                     }
                     WorkerEvent::SpeedUpdated { pane, speed, result } => {
                         result?;
                         let runtime = panes.get_mut(&pane).expect("speed pane must exist");
-                        let previous = runtime.current_speed;
+                        let previous = runtime.settings.speed;
                         let journal = runtime.journal_mut()?;
                         if journal.is_empty() {
                             journal.set_initial_speed(speed);
@@ -1362,7 +1391,7 @@ pub(crate) async fn run(
                             })?;
                             schedule(app.update(AppEvent::Transcript { pane, record }), &mut scheduler);
                         }
-                        runtime.current_speed = speed;
+                        runtime.settings.speed = speed;
                         runtime.subagent_control.set_speed(speed);
                         if app.main_pane() == Some(pane) {
                             config.set_speed(speed);
@@ -1429,7 +1458,7 @@ pub(crate) async fn run(
                     continue;
                 };
                 let (pane, generation) = completion.identity();
-                if memory_generations.get(&pane) != Some(&generation) {
+                if !memory_generations.is_current(pane, generation) {
                     continue;
                 }
                 schedule(app.update(completion.into_event()), &mut scheduler);
@@ -1815,7 +1844,7 @@ fn install_agent(
             next_sequence,
             lock,
         } => (
-            PaneSession::persisted(&session_id, next_sequence, skills_catalog_present),
+            PaneSession::resumed(&session_id, next_sequence, skills_catalog_present),
             lock,
             worker::MemoryReviewState::restored(memory_enabled),
         ),
@@ -1880,18 +1909,12 @@ fn open_pane(
     lock: SessionLock,
 ) -> Result<PaneRuntime> {
     let PaneGeneration { pane, generation } = identity;
-    let PaneSettings {
-        effort,
-        reasoning_mode,
-        speed,
-        model,
-    } = settings;
     let PaneSession {
         id: session_id,
         parent_id: parent_session_id,
         parent_sequence,
         next_sequence,
-        previously_persisted,
+        origin,
         skills_catalog_present,
     } = session;
     let (mut journal, writer) =
@@ -1902,10 +1925,10 @@ fn open_pane(
         session_id: session_id.to_owned(),
         parent_session_id: parent_session_id.map(str::to_owned),
         parent_sequence,
-        model: model.to_string(),
-        effort,
-        reasoning_mode,
-        speed,
+        model: settings.model.to_string(),
+        effort: settings.effort,
+        reasoning_mode: settings.reasoning_mode,
+        speed: settings.speed,
         workspace: config.agent().workspace().to_path_buf(),
         application_version: env!("CARGO_PKG_VERSION").to_owned(),
     });
@@ -1930,23 +1953,19 @@ fn open_pane(
         session_id: session_id.to_owned(),
         instructions,
         skills_catalog_present,
-        previously_persisted,
+        origin,
         journal: Some(journal),
         writer_path,
         persisted_transcript,
-        event_streams_open: 1,
+        agent: AgentState::Running,
         next_turn: 1,
         next_shell: 1,
         pending_shell_context: Vec::new(),
         pending_submission: None,
-        current_effort: effort,
-        reasoning_mode,
-        current_speed: speed,
-        current_model: model,
+        settings,
         active_shells: 0,
         generation,
         subagent_control,
-        closing: false,
         _lock: lock,
     })
 }
@@ -2065,7 +2084,7 @@ struct EffectContext<'a> {
     web_tasks: &'a mut JoinSet<WebTaskCompletion>,
     memory_store: &'a mut Option<SelectedMemoryStore>,
     memory_tasks: &'a mut JoinSet<MemoryCompletion>,
-    memory_generations: &'a mut HashMap<PaneId, u64>,
+    memory_generations: &'a mut MemoryGenerations,
     subagent_shutdowns: &'a mut JoinSet<()>,
 }
 
@@ -2087,7 +2106,9 @@ async fn apply_update(
             AppEffect::ClosePane(pane) => {
                 if let Some(runtime) = context.panes.get_mut(&pane) {
                     schedule_subagent_shutdown(runtime, context.subagent_shutdowns);
-                    runtime.closing = true;
+                    if runtime.agent == AgentState::Running {
+                        runtime.agent = AgentState::Closing;
+                    }
                 }
                 context
                     .commands
@@ -2134,7 +2155,7 @@ fn reload_config(
     if let Err(error) = context
         .panes
         .values()
-        .try_for_each(|runtime| config.claude().ensure_model_enabled(runtime.current_model))
+        .try_for_each(|runtime| config.claude().ensure_model_enabled(runtime.settings.model))
     {
         return refuse(
             context,
@@ -2157,7 +2178,7 @@ fn reload_config(
     let tui = *config.tui();
     let preferred_reasoning_mode = config.agent().reasoning_mode();
     let memory_enabled = config.memory().enabled();
-    invalidate_memory_generations(context.memory_generations);
+    context.memory_generations.invalidate_all();
     *context.memory_store = selected_memory_store;
     context
         .app
@@ -2446,7 +2467,7 @@ fn apply_pane_effect(
                 );
                 return Ok(());
             };
-            let generation = next_memory_generation(context.memory_generations, pane);
+            let generation = context.memory_generations.next(pane);
             context.memory_tasks.spawn(async move {
                 run_memory_operation(pane, generation, &store, MemoryOperation::List).await
             });
@@ -2463,7 +2484,7 @@ fn apply_pane_effect(
                 );
                 return Ok(());
             };
-            let generation = next_memory_generation(context.memory_generations, pane);
+            let generation = context.memory_generations.next(pane);
             context.memory_tasks.spawn(async move {
                 run_memory_operation(pane, generation, &store, MemoryOperation::Delete(key)).await
             });
@@ -2840,7 +2861,7 @@ fn start_handoff(context: &mut EffectContext<'_>, pane: PaneId) {
     let pane_generation = runtime.generation;
     let id = TurnId::new(runtime.next_turn);
     runtime.next_turn = runtime.next_turn.saturating_add(1);
-    let model = runtime.current_model;
+    let model = runtime.settings.model;
     let commands = context.commands.clone();
     let config = context.config.with_workspace(
         context
@@ -3283,11 +3304,10 @@ fn request_render(request: RenderRequest, scheduler: &mut RenderScheduler) {
 #[cfg(test)]
 mod tests {
     use super::{
-        MemoryCompletion, MemoryOperation, PaneGeneration, PaneSession, PaneSettings,
-        PendingSubmission, close_pane_journal, copy_selection_with, invalidate_memory_generations,
-        is_image_paste, local_link_path, merge_recent_prompts, next_memory_generation, open_pane,
-        run_memory_operation, send_submission, subagent_pane, supported_reasoning_mode,
-        validate_interactive,
+        MemoryCompletion, MemoryGenerations, MemoryOperation, PaneGeneration, PaneSession,
+        PaneSettings, PendingSubmission, close_pane_journal, copy_selection_with, is_image_paste,
+        local_link_path, merge_recent_prompts, open_pane, run_memory_operation, send_submission,
+        subagent_pane, supported_reasoning_mode, validate_interactive,
     };
     use crate::{
         app::{
@@ -3816,16 +3836,20 @@ mod tests {
 
     #[test]
     fn newer_memory_operations_supersede_older_pane_completions() {
-        let mut generations = HashMap::new();
+        let mut generations = MemoryGenerations::default();
 
-        assert_eq!(next_memory_generation(&mut generations, PaneId::Main), 1);
-        assert_eq!(next_memory_generation(&mut generations, PaneId::Fork(1)), 1);
-        assert_eq!(next_memory_generation(&mut generations, PaneId::Main), 2);
-        assert_eq!(generations[&PaneId::Main], 2);
+        let superseded = generations.next(PaneId::Main);
+        let fork = generations.next(PaneId::Fork(1));
+        let latest = generations.next(PaneId::Main);
+        assert!(!generations.is_current(PaneId::Main, superseded));
+        assert!(generations.is_current(PaneId::Main, latest));
+        assert!(generations.is_current(PaneId::Fork(1), fork));
 
-        invalidate_memory_generations(&mut generations);
-        assert_eq!(generations[&PaneId::Main], 3);
-        assert_eq!(generations[&PaneId::Fork(1)], 2);
+        generations.invalidate_all();
+        assert!(!generations.is_current(PaneId::Main, latest));
+        assert!(!generations.is_current(PaneId::Fork(1), fork));
+        let renewed = generations.next(PaneId::Main);
+        assert!(generations.is_current(PaneId::Main, renewed));
     }
 
     #[tokio::test]
