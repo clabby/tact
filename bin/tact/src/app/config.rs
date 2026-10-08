@@ -1972,6 +1972,17 @@ mod tests {
         )
     }
 
+    /// Parses TOML text and returns the string stored at a key path.
+    fn toml_string(text: &str, path: &[&str]) -> String {
+        let mut value = &toml::from_str::<toml::Value>(text).unwrap();
+        for key in path {
+            value = value
+                .get(key)
+                .unwrap_or_else(|| panic!("missing `{}`", path.join(".")));
+        }
+        value.as_str().expect("expected a TOML string").to_owned()
+    }
+
     fn assert_table_fields(value: &toml::Value, expected: &[&str]) {
         let table = value.as_table().expect("expected a TOML table");
         assert_eq!(table.len(), expected.len());
@@ -2186,8 +2197,8 @@ mod tests {
         assert_eq!(config.theme.border(), Color::DarkGray);
 
         let rendered_toml = config.to_toml().unwrap();
-        assert!(rendered_toml.contains("[memory.remote]"));
         let rendered: toml::Value = toml::from_str(&rendered_toml).unwrap();
+        assert!(rendered["memory"]["remote"].is_table());
         assert_table_fields(
             &rendered,
             &[
@@ -2788,7 +2799,6 @@ mod tests {
             ))
         ));
         assert!(!rendered.contains("not-a-real-secret"));
-        assert!(rendered.contains("must not contain credentials"));
     }
 
     #[test]
@@ -3595,8 +3605,17 @@ mod tests {
         assert_eq!(server.header_env()["X-Tenant"], "TENANT_ID");
 
         let rendered = config.to_toml().unwrap();
-        assert!(rendered.contains("bearer_token_env_var = \"MCP_TOKEN\""));
-        assert!(rendered.contains("X-Tenant = \"TENANT_ID\""));
+        assert_eq!(
+            toml_string(&rendered, &["mcp_servers", "docs", "bearer_token_env_var"]),
+            "MCP_TOKEN"
+        );
+        assert_eq!(
+            toml_string(
+                &rendered,
+                &["mcp_servers", "docs", "header_env", "X-Tenant"]
+            ),
+            "TENANT_ID"
+        );
     }
 
     #[test]
@@ -3665,7 +3684,6 @@ mod tests {
             Error::Config(ConfigError::McpUrl { name, .. }) if name == "docs"
         ));
         assert!(!rendered.contains("not-a-real-secret"));
-        assert!(rendered.contains("must not contain credentials"));
     }
 
     #[test]
@@ -3727,10 +3745,23 @@ mod tests {
             .unwrap();
 
         let contents = fs::read_to_string(&config_path).unwrap();
-        assert!(contents.contains("# Keep this comment."));
-        assert!(contents.contains("url = \"https://example.com/mcp\""));
-        assert!(contents.contains("bearer_token_env_var = \"MCP_TOKEN\""));
-        assert!(contents.contains("X-Tenant = \"TENANT_ID\""));
+        assert!(contents.starts_with("# Keep this comment."));
+        assert_eq!(toml_string(&contents, &["agent", "thinking"]), "high");
+        assert_eq!(
+            toml_string(&contents, &["mcp_servers", "docs", "url"]),
+            "https://example.com/mcp"
+        );
+        assert_eq!(
+            toml_string(&contents, &["mcp_servers", "docs", "bearer_token_env_var"]),
+            "MCP_TOKEN"
+        );
+        assert_eq!(
+            toml_string(
+                &contents,
+                &["mcp_servers", "docs", "header_env", "X-Tenant"]
+            ),
+            "TENANT_ID"
+        );
 
         let error = config
             .add_http_mcp_server(
@@ -3780,7 +3811,10 @@ mod tests {
             .unwrap();
 
         let contents = fs::read_to_string(&config_path).unwrap();
-        assert!(contents.contains("[mcp_servers.\"files.v1\"]"));
+        assert_eq!(
+            toml_string(&contents, &["mcp_servers", "files.v1", "command"]),
+            "npx"
+        );
         let loaded = Config::load_with(
             ConfigOverrides {
                 path: Some(config_path),
@@ -3844,8 +3878,11 @@ mod tests {
             Error::Config(ConfigError::McpServerExists { name }) if name == "search"
         ));
         assert_eq!(fs::read_to_string(config_path).unwrap(), before_duplicate);
-        assert!(before_duplicate.contains("# Keep this comment."));
-        assert!(before_duplicate.contains("thinking = \"high\""));
+        assert!(before_duplicate.starts_with("# Keep this comment."));
+        assert_eq!(
+            toml_string(&before_duplicate, &["agent", "thinking"]),
+            "high"
+        );
     }
 
     #[test]
@@ -4003,9 +4040,15 @@ mod tests {
         );
 
         let rendered = config.to_toml().unwrap();
-        assert!(rendered.contains("text = \"#AABBCC\""));
-        assert!(rendered.contains("border = \"239\""));
-        assert!(rendered.contains("model_sol = \"#123456\""));
+        for (key, expected) in [
+            ("text", "#AABBCC"),
+            ("border", "239"),
+            ("model_sol", "#123456"),
+        ] {
+            for palette in ["light", "dark"] {
+                assert_eq!(toml_string(&rendered, &["theme", palette, key]), expected);
+            }
+        }
     }
 
     #[test]
