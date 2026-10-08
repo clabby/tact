@@ -31,5 +31,7 @@ pub use store::{RemoteClientError, RemoteMemoryClient, RemoteToken};
 #[cfg(feature = "tool")]
 pub use tool::{MemoryTool, MutationAuthorizer};
 
+#[cfg(all(test, feature = "client"))]
+mod test_support;
 #[cfg(test)]
 mod tests;
