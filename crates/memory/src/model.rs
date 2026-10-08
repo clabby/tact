@@ -158,26 +158,99 @@ pub enum MemorySource {
 }
 
 /// Negotiated access information for the active backend.
+///
+/// Serializes as a flat `{"source", "namespace", "role"}` object whose remote-only fields are
+/// `null` for local storage.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct MemoryAccess {
-    /// Selected backend kind.
-    pub source: MemorySource,
-    /// Configured namespace for a remote backend.
-    pub namespace: Option<String>,
-    /// Server-authorized role after remote session negotiation.
-    pub role: Option<RemoteRole>,
+#[serde(into = "AccessFields", try_from = "AccessFields")]
+pub enum MemoryAccess {
+    /// Private local storage.
+    Local,
+    /// Namespaced remote storage after session negotiation.
+    Remote {
+        /// Namespace bound to the client credential.
+        namespace: String,
+        /// Server-authorized role for that credential.
+        role: RemoteRole,
+    },
 }
 
 impl MemoryAccess {
+    /// Returns the backend kind.
+    pub const fn source(&self) -> MemorySource {
+        match self {
+            Self::Local => MemorySource::Local,
+            Self::Remote { .. } => MemorySource::Remote,
+        }
+    }
+
+    /// Returns the authenticated namespace of a remote backend.
+    pub fn namespace(&self) -> Option<&str> {
+        match self {
+            Self::Local => None,
+            Self::Remote { namespace, .. } => Some(namespace),
+        }
+    }
+
     /// Returns whether this backend lets the user delete the memory identified by `key`: any
     /// local memory, or a remote memory in the writer's own namespace.
     pub fn can_delete(&self, key: &MemoryKey) -> bool {
-        match self.source {
-            MemorySource::Local => key.is_local(),
-            MemorySource::Remote => {
-                self.role == Some(RemoteRole::Writer)
-                    && key.namespace.as_deref() == self.namespace.as_deref()
+        match self {
+            Self::Local => key.is_local(),
+            Self::Remote { namespace, role } => {
+                *role == RemoteRole::Writer && key.namespace.as_ref() == Some(namespace)
             }
+        }
+    }
+}
+
+#[derive(Deserialize, Serialize)]
+struct AccessFields {
+    source: MemorySource,
+    namespace: Option<String>,
+    role: Option<RemoteRole>,
+}
+
+impl From<MemoryAccess> for AccessFields {
+    fn from(access: MemoryAccess) -> Self {
+        match access {
+            MemoryAccess::Local => Self {
+                source: MemorySource::Local,
+                namespace: None,
+                role: None,
+            },
+            MemoryAccess::Remote { namespace, role } => Self {
+                source: MemorySource::Remote,
+                namespace: Some(namespace),
+                role: Some(role),
+            },
+        }
+    }
+}
+
+/// Access fields that contradict their declared source.
+#[derive(Debug, thiserror::Error)]
+#[error("memory access fields do not match the {declared:?} source")]
+struct InvalidMemoryAccess {
+    declared: MemorySource,
+}
+
+impl TryFrom<AccessFields> for MemoryAccess {
+    type Error = InvalidMemoryAccess;
+
+    fn try_from(fields: AccessFields) -> Result<Self, Self::Error> {
+        match fields {
+            AccessFields {
+                source: MemorySource::Local,
+                namespace: None,
+                role: None,
+            } => Ok(Self::Local),
+            AccessFields {
+                source: MemorySource::Remote,
+                namespace: Some(namespace),
+                role: Some(role),
+            } => Ok(Self::Remote { namespace, role }),
+            AccessFields { source, .. } => Err(InvalidMemoryAccess { declared: source }),
         }
     }
 }
@@ -238,4 +311,44 @@ pub fn normalize_identity(content: &str) -> String {
         .map(str::to_lowercase)
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MemoryAccess, RemoteRole};
+    use serde_json::{from_value, json, to_value};
+
+    #[test]
+    fn access_serializes_as_flat_nullable_fields() {
+        let remote = MemoryAccess::Remote {
+            namespace: "alice".to_owned(),
+            role: RemoteRole::Writer,
+        };
+        let cases = [
+            (
+                MemoryAccess::Local,
+                json!({"source": "local", "namespace": null, "role": null}),
+            ),
+            (
+                remote,
+                json!({"source": "remote", "namespace": "alice", "role": "writer"}),
+            ),
+        ];
+
+        for (access, shape) in cases {
+            assert_eq!(to_value(&access).unwrap(), shape);
+            assert_eq!(from_value::<MemoryAccess>(shape).unwrap(), access);
+        }
+    }
+
+    #[test]
+    fn access_rejects_fields_that_contradict_the_source() {
+        for shape in [
+            json!({"source": "local", "namespace": "alice", "role": null}),
+            json!({"source": "remote", "namespace": null, "role": "reader"}),
+            json!({"source": "remote", "namespace": "alice", "role": null}),
+        ] {
+            assert!(from_value::<MemoryAccess>(shape).is_err());
+        }
+    }
 }

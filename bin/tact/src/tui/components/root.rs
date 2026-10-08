@@ -3548,14 +3548,6 @@ mod tests {
     use tact_memory::{MemoryAccess, MemoryKey, MemoryRecord, MemorySource};
     use tact_subagents::{AgentDescriptor, AgentId, AgentMessageUpdate, AgentStatus, AgentUpdate};
 
-    fn local_memory_access() -> MemoryAccess {
-        MemoryAccess {
-            source: MemorySource::Local,
-            namespace: None,
-            role: None,
-        }
-    }
-
     fn key(code: KeyCode, modifiers: KeyModifiers) -> super::RootEvent {
         super::RootEvent::Terminal(Event::Key(KeyEvent::new(code, modifiers)))
     }
@@ -7010,7 +7002,7 @@ mod tests {
         assert!(root.composer().draft().is_empty());
 
         root.update(RootEvent::MemoriesLoaded {
-            access: local_memory_access(),
+            access: MemoryAccess::Local,
             records: vec![memory_record(7, 3, "remember this")],
         });
         let inspected = root.update(key(KeyCode::Enter, KeyModifiers::NONE));
@@ -7045,7 +7037,7 @@ mod tests {
 
         for event in [
             RootEvent::MemoriesLoaded {
-                access: local_memory_access(),
+                access: MemoryAccess::Local,
                 records: vec![memory_record(1, 1, "stale")],
             },
             RootEvent::MemoryLoadFailed {

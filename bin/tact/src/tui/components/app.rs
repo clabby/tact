@@ -1556,15 +1556,7 @@ mod tests {
     use ratatui::{Terminal, backend::TestBackend};
     use semver::Version;
     use std::{num::NonZeroU16, path::PathBuf, sync::Arc};
-    use tact_memory::{MemoryAccess, MemoryKey, MemoryRecord, MemorySource};
-
-    fn local_memory_access() -> MemoryAccess {
-        MemoryAccess {
-            source: MemorySource::Local,
-            namespace: None,
-            role: None,
-        }
-    }
+    use tact_memory::{MemoryAccess, MemoryKey, MemoryRecord};
 
     fn app() -> AppNode {
         let workspace = PathBuf::from("/workspace");
@@ -2177,12 +2169,12 @@ mod tests {
 
         app.update(AppEvent::MemoriesLoaded {
             pane: PaneId::Main,
-            access: local_memory_access(),
+            access: MemoryAccess::Local,
             records: vec![memory_record(1, "main pane memory")],
         });
         app.update(AppEvent::MemoriesLoaded {
             pane: PaneId::Fork(1),
-            access: local_memory_access(),
+            access: MemoryAccess::Local,
             records: vec![memory_record(2, "fork pane memory")],
         });
         let output = rendered(&mut app, 120, 24);

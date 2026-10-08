@@ -183,15 +183,10 @@ impl SelectedMemoryStore {
     /// Returns backend provenance and negotiated remote authorization.
     pub async fn access(&self) -> Result<MemoryAccess, MemoryError> {
         match self {
-            Self::Local(_) => Ok(MemoryAccess {
-                source: MemorySource::Local,
-                namespace: None,
-                role: None,
-            }),
-            Self::Remote(client) => Ok(MemoryAccess {
-                source: MemorySource::Remote,
-                namespace: Some(client.namespace().to_owned()),
-                role: Some(client.session().await?),
+            Self::Local(_) => Ok(MemoryAccess::Local),
+            Self::Remote(client) => Ok(MemoryAccess::Remote {
+                namespace: client.namespace().to_owned(),
+                role: client.session().await?,
             }),
         }
     }

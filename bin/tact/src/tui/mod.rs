@@ -3805,7 +3805,7 @@ mod tests {
             panic!("list should complete for the originating pane");
         };
 
-        assert_eq!(access.source, tact_memory::MemorySource::Local);
+        assert_eq!(access, tact_memory::MemoryAccess::Local);
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].scan_count, 0);
         assert_eq!(records[0].last_scanned_at_ms, None);

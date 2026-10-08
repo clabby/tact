@@ -439,7 +439,7 @@ impl MemoryBrowser {
 
     fn replace_records(&mut self, access: MemoryAccess, records: Vec<MemoryRecord>) {
         let fallback = self.selected_match_index().unwrap_or_default();
-        self.source = access.source;
+        self.source = access.source();
         self.access = Some(access);
         self.records = records;
         self.rebuild_matches(fallback);
@@ -536,7 +536,7 @@ impl MemoryBrowser {
     fn is_remote(&self) -> bool {
         self.access
             .as_ref()
-            .is_some_and(|access| access.source == MemorySource::Remote)
+            .is_some_and(|access| access.source() == MemorySource::Remote)
             || self.source == MemorySource::Remote
     }
 
@@ -546,7 +546,7 @@ impl MemoryBrowser {
             || self
                 .access
                 .as_ref()
-                .and_then(|access| access.namespace.as_deref())
+                .and_then(MemoryAccess::namespace)
                 .is_some_and(|namespace| record.key.namespace.as_deref() == Some(namespace))
     }
 
@@ -559,22 +559,14 @@ impl MemoryBrowser {
             NamespaceScope::Own => self
                 .access
                 .as_ref()
-                .and_then(|access| access.namespace.clone())
-                .unwrap_or_else(|| "Our namespace".to_owned()),
+                .and_then(MemoryAccess::namespace)
+                .map_or_else(|| "Our namespace".to_owned(), str::to_owned),
         })
     }
 
     fn context_label(&self) -> String {
         match self.access.as_ref() {
-            Some(MemoryAccess {
-                source: MemorySource::Remote,
-                namespace: Some(namespace),
-                ..
-            }) => format!("Remote memory · {namespace}"),
-            Some(MemoryAccess {
-                source: MemorySource::Remote,
-                ..
-            }) => "Remote memory".to_owned(),
+            Some(MemoryAccess::Remote { namespace, .. }) => format!("Remote memory · {namespace}"),
             _ if self.source == MemorySource::Remote => "Remote memory".to_owned(),
             _ => "Local memory".to_owned(),
         }
@@ -1221,19 +1213,10 @@ mod tests {
     use ratatui::{Terminal, backend::TestBackend};
     use tact_memory::{MemoryAccess, MemoryKey, MemoryRecord, MemorySource, RemoteRole};
 
-    fn local_access() -> MemoryAccess {
-        MemoryAccess {
-            source: MemorySource::Local,
-            namespace: None,
-            role: None,
-        }
-    }
-
     fn remote_access(namespace: &str, role: RemoteRole) -> MemoryAccess {
-        MemoryAccess {
-            source: MemorySource::Remote,
-            namespace: Some(namespace.to_owned()),
-            role: Some(role),
+        MemoryAccess::Remote {
+            namespace: namespace.to_owned(),
+            role,
         }
     }
 
@@ -1290,7 +1273,7 @@ mod tests {
     }
 
     fn loaded(records: Vec<MemoryRecord>) -> MemoryBrowser {
-        loaded_with_access(local_access(), records)
+        loaded_with_access(MemoryAccess::Local, records)
     }
 
     fn loaded_with_access(access: MemoryAccess, records: Vec<MemoryRecord>) -> MemoryBrowser {
@@ -1323,7 +1306,7 @@ mod tests {
         assert_eq!(browser.selected_key, Some(MemoryKey::local(1, 1)));
 
         browser.update(MemoryBrowserEvent::Loaded {
-            access: local_access(),
+            access: MemoryAccess::Local,
             records: vec![record(42, 2, "cafe sun"), record(1, 1, "cafe moon")],
         });
         assert_eq!(browser.selected_key, Some(MemoryKey::local(1, 1)));
@@ -1356,7 +1339,7 @@ mod tests {
             "memory".to_owned(),
         )));
         browser.update(MemoryBrowserEvent::Loaded {
-            access: local_access(),
+            access: MemoryAccess::Local,
             records: vec![
                 record_with_stats(4, 50, 0),
                 record_with_stats(3, 200, 5),
