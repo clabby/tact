@@ -173,9 +173,9 @@ pub struct ExportRequest {
     pub limit: usize,
 }
 
-/// One deterministic snapshot export page.
-#[derive(Debug, Deserialize, Serialize)]
-pub struct ExportResponse {
+/// One deterministic snapshot export page, as returned by a store and sent on the wire.
+#[derive(Debug, Default, Deserialize, Serialize)]
+pub struct ExportPage {
     /// Records strictly after the request cursor in `(namespace, id)` order.
     pub memories: Vec<MemoryRecord>,
     /// Cursor for another page, or `None` when the snapshot is exhausted.

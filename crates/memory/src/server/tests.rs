@@ -4,9 +4,9 @@ use crate::{
     RemoteClientError, RemoteMemoryClient, RemoteToken,
     model::normalize_identity,
     protocol::{
-        self, DeleteRequest, ErrorResponse, ExportCursor, ExportRequest, ExportResponse,
-        ListResponse, PutRequest, PutResponse, ReadRequest, ReadResponse, RemoteErrorCode,
-        RemoteRole, ScanRequest, ScanResponse, SessionResponse, SyncReport, SyncRequest,
+        self, DeleteRequest, ErrorResponse, ExportCursor, ExportPage, ExportRequest, ListResponse,
+        PutRequest, PutResponse, ReadRequest, ReadResponse, RemoteErrorCode, RemoteRole,
+        ScanRequest, ScanResponse, SessionResponse, SyncReport, SyncRequest,
     },
 };
 use axum::{
@@ -361,7 +361,7 @@ impl MemoryStore for TestMemoryStore {
         namespaces: Option<&[String]>,
         cursor: Option<&ExportCursor>,
         limit: usize,
-    ) -> Result<(Vec<MemoryRecord>, Option<ExportCursor>), MemoryError> {
+    ) -> Result<ExportPage, MemoryError> {
         let mut state = self.database.state.lock().unwrap();
         prune_expired(&mut state, now_ms());
         let selected = namespaces.map(|values| values.iter().collect::<HashSet<_>>());
@@ -388,7 +388,10 @@ impl MemoryStore for TestMemoryStore {
                 id: key.id,
             }
         });
-        Ok((records, next_cursor))
+        Ok(ExportPage {
+            memories: records,
+            next_cursor,
+        })
     }
 }
 
@@ -1106,7 +1109,12 @@ async fn remote_export_reduces_pages_to_fit_the_response_bound() {
         memories[0].content
     );
     assert_eq!(
-        client.export_page(None, None, 64).await.unwrap().0.len(),
+        client
+            .export_page(None, None, 64)
+            .await
+            .unwrap()
+            .memories
+            .len(),
         64
     );
 
@@ -1358,7 +1366,7 @@ async fn export_page(
     namespaces: Option<Vec<String>>,
     cursor: Option<ExportCursor>,
     limit: usize,
-) -> ExportResponse {
+) -> ExportPage {
     json(
         send(
             app,
@@ -1661,8 +1669,8 @@ async fn ascending_score_scan() -> Json<ScanResponse> {
     })
 }
 
-async fn oversized_export() -> Json<ExportResponse> {
-    Json(ExportResponse {
+async fn oversized_export() -> Json<ExportPage> {
+    Json(ExportPage {
         memories: (1..=2)
             .map(|id| {
                 let mut memory = record(id, 1, &format!("memory {id}"));
@@ -1988,7 +1996,7 @@ async fn client_does_not_retry_unrecoverable_export_responses() {
                 if request.limit == 1 {
                     let mut memory = record(1, 1, &"x".repeat(8 * 1_024 * 1_024));
                     memory.key.namespace = Some("alice".to_owned());
-                    return Json(ExportResponse {
+                    return Json(ExportPage {
                         memories: vec![memory],
                         next_cursor: None,
                     })
@@ -2279,9 +2287,8 @@ impl MemoryStore for AsyncStore {
         _namespaces: Option<&[String]>,
         _cursor: Option<&ExportCursor>,
         _limit: usize,
-    ) -> impl Future<Output = Result<(Vec<MemoryRecord>, Option<ExportCursor>), MemoryError>> + Send
-    {
-        async { Ok((Vec::new(), None)) }
+    ) -> impl Future<Output = Result<ExportPage, MemoryError>> + Send {
+        async { Ok(ExportPage::default()) }
     }
 }
 

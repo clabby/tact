@@ -9,7 +9,7 @@ mod remote;
 use crate::{MemoryAccess, MemorySource, secrets::contains_likely_secret};
 use crate::{
     MemoryKey, MemoryLimits, MemoryRecord, MemoryScan,
-    protocol::{self, ExportCursor, SyncReport},
+    protocol::{self, ExportCursor, ExportPage, SyncReport},
 };
 #[cfg(feature = "local")]
 pub use local::LocalMemoryStore;
@@ -82,7 +82,7 @@ pub trait MemoryStore: Clone + Send + Sync + 'static {
         namespaces: Option<&[String]>,
         cursor: Option<&ExportCursor>,
         limit: usize,
-    ) -> impl Future<Output = Result<(Vec<MemoryRecord>, Option<ExportCursor>), MemoryError>> + Send;
+    ) -> impl Future<Output = Result<ExportPage, MemoryError>> + Send;
 
     /// Collects a complete export through the paginated storage contract within caller-provided
     /// record-count, per-record, and aggregate-content bounds.
@@ -99,7 +99,10 @@ pub trait MemoryStore: Clone + Send + Sync + 'static {
             let mut records = Vec::new();
             let mut content_bytes = 0usize;
             loop {
-                let (page, next_cursor) = self
+                let ExportPage {
+                    memories: page,
+                    next_cursor,
+                } = self
                     .export_page(
                         namespaces,
                         cursor.as_ref(),
@@ -266,8 +269,7 @@ impl MemoryStore for SelectedMemoryStore {
         namespaces: Option<&[String]>,
         cursor: Option<&ExportCursor>,
         limit: usize,
-    ) -> impl Future<Output = Result<(Vec<MemoryRecord>, Option<ExportCursor>), MemoryError>> + Send
-    {
+    ) -> impl Future<Output = Result<ExportPage, MemoryError>> + Send {
         async move {
             match self {
                 Self::Local(store) => {

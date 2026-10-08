@@ -4,7 +4,7 @@ use super::{MemoryError, MemoryStore, current_time_ms};
 use crate::{
     MemoryImportReport, MemoryKey, MemoryLimits, MemoryRecord, MemoryScan,
     model::{StoredMemory, normalize_identity},
-    protocol::{self, ExportCursor, SyncReport},
+    protocol::{self, ExportCursor, ExportPage, SyncReport},
     secrets::contains_likely_secret,
 };
 use rusqlite::{
@@ -651,7 +651,7 @@ impl LocalMemoryStore {
         cursor: Option<ExportCursor>,
         limit: usize,
         now_ms: i64,
-    ) -> Result<(Vec<MemoryRecord>, Option<ExportCursor>), MemoryError> {
+    ) -> Result<ExportPage, MemoryError> {
         let mut records = self.list(now_ms).await?;
         let after = cursor.map_or(0, |cursor| cursor.id);
         records.retain(|record| record.key.id > after);
@@ -662,7 +662,10 @@ impl LocalMemoryStore {
             namespace: String::new(),
             id: records.last().expect("non-empty limited page").key.id,
         });
-        Ok((records, next))
+        Ok(ExportPage {
+            memories: records,
+            next_cursor: next,
+        })
     }
 }
 
@@ -708,8 +711,7 @@ impl MemoryStore for LocalMemoryStore {
         _namespaces: Option<&[String]>,
         cursor: Option<&ExportCursor>,
         limit: usize,
-    ) -> impl Future<Output = Result<(Vec<MemoryRecord>, Option<ExportCursor>), MemoryError>> + Send
-    {
+    ) -> impl Future<Output = Result<ExportPage, MemoryError>> + Send {
         let store = self.clone();
         let cursor = cursor.cloned();
         let now_ms = current_time_ms();

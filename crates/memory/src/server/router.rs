@@ -4,9 +4,9 @@ use super::credential::{Credential, Principal, hash_token, is_bearer_token_byte}
 use crate::{
     MemoryError, MemoryLimits, MemoryRecord, MemoryStore,
     protocol::{
-        self, DeleteRequest, ErrorResponse, ExportRequest, ExportResponse, ListResponse,
-        PutRequest, PutResponse, ReadRequest, ReadResponse, RemoteErrorCode, RemoteRole,
-        ScanRequest, ScanResponse, SessionResponse, SyncRequest,
+        self, DeleteRequest, ErrorResponse, ExportRequest, ListResponse, PutRequest, PutResponse,
+        ReadRequest, ReadResponse, RemoteErrorCode, RemoteRole, ScanRequest, ScanResponse,
+        SessionResponse, SyncRequest,
     },
 };
 use axum::{
@@ -401,15 +401,11 @@ async fn export<S: MemoryStore>(
             request.cursor.as_ref(),
             request.limit,
         ),
-        |(memories, _)| OperationCounts::records(memories.len()),
+        |page| OperationCounts::records(page.memories.len()),
     )
     .await
     {
-        Ok((memories, next_cursor)) => Json(ExportResponse {
-            memories,
-            next_cursor,
-        })
-        .into_response(),
+        Ok(page) => Json(page).into_response(),
         Err(error) => error.into_response(),
     }
 }

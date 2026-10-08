@@ -20,7 +20,7 @@ use std::{
 use tact_memory::{
     MemoryError, MemoryKey, MemoryLimits, MemoryRecord, MemoryScan, MemoryStore,
     normalize_identity,
-    protocol::{self, ExportCursor, SyncReport},
+    protocol::{self, ExportCursor, ExportPage, SyncReport},
 };
 use thiserror::Error;
 use unicode_general_category::{GeneralCategory, get_general_category};
@@ -376,8 +376,7 @@ impl MemoryStore for CloudflareMemoryStore {
         namespaces: Option<&[String]>,
         cursor: Option<&ExportCursor>,
         limit: usize,
-    ) -> impl Future<Output = Result<(Vec<MemoryRecord>, Option<ExportCursor>), MemoryError>> + Send
-    {
+    ) -> impl Future<Output = Result<ExportPage, MemoryError>> + Send {
         let store = self.clone();
         let namespaces = namespaces.map(<[String]>::to_vec);
         let cursor = cursor.cloned();
@@ -418,7 +417,10 @@ impl MemoryStore for CloudflareMemoryStore {
                     id: key.id,
                 }
             });
-            Ok((records, next))
+            Ok(ExportPage {
+                memories: records,
+                next_cursor: next,
+            })
         })
     }
 }

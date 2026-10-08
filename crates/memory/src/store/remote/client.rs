@@ -3,8 +3,8 @@ use crate::{
     protocol,
 };
 use protocol::{
-    DeleteRequest, ErrorResponse, ExportRequest, ExportResponse, ListResponse, PutRequest,
-    PutResponse, ReadRequest, ReadResponse, RemoteErrorCode, RemoteRole, ScanRequest, ScanResponse,
+    DeleteRequest, ErrorResponse, ExportPage, ExportRequest, ListResponse, PutRequest, PutResponse,
+    ReadRequest, ReadResponse, RemoteErrorCode, RemoteRole, ScanRequest, ScanResponse,
     SessionResponse, SyncReport, SyncRequest,
 };
 use reqwest::{Client, Response, StatusCode, Url};
@@ -387,7 +387,7 @@ impl RemoteMemoryClient {
     fn validate_export_page(
         namespaces: Option<&[String]>,
         cursor: Option<&protocol::ExportCursor>,
-        response: &ExportResponse,
+        response: &ExportPage,
     ) -> Result<(), RemoteClientError> {
         if response.memories.len() > protocol::MAX_EXPORT_PAGE_RECORDS {
             return Err(RemoteClientError::InvalidResponse);
@@ -577,14 +577,12 @@ impl MemoryStore for RemoteMemoryClient {
         namespaces: Option<&[String]>,
         cursor: Option<&protocol::ExportCursor>,
         limit: usize,
-    ) -> impl std::future::Future<
-        Output = Result<(Vec<MemoryRecord>, Option<protocol::ExportCursor>), MemoryError>,
-    > + Send {
+    ) -> impl std::future::Future<Output = Result<ExportPage, MemoryError>> + Send {
         let namespaces = namespaces.map(<[String]>::to_vec);
         let cursor = cursor.cloned();
         async move {
             let mut limit = limit.clamp(1, protocol::MAX_EXPORT_PAGE_RECORDS);
-            let response: ExportResponse = loop {
+            let response: ExportPage = loop {
                 match self
                     .post(
                         protocol::EXPORT_PATH,
@@ -607,7 +605,7 @@ impl MemoryStore for RemoteMemoryClient {
                 return Err(RemoteClientError::InvalidResponse.into());
             }
             Self::validate_export_page(namespaces.as_deref(), cursor.as_ref(), &response)?;
-            Ok((response.memories, response.next_cursor))
+            Ok(response)
         }
     }
 }
@@ -724,8 +722,8 @@ mod tests {
         }
     }
 
-    fn response(memories: Vec<MemoryRecord>, next: Option<(&str, i64)>) -> ExportResponse {
-        ExportResponse {
+    fn response(memories: Vec<MemoryRecord>, next: Option<(&str, i64)>) -> ExportPage {
+        ExportPage {
             memories,
             next_cursor: next.map(|(namespace, id)| ExportCursor {
                 namespace: namespace.to_owned(),
