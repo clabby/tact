@@ -1373,8 +1373,8 @@ impl Worker {
 mod tests {
     use super::{
         ActiveTurns, CompletedCompaction, FinishedTurn, MemoryReviewState, PaneAgents,
-        ReflectionContext, TurnKey, TurnPurpose, Updates, Worker, WorkerCommand, WorkerError,
-        WorkerEvent, reflection_prompt, spawn,
+        REFLECTION_PROMPT, REFLECTION_REPORT_ENDING, ReflectionContext, TurnKey, TurnPurpose,
+        Updates, Worker, WorkerCommand, WorkerError, WorkerEvent, reflection_prompt, spawn,
     };
     use crate::{
         app::config::{ReasoningEffort, Speed},
@@ -2451,35 +2451,48 @@ mod tests {
 
     #[test]
     fn review_state_decorates_followups_and_steers_without_changing_display_text() {
+        let with_images = |text: &str| format!("{text}\n\n{IMAGE_RENDERING_INSTRUCTIONS}");
+        let with_review =
+            |text: &str| format!("{}\n\n{MEMORY_REVIEW_CHECKPOINT}", with_images(text));
         let initial = Submission::text("initial request".to_owned());
         let follow_up = Submission::text("actually, preserve ordering".to_owned());
         let steer = Submission::text("change direction".to_owned());
         let mut review = MemoryReviewState::fresh(true);
 
-        let initial_prompt = prompt_text(review.submission_prompt(&initial));
-        assert!(!initial_prompt.contains(MEMORY_REVIEW_CHECKPOINT));
-        assert!(initial_prompt.contains(IMAGE_RENDERING_INSTRUCTIONS));
-        review.turn_accepted();
-        let follow_up_prompt = prompt_text(review.submission_prompt(&follow_up));
         assert_eq!(
-            follow_up_prompt.matches(MEMORY_REVIEW_CHECKPOINT).count(),
-            1
+            prompt_text(review.submission_prompt(&initial)),
+            with_images("initial request")
         );
-        assert!(follow_up_prompt.contains(IMAGE_RENDERING_INSTRUCTIONS));
-        let steer_prompt = prompt_text(MemoryReviewState::fresh(true).steer_prompt(&steer));
-        assert_eq!(steer_prompt.matches(MEMORY_REVIEW_CHECKPOINT).count(), 1);
-        assert!(steer_prompt.contains(IMAGE_RENDERING_INSTRUCTIONS));
+        review.turn_accepted();
+        assert_eq!(
+            prompt_text(review.submission_prompt(&follow_up)),
+            with_review("actually, preserve ordering")
+        );
+        assert_eq!(
+            prompt_text(MemoryReviewState::fresh(true).steer_prompt(&steer)),
+            with_review("change direction")
+        );
         assert_eq!(follow_up.display_text(), "actually, preserve ordering");
         assert_eq!(steer.display_text(), "change direction");
 
-        let disabled = MemoryReviewState::fresh(false);
-        let disabled_prompt = prompt_text(disabled.steer_prompt(&steer));
-        assert!(!disabled_prompt.contains(MEMORY_REVIEW_CHECKPOINT));
-        assert!(disabled_prompt.contains(IMAGE_RENDERING_INSTRUCTIONS));
+        assert_eq!(
+            prompt_text(MemoryReviewState::fresh(false).steer_prompt(&steer)),
+            with_images("change direction")
+        );
+    }
+
+    /// The text between `<tag>` and `</tag>` lines.
+    fn tagged_section<'a>(text: &'a str, tag: &str) -> &'a str {
+        let open = format!("<{tag}>\n");
+        let start = text.find(&open).expect("section opens") + open.len();
+        let end = text[start..]
+            .find(&format!("\n</{tag}>"))
+            .expect("section closes");
+        &text[start..start + end]
     }
 
     #[test]
-    fn reflection_prompt_is_read_only_and_ends_with_reviewable_actions() {
+    fn reflection_prompt_embeds_instructions_and_context_between_fixed_guidance() {
         let context =
             ReflectionContext::new(Path::new("/tact/config.toml"), Path::new("/work/current"));
         let prompt = reflection_prompt(
@@ -2488,23 +2501,32 @@ mod tests {
         );
         let text = prompt_text(prompt);
 
-        assert!(text.contains("Focus on validation gaps."));
-        assert!(text.contains("self-contained Tact reflection turn"));
-        assert!(text.contains("`find_sessions`"));
-        assert!(text.contains("`read_session`"));
-        assert!(text.contains("`parent_session_id`"));
-        assert!(text.contains("`user.submitted` and `user.steered`"));
-        assert!(text.contains("unless the relevant scope was inspected exhaustively"));
-        assert!(text.contains(r#""workspace":"/work/current""#));
-        assert!(!text.contains("sqlite3"));
-        assert!(!text.contains("session_database"));
-        assert!(text.contains("global-memory scans"));
-        assert!(text.contains("config show"));
-        assert!(text.contains("read-only analysis turn"));
-        assert!(text.contains("do not create, replace, or delete memories"));
-        assert!(text.contains("`Findings`"));
-        assert!(text.contains("`Recommended actions`"));
+        assert!(text.starts_with(REFLECTION_PROMPT));
+        assert!(text.ends_with(REFLECTION_REPORT_ENDING));
+        assert_eq!(
+            tagged_section(&text, "additional_instructions"),
+            "Focus on validation gaps."
+        );
+        let context: serde_json::Value =
+            serde_json::from_str(tagged_section(&text, "reflection_context")).unwrap();
+        assert_eq!(
+            context,
+            serde_json::json!({
+                "config_path": "/tact/config.toml",
+                "workspace": "/work/current",
+            })
+        );
         assert!(!text.contains(MEMORY_REVIEW_CHECKPOINT));
+        // The guidance names tools and record kinds that the agent must be able to call and filter.
+        for identifier in [
+            "find_sessions",
+            "read_session",
+            "parent_session_id",
+            "user.submitted",
+            "user.steered",
+        ] {
+            assert!(REFLECTION_PROMPT.contains(&format!("`{identifier}`")));
+        }
     }
 
     #[test]
