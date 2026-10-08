@@ -10,7 +10,7 @@ use nanocodex::{
 use std::{
     env::VarError, error::Error as StdError, io, path::PathBuf, result::Result as StdResult,
 };
-use tact_memory::{MemoryError, RemoteClientError};
+use tact_memory::{RemoteClientError, transfer::TransferError};
 use thiserror::Error;
 
 pub(crate) type Result<T> = StdResult<T, Error>;
@@ -35,35 +35,13 @@ pub(crate) enum Error {
     #[error(transparent)]
     Runtime(#[from] RuntimeError),
     #[error(transparent)]
-    MemoryTransfer(#[from] MemoryTransferError),
+    MemoryTransfer(#[from] TransferError),
     #[error(transparent)]
     Session(#[from] SessionError),
     #[error(transparent)]
     Transcript(#[from] TranscriptError),
     #[error("update failed: {0}")]
     Update(#[source] Box<dyn StdError + Send + Sync>),
-}
-
-#[derive(Debug, Error)]
-pub(crate) enum MemoryTransferError {
-    #[error("remote memory is not configured")]
-    RemoteNotConfigured,
-    #[error("failed to read the local memory snapshot for push: {0}")]
-    Local(#[source] MemoryError),
-    #[error(
-        "local memories kept changing while the remote snapshot was synchronized; retry once writes settle"
-    )]
-    LocalChanged,
-    #[error("memory push failed: {0}")]
-    Push(#[source] RemoteClientError),
-    #[error("remote memory rejected the push: {0}")]
-    PushStore(#[source] MemoryError),
-    #[error("memory pull failed: {0}")]
-    Pull(#[source] RemoteClientError),
-    #[error("remote memory rejected the pull: {0}")]
-    PullStore(#[source] MemoryError),
-    #[error("failed to merge pulled memories into the local store: {0}")]
-    Merge(#[source] MemoryError),
 }
 
 impl Error {
@@ -164,6 +142,8 @@ pub(crate) enum ConfigError {
     },
     #[error(transparent)]
     RemoteMemory(#[from] RemoteMemoryConfigError),
+    #[error("remote memory is not configured")]
+    RemoteMemoryNotConfigured,
     #[error("MCP environment variable {name} is not set")]
     McpEnvironmentNotPresent { name: String },
     #[error("MCP environment variable {name} is not valid Unicode")]

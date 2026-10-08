@@ -28,7 +28,7 @@ mod web;
 pub(crate) use agent::AgentConfig;
 pub(crate) use edit::{ConfigDocument, Setting};
 pub(crate) use mcp::McpServerConfig;
-pub(crate) use memory::MemoryConfig;
+pub(crate) use memory::{MemoryConfig, RemoteMemoryConfig};
 pub(crate) use providers::{AuthConfig, AuthMode, ClaudeConfig};
 pub(crate) use settings::{
     DEFAULT_MAX_SUBAGENTS, ReasoningEffort, ReasoningMode, Speed, Transport,

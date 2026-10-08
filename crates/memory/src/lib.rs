@@ -15,6 +15,8 @@ pub mod server;
 mod store;
 #[cfg(feature = "tool")]
 mod tool;
+#[cfg(all(feature = "client", feature = "local"))]
+pub mod transfer;
 
 pub use model::{
     MemoryAccess, MemoryCandidate, MemoryImportReport, MemoryKey, MemoryLimits, MemoryRecord,

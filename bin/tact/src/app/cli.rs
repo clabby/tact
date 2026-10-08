@@ -2,8 +2,11 @@
 
 use crate::{
     app::{
-        config::{AuthMode, Config, ConfigOverrides, ReasoningEffort, ReasoningMode, Transport},
-        error::{Error, Result, RuntimeError},
+        config::{
+            AuthMode, Config, ConfigOverrides, ReasoningEffort, ReasoningMode, RemoteMemoryConfig,
+            Transport,
+        },
+        error::{ConfigError, Error, Result, RuntimeError},
         model,
         secret::SecretString,
         shutdown, update,
@@ -15,6 +18,10 @@ use clap::{ArgAction, Parser, Subcommand, builder::NonEmptyStringValueParser};
 use crossterm::style::{Color, Stylize};
 use nanocodex::{HarnessFamily, HarnessModel as Model};
 use std::{env, env::VarError, fmt, path::PathBuf};
+use tact_memory::{
+    LocalMemoryStore, RemoteClientError, RemoteMemoryClient, RemoteToken,
+    transfer::{self, TransferError},
+};
 use tokio_util::sync::CancellationToken;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
@@ -502,24 +509,18 @@ impl MemoryCommand {
 }
 
 async fn push_memories(config: &Config, dry_run: bool) -> Result<()> {
-    use crate::app::error::MemoryTransferError;
-    use tact_memory::{
-        MemoryStore, RemoteMemoryClient, RemoteRole, RemoteToken, SelectedMemoryStore,
-    };
-
     let remote = config
         .memory()
         .remote()
-        .ok_or(MemoryTransferError::RemoteNotConfigured)?;
-
+        .ok_or(ConfigError::RemoteMemoryNotConfigured)?;
     let limits = config.memory().local().limits();
-    let store = SelectedMemoryStore::local(config.memory_path(), limits);
-    let mut memories = export_memories(store.clone(), limits).await?;
-    let content_bytes = memories
-        .iter()
-        .map(|memory| memory.content.len())
-        .sum::<usize>();
+    let local = LocalMemoryStore::new(config.memory_path(), limits);
     if dry_run {
+        let memories = transfer::local_snapshot(&local, limits).await?;
+        let content_bytes = memories
+            .iter()
+            .map(|memory| memory.content.len())
+            .sum::<usize>();
         println!(
             "Would push {} memories ({} content bytes) as the complete snapshot for namespace `{}`; remote-only rows may be deleted.",
             memories.len(),
@@ -529,95 +530,47 @@ async fn push_memories(config: &Config, dry_run: bool) -> Result<()> {
         return Ok(());
     }
 
-    let token =
-        RemoteToken::new(remote.bearer_token().to_owned()).map_err(MemoryTransferError::Push)?;
-    let client = RemoteMemoryClient::new(remote.endpoint(), remote.namespace().to_owned(), token)
-        .map_err(MemoryTransferError::Push)?;
-    if client.session().await.map_err(MemoryTransferError::Push)? != RemoteRole::Writer {
-        return Err(MemoryTransferError::Push(tact_memory::RemoteClientError::ReadOnly).into());
-    }
-    let remote_store = SelectedMemoryStore::remote(client);
-    for _ in 0..3 {
-        let report = remote_store
-            .sync(&memories)
-            .await
-            .map_err(MemoryTransferError::PushStore)?;
-
-        let current = export_memories(store.clone(), limits).await?;
-        if same_replication_snapshot(&memories, &current) {
-            println!(
-                "Pushed {} memories to namespace `{}`: {} inserted, {} replaced, {} unchanged, {} deleted.",
-                memories.len(),
-                remote.namespace(),
-                report.inserted,
-                report.replaced,
-                report.unchanged,
-                report.deleted
-            );
-            return Ok(());
-        }
-        memories = current;
-    }
-    Err(MemoryTransferError::LocalChanged.into())
+    let client = remote_client(remote).map_err(TransferError::Push)?;
+    let report = transfer::push(&local, client, limits).await?;
+    println!(
+        "Pushed {} memories to namespace `{}`: {} inserted, {} replaced, {} unchanged, {} deleted.",
+        report.memories,
+        remote.namespace(),
+        report.sync.inserted,
+        report.sync.replaced,
+        report.sync.unchanged,
+        report.sync.deleted
+    );
+    Ok(())
 }
 
 async fn pull_memories(config: &Config, all: bool, namespaces: Vec<String>) -> Result<()> {
-    use crate::app::error::MemoryTransferError;
-    use tact_memory::{
-        LocalMemoryStore, MemoryStore, RemoteMemoryClient, RemoteToken, SelectedMemoryStore,
-    };
-
     let remote = config
         .memory()
         .remote()
-        .ok_or(MemoryTransferError::RemoteNotConfigured)?;
-    let token =
-        RemoteToken::new(remote.bearer_token().to_owned()).map_err(MemoryTransferError::Pull)?;
-    let client = RemoteMemoryClient::new(remote.endpoint(), remote.namespace().to_owned(), token)
-        .map_err(MemoryTransferError::Pull)?;
-    client.session().await.map_err(MemoryTransferError::Pull)?;
+        .ok_or(ConfigError::RemoteMemoryNotConfigured)?;
+    let client = remote_client(remote).map_err(TransferError::Pull)?;
+    let limits = config.memory().local().limits();
+    let local = LocalMemoryStore::new(config.memory_path(), limits);
     let selection = (!all).then_some(namespaces.as_slice());
-    let memories = SelectedMemoryStore::remote(client)
-        .export_all(selection, config.memory().local().limits())
-        .await
-        .map_err(MemoryTransferError::PullStore)?;
-    let fetched = memories.len();
-    let report = LocalMemoryStore::new(config.memory_path(), config.memory().local().limits())
-        .merge_remote_export(memories)
-        .await
-        .map_err(MemoryTransferError::Merge)?;
+    let report = transfer::pull(client, &local, selection, limits).await?;
     let selected = if all {
         "all namespaces".to_owned()
     } else {
         format!("namespaces `{}`", namespaces.join("`, `"))
     };
     println!(
-        "Pulled {selected}: {fetched} fetched, {} inserted, {} skipped.",
-        report.inserted, report.skipped
+        "Pulled {selected}: {} fetched, {} inserted, {} skipped.",
+        report.fetched, report.import.inserted, report.import.skipped
     );
     Ok(())
 }
 
-async fn export_memories(
-    store: tact_memory::SelectedMemoryStore,
-    limits: tact_memory::MemoryLimits,
-) -> std::result::Result<Vec<tact_memory::MemoryRecord>, crate::app::error::MemoryTransferError> {
-    use crate::app::error::MemoryTransferError;
-    use tact_memory::MemoryStore;
-
-    let mut memories = store
-        .export_all(None, limits)
-        .await
-        .map_err(MemoryTransferError::Local)?;
-    memories.sort_unstable_by_key(|memory| memory.key.id);
-    Ok(memories)
-}
-
-fn same_replication_snapshot(
-    left: &[tact_memory::MemoryRecord],
-    right: &[tact_memory::MemoryRecord],
-) -> bool {
-    left == right
+fn remote_client(
+    remote: &RemoteMemoryConfig,
+) -> std::result::Result<RemoteMemoryClient, RemoteClientError> {
+    let token = RemoteToken::new(remote.bearer_token().to_owned())?;
+    RemoteMemoryClient::new(remote.endpoint(), remote.namespace().to_owned(), token)
 }
 
 impl AuthCommand {
@@ -730,17 +683,13 @@ fn parse_header_env(value: &str) -> std::result::Result<(String, String), String
 fn read_mcp_environment(
     name: String,
     read: impl FnOnce(&str) -> std::result::Result<String, VarError>,
-) -> std::result::Result<(String, Zeroizing<String>), crate::app::error::ConfigError> {
+) -> std::result::Result<(String, Zeroizing<String>), ConfigError> {
     match read(&name) {
         Ok(value) => Ok((name, Zeroizing::new(value))),
-        Err(VarError::NotPresent) => {
-            Err(crate::app::error::ConfigError::McpEnvironmentNotPresent { name })
-        }
+        Err(VarError::NotPresent) => Err(ConfigError::McpEnvironmentNotPresent { name }),
         // VarError owns and renders the non-Unicode value, so discard it before constructing the
         // diagnostic. The process environment retains the original outside tact's ownership.
-        Err(VarError::NotUnicode(_)) => {
-            Err(crate::app::error::ConfigError::McpEnvironmentNotUnicode { name })
-        }
+        Err(VarError::NotUnicode(_)) => Err(ConfigError::McpEnvironmentNotUnicode { name }),
     }
 }
 
@@ -748,7 +697,6 @@ fn read_mcp_environment(
 mod tests {
     use super::{
         Cli, McpCommand, MemoryCommand, push_memories, read_mcp_environment, resume_command,
-        same_replication_snapshot,
     };
     use crate::app::{
         cli::Command,
@@ -768,29 +716,6 @@ mod tests {
         },
     };
     use tempfile::tempdir;
-
-    #[test]
-    fn replication_snapshot_includes_memory_telemetry() {
-        let original = tact_memory::MemoryRecord {
-            key: tact_memory::MemoryKey::local(1, 1),
-            content: "telemetry".to_owned(),
-            created_at_ms: 1,
-            updated_at_ms: 1,
-            last_scanned_at_ms: None,
-            scan_count: 0,
-            last_used_at_ms: None,
-            use_count: 0,
-            probation_until_ms: Some(10),
-        };
-        let mut current = original.clone();
-        current.last_scanned_at_ms = Some(2);
-        current.scan_count = 1;
-        current.last_used_at_ms = Some(3);
-        current.use_count = 1;
-        current.probation_until_ms = None;
-
-        assert!(!same_replication_snapshot(&[original], &[current]));
-    }
 
     #[test]
     fn clap_definition_is_valid() {
