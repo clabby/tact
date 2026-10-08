@@ -121,6 +121,15 @@ impl HitMap {
         self.expandables.iter().map(|hit| hit.row).collect()
     }
 
+    /// The layout line drawn on a terminal row.
+    #[cfg(test)]
+    pub(super) fn anchor_at(&self, row: u16) -> Option<Anchor> {
+        self.rows
+            .iter()
+            .find(|(drawn, _)| *drawn == row)
+            .map(|(_, anchor)| *anchor)
+    }
+
     pub(super) fn selection_span(
         &self,
         position: Position,

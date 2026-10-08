@@ -323,6 +323,11 @@ impl LayoutCache {
 }
 
 impl CachedEntry {
+    #[cfg(test)]
+    pub(super) const fn expanded(&self) -> bool {
+        self.expanded
+    }
+
     fn new(
         renderer: &mut EntryRenderer<'_>,
         entry: &TranscriptEntry,
