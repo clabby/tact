@@ -4,7 +4,7 @@
 //! tree. A range resolves to one full-context patch, and a content version detects when the
 //! checkout changed underneath an open review.
 
-use super::checkout::Checkout;
+use crate::{Checkout, FilePatch, VcsError};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -33,25 +33,31 @@ enum PatchHookPhase {
 const MAX_DIFF_BYTES: usize = 32 * 1024 * 1024;
 const FULL_CONTEXT: &str = "--unified=2147483647";
 
+/// An interval between two review targets, as indices into [`ReviewContext::range_targets`].
+/// A valid range has `from < to`.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
-pub(crate) struct ReviewRange {
-    pub(crate) from: usize,
-    pub(crate) to: usize,
+pub struct ReviewRange {
+    pub from: usize,
+    pub to: usize,
 }
 
+/// A point a review range can start or end at.
 #[derive(Clone, Debug, Serialize)]
-pub(crate) struct ReviewTarget {
-    pub(crate) index: usize,
-    pub(crate) kind: ReviewTargetKind,
-    pub(crate) short_id: String,
-    pub(crate) title: String,
+pub struct ReviewTarget {
+    pub index: usize,
+    pub kind: ReviewTargetKind,
+    pub short_id: String,
+    pub title: String,
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum ReviewTargetKind {
+pub enum ReviewTargetKind {
+    /// The merge base with the trunk branch; always the first target.
     Trunk,
+    /// A first-parent commit between the merge base and the checkout's head.
     Commit,
+    /// The uncommitted state of the checkout; always the last target.
     WorkingTree,
 }
 
@@ -61,8 +67,9 @@ struct RangePoint {
     revision: Option<String>,
 }
 
+/// The reviewable targets of one checkout, read once. Cloning shares the underlying checkout.
 #[derive(Clone)]
-pub(crate) struct ReviewContext {
+pub struct ReviewContext {
     root: Arc<Checkout>,
     repository: String,
     trunk: Trunk,
@@ -70,46 +77,62 @@ pub(crate) struct ReviewContext {
     version: WorkspaceVersion,
 }
 
+/// The change across one review range.
 #[derive(Clone, Serialize)]
-pub(crate) struct DiffSnapshot {
-    pub(crate) patch: String,
+pub struct DiffSnapshot {
+    /// A `git diff` patch with full file context, untracked files included.
+    pub patch: String,
     #[serde(skip)]
-    pub(crate) overview: OverviewContext,
-    pub(crate) repository: String,
-    pub(crate) scope: String,
-    pub(crate) base: String,
+    pub overview: OverviewContext,
+    /// The name of the checkout's directory.
+    pub repository: String,
+    /// A human-readable label for the range.
+    pub scope: String,
+    /// The commit the patch starts from.
+    pub base: String,
+}
+
+/// Where a snapshot came from, so an agent can inspect the same change in the repository.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OverviewContext {
+    pub repository: PathBuf,
+    pub range: OverviewRange,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct OverviewContext {
-    pub(crate) repository: PathBuf,
-    pub(crate) range: OverviewRange,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum OverviewRange {
+pub enum OverviewRange {
     Commits { base: String, head: String },
     WorkingTree { base: String },
 }
 
+/// Which side of a patch a line number refers to.
 #[derive(Clone, Copy)]
-pub(crate) enum PatchSide {
+pub enum PatchSide {
     Additions,
     Deletions,
 }
 
+/// A content hash of a checkout's trunk merge base, head commit, and working-tree changes.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct WorkspaceVersion([u8; 32]);
+pub struct WorkspaceVersion([u8; 32]);
 
 impl WorkspaceVersion {
+    /// Reads the current version of the checkout that contains `workspace`.
+    pub async fn current(workspace: &Path) -> Result<Self, VcsError> {
+        let root = Checkout::detect(workspace).await?;
+        let trunk = resolve_trunk(&root).await?;
+        workspace_version_at(&root, &trunk).await
+    }
+
     /// An opaque, comparable rendering for clients.
-    pub(crate) fn to_hex(&self) -> String {
+    pub fn to_hex(&self) -> String {
         self.0.iter().map(|byte| format!("{byte:02x}")).collect()
     }
 }
 
 impl ReviewContext {
-    pub(crate) async fn load(workspace: &Path) -> Result<Self, DiffError> {
+    /// Reads the targets of the checkout that contains `workspace`.
+    pub async fn load(workspace: &Path) -> Result<Self, VcsError> {
         let root = Checkout::detect(workspace).await?;
         let trunk = resolve_trunk(&root).await?;
         let version = workspace_version_at(&root, &trunk).await?;
@@ -129,22 +152,24 @@ impl ReviewContext {
         })
     }
 
-    pub(crate) fn repository(&self) -> &str {
+    pub fn repository(&self) -> &str {
         &self.repository
     }
 
-    pub(crate) fn trunk_name(&self) -> &str {
+    pub fn trunk_name(&self) -> &str {
         &self.trunk.name
     }
 
-    pub(crate) fn range_targets(&self) -> Vec<ReviewTarget> {
+    /// Trunk first, then each commit oldest first, then the working tree.
+    pub fn range_targets(&self) -> Vec<ReviewTarget> {
         self.range_points
             .iter()
             .map(|point| point.target.clone())
             .collect()
     }
 
-    pub(crate) fn default_range(&self) -> ReviewRange {
+    /// The range a review opens with: the whole branch.
+    pub fn default_range(&self) -> ReviewRange {
         self.full_range()
     }
 
@@ -153,14 +178,15 @@ impl ReviewContext {
         ReviewRange { from: to - 1, to }
     }
 
-    pub(crate) fn full_range(&self) -> ReviewRange {
+    pub fn full_range(&self) -> ReviewRange {
         ReviewRange {
             from: 0,
             to: self.range_points.len() - 1,
         }
     }
 
-    pub(crate) fn range_label(&self, range: ReviewRange) -> Result<String, DiffError> {
+    /// A short label for `range`, such as "Full branch".
+    pub fn range_label(&self, range: ReviewRange) -> Result<String, VcsError> {
         self.validate_range(range)?;
         if range == self.uncommitted_range() {
             return Ok("Uncommitted changes".to_owned());
@@ -173,7 +199,9 @@ impl ReviewContext {
         Ok(format!("{} → {}", target_label(from), target_label(to)))
     }
 
-    pub(crate) async fn collect(&self, range: ReviewRange) -> Result<DiffSnapshot, DiffError> {
+    /// Captures the patch for `range`. A range ending at the working tree is captured until two
+    /// consecutive captures agree, so the patch never mixes two states.
+    pub async fn collect(&self, range: ReviewRange) -> Result<DiffSnapshot, VcsError> {
         self.validate_range(range)?;
         let base = self.range_points[range.from]
             .revision
@@ -199,7 +227,8 @@ impl ReviewContext {
         })
     }
 
-    pub(crate) fn version(&self) -> WorkspaceVersion {
+    /// The checkout's version when this context was loaded.
+    pub fn version(&self) -> WorkspaceVersion {
         self.version.clone()
     }
 
@@ -207,7 +236,7 @@ impl ReviewContext {
         &self,
         base: &str,
         range: ReviewRange,
-    ) -> Result<DiffSnapshot, DiffError> {
+    ) -> Result<DiffSnapshot, VcsError> {
         for _ in 0..3 {
             let patch = working_tree_patch(&self.root, base, true).await?;
             if working_tree_patch(&self.root, base, true).await? != patch {
@@ -226,14 +255,14 @@ impl ReviewContext {
                 base: base.to_owned(),
             });
         }
-        Err(DiffError::WorkspaceChangedDuringSnapshot)
+        Err(VcsError::WorkspaceChangedDuringSnapshot)
     }
 
-    fn validate_range(&self, range: ReviewRange) -> Result<(), DiffError> {
+    fn validate_range(&self, range: ReviewRange) -> Result<(), VcsError> {
         if range.from < range.to && range.to < self.range_points.len() {
             return Ok(());
         }
-        Err(DiffError::InvalidRange {
+        Err(VcsError::InvalidRange {
             from: range.from,
             to: range.to,
             target_count: self.range_points.len(),
@@ -242,133 +271,30 @@ impl ReviewContext {
 }
 
 impl DiffSnapshot {
-    pub(crate) fn contains_anchor(
+    /// Whether the lines `start_line` through `end_line` of `path` fall inside one hunk on the
+    /// given side of the patch, so a comment anchored there points at reviewed content.
+    pub fn contains_anchor(
         &self,
         path: &str,
         side: PatchSide,
         start_line: u32,
         end_line: u32,
     ) -> bool {
-        if start_line == 0 || end_line < start_line {
-            return false;
-        }
-
-        let mut old_path = None;
-        let mut new_path = None;
-        for line in self.patch.lines() {
-            if line.starts_with("diff --git ") {
-                old_path = None;
-                new_path = None;
-                continue;
-            }
-            if let Some(value) = line.strip_prefix("--- ") {
-                old_path = patch_path(value);
-                continue;
-            }
-            if let Some(value) = line.strip_prefix("+++ ") {
-                new_path = patch_path(value);
-                continue;
-            }
-            let Some((old_start, old_count, new_start, new_count)) = parse_hunk_header(line) else {
-                continue;
+        FilePatch::parse_all(&self.patch).iter().any(|file| {
+            let candidate = match side {
+                PatchSide::Additions => file.new_path.as_deref(),
+                PatchSide::Deletions => file.old_path.as_deref(),
             };
-            let (candidate_path, first, count) = match side {
-                PatchSide::Additions => (new_path.as_deref(), new_start, new_count),
-                PatchSide::Deletions => (old_path.as_deref(), old_start, old_count),
-            };
-            if candidate_path != Some(path) || count == 0 {
-                continue;
-            }
-            let Some(last) = first.checked_add(count - 1) else {
-                continue;
-            };
-            if start_line >= first && end_line <= last {
-                return true;
-            }
-        }
-        false
+            candidate == Some(path)
+                && file.hunks.iter().any(|hunk| {
+                    let span = match side {
+                        PatchSide::Additions => hunk.new,
+                        PatchSide::Deletions => hunk.old,
+                    };
+                    span.contains(start_line, end_line)
+                })
+        })
     }
-}
-
-fn patch_path(value: &str) -> Option<String> {
-    let value = value.split('\t').next().unwrap_or(value);
-    if value == "/dev/null" {
-        return None;
-    }
-    let value = decode_git_path(value)?;
-    Some(
-        value
-            .strip_prefix("a/")
-            .or_else(|| value.strip_prefix("b/"))
-            .unwrap_or(&value)
-            .to_owned(),
-    )
-}
-
-fn decode_git_path(value: &str) -> Option<String> {
-    let Some(quoted) = value
-        .strip_prefix('"')
-        .and_then(|value| value.strip_suffix('"'))
-    else {
-        return Some(value.to_owned());
-    };
-    let bytes = quoted.as_bytes();
-    let mut decoded = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] != b'\\' {
-            decoded.push(bytes[index]);
-            index += 1;
-            continue;
-        }
-        index += 1;
-        let escaped = *bytes.get(index)?;
-        if escaped.is_ascii_digit() && escaped < b'8' {
-            let mut value = 0_u8;
-            let mut digits = 0;
-            while digits < 3 {
-                let Some(digit) = bytes.get(index).copied() else {
-                    break;
-                };
-                if !(b'0'..=b'7').contains(&digit) {
-                    break;
-                }
-                value = value.checked_mul(8)?.checked_add(digit - b'0')?;
-                index += 1;
-                digits += 1;
-            }
-            decoded.push(value);
-            continue;
-        }
-        decoded.push(match escaped {
-            b'a' => 0x07,
-            b'b' => 0x08,
-            b'f' => 0x0c,
-            b'n' => b'\n',
-            b'r' => b'\r',
-            b't' => b'\t',
-            b'v' => 0x0b,
-            b'\\' => b'\\',
-            b'"' => b'"',
-            _ => return None,
-        });
-        index += 1;
-    }
-    String::from_utf8(decoded).ok()
-}
-
-fn parse_hunk_header(line: &str) -> Option<(u32, u32, u32, u32)> {
-    let header = line.strip_prefix("@@ -")?;
-    let (old, remainder) = header.split_once(" +")?;
-    let (new, _) = remainder.split_once(" @@")?;
-    let (old_start, old_count) = parse_hunk_range(old)?;
-    let (new_start, new_count) = parse_hunk_range(new)?;
-    Some((old_start, old_count, new_start, new_count))
-}
-
-fn parse_hunk_range(value: &str) -> Option<(u32, u32)> {
-    let (start, count) = value.split_once(',').unwrap_or((value, "1"));
-    Some((start.parse().ok()?, count.parse().ok()?))
 }
 
 fn target_label(target: &ReviewTarget) -> &str {
@@ -378,20 +304,10 @@ fn target_label(target: &ReviewTarget) -> &str {
     }
 }
 
-pub(crate) async fn load(workspace: &Path) -> Result<ReviewContext, DiffError> {
-    ReviewContext::load(workspace).await
-}
-
-pub(crate) async fn current_version(workspace: &Path) -> Result<WorkspaceVersion, DiffError> {
-    let root = Checkout::detect(workspace).await?;
-    let trunk = resolve_trunk(&root).await?;
-    workspace_version_at(&root, &trunk).await
-}
-
 async fn workspace_version_at(
     root: &Checkout,
     trunk: &Trunk,
-) -> Result<WorkspaceVersion, DiffError> {
+) -> Result<WorkspaceVersion, VcsError> {
     let output = git_output(root, ["rev-parse", root.head()]).await?;
     ensure_success(output.status, &output.stderr)?;
     let head = String::from_utf8(output.stdout)?.trim().to_owned();
@@ -408,7 +324,7 @@ fn workspace_version(trunk: &str, head: &str, patch: &str) -> WorkspaceVersion {
     WorkspaceVersion(digest.finalize().into())
 }
 
-async fn resolve_trunk(root: &Checkout) -> Result<Trunk, DiffError> {
+async fn resolve_trunk(root: &Checkout) -> Result<Trunk, VcsError> {
     let current_branch = current_branch(root).await?;
     let mut candidates = ["refs/remotes/origin/HEAD", "refs/remotes/upstream/HEAD"]
         .map(str::to_owned)
@@ -429,14 +345,14 @@ async fn resolve_trunk(root: &Checkout) -> Result<Trunk, DiffError> {
         }
     }
 
-    Err(DiffError::BaseNotFound)
+    Err(VcsError::BaseNotFound)
 }
 
-async fn current_branch(root: &Checkout) -> Result<Option<String>, DiffError> {
+async fn current_branch(root: &Checkout) -> Result<Option<String>, VcsError> {
     symbolic_ref(root, root.head()).await
 }
 
-async fn symbolic_ref(root: &Checkout, reference: &str) -> Result<Option<String>, DiffError> {
+async fn symbolic_ref(root: &Checkout, reference: &str) -> Result<Option<String>, VcsError> {
     let output = git_output(root, ["symbolic-ref", "--quiet", "--short", reference]).await?;
     if output.status.code() == Some(1) {
         return Ok(None);
@@ -449,7 +365,7 @@ async fn symbolic_ref(root: &Checkout, reference: &str) -> Result<Option<String>
 async fn current_upstream(
     root: &Checkout,
     current_branch: Option<&str>,
-) -> Result<Option<String>, DiffError> {
+) -> Result<Option<String>, VcsError> {
     let Some(current_branch) = current_branch else {
         return Ok(None);
     };
@@ -480,7 +396,7 @@ struct Trunk {
     merge_base: String,
 }
 
-async fn load_range_points(root: &Checkout, trunk: &Trunk) -> Result<Vec<RangePoint>, DiffError> {
+async fn load_range_points(root: &Checkout, trunk: &Trunk) -> Result<Vec<RangePoint>, VcsError> {
     let trunk_commit = commit_metadata(root, &trunk.merge_base).await?;
     let mut points = vec![RangePoint {
         target: ReviewTarget {
@@ -511,7 +427,7 @@ async fn load_range_points(root: &Checkout, trunk: &Trunk) -> Result<Vec<RangePo
         let short_id = fields.next().unwrap_or_default();
         let title = fields.next().unwrap_or_default();
         if revision.is_empty() || short_id.is_empty() {
-            return Err(DiffError::InvalidCommitMetadata);
+            return Err(VcsError::InvalidCommitMetadata);
         }
         points.push(RangePoint {
             target: ReviewTarget {
@@ -540,12 +456,12 @@ struct CommitMetadata {
     title: String,
 }
 
-async fn commit_metadata(root: &Checkout, revision: &str) -> Result<CommitMetadata, DiffError> {
+async fn commit_metadata(root: &Checkout, revision: &str) -> Result<CommitMetadata, VcsError> {
     let output = git_output(root, ["show", "--no-patch", "--format=%h%x00%s", revision]).await?;
     ensure_success(output.status, &output.stderr)?;
     let value = String::from_utf8(output.stdout)?;
     let Some((short_id, title)) = value.trim().split_once('\0') else {
-        return Err(DiffError::InvalidCommitMetadata);
+        return Err(VcsError::InvalidCommitMetadata);
     };
     Ok(CommitMetadata {
         short_id: short_id.to_owned(),
@@ -553,7 +469,7 @@ async fn commit_metadata(root: &Checkout, revision: &str) -> Result<CommitMetada
     })
 }
 
-async fn revision_exists(root: &Checkout, revision: &str) -> Result<bool, DiffError> {
+async fn revision_exists(root: &Checkout, revision: &str) -> Result<bool, VcsError> {
     let output = git_output(root, ["rev-parse", "--verify", "--quiet", revision]).await?;
     if output.status.success() {
         return Ok(true);
@@ -565,10 +481,10 @@ async fn revision_exists(root: &Checkout, revision: &str) -> Result<bool, DiffEr
     Ok(false)
 }
 
-async fn merge_base(root: &Checkout, revision: &str) -> Result<String, DiffError> {
+async fn merge_base(root: &Checkout, revision: &str) -> Result<String, VcsError> {
     let output = git_output(root, ["merge-base", revision, root.head()]).await?;
     if !output.status.success() {
-        return Err(DiffError::InvalidBase(revision.to_owned()));
+        return Err(VcsError::InvalidBase(revision.to_owned()));
     }
     Ok(String::from_utf8(output.stdout)?.trim().to_owned())
 }
@@ -578,7 +494,7 @@ async fn committed_patch(
     base: &str,
     head: &str,
     full_context: bool,
-) -> Result<String, DiffError> {
+) -> Result<String, VcsError> {
     let mut arguments = vec![
         "diff",
         "--binary",
@@ -601,7 +517,7 @@ async fn append_untracked_files(
     root: &Checkout,
     patch: &mut String,
     full_context: bool,
-) -> Result<(), DiffError> {
+) -> Result<(), VcsError> {
     let output = git_output(root, ["ls-files", "--others", "--exclude-standard", "-z"]).await?;
     ensure_success(output.status, &output.stderr)?;
 
@@ -645,7 +561,7 @@ async fn working_tree_patch(
     root: &Checkout,
     base: &str,
     full_context: bool,
-) -> Result<String, DiffError> {
+) -> Result<String, VcsError> {
     #[cfg(test)]
     run_patch_hook(root.work_tree(), full_context, PatchHookPhase::Before);
 
@@ -684,12 +600,12 @@ fn run_patch_hook(root: &Path, full_context: bool, phase: PatchHookPhase) {
 async fn git_output<const N: usize>(
     root: &Checkout,
     arguments: [&str; N],
-) -> Result<Output, DiffError> {
+) -> Result<Output, VcsError> {
     root.git()
         .args(arguments)
         .output()
         .await
-        .map_err(DiffError::StartGit)
+        .map_err(VcsError::StartGit)
 }
 
 async fn git_output_limited<I, S>(
@@ -697,7 +613,7 @@ async fn git_output_limited<I, S>(
     arguments: I,
     limit: usize,
     used: usize,
-) -> Result<Output, DiffError>
+) -> Result<Output, VcsError>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<std::ffi::OsStr>,
@@ -708,7 +624,7 @@ where
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(DiffError::StartGit)?;
+        .map_err(VcsError::StartGit)?;
     let stdout = child.stdout.take().expect("piped git stdout must exist");
     let mut stderr = child.stderr.take().expect("piped git stderr must exist");
     let stderr_task = tokio::spawn(async move {
@@ -720,21 +636,21 @@ where
         .take(limit.saturating_add(1) as u64)
         .read_to_end(&mut output)
         .await
-        .map_err(DiffError::ReadGit)?;
+        .map_err(VcsError::ReadGit)?;
     if output.len() > limit {
         let _ = child.kill().await;
         let _ = child.wait().await;
         stderr_task.abort();
-        return Err(DiffError::TooLarge {
+        return Err(VcsError::TooLarge {
             actual: used.saturating_add(output.len()),
             maximum: MAX_DIFF_BYTES,
         });
     }
-    let status = child.wait().await.map_err(DiffError::WaitGit)?;
+    let status = child.wait().await.map_err(VcsError::WaitGit)?;
     let stderr = stderr_task
         .await
-        .map_err(DiffError::GitOutputTask)?
-        .map_err(DiffError::ReadGit)?;
+        .map_err(VcsError::GitOutputTask)?
+        .map_err(VcsError::ReadGit)?;
     Ok(Output {
         status,
         stdout: output,
@@ -742,12 +658,12 @@ where
     })
 }
 
-fn ensure_success(status: std::process::ExitStatus, stderr: &[u8]) -> Result<(), DiffError> {
+fn ensure_success(status: std::process::ExitStatus, stderr: &[u8]) -> Result<(), VcsError> {
     if status.success() {
         return Ok(());
     }
 
-    Err(DiffError::GitFailed(
+    Err(VcsError::GitFailed(
         String::from_utf8_lossy(stderr).trim().to_owned(),
     ))
 }
@@ -762,58 +678,23 @@ const fn null_device() -> &'static str {
     "NUL"
 }
 
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum DiffError {
-    #[error("the repository is managed by jj, which is not installed or not on the PATH")]
-    JjMissing,
-    #[error("jj failed: {0}")]
-    Jj(String),
-    #[error("could not create scratch space for the review: {0}")]
-    Scratch(#[source] std::io::Error),
-    #[error("failed to start git: {0}")]
-    StartGit(#[source] std::io::Error),
-    #[error("failed to read git output: {0}")]
-    ReadGit(#[source] std::io::Error),
-    #[error("failed to wait for git: {0}")]
-    WaitGit(#[source] std::io::Error),
-    #[error("git output task failed: {0}")]
-    GitOutputTask(#[source] tokio::task::JoinError),
-    #[error("git command failed: {0}")]
-    GitFailed(String),
-    #[error("review workspace is not in a Git repository: {0}")]
-    NotRepository(std::path::PathBuf),
-    #[error("could not determine the branch base; configure an upstream for the current branch")]
-    BaseNotFound,
-    #[error("could not find a merge base between HEAD and `{0}`")]
-    InvalidBase(String),
-    #[error("the selected review range {from}..{to} is invalid for {target_count} targets")]
-    InvalidRange {
-        from: usize,
-        to: usize,
-        target_count: usize,
-    },
-    #[error("git returned invalid commit metadata for the review range")]
-    InvalidCommitMetadata,
-    #[error("workspace kept changing while the review snapshot was collected")]
-    WorkspaceChangedDuringSnapshot,
-    #[error("review diff is {actual} bytes, exceeding the {maximum}-byte limit")]
-    TooLarge { actual: usize, maximum: usize },
-    #[error("git output was not valid UTF-8: {0}")]
-    Utf8(#[from] std::string::FromUtf8Error),
-    #[error("git returned a path that is not valid UTF-8: {0}")]
-    PathUtf8(#[from] std::str::Utf8Error),
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        Checkout, DiffSnapshot, PatchHook, PatchHookPhase, PatchSide, ReviewRange,
-        ReviewTargetKind, current_version, load,
+        DiffSnapshot, OverviewContext, OverviewRange, PATCH_HOOK, PATCH_HOOK_SERIAL, PatchHook,
+        PatchHookPhase, PatchSide, ReviewContext, ReviewRange, ReviewTargetKind, WorkspaceVersion,
+    };
+    use crate::{
+        Checkout, FilePatch, LineSpan, VcsError,
+        testing::{
+            added_lines, commit_file, expected_lines, git, repository,
+            repository_with_initial_branch,
+        },
     };
     use std::{
+        collections::BTreeSet,
         fs,
         path::Path,
-        process::Command,
         sync::{
             Arc, MutexGuard,
             atomic::{AtomicUsize, Ordering},
@@ -821,33 +702,45 @@ mod tests {
     };
     use tempfile::TempDir;
 
+    fn paths(patch: &str) -> BTreeSet<String> {
+        FilePatch::parse_all(patch)
+            .iter()
+            .filter_map(|file| file.path().map(str::to_owned))
+            .collect()
+    }
+
+    fn feature_branch(repository: &TempDir) {
+        git(repository.path(), &["checkout", "--quiet", "-b", "feature"]);
+        commit_file(repository.path(), "tracked.txt", "feature\n", "feature");
+    }
+
     #[tokio::test]
     async fn uncommitted_scope_includes_tracked_and_untracked_files() {
         let repository = repository();
         fs::write(repository.path().join("tracked.txt"), "changed\n").unwrap();
         fs::write(repository.path().join("new.txt"), "new\n").unwrap();
 
-        let context = load(repository.path()).await.unwrap();
+        let context = ReviewContext::load(repository.path()).await.unwrap();
         let snapshot = context.collect(context.uncommitted_range()).await.unwrap();
 
-        assert!(snapshot.patch.contains("tracked.txt"));
-        assert!(snapshot.patch.contains("new.txt"));
-        assert!(snapshot.patch.contains("+changed"));
-        assert!(snapshot.patch.contains("+new"));
+        assert_eq!(
+            added_lines(&snapshot.patch),
+            expected_lines(&[("new.txt", &["new"]), ("tracked.txt", &["changed"])])
+        );
     }
 
     #[tokio::test]
     async fn branch_scope_starts_at_the_merge_base() {
         let repository = repository();
-        git(repository.path(), ["checkout", "--quiet", "-b", "feature"]);
-        fs::write(repository.path().join("tracked.txt"), "feature\n").unwrap();
-        git(repository.path(), ["add", "tracked.txt"]);
-        git(repository.path(), ["commit", "--quiet", "-m", "feature"]);
+        feature_branch(&repository);
 
-        let context = load(repository.path()).await.unwrap();
+        let context = ReviewContext::load(repository.path()).await.unwrap();
         let snapshot = context.collect(context.full_range()).await.unwrap();
 
-        assert!(snapshot.patch.contains("+feature"));
+        assert_eq!(
+            added_lines(&snapshot.patch),
+            expected_lines(&[("tracked.txt", &["feature"])])
+        );
         assert_ne!(snapshot.base, "HEAD");
     }
 
@@ -855,29 +748,36 @@ mod tests {
     async fn review_patch_uses_canonical_prefixes_despite_git_configuration() {
         for setting in ["diff.mnemonicPrefix", "diff.noprefix"] {
             let repository = repository();
-            git(repository.path(), ["checkout", "--quiet", "-b", "feature"]);
-            fs::write(repository.path().join("committed.txt"), "committed\n").unwrap();
-            git(repository.path(), ["add", "committed.txt"]);
-            git(repository.path(), ["commit", "--quiet", "-m", "feature"]);
+            git(repository.path(), &["checkout", "--quiet", "-b", "feature"]);
+            commit_file(repository.path(), "committed.txt", "committed\n", "feature");
             fs::write(repository.path().join("tracked.txt"), "working tree\n").unwrap();
             fs::write(repository.path().join("untracked.txt"), "untracked\n").unwrap();
-            git(repository.path(), ["config", setting, "true"]);
+            git(repository.path(), &["config", setting, "true"]);
 
-            let context = load(repository.path()).await.unwrap();
+            let context = ReviewContext::load(repository.path()).await.unwrap();
             let snapshot = context.collect(context.full_range()).await.unwrap();
-            let headers = snapshot
-                .patch
-                .lines()
-                .filter(|line| line.starts_with("diff --git "))
-                .collect::<Vec<_>>();
+            let files = FilePatch::parse_all(&snapshot.patch);
 
-            assert_eq!(headers.len(), 3, "{setting}: {}", snapshot.patch);
             assert!(
-                headers
-                    .iter()
+                snapshot
+                    .patch
+                    .lines()
+                    .filter(|line| line.starts_with("diff --git "))
                     .all(|header| header.starts_with("diff --git a/") && header.contains(" b/")),
                 "{setting}: {}",
                 snapshot.patch
+            );
+            assert_eq!(
+                files
+                    .iter()
+                    .map(|file| (file.old_path.as_deref(), file.new_path.as_deref()))
+                    .collect::<Vec<_>>(),
+                [
+                    (None, Some("committed.txt")),
+                    (Some("tracked.txt"), Some("tracked.txt")),
+                    (None, Some("untracked.txt")),
+                ],
+                "{setting}"
             );
         }
     }
@@ -885,16 +785,25 @@ mod tests {
     #[tokio::test]
     async fn review_patch_tracks_renames_and_binary_content() {
         let repository = repository();
-        git(repository.path(), ["mv", "tracked.txt", "renamed.txt"]);
+        git(repository.path(), &["mv", "tracked.txt", "renamed.txt"]);
 
-        let context = load(repository.path()).await.unwrap();
+        let context = ReviewContext::load(repository.path()).await.unwrap();
         let snapshot = context.collect(context.uncommitted_range()).await.unwrap();
-        assert!(snapshot.patch.contains("rename from tracked.txt"));
-        assert!(snapshot.patch.contains("rename to renamed.txt"));
+        let files = FilePatch::parse_all(&snapshot.patch);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].old_path.as_deref(), Some("tracked.txt"));
+        assert_eq!(files[0].new_path.as_deref(), Some("renamed.txt"));
+        assert!(files[0].hunks.is_empty());
 
         fs::write(repository.path().join("renamed.txt"), [0xff, 0x00]).unwrap();
         let snapshot = context.collect(context.uncommitted_range()).await.unwrap();
-        assert!(snapshot.patch.contains("GIT binary patch"));
+        let files = FilePatch::parse_all(&snapshot.patch);
+        assert!(
+            files
+                .iter()
+                .any(|file| file.new_path.as_deref() == Some("renamed.txt") && file.binary),
+            "{files:?}"
+        );
     }
 
     #[tokio::test]
@@ -905,38 +814,43 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n")
             + "\n";
-        fs::write(repository.path().join("tracked.txt"), &original).unwrap();
-        git(repository.path(), ["add", "tracked.txt"]);
-        git(repository.path(), ["commit", "--quiet", "-m", "long file"]);
+        commit_file(repository.path(), "tracked.txt", &original, "long file");
         let changed = original.replace("line 20\n", "changed line 20\n");
         fs::write(repository.path().join("tracked.txt"), changed).unwrap();
 
-        let context = load(repository.path()).await.unwrap();
+        let context = ReviewContext::load(repository.path()).await.unwrap();
         let snapshot = context.collect(context.uncommitted_range()).await.unwrap();
+        let files = FilePatch::parse_all(&snapshot.patch);
 
-        assert!(snapshot.patch.contains(" line 1\n"));
-        assert!(snapshot.patch.contains(" line 40\n"));
+        assert_eq!(files.len(), 1);
+        assert_eq!(
+            files[0]
+                .hunks
+                .iter()
+                .map(|hunk| (hunk.old, hunk.new))
+                .collect::<Vec<_>>(),
+            [(
+                LineSpan {
+                    start: 1,
+                    count: 40
+                },
+                LineSpan {
+                    start: 1,
+                    count: 40
+                }
+            )]
+        );
     }
 
     #[tokio::test]
     async fn any_interval_between_trunk_commits_and_working_tree_can_be_selected() {
         let repository = repository();
-        git(repository.path(), ["checkout", "--quiet", "-b", "feature"]);
-        fs::write(repository.path().join("first.txt"), "first\n").unwrap();
-        git(repository.path(), ["add", "first.txt"]);
-        git(
-            repository.path(),
-            ["commit", "--quiet", "-m", "first change"],
-        );
-        fs::write(repository.path().join("second.txt"), "second\n").unwrap();
-        git(repository.path(), ["add", "second.txt"]);
-        git(
-            repository.path(),
-            ["commit", "--quiet", "-m", "second change"],
-        );
+        git(repository.path(), &["checkout", "--quiet", "-b", "feature"]);
+        commit_file(repository.path(), "first.txt", "first\n", "first change");
+        commit_file(repository.path(), "second.txt", "second\n", "second change");
         fs::write(repository.path().join("working.txt"), "working\n").unwrap();
 
-        let context = load(repository.path()).await.unwrap();
+        let context = ReviewContext::load(repository.path()).await.unwrap();
         let targets = context.range_targets();
         assert_eq!(context.default_range(), context.full_range());
         assert_eq!(targets.len(), 4);
@@ -951,17 +865,18 @@ mod tests {
             .unwrap();
         assert_eq!(
             committed.overview,
-            super::OverviewContext {
+            OverviewContext {
                 repository: context.root.work_tree().to_owned(),
-                range: super::OverviewRange::Commits {
+                range: OverviewRange::Commits {
                     base: context.range_points[1].revision.clone().unwrap(),
                     head: context.range_points[2].revision.clone().unwrap(),
                 },
             }
         );
-        assert!(!committed.patch.contains("first.txt"));
-        assert!(committed.patch.contains("second.txt"));
-        assert!(!committed.patch.contains("working.txt"));
+        assert_eq!(
+            paths(&committed.patch),
+            BTreeSet::from(["second.txt".to_owned()])
+        );
 
         let through_working_tree = context
             .collect(ReviewRange { from: 2, to: 3 })
@@ -969,21 +884,23 @@ mod tests {
             .unwrap();
         assert_eq!(
             through_working_tree.overview,
-            super::OverviewContext {
+            OverviewContext {
                 repository: context.root.work_tree().to_owned(),
-                range: super::OverviewRange::WorkingTree {
+                range: OverviewRange::WorkingTree {
                     base: context.range_points[2].revision.clone().unwrap(),
                 },
             }
         );
-        assert!(through_working_tree.patch.contains("working.txt"));
-        assert!(!through_working_tree.patch.contains("second.txt"));
+        assert_eq!(
+            paths(&through_working_tree.patch),
+            BTreeSet::from(["working.txt".to_owned()])
+        );
     }
 
     #[tokio::test]
     async fn reversed_or_empty_ranges_are_rejected() {
         let repository = repository();
-        let context = load(repository.path()).await.unwrap();
+        let context = ReviewContext::load(repository.path()).await.unwrap();
 
         for range in [
             ReviewRange { from: 0, to: 0 },
@@ -991,7 +908,7 @@ mod tests {
         ] {
             assert!(matches!(
                 context.collect(range).await,
-                Err(super::DiffError::InvalidRange { .. })
+                Err(VcsError::InvalidRange { .. })
             ));
         }
     }
@@ -1000,29 +917,29 @@ mod tests {
     async fn workspace_version_detects_further_edits_to_an_already_modified_file() {
         let repository = repository();
         fs::write(repository.path().join("tracked.txt"), "first edit\n").unwrap();
-        let context = load(repository.path()).await.unwrap();
+        let context = ReviewContext::load(repository.path()).await.unwrap();
         let _snapshot = context.collect(context.uncommitted_range()).await.unwrap();
         let initial = context.version();
 
         fs::write(repository.path().join("tracked.txt"), "second edit\n").unwrap();
 
-        assert_ne!(current_version(repository.path()).await.unwrap(), initial);
+        assert_ne!(
+            WorkspaceVersion::current(repository.path()).await.unwrap(),
+            initial
+        );
     }
 
     #[tokio::test]
     async fn clean_feature_branch_snapshot_matches_the_current_workspace_version() {
         let repository = repository();
-        git(repository.path(), ["checkout", "--quiet", "-b", "feature"]);
-        fs::write(repository.path().join("tracked.txt"), "feature\n").unwrap();
-        git(repository.path(), ["add", "tracked.txt"]);
-        git(repository.path(), ["commit", "--quiet", "-m", "feature"]);
+        feature_branch(&repository);
 
-        let context = load(repository.path()).await.unwrap();
+        let context = ReviewContext::load(repository.path()).await.unwrap();
         let _snapshot = context.collect(context.full_range()).await.unwrap();
 
         assert_eq!(
             context.version(),
-            current_version(repository.path()).await.unwrap()
+            WorkspaceVersion::current(repository.path()).await.unwrap()
         );
     }
 
@@ -1031,9 +948,8 @@ mod tests {
         let repository = repository();
         let path = repository.path().join("tracked.txt");
         fs::write(&path, "state-a\n").unwrap();
-        let context = load(repository.path()).await.unwrap();
+        let context = ReviewContext::load(repository.path()).await.unwrap();
         let full_context_calls = Arc::new(AtomicUsize::new(0));
-        let observed_full_context_calls = Arc::clone(&full_context_calls);
         let _hook = install_patch_hook({
             let root = fs::canonicalize(repository.path()).unwrap();
             let path = path.clone();
@@ -1054,56 +970,34 @@ mod tests {
             }
         });
 
-        match context.collect(context.uncommitted_range()).await {
-            Err(super::DiffError::WorkspaceChangedDuringSnapshot) => {}
-            Err(error) => panic!("unexpected snapshot error: {error}"),
-            Ok(snapshot) => panic!(
-                "snapshot mixed states after {} full captures: patch_b={}",
-                observed_full_context_calls.load(Ordering::SeqCst),
-                snapshot.patch.contains("state-b-with-a-different-size")
-            ),
-        }
+        assert!(matches!(
+            context.collect(context.uncommitted_range()).await,
+            Err(VcsError::WorkspaceChangedDuringSnapshot)
+        ));
     }
 
     #[tokio::test]
     async fn develop_branch_can_define_trunk_without_a_remote_head() {
         let repository = repository_with_initial_branch("develop");
-        git(repository.path(), ["checkout", "--quiet", "-b", "feature"]);
-        fs::write(repository.path().join("tracked.txt"), "feature\n").unwrap();
-        git(repository.path(), ["add", "tracked.txt"]);
-        git(repository.path(), ["commit", "--quiet", "-m", "feature"]);
+        feature_branch(&repository);
 
-        let context = load(repository.path()).await.unwrap();
+        let context = ReviewContext::load(repository.path()).await.unwrap();
+        let snapshot = context.collect(context.full_range()).await.unwrap();
 
         assert_eq!(context.trunk_name(), "develop");
-        assert!(
-            context
-                .collect(context.full_range())
-                .await
-                .unwrap()
-                .patch
-                .contains("+feature")
+        assert_eq!(
+            added_lines(&snapshot.patch),
+            expected_lines(&[("tracked.txt", &["feature"])])
         );
     }
 
     #[tokio::test]
     async fn remote_default_branch_is_named_without_the_head_alias() {
         let repository = repository();
-        git(
-            repository.path(),
-            ["update-ref", "refs/remotes/origin/main", "HEAD"],
-        );
-        git(
-            repository.path(),
-            [
-                "symbolic-ref",
-                "refs/remotes/origin/HEAD",
-                "refs/remotes/origin/main",
-            ],
-        );
-        git(repository.path(), ["checkout", "--quiet", "-b", "feature"]);
+        point_origin_head_at_main(&repository);
+        git(repository.path(), &["checkout", "--quiet", "-b", "feature"]);
 
-        let context = load(repository.path()).await.unwrap();
+        let context = ReviewContext::load(repository.path()).await.unwrap();
 
         assert_eq!(context.trunk_name(), "origin/main");
     }
@@ -1111,30 +1005,17 @@ mod tests {
     #[tokio::test]
     async fn remote_default_branch_precedes_a_differently_named_feature_upstream() {
         let repository = repository();
-        git(repository.path(), ["remote", "add", "origin", "."]);
+        git(repository.path(), &["remote", "add", "origin", "."]);
+        point_origin_head_at_main(&repository);
+        git(repository.path(), &["checkout", "--quiet", "-b", "topic"]);
+        commit_file(repository.path(), "pushed.txt", "pushed\n", "pushed");
         git(
             repository.path(),
-            ["update-ref", "refs/remotes/origin/main", "HEAD"],
+            &["update-ref", "refs/remotes/origin/topic", "HEAD"],
         );
         git(
             repository.path(),
-            [
-                "symbolic-ref",
-                "refs/remotes/origin/HEAD",
-                "refs/remotes/origin/main",
-            ],
-        );
-        git(repository.path(), ["checkout", "--quiet", "-b", "topic"]);
-        fs::write(repository.path().join("pushed.txt"), "pushed\n").unwrap();
-        git(repository.path(), ["add", "pushed.txt"]);
-        git(repository.path(), ["commit", "--quiet", "-m", "pushed"]);
-        git(
-            repository.path(),
-            ["update-ref", "refs/remotes/origin/topic", "HEAD"],
-        );
-        git(
-            repository.path(),
-            [
+            &[
                 "checkout",
                 "--quiet",
                 "--track",
@@ -1143,29 +1024,29 @@ mod tests {
                 "origin/topic",
             ],
         );
-        fs::write(repository.path().join("local.txt"), "local\n").unwrap();
-        git(repository.path(), ["add", "local.txt"]);
-        git(repository.path(), ["commit", "--quiet", "-m", "local"]);
+        commit_file(repository.path(), "local.txt", "local\n", "local");
 
-        let context = load(repository.path()).await.unwrap();
+        let context = ReviewContext::load(repository.path()).await.unwrap();
         let snapshot = context.collect(context.full_range()).await.unwrap();
 
         assert_eq!(context.trunk_name(), "origin/main");
-        assert!(snapshot.patch.contains("+pushed"));
-        assert!(snapshot.patch.contains("+local"));
+        assert_eq!(
+            added_lines(&snapshot.patch),
+            expected_lines(&[("local.txt", &["local"]), ("pushed.txt", &["pushed"])])
+        );
     }
 
     #[tokio::test]
     async fn current_branch_upstream_can_define_an_arbitrary_trunk() {
         let repository = repository_with_initial_branch("stable");
-        git(repository.path(), ["checkout", "--quiet", "-b", "feature"]);
-        git(repository.path(), ["config", "branch.feature.remote", "."]);
+        git(repository.path(), &["checkout", "--quiet", "-b", "feature"]);
+        git(repository.path(), &["config", "branch.feature.remote", "."]);
         git(
             repository.path(),
-            ["config", "branch.feature.merge", "refs/heads/stable"],
+            &["config", "branch.feature.merge", "refs/heads/stable"],
         );
 
-        let context = load(repository.path()).await.unwrap();
+        let context = ReviewContext::load(repository.path()).await.unwrap();
 
         assert_eq!(context.trunk_name(), "stable");
     }
@@ -1173,22 +1054,22 @@ mod tests {
     #[tokio::test]
     async fn same_branch_remote_upstream_is_not_treated_as_trunk() {
         let repository = repository();
-        git(repository.path(), ["checkout", "--quiet", "-b", "feature"]);
-        git(repository.path(), ["remote", "add", "origin", "."]);
+        git(repository.path(), &["checkout", "--quiet", "-b", "feature"]);
+        git(repository.path(), &["remote", "add", "origin", "."]);
         git(
             repository.path(),
-            ["update-ref", "refs/remotes/origin/feature", "HEAD"],
+            &["update-ref", "refs/remotes/origin/feature", "HEAD"],
         );
         git(
             repository.path(),
-            ["config", "branch.feature.remote", "origin"],
+            &["config", "branch.feature.remote", "origin"],
         );
         git(
             repository.path(),
-            ["config", "branch.feature.merge", "refs/heads/feature"],
+            &["config", "branch.feature.merge", "refs/heads/feature"],
         );
 
-        let context = load(repository.path()).await.unwrap();
+        let context = ReviewContext::load(repository.path()).await.unwrap();
 
         assert_eq!(context.trunk_name(), "main");
     }
@@ -1200,7 +1081,7 @@ mod tests {
 
         assert!(matches!(
             Checkout::detect(repository.path()).await.map(|_| ()),
-            Err(super::DiffError::GitFailed(error)) if error.contains("config")
+            Err(VcsError::GitFailed(_))
         ));
     }
 
@@ -1210,25 +1091,26 @@ mod tests {
 
         assert!(matches!(
             Checkout::detect(directory.path()).await.map(|_| ()),
-            Err(super::DiffError::NotRepository(path)) if path == directory.path()
+            Err(VcsError::NotRepository(path)) if path == directory.path()
         ));
     }
 
     #[test]
-    fn comment_anchors_decode_git_quoted_paths() {
+    fn comment_anchors_must_fall_inside_a_hunk_on_the_named_side() {
         let snapshot = DiffSnapshot {
             patch: concat!(
                 "diff --git \"a/caf\\303\\251.rs\" \"b/caf\\303\\251.rs\"\n",
                 "--- \"a/caf\\303\\251.rs\"\n",
                 "+++ \"b/caf\\303\\251.rs\"\n",
-                "@@ -1 +1 @@\n",
+                "@@ -1 +1,2 @@\n",
                 "-old\n",
                 "+new\n",
+                "+newer\n",
             )
             .to_owned(),
-            overview: super::OverviewContext {
+            overview: OverviewContext {
                 repository: "/repo".into(),
-                range: super::OverviewRange::WorkingTree {
+                range: OverviewRange::WorkingTree {
                     base: "HEAD".to_owned(),
                 },
             },
@@ -1237,29 +1119,25 @@ mod tests {
             base: "HEAD".to_owned(),
         };
 
-        assert!(snapshot.contains_anchor("café.rs", PatchSide::Additions, 1, 1));
+        assert!(snapshot.contains_anchor("café.rs", PatchSide::Additions, 1, 2));
+        assert!(snapshot.contains_anchor("café.rs", PatchSide::Deletions, 1, 1));
+        assert!(!snapshot.contains_anchor("café.rs", PatchSide::Deletions, 1, 2));
+        assert!(!snapshot.contains_anchor("cafe.rs", PatchSide::Additions, 1, 1));
     }
 
-    fn repository() -> TempDir {
-        repository_with_initial_branch("main")
-    }
-
-    fn repository_with_initial_branch(branch: &str) -> TempDir {
-        let directory = TempDir::new().unwrap();
-        git_dynamic(
-            directory.path(),
-            &["init", "--quiet", &format!("--initial-branch={branch}")],
+    fn point_origin_head_at_main(repository: &TempDir) {
+        git(
+            repository.path(),
+            &["update-ref", "refs/remotes/origin/main", "HEAD"],
         );
         git(
-            directory.path(),
-            ["config", "user.email", "test@example.com"],
+            repository.path(),
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/main",
+            ],
         );
-        git(directory.path(), ["config", "user.name", "Test User"]);
-        git(directory.path(), ["config", "commit.gpgSign", "false"]);
-        fs::write(directory.path().join("tracked.txt"), "initial\n").unwrap();
-        git(directory.path(), ["add", "tracked.txt"]);
-        git(directory.path(), ["commit", "--quiet", "-m", "initial"]);
-        directory
     }
 
     struct PatchHookGuard {
@@ -1268,28 +1146,15 @@ mod tests {
 
     impl Drop for PatchHookGuard {
         fn drop(&mut self) {
-            *super::PATCH_HOOK.write().unwrap() = None;
+            *PATCH_HOOK.write().unwrap() = None;
         }
     }
 
     fn install_patch_hook(
         hook: impl Fn(&Path, bool, PatchHookPhase) + Send + Sync + 'static,
     ) -> PatchHookGuard {
-        let serial = super::PATCH_HOOK_SERIAL.lock().unwrap();
-        *super::PATCH_HOOK.write().unwrap() = Some(Arc::new(hook) as PatchHook);
+        let serial = PATCH_HOOK_SERIAL.lock().unwrap();
+        *PATCH_HOOK.write().unwrap() = Some(Arc::new(hook) as PatchHook);
         PatchHookGuard { _serial: serial }
-    }
-
-    fn git<const N: usize>(root: &Path, arguments: [&str; N]) {
-        git_dynamic(root, &arguments);
-    }
-
-    fn git_dynamic(root: &Path, arguments: &[&str]) {
-        let status = Command::new("git")
-            .args(arguments)
-            .current_dir(root)
-            .status()
-            .unwrap();
-        assert!(status.success());
     }
 }

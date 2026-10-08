@@ -73,7 +73,7 @@ fn just_recipes_forward_command_arguments() {
 fn harbor_context_contains_every_workspace_member() {
     assert_contains(
         JUSTFILE,
-        "for source_tree in bin/tact/src crates/memory/src crates/subagents/src examples/tact-memory-cloudflare/src; do",
+        "for source_tree in bin/tact/src crates/memory/src crates/subagents/src crates/vcs/src examples/tact-memory-cloudflare/src; do",
     );
     assert_contains(
         JUSTFILE,
@@ -86,6 +86,14 @@ fn harbor_context_contains_every_workspace_member() {
     assert_contains(
         JUSTFILE,
         "cp -R crates/subagents/src \"$build_context/crates/subagents/src\"",
+    );
+    assert_contains(
+        JUSTFILE,
+        "cp crates/vcs/Cargo.toml crates/vcs/README.md \"$build_context/crates/vcs/\"",
+    );
+    assert_contains(
+        JUSTFILE,
+        "cp -R crates/vcs/src \"$build_context/crates/vcs/src\"",
     );
     assert_contains(
         JUSTFILE,
@@ -450,6 +458,8 @@ fn library_crates_are_published_before_tact() {
         "publish_package tact-memory",
         "cargo package --locked -p tact-subagents",
         "publish_package tact-subagents",
+        "cargo package --locked -p tact-vcs",
+        "publish_package tact-vcs",
         "cp \"${RUNNER_TEMP}/signed-release/bin/tact/Cargo.toml\" bin/tact/Cargo.toml",
         "cargo package --locked --allow-dirty -p tact",
         "publish_package tact --allow-dirty",
@@ -459,9 +469,15 @@ fn library_crates_are_published_before_tact() {
 
     let memory = publish.find("publish_package tact-memory").unwrap();
     let subagents = publish.find("publish_package tact-subagents").unwrap();
+    let vcs = publish.find("publish_package tact-vcs").unwrap();
     let signed_manifest = publish.find("cp \"${RUNNER_TEMP}").unwrap();
     let tact = publish.find("publish_package tact --allow-dirty").unwrap();
-    assert!(memory < signed_manifest && subagents < signed_manifest && signed_manifest < tact);
+    assert!(
+        memory < signed_manifest
+            && subagents < signed_manifest
+            && vcs < signed_manifest
+            && signed_manifest < tact
+    );
 }
 
 #[test]

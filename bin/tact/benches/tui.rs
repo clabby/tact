@@ -49,9 +49,6 @@ mod tui {
     pub(crate) mod spinner;
 }
 
-#[path = "../src/vcs/mod.rs"]
-mod vcs;
-
 #[path = "../src/web"]
 mod web {
     pub(crate) mod bridge;

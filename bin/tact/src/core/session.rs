@@ -503,7 +503,7 @@ pub(crate) async fn list_async(
     workspace: PathBuf,
     resumable_only: bool,
 ) -> Result<Vec<SessionSummary>, SessionError> {
-    let workspaces = crate::vcs::checkout::family_paths(&workspace).await;
+    let workspaces = tact_vcs::family_paths(&workspace).await;
     tokio::task::spawn_blocking(move || {
         let Some(storage) = SessionStorage::open_read_only(&config_path)? else {
             return Ok(Vec::new());

@@ -12,13 +12,7 @@ use super::{
     wire::PROTOCOL_VERSION,
     workspaces::{Target, WorkspaceError, Workspaces},
 };
-use crate::{
-    core::protocol::{AuxiliaryError, AuxiliaryRequest},
-    vcs::{
-        checkout::CheckoutKind,
-        diff::{self, ReviewRange},
-    },
-};
+use crate::core::protocol::{AuxiliaryError, AuxiliaryRequest};
 use axum::{
     Json, Router,
     body::Body,
@@ -34,6 +28,10 @@ use std::{
     path::{Path, PathBuf},
     sync::{Arc, Mutex as StdMutex},
     time::Duration,
+};
+use tact_vcs::{
+    CheckoutKind, DiffSnapshot, OverviewContext, OverviewRange, PatchSide, ReviewContext,
+    ReviewRange, ReviewTarget, VcsError, WorkspaceVersion,
 };
 use tokio::sync::{MappedMutexGuard, Mutex, MutexGuard, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -53,9 +51,9 @@ const MAX_CACHED_OVERVIEW_BYTES: usize = 8 * 1024 * 1024;
 const MAX_OVERVIEW_INSTRUCTIONS_BYTES: usize = 8 * 1024;
 
 /// Range, instructions, and the owning session.
-type OverviewCacheKey = (diff::ReviewRange, Option<String>, String);
+type OverviewCacheKey = (ReviewRange, Option<String>, String);
 /// Generation, range, instructions, and the owning session.
-type OverviewOperationKey = (u64, diff::ReviewRange, Option<String>, String);
+type OverviewOperationKey = (u64, ReviewRange, Option<String>, String);
 type OverviewOperations = Mutex<HashMap<OverviewOperationKey, Arc<OverviewOperation>>>;
 
 struct OverviewOperation {
@@ -75,10 +73,10 @@ impl OverviewOperation {
 #[derive(Clone, Serialize)]
 pub(super) struct ReviewPage {
     pub(super) generation: u64,
-    pub(super) selected_range: diff::ReviewRange,
+    pub(super) selected_range: ReviewRange,
     pub(super) full_context: bool,
     #[serde(flatten)]
-    pub(super) diff: diff::DiffSnapshot,
+    pub(super) diff: DiffSnapshot,
 }
 
 #[derive(Clone, Serialize)]
@@ -90,8 +88,8 @@ pub(super) struct ReviewBootstrap {
     /// The checkout this review reads.
     pub(super) checkout: CheckoutIdentity,
     pub(super) trunk: String,
-    pub(super) range_targets: Vec<diff::ReviewTarget>,
-    pub(super) default_range: diff::ReviewRange,
+    pub(super) range_targets: Vec<ReviewTarget>,
+    pub(super) default_range: ReviewRange,
 }
 
 #[derive(Clone, Serialize)]
@@ -106,15 +104,15 @@ pub(super) struct CheckoutIdentity {
 pub(super) struct PreparedReview {
     pub(super) bootstrap: ReviewBootstrap,
     pub(super) initial_page: ReviewPage,
-    pub(super) context: diff::ReviewContext,
-    pub(super) version: diff::WorkspaceVersion,
+    pub(super) context: ReviewContext,
+    pub(super) version: WorkspaceVersion,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RangeRequest {
     generation: u64,
-    range: diff::ReviewRange,
+    range: ReviewRange,
     #[serde(default)]
     session: Option<String>,
     #[serde(default)]
@@ -128,7 +126,7 @@ struct OverviewRequest {
     #[serde(default)]
     checkout: Option<String>,
     generation: u64,
-    range: diff::ReviewRange,
+    range: ReviewRange,
     instructions: Option<String>,
 }
 
@@ -139,7 +137,7 @@ struct AiReviewRequest {
     #[serde(default)]
     checkout: Option<String>,
     generation: u64,
-    range: diff::ReviewRange,
+    range: ReviewRange,
 }
 
 #[derive(Deserialize)]
@@ -162,7 +160,7 @@ struct SessionQuery {
 #[derive(Serialize)]
 struct OverviewResponse {
     generation: u64,
-    selected_range: diff::ReviewRange,
+    selected_range: ReviewRange,
     overview_mdx: String,
     instructions: Option<String>,
 }
@@ -170,7 +168,7 @@ struct OverviewResponse {
 #[derive(Serialize)]
 struct AiReviewResponse {
     generation: u64,
-    selected_range: diff::ReviewRange,
+    selected_range: ReviewRange,
     comments: Vec<AiReviewComment>,
 }
 
@@ -192,7 +190,7 @@ pub(super) struct AiReviewComment {
 
 #[derive(Clone, Serialize)]
 struct StoredOverview {
-    selected_range: diff::ReviewRange,
+    selected_range: ReviewRange,
     status: OverviewStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     overview_mdx: Option<String>,
@@ -215,7 +213,7 @@ pub(super) struct QuestionRequest {
     pub(super) thread_id: String,
     pub(super) operation_id: String,
     pub(super) generation: u64,
-    pub(super) range: diff::ReviewRange,
+    pub(super) range: ReviewRange,
     pub(super) path: String,
     pub(super) side: CommentSide,
     pub(super) start_line: u32,
@@ -231,7 +229,7 @@ struct QuestionCancelRequest {
     _session: serde::de::IgnoredAny,
     operation_id: String,
     generation: u64,
-    range: diff::ReviewRange,
+    range: ReviewRange,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -251,7 +249,7 @@ pub(super) enum ThreadRole {
 #[derive(Serialize)]
 struct QuestionResponse {
     generation: u64,
-    selected_range: diff::ReviewRange,
+    selected_range: ReviewRange,
     answer: String,
 }
 
@@ -262,7 +260,7 @@ struct StoredQuestion {
     thread_id: String,
     operation_id: String,
     generation: u64,
-    range: diff::ReviewRange,
+    range: ReviewRange,
     path: String,
     side: CommentSide,
     start_line: u32,
@@ -343,7 +341,7 @@ pub(super) struct ReviewDecision {
     #[serde(skip_deserializing, default)]
     pub(super) reviewed_in: Option<PathBuf>,
     pub(super) generation: u64,
-    pub(super) range: diff::ReviewRange,
+    pub(super) range: ReviewRange,
     #[serde(skip_deserializing, default)]
     pub(super) scope: String,
     pub(super) decision: Decision,
@@ -391,7 +389,7 @@ pub(super) async fn watch_workspace(state: Arc<ReviewState>, shutdown: Cancellat
         checkout: &'a Path,
     }
 
-    let mut seen: Option<diff::WorkspaceVersion> = None;
+    let mut seen: Option<WorkspaceVersion> = None;
     let mut poll = tokio::time::interval(WORKSPACE_POLL_INTERVAL);
     poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
@@ -616,7 +614,7 @@ impl ReviewState {
 
 struct ActiveQuestion {
     generation: u64,
-    range: diff::ReviewRange,
+    range: ReviewRange,
     cancellation: CancellationToken,
 }
 
@@ -641,14 +639,14 @@ struct ReviewSession {
     bootstrap: ReviewBootstrap,
     default_page: ReviewPage,
     selected_page: ReviewPage,
-    context: diff::ReviewContext,
-    range_pages: BoundedCache<diff::ReviewRange, ReviewPage>,
+    context: ReviewContext,
+    range_pages: BoundedCache<ReviewRange, ReviewPage>,
     overviews: BoundedCache<OverviewCacheKey, String>,
     /// Per session: the overview currently being generated and the one the browser has selected.
     active_overview: HashMap<String, OverviewOperationKey>,
     selected_overview_key: HashMap<String, OverviewCacheKey>,
     questions: Vec<StoredQuestion>,
-    version: diff::WorkspaceVersion,
+    version: WorkspaceVersion,
     generation_shutdown: CancellationToken,
     session_shutdown: CancellationToken,
 }
@@ -746,7 +744,7 @@ impl ReviewSession {
         }
     }
 
-    fn page(&self, range: &diff::ReviewRange) -> Option<&ReviewPage> {
+    fn page(&self, range: &ReviewRange) -> Option<&ReviewPage> {
         if range == &self.bootstrap.default_range {
             return Some(&self.default_page);
         }
@@ -822,7 +820,7 @@ async fn ensure_loaded(state: &ReviewState) -> Result<(), Box<Response<Body>>> {
 fn preparation_failure(error: ReviewError) -> Response<Body> {
     match error {
         ReviewError::Cancelled => operation_cancelled("review preparation was cancelled"),
-        ReviewError::Diff(diff::DiffError::NotRepository(_)) => error_response(
+        ReviewError::Diff(VcsError::NotRepository(_)) => error_response(
             StatusCode::UNPROCESSABLE_ENTITY,
             ErrorCode::WorkspaceChanged,
             "The folder must be a git repository.",
@@ -1253,7 +1251,7 @@ async fn run_overview(
     state: &ReviewState,
     session: &str,
     page: &ReviewPage,
-    version: diff::WorkspaceVersion,
+    version: WorkspaceVersion,
     instructions: Option<&str>,
     shutdown: CancellationToken,
 ) -> OverviewRunResult {
@@ -1620,7 +1618,7 @@ async fn run_question(
     state: &ReviewState,
     request: &QuestionRequest,
     page: &ReviewPage,
-    version: diff::WorkspaceVersion,
+    version: WorkspaceVersion,
     shutdown: CancellationToken,
 ) -> QuestionRunResult {
     let current = match state.backend.current_version(shutdown.clone()).await {
@@ -1772,7 +1770,7 @@ async fn cancel_question(
 fn matching_page<'a>(
     session: &'a ReviewSession,
     generation: u64,
-    range: &diff::ReviewRange,
+    range: &ReviewRange,
 ) -> Option<&'a ReviewPage> {
     if generation != session.generation {
         return None;
@@ -1781,20 +1779,20 @@ fn matching_page<'a>(
 }
 
 fn valid_anchor(
-    snapshot: &diff::DiffSnapshot,
+    snapshot: &DiffSnapshot,
     path: &str,
     side: CommentSide,
     start_line: u32,
     end_line: u32,
 ) -> bool {
     let side = match side {
-        CommentSide::Additions => diff::PatchSide::Additions,
-        CommentSide::Deletions => diff::PatchSide::Deletions,
+        CommentSide::Additions => PatchSide::Additions,
+        CommentSide::Deletions => PatchSide::Deletions,
     };
     snapshot.contains_anchor(path, side, start_line, end_line)
 }
 
-fn valid_comment_anchor(snapshot: &diff::DiffSnapshot, comment: &ReviewComment) -> bool {
+fn valid_comment_anchor(snapshot: &DiffSnapshot, comment: &ReviewComment) -> bool {
     valid_anchor(
         snapshot,
         &comment.path,
@@ -2056,7 +2054,7 @@ impl ReviewBackend {
     async fn prepare(&self, shutdown: CancellationToken) -> Result<PreparedReview, ReviewError> {
         for _ in 0..MAX_PREPARATION_ATTEMPTS {
             let context = tokio::select! {
-                result = diff::load(&self.workspace) => result?,
+                result = ReviewContext::load(&self.workspace) => result?,
                 () = shutdown.cancelled() => return Err(ReviewError::Cancelled),
             };
             let default_range = context.default_range();
@@ -2099,14 +2097,14 @@ impl ReviewBackend {
     async fn current_version(
         &self,
         shutdown: CancellationToken,
-    ) -> Result<diff::WorkspaceVersion, ScopeLoadError> {
+    ) -> Result<WorkspaceVersion, ScopeLoadError> {
         #[cfg(test)]
         if let Some(error) = &self.current_version_error {
             return Err(ScopeLoadError::Failed(error.clone()));
         }
 
         tokio::select! {
-            result = diff::current_version(&self.workspace) => {
+            result = WorkspaceVersion::current(&self.workspace) => {
                 result.map_err(|error| ScopeLoadError::Failed(error.to_string()))
             }
             () = shutdown.cancelled() => Err(ScopeLoadError::Cancelled),
@@ -2115,7 +2113,7 @@ impl ReviewBackend {
 
     async fn prepare_page(
         &self,
-        context: diff::ReviewContext,
+        context: ReviewContext,
         range: ReviewRange,
         shutdown: CancellationToken,
     ) -> Result<ReviewPage, ReviewError> {
@@ -2135,7 +2133,7 @@ impl ReviewBackend {
         &self,
         session: &str,
         label: &str,
-        context: &diff::OverviewContext,
+        context: &OverviewContext,
         instructions: Option<&str>,
         shutdown: CancellationToken,
     ) -> Result<String, ScopeLoadError> {
@@ -2185,7 +2183,7 @@ impl ReviewBackend {
         &self,
         session: &str,
         label: &str,
-        context: &diff::OverviewContext,
+        context: &OverviewContext,
         shutdown: CancellationToken,
     ) -> Result<Vec<AiReviewComment>, ScopeLoadError> {
         let repository = repository_scope(context);
@@ -2214,7 +2212,7 @@ impl ReviewBackend {
         &self,
         session: &str,
         label: &str,
-        context: &diff::OverviewContext,
+        context: &OverviewContext,
         question: &QuestionRequest,
         shutdown: CancellationToken,
     ) -> Result<String, ScopeLoadError> {
@@ -2250,11 +2248,7 @@ impl ReviewBackend {
     }
 }
 
-fn overview_prompt(
-    label: &str,
-    context: &diff::OverviewContext,
-    instructions: Option<&str>,
-) -> String {
+fn overview_prompt(label: &str, context: &OverviewContext, instructions: Option<&str>) -> String {
     let repository = repository_scope(context);
     let mut prompt = format!(
         r#"Delegate this task to a sub-agent so the host agent does not absorb the investigation context. Ask the sub-agent to quickly write a concise MDX explainer of `{label}` for a human reviewer. {repository} Inspect the diff, actual source files, relevant history, and surrounding code needed to understand the change without modifying the workspace. Explain what changed, why it matters, how the pieces fit together, and where a human reviewer should direct attention. Keep it brief and proportionate to the change. This is guidance for a human reviewer; do not perform a comprehensive defect audit or generate inline review findings. Whenever directing the reviewer's attention to code, cite direct `path:line` or `path:start-end` locations. Return only MDX source with Markdown headings, paragraphs, lists, tables, and fenced code where useful. Prefer the concise built-in components `<Callout title="..." tone="...">`, `<CardGrid>` with `<Card title="..." label="...">`, `<MetricGrid>` with `<Metric value="..." label="..." detail="..." />`, `<Process>` with `<ProcessStep title="...">`, and `<Figure caption="...">` for familiar layouts. You may define your own MDX components with `export function Name() {{ return <svg viewBox="0 0 400 120">...</svg> }}` and use `<Name />` for custom charts, diagrams, SVGs, and visual explanations when they clarify a change. Write self-contained JSX and calculations; do not import packages, fetch external resources, or use Markdown fences around the document. Charts must reflect actual repository facts, not invented measurements. The overview runs in an isolated frame with no network access. Keep all visualizations accessible and responsive."#,
@@ -2267,13 +2261,13 @@ fn overview_prompt(
     prompt
 }
 
-fn repository_scope(context: &diff::OverviewContext) -> String {
+fn repository_scope(context: &OverviewContext) -> String {
     let repository = context.repository.to_string_lossy();
     match &context.range {
-        diff::OverviewRange::Commits { base, head } => format!(
+        OverviewRange::Commits { base, head } => format!(
             "Inspect the Git commit range `{base}..{head}` in the repository at `{repository}`."
         ),
-        diff::OverviewRange::WorkingTree { base } => format!(
+        OverviewRange::WorkingTree { base } => format!(
             "Inspect the changes from Git commit `{base}` through the working tree, including untracked files, in the repository at `{repository}`."
         ),
     }
@@ -2331,7 +2325,7 @@ impl ReviewDecision {
 #[derive(Debug, thiserror::Error)]
 enum ReviewError {
     #[error(transparent)]
-    Diff(#[from] diff::DiffError),
+    Diff(#[from] VcsError),
     #[error("failed to validate the review workspace: {0}")]
     WorkspaceValidation(String),
     #[error("review preparation was cancelled")]

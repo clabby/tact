@@ -6,7 +6,6 @@ mod app;
 mod core;
 mod search;
 mod tui;
-mod vcs;
 mod web;
 
 use app::Cli;

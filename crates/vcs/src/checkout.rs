@@ -5,7 +5,7 @@
 //! workspace has no `.git`, so git is pointed at the repository's git store with an explicit work
 //! tree and a throwaway index; nothing in the user's repository is written.
 
-use super::diff::DiffError;
+use crate::VcsError;
 use serde::Serialize;
 use std::{
     ffi::OsStr,
@@ -15,7 +15,9 @@ use std::{
 use tempfile::TempDir;
 use tokio::process::Command;
 
-pub(crate) async fn family_paths(directory: &Path) -> Vec<PathBuf> {
+/// The directories of every checkout in the repository that contains `directory`, including
+/// `directory` itself. A directory outside any repository is its own only member.
+pub async fn family_paths(directory: &Path) -> Vec<PathBuf> {
     let Ok(checkout) = Checkout::detect(directory).await else {
         return vec![directory.to_owned()];
     };
@@ -32,7 +34,7 @@ pub(crate) async fn family_paths(directory: &Path) -> Vec<PathBuf> {
 }
 
 /// A directory holding one working copy of a repository.
-pub(crate) struct Checkout {
+pub struct Checkout {
     work_tree: PathBuf,
     view: GitView,
 }
@@ -56,7 +58,7 @@ impl Checkout {
     ///
     /// The nearest ancestor with a `.git` or `.jj` decides. A `.git` there means git can be used
     /// directly, including a colocated jj repository; a lone `.jj` means a jj workspace.
-    pub(crate) async fn detect(path: &Path) -> Result<Self, DiffError> {
+    pub async fn detect(path: &Path) -> Result<Self, VcsError> {
         let marker = path.ancestors().find_map(|directory| {
             let git = directory.join(".git").exists();
             let jj = directory.join(".jj").exists();
@@ -68,18 +70,18 @@ impl Checkout {
         }
     }
 
-    async fn detect_git(path: &Path) -> Result<Self, DiffError> {
+    async fn detect_git(path: &Path) -> Result<Self, VcsError> {
         let output = git_at(path)
             .args(["rev-parse", "--show-toplevel"])
             .output()
             .await
-            .map_err(DiffError::StartGit)?;
+            .map_err(VcsError::StartGit)?;
         if !output.status.success() {
             let error = String::from_utf8_lossy(&output.stderr).trim().to_owned();
             if error.contains("not a git repository") {
-                return Err(DiffError::NotRepository(path.to_owned()));
+                return Err(VcsError::NotRepository(path.to_owned()));
             }
-            return Err(DiffError::GitFailed(error));
+            return Err(VcsError::GitFailed(error));
         }
         let root = String::from_utf8(output.stdout)?;
         Ok(Self {
@@ -88,7 +90,7 @@ impl Checkout {
         })
     }
 
-    async fn detect_jj(root: PathBuf) -> Result<Self, DiffError> {
+    async fn detect_jj(root: PathBuf) -> Result<Self, VcsError> {
         let git_dir = PathBuf::from(
             jj(&root, ["git", "root"])
                 .await?
@@ -98,16 +100,16 @@ impl Checkout {
             .await?
             .trim()
             .to_owned();
-        let index = TempDir::new().map_err(DiffError::Scratch)?;
+        let index = TempDir::new().map_err(VcsError::Scratch)?;
         let seeded = Command::new("git")
             .args(["read-tree", &head])
             .env("GIT_DIR", &git_dir)
             .env("GIT_INDEX_FILE", index.path().join("index"))
             .output()
             .await
-            .map_err(DiffError::StartGit)?;
+            .map_err(VcsError::StartGit)?;
         if !seeded.status.success() {
-            return Err(DiffError::GitFailed(
+            return Err(VcsError::GitFailed(
                 String::from_utf8_lossy(&seeded.stderr).trim().to_owned(),
             ));
         }
@@ -155,7 +157,7 @@ impl Checkout {
 
     /// How many files differ from the head commit, counting files git does not track yet. `None`
     /// when git cannot say.
-    pub(crate) async fn changed_files(&self) -> Option<usize> {
+    pub async fn changed_files(&self) -> Option<usize> {
         let changed = self
             .git()
             .args(["diff", "--name-only", "-z", self.head(), "--"])
@@ -183,7 +185,7 @@ impl Checkout {
     }
 
     /// Every checkout of the same repository, this one included, main checkout first.
-    pub(crate) async fn family(&self) -> Vec<FamilyMember> {
+    pub async fn family(&self) -> Vec<FamilyMember> {
         let mut members = Vec::new();
         if self.work_tree.join(".jj").exists() || matches!(self.view, GitView::Jj { .. }) {
             members.extend(jj_workspaces(&self.work_tree).await);
@@ -215,18 +217,18 @@ impl Checkout {
 
 /// One checkout of a repository, as listed to the user.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub(crate) struct FamilyMember {
-    pub(crate) path: PathBuf,
+pub struct FamilyMember {
+    pub path: PathBuf,
     /// The branch, or the jj workspace name.
-    pub(crate) label: String,
-    pub(crate) kind: CheckoutKind,
+    pub label: String,
+    pub kind: CheckoutKind,
     /// The directory no longer exists, for example a worktree that was deleted without pruning.
-    pub(crate) missing: bool,
+    pub missing: bool,
 }
 
 impl FamilyMember {
     /// A checkout known only by its directory, such as one whose repository could not be read.
-    pub(crate) fn standalone(path: &Path) -> Self {
+    pub fn standalone(path: &Path) -> Self {
         Self {
             path: path.to_owned(),
             label: path
@@ -238,9 +240,10 @@ impl FamilyMember {
     }
 }
 
+/// The version control system that lists a checkout.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
-pub(crate) enum CheckoutKind {
+pub enum CheckoutKind {
     Git,
     Jj,
 }
@@ -252,14 +255,14 @@ fn git_at(directory: &Path) -> Command {
 }
 
 /// Runs `jj` in `directory` without snapshotting the working copy, so reading never writes.
-async fn jj<const N: usize>(directory: &Path, arguments: [&str; N]) -> Result<String, DiffError> {
+async fn jj<const N: usize>(directory: &Path, arguments: [&str; N]) -> Result<String, VcsError> {
     jj_dynamic(directory, &arguments).await
 }
 
 async fn jj_dynamic<S: AsRef<OsStr>>(
     directory: &Path,
     arguments: &[S],
-) -> Result<String, DiffError> {
+) -> Result<String, VcsError> {
     let output = Command::new("jj")
         .arg("--ignore-working-copy")
         .args(arguments)
@@ -269,11 +272,11 @@ async fn jj_dynamic<S: AsRef<OsStr>>(
         .output()
         .await
         .map_err(|error| match error.kind() {
-            std::io::ErrorKind::NotFound => DiffError::JjMissing,
-            _ => DiffError::StartGit(error),
+            std::io::ErrorKind::NotFound => VcsError::JjMissing,
+            _ => VcsError::StartGit(error),
         })?;
     if !output.status.success() {
-        return Err(DiffError::Jj(
+        return Err(VcsError::Jj(
             String::from_utf8_lossy(&output.stderr).trim().to_owned(),
         ));
     }
@@ -354,31 +357,16 @@ fn parse_worktrees(listing: &str) -> Vec<FamilyMember> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CheckoutKind, parse_worktrees};
-    use std::path::PathBuf;
-
-    #[test]
-    fn worktree_listing_names_branches_and_detached_heads_and_skips_bare_entries() {
-        let listing = "worktree /repo\nHEAD 1111111aaaa\nbranch refs/heads/main\n\n\
-                       worktree /repo-feature\nHEAD 2222222bbbb\ndetached\n\n\
-                       worktree /repo.git\nbare\n";
-
-        let members = parse_worktrees(listing);
-
-        assert_eq!(
-            members
-                .iter()
-                .map(|member| (member.path.clone(), member.label.as_str(), member.kind))
-                .collect::<Vec<_>>(),
-            [
-                (PathBuf::from("/repo"), "main", CheckoutKind::Git),
-                (PathBuf::from("/repo-feature"), "2222222", CheckoutKind::Git),
-            ]
-        );
-    }
-    use super::Checkout;
-    use crate::vcs::diff::{current_version, load};
-    use std::{fs, path::Path, process::Command};
+    use super::{Checkout, CheckoutKind, parse_worktrees};
+    use crate::{
+        ReviewContext, WorkspaceVersion,
+        testing::{added_lines, commit_file, expected_lines, init_git, run},
+    };
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+        process::Command,
+    };
     use tempfile::TempDir;
 
     #[derive(Clone, Copy, Debug)]
@@ -396,9 +384,9 @@ mod tests {
         Kind::JjWorkspace,
     ];
 
-    /// A repository with a `main` trunk, one commit on top of it, and the directory to review.
-    /// Returns nothing for the jj kinds when `jj` is not installed.
-    fn fixture(kind: Kind) -> Option<(TempDir, std::path::PathBuf)> {
+    /// A repository with a `main` trunk, one `feature` commit on top of it, and the directory to
+    /// review. Returns nothing for the jj kinds when `jj` is not installed.
+    fn fixture(kind: Kind) -> Option<(TempDir, PathBuf)> {
         let jj_kind = matches!(kind, Kind::JjColocated | Kind::JjWorkspace);
         if jj_kind && Command::new("jj").arg("--version").output().is_err() {
             return None;
@@ -419,29 +407,14 @@ mod tests {
             fs::write(repository.join("feature.txt"), "feature\n").unwrap();
             run("jj", &repository, &["commit", "-m", "feature"]);
         } else {
-            run(
-                "git",
-                &repository,
-                &["init", "--quiet", "--initial-branch=main"],
-            );
-            for (key, value) in [
-                ("user.email", "test@example.com"),
-                ("user.name", "Test User"),
-                ("commit.gpgSign", "false"),
-            ] {
-                run("git", &repository, &["config", key, value]);
-            }
-            fs::write(repository.join("tracked.txt"), "initial\n").unwrap();
-            run("git", &repository, &["add", "."]);
-            run("git", &repository, &["commit", "--quiet", "-m", "initial"]);
+            init_git(&repository, "main");
+            commit_file(&repository, "tracked.txt", "initial\n", "initial");
             run(
                 "git",
                 &repository,
                 &["checkout", "--quiet", "-b", "feature"],
             );
-            fs::write(repository.join("feature.txt"), "feature\n").unwrap();
-            run("git", &repository, &["add", "."]);
-            run("git", &repository, &["commit", "--quiet", "-m", "feature"]);
+            commit_file(&repository, "feature.txt", "feature\n", "feature");
         }
         let path = match kind {
             Kind::Git | Kind::JjColocated => repository,
@@ -465,18 +438,23 @@ mod tests {
         Some((directory, path))
     }
 
-    fn run(program: &str, directory: &Path, arguments: &[&str]) {
-        let output = Command::new(program)
-            .args(arguments)
-            .current_dir(directory)
-            .env("JJ_USER", "Test User")
-            .env("JJ_EMAIL", "test@example.com")
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{program} {arguments:?}: {}",
-            String::from_utf8_lossy(&output.stderr)
+    #[test]
+    fn worktree_listing_names_branches_and_detached_heads_and_skips_bare_entries() {
+        let listing = "worktree /repo\nHEAD 1111111aaaa\nbranch refs/heads/main\n\n\
+                       worktree /repo-feature\nHEAD 2222222bbbb\ndetached\n\n\
+                       worktree /repo.git\nbare\n";
+
+        let members = parse_worktrees(listing);
+
+        assert_eq!(
+            members
+                .iter()
+                .map(|member| (member.path.clone(), member.label.as_str(), member.kind))
+                .collect::<Vec<_>>(),
+            [
+                (PathBuf::from("/repo"), "main", CheckoutKind::Git),
+                (PathBuf::from("/repo-feature"), "2222222", CheckoutKind::Git),
+            ]
         );
     }
 
@@ -489,25 +467,19 @@ mod tests {
             fs::write(path.join("tracked.txt"), "edited\n").unwrap();
             fs::write(path.join("new.txt"), "new\n").unwrap();
 
-            let context = load(&path)
+            let context = ReviewContext::load(&path)
                 .await
                 .unwrap_or_else(|error| panic!("{kind:?}: {error}"));
             let snapshot = context.collect(context.full_range()).await.unwrap();
 
-            assert!(
-                snapshot.patch.contains("+edited"),
-                "{kind:?}: {}",
-                snapshot.patch
-            );
-            assert!(
-                snapshot.patch.contains("+new"),
-                "{kind:?}: {}",
-                snapshot.patch
-            );
-            assert!(
-                !snapshot.patch.contains(".jj/"),
-                "{kind:?}: {}",
-                snapshot.patch
+            assert_eq!(
+                added_lines(&snapshot.patch),
+                expected_lines(&[
+                    ("feature.txt", &["feature"]),
+                    ("new.txt", &["new"]),
+                    ("tracked.txt", &["edited"]),
+                ]),
+                "{kind:?}"
             );
             assert_eq!(context.trunk_name(), "main", "{kind:?}");
         }
@@ -519,12 +491,20 @@ mod tests {
             let Some((_directory, path)) = fixture(kind) else {
                 continue;
             };
-            let before = current_version(&path).await.unwrap();
-            assert_eq!(before, current_version(&path).await.unwrap(), "{kind:?}");
+            let before = WorkspaceVersion::current(&path).await.unwrap();
+            assert_eq!(
+                before,
+                WorkspaceVersion::current(&path).await.unwrap(),
+                "{kind:?}"
+            );
 
             fs::write(path.join("tracked.txt"), "again\n").unwrap();
 
-            assert_ne!(before, current_version(&path).await.unwrap(), "{kind:?}");
+            assert_ne!(
+                before,
+                WorkspaceVersion::current(&path).await.unwrap(),
+                "{kind:?}"
+            );
         }
     }
 
@@ -551,7 +531,7 @@ mod tests {
             };
             let before = log(&path);
 
-            load(&path).await.unwrap();
+            ReviewContext::load(&path).await.unwrap();
 
             assert_eq!(before, log(&path), "{kind:?}");
         }
@@ -579,8 +559,8 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn bookkeeping_directories_are_recognised() {
+    #[test]
+    fn bookkeeping_directories_are_recognised() {
         assert!(Checkout::is_bookkeeping(".jj/repo"));
         assert!(Checkout::is_bookkeeping(".git"));
         assert!(!Checkout::is_bookkeeping(".github/workflows/ci.yml"));

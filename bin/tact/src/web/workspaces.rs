@@ -5,7 +5,6 @@
 //! client cannot point the review at an arbitrary directory.
 
 use super::hub::Hub;
-use crate::vcs::checkout::{Checkout, CheckoutKind, FamilyMember};
 use futures_util::future::join_all;
 use serde::Serialize;
 use std::{
@@ -14,6 +13,7 @@ use std::{
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
+use tact_vcs::{Checkout, CheckoutKind, FamilyMember};
 use thiserror::Error;
 
 /// How long a repository's list of checkouts is reused. Checkouts come and go rarely, and the
