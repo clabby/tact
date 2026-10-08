@@ -62,6 +62,29 @@ pub(super) enum ComposerChromeTarget {
     Subagents,
 }
 
+/// What the draft in the composer is for. Modes other than [`InputMode::Prompt`] show their keys
+/// in the status line.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum InputMode {
+    /// A prompt for the agent.
+    #[default]
+    Prompt,
+    /// Optional guidance for a reflection, which starts when the draft is submitted.
+    Reflection,
+    /// A queued message being edited in place.
+    EditingQueued,
+}
+
+impl InputMode {
+    const fn hint(self) -> Option<&'static str> {
+        match self {
+            Self::Prompt => None,
+            Self::Reflection => Some("Reflection instructions · enter start · esc cancel"),
+            Self::EditingQueued => Some("editing queued message · enter save · esc cancel"),
+        }
+    }
+}
+
 pub(crate) enum ComposerEvent {
     Terminal(Event),
     PasteImage(String),
@@ -75,7 +98,7 @@ pub(crate) enum ComposerEvent {
     SetModel(Model),
     SetReasoningMode(ReasoningMode),
     SetSpeed(Speed),
-    InputMode(Option<String>),
+    InputMode(InputMode),
     Activity {
         active: bool,
         status: Option<String>,
@@ -116,7 +139,7 @@ pub(crate) struct Composer {
     model: Model,
     reasoning_mode: ReasoningMode,
     speed: Speed,
-    input_mode: Option<String>,
+    input_mode: InputMode,
     activity_wave: Option<WavedText>,
     activity_status: Option<String>,
     task_wave: Option<WavedText>,
@@ -241,7 +264,7 @@ impl Composer {
             model: Model::Codex(CodexModel::Sol),
             reasoning_mode: ReasoningMode::Standard,
             speed: Speed::Standard,
-            input_mode: None,
+            input_mode: InputMode::Prompt,
             activity_wave: None,
             activity_status: None,
             task_wave: None,
@@ -630,8 +653,8 @@ impl Composer {
         &self.draft
     }
 
-    pub(crate) fn input_mode(&self) -> Option<&str> {
-        self.input_mode.as_deref()
+    pub(crate) const fn input_mode(&self) -> InputMode {
+        self.input_mode
     }
 
     pub(crate) const fn effort(&self) -> ReasoningEffort {
@@ -1279,8 +1302,8 @@ impl Composer {
         );
         let input_mode_segment = self
             .input_mode
-            .as_ref()
-            .map(|mode| format!("{mode} "))
+            .hint()
+            .map(|hint| format!("{hint} "))
             .unwrap_or_default();
         let task_segment = self
             .task_status

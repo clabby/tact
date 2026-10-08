@@ -1,6 +1,6 @@
 use super::{
-    Component, ComposerChromeTarget, ConfirmationAction, DraftReset, Overlay, RenderRequest,
-    RootEffect, RootEvent, RootNode, SessionListKind, SubagentOverlay, ThreadState,
+    Component, ComposerChromeTarget, ConfirmationAction, DraftReset, InputMode, Overlay,
+    RenderRequest, RootEffect, RootEvent, RootNode, SessionListKind, SubagentOverlay, ThreadState,
     TranscriptEvent,
 };
 use crate::{
@@ -3410,7 +3410,7 @@ fn reflection_action_collects_hidden_optional_instructions() {
     root.update(key(KeyCode::Enter, KeyModifiers::NONE));
 
     assert!(root.reflection_input);
-    assert!(render_root_text(&mut root, 100, 20).contains("Reflection instructions"));
+    assert_eq!(root.composer().input_mode(), InputMode::Reflection);
     for character in "Focus on validation gaps.".chars() {
         root.update(key(KeyCode::Char(character), KeyModifiers::NONE));
     }
@@ -3423,6 +3423,7 @@ fn reflection_action_collects_hidden_optional_instructions() {
         )]
     );
     assert!(!root.reflection_input);
+    assert_eq!(root.composer().input_mode(), InputMode::Prompt);
     assert!(root.thread == ThreadState::Started);
     assert_eq!(root.busy().turns, 1);
     assert!(root.composer().draft().is_empty());

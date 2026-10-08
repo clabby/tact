@@ -4,7 +4,9 @@ mod turns;
 
 use super::{
     actions::{Action, ActionAvailability, ActionsEffect, ActionsEvent, ActionsMenu},
-    composer::{Composer, ComposerChromeTarget, ComposerDraft, ComposerEffect, ComposerEvent},
+    composer::{
+        Composer, ComposerChromeTarget, ComposerDraft, ComposerEffect, ComposerEvent, InputMode,
+    },
     confirmation::{Confirmation, ConfirmationEffect, ConfirmationEvent},
     context_diagnostics::{
         ContextDiagnosticsEffect, ContextDiagnosticsEvent, ContextDiagnosticsPanel,
@@ -338,7 +340,7 @@ struct SkillMention {
 struct QueueEdit {
     id: QueueId,
     original_draft: Option<ComposerDraft>,
-    original_input_mode: Option<String>,
+    original_input_mode: InputMode,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -1559,9 +1561,7 @@ impl RootNode {
                 self.overlay = None;
                 self.reflection_input = true;
                 return self.update_composer(
-                    ComposerEvent::InputMode(Some(
-                        "Reflection instructions · enter start · esc cancel".to_owned(),
-                    )),
+                    ComposerEvent::InputMode(InputMode::Reflection),
                     RenderRequest::Immediate,
                 );
             }
@@ -2122,12 +2122,12 @@ impl RootNode {
     }
 
     fn begin_queue_edit(&mut self, id: QueueId, text: String) -> ComponentUpdate<RootEffect> {
-        let original_input_mode = self.composer.input_mode().map(ToOwned::to_owned);
+        let original_input_mode = self.composer.input_mode();
         let original_draft = self.composer.take_draft();
         self.composer.replace_draft(text);
-        let _ = self.composer.update(ComposerEvent::InputMode(Some(
-            "editing queued message · enter save · esc cancel".to_owned(),
-        )));
+        let _ = self
+            .composer
+            .update(ComposerEvent::InputMode(InputMode::EditingQueued));
         self.queue_edit = Some(QueueEdit {
             id,
             original_draft,
@@ -2547,7 +2547,10 @@ impl RootNode {
 
     fn start_reflection(&mut self, instructions: Submission) -> ComponentUpdate<RootEffect> {
         self.reflection_input = false;
-        let mode = self.update_composer(ComposerEvent::InputMode(None), RenderRequest::Immediate);
+        let mode = self.update_composer(
+            ComposerEvent::InputMode(InputMode::Prompt),
+            RenderRequest::Immediate,
+        );
         self.thread = ThreadState::Started;
         self.turns.start_turn();
         let transcript = self.update_transcript(TranscriptEvent::FollowTail);
@@ -2560,7 +2563,10 @@ impl RootNode {
     fn cancel_reflection(&mut self) -> ComponentUpdate<RootEffect> {
         self.reflection_input = false;
         self.composer.replace_draft(String::new());
-        self.update_composer(ComposerEvent::InputMode(None), RenderRequest::Immediate)
+        self.update_composer(
+            ComposerEvent::InputMode(InputMode::Prompt),
+            RenderRequest::Immediate,
+        )
     }
 
     fn discard_draft(&mut self) -> ComponentUpdate<RootEffect> {
