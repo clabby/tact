@@ -353,6 +353,16 @@ struct ReloadSource {
     current_dir: PathBuf,
 }
 
+/// Whether an explicitly selected configuration file must already exist. The default file
+/// location may always be absent, in which case defaults apply.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MissingFile {
+    /// A `--config` path that does not exist is an error.
+    Explicit,
+    /// The caller creates the file, so any selected path may be absent.
+    Allowed,
+}
+
 #[derive(Debug)]
 pub(crate) struct ConfigReload {
     config: Config,
@@ -535,10 +545,16 @@ impl Config {
         Self::load_with(overrides, Environment::read(), &current_dir)
     }
 
-    /// Loads configuration for a command that may create the selected file.
-    pub(crate) fn load_for_update(overrides: ConfigOverrides) -> Result<Self> {
+    /// Loads configuration for a command that writes it, such as adding an MCP server. An
+    /// explicitly selected file may be absent because the command creates it.
+    pub(crate) fn load_for_edit(overrides: ConfigOverrides) -> Result<Self> {
         let current_dir = env::current_dir().map_err(ConfigError::CurrentDirectory)?;
-        Self::load_with_options(overrides, Environment::read(), &current_dir, true)
+        Self::load_with_options(
+            overrides,
+            Environment::read(),
+            &current_dir,
+            MissingFile::Allowed,
+        )
     }
 
     fn load_with(
@@ -546,23 +562,23 @@ impl Config {
         environment: Environment,
         current_dir: &Path,
     ) -> Result<Self> {
-        Self::load_with_options(overrides, environment, current_dir, false)
+        Self::load_with_options(overrides, environment, current_dir, MissingFile::Explicit)
     }
 
     fn load_with_options(
         overrides: ConfigOverrides,
         environment: Environment,
         current_dir: &Path,
-        allow_missing: bool,
+        missing: MissingFile,
     ) -> Result<Self> {
         let reload = ReloadSource {
             overrides: overrides.clone(),
             environment: environment.clone(),
             current_dir: current_dir.to_path_buf(),
         };
-        let explicit_path = overrides.path.is_some();
+        let required = overrides.path.is_some() && missing == MissingFile::Explicit;
         let path = Self::config_path(overrides.path, &environment, current_dir)?;
-        let mut file = ConfigFile::read(&path, explicit_path && !allow_missing)?;
+        let mut file = ConfigFile::read(&path, required)?;
         file.validate_secret_permissions(&path)?;
         let auth_file = Self::auth_file_path(
             overrides.auth_file,
@@ -1768,10 +1784,11 @@ impl Config {
 }
 
 impl ConfigFile {
-    fn read(path: &Path, explicit: bool) -> Result<Self> {
+    /// Reads the file, or the defaults when it is absent and not `required`.
+    fn read(path: &Path, required: bool) -> Result<Self> {
         let contents = match fs::read_to_string(path) {
             Ok(contents) => Zeroizing::new(contents),
-            Err(source) if source.kind() == ErrorKind::NotFound && !explicit => {
+            Err(source) if source.kind() == ErrorKind::NotFound && !required => {
                 return Ok(Self::default());
             }
             Err(source) => {
@@ -1901,7 +1918,7 @@ impl Config {
 mod tests {
     use super::{
         AuthMode, Config, ConfigOverrides, Environment, McpEnvironment, McpSecretString,
-        McpServerConfig, ReasoningEffort, ReasoningMode, RemoteMemoryConfigFile,
+        McpServerConfig, MissingFile, ReasoningEffort, ReasoningMode, RemoteMemoryConfigFile,
         RemoteMemoryTokenFile, Speed, ThemeMode, Transport, validate_mcp_url,
     };
     use crate::app::error::{
@@ -3793,7 +3810,7 @@ mod tests {
                 ..Environment::default()
             },
             directory.path(),
-            true,
+            MissingFile::Allowed,
         )
         .unwrap();
 

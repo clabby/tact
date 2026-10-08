@@ -392,7 +392,7 @@ impl Cli {
             transport: self.responses_transport,
         };
         let config = if matches!(&self.command, Some(Command::Mcp { .. })) {
-            Config::load_for_update(overrides)?
+            Config::load_for_edit(overrides)?
         } else {
             Config::load(overrides)?
         };
