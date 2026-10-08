@@ -68,7 +68,9 @@ pub(crate) struct Draft {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct DraftImage {
     pub(crate) marker: String,
-    pub(crate) data_url: String,
+    /// Shared because every publication of the draft carries all of its images,
+    /// which can be large.
+    pub(crate) data_url: Arc<str>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

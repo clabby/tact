@@ -15,6 +15,7 @@ use crate::{
 use axum::body::Bytes;
 use serde::Serialize;
 use serde_json::Value;
+use std::sync::Arc;
 use tact_subagents::{
     AgentMessage, MessageDeliveryState, MessageDisposition, MessagePriority, MessagePurpose,
     MessageSender, SubagentRoster,
@@ -89,14 +90,14 @@ pub(super) struct WireDraft {
 #[derive(Serialize)]
 pub(super) struct WireImage {
     marker: String,
-    data_url: String,
+    data_url: Arc<str>,
 }
 
 impl From<&DraftImage> for WireImage {
     fn from(image: &DraftImage) -> Self {
         Self {
             marker: image.marker.clone(),
-            data_url: image.data_url.clone(),
+            data_url: Arc::clone(&image.data_url),
         }
     }
 }

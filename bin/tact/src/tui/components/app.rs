@@ -1293,10 +1293,13 @@ impl AppNode {
                 continue;
             };
             let draft = root.shared_draft();
-            if published.draft.text != draft || !images_match(&published.draft.images, root) {
+            let images_changed = !images_match(&published.draft.images, root);
+            if published.draft.text != draft || images_changed {
                 published.draft.rev = published.draft.rev.saturating_add(1);
                 draft.clone_into(&mut published.draft.text);
-                published.draft.images = draft_images(root);
+                if images_changed {
+                    published.draft.images = draft_images(root);
+                }
                 publish(Publication::Draft {
                     session: published.session.clone(),
                     draft: published.draft.clone(),
@@ -1476,7 +1479,7 @@ fn draft_images(root: &RootNode) -> Vec<DraftImage> {
     root.shared_draft_images()
         .map(|(marker, data_url)| DraftImage {
             marker: marker.to_owned(),
-            data_url: data_url.to_owned(),
+            data_url: Arc::from(data_url),
         })
         .collect()
 }
@@ -2926,7 +2929,7 @@ mod parity_tests {
             .unwrap();
         let marker = DraftImage {
             marker: "[Image #1]".to_owned(),
-            data_url: IMAGE.to_owned(),
+            data_url: Arc::from(IMAGE),
         };
         assert_eq!(
             harness.app.root(PaneId::Main).unwrap().shared_draft(),
