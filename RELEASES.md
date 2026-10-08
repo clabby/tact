@@ -71,3 +71,24 @@ Rerun failed jobs against the original tag. The signing job retains its signed b
 artifact so later publication jobs can reuse the same key and signatures. Before rerunning a
 partially completed release, check whether crates.io, the GitHub Release, or GHCR already accepted
 its publication. If the source itself is wrong, bump to a new version and create a new tag.
+## Pre-releases
+
+`.github/workflows/release.yaml` also runs for every push to `main`, which is every merged pull
+request. It is the same workflow as an official release with these differences:
+
+- The release is tagged `dev-<first 12 digits of the commit hash>` and marked as a GitHub
+  pre-release, so it never becomes the repository's latest release and `tact update` without a
+  commit and the installer ignore it.
+- Binaries are built with `TACT_RELEASE_BUILD=pre-release`. The build records the commit, shows a
+  `pre-release` badge, keeps its Cargo version for update notifications, and downloads its web
+  bundle from its own release.
+- Nothing is published to crates.io, and there is no changelog: the notes name the commit.
+- The archives are still signed and published with the others, but `tact update <sha>` verifies
+  only the checksum, because the signing key of an official release is published in its crates.io
+  package and a pre-release has none.
+- Images are published as `ghcr.io/clabby/tact:dev-<commit>` and `:dev`, never as `latest`.
+- The `prune_pre_releases` job deletes pre-releases and their tags beyond the most recent fifty
+  (`RETAINED_PRE_RELEASES`). Container images are not pruned.
+
+Rerun a failed pre-release from the Actions tab like any other run. An official release commit
+also produces a pre-release, because it is a push to `main`.

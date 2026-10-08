@@ -4,6 +4,14 @@ on:
   push:
     tags:
       - "v*"
+    branches:
+      - main
+
+# A tag publishes an official release. A merge to main publishes a pre-release of that commit,
+# which skips crates.io and is kept only while it is among the most recent.
+concurrency:
+  group: release-${{ github.sha }}
+  cancel-in-progress: false
 
 env:
   BINARY_NAME: tact
@@ -17,13 +25,38 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    outputs:
+      tag: ${{ steps.identity.outputs.tag }}
+      version: ${{ steps.identity.outputs.version }}
+      prerelease: ${{ steps.identity.outputs.prerelease }}
     steps:
       - name: Checkout sources
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: Name the release
+        id: identity
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "tact") | .version')
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            tag="$GITHUB_REF_NAME"
+            prerelease=false
+          else
+            tag="dev-${GITHUB_SHA::12}"
+            prerelease=true
+          fi
+
+          {
+            echo "tag=$tag"
+            echo "version=$version"
+            echo "prerelease=$prerelease"
+          } >> "$GITHUB_OUTPUT"
       - name: Verify tag matches crate version on main
+        if: github.ref_type == 'tag'
         shell: bash
         run: |
           set -euo pipefail
@@ -48,6 +81,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
+    env:
+      RELEASE_TAG: ${{ needs.validate.outputs.tag }}
     strategy:
       fail-fast: false
       matrix:
@@ -80,12 +115,12 @@ jobs:
       - name: Build with Cargo
         run: cargo build --locked --release --package tact --bin tact --target ${{ matrix.target }}
         env:
-          TACT_RELEASE_BUILD: "1"
+          TACT_RELEASE_BUILD: ${{ needs.validate.outputs.prerelease == 'true' && 'pre-release' || '1' }}
       - name: Package binary
         shell: bash
         run: |
           set -euo pipefail
-          package_name="${BINARY_NAME}-${{ matrix.target }}-${GITHUB_REF_NAME}"
+          package_name="${BINARY_NAME}-${{ matrix.target }}-${RELEASE_TAG}"
 
           mkdir "$package_name"
           cp "target/${{ matrix.target }}/release/${BINARY_NAME}" "$package_name/"
@@ -97,8 +132,8 @@ jobs:
         with:
           name: ${{ matrix.target }}
           path: |
-            ${{ env.BINARY_NAME }}-${{ matrix.target }}-${{ github.ref_name }}.${{ matrix.archive_ext }}
-            ${{ env.BINARY_NAME }}-${{ matrix.target }}-${{ github.ref_name }}.${{ matrix.archive_ext }}.sha256
+            ${{ env.BINARY_NAME }}-${{ matrix.target }}-${{ needs.validate.outputs.tag }}.${{ matrix.archive_ext }}
+            ${{ env.BINARY_NAME }}-${{ matrix.target }}-${{ needs.validate.outputs.tag }}.${{ matrix.archive_ext }}.sha256
           if-no-files-found: error
 
   web_assets:
@@ -107,6 +142,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    env:
+      RELEASE_TAG: ${{ needs.validate.outputs.tag }}
     defaults:
       run:
         working-directory: web
@@ -123,7 +160,7 @@ jobs:
         run: bun install --frozen-lockfile
       - name: Build web assets
         shell: bash
-        run: TACT_VERSION="${GITHUB_REF_NAME#v}" bun run build
+        run: TACT_VERSION="${{ needs.validate.outputs.version }}" bun run build
       - name: Typecheck web app
         run: bun run typecheck
       - name: Package web assets
@@ -131,7 +168,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          archive="tact-web-${GITHUB_REF_NAME}.tar.gz"
+          archive="tact-web-${RELEASE_TAG}.tar.gz"
           mkdir web
           cp -R dist/. web/
           tar -czf "$archive" web
@@ -141,8 +178,8 @@ jobs:
         with:
           name: web-assets
           path: |
-            web/tact-web-${{ github.ref_name }}.tar.gz
-            web/tact-web-${{ github.ref_name }}.tar.gz.sha256
+            web/tact-web-${{ needs.validate.outputs.tag }}.tar.gz
+            web/tact-web-${{ needs.validate.outputs.tag }}.tar.gz.sha256
           if-no-files-found: error
 
   sign:
@@ -212,6 +249,7 @@ jobs:
   publish_crates:
     name: Publish Crates
     needs: sign
+    if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -298,7 +336,9 @@ jobs:
 
   release:
     name: Publish GitHub Release
-    needs: publish_crates
+    needs: [validate, sign, publish_crates]
+    # Pre-releases skip crates.io, so a skipped publication does not block the release.
+    if: ${{ !cancelled() && needs.sign.result == 'success' && contains(fromJSON('["success", "skipped"]'), needs.publish_crates.result) }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -320,6 +360,7 @@ jobs:
           tool: git-cliff@2.13.1
           fallback: none
       - name: Generate release notes
+        if: needs.validate.outputs.prerelease != 'true'
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -329,11 +370,30 @@ jobs:
           cp .github/RELEASE_TEMPLATE.md release-notes.md
           printf '\n\n' >> release-notes.md
           git cliff --current --strip all >> release-notes.md
+      - name: Generate pre-release notes
+        if: needs.validate.outputs.prerelease == 'true'
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          {
+            printf '**Pre-release build of [%s](https://github.com/%s/commit/%s).** ' \
+              "${GITHUB_SHA::12}" "$GITHUB_REPOSITORY" "$GITHUB_SHA"
+            printf 'It is not an official release: it is built from a commit on main, and it has no crates.io package to hold an independent signing key, so it is verified by checksum only.\n\n'
+            git log -1 --format='> %s' "$GITHUB_SHA"
+            printf '\nInstall it over an existing tact release install:\n\n'
+            printf '%s\n' '```sh' "tact update ${GITHUB_SHA::12}" '```'
+            printf '\nReleases are only retained for the most recent merges to main. Each archive is covered by a SHA-256 checksum.\n'
+          } > release-notes.md
       - name: Publish release
         uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
-          name: ${{ github.ref_name }}
-          tag_name: ${{ github.ref_name }}
+          name: ${{ needs.validate.outputs.tag }}
+          tag_name: ${{ needs.validate.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          prerelease: ${{ needs.validate.outputs.prerelease == 'true' }}
           body_path: release-notes.md
           files: |
             dist/*.tar.gz
@@ -344,11 +404,13 @@ jobs:
 
   container_build:
     name: Package Image (${{ matrix.platform }})
-    needs: release
+    needs: [validate, release]
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
       packages: write
+    env:
+      RELEASE_TAG: ${{ needs.validate.outputs.tag }}
     strategy:
       fail-fast: false
       matrix:
@@ -382,7 +444,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          package_name="${BINARY_NAME}-${TARGET}-${GITHUB_REF_NAME}"
+          package_name="${BINARY_NAME}-${TARGET}-${RELEASE_TAG}"
           archive="${package_name}.tar.gz"
           mkdir -p "${GITHUB_WORKSPACE}/target/image-context" "${RUNNER_TEMP}/release-package"
 
@@ -407,7 +469,7 @@ jobs:
         env:
           RELEASE_BINARY_CONTEXT: target/image-context
           RELEASE_REVISION: ${{ github.sha }}
-          RELEASE_VERSION: ${{ github.ref_name }}
+          RELEASE_VERSION: ${{ needs.validate.outputs.tag }}
         with:
           source: .
           files: docker/docker-bake.hcl
@@ -444,7 +506,7 @@ jobs:
 
   container_publish:
     name: Publish Release Image
-    needs: container_build
+    needs: [validate, container_build]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -469,15 +531,41 @@ jobs:
         run: |
           set -euo pipefail
 
-          version="${GITHUB_REF_NAME#v}"
+          tag="${{ needs.validate.outputs.tag }}"
           images=()
           for digest in "${RUNNER_TEMP}"/digests/*; do
             images+=("${REGISTRY_IMAGE}@sha256:${digest##*/}")
           done
 
           test "${#images[@]}" = 2
-          docker buildx imagetools create \
-            --tag "${REGISTRY_IMAGE}:${version}" \
-            --tag "${REGISTRY_IMAGE}:latest" \
-            "${images[@]}"
-          docker buildx imagetools inspect "${REGISTRY_IMAGE}:${version}"
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            tags=(--tag "${REGISTRY_IMAGE}:${tag#v}" --tag "${REGISTRY_IMAGE}:latest")
+          else
+            tags=(--tag "${REGISTRY_IMAGE}:${tag}" --tag "${REGISTRY_IMAGE}:dev")
+          fi
+          docker buildx imagetools create "${tags[@]}" "${images[@]}"
+          docker buildx imagetools inspect "${REGISTRY_IMAGE}:${tag#v}"
+
+  prune_pre_releases:
+    name: Prune Old Pre-releases
+    needs: [validate, release]
+    if: needs.validate.outputs.prerelease == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      # How many pre-releases remain published. Older ones are deleted with their tags.
+      RETAINED_PRE_RELEASES: "50"
+    steps:
+      - name: Delete pre-releases beyond the retention limit
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 1000 \
+            --json tagName,isPrerelease,createdAt \
+            --jq "[.[] | select(.isPrerelease and (.tagName | startswith(\"dev-\")))] | sort_by(.createdAt) | reverse | .[${RETAINED_PRE_RELEASES}:] | .[].tagName" \
+            | while read -r tag; do
+                gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes
+              done
