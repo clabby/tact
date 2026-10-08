@@ -2340,7 +2340,7 @@ mod tests {
         core::protocol::{Busy, Publication},
         web::{
             review::ReviewAgent,
-            testing::{Harness, idle_agent, repository},
+            testing::{Harness, idle_agent, repository, sse_event},
             wire::PROTOCOL_VERSION,
         },
     };
@@ -2731,7 +2731,7 @@ mod tests {
             while let Ok(Some(frame)) =
                 tokio::time::timeout_at(deadline, stream.frames.recv()).await
             {
-                if frame.starts_with("event: workspace\n") {
+                if sse_event(&frame).0 == "workspace" {
                     seen = true;
                     break 'attempts;
                 }

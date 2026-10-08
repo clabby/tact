@@ -306,7 +306,9 @@ fn reachable_host(bind: IpAddr) -> IpAddr {
 
 #[cfg(test)]
 mod tests {
-    use super::{Channels, Exposure, Server, Settings, bind, bridge, hub::Hub, registry};
+    use super::{
+        Channels, Exposure, Server, Settings, bind, bridge, hub::Hub, registry, testing::sse_event,
+    };
     use std::{
         fs,
         net::{IpAddr, Ipv4Addr},
@@ -376,9 +378,9 @@ mod tests {
         assert_eq!(stream.status(), reqwest::StatusCode::OK);
         assert_eq!(stream.headers()["content-type"], "text/event-stream");
         let first = stream.chunk().await.unwrap().unwrap();
-        assert!(String::from_utf8_lossy(&first).starts_with("event: hello\n"));
+        assert_eq!(sse_event(&first).0, "hello");
         let live = stream.chunk().await.unwrap().unwrap();
-        assert!(String::from_utf8_lossy(&live).starts_with("event: live\n"));
+        assert_eq!(sse_event(&live).0, "live");
 
         shutdown.cancel();
         tokio::time::timeout(Duration::from_secs(10), task)

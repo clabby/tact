@@ -7,8 +7,17 @@
 //!
 //! Publications are applied immediately but delivered at most once per [`FLUSH_INTERVAL`], so a
 //! streaming response costs one event per frame no matter how many records produced it. Each event
-//! is serialized once and shared by every client. A client whose buffer fills up is dropped; it
-//! reconnects and starts from a fresh snapshot, so a slow browser can never stall the hub.
+//! is serialized once into a shared buffer, and every client receives a reference to it. A client
+//! whose buffer fills up is dropped; it reconnects and starts from a fresh snapshot, so a slow
+//! browser can never stall the hub.
+//!
+//! All clients share one record of what they have been told, so a flush computes each event once.
+//! A client that connects between flushes gets a snapshot that already includes changes the others
+//! have not been sent yet, and then receives those changes again at the next flush. Browsers
+//! upsert entries by id and revision, so the repeated events are harmless.
+//!
+//! The projection sits behind one synchronous lock. Every critical section is short and never
+//! awaits; events are serialized inside it so they reflect a single consistent state.
 
 use super::wire::{
     Frame, PROTOCOL_VERSION, SessionSnapshot, SessionSummary, SummaryState, ToolDetail, WireDraft,
@@ -709,7 +718,7 @@ impl State {
     /// Sends to every client, dropping those whose buffer is full or whose stream ended.
     fn broadcast(&mut self, frame: &Frame) {
         self.clients
-            .retain(|client| client.try_send(Arc::clone(frame)).is_ok());
+            .retain(|client| client.try_send(frame.clone()).is_ok());
     }
 
     fn flush(&mut self) {
@@ -987,7 +996,10 @@ mod tests {
             protocol::{Busy, Draft, Origin, Publication, QueuedPrompt, SessionInfo},
             transcript::{LocalEvent, SessionStarted, TranscriptModel, TranscriptRecord, TurnId},
         },
-        web::bridge::{self, LoopEnd},
+        web::{
+            bridge::{self, LoopEnd},
+            testing::sse_event,
+        },
     };
     use nanocodex::agent::events::{AgentEvent, AgentEventKind};
     use serde_json::{Value, json, value::to_raw_value};
@@ -1100,14 +1112,7 @@ mod tests {
     fn drain(subscription: &mut Subscription) -> Vec<(String, Value)> {
         let mut events = Vec::new();
         while let Ok(frame) = subscription.frames.try_recv() {
-            let (name, data) = frame
-                .strip_prefix("event: ")
-                .and_then(|frame| frame.split_once("\ndata: "))
-                .expect("frames are SSE events");
-            events.push((
-                name.to_owned(),
-                serde_json::from_str(data.trim_end()).unwrap(),
-            ));
+            events.push(sse_event(&frame));
         }
         events
     }

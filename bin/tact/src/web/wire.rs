@@ -12,9 +12,9 @@ use crate::{
         },
     },
 };
+use axum::body::Bytes;
 use serde::Serialize;
 use serde_json::Value;
-use std::sync::Arc;
 use tact_subagents::{
     AgentMessage, MessageDeliveryState, MessageDisposition, MessagePriority, MessagePurpose,
     MessageSender, SubagentRoster,
@@ -26,12 +26,19 @@ pub(super) const PROTOCOL_VERSION: u32 = 9;
 const MAX_STRING_BYTES: usize = 256 * 1024;
 const MAX_SUMMARY_CHARS: usize = 200;
 
-/// One complete Server-Sent Events message, serialized once and shared by every client.
-pub(super) type Frame = Arc<str>;
+/// One complete Server-Sent Events message. Clones share one buffer, so sending a frame to every
+/// client copies no bytes.
+pub(super) type Frame = Bytes;
 
+/// Serializes one event as a Server-Sent Events message.
 pub(super) fn frame(event: &str, data: &impl Serialize) -> Frame {
-    let data = serde_json::to_string(data).expect("wire types serialize to JSON");
-    format!("event: {event}\ndata: {data}\n\n").into()
+    let mut message = Vec::with_capacity(64);
+    message.extend_from_slice(b"event: ");
+    message.extend_from_slice(event.as_bytes());
+    message.extend_from_slice(b"\ndata: ");
+    serde_json::to_writer(&mut message, data).expect("wire types serialize to JSON");
+    message.extend_from_slice(b"\n\n");
+    Bytes::from(message)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]

@@ -183,6 +183,19 @@ impl Harness {
     }
 }
 
+/// The event name and JSON data of one Server-Sent Events message.
+pub(super) fn sse_event(message: &[u8]) -> (String, serde_json::Value) {
+    let message = std::str::from_utf8(message).expect("events are UTF-8");
+    let (name, data) = message
+        .strip_prefix("event: ")
+        .and_then(|message| message.split_once("\ndata: "))
+        .expect("messages are SSE events");
+    let data = data
+        .strip_suffix("\n\n")
+        .expect("events end with a blank line");
+    (name.to_owned(), serde_json::from_str(data).unwrap())
+}
+
 pub(super) fn repository() -> TempDir {
     let directory = TempDir::new().unwrap();
     git(

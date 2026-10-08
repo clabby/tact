@@ -589,7 +589,7 @@ async fn stream_events(State(state): State<Arc<AppState>>) -> ApiResult<ApiError
         (subscription, keep_alive, shutdown),
         |(mut subscription, mut keep_alive, shutdown)| async move {
             let chunk = tokio::select! {
-                frame = subscription.frames.recv() => Bytes::copy_from_slice(frame?.as_bytes()),
+                frame = subscription.frames.recv() => frame?,
                 _ = keep_alive.tick() => Bytes::from_static(b": keep-alive\n\n"),
                 () = shutdown.cancelled() => return None,
             };
