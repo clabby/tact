@@ -6,7 +6,7 @@ use crate::{
             AuthMode, Config, ConfigOverrides, ReasoningEffort, ReasoningMode, RemoteMemoryConfig,
             Transport,
         },
-        error::{ConfigError, Error, Result, RuntimeError},
+        error::{CliError, ConfigError, Result},
         model,
         secret::SecretString,
         shutdown, update,
@@ -365,7 +365,7 @@ impl Cli {
     /// `update` works even when the configuration file is invalid.
     pub(crate) async fn run(mut self) -> Result<()> {
         if self.resume.is_some() && self.command.is_some() {
-            return Err(RuntimeError::ResumeWithCommand.into());
+            return Err(CliError::ResumeWithCommand.into());
         }
         let command = self.command.take();
         let resume = self.resume.take();
@@ -480,7 +480,7 @@ fn resume_command(session_id: &str) -> String {
 }
 
 async fn run_update() -> Result<()> {
-    match update::install_latest().await.map_err(Error::update)? {
+    match update::install_latest().await.map_err(CliError::Update)? {
         update::UpdateStatus::UpToDate { version } => {
             println!("tact v{version} is already up to date.");
         }
@@ -516,7 +516,9 @@ async fn push_memories(config: &Config, dry_run: bool) -> Result<()> {
     let limits = config.memory().local().limits();
     let local = LocalMemoryStore::new(config.memory_path(), limits);
     if dry_run {
-        let memories = transfer::local_snapshot(&local, limits).await?;
+        let memories = transfer::local_snapshot(&local, limits)
+            .await
+            .map_err(CliError::MemoryTransfer)?;
         let content_bytes = memories
             .iter()
             .map(|memory| memory.content.len())
@@ -530,8 +532,11 @@ async fn push_memories(config: &Config, dry_run: bool) -> Result<()> {
         return Ok(());
     }
 
-    let client = remote_client(remote).map_err(TransferError::Push)?;
-    let report = transfer::push(&local, client, limits).await?;
+    let client = remote_client(remote)
+        .map_err(|source| CliError::MemoryTransfer(TransferError::Push(source)))?;
+    let report = transfer::push(&local, client, limits)
+        .await
+        .map_err(CliError::MemoryTransfer)?;
     println!(
         "Pushed {} memories to namespace `{}`: {} inserted, {} replaced, {} unchanged, {} deleted.",
         report.memories,
@@ -549,11 +554,14 @@ async fn pull_memories(config: &Config, all: bool, namespaces: Vec<String>) -> R
         .memory()
         .remote()
         .ok_or(ConfigError::RemoteMemoryNotConfigured)?;
-    let client = remote_client(remote).map_err(TransferError::Pull)?;
+    let client = remote_client(remote)
+        .map_err(|source| CliError::MemoryTransfer(TransferError::Pull(source)))?;
     let limits = config.memory().local().limits();
     let local = LocalMemoryStore::new(config.memory_path(), limits);
     let selection = (!all).then_some(namespaces.as_slice());
-    let report = transfer::pull(client, &local, selection, limits).await?;
+    let report = transfer::pull(client, &local, selection, limits)
+        .await
+        .map_err(CliError::MemoryTransfer)?;
     let selected = if all {
         "all namespaces".to_owned()
     } else {
@@ -701,7 +709,7 @@ mod tests {
     use crate::app::{
         cli::Command,
         config::{AuthMode, Config, ConfigOverrides},
-        error::{ConfigError, Error},
+        error::{CliError, ConfigError, Error},
     };
     use clap::{CommandFactory, Parser, error::ErrorKind};
     use nanocodex::{HarnessModel as Model, Model as CodexModel};
@@ -1252,7 +1260,10 @@ mod tests {
 
         let result = push_memories(&config, false).await;
 
-        assert!(matches!(result, Err(Error::MemoryTransfer(_))));
+        assert!(matches!(
+            result,
+            Err(Error::Cli(CliError::MemoryTransfer(_)))
+        ));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

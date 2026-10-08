@@ -20,6 +20,7 @@ mod app {
     pub(crate) mod model;
     pub(crate) mod secret;
     pub(crate) mod theme;
+    pub(crate) mod update;
 }
 
 #[path = "../src/core"]
