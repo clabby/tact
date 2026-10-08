@@ -73,6 +73,8 @@ pub(crate) struct TranscriptModel {
     // The next run starts a new telemetry scope for automatic compaction.
     manual_compaction: Option<ManualCompaction>,
     run_started_at_unix_ms: VecDeque<u64>,
+    /// The timestamp of the record being applied, stamped on every entry it creates.
+    applying_at_unix_ms: Option<u64>,
     transient: Option<TransientStatus>,
     pending_error: Option<String>,
     pending_compaction_error: Option<String>,
@@ -183,13 +185,16 @@ impl TranscriptModel {
     }
 
     pub(crate) fn apply(&mut self, record: &TranscriptRecord) -> ModelChange {
-        if let Some(kind) = record.local_kind() {
-            return self.apply_local(kind, record);
-        }
-        if let Some(kind) = record.agent_kind() {
-            return self.apply_agent(kind, record);
-        }
-        ModelChange::default()
+        self.applying_at_unix_ms = Some(record.recorded_at_unix_ms()).filter(|at| *at > 0);
+        let change = if let Some(kind) = record.local_kind() {
+            self.apply_local(kind, record)
+        } else if let Some(kind) = record.agent_kind() {
+            self.apply_agent(kind, record)
+        } else {
+            ModelChange::default()
+        };
+        self.applying_at_unix_ms = None;
+        change
     }
 
     pub(crate) fn apply_message(
@@ -1098,6 +1103,7 @@ impl TranscriptModel {
             hidden,
             parent,
             trailing_spacer: true,
+            recorded_at_unix_ms: self.applying_at_unix_ms,
         });
         id
     }

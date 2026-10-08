@@ -1,7 +1,10 @@
 //! JSON shapes of the web protocol (see `docs/web.md`) and the projection of
 //! transcript entries onto them.
 
-use super::hub::now_unix_ms;
+use super::{
+    hub::now_unix_ms,
+    outcome::{PatchStats, ToolOutcome},
+};
 use crate::{
     app::config::{ReasoningEffort, ReasoningMode, Speed},
     core::{
@@ -182,6 +185,8 @@ pub(super) struct WireEntry {
     pub(super) id: usize,
     pub(super) revision: u64,
     parent: Option<usize>,
+    /// When the entry's first record was written, or `None` when no record created it.
+    at_ms: Option<u64>,
     #[serde(flatten)]
     body: WireBody,
 }
@@ -222,6 +227,10 @@ enum WireBody {
         substeps: Vec<String>,
         child_count: usize,
         has_detail: bool,
+        /// How a finished command-like tool ended; `None` while running or without output.
+        outcome: Option<ToolOutcome>,
+        /// The size of an `apply_patch` envelope; `None` for other tools and failed patches.
+        stats: Option<PatchStats>,
     },
     DirectedMessage {
         from: String,
@@ -301,6 +310,7 @@ impl WireEntry {
             id: entry.id.index(),
             revision: entry.revision,
             parent: entry.parent.map(|parent| parent.index()),
+            at_ms: entry.recorded_at_unix_ms,
             body,
         }
     }
@@ -325,6 +335,12 @@ impl WireBody {
             substeps: tool.substeps.iter().map(|step| cap(step)).collect(),
             child_count: tool.child_count,
             has_detail: true,
+            outcome: (tool.state != ToolState::Running)
+                .then(|| tool.result.as_ref().and_then(ToolOutcome::from_result))
+                .flatten(),
+            stats: (tool.name == "apply_patch" && tool.state != ToolState::Failed)
+                .then(|| PatchStats::from_patch(patch_text(&tool.arguments)))
+                .flatten(),
         }
     }
 
@@ -577,11 +593,7 @@ fn memory_key(value: &Value) -> Option<String> {
 
 /// Lists the files an `apply_patch` envelope touches.
 fn patch_files(arguments: &Value) -> String {
-    let patch = arguments
-        .as_str()
-        .or_else(|| arguments.get("input").and_then(Value::as_str))
-        .unwrap_or_default();
-    patch
+    patch_text(arguments)
         .lines()
         .filter_map(|line| {
             ["*** Add File: ", "*** Update File: ", "*** Delete File: "]
@@ -590,6 +602,14 @@ fn patch_files(arguments: &Value) -> String {
         })
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// The envelope of an `apply_patch` call, passed either bare or as its `input` field.
+fn patch_text(arguments: &Value) -> &str {
+    arguments
+        .as_str()
+        .or_else(|| arguments.get("input").and_then(Value::as_str))
+        .unwrap_or_default()
 }
 
 fn first_line(text: &str) -> String {
@@ -671,9 +691,13 @@ fn numeric(id: impl std::fmt::Display) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_STRING_BYTES, WireBody, cap, now_unix_ms, tool_summary};
-    use crate::core::transcript::{ToolEntry, ToolState};
-    use serde_json::{Value, json};
+    use super::{MAX_STRING_BYTES, WireBody, WireEntry, cap, now_unix_ms, tool_summary};
+    use crate::core::transcript::{
+        LocalEvent, ToolEntry, ToolState, TranscriptModel, TranscriptRecord, TurnId, UserSubmitted,
+    };
+    use nanocodex::agent::events::{AgentEvent, AgentEventKind};
+    use serde_json::{Value, json, value::to_raw_value};
+    use std::sync::Arc;
 
     fn tool(name: &str, arguments: Value) -> ToolEntry {
         ToolEntry {
@@ -687,6 +711,131 @@ mod tests {
             substeps: Vec::new(),
             child_count: 0,
         }
+    }
+
+    fn agent_record(at: u64, kind: AgentEventKind, payload: Value) -> TranscriptRecord {
+        TranscriptRecord::from_agent(
+            at,
+            at,
+            AgentEvent {
+                protocol_version: 1,
+                request_id: Arc::from("session"),
+                seq: at,
+                kind,
+                payload: to_raw_value(&payload).unwrap().into(),
+            },
+        )
+    }
+
+    fn call(at: u64, id: &str, name: &str, arguments: Value) -> TranscriptRecord {
+        agent_record(
+            at,
+            AgentEventKind::ToolCall,
+            json!({"call_id": id, "tool": name, "arguments": arguments}),
+        )
+    }
+
+    fn finish(at: u64, id: &str, name: &str, status: &str, result: Value) -> TranscriptRecord {
+        agent_record(
+            at,
+            AgentEventKind::ToolResult,
+            json!({
+                "call_id": id, "tool": name, "status": status, "duration_ns": 1,
+                "result": result, "structured_result": result, "metadata": null,
+            }),
+        )
+    }
+
+    fn projected(model: &TranscriptModel) -> Vec<Value> {
+        model
+            .entries()
+            .iter()
+            .map(|entry| serde_json::to_value(WireEntry::new(entry)).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn entries_carry_the_time_of_their_first_record() {
+        let mut model = TranscriptModel::default();
+        model.apply(
+            &TranscriptRecord::from_local(
+                1,
+                1_000,
+                LocalEvent::UserSubmitted(UserSubmitted {
+                    id: TurnId::new(1),
+                    text: "hi".to_owned(),
+                }),
+            )
+            .unwrap(),
+        );
+        model.apply(&call(2_000, "c1", "view_image", json!({"path": "a.png"})));
+        model.apply(&finish(5_000, "c1", "view_image", "completed", json!("ok")));
+        let entries = projected(&model);
+        assert_eq!(entries[0]["at_ms"], 1_000);
+        assert_eq!(
+            entries[1]["at_ms"], 2_000,
+            "a later result keeps the call's time"
+        );
+    }
+
+    #[test]
+    fn finished_shell_tools_report_their_outcome() {
+        let mut model = TranscriptModel::default();
+        let command = json!({"cmd": "cargo test"});
+        model.apply(&call(1, "c1", "exec_command", command.clone()));
+        let running = &projected(&model)[0];
+        assert!(running["outcome"].is_null());
+        assert!(running["stats"].is_null());
+
+        model.apply(&finish(
+            2,
+            "c1",
+            "exec_command",
+            "completed",
+            json!({
+                "output": "\u{1b}[32mCompiling\u{1b}[0m tact\n\ntest result: FAILED. 17 passed; 1 failed; 0 ignored\n",
+                "exit_code": 101,
+                "wall_time_seconds": 1.0,
+            }),
+        ));
+        model.apply(&call(3, "c2", "view_image", json!({"path": "a.png"})));
+        model.apply(&finish(
+            4,
+            "c2",
+            "view_image",
+            "completed",
+            json!({"text": "ok"}),
+        ));
+        let entries = projected(&model);
+        assert_eq!(
+            entries[0]["outcome"],
+            json!({
+                "exit_code": 101,
+                "tail": ["Compiling tact", "test result: FAILED. 17 passed; 1 failed; 0 ignored"],
+                "summary": "17 passed, 1 failed",
+            })
+        );
+        assert!(entries[1]["outcome"].is_null(), "no textual output");
+    }
+
+    #[test]
+    fn applied_patches_report_their_size() {
+        let patch = "*** Begin Patch\n*** Add File: a.rs\n+one\n+two\n*** Update File: b.rs\n@@\n-old\n+new\n*** Delete File: c.rs\n*** End Patch";
+        let mut model = TranscriptModel::default();
+        model.apply(&call(1, "c1", "apply_patch", json!(patch)));
+        model.apply(&finish(2, "c1", "apply_patch", "completed", json!("Done")));
+        model.apply(&call(3, "c2", "apply_patch", json!({"input": patch})));
+        model.apply(&finish(4, "c2", "apply_patch", "failed", json!("conflict")));
+        let entries = projected(&model);
+        assert_eq!(
+            entries[0]["stats"],
+            json!({"files": 3, "additions": 3, "deletions": 1})
+        );
+        assert!(entries[0]["outcome"].is_null());
+        assert!(
+            entries[1]["stats"].is_null(),
+            "failed patches have no stats"
+        );
     }
 
     #[test]
