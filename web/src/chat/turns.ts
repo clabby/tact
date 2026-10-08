@@ -21,15 +21,24 @@ export type Turn = {
 
 export function segmentTurns(data: TranscriptData): Turn[] {
   const turns: Turn[] = [];
+  const turnOf = new Map<number, Turn>();
   let turn: Turn | null = null;
   for (const id of data.order) {
     const entry = data.entries.get(id);
     if (!entry) continue;
+    // A child call (of a Code Mode batch, say) belongs to its parent's turn wherever it arrives.
+    const owner = entry.parent === null ? undefined : turnOf.get(entry.parent);
+    if (owner) {
+      owner.body.push(id);
+      turnOf.set(id, owner);
+      continue;
+    }
     if (entry.kind === "user" && entry.parent === null) {
       turns.push(turn = { key: id, user: id, body: [], end: null, trailing: [] });
       continue;
     }
     if (!turn) turns.push(turn = { key: -1, user: null, body: [], end: null, trailing: [] });
+    turnOf.set(id, turn);
     if (turn.end !== null) turn.trailing.push(id);
     else if (entry.parent === null && (entry.kind === "turn_completed" || entry.kind === "interrupted")) turn.end = id;
     else turn.body.push(id);
@@ -48,13 +57,18 @@ export type TurnPlan = {
   answer: number | null;
   /** Assistant messages before the answer, which narrate the work. */
   narration: Set<number>;
-  /** The body without the answer, in order, with exploring runs grouped. */
+  /**
+   * The body without the answer, in order, with exploring runs grouped. Child entries are not
+   * rows of their own: they extend their parent's row, in `children`.
+   */
   log: LogItem[];
+  /** Each parent's child entries in order, which render under it whatever arrived in between. */
+  children: Map<number, number[]>;
   /** Notices that stay in sight when the work log is folded. */
   pinned: Set<number>;
   recovered: Set<number>;
   unrecovered: number[];
-  /** Top-level tool calls. */
+  /** Tool calls, child calls included. */
   steps: number;
 };
 
@@ -80,6 +94,14 @@ export function planTurn(turn: Turn, entries: ReadonlyMap<number, WireEntry>): T
   const narration = new Set(body.filter((entry) => entry.kind === "assistant" && entry.parent === null && entry.id !== answer).map((entry) => entry.id));
   const tools = body.filter((entry): entry is ToolEntry => entry.kind === "tool");
   const { recovered, unrecovered } = classifyFailures(tools);
+  const inTurn = new Set(turn.body);
+  const children = new Map<number, number[]>();
+  for (const entry of body) {
+    if (entry.parent === null || !inTurn.has(entry.parent)) continue;
+    const siblings = children.get(entry.parent) ?? [];
+    siblings.push(entry.id);
+    children.set(entry.parent, siblings);
+  }
 
   const log: LogItem[] = [];
   let run: WireEntry[] = [];
@@ -98,6 +120,7 @@ export function planTurn(turn: Turn, entries: ReadonlyMap<number, WireEntry>): T
     run = [];
   };
   for (const entry of body) {
+    if (entry.parent !== null && inTurn.has(entry.parent)) continue;
     if (entry.id === answer) {
       flushRun();
       continue;
@@ -115,9 +138,10 @@ export function planTurn(turn: Turn, entries: ReadonlyMap<number, WireEntry>): T
     answer,
     narration,
     log,
+    children,
     pinned: new Set(body.filter((entry) => PINNED.has(entry.kind)).map((entry) => entry.id)),
     recovered,
     unrecovered,
-    steps: tools.filter((tool) => tool.parent === null).length,
+    steps: tools.length,
   };
 }

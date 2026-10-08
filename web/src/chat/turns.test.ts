@@ -83,6 +83,38 @@ test("failures, writes, and commands are never swallowed by a group", () => {
   expect(plan.unrecovered).toEqual([3]);
 });
 
+test("a batch's children extend it in place, whatever arrived between them", () => {
+  const t = transcript();
+  t.user("go");
+  const batch = t.tool("exec", "4 tools");
+  t.tool("read", "a.rs", { parent: batch });
+  t.tool("exec_command", "cargo test", { parent: batch, state: "failed" });
+  t.other({ kind: "directed_message", from: "agent 2", to: "root", body: "hi", delivery: "delivered", thread: 1, messages: [] });
+  t.say("Waiting on the batch.");
+  t.tool("read", "b.rs", { parent: batch });
+  t.tool("exec_command", "cargo test", { parent: batch });
+  t.tool("read", "c.rs");
+  t.tool("read", "d.rs");
+  t.say("done");
+  t.done();
+  // A child that arrives after the end still belongs to its parent's turn.
+  t.tool("read", "late.rs", { parent: batch });
+  const data = t.data();
+  const [turn] = segmentTurns(data);
+  expect(turn).toMatchObject({ end: 12, trailing: [], body: [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13] });
+  const plan = planTurn(turn!, data.entries);
+  expect(plan.log).toEqual([
+    { kind: "entry", id: 2 },
+    { kind: "entry", id: 5 },
+    { kind: "entry", id: 6 },
+    { kind: "group", key: 9, members: [9, 10], tools: [9, 10] },
+  ]);
+  expect(plan.children.get(batch)).toEqual([3, 4, 7, 8, 13]);
+  expect(plan.answer).toBe(11);
+  expect(plan.steps).toBe(8);
+  expect([...plan.recovered]).toEqual([4]);
+});
+
 test("error notices stay pinned and failures that were retried successfully are recovered", () => {
   const t = transcript();
   t.user("go");

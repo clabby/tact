@@ -23,7 +23,7 @@ type EntryContext = { role?: "answer" | "narration"; recovered?: true; outcome?:
 type Rendered = { element: HTMLElement; revision: number; context: string };
 
 /** A turn's DOM: the section, the row that folds its work log, the log, and the log's groups. */
-type TurnView = { section: HTMLElement; fold: HTMLElement; log: HTMLElement; groups: Map<number, HTMLElement> };
+type TurnView = { section: HTMLElement; fold: HTMLElement; log: HTMLElement; groups: Map<number, HTMLElement>; batches: Map<number, HTMLElement> };
 
 /** What a transcript view shows: a session's or a subagent's entries, and where details live. */
 export type TranscriptSource = {
@@ -280,7 +280,10 @@ export class Transcript {
       this.folds.set(turn.key, false);
       changed = true;
     }
-    const group = plan.log.find((item): item is Extract<LogItem, { kind: "group" }> => item.kind === "group" && item.members.includes(id));
+    // A child entry sits in its outermost parent's place.
+    let row = id;
+    for (let parent = this.source.data.entries.get(row)?.parent; parent != null && turn.body.includes(parent); parent = this.source.data.entries.get(row)?.parent) row = parent;
+    const group = plan.log.find((item): item is Extract<LogItem, { kind: "group" }> => item.kind === "group" && item.members.includes(row));
     if (group && !this.openGroups.has(group.key)) {
       this.openGroups.add(group.key);
       changed = true;
@@ -437,7 +440,7 @@ export class Transcript {
       fold.innerHTML = `<button class="tool-row fold-row" type="button"><span class="tool-state"></span><span class="fold-text"></span><span class="tool-meta"></span>${glyph("chevron-right", "glyph chevron")}</button>`;
       const log = document.createElement("div");
       log.className = "turn-log";
-      view = { section, fold, log, groups: new Map() };
+      view = { section, fold, log, groups: new Map(), batches: new Map() };
       this.views.set(key, view);
     }
     return view;
@@ -462,7 +465,23 @@ export class Transcript {
     const rect = this.following || !view.section.isConnected ? null : view.section.getBoundingClientRect();
     const above = rect !== null && rect.bottom <= this.scroller.getBoundingClientRect().top;
     const folded = this.isFolded(turn, plan);
-    const element = (id: number) => this.rendered.get(id)?.element;
+    // A call with child entries is laid out as a batch: its row, then its children in order.
+    const batches = new Set<number>();
+    const element = (id: number): HTMLElement | undefined => {
+      const article = this.rendered.get(id)?.element;
+      const children = plan.children.get(id);
+      if (!article || !children?.length) return article;
+      let batch = view.batches.get(id);
+      if (!batch) {
+        batch = document.createElement("div");
+        batch.className = "batch";
+        batch.dataset.parent = String(id);
+        view.batches.set(id, batch);
+      }
+      batches.add(id);
+      setChildren(batch, [article, ...children.flatMap((child) => element(child) ?? [])]);
+      return batch;
+    };
     const children: HTMLElement[] = [];
     const push = (into: HTMLElement[], id: number) => {
       const node = element(id);
@@ -484,6 +503,7 @@ export class Transcript {
       log.push(this.renderGroup(view, item, (id) => element(id)));
     }
     for (const key of view.groups.keys()) if (!groups.has(key)) view.groups.delete(key);
+    for (const key of view.batches.keys()) if (!batches.has(key)) view.batches.delete(key);
     setChildren(view.log, log);
     view.log.hidden = folded;
     if (log.length) children.push(view.log);

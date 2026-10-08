@@ -879,6 +879,8 @@ export class MockTact {
     shell("cargo nextest run -p tact", 101, "        FAIL [   0.412s] tact web::bridge::tests::draft_echo_follows_acknowledgement\n\nassertion failed: echo arrived before the acknowledgement\n     Summary [  48.201s] 312 tests run: 311 passed, 1 failed\n", 48);
     const batch = add(tool("exec", "2 tools", { duration_ns: 11_000_000_000, child_count: 2 }), 12);
     for (const [agent, role] of [[2, "protocol auditor"], [5, "ordering prover"]] as const) {
+      // An agent thread published between the batch's calls must not split the batch.
+      if (agent === 5) add(directedThread(1, THREAD_DOCS), 2);
       const spawn = add(tool("spawn_agent", `${role} · ${agent === 2 ? "sol high" : "astra high"}`, { duration_ns: 900_000_000, has_detail: true }), 1, batch.id);
       detail(spawn, { arguments: { role, model: agent === 2 ? "sol" : "astra" }, result: JSON.stringify({ agent_id: agent, role, status: "running" }), metadata: null });
     }
@@ -889,7 +891,6 @@ export class MockTact {
     const replace = add(tool("memory", "replace · local · 12@v3", { duration_ns: 9_000_000, has_detail: true }), 1);
     const remove = add(tool("memory", "delete · 9@v1", { state: "failed", duration_ns: 3_000_000, has_detail: true }), 1);
     add({ kind: "assistant", text: "One test failed: the draft echo arrived before the acknowledgement. I'll make the reply wait for the loop to apply the command.", complete: true, commentary: false }, 10);
-    add(directedThread(1, THREAD_DOCS), 5);
     const send = add(tool("send_agent_message", "→ #2", { duration_ns: 3_000_000, has_detail: true }), 3);
     const plan = add(tool("update_plan", "2/4 done", { duration_ns: 1_000_000, has_detail: true }), 3);
     add(directedThread(2, THREAD_SCHEMA), 20);
