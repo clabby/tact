@@ -543,56 +543,29 @@ pub(crate) async fn run(
     let initial_max_subagents = config.agent().max_subagents();
     let preferred_reasoning_mode = config.agent().reasoning_mode();
     let open_resume_selector = matches!(&startup, StartupMode::ResumeSelector(_));
-    let (resume_session_id, fresh_model) = match startup {
-        StartupMode::NewSession(model) | StartupMode::ResumeSelector(model) => (None, Some(model)),
-        StartupMode::ResumeSession(session_id) => (Some(session_id), None),
-    };
-    let resuming = resume_session_id.is_some();
-    let resume_lock = resume_session_id
-        .as_deref()
-        .map(|session_id| SessionLock::acquire(config.path(), session_id))
-        .transpose()?;
-    let (configured, restored, reasoning_mode, model, next_sequence) =
-        if let Some(session_id) = resume_session_id {
-            let restored_config = config.clone();
-            let config_path = restored_config.path().to_path_buf();
-            let checkpoint_session_id = session_id.clone();
-            let checkpoint = tokio::task::spawn_blocking(move || {
-                session::load_checkpoint(&config_path, &checkpoint_session_id)
-            });
-            let transcript = session::load_transcript_async(
-                restored_config.path().to_path_buf(),
-                session_id.clone(),
-            );
-            let (snapshot, records) = tokio::join!(checkpoint, transcript);
-            let snapshot = snapshot.map_err(RuntimeError::SessionTask)??;
-            let records = records?;
-            tokio::task::spawn_blocking(move || -> Result<_> {
-                let restored_config = restored_config.with_workspace(session::workspace(&records)?);
-                let reasoning_mode = session::reasoning_mode(&records);
-                let model = session::model(&records)?;
-                let next_sequence = session::next_sequence(&records);
-                let projection = RootNode::project_session(initial_effort, records.clone());
-                let configured = ConfiguredAgent::from_config_with_session(
-                    &restored_config,
-                    initial_effort,
-                    reasoning_mode,
-                    model,
-                    Some(&session_id),
-                    Some(snapshot),
-                )?;
-                Ok((
-                    configured,
-                    Some((projection, records)),
-                    reasoning_mode,
-                    model,
-                    next_sequence,
-                ))
-            })
-            .await
-            .map_err(RuntimeError::SessionTask)??
-        } else {
-            let model = fresh_model.expect("a fresh TUI startup must select a model");
+    let resuming = matches!(&startup, StartupMode::ResumeSession(_));
+    let (configured, restored, reasoning_mode, model, next_sequence, resume_lock) = match startup {
+        StartupMode::ResumeSession(session_id) => {
+            let lock = SessionLock::acquire(config.path(), &session_id)?;
+            let RestoredSession {
+                configured,
+                lock,
+                records,
+                projection,
+                reasoning_mode,
+                model,
+                next_sequence,
+            } = restore_session(config.clone(), session_id, initial_effort, lock).await?;
+            (
+                configured,
+                Some((projection, records)),
+                reasoning_mode,
+                model,
+                next_sequence,
+                Some(lock),
+            )
+        }
+        StartupMode::NewSession(model) | StartupMode::ResumeSelector(model) => {
             let reasoning_mode = supported_reasoning_mode(model, preferred_reasoning_mode);
             (
                 ConfiguredAgent::from_config_with_model(
@@ -605,8 +578,10 @@ pub(crate) async fn run(
                 reasoning_mode,
                 model,
                 1,
+                None,
             )
-        };
+        }
+    };
     let workspace = config.agent().workspace().to_path_buf();
     let mut terminal = TerminalSession::enter().map_err(RuntimeError::Terminal)?;
     let ConfiguredAgent {
