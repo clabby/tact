@@ -46,6 +46,16 @@ export type TransientStatus =
 
 export type ToolState = "running" | "succeeded" | "failed";
 
+/**
+ * How a finished shell-like call ended: its exit code, the last non-empty output lines (at most 8,
+ * each at most 200 characters, ANSI escapes removed), and a test or build summary such as
+ * "17 passed, 1 failed" when the output has a recognisable one.
+ */
+export type ToolOutcome = { exit_code: number | null; tail: string[]; summary: string | null };
+
+/** The size of an applied patch, computed from its envelope. */
+export type PatchStats = { files: number; additions: number; deletions: number };
+
 export type MessagePurpose = "delegate" | "coordinate" | "finding" | "question" | "reply";
 export type MessageDelivery = "admitted" | "delivered" | "failed" | "unknown";
 
@@ -82,6 +92,10 @@ export type EntryBody =
     substeps: string[];
     child_count: number;
     has_detail: boolean;
+    /** Set once a shell-like call finishes; absent from older servers. */
+    outcome?: ToolOutcome | null;
+    /** Set for an applied `apply_patch`; absent from older servers and for failed patches. */
+    stats?: PatchStats | null;
   }
   /**
    * One conversation thread between agents, updated in place as messages arrive and delivery
@@ -110,8 +124,9 @@ export type EntryBody =
 /**
  * `id` is stable; `revision` increases on every change to the entry. A newer server may send kinds
  * missing from `EntryBody`; renderers must treat any other kind as a generic row.
+ * `at_ms` is the unix-millisecond time the entry's first record was recorded, when known.
  */
-export type WireEntry = { id: number; revision: number; parent: number | null } & EntryBody;
+export type WireEntry = { id: number; revision: number; parent: number | null; at_ms?: number | null } & EntryBody;
 
 export type SubagentStatus =
   | { state: "pending" | "running" | "interrupted" | "closing" | "closed" }
