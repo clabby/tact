@@ -1,3 +1,17 @@
+//! Ordered, append-only persistence for one live session's transcript.
+//!
+//! [`TranscriptJournal`] belongs to the session's event loop. It assigns every record its sequence, holds the
+//! session's start record back until the first other record (so an untouched session leaves
+//! nothing on disk), and hands records to a dedicated blocking writer that commits everything
+//! queued since its previous commit in one SQLite transaction. Appends never wait for disk;
+//! callers that need durability await [`TranscriptJournal::flush`].
+//!
+//! Raw API transport events are returned for live diagnostics but never persisted. Only the
+//! content-free context facts derived from outbound requests reach storage.
+//!
+//! The writer retries while another connection holds the database write lock. Any other
+//! persistence failure stops it, and the journal reports that failure from every later append.
+
 use super::{TranscriptError, TranscriptRecord};
 use crate::{
     app::config::{ReasoningEffort, Speed},
@@ -24,8 +38,12 @@ use tokio::{
 
 pub(crate) struct TranscriptJournal {
     path: PathBuf,
+    /// Unbounded so the event loop never blocks on disk; the writer drains the whole queue into
+    /// each batch.
     sender: mpsc::UnboundedSender<JournalCommand>,
+    /// Set once the writer has committed at least one batch.
     persisted: Arc<AtomicBool>,
+    /// The writer's terminal error, kept so later appends can report why it stopped.
     failure: Arc<OnceLock<String>>,
     pending_start: Option<SessionStarted>,
     next_sequence: u64,
@@ -35,6 +53,7 @@ pub(crate) struct TranscriptJournal {
 
 const LOCK_RETRY_DELAY: Duration = Duration::from_millis(50);
 
+/// The writer task, which finishes after every journal handle is dropped and its queue drained.
 pub(crate) struct TranscriptWriter {
     task: JoinHandle<Result<(), TranscriptError>>,
 }
@@ -342,15 +361,15 @@ mod tests {
         app::config::{ReasoningEffort, ReasoningMode, Speed},
         core::{
             session::SessionStore,
-            storage::{SessionStorage, database_path},
+            storage::{SessionStorage, StorageError, database_path},
             transcript::{
-                LocalEvent, LocalKind, SessionStarted, SpeedChanged, TurnId, UserSubmitted,
-                WorkerTurnAccepted, WorkerTurnFinished,
+                LocalEvent, LocalKind, SessionStarted, SpeedChanged, TranscriptError, TurnId,
+                UserSubmitted, WorkerTurnAccepted, WorkerTurnFinished,
             },
         },
     };
     use nanocodex::agent::events::{AgentEvent, AgentEventKind};
-    use rusqlite::Connection;
+    use rusqlite::{Connection, ffi::ErrorCode};
     use serde_json::{Value, json, value::to_raw_value};
     use std::sync::Arc;
     use tempfile::tempdir;
@@ -536,8 +555,10 @@ mod tests {
                 Some(LocalKind::ContextObserved)
             ]
         );
-        let observed: serde_json::Value = records[1].decode_payload().unwrap();
-        assert!(!observed.to_string().contains(marker), "{observed}");
+        assert_eq!(
+            records[1].decode_payload::<Value>().unwrap(),
+            json!({"prompt_cache": true, "previous_response": true})
+        );
     }
 
     #[tokio::test]
@@ -711,11 +732,11 @@ mod tests {
             }))
             .unwrap();
         let writer_error = writer.into_task().await.unwrap().unwrap_err();
-        assert!(
-            writer_error
-                .to_string()
-                .contains("forced persistence failure")
-        );
+        assert!(matches!(
+            &writer_error,
+            TranscriptError::Storage(StorageError::Query { source, .. })
+                if source.sqlite_error_code() == Some(ErrorCode::ConstraintViolation)
+        ));
 
         let append_error = journal
             .append_local(LocalEvent::UserSubmitted(UserSubmitted {
@@ -724,11 +745,10 @@ mod tests {
             }))
             .unwrap_err();
 
-        assert!(
-            append_error
-                .to_string()
-                .contains("forced persistence failure")
-        );
+        assert!(matches!(
+            append_error,
+            TranscriptError::WriterFailed { reason, .. } if reason == writer_error.to_string()
+        ));
     }
 
     #[tokio::test]
