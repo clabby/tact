@@ -354,18 +354,57 @@ impl Drop for McpCommand {
 impl ZeroizeOnDrop for McpCommand {}
 
 impl Cli {
+    /// Dispatches the invocation. Each command loads configuration only if it uses it, so
+    /// `update` works even when the configuration file is invalid.
     pub(crate) async fn run(mut self) -> Result<()> {
         if self.resume.is_some() && self.command.is_some() {
             return Err(RuntimeError::ResumeWithCommand.into());
         }
-        if matches!(&self.command, None | Some(Command::Resume)) {
-            tui::ensure_interactive()?;
+        let command = self.command.take();
+        let resume = self.resume.take();
+        let overrides = self.into_overrides();
+        match command {
+            None => {
+                tui::ensure_interactive()?;
+                let config = Config::load(overrides)?;
+                let startup = resume.map_or_else(
+                    || tui::StartupMode::NewSession(config.agent().model()),
+                    tui::StartupMode::ResumeSession,
+                );
+                Self::run_tui(config, startup).await
+            }
+            Some(Command::Resume) => {
+                tui::ensure_interactive()?;
+                let config = Config::load(overrides)?;
+                let startup = tui::StartupMode::ResumeSelector(config.agent().model());
+                Self::run_tui(config, startup).await
+            }
+            Some(Command::Update) => run_update().await,
+            // Adding a server creates the selected file when it does not exist yet.
+            Some(Command::Mcp { command }) => command.run(&Config::load_for_edit(overrides)?),
+            Some(Command::Auth { provider, command }) => {
+                command.run(&Config::load(overrides)?, provider).await
+            }
+            Some(Command::Config { command }) => command.run(&Config::load(overrides)?),
+            Some(Command::Memory { command }) => command.run(&Config::load(overrides)?).await,
+            Some(Command::Run {
+                prompt,
+                #[cfg(feature = "harbor-evals")]
+                orchestration_log,
+            }) => {
+                Self::run_agent(
+                    &Config::load(overrides)?,
+                    prompt,
+                    #[cfg(feature = "harbor-evals")]
+                    orchestration_log,
+                )
+                .await
+            }
         }
-        if let Some(command) = self.command.take_if(|command| !command.requires_config()) {
-            return command.run_without_config().await;
-        }
+    }
 
-        let overrides = ConfigOverrides {
+    fn into_overrides(self) -> ConfigOverrides {
+        ConfigOverrides {
             path: self.config,
             auth_mode: self.auth,
             auth_file: self.auth_file,
@@ -382,27 +421,6 @@ impl Cli {
             websocket_url: self.websocket_url,
             api_base_url: self.api_base_url,
             transport: self.responses_transport,
-        };
-        let config = if matches!(&self.command, Some(Command::Mcp { .. })) {
-            Config::load_for_edit(overrides)?
-        } else {
-            Config::load(overrides)?
-        };
-        let model = config.agent().model();
-
-        match self.command {
-            Some(Command::Resume) => {
-                Self::run_tui(config, tui::StartupMode::ResumeSelector(model)).await
-            }
-            Some(command) => command.run_with_config(&config, model).await,
-            None => {
-                let startup = self
-                    .resume
-                    .map_or(tui::StartupMode::NewSession(model), |session_id| {
-                        tui::StartupMode::ResumeSession(session_id)
-                    });
-                Self::run_tui(config, startup).await
-            }
         }
     }
 
@@ -413,6 +431,23 @@ impl Cli {
             print_resume_hint(&session_id);
         }
         Ok(())
+    }
+
+    async fn run_agent(
+        config: &Config,
+        prompt: String,
+        #[cfg(feature = "harbor-evals")] orchestration_log: Option<PathBuf>,
+    ) -> Result<()> {
+        let shutdown = CancellationToken::new();
+        let run = ConfiguredAgent::run_from_config(
+            config,
+            config.agent().model(),
+            prompt,
+            shutdown.clone(),
+            #[cfg(feature = "harbor-evals")]
+            orchestration_log,
+        );
+        shutdown::run_until_complete(shutdown, run).await
     }
 }
 
@@ -437,76 +472,24 @@ fn resume_command(session_id: &str) -> String {
     format!("tact --resume {session_id}")
 }
 
-impl Command {
-    const fn requires_config(&self) -> bool {
-        !matches!(self, Self::Update)
-    }
-
-    async fn run_without_config(self) -> Result<()> {
-        let Self::Update = self else {
-            unreachable!("only update is config-independent");
-        };
-        match update::install_latest().await.map_err(Error::update)? {
-            update::UpdateStatus::UpToDate { version } => {
-                println!("tact v{version} is already up to date.");
-            }
-            update::UpdateStatus::Updated { from, to } => {
-                println!("Updated tact from v{from} to v{to}.");
-            }
-            update::UpdateStatus::UseCargo { command } => {
-                println!("This tact binary is managed by Cargo. Update it with `{command}`.");
-            }
-            update::UpdateStatus::UsePackageManager { manager } => {
-                println!(
-                    "This tact binary is managed by {manager}. Update it with your package manager."
-                );
-            }
+async fn run_update() -> Result<()> {
+    match update::install_latest().await.map_err(Error::update)? {
+        update::UpdateStatus::UpToDate { version } => {
+            println!("tact v{version} is already up to date.");
         }
-        Ok(())
-    }
-
-    async fn run_with_config(self, config: &Config, model: Model) -> Result<()> {
-        match self {
-            Self::Auth { provider, command } => command.run(config, provider).await,
-            Self::Config { command } => command.run(config),
-            Self::Mcp { command } => command.run(config),
-            Self::Run {
-                prompt,
-                #[cfg(feature = "harbor-evals")]
-                orchestration_log,
-            } => {
-                Self::run_agent(
-                    config,
-                    model,
-                    prompt,
-                    #[cfg(feature = "harbor-evals")]
-                    orchestration_log,
-                )
-                .await
-            }
-            Self::Resume => unreachable!("resume is dispatched to the TUI"),
-            Self::Memory { command } => command.run(config).await,
-            Self::Update => unreachable!("update is dispatched before configuration is loaded"),
+        update::UpdateStatus::Updated { from, to } => {
+            println!("Updated tact from v{from} to v{to}.");
+        }
+        update::UpdateStatus::UseCargo { command } => {
+            println!("This tact binary is managed by Cargo. Update it with `{command}`.");
+        }
+        update::UpdateStatus::UsePackageManager { manager } => {
+            println!(
+                "This tact binary is managed by {manager}. Update it with your package manager."
+            );
         }
     }
-
-    async fn run_agent(
-        config: &Config,
-        model: Model,
-        prompt: String,
-        #[cfg(feature = "harbor-evals")] orchestration_log: Option<PathBuf>,
-    ) -> Result<()> {
-        let shutdown = CancellationToken::new();
-        let run = ConfiguredAgent::run_from_config(
-            config,
-            model,
-            prompt,
-            shutdown.clone(),
-            #[cfg(feature = "harbor-evals")]
-            orchestration_log,
-        );
-        shutdown::run_until_complete(shutdown, run).await
-    }
+    Ok(())
 }
 
 impl MemoryCommand {
@@ -1249,12 +1232,10 @@ mod tests {
     }
 
     #[test]
-    fn update_is_config_independent() {
+    fn update_takes_no_arguments() {
         let cli = Cli::try_parse_from(["tact", "update"]).unwrap();
-        let command = cli.command.expect("missing update command");
-
-        assert!(matches!(&command, Command::Update));
-        assert!(!command.requires_config());
+        assert!(matches!(cli.command, Some(Command::Update)));
+        assert!(Cli::try_parse_from(["tact", "update", "now"]).is_err());
     }
 
     #[test]
@@ -1270,7 +1251,6 @@ mod tests {
                 command: MemoryCommand::Push { dry_run: true }
             }
         ));
-        assert!(command.requires_config());
         assert!(Cli::try_parse_from(["tact", "memory", "upload"]).is_err());
         assert!(Cli::try_parse_from(["tact", "sync-memories"]).is_err());
     }
