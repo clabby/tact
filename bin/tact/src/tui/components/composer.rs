@@ -35,6 +35,7 @@ use ratatui::{
 };
 use std::{
     collections::VecDeque,
+    fmt::{self, Display, Formatter, Write as _},
     mem,
     ops::Range,
     path::Path,
@@ -85,6 +86,23 @@ impl InputMode {
     }
 }
 
+/// The sessions hosted by this process, of which `running` have a turn or shell command in flight.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct LiveSessions {
+    pub(crate) live: usize,
+    pub(crate) running: usize,
+}
+
+impl Display for LiveSessions {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "{} sessions, {} running",
+            self.live, self.running
+        )
+    }
+}
+
 pub(crate) enum ComposerEvent {
     Terminal(Event),
     PasteImage(String),
@@ -110,7 +128,7 @@ pub(crate) enum ComposerEvent {
         now: Instant,
     },
     /// Summarizes this process's live sessions when there is more than one.
-    LiveSessions(Option<String>),
+    LiveSessions(Option<LiveSessions>),
     ActiveSubagents {
         count: usize,
         now: Instant,
@@ -144,7 +162,7 @@ pub(crate) struct Composer {
     activity_status: Option<String>,
     task_wave: Option<WavedText>,
     task_status: Option<String>,
-    live_sessions: Option<String>,
+    live_sessions: Option<LiveSessions>,
     active_subagents: usize,
     subagent_wave: Option<WavedText>,
     turn_timers: VecDeque<TurnTimer>,
@@ -1326,9 +1344,8 @@ impl Composer {
         } else {
             format!("{usage_before_subagents}{} ", subagent_segment.trim_start())
         };
-        if let Some(sessions) = &self.live_sessions {
-            usage.push_str(sessions);
-            usage.push(' ');
+        if let Some(sessions) = self.live_sessions {
+            write!(usage, "{sessions} ").expect("writing to a String cannot fail");
         }
         let model = format!(" {} ", self.model);
         let timer = self

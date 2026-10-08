@@ -9,6 +9,7 @@
 //! each live session with what was last published and sends only real changes.
 
 use super::{
+    composer::LiveSessions,
     confirmation::{Confirmation, ConfirmationEffect, ConfirmationEvent},
     node::{Component, ComponentUpdate, RenderRequest},
     root::{DraftReset, PaneCommand, RestoredSessionProjection, RootEffect, RootEvent, RootNode},
@@ -241,7 +242,7 @@ enum AppOverlay {
 
 #[derive(Clone, Debug, PartialEq)]
 struct Settings {
-    model: String,
+    model: Model,
     effort: ReasoningEffort,
     reasoning_mode: ReasoningMode,
     speed: Speed,
@@ -251,7 +252,7 @@ impl Settings {
     fn of(root: &RootNode) -> Self {
         let composer = root.composer();
         Self {
-            model: composer.model().to_string(),
+            model: composer.model(),
             effort: composer.effort(),
             reasoning_mode: composer.reasoning_mode(),
             speed: composer.speed(),
@@ -1252,7 +1253,7 @@ impl AppNode {
                 info: SessionInfo {
                     id: published.session.clone(),
                     workspace: root.workspace().to_owned(),
-                    model: settings.model,
+                    model: settings.model.to_string(),
                     effort: settings.effort,
                     reasoning_mode: settings.reasoning_mode,
                     speed: settings.speed,
@@ -1313,7 +1314,7 @@ impl AppNode {
             if published.settings != settings {
                 publish(Publication::Settings {
                     session: published.session.clone(),
-                    model: settings.model.clone(),
+                    model: settings.model.to_string(),
                     effort: settings.effort,
                     reasoning_mode: settings.reasoning_mode,
                     speed: settings.speed,
@@ -1359,13 +1360,13 @@ impl AppNode {
                 session: session.clone(),
             });
         }
-        let summary = (panes.len() > 1).then(|| {
-            let live = panes.len();
-            format!("{live} sessions, {running} running")
+        let summary = (panes.len() > 1).then_some(LiveSessions {
+            live: panes.len(),
+            running,
         });
         let mut render = RenderRequest::None;
         for entry in panes.values_mut() {
-            render = render.max(entry.root.set_live_sessions(summary.clone()));
+            render = render.max(entry.root.set_live_sessions(summary));
         }
         render
     }

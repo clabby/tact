@@ -6,6 +6,7 @@ use super::{
     actions::{Action, ActionAvailability, ActionsEffect, ActionsEvent, ActionsMenu},
     composer::{
         Composer, ComposerChromeTarget, ComposerDraft, ComposerEffect, ComposerEvent, InputMode,
+        LiveSessions,
     },
     confirmation::{Confirmation, ConfirmationEffect, ConfirmationEvent},
     context_diagnostics::{
@@ -2411,7 +2412,7 @@ impl RootNode {
         self.title.as_deref()
     }
 
-    pub(super) fn set_live_sessions(&mut self, summary: Option<String>) -> RenderRequest {
+    pub(super) fn set_live_sessions(&mut self, summary: Option<LiveSessions>) -> RenderRequest {
         let update = self.composer.update(ComposerEvent::LiveSessions(summary));
         if update.changed {
             RenderRequest::Immediate
