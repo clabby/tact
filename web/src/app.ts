@@ -3,6 +3,9 @@ import "./ui/controls.css";
 import "./shell/shell.css";
 import { ApiClient, ApiError, describeError } from "./core/api-client";
 import { Transcript } from "./chat/chat";
+import { FindBar } from "./chat/find-bar";
+import { agentNote } from "./chat/agent-links";
+import { entryLink, hashWithoutToken, parseHashLink, type HashLink } from "./core/permalink";
 import { Composer } from "./chat/composer";
 import { setAttentionBadge } from "./shell/favicon";
 import { effortColor, modelColor } from "./core/format";
@@ -23,7 +26,7 @@ import { openSheet } from "./ui/sheet";
 import { toast } from "./ui/toast";
 import { openMenu } from "./ui/menu";
 import { checkoutMenu, workspaceChip, workspaceLabel } from "./core/workspaces";
-import type { CommandName, Commands, ModelCatalog, SiblingInstance, Workspaces } from "./core/wire";
+import type { CommandName, Commands, ModelCatalog, SiblingInstance, Subagent, Workspaces } from "./core/wire";
 
 const root = document.getElementById("app")!;
 const SIDEBAR_KEY = "tact.web.sidebar";
@@ -80,6 +83,10 @@ class App {
   };
   private shownSession: string | null = null;
   private wasRunning = false;
+  private readonly findBar: FindBar;
+  /** An entry link this page was opened with, shown once its session is. */
+  private pendingLink: HashLink | null = null;
+  private linkActivated = false;
 
   constructor(private readonly api: ApiClient) {
     root.innerHTML = `
@@ -115,8 +122,19 @@ class App {
       root.querySelector(".transcript-scroller")!,
       root.querySelector(".jump-latest")!,
       () => this.theme.current,
+      {
+        openReview: () => this.showView("review"),
+        seen: sessionStorage,
+        laidOut: () => this.rail.refresh(),
+      },
     );
-    this.rail = new PromptRail(root.querySelector("#view-chat")!, root.querySelector(".transcript-scroller")!, () => this.store.state.session);
+    this.rail = new PromptRail(
+      root.querySelector("#view-chat")!,
+      root.querySelector(".transcript-scroller")!,
+      () => this.store.state.session,
+      (prompt) => this.transcript.marks(prompt),
+    );
+    this.findBar = new FindBar(root.querySelector("#view-chat")!, this.transcript);
     this.composer = new Composer(root.querySelector(".dock")!, {
       api,
       catalog: () => this.catalog,
@@ -186,6 +204,12 @@ class App {
       this.instances = instances;
       this.sidebar.renderFooter(this.store.state.connection, instances);
     }).catch(() => {});
+    this.pendingLink = linkTarget(location.hash);
+    addEventListener("hashchange", () => {
+      this.pendingLink = linkTarget(location.hash);
+      this.linkActivated = false;
+      this.openLink();
+    });
     document.addEventListener("visibilitychange", () => {
       if (document.visibilityState !== "visible") return;
       this.stream.reconnectNow();
@@ -214,6 +238,7 @@ class App {
           this.composer.statusChanged();
           this.composer.settingsChanged();
           this.renderHeader();
+          this.openLink();
           const running = this.store.anyRunning();
           if (running !== this.wasRunning) {
             this.wasRunning = running;
@@ -224,6 +249,7 @@ class App {
         case "session":
           this.transcript.show(state.session && this.sessionSource(state.session.id));
           this.rail.refresh();
+          this.openLink();
           this.composer.show(state.session);
           this.renderHeader();
           if ((state.session?.id ?? null) !== this.shownSession) {
@@ -256,15 +282,45 @@ class App {
           break;
         case "subagents":
           this.subagents?.rosterChanged();
+          this.transcript.agentsChanged();
           this.composer.statusChanged();
           break;
         case "subagent_entry":
           this.subagents?.entryChanged(change.agent, change.id);
+          this.transcript.agentsChanged();
           break;
         case "workspace":
           for (const listener of this.reviewListeners.workspace) listener(change.checkout);
           break;
       }
+    }
+  }
+
+  /**
+   * Opens the entry a link named once its session is shown, asking for the session first when it
+   * is live but not the active one.
+   */
+  private openLink() {
+    const link = this.pendingLink;
+    if (!link?.session || link.entry === null) return;
+    const state = this.store.state;
+    if (state.session?.id === link.session) {
+      this.pendingLink = null;
+      history.replaceState(null, "", location.pathname + location.search);
+      this.showView("chat");
+      const entry = link.entry;
+      requestAnimationFrame(() => {
+        if (!this.transcript.reveal(entry, { flash: true })) toast("That entry is no longer in the transcript.", "info");
+      });
+      return;
+    }
+    if (state.live.some((summary) => summary.id === link.session)) {
+      if (this.linkActivated) return;
+      this.linkActivated = true;
+      this.command("activate", { session: link.session });
+    } else if (state.connection === "open" && state.live.length > 0) {
+      this.pendingLink = null;
+      toast("The linked session is not open in this Tact.", "info");
     }
   }
 
@@ -489,6 +545,9 @@ class App {
       } else if (mod && event.key === ".") {
         event.preventDefault();
         this.showView(this.layout.view === "review" ? "chat" : "review");
+      } else if (mod && event.key.toLowerCase() === "f" && !event.shiftKey && !event.altKey && !isEditable(event.target)) {
+        event.preventDefault();
+        this.openFind();
       } else if (mod && event.key.toLowerCase() === "k") {
         event.preventDefault();
         if (this.palette.isOpen) this.palette.close();
@@ -525,6 +584,10 @@ class App {
       detail: (entry: number) => this.api.toolDetail(id, entry),
       image: (entry: number, index: number) => this.api.imageUrl(id, entry, index),
       participants: () => ({ agents: this.store.state.session?.subagents.agents ?? [] }),
+      link: (entry: number) => entryLink(location, id, entry),
+      agents: () => this.store.state.session?.subagents.agents ?? [],
+      agentNote: (agent: Subagent) => agentNote(agent, this.store.state.session?.agents.get(agent.id)),
+      openAgent: (agent: number) => this.openSubagents(agent),
     };
   }
 
@@ -549,11 +612,22 @@ class App {
     }));
   }
 
-  private openSubagents() {
-    if (this.subagents) return;
+  /** Opens the subagents popup, showing `agent`'s transcript when one is named. */
+  private openSubagents(agent?: number) {
+    if (this.subagents) {
+      if (agent !== undefined) this.subagents.select(agent);
+      return;
+    }
     this.subagents = openSubagents(this.api, () => this.store.state.session, () => this.theme.current, () => {
       this.subagents = null;
-    });
+    }, agent);
+  }
+
+  /** Find in the transcript; in a text field the browser's own find stays in charge. */
+  private openFind() {
+    if (!this.store.state.session) return;
+    this.showView("chat");
+    this.findBar.open();
   }
 
   /** Sends a command, reporting a refusal as a toast. */
@@ -661,6 +735,7 @@ class App {
       { id: "view", title: this.layout.view === "review" ? "Show chat" : "Show review", group: "View", icon: this.layout.view === "review" ? "message" : "panel", keywords: "diff changes overview", hint: isMac ? "⌘." : "Ctrl .", run: () => this.showView(this.layout.view === "review" ? "chat" : "review") },
       { id: "sidebar", title: "Toggle sidebar", group: "View", icon: "sidebar", hint: isMac ? "⌘B" : "Ctrl B", run: () => this.dispatch({ type: "toggle-sidebar" }) },
       { id: "composer", title: "Focus composer", group: "View", icon: "pencil", hint: "/", run: () => this.composer.focus() },
+      { id: "find", title: "Find in transcript", group: "View", icon: "search", keywords: "search", hint: isMac ? "⌘F" : "Ctrl F", run: () => this.openFind() },
       { id: "shortcuts", title: "Keyboard shortcuts", group: "View", icon: "keyboard", hint: "?", run: () => showShortcuts() },
       ...(["system", "light", "dark"] as const).filter((choice) => choice !== this.theme.choice).map((choice): PaletteCommand => ({
         id: `theme:${choice}`, title: `Theme: ${choice}`, group: "View", icon: choice === "dark" ? "moon" : choice === "light" ? "sun" : "monitor",
@@ -694,6 +769,7 @@ const SHORTCUTS: [string, string][] = [
   [isMac ? "⌘B" : "Ctrl B", "Show or hide the sidebar"],
   [isMac ? "⌘." : "Ctrl .", "Switch between chat and review"],
   ["/", "Focus the composer"],
+  [isMac ? "⌘F" : "Ctrl F", "Find in the transcript (outside text fields)"],
   ["Enter", "Send, or steer while a turn runs"],
   ["Shift Tab", "Queue the prompt while a turn runs (instead of steering)"],
   ["Shift Enter", "New line"],
@@ -719,16 +795,23 @@ function showShortcuts() {
   sheet.body.append(list);
 }
 
+/** The entry a link in the fragment names, if any. */
+function linkTarget(hash: string): HashLink | null {
+  const link = parseHashLink(hash);
+  return link.session && link.entry !== null ? link : null;
+}
+
 function isEditable(target: EventTarget | null) {
   return target instanceof HTMLElement && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName));
 }
 
 async function main() {
   const api = new ApiClient();
-  const token = new URLSearchParams(location.hash.slice(1)).get("k");
+  const { token } = parseHashLink(location.hash);
   if (token) {
-    // The fragment is a credential: drop it from the address bar and history before anything else.
-    history.replaceState(null, "", location.pathname + location.search);
+    // The token is a credential: drop it from the address bar and history before anything else,
+    // keeping an entry link that came with it.
+    history.replaceState(null, "", location.pathname + location.search + hashWithoutToken(location.hash));
     try {
       await api.login(token);
     } catch (error) {

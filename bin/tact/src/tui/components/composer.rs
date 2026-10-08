@@ -22,6 +22,7 @@ use super::{
 use crate::{
     app::{
         config::{ReasoningEffort, ReasoningMode, Speed},
+        installation::InstallationKind,
         theme::Theme,
     },
     core::{
@@ -54,7 +55,16 @@ use unicode_width::UnicodeWidthStr;
 
 const MIN_CONTENT_ROWS: usize = 3;
 const MAX_CONTENT_ROWS: usize = 6;
-const DEVELOPMENT_BADGE: &str = " ◉ dev ";
+
+/// The footer badge of a build that is not an official release: red for a source build and blue for
+/// a pre-release published from `main`.
+fn build_badge(installation: &InstallationKind) -> Option<(&'static str, Color)> {
+    match installation {
+        InstallationKind::Development => Some((" ◉ dev ", Color::Red)),
+        InstallationKind::PreRelease { .. } => Some((" ◉ pre-release ", Color::Blue)),
+        _ => None,
+    }
+}
 
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum ComposerEffect {
@@ -1117,17 +1127,13 @@ impl Composer {
         let directory_width = directory.width().min(content_width);
         let directory_start =
             content_end.saturating_sub(u16::try_from(directory_width).unwrap_or(u16::MAX));
-        let development_width = if crate::app::installation::current().is_development()
-            && DEVELOPMENT_BADGE.width()
-                <= usize::from(directory_start.saturating_sub(content_start))
-        {
-            DEVELOPMENT_BADGE.width()
-        } else {
-            0
-        };
-        let development_start =
-            directory_start.saturating_sub(u16::try_from(development_width).unwrap_or(u16::MAX));
-        let hint_space = usize::from(development_start.saturating_sub(content_start));
+        let badge = build_badge(crate::app::installation::current()).filter(|(text, _)| {
+            text.width() <= usize::from(directory_start.saturating_sub(content_start))
+        });
+        let badge_width = badge.map_or(0, |(text, _)| text.width());
+        let badge_start =
+            directory_start.saturating_sub(u16::try_from(badge_width).unwrap_or(u16::MAX));
+        let hint_space = usize::from(badge_start.saturating_sub(content_start));
         let entry_hint = entry_hint(theme, self.draft.text().is_empty());
         if entry_hint.width() <= hint_space {
             buffer.set_line(
@@ -1148,13 +1154,13 @@ impl Composer {
                     .add_modifier(Modifier::BOLD),
             );
         }
-        if development_width > 0 {
+        if let Some((text, color)) = badge {
             buffer.set_stringn(
-                development_start,
+                badge_start,
                 bottom,
-                DEVELOPMENT_BADGE,
-                development_width,
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                text,
+                badge_width,
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
             );
         }
         buffer.set_stringn(
@@ -1277,12 +1283,12 @@ mod tests {
     use super::{
         super::selection::{Selection, Surface, TextRange},
         Composer, ComposerChromeTarget, ComposerEffect, ComposerEvent, InputMode, LiveSessions,
-        StatusLine, context_percent,
+        StatusLine, build_badge, context_percent,
     };
     use crate::{
         app::{
             config::{ReasoningEffort, ReasoningMode, Speed},
-            installation,
+            installation::{self, InstallationKind},
             theme::Theme,
         },
         core::context::ContextBudget,
@@ -1679,6 +1685,22 @@ mod tests {
                 assert!(cell.modifier.contains(Modifier::BOLD));
             }
         }
+    }
+
+    #[test]
+    fn only_builds_that_are_not_official_releases_carry_a_badge() {
+        let pre_release = InstallationKind::PreRelease {
+            revision: "0123456789ab".to_owned(),
+        };
+        assert_eq!(
+            build_badge(&InstallationKind::Development),
+            Some((" ◉ dev ", Color::Red))
+        );
+        assert_eq!(
+            build_badge(&pre_release),
+            Some((" ◉ pre-release ", Color::Blue))
+        );
+        assert_eq!(build_badge(&InstallationKind::ReleaseArchive), None);
     }
 
     #[test]

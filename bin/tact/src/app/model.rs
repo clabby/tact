@@ -6,7 +6,7 @@ use nanocodex::{
     ClaudeModel, HarnessModel as Model, Model as CodexModel, ReasoningMode as NativeReasoningMode,
 };
 use serde::{Deserialize, Deserializer, Serialize, de};
-use tact_subagents::SUPPORTED_MODELS;
+use tact_subagents::{AgentContext, SUPPORTED_MODELS};
 
 /// The number of OpenAI models in [`SUPPORTED_MODELS`]. The roster lists every OpenAI model
 /// before any Claude model, so the OpenAI-only roster is a prefix of the full one; the
@@ -103,11 +103,9 @@ impl ModelOption {
 
 /// The reasoning modes a model accepts. Pro reasoning is an OpenAI capability.
 pub(crate) const fn reasoning_modes(model: Model) -> &'static [ReasoningMode] {
-    match model {
-        Model::Codex(model) if model.supports_reasoning_mode(NativeReasoningMode::Pro) => {
-            &[ReasoningMode::Standard, ReasoningMode::Pro]
-        }
-        _ => &[ReasoningMode::Standard],
+    match AgentContext::resolve_reasoning_mode(model, NativeReasoningMode::Pro) {
+        NativeReasoningMode::Pro => &[ReasoningMode::Standard, ReasoningMode::Pro],
+        NativeReasoningMode::Standard => &[ReasoningMode::Standard],
     }
 }
 

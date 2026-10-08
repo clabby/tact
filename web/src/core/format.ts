@@ -52,7 +52,7 @@ export function inputBlocked(status: TransientStatus | null, running: boolean): 
 
 /** The CSS custom property holding a model's hue, following the TUI's model palette. */
 export function modelColor(model: string) {
-  const family = ["luna", "sol", "astra", "sonnet", "opus", "fable"].find((name) => model.includes(name));
+  const family = ["luna", "sol", "astra", "haiku", "sonnet", "opus", "fable"].find((name) => model.includes(name));
   return family ? `var(--model-${family})` : "var(--muted)";
 }
 

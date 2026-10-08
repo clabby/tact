@@ -41,7 +41,10 @@ use crate::{
     },
 };
 pub(crate) use instructions::{IMAGE_RENDERING_INSTRUCTIONS, MEMORY_REVIEW_CHECKPOINT};
-use nanocodex::{AgentEvents, HarnessModel as Model, Nanocodex, NanocodexError, Tools};
+use nanocodex::{
+    AgentEvents, HarnessModel as Model, Nanocodex, NanocodexError,
+    ReasoningMode as NativeReasoningMode, Tools,
+};
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
@@ -68,10 +71,9 @@ pub(crate) struct ConfiguredAgent {
 }
 
 pub(crate) fn supported_reasoning_mode(model: Model, preferred: ReasoningMode) -> ReasoningMode {
-    if matches!(model, Model::Codex(model) if model.supports_reasoning_mode(preferred.into())) {
-        preferred
-    } else {
-        ReasoningMode::Standard
+    match AgentContext::resolve_reasoning_mode(model, preferred.into()) {
+        NativeReasoningMode::Standard => ReasoningMode::Standard,
+        NativeReasoningMode::Pro => ReasoningMode::Pro,
     }
 }
 

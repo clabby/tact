@@ -8,6 +8,7 @@ mod api;
 mod assets;
 pub(crate) mod bridge;
 mod hub;
+mod outcome;
 mod registry;
 mod review;
 mod tailscale;

@@ -41,6 +41,8 @@ const BUILD_VERSION: &str = concat!(
     env!("TACT_BUILD_TARGET"),
     "\nprofile: ",
     env!("TACT_BUILD_PROFILE"),
+    "\nchannel: ",
+    env!("TACT_RELEASE_CHANNEL"),
     "\nrustc: ",
     env!("TACT_RUSTC_VERSION"),
 );
@@ -219,8 +221,13 @@ enum Command {
         #[command(subcommand)]
         command: MemoryCommand,
     },
-    /// Download and install the latest signed tact release.
-    Update,
+    /// Download and install the latest signed tact release, or a pre-release build.
+    Update {
+        /// Install the pre-release build of this commit on main, given as at least seven
+        /// hexadecimal digits of its hash, instead of the latest release.
+        #[arg(value_name = "SHA")]
+        revision: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -386,7 +393,7 @@ impl Cli {
                 let startup = tui::StartupMode::ResumeSelector(config.agent().model());
                 Self::run_tui(config, startup).await
             }
-            Some(Command::Update) => run_update().await,
+            Some(Command::Update { revision }) => run_update(revision).await,
             // Adding a server creates the selected file when it does not exist yet.
             Some(Command::Mcp { command }) => command.run(&Config::load_for_edit(overrides)?),
             Some(Command::Auth { provider, command }) => {
@@ -479,13 +486,17 @@ fn resume_command(session_id: &str) -> String {
     format!("tact --resume {session_id}")
 }
 
-async fn run_update() -> Result<()> {
-    match update::install_latest().await.map_err(CliError::Update)? {
-        update::UpdateStatus::UpToDate { version } => {
-            println!("tact v{version} is already up to date.");
+async fn run_update(revision: Option<String>) -> Result<()> {
+    let status = match revision {
+        Some(revision) => update::install_pre_release(&revision).await,
+        None => update::install_latest().await,
+    };
+    match status.map_err(CliError::Update)? {
+        update::UpdateStatus::UpToDate { current } => {
+            println!("tact {current} is already up to date.");
         }
         update::UpdateStatus::Updated { from, to } => {
-            println!("Updated tact from v{from} to v{to}.");
+            println!("Updated tact from {from} to {to}.");
         }
         update::UpdateStatus::UseCargo { command } => {
             println!("This tact binary is managed by Cargo. Update it with `{command}`.");
@@ -1165,10 +1176,18 @@ mod tests {
     }
 
     #[test]
-    fn update_takes_no_arguments() {
+    fn update_takes_an_optional_commit() {
         let cli = Cli::try_parse_from(["tact", "update"]).unwrap();
-        assert!(matches!(cli.command, Some(Command::Update)));
-        assert!(Cli::try_parse_from(["tact", "update", "now"]).is_err());
+        assert!(matches!(
+            cli.command,
+            Some(Command::Update { revision: None })
+        ));
+        let cli = Cli::try_parse_from(["tact", "update", "0123abc"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Update { revision: Some(revision) }) if revision == "0123abc"
+        ));
+        assert!(Cli::try_parse_from(["tact", "update", "a", "b"]).is_err());
     }
 
     #[test]

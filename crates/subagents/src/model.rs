@@ -23,20 +23,24 @@ pub struct AgentContext {
 }
 
 impl AgentContext {
+    /// Records the selected model and effort with a supported reasoning mode.
+    pub fn new(model: Model, thinking: Thinking, preferred: ReasoningMode) -> Self {
+        Self {
+            model,
+            thinking,
+            reasoning_mode: Self::resolve_reasoning_mode(model, preferred),
+        }
+    }
+
     /// Resolves a preferred reasoning mode to the one `model` actually runs.
     ///
     /// Pro is a per-model preference: a model without Pro support runs in standard mode. Callers
     /// that authorize Pro must do so before this resolution, because the resolved mode is the
     /// authority the session later carries.
-    pub fn new(model: Model, thinking: Thinking, preferred: ReasoningMode) -> Self {
-        let reasoning_mode = match model {
+    pub const fn resolve_reasoning_mode(model: Model, preferred: ReasoningMode) -> ReasoningMode {
+        match model {
             Model::Codex(codex) if codex.supports_reasoning_mode(preferred) => preferred,
             _ => ReasoningMode::Standard,
-        };
-        Self {
-            model,
-            thinking,
-            reasoning_mode,
         }
     }
 

@@ -56,7 +56,37 @@ The updater verifies both the release checksum and signature before replacing a 
 binary. If Cargo owns the installation, tact instead prints `cargo install tact --locked` so
 Cargo's records stay accurate, and builds declared through `TACT_PACKAGE_MANAGER` defer to the
 named package manager. Automatic update notifications are shown by every installation except
-development builds.
+builds made from source, which show a red `◉ dev` badge in the composer footer.
+
+#### Pre-release builds
+
+Every change merged to `main` is built and published as a pre-release, so you can try a change
+before the next official release. Find the commit you want, which `tact --version` also prints for
+the build you are running, and install its build with at least its first seven hexadecimal digits:
+
+```sh
+tact update 0123abc
+```
+
+A pre-release is a complete build: it ships the same four platform archives and web interface
+bundle as an official release, which tact downloads on first use exactly as it does for a release.
+Its composer footer shows a blue `◉ pre-release` badge, and `tact --version` reports the
+`pre-release` channel and its commit.
+
+- **Notifications.** A pre-release is treated as its Cargo version, so it is told when an official
+  release with a later version comes out, just as an official build is.
+- **Returning to a release.** `tact update` without a commit installs the latest official release,
+  even when it has the same version as the pre-release you are running.
+- **Trust.** Official releases are verified against a signing key published in the crates.io
+  package. Pre-releases are not published to crates.io, so they have no independent key: tact
+  verifies only the SHA-256 checksum of the archive, which makes them as trustworthy as the GitHub
+  Releases of `clabby/tact` themselves. Install official releases when that is not enough.
+- **Retention.** Only the fifty most recent pre-releases are kept. A commit older than that, or
+  one whose release workflow has not finished, reports that it has no build.
+- **Where it works.** Pre-releases replace a tact installed from a release archive or the install
+  script. Builds owned by Cargo or a package manager, and builds from source, are not replaced.
+- **Container images.** `ghcr.io/clabby/tact:dev` follows the latest pre-release, and
+  `ghcr.io/clabby/tact:dev-<commit>` pins one. `latest` and version tags stay official.
 
 ### Packaging
 
@@ -536,8 +566,9 @@ session's worker, and stop when the session closes.
 The browser files are a separate bundle. Official releases publish `tact-web-v<version>.tar.gz`; the
 server serves the bundle installed at `~/.tact/web/assets/v<version>` (it is re-checked on request
 while missing, so installing it needs no restart). Until it is installed the server answers with a
-page that explains how to install it. Official releases download and verify the matching bundle
-in the background on first start.
+page that explains how to install it. Official releases and pre-releases download and verify the
+matching bundle in the background on first start; a pre-release's is named
+`tact-web-dev-<commit>.tar.gz` and installed at `~/.tact/web/assets/dev-<commit>`.
 
 #### Developing the web interface
 

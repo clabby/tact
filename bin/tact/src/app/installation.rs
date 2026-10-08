@@ -15,9 +15,16 @@ struct CargoInstallMetadata {
     v1: BTreeMap<String, Vec<String>>,
 }
 
+/// How this build was produced, which decides how it is updated and what it shows.
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum InstallationKind {
+    /// An official release archive, signed and published with a version tag.
     ReleaseArchive,
+    /// The pre-release archive CI publishes for one commit on `main`. It updates like a release
+    /// archive, and `revision` is the commit's twelve-digit abbreviated hash.
+    PreRelease {
+        revision: String,
+    },
     CratesIo {
         root: PathBuf,
     },
@@ -34,16 +41,33 @@ impl InstallationKind {
     pub(crate) fn is_development(&self) -> bool {
         matches!(self, Self::Development)
     }
+
+    /// The tag of the GitHub Release that published this build: `v<version>` for an official
+    /// release and `dev-<revision>` for a pre-release. A build not made from a release archive has
+    /// no release of its own, so it names the official release of its version, whose web bundle it
+    /// shares.
+    pub(crate) fn release_tag(&self) -> String {
+        match self {
+            Self::PreRelease { revision } => format!("dev-{revision}"),
+            _ => format!("v{}", env!("CARGO_PKG_VERSION")),
+        }
+    }
 }
 
 pub(crate) fn current() -> &'static InstallationKind {
     INSTALLATION.get_or_init(|| {
-        let explicitly_released = matches!(env!("TACT_RELEASE_BUILD"), "true");
+        let channel = match env!("TACT_RELEASE_CHANNEL") {
+            "release" => ReleaseChannel::Release,
+            "pre-release" => ReleaseChannel::PreRelease {
+                revision: env!("TACT_GIT_SHA"),
+            },
+            _ => ReleaseChannel::Development,
+        };
         let package_manager =
             Some(env!("TACT_PACKAGE_MANAGER")).filter(|manager| !manager.is_empty());
         let executable = env::current_exe().ok();
         detect(
-            explicitly_released,
+            channel,
             package_manager,
             executable.as_deref(),
             installed_packages,
@@ -51,8 +75,15 @@ pub(crate) fn current() -> &'static InstallationKind {
     })
 }
 
+/// What the build declared itself to be through `TACT_RELEASE_BUILD`.
+enum ReleaseChannel<'a> {
+    Release,
+    PreRelease { revision: &'a str },
+    Development,
+}
+
 fn detect(
-    explicitly_released: bool,
+    channel: ReleaseChannel<'_>,
     package_manager: Option<&str>,
     executable: Option<&Path>,
     installed_packages: impl FnOnce(&Path) -> Option<String>,
@@ -67,10 +98,13 @@ fn detect(
             manager: manager.to_owned(),
         };
     }
-    if explicitly_released {
-        return InstallationKind::ReleaseArchive;
+    match channel {
+        ReleaseChannel::Release => InstallationKind::ReleaseArchive,
+        ReleaseChannel::PreRelease { revision } => InstallationKind::PreRelease {
+            revision: revision.to_owned(),
+        },
+        ReleaseChannel::Development => InstallationKind::Development,
     }
-    InstallationKind::Development
 }
 
 fn crates_io_install_root(
@@ -160,7 +194,7 @@ fn cargo_list_owns_tact(output: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        InstallationKind, candidate_cargo_install_root, cargo_list_owns_tact,
+        InstallationKind, ReleaseChannel, candidate_cargo_install_root, cargo_list_owns_tact,
         cargo_metadata_tact_ownership, detect,
     };
     use std::{
@@ -183,13 +217,15 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            detect(false, None, Some(&executable), |_| None),
+            detect(ReleaseChannel::Development, None, Some(&executable), |_| {
+                None
+            }),
             InstallationKind::CratesIo {
                 root: root.path().to_path_buf(),
             }
         );
         assert_eq!(
-            detect(true, None, Some(&executable), |_| None),
+            detect(ReleaseChannel::Release, None, Some(&executable), |_| None),
             InstallationKind::CratesIo {
                 root: root.path().to_path_buf(),
             }
@@ -198,7 +234,12 @@ mod tests {
         // release flag above: a cargo-managed binary must be updated through
         // Cargo regardless of how it was produced.
         assert_eq!(
-            detect(false, Some("nix"), Some(&executable), |_| None),
+            detect(
+                ReleaseChannel::Development,
+                Some("nix"),
+                Some(&executable),
+                |_| None
+            ),
             InstallationKind::CratesIo {
                 root: root.path().to_path_buf(),
             }
@@ -206,10 +247,10 @@ mod tests {
     }
 
     #[test]
-    fn release_archives_and_repository_builds_are_distinct() {
+    fn release_archives_pre_releases_and_repository_builds_are_distinct() {
         assert_eq!(
             detect(
-                true,
+                ReleaseChannel::Release,
                 None,
                 Some(Path::new("/work/target/release/tact")),
                 |_| None
@@ -218,12 +259,38 @@ mod tests {
         );
         assert_eq!(
             detect(
-                false,
+                ReleaseChannel::PreRelease {
+                    revision: "0123456789ab",
+                },
+                None,
+                Some(Path::new("/work/target/release/tact")),
+                |_| None
+            ),
+            InstallationKind::PreRelease {
+                revision: "0123456789ab".to_owned(),
+            },
+        );
+        assert_eq!(
+            detect(
+                ReleaseChannel::Development,
                 None,
                 Some(Path::new("/work/target/debug/tact")),
                 |_| None
             ),
             InstallationKind::Development,
+        );
+    }
+
+    #[test]
+    fn releases_are_tagged_by_version_and_pre_releases_by_revision() {
+        let pre_release = InstallationKind::PreRelease {
+            revision: "0123456789ab".to_owned(),
+        };
+        assert_eq!(pre_release.release_tag(), "dev-0123456789ab");
+        assert!(!pre_release.is_development());
+        assert_eq!(
+            InstallationKind::ReleaseArchive.release_tag(),
+            format!("v{}", env!("CARGO_PKG_VERSION"))
         );
     }
 
@@ -235,11 +302,21 @@ mod tests {
         };
 
         assert_eq!(
-            detect(false, Some("nix"), Some(executable), |_| None),
+            detect(
+                ReleaseChannel::Development,
+                Some("nix"),
+                Some(executable),
+                |_| None
+            ),
             external
         );
         assert_eq!(
-            detect(true, Some("nix"), Some(executable), |_| None),
+            detect(
+                ReleaseChannel::Release,
+                Some("nix"),
+                Some(executable),
+                |_| None
+            ),
             external
         );
         assert!(!external.is_development());
@@ -252,7 +329,7 @@ mod tests {
         fs::create_dir(root.path().join("bin")).unwrap();
 
         assert_eq!(
-            detect(false, None, Some(&executable), |_| {
+            detect(ReleaseChannel::Development, None, Some(&executable), |_| {
                 Some("tact v1.2.3:\n    tact\n".to_owned())
             }),
             InstallationKind::CratesIo {

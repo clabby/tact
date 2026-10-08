@@ -283,22 +283,19 @@ async fn harness_injects_descriptor_context_on_initial_and_reused_turns() {
     let (agent, events) = Nanocodex::builder(openai)
         .model(nanocodex::Model::Sol)
         .thinking(Thinking::Medium)
+        .reasoning_mode(ReasoningMode::Pro)
         .build()
         .unwrap();
     let reservation = registry.reserve("root").await.unwrap();
-    insert_runtime_session(&registry, &reservation, None, agent, events).await;
-    registry
-        .state
-        .lock()
-        .await
-        .scopes
-        .get_mut("root")
-        .unwrap()
-        .sessions
-        .get_mut(&reservation.id)
-        .unwrap()
-        .descriptor
-        .reasoning_mode = ReasoningMode::Pro;
+    insert_runtime_session(
+        &registry,
+        &reservation,
+        None,
+        ReasoningMode::Pro,
+        agent,
+        events,
+    )
+    .await;
     for token in [1, 2] {
         registry
             .launch_initial_turn(
@@ -395,6 +392,7 @@ async fn insert_runtime_session(
     registry: &Arc<Registry>,
     reservation: &AgentReservation,
     parent: Option<AgentId>,
+    reasoning_mode: ReasoningMode,
     agent: Nanocodex,
     events: nanocodex::AgentEvents,
 ) -> String {
@@ -404,7 +402,7 @@ async fn insert_runtime_session(
         session_id: session_id.clone(),
         model: Model::Codex(CodexModel::Sol),
         thinking: Thinking::Medium,
-        reasoning_mode: ReasoningMode::Standard,
+        reasoning_mode,
         role: format!("agent-{}", reservation.id),
         task: "wait forever".to_owned(),
         parent,
@@ -441,7 +439,15 @@ async fn insert_pending_runtime_session(
     let reservation = registry.reserve(root_session_id).await.unwrap();
     let id = reservation.id;
     let (agent, events) = pending_agent(called);
-    let session_id = insert_runtime_session(registry, &reservation, parent, agent, events).await;
+    let session_id = insert_runtime_session(
+        registry,
+        &reservation,
+        parent,
+        ReasoningMode::Standard,
+        agent,
+        events,
+    )
+    .await;
     (id, session_id)
 }
 
@@ -664,8 +670,15 @@ async fn interrupt_and_close_stop_recursive_turns_and_preserve_continuation() {
 
     let parent = registry.reserve("main").await.unwrap();
     let (parent_agent, parent_events) = pending_agent(Arc::clone(&parent_called));
-    let parent_session =
-        insert_runtime_session(&registry, &parent, None, parent_agent, parent_events).await;
+    let parent_session = insert_runtime_session(
+        &registry,
+        &parent,
+        None,
+        ReasoningMode::Standard,
+        parent_agent,
+        parent_events,
+    )
+    .await;
     registry
         .launch_initial_turn(
             &parent.root_session_id,
@@ -682,6 +695,7 @@ async fn interrupt_and_close_stop_recursive_turns_and_preserve_continuation() {
         &registry,
         &child,
         Some(parent.id),
+        ReasoningMode::Standard,
         child_agent,
         child_events,
     )
@@ -698,7 +712,15 @@ async fn interrupt_and_close_stop_recursive_turns_and_preserve_continuation() {
 
     let sibling = registry.reserve("main").await.unwrap();
     let (sibling_agent, sibling_events) = pending_agent(Arc::clone(&sibling_called));
-    insert_runtime_session(&registry, &sibling, None, sibling_agent, sibling_events).await;
+    insert_runtime_session(
+        &registry,
+        &sibling,
+        None,
+        ReasoningMode::Standard,
+        sibling_agent,
+        sibling_events,
+    )
+    .await;
     registry
         .launch_initial_turn(
             &sibling.root_session_id,

@@ -54,10 +54,11 @@ pub(crate) struct Registry {
     claude_enabled: AtomicBool,
 }
 
-/// Owns the clean-agent recipe and the settings applied to the next spawn.
+/// Owns the clean-agent recipe, fixed mode ceiling, and live spawn settings.
 /// Per-agent tool factories hold only a weak registry reference, keeping this ownership acyclic.
 struct AgentFactory {
     build: Box<AgentBuilder>,
+    max_reasoning_mode: ReasoningMode,
     settings: Mutex<AgentSettings>,
 }
 
@@ -67,7 +68,6 @@ type AgentBuilder =
 #[derive(Clone, Copy)]
 struct AgentSettings {
     max_thinking: Thinking,
-    max_reasoning_mode: ReasoningMode,
     speed: Speed,
 }
 
@@ -125,9 +125,9 @@ impl Registry {
         self.agent_factory
             .set(AgentFactory {
                 build: Box::new(factory),
+                max_reasoning_mode,
                 settings: Mutex::new(AgentSettings {
                     max_thinking,
-                    max_reasoning_mode,
                     speed,
                 }),
             })
@@ -166,10 +166,10 @@ impl Registry {
             }
             .into());
         }
-        if reasoning_mode_exceeds(reasoning_mode, settings.max_reasoning_mode) {
+        if reasoning_mode_exceeds(reasoning_mode, factory.max_reasoning_mode) {
             return Err(SpawnError::ReasoningModeExceedsMaximum {
                 requested: reasoning_mode,
-                maximum: settings.max_reasoning_mode,
+                maximum: factory.max_reasoning_mode,
             }
             .into());
         }

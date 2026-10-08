@@ -263,7 +263,11 @@ impl Hub {
     pub(super) fn agent_entries(&self, session: &str, agent: AgentId) -> Option<Vec<WireEntry>> {
         let state = self.state();
         let model = state.live(session)?.agents.get(&agent)?;
-        Some(visible(model).map(WireEntry::new).collect())
+        Some(
+            visible(model)
+                .map(|entry| WireEntry::new(model, entry))
+                .collect(),
+        )
     }
 
     pub(super) fn agent_entry_detail(
@@ -443,7 +447,10 @@ impl Live {
             effort: self.info.effort,
             reasoning_mode: self.info.reasoning_mode,
             speed: self.info.speed,
-            entries: self.visible().map(WireEntry::new).collect(),
+            entries: self
+                .visible()
+                .map(|entry| WireEntry::new(&self.model, entry))
+                .collect(),
             status: self.model.transient().map(WireStatus::from),
             queue: self.queue.iter().map(WireQueued::from).collect(),
             draft: WireDraft {
@@ -945,7 +952,7 @@ fn diff_active(live: &mut Live, previous: &ActiveSent, frames: &mut Vec<Frame>) 
                     &SubagentEntryEvent {
                         session,
                         agent: *agent,
-                        entry: WireEntry::new(entry),
+                        entry: WireEntry::new(model, entry),
                     },
                 ));
             }
@@ -973,7 +980,7 @@ fn diff_active(live: &mut Live, previous: &ActiveSent, frames: &mut Vec<Frame>) 
                 "entry",
                 &EntryEvent {
                     session,
-                    entry: WireEntry::new(entry),
+                    entry: WireEntry::new(&live.model, entry),
                 },
             ));
         }

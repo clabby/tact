@@ -15,6 +15,8 @@ export type SubagentsView = {
   rosterChanged(): void;
   entryChanged(agent: number, entry: number): void;
   themeChanged(): void;
+  /** Selects an agent and shows its transcript. */
+  select(agent: number): void;
 };
 
 const SVG = "http://www.w3.org/2000/svg";
@@ -28,6 +30,7 @@ export function openSubagents(
   session: () => SessionView | null,
   theme: () => Theme,
   onClose: () => void,
+  initial?: number,
 ): SubagentsView {
   const sheet = openSheet("Subagents", { size: "xl" });
   sheet.actions.innerHTML = `<label class="max-agents">Max <input type="number" min="1" step="1" inputmode="numeric" aria-label="Maximum subagents"></label>`;
@@ -54,7 +57,7 @@ export function openSubagents(
     sheet.body.querySelector(".agent-scroller")!,
     sheet.body.querySelector(".agent-view .jump-latest")!,
     theme,
-    { title: "Pick a subagent", body: "Its transcript streams here while it works." },
+    { empty: { title: "Pick a subagent", body: "Its transcript streams here while it works." } },
   );
   const panes = sheet.body.querySelector<HTMLElement>(".agents")!;
   /** As in the terminal, the graph starts on active agents; "all" also shows settled ones. */
@@ -225,7 +228,13 @@ export function openSubagents(
 
   renderGraph();
   transcript.show(null);
+  const selectId = (id: number) => {
+    const agent = roster().agents.find((candidate) => candidate.id === id);
+    if (agent && !closed) void select(agent);
+  };
+  if (initial !== undefined) selectId(initial);
   return {
+    select: selectId,
     rosterChanged: () => {
       if (closed) return;
       if (selected !== null && !roster().agents.some((agent) => agent.id === selected)) {
