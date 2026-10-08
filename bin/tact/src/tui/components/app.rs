@@ -31,7 +31,6 @@ use crate::{
             QueuedPrompt, SessionInfo,
         },
         session::{RecentPrompt, SessionSummary},
-        subagent_roster::SubagentRoster,
         transcript::TranscriptRecord,
     },
 };
@@ -46,7 +45,7 @@ use ratatui::{
 use semver::Version;
 use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Instant};
 use tact_memory::{MemoryAccess, MemoryKey, MemoryRecord, MemorySource};
-use tact_subagents::AgentUpdate;
+use tact_subagents::{AgentUpdate, SubagentRoster};
 use unicode_width::UnicodeWidthStr;
 
 const SPLIT_HINT: &str = " mouse: focus · Ctrl+C: clear · Ctrl+C×2: close ";

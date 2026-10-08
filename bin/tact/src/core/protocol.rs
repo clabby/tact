@@ -18,7 +18,6 @@ use crate::{
         context::{ContextBudget, ContextDiagnostics},
         extensions::SkillMatches,
         session::{HistoryPage, RecentPromptScope, RecentPrompts},
-        subagent_roster::SubagentRoster,
         transcript::TranscriptRecord,
     },
     search::FileMatches,
@@ -26,7 +25,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc};
 use tact_memory::{MemoryAccess, MemoryKey, MemoryRecord};
-use tact_subagents::{AgentId, AgentMessageUpdate};
+use tact_subagents::{AgentId, AgentMessageUpdate, SubagentRoster};
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;

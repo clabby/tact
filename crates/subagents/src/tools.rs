@@ -36,7 +36,7 @@ const WAIT_AGENT_TOOL: &str = "wait_agent";
 struct AgentTask {
     role: String,
     task: String,
-    #[serde(deserialize_with = "crate::roster::deserialize_model")]
+    #[serde(deserialize_with = "crate::models::deserialize_model")]
     model: Model,
     thinking: Thinking,
     output_schema: Value,

@@ -19,7 +19,6 @@ use crate::{
     core::{
         context::ContextBudget,
         protocol::{Busy, Draft, Origin, Publication, QueuedPrompt, SessionInfo},
-        subagent_roster::SubagentRoster,
         transcript::{
             EntryKind, SessionStarted, TranscriptEntry, TranscriptModel, TranscriptRecord,
             TransientStatus,
@@ -37,7 +36,7 @@ use std::{
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tact_subagents::{AgentId, AgentMessageUpdate, MessageSender};
+use tact_subagents::{AgentId, AgentMessageUpdate, MessageSender, SubagentRoster};
 use tokio::{
     sync::mpsc::{self, UnboundedReceiver},
     time::{Instant, sleep_until},
@@ -1372,8 +1371,8 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn context_and_subagents_are_projected_and_coalesced() {
-        use crate::core::{context::ContextBudget, subagent_roster::SubagentRoster};
-        use tact_subagents::AgentId;
+        use crate::core::context::ContextBudget;
+        use tact_subagents::{AgentId, SubagentRoster};
 
         let fixture = fixture();
         fixture.open("s1", None);

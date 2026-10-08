@@ -7,7 +7,6 @@ use crate::{
     core::{
         context::ContextBudget,
         protocol::{DraftImage, Origin, QueuedPrompt},
-        subagent_roster::SubagentRoster,
         transcript::{
             DirectedMessageEntry, EntryKind, ToolEntry, ToolState, TranscriptEntry, TransientStatus,
         },
@@ -18,7 +17,7 @@ use serde_json::Value;
 use std::sync::Arc;
 use tact_subagents::{
     AgentMessage, MessageDeliveryState, MessageDisposition, MessagePriority, MessagePurpose,
-    MessageSender,
+    MessageSender, SubagentRoster,
 };
 
 /// Version of the browser protocol. Bundles declare the range they speak in their manifest.

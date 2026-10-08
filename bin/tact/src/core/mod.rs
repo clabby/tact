@@ -24,7 +24,6 @@ mod recipe;
 pub(crate) mod session;
 pub(crate) mod shell;
 pub(crate) mod storage;
-pub(crate) mod subagent_roster;
 pub(crate) mod subagent_updates;
 pub(crate) mod transcript;
 pub(crate) mod worker;

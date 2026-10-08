@@ -30,7 +30,6 @@ mod core {
     pub(crate) mod protocol;
     pub(crate) mod session;
     pub(crate) mod storage;
-    pub(crate) mod subagent_roster;
     pub(crate) mod transcript;
 
     pub(crate) mod extensions {

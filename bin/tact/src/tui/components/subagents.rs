@@ -10,10 +10,7 @@ use super::{
 };
 use crate::{
     app::{config::DEFAULT_MAX_SUBAGENTS, model, theme::Theme},
-    core::{
-        subagent_roster::{SubagentNode, SubagentRoster},
-        transcript::TranscriptRecord,
-    },
+    core::transcript::TranscriptRecord,
     tui::format::sanitize_terminal_text_inline,
 };
 use crossterm::event::{Event, KeyCode, KeyEventKind};
@@ -31,7 +28,9 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-use tact_subagents::{AgentId, AgentStatus, AgentUpdate, MessageSender};
+use tact_subagents::{
+    AgentId, AgentStatus, AgentUpdate, MessageSender, SubagentNode, SubagentRoster,
+};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 

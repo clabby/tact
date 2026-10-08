@@ -37,7 +37,6 @@ use crate::{
         prompt::{QueueId, Submission},
         protocol::{Busy, CommandError},
         session::{RecentPrompt, SessionSummary},
-        subagent_roster::SubagentRoster,
         transcript::TranscriptRecord,
     },
 };
@@ -59,7 +58,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tact_memory::{MemoryAccess, MemoryKey, MemoryRecord, MemorySource};
-use tact_subagents::{AgentId, AgentStatus, AgentUpdate, MessageSender};
+use tact_subagents::{AgentId, AgentStatus, AgentUpdate, MessageSender, SubagentRoster};
 
 const KEY_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(2);
 const SELECTION_SCROLL_INTERVAL: Duration = Duration::from_millis(60);
