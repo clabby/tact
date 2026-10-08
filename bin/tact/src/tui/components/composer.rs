@@ -1270,6 +1270,10 @@ mod tests {
     };
     use unicode_width::UnicodeWidthStr;
 
+    fn new_composer() -> Composer {
+        Composer::new(Path::new("/work"), ReasoningEffort::Medium)
+    }
+
     fn key(code: KeyCode, modifiers: KeyModifiers) -> ComposerEvent {
         ComposerEvent::Terminal(Event::Key(KeyEvent::new(code, modifiers)))
     }
@@ -1316,7 +1320,7 @@ mod tests {
 
     #[test]
     fn empty_composer_matches_the_pi_chrome() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         let terminal = render(&mut composer, 60, 5);
         let footer = if crate::app::installation::current().is_development() {
             "╰─ / actions · @ paths · @@ sessions ─────── ◉ dev  /work ─╯"
@@ -1360,7 +1364,7 @@ mod tests {
                 Theme::default().model(Model::Codex(CodexModel::Astra)),
             ),
         ] {
-            let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+            let mut composer = new_composer();
             composer.update(ComposerEvent::SetModel(model));
             let terminal = render(&mut composer, 60, 5);
             let label = model.to_string().chars().collect::<Vec<_>>();
@@ -1379,7 +1383,7 @@ mod tests {
 
     #[test]
     fn task_status_uses_green_chrome_next_to_context() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         composer.update(ComposerEvent::TaskStatus {
             status: Some("Preparing handoff…".to_owned()),
             now: Instant::now(),
@@ -1393,7 +1397,7 @@ mod tests {
 
     #[test]
     fn turn_timer_is_rendered_immediately_before_the_model() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         let started_at = Instant::now();
         composer.update(ComposerEvent::TurnStarted {
             elapsed: Duration::from_secs(65),
@@ -1417,7 +1421,7 @@ mod tests {
 
     #[test]
     fn completing_one_run_keeps_the_next_active_run_timed() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         let now = Instant::now();
         composer.update(ComposerEvent::TurnStarted {
             elapsed: Duration::from_secs(65),
@@ -1438,7 +1442,7 @@ mod tests {
 
     #[test]
     fn speed_icon_displays_the_effective_tier_and_is_clickable() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         composer.update(ComposerEvent::SetSpeed(Speed::Ultrafast));
         for (model, effective, icon) in [
             (Model::Codex(CodexModel::Astra), Speed::Ultrafast, "󰑣"),
@@ -1486,7 +1490,7 @@ mod tests {
 
     #[test]
     fn pro_mode_places_a_green_badge_after_speed() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         composer.update(ComposerEvent::SetSpeed(Speed::Fast));
         composer.update(ComposerEvent::SetReasoningMode(ReasoningMode::Pro));
 
@@ -1509,7 +1513,7 @@ mod tests {
 
     #[test]
     fn narrow_composer_prioritizes_the_complete_pro_badge() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         composer.update(ComposerEvent::SetSpeed(Speed::Fast));
         composer.update(ComposerEvent::SetReasoningMode(ReasoningMode::Pro));
 
@@ -1533,7 +1537,7 @@ mod tests {
 
     #[test]
     fn standard_mode_does_not_render_the_pro_badge() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
 
         let terminal = render(&mut composer, 60, 5);
         let rendered = terminal.backend().buffer().content[..60]
@@ -1546,7 +1550,7 @@ mod tests {
 
     #[test]
     fn development_badge_matches_the_installation_kind() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         let terminal = render(&mut composer, 60, 5);
         let row = &terminal.backend().buffer().content[4 * 60..5 * 60];
         let rendered = row.iter().map(|cell| cell.symbol()).collect::<String>();
@@ -1568,7 +1572,7 @@ mod tests {
 
     #[test]
     fn entry_hint_keeps_file_and_session_shortcuts_visible_while_typing() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         assert!(rows(&render(&mut composer, 60, 5))[4].contains("@@ sessions"));
 
         composer.replace_draft("hello".to_owned());
@@ -1582,7 +1586,7 @@ mod tests {
 
     #[test]
     fn active_turn_waves_the_transient_status_after_context_usage() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         composer.update(ComposerEvent::Activity {
             active: true,
             status: Some("Running exec command…".to_owned()),
@@ -1606,7 +1610,7 @@ mod tests {
 
     #[test]
     fn active_subagents_wave_after_the_transient_status() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         let now = Instant::now();
         composer.update(ComposerEvent::Activity {
             active: true,
@@ -1633,7 +1637,7 @@ mod tests {
 
     #[test]
     fn composer_grows_from_three_through_six_rows() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         assert_eq!(composer.desired_height(20), 5);
 
         composer.replace_draft("1\n2\n3\n4\n5\n6".to_owned());
@@ -1645,7 +1649,7 @@ mod tests {
 
     #[test]
     fn overflow_scrolls_to_keep_the_cursor_visible() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         composer.replace_draft("one\ntwo\nthree\nfour\nfive\nsix\nseven".to_owned());
         let terminal = render(&mut composer, 30, 8);
         let rows = rows(&terminal);
@@ -1657,7 +1661,7 @@ mod tests {
 
     #[test]
     fn resize_reflows_wrapped_text() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         composer.replace_draft("alpha beta gamma delta".to_owned());
 
         render(&mut composer, 14, 5);
@@ -1671,7 +1675,7 @@ mod tests {
 
     #[test]
     fn cursor_movement_respects_graphemes_and_display_width() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         composer.replace_draft("a界e\u{301}".to_owned());
         composer.update(key(KeyCode::Left, KeyModifiers::NONE));
         assert_eq!(composer.cursor(), 4);
@@ -1684,7 +1688,7 @@ mod tests {
 
     #[test]
     fn paste_and_editor_replacement_preserve_multiline_text() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         composer.update(ComposerEvent::Terminal(Event::Paste("one\ntwo".to_owned())));
         assert_eq!(composer.draft(), "one\ntwo");
 
@@ -1695,7 +1699,7 @@ mod tests {
 
     #[test]
     fn paste_and_editor_replacement_normalize_carriage_returns() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         composer.update(ComposerEvent::Terminal(Event::Paste(
             "one\r\ntwo\rthree".to_owned(),
         )));
@@ -1708,7 +1712,7 @@ mod tests {
 
     #[test]
     fn pasted_controls_are_visible_without_changing_the_submission() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         let pasted = "one\ttwo\u{1b}three";
         composer.update(ComposerEvent::Terminal(Event::Paste(pasted.to_owned())));
 
@@ -1722,7 +1726,7 @@ mod tests {
 
     #[test]
     fn pasted_images_render_as_numbered_blue_tokens_and_submit_as_images() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         composer.update(ComposerEvent::Terminal(Event::Paste("inspect ".to_owned())));
         composer.update(ComposerEvent::PasteImage(
             "data:image/png;base64,first".to_owned(),
@@ -1757,7 +1761,7 @@ mod tests {
 
     #[test]
     fn deleting_an_image_token_removes_its_attachment_atomically() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         composer.update(ComposerEvent::PasteImage(
             "data:image/png;base64,removed".to_owned(),
         ));
@@ -1770,7 +1774,7 @@ mod tests {
 
     #[test]
     fn option_backspace_deletes_the_previous_word() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         composer.replace_draft("one two  ".to_owned());
 
         let update = composer.update(key(KeyCode::Backspace, KeyModifiers::ALT));
@@ -1782,7 +1786,7 @@ mod tests {
 
     #[test]
     fn option_backspace_removes_an_image_attachment_with_its_token() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         composer.update(ComposerEvent::Terminal(Event::Paste("inspect ".to_owned())));
         composer.update(ComposerEvent::PasteImage(
             "data:image/png;base64,removed".to_owned(),
@@ -1796,7 +1800,7 @@ mod tests {
 
     #[test]
     fn readline_shortcuts_move_by_character_and_stay_on_the_logical_line() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         composer.replace_draft("one\ntwo\nthree".to_owned());
         composer.draft.set_cursor("one\nt".len());
 
@@ -1820,7 +1824,7 @@ mod tests {
 
     #[test]
     fn ctrl_k_deletes_to_logical_line_end_then_removes_the_newline() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         composer.replace_draft("one\ntwo three\nfour".to_owned());
         composer.draft.set_cursor("one\ntwo".len());
 
@@ -1840,7 +1844,7 @@ mod tests {
 
     #[test]
     fn ctrl_k_uses_logical_lines_in_wrapped_unicode_text() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         composer.replace_draft("界 alpha beta gamma\nnext".to_owned());
         composer.draft.set_cursor("界 alpha".len());
         render(&mut composer, 8, 6);
@@ -1854,7 +1858,7 @@ mod tests {
 
     #[test]
     fn ctrl_k_removes_images_and_shifts_later_attachments() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         composer.update(ComposerEvent::Terminal(Event::Paste("é ".to_owned())));
         let cursor = composer.cursor();
         composer.update(ComposerEvent::PasteImage(
@@ -1883,7 +1887,7 @@ mod tests {
 
     #[test]
     fn readline_shortcuts_require_exact_modifiers() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         composer.replace_draft("abcd".to_owned());
         composer.draft.set_cursor(2);
 
@@ -1905,7 +1909,7 @@ mod tests {
 
     #[test]
     fn readline_word_movement_skips_delimiters_between_alphanumeric_words() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         composer.replace_draft("foo...bar".to_owned());
 
         composer.update(key(KeyCode::Char('b'), KeyModifiers::ALT));
@@ -1942,7 +1946,7 @@ mod tests {
 
     #[test]
     fn readline_word_movement_treats_images_as_atomic() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         composer.update(ComposerEvent::Terminal(Event::Paste("inspect ".to_owned())));
         composer.update(ComposerEvent::PasteImage(
             "data:image/png;base64,attached".to_owned(),
@@ -1956,7 +1960,7 @@ mod tests {
 
     #[test]
     fn readline_vertical_movement_treats_images_as_atomic() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         composer.update(ComposerEvent::PasteImage(
             "data:image/png;base64,attached".to_owned(),
         ));
@@ -1968,7 +1972,7 @@ mod tests {
         composer.update(key(KeyCode::Char('p'), KeyModifiers::CONTROL));
         assert_eq!(composer.cursor(), 0);
 
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         composer.update(ComposerEvent::Terminal(Event::Paste("a".to_owned())));
         composer.update(ComposerEvent::PasteImage(
             "data:image/png;base64,attached".to_owned(),
@@ -1980,7 +1984,7 @@ mod tests {
         composer.update(key(KeyCode::Char('n'), KeyModifiers::CONTROL));
         assert_eq!(composer.cursor(), composer.draft().len());
 
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         composer.update(ComposerEvent::Terminal(Event::Paste(
             "123456789\na".to_owned(),
         )));
@@ -1997,7 +2001,7 @@ mod tests {
 
     #[test]
     fn readline_vertical_shortcuts_restore_the_unsent_draft_after_history() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         composer.replace_draft("older".to_owned());
         composer.update(key(KeyCode::Enter, KeyModifiers::NONE));
         composer.replace_draft("newer".to_owned());
@@ -2026,7 +2030,7 @@ mod tests {
             (KeyCode::Char('k'), KeyModifiers::CONTROL),
             (KeyCode::Char('b'), KeyModifiers::ALT),
         ] {
-            let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+            let mut composer = new_composer();
             composer.replace_draft("previous".to_owned());
             composer.update(key(KeyCode::Enter, KeyModifiers::NONE));
             composer.update(key(KeyCode::Up, KeyModifiers::NONE));
@@ -2040,7 +2044,7 @@ mod tests {
 
     #[test]
     fn submission_trims_nonempty_prompts_and_preserves_empty_drafts() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         composer.replace_draft("  inspect this  \n".to_owned());
         let update = composer.update(key(KeyCode::Enter, KeyModifiers::NONE));
 
@@ -2058,7 +2062,7 @@ mod tests {
 
     #[test]
     fn leading_bang_uses_yellow_shell_chrome_and_submits_only_the_command() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         composer.replace_draft("!  printf hello  ".to_owned());
 
         let terminal = render(&mut composer, 80, 5);
@@ -2079,7 +2083,7 @@ mod tests {
 
     #[test]
     fn bang_without_a_command_is_not_submitted() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         composer.replace_draft("!   ".to_owned());
 
         let update = composer.update(key(KeyCode::Enter, KeyModifiers::NONE));
@@ -2090,7 +2094,7 @@ mod tests {
 
     #[test]
     fn arrows_cycle_submitted_prompts_and_restore_the_unsent_draft() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         for prompt in ["first", "second"] {
             composer.replace_draft(prompt.to_owned());
             composer.update(key(KeyCode::Enter, KeyModifiers::NONE));
@@ -2111,7 +2115,7 @@ mod tests {
 
     #[test]
     fn editing_a_recalled_prompt_detaches_it_from_history() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         composer.replace_draft("previous".to_owned());
         composer.update(key(KeyCode::Enter, KeyModifiers::NONE));
 
@@ -2124,7 +2128,7 @@ mod tests {
 
     #[test]
     fn multiline_and_control_effect_keys_are_distinct() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         composer.update(key(KeyCode::Enter, KeyModifiers::SHIFT));
         composer.update(key(KeyCode::Char('j'), KeyModifiers::CONTROL));
         assert_eq!(composer.draft(), "\n\n");
@@ -2139,7 +2143,7 @@ mod tests {
 
     #[test]
     fn editing_keys_follow_visual_lines_and_grapheme_boundaries() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         composer.replace_draft("abc\ndef".to_owned());
         render(&mut composer, 20, 5);
 
@@ -2156,7 +2160,7 @@ mod tests {
 
     #[test]
     fn wrapping_prefers_words_and_hard_wraps_long_words() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         composer.replace_draft("alpha betaabcdefgh".to_owned());
         let terminal = render(&mut composer, 8, 6);
         let rows = rows(&terminal);
@@ -2168,7 +2172,7 @@ mod tests {
 
     #[test]
     fn semantic_selection_preserves_source_across_soft_and_hard_wraps() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         composer.replace_draft("abcdef\ngh".to_owned());
         let area = Rect::new(10, 5, 3, 3);
         let anchor = composer.selection_span(Position::new(11, 5), area).unwrap();
@@ -2187,7 +2191,7 @@ mod tests {
 
     #[test]
     fn selection_scrolling_keeps_the_semantic_range_visible_without_cursor_follow() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         composer.replace_draft("line 1\nline 2\nline 3\nline 4".to_owned());
         render(&mut composer, 12, 4);
         assert_eq!(composer.scroll, 2);
@@ -2219,7 +2223,7 @@ mod tests {
 
     #[test]
     fn narrow_selection_matches_the_visible_draft_text() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         composer.replace_draft("first\nsecond\nthird".to_owned());
         render(&mut composer, 12, 4);
 
@@ -2248,7 +2252,7 @@ mod tests {
 
     #[test]
     fn narrow_rendering_truncates_without_panicking() {
-        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        let mut composer = new_composer();
         composer.replace_draft("abcdef".to_owned());
 
         let terminal = render(&mut composer, 3, 2);
