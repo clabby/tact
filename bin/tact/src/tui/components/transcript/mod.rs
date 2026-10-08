@@ -28,8 +28,6 @@ mod render;
 mod tool;
 mod viewport;
 
-pub(super) use viewport::ScrollCommand;
-
 use super::{
     clock::unix_time_ms,
     node::{Component, ComponentUpdate, RenderRequest},
@@ -66,6 +64,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tact_subagents::{AgentMessageUpdate, MessageSender};
+pub(super) use viewport::ScrollCommand;
 use viewport::{Anchor, Layouts, RenderPlan, Reveal, Viewport};
 
 const EXPANDABLE_FOCUS_HINTS: [&str; 2] =

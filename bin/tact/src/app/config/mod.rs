@@ -25,27 +25,23 @@ mod test_support;
 mod tui;
 mod web;
 
-pub(crate) use agent::AgentConfig;
-pub(crate) use edit::{ConfigDocument, Setting};
-pub(crate) use mcp::McpServerConfig;
-pub(crate) use memory::{MemoryConfig, RemoteMemoryConfig};
-pub(crate) use providers::{AuthConfig, AuthMode, ClaudeConfig};
-pub(crate) use settings::{
-    DEFAULT_MAX_SUBAGENTS, ReasoningEffort, ReasoningMode, Speed, Transport,
-};
-pub(crate) use skills::SkillsConfig;
-pub(crate) use subagents::SubagentsConfig;
-pub(crate) use tui::TuiConfig;
-pub(crate) use web::WebConfig;
-
 use crate::app::{
     error::{ConfigError, Result},
     theme::Theme,
 };
+pub(crate) use agent::AgentConfig;
+pub(crate) use edit::{ConfigDocument, Setting};
 use file::ConfigFile;
+pub(crate) use mcp::McpServerConfig;
+pub(crate) use memory::{MemoryConfig, RemoteMemoryConfig};
 use nanocodex::HarnessModel as Model;
 use providers::OpenAiConfig;
+pub(crate) use providers::{AuthConfig, AuthMode, ClaudeConfig};
 use serde::Serialize;
+pub(crate) use settings::{
+    DEFAULT_MAX_SUBAGENTS, ReasoningEffort, ReasoningMode, Speed, Transport,
+};
+pub(crate) use skills::SkillsConfig;
 use std::{
     collections::BTreeMap,
     env,
@@ -53,6 +49,9 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
+pub(crate) use subagents::SubagentsConfig;
+pub(crate) use tui::TuiConfig;
+pub(crate) use web::WebConfig;
 
 /// Effective application configuration.
 #[derive(Clone, Debug, Serialize)]

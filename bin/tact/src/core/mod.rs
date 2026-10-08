@@ -28,8 +28,6 @@ pub(crate) mod subagent_updates;
 pub(crate) mod transcript;
 pub(crate) mod worker;
 
-pub(crate) use instructions::{IMAGE_RENDERING_INSTRUCTIONS, MEMORY_REVIEW_CHECKPOINT};
-
 use crate::{
     app::{
         config::{Config, ReasoningEffort, ReasoningMode, Speed},
@@ -42,6 +40,7 @@ use crate::{
         session::ResumeState,
     },
 };
+pub(crate) use instructions::{IMAGE_RENDERING_INSTRUCTIONS, MEMORY_REVIEW_CHECKPOINT};
 use nanocodex::{AgentEvents, HarnessModel as Model, Nanocodex, NanocodexError, Tools};
 use std::{
     path::{Path, PathBuf},

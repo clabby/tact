@@ -21,10 +21,15 @@ use crate::{
         AgentContext, AgentDescriptor, AgentId, AgentStatus, AgentUpdate, ScopedAgentUpdate,
         SubagentRuntimeId,
     },
+    output::OutputContract,
     turn::TurnSlot,
 };
+pub(crate) use messaging::DelegationChange;
 use nanocodex::{AgentEvents, HarnessModel as Model, Nanocodex, NanocodexError, Thinking};
+use policy::thinking_rank;
 use serde_json::Value;
+pub(crate) use state::{AgentDirectoryEntry, AgentSummary};
+use state::{AgentReservation, ChildSession, RegistryState, TurnSteer, complete_session};
 use std::sync::{
     Arc, Mutex, OnceLock, Weak,
     atomic::{AtomicBool, Ordering},
@@ -34,12 +39,6 @@ use tokio::{
     sync::{mpsc, oneshot, watch},
     task::JoinHandle,
 };
-
-use crate::output::OutputContract;
-pub(crate) use messaging::DelegationChange;
-use policy::thinking_rank;
-pub(crate) use state::{AgentDirectoryEntry, AgentSummary};
-use state::{AgentReservation, ChildSession, RegistryState, TurnSteer, complete_session};
 
 pub(crate) struct Registry {
     id: SubagentRuntimeId,

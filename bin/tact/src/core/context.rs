@@ -1,11 +1,13 @@
 //! Content-free context diagnostics projected from transcript telemetry.
 
 use crate::core::transcript::{CompactionFinished, ContextObserved, LocalKind, TranscriptRecord};
-use nanocodex::agent::events::AgentEventKind;
-use nanocodex::oai::{
-    self,
-    events::{CompactionStarted, ModelCallCompleted},
-    responses::Usage,
+use nanocodex::{
+    agent::events::AgentEventKind,
+    oai::{
+        self,
+        events::{CompactionStarted, ModelCallCompleted},
+        responses::Usage,
+    },
 };
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;

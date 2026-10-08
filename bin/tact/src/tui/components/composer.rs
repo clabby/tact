@@ -14,8 +14,6 @@ mod draft;
 mod history;
 mod layout;
 
-pub(crate) use draft::ComposerDraft;
-
 use super::{
     node::{Component, ComponentUpdate, RenderRequest},
     selection::{TextRange, TextSpan},
@@ -33,6 +31,7 @@ use crate::{
     tui::format::{format_turn_duration, shorten_home},
 };
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+pub(crate) use draft::ComposerDraft;
 use draft::{Direction, DraftBuffer};
 use history::PromptHistory;
 use layout::grapheme_at_column;

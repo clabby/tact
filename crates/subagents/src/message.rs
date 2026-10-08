@@ -198,8 +198,10 @@ fn validate_body(body: &str) -> Result<(), MessageError> {
 #[cfg(test)]
 mod tests {
     use super::{MAX_MESSAGE_BYTES, MAX_RETAINED_MESSAGES, MessageThreads};
-    use crate::error::MessageError;
-    use crate::{AgentId, MessageDisposition, MessagePriority, MessagePurpose, MessageSender};
+    use crate::{
+        AgentId, MessageDisposition, MessagePriority, MessagePurpose, MessageSender,
+        error::MessageError,
+    };
 
     #[test]
     fn replies_inherit_threads_and_require_the_original_recipient() {

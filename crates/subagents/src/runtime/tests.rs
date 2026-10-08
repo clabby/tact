@@ -5,10 +5,10 @@ use super::{
     TurnSlot, forward_events,
     state::{AgentReservation, ChildSession, RegistryState, complete_session},
 };
-use crate::error::{DeliveryFailure, SpawnError, SubagentError};
-use crate::output::OutputContract;
 use crate::{
     AgentUpdate, MessageDeliveryState, MessageDisposition, MessagePriority, MessagePurpose, Speed,
+    error::{DeliveryFailure, SpawnError, SubagentError},
+    output::OutputContract,
 };
 use futures_util::future::Either;
 use nanocodex::{

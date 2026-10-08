@@ -9,20 +9,19 @@ mod cli;
 mod config;
 mod runtime;
 
+use crate::core::{session::SessionError, transcript::TranscriptError};
 pub(crate) use auth::{AuthError, SecretError};
 pub(crate) use cli::CliError;
 pub(crate) use config::{
     ConfigEditError, ConfigError, ConfigSyntaxError, McpUrlError, RemoteMemoryConfigError,
 };
-pub(crate) use runtime::{ExternalEditorError, RuntimeError};
-
-use crate::core::{session::SessionError, transcript::TranscriptError};
 use miette::Diagnostic;
 use nanocodex::{
     NanocodexError,
     oai::{OpenAiError, events::EventError},
     tools::mcp::McpBuildError,
 };
+pub(crate) use runtime::{ExternalEditorError, RuntimeError};
 use std::result::Result as StdResult;
 use thiserror::Error;
 
