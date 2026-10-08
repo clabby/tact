@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { resultText, summaryFailed, turnMarkdown, turnOutcome } from "./outcome";
 import { planTurn, segmentTurns } from "./turns";
 import { transcript } from "./test-entries";
-import type { ToolEntry } from "./exploration";
+import type { ToolEntry } from "./routine";
 
 const failedTests = { exit_code: 101, tail: ["FAIL a::b", "Summary 18 tests run: 17 passed, 1 failed"], summary: "17 passed, 1 failed" };
 

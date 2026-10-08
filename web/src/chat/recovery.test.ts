@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { classifyFailures } from "./recovery";
 import { transcript } from "./test-entries";
-import type { ToolEntry } from "./exploration";
+import type { ToolEntry } from "./routine";
 
 test("a failure is recovered only by a later success of the same tool and summary", () => {
   const t = transcript();

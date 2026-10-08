@@ -1,5 +1,5 @@
 import type { WireEntry } from "../core/wire";
-import type { ToolEntry } from "./exploration";
+import type { ToolEntry } from "./routine";
 import type { Turn, TurnPlan } from "./turns";
 
 /** One applied patch, or several with the same files, for the turn's change list. */

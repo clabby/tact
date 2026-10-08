@@ -1,4 +1,4 @@
-import type { ToolEntry } from "./exploration";
+import type { ToolEntry } from "./routine";
 
 /**
  * Splits a turn's failed calls into recovered and unrecovered ones. A failure is recovered when a

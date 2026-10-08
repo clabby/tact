@@ -19,6 +19,7 @@ import type {
   QueryName,
   QueuedPrompt,
   ReasoningMode,
+  Significance,
   Speed,
   Subagent,
   SubagentRoster,
@@ -28,6 +29,7 @@ import type {
   StreamEvents,
   ToolDetail,
   ToolOutcome,
+  ToolState,
   TransientStatus,
   WireEntry,
   Workspaces,
@@ -40,11 +42,24 @@ type EntryBody = WireEntry extends infer Entry
 
 type ToolBody = Extract<EntryBody, { kind: "tool" }>;
 
+/** Tools whose calls are landmarks whatever their outcome. */
+const LANDMARK_TOOLS = new Set(["apply_patch", "update_plan", "spawn_agent", "send_agent_message", "close_agent", "interrupt_agent"]);
+
+/**
+ * The class of a call without Code Mode children. It mirrors `Significance::is_landmark` in
+ * bin/tact/src/web/wire.rs and must change with it; memory writes are told apart by the operation
+ * that starts their summary, since the mock's rows carry no arguments.
+ */
+function significanceOf(name: string, state: ToolState, summary: string): Significance {
+  const landmark = state === "failed" || LANDMARK_TOOLS.has(name) || (name === "memory" && /^(store|replace|delete)\b/.test(summary));
+  return landmark ? "landmark" : "routine";
+}
+
 /** A finished tool row; `fields` override the defaults. */
 function tool(name: string, summary: string, fields: Partial<ToolBody> = {}): ToolBody {
   return {
     kind: "tool", name, summary, state: "succeeded", duration_ns: 4_000_000, substeps: [], child_count: 0,
-    has_detail: false, outcome: null, stats: null, ...fields,
+    has_detail: false, outcome: null, stats: null, significance: significanceOf(name, fields.state ?? "succeeded", summary), ...fields,
   };
 }
 
@@ -684,6 +699,7 @@ export class MockTact {
         const row = this.append(session, {
           kind: "tool", name: tool.name, summary: tool.summary, state: "running",
           duration_ns: null, elapsed_ns: 0, substeps: [], child_count: 0, has_detail: true,
+          significance: significanceOf(tool.name, "running", tool.summary),
         });
         session.details.set(row.id, { arguments: tool.arguments, result: null, metadata: null });
         for (const step of tool.substeps ?? []) {
@@ -703,6 +719,7 @@ export class MockTact {
           duration_ns: tool.ms * 1_000_000,
           outcome: tool.name === "exec_command" ? outcomeOf(tool.result) : null,
           stats: tool.name === "apply_patch" && !tool.failed ? statsOf(String(tool.arguments)) : null,
+          significance: significanceOf(tool.name, tool.failed ? "failed" : "succeeded", tool.summary),
         } as Partial<EntryBody>);
       }
       if (script.retry) {
@@ -761,7 +778,7 @@ export class MockTact {
     try {
       add({ kind: "user", text: agent.task });
       await sleep(400 * this.pace, signal);
-      add({ kind: "tool", name: "read", summary: "bin/tact/src/web/bridge.rs", state: "succeeded", duration_ns: 6_000_000, substeps: [], child_count: 0, has_detail: false });
+      add(tool("read", "bin/tact/src/web/bridge.rs", { duration_ns: 6_000_000 }));
       await sleep(600 * this.pace, signal);
       const answer = add({ kind: "assistant", text: "", complete: false, commentary: false });
       let text = "";
@@ -825,7 +842,7 @@ export class MockTact {
     add({ kind: "user", text: "The bridge test is flaky on CI. Find out why and harden it." }, 0);
     add({ kind: "reasoning", text: "A flaky ordering test usually means two tasks race on a channel. Run it first, then read the bridge." }, 6);
     shell(BRIDGE_TEST, 0, "     Summary [  47.902s] 18 tests run: 18 passed, 0 skipped\n", 48);
-    add(tool("read", "bin/tact/src/web/bridge.rs", { duration_ns: 4_000_000 }), 8);
+    shell("sed -n 1,200p bin/tact/src/web/bridge.rs", 0, "//! Connects the web server to the terminal event loop.\n", 1);
     patch(PATCH_FLAKE, "bin/tact/src/web/bridge.rs");
     shell("cargo clippy -p tact -- -D warnings", 101, [
       "    Checking tact v0.7.0 (/Users/dev/src/tact/bin/tact)",
@@ -843,10 +860,9 @@ export class MockTact {
     add({ kind: "user", text: "Make draft echoes follow the acknowledgement." }, 0);
     add({ kind: "reasoning", text: "Find where the echo is published and where the reply is sent." }, 5);
     const exploring: [string, string][] = [
-      ["read", "bin/tact/src/web/bridge.rs"], ["read", "bin/tact/src/web/server.rs:1-180"], ["grep", "fn publish"],
-      ["read", "bin/tact/src/web/stream.rs"], ["grep", "DraftEcho"], ["read", "web/src/core/store.ts"],
-      ["memory", "scan · local · draft echo ordering · 2 candidates"], ["web__run", "tokio mpsc ordering guarantees"],
-      ["read", "docs/web.md:80-140"],
+      ["memory", "scan · local · draft echo ordering · 2 candidates"], ["find_sessions", "draft echo"],
+      ["read_session", "019a00ff-7c1e-7d55-9b1f-3e2a9c8d4f01"], ["web__run", "tokio mpsc ordering guarantees"],
+      ["web__run", "tokio broadcast lagged receivers"], ["view_image", "/tmp/draft-echo-race.png"],
     ];
     for (const [name, summary] of exploring) add(tool(name, summary, { duration_ns: 40_000_000 + summary.length * 1_000_000 }), 4);
     add({ kind: "assistant", text: "The echo is published before the reply is sent, so a second tab sees the draft first. I'll make the reply wait for the loop to apply the command.", complete: true, commentary: false }, 12);
@@ -868,16 +884,22 @@ export class MockTact {
     clock = Date.now() - 42 * 60_000;
     add({ kind: "user", text: "Wire the web bridge into the TUI loop. Publications must never block the loop, and every web command has to go through the same effect as its keypress.\n\n[Image #1]\nThe current flow is above; compare it with [Image #2] before you start.", images: 2 }, 0);
     add({ kind: "reasoning", text: "The loop already owns all session state, so the bridge only needs a non-blocking publisher and a request channel the select loop polls next to terminal input." }, 8);
-    add(tool("read", "bin/tact/src/web/bridge.rs", { duration_ns: 4_000_000 }), 5);
+    shell("sed -n 1,200p bin/tact/src/web/bridge.rs", 0, "//! Connects the web server to the terminal event loop.\n", 1);
     const rg = add(tool("exec_command", "rg -n \"enum Action\" bin/tact/src/tui", { duration_ns: 182_000_000, has_detail: true, outcome: { exit_code: 0, tail: ["bin/tact/src/tui/components/actions.rs:73:pub(super) enum Action {", "bin/tact/src/tui/components/app.rs:112:enum Action {"], summary: null } }), 6);
     detail(rg, {
       arguments: { cmd: 'rg -n "enum Action" bin/tact/src/tui' },
       result: { chunk_id: "a1", exit_code: 0, wall_time_seconds: 0.18, output: "bin/tact/src/tui/components/actions.rs:73:pub(super) enum Action {\nbin/tact/src/tui/components/app.rs:112:enum Action {\n" },
       metadata: null,
     });
+    shell("jj st", 0, "Working copy changes:\nM bin/tact/src/tui/app.rs\n", 1);
+    shell("cargo check -p tact", 0, "    Checking tact v0.7.0 (/Users/dev/src/tact/bin/tact)\n    Finished `dev` profile [unoptimized + debuginfo] target(s) in 9.84s\n", 10);
+    // A Code Mode cell that only reads stays routine and folds with the commands around it.
+    const reads = add(tool("exec", "2 tools", { duration_ns: 120_000_000, child_count: 2 }), 2);
+    for (const path of ["bin/tact/src/tui/app.rs", "bin/tact/src/tui/event_loop.rs"]) add(tool("exec_command", `sed -n 1,160p ${path}`, { duration_ns: 30_000_000 }), 1, reads.id);
     patch(PATCH_ENVELOPE, "bin/tact/src/tui/app.rs, bin/tact/src/web/bridge.rs");
     shell("cargo nextest run -p tact", 101, "        FAIL [   0.412s] tact web::bridge::tests::draft_echo_follows_acknowledgement\n\nassertion failed: echo arrived before the acknowledgement\n     Summary [  48.201s] 312 tests run: 311 passed, 1 failed\n", 48);
-    const batch = add(tool("exec", "2 tools", { duration_ns: 11_000_000_000, child_count: 2 }), 12);
+    // A cell that spawns agents is a landmark through its children.
+    const batch = add(tool("exec", "2 tools", { duration_ns: 11_000_000_000, child_count: 2, significance: "landmark" }), 12);
     for (const [agent, role] of [[2, "protocol auditor"], [5, "ordering prover"]] as const) {
       // An agent thread published between the batch's calls must not split the batch.
       if (agent === 5) add(directedThread(1, THREAD_DOCS), 2);
@@ -978,7 +1000,7 @@ export class MockTact {
     });
     main.agentEntries.set(1, [
       { id: 1, revision: 1, parent: null, kind: "user", text: "Review bridge ordering between acknowledgements and draft echoes." },
-      { id: 2, revision: 1, parent: null, kind: "tool", name: "read", summary: "bin/tact/src/web/bridge.rs", state: "succeeded", duration_ns: 5_000_000, substeps: [], child_count: 0, has_detail: false },
+      { id: 2, revision: 1, parent: null, ...tool("read", "bin/tact/src/web/bridge.rs", { duration_ns: 5_000_000 }) },
       { id: 3, revision: 1, parent: null, kind: "assistant", text: "The acknowledgement must follow the publication, otherwise a tab can submit a stale revision.", complete: true, commentary: false },
     ]);
 
@@ -1177,19 +1199,19 @@ function scriptFor(prompt: string) {
   const testCommand = "cargo nextest run -p tact -E 'test(stream)'";
   const tools: ScriptedTool[] = [
     {
-      name: "read", summary: "bin/tact/src/web/server.rs:1-180", ms: 160,
-      arguments: { path: "bin/tact/src/web/server.rs", offset: 1, limit: 180 },
-      result: { content: "//! The HTTP server for the web interface.\n…" },
+      name: "exec_command", summary: "sed -n 1,180p bin/tact/src/web/server.rs", ms: 300,
+      arguments: { cmd: "sed -n 1,180p bin/tact/src/web/server.rs" },
+      result: { exit_code: 0, output: "//! The HTTP server for the web interface.\n…\n" },
     },
     {
-      name: "grep", summary: "fn publish", ms: 220,
-      arguments: { pattern: "fn publish", path: "bin/tact/src" },
-      result: { output: "bin/tact/src/web/bridge.rs:104:    pub(crate) fn publish(&self, publication: Publication) {\n" },
+      name: "exec_command", summary: "rg -n 'fn publish' bin/tact/src", ms: 1500,
+      arguments: { cmd: "rg -n 'fn publish' bin/tact/src" },
+      result: { exit_code: 0, output: "bin/tact/src/web/bridge.rs:104:    pub(crate) fn publish(&self, publication: Publication) {\n" },
     },
     {
-      name: "read", summary: "bin/tact/src/web/stream.rs", ms: 140,
-      arguments: { path: "bin/tact/src/web/stream.rs" },
-      result: { content: "//! Coalesces publications into frames.\n…" },
+      name: "exec_command", summary: "sed -n 1,200p bin/tact/src/web/stream.rs", ms: 300,
+      arguments: { cmd: "sed -n 1,200p bin/tact/src/web/stream.rs" },
+      result: { exit_code: 0, output: "//! Coalesces publications into frames.\n…\n" },
     },
     {
       name: "apply_patch", summary: "bin/tact/src/web/stream.rs", ms: 260,

@@ -56,6 +56,12 @@ export type ToolOutcome = { exit_code: number | null; tail: string[]; summary: s
 /** The size of an applied patch, computed from its envelope. */
 export type PatchStats = { files: number; additions: number; deletions: number };
 
+/**
+ * A landmark keeps a row of its own: a failure, a patch, a plan update, agent coordination, a
+ * memory write, or a Code Mode cell that made one of those calls. Everything else is routine.
+ */
+export type Significance = "routine" | "landmark";
+
 export type MessagePurpose = "delegate" | "coordinate" | "finding" | "question" | "reply";
 export type MessageDelivery = "admitted" | "delivered" | "failed" | "unknown";
 
@@ -96,6 +102,8 @@ export type EntryBody =
     outcome?: ToolOutcome | null;
     /** Set for an applied `apply_patch`; absent from older servers and for failed patches. */
     stats?: PatchStats | null;
+    /** Whether the call may fold into a run of routine work; absent from older servers, whose calls never fold. */
+    significance?: Significance;
   }
   /**
    * One conversation thread between agents, updated in place as messages arrive and delivery

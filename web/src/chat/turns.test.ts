@@ -45,15 +45,15 @@ test("while a turn runs, a message is the answer only until a tool call follows 
   expect([...plan.narration]).toEqual([2]);
 });
 
-test("consecutive exploring calls fold into one group with the thoughts between them", () => {
+test("consecutive routine calls fold into one group with the thoughts between them", () => {
   const t = transcript();
   t.user("go");
   t.tool("read", "a.rs");
   t.think();
-  t.tool("web__run", "rust select");
+  t.tool("exec_command", "cargo test");
   t.tool("memory", "scan · local · ordering · 2 candidates");
   t.think("before the edit");
-  t.tool("apply_patch", "a.rs");
+  t.tool("apply_patch", "a.rs", { significance: "landmark" });
   t.tool("read", "b.rs");
   t.say("done");
   t.done();
@@ -68,14 +68,15 @@ test("consecutive exploring calls fold into one group with the thoughts between 
   expect(plan.steps).toBe(5);
 });
 
-test("failures, writes, and commands are never swallowed by a group", () => {
+test("landmarks are never swallowed by a group", () => {
   const t = transcript();
   t.user("go");
   t.tool("read", "a.rs");
-  t.tool("read", "missing.rs", { state: "failed" });
-  t.tool("read", "b.rs");
+  t.tool("exec_command", "cargo test", { state: "failed" });
   t.tool("exec_command", "ls");
-  t.tool("memory", "replace · local · 12@v3");
+  t.tool("exec", "2 tools", { significance: "landmark" });
+  t.tool("read", "b.rs");
+  t.tool("memory", "replace · local · 12@v3", { significance: "landmark" });
   t.tool("read", "c.rs");
   const data = t.data();
   const plan = planTurn(segmentTurns(data)[0]!, data.entries);
@@ -83,10 +84,46 @@ test("failures, writes, and commands are never swallowed by a group", () => {
   expect(plan.unrecovered).toEqual([3]);
 });
 
+test("a running routine call joins the run before it, under the run's key", () => {
+  const t = transcript();
+  t.user("go");
+  t.tool("exec_command", "jj st");
+  t.tool("exec_command", "cargo test", { state: "running" });
+  const data = t.data();
+  expect(planTurn(segmentTurns(data)[0]!, data.entries).log).toEqual([
+    { kind: "group", key: 2, members: [2, 3], tools: [2, 3] },
+  ]);
+});
+
+test("a group keeps its key as it grows, so the reader's open state survives a new member", () => {
+  const t = transcript();
+  t.user("go");
+  t.tool("exec_command", "jj st");
+  t.tool("exec_command", "cargo check");
+  const before = t.data();
+  expect(planTurn(segmentTurns(before)[0]!, before.entries).log).toEqual([{ kind: "group", key: 2, members: [2, 3], tools: [2, 3] }]);
+  t.think();
+  t.tool("exec_command", "cargo test", { state: "running" });
+  const after = t.data();
+  expect(planTurn(segmentTurns(after)[0]!, after.entries).log).toEqual([{ kind: "group", key: 2, members: [2, 3, 4, 5], tools: [2, 3, 5] }]);
+});
+
+test("a group dissolves when a member turns into a landmark", () => {
+  const t = transcript();
+  t.user("go");
+  t.tool("exec_command", "jj st");
+  const test = t.tool("exec_command", "cargo test", { state: "running" });
+  const running = t.data();
+  expect(planTurn(segmentTurns(running)[0]!, running.entries).log).toEqual([{ kind: "group", key: 2, members: [2, 3], tools: [2, 3] }]);
+  Object.assign(t.entries[test - 1]!, { state: "failed", significance: "landmark" });
+  const failed = t.data();
+  expect(planTurn(segmentTurns(failed)[0]!, failed.entries).log).toEqual([{ kind: "entry", id: 2 }, { kind: "entry", id: 3 }]);
+});
+
 test("a batch's children extend it in place, whatever arrived between them", () => {
   const t = transcript();
   t.user("go");
-  const batch = t.tool("exec", "4 tools");
+  const batch = t.tool("exec", "4 tools", { significance: "landmark" });
   t.tool("read", "a.rs", { parent: batch });
   t.tool("exec_command", "cargo test", { parent: batch, state: "failed" });
   t.other({ kind: "directed_message", from: "agent 2", to: "root", body: "hi", delivery: "delivered", thread: 1, messages: [] });
@@ -119,7 +156,7 @@ test("error notices stay pinned and failures that were retried successfully are 
   const t = transcript();
   t.user("go");
   t.tool("exec_command", "cargo test", { state: "failed" });
-  t.tool("apply_patch", "a.rs");
+  t.tool("apply_patch", "a.rs", { significance: "landmark" });
   t.tool("exec_command", "cargo test");
   t.other({ kind: "error", message: "stream reset" });
   t.done();

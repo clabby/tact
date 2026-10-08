@@ -1,6 +1,6 @@
 import type { TranscriptData } from "../core/store";
 import type { WireEntry } from "../core/wire";
-import { explorationKind, type ToolEntry } from "./exploration";
+import { isRoutine, type ToolEntry } from "./routine";
 import { classifyFailures } from "./recovery";
 
 /**
@@ -46,7 +46,7 @@ export function segmentTurns(data: TranscriptData): Turn[] {
   return turns;
 }
 
-/** One row of a turn's work log: an entry, or a run of exploring calls folded into one step. */
+/** One row of a turn's work log: an entry, or a run of routine calls folded into one step. */
 export type LogItem =
   | { kind: "entry"; id: number }
   /** `key` is the first call's id; `members` includes thoughts between the calls. */
@@ -58,7 +58,7 @@ export type TurnPlan = {
   /** Assistant messages before the answer, which narrate the work. */
   narration: Set<number>;
   /**
-   * The body without the answer, in order, with exploring runs grouped. Child entries are not
+   * The body without the answer, in order, with routine runs grouped. Child entries are not
    * rows of their own: they extend their parent's row, in `children`.
    */
   log: LogItem[];
@@ -75,7 +75,7 @@ export type TurnPlan = {
 /** Kinds that report a problem the reader must see even when the work log is folded. */
 const PINNED = new Set(["error", "compaction_failed"]);
 
-/** Fewer exploring calls than this keep their own rows. */
+/** Fewer routine calls than this keep their own rows. */
 const MIN_GROUP = 2;
 
 export function planTurn(turn: Turn, entries: ReadonlyMap<number, WireEntry>): TurnPlan {
@@ -106,7 +106,7 @@ export function planTurn(turn: Turn, entries: ReadonlyMap<number, WireEntry>): T
   const log: LogItem[] = [];
   let run: WireEntry[] = [];
   const flushRun = () => {
-    // Thoughts after the last exploring call belong to whatever comes next, not to the group.
+    // Thoughts after the last routine call belong to whatever comes next, not to the group.
     let end = run.length;
     while (end > 0 && run[end - 1]!.kind !== "tool") end -= 1;
     const members = run.slice(0, end);
@@ -125,7 +125,7 @@ export function planTurn(turn: Turn, entries: ReadonlyMap<number, WireEntry>): T
       flushRun();
       continue;
     }
-    if (explorationKind(entry) || (entry.kind === "reasoning" && run.length > 0)) {
+    if (isRoutine(entry) || (entry.kind === "reasoning" && run.length > 0)) {
       run.push(entry);
       continue;
     }

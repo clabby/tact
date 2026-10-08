@@ -10,7 +10,7 @@ import type { Theme } from "../core/theme";
 import { promptParts } from "./user-prompt";
 import { presentDetail, TOOL_DEFAULT_OPEN, toolLabel } from "./tool-detail";
 import { renderThread, type Participants } from "./directed";
-import { explorationLabel, type ToolEntry } from "./exploration";
+import { runLabel, runOpen, type ToolEntry } from "./routine";
 import { resultText, turnMarkdown, turnOutcome, type TurnOutcome } from "./outcome";
 import { planTurn, segmentTurns, type LogItem, type Turn, type TurnPlan } from "./turns";
 import { firstUnseen, latestEntry, newSinceLabel, readSeen, writeSeen, type Seen } from "./seen";
@@ -109,7 +109,8 @@ export class Transcript {
   private readonly signatures = new Map<number, string>();
   /** The reader's fold choice per turn, which outlives re-renders; absent turns use the default. */
   private readonly folds = new Map<number, boolean>();
-  private readonly openGroups = new Set<number>();
+  /** Groups, by key, whose open state the reader flipped from the default. */
+  private readonly toggledGroups = new Set<number>();
 
   private seen: Seen | null = null;
   private newSince: { id: number; label: string } | null = null;
@@ -210,7 +211,7 @@ export class Transcript {
       this.lazy.disconnect();
       this.turns = [];
       for (const map of [this.turnOf, this.turnByKey, this.shapes, this.plans, this.views, this.contexts, this.signatures, this.folds]) map.clear();
-      this.openGroups.clear();
+      this.toggledGroups.clear();
       this.dirtyTurns.clear();
       this.relayoutAll = true;
       this.list.replaceChildren();
@@ -284,8 +285,8 @@ export class Transcript {
     let row = id;
     for (let parent = this.source.data.entries.get(row)?.parent; parent != null && turn.body.includes(parent); parent = this.source.data.entries.get(row)?.parent) row = parent;
     const group = plan.log.find((item): item is Extract<LogItem, { kind: "group" }> => item.kind === "group" && item.members.includes(row));
-    if (group && !this.openGroups.has(group.key)) {
-      this.openGroups.add(group.key);
+    if (group && !this.groupOpen(group)) {
+      if (!this.toggledGroups.delete(group.key)) this.toggledGroups.add(group.key);
       changed = true;
     }
     if (changed) {
@@ -534,17 +535,19 @@ export class Transcript {
     if (!group) {
       group = document.createElement("div");
       group.className = "step-group";
-      group.innerHTML = `<button class="tool-row group-row" type="button"><span class="tool-state"></span><span class="tool-name">Explored</span><span class="tool-summary"></span><span class="tool-meta"></span>${glyph("chevron-right", "glyph chevron")}</button><div class="step-group-body"></div>`;
+      group.innerHTML = `<button class="tool-row group-row" type="button"><span class="tool-state"></span><span class="tool-name"></span><span class="tool-summary"></span><span class="tool-meta"></span>${glyph("chevron-right", "glyph chevron")}</button><div class="step-group-body"></div>`;
       view.groups.set(item.key, group);
     }
     const entries = this.source!.data.entries;
-    const calls = item.tools.map((id) => entries.get(id)).filter((entry): entry is ToolEntry => entry?.kind === "tool");
-    const open = this.openGroups.has(item.key);
+    const calls = this.groupCalls(item);
+    const open = runOpen(calls, this.toggledGroups.has(item.key));
     group.dataset.key = String(item.key);
     group.dataset.state = calls.some((call) => call.state === "running") ? "running" : "succeeded";
     group.classList.toggle("open", open);
     group.querySelector(".group-row")!.setAttribute("aria-expanded", String(open));
-    group.querySelector(".tool-summary")!.textContent = explorationLabel(calls);
+    const label = runLabel(calls);
+    group.querySelector(".tool-name")!.textContent = label.verb;
+    group.querySelector(".tool-summary")!.textContent = label.summary;
     const total = calls.reduce((sum, call) => sum + (call.duration_ns ?? 0), 0);
     group.querySelector(".tool-meta")!.textContent = total ? formatDuration(total) : "";
     const first = entries.get(item.key);
@@ -557,6 +560,15 @@ export class Transcript {
     body.hidden = !open;
     setChildren(body, item.members.flatMap((id) => element(id) ?? []));
     return group;
+  }
+
+  private groupCalls(item: Extract<LogItem, { kind: "group" }>) {
+    const entries = this.source!.data.entries;
+    return item.tools.map((id) => entries.get(id)).filter((entry): entry is ToolEntry => entry?.kind === "tool");
+  }
+
+  private groupOpen(item: Extract<LogItem, { kind: "group" }>) {
+    return runOpen(this.groupCalls(item), this.toggledGroups.has(item.key));
   }
 
   private entryOf(node: HTMLElement) {
@@ -1042,7 +1054,7 @@ export class Transcript {
     const turn = this.turnOf.get(this.newSince.id);
     const view = turn && this.views.get(turn.key);
     const group = anchor.parentElement?.closest<HTMLElement>(".step-group");
-    if (group && !this.openGroups.has(Number(group.dataset.key))) anchor = group;
+    if (group && !group.classList.contains("open")) anchor = group;
     if (view && anchor.closest(".turn-log") === view.log && view.log.hidden) anchor = view.fold;
     if (view && turn?.user === this.newSince.id) anchor = view.section;
     marker.textContent = this.newSince.label;
@@ -1091,7 +1103,7 @@ export class Transcript {
     const groupRow = target.closest<HTMLElement>(".group-row");
     if (groupRow) {
       const key = Number(groupRow.closest<HTMLElement>(".step-group")!.dataset.key);
-      if (!this.openGroups.delete(key)) this.openGroups.add(key);
+      if (!this.toggledGroups.delete(key)) this.toggledGroups.add(key);
       const turn = this.turnOf.get(key);
       if (turn) this.relayout(turn.key);
       return;
