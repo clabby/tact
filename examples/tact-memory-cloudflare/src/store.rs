@@ -20,7 +20,7 @@ use std::{
 use tact_memory::{
     MemoryError, MemoryKey, MemoryLimits, MemoryRecord, MemoryScan, MemoryStore,
     normalize_identity,
-    server::protocol::{self, ExportCursor, SyncReport},
+    protocol::{self, ExportCursor, SyncReport},
 };
 use thiserror::Error;
 use unicode_general_category::{GeneralCategory, get_general_category};
@@ -695,8 +695,7 @@ fn validate_snapshot(memories: &[MemoryRecord], limits: MemoryLimits) -> Result<
     let mut bytes = 0usize;
     for memory in memories {
         if !memory.key.is_local()
-            || memory.key.id <= 0
-            || memory.key.version == 0
+            || !memory.key.is_well_formed()
             || memory.key.version > i64::MAX as u64
             || memory.scan_count > i64::MAX as u64
             || memory.use_count > i64::MAX as u64

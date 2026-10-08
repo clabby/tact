@@ -4,8 +4,8 @@ use super::{MemoryError, MemoryStore, current_time_ms};
 use crate::{
     MemoryImportReport, MemoryKey, MemoryLimits, MemoryRecord, MemoryScan,
     model::{StoredMemory, normalize_identity},
+    protocol::{self, ExportCursor, SyncReport},
     secrets::contains_likely_secret,
-    server::protocol::{self, ExportCursor, SyncReport},
 };
 use rusqlite::{
     Connection, ErrorCode, OptionalExtension, Transaction, TransactionBehavior, params,
@@ -295,10 +295,7 @@ impl LocalMemoryStore {
                 .namespace
                 .as_deref()
                 .ok_or(MemoryError::Conflict)?;
-            if !protocol::is_valid_namespace(namespace)
-                || memory.key.id <= 0
-                || memory.key.version == 0
-            {
+            if !protocol::is_valid_namespace(namespace) || !memory.key.is_well_formed() {
                 return Err(MemoryError::Conflict);
             }
             validate_content(&memory.content, &self.limits)?;
@@ -577,10 +574,7 @@ impl LocalMemoryStore {
         let mut identities = HashSet::new();
         let mut ids = HashSet::new();
         let content_bytes = memories.iter().try_fold(0usize, |total, memory| {
-            if !memory.key.is_local()
-                || memory.key.id <= 0
-                || memory.key.version == 0
-                || !ids.insert(memory.key.id)
+            if !memory.key.is_local() || !memory.key.is_well_formed() || !ids.insert(memory.key.id)
             {
                 return Err(MemoryError::Conflict);
             }

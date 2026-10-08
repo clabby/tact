@@ -11,7 +11,6 @@
 
 #[cfg(feature = "server")]
 mod credential;
-pub mod protocol;
 #[cfg(feature = "server")]
 mod router;
 

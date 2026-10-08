@@ -3,7 +3,7 @@
 //! Raw bearer tokens exist only while credentials are assembled. Server construction hashes each
 //! token, consumes the credential, and retains only the digest, namespace, and role.
 
-use super::protocol::{self, RemoteRole};
+use crate::protocol::{self, RemoteRole};
 use sha2::{Digest, Sha256};
 use std::{fmt, mem};
 use thiserror::Error;

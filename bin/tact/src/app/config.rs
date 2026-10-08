@@ -1531,7 +1531,7 @@ impl RemoteMemoryConfig {
         if file.namespace.chars().any(char::is_control) {
             return Err(RemoteMemoryConfigError::NamespaceControl);
         }
-        if !tact_memory::server::protocol::is_valid_namespace(&file.namespace) {
+        if !tact_memory::protocol::is_valid_namespace(&file.namespace) {
             return Err(RemoteMemoryConfigError::NamespaceInvalid);
         }
         Ok(Some(Self {

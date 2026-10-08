@@ -1359,7 +1359,7 @@ mod tests {
         };
         use tact_memory::{
             LocalMemoryStore, MemoryStore, VERSION,
-            server::protocol::{
+            protocol::{
                 RemoteRole, SESSION_PATH, SYNC_PATH, SessionResponse, SyncReport, SyncRequest,
             },
         };

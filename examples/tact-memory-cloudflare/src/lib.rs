@@ -17,9 +17,9 @@ use axum::{
 use config::{max_request_bytes, memory_limits};
 use std::sync::{Arc, Once};
 use store::CloudflareMemoryStore;
-use tact_memory::server::{
-    MemoryServer,
+use tact_memory::{
     protocol::{self, ErrorResponse, RemoteErrorCode},
+    server::MemoryServer,
 };
 use tower::ServiceExt;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};

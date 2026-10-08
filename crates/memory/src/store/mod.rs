@@ -9,7 +9,7 @@ mod remote;
 use crate::{MemoryAccess, MemorySource, secrets::contains_likely_secret};
 use crate::{
     MemoryKey, MemoryLimits, MemoryRecord, MemoryScan,
-    server::protocol::{self, ExportCursor, SyncReport},
+    protocol::{self, ExportCursor, SyncReport},
 };
 #[cfg(feature = "local")]
 pub use local::LocalMemoryStore;

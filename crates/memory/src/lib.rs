@@ -7,6 +7,7 @@
 pub const VERSION: u32 = 1;
 
 mod model;
+pub mod protocol;
 mod retrieval;
 #[cfg(any(feature = "client", feature = "local"))]
 mod secrets;
@@ -19,7 +20,7 @@ pub use model::{
     MemoryAccess, MemoryCandidate, MemoryImportReport, MemoryKey, MemoryLimits, MemoryRecord,
     MemoryScan, MemorySource, normalize_identity,
 };
-pub use server::protocol::RemoteRole;
+pub use protocol::RemoteRole;
 #[cfg(feature = "local")]
 pub use store::LocalMemoryStore;
 #[cfg(all(feature = "client", feature = "local"))]

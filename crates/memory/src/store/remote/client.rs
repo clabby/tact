@@ -1,6 +1,6 @@
 use crate::{
     MemoryCandidate, MemoryError, MemoryKey, MemoryLimits, MemoryRecord, MemoryScan, MemoryStore,
-    server::protocol,
+    protocol,
 };
 use protocol::{
     DeleteRequest, ErrorResponse, ExportRequest, ExportResponse, ListResponse, PutRequest,
@@ -246,7 +246,7 @@ impl RemoteMemoryClient {
     ) -> Result<Vec<MemoryRecord>, RemoteClientError> {
         let keys = keys
             .iter()
-            .filter(|key| Self::valid_key(key) && key.namespace.is_some())
+            .filter(|key| key.is_well_formed() && key.namespace.is_some())
             .cloned()
             .collect::<Vec<_>>();
         let ids = ids.iter().copied().filter(|id| *id > 0).collect::<Vec<_>>();
@@ -424,16 +424,8 @@ impl RemoteMemoryClient {
         Ok(())
     }
 
-    fn valid_key(key: &MemoryKey) -> bool {
-        key.namespace
-            .as_deref()
-            .is_none_or(protocol::is_valid_namespace)
-            && key.id > 0
-            && key.version > 0
-    }
-
     fn valid_candidate(&self, candidate: &MemoryCandidate) -> bool {
-        Self::valid_key(&candidate.key)
+        candidate.key.is_well_formed()
             && candidate.key.namespace.is_some()
             && candidate.preview.len() <= 64
             && candidate.score.is_finite()
@@ -442,7 +434,7 @@ impl RemoteMemoryClient {
     }
 
     fn valid_record(memory: &MemoryRecord) -> bool {
-        Self::valid_key(&memory.key)
+        memory.key.is_well_formed()
             && memory.key.namespace.is_some()
             && !memory.content.trim().is_empty()
             && memory.created_at_ms >= 0

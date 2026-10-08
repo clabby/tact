@@ -1,6 +1,6 @@
 //! Domain models shared by local storage, remote storage, and the wire protocol.
 
-use crate::server::protocol::RemoteRole;
+use crate::protocol::{self, RemoteRole};
 use serde::{Deserialize, Serialize};
 
 const PROBATION_DURATION_MS: i64 = 7 * 24 * 60 * 60 * 1_000;
@@ -39,6 +39,18 @@ impl MemoryKey {
     /// Returns whether this key belongs to a local store.
     pub const fn is_local(&self) -> bool {
         self.namespace.is_none()
+    }
+
+    /// Returns whether the ID and version are positive and any namespace is protocol-valid.
+    ///
+    /// Stores never allocate keys outside this shape, so a malformed key cannot name a record.
+    pub fn is_well_formed(&self) -> bool {
+        self.id > 0
+            && self.version > 0
+            && self
+                .namespace
+                .as_deref()
+                .is_none_or(protocol::is_valid_namespace)
     }
 }
 

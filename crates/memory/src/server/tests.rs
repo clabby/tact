@@ -1,14 +1,13 @@
-use super::{
-    Credential, MemoryServer, ServerBuildError,
+use super::{Credential, MemoryServer, ServerBuildError};
+use crate::{
+    MemoryCandidate, MemoryError, MemoryKey, MemoryLimits, MemoryRecord, MemoryScan, MemoryStore,
+    RemoteClientError, RemoteMemoryClient, RemoteToken,
+    model::normalize_identity,
     protocol::{
         self, DeleteRequest, ErrorResponse, ExportCursor, ExportRequest, ExportResponse,
         ListResponse, PutRequest, PutResponse, ReadRequest, ReadResponse, RemoteErrorCode,
         RemoteRole, ScanRequest, ScanResponse, SessionResponse, SyncReport, SyncRequest,
     },
-};
-use crate::{
-    MemoryCandidate, MemoryError, MemoryKey, MemoryLimits, MemoryRecord, MemoryScan, MemoryStore,
-    RemoteClientError, RemoteMemoryClient, RemoteToken, model::normalize_identity,
 };
 use axum::{
     Json, Router,
@@ -293,8 +292,7 @@ impl MemoryStore for TestMemoryStore {
                     maximum_bytes: self.limits.content_bytes,
                 });
             }
-            if memory.key.id <= 0
-                || memory.key.version == 0
+            if !memory.key.is_well_formed()
                 || !identities.insert(normalize_identity(&memory.content))
             {
                 return Err(MemoryError::Conflict);

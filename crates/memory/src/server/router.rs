@@ -1,14 +1,14 @@
 //! Authenticated HTTP routing for the remote-memory protocol.
 
-use super::{
-    credential::{Credential, Principal, hash_token, is_bearer_token_byte},
+use super::credential::{Credential, Principal, hash_token, is_bearer_token_byte};
+use crate::{
+    MemoryError, MemoryLimits, MemoryRecord, MemoryStore,
     protocol::{
         self, DeleteRequest, ErrorResponse, ExportRequest, ExportResponse, ListResponse,
         PutRequest, PutResponse, ReadRequest, ReadResponse, RemoteErrorCode, RemoteRole,
         ScanRequest, ScanResponse, SessionResponse, SyncRequest,
     },
 };
-use crate::{MemoryError, MemoryKey, MemoryLimits, MemoryRecord, MemoryStore};
 use axum::{
     Json, Router,
     body::Body,
@@ -195,7 +195,7 @@ async fn read<S: MemoryStore>(
     let counts = OperationCounts::input(request.ids.len().saturating_add(request.keys.len()));
     if counts.input_count > protocol::MAX_READ_SELECTORS
         || request.ids.iter().any(|id| *id <= 0)
-        || request.keys.iter().any(|key| !valid_key(key))
+        || request.keys.iter().any(|key| !key.is_well_formed())
     {
         return operation.error_response(ApiError::bad_request(), counts);
     }
@@ -261,7 +261,7 @@ async fn put<S: MemoryStore>(
         return operation.error_response(ApiError::bad_request(), counts);
     }
     if request.replacement.as_ref().is_some_and(|key| {
-        !valid_key(key) || key.namespace.as_deref() != Some(principal.namespace.as_str())
+        !key.is_well_formed() || key.namespace.as_deref() != Some(principal.namespace.as_str())
     }) {
         return operation.error_response(
             ApiError::new(StatusCode::FORBIDDEN, RemoteErrorCode::Forbidden),
@@ -303,7 +303,7 @@ async fn delete<S: MemoryStore>(
         Err(error) => return operation.error_response(error, OperationCounts::default()),
     };
     let counts = OperationCounts::input(1);
-    if !valid_key(&request.key)
+    if !request.key.is_well_formed()
         || request.key.namespace.as_deref() != Some(principal.namespace.as_str())
     {
         return operation.error_response(
@@ -458,20 +458,11 @@ fn authenticate<S>(state: &ServerState<S>, headers: &HeaderMap) -> Result<Princi
     Ok(principal)
 }
 
-fn valid_key(key: &MemoryKey) -> bool {
-    key.id > 0
-        && key.version > 0
-        && key
-            .namespace
-            .as_deref()
-            .is_none_or(protocol::is_valid_namespace)
-}
-
 fn valid_snapshot(memories: &[MemoryRecord]) -> bool {
     let mut ids = HashSet::with_capacity(memories.len());
     memories.iter().all(|memory| {
         memory.key.is_local()
-            && valid_key(&memory.key)
+            && memory.key.is_well_formed()
             && ids.insert(memory.key.id)
             && !memory.content.trim().is_empty()
             && memory.created_at_ms >= 0
