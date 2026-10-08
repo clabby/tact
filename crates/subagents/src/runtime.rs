@@ -3,6 +3,7 @@
 use super::{
     Speed,
     capacity::{Capacity, TurnCapacity},
+    error::{MessageError, RegistryEntry, ShutdownPhase, SpawnError, SubagentError},
     harness::{self, HarnessHandle},
     message::MessageThreads,
     model::{
@@ -56,12 +57,13 @@ pub(super) struct OutputContract {
 }
 
 impl OutputContract {
-    pub(super) fn compile(schema: &Value) -> std::io::Result<Self> {
+    pub(super) fn compile(schema: &Value) -> Result<Self, SubagentError> {
         let validator = jsonschema::validator_for(schema)
-            .map_err(|error| std::io::Error::other(format!("invalid output_schema: {error}")))?;
-        let schema = serde_json::to_string_pretty(schema)
-            .map_err(|error| std::io::Error::other(format!("could not render schema: {error}")))?;
-        Ok(Self { validator, schema })
+            .map_err(|error| SubagentError::InvalidSchema(Box::new(error)))?;
+        Ok(Self {
+            validator,
+            schema: format!("{schema:#}"),
+        })
     }
 }
 
@@ -103,13 +105,9 @@ struct AgentSettings {
     speed: Speed,
 }
 
-fn thinking_rank(thinking: Thinking) -> Result<u8, NanocodexError> {
+fn thinking_rank(thinking: Thinking) -> Result<u8, SpawnError> {
     Ok(match thinking {
-        Thinking::None => {
-            return Err(NanocodexError::InvalidRequest(
-                "subagent thinking must be low, medium, high, xhigh, or max".to_owned(),
-            ));
-        }
+        Thinking::None => return Err(SpawnError::ThinkingDisabled),
         Thinking::Low => 1,
         Thinking::Medium => 2,
         Thinking::High => 3,
@@ -164,18 +162,18 @@ impl AgentReservation {
         caller_model: &str,
         model: Model,
         thinking: Thinking,
-    ) -> Result<(), NanocodexError> {
+    ) -> Result<(), SpawnError> {
         let parent_model = match self.parent_context {
             Some(parent) => {
                 if thinking_rank(thinking)? > thinking_rank(parent.thinking)? {
-                    return Err(NanocodexError::InvalidRequest(format!(
-                        "subagent thinking {thinking} exceeds parent effort {}",
-                        parent.thinking
-                    )));
+                    return Err(SpawnError::ThinkingExceedsParent {
+                        requested: thinking,
+                        parent: parent.thinking,
+                    });
                 }
                 parent.model
             }
-            None => crate::parse_model(caller_model).map_err(NanocodexError::InvalidRequest)?,
+            None => crate::parse_model(caller_model)?,
         };
         if matches!(
             (parent_model, model),
@@ -187,9 +185,10 @@ impl AgentReservation {
                 Model::Codex(CodexModel::Astra)
             )
         ) {
-            return Err(NanocodexError::InvalidRequest(format!(
-                "subagent model {model} exceeds parent model {parent_model}"
-            )));
+            return Err(SpawnError::ModelExceedsParent {
+                requested: model,
+                parent: parent_model,
+            });
         }
         Ok(())
     }
@@ -272,51 +271,40 @@ impl RegistryState {
         session_id: &str,
         turn_token: u64,
         output: Value,
-    ) -> std::io::Result<()> {
+    ) -> Result<(), SubagentError> {
         let root_session_id = self.root_session_id(session_id).to_owned();
         let scope = self
             .scopes
             .get_mut(&root_session_id)
-            .ok_or_else(|| std::io::Error::other("submit_result is only available to subagents"))?;
+            .ok_or(SubagentError::NotSubagent)?;
         let id = scope
             .topology
             .agent_for_session(session_id)
-            .ok_or_else(|| std::io::Error::other("submit_result is only available to subagents"))?;
+            .ok_or(SubagentError::NotSubagent)?;
         let session = scope
             .sessions
             .get_mut(&id)
-            .ok_or_else(|| std::io::Error::other("subagent session disappeared"))?;
+            .ok_or(SubagentError::StateDisappeared(RegistryEntry::Session))?;
         if !session.active {
-            return Err(std::io::Error::other(
-                "submit_result is only available during an active subagent turn",
-            ));
+            return Err(SubagentError::NoActiveTurn);
         }
         if session.steering {
-            return Err(std::io::Error::other(
-                "the subagent turn is being steered; retry submit_result",
-            ));
+            return Err(SubagentError::TurnSteering);
         }
         if session.active_turn_token != Some(turn_token) {
-            return Err(std::io::Error::other(
-                "submit_result used a stale or unknown turn_token",
-            ));
+            return Err(SubagentError::StaleTurnToken);
         }
         if session.submitted_output.is_some() {
-            return Err(std::io::Error::other(
-                "submit_result already accepted one result for this turn",
-            ));
+            return Err(SubagentError::AlreadySubmitted);
         }
-        let errors = session
+        let violations = session
             .output_validator
             .iter_errors(&output)
             .take(4)
             .map(|error| error.to_string())
             .collect::<Vec<_>>();
-        if !errors.is_empty() {
-            return Err(std::io::Error::other(format!(
-                "submitted output does not match the required schema: {}",
-                errors.join("; ")
-            )));
+        if !violations.is_empty() {
+            return Err(SubagentError::OutputMismatch { violations });
         }
         session.submitted_output = Some(output);
         Ok(())
@@ -360,7 +348,7 @@ impl RegistryState {
         session.steering = false;
     }
 
-    fn reserve_for(&mut self, session_id: &str) -> std::io::Result<AgentReservation> {
+    fn reserve_for(&mut self, session_id: &str) -> Result<AgentReservation, SubagentError> {
         let root_session_id = self.root_session_id(session_id).to_owned();
         let parent = self
             .scopes
@@ -371,14 +359,12 @@ impl RegistryState {
                 .scopes
                 .get(&root_session_id)
                 .and_then(|scope| scope.sessions.get(&parent))
-                .ok_or_else(|| std::io::Error::other("subagent parent disappeared"))?;
+                .ok_or(SubagentError::StateDisappeared(RegistryEntry::Parent))?;
             if matches!(
                 parent_session.status,
                 AgentStatus::Closing | AgentStatus::Closed
             ) {
-                return Err(std::io::Error::other(format!(
-                    "agent {parent} is closing and cannot spawn children"
-                )));
+                return Err(SubagentError::ParentClosing(parent));
             }
             Some(AgentContext {
                 model: parent_session.descriptor.model,
@@ -396,7 +382,7 @@ impl RegistryState {
         &mut self,
         session_id: &str,
         parent: Option<AgentId>,
-    ) -> std::io::Result<AgentReservation> {
+    ) -> Result<AgentReservation, SubagentError> {
         let root_session_id = self.root_session_id(session_id).to_owned();
         let id = self.scope_mut(&root_session_id).topology.reserve(parent)?;
         Ok(AgentReservation {
@@ -413,20 +399,18 @@ impl RegistryState {
         id: AgentId,
         session_id: String,
         session: ChildSession,
-    ) -> std::io::Result<()> {
+    ) -> Result<(), SubagentError> {
         if let Some(parent) = session.descriptor.parent {
             let parent_session = self
                 .scopes
                 .get(&root_session_id)
                 .and_then(|scope| scope.sessions.get(&parent))
-                .ok_or_else(|| std::io::Error::other(format!("unknown parent agent {parent}")))?;
+                .ok_or(SubagentError::UnknownParent(parent))?;
             if matches!(
                 parent_session.status,
                 AgentStatus::Closing | AgentStatus::Closed
             ) {
-                return Err(std::io::Error::other(format!(
-                    "agent {parent} stopped while spawning child {id}"
-                )));
+                return Err(SubagentError::ParentStopped { parent, child: id });
             }
         }
         self.scope_mut(&root_session_id).topology.insert(
@@ -446,12 +430,12 @@ impl RegistryState {
         &self,
         root_session_id: &str,
         id: AgentId,
-    ) -> std::io::Result<HarnessHandle> {
+    ) -> Result<HarnessHandle, SubagentError> {
         self.scopes
             .get(root_session_id)
             .and_then(|scope| scope.sessions.get(&id))
             .and_then(|session| session.harness.clone())
-            .ok_or_else(|| std::io::Error::other(format!("agent {id} is closed")))
+            .ok_or(SubagentError::AgentClosed(id))
     }
 
     fn directory(
@@ -509,12 +493,12 @@ impl RegistryState {
         purpose: MessagePurpose,
         in_reply_to: Option<MessageId>,
         body: String,
-    ) -> std::io::Result<PreparedMessage> {
+    ) -> Result<PreparedMessage, SubagentError> {
         let root_session_id = self.root_session_id(session_id).to_owned();
         let scope = self
             .scopes
             .get_mut(&root_session_id)
-            .ok_or_else(|| std::io::Error::other(format!("unknown agent_id {to}")))?;
+            .ok_or(SubagentError::UnknownAgent(to))?;
         let from = scope
             .topology
             .agent_for_session(session_id)
@@ -522,7 +506,7 @@ impl RegistryState {
                 agent_id,
             });
         if from.agent_id() == Some(to) {
-            return Err(std::io::Error::other("agents cannot message themselves"));
+            return Err(MessageError::SelfAddressed.into());
         }
         if purpose == MessagePurpose::Delegate {
             scope.topology.authorize(session_id, to)?;
@@ -530,22 +514,20 @@ impl RegistryState {
         let target = scope
             .sessions
             .get(&to)
-            .ok_or_else(|| std::io::Error::other(format!("unknown agent_id {to}")))?;
+            .ok_or(SubagentError::UnknownAgent(to))?;
         if matches!(target.status, AgentStatus::Pending) {
-            return Err(std::io::Error::other(format!(
-                "agent {to} has not started and cannot receive messages yet"
-            )));
+            return Err(SubagentError::RecipientPending(to));
         }
         if matches!(target.status, AgentStatus::Closing | AgentStatus::Closed) {
-            return Err(std::io::Error::other(format!(
-                "agent {to} is {:?} and cannot receive messages",
-                target.status
-            )));
+            return Err(SubagentError::RecipientStopped {
+                agent: to,
+                status: target.status.clone(),
+            });
         }
         let harness = target
             .harness
             .clone()
-            .ok_or_else(|| std::io::Error::other(format!("agent {to} is closed")))?;
+            .ok_or(SubagentError::AgentClosed(to))?;
         let message = scope
             .messages
             .prepare(from, to, priority, purpose, in_reply_to, body)?;
@@ -560,11 +542,11 @@ impl RegistryState {
         &mut self,
         root_session_id: &str,
         message: AgentMessage,
-    ) -> std::io::Result<AgentThread> {
+    ) -> Result<AgentThread, SubagentError> {
         let scope = self
             .scopes
             .get_mut(root_session_id)
-            .ok_or_else(|| std::io::Error::other("subagent scope disappeared"))?;
+            .ok_or(SubagentError::StateDisappeared(RegistryEntry::Scope))?;
         Ok(scope.messages.commit(message))
     }
 
@@ -632,7 +614,11 @@ impl RegistryState {
         }
     }
 
-    fn summaries(&self, session_id: &str, ids: &[AgentId]) -> std::io::Result<Vec<AgentSummary>> {
+    fn summaries(
+        &self,
+        session_id: &str,
+        ids: &[AgentId],
+    ) -> Result<Vec<AgentSummary>, SubagentError> {
         let root_session_id = self.root_session_id(session_id);
         for &id in ids {
             self.authorize(session_id, id)?;
@@ -644,18 +630,18 @@ impl RegistryState {
         &self,
         root_session_id: &str,
         ids: &[AgentId],
-    ) -> std::io::Result<Vec<AgentSummary>> {
+    ) -> Result<Vec<AgentSummary>, SubagentError> {
         let scope = self
             .scopes
             .get(root_session_id)
-            .ok_or_else(|| std::io::Error::other("subagent scope disappeared"))?;
+            .ok_or(SubagentError::StateDisappeared(RegistryEntry::Scope))?;
         ids.iter()
             .map(|id| {
                 scope
                     .sessions
                     .get(id)
                     .map(ChildSession::summary)
-                    .ok_or_else(|| std::io::Error::other(format!("unknown agent_id {id}")))
+                    .ok_or(SubagentError::UnknownAgent(*id))
             })
             .collect()
     }
@@ -664,14 +650,18 @@ impl RegistryState {
         &mut self,
         session_id: &str,
         id: AgentId,
-    ) -> std::io::Result<(String, Vec<AgentId>, Vec<HarnessHandle>)> {
+    ) -> Result<(String, Vec<AgentId>, Vec<HarnessHandle>), SubagentError> {
         let root_session_id = self.authorize(session_id, id)?;
         let ids = self.subtree_shutdown_order(&root_session_id, id)?;
         let harnesses = self.harnesses(&root_session_id, &ids, false)?;
         Ok((root_session_id, ids, harnesses))
     }
 
-    fn request_close(&mut self, session_id: &str, id: AgentId) -> std::io::Result<CloseRequest> {
+    fn request_close(
+        &mut self,
+        session_id: &str,
+        id: AgentId,
+    ) -> Result<CloseRequest, SubagentError> {
         let root_session_id = self.authorize(session_id, id)?;
         let ids = self.subtree_shutdown_order(&root_session_id, id)?;
         let harnesses = self.harnesses(&root_session_id, &ids, true)?;
@@ -688,7 +678,7 @@ impl RegistryState {
         })
     }
 
-    fn request_close_all(&mut self, session_id: &str) -> std::io::Result<CloseRequest> {
+    fn request_close_all(&mut self, session_id: &str) -> Result<CloseRequest, SubagentError> {
         let root_session_id = self.root_session_id(session_id).to_owned();
         let Some(scope) = self.scopes.get(&root_session_id) else {
             return Ok(CloseRequest {
@@ -734,17 +724,17 @@ impl RegistryState {
         root_session_id: &str,
         ids: &[AgentId],
         closing: bool,
-    ) -> std::io::Result<Vec<HarnessHandle>> {
+    ) -> Result<Vec<HarnessHandle>, SubagentError> {
         let scope = self
             .scopes
             .get_mut(root_session_id)
-            .ok_or_else(|| std::io::Error::other("subagent scope disappeared"))?;
+            .ok_or(SubagentError::StateDisappeared(RegistryEntry::Scope))?;
         let mut harnesses = Vec::new();
         for id in ids {
             let session = scope
                 .sessions
                 .get_mut(id)
-                .ok_or_else(|| std::io::Error::other(format!("unknown agent_id {id}")))?;
+                .ok_or(SubagentError::UnknownAgent(*id))?;
             if closing {
                 session.status = AgentStatus::Closing;
             }
@@ -757,22 +747,20 @@ impl RegistryState {
         &mut self,
         root_session_id: &str,
         ids: &[AgentId],
-    ) -> std::io::Result<ClosedSessions> {
+    ) -> Result<ClosedSessions, SubagentError> {
         let scope = self
             .scopes
             .get_mut(root_session_id)
-            .ok_or_else(|| std::io::Error::other("subagent scope disappeared"))?;
+            .ok_or(SubagentError::StateDisappeared(RegistryEntry::Scope))?;
         let mut harness_tasks = Vec::new();
         let mut event_tasks = Vec::new();
         for id in ids {
             let session = scope
                 .sessions
                 .get_mut(id)
-                .ok_or_else(|| std::io::Error::other(format!("unknown agent_id {id}")))?;
+                .ok_or(SubagentError::UnknownAgent(*id))?;
             if session.active {
-                return Err(std::io::Error::other(format!(
-                    "agent {id} is still running"
-                )));
+                return Err(SubagentError::StillRunning(*id));
             }
             session.harness = None;
             harness_tasks.extend(session.harness_task.take());
@@ -790,11 +778,11 @@ impl RegistryState {
         })
     }
 
-    fn all_inactive(&self, root_session_id: &str, ids: &[AgentId]) -> std::io::Result<bool> {
+    fn all_inactive(&self, root_session_id: &str, ids: &[AgentId]) -> Result<bool, SubagentError> {
         let scope = self
             .scopes
             .get(root_session_id)
-            .ok_or_else(|| std::io::Error::other("subagent scope disappeared"))?;
+            .ok_or(SubagentError::StateDisappeared(RegistryEntry::Scope))?;
         Ok(ids.iter().all(|id| {
             scope
                 .sessions
@@ -807,19 +795,19 @@ impl RegistryState {
         &self,
         root_session_id: &str,
         id: AgentId,
-    ) -> std::io::Result<Vec<AgentId>> {
+    ) -> Result<Vec<AgentId>, SubagentError> {
         self.scopes
             .get(root_session_id)
-            .ok_or_else(|| std::io::Error::other("subagent scope disappeared"))?
+            .ok_or(SubagentError::StateDisappeared(RegistryEntry::Scope))?
             .topology
             .subtree_postorder(id)
     }
 
-    fn authorize(&self, session_id: &str, id: AgentId) -> std::io::Result<String> {
+    fn authorize(&self, session_id: &str, id: AgentId) -> Result<String, SubagentError> {
         let root_session_id = self.root_session_id(session_id);
         self.scopes
             .get(root_session_id)
-            .ok_or_else(|| std::io::Error::other(format!("unknown agent_id {id}")))?
+            .ok_or(SubagentError::UnknownAgent(id))?
             .topology
             .authorize(session_id, id)?;
         Ok(root_session_id.to_owned())
@@ -885,36 +873,29 @@ impl Registry {
         &self,
         model: Model,
         thinking: Thinking,
-    ) -> Result<(Nanocodex, AgentEvents), NanocodexError> {
+    ) -> Result<(Nanocodex, AgentEvents), SubagentError> {
         if !crate::SUPPORTED_MODELS.contains(&model) {
-            return Err(NanocodexError::InvalidRequest(
-                "unsupported subagent model".into(),
-            ));
+            return Err(SpawnError::ModelNotOffered.into());
         }
         if matches!(model, Model::Claude(_)) && !self.claude_enabled() {
-            return Err(NanocodexError::InvalidRequest(
-                "Claude subagents are disabled".to_owned(),
-            ));
+            return Err(SpawnError::ClaudeDisabled.into());
         }
         if !model.supports_thinking(thinking) {
-            return Err(NanocodexError::InvalidRequest(format!(
-                "model {model} does not support thinking {thinking}"
-            )));
+            return Err(SpawnError::UnsupportedThinking { model, thinking }.into());
         }
-        let factory = self.agent_factory.get().ok_or_else(|| {
-            NanocodexError::InvalidRequest("subagent factory is not configured".to_owned())
-        })?;
+        let factory = self.agent_factory.get().ok_or(SpawnError::FactoryMissing)?;
         let settings = *factory
             .settings
             .lock()
             .expect("subagent settings lock should not be poisoned");
         if thinking_rank(thinking)? > thinking_rank(settings.max_thinking)? {
-            return Err(NanocodexError::InvalidRequest(format!(
-                "subagent thinking {thinking} exceeds configured maximum {}",
-                settings.max_thinking
-            )));
+            return Err(SpawnError::ThinkingExceedsMaximum {
+                requested: thinking,
+                maximum: settings.max_thinking,
+            }
+            .into());
         }
-        (factory.build)(model, thinking, settings.speed)
+        Ok((factory.build)(model, thinking, settings.speed)?)
     }
 
     pub(super) fn claude_enabled(&self) -> bool {
@@ -941,7 +922,7 @@ impl Registry {
         }
     }
 
-    pub(super) fn reserve_turn(&self) -> std::io::Result<TurnCapacity> {
+    pub(super) fn reserve_turn(&self) -> Result<TurnCapacity, SubagentError> {
         self.capacity.reserve()
     }
 
@@ -958,7 +939,10 @@ impl Registry {
             .contains_key(session_id)
     }
 
-    pub(super) async fn reserve(&self, session_id: &str) -> std::io::Result<AgentReservation> {
+    pub(super) async fn reserve(
+        &self,
+        session_id: &str,
+    ) -> Result<AgentReservation, SubagentError> {
         self.state.lock().await.reserve_for(session_id)
     }
 
@@ -967,7 +951,7 @@ impl Registry {
         session_id: &str,
         turn_token: u64,
         output: Value,
-    ) -> std::io::Result<()> {
+    ) -> Result<(), SubagentError> {
         self.state
             .lock()
             .await
@@ -1004,7 +988,7 @@ impl Registry {
         agent: Nanocodex,
         event_task: JoinHandle<()>,
         contract: OutputContract,
-    ) -> std::io::Result<()> {
+    ) -> Result<(), SubagentError> {
         let OutputContract { validator, schema } = contract;
         let (harness, harness_task) = harness::spawn(
             root_session_id.clone(),
@@ -1043,7 +1027,7 @@ impl Registry {
         id: AgentId,
         prompt: String,
         capacity: TurnCapacity,
-    ) -> std::io::Result<()> {
+    ) -> Result<(), SubagentError> {
         let harness = self
             .state
             .lock()
@@ -1239,7 +1223,7 @@ impl Registry {
         purpose: MessagePurpose,
         in_reply_to: Option<MessageId>,
         body: String,
-    ) -> std::io::Result<MessageReceipt> {
+    ) -> Result<MessageReceipt, SubagentError> {
         let _message_guard = self.message_lock.lock().await;
         let prepared = self.state.lock().await.prepare_message(
             session_id,
@@ -1392,9 +1376,9 @@ impl Registry {
         session_id: &str,
         ids: &[AgentId],
         duration: Duration,
-    ) -> std::io::Result<(Vec<AgentSummary>, bool)> {
+    ) -> Result<(Vec<AgentSummary>, bool), SubagentError> {
         if ids.is_empty() {
-            return Err(std::io::Error::other("agent_ids must not be empty"));
+            return Err(SubagentError::EmptyWaitSet);
         }
         let mut revision = self.revision.subscribe();
         let deadline = Instant::now() + duration;
@@ -1403,21 +1387,15 @@ impl Registry {
             let terminal = summaries
                 .iter()
                 .filter(|summary| summary.status.is_wait_terminal())
-                .map(|summary| summary.agent_id.to_string())
+                .map(|summary| summary.agent_id)
                 .collect::<Vec<_>>();
             if !terminal.is_empty() {
                 let active = summaries
                     .iter()
                     .filter(|summary| summary.status.is_active())
-                    .map(|summary| summary.agent_id.to_string())
-                    .collect::<Vec<_>>();
-                return Err(std::io::Error::other(format!(
-                    "already terminal agent_ids: [{}]; remaining active agent_ids: [{}]. \
-                     Read available results with list_agents({{include_completed:true}}) and \
-                     wait only on active IDs.",
-                    terminal.join(", "),
-                    active.join(", ")
-                )));
+                    .map(|summary| summary.agent_id)
+                    .collect();
+                return Err(SubagentError::AlreadyTerminal { terminal, active });
             }
         }
         loop {
@@ -1439,7 +1417,7 @@ impl Registry {
         &self,
         session_id: &str,
         id: AgentId,
-    ) -> std::io::Result<Vec<AgentSummary>> {
+    ) -> Result<Vec<AgentSummary>, SubagentError> {
         let _message_guard = self.message_lock.lock().await;
         let (root_session_id, ids, harnesses) = {
             let mut state = self.state.lock().await;
@@ -1459,7 +1437,7 @@ impl Registry {
         &self,
         session_id: &str,
         id: AgentId,
-    ) -> std::io::Result<Vec<AgentSummary>> {
+    ) -> Result<Vec<AgentSummary>, SubagentError> {
         let _message_guard = self.message_lock.lock().await;
         let CloseRequest {
             root_session_id,
@@ -1477,7 +1455,7 @@ impl Registry {
         self.stop_and_close(root_session_id, ids, harnesses).await
     }
 
-    async fn close_all(&self, session_id: &str) -> std::io::Result<Vec<AgentSummary>> {
+    async fn close_all(&self, session_id: &str) -> Result<Vec<AgentSummary>, SubagentError> {
         let _message_guard = self.message_lock.lock().await;
         let CloseRequest {
             root_session_id,
@@ -1500,7 +1478,7 @@ impl Registry {
         root_session_id: String,
         ids: Vec<AgentId>,
         harnesses: Vec<HarnessHandle>,
-    ) -> std::io::Result<Vec<AgentSummary>> {
+    ) -> Result<Vec<AgentSummary>, SubagentError> {
         if ids.is_empty() {
             return Ok(Vec::new());
         }
@@ -1531,9 +1509,9 @@ impl Registry {
             );
         }
         self.changed();
-        self.wait_for_tasks(harness_tasks, deadline, "subagent harnesses")
+        self.wait_for_tasks(harness_tasks, deadline, ShutdownPhase::JoinHarnesses)
             .await?;
-        self.wait_for_tasks(event_tasks, deadline, "subagent event streams")
+        self.wait_for_tasks(event_tasks, deadline, ShutdownPhase::JoinEventStreams)
             .await?;
         Ok(summaries)
     }
@@ -1558,7 +1536,7 @@ impl Registry {
         ids: &[AgentId],
         harnesses: Vec<HarnessHandle>,
         deadline: Instant,
-    ) -> std::io::Result<()> {
+    ) -> Result<(), SubagentError> {
         let interruption = async move {
             let results = join_all(
                 harnesses
@@ -1568,12 +1546,9 @@ impl Registry {
             .await;
             first_error(results)
         };
-        let interruption_result = timeout_at(deadline, interruption).await.map_err(|_| {
-            std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "timed out interrupting subagent harnesses",
-            )
-        })?;
+        let interruption_result = timeout_at(deadline, interruption)
+            .await
+            .map_err(|_| SubagentError::ShutdownTimedOut(ShutdownPhase::InterruptHarnesses))?;
         self.wait_until_inactive(root_session_id, ids, deadline)
             .await?;
         drop(interruption_result);
@@ -1584,7 +1559,7 @@ impl Registry {
         &self,
         harnesses: Vec<HarnessHandle>,
         deadline: Instant,
-    ) -> std::io::Result<()> {
+    ) -> Result<(), SubagentError> {
         let closing = async move {
             let results = join_all(
                 harnesses
@@ -1594,20 +1569,17 @@ impl Registry {
             .await;
             first_error(results)
         };
-        timeout_at(deadline, closing).await.map_err(|_| {
-            std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "timed out closing subagent harnesses",
-            )
-        })?
+        timeout_at(deadline, closing)
+            .await
+            .map_err(|_| SubagentError::ShutdownTimedOut(ShutdownPhase::CloseHarnesses))?
     }
 
     async fn wait_for_tasks(
         &self,
         mut tasks: Vec<JoinHandle<()>>,
         deadline: Instant,
-        description: &str,
-    ) -> std::io::Result<()> {
+        phase: ShutdownPhase,
+    ) -> Result<(), SubagentError> {
         if tasks.is_empty() {
             return Ok(());
         }
@@ -1616,19 +1588,14 @@ impl Registry {
             Ok(results) => results
                 .into_iter()
                 .find_map(Result::err)
-                .map_or(Ok(()), |error| {
-                    Err(std::io::Error::other(format!(
-                        "{description} failed during shutdown: {error}"
-                    )))
+                .map_or(Ok(()), |source| {
+                    Err(SubagentError::ShutdownTask { phase, source })
                 }),
             Err(_) => {
                 for task in tasks {
                     task.abort();
                 }
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    format!("timed out waiting for {description} to close"),
-                ))
+                Err(SubagentError::ShutdownTimedOut(phase))
             }
         }
     }
@@ -1638,7 +1605,7 @@ impl Registry {
         root_session_id: &str,
         ids: &[AgentId],
         deadline: Instant,
-    ) -> std::io::Result<()> {
+    ) -> Result<(), SubagentError> {
         let mut revision = self.revision.subscribe();
         loop {
             if self.state.lock().await.all_inactive(root_session_id, ids)? {
@@ -1646,13 +1613,8 @@ impl Registry {
             }
             timeout_at(deadline, revision.changed())
                 .await
-                .map_err(|_| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::TimedOut,
-                        "timed out waiting for subagent turns to stop",
-                    )
-                })?
-                .map_err(|_| std::io::Error::other("subagent runtime is closed"))?;
+                .map_err(|_| SubagentError::ShutdownTimedOut(ShutdownPhase::StopTurns))?
+                .map_err(|_| SubagentError::RuntimeClosed)?;
         }
     }
 
@@ -1691,7 +1653,7 @@ fn complete_session(session: &mut ChildSession, output: Option<Value>) -> AgentS
     AgentStatus::Completed { output }
 }
 
-fn first_error(results: Vec<std::io::Result<()>>) -> std::io::Result<()> {
+fn first_error(results: Vec<Result<(), SubagentError>>) -> Result<(), SubagentError> {
     results.into_iter().find(Result::is_err).unwrap_or(Ok(()))
 }
 
@@ -1904,6 +1866,7 @@ mod tests {
         Registry, RegistryState, RootAgentAuthority, Subagents, complete_session,
         completion_instructions, forward_events,
     };
+    use crate::error::{DeliveryFailure, SpawnError, SubagentError};
     use crate::{
         AgentUpdate, MessageDeliveryState, MessageDisposition, MessagePriority, MessagePurpose,
         Speed,
@@ -2017,14 +1980,19 @@ mod tests {
                 .expect("factory should stop after capture");
             let actual = seen.lock().unwrap().take();
             if allowed {
-                assert!(error.to_string().contains("stop after capture"));
+                assert!(matches!(error, SubagentError::Agent(_)));
                 assert_eq!(
                     actual,
                     Some((Model::Codex(CodexModel::Luna), requested, Speed::Ultrafast))
                 );
             } else {
                 assert_eq!(actual, None);
-                assert!(matches!(error, NanocodexError::InvalidRequest(_)));
+                assert!(matches!(
+                    error,
+                    SubagentError::Spawn(
+                        SpawnError::ThinkingExceedsMaximum { .. } | SpawnError::ThinkingDisabled
+                    )
+                ));
             }
         }
     }
@@ -2068,17 +2036,24 @@ mod tests {
         ] {
             let result = reservation
                 .validate_child(Model::Codex(CodexModel::Astra).as_str(), model, thinking)
+                .map_err(SubagentError::from)
                 .and_then(|()| registry.spawn_agent(model, thinking));
             let error = result.err().unwrap();
             if allowed {
-                assert!(error.to_string().contains("stop after capture"));
+                assert!(matches!(error, SubagentError::Agent(_)));
                 assert_eq!(
                     arguments.try_recv().unwrap(),
                     (model, thinking, Speed::Standard)
                 );
             } else {
                 assert!(arguments.try_recv().is_err());
-                assert!(error.to_string().contains("exceeds parent"));
+                assert!(matches!(
+                    error,
+                    SubagentError::Spawn(
+                        SpawnError::ModelExceedsParent { .. }
+                            | SpawnError::ThinkingExceedsParent { .. }
+                    )
+                ));
             }
         }
         for (cap, allowed) in [(Thinking::Low, false), (Thinking::High, true)] {
@@ -2095,7 +2070,7 @@ mod tests {
                 .err()
                 .unwrap();
             if allowed {
-                assert!(error.to_string().contains("stop after capture"));
+                assert!(matches!(error, SubagentError::Agent(_)));
                 assert_eq!(
                     arguments.try_recv().unwrap(),
                     (
@@ -2105,7 +2080,13 @@ mod tests {
                     )
                 );
             } else {
-                assert!(error.to_string().contains("exceeds configured maximum"));
+                assert!(matches!(
+                    error,
+                    SubagentError::Spawn(SpawnError::ThinkingExceedsMaximum {
+                        requested: Thinking::Medium,
+                        maximum: Thinking::Low,
+                    })
+                ));
                 assert!(arguments.try_recv().is_err());
             }
         }
@@ -2294,11 +2275,14 @@ mod tests {
         let contract = OutputContract::compile(&schema).unwrap();
         let instructions = completion_instructions(&contract.schema, 7);
 
-        assert!(instructions.contains("tools.submit_result"));
         assert!(instructions.contains("turn_token: 7"));
-        assert!(instructions.contains("exactly once"));
-        assert!(instructions.contains("\"report\""));
+        assert!(instructions.ends_with(&contract.schema));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&contract.schema).unwrap(),
+            schema
+        );
         assert!(contract.validator.is_valid(&json!({ "report": "done" })));
+        assert!(!contract.validator.is_valid(&json!({ "report": 1 })));
     }
 
     async fn insert_runtime_session(
@@ -2441,17 +2425,17 @@ mod tests {
             .unwrap();
 
         let invalid = registry.submit_result("child-session", 1, json!({ "answer": "42" }));
-        assert!(invalid.unwrap_err().to_string().contains("required schema"));
+        assert!(matches!(
+            invalid,
+            Err(SubagentError::OutputMismatch { violations }) if violations.len() == 1
+        ));
         registry
             .submit_result("child-session", 1, json!({ "answer": 42 }))
             .unwrap();
-        assert!(
-            registry
-                .submit_result("child-session", 1, json!({ "answer": 43 }))
-                .unwrap_err()
-                .to_string()
-                .contains("already accepted")
-        );
+        assert!(matches!(
+            registry.submit_result("child-session", 1, json!({ "answer": 43 })),
+            Err(SubagentError::AlreadySubmitted)
+        ));
 
         let session = registry
             .scopes
@@ -2478,12 +2462,7 @@ mod tests {
 
         let error = registry.submit_result("main", 1, json!({ "report": "no" }));
 
-        assert!(
-            error
-                .unwrap_err()
-                .to_string()
-                .contains("only available to subagents")
-        );
+        assert!(matches!(error, Err(SubagentError::NotSubagent)));
     }
 
     #[tokio::test]
@@ -2492,7 +2471,7 @@ mod tests {
 
         let status = complete_session(&mut session, None);
 
-        assert!(matches!(status, AgentStatus::Failed { error } if error.contains("submit_result")));
+        assert!(matches!(status, AgentStatus::Failed { .. }));
         assert_eq!(session.last_output, None);
     }
 
@@ -2747,17 +2726,11 @@ mod tests {
         let Poll::Ready(Err(error)) = futures_util::poll!(&mut rejected) else {
             panic!("a terminal member must reject the mixed wait immediately");
         };
-        assert!(
-            error
-                .to_string()
-                .contains("already terminal agent_ids: [1, 2]")
-        );
-        assert!(
-            error
-                .to_string()
-                .contains("remaining active agent_ids: [3]")
-        );
-        assert!(error.to_string().contains("list_agents"));
+        let SubagentError::AlreadyTerminal { terminal, active } = error else {
+            panic!("expected an already-terminal rejection, got {error}");
+        };
+        assert_eq!(terminal, [parent.id, child.id]);
+        assert_eq!(active, [sibling.id]);
         assert_eq!(
             registry
                 .state
@@ -2878,7 +2851,7 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(error.to_string().contains("has not started"));
+        assert!(matches!(error, SubagentError::RecipientPending(id) if id == target));
         registry.close_all("main").await.unwrap();
     }
 
@@ -2902,7 +2875,7 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(error.to_string().contains("only manage its descendants"));
+        assert!(matches!(error, SubagentError::NotDescendant { .. }));
         registry.close_all("main").await.unwrap();
     }
 
@@ -3115,7 +3088,13 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(normal_error.to_string().contains("mailbox"));
+        assert!(matches!(
+            normal_error,
+            SubagentError::Delivery(DeliveryFailure::QueueFull {
+                priority: MessagePriority::Deferred,
+                agent,
+            }) if agent == target
+        ));
 
         for index in 0..crate::harness::URGENT_CAPACITY {
             let receipt = registry
@@ -3142,7 +3121,13 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(urgent_error.to_string().contains("mailbox"));
+        assert!(matches!(
+            urgent_error,
+            SubagentError::Delivery(DeliveryFailure::QueueFull {
+                priority: MessagePriority::Urgent,
+                agent,
+            }) if agent == target
+        ));
         registry.close_all("main").await.unwrap();
     }
 
@@ -3164,7 +3149,7 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(error.to_string().contains("unknown agent_id"));
+        assert!(matches!(error, SubagentError::UnknownAgent(id) if id == target));
         registry.close_all("main").await.unwrap();
     }
 

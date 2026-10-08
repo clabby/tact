@@ -267,7 +267,7 @@ impl AgentSnapshot {
             ));
         };
         let model = tact_subagents::parse_model(model.as_str())
-            .map_err(NanocodexError::InvalidSessionSnapshot)?;
+            .map_err(|error| NanocodexError::InvalidSessionSnapshot(error.to_string()))?;
         Ok(Self::Claude(ClaudeSnapshot {
             model,
             session_id,

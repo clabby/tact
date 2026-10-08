@@ -1,6 +1,7 @@
 #![doc = include_str!("../README.md")]
 
 mod capacity;
+mod error;
 mod harness;
 mod message;
 mod model;
@@ -15,6 +16,6 @@ pub use model::{
     AgentThread, AgentUpdate, MessageDeliveryState, MessageDisposition, MessageId, MessagePriority,
     MessagePurpose, MessageSender, ScopedAgentUpdate, SubagentRuntimeId, ThreadId,
 };
-pub use roster::{SUPPORTED_MODELS, parse_model};
+pub use roster::{SUPPORTED_MODELS, UnsupportedModel, parse_model};
 pub use runtime::{AuthorityError, RootAgentAuthority, Subagents, WeakSubagents};
 pub use speed::Speed;

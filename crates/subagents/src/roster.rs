@@ -1,5 +1,6 @@
 use nanocodex::{ClaudeModel, HarnessModel, Model};
 use serde::{Deserialize, Deserializer, de};
+use thiserror::Error;
 
 /// Models enabled by Tact's provider policy, in picker order.
 pub const SUPPORTED_MODELS: [HarnessModel; 6] = [
@@ -11,8 +12,17 @@ pub const SUPPORTED_MODELS: [HarnessModel; 6] = [
     HarnessModel::Claude(ClaudeModel::Fable51),
 ];
 
+/// A model name outside [`SUPPORTED_MODELS`].
+#[derive(Clone, Debug, Eq, Error, PartialEq)]
+#[error("unsupported Tact model: {0}")]
+pub struct UnsupportedModel(String);
+
 /// Parses Tact's aliases and rejects models outside its supported roster.
-pub fn parse_model(value: &str) -> Result<HarnessModel, String> {
+///
+/// # Errors
+///
+/// Returns [`UnsupportedModel`] for unknown names and for upstream models Tact does not offer.
+pub fn parse_model(value: &str) -> Result<HarnessModel, UnsupportedModel> {
     let value = match value {
         "sonnet-5.5" => ClaudeModel::Sonnet55.as_str(),
         "opus-5.5" => ClaudeModel::Opus55.as_str(),
@@ -23,7 +33,7 @@ pub fn parse_model(value: &str) -> Result<HarnessModel, String> {
         .parse::<HarnessModel>()
         .ok()
         .filter(|model| SUPPORTED_MODELS.contains(model))
-        .ok_or_else(|| format!("unsupported Tact model: {value}"))
+        .ok_or_else(|| UnsupportedModel(value.to_owned()))
 }
 
 pub(crate) fn deserialize_model<'de, D: Deserializer<'de>>(

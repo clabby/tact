@@ -1,3 +1,4 @@
+use super::error::SubagentError;
 use std::sync::{Arc, Mutex};
 use tokio::sync::watch;
 
@@ -26,16 +27,13 @@ impl Capacity {
         }
     }
 
-    pub(super) fn reserve(&self) -> std::io::Result<TurnCapacity> {
+    pub(super) fn reserve(&self) -> Result<TurnCapacity, SubagentError> {
         let mut state = self
             .state
             .lock()
             .expect("subagent capacity lock should not be poisoned");
         if state.active >= state.limit {
-            return Err(std::io::Error::other(format!(
-                "sub-agent concurrency limit of {} has been reached; try delegation again later",
-                state.limit
-            )));
+            return Err(SubagentError::CapacityExhausted { limit: state.limit });
         }
         state.active += 1;
         drop(state);
@@ -80,17 +78,17 @@ impl Drop for TurnCapacity {
 #[cfg(test)]
 mod tests {
     use super::Capacity;
+    use crate::error::SubagentError;
 
     #[test]
     fn capacity_is_released_for_later_delegation() {
         let capacity = Capacity::new(1);
         let reservation = capacity.reserve().unwrap();
 
-        let error = capacity.reserve().err().unwrap();
-        assert_eq!(
-            error.to_string(),
-            "sub-agent concurrency limit of 1 has been reached; try delegation again later"
-        );
+        assert!(matches!(
+            capacity.reserve(),
+            Err(SubagentError::CapacityExhausted { limit: 1 })
+        ));
 
         drop(reservation);
         assert!(capacity.reserve().is_ok());

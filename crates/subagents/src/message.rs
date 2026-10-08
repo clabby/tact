@@ -1,8 +1,11 @@
 //! Message identity, thread correlation, and bounded input validation.
 
-use super::model::{
-    AgentId, AgentMessage, AgentThread, MessageDisposition, MessageId, MessagePriority,
-    MessagePurpose, MessageSender, ThreadId,
+use super::{
+    error::MessageError,
+    model::{
+        AgentId, AgentMessage, AgentThread, MessageDisposition, MessageId, MessagePriority,
+        MessagePurpose, MessageSender, ThreadId,
+    },
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -27,7 +30,7 @@ impl MessageThreads {
         purpose: MessagePurpose,
         in_reply_to: Option<MessageId>,
         body: String,
-    ) -> std::io::Result<AgentMessage> {
+    ) -> Result<AgentMessage, MessageError> {
         validate_body(&body)?;
         validate_reply(purpose, in_reply_to)?;
         let id = MessageId::next(&mut self.next_message_id);
@@ -109,10 +112,11 @@ impl MessageThreads {
         previous_id: MessageId,
         from: MessageSender,
         to: AgentId,
-    ) -> std::io::Result<ThreadId> {
-        let thread_id = self.thread_by_message.get(&previous_id).ok_or_else(|| {
-            std::io::Error::other(format!("unknown in_reply_to message {previous_id}"))
-        })?;
+    ) -> Result<ThreadId, MessageError> {
+        let thread_id = self
+            .thread_by_message
+            .get(&previous_id)
+            .ok_or(MessageError::UnknownReplyTarget(previous_id))?;
         let thread = self
             .threads
             .get(thread_id)
@@ -122,20 +126,17 @@ impl MessageThreads {
             .iter()
             .find(|message| message.id == previous_id)
             .expect("message index should reference an existing message");
-        let expected_target = previous.from.agent_id().ok_or_else(|| {
-            std::io::Error::other(
-                "top-level root agents do not accept inbound messages in this experiment",
-            )
-        })?;
+        let expected_target = previous
+            .from
+            .agent_id()
+            .ok_or(MessageError::RootNotAddressable)?;
         if from
             != (MessageSender::Agent {
                 agent_id: previous.to,
             })
             || to != expected_target
         {
-            return Err(std::io::Error::other(format!(
-                "message {previous_id} can only be answered by its recipient"
-            )));
+            return Err(MessageError::ReplyByNonRecipient(previous_id));
         }
         Ok(*thread_id)
     }
@@ -171,26 +172,25 @@ impl MessageThreads {
     }
 }
 
-fn validate_reply(purpose: MessagePurpose, in_reply_to: Option<MessageId>) -> std::io::Result<()> {
+fn validate_reply(
+    purpose: MessagePurpose,
+    in_reply_to: Option<MessageId>,
+) -> Result<(), MessageError> {
     match (purpose, in_reply_to) {
-        (MessagePurpose::Reply, None) => Err(std::io::Error::other(
-            "reply messages require an in_reply_to message ID",
-        )),
+        (MessagePurpose::Reply, None) => Err(MessageError::ReplyWithoutTarget),
         (MessagePurpose::Reply, Some(_)) | (_, None) => Ok(()),
-        (_, Some(_)) => Err(std::io::Error::other(
-            "in_reply_to is only valid for reply messages",
-        )),
+        (_, Some(_)) => Err(MessageError::TargetWithoutReply),
     }
 }
 
-fn validate_body(body: &str) -> std::io::Result<()> {
+fn validate_body(body: &str) -> Result<(), MessageError> {
     if body.trim().is_empty() {
-        return Err(std::io::Error::other("message must not be empty"));
+        return Err(MessageError::Empty);
     }
     if body.len() > MAX_MESSAGE_BYTES {
-        return Err(std::io::Error::other(format!(
-            "message exceeds the {MAX_MESSAGE_BYTES}-byte limit"
-        )));
+        return Err(MessageError::TooLarge {
+            limit: MAX_MESSAGE_BYTES,
+        });
     }
     Ok(())
 }
@@ -198,6 +198,7 @@ fn validate_body(body: &str) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{MAX_MESSAGE_BYTES, MAX_RETAINED_MESSAGES, MessageThreads};
+    use crate::error::MessageError;
     use crate::{AgentId, MessageDisposition, MessagePriority, MessagePurpose, MessageSender};
 
     #[test]
@@ -243,11 +244,7 @@ mod tests {
                 "spoofed answer".to_owned(),
             )
             .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("only be answered by its recipient")
-        );
+        assert!(matches!(error, MessageError::ReplyByNonRecipient(id) if id == first.id));
     }
 
     #[test]
@@ -268,18 +265,19 @@ mod tests {
         );
 
         let too_long = "é".repeat(MAX_MESSAGE_BYTES / 2 + 1);
-        assert!(
-            threads
-                .prepare(
-                    MessageSender::Root,
-                    AgentId::new(1),
-                    MessagePriority::Deferred,
-                    MessagePurpose::Coordinate,
-                    None,
-                    too_long,
-                )
-                .is_err()
-        );
+        assert!(matches!(
+            threads.prepare(
+                MessageSender::Root,
+                AgentId::new(1),
+                MessagePriority::Deferred,
+                MessagePurpose::Coordinate,
+                None,
+                too_long,
+            ),
+            Err(MessageError::TooLarge {
+                limit: MAX_MESSAGE_BYTES
+            })
+        ));
     }
 
     #[test]
@@ -298,7 +296,10 @@ mod tests {
                 "answer".to_owned(),
             )
             .unwrap_err();
-        assert!(missing_reference.to_string().contains("require"));
+        assert!(matches!(
+            missing_reference,
+            MessageError::ReplyWithoutTarget
+        ));
 
         let unexpected_reference = threads
             .prepare(
@@ -312,7 +313,10 @@ mod tests {
                 "answer".to_owned(),
             )
             .unwrap_err();
-        assert!(unexpected_reference.to_string().contains("only valid"));
+        assert!(matches!(
+            unexpected_reference,
+            MessageError::TargetWithoutReply
+        ));
     }
 
     #[test]

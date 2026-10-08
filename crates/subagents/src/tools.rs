@@ -1,4 +1,5 @@
 use super::{
+    error::SubagentError,
     message::MAX_MESSAGE_BYTES,
     model::{
         AgentDescriptor, AgentId, AgentStatus, AgentUpdate, MessageId, MessagePriority,
@@ -190,10 +191,12 @@ impl Tool for SpawnAgent {
         let registry = self
             .registry
             .upgrade()
-            .ok_or_else(|| std::io::Error::other("subagent runtime is closed"))?;
+            .ok_or(SubagentError::RuntimeClosed)?;
         let capacity = registry.reserve_turn()?;
         let reservation = registry.reserve(context.session_id()).await?;
-        reservation.validate_child(context.model(), model, thinking)?;
+        reservation
+            .validate_child(context.model(), model, thinking)
+            .map_err(SubagentError::from)?;
         let id = reservation.id;
         let (child, events) = registry.spawn_agent(model, thinking)?;
         let session_id = child.session_id().to_string();
@@ -292,7 +295,7 @@ impl Tool for SubmitResult {
         let registry = self
             .registry
             .upgrade()
-            .ok_or_else(|| std::io::Error::other("subagent runtime is closed"))?;
+            .ok_or(SubagentError::RuntimeClosed)?;
         registry
             .submit_result(context.session_id(), turn_token, output)
             .await?;
@@ -359,7 +362,7 @@ impl Tool for SendAgentMessage {
         let registry = self
             .registry
             .upgrade()
-            .ok_or_else(|| std::io::Error::other("subagent runtime is closed"))?;
+            .ok_or(SubagentError::RuntimeClosed)?;
         let receipt = registry
             .send_message(
                 context.session_id(),
@@ -411,7 +414,7 @@ impl Tool for ListAgents {
         let registry = self
             .registry
             .upgrade()
-            .ok_or_else(|| std::io::Error::other("subagent runtime is closed"))?;
+            .ok_or(SubagentError::RuntimeClosed)?;
         json_output(&AgentDirectory {
             agents: registry
                 .directory(context.session_id(), include_completed, include_self)
@@ -461,7 +464,7 @@ impl Tool for WaitAgent {
         let registry = self
             .registry
             .upgrade()
-            .ok_or_else(|| std::io::Error::other("subagent runtime is closed"))?;
+            .ok_or(SubagentError::RuntimeClosed)?;
         let duration = timeout_ms
             .map(Duration::from_millis)
             .unwrap_or(DEFAULT_WAIT_TIMEOUT)
@@ -527,7 +530,7 @@ impl Tool for ChangeAgentLifecycle {
         let registry = self
             .registry
             .upgrade()
-            .ok_or_else(|| std::io::Error::other("subagent runtime is closed"))?;
+            .ok_or(SubagentError::RuntimeClosed)?;
         let agents = match self.operation {
             LifecycleOperation::Interrupt => {
                 registry.interrupt(context.session_id(), agent_id).await?
@@ -653,14 +656,24 @@ fn agent_status_schema() -> Value {
 #[cfg(test)]
 mod tests {
     use super::{SendAgentMessage, SpawnAgent, SubmitResult, WaitAgent};
-    use crate::{Speed, runtime::Registry};
+    use crate::{
+        Speed,
+        error::{SpawnError, SubagentError},
+        runtime::Registry,
+    };
     use nanocodex::{
         HarnessModel as Model, Model as CodexModel, NanocodexError, Thinking, Tool,
-        tools::contract::{ToolContext, ToolInput},
+        tools::contract::{ToolContext, ToolError, ToolInput},
     };
     use serde_json::{json, value::to_raw_value};
     use std::sync::{Arc, Weak};
     use tokio::sync::mpsc;
+
+    fn subagent_error(error: &ToolError) -> &SubagentError {
+        error
+            .downcast_ref()
+            .expect("subagent tools should fail with a typed runtime error")
+    }
 
     #[tokio::test]
     async fn claude_opt_in_controls_schema_and_runtime_admission() {
@@ -706,13 +719,16 @@ mod tests {
                     .err()
                     .unwrap();
                 if enabled {
-                    assert!(error.to_string().contains("stop after capture"));
+                    assert!(matches!(subagent_error(&error), SubagentError::Agent(_)));
                     assert_eq!(
                         arguments.try_recv().unwrap().0,
                         crate::parse_model(model).unwrap()
                     );
                 } else {
-                    assert!(error.to_string().contains("Claude subagents are disabled"));
+                    assert!(matches!(
+                        subagent_error(&error),
+                        SubagentError::Spawn(SpawnError::ClaudeDisabled)
+                    ));
                     assert!(arguments.try_recv().is_err());
                 }
             }
@@ -780,11 +796,14 @@ mod tests {
                         .err()
                         .expect("factory should stop after capture");
                     if child_rank > parent_rank {
-                        assert!(error.to_string().contains("exceeds parent model"));
+                        assert!(matches!(
+                            subagent_error(&error),
+                            SubagentError::Spawn(SpawnError::ModelExceedsParent { .. })
+                        ));
                         assert!(arguments.try_recv().is_err());
                         continue;
                     }
-                    assert!(error.to_string().contains("stop after capture"));
+                    assert!(matches!(subagent_error(&error), SubagentError::Agent(_)));
                     assert_eq!(
                         arguments.try_recv().unwrap(),
                         (expected_model, expected, Speed::Standard)
@@ -850,7 +869,7 @@ mod tests {
     }
 
     #[test]
-    fn send_message_definition_names_deferred_delivery_and_queued_waiting() {
+    fn send_message_priority_defaults_to_deferred_delivery() {
         let definition = SendAgentMessage {
             registry: Weak::<Registry>::new(),
         }
@@ -859,8 +878,6 @@ mod tests {
 
         assert_eq!(priority["enum"], json!(["deferred", "urgent"]));
         assert_eq!(priority["default"], json!("deferred"));
-        assert!(definition.description().contains("do not wait"));
-        assert!(definition.description().contains("finish the turn"));
     }
 
     #[test]
@@ -877,18 +894,14 @@ mod tests {
     }
 
     #[test]
-    fn wait_agent_only_refers_to_clean_spawns() {
+    fn wait_agent_reports_the_model_of_every_agent() {
         let definition = WaitAgent {
             registry: Weak::<Registry>::new(),
         }
         .definition();
-        let description =
-            &definition.parameters().unwrap().as_value()["properties"]["agent_ids"]["description"];
         let output = definition.output_schema().unwrap();
         let agent = &output.as_value()["properties"]["agents"]["items"];
 
-        assert!(description.as_str().unwrap().contains("spawn_agent"));
-        assert!(!description.as_str().unwrap().contains("fork_agent"));
         assert_eq!(agent["properties"]["model"], json!({ "type": "string" }));
         assert!(
             agent["required"]

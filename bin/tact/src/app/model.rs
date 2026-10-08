@@ -35,7 +35,7 @@ pub(crate) fn available(claude_enabled: bool) -> &'static [Model] {
 }
 
 pub(crate) fn parse(value: &str) -> Result<Model, String> {
-    tact_subagents::parse_model(value)
+    tact_subagents::parse_model(value).map_err(|error| error.to_string())
 }
 
 /// The selectable models and the settings each one accepts. Every front-end offers exactly
