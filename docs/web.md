@@ -437,7 +437,7 @@ mobile-first.
   remembered per browser); on narrower windows it is a drawer.
 - **Tabs.** **Chat** holds the transcript and the shared composer. **Review** holds the Pierre
   diffs, live while the agent edits, and an **Overview** sub-tab. Cmd/Ctrl . switches between them.
-- **Transcript.** Apply-patch calls render as truncated Pierre diffs; shell and code calls render
+- **Transcript.** Prompts and messages render as Markdown with highlighted code. Apply-patch calls render as truncated Pierre diffs; shell and code calls render
   as terminal blocks. Routine work that succeeded is folded; failures, edits, plans, and agents
   always get their own row. Two or more consecutive routine calls (see `significance`) fold into
   one row, with the thoughts between them. The row reads **Ran** when the run includes a shell

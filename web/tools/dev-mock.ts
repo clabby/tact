@@ -858,7 +858,7 @@ export class MockTact {
     add({ kind: "turn_completed", duration_ns: 432_000_000_000 }, 2);
 
     clock += 70 * 60_000;
-    add({ kind: "user", text: "Make draft echoes follow the acknowledgement." }, 0);
+    add({ kind: "user", text: "Make draft echoes follow the acknowledgement.\n\n- Keep `Publisher::publish` non-blocking\n- **Don't** touch the keymap" }, 0);
     add({ kind: "reasoning", text: "Find where the echo is published and where the reply is sent." }, 5);
     const exploring: [string, string][] = [
       ["memory", "scan · local · draft echo ordering · 2 candidates"], ["find_sessions", "draft echo"],

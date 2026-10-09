@@ -592,8 +592,8 @@ export class Transcript {
         bubble.replaceChildren(...promptParts(entry.text, image ? entry.images ?? 0 : 0).map((part) => {
           const block = document.createElement("div");
           if (part.kind === "text") {
-            block.className = "user-text";
-            block.textContent = part.text;
+            block.className = "user-text markdown";
+            this.markdown(block, part.text);
           } else {
             block.className = "user-image";
             const picture = document.createElement("img");

@@ -238,7 +238,8 @@ diffs-container { --diffs-light-bg: var(--bg); --diffs-dark-bg: var(--bg); }
 
 .entry-user { display: flex; justify-content: flex-end; }
 .entry-user:first-child { margin-top: var(--space-2); }
-.user-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+/* A prompt keeps the spaces and indentation it was typed with inside each paragraph. */
+.user-text p { white-space: pre-wrap; }
 .user-image { margin: var(--space-2) 0; }
 .user-image img { display: block; max-width: min(100%, 420px); max-height: 320px; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--surface); object-fit: contain; }
 .app[data-viewport="phone"] .user-image img { max-height: 240px; }
@@ -247,7 +248,7 @@ diffs-container { --diffs-light-bg: var(--bg); --diffs-dark-bg: var(--bg); }
 .user-bubble {
   max-width: min(85%, 640px); padding: 10px 14px;
   border-radius: 18px 18px 6px 18px; background: var(--surface-active);
-  white-space: pre-wrap; overflow-wrap: anywhere;
+  overflow-wrap: anywhere;
 }
 :root[data-theme="light"] .user-bubble { background: #efefec; }
 
