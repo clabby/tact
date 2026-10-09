@@ -67,6 +67,7 @@ pub(super) struct AppState {
     pub(super) workspaces: Arc<Workspaces>,
     pub(super) registry_directory: PathBuf,
     pub(super) assets: AssetStore,
+    /// Carries this machine's token to sibling instances; see [`sibling_client`].
     pub(super) client: reqwest::Client,
     pub(super) shutdown: CancellationToken,
 }
@@ -518,6 +519,16 @@ async fn probe(state: &AppState, record: &InstanceRecord) -> Option<SiblingStatu
     response.json().await.ok()
 }
 
+/// The client for sibling probes. Probes carry the machine token, so they go straight to the
+/// registered loopback port: never through a proxy from the environment, and never on to wherever
+/// a redirect points.
+pub(super) fn sibling_client() -> reqwest::Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+}
+
 fn entry_not_found() -> ApiError {
     ApiError::new(StatusCode::NOT_FOUND, "unknown_session", ENTRY_NOT_FOUND)
 }
@@ -680,15 +691,18 @@ pub(super) fn secure(response: &mut Response<Body>) {
 mod tests {
     use super::{
         super::{
+            registry::{InstanceRecord, Registration},
             tailscale::Tailnet,
-            testing::{self, Harness},
+            testing::{self, Harness, Upstream},
         },
         PublicOrigin,
     };
     use crate::core::protocol::{Command, CommandError, OpenSpec, Publication, Query, Reply};
     use axum::{
+        Router,
         body::Body,
         http::{Method, Request, StatusCode, header},
+        routing::get,
     };
     use serde_json::json;
     use std::{path::PathBuf, time::Duration};
@@ -1008,6 +1022,61 @@ mod tests {
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body["code"], "tailscale_unavailable", "{body}");
         assert!(body.get("token").is_none());
+    }
+
+    /// Registers `sibling` as another instance and lists the instances.
+    async fn list_with_sibling(harness: &Harness, sibling: &Upstream) -> serde_json::Value {
+        let _registration = Registration::create(
+            &harness.state.registry_directory,
+            &InstanceRecord {
+                pid: std::process::id().wrapping_add(1),
+                port: sibling.port,
+                workspace: "/sibling".into(),
+                started_at: 1,
+            },
+        )
+        .unwrap();
+        let (status, body) = harness.call(Method::GET, "/api/instances", None).await;
+        assert_eq!(status, StatusCode::OK);
+        body
+    }
+
+    fn sibling_status() -> Router {
+        Router::new().route(
+            "/api/instance",
+            get(|| async { axum::Json(json!({"live": 2, "running": false})) }),
+        )
+    }
+
+    #[tokio::test]
+    async fn sibling_probes_do_not_follow_redirects() {
+        let elsewhere = Upstream::spawn(sibling_status()).await;
+        let target = format!("{}/api/instance", elsewhere.origin);
+        let sibling = Upstream::spawn(Router::new().route(
+            "/api/instance",
+            get(move || async move { (StatusCode::FOUND, [(header::LOCATION, target)]) }),
+        ))
+        .await;
+        let harness = Harness::new();
+
+        let body = list_with_sibling(&harness, &sibling).await;
+
+        assert_eq!(sibling.hits(), 1);
+        assert_eq!(elsewhere.hits(), 0, "the token never follows a redirect");
+        assert_eq!(body["instances"].as_array().unwrap().len(), 1, "{body}");
+    }
+
+    #[tokio::test]
+    async fn sibling_probes_ignore_environment_proxies() {
+        let proxy = Upstream::spawn(sibling_status()).await;
+        let sibling = Upstream::spawn(sibling_status()).await;
+        let harness = testing::with_proxy_environment(&proxy.origin, Harness::new);
+
+        let body = list_with_sibling(&harness, &sibling).await;
+
+        assert_eq!(proxy.hits(), 0, "the token never goes through a proxy");
+        assert_eq!(sibling.hits(), 1);
+        assert_eq!(body["instances"].as_array().unwrap().len(), 2, "{body}");
     }
 
     #[tokio::test]

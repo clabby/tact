@@ -245,9 +245,7 @@ impl Server {
             workspaces,
             registry_directory,
             assets: AssetStore::new(settings.home),
-            client: reqwest::Client::builder()
-                .build()
-                .map_err(StartError::Client)?,
+            client: api::sibling_client().map_err(StartError::Client)?,
             shutdown: shutdown.clone(),
         });
         let app = api::router(state, review::router(review));

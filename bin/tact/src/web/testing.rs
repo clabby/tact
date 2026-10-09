@@ -20,10 +20,22 @@ use axum::{
     Router,
     body::Body,
     http::{HeaderMap, Method, Request, StatusCode, header},
+    middleware::{self, Next},
 };
 use futures_util::future::BoxFuture;
-use std::{fs, future::Future, path::Path, process::Command, sync::Arc};
+use std::{
+    fs,
+    future::Future,
+    net::Ipv4Addr,
+    path::Path,
+    process::Command,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
 use tempfile::TempDir;
+use tokio::{net::TcpListener, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt as _;
 
@@ -101,7 +113,7 @@ impl Harness {
             workspaces,
             registry_directory: home.path().join("web/instances"),
             assets: AssetStore::new(home.path().to_owned()),
-            client: reqwest::Client::new(),
+            client: api::sibling_client().unwrap(),
             shutdown: shutdown.clone(),
         });
         let app = api::router(Arc::clone(&state), review::router(review));
@@ -204,6 +216,80 @@ impl Harness {
             tokio::task::yield_now().await;
         }
     }
+}
+
+/// A real HTTP server on loopback that counts every request, including unrouted ones, before its
+/// router answers. It stands in for a sibling instance or a proxy.
+pub(super) struct Upstream {
+    pub(super) origin: String,
+    pub(super) port: u16,
+    hits: Arc<AtomicUsize>,
+    task: JoinHandle<()>,
+}
+
+impl Upstream {
+    pub(super) async fn spawn(router: Router) -> Self {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&hits);
+        let app = router.layer(middleware::from_fn(
+            move |request: Request<Body>, next: Next| {
+                counter.fetch_add(1, Ordering::SeqCst);
+                next.run(request)
+            },
+        ));
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        Self {
+            origin: format!("http://127.0.0.1:{port}"),
+            port,
+            hits,
+            task,
+        }
+    }
+
+    pub(super) fn hits(&self) -> usize {
+        self.hits.load(Ordering::SeqCst)
+    }
+}
+
+impl Drop for Upstream {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+/// Runs `build` while every proxy variable of the environment points at `proxy` and none exempts
+/// any host, then restores the environment. HTTP clients read proxies when they are built.
+///
+/// Changing the environment is sound here because nextest runs each test in its own process.
+pub(super) fn with_proxy_environment<T>(proxy: &str, build: impl FnOnce() -> T) -> T {
+    let variables = [
+        ("HTTP_PROXY", Some(proxy)),
+        ("http_proxy", Some(proxy)),
+        ("HTTPS_PROXY", Some(proxy)),
+        ("https_proxy", Some(proxy)),
+        ("ALL_PROXY", Some(proxy)),
+        ("all_proxy", Some(proxy)),
+        ("NO_PROXY", None),
+        ("no_proxy", None),
+    ];
+    let previous: Vec<_> = variables
+        .iter()
+        .map(|(name, _)| (*name, std::env::var_os(name)))
+        .collect();
+    let set = |name: &str, value: Option<&std::ffi::OsStr>| match value {
+        Some(value) => unsafe { std::env::set_var(name, value) },
+        None => unsafe { std::env::remove_var(name) },
+    };
+    for (name, value) in variables {
+        set(name, value.map(std::ffi::OsStr::new));
+    }
+    let built = build();
+    for (name, value) in &previous {
+        set(name, value.as_deref());
+    }
+    built
 }
 
 /// The event name and JSON data of one Server-Sent Events message.
