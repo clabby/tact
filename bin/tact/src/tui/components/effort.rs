@@ -111,13 +111,13 @@ impl EffortSelector {
                 ),
             ]),
             Line::from(vec![
-                Span::styled("Pro: ", Style::default().fg(Color::Green)),
                 Span::styled(
-                    if self.pro { "on" } else { "off" },
+                    if self.pro { "[x]" } else { "[ ]" },
                     Style::default()
                         .fg(Color::Green)
                         .add_modifier(Modifier::BOLD),
                 ),
+                Span::styled(" Pro", Style::default().fg(Color::Green)),
             ]),
         ];
         if !self.pro_available {
@@ -487,7 +487,7 @@ mod tests {
         let label = (6..54)
             .map(|x| buffer[(x, 13)].symbol())
             .collect::<String>();
-        assert!(label.contains("Pro: off"));
+        assert!(label.contains("[ ] Pro"));
         let row = &buffer.content[13 * 60..14 * 60];
         let pro_start = row
             .windows(3)
@@ -505,7 +505,7 @@ mod tests {
         let label = (6..54)
             .map(|x| buffer[(x, 13)].symbol())
             .collect::<String>();
-        assert!(label.contains("Pro: on"));
+        assert!(label.contains("[x] Pro"));
     }
 
     #[test]

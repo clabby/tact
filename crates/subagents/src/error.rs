@@ -5,7 +5,7 @@
 //! exists, name the corrective action.
 
 use super::model::{AgentId, AgentStatus, MessageId, MessagePriority};
-use nanocodex::{HarnessModel as Model, NanocodexError, Thinking};
+use nanocodex::{HarnessModel as Model, NanocodexError, ReasoningMode, Thinking};
 use std::fmt;
 use thiserror::Error;
 use tokio::task::JoinError;
@@ -194,6 +194,16 @@ pub(crate) enum SpawnError {
         /// The parent's assigned effort.
         parent: Thinking,
     },
+    /// The caller requested Pro beneath a parent that runs standard reasoning.
+    #[error(
+        "subagent reasoning_mode {requested} exceeds parent reasoning mode {parent}; request standard"
+    )]
+    ReasoningModeExceedsParent {
+        /// The requested child mode.
+        requested: ReasoningMode,
+        /// The parent's actual mode.
+        parent: ReasoningMode,
+    },
     /// The child would run a higher Codex tier than its parent.
     #[error("subagent model {requested} exceeds parent model {parent}")]
     ModelExceedsParent {
@@ -226,6 +236,16 @@ pub(crate) enum SpawnError {
         requested: Thinking,
         /// The configured cap.
         maximum: Thinking,
+    },
+    /// The child would exceed the root session's reasoning mode.
+    #[error(
+        "subagent reasoning_mode {requested} exceeds configured maximum {maximum}; request standard"
+    )]
+    ReasoningModeExceedsMaximum {
+        /// The requested child mode.
+        requested: ReasoningMode,
+        /// The configured cap.
+        maximum: ReasoningMode,
     },
     /// The application has not configured a child-session factory.
     #[error("subagent factory is not configured")]

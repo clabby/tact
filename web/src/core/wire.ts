@@ -150,6 +150,7 @@ export type Subagent = {
   task: string;
   model: string;
   thinking: Effort;
+  reasoning_mode: ReasoningMode;
   status: SubagentStatus;
 };
 

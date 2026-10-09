@@ -41,16 +41,17 @@ const SUBAGENT_INSTRUCTIONS: &str = concat!(
     "across agents in parallel, await and reduce their results, then dispatch dependent stages. Do ",
     "not repeat delegated work yourself; wait for delegated work to finish, then use its results for ",
     "the next step. Double-check their results against the relevant evidence before relying on them. ",
-    "For each `spawn_agent` call, choose `model` and `thinking` separately for the assigned subtask. ",
+    "For each `spawn_agent` call, choose `model`, `thinking`, and `reasoning_mode` separately for ",
+    "the assigned subtask. ",
     "Optimize expected total cost and time to a correct completed result, including rework. A ",
     "stronger model or `xhigh`/`max` upfront can be cheaper and faster than repeated weaker runs; ",
     "do not require a cheaper or lower-effort attempt first. Name an eligible model explicitly. ",
-    "The current turn's model and effort are supplied in `<agent_context>`. A child's model cannot ",
+    "The current turn's model, effort, and mode are supplied in `<agent_context>`. A child's model cannot ",
     "exceed the spawning parent's model when both use Codex (`luna` < `sol` < `astra`). Root agents ",
     "use the live configured `agent.thinking` as their spawning effort cap: user changes authorize subsequent ",
     "spawns even during an already active turn. Registered subagents are additionally limited to ",
     "their own assigned effort, regardless of the root's cap. Existing children retain their ",
-    "model and effort.\n\n",
+    "model, effort, and mode.\n\n",
     "Choose effort for the full delegated reasoning obligation:\n\n",
     "- `low`: bounded lookups, extraction, mechanical edits, or prescribed checks.\n",
     "- `medium`: localized implementation, editorial/design work, or focused review with an ",
@@ -77,12 +78,12 @@ const SUBAGENT_INSTRUCTIONS: &str = concat!(
     "within your caps, using a more capable model when appropriate. Give it the original request ",
     "and constraints, the prior result, relevant evidence and counterexamples, and the unresolved ",
     "questions or failed checks. Ask it to challenge the prior result and reach a verified ",
-    "conclusion. If the required model or effort exceeds your cap, return that package to an ",
-    "ancestor able to launch the stronger run. Let still-running work finish. If permitted ",
+    "conclusion. If the required model, effort, or reasoning mode exceeds your cap, return that ",
+    "package to an ancestor able to launch the stronger run. Let still-running work finish. If permitted ",
     "escalation cannot settle the question, report what remains unresolved.\n\n",
     "Example `spawn_agent` arguments:\n```json\n",
     r#"{"role":"config mapper","task":"List configuration keys and their parsing locations.","model":"luna","#,
-    r#""thinking":"low","output_schema":{"type":"object","properties":{"locations":{"type":"string"}},"#,
+    r#""thinking":"low","reasoning_mode":"standard","output_schema":{"type":"object","properties":{"locations":{"type":"string"}},"#,
     r#""required":["locations"],"additionalProperties":false}}"#,
     "\n```\n",
     "Use schemas that expose the fields downstream stages need, and use loops to iterate until the ",
@@ -94,6 +95,9 @@ const SUBAGENT_MODEL_INSTRUCTIONS: &str = r#"## Subagent model selection
 Among Codex models, start with `sol` (GPT-6.1 Sol). Use `astra` for especially deep reviews or
 unresolved reasoning that warrants it.
 
+Choose `reasoning_mode: "standard"` by default. Use `"pro"` selectively for especially difficult
+reasoning; only a Pro parent may request Pro for a child.
+
 For document, system, and protocol reviews, request explicit assumptions, counterexamples,
 safety/liveness conditions, and proof obligations. Verify findings against source evidence.
 
@@ -102,6 +106,7 @@ DeepSWE 1.1 (Artificial Analysis, native Codex). Cost/time are averages across A
 | Model | Effort | DeepSWE | API $/task | Time/task |
 | --- | --- | --- | --- | --- |
 | `luna` | max | 64% | $0.18 | 21.4m |
+| `sol` | medium | 72% | $0.70 | 10.9m |
 | `sol` | xhigh | 73% | $1.04 | 15.5m |
 | `astra` | max | 68% | $7.47 | 29.4m |
 
@@ -120,12 +125,17 @@ Use `opus-5.5` or `sonnet-5.5` as the normal starting choices for implementation
 document, system, or protocol review. Bring in `astra`, `fable-5.1`, or another eligible model
 for especially deep reviews, unresolved premises, or independent challenges. Prefer model diversity
 for second opinions: use an eligible Codex model alongside Claude. Both providers may delegate to
-either provider within the applicable model and effort caps.
+either provider within the applicable model, effort, and reasoning mode caps.
+
+Use `haiku-5.5` for narrow, well-specified work when lower cost matters; start at `medium`.
 
 DeepSWE 1.1 (Artificial Analysis, native Claude Code). Cost/time are averages across AA's coding suite.
 
 | Model | Effort | DeepSWE | API $/task | Time/task |
 | --- | --- | --- | --- | --- |
+| `haiku-5.5` | medium | 47% | $0.23 | 14.0m |
+| `haiku-5.5` | xhigh | 49% | $0.61 | 25.9m |
+| `sonnet-5.5` | xhigh | 68% | $3.33 | 27.0m |
 | `sonnet-5.5` | max | 72% | $14.19 | 1.5h |
 | `opus-5.5` | max | 68% | $13.04 | 1.1h |
 | `fable-5.1` (with fallback) | max | 64% | $12.39 | 34.8m |
@@ -134,6 +144,7 @@ FrontierCode 1.1 Main (native Claude Code; best scoring effort per model).
 
 | Model | Effort | Score / 100 | API $/rollout |
 | --- | --- | --- | --- |
+| `haiku-5.5` | max | 46.36 | $1.33 |
 | `sonnet-5.5` | xhigh | 52.09 | $1.59 |
 | `opus-5.5` | medium | 54.64 | $0.80 |
 | `fable-5.1` | medium | 50.91 | $3.28 |

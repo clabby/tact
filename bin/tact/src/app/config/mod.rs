@@ -536,6 +536,7 @@ mod tests {
             "model_luna",
             "model_sol",
             "model_astra",
+            "model_haiku",
             "model_sonnet",
             "model_opus",
             "model_fable",

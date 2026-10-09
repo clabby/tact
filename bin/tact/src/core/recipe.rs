@@ -15,10 +15,9 @@ use super::{
         sessions::{FindSessionsTool, ReadSessionTool},
     },
     session::AgentSnapshot,
-    supported_reasoning_mode,
 };
 use crate::app::{
-    config::{Config, ReasoningMode, Speed},
+    config::{Config, Speed},
     error::{AuthError, ConfigError, SecretError},
     secret::SecretString,
 };
@@ -65,7 +64,6 @@ impl From<AgentBuildError> for NanocodexError {
 /// resumes an existing session.
 pub(super) struct AgentSpec<'a> {
     pub(super) context: AgentContext,
-    pub(super) reasoning_mode: ReasoningMode,
     pub(super) speed: Speed,
     pub(super) instructions: Arc<str>,
     pub(super) session_id: Option<&'a str>,
@@ -73,17 +71,9 @@ pub(super) struct AgentSpec<'a> {
 }
 
 impl AgentSpec<'static> {
-    /// A brand-new agent, as spawned for subagents. Pro reasoning is kept only on models that
-    /// support it.
-    pub(super) fn clean(
-        context: AgentContext,
-        reasoning_mode: ReasoningMode,
-        speed: Speed,
-        instructions: Arc<str>,
-    ) -> Self {
+    pub(super) fn clean(context: AgentContext, speed: Speed, instructions: Arc<str>) -> Self {
         Self {
             context,
-            reasoning_mode: supported_reasoning_mode(context.model, reasoning_mode),
             speed,
             instructions,
             session_id: None,
@@ -136,7 +126,7 @@ impl AgentRecipe {
             .model(model)
             .workspace(&self.workspace)
             .thinking(spec.context.thinking)
-            .reasoning_mode(spec.reasoning_mode.into())
+            .reasoning_mode(spec.context.reasoning_mode)
             .instructions(spec.instructions)
             .tools_factory(move |_| tools());
         if let Some(home) = self.config.codex_home() {
@@ -161,7 +151,6 @@ impl AgentRecipe {
         let runtime =
             claude::tool_runtime(&self.config, &self.workspace, &self.tools_factory()()?)?;
         let recipe = Arc::clone(self);
-        let reasoning_mode = spec.reasoning_mode;
         let clean_instructions = Arc::clone(&spec.instructions);
         let spawn: claude::CleanAgentFactory = Arc::new(move |context, fast_mode| {
             let speed = if fast_mode {
@@ -171,7 +160,6 @@ impl AgentRecipe {
             };
             recipe.build(AgentSpec::clean(
                 context,
-                reasoning_mode,
                 speed,
                 Arc::clone(&clean_instructions),
             ))

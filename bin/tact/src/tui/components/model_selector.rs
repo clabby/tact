@@ -319,6 +319,7 @@ mod tests {
         for (query, expected) in [
             ("SoL", vec![SOL]),
             ("sonnet-5.5", vec![Model::Claude(ClaudeModel::Sonnet55)]),
+            ("haiku", vec![Model::Claude(ClaudeModel::Haiku55)]),
             ("gpt-6.1-sol", vec![SOL]),
             ("claude-fable-5-1", vec![FABLE]),
             ("OpenAI", available(false).to_vec()),
@@ -380,7 +381,7 @@ mod tests {
     fn vertical_rows_use_configured_colors_and_distinguish_current_from_selection() {
         let theme: Theme = toml::from_str("model_sol = '#123456'\nmodel_fable = 'red'\n").unwrap();
         let mut selector = ModelSelector::new(SOL, true);
-        for _ in 0..4 {
+        for _ in 0..available(true).len() {
             key(&mut selector, KeyCode::Down);
         }
         let terminal = render(&mut selector, 68, 12, &theme);

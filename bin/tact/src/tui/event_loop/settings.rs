@@ -251,7 +251,7 @@ mod tests {
     use super::apply_subagent_config;
     use crate::app::config::{Config, ConfigOverrides, Speed};
     use nanocodex::{
-        HarnessModel as Model, Model as CodexModel, NanocodexError, Thinking, Tools,
+        HarnessModel as Model, Model as CodexModel, NanocodexError, ReasoningMode, Thinking, Tools,
         tools::{
             contract::{ToolContext, ToolInput},
             runtime::ToolRuntime,
@@ -281,12 +281,17 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let observed = calls.clone();
         subagents
-            .set_agent_factory(Thinking::Max, Speed::Standard, move |_, _, _| {
-                observed.fetch_add(1, Ordering::SeqCst);
-                Err(NanocodexError::InvalidRequest(
-                    "test factory admitted".to_owned(),
-                ))
-            })
+            .set_agent_factory(
+                Thinking::Max,
+                ReasoningMode::Standard,
+                Speed::Standard,
+                move |_, _| {
+                    observed.fetch_add(1, Ordering::SeqCst);
+                    Err(NanocodexError::InvalidRequest(
+                        "test factory admitted".to_owned(),
+                    ))
+                },
+            )
             .unwrap();
         let tools = subagents
             .downgrade()

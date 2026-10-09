@@ -92,7 +92,8 @@ export const MOCK_CATALOG: ModelCatalog = {
   models: [
     { id: "sol", label: "Sol", ...codex, effective_speeds: ["standard", "fast", "ultrafast"] },
     { id: "luna", label: "Luna", ...codex, effective_speeds: ["standard", "fast", "fast"] },
-    { id: "astra", label: "Astra", ...codex, effective_speeds: ["standard", "fast", "fast"] },
+    { id: "astra", label: "Astra", ...codex, effective_speeds: ["standard", "fast", "ultrafast"] },
+    { id: "haiku-5.5", label: "Haiku 5.5", ...claude, effective_speeds: ["standard", "standard", "standard"] },
     { id: "opus-5.5", label: "Opus 5.5", ...claude, effective_speeds: ["standard", "fast", "fast"] },
     { id: "sonnet-5.5", label: "Sonnet 5.5", ...claude, effective_speeds: ["standard", "standard", "standard"] },
     { id: "fable-5.1", label: "Fable 5.1", ...claude, effective_speeds: ["standard", "standard", "standard"] },
@@ -762,7 +763,7 @@ export class MockTact {
     const id = session.subagents.agents.length + 1;
     const agent = {
       id, parent: null, session_id: this.newId(), role: "bridge reviewer", task: "Check that publications never block the loop.",
-      model: "sol", thinking: "high" as Effort, status: { state: "running" as const },
+      model: "sol", thinking: "high" as Effort, reasoning_mode: "standard" as const, status: { state: "running" as const },
     };
     session.subagents.agents.push(agent);
     const entries: WireEntry[] = [];
@@ -993,9 +994,10 @@ export class MockTact {
     });
     main.context.active_tokens = 142_600;
     main.speed = "fast";
+    main.reasoningMode = "pro";
     main.subagents.agents.push({
       id: 1, parent: null, session_id: "019a00ff-7c1e-7d55-9b1f-3e2a9c8d4f01", role: "ordering reviewer",
-      task: "Review bridge ordering between acknowledgements and draft echoes.", model: "sol", thinking: "xhigh",
+      task: "Review bridge ordering between acknowledgements and draft echoes.", model: "sol", thinking: "xhigh", reasoning_mode: "pro",
       status: { state: "completed", output: "The acknowledgement must follow the publication." },
     });
     main.agentEntries.set(1, [
@@ -1011,7 +1013,7 @@ export class MockTact {
       [5, 1, "ordering prover", "astra", "Prove the acknowledgement ordering invariant.", { state: "pending" }],
     ];
     for (const [id, parent, role, model, task, status] of extra) {
-      main.subagents.agents.push({ id, parent, session_id: "019a00ff-0000-7000-8000-00000000000" + id, role, task, model, thinking: "high", status });
+      main.subagents.agents.push({ id, parent, session_id: "019a00ff-0000-7000-8000-00000000000" + id, role, task, model, thinking: "high", reasoning_mode: "standard", status });
       main.agentEntries.set(id, [
         { id: 1, revision: 1, parent: null, kind: "user", text: task },
         { id: 2, revision: 1, parent: null, kind: "reasoning", text: "Start with the entry points, then follow the data through each layer." },

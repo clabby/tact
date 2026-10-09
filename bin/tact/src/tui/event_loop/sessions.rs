@@ -368,7 +368,7 @@ mod tests {
     use std::{fs, sync::Arc};
 
     #[test]
-    fn fresh_sessions_on_astra_use_standard_reasoning_while_other_models_keep_the_preference() {
+    fn fresh_openai_sessions_keep_the_pro_reasoning_preference() {
         let directory = tempfile::tempdir().unwrap();
         let config_path = directory.path().join("config.toml");
         fs::write(&config_path, "[agent]\nreasoning_mode = \"pro\"\n").unwrap();
@@ -379,12 +379,11 @@ mod tests {
         })
         .unwrap();
 
-        let astra = fresh_settings(&config, Model::Codex(CodexModel::Astra));
-        let sol = fresh_settings(&config, Model::Codex(CodexModel::Sol));
-
-        assert_eq!(astra.reasoning_mode, ReasoningMode::Standard);
-        assert_eq!(sol.reasoning_mode, ReasoningMode::Pro);
-        assert_eq!(sol.effort, config.agent().thinking());
+        for model in [CodexModel::Astra, CodexModel::Sol, CodexModel::Luna] {
+            let settings = fresh_settings(&config, Model::Codex(model));
+            assert_eq!(settings.reasoning_mode, ReasoningMode::Pro);
+            assert_eq!(settings.effort, config.agent().thinking());
+        }
     }
 
     #[tokio::test]

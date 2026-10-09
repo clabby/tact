@@ -30,23 +30,27 @@ children delegate further while the runtime enforces task-tree authority. Drain 
 for as long as the runtime lives; dropping it stops event forwarding.
 
 ```rust,no_run
-use nanocodex::{AgentEvents, HarnessModel, Nanocodex, NanocodexError, Thinking};
+use nanocodex::{AgentEvents, Nanocodex, NanocodexError, ReasoningMode, Thinking};
 use nanocodex::tools::ToolsBuilder;
-use tact_subagents::{Speed, SubagentRoster, Subagents};
+use tact_subagents::{AgentContext, Speed, SubagentRoster, Subagents};
 
 fn build_child(
-    model: HarnessModel,
-    thinking: Thinking,
+    context: AgentContext,
     speed: Speed,
 ) -> Result<(Nanocodex, AgentEvents), NanocodexError> {
-    // Build a clean session with the requested model, effort, and speed.
-    # let _ = (model, thinking, speed);
+    // Build a clean session with the resolved model, effort, reasoning mode, and speed.
+    # let _ = (context, speed);
     # unimplemented!()
 }
 
 # async fn run() -> Result<(), NanocodexError> {
 let (subagents, mut updates) = Subagents::new(8);
-subagents.set_agent_factory(Thinking::High, Speed::Standard, build_child)?;
+subagents.set_agent_factory(
+    Thinking::High,
+    ReasoningMode::Standard,
+    Speed::Standard,
+    build_child,
+)?;
 
 // Capture only the weak handle in tool factories.
 let weak = subagents.downgrade();
@@ -67,11 +71,18 @@ tokio::spawn(async move {
 
 Each spawn names its model and reasoning effort with Nanocodex's `HarnessModel` and `Thinking`
 types. A Codex child cannot run a higher tier than a Codex parent (Luna < Sol < Astra). Claude models
-(Sonnet 5.5, Opus 5.5, and Fable 5.1) are rejected until `Subagents::set_claude_enabled(true)`;
+(Haiku 5.5, Sonnet 5.5, Opus 5.5, and Fable 5.1) are rejected until `Subagents::set_claude_enabled(true)`;
 once enabled, any model may delegate to them and they may delegate to any model. Every spawn is
 bounded by the runtime's live effort cap, and a registered child cannot spawn above its own
-effort. `AgentContext::prompt` appends the executing turn's model and effort to a root prompt; the
-runtime does the same on every child turn.
+effort.
+
+A spawn may also request `ReasoningMode::Pro`. The root's ceiling is the `max_reasoning_mode`
+passed to `Subagents::set_agent_factory`, which should be the root session's actual mode; a
+registered child's ceiling is its own actual mode. Requests are authorized before
+`AgentContext::new` resolves Pro to standard for models without Pro support, and the factory,
+descriptor, roster, and tool reports carry that resolved mode. A child that fell back therefore
+cannot spawn Pro descendants. `AgentContext::prompt` appends the executing turn's model, effort,
+and reasoning mode to a root prompt; the runtime does the same on every child turn.
 
 ## Limits
 

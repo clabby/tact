@@ -233,7 +233,7 @@ mod tests {
     fn fallback_is_shown_without_changing_the_preference() {
         for (model, fallback) in [
             (
-                Model::Codex(CodexModel::Sol),
+                Model::Codex(CodexModel::Luna),
                 Some("Uses fast with this model"),
             ),
             (
@@ -249,6 +249,11 @@ mod tests {
                 Some("Uses standard with this model"),
             ),
             (Model::Codex(CodexModel::Astra), None),
+            (Model::Codex(CodexModel::Sol), None),
+            (
+                Model::Claude(ClaudeModel::Haiku55),
+                Some("Uses standard with this model"),
+            ),
         ] {
             let mut selector = SpeedSelector::new(Speed::Ultrafast, model);
             let rendered = text(&render(&mut selector, 60, 18));

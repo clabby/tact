@@ -189,6 +189,7 @@ mod tests {
             ("sol", ReasoningEffort::Low),
             ("luna", ReasoningEffort::Medium),
             ("astra", ReasoningEffort::Low),
+            ("haiku-5.5", ReasoningEffort::Medium),
             ("sonnet-5.5", ReasoningEffort::High),
             ("opus-5.5", ReasoningEffort::Medium),
             ("fable-5.1", ReasoningEffort::High),

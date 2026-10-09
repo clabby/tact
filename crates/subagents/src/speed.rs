@@ -1,4 +1,4 @@
-use nanocodex::{HarnessModel as Model, Model as CodexModel, oai::pricing::ServiceTier};
+use nanocodex::{HarnessModel as Model, oai::pricing::ServiceTier};
 use serde::{Deserialize, Serialize};
 
 /// Preferred processing speed, inherited by newly created child sessions.
@@ -31,7 +31,14 @@ impl Speed {
     pub const fn for_model(self, model: Model) -> Self {
         match (self, model) {
             (Self::Standard, _) => Self::Standard,
-            (Self::Ultrafast, Model::Codex(CodexModel::Astra)) => Self::Ultrafast,
+            (Self::Ultrafast, Model::Codex(model))
+                if matches!(
+                    ServiceTier::Ultrafast.effective_for_model(model),
+                    ServiceTier::Ultrafast
+                ) =>
+            {
+                Self::Ultrafast
+            }
             _ if model.supports_fast_mode() => Self::Fast,
             _ => Self::Standard,
         }
@@ -61,9 +68,14 @@ mod tests {
                 Speed::Fast,
                 Speed::Ultrafast,
             ),
-            (Model::Codex(CodexModel::Sol), Speed::Fast, Speed::Fast),
+            (Model::Codex(CodexModel::Sol), Speed::Fast, Speed::Ultrafast),
             (Model::Codex(CodexModel::Luna), Speed::Fast, Speed::Fast),
             (Model::Claude(ClaudeModel::Opus55), Speed::Fast, Speed::Fast),
+            (
+                Model::Claude(ClaudeModel::Haiku55),
+                Speed::Standard,
+                Speed::Standard,
+            ),
             (
                 Model::Claude(ClaudeModel::Sonnet55),
                 Speed::Standard,

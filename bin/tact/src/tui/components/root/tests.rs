@@ -18,7 +18,8 @@ use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use nanocodex::{
-    ClaudeModel, HarnessModel as Model, Model as CodexModel, Thinking,
+    ClaudeModel, HarnessModel as Model, Model as CodexModel,
+    ReasoningMode as NanocodexReasoningMode, Thinking,
     agent::{
         events::{AgentEvent, AgentEventKind},
         input::{PromptInput, UserInput},
@@ -96,6 +97,7 @@ fn subagent(id: u64, task: &str) -> AgentDescriptor {
         session_id: format!("agent-{id}"),
         model: Model::Codex(CodexModel::Sol),
         thinking: Thinking::Medium,
+        reasoning_mode: NanocodexReasoningMode::Standard,
         role: "worker".to_owned(),
         task: task.to_owned(),
         parent: None,
@@ -2948,7 +2950,11 @@ fn speed_action_selects_applies_and_cancels_preferences() {
 fn unsupported_models_preserve_speed_preference_for_forks_and_later_models() {
     let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
     root.set_speed(Speed::Ultrafast);
-    for model in [ClaudeModel::Sonnet55, ClaudeModel::Fable51] {
+    for model in [
+        ClaudeModel::Haiku55,
+        ClaudeModel::Sonnet55,
+        ClaudeModel::Fable51,
+    ] {
         root.set_model(Model::Claude(model));
         assert_eq!(root.composer().speed(), Speed::Ultrafast);
         let fork = root.fork(Path::new("/work"), ReasoningEffort::Medium);
@@ -2958,7 +2964,7 @@ fn unsupported_models_preserve_speed_preference_for_forks_and_later_models() {
         assert!(render_root_text(&mut root, 80, 18).contains("Uses standard with this model"));
         root.update(key(KeyCode::Esc, KeyModifiers::NONE));
     }
-    root.set_model(Model::Codex(CodexModel::Astra));
+    root.set_model(Model::Codex(CodexModel::Sol));
     assert!(render_root_text(&mut root, 80, 18).contains("medium 󰑣"));
     assert_eq!(root.composer().speed(), Speed::Ultrafast);
 }

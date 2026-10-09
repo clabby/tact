@@ -3,7 +3,7 @@ import { CLAMP_LINES, deliveryNote, deliverySummary, needsClamp, party, sentMess
 import type { AgentMessage, Subagent } from "../core/wire";
 
 const agent = (id: number, role: string): Subagent => ({
-  id, parent: null, session_id: `s${id}`, role, task: "", model: "sol", thinking: "high", status: { state: "running" },
+  id, parent: null, session_id: `s${id}`, role, task: "", model: "sol", thinking: "high", reasoning_mode: "standard", status: { state: "running" },
 });
 const agents = [agent(2, "protocol auditor"), agent(4, "docs verifier")];
 

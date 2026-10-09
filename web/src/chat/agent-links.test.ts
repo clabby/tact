@@ -13,7 +13,7 @@ test("the spawned agent is read from a receipt in any of its shapes", () => {
 
 test("an agent's note prefers its error or result, then its latest activity, then its task", () => {
   const agent = (status: Subagent["status"]): Subagent => ({
-    id: 2, parent: null, session_id: "s", role: "auditor", task: "Audit the protocol.\nIn depth.", model: "sol", thinking: "high", status,
+    id: 2, parent: null, session_id: "s", role: "auditor", task: "Audit the protocol.\nIn depth.", model: "sol", thinking: "high", reasoning_mode: "standard", status,
   });
   const t = transcript();
   t.user("Audit the protocol.");

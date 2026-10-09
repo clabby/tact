@@ -1,9 +1,9 @@
 use nanocodex::{
-    HarnessModel as Model, Model as CodexModel, Thinking,
+    HarnessModel as Model, Model as CodexModel, ReasoningMode, Thinking,
     agent::events::AgentEvent,
     oai::{Prompt, PromptInput, UserInput},
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use std::{
     fmt,
     sync::atomic::{AtomicU64, Ordering},
@@ -11,17 +11,41 @@ use std::{
 
 static NEXT_RUNTIME_ID: AtomicU64 = AtomicU64::new(0);
 
-/// The model and reasoning effort executing an agent turn.
+/// The model, reasoning effort, and reasoning mode executing an agent turn.
 #[derive(Clone, Copy, Debug)]
 pub struct AgentContext {
     /// The model executing the turn.
     pub model: Model,
     /// The reasoning effort executing the turn.
     pub thinking: Thinking,
+    /// The reasoning mode the model actually runs, never Pro on a model without Pro support.
+    pub reasoning_mode: ReasoningMode,
 }
 
 impl AgentContext {
-    /// Appends the turn's model and reasoning effort without discarding prompt content.
+    /// Records the selected model and effort with a supported reasoning mode.
+    pub fn new(model: Model, thinking: Thinking, preferred: ReasoningMode) -> Self {
+        Self {
+            model,
+            thinking,
+            reasoning_mode: Self::resolve_reasoning_mode(model, preferred),
+        }
+    }
+
+    /// Resolves a preferred reasoning mode to the one `model` actually runs.
+    ///
+    /// Pro is a per-model preference: a model without Pro support runs in standard mode. Callers
+    /// that authorize Pro must do so before this resolution, because the resolved mode is the
+    /// authority the session later carries.
+    pub const fn resolve_reasoning_mode(model: Model, preferred: ReasoningMode) -> ReasoningMode {
+        match model {
+            Model::Codex(codex) if codex.supports_reasoning_mode(preferred) => preferred,
+            _ => ReasoningMode::Standard,
+        }
+    }
+
+    /// Appends the turn's model, reasoning effort, and reasoning mode without discarding prompt
+    /// content.
     pub fn prompt(&self, prompt: impl Into<Prompt>) -> Prompt {
         let mut prompt = prompt.into();
         let model = match self.model {
@@ -31,8 +55,8 @@ impl AgentContext {
             _ => self.model.as_str(),
         };
         let context = format!(
-            "\n\n<agent_context>\nThis turn runs on {model} with {} reasoning effort.\n</agent_context>",
-            self.thinking
+            "\n\n<agent_context>\nThis turn runs on {model} with {} reasoning effort in {} reasoning mode.\n</agent_context>",
+            self.thinking, self.reasoning_mode
         );
         match &mut prompt.instruction {
             PromptInput::Text(text) => text.push_str(&context),
@@ -40,6 +64,21 @@ impl AgentContext {
         }
         prompt
     }
+}
+
+pub(crate) fn serialize_reasoning_mode<S: Serializer>(
+    mode: &ReasoningMode,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(mode.as_str())
+}
+
+pub(crate) fn deserialize_reasoning_mode<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<ReasoningMode, D::Error> {
+    String::deserialize(deserializer)?
+        .parse()
+        .map_err(de::Error::custom)
 }
 
 /// Identifies a child within one root session's task tree.
@@ -375,12 +414,26 @@ pub struct AgentDescriptor {
     pub model: Model,
     /// The reasoning effort selected when the child was spawned.
     pub thinking: Thinking,
+    /// The reasoning mode the child actually runs. It is fixed for the session and bounds the
+    /// mode of every child it spawns.
+    pub reasoning_mode: ReasoningMode,
     /// The short specialization assigned by the caller.
     pub role: String,
     /// The child's current delegated task.
     pub task: String,
     /// The child that spawned this agent, or `None` for a direct child of the root.
     pub parent: Option<AgentId>,
+}
+
+impl AgentDescriptor {
+    /// The registered context that runs every turn of this child and bounds its children.
+    pub(crate) const fn context(&self) -> AgentContext {
+        AgentContext {
+            model: self.model,
+            thinking: self.thinking,
+            reasoning_mode: self.reasoning_mode,
+        }
+    }
 }
 
 /// A typed observation emitted by a [`Subagents`](crate::Subagents) runtime.
@@ -430,7 +483,7 @@ impl SubagentRuntimeId {
 mod tests {
     use super::{AgentContext, AgentId, AgentStatus, MessagePriority, agent_prompt};
     use nanocodex::{
-        HarnessModel as Model, Model as CodexModel, Thinking,
+        HarnessModel as Model, Model as CodexModel, ReasoningMode, Thinking,
         oai::{Prompt, PromptInput, PromptMessage, UserInput},
     };
 
@@ -439,8 +492,9 @@ mod tests {
         let context = AgentContext {
             model: Model::Codex(CodexModel::Sol),
             thinking: Thinking::Medium,
+            reasoning_mode: ReasoningMode::Pro,
         };
-        let expected = "\n\n<agent_context>\nThis turn runs on sol with medium reasoning effort.\n</agent_context>";
+        let expected = "\n\n<agent_context>\nThis turn runs on sol with medium reasoning effort in pro reasoning mode.\n</agent_context>";
         let prompt = context.prompt("task");
         assert!(
             matches!(prompt.instruction, PromptInput::Text(text) if text == format!("task{expected}"))
@@ -464,6 +518,22 @@ mod tests {
         assert_eq!(after["instruction"][0], before["instruction"][0]);
         assert_eq!(after["instruction"][1], before["instruction"][1]);
         assert_eq!(after["instruction"][2]["text"], expected);
+    }
+
+    #[test]
+    fn agent_context_keeps_pro_only_on_models_that_support_it() {
+        for model in crate::SUPPORTED_MODELS {
+            let standard = AgentContext::new(model, Thinking::High, ReasoningMode::Standard);
+            assert_eq!(standard.reasoning_mode, ReasoningMode::Standard);
+            let pro = AgentContext::new(model, Thinking::High, ReasoningMode::Pro);
+            let expected = if matches!(model, Model::Codex(_)) {
+                ReasoningMode::Pro
+            } else {
+                ReasoningMode::Standard
+            };
+            assert_eq!(pro.reasoning_mode, expected, "{model}");
+            assert_eq!((pro.model, pro.thinking), (model, Thinking::High));
+        }
     }
 
     #[test]

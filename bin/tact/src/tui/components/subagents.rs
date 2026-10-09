@@ -28,7 +28,7 @@ use crate::{
     tui::format::sanitize_terminal_text_inline,
 };
 use crossterm::event::{Event, KeyCode, KeyEventKind};
-use nanocodex::agent::events::AgentEvent;
+use nanocodex::{ReasoningMode, agent::events::AgentEvent};
 use ratatui::{
     Frame,
     layout::Rect,
@@ -726,7 +726,7 @@ impl SubagentTree {
                 )),
                 Span::styled("    Model  ", Style::default().fg(theme.muted())),
                 Span::styled(
-                    format!("{} ({})", model::name(node.model), node.thinking),
+                    model_label(node),
                     Style::default()
                         .fg(theme.model(node.model))
                         .add_modifier(Modifier::BOLD),
@@ -747,14 +747,16 @@ impl SubagentTree {
     }
 }
 
+fn model_label(node: &SubagentNode) -> String {
+    let pro = match node.reasoning_mode {
+        ReasoningMode::Pro => " pro",
+        ReasoningMode::Standard => "",
+    };
+    format!("{} ({}{pro})", model::name(node.model), node.thinking)
+}
+
 fn transcript_title(node: &SubagentNode) -> String {
-    format!(
-        "{} · {} ({}) · #{}",
-        node.role,
-        model::name(node.model),
-        node.thinking,
-        node.id
-    )
+    format!("{} · {} · #{}", node.role, model_label(node), node.id)
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -1099,7 +1101,7 @@ mod tests {
         Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     };
     use nanocodex::{
-        HarnessModel as Model, Model as CodexModel, Thinking,
+        HarnessModel as Model, Model as CodexModel, ReasoningMode, Thinking,
         agent::events::{AgentEvent, AgentEventKind},
     };
     use ratatui::{Terminal, backend::TestBackend, style::Color};
@@ -1139,6 +1141,7 @@ mod tests {
             session_id: format!("agent-{id}"),
             model: Model::Codex(CodexModel::Sol),
             thinking: Thinking::Medium,
+            reasoning_mode: ReasoningMode::Standard,
             role: role.to_owned(),
             task: format!("Task for {role}"),
             parent: parent.map(AgentId::new),
@@ -1305,6 +1308,13 @@ mod tests {
         let node = tree.roster.agent(AgentId::new(1)).unwrap();
         assert_eq!(node.thinking, Thinking::Low);
         assert_eq!(transcript_title(node), "researcher · Luna (low) · #1");
+
+        tree.apply(AgentUpdate::Added(AgentDescriptor {
+            reasoning_mode: ReasoningMode::Pro,
+            ..agent(2, None, "reviewer")
+        }));
+        let node = tree.roster.agent(AgentId::new(2)).unwrap();
+        assert_eq!(transcript_title(node), "reviewer · Sol (medium pro) · #2");
     }
 
     #[test]

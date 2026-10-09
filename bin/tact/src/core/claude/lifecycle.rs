@@ -10,7 +10,8 @@
 use super::*;
 use futures_util::{FutureExt, Stream};
 use nanocodex::{
-    AgentSessionContext, HarnessFamily, HarnessModel, PromptRequest, TurnControl, TurnResult,
+    AgentSessionContext, HarnessFamily, HarnessModel, PromptRequest, ReasoningMode, TurnControl,
+    TurnResult,
     agent::{ChildSnapshot, SpawnOptions},
     oai::Prompt,
 };
@@ -383,6 +384,7 @@ impl LifecycleBackend for Driver {
                 AgentContext {
                     model,
                     thinking: options.selected_thinking().unwrap_or(thinking),
+                    reasoning_mode: ReasoningMode::Standard,
                 },
                 state.fast_mode.load(Ordering::Acquire),
             )

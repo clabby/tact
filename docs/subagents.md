@@ -29,7 +29,7 @@ tool surface or instructions of an existing runtime. A later new or restored ses
 reloaded setting.
 
 Subagents explicitly choose `luna`, `sol`, or `astra` for each task. Setting `[claude] enabled = true`
-also exposes `sonnet-5.5`, `opus-5.5`, and `fable-5.1`. Both providers can create children using
+also exposes `haiku-5.5`, `sonnet-5.5`, `opus-5.5`, and `fable-5.1`. Both providers can create children using
 either provider. Claude is rejected at the runtime boundary unless enabled. There is no `selected`
 alias. Tact's session instructions include a self-contained model-selection guide for the enabled
 models; the `spawn_agent` schema states availability and delegation limits.
@@ -52,10 +52,10 @@ An enabled runtime installs seven tools:
 
 | Tool | Contract |
 | --- | --- |
-| `spawn_agent` | Create a clean child session with a required role, focused task, model choice, thinking effort, and output schema. |
+| `spawn_agent` | Create a clean child session with a required role, focused task, model choice, thinking effort, and output schema, plus an optional reasoning mode. |
 | `submit_result` | Submit the current subagent turn's final JSON value. The value must satisfy its output schema and use the current turn token. |
 | `send_agent_message` | Send a bounded directed message within the current task tree. |
-| `list_agents` | List visible agents, their status, topology, and the caller's messaging and management authority. |
+| `list_agents` | List visible agents, their model, actual reasoning mode, status, topology, and the caller's messaging and management authority. |
 | `wait_agent` | Wait until any selected agent becomes terminal, with a bounded timeout. |
 | `interrupt_agent` | Stop an agent's active turn and active descendants while keeping their sessions reusable. |
 | `close_agent` | Close an agent and its descendant subtree. Closed agents remain inspectable but cannot be reused. |
@@ -76,14 +76,14 @@ does not inherit the caller's conversation. Each child model's instructions are 
 configuration and skill catalog when the root runtime starts. This includes configured replacement
 and appended instructions. A resumed parent keeps its saved instructions; its new children use
 these freshly composed instructions. Fresh and resumed sessions include the model-selection guide
-directly in their instruction Markdown. Children inherit the configured fast-mode setting where
-the selected model supports it, including Opus 5.5 but excluding Sonnet 5.5 and
-Fable 5.1. Codex children also inherit the configured reasoning mode; Claude children use standard
-reasoning mode. Their initial prompt contains:
+directly in their instruction Markdown. Children inherit the configured speed preference and use
+the fastest supported tier no higher than requested: Astra and Sol support ultrafast, Luna and
+Opus 5.5 support fast, and Haiku 5.5, Sonnet 5.5, and Fable 5.1 use standard speed.
+Their initial prompt contains:
 
 - the assigned role and task;
 - its agent ID and place in the task tree;
-- its own model and reasoning effort;
+- its own model, reasoning effort, and actual reasoning mode;
 - coordination rules for peers and descendants; and
 - the required structured-output contract.
 
@@ -102,19 +102,32 @@ Existing children retain their model and effort. The same provider and effort ru
 they spawn descendants.
 Requests above either applicable cap fail before the child factory runs.
 
-Every new turn receives an `<agent_context>` block identifying its own model and effort. Root,
-restored, forked, auxiliary, and child sessions receive this context. Effort changes update it for
-subsequently accepted turns; already accepted turns and active steering retain their original effort.
+The optional `reasoning_mode` field selects `standard` (the default) or `pro` for each child.
+Pro authority follows the actual mode of the spawning agent. A root may request Pro only when its
+own session runs Pro, and a registered child may request Pro only when it runs Pro itself,
+regardless of the root's mode. Pro is a per-model preference: an authorized Pro request for a
+model without Pro support, such as any Claude model, runs that child in standard mode. The child
+stores, reports, and receives that actual mode, so it cannot spawn Pro descendants. Authority is
+checked against the requested mode before this fallback, so an unauthorized Pro request fails even
+when its target would fall back. A session's mode never changes after creation, including when
+the child is reused or its task is replaced. `spawn_agent`, `list_agents`, and `wait_agent`
+report each child's actual mode.
+
+Every new turn receives an `<agent_context>` block identifying its own model, effort, and actual
+reasoning mode. Root, restored, forked, auxiliary, and child sessions receive this context. Effort
+changes update it for subsequently accepted turns; already accepted turns and active steering
+retain their original effort.
 
 ## Model selection
 
 Tact's session instructions contain the model-selection guide: starting models for each provider,
 how to pick an effort level, when to escalate to a stronger child, and the benchmark figures behind
 those suggestions. The guide is defined once, with the session instructions in
-`bin/tact/src/core/mod.rs`, because its figures change with each model release. The
+`bin/tact/src/core/instructions.rs`, because its figures change with each model release. The
 `spawn_agent` schema describes the effort scale again in its `thinking` field.
 
-Every `spawn_agent` call must provide `role`, `task`, `model`, `thinking`, and `output_schema`:
+Every `spawn_agent` call must provide `role`, `task`, `model`, `thinking`, and `output_schema`.
+`reasoning_mode` is optional and defaults to `standard`:
 
 ```json
 {
@@ -276,7 +289,8 @@ The implementation preserves these invariants:
 - disabling subagents removes their tools and omits their fixed instructions from fresh sessions;
 - Codex children cannot exceed a Codex parent's model; Claude requires explicit opt-in;
 - the live configured effort cap bounds every new spawn; registered subagents also cannot delegate above their own assigned effort;
-- each new turn receives its own effective model and effort in context;
+- Pro children require a spawning agent whose actual mode is Pro, and a child's actual mode is fixed at creation;
+- each new turn receives its own effective model, effort, and reasoning mode in context;
 - memory remains independent from the subagent enable switch;
 - every child starts with clean conversation context and a caller-supplied output contract;
 - task-tree scope prevents cross-root access;

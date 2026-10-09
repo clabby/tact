@@ -4,8 +4,8 @@
 //! agents exist, who spawned whom, and each agent's lifecycle state. Model events and directed
 //! messages belong to an agent's transcript and leave the roster unchanged.
 
-use super::model::{AgentDescriptor, AgentId, AgentStatus, AgentUpdate};
-use nanocodex::{HarnessModel as Model, Thinking};
+use super::model::{AgentDescriptor, AgentId, AgentStatus, AgentUpdate, serialize_reasoning_mode};
+use nanocodex::{HarnessModel as Model, ReasoningMode, Thinking};
 use serde::{Serialize, Serializer};
 
 /// The agents of one root session's task tree and the concurrency limit they share.
@@ -35,6 +35,9 @@ pub struct SubagentNode {
     pub model: Model,
     /// The child's assigned reasoning effort.
     pub thinking: Thinking,
+    /// The reasoning mode the child actually runs.
+    #[serde(serialize_with = "serialize_reasoning_mode")]
+    pub reasoning_mode: ReasoningMode,
     /// The most recently reported lifecycle state.
     pub status: AgentStatus,
 }
@@ -103,6 +106,7 @@ impl SubagentNode {
             task: descriptor.task.clone(),
             model: descriptor.model,
             thinking: descriptor.thinking,
+            reasoning_mode: descriptor.reasoning_mode,
             status: AgentStatus::Running,
         }
     }
@@ -124,7 +128,7 @@ fn serialize_model<S: Serializer>(model: &Model, serializer: S) -> Result<S::Ok,
 mod tests {
     use super::SubagentRoster;
     use crate::{AgentDescriptor, AgentId, AgentStatus, AgentUpdate};
-    use nanocodex::{HarnessModel as Model, Model as CodexModel, Thinking};
+    use nanocodex::{HarnessModel as Model, Model as CodexModel, ReasoningMode, Thinking};
     use serde_json::json;
 
     fn added(id: u64, parent: Option<u64>, task: &str) -> AgentUpdate {
@@ -133,6 +137,7 @@ mod tests {
             session_id: format!("child-{id}"),
             model: Model::Codex(CodexModel::Sol),
             thinking: Thinking::High,
+            reasoning_mode: ReasoningMode::Pro,
             role: "reviewer".to_owned(),
             task: task.to_owned(),
             parent: parent.map(AgentId::new),
@@ -189,6 +194,7 @@ mod tests {
                     "task": "audit",
                     "model": Model::Codex(CodexModel::Sol).as_str(),
                     "thinking": "high",
+                    "reasoning_mode": "pro",
                     "status": { "state": "running" },
                 }],
             })

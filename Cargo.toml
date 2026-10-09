@@ -38,8 +38,8 @@ image = { version = "0.25.10", default-features = false, features = ["bmp", "dds
 jsonschema = { version = "0.48.5", default-features = false }
 miette = { version = "7.6.0", features = ["fancy"] }
 minisign-verify = "0.2.5"
-nanocodex = { git = "https://github.com/gakonst/nanocodex", branch = "master", features = ["claude"] }
-nanocodex-agent = { git = "https://github.com/gakonst/nanocodex", branch = "master" }
+nanocodex = { git = "https://github.com/gakonst/nanocodex", rev = "b1f1a166be17870e9b15bcb8ee59526e80ccf759", features = ["claude"] }
+nanocodex-agent = { git = "https://github.com/gakonst/nanocodex", rev = "b1f1a166be17870e9b15bcb8ee59526e80ccf759" }
 png = "0.18.1"
 pulldown-cmark = { version = "0.13.4", default-features = false }
 ratatui = "0.30.2"

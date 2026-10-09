@@ -12,7 +12,7 @@ use axum::{
 };
 use nanocodex::{
     AgentEvents, ClaudeModel, HarnessModel, Model as CodexModel, Nanocodex, NanocodexError, OpenAi,
-    Thinking, Tools,
+    ReasoningMode, Thinking, Tools,
     agent::{ChildSnapshot, SpawnOptions},
     oai::{
         ResponseError,
@@ -230,7 +230,11 @@ fn build_agent(
     codex: Script,
     speed: Speed,
 ) -> Result<(Nanocodex, AgentEvents), NanocodexError> {
-    let AgentContext { model, thinking } = context;
+    let AgentContext {
+        model,
+        thinking,
+        reasoning_mode,
+    } = context;
     let speed = speed.for_model(model);
     let tools = recipe.tools_factory()()?;
     if let HarnessModel::Codex(model) = model {
@@ -242,6 +246,7 @@ fn build_agent(
         Nanocodex::builder(openai)
             .model(model)
             .thinking(thinking)
+            .reasoning_mode(reasoning_mode)
             .service_tier(speed.into())
             .workspace(&recipe.workspace)
             .tools(tools)
@@ -280,6 +285,7 @@ fn build_agent(
 #[tokio::test]
 async fn claude_root_runs_codex_child_through_code_mode() {
     for model in [
+        ClaudeModel::Haiku55,
         ClaudeModel::Sonnet55,
         ClaudeModel::Opus55,
         ClaudeModel::Fable51,
@@ -297,6 +303,7 @@ async fn claude_root_runs_codex_child_through_code_mode() {
 #[tokio::test]
 async fn codex_root_runs_claude_child_through_code_mode() {
     for model in [
+        ClaudeModel::Haiku55,
         ClaudeModel::Sonnet55,
         ClaudeModel::Opus55,
         ClaudeModel::Fable51,
@@ -401,6 +408,7 @@ async fn api_key_messages_reject_redirects_without_forwarding_credentials() {
             AgentContext {
                 model,
                 thinking: Thinking::Medium,
+                reasoning_mode: ReasoningMode::Standard,
             },
             &recipe,
             Script::new(HarnessModel::Codex(CodexModel::Sol), String::new()),
@@ -530,17 +538,15 @@ for (let attempt = 0; attempt < 3; attempt++) {{
     subagents
         .set_agent_factory(
             Thinking::Medium,
+            ReasoningMode::Standard,
             Speed::Standard,
-            move |model, thinking, speed| {
-                assert_eq!(model, child_model);
-                assert_eq!(thinking, Thinking::Medium);
+            move |context, speed| {
+                assert_eq!(context.model, child_model);
+                assert_eq!(context.thinking, Thinking::Medium);
+                assert_eq!(context.reasoning_mode, ReasoningMode::Standard);
                 assert_eq!(speed, Speed::Standard);
-                let (agent, events) = build_agent(
-                    AgentContext { model, thinking },
-                    &child_recipe,
-                    child_codex.clone(),
-                    speed,
-                )?;
+                let (agent, events) =
+                    build_agent(context, &child_recipe, child_codex.clone(), speed)?;
                 captured_children.lock().unwrap().push(agent.clone());
                 Ok((agent, events))
             },
@@ -550,6 +556,7 @@ for (let attempt = 0; attempt < 3; attempt++) {{
         AgentContext {
             model: root_model,
             thinking: Thinking::Medium,
+            reasoning_mode: ReasoningMode::Standard,
         },
         &recipe,
         codex.clone(),

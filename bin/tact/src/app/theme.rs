@@ -50,6 +50,7 @@ struct ThemePalette {
     model_luna: ThemeColor,
     model_sol: ThemeColor,
     model_astra: ThemeColor,
+    model_haiku: ThemeColor,
     model_sonnet: ThemeColor,
     model_opus: ThemeColor,
     model_fable: ThemeColor,
@@ -85,6 +86,7 @@ struct PaletteFields {
     model_luna: Option<ThemeColor>,
     model_sol: Option<ThemeColor>,
     model_astra: Option<ThemeColor>,
+    model_haiku: Option<ThemeColor>,
     model_sonnet: Option<ThemeColor>,
     model_opus: Option<ThemeColor>,
     model_fable: Option<ThemeColor>,
@@ -197,6 +199,7 @@ impl Theme {
             Model::Codex(CodexModel::Luna) => self.palette().model_luna.0,
             Model::Codex(CodexModel::Sol) => self.palette().model_sol.0,
             Model::Codex(CodexModel::Astra) => self.palette().model_astra.0,
+            Model::Claude(ClaudeModel::Haiku55) => self.palette().model_haiku.0,
             Model::Claude(ClaudeModel::Sonnet55) => self.palette().model_sonnet.0,
             Model::Claude(ClaudeModel::Opus55) => self.palette().model_opus.0,
             Model::Claude(ClaudeModel::Fable51) => self.palette().model_fable.0,
@@ -245,6 +248,7 @@ impl ThemePalette {
             model_luna: ThemeColor(Color::Reset),
             model_sol: ThemeColor(Color::Yellow),
             model_astra: ThemeColor(Color::Magenta),
+            model_haiku: ThemeColor(Color::Blue),
             model_sonnet: ThemeColor(Color::Green),
             model_opus: ThemeColor(Color::Red),
             model_fable: ThemeColor(Color::Cyan),
@@ -267,6 +271,7 @@ impl ThemePalette {
             model_luna: ThemeColor(Color::Reset),
             model_sol: ThemeColor(Color::Yellow),
             model_astra: ThemeColor(Color::Magenta),
+            model_haiku: ThemeColor(Color::Blue),
             model_sonnet: ThemeColor(Color::Green),
             model_opus: ThemeColor(Color::Red),
             model_fable: ThemeColor(Color::Cyan),
@@ -288,6 +293,7 @@ impl ThemePalette {
         self.model_luna = fields.model_luna.unwrap_or(self.model_luna);
         self.model_sol = fields.model_sol.unwrap_or(self.model_sol);
         self.model_astra = fields.model_astra.unwrap_or(self.model_astra);
+        self.model_haiku = fields.model_haiku.unwrap_or(self.model_haiku);
         self.model_sonnet = fields.model_sonnet.unwrap_or(self.model_sonnet);
         self.model_opus = fields.model_opus.unwrap_or(self.model_opus);
         self.model_fable = fields.model_fable.unwrap_or(self.model_fable);
@@ -392,10 +398,12 @@ mod tests {
             Color::Reset,
             Color::Yellow,
             Color::Magenta,
+            Color::Blue,
             Color::Green,
             Color::Red,
             Color::Cyan,
         ];
+        assert_eq!(models.len(), colors.len());
         for mode in [ThemeMode::Dark, ThemeMode::Light] {
             theme.set_mode(mode);
             for (&model, color) in models.iter().zip(colors) {

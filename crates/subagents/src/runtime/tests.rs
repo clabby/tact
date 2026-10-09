@@ -6,33 +6,26 @@ use super::{
     state::{AgentReservation, ChildSession, RegistryState, complete_session},
 };
 use crate::{
-    AgentUpdate, MessageDeliveryState, MessageDisposition, MessagePriority, MessagePurpose, Speed,
+    AgentContext, AgentUpdate, MessageDeliveryState, MessageDisposition, MessagePriority,
+    MessagePurpose, Speed,
     error::{DeliveryFailure, SpawnError, SubagentError},
     output::OutputContract,
+    test_support::{PendingService, pending_agent},
 };
-use futures_util::future::Either;
 use nanocodex::{
-    HarnessModel as Model, Model as CodexModel, Nanocodex, NanocodexError, OpenAi, Thinking,
-    oai::{
-        ResponseError,
-        tower::{
-            ResponsesAttempt, ResponsesAttemptKind, ResponsesOutput, ResponsesServiceResponse,
-        },
-    },
+    HarnessModel as Model, Model as CodexModel, Nanocodex, NanocodexError, OpenAi, ReasoningMode,
+    Thinking,
 };
 use serde_json::json;
 use std::{
-    future::{Pending, Ready, pending, ready},
-    result::Result as StdResult,
     sync::{Arc, Mutex},
-    task::{Context, Poll},
+    task::Poll,
     time::Duration,
 };
 use tokio::{
     sync::{Notify, mpsc, oneshot},
     time::timeout,
 };
-use tower::Service;
 
 #[tokio::test]
 async fn descendants_can_switch_providers_with_local_model_and_shared_effort_caps() {
@@ -64,13 +57,23 @@ async fn descendants_can_switch_providers_with_local_model_and_shared_effort_cap
         for child_model in crate::SUPPORTED_MODELS {
             assert_eq!(
                 child
-                    .validate_child("ignored", child_model, Thinking::Medium)
+                    .validate_child(
+                        "ignored",
+                        child_model,
+                        Thinking::Medium,
+                        ReasoningMode::Standard
+                    )
                     .is_ok(),
                 !denied.contains(&(parent_model, child_model))
             );
             assert!(
                 child
-                    .validate_child("ignored", child_model, Thinking::High)
+                    .validate_child(
+                        "ignored",
+                        child_model,
+                        Thinking::High,
+                        ReasoningMode::Standard
+                    )
                     .is_err()
             );
         }
@@ -86,9 +89,10 @@ fn agent_factory_enforces_thinking_cap() {
     registry
         .set_agent_factory(
             Thinking::Medium,
+            ReasoningMode::Standard,
             Speed::Standard,
-            move |model, thinking, speed| {
-                *captured.lock().unwrap() = Some((model, thinking, speed));
+            move |context: AgentContext, speed| {
+                *captured.lock().unwrap() = Some((context.model, context.thinking, speed));
                 Err(NanocodexError::InvalidRequest(
                     "stop after capture".to_owned(),
                 ))
@@ -110,7 +114,11 @@ fn agent_factory_enforces_thinking_cap() {
     ] {
         registry.set_agent_max_thinking(maximum);
         let error = registry
-            .spawn_agent(Model::Codex(CodexModel::Luna), requested)
+            .spawn_agent(
+                Model::Codex(CodexModel::Luna),
+                requested,
+                ReasoningMode::Standard,
+            )
             .err()
             .expect("factory should stop after capture");
         let actual = seen.lock().unwrap().take();
@@ -140,9 +148,12 @@ async fn registered_parent_caps_and_turn_context_follow_its_descriptor() {
     registry
         .set_agent_factory(
             Thinking::High,
+            ReasoningMode::Standard,
             Speed::Standard,
-            move |model, thinking, speed| {
-                captured.send((model, thinking, speed)).unwrap();
+            move |context: AgentContext, speed| {
+                captured
+                    .send((context.model, context.thinking, speed))
+                    .unwrap();
                 Err(NanocodexError::InvalidRequest(
                     "stop after capture".to_owned(),
                 ))
@@ -155,6 +166,7 @@ async fn registered_parent_caps_and_turn_context_follow_its_descriptor() {
             Model::Codex(CodexModel::Astra).as_str(),
             Model::Codex(CodexModel::Sol),
             Thinking::Medium,
+            ReasoningMode::Standard,
         )
         .unwrap();
     {
@@ -170,9 +182,14 @@ async fn registered_parent_caps_and_turn_context_follow_its_descriptor() {
         (Model::Codex(CodexModel::Luna), Thinking::Low, true),
     ] {
         let result = reservation
-            .validate_child(Model::Codex(CodexModel::Astra).as_str(), model, thinking)
+            .validate_child(
+                Model::Codex(CodexModel::Astra).as_str(),
+                model,
+                thinking,
+                ReasoningMode::Standard,
+            )
             .map_err(SubagentError::from)
-            .and_then(|()| registry.spawn_agent(model, thinking));
+            .and_then(|()| registry.spawn_agent(model, thinking, ReasoningMode::Standard));
         let error = result.err().unwrap();
         if allowed {
             assert!(matches!(error, SubagentError::Agent(_)));
@@ -198,10 +215,15 @@ async fn registered_parent_caps_and_turn_context_follow_its_descriptor() {
                 "ignored for registered children",
                 Model::Codex(CodexModel::Sol),
                 Thinking::Medium,
+                ReasoningMode::Standard,
             )
             .unwrap();
         let error = registry
-            .spawn_agent(Model::Codex(CodexModel::Sol), Thinking::Medium)
+            .spawn_agent(
+                Model::Codex(CodexModel::Sol),
+                Thinking::Medium,
+                ReasoningMode::Standard,
+            )
             .err()
             .unwrap();
         if allowed {
@@ -246,57 +268,6 @@ async fn registered_parent_caps_and_turn_context_follow_its_descriptor() {
     }
 }
 
-#[derive(Clone)]
-struct PendingService {
-    called: Arc<Notify>,
-    prompts: Option<mpsc::UnboundedSender<(nanocodex::Model, Thinking, String)>>,
-}
-
-impl Service<ResponsesAttempt> for PendingService {
-    type Response = ResponsesServiceResponse;
-    type Error = ResponseError;
-    type Future = Either<
-        Ready<StdResult<Self::Response, Self::Error>>,
-        Pending<StdResult<Self::Response, Self::Error>>,
-    >;
-
-    fn poll_ready(&mut self, _context: &mut Context<'_>) -> Poll<StdResult<(), Self::Error>> {
-        Poll::Ready(Ok(()))
-    }
-
-    fn call(&mut self, request: ResponsesAttempt) -> Self::Future {
-        if self.prompts.is_some() && matches!(request.kind(), ResponsesAttemptKind::Warmup) {
-            return Either::Left(ready(Ok(ResponsesServiceResponse::new(
-                ResponsesOutput::Warmup(serde_json::from_value(json!({ "id": "warmup" })).unwrap()),
-            ))));
-        }
-        if let Some(prompts) = &self.prompts
-            && let Some(prompt) = request
-                .input_items()
-                .map(|item| serde_json::to_value(item).unwrap())
-                .filter(|item| item["role"] == "user")
-                .last()
-        {
-            prompts
-                .send((request.model(), request.thinking(), prompt.to_string()))
-                .unwrap();
-        }
-        self.called.notify_one();
-        Either::Right(pending())
-    }
-}
-
-fn pending_agent(called: Arc<Notify>) -> (Nanocodex, nanocodex::AgentEvents) {
-    let openai = OpenAi::builder("test-key")
-        .service(move || PendingService {
-            called: Arc::clone(&called),
-            prompts: None,
-        })
-        .build()
-        .unwrap();
-    Nanocodex::builder(openai).build().unwrap()
-}
-
 #[tokio::test]
 async fn harness_injects_descriptor_context_on_initial_and_reused_turns() {
     let (updates, _receiver) = mpsc::unbounded_channel();
@@ -312,10 +283,19 @@ async fn harness_injects_descriptor_context_on_initial_and_reused_turns() {
     let (agent, events) = Nanocodex::builder(openai)
         .model(nanocodex::Model::Sol)
         .thinking(Thinking::Medium)
+        .reasoning_mode(ReasoningMode::Pro)
         .build()
         .unwrap();
     let reservation = registry.reserve("root").await.unwrap();
-    insert_runtime_session(&registry, &reservation, None, agent, events).await;
+    insert_runtime_session(
+        &registry,
+        &reservation,
+        None,
+        ReasoningMode::Pro,
+        agent,
+        events,
+    )
+    .await;
     for token in [1, 2] {
         registry
             .launch_initial_turn(
@@ -335,7 +315,13 @@ async fn harness_injects_descriptor_context_on_initial_and_reused_turns() {
         assert!(prompt.contains(&format!("task {token}")), "{prompt}");
         assert!(prompt.contains(&format!("turn_token: {token}")));
         assert!(prompt.contains("<agent_context>"));
-        assert!(prompt.contains("This turn runs on sol with medium reasoning effort."));
+        assert!(
+            prompt.contains(
+                "This turn runs on sol with medium reasoning effort in pro reasoning mode."
+            )
+        );
+        let directory = registry.directory("root", true, false).await;
+        assert_eq!(directory[0].reasoning_mode, ReasoningMode::Pro);
         registry.interrupt("root", reservation.id).await.unwrap();
     }
     registry.close("root", reservation.id).await.unwrap();
@@ -381,10 +367,15 @@ async fn runtime_owned_agent_factory_does_not_keep_the_runtime_alive() {
     let weak = subagents.downgrade();
     let factory_weak = weak.clone();
     subagents
-        .set_agent_factory(Thinking::Medium, Speed::Standard, move |_, _, _| {
-            let _ = &factory_weak;
-            Err(NanocodexError::InvalidRequest("unused factory".to_owned()))
-        })
+        .set_agent_factory(
+            Thinking::Medium,
+            ReasoningMode::Standard,
+            Speed::Standard,
+            move |_, _| {
+                let _ = &factory_weak;
+                Err(NanocodexError::InvalidRequest("unused factory".to_owned()))
+            },
+        )
         .unwrap();
 
     drop(subagents);
@@ -401,6 +392,7 @@ async fn insert_runtime_session(
     registry: &Arc<Registry>,
     reservation: &AgentReservation,
     parent: Option<AgentId>,
+    reasoning_mode: ReasoningMode,
     agent: Nanocodex,
     events: nanocodex::AgentEvents,
 ) -> String {
@@ -410,6 +402,7 @@ async fn insert_runtime_session(
         session_id: session_id.clone(),
         model: Model::Codex(CodexModel::Sol),
         thinking: Thinking::Medium,
+        reasoning_mode,
         role: format!("agent-{}", reservation.id),
         task: "wait forever".to_owned(),
         parent,
@@ -446,7 +439,15 @@ async fn insert_pending_runtime_session(
     let reservation = registry.reserve(root_session_id).await.unwrap();
     let id = reservation.id;
     let (agent, events) = pending_agent(called);
-    let session_id = insert_runtime_session(registry, &reservation, parent, agent, events).await;
+    let session_id = insert_runtime_session(
+        registry,
+        &reservation,
+        parent,
+        ReasoningMode::Standard,
+        agent,
+        events,
+    )
+    .await;
     (id, session_id)
 }
 
@@ -490,6 +491,7 @@ fn test_session(id: AgentId, session_id: &str, parent: Option<AgentId>) -> Child
         session_id: session_id.to_owned(),
         model: Model::Codex(CodexModel::Sol),
         thinking: Thinking::Medium,
+        reasoning_mode: ReasoningMode::Standard,
         role: format!("agent-{id}"),
         task: "test lifecycle".to_owned(),
         parent,
@@ -668,8 +670,15 @@ async fn interrupt_and_close_stop_recursive_turns_and_preserve_continuation() {
 
     let parent = registry.reserve("main").await.unwrap();
     let (parent_agent, parent_events) = pending_agent(Arc::clone(&parent_called));
-    let parent_session =
-        insert_runtime_session(&registry, &parent, None, parent_agent, parent_events).await;
+    let parent_session = insert_runtime_session(
+        &registry,
+        &parent,
+        None,
+        ReasoningMode::Standard,
+        parent_agent,
+        parent_events,
+    )
+    .await;
     registry
         .launch_initial_turn(
             &parent.root_session_id,
@@ -686,6 +695,7 @@ async fn interrupt_and_close_stop_recursive_turns_and_preserve_continuation() {
         &registry,
         &child,
         Some(parent.id),
+        ReasoningMode::Standard,
         child_agent,
         child_events,
     )
@@ -702,7 +712,15 @@ async fn interrupt_and_close_stop_recursive_turns_and_preserve_continuation() {
 
     let sibling = registry.reserve("main").await.unwrap();
     let (sibling_agent, sibling_events) = pending_agent(Arc::clone(&sibling_called));
-    insert_runtime_session(&registry, &sibling, None, sibling_agent, sibling_events).await;
+    insert_runtime_session(
+        &registry,
+        &sibling,
+        None,
+        ReasoningMode::Standard,
+        sibling_agent,
+        sibling_events,
+    )
+    .await;
     registry
         .launch_initial_turn(
             &sibling.root_session_id,

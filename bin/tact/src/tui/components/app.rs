@@ -2819,7 +2819,8 @@ mod parity_tests {
         web::bridge::{self, WebEnd},
     };
     use nanocodex::{
-        ClaudeModel, HarnessModel as Model, Model as CodexModel, Thinking,
+        ClaudeModel, HarnessModel as Model, Model as CodexModel,
+        ReasoningMode as NanocodexReasoningMode, Thinking,
         agent::{
             events::{AgentEvent, AgentEventKind},
             input::{PromptInput, UserInput},
@@ -3117,6 +3118,7 @@ mod parity_tests {
                 session_id: "child".to_owned(),
                 model: Model::Codex(CodexModel::Sol),
                 thinking: Thinking::Medium,
+                reasoning_mode: NanocodexReasoningMode::Standard,
                 role: "worker".to_owned(),
                 task: "trace".to_owned(),
                 parent: None,
