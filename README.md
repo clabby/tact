@@ -92,7 +92,7 @@ Its composer footer shows a blue `◉ pre-release` badge, and `tact --version` r
   package. Pre-releases are not published to crates.io, so they have no independent key: tact
   verifies only the SHA-256 checksum of the archive, which makes them as trustworthy as the GitHub
   Releases of `clabby/tact` themselves. Install official releases when that is not enough.
-- **Retention.** Only the fifty most recent pre-releases are kept. A commit older than that, or
+- **Retention.** Only the five most recent pre-releases are kept. A commit older than that, or
   one whose release workflow has not finished, reports that it has no build.
 - **Where it works.** Pre-releases replace a tact installed from a release archive or the install
   script, and a build from source, which makes them easy to try from a checkout. The binary that

@@ -556,7 +556,7 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       # How many pre-releases remain published. Older ones are deleted with their tags.
-      RETAINED_PRE_RELEASES: "50"
+      RETAINED_PRE_RELEASES: "5"
     steps:
       - name: Delete pre-releases beyond the retention limit
         shell: bash
