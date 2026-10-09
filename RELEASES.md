@@ -87,7 +87,7 @@ request. It is the same workflow as an official release with these differences:
   only the checksum, because the signing key of an official release is published in its crates.io
   package and a pre-release has none.
 - Images are published as `ghcr.io/clabby/tact:dev-<commit>` and `:dev`, never as `latest`.
-- The `prune_pre_releases` job deletes pre-releases and their tags beyond the most recent fifty
+- The `prune_pre_releases` job deletes pre-releases and their tags beyond the most recent five
   (`RETAINED_PRE_RELEASES`). Container images are not pruned.
 
 Rerun a failed pre-release from the Actions tab like any other run. An official release commit
