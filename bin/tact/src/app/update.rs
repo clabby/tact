@@ -3,7 +3,7 @@
 use crate::app::installation::{InstallationKind, current as installation};
 use flate2::read::GzDecoder;
 use minisign_verify::{PublicKey, Signature};
-use reqwest::Client;
+use reqwest::{Client, StatusCode};
 use semver::Version;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -49,7 +49,9 @@ pub(crate) enum UpdateError {
         "`{revision}` is not a commit: give between 7 and 40 hexadecimal digits of a commit on main"
     )]
     InvalidRevision { revision: String },
-    #[error("clabby/tact has no commit `{revision}`")]
+    #[error(
+        "clabby/tact has no commit `{revision}`, or the abbreviation matches more than one commit"
+    )]
     RevisionNotFound { revision: String },
     #[error("GitHub returned invalid commit metadata for `{revision}`: {source}")]
     CommitMetadata {
@@ -600,7 +602,7 @@ impl Updater {
             )
             .await
             .map_err(|error| match error {
-                error if is_not_found(&error) => UpdateError::RevisionNotFound {
+                error if rejects_revision(&error) => UpdateError::RevisionNotFound {
                     revision: revision.to_owned(),
                 },
                 error => error,
@@ -837,7 +839,20 @@ impl Updater {
 }
 
 fn is_not_found(error: &UpdateError) -> bool {
-    matches!(error, UpdateError::Http { source, .. } if source.status() == Some(reqwest::StatusCode::NOT_FOUND))
+    matches!(error, UpdateError::Http { source, .. } if source.status() == Some(StatusCode::NOT_FOUND))
+}
+
+/// Whether GitHub's commit lookup refused the abbreviation. It answers 404 for a full hash that
+/// names no commit and 422 for an abbreviation that names none or several.
+fn rejects_revision(error: &UpdateError) -> bool {
+    matches!(error, UpdateError::Http { source, .. } if source.status().is_some_and(is_unknown_commit_status))
+}
+
+fn is_unknown_commit_status(status: StatusCode) -> bool {
+    matches!(
+        status,
+        StatusCode::NOT_FOUND | StatusCode::UNPROCESSABLE_ENTITY
+    )
 }
 
 fn default_cargo_install_root() -> Option<PathBuf> {
@@ -1103,7 +1118,8 @@ mod tests {
     use super::{
         GithubAsset, GithubReleaseResponse, Release, ReleaseTag, SupportedTarget, UpdateError,
         cargo_update_command, crate_manifest, ensure_pre_release_installable, extract_binary,
-        normalize_revision, parse_hex_checksum, update_artifact_target, verify_archive_checksum,
+        is_unknown_commit_status, normalize_revision, parse_hex_checksum, update_artifact_target,
+        verify_archive_checksum,
     };
     use crate::app::installation::InstallationKind;
     use flate2::{Compression, write::GzEncoder};
@@ -1210,6 +1226,15 @@ mod tests {
                 Err(UpdateError::PreReleaseManaged)
             ));
         }
+    }
+
+    #[test]
+    fn github_refuses_unknown_and_ambiguous_commits_with_404_and_422() {
+        use reqwest::StatusCode;
+        assert!(is_unknown_commit_status(StatusCode::NOT_FOUND));
+        assert!(is_unknown_commit_status(StatusCode::UNPROCESSABLE_ENTITY));
+        assert!(!is_unknown_commit_status(StatusCode::FORBIDDEN));
+        assert!(!is_unknown_commit_status(StatusCode::INTERNAL_SERVER_ERROR));
     }
 
     #[test]
