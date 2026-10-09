@@ -8,6 +8,11 @@ test("a link names a session and entry and never carries the login token", () =>
   expect(parseHashLink(`${new URL(link).hash}&heading=next-steps`).heading).toBe("next-steps");
 });
 
+test("a link keeps the machine the page works on", () => {
+  const link = entryLink({ origin: "https://hub.tail.net", pathname: "/", search: "?m=devbox" }, "019a-01", 3);
+  expect(link).toBe("https://hub.tail.net/?m=devbox#s=019a-01&entry=3");
+});
+
 test("the token is consumed while the link target survives", () => {
   expect(parseHashLink("#k=secret&s=abc&entry=7")).toEqual({ token: "secret", session: "abc", entry: 7, heading: null });
   expect(hashWithoutToken("#k=secret&s=abc&entry=7")).toBe("#s=abc&entry=7");

@@ -195,7 +195,9 @@ delegation. Your appended instructions come after it.
 Every running Tact serves a web interface in the background. It's a second front end on the same
 process, not a separate client. The terminal and browser share the active session and each
 session's draft, queue, settings, and transcript. Either one can start, switch, fork, and close
-sessions. There is no headless mode, so the terminal has to stay open.
+sessions. The terminal has to stay open unless you run `tact serve`, which runs the same sessions
+without one. To run sessions on other machines from one web interface, see
+[Other machines](docs/web.md#other-machines).
 
 Open the login URL that Tact shows. The token in its fragment is stored in `~/.tact/web/token` (mode
 0600) and shared by all of your Tact instances. **It grants the same access as a shell**, so treat

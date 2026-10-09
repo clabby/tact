@@ -59,12 +59,22 @@ impl MachineToken {
         Self::create(&path)
     }
 
-    fn parse(contents: &str) -> Option<Self> {
+    /// The token in `contents`, ignoring surrounding whitespace, if it is well formed.
+    pub(super) fn parse(contents: &str) -> Option<Self> {
         let token = contents.trim();
         let valid = URL_SAFE_NO_PAD
             .decode(token)
             .is_ok_and(|bytes| bytes.len() == TOKEN_BYTES);
         valid.then(|| Self(SecretString::new(token.to_owned())))
+    }
+
+    /// The token in `directory`, if one exists and is well formed. Nothing is created.
+    pub(super) fn read(directory: &Path) -> io::Result<Option<Self>> {
+        match fs::read_to_string(directory.join("token")) {
+            Ok(contents) => Ok(Self::parse(SecretString::new(contents).expose_secret())),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 
     fn create(path: &Path) -> Result<Self, TokenError> {

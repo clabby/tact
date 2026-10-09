@@ -321,10 +321,12 @@ export class QuestionThreads {
     const element = document.createElement("article");
     element.className = "agent-thread";
     element.dataset.threadId = String(thread.id);
-    const inputId = `thread-${thread.id}-input`;
-    const headingId = `thread-${thread.id}-heading`;
-    const contextId = `thread-${thread.id}-context`;
-    const linesId = `thread-${thread.id}-lines`;
+    // Thread ids come from the server and are placed in markup below.
+    const threadKey = escapeHtml(String(thread.id));
+    const inputId = `thread-${threadKey}-input`;
+    const headingId = `thread-${threadKey}-heading`;
+    const contextId = `thread-${threadKey}-context`;
+    const linesId = `thread-${threadKey}-lines`;
     const lineLabel = thread.startLine === thread.endLine ? "Line" : "Lines";
     element.setAttribute("aria-labelledby", `${headingId} ${contextId} ${linesId}`);
     if (thread.turn.kind === "asking") element.setAttribute("aria-busy", "true");
@@ -378,8 +380,8 @@ export class QuestionThreads {
     }
     turn.innerHTML = `
       <label for="${inputId}">Ask a follow-up</label>
-      <textarea id="${inputId}" data-thread-input aria-describedby="${contextId} ${linesId} thread-${thread.id}-validation" rows="3" placeholder="Ask about this code" ${this.deps.agentUnavailable() ? "disabled" : ""}></textarea>
-      <span id="thread-${thread.id}-validation" class="agent-thread-validation" role="alert" ${thread.validationError ? "" : "hidden"}>${escapeHtml(thread.validationError ?? "")}</span>
+      <textarea id="${inputId}" data-thread-input aria-describedby="${contextId} ${linesId} thread-${threadKey}-validation" rows="3" placeholder="Ask about this code" ${this.deps.agentUnavailable() ? "disabled" : ""}></textarea>
+      <span id="thread-${threadKey}-validation" class="agent-thread-validation" role="alert" ${thread.validationError ? "" : "hidden"}>${escapeHtml(thread.validationError ?? "")}</span>
       <div><button class="button" data-agent-action data-thread-ask disabled>Ask <span aria-hidden="true">✨</span></button></div>`;
     const textarea = turn.querySelector<HTMLTextAreaElement>("textarea");
     const ask = turn.querySelector<HTMLButtonElement>("[data-thread-ask]");

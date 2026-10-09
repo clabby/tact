@@ -3,6 +3,7 @@ import type {
   DraftImage,
   DraftOrigin,
   Effort,
+  PatchStats,
   QueuedPrompt,
   ReasoningMode,
   SessionSnapshot,
@@ -84,9 +85,18 @@ export function transcriptData(entries: readonly WireEntry[]): TranscriptData {
 export function upsert(data: TranscriptData, entry: WireEntry): { added: boolean } | null {
   const held = data.entries.get(entry.id);
   if (held && held.revision >= entry.revision) return null;
-  data.entries.set(entry.id, entry);
+  data.entries.set(entry.id, entry.kind === "tool" && entry.stats ? { ...entry, stats: patchStats(entry.stats) } : entry);
   if (!held) insertOrdered(data.order, entry.id);
   return { added: !held };
+}
+
+/**
+ * Patch sizes are summed and displayed, and the server that sent them may be a linked machine, so
+ * anything that is not a non-negative whole number counts as zero.
+ */
+function patchStats(stats: PatchStats): PatchStats {
+  const count = (value: unknown) => (typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0);
+  return { files: count(stats.files), additions: count(stats.additions), deletions: count(stats.deletions) };
 }
 
 function sessionView(snapshot: SessionSnapshot): SessionView {

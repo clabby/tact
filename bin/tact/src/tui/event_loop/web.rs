@@ -7,7 +7,10 @@
 
 use super::{EventLoop, links, remote};
 use crate::{
-    app::{config::Config, error::Result},
+    app::{
+        config::Config,
+        error::{Result, RuntimeError},
+    },
     core::{
         pane::PaneId,
         protocol::{
@@ -29,7 +32,7 @@ use std::{
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-/// How long the web server may take to stop once the terminal has been restored.
+/// How long the web server may take to stop once the loop has finished.
 const WEB_SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 
 /// The web server task, when the web interface is enabled.
@@ -55,11 +58,29 @@ impl WebServer {
         Self { shutdown, task }
     }
 
+    /// Starts the server as the only front-end. Failing to serve is fatal here, so the server is
+    /// listening, and published to the tailnet when configured, once this returns.
+    pub(super) async fn serve(
+        config: &Config,
+        workspace: &Path,
+        end: WebEnd,
+        shutdown: &CancellationToken,
+    ) -> Result<Self> {
+        let shutdown = shutdown.child_token();
+        let task = web::serve(config, workspace, end, shutdown.clone())
+            .await
+            .map_err(|error| RuntimeError::Web(error.into()))?;
+        Ok(Self {
+            shutdown,
+            task: Some(task),
+        })
+    }
+
     /// Stops the server, waiting a short grace period for it to finish.
     pub(super) async fn stop(self) {
         self.shutdown.cancel();
         if let Some(task) = self.task {
-            // A server that does not stop promptly must not hold the terminal's exit.
+            // A server that does not stop promptly must not hold the process's exit.
             drop(tokio::time::timeout(WEB_SHUTDOWN_GRACE, task).await);
         }
     }
@@ -222,8 +243,11 @@ impl EventLoop {
     }
 
     pub(super) fn copy_web_link(&mut self, pane: PaneId) {
-        let copied = links::web_link(&self.web_status, self.config.web().enabled())
-            .and_then(|url| clipboard::copy_selection(&mut self.terminal, &url));
+        let copied =
+            links::web_link(&self.web_status, self.config.web().enabled()).and_then(|url| {
+                let session = self.frontend.session().map_err(|error| error.to_string())?;
+                clipboard::copy_selection(session, &url)
+            });
         self.show(match copied {
             Ok(()) => AppEvent::NotifySuccess {
                 pane,

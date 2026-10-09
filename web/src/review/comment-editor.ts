@@ -239,7 +239,7 @@ export class CommentEditor {
     element.className = "diff-comment";
     element.innerHTML = `
       <header>
-        <span>${severityBadge(comment.body)} Lines ${formatRange(comment.start_line, comment.end_line)}</span>
+        <span>${severityBadge(comment.body)} Lines ${escapeHtml(formatRange(comment.start_line, comment.end_line))}</span>
         <div>
           <button class="small-icon-button" data-comment-edit aria-label="Edit comment" ${this.deps.commentsLocked() ? "disabled" : ""}>${icon("edit")}</button>
           <button class="small-icon-button danger" data-comment-delete aria-label="Delete comment" ${this.deps.commentsLocked() ? "disabled" : ""}>${icon("trash")}</button>
@@ -319,7 +319,7 @@ export class CommentEditor {
       item.innerHTML = `
         <button class="comment-jump">
           <strong>${escapeHtml(comment.path)}</strong>
-          <span>${severityBadge(comment.body)} ${formatRange(comment.start_line, comment.end_line)} · ${comment.side === "additions" ? "new" : "old"}</span>
+          <span>${severityBadge(comment.body)} ${escapeHtml(formatRange(comment.start_line, comment.end_line))} · ${comment.side === "additions" ? "new" : "old"}</span>
           <p>${escapeHtml(comment.body)}</p>
         </button>
         <div class="comment-link-actions">

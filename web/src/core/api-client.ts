@@ -98,14 +98,30 @@ export class ApiClient {
     return this.get<{ instances: SiblingInstance[] }>("instances", options);
   }
 
+  /** The linked machines a session can run on; only the hub answers. */
+  machines(options?: RequestOptions) {
+    return this.get<{ machines: { name: string }[] }>("machines", options);
+  }
+
   /** One entry's full tool detail; `agent` addresses a subagent's transcript. */
   toolDetail(session: string, entry: number, agent?: number, options?: RequestOptions) {
     return this.get<ToolDetail>(`${sessionPath(session, agent)}/entries/${entry}`, options);
   }
 
+  /** The URL of `path` under this client's API root, for the browser to load directly (streams, images). */
+  url(path: string) {
+    return `${this.base}/${path}`;
+  }
+
   /** The URL of the n-th image attached to a user entry. */
   imageUrl(session: string, entry: number, index: number) {
-    return `${this.base}/${sessionPath(session)}/entries/${entry}/images/${index}`;
+    return this.url(`${sessionPath(session)}/entries/${entry}/images/${index}`);
+  }
+
+  /** The URL of a workspace file a Markdown image names, resolved against `session`'s workspace. */
+  fileUrl(path: string, session?: string) {
+    const query = session ? `&session=${encodeURIComponent(session)}` : "";
+    return this.url(`file?path=${encodeURIComponent(path)}${query}`);
   }
 
   agentEntries(session: string, agent: number, options?: RequestOptions) {
@@ -115,7 +131,7 @@ export class ApiClient {
   private async request<T>(path: string, init: RequestInit): Promise<T> {
     let response: Response;
     try {
-      response = await fetch(`${this.base}/${path}`, { ...init, credentials: "same-origin" });
+      response = await fetch(this.url(path), { ...init, credentials: "same-origin" });
     } catch (error) {
       if (init.signal?.aborted) throw error;
       throw new ApiError("network_error", errorMessage(error));

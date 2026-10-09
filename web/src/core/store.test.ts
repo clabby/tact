@@ -135,3 +135,14 @@ test("context, roster, and settings events update the session", () => {
     model: "opus-5.5", effort: "max", reasoningMode: "pro", speed: "fast",
   });
 });
+
+test("patch sizes that are not non-negative whole numbers count as zero", () => {
+  const state = connected();
+  const tool = (stats: unknown) => ({ id: 2, revision: 1, parent: null, kind: "tool", name: "apply_patch", summary: "a.rs", state: "succeeded", duration_ns: 1, substeps: [], child_count: 0, has_detail: false, stats }) as unknown as WireEntry;
+
+  reduce(state, { type: "entry", data: { session: "a", entry: tool({ files: 2, additions: "<img src=x>", deletions: -1 }) } });
+  expect(state.session!.entries.get(2)).toMatchObject({ stats: { files: 2, additions: 0, deletions: 0 } });
+
+  reduce(state, { type: "entry", data: { session: "a", entry: { ...tool({ files: 1, additions: 3.5, deletions: 4 }), id: 3 } } });
+  expect(state.session!.entries.get(3)).toMatchObject({ stats: { files: 1, additions: 0, deletions: 4 } });
+});

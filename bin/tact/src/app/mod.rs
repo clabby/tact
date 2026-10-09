@@ -8,6 +8,7 @@ pub(crate) mod error;
 pub(crate) mod herdr;
 pub(crate) mod hook;
 pub(crate) mod installation;
+mod machine;
 pub(crate) mod model;
 pub(crate) mod secret;
 mod shutdown;

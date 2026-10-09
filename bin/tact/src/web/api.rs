@@ -4,6 +4,8 @@
 use super::{
     assets::AssetStore,
     hub::Hub,
+    machines::Registry,
+    proxy,
     registry::{self, InstanceRecord},
     tailscale::Tailnet,
     token::MachineToken,
@@ -22,7 +24,7 @@ use axum::{
     http::{HeaderMap, HeaderValue, Method, Response, StatusCode, Uri, header},
     middleware::{self, Next},
     response::IntoResponse,
-    routing::{get, post},
+    routing::{any, get, post},
 };
 use futures_util::{StreamExt as _, future::join_all, stream};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -34,9 +36,9 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-const MAX_BODY_BYTES: usize = 1024 * 1024;
+pub(super) const MAX_BODY_BYTES: usize = 1024 * 1024;
 /// Commands may carry pasted images in a data URL.
-const MAX_COMMAND_BODY_BYTES: usize = 32 * 1024 * 1024;
+pub(super) const MAX_COMMAND_BODY_BYTES: usize = 32 * 1024 * 1024;
 const KEEP_ALIVE: Duration = Duration::from_secs(15);
 /// Longest a command may wait for the terminal loop. Opening a large session can be slow.
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
@@ -66,8 +68,14 @@ pub(super) struct AppState {
     pub(super) public_origin: PublicOrigin,
     pub(super) workspaces: Arc<Workspaces>,
     pub(super) registry_directory: PathBuf,
-    pub(super) assets: AssetStore,
+    /// The web interface's files, or `None` for `tact serve`, which serves only its API.
+    pub(super) assets: Option<AssetStore>,
+    /// Carries this machine's token to sibling instances; see [`sibling_client`].
     pub(super) client: reqwest::Client,
+    /// The linked machines, read from disk on every request.
+    pub(super) machines: Registry,
+    /// Carries peer tokens to linked machines; see [`super::machines::peer_client`].
+    pub(super) peer_client: reqwest::Client,
     pub(super) shutdown: CancellationToken,
 }
 
@@ -98,6 +106,8 @@ pub(super) fn router(state: Arc<AppState>, extra: Router<Arc<AppState>>) -> Rout
             post(command).layer(DefaultBodyLimit::max(MAX_COMMAND_BODY_BYTES)),
         )
         .route("/api/query", post(query))
+        .route("/api/machines", get(proxy::machines))
+        .route("/api/m/{name}/{*rest}", any(proxy::relay))
         .merge(extra)
         .fallback(static_asset)
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
@@ -381,7 +391,7 @@ async fn local_image(
 }
 
 /// The media type of a PNG, JPEG, GIF, or WebP file, judged by its leading bytes.
-fn sniff_image(bytes: &[u8]) -> Option<&'static str> {
+pub(super) fn sniff_image(bytes: &[u8]) -> Option<&'static str> {
     match bytes {
         [0x89, b'P', b'N', b'G', ..] => Some("image/png"),
         [0xFF, 0xD8, 0xFF, ..] => Some("image/jpeg"),
@@ -518,6 +528,16 @@ async fn probe(state: &AppState, record: &InstanceRecord) -> Option<SiblingStatu
     response.json().await.ok()
 }
 
+/// The client for sibling probes. Probes carry the machine token, so they go straight to the
+/// registered loopback port: never through a proxy from the environment, and never on to wherever
+/// a redirect points.
+pub(super) fn sibling_client() -> reqwest::Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+}
+
 fn entry_not_found() -> ApiError {
     ApiError::new(StatusCode::NOT_FOUND, "unknown_session", ENTRY_NOT_FOUND)
 }
@@ -609,10 +629,18 @@ async fn stream_events(State(state): State<Arc<AppState>>) -> ApiResult<ApiError
 }
 
 async fn static_asset(State(state): State<Arc<AppState>>, uri: Uri) -> Response<Body> {
+    let Some(store) = &state.assets else {
+        return ApiError::new(
+            StatusCode::NOT_FOUND,
+            "unknown_route",
+            "this server serves only its API",
+        )
+        .into_response();
+    };
     let path = uri.path().trim_start_matches('/');
-    let Some(assets) = state.assets.current().await else {
+    let Some(assets) = store.current().await else {
         if path.is_empty() {
-            let mut response = Response::new(Body::from(state.assets.placeholder_html()));
+            let mut response = Response::new(Body::from(store.placeholder_html()));
             response.headers_mut().insert(
                 header::CONTENT_TYPE,
                 HeaderValue::from_static("text/html; charset=utf-8"),
@@ -671,7 +699,7 @@ pub(super) fn secure(response: &mut Response<Body>) {
     headers.insert(
         header::CONTENT_SECURITY_POLICY,
         HeaderValue::from_static(
-            "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-src 'self'",
+            "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-src 'self'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'",
         ),
     );
 }
@@ -680,15 +708,18 @@ pub(super) fn secure(response: &mut Response<Body>) {
 mod tests {
     use super::{
         super::{
+            registry::{InstanceRecord, Registration},
             tailscale::Tailnet,
-            testing::{self, Harness},
+            testing::{self, Harness, Upstream},
         },
         PublicOrigin,
     };
     use crate::core::protocol::{Command, CommandError, OpenSpec, Publication, Query, Reply};
     use axum::{
+        Router,
         body::Body,
         http::{Method, Request, StatusCode, header},
+        routing::get,
     };
     use serde_json::json;
     use std::{path::PathBuf, time::Duration};
@@ -832,12 +863,53 @@ mod tests {
                 .contains("default-src 'none'")
         );
         assert_eq!(headers[header::CONTENT_TYPE], "text/html; charset=utf-8");
-        assert_eq!(body, harness.state.assets.placeholder_html().into_bytes());
+        let store = harness.state.assets.as_ref().unwrap();
+        assert_eq!(body, store.placeholder_html().into_bytes());
         let missing = Request::builder()
             .uri("/app.js")
             .body(Body::empty())
             .unwrap();
         assert_eq!(harness.send(missing).await.0, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn the_application_policy_forbids_forms_base_urls_and_framing() {
+        let harness = Harness::new();
+        harness.install_bundle(&[
+            ("index.html", "<!doctype html>"),
+            ("overview-frame.html", "<!doctype html>"),
+        ]);
+        let get = |uri: &str| {
+            Request::builder()
+                .uri(uri)
+                .header(header::COOKIE, harness.cookie())
+                .body(Body::empty())
+                .unwrap()
+        };
+        let policy = |headers: &axum::http::HeaderMap| {
+            headers[header::CONTENT_SECURITY_POLICY]
+                .to_str()
+                .unwrap()
+                .to_owned()
+        };
+
+        for uri in ["/", "/api/instance"] {
+            let (status, headers, _) = harness.send(get(uri)).await;
+            assert_eq!(status, StatusCode::OK, "{uri}");
+            let policy = policy(&headers);
+            for directive in [
+                "form-action 'none'",
+                "base-uri 'none'",
+                "frame-ancestors 'none'",
+            ] {
+                assert!(policy.contains(directive), "{uri}: {policy}");
+            }
+        }
+        let (status, headers, _) = harness.send(get("/overview-frame.html")).await;
+        assert_eq!(status, StatusCode::OK);
+        let policy = policy(&headers);
+        assert!(policy.contains("frame-ancestors 'self'"), "{policy}");
+        assert!(!policy.contains("frame-ancestors 'none'"), "{policy}");
     }
 
     #[tokio::test]
@@ -1008,6 +1080,61 @@ mod tests {
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body["code"], "tailscale_unavailable", "{body}");
         assert!(body.get("token").is_none());
+    }
+
+    /// Registers `sibling` as another instance and lists the instances.
+    async fn list_with_sibling(harness: &Harness, sibling: &Upstream) -> serde_json::Value {
+        let _registration = Registration::create(
+            &harness.state.registry_directory,
+            &InstanceRecord {
+                pid: std::process::id().wrapping_add(1),
+                port: sibling.port,
+                workspace: "/sibling".into(),
+                started_at: 1,
+            },
+        )
+        .unwrap();
+        let (status, body) = harness.call(Method::GET, "/api/instances", None).await;
+        assert_eq!(status, StatusCode::OK);
+        body
+    }
+
+    fn sibling_status() -> Router {
+        Router::new().route(
+            "/api/instance",
+            get(|| async { axum::Json(json!({"live": 2, "running": false})) }),
+        )
+    }
+
+    #[tokio::test]
+    async fn sibling_probes_do_not_follow_redirects() {
+        let elsewhere = Upstream::spawn(sibling_status()).await;
+        let target = format!("{}/api/instance", elsewhere.origin);
+        let sibling = Upstream::spawn(Router::new().route(
+            "/api/instance",
+            get(move || async move { (StatusCode::FOUND, [(header::LOCATION, target)]) }),
+        ))
+        .await;
+        let harness = Harness::new();
+
+        let body = list_with_sibling(&harness, &sibling).await;
+
+        assert_eq!(sibling.hits(), 1);
+        assert_eq!(elsewhere.hits(), 0, "the token never follows a redirect");
+        assert_eq!(body["instances"].as_array().unwrap().len(), 1, "{body}");
+    }
+
+    #[tokio::test]
+    async fn sibling_probes_ignore_environment_proxies() {
+        let proxy = Upstream::spawn(sibling_status()).await;
+        let sibling = Upstream::spawn(sibling_status()).await;
+        let harness = testing::with_proxy_environment(&proxy.origin, Harness::new);
+
+        let body = list_with_sibling(&harness, &sibling).await;
+
+        assert_eq!(proxy.hits(), 0, "the token never goes through a proxy");
+        assert_eq!(sibling.hits(), 1);
+        assert_eq!(body["instances"].as_array().unwrap().len(), 2, "{body}");
     }
 
     #[tokio::test]

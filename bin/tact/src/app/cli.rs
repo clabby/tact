@@ -7,17 +7,24 @@ use crate::{
             Transport,
         },
         error::{CliError, ConfigError, Result},
+        machine::MachineCommand,
         model,
         secret::SecretString,
         shutdown, update,
     },
     core::ConfiguredAgent,
     tui,
+    web::MachineToken,
 };
 use clap::{ArgAction, Parser, Subcommand, builder::NonEmptyStringValueParser};
 use crossterm::style::{Color, Stylize};
 use nanocodex::{HarnessFamily, HarnessModel as Model};
-use std::{env, env::VarError, fmt, path::PathBuf};
+use std::{
+    env,
+    env::VarError,
+    fmt,
+    path::{Path, PathBuf},
+};
 use tact_memory::{
     LocalMemoryStore, RemoteClientError, RemoteMemoryClient, RemoteToken,
     transfer::{self, TransferError},
@@ -216,10 +223,22 @@ enum Command {
     },
     /// Open the interactive session picker.
     Resume,
+    /// Run the app server without a terminal, for the web interface and linked machines.
+    Serve,
+    /// Manage the web interface.
+    Web {
+        #[command(subcommand)]
+        command: WebCommand,
+    },
     /// Transfer memories between the global local store and the remote service.
     Memory {
         #[command(subcommand)]
         command: MemoryCommand,
+    },
+    /// Link other machines running `tact serve` to this web interface.
+    Machine {
+        #[command(subcommand)]
+        command: MachineCommand,
     },
     /// Download and install the latest signed tact release, or a pre-release build.
     Update {
@@ -267,6 +286,13 @@ enum AuthCommand {
     Status,
     /// Remove Codex credentials, or show API-key removal instructions for Claude.
     Logout,
+}
+
+#[derive(Debug, Subcommand)]
+enum WebCommand {
+    /// Print this machine's web token and nothing else. Whoever holds it controls this user's
+    /// Tact on this machine.
+    Token,
 }
 
 #[derive(Debug, Subcommand)]
@@ -393,6 +419,21 @@ impl Cli {
                 let startup = tui::StartupMode::ResumeSelector(config.agent().model());
                 Self::run_tui(config, startup).await
             }
+            Some(Command::Serve) => {
+                let config = Config::load(overrides)?;
+                let shutdown = CancellationToken::new();
+                shutdown::run_until_complete(shutdown.clone(), tui::serve(config, shutdown)).await
+            }
+            Some(Command::Web {
+                command: WebCommand::Token,
+            }) => {
+                let config = Config::load(overrides)?;
+                let home = config.path().parent().unwrap_or(Path::new("."));
+                let token =
+                    MachineToken::load_or_create(&home.join("web")).map_err(CliError::WebToken)?;
+                println!("{}", token.expose());
+                Ok(())
+            }
             Some(Command::Update { revision }) => run_update(revision).await,
             // Adding a server creates the selected file when it does not exist yet.
             Some(Command::Mcp { command }) => command.run(&Config::load_for_edit(overrides)?),
@@ -401,6 +442,7 @@ impl Cli {
             }
             Some(Command::Config { command }) => command.run(&Config::load(overrides)?),
             Some(Command::Memory { command }) => command.run(&Config::load(overrides)?).await,
+            Some(Command::Machine { command }) => command.run(&Config::load(overrides)?).await,
             Some(Command::Run {
                 prompt,
                 #[cfg(feature = "harbor-evals")]

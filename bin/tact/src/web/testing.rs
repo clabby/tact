@@ -5,8 +5,10 @@ use super::{
     assets::AssetStore,
     bridge::{self, LoopEnd},
     hub::Hub,
+    machines::{self, Registry as Machines},
     review::{self, AgentPrompt, ReviewAgent, ReviewRegistry},
     token::MachineToken,
+    wire::PROTOCOL_VERSION,
     workspaces::Workspaces,
 };
 use crate::{
@@ -18,12 +20,22 @@ use crate::{
 };
 use axum::{
     Router,
-    body::Body,
+    body::{Body, Bytes},
     http::{HeaderMap, Method, Request, StatusCode, header},
+    middleware::{self, Next},
 };
 use futures_util::future::BoxFuture;
-use std::{fs, future::Future, path::Path, process::Command, sync::Arc};
+use sha2::{Digest, Sha256};
+use std::{
+    fs,
+    future::Future,
+    net::Ipv4Addr,
+    path::Path,
+    process::Command,
+    sync::{Arc, Mutex},
+};
 use tempfile::TempDir;
+use tokio::{net::TcpListener, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt as _;
 
@@ -35,7 +47,7 @@ pub(super) struct Harness {
     pub(super) state: Arc<AppState>,
     pub(super) workspace: TempDir,
     pub(super) shutdown: CancellationToken,
-    _home: TempDir,
+    home: TempDir,
 }
 
 /// A review agent backed by a closure.
@@ -100,8 +112,10 @@ impl Harness {
             public_origin,
             workspaces,
             registry_directory: home.path().join("web/instances"),
-            assets: AssetStore::new(home.path().to_owned()),
-            client: reqwest::Client::new(),
+            assets: Some(AssetStore::new(home.path().to_owned())),
+            client: api::sibling_client().unwrap(),
+            machines: Machines::allowing_http(&home.path().join("web")),
+            peer_client: machines::test_peer_client(),
             shutdown: shutdown.clone(),
         });
         let app = api::router(Arc::clone(&state), review::router(review));
@@ -112,12 +126,54 @@ impl Harness {
             state,
             workspace,
             shutdown,
-            _home: home,
+            home,
         }
     }
 
     pub(super) fn cookie(&self) -> String {
         format!("tact={}", self.state.token.expose())
+    }
+
+    /// Links the machine `name` at `origin` the way `tact machine add` records it.
+    pub(super) fn link_machine(&self, name: &str, origin: &str, token: &str) {
+        let directory = self.home.path().join("web/machines");
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(
+            directory.join(format!("{name}.toml")),
+            format!("url = \"{origin}\"\ntoken = \"{token}\"\n"),
+        )
+        .unwrap();
+    }
+
+    /// Installs a development web bundle of HTML files, given as `(path, contents)`, where the
+    /// server looks for one. Call it before the first static request; absence is remembered briefly.
+    pub(super) fn install_bundle(&self, files: &[(&str, &str)]) {
+        let directory = self
+            .home
+            .path()
+            .join("web/assets")
+            .join(crate::app::installation::current().web_bundle_directory());
+        fs::create_dir_all(&directory).unwrap();
+        let manifest_files: Vec<_> = files
+            .iter()
+            .map(|(path, contents)| {
+                fs::write(directory.join(path), contents).unwrap();
+                serde_json::json!({
+                    "path": path,
+                    "content_type": "text/html; charset=utf-8",
+                    "bytes": contents.len(),
+                    "sha256": format!("{:x}", Sha256::digest(contents.as_bytes())),
+                })
+            })
+            .collect();
+        let manifest = serde_json::json!({
+            "schema_version": 2,
+            "web_api": {"min": PROTOCOL_VERSION, "max": PROTOCOL_VERSION},
+            "tact": {"version": env!("CARGO_PKG_VERSION")},
+            "entrypoint": files[0].0,
+            "files": manifest_files,
+        });
+        fs::write(directory.join("manifest.json"), manifest.to_string()).unwrap();
     }
 
     /// Sends an authenticated request the way the browser application does.
@@ -204,6 +260,103 @@ impl Harness {
             tokio::task::yield_now().await;
         }
     }
+}
+
+/// A request an [`Upstream`] received.
+#[derive(Clone, Debug)]
+pub(super) struct Received {
+    pub(super) method: Method,
+    pub(super) uri: String,
+    pub(super) headers: HeaderMap,
+    pub(super) body: Bytes,
+}
+
+/// A real HTTP server on loopback that records every request, including unrouted ones, before its
+/// router answers. It stands in for a sibling instance, a linked machine, or a proxy.
+pub(super) struct Upstream {
+    pub(super) origin: String,
+    pub(super) port: u16,
+    received: Arc<Mutex<Vec<Received>>>,
+    task: JoinHandle<()>,
+}
+
+impl Upstream {
+    pub(super) async fn spawn(router: Router) -> Self {
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let recorder = Arc::clone(&received);
+        let app = router.layer(middleware::from_fn(
+            move |request: Request<Body>, next: Next| {
+                let recorder = Arc::clone(&recorder);
+                async move {
+                    let (parts, body) = request.into_parts();
+                    let body = axum::body::to_bytes(body, usize::MAX).await.unwrap();
+                    recorder.lock().unwrap().push(Received {
+                        method: parts.method.clone(),
+                        uri: parts.uri.to_string(),
+                        headers: parts.headers.clone(),
+                        body: body.clone(),
+                    });
+                    next.run(Request::from_parts(parts, Body::from(body))).await
+                }
+            },
+        ));
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        Self {
+            origin: format!("http://127.0.0.1:{port}"),
+            port,
+            received,
+            task,
+        }
+    }
+
+    pub(super) fn received(&self) -> Vec<Received> {
+        self.received.lock().unwrap().clone()
+    }
+
+    pub(super) fn hits(&self) -> usize {
+        self.received.lock().unwrap().len()
+    }
+}
+
+impl Drop for Upstream {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+/// Runs `build` while every proxy variable of the environment points at `proxy` and none exempts
+/// any host, then restores the environment. HTTP clients read proxies when they are built.
+///
+/// Changing the environment is sound here because nextest runs each test in its own process.
+pub(super) fn with_proxy_environment<T>(proxy: &str, build: impl FnOnce() -> T) -> T {
+    let variables = [
+        ("HTTP_PROXY", Some(proxy)),
+        ("http_proxy", Some(proxy)),
+        ("HTTPS_PROXY", Some(proxy)),
+        ("https_proxy", Some(proxy)),
+        ("ALL_PROXY", Some(proxy)),
+        ("all_proxy", Some(proxy)),
+        ("NO_PROXY", None),
+        ("no_proxy", None),
+    ];
+    let previous: Vec<_> = variables
+        .iter()
+        .map(|(name, _)| (*name, std::env::var_os(name)))
+        .collect();
+    let set = |name: &str, value: Option<&std::ffi::OsStr>| match value {
+        Some(value) => unsafe { std::env::set_var(name, value) },
+        None => unsafe { std::env::remove_var(name) },
+    };
+    for (name, value) in variables {
+        set(name, value.map(std::ffi::OsStr::new));
+    }
+    let built = build();
+    for (name, value) in &previous {
+        set(name, value.as_deref());
+    }
+    built
 }
 
 /// The event name and JSON data of one Server-Sent Events message.

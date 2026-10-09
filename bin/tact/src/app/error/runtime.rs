@@ -1,7 +1,7 @@
 //! Errors from running sessions, the terminal interface, and their background tasks.
 
 use crate::core::pane::PaneId;
-use std::{env::VarError, io, path::PathBuf};
+use std::{env::VarError, error::Error as StdError, io, path::PathBuf};
 use tact_memory::RemoteClientError;
 use thiserror::Error;
 
@@ -65,6 +65,9 @@ pub(crate) enum RuntimeError {
     OrchestrationLogTask(#[source] tokio::task::JoinError),
     #[error("failed to listen for a shutdown signal: {0}")]
     ShutdownSignal(#[source] io::Error),
+    /// The web server of `tact serve` could not start; the source is the server's startup error.
+    #[error("could not serve the web interface: {0}")]
+    Web(#[source] Box<dyn StdError + Send + Sync>),
 }
 
 #[derive(Debug, Error)]

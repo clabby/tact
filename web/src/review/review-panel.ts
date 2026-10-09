@@ -52,6 +52,8 @@ import "./review-panel.css";
 /** What the application shell lends the review panel. */
 export type ReviewHost = {
   api: ReviewTransport;
+  /** Where the reviewed checkout of each session is remembered; private to the machine the sessions run on. */
+  storage: Pick<Storage, "getItem" | "setItem">;
   activeSession(): string | null;
   onActiveSessionChange(listener: () => void): () => void;
   /** Fires when files in `checkout` (null: the session's workspace) may have changed. */
@@ -284,7 +286,7 @@ class ReviewPanel {
 
   private async load() {
     const epoch = this.sessionEpoch;
-    if (this.session !== null) this.target = loadCheckoutChoice(localStorage, this.session);
+    if (this.session !== null) this.target = loadCheckoutChoice(this.host.storage, this.session);
     this.root.innerHTML = '<div class="panel-notice" role="status"><span class="activity-spinner" aria-hidden="true"></span>Loading changes…</div>';
     try {
       const review = await this.api.review(this.session);
@@ -503,8 +505,8 @@ class ReviewPanel {
     if (!container) return;
     container.innerHTML = `
       <span>${this.files.length} ${this.files.length === 1 ? "file" : "files"}</span>
-      <strong class="add">+${stats.additions}</strong>
-      <strong class="del">−${stats.deletions}</strong>`;
+      <strong class="add">+${escapeHtml(String(stats.additions))}</strong>
+      <strong class="del">−${escapeHtml(String(stats.deletions))}</strong>`;
   }
 
   private selectFile(path: string) {
@@ -604,7 +606,7 @@ class ReviewPanel {
     const session = this.host.activeSession();
     if (session === this.session) return;
     this.session = session;
-    this.target = session === null ? null : loadCheckoutChoice(localStorage, session);
+    this.target = session === null ? null : loadCheckoutChoice(this.host.storage, session);
     this.workspaces = null;
     this.touched.reset();
     const epoch = ++this.sessionEpoch;
@@ -638,7 +640,7 @@ class ReviewPanel {
    */
   private forgetUnknownCheckout(error: unknown) {
     if (this.target === null || (error as { status?: unknown }).status !== 404) return false;
-    if (this.session !== null) saveCheckoutChoice(localStorage, this.session, null);
+    if (this.session !== null) saveCheckoutChoice(this.host.storage, this.session, null);
     this.target = null;
     return true;
   }
@@ -714,7 +716,7 @@ class ReviewPanel {
       const review = await this.api.review(this.session);
       if (epoch !== this.sessionEpoch || this.disposed) return;
       await this.installSnapshot(review, epoch);
-      if (this.session !== null) saveCheckoutChoice(localStorage, this.session, target);
+      if (this.session !== null) saveCheckoutChoice(this.host.storage, this.session, target);
     } catch (error) {
       if (epoch !== this.sessionEpoch) return;
       this.target = previous;

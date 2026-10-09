@@ -57,6 +57,9 @@ mod tui {
 mod web {
     pub(crate) mod bridge;
     pub(crate) mod tailscale;
+    pub(crate) mod token;
+
+    pub(crate) use token::TokenError;
 }
 
 use crate::{

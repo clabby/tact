@@ -1,8 +1,9 @@
-//! Interactive terminal runtime.
+//! Interactive terminal runtime, and its headless form for `tact serve`.
 //!
 //! [`run`] serves the terminal and the web front-end from one event loop (see
-//! [`event_loop`]). The loop owns the application tree and every pane's runtime, which holds the
-//! pane's session lock and transcript journal; the turn worker owns every agent.
+//! [`event_loop`]); [`serve`] runs the same loop with the web front-end alone. The loop owns the
+//! application tree and every pane's runtime, which holds the pane's session lock and transcript
+//! journal; the turn worker owns every agent.
 //!
 //! # Event-loop contract
 //!
@@ -45,6 +46,7 @@ use crate::app::{
     config::Config,
     error::{Result, RuntimeError},
 };
+use event_loop::Interface;
 use nanocodex::HarnessModel as Model;
 use std::io::{self, IsTerminal};
 use tokio_util::sync::CancellationToken;
@@ -65,7 +67,16 @@ pub(crate) async fn run(
     shutdown: CancellationToken,
 ) -> Result<Option<String>> {
     ensure_interactive()?;
-    event_loop::run(config, startup, shutdown).await
+    event_loop::run(config, startup, shutdown, Interface::Terminal).await
+}
+
+/// Runs the app server without a terminal until shutdown. It starts one new session, keeps running
+/// when sessions close, and fails if the web interface cannot be served.
+pub(crate) async fn serve(config: Config, shutdown: CancellationToken) -> Result<()> {
+    let startup = StartupMode::NewSession(config.agent().model());
+    event_loop::run(config, startup, shutdown, Interface::Headless)
+        .await
+        .map(drop)
 }
 
 pub(crate) fn ensure_interactive() -> Result<()> {

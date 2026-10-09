@@ -201,11 +201,13 @@ impl EventLoop {
         &mut self,
         completion: std::result::Result<EditorCompletion, ExternalEditorError>,
     ) -> Result<()> {
-        self.terminal.resume().map_err(RuntimeError::Terminal)?;
+        // Only a terminal runs the editor, so a headless loop never gets here.
+        if let Ok(session) = self.frontend.session() {
+            session.resume().map_err(RuntimeError::Terminal)?;
+        }
         self.rereport_active_workspace()?;
         self.app.refresh_terminal_images();
-        self.input
-            .get_or_insert_with(crossterm::event::EventStream::new);
+        self.frontend.attach_input();
         if let EditorCompletion::Draft {
             pane,
             outcome: EditorOutcome::Updated(draft),

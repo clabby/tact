@@ -40,6 +40,40 @@ test("queries use the single query route and omit absent arguments", async () =>
   expect(JSON.parse(String(requests[1]!.init.body))).toEqual({ query: "models" });
 });
 
+test("a machine client carries every session call, stream, and image to the machine's API root", async () => {
+  const requests = respond(() => Response.json({}));
+  const machine = new ApiClient("./api/m/devbox", 1);
+
+  await machine.command("reload_config");
+  await machine.query("models");
+  await machine.instance();
+  await machine.toolDetail("s1", 4);
+  await machine.agentEntries("s1", 2);
+
+  expect(requests.map((request) => request.url)).toEqual([
+    "./api/m/devbox/cmd",
+    "./api/m/devbox/query",
+    "./api/m/devbox/instance",
+    "./api/m/devbox/sessions/s1/entries/4",
+    "./api/m/devbox/sessions/s1/agents/2/entries",
+  ]);
+  expect(machine.url("stream")).toBe("./api/m/devbox/stream");
+  expect(machine.imageUrl("s1", 4, 0)).toBe("./api/m/devbox/sessions/s1/entries/4/images/0");
+  expect(machine.fileUrl("a b/c.png", "s 1")).toBe("./api/m/devbox/file?path=a%20b%2Fc.png&session=s%201");
+});
+
+test("the hub client keeps sign-in, the machine list, the phone link, and instances on the hub", async () => {
+  const requests = respond(() => Response.json({ machines: [], instances: [], public_origin: null, token: "t" }));
+  const hub = new ApiClient();
+
+  await hub.login("t");
+  await hub.machines();
+  await hub.link();
+  await hub.instances();
+
+  expect(requests.map((request) => request.url)).toEqual(["./api/login", "./api/machines", "./api/link", "./api/instances"]);
+});
+
 test("refusals keep their wire code and message", async () => {
   respond(() => Response.json({ code: "draft_changed", message: "the draft changed" }, { status: 409 }));
 

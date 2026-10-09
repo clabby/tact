@@ -7,6 +7,7 @@
 mod auth;
 mod cli;
 mod config;
+mod machine;
 mod runtime;
 
 use crate::core::{session::SessionError, transcript::TranscriptError};
@@ -15,6 +16,7 @@ pub(crate) use cli::CliError;
 pub(crate) use config::{
     ConfigEditError, ConfigError, ConfigSyntaxError, McpUrlError, RemoteMemoryConfigError,
 };
+pub(crate) use machine::MachineError;
 use miette::Diagnostic;
 use nanocodex::{
     NanocodexError,

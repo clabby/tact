@@ -106,6 +106,11 @@ diffs-container { --diffs-light-bg: var(--bg); --diffs-dark-bg: var(--bg); }
 .new-chat-button .glyph { width: 16px; height: 16px; }
 .new-chat-model { justify-content: center; width: max(36px, var(--touch)); border-left: 1px solid var(--line) !important; border-radius: 0 var(--radius-md) var(--radius-md) 0; color: var(--muted); }
 .new-chat-model .glyph { width: 15px; height: 15px; }
+.app > .sidebar .machine-button { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); margin: var(--space-1) var(--space-3) 0; padding: 0 var(--space-3); min-height: max(32px, var(--touch)); border: 1px solid var(--line); border-radius: var(--radius-md); background: transparent; color: var(--muted); font-size: var(--text-sm); }
+.app > .sidebar .machine-button:hover { background: var(--surface-hover); }
+.app > .sidebar .machine-button[hidden] { display: none; }
+.app > .sidebar .machine-button .machine-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.app > .sidebar .machine-button .glyph { flex: none; width: 14px; height: 14px; }
 
 .sidebar-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 0 var(--space-2) var(--space-4); overscroll-behavior: contain; scrollbar-width: thin; }
 .section-title { display: flex; align-items: center; gap: var(--space-2); margin: var(--space-3) var(--space-2) var(--space-1); color: var(--faint); font-size: var(--text-xs); font-weight: 600; letter-spacing: .06em; text-transform: uppercase; }
@@ -185,6 +190,8 @@ diffs-container { --diffs-light-bg: var(--bg); --diffs-dark-bg: var(--bg); }
 .chat-workspace, .session-workspace { overflow: hidden; color: var(--faint); text-overflow: ellipsis; white-space: nowrap; }
 .chat-workspace::before, .session-workspace::before { content: "·"; margin-right: 6px; }
 .chat-workspace[hidden], .session-workspace[hidden] { display: none; }
+.app > .main > .chat-header .machine-chip { flex: none; max-width: 16ch; overflow: hidden; padding: 0 var(--space-2); border-radius: 999px; background: var(--accent-soft); color: var(--accent); font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.app > .main > .chat-header .machine-chip[hidden] { display: none; }
 .header-actions { display: flex; align-items: center; gap: var(--space-1); }
 
 .app[data-viewport="phone"] .view-tabs { display: grid; grid-template-columns: 1fr 1fr; }

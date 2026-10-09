@@ -77,6 +77,7 @@ impl EventLoop {
                 self.open_web_link(pane, destination);
             }
             RootEffect::OpenLink(destination) => self.open_editor(
+                pane,
                 EditorTarget::File(links::local_link_path(&destination, workspace)),
                 workspace,
             )?,
@@ -88,11 +89,11 @@ impl EventLoop {
                     .composer()
                     .draft()
                     .to_owned();
-                self.open_editor(EditorTarget::Draft { pane, text }, workspace)?;
+                self.open_editor(pane, EditorTarget::Draft { pane, text }, workspace)?;
             }
             RootEffect::OpenConfigEditor => {
                 let path = self.config.path().to_path_buf();
-                self.open_editor(EditorTarget::Config(path), workspace)?;
+                self.open_editor(pane, EditorTarget::Config(path), workspace)?;
             }
             RootEffect::SetEffort {
                 effort,
@@ -202,10 +203,19 @@ impl EventLoop {
         });
     }
 
-    /// Hands the terminal to the external editor until it exits.
-    fn open_editor(&mut self, target: EditorTarget, workspace: &Path) -> Result<()> {
-        self.terminal.suspend().map_err(RuntimeError::Terminal)?;
-        self.input = None;
+    /// Hands the terminal to the external editor until it exits. Without a terminal, `pane` is
+    /// told why nothing opened.
+    fn open_editor(&mut self, pane: PaneId, target: EditorTarget, workspace: &Path) -> Result<()> {
+        let session = match self.frontend.session() {
+            Ok(session) => session,
+            Err(error) => {
+                let error = error.to_string();
+                self.show(AppEvent::NotifyError { pane, error });
+                return Ok(());
+            }
+        };
+        session.suspend().map_err(RuntimeError::Terminal)?;
+        self.frontend.detach_input();
         let workspace = workspace.to_path_buf();
         self.tasks.spawn(TaskKind::Editor, async move {
             TaskOutput::Editor(target.edit(&workspace).await)
@@ -214,7 +224,12 @@ impl EventLoop {
     }
 
     fn copy(&mut self, pane: PaneId, text: &str) {
-        let event = match clipboard::copy_selection(&mut self.terminal, text) {
+        let copied = self
+            .frontend
+            .session()
+            .map_err(|error| error.to_string())
+            .and_then(|session| clipboard::copy_selection(session, text));
+        let event = match copied {
             Ok(()) => AppEvent::NotifySuccess {
                 pane,
                 message: "Copied to clipboard.".to_owned(),
