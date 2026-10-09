@@ -5,7 +5,7 @@
 import { watch } from "node:fs";
 import { mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
-import { reviewEntrypoints, reviewScriptAssets } from "./build-config";
+import { buildApp } from "./build-config";
 import { overviewFixtures, reviewBootstrap, reviewFixtures } from "./dev-fixture";
 import { MockRefusal, MockTact, mockCheckoutPage } from "./dev-mock";
 import { overviewFrameDocument } from "../src/review/overview";
@@ -16,20 +16,9 @@ import type { Checkout, CommandName, QueryName } from "../src/core/wire";
 const token = process.env.TACT_DEV_TOKEN ?? "dev";
 const port = Number(process.env.PORT ?? 4173);
 const outputDirectory = join(import.meta.dir, "..", ".dev");
-const staticFiles = new Set(["index.html", "overview-frame.html", "app.css", "favicon.svg", ...reviewScriptAssets]);
 
 async function buildAssets() {
-  const build = await Bun.build({
-    entrypoints: reviewEntrypoints,
-    outdir: outputDirectory,
-    target: "browser",
-    sourcemap: "inline",
-    naming: "[name].[ext]",
-  });
-  if (!build.success) {
-    for (const message of build.logs) console.error(message);
-    return false;
-  }
+  if (!await buildApp(outputDirectory, { sourcemap: "inline" })) return false;
   await Bun.write(join(outputDirectory, "overview-frame.html"), overviewFrameDocument());
   await Bun.write(join(outputDirectory, "favicon.svg"), Bun.file(join(import.meta.dir, "..", "..", "assets", "favicon.svg")));
   const html = await Bun.file(join(import.meta.dir, "..", "index.html")).text();
@@ -277,8 +266,9 @@ const server = Bun.serve({
     }
     if (url.pathname === "/__reload" && server.upgrade(request)) return;
     const name = url.pathname === "/" ? "index.html" : url.pathname.slice(1);
-    if (!staticFiles.has(name)) return new Response("Not found", { status: 404 });
-    return new Response(Bun.file(join(outputDirectory, name)));
+    const file = Bun.file(join(outputDirectory, name));
+    if (name.includes("/") || !await file.exists()) return new Response("Not found", { status: 404 });
+    return new Response(file);
   },
   websocket: {
     open(socket) { socket.subscribe("reload"); },

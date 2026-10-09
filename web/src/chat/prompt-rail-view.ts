@@ -1,10 +1,18 @@
 import { activeIndex, lineLength, MAX_LINES, promptLabel, windowFor } from "./prompt-rail";
 import type { TranscriptData } from "../core/store";
+import type { Heading } from "../core/markdown";
 
-type Prompt = { id: number; text: string; marks: string };
+type Outline = { entry: number; headings: Heading[] } | null;
+type Prompt = { id: number; text: string; marks: string; outline: Outline };
 
 /** What a prompt's turn did that the rail marks beside its tick. */
 export type RailMarks = (prompt: number) => { edits: boolean; failures: boolean };
+
+/** The sections of a prompt's answer, which the expanded rail lists under the current prompt. */
+export type RailOutline = {
+  headings(prompt: number): Outline;
+  open(entry: number, slug: string): void;
+};
 
 /** Pixels below the transcript's top edge that count as "where the reader is". */
 const READING_LINE = 96;
@@ -28,6 +36,7 @@ export class PromptRail {
     private readonly scroller: HTMLElement,
     private readonly data: () => TranscriptData | null,
     private readonly marks: RailMarks = () => ({ edits: false, failures: false }),
+    private readonly outline?: RailOutline,
   ) {
     const layer = document.createElement("div");
     layer.className = "rail-layer";
@@ -61,11 +70,12 @@ export class PromptRail {
       const entry = data!.entries.get(id);
       if (entry?.kind !== "user" || entry.parent !== null) return [];
       const { edits, failures } = this.marks(id);
-      return [{ id, text: entry.text, marks: `${edits ? "e" : ""}${failures ? "f" : ""}` }];
+      return [{ id, text: entry.text, marks: `${edits ? "e" : ""}${failures ? "f" : ""}`, outline: this.outline?.headings(id) ?? null }];
     });
     const changed = prompts.length !== this.prompts.length || prompts.some((prompt, index) => {
       const shown = this.prompts[index]!;
-      return prompt.id !== shown.id || prompt.text !== shown.text || prompt.marks !== shown.marks;
+      return prompt.id !== shown.id || prompt.text !== shown.text || prompt.marks !== shown.marks
+        || prompt.outline !== shown.outline;
     });
     this.prompts = prompts;
     const active = this.measureActive();
@@ -114,6 +124,18 @@ export class PromptRail {
       const notes = [prompt.marks.includes("e") ? "edited files" : "", prompt.marks.includes("f") ? "has failures" : ""].filter(Boolean).join(", ");
       item.setAttribute("aria-label", `Prompt ${index + 1}: ${promptLabel(prompt.text)}${notes ? `, ${notes}` : ""}`);
       items.push(item);
+      for (const heading of prompt.outline?.headings ?? []) {
+        const section = document.createElement("button");
+        section.type = "button";
+        section.className = "rail-heading";
+        section.dataset.index = String(index);
+        section.dataset.entry = String(prompt.outline!.entry);
+        section.dataset.slug = heading.slug;
+        section.style.setProperty("--depth", String(heading.depth));
+        section.textContent = heading.text;
+        section.setAttribute("aria-label", `Section: ${heading.text}`);
+        items.push(section);
+      }
     }
     if (end < this.prompts.length) items.push(this.more(1, `${this.prompts.length - end} later`));
     this.nav.replaceChildren(...items);
@@ -136,9 +158,18 @@ export class PromptRail {
       if (current) item.setAttribute("aria-current", "true");
       else item.removeAttribute("aria-current");
     }
+    for (const section of this.nav.querySelectorAll<HTMLElement>(".rail-heading")) {
+      section.hidden = Number(section.dataset.index) !== this.active;
+    }
   }
 
   private click(target: HTMLElement) {
+    const section = target.closest<HTMLElement>(".rail-heading");
+    if (section) {
+      this.chosen = Number(section.dataset.index);
+      this.outline?.open(Number(section.dataset.entry), section.dataset.slug!);
+      return;
+    }
     const more = target.closest<HTMLElement>(".rail-more");
     if (more) {
       const { start } = windowFor(this.prompts.length, this.active, MAX_LINES, this.manualStart);
@@ -161,4 +192,3 @@ export class PromptRail {
     bubble?.classList.add("rail-flash");
   }
 }
-
