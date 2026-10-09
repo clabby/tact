@@ -7,6 +7,7 @@ use crate::{
             Transport,
         },
         error::{CliError, ConfigError, Result},
+        machine::MachineCommand,
         model,
         secret::SecretString,
         shutdown, update,
@@ -221,6 +222,11 @@ enum Command {
         #[command(subcommand)]
         command: MemoryCommand,
     },
+    /// Link other machines running `tact serve` to this web interface.
+    Machine {
+        #[command(subcommand)]
+        command: MachineCommand,
+    },
     /// Download and install the latest signed tact release, or a pre-release build.
     Update {
         /// Install the pre-release build of this commit on main, given as at least seven
@@ -401,6 +407,7 @@ impl Cli {
             }
             Some(Command::Config { command }) => command.run(&Config::load(overrides)?),
             Some(Command::Memory { command }) => command.run(&Config::load(overrides)?).await,
+            Some(Command::Machine { command }) => command.run(&Config::load(overrides)?).await,
             Some(Command::Run {
                 prompt,
                 #[cfg(feature = "harbor-evals")]
