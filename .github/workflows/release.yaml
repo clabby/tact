@@ -405,6 +405,9 @@ jobs:
   container_build:
     name: Package Image (${{ matrix.platform }})
     needs: [validate, release]
+    # The implicit success() check fails when any ancestor was skipped, as publish_crates is for
+    # pre-releases, so every job downstream of release states its condition.
+    if: ${{ !cancelled() && needs.release.result == 'success' }}
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
@@ -507,6 +510,7 @@ jobs:
   container_publish:
     name: Publish Release Image
     needs: [validate, container_build]
+    if: ${{ !cancelled() && needs.container_build.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -549,7 +553,7 @@ jobs:
   prune_pre_releases:
     name: Prune Old Pre-releases
     needs: [validate, release]
-    if: needs.validate.outputs.prerelease == 'true'
+    if: ${{ !cancelled() && needs.release.result == 'success' && needs.validate.outputs.prerelease == 'true' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
