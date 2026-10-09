@@ -1,23 +1,13 @@
-import { mkdir, rm } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdir, readdir, rm } from "node:fs/promises";
+import { extname, join } from "node:path";
 import { overviewFrameDocument } from "../src/review/overview";
-import { reviewEntrypoints, reviewScriptAssets } from "./build-config";
+import { buildApp } from "./build-config";
 
 const outputDirectory = join(import.meta.dir, "..", "dist");
 await rm(outputDirectory, { recursive: true, force: true });
 await mkdir(outputDirectory, { recursive: true });
 
-const result = await Bun.build({
-  entrypoints: reviewEntrypoints,
-  outdir: outputDirectory,
-  target: "browser",
-  minify: true,
-  naming: "[name].[ext]",
-});
-if (!result.success) {
-  for (const message of result.logs) console.error(message);
-  process.exit(1);
-}
+if (!await buildApp(outputDirectory, { minify: true })) process.exit(1);
 
 await Bun.write(join(outputDirectory, "overview-frame.html"), overviewFrameDocument());
 await Bun.write(
@@ -44,24 +34,32 @@ await Bun.write(
   Bun.file(join(import.meta.dir, "..", "..", "assets", "favicon.svg")),
 );
 
+// Every file in the bundle is listed, since the server serves nothing else. Chunk names carry
+// content hashes, so the list comes from the output rather than a fixed set.
 const contentTypes: Record<string, string> = {
-  "index.html": "text/html; charset=utf-8",
-  "overview-frame.html": "text/html; charset=utf-8",
-  "app.css": "text/css; charset=utf-8",
-  "favicon.svg": "image/svg+xml",
-  "FONT-AWESOME-LICENSE.txt": "text/plain; charset=utf-8",
-  "LICENSE.md": "text/markdown; charset=utf-8",
+  ".html": "text/html; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".svg": "image/svg+xml",
+  ".txt": "text/plain; charset=utf-8",
+  ".md": "text/markdown; charset=utf-8",
 };
-for (const asset of reviewScriptAssets) {
-  contentTypes[asset] = "text/javascript; charset=utf-8";
+const entries = await readdir(outputDirectory, { withFileTypes: true });
+const paths = entries.map((entry) => entry.name).sort();
+const unservable = entries
+  .filter((entry) => !entry.isFile() || !contentTypes[extname(entry.name)])
+  .map((entry) => entry.name);
+if (unservable.length) {
+  console.error(`the bundle must be flat files with known content types: ${unservable.join(", ")}`);
+  process.exit(1);
 }
 const files = await Promise.all(
-  Object.keys(contentTypes).map(async (path) => {
+  paths.map(async (path) => {
     const file = Bun.file(join(outputDirectory, path));
     const bytes = await file.bytes();
     return {
       path,
-      content_type: contentTypes[path],
+      content_type: contentTypes[extname(path)],
       bytes: bytes.byteLength,
       sha256: new Bun.CryptoHasher("sha256").update(bytes).digest("hex"),
     };

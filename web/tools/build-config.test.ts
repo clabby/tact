@@ -1,17 +1,15 @@
 import { expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
-import { reviewEntrypoints } from "./build-config";
+import { join } from "node:path";
+import { workerEntrypoint } from "./build-config";
 
 test("the review worker builds as a runnable browser asset", async () => {
   const outputDirectory = await mkdtemp(join(tmpdir(), "tact-web-worker-"));
-  const workerEntrypoint = reviewEntrypoints.find((path) => basename(path) === "worker.js");
 
   try {
-    expect(workerEntrypoint).toBeDefined();
     const result = await Bun.build({
-      entrypoints: [workerEntrypoint!],
+      entrypoints: [workerEntrypoint],
       outdir: outputDirectory,
       target: "browser",
       minify: true,
