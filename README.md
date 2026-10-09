@@ -30,6 +30,17 @@ curl --proto '=https' --tlsv1.2 -LsSf \
 It verifies the release checksum and installs `tact` in `~/.local/bin` without `sudo`. Set
 `TACT_INSTALL_DIR` to another absolute directory if you prefer a different location.
 
+In a terminal the installer asks which channel to install, with arrow keys or `j`/`k` to move and
+enter to select: the latest signed **release** (the default) or the latest **pre-release** build of
+`main` (see [Pre-release builds](#pre-release-builds)). Without a terminal it installs the release.
+Set `TACT_CHANNEL=release` or `TACT_CHANNEL=pre-release` to choose without being asked, for
+example in scripts:
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://tact.clab.by/install.sh | TACT_CHANNEL=pre-release sh
+```
+
 You can also install the published crate with Cargo:
 
 ```sh
