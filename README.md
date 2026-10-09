@@ -417,6 +417,12 @@ its transcript. Checkpoints hold the full conversation unredacted, so treat them
 - **Compact.** Enter `/compact` or choose **Compact context** while idle. Tact uses the provider's native
   compaction and saves the result, so resuming picks up the compacted context. A failed compaction
   leaves the saved session alone.
+- **Context.** Choose **Debug context** in the Actions menu, or **Context diagnostics** in the web
+  command palette, to see what fills the window: the active size against the auto-compact limit,
+  a breakdown by source (instructions and tools, prompts, assistant text, reasoning, tool calls and
+  output, compacted history), the tools and single items that cost the most, context growth over
+  recent calls with compactions marked, and prompt-cache hits. The total is the server's exact
+  count; the split among sources is an estimate. It holds no conversation text.
 - **Copy.** `/copy` copies the latest finished assistant message as raw Markdown, and `/copy N` copies
   the Nth most recent. It skips reasoning, tool output, empty messages, and anything still
   streaming, and works mid-turn. **Copy response** in the Actions menu does the same.

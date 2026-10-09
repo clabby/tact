@@ -3,75 +3,23 @@
 // generic query route and acts through the generic command route.
 
 import { ApiError, describeError, type ApiClient } from "../core/api-client";
-import { formatAge, formatTokens, modelColor } from "../core/format";
+import { formatAge } from "../core/format";
 import { glyph } from "../ui/glyphs";
+import { contextSheet } from "./context-sheet";
 import { qrSvg } from "./qr";
 import { shareableOrigin, signInLink } from "./phone-link";
 import { openSheet, sheetMessage } from "../ui/sheet";
 import { toast } from "../ui/toast";
-import type { ContextDiagnostics, ListedMemory } from "../core/wire";
-
-function rows(container: HTMLElement, entries: [string, string][]) {
-  const list = document.createElement("dl");
-  list.className = "facts";
-  for (const [label, value] of entries) {
-    const term = document.createElement("dt");
-    term.textContent = label;
-    const description = document.createElement("dd");
-    description.textContent = value;
-    list.append(term, description);
-  }
-  container.append(list);
-}
+import type { ListedMemory } from "../core/wire";
 
 export async function openContextDiagnostics(api: ApiClient, session: string) {
-  const sheet = openSheet("Context");
+  const sheet = openSheet("Context", { wide: true });
   sheetMessage(sheet.body, "Loading…");
-  let diagnostics: ContextDiagnostics;
   try {
-    diagnostics = await api.query("context_diagnostics", { session });
+    sheet.body.replaceChildren(contextSheet(await api.query("context_diagnostics", { session })));
   } catch (error) {
     sheetMessage(sheet.body, describeError(error), "danger");
-    return;
   }
-  sheet.body.replaceChildren();
-  const window = diagnostics.model_window_tokens;
-  const active = diagnostics.active_tokens;
-  if (active !== null && window > 0) {
-    const ratio = Math.min(1, active / window);
-    const meter = document.createElement("div");
-    meter.className = "context-bar";
-    meter.innerHTML = `<div class="context-bar-track"><span></span>${diagnostics.auto_compact_token_limit ? "<i></i>" : ""}</div><p></p>`;
-    meter.querySelector<HTMLElement>("span")!.style.width = `${ratio * 100}%`;
-    const limit = meter.querySelector<HTMLElement>("i");
-    if (limit && diagnostics.auto_compact_token_limit) limit.style.left = `${Math.min(100, diagnostics.auto_compact_token_limit / window * 100)}%`;
-    meter.querySelector("p")!.textContent = `${formatTokens(active)} of ${formatTokens(window)} tokens · ${Math.round(ratio * 100)}%`;
-    sheet.body.append(meter);
-  }
-  const usage = diagnostics.usage;
-  const last = diagnostics.last_compaction;
-  rows(sheet.body, [
-    ["Model window", `${formatTokens(window)} tokens`],
-    ["Auto-compact at", diagnostics.auto_compact_token_limit === null ? "off" : `${formatTokens(diagnostics.auto_compact_token_limit)} tokens`],
-    ["Active context", active === null ? "unknown" : `${formatTokens(active)} tokens`],
-    ...(usage ? [
-      ["Last request input", `${formatTokens(usage.input)} (${formatTokens(usage.cached_input)} cached, ${formatTokens(usage.uncached_input)} uncached)`],
-      ["Last request output", formatTokens(usage.output)],
-      ["Last request total", formatTokens(usage.total)],
-    ] as [string, string][] : []),
-    ["Continuation", diagnostics.continuation?.replace("_", " ") ?? "unknown"],
-    ["Prompt cache", diagnostics.prompt_cache === null ? "unknown" : diagnostics.prompt_cache ? "on" : "off"],
-    ["Compactions", `${diagnostics.compactions_completed} completed of ${diagnostics.compactions_started} started`],
-    ...(last ? [[
-      "Last compaction",
-      [
-        last.trigger,
-        formatAge(last.started_at_unix_ms) === "now" ? "just now" : `${formatAge(last.started_at_unix_ms)} ago`,
-        last.before_tokens !== null && last.after_tokens !== null ? `${formatTokens(last.before_tokens)} → ${formatTokens(last.after_tokens)}` : "",
-        last.completed_at_unix_ms === null ? "running" : "",
-      ].filter(Boolean).join(" · "),
-    ]] as [string, string][] : []),
-  ]);
 }
 
 type MemorySort = "updated" | "used" | "created";

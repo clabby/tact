@@ -117,11 +117,13 @@ fn prepare(query: Query, state: &QueryState<'_>) -> Result<Answer<QueryReply>, C
                 }
             }
         }
-        Query::ContextDiagnostics { session } => Answer::Ready(Ok(QueryReply::ContextDiagnostics(
-            session_root(state.app, &session)?
-                .context_diagnostics()
-                .clone(),
-        ))),
+        Query::ContextDiagnostics { session } => {
+            Answer::Ready(Ok(QueryReply::ContextDiagnostics(Box::new(
+                session_root(state.app, &session)?
+                    .context_diagnostics()
+                    .clone(),
+            ))))
+        }
         Query::Memories => {
             let store = memory_store(state.memory_store)?;
             Answer::pending(async move {

@@ -291,7 +291,7 @@ once a turn started (`invalid_request`). A session has started when its snapshot
 | `skills` | `query?` | `{ skills: { name, description }[] }` |
 | `recent_prompts` | `session, scope?: "global" \| "current_session", query?` | `{ prompts: { text, recorded_at_unix_ms, session_id, workspace }[] }` |
 | `workspaces` | `session?` | `{ default: string, checkouts: Checkout[], recent: string[] }`: the checkouts of the session's repository (the default workspace's without a session), main checkout first, and other workspaces live sessions run in. Answered by the server without the terminal loop |
-| `context_diagnostics` | `session` | `ContextDiagnostics` |
+| `context_diagnostics` | `session` | `ContextDiagnostics`: window, auto-compact limit, latest usage, compactions, an estimated per-category `breakdown` of the latest call's input (`null` until a call reports usage and for models that report none), and the per-call `history`. Counts, sizes, and tool names only, never content |
 | `memories` | none | `{ access: { source, namespace, role }, records: (MemoryRecord & { deletable: boolean })[] }`; `disabled` when memory is off |
 | `config` | none | `{ path, text, revision }`; `not_available_remotely` when the file holds credentials (they never leave the terminal), `invalid_request` when it does not parse |
 
@@ -330,7 +330,18 @@ type ContextDiagnostics = {
   compactions_started: number; compactions_completed: number;
   last_compaction: { trigger: "automatic" | "manual"; started_at_unix_ms: number;
     completed_at_unix_ms: number | null; before_tokens: number | null; after_tokens: number | null } | null;
+  breakdown: {                          // null until a call reports usage, and for models that report none
+    input_tokens: number;               // exact: the latest call's input; categories sum to it
+    categories: { kind: ContextCategory; tokens: number; items: number }[]; // every kind, in display order;
+                                        // shares are estimates (each growth step is split by size)
+    tools: { name: string; calls: number; call_tokens: number; output_tokens: number }[];
+                                        // by descending output_tokens, at most 12, rest merged as "(other tools)"
+    largest: { kind: ContextCategory; tool: string | null; turn: number; tokens: number }[]; // top 6
+  } | null;
+  history: { call: number; input: number; cached: number; output: number; after_compaction: boolean }[];
+                                        // oldest first, at most the 120 newest calls
 };
+type ContextCategory = "prefix" | "user" | "assistant" | "reasoning" | "tool_calls" | "tool_output" | "compacted" | "other";
 type MemoryRecord = {
   key: { id: number; version: number; namespace?: string }; content: string;
   created_at_ms: number; updated_at_ms: number; last_scanned_at_ms: number | null;

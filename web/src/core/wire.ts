@@ -267,6 +267,25 @@ export type PersistedSession = {
 
 export type RecentPrompt = { text: string; recorded_at_unix_ms: number; session_id: string; workspace: string };
 
+/** Where a slice of the active context came from, in display order. */
+export type ContextCategory = "prefix" | "user" | "assistant" | "reasoning" | "tool_calls" | "tool_output" | "compacted" | "other";
+
+/**
+ * An attribution of the latest call's input. The categories (every one, in display order) sum to
+ * `input_tokens`, which is exact; the split between them is an estimate. Carries no content.
+ */
+export type ContextBreakdown = {
+  input_tokens: number;
+  categories: { kind: ContextCategory; tokens: number; items: number }[];
+  /** By descending output tokens; at most 12, the remainder merged into "(other tools)". */
+  tools: { name: string; calls: number; call_tokens: number; output_tokens: number }[];
+  /** The largest single items by descending tokens. */
+  largest: { kind: ContextCategory; tool: string | null; turn: number; tokens: number }[];
+};
+
+/** One model call on the context-size history. */
+export type CallPoint = { call: number; input: number; cached: number; output: number; after_compaction: boolean };
+
 export type ContextDiagnostics = {
   model_window_tokens: number;
   auto_compact_token_limit: number | null;
@@ -283,6 +302,10 @@ export type ContextDiagnostics = {
     before_tokens: number | null;
     after_tokens: number | null;
   } | null;
+  /** Absent until a call reports usage, and for models that report none. */
+  breakdown: ContextBreakdown | null;
+  /** The most recent calls, oldest first. */
+  history: CallPoint[];
 };
 
 export type MemoryRecord = {
