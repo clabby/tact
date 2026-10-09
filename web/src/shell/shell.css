@@ -285,6 +285,8 @@ diffs-container { --diffs-light-bg: var(--bg); --diffs-dark-bg: var(--bg); }
 .lightbox-caption { margin: 0; padding: 0 var(--space-6) calc(var(--space-4) + var(--safe-bottom)); color: rgb(255 255 255 / .75); font-size: var(--text-sm); text-align: center; }
 .image-missing { color: var(--faint); font-size: var(--text-sm); font-style: italic; }
 .markdown hr { border: 0; border-top: 1px solid var(--line); margin: 1.5em 0; }
+.markdown .math-display { display: block; overflow-x: auto; overflow-y: hidden; }
+.markdown div.math-display { margin: 0 0 .75em; }
 
 /* Messages before a turn's answer narrate the work: quieter, and folded away with it. */
 .entry-assistant.narration { color: var(--muted); font-size: var(--text-md); }

@@ -43,6 +43,7 @@ const contentTypes: Record<string, string> = {
   ".svg": "image/svg+xml",
   ".txt": "text/plain; charset=utf-8",
   ".md": "text/markdown; charset=utf-8",
+  ".woff2": "font/woff2",
 };
 const entries = await readdir(outputDirectory, { withFileTypes: true });
 const paths = entries.map((entry) => entry.name).sort();

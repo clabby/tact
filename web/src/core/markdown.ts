@@ -3,7 +3,8 @@ import {
   type DiffsThemeNames,
   type SupportedLanguages,
 } from "@pierre/diffs";
-import { Marked, Renderer } from "marked";
+import katex from "katex";
+import { Marked, Renderer, type TokenizerAndRendererExtension } from "marked";
 import type { SyntaxTheme } from "../review/review-settings";
 
 const renderer = new Renderer();
@@ -20,7 +21,50 @@ renderer.image = ({ href, title, text }) => {
   return `<img src="${escapeHtml(href)}" alt="${escapeHtml(text)}"${titleAttribute}>`;
 };
 
-const markdown = new Marked({ breaks: true, gfm: true, renderer });
+// Math is parsed here but typeset after sanitizing: the parser emits the TeX source as escaped text in
+// a `code.language-math` element, which the sanitizer keeps, and `renderMath` replaces it with
+// KaTeX output. A `pre` around it, as for a ```math fence, or a `math-display` class means display
+// mode. Single dollars follow Pandoc's rule, so prices and shell variables stay text: the opening
+// `$` is not followed by a space and the closing one is not preceded by a space or followed by a
+// word character.
+const BLOCK_MATH = /^ {0,3}(?:\$\$([\s\S]+?)\$\$|\\\[([\s\S]+?)\\\])[ \t]*(?:\n+|$)/;
+const INLINE_MATH: [RegExp, boolean][] = [
+  [/^\$\$([^\n]+?)\$\$/, true],
+  [/^\\\[([^\n]+?)\\\]/, true],
+  [/^\\\(([^\n]+?)\\\)/, false],
+  [/^\$(?![\s$])((?:\\[^\n]|[^\\$\n])+?)(?<!\s)\$(?![\w$])/, false],
+];
+const math: TokenizerAndRendererExtension[] = [
+  {
+    name: "blockMath",
+    level: "block",
+    // Marked asks from the middle of a line, so a block can only start after a newline.
+    start: (source) => {
+      const index = /\n {0,3}(?:\$\$|\\\[)/.exec(source)?.index;
+      return index === undefined ? undefined : index + 1;
+    },
+    tokenizer(source) {
+      const match = BLOCK_MATH.exec(source);
+      if (match) return { type: "blockMath", raw: match[0], text: (match[1] ?? match[2]!).trim() };
+    },
+    renderer: ({ text }) => `<pre><code class="language-math">${escapeHtml(text)}</code></pre>\n`,
+  },
+  {
+    name: "inlineMath",
+    level: "inline",
+    start: (source) => /\$|\\[([]/.exec(source)?.index,
+    tokenizer(source) {
+      for (const [pattern, display] of INLINE_MATH) {
+        const match = pattern.exec(source);
+        if (match) return { type: "inlineMath", raw: match[0], text: match[1]!.trim(), display };
+      }
+    },
+    renderer: ({ text, display }) =>
+      `<code class="language-math${display ? " math-display" : ""}">${escapeHtml(text)}</code>`,
+  },
+];
+
+const markdown = new Marked({ breaks: true, gfm: true, renderer, extensions: math });
 const themes: DiffsThemeNames[] = [
   "pierre-light", "pierre-light-soft", "pierre-dark", "pierre-dark-soft",
 ];
@@ -51,6 +95,7 @@ export async function renderMarkdown(
   const template = document.createElement("template");
   template.innerHTML = markdownHtml(source || placeholder);
   sanitize(template.content, imageSource);
+  renderMath(template.content);
   container.replaceChildren(template.content);
   for (const image of container.querySelectorAll("img")) {
     image.addEventListener("error", () => {
@@ -119,6 +164,18 @@ function sanitize(fragment: DocumentFragment, imageSource?: (destination: string
         && attribute.value.startsWith("language-");
       if (!keepLinkAttribute && !keepCodeLanguage) element.removeAttribute(attribute.name);
     }
+  }
+}
+
+/** Typesets the math the parser marked. KaTeX escapes the source and ignores links and HTML. */
+function renderMath(fragment: DocumentFragment) {
+  for (const code of fragment.querySelectorAll<HTMLElement>("code.language-math")) {
+    const block = code.parentElement?.tagName === "PRE" ? code.parentElement : null;
+    const displayMode = block !== null || code.classList.contains("math-display");
+    const typeset = document.createElement(block ? "div" : "span");
+    typeset.className = displayMode ? "math math-display" : "math";
+    katex.render(code.textContent ?? "", typeset, { displayMode, throwOnError: false, strict: "ignore" });
+    (block ?? code).replaceWith(typeset);
   }
 }
 

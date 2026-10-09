@@ -879,7 +879,7 @@ export class MockTact {
     add({ kind: "assistant", text: "One test still sees the echo first: the acknowledgement is queued behind the publication. Sending it from the loop fixes that.", complete: true, commentary: false }, 15);
     patch(PATCH_ACK, "bin/tact/src/web/bridge.rs");
     shell(BRIDGE_TEST, 0, "        PASS [   0.401s] tact web::bridge::tests::draft_echo_follows_acknowledgement\n     Summary [  47.630s] 18 tests run: 18 passed, 0 skipped\n", 48);
-    add({ kind: "assistant", text: "Draft echoes now follow the acknowledgement. The reply is sent from the loop after the command is applied, and `draft_echo_follows_acknowledgement` covers it.", complete: true, commentary: false }, 20);
+    add({ kind: "assistant", text: "Draft echoes now follow the acknowledgement. The reply is sent from the loop after the command is applied, and `draft_echo_follows_acknowledgement` covers it.\n\nWith $n$ connected tabs, each command now costs one publication and one reply, so the loop does $O(n)$ work per command instead of $O(n^2)$. A tab sees its echo after\n\n$$\nt_{\\text{echo}} = t_{\\text{apply}} + \\sum_{i=1}^{n} \\delta_i \\le t_{\\text{apply}} + n\\,\\delta_{\\max}\n$$\n\nwhich stays under a frame (16 ms) for $n \\le 8$.", complete: true, commentary: false }, 20);
     add({ kind: "turn_completed", duration_ns: 402_000_000_000 }, 2);
 
     clock = Date.now() - 42 * 60_000;

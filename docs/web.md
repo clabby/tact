@@ -437,7 +437,7 @@ mobile-first.
   remembered per browser); on narrower windows it is a drawer.
 - **Tabs.** **Chat** holds the transcript and the shared composer. **Review** holds the Pierre
   diffs, live while the agent edits, and an **Overview** sub-tab. Cmd/Ctrl . switches between them.
-- **Transcript.** Prompts and messages render as Markdown with highlighted code. Apply-patch calls render as truncated Pierre diffs; shell and code calls render
+- **Transcript.** Prompts and messages render as Markdown with highlighted code and KaTeX math (`$…$`, `$$…$$`, `\(…\)`, `\[…\]`, or a `math` fence). Apply-patch calls render as truncated Pierre diffs; shell and code calls render
   as terminal blocks. Routine work that succeeded is folded; failures, edits, plans, and agents
   always get their own row. Two or more consecutive routine calls (see `significance`) fold into
   one row, with the thoughts between them. The row reads **Ran** when the run includes a shell
@@ -525,5 +525,5 @@ and the token grants the same access as a shell.
 ## Security notes
 
 The token is equivalent to a shell as the user. Drafts are visible to every connected device. All
-transcript and draft text is rendered as text or through the sanitizing Markdown renderer; agent
+transcript and draft text is rendered as text or through the sanitizing Markdown renderer, and math is typeset from the sanitized source; agent
 MDX runs only in the opaque-origin sandboxed overview frame.
