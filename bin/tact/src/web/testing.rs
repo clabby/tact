@@ -7,6 +7,7 @@ use super::{
     hub::Hub,
     review::{self, AgentPrompt, ReviewAgent, ReviewRegistry},
     token::MachineToken,
+    wire::PROTOCOL_VERSION,
     workspaces::Workspaces,
 };
 use crate::{
@@ -23,6 +24,7 @@ use axum::{
     middleware::{self, Next},
 };
 use futures_util::future::BoxFuture;
+use sha2::{Digest, Sha256};
 use std::{
     fs,
     future::Future,
@@ -47,7 +49,7 @@ pub(super) struct Harness {
     pub(super) state: Arc<AppState>,
     pub(super) workspace: TempDir,
     pub(super) shutdown: CancellationToken,
-    _home: TempDir,
+    home: TempDir,
 }
 
 /// A review agent backed by a closure.
@@ -124,12 +126,43 @@ impl Harness {
             state,
             workspace,
             shutdown,
-            _home: home,
+            home,
         }
     }
 
     pub(super) fn cookie(&self) -> String {
         format!("tact={}", self.state.token.expose())
+    }
+
+    /// Installs a development web bundle of HTML files, given as `(path, contents)`, where the
+    /// server looks for one. Call it before the first static request; absence is remembered briefly.
+    pub(super) fn install_bundle(&self, files: &[(&str, &str)]) {
+        let directory = self
+            .home
+            .path()
+            .join("web/assets")
+            .join(crate::app::installation::current().web_bundle_directory());
+        fs::create_dir_all(&directory).unwrap();
+        let manifest_files: Vec<_> = files
+            .iter()
+            .map(|(path, contents)| {
+                fs::write(directory.join(path), contents).unwrap();
+                serde_json::json!({
+                    "path": path,
+                    "content_type": "text/html; charset=utf-8",
+                    "bytes": contents.len(),
+                    "sha256": format!("{:x}", Sha256::digest(contents.as_bytes())),
+                })
+            })
+            .collect();
+        let manifest = serde_json::json!({
+            "schema_version": 2,
+            "web_api": {"min": PROTOCOL_VERSION, "max": PROTOCOL_VERSION},
+            "tact": {"version": env!("CARGO_PKG_VERSION")},
+            "entrypoint": files[0].0,
+            "files": manifest_files,
+        });
+        fs::write(directory.join("manifest.json"), manifest.to_string()).unwrap();
     }
 
     /// Sends an authenticated request the way the browser application does.

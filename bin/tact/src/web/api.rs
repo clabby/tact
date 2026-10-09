@@ -682,7 +682,7 @@ pub(super) fn secure(response: &mut Response<Body>) {
     headers.insert(
         header::CONTENT_SECURITY_POLICY,
         HeaderValue::from_static(
-            "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-src 'self'",
+            "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-src 'self'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'",
         ),
     );
 }
@@ -852,6 +852,46 @@ mod tests {
             .body(Body::empty())
             .unwrap();
         assert_eq!(harness.send(missing).await.0, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn the_application_policy_forbids_forms_base_urls_and_framing() {
+        let harness = Harness::new();
+        harness.install_bundle(&[
+            ("index.html", "<!doctype html>"),
+            ("overview-frame.html", "<!doctype html>"),
+        ]);
+        let get = |uri: &str| {
+            Request::builder()
+                .uri(uri)
+                .header(header::COOKIE, harness.cookie())
+                .body(Body::empty())
+                .unwrap()
+        };
+        let policy = |headers: &axum::http::HeaderMap| {
+            headers[header::CONTENT_SECURITY_POLICY]
+                .to_str()
+                .unwrap()
+                .to_owned()
+        };
+
+        for uri in ["/", "/api/instance"] {
+            let (status, headers, _) = harness.send(get(uri)).await;
+            assert_eq!(status, StatusCode::OK, "{uri}");
+            let policy = policy(&headers);
+            for directive in [
+                "form-action 'none'",
+                "base-uri 'none'",
+                "frame-ancestors 'none'",
+            ] {
+                assert!(policy.contains(directive), "{uri}: {policy}");
+            }
+        }
+        let (status, headers, _) = harness.send(get("/overview-frame.html")).await;
+        assert_eq!(status, StatusCode::OK);
+        let policy = policy(&headers);
+        assert!(policy.contains("frame-ancestors 'self'"), "{policy}");
+        assert!(!policy.contains("frame-ancestors 'none'"), "{policy}");
     }
 
     #[tokio::test]
