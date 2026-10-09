@@ -1,3 +1,7 @@
+
+
+https://github.com/user-attachments/assets/adf36cfa-c54e-46f2-988a-0dc316715625
+
 # tact
 
 [![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/clabby/tact/ci.yaml?style=for-the-badge&label=CI)](https://github.com/clabby/tact/actions/workflows/ci.yaml)
@@ -11,7 +15,8 @@ the terminal UI, every Tact process serves a web interface you can open from a b
 with a built-in code review panel. Agents can delegate work to subagents, keep a small long-term
 memory across sessions, load skills, and call MCP servers.
 
-<https://github.com/user-attachments/assets/5c634ae8-5c74-47c9-bb8c-9c18cb7fc97d>
+
+<https://github.com/user-attachments/assets/4d19d0ad-f811-402b-82f6-f4961f88c2a7>
 
 - [Install](#install)
 - [Set up](#set-up)
