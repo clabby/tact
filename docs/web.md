@@ -437,14 +437,17 @@ mobile-first.
   remembered per browser); on narrower windows it is a drawer.
 - **Tabs.** **Chat** holds the transcript and the shared composer. **Review** holds the Pierre
   diffs, live while the agent edits, and an **Overview** sub-tab. Cmd/Ctrl . switches between them.
-- **Transcript.** Prompts and messages render as Markdown with highlighted code and KaTeX math (`$…$`, `$$…$$`, `\(…\)`, `\[…\]`, or a `math` fence). Apply-patch calls render as truncated Pierre diffs; shell and code calls render
-  as terminal blocks. Routine work that succeeded is folded; failures, edits, plans, and agents
-  always get their own row. Two or more consecutive routine calls (see `significance`) fold into
-  one row, with the thoughts between them. The row reads **Ran** when the run includes a shell
-  command or Code Mode cell and **Explored** otherwise, and counts what the run covered ("4
-  commands, 1 code cell"). While one of its calls runs, the row names that call, as **Running**
-  for a command or cell and **Exploring** otherwise, and the row is open so the live call stays in
-  sight. Toggling a row inverts that default, and the choice stays with the row as the run grows.
+- **Transcript.** Prompts and messages render as Markdown with highlighted code and KaTeX math
+  (`$…$`, `$$…$$`, `\(…\)`, `\[…\]`, or a `math` fence). A `mermaid` fence renders as a
+  diagram; Mermaid loads with the first one. Apply-patch calls render as truncated Pierre diffs;
+  shell and code calls render as terminal blocks. Routine work that succeeded is folded; failures,
+  edits, plans, and agents always get their own row. Two or more consecutive routine calls (see
+  `significance`) fold into one row, with the thoughts between them. The row reads **Ran** when the
+  run includes a shell command or Code Mode cell and **Explored** otherwise, and counts what the
+  run covered ("4 commands, 1 code cell"). While one of its calls runs, the row names that call, as
+  **Running** for a command or cell and **Exploring** otherwise, and the row is open so the live
+  call stays in sight. Toggling a row inverts that default, and the choice stays with the row as
+  the run grows.
 - **Prompt minimap.** One tick per prompt on the chat's right edge; longer prompts draw longer
   ticks and the current one is highlighted. Pointing at it lists prompt previews, choosing one
   scrolls there, and sessions with more than 12 prompts page through them.
@@ -525,5 +528,6 @@ and the token grants the same access as a shell.
 ## Security notes
 
 The token is equivalent to a shell as the user. Drafts are visible to every connected device. All
-transcript and draft text is rendered as text or through the sanitizing Markdown renderer, and math is typeset from the sanitized source; agent
-MDX runs only in the opaque-origin sandboxed overview frame.
+transcript and draft text is rendered as text or through the sanitizing Markdown renderer, math is
+typeset from the sanitized source, and Mermaid renders diagrams in its strict mode; agent MDX runs
+only in the opaque-origin sandboxed overview frame.

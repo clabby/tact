@@ -107,8 +107,9 @@ export async function renderMarkdown(
   }
   if (!highlight) return;
 
-  const codeBlocks = [...container.querySelectorAll<HTMLElement>("pre > code")];
-  await Promise.all(codeBlocks.map(async (code) => {
+  const diagrams = renderDiagrams(container, themeName.includes("dark"));
+  const codeBlocks = [...container.querySelectorAll<HTMLElement>("pre > code:not(.language-mermaid)")];
+  await Promise.all([diagrams, ...codeBlocks.map(async (code) => {
     const pre = code.parentElement;
     if (!pre) return;
     const language = code.className.match(/(?:^|\s)language-([^\s]+)/)?.[1] ?? "text";
@@ -128,7 +129,7 @@ export async function renderMarkdown(
     } catch {
       code.className = "language-text";
     }
-  }));
+  })]);
 }
 
 function sanitize(fragment: DocumentFragment, imageSource?: (destination: string) => string | null) {
@@ -177,6 +178,42 @@ function renderMath(fragment: DocumentFragment) {
     katex.render(code.textContent ?? "", typeset, { displayMode, throwOnError: false, strict: "ignore" });
     (block ?? code).replaceWith(typeset);
   }
+}
+
+// Mermaid keeps one global configuration, so renders run one at a time with their theme set first.
+let diagramQueue: Promise<unknown> = Promise.resolve();
+let diagramCount = 0;
+
+/**
+ * Replaces ```mermaid fences with diagrams. Mermaid is large, so it loads with the first diagram.
+ * Strict security makes it sanitize labels and drop click handlers. A fence that fails to parse
+ * stays as code.
+ */
+function renderDiagrams(container: HTMLElement, dark: boolean) {
+  const fences = [...container.querySelectorAll<HTMLElement>("pre > code.language-mermaid")];
+  if (!fences.length) return Promise.resolve();
+  diagramQueue = diagramQueue.then(async () => {
+    const { default: mermaid } = await import("mermaid");
+    mermaid.initialize({
+      startOnLoad: false,
+      securityLevel: "strict",
+      suppressErrorRendering: true,
+      theme: dark ? "dark" : "default",
+      fontFamily: getComputedStyle(container).fontFamily,
+    });
+    for (const code of fences) {
+      try {
+        const { svg } = await mermaid.render(`mermaid-${++diagramCount}`, code.textContent ?? "");
+        const diagram = document.createElement("div");
+        diagram.className = "diagram";
+        diagram.innerHTML = svg;
+        code.parentElement!.replaceWith(diagram);
+      } catch {
+        // An invalid diagram stays as its source.
+      }
+    }
+  }).catch(() => {});
+  return diagramQueue;
 }
 
 function safeLink(value: string) {
