@@ -1,7 +1,3 @@
-
-
-https://github.com/user-attachments/assets/adf36cfa-c54e-46f2-988a-0dc316715625
-
 # tact
 
 [![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/clabby/tact/ci.yaml?style=for-the-badge&label=CI)](https://github.com/clabby/tact/actions/workflows/ci.yaml)
