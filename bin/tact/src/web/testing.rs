@@ -5,6 +5,7 @@ use super::{
     assets::AssetStore,
     bridge::{self, LoopEnd},
     hub::Hub,
+    machines::{self, Registry as Machines},
     review::{self, AgentPrompt, ReviewAgent, ReviewRegistry},
     token::MachineToken,
     wire::PROTOCOL_VERSION,
@@ -19,7 +20,7 @@ use crate::{
 };
 use axum::{
     Router,
-    body::Body,
+    body::{Body, Bytes},
     http::{HeaderMap, Method, Request, StatusCode, header},
     middleware::{self, Next},
 };
@@ -31,10 +32,7 @@ use std::{
     net::Ipv4Addr,
     path::Path,
     process::Command,
-    sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    },
+    sync::{Arc, Mutex},
 };
 use tempfile::TempDir;
 use tokio::{net::TcpListener, task::JoinHandle};
@@ -116,6 +114,8 @@ impl Harness {
             registry_directory: home.path().join("web/instances"),
             assets: AssetStore::new(home.path().to_owned()),
             client: api::sibling_client().unwrap(),
+            machines: Machines::allowing_http(&home.path().join("web")),
+            peer_client: machines::test_peer_client(),
             shutdown: shutdown.clone(),
         });
         let app = api::router(Arc::clone(&state), review::router(review));
@@ -132,6 +132,17 @@ impl Harness {
 
     pub(super) fn cookie(&self) -> String {
         format!("tact={}", self.state.token.expose())
+    }
+
+    /// Links the machine `name` at `origin` the way `tact machine add` records it.
+    pub(super) fn link_machine(&self, name: &str, origin: &str, token: &str) {
+        let directory = self.home.path().join("web/machines");
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(
+            directory.join(format!("{name}.toml")),
+            format!("url = \"{origin}\"\ntoken = \"{token}\"\n"),
+        )
+        .unwrap();
     }
 
     /// Installs a development web bundle of HTML files, given as `(path, contents)`, where the
@@ -251,23 +262,42 @@ impl Harness {
     }
 }
 
-/// A real HTTP server on loopback that counts every request, including unrouted ones, before its
-/// router answers. It stands in for a sibling instance or a proxy.
+/// A request an [`Upstream`] received.
+#[derive(Clone, Debug)]
+pub(super) struct Received {
+    pub(super) method: Method,
+    pub(super) uri: String,
+    pub(super) headers: HeaderMap,
+    pub(super) body: Bytes,
+}
+
+/// A real HTTP server on loopback that records every request, including unrouted ones, before its
+/// router answers. It stands in for a sibling instance, a linked machine, or a proxy.
 pub(super) struct Upstream {
     pub(super) origin: String,
     pub(super) port: u16,
-    hits: Arc<AtomicUsize>,
+    received: Arc<Mutex<Vec<Received>>>,
     task: JoinHandle<()>,
 }
 
 impl Upstream {
     pub(super) async fn spawn(router: Router) -> Self {
-        let hits = Arc::new(AtomicUsize::new(0));
-        let counter = Arc::clone(&hits);
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let recorder = Arc::clone(&received);
         let app = router.layer(middleware::from_fn(
             move |request: Request<Body>, next: Next| {
-                counter.fetch_add(1, Ordering::SeqCst);
-                next.run(request)
+                let recorder = Arc::clone(&recorder);
+                async move {
+                    let (parts, body) = request.into_parts();
+                    let body = axum::body::to_bytes(body, usize::MAX).await.unwrap();
+                    recorder.lock().unwrap().push(Received {
+                        method: parts.method.clone(),
+                        uri: parts.uri.to_string(),
+                        headers: parts.headers.clone(),
+                        body: body.clone(),
+                    });
+                    next.run(Request::from_parts(parts, Body::from(body))).await
+                }
             },
         ));
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
@@ -276,13 +306,17 @@ impl Upstream {
         Self {
             origin: format!("http://127.0.0.1:{port}"),
             port,
-            hits,
+            received,
             task,
         }
     }
 
+    pub(super) fn received(&self) -> Vec<Received> {
+        self.received.lock().unwrap().clone()
+    }
+
     pub(super) fn hits(&self) -> usize {
-        self.hits.load(Ordering::SeqCst)
+        self.received.lock().unwrap().len()
     }
 }
 

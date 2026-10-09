@@ -10,6 +10,7 @@ pub(crate) mod bridge;
 mod hub;
 pub(crate) mod machines;
 mod outcome;
+mod proxy;
 mod registry;
 mod review;
 mod tailscale;
@@ -27,6 +28,7 @@ use api::{AppState, PublicOrigin};
 use assets::AssetStore;
 pub(crate) use assets::{Located, WebAssets};
 use hub::Hub;
+use machines::Registry as Machines;
 use registry::{InstanceRecord, Registration, RegistryError};
 use review::{BridgeAgent, ReviewRegistry};
 use std::{
@@ -247,6 +249,8 @@ impl Server {
             registry_directory,
             assets: AssetStore::new(settings.home),
             client: api::sibling_client().map_err(StartError::Client)?,
+            machines: Machines::new(&web_directory),
+            peer_client: machines::peer_client().map_err(StartError::Client)?,
             shutdown: shutdown.clone(),
         });
         let app = api::router(state, review::router(review));

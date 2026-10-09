@@ -4,6 +4,8 @@
 use super::{
     assets::AssetStore,
     hub::Hub,
+    machines::Registry,
+    proxy,
     registry::{self, InstanceRecord},
     tailscale::Tailnet,
     token::MachineToken,
@@ -22,7 +24,7 @@ use axum::{
     http::{HeaderMap, HeaderValue, Method, Response, StatusCode, Uri, header},
     middleware::{self, Next},
     response::IntoResponse,
-    routing::{get, post},
+    routing::{any, get, post},
 };
 use futures_util::{StreamExt as _, future::join_all, stream};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -34,9 +36,9 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-const MAX_BODY_BYTES: usize = 1024 * 1024;
+pub(super) const MAX_BODY_BYTES: usize = 1024 * 1024;
 /// Commands may carry pasted images in a data URL.
-const MAX_COMMAND_BODY_BYTES: usize = 32 * 1024 * 1024;
+pub(super) const MAX_COMMAND_BODY_BYTES: usize = 32 * 1024 * 1024;
 const KEEP_ALIVE: Duration = Duration::from_secs(15);
 /// Longest a command may wait for the terminal loop. Opening a large session can be slow.
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
@@ -69,6 +71,10 @@ pub(super) struct AppState {
     pub(super) assets: AssetStore,
     /// Carries this machine's token to sibling instances; see [`sibling_client`].
     pub(super) client: reqwest::Client,
+    /// The linked machines, read from disk on every request.
+    pub(super) machines: Registry,
+    /// Carries peer tokens to linked machines; see [`super::machines::peer_client`].
+    pub(super) peer_client: reqwest::Client,
     pub(super) shutdown: CancellationToken,
 }
 
@@ -99,6 +105,8 @@ pub(super) fn router(state: Arc<AppState>, extra: Router<Arc<AppState>>) -> Rout
             post(command).layer(DefaultBodyLimit::max(MAX_COMMAND_BODY_BYTES)),
         )
         .route("/api/query", post(query))
+        .route("/api/machines", get(proxy::machines))
+        .route("/api/m/{name}/{*rest}", any(proxy::relay))
         .merge(extra)
         .fallback(static_asset)
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
@@ -382,7 +390,7 @@ async fn local_image(
 }
 
 /// The media type of a PNG, JPEG, GIF, or WebP file, judged by its leading bytes.
-fn sniff_image(bytes: &[u8]) -> Option<&'static str> {
+pub(super) fn sniff_image(bytes: &[u8]) -> Option<&'static str> {
     match bytes {
         [0x89, b'P', b'N', b'G', ..] => Some("image/png"),
         [0xFF, 0xD8, 0xFF, ..] => Some("image/jpeg"),
