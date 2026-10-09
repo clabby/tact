@@ -74,7 +74,7 @@ class App {
   private runningSession: string | null = null;
   /** The active session's repository checkouts, for the composer's workspace chip. */
   private workspaces: { session: string; reply: Workspaces } | null = null;
-  private review: { dispose(): void; setVisible?(visible: boolean): void } | null = null;
+  private review: ReturnType<typeof mountReviewPanel> | null = null;
   private readonly reviewListeners = {
     active: new Set<() => void>(),
     workspace: new Set<(checkout: string | null) => void>(),
@@ -124,6 +124,11 @@ class App {
       () => this.theme.current,
       {
         openReview: () => this.showView("review"),
+        openFile: (path, line) => {
+          if (!this.review?.revealFile(path, line)) return false;
+          this.showView("review");
+          return true;
+        },
         seen: sessionStorage,
         laidOut: () => this.rail.refresh(),
       },
@@ -133,6 +138,10 @@ class App {
       root.querySelector(".transcript-scroller")!,
       () => this.store.state.session,
       (prompt) => this.transcript.marks(prompt),
+      {
+        headings: (prompt) => this.transcript.outline(prompt),
+        open: (entry, slug) => void this.transcript.revealHeading(entry, slug),
+      },
     );
     this.findBar = new FindBar(root.querySelector("#view-chat")!, this.transcript);
     this.composer = new Composer(root.querySelector(".dock")!, {
@@ -309,7 +318,9 @@ class App {
       history.replaceState(null, "", location.pathname + location.search);
       this.showView("chat");
       const entry = link.entry;
+      const heading = link.heading;
       requestAnimationFrame(() => {
+        if (heading !== null && this.transcript.revealHeading(entry, heading)) return;
         if (!this.transcript.reveal(entry, { flash: true })) toast("That entry is no longer in the transcript.", "info");
       });
       return;

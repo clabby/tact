@@ -1,9 +1,10 @@
 /**
  * Links into a transcript. The fragment carries a login token (`k`) and optionally a target: a
- * session (`s`) and an entry in it (`entry`). The token is a credential and is never part of a
- * copied link; the target survives the login so the app can open it.
+ * session (`s`), an entry in it (`entry`), and a heading of that entry by slug (`heading`). The
+ * token is a credential and is never part of a copied link; the target survives the login so the
+ * app can open it.
  */
-export type HashLink = { token: string | null; session: string | null; entry: number | null };
+export type HashLink = { token: string | null; session: string | null; entry: number | null; heading: string | null };
 
 export function parseHashLink(hash: string): HashLink {
   const params = new URLSearchParams(hash.replace(/^#/, ""));
@@ -12,6 +13,7 @@ export function parseHashLink(hash: string): HashLink {
     token: params.get("k"),
     session: params.get("s"),
     entry: params.has("entry") && Number.isInteger(entry) && entry >= 0 ? entry : null,
+    heading: params.get("heading"),
   };
 }
 

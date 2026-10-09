@@ -85,6 +85,7 @@ export function mountReviewPanel(container: HTMLElement, host: ReviewHost) {
   return {
     dispose: () => panel.cleanUp(),
     setVisible: (visible: boolean) => panel.setVisible(visible),
+    revealFile: (path: string, line: number | null) => panel.revealFile(path, line),
   };
 }
 
@@ -512,6 +513,35 @@ class ReviewPanel {
     // On narrow screens the file list replaces the diff, so return to the diff before scrolling.
     this.selectMobilePanel("diff");
     this.diffView.viewer?.scrollTo({ type: "item", id, align: "start", behavior: "smooth-auto" });
+  }
+
+  /**
+   * Shows the changed file a reference names, at a line of its new version when given. The
+   * reference may be relative to the workspace, absolute, or a trailing part of the path. Returns
+   * false when no changed file matches; the scroll happens in the next frame, once the caller has
+   * made the review visible.
+   */
+  revealFile(reference: string, line: number | null) {
+    const path = reference.replace(/^\.\//, "");
+    const id = this.pathToItem.get(path)
+      ?? [...this.pathToItem.keys()].find((name) => path.endsWith(`/${name}`) || name.endsWith(`/${path}`));
+    if (!id) return false;
+    requestAnimationFrame(() => {
+      this.selectTab("changes");
+      this.selectMobilePanel("diff");
+      const item = this.items.find((candidate) => candidate.id === id);
+      if (item?.collapsed) this.diffView.setCollapsed(item, false);
+      if (line === null) {
+        this.diffView.viewer?.scrollTo({ type: "item", id, align: "start", behavior: "smooth-auto" });
+        return;
+      }
+      this.diffView.viewer?.setSelectedLines({
+        id,
+        range: { start: line, end: line, side: "additions", endSide: "additions" },
+      }, { notify: false });
+      this.diffView.viewer?.scrollTo({ type: "line", id, lineNumber: line, side: "additions", align: "center", behavior: "smooth-auto" });
+    });
+    return true;
   }
 
   private seenFiles() {

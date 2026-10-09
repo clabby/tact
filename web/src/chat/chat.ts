@@ -3,8 +3,8 @@ import { ApiError, errorMessage } from "../core/api-client";
 import { firstLine, formatAge, formatDuration, modelColor } from "../core/format";
 import { glyph } from "../ui/glyphs";
 import { toast } from "../ui/toast";
-import { openLightbox } from "./lightbox";
-import { renderMarkdown } from "../core/markdown";
+import { openLightbox, type LightboxImage } from "./lightbox";
+import { headings, markdownImages, renderMarkdown, type Heading } from "../core/markdown";
 import type { TranscriptData } from "../core/store";
 import type { Theme } from "../core/theme";
 import { promptParts } from "./user-prompt";
@@ -52,6 +52,8 @@ export type TranscriptOptions = {
   seen?: Storage;
   /** Called after turns were laid out again, so summaries of them (the prompt rail) can follow. */
   laidOut?(): void;
+  /** Shows a workspace file a message names in the review; false when the review lacks it. */
+  openFile?(path: string, line: number | null): boolean;
 };
 
 /** Distance from the bottom, in pixels, within which the transcript keeps following new output. */
@@ -81,6 +83,11 @@ export class Transcript {
   private frame = 0;
   private source: TranscriptSource | null = null;
   private following = true;
+  /**
+   * A heading just revealed, held near the top while late layout above it settles: the scroller
+   * opts out of scroll anchoring, so entries rendering above would otherwise push it away.
+   */
+  private pinned: { element: HTMLElement; until: number } | null = null;
   private readonly lazy: IntersectionObserver;
   /**
    * Tool calls and agent threads whose open state differs from their default, patches shown
@@ -109,6 +116,8 @@ export class Transcript {
   private readonly signatures = new Map<number, string>();
   /** The reader's fold choice per turn, which outlives re-renders; absent turns use the default. */
   private readonly folds = new Map<number, boolean>();
+  /** Answer headings by entry, kept while the entry's text is unchanged. */
+  private readonly outlines = new Map<number, { text: string; entry: number; headings: Heading[] }>();
   /** Groups, by key, the reader has opened; every group starts closed and stays as the reader left it. */
   private readonly openGroups = new Set<number>();
 
@@ -182,7 +191,11 @@ export class Transcript {
     // Late layout (Markdown upgrades, highlighting, images) must not leave a follower short of the end.
     new ResizeObserver(() => {
       if (this.following) scroller.scrollTop = scroller.scrollHeight;
+      else if (this.pinned && performance.now() < this.pinned.until) this.scrollToPinned();
     }).observe(this.list);
+    for (const gesture of ["wheel", "touchstart", "keydown"]) {
+      scroller.addEventListener(gesture, () => { this.pinned = null; }, { passive: true });
+    }
     jump.addEventListener("click", () => this.scrollToEnd("smooth"));
     this.list.addEventListener("click", (event) => this.handleClick(event));
     if (options.seen) {
@@ -210,7 +223,7 @@ export class Transcript {
       this.agentIds.clear();
       this.lazy.disconnect();
       this.turns = [];
-      for (const map of [this.turnOf, this.turnByKey, this.shapes, this.plans, this.views, this.contexts, this.signatures, this.folds]) map.clear();
+      for (const map of [this.turnOf, this.turnByKey, this.shapes, this.plans, this.views, this.contexts, this.signatures, this.folds, this.outlines]) map.clear();
       this.openGroups.clear();
       this.dirtyTurns.clear();
       this.relayoutAll = true;
@@ -329,6 +342,46 @@ export class Transcript {
       return entry?.kind === "tool" && entry.name === "apply_patch" && entry.state === "succeeded";
     });
     return { edits, failures: plan.unrecovered.length > 0 };
+  }
+
+  /** The top headings of a prompt's answer, for the prompt rail; the same object while unchanged. */
+  outline(prompt: number): { entry: number; headings: Heading[] } | null {
+    const answer = this.plans.get(prompt)?.answer;
+    const entry = answer == null ? undefined : this.source?.data.entries.get(answer);
+    if (entry?.kind !== "assistant" || !entry.complete) return null;
+    let cached = this.outlines.get(entry.id);
+    if (cached?.text !== entry.text) {
+      cached = { text: entry.text, entry: entry.id, headings: headings(entry.text).filter((heading) => heading.depth <= 3) };
+      this.outlines.set(entry.id, cached);
+    }
+    return cached.headings.length ? cached : null;
+  }
+
+  /** Brings a heading of an entry into view and highlights it; false when it is gone. */
+  revealHeading(id: number, slug: string) {
+    const element = this.reveal(id, { scroll: false });
+    const body = element?.querySelector<HTMLElement>(".markdown");
+    const entry = this.source?.data.entries.get(id);
+    if (!body || !entry) return false;
+    if (body.classList.contains("plain")) {
+      this.lazy.unobserve(body);
+      this.renderBody(body, entry, true);
+    }
+    const heading = body.querySelector<HTMLElement>(`[data-heading="${CSS.escape(slug)}"]`);
+    if (!heading) return false;
+    this.setFollowing(false);
+    this.jump.hidden = false;
+    this.pinned = { element: heading, until: performance.now() + 2000 };
+    this.scrollToPinned();
+    heading.classList.remove("heading-flash");
+    void heading.offsetWidth;
+    heading.classList.add("heading-flash");
+    return true;
+  }
+
+  private scrollToPinned() {
+    const offset = this.pinned!.element.getBoundingClientRect().top - this.scroller.getBoundingClientRect().top;
+    this.scroller.scrollTop += offset - 24;
   }
 
   private schedule() {
@@ -728,10 +781,18 @@ export class Transcript {
     container.classList.remove("plain");
     delete container.dataset.stale;
     const streaming = entry.kind === "assistant" && !entry.complete;
+    const link = this.source?.link;
+    const openFile = this.options.openFile;
     void renderMarkdown(container, text, this.theme() === "dark" ? "pierre-dark" : "pierre-light", {
       imageSource: this.imageSource,
       highlight: !streaming,
       placeholder: streaming ? "" : " ",
+      openFile: openFile && ((path, line) => {
+        if (!openFile(path, line)) toast(`${path} is not among this session's changes.`, "info");
+      }),
+      linkHeading: link && !streaming
+        ? (slug) => void copy(`${link(entry.id)}&heading=${encodeURIComponent(slug)}`, "Copied a link to this section.")
+        : undefined,
     });
   }
 
@@ -1077,10 +1138,35 @@ export class Transcript {
     this.entryChanged(id);
   }
 
+  /**
+   * Every image the transcript shows, in order: prompt attachments and images embedded in prompts
+   * and messages. It reads the entries rather than the page, so images in entries not yet
+   * rendered are included.
+   */
+  private gallery(): LightboxImage[] {
+    const source = this.source;
+    if (!source) return [];
+    const embedded = (text: string) => markdownImages(text).flatMap(({ destination, alt }) => {
+      const url = this.imageSource(destination);
+      return url ? [{ source: url, alt }] : [];
+    });
+    return source.data.order.flatMap((id) => {
+      const entry = source.data.entries.get(id);
+      if (entry?.kind === "assistant") return embedded(entry.text);
+      if (entry?.kind !== "user") return [];
+      return promptParts(entry.text, source.image ? entry.images ?? 0 : 0).flatMap((part) =>
+        part.kind === "text" ? embedded(part.text) : [{ source: source.image!(id, part.index), alt: part.marker }]);
+    });
+  }
+
   private handleClick(event: MouseEvent) {
     const target = event.target as HTMLElement;
     if (target instanceof HTMLImageElement && target.closest(".markdown, .user-image")) {
-      openLightbox(target.currentSrc || target.src, target.alt);
+      const clicked = target.currentSrc || target.src;
+      const gallery = this.gallery();
+      const index = gallery.findIndex((image) => new URL(image.source, location.href).href === clicked);
+      if (index >= 0) openLightbox(gallery, index);
+      else openLightbox([{ source: clicked, alt: target.alt }]);
       return;
     }
     const link = target.closest<HTMLAnchorElement>("a.entry-link");

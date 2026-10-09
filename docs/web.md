@@ -439,7 +439,12 @@ mobile-first.
   diffs, live while the agent edits, and an **Overview** sub-tab. Cmd/Ctrl . switches between them.
 - **Transcript.** Prompts and messages render as Markdown with highlighted code and KaTeX math
   (`$…$`, `$$…$$`, `\(…\)`, `\[…\]`, or a `math` fence). A `mermaid` fence renders as a
-  diagram; Mermaid loads with the first one. Apply-patch calls render as truncated Pierre diffs;
+  diagram; Mermaid loads with the first one, a diagram opens enlarged on click, and one that
+  cannot be drawn shows its source under a note. GitHub alerts (`> [!NOTE]` and the like),
+  footnotes, and task lists render as on GitHub. Code blocks, display math, and diagrams have a
+  copy control, and code blocks over 40 lines start folded. A code span naming a changed file
+  (`src/app.ts:12`) opens it in **Review** at that line. Headings in messages have a control that
+  copies a link to the section. Apply-patch calls render as truncated Pierre diffs;
   shell and code calls render as terminal blocks. Routine work that succeeded is folded; failures,
   edits, plans, and agents always get their own row. Two or more consecutive routine calls (see
   `significance`) fold into one row, with the thoughts between them. The row reads **Ran** when the
@@ -450,7 +455,12 @@ mobile-first.
   the run grows.
 - **Prompt minimap.** One tick per prompt on the chat's right edge; longer prompts draw longer
   ticks and the current one is highlighted. Pointing at it lists prompt previews, choosing one
-  scrolls there, and sessions with more than 12 prompts page through them.
+  scrolls there, and sessions with more than 12 prompts page through them. Under the current
+  prompt, the list also shows its answer's headings.
+- **Images.** Clicking an image opens it over the page with every image of the transcript in
+  order: the arrow buttons or the Left and Right keys step through them, the wheel, the zoom
+  buttons, + and -, or a double click zoom in about the pointer, dragging pans, and 0 fits the image
+  again. On touch screens, a swipe at fit size steps to the next image.
 - **Subagents.** A hierarchy graph (Active or All, Active by default) fills a popup. Selecting an
   agent opens its transcript beside the graph with the chat's renderer; the back button returns to
   the full graph. A chip above the composer reports running subagents and opens the popup.
