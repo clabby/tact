@@ -40,7 +40,7 @@ use std::{
 };
 use tailscale::{Tailnet, TailscaleError};
 use thiserror::Error;
-use token::{MachineToken, TokenError};
+pub(crate) use token::{MachineToken, TokenError};
 use tokio::{
     net::TcpListener,
     sync::{mpsc::UnboundedSender, watch},

@@ -1,4 +1,4 @@
-//! `tact serve` as a process.
+//! The commands that run this machine as a peer of another Tact, as processes.
 
 use std::{fs, path::Path, process::Command};
 use tempfile::TempDir;
@@ -54,4 +54,21 @@ fn serve_exits_with_an_error_when_it_cannot_listen() {
     assert!(stderr.contains("192.0.2.1"), "{stderr}");
     let token = fs::read_to_string(home.path().join("web/token")).unwrap();
     assert!(!stderr.contains(token.trim()));
+}
+
+#[test]
+fn web_token_prints_the_machine_token_and_nothing_else() {
+    let home = home("127.0.0.1");
+
+    let first = tact(home.path(), &["web", "token"]).output().unwrap();
+    let second = tact(home.path(), &["web", "token"]).output().unwrap();
+
+    assert!(first.status.success());
+    let token = fs::read_to_string(home.path().join("web/token")).unwrap();
+    assert_eq!(
+        String::from_utf8(first.stdout.clone()).unwrap(),
+        format!("{token}\n")
+    );
+    assert!(first.stderr.is_empty());
+    assert_eq!(second.stdout, first.stdout);
 }
