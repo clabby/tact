@@ -3,9 +3,10 @@
 Every running Tact serves a web interface in the background. It is a second front-end onto the
 sessions the process is running, not a separate client: the terminal and the browser share the active
 session, each session's draft, queue, settings, and transcript. The TUI must stay open for the web
-interface to be served (there is no headless mode). Reachability needs a tunnel: Tact can publish
-itself to your tailnet (`web.tailscale`), or you run a tunnel (Tailscale, an SSH forward, or
-similar) and give Tact its address (`web.public_url`). See "Remote access".
+interface to be served, or you run `tact serve`, which runs the same sessions without a terminal.
+Reachability needs a tunnel: Tact can publish itself to your tailnet (`web.tailscale`), or you run
+a tunnel (Tailscale, an SSH forward, or similar) and give Tact its address (`web.public_url`). See
+"Remote access". One web interface can also run sessions on other machines; see "Other machines".
 
 ## Ownership
 
@@ -51,7 +52,9 @@ Static assets are public. Every `/api/*` route except `POST /api/login` requires
 - Errors are JSON `{ "code": string, "message": string }`. Codes: `unauthorized` (401),
   `invalid_request` (400), `turn_running`, `queue_not_empty`, `nothing_running`, `draft_changed`,
   `session_locked`, `unknown_session`, `unknown_queue_item`, `too_many_sessions`,
-  `not_available_remotely`, `stale`, `disabled` (409/404), `failed` (500). Commands and queries
+  `not_available_remotely`, `stale`, `disabled` (409/404), `failed` (500), and for other
+  machines `unknown_machine` (404), `unknown_route` (404/405), `machine_unauthorized` (409),
+  `machine_unreachable` and `machine_protocol_error` (502). Commands and queries
   share one mapping (`protocol::CommandError::code`). The review routes use their own error body;
   see "Review errors".
 
@@ -473,6 +476,107 @@ The terminal's Actions menu has **Show QR code**, which draws the sign-in link a
 (black on white, whatever the theme) for a phone to scan. Like the web version it refuses an
 address that only this computer can reach, so set `web.tailscale` or `web.public_url` first. The
 credential is only inside the code and is never shown as text.
+
+## Other machines
+
+One web interface, on your machine (the hub), can run sessions on other machines that run
+`tact serve` (peers). You pick the machine in the interface, and the session runs there: in that
+machine's checkout, with that machine's credentials, journaled on that machine. Sessions never move
+between machines, and each peer keeps its own history.
+
+### Set up a peer
+
+On the other machine, make it reachable (`web.tailscale = true`, or a tunnel and `web.public_url`;
+see "Remote access") and run:
+
+```sh
+tact serve [--workspace DIR]
+```
+
+`tact serve` runs the sessions and the web server with no terminal, always in a new session, until
+SIGINT or SIGTERM. It serves only the API, so it has no web interface of its own to open. Start-up
+failures are fatal and exit non-zero (the web interface disabled, a bind or token error, Tailscale
+not installed); other Tailscale problems are reported on stderr and retried every 30 to 60
+seconds, so a peer recovers when `tailscaled` comes back. A peer needs its own credentials
+(`tact auth login`), and since one Tact per machine can hold the tailnet's port 443, it runs one
+instance. It never prints its token. Run it under a supervisor: the last live session cannot be
+closed, so stop the server instead.
+
+A new session on a peer can start in the peer's default workspace (`--workspace`, else the current
+directory) or in another checkout of its repository, as described in [workspaces](workspaces.md).
+Run `tact serve` from the repository you want to work in.
+
+### Link a peer from the hub
+
+```sh
+ssh peer tact web token | tact machine add peer https://peer.tailnet.ts.net
+tact machine list
+tact machine remove peer
+```
+
+`tact web token` prints the peer's token and nothing else. `tact machine add NAME URL` reads the
+token from stdin (or prompts without echo on a terminal), checks it against the peer's
+`/api/instance`, and saves it only if the peer accepts it. It refuses a token equal to this
+machine's own, which is what a synced `$TACT_HOME` would produce, and it needs `--replace` to
+overwrite an existing machine. A protocol version mismatch is reported but saved: the interface
+refuses to use a peer whose version differs from its own, so upgrade both. Names are lowercase
+letters, digits, and `-` (at most 32). The URL must be `https` with a host, no userinfo, path,
+query, or fragment, and not a loopback address. Plain `http` is not accepted, because the token
+would cross the network unencrypted, and a forwarded loopback port can be taken over by another
+local user.
+
+Each machine is one file, `$TACT_HOME/web/machines/<name>.toml` (directory 0700, files 0600),
+holding the URL and the token. Only the command writes it, and the server reads it on every
+request, so `add` and `remove` apply to a running hub. Never sync `$TACT_HOME/web` between
+machines.
+
+### Use it
+
+When a machine is linked, the sidebar header gets a machine menu: **This machine** and one entry
+per linked name. Choosing one reloads the interface at `?m=<name>`, scoped to that machine: its
+sessions, workspaces, models, review, and settings. A chip in the header, a prefix on the tab
+title, and the composer name the machine. New chats start on the machine you have selected. The
+interface shows a card instead of the chat when the machine refused its token (link it again with
+`tact machine add --replace`), is not linked, or runs a different protocol version, and it
+reconnects on its own while the machine is unreachable.
+
+### How the hub reaches a peer
+
+The browser only ever talks to the hub, with the hub's cookie. The hub relays
+`/api/m/<name>/<route>` to the peer's `/api/<route>` with the peer's token, which never reaches
+the browser. `GET /api/machines` lists the linked names and nothing else.
+
+Only these routes are relayed; everything else is a 404 and no connection is opened:
+
+| Method | Route |
+| :-- | :-- |
+| GET | `instance`, `stream` (SSE), `file`, `review` |
+| GET | `sessions/<id>/entries/<n>`, `sessions/<id>/entries/<n>/images/<i>`, `sessions/<id>/agents/<a>/entries`, `sessions/<id>/agents/<a>/entries/<n>` |
+| POST | `cmd` (32 MiB), `query`, `review/compose`, `refresh`, `range`, `overview`, `ai-review`, `question`, `questions`, `question/cancel` |
+
+Each request is parsed into a typed route and rebuilt from its parts, so no browser header and no
+raw path or query reaches the peer, which receives its own cookie and nothing the browser sent.
+Each response is rebuilt too: the hub picks the status, content type, and security headers, never
+copies a peer header (no cookies, redirects, CSP, or CORS), accepts images only after checking
+their bytes, and caps a response at 64 MiB. Only the event stream is passed on as it arrives, and
+it ends after 45 seconds of silence. The relay uses HTTPS only, follows no redirects, ignores proxy
+environment variables, and puts no time limit on requests other than the stream, because agent-run
+review routes send nothing until the run finishes. A `401` from the peer becomes `409
+machine_unauthorized`, never a sign-out of the hub.
+
+### Trust
+
+- **The hub's token is control of every linked machine.** It can start an agent on the hub, and the
+  hub holds each peer's token. A stolen hub login is a compromise of all of them. Keeping the
+  tokens in a file only the command writes keeps them out of the browser-editable config and out of
+  `tact config`; it is not a boundary against someone who holds the hub token.
+- **A peer is trusted to run its own sessions, not to touch the hub.** It cannot run script in the
+  hub's page, set its cookies, redirect it, or learn its token, and one peer cannot reach another.
+  Everything a peer sends is rendered as text or through the sanitizing renderer, and local state
+  keyed by session ID is kept apart per machine.
+- **Revoking a peer:** `tact machine remove` on the hub stops the hub using it. To make the token
+  itself useless, delete `$TACT_HOME/web/token` on the peer, restart every Tact instance of that
+  user there, and link it again with `--replace`. The same procedure rotates a hub token.
 
 ## Remote access
 
