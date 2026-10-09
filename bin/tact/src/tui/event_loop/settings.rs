@@ -21,7 +21,6 @@ use crate::{
     },
     tui::components::AppEvent,
 };
-use crossterm::event::EventStream;
 use nanocodex::NanocodexError;
 use std::time::Instant;
 use tact_subagents::Subagents;
@@ -48,7 +47,7 @@ impl EventLoop {
         effort: ReasoningEffort,
         reasoning_mode: ReasoningMode,
     ) {
-        self.input = None;
+        self.frontend.detach_input();
         let config = self.config.clone();
         let is_main = self.app.main_pane() == Some(pane);
         self.tasks.spawn_blocking(TaskKind::Effort, move || {
@@ -93,7 +92,7 @@ impl EventLoop {
         let runtime = self.panes.runtime(pane)?;
         let previous = runtime.settings.effort;
         if let Err(error) = result {
-            self.input.get_or_insert_with(EventStream::new);
+            self.frontend.attach_input();
             return self
                 .apply(AppEvent::EffortUpdateFailed {
                     pane,
@@ -113,14 +112,14 @@ impl EventLoop {
             self.show(AppEvent::Transcript { pane, record });
         }
         self.panes.runtime(pane)?.settings.effort = effort;
-        self.input.get_or_insert_with(EventStream::new);
+        self.frontend.attach_input();
         self.scheduler.request_immediate(Instant::now());
         Ok(())
     }
 
     /// Persists a pane's new speed. Only the main pane's speed becomes the configured default.
     pub(super) fn set_speed(&mut self, pane: PaneId, speed: Speed) {
-        self.input = None;
+        self.frontend.detach_input();
         let config = (self.app.main_pane() == Some(pane)).then(|| self.config.clone());
         self.tasks.spawn_blocking(TaskKind::Speed, move || {
             let persisted = config.map_or(Ok(()), |config| config.persist(Setting::Speed(speed)));
@@ -155,7 +154,7 @@ impl EventLoop {
         if self.app.main_pane() == Some(pane) {
             self.config.set_speed(speed);
         }
-        self.input.get_or_insert_with(EventStream::new);
+        self.frontend.attach_input();
         self.scheduler.request_immediate(Instant::now());
         Ok(())
     }

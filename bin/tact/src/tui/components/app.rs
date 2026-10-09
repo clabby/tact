@@ -1107,7 +1107,9 @@ impl AppNode {
         true
     }
 
-    /// Closes `pane` unless work is in flight and `force` is unset.
+    /// Closes `pane` unless work is in flight and `force` is unset. The last live session stays:
+    /// a pane that is still opening may yet fail, and without a live session nothing could open
+    /// another one.
     pub(crate) fn close_pane(
         &mut self,
         pane: PaneId,
@@ -1117,9 +1119,13 @@ impl AppNode {
         if !force && (busy.turns > 0 || busy.shells > 0) {
             return Err(CommandError::TurnRunning);
         }
-        if self.panes.len() == 1 {
+        let another_live = self
+            .panes
+            .iter()
+            .any(|(&other, entry)| other != pane && entry.published.is_some());
+        if !another_live {
             return Err(CommandError::Invalid(
-                "the last session cannot be closed; quit Tact instead".to_owned(),
+                "the last session cannot be closed; stop Tact instead".to_owned(),
             ));
         }
         self.remove_pane(pane);
@@ -2680,6 +2686,27 @@ mod registry_tests {
             }),
             Err(CommandError::Invalid(_))
         ));
+    }
+
+    #[test]
+    fn a_session_still_opening_does_not_let_the_last_live_one_close() {
+        let mut harness = Harness::new();
+        let opening = harness.app.begin_open("Starting new session…").unwrap();
+
+        assert!(matches!(
+            harness.command(Command::Close {
+                session: "main".to_owned(),
+                force: true,
+            }),
+            Err(CommandError::Invalid(_))
+        ));
+        let failed = harness.app.update(AppEvent::OpenFailed {
+            pane: opening,
+            error: "no agent".to_owned(),
+        });
+
+        assert!(failed.effects.is_empty());
+        assert!(harness.app.root(PaneId::Main).is_some());
     }
 
     #[test]

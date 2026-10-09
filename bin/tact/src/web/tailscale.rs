@@ -4,14 +4,15 @@
 //! the child process is the whole lifecycle: stopping or dropping it withdraws the publication and
 //! leaves nothing behind in the Tailscale daemon. The web server itself never depends on Tailscale:
 //! it listens locally either way, and the publication is established, and re-verified, whenever a
-//! sign-in link for another device is wanted.
+//! sign-in link for another device is wanted. A headless server, whose sign-in link is reachable
+//! only through the publication, publishes at start and re-verifies on a timer instead.
 
 use serde::Deserialize;
 use std::{
     collections::BTreeMap,
     fmt, io,
     path::{Path, PathBuf},
-    process::Stdio,
+    process::{Output, Stdio},
     sync::Arc,
     time::Duration,
 };
@@ -20,11 +21,21 @@ use tokio::{
     io::{AsyncRead, AsyncReadExt},
     process::{Child, ChildStderr, ChildStdout, Command},
     sync::Mutex,
+    task::JoinHandle,
 };
+use tokio_util::sync::CancellationToken;
 
 /// How long `tailscale serve` may run before it is considered to have started. It exits quickly
 /// when it cannot publish, for example when Serve is not enabled for the tailnet.
 const STARTUP_GRACE: Duration = Duration::from_secs(2);
+/// How long one Tailscale status command may take. A healthy CLI answers in well under a second;
+/// a hung daemon must neither stall startup nor push back the next re-verification, so a command
+/// is killed after a third of the re-verification interval and the attempt counts as failed.
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
+/// How often a headless server re-verifies its publication.
+const REVERIFY_INTERVAL: Duration = Duration::from_secs(30);
+/// The longest wait between attempts while publishing keeps failing.
+const RETRY_LIMIT: Duration = Duration::from_secs(60);
 /// The most of a failed command's output that is shown to the user.
 const OUTPUT_LIMIT: usize = 400;
 
@@ -142,19 +153,75 @@ impl Tailnet {
     pub(super) async fn stop(&self) {
         *self.0.serve.lock().await = None;
     }
+
+    /// Publishes now, then re-verifies the publication until `shutdown`, republishing whenever
+    /// it was lost. Only a missing Tailscale is an error; every other failure is retried, and each
+    /// change of state is reported once on stderr. Returns `None` when `shutdown` comes before
+    /// the first attempt finishes; that attempt's commands are killed.
+    pub(super) async fn keep_published(
+        &self,
+        shutdown: CancellationToken,
+    ) -> Result<Option<JoinHandle<()>>, TailscaleError> {
+        self.keep_published_every(REVERIFY_INTERVAL, RETRY_LIMIT, shutdown)
+            .await
+    }
+
+    /// [`Tailnet::keep_published`] with an `interval` between checks that consecutive failures
+    /// double up to `limit`.
+    async fn keep_published_every(
+        &self,
+        interval: Duration,
+        limit: Duration,
+        shutdown: CancellationToken,
+    ) -> Result<Option<JoinHandle<()>>, TailscaleError> {
+        let first = tokio::select! {
+            () = shutdown.cancelled() => return Ok(None),
+            first = self.origin() => first,
+        };
+        if let Err(TailscaleError::NotInstalled) = first {
+            return Err(TailscaleError::NotInstalled);
+        }
+        let tailnet = self.clone();
+        Ok(Some(tokio::spawn(async move {
+            let mut reported = report_publication(&first, None);
+            let mut delay = interval;
+            loop {
+                tokio::select! {
+                    () = shutdown.cancelled() => return,
+                    () = tokio::time::sleep(delay) => {}
+                }
+                let outcome = tokio::select! {
+                    () = shutdown.cancelled() => return,
+                    outcome = tailnet.origin() => outcome,
+                };
+                reported = report_publication(&outcome, Some(&reported));
+                delay = if outcome.is_ok() {
+                    interval
+                } else {
+                    delay.saturating_mul(2).min(limit)
+                };
+            }
+        })))
+    }
+}
+
+/// Prints the state `outcome` describes to stderr unless it equals `previous`, and returns it.
+fn report_publication(outcome: &Result<String, TailscaleError>, previous: Option<&str>) -> String {
+    let state = match outcome {
+        Ok(origin) => format!("published to the tailnet at {origin}"),
+        Err(error) => format!("not published to the tailnet: {error}"),
+    };
+    if previous != Some(state.as_str()) {
+        eprintln!("tact: {state}");
+    }
+    state
 }
 
 /// Refuses to share while anything else, such as another Tact, is served on HTTPS port 443: the
 /// tailnet address belongs to one interface at a time. A status that cannot be read is not a
 /// conflict; `tailscale serve` itself then decides.
 async fn ensure_unserved(program: &Path) -> Result<(), TailscaleError> {
-    let Ok(output) = Command::new(program)
-        .args(["serve", "status", "--json"])
-        .stdin(Stdio::null())
-        .kill_on_drop(true)
-        .output()
-        .await
-    else {
+    let Ok(output) = output(program, &["serve", "status", "--json"]).await else {
         return Ok(());
     };
     if output.status.success() && https_port_in_use(&output.stdout) {
@@ -227,13 +294,7 @@ async fn start_serve(program: &Path, port: u16, grace: Duration) -> Result<Serve
 /// This machine's HTTPS name, from `tailscale status --json` run by the first command that exists.
 async fn status(programs: &[PathBuf]) -> Result<(&Path, String), TailscaleError> {
     for program in programs {
-        match Command::new(program)
-            .args(["status", "--json"])
-            .stdin(Stdio::null())
-            .kill_on_drop(true)
-            .output()
-            .await
-        {
+        match output(program, &["status", "--json"]).await {
             Ok(output) if output.status.success() => {
                 return parse_status(&output.stdout).map(|host| (program.as_path(), host));
             }
@@ -248,6 +309,23 @@ async fn status(programs: &[PathBuf]) -> Result<(&Path, String), TailscaleError>
         }
     }
     Err(TailscaleError::NotInstalled)
+}
+
+/// Runs `program` to completion, killing it when it has not finished within [`COMMAND_TIMEOUT`].
+async fn output(program: &Path, arguments: &[&str]) -> io::Result<Output> {
+    let output = Command::new(program)
+        .args(arguments)
+        .stdin(Stdio::null())
+        .kill_on_drop(true)
+        .output();
+    tokio::time::timeout(COMMAND_TIMEOUT, output)
+        .await
+        .unwrap_or_else(|_| {
+            Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("no answer within {} s", COMMAND_TIMEOUT.as_secs()),
+            ))
+        })
 }
 
 #[derive(Deserialize)]
@@ -281,6 +359,7 @@ mod tests {
         os::unix::fs::PermissionsExt,
         path::{Path, PathBuf},
     };
+    use tokio_util::sync::CancellationToken;
 
     const GRACE: Duration = Duration::from_millis(300);
     const RUNNING: &str = r#"{"BackendState":"Running","CertDomains":["box.tail1234.ts.net."]}"#;
@@ -498,5 +577,139 @@ mod tests {
         let second = serve_pids(directory.path()).remove(1);
         drop(tailnet);
         assert!(stops(&second).await);
+    }
+
+    #[tokio::test]
+    async fn a_kept_publication_is_published_at_once_and_again_after_its_serve_dies() {
+        let directory = tempfile::tempdir().unwrap();
+        let tailnet = fake(directory.path(), RUNNING, "exec sleep 30");
+        let shutdown = CancellationToken::new();
+
+        let republisher = tailnet
+            .keep_published_every(
+                Duration::from_millis(100),
+                Duration::from_millis(200),
+                shutdown.clone(),
+            )
+            .await
+            .unwrap()
+            .expect("the first attempt finishes before shutdown");
+
+        let first = serve_pids(directory.path()).remove(0);
+        std::process::Command::new("kill")
+            .arg(&first)
+            .output()
+            .unwrap();
+        let mut republished = false;
+        for _ in 0..50 {
+            if serve_pids(directory.path()).len() == 2 {
+                republished = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(republished, "the dead serve is started again");
+
+        shutdown.cancel();
+        tokio::time::timeout(Duration::from_secs(5), republisher)
+            .await
+            .unwrap()
+            .unwrap();
+        tailnet.stop().await;
+        let second = serve_pids(directory.path()).remove(1);
+        assert!(stops(&second).await);
+    }
+
+    #[tokio::test]
+    async fn a_publication_that_fails_at_start_is_retried() {
+        let directory = tempfile::tempdir().unwrap();
+        let tailnet = fake(directory.path(), STOPPED, "exec sleep 30");
+        let shutdown = CancellationToken::new();
+
+        let republisher = tailnet
+            .keep_published_every(
+                Duration::from_millis(100),
+                Duration::from_millis(200),
+                shutdown.clone(),
+            )
+            .await
+            .unwrap()
+            .expect("the first attempt finishes before shutdown");
+        assert!(serve_pids(directory.path()).is_empty());
+        fs::write(directory.path().join("status.json"), RUNNING).unwrap();
+
+        let mut published = false;
+        for _ in 0..50 {
+            if serve_pids(directory.path()).len() == 1 {
+                published = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(published, "the publication follows Tailscale coming up");
+        shutdown.cancel();
+        republisher.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn keeping_a_publication_requires_tailscale() {
+        let tailnet = Tailnet::with(vec![PathBuf::from("/nonexistent/tailscale")], 7878, GRACE);
+
+        let kept = tailnet.keep_published(CancellationToken::new()).await;
+
+        assert!(matches!(kept, Err(TailscaleError::NotInstalled)));
+    }
+
+    /// A stand-in `tailscale` in `directory` whose every command records its pid in `hung.pid`
+    /// and never answers.
+    fn unresponsive(directory: &Path) -> Tailnet {
+        let program = directory.join("tailscale");
+        fs::write(
+            &program,
+            format!(
+                "#!/bin/sh\necho $$ > {}/hung.pid\nexec sleep 30\n",
+                directory.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+        Tailnet::with(vec![program], 7878, GRACE)
+    }
+
+    #[tokio::test]
+    async fn shutdown_ends_a_first_publication_that_tailscale_never_answers() {
+        let directory = tempfile::tempdir().unwrap();
+        let tailnet = unresponsive(directory.path());
+        let shutdown = CancellationToken::new();
+        let cancel = shutdown.clone();
+        let pid_file = directory.path().join("hung.pid");
+        let watched = pid_file.clone();
+        tokio::spawn(async move {
+            while !watched.exists() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            cancel.cancel();
+        });
+
+        let kept = tokio::time::timeout(Duration::from_secs(5), tailnet.keep_published(shutdown))
+            .await
+            .expect("shutdown ends the first publication");
+
+        assert!(matches!(kept, Ok(None)));
+        let pid = fs::read_to_string(pid_file).unwrap();
+        assert!(stops(pid.trim()).await, "the tailscale command is killed");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_tailscale_command_that_never_answers_times_out() {
+        let directory = tempfile::tempdir().unwrap();
+        let tailnet = unresponsive(directory.path());
+
+        let error = tailnet.origin().await.unwrap_err();
+
+        assert!(
+            matches!(&error, TailscaleError::Run(error) if error.kind() == std::io::ErrorKind::TimedOut),
+            "{error}"
+        );
     }
 }

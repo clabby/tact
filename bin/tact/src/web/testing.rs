@@ -112,7 +112,7 @@ impl Harness {
             public_origin,
             workspaces,
             registry_directory: home.path().join("web/instances"),
-            assets: AssetStore::new(home.path().to_owned()),
+            assets: Some(AssetStore::new(home.path().to_owned())),
             client: api::sibling_client().unwrap(),
             machines: Machines::allowing_http(&home.path().join("web")),
             peer_client: machines::test_peer_client(),

@@ -17,9 +17,11 @@
 //!   actions; [`links`] resolves the links they and the transcript open.
 //! - [`background`]: single-slot tasks such as the external editor and the update check.
 //! - [`lifecycle`]: shutdown ordering.
+//! - [`frontend`]: the terminal, or its absence under `tact serve`.
 
 mod background;
 mod effects;
+mod frontend;
 mod handoff;
 mod lifecycle;
 mod links;
@@ -29,6 +31,8 @@ mod pane_events;
 mod panes;
 mod recent_prompts;
 mod remote;
+#[cfg(test)]
+mod serve_tests;
 mod sessions;
 mod settings;
 mod web;
@@ -36,6 +40,7 @@ mod worker_events;
 
 use self::{
     background::{BackgroundTasks, TaskKind, TaskOutput},
+    frontend::Frontend,
     handoff::HandoffController,
     lifecycle::Lifecycle,
     memory::Memory,
@@ -51,7 +56,6 @@ use super::{
     components::{AppEvent, AppNode, RenderRequest, RootNode},
     scheduler::{RenderScheduler, STREAM_FRAME_INTERVAL},
     system_scheme,
-    terminal::TerminalSession,
 };
 use crate::{
     app::{
@@ -72,8 +76,7 @@ use crate::{
     },
     web::bridge::{self, WebStatus},
 };
-use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
-use futures_util::StreamExt;
+use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
 use std::{
     future, io,
     path::{Path, PathBuf},
@@ -86,19 +89,29 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-/// Serves the terminal and the web front-end until shutdown, returning the main session's ID when
+/// Which front-end the loop serves beside the web interface.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum Interface {
+    /// The interactive terminal. The web server is optional and its failure is not fatal.
+    Terminal,
+    /// `tact serve`: the web server is the only front-end, so failing to start it is fatal.
+    Headless,
+}
+
+/// Serves `interface` and the web front-end until shutdown, returning the main session's ID when
 /// it can be resumed.
 pub(super) async fn run(
     config: Config,
     startup: StartupMode,
     shutdown: CancellationToken,
+    interface: Interface,
 ) -> Result<Option<String>> {
     let (mut event_loop, mut inbox, web_server) =
-        EventLoop::start(config, startup, shutdown).await?;
+        EventLoop::start(config, startup, shutdown, interface).await?;
     event_loop.serve(&mut inbox).await?;
     let outcome = event_loop.outcome();
-    let EventLoop { terminal, .. } = event_loop;
-    drop(terminal);
+    let EventLoop { frontend, .. } = event_loop;
+    drop(frontend);
     web_server.stop().await;
     outcome
 }
@@ -121,13 +134,8 @@ struct EventLoop {
     shutdown: CancellationToken,
     lifecycle: Lifecycle,
     app: AppNode,
-    terminal: TerminalSession,
-    /// Terminal input. It is detached while an external editor owns the terminal and while a task
-    /// that must finish before the next keystroke is handled runs.
-    input: Option<EventStream>,
+    frontend: Frontend,
     scheduler: RenderScheduler,
-    /// The working directory last reported to the terminal.
-    reported_workspace: PathBuf,
     worker: WorkerLink,
     busy_turns: BusyTurns,
     panes: Panes,
@@ -144,12 +152,13 @@ struct EventLoop {
 }
 
 impl EventLoop {
-    /// Configures the main pane's agent, enters the terminal, and starts the worker, the web
-    /// server, and the startup background tasks.
+    /// Configures the main pane's agent, enters the terminal when there is one, and starts the
+    /// worker, the web server, and the startup background tasks.
     async fn start(
         config: Config,
         startup: StartupMode,
         shutdown: CancellationToken,
+        interface: Interface,
     ) -> Result<(Self, Inbox, WebServer)> {
         let initial_effort = config.agent().thinking();
         let initial_speed = config.agent().speed();
@@ -193,7 +202,6 @@ impl EventLoop {
             }
         };
         let workspace = config.agent().workspace().to_path_buf();
-        let mut terminal = TerminalSession::enter().map_err(RuntimeError::Terminal)?;
         let ConfiguredAgent {
             workspace: initial_workspace,
             agent,
@@ -205,9 +213,12 @@ impl EventLoop {
             subagent_updates,
             subagent_control,
         } = configured;
-        terminal
-            .report_working_directory(&initial_workspace)
-            .map_err(RuntimeError::Terminal)?;
+        let frontend = match interface {
+            Interface::Terminal => {
+                Frontend::terminal(&initial_workspace).map_err(RuntimeError::Terminal)?
+            }
+            Interface::Headless => Frontend::Headless,
+        };
         let main_session_id = agent.session_id().to_string();
         let (session, lock, memory_review) = match history {
             Some((next_sequence, lock)) => (
@@ -282,7 +293,12 @@ impl EventLoop {
             main_session_id,
             restored_records.unwrap_or_default(),
         );
-        let web_server = WebServer::spawn(&config, &workspace, web_end, &shutdown);
+        let web_server = match interface {
+            Interface::Terminal => WebServer::spawn(&config, &workspace, web_end, &shutdown),
+            Interface::Headless => WebServer::serve(&config, &workspace, web_end, &shutdown)
+                .await
+                .inspect_err(|_| shutdown.cancel())?,
+        };
         let mut tasks = BackgroundTasks::default();
         tasks.spawn(
             TaskKind::RecentPrompts,
@@ -306,13 +322,11 @@ impl EventLoop {
         };
         let mut event_loop = Self {
             config,
-            reported_workspace: initial_workspace,
             workspace,
             shutdown,
             lifecycle: Lifecycle::Running,
             app,
-            terminal,
-            input: Some(EventStream::new()),
+            frontend,
             scheduler: RenderScheduler::new(STREAM_FRAME_INTERVAL, Instant::now()),
             worker: WorkerLink::new(commands),
             busy_turns,
@@ -344,12 +358,14 @@ impl EventLoop {
             self.present()?;
 
             let running = self.lifecycle.is_running();
-            let rendering = running && !self.tasks.is_active(TaskKind::Editor);
+            let rendering = running
+                && matches!(self.frontend, Frontend::Terminal { .. })
+                && !self.tasks.is_active(TaskKind::Editor);
             let render_deadline = self.scheduler.deadline();
             let animation_deadline = self.app.animation_deadline();
             tokio::select! {
                 () = self.shutdown.cancelled(), if running => self.begin_shutdown().await,
-                event = next_input(&mut self.input), if self.input.is_some() && running => {
+                event = self.frontend.next_input(), if self.frontend.has_input() && running => {
                     self.on_terminal_event(event).await?;
                 }
                 Some(scheme) = inbox.system_scheme.recv(), if running => {
@@ -410,15 +426,18 @@ impl EventLoop {
         }
     }
 
-    /// Publishes changed state to web clients and draws the terminal when a frame is due.
+    /// Publishes changed state to web clients and draws the terminal, if any, when a frame is due.
     fn present(&mut self) -> Result<()> {
         let render = self.app.publish_changes(Origin::Terminal);
         self.scheduler.request(render, Instant::now());
+        let Frontend::Terminal { session, .. } = &mut self.frontend else {
+            return Ok(());
+        };
         if self.lifecycle.is_running()
             && !self.tasks.is_active(TaskKind::Editor)
             && self.scheduler.is_due(Instant::now())
         {
-            self.terminal
+            session
                 .draw(|frame| self.app.render(frame))
                 .map_err(RuntimeError::Terminal)?;
             self.scheduler.presented(Instant::now());
@@ -438,24 +457,18 @@ impl EventLoop {
         let Some(root) = self.app.root(self.app.active_pane()) else {
             return Ok(());
         };
-        if root.workspace() == self.reported_workspace {
-            return Ok(());
-        }
-        self.terminal
-            .report_working_directory(root.workspace())
-            .map_err(RuntimeError::Terminal)?;
-        self.reported_workspace = root.workspace().to_owned();
-        Ok(())
+        self.frontend
+            .report_workspace(root.workspace(), false)
+            .map_err(|error| RuntimeError::Terminal(error).into())
     }
 
     /// Reports the active pane's workspace to the terminal unconditionally, for when the terminal
     /// may have lost it.
     fn rereport_active_workspace(&mut self) -> Result<()> {
         let workspace = self.active_workspace().to_owned();
-        self.terminal
-            .report_working_directory(&workspace)
-            .map_err(RuntimeError::Terminal)?;
-        Ok(())
+        self.frontend
+            .report_workspace(&workspace, true)
+            .map_err(|error| RuntimeError::Terminal(error).into())
     }
 
     /// Delivers an event whose handling cannot request effects, scheduling the render it asks for.
@@ -487,8 +500,8 @@ impl EventLoop {
                 &event,
                 Event::Mouse(mouse) if matches!(mouse.kind, MouseEventKind::Down(_))
             );
-        if refresh_cursor {
-            self.terminal.invalidate_cursor_visibility();
+        if refresh_cursor && let Ok(session) = self.frontend.session() {
+            session.invalidate_cursor_visibility();
         }
         let mut update = if is_image_paste(&event)
             && let Some(data_url) = clipboard::image_data_url()
@@ -507,7 +520,7 @@ impl EventLoop {
     /// has released the terminal and settings being persisted are written before the loop drains.
     async fn begin_shutdown(&mut self) {
         self.lifecycle.stop();
-        self.input = None;
+        self.frontend.detach_input();
         self.tasks.shutdown().await;
     }
 
@@ -524,13 +537,6 @@ impl EventLoop {
         self.worker
             .take_error()
             .map_or(Ok(session_id), |error| Err(error.into()))
-    }
-}
-
-async fn next_input(input: &mut Option<EventStream>) -> Option<io::Result<Event>> {
-    match input {
-        Some(input) => input.next().await,
-        None => future::pending().await,
     }
 }
 

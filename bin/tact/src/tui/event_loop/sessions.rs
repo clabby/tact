@@ -23,7 +23,6 @@ use crate::{
     },
     tui::components::{AppEvent, DraftReset, RestoredSessionProjection, RootNode, SessionListKind},
 };
-use crossterm::event::EventStream;
 use nanocodex::HarnessModel as Model;
 use std::{path::Path, sync::Arc, time::Instant};
 
@@ -174,7 +173,7 @@ impl EventLoop {
         draft_reset: DraftReset,
         configure: impl FnOnce(PaneSettings) -> Result<ConfiguredAgent> + Send + 'static,
     ) {
-        self.input = None;
+        self.frontend.detach_input();
         self.tasks.spawn_blocking(TaskKind::NewSession, move || {
             TaskOutput::NewSession(NewSession {
                 pane,
@@ -192,7 +191,7 @@ impl EventLoop {
             draft_reset,
             configured,
         } = session;
-        self.input.get_or_insert_with(EventStream::new);
+        self.frontend.attach_input();
         match configured {
             Ok(_) if self.app.root(pane).is_none() => {}
             Ok(configured) => {
@@ -220,7 +219,7 @@ impl EventLoop {
 
     /// Lists stored sessions in `workspace` for a picker, leaving out the pane's own session.
     pub(super) fn load_sessions(&mut self, pane: PaneId, kind: SessionListKind, workspace: &Path) {
-        self.input = None;
+        self.frontend.detach_input();
         let store = SessionStore::new(self.config.path());
         let workspace = workspace.to_path_buf();
         let active_session_id = self
@@ -249,7 +248,7 @@ impl EventLoop {
         pane: PaneId,
         sessions: Result<Vec<SessionSummary>>,
     ) {
-        self.input.get_or_insert_with(EventStream::new);
+        self.frontend.attach_input();
         self.show(match sessions {
             Ok(sessions) => AppEvent::SessionsLoaded { pane, sessions },
             Err(error) => AppEvent::SessionLoadFailed {
@@ -280,7 +279,7 @@ impl EventLoop {
                 return;
             }
         };
-        self.input = None;
+        self.frontend.detach_input();
         let agent = self.config.agent();
         let effort = agent.thinking();
         let preferred_reasoning_mode = agent.reasoning_mode();
@@ -306,7 +305,7 @@ impl EventLoop {
             speed,
             restored,
         } = session;
-        self.input.get_or_insert_with(EventStream::new);
+        self.frontend.attach_input();
         match restored {
             Ok(_) if self.app.root(pane).is_none() => {}
             Ok(RestoredSession {

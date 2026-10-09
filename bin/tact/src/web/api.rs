@@ -68,7 +68,8 @@ pub(super) struct AppState {
     pub(super) public_origin: PublicOrigin,
     pub(super) workspaces: Arc<Workspaces>,
     pub(super) registry_directory: PathBuf,
-    pub(super) assets: AssetStore,
+    /// The web interface's files, or `None` for `tact serve`, which serves only its API.
+    pub(super) assets: Option<AssetStore>,
     /// Carries this machine's token to sibling instances; see [`sibling_client`].
     pub(super) client: reqwest::Client,
     /// The linked machines, read from disk on every request.
@@ -628,10 +629,18 @@ async fn stream_events(State(state): State<Arc<AppState>>) -> ApiResult<ApiError
 }
 
 async fn static_asset(State(state): State<Arc<AppState>>, uri: Uri) -> Response<Body> {
+    let Some(store) = &state.assets else {
+        return ApiError::new(
+            StatusCode::NOT_FOUND,
+            "unknown_route",
+            "this server serves only its API",
+        )
+        .into_response();
+    };
     let path = uri.path().trim_start_matches('/');
-    let Some(assets) = state.assets.current().await else {
+    let Some(assets) = store.current().await else {
         if path.is_empty() {
-            let mut response = Response::new(Body::from(state.assets.placeholder_html()));
+            let mut response = Response::new(Body::from(store.placeholder_html()));
             response.headers_mut().insert(
                 header::CONTENT_TYPE,
                 HeaderValue::from_static("text/html; charset=utf-8"),
@@ -854,7 +863,8 @@ mod tests {
                 .contains("default-src 'none'")
         );
         assert_eq!(headers[header::CONTENT_TYPE], "text/html; charset=utf-8");
-        assert_eq!(body, harness.state.assets.placeholder_html().into_bytes());
+        let store = harness.state.assets.as_ref().unwrap();
+        assert_eq!(body, store.placeholder_html().into_bytes());
         let missing = Request::builder()
             .uri("/app.js")
             .body(Body::empty())

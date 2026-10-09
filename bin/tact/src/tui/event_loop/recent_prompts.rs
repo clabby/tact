@@ -16,7 +16,6 @@ use crate::{
     },
     tui::components::{AppEvent, RecentPromptDraft},
 };
-use crossterm::event::EventStream;
 use std::{
     cmp::Reverse,
     future::Future,
@@ -133,7 +132,7 @@ impl EventLoop {
             return;
         }
 
-        self.input = None;
+        self.frontend.detach_input();
         self.recent_prompts.request = Some(request);
         if !self.tasks.is_active(TaskKind::RecentPrompts) {
             self.tasks.spawn(
@@ -147,12 +146,12 @@ impl EventLoop {
         match (prompts, self.recent_prompts.request.take()) {
             (Ok(prompts), Some(request)) => {
                 self.recent_prompts.cache = Some(prompts.clone());
-                self.input.get_or_insert_with(EventStream::new);
+                self.frontend.attach_input();
                 self.show(request.into_event(prompts));
             }
             (Ok(prompts), None) => self.recent_prompts.cache = Some(prompts),
             (Err(error), Some(request)) => {
-                self.input.get_or_insert_with(EventStream::new);
+                self.frontend.attach_input();
                 self.show(AppEvent::RecentPromptLoadFailed {
                     pane: request.pane,
                     error: format!("Could not load recent prompts: {error}"),

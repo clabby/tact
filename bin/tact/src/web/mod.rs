@@ -38,10 +38,14 @@ use std::{
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
-use tailscale::Tailnet;
+use tailscale::{Tailnet, TailscaleError};
 use thiserror::Error;
 use token::{MachineToken, TokenError};
-use tokio::{net::TcpListener, sync::mpsc::UnboundedSender};
+use tokio::{
+    net::TcpListener,
+    sync::{mpsc::UnboundedSender, watch},
+    task::JoinHandle,
+};
 use tokio_util::sync::CancellationToken;
 use workspaces::Workspaces;
 
@@ -49,7 +53,7 @@ use workspaces::Workspaces;
 const PORT_SCAN_SPAN: u16 = 20;
 
 #[derive(Debug, Error)]
-enum StartError {
+pub(crate) enum StartError {
     #[error("the web interface is disabled")]
     Disabled,
     #[error(transparent)]
@@ -64,6 +68,8 @@ enum StartError {
     },
     #[error("could not build the HTTP client: {0}")]
     Client(#[source] reqwest::Error),
+    #[error(transparent)]
+    Tailscale(#[from] TailscaleError),
 }
 
 /// Starts the web server for this process and reports its readiness through `end.status`.
@@ -75,34 +81,13 @@ pub(crate) fn spawn(
     workspace: &Path,
     end: bridge::WebEnd,
     shutdown: CancellationToken,
-) -> tokio::task::JoinHandle<()> {
+) -> JoinHandle<()> {
     let settings = Settings::new(config, workspace);
     tokio::spawn(async move {
-        let bridge::WebEnd {
-            publications,
-            requests,
-            queries,
-            auxiliary,
-            status,
-        } = end;
-        let hub = Hub::spawn(publications, shutdown.clone());
-        match Server::start(
-            settings,
-            hub,
-            Channels {
-                requests,
-                queries,
-                auxiliary,
-            },
-            shutdown.clone(),
-        )
-        .await
-        {
+        let (status, started) = Server::launch(settings, end, shutdown.clone()).await;
+        match started {
             Ok(server) => {
-                status.send_replace(bridge::WebStatus::Ready {
-                    url: server.login_url.clone(),
-                    tailnet: server.tailnet.clone(),
-                });
+                status.send_replace(server.ready());
                 server.run().await;
             }
             Err(error) => {
@@ -115,6 +100,30 @@ pub(crate) fn spawn(
     })
 }
 
+/// Starts the web server of `tact serve`, which has no other front-end. It serves only the API,
+/// for a hub's web interface to reach; every other path is a JSON 404. Startup failure is returned
+/// instead of reported, and with `web.tailscale` the server is published before this returns,
+/// unless `shutdown` comes first, and kept published while it runs. The server runs until
+/// `shutdown` is cancelled.
+pub(crate) async fn serve(
+    config: &Config,
+    workspace: &Path,
+    end: bridge::WebEnd,
+    shutdown: CancellationToken,
+) -> Result<JoinHandle<()>, StartError> {
+    let settings = Settings {
+        api_only: true,
+        ..Settings::new(config, workspace)
+    };
+    let (status, started) = Server::launch(settings, end, shutdown.clone()).await;
+    let mut server = started?;
+    if let Some(tailnet) = &server.tailnet {
+        server.republisher = tailnet.keep_published(shutdown).await?;
+    }
+    status.send_replace(server.ready());
+    Ok(tokio::spawn(server.run()))
+}
+
 struct Settings {
     enabled: bool,
     bind: IpAddr,
@@ -123,6 +132,8 @@ struct Settings {
     /// The Tact home directory; the web state lives in its `web` subdirectory.
     home: PathBuf,
     workspace: PathBuf,
+    /// Serve the API without the web interface.
+    api_only: bool,
 }
 
 /// How the server is reached from other devices.
@@ -150,6 +161,7 @@ impl Settings {
             },
             home: config.path().parent().unwrap_or(Path::new(".")).to_owned(),
             workspace: workspace.to_owned(),
+            api_only: false,
         }
     }
 }
@@ -168,9 +180,34 @@ struct Server {
     shutdown: CancellationToken,
     _registration: Registration,
     tailnet: Option<Tailnet>,
+    /// Keeps a headless server published to the tailnet; it ends with `shutdown`.
+    republisher: Option<JoinHandle<()>>,
 }
 
 impl Server {
+    /// Starts the server on the loop's side of the bridge, returning the status sender that
+    /// reports its readiness.
+    async fn launch(
+        settings: Settings,
+        end: bridge::WebEnd,
+        shutdown: CancellationToken,
+    ) -> (watch::Sender<bridge::WebStatus>, Result<Self, StartError>) {
+        let bridge::WebEnd {
+            publications,
+            requests,
+            queries,
+            auxiliary,
+            status,
+        } = end;
+        let hub = Hub::spawn(publications, shutdown.clone());
+        let channels = Channels {
+            requests,
+            queries,
+            auxiliary,
+        };
+        (status, Self::start(settings, hub, channels, shutdown).await)
+    }
+
     async fn start(
         settings: Settings,
         hub: Hub,
@@ -247,7 +284,7 @@ impl Server {
             public_origin,
             workspaces,
             registry_directory,
-            assets: AssetStore::new(settings.home),
+            assets: (!settings.api_only).then(|| AssetStore::new(settings.home)),
             client: api::sibling_client().map_err(StartError::Client)?,
             machines: Machines::new(&web_directory),
             peer_client: machines::peer_client().map_err(StartError::Client)?,
@@ -261,7 +298,15 @@ impl Server {
             shutdown,
             _registration: registration,
             tailnet,
+            republisher: None,
         })
+    }
+
+    fn ready(&self) -> bridge::WebStatus {
+        bridge::WebStatus::Ready {
+            url: self.login_url.clone(),
+            tailnet: self.tailnet.clone(),
+        }
     }
 
     async fn run(self) {
@@ -272,6 +317,11 @@ impl Server {
         if served.is_err() {
             // The listener failed; the registry entry is removed on drop either way.
             self.shutdown.cancel();
+        }
+        // The republisher stops with `shutdown`; it must be gone before the publication is
+        // withdrawn, or it could publish again.
+        if let Some(republisher) = self.republisher {
+            drop(republisher.await);
         }
         if let Some(tailnet) = self.tailnet {
             tailnet.stop().await;
@@ -350,6 +400,7 @@ mod tests {
                 exposure: Exposure::Local,
                 home: home.path().to_owned(),
                 workspace: workspace.path().to_owned(),
+                api_only: false,
             },
             hub,
             Channels {
@@ -374,6 +425,12 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(unauthenticated.status(), reqwest::StatusCode::UNAUTHORIZED);
+        let interface = client.get(format!("{origin}/")).send().await.unwrap();
+        assert_eq!(interface.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            interface.headers()["content-type"],
+            "text/html; charset=utf-8"
+        );
         let mut stream = client
             .get(format!("{origin}/api/stream"))
             .header("cookie", format!("tact={token}"))
@@ -411,6 +468,7 @@ mod tests {
                 exposure: Exposure::PublicUrl("https://tact.example.net".to_owned()),
                 home: home.path().to_owned(),
                 workspace: home.path().to_owned(),
+                api_only: false,
             },
             hub,
             Channels {
@@ -440,6 +498,7 @@ mod tests {
                 exposure: Exposure::Local,
                 home: ".".into(),
                 workspace: ".".into(),
+                api_only: false,
             },
             hub,
             Channels {

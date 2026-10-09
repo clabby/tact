@@ -217,6 +217,8 @@ enum Command {
     },
     /// Open the interactive session picker.
     Resume,
+    /// Run the app server without a terminal, for the web interface and linked machines.
+    Serve,
     /// Transfer memories between the global local store and the remote service.
     Memory {
         #[command(subcommand)]
@@ -398,6 +400,11 @@ impl Cli {
                 let config = Config::load(overrides)?;
                 let startup = tui::StartupMode::ResumeSelector(config.agent().model());
                 Self::run_tui(config, startup).await
+            }
+            Some(Command::Serve) => {
+                let config = Config::load(overrides)?;
+                let shutdown = CancellationToken::new();
+                shutdown::run_until_complete(shutdown.clone(), tui::serve(config, shutdown)).await
             }
             Some(Command::Update { revision }) => run_update(revision).await,
             // Adding a server creates the selected file when it does not exist yet.
