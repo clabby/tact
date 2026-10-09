@@ -1479,19 +1479,20 @@ fn draft_images(root: &RootNode) -> Vec<DraftImage> {
     root.shared_draft_images()
         .map(|(marker, data_url)| DraftImage {
             marker: marker.to_owned(),
-            data_url: Arc::from(data_url),
+            data_url: Arc::clone(data_url),
         })
         .collect()
 }
 
-/// Markers identify images: a marker is never reused for a different image within a draft, so
-/// comparing markers avoids comparing image data on every change.
+/// The draft shares each image's data with its publication, so the published images are current
+/// while the draft holds the same data under the same markers. Comparing the shared data by
+/// identity avoids comparing image bytes on every change.
 fn images_match(published: &[DraftImage], root: &RootNode) -> bool {
     let mut current = root.shared_draft_images();
     published.iter().all(|image| {
-        current
-            .next()
-            .is_some_and(|(marker, _)| image.marker == marker)
+        current.next().is_some_and(|(marker, data_url)| {
+            image.marker == marker && Arc::ptr_eq(&image.data_url, data_url)
+        })
     }) && current.next().is_none()
 }
 
@@ -2818,6 +2819,7 @@ mod parity_tests {
         },
         web::bridge::{self, WebEnd},
     };
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use nanocodex::{
         ClaudeModel, HarnessModel as Model, Model as CodexModel,
         ReasoningMode as NanocodexReasoningMode, Thinking,
@@ -2981,6 +2983,52 @@ mod parity_tests {
             part,
             UserInput::Image { image_url, .. } if image_url == IMAGE
         )));
+    }
+
+    #[test]
+    fn recalling_a_prompt_from_history_publishes_its_images() {
+        const UNSENT: &str = "data:image/png;base64,dW5zZW50";
+        let mut harness = Harness::new();
+        harness
+            .command(Command::AttachImage {
+                session: "main".to_owned(),
+                data_url: IMAGE.to_owned(),
+            })
+            .unwrap();
+        harness
+            .command(Command::Submit {
+                session: "main".to_owned(),
+                rev: 1,
+                queue: false,
+            })
+            .unwrap();
+        harness
+            .command(Command::AttachImage {
+                session: "main".to_owned(),
+                data_url: UNSENT.to_owned(),
+            })
+            .unwrap();
+        harness.publications();
+
+        harness
+            .app
+            .update(AppEvent::Terminal(Event::Key(KeyEvent::new(
+                KeyCode::Up,
+                KeyModifiers::NONE,
+            ))));
+        harness.app.publish_changes(Origin::Terminal);
+
+        assert_eq!(
+            harness.app.root(PaneId::Main).unwrap().shared_draft(),
+            "[Image #1]"
+        );
+        assert_eq!(
+            draft_images(&harness.publications()),
+            [vec![DraftImage {
+                marker: "[Image #1]".to_owned(),
+                data_url: Arc::from(IMAGE),
+            }]]
+        );
     }
 
     #[test]

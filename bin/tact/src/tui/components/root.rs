@@ -2138,7 +2138,7 @@ impl RootNode {
     }
 
     /// The images of [`Self::shared_draft`] as (marker, data URL) pairs.
-    pub(crate) fn shared_draft_images(&self) -> Box<dyn Iterator<Item = (&str, &str)> + '_> {
+    pub(crate) fn shared_draft_images(&self) -> Box<dyn Iterator<Item = (&str, &Arc<str>)> + '_> {
         match &self.queue_edit {
             Some(edit) => match &edit.original_draft {
                 Some(draft) => Box::new(draft.images()),

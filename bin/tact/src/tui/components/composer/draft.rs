@@ -18,7 +18,7 @@ use ratatui::{
     layout::{Position, Rect},
     style::{Color, Style},
 };
-use std::{mem, ops::Range};
+use std::{mem, ops::Range, sync::Arc};
 use unicode_segmentation::UnicodeSegmentation;
 
 /// The direction of a cursor movement or edit.
@@ -52,14 +52,14 @@ impl ComposerDraft {
         &self.text
     }
 
-    pub(crate) fn images(&self) -> impl Iterator<Item = (&str, &str)> {
+    pub(crate) fn images(&self) -> impl Iterator<Item = (&str, &Arc<str>)> {
         draft_images(&self.text, &self.images)
     }
 }
 
 struct PastedImage {
     range: Range<usize>,
-    data_url: String,
+    data_url: Arc<str>,
 }
 
 /// The visual layout of the text for one width and cursor position.
@@ -72,10 +72,10 @@ struct CachedLayout {
 fn draft_images<'a>(
     text: &'a str,
     images: &'a [PastedImage],
-) -> impl Iterator<Item = (&'a str, &'a str)> {
+) -> impl Iterator<Item = (&'a str, &'a Arc<str>)> {
     images
         .iter()
-        .map(|image| (&text[image.range.clone()], image.data_url.as_str()))
+        .map(|image| (&text[image.range.clone()], &image.data_url))
 }
 
 impl Default for DraftBuffer {
@@ -105,7 +105,7 @@ impl DraftBuffer {
     }
 
     /// The images as (marker, data URL) pairs in text order.
-    pub(super) fn images(&self) -> impl Iterator<Item = (&str, &str)> {
+    pub(super) fn images(&self) -> impl Iterator<Item = (&str, &Arc<str>)> {
         draft_images(&self.text, &self.images)
     }
 
@@ -194,6 +194,44 @@ impl DraftBuffer {
         self.layout = None;
     }
 
+    /// The draft as a prompt, including any surrounding whitespace.
+    pub(super) fn prompt(&self) -> Submission {
+        Submission::multimodal(
+            self.text.clone(),
+            self.images
+                .iter()
+                .map(|image| (image.range.clone(), image.data_url.clone())),
+        )
+    }
+
+    /// Replaces the draft with `prompt` and its images, and moves the cursor to the end. Images
+    /// pasted afterwards continue numbering after the prompt's highest marker.
+    pub(super) fn load(&mut self, prompt: &Submission) {
+        self.text = prompt.display_text().to_owned();
+        self.images = prompt
+            .images()
+            .map(|(range, data_url)| PastedImage {
+                range,
+                data_url: Arc::clone(data_url),
+            })
+            .collect();
+        self.next_image = self
+            .images
+            .iter()
+            .filter_map(|image| {
+                self.text[image.range.clone()]
+                    .strip_prefix("[Image #")?
+                    .strip_suffix(']')?
+                    .parse::<u64>()
+                    .ok()
+            })
+            .max()
+            .map_or(1, |number| number.saturating_add(1));
+        self.cursor = self.text.len();
+        self.preferred_column = None;
+        self.layout = None;
+    }
+
     /// Inserts text at the cursor, after the marker when the cursor is inside
     /// one.
     pub(super) fn insert(&mut self, text: &str) {
@@ -219,7 +257,7 @@ impl DraftBuffer {
         self.insert(&marker);
         self.images.push(PastedImage {
             range: start..self.cursor,
-            data_url,
+            data_url: data_url.into(),
         });
         self.images.sort_by_key(|image| image.range.start);
         self.next_image = self.next_image.saturating_add(1);

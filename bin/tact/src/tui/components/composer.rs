@@ -49,6 +49,7 @@ use std::{
     fmt::{self, Display, Formatter, Write as _},
     ops::Range,
     path::Path,
+    sync::Arc,
     time::{Duration, Instant},
 };
 use unicode_width::UnicodeWidthStr;
@@ -309,7 +310,7 @@ impl Composer {
     }
 
     /// The draft's images as (marker, data URL) pairs in text order.
-    pub(crate) fn images(&self) -> impl Iterator<Item = (&str, &str)> {
+    pub(crate) fn images(&self) -> impl Iterator<Item = (&str, &Arc<str>)> {
         self.draft.images()
     }
 
@@ -816,7 +817,7 @@ impl Composer {
             if command.is_empty() {
                 return ComposerUpdate::unchanged();
             }
-            self.history.record(format!("!{command}"));
+            self.history.record(Submission::text(format!("!{command}")));
             self.replace_draft(String::new());
             return ComposerUpdate::effect(ComposerEffect::RunShell(command), true);
         }
@@ -824,7 +825,7 @@ impl Composer {
         let prompt = self
             .take_submission()
             .expect("non-empty composer draft must produce a submission");
-        self.history.record(prompt.display_text().to_owned());
+        self.history.record(prompt.clone());
         ComposerUpdate::effect(ComposerEffect::Submit(prompt), true)
     }
 
@@ -836,14 +837,15 @@ impl Composer {
             return true;
         }
         let prompt = match direction {
-            Direction::Backward => self.history.previous(self.draft.text()),
+            Direction::Backward => self.history.previous(|| self.draft.prompt()),
             Direction::Forward if browsing => self.history.next(),
             Direction::Forward => None,
         };
         let Some(prompt) = prompt else {
             return false;
         };
-        self.replace_draft(prompt);
+        self.draft.load(&prompt);
+        self.scroll = 0;
         true
     }
 
@@ -1313,6 +1315,13 @@ mod tests {
 
     fn new_composer() -> Composer {
         Composer::new(Path::new("/work"), ReasoningEffort::Medium)
+    }
+
+    fn images(composer: &Composer) -> Vec<(&str, &str)> {
+        composer
+            .images()
+            .map(|(marker, data_url)| (marker, &**data_url))
+            .collect()
     }
 
     /// The status line of [`new_composer`].
@@ -2030,7 +2039,7 @@ mod tests {
 
         assert_eq!(composer.draft(), "é \nkeep [Image #2]");
         assert_eq!(
-            composer.images().collect::<Vec<_>>(),
+            images(&composer),
             [("[Image #2]", "data:image/png;base64,kept")]
         );
         assert_eq!(
@@ -2286,6 +2295,72 @@ mod tests {
         composer.update(key(KeyCode::Down, KeyModifiers::NONE));
 
         assert_eq!(composer.draft(), "previous!");
+    }
+
+    #[test]
+    fn recalled_prompts_resubmit_their_images() {
+        let mut composer = new_composer();
+        composer.update(ComposerEvent::Terminal(Event::Paste("inspect ".to_owned())));
+        composer.update(ComposerEvent::PasteImage(
+            "data:image/png;base64,sent".to_owned(),
+        ));
+        composer.update(key(KeyCode::Enter, KeyModifiers::NONE));
+
+        composer.update(key(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(
+            images(&composer),
+            [("[Image #1]", "data:image/png;base64,sent")]
+        );
+        composer.update(ComposerEvent::PasteImage(
+            "data:image/png;base64,added".to_owned(),
+        ));
+        assert_eq!(composer.draft(), "inspect [Image #1][Image #2]");
+
+        let update = composer.update(key(KeyCode::Enter, KeyModifiers::NONE));
+        let Some(ComposerEffect::Submit(submission)) = update.effect else {
+            panic!("recalled image prompt should submit");
+        };
+        let PromptInput::Content(content) = submission.agent_prompt().instruction else {
+            panic!("recalled image prompt should use multimodal content");
+        };
+        let sent = content
+            .iter()
+            .filter_map(|item| match item {
+                UserInput::Image { image_url, .. } => Some(image_url.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            sent,
+            ["data:image/png;base64,sent", "data:image/png;base64,added"]
+        );
+    }
+
+    #[test]
+    fn browsing_history_keeps_each_drafts_own_images() {
+        let mut composer = new_composer();
+        composer.update(ComposerEvent::Terminal(Event::Paste("older ".to_owned())));
+        composer.update(ComposerEvent::PasteImage(
+            "data:image/png;base64,older".to_owned(),
+        ));
+        composer.update(key(KeyCode::Enter, KeyModifiers::NONE));
+        composer.update(ComposerEvent::Terminal(Event::Paste("unsent ".to_owned())));
+        composer.update(ComposerEvent::PasteImage(
+            "data:image/png;base64,unsent".to_owned(),
+        ));
+
+        composer.update(key(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(
+            images(&composer),
+            [("[Image #1]", "data:image/png;base64,older")]
+        );
+        composer.update(key(KeyCode::Down, KeyModifiers::NONE));
+
+        assert_eq!(composer.draft(), "unsent [Image #1]");
+        assert_eq!(
+            images(&composer),
+            [("[Image #1]", "data:image/png;base64,unsent")]
+        );
     }
 
     #[test]

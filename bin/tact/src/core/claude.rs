@@ -508,7 +508,10 @@ impl CodeModeObserver for Observer<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{app::config::Speed, core::set_speed};
+    use crate::{
+        app::config::Speed,
+        core::{prompt::Submission, set_speed},
+    };
     use axum::{
         Json, Router,
         extract::State,
@@ -709,6 +712,37 @@ mod tests {
                 .collect::<Vec<_>>();
             assert_eq!(replies, ["first reply", "second reply"]);
         }
+    }
+
+    #[tokio::test]
+    async fn pasted_images_reach_claude_as_image_blocks() {
+        const PNG: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGMQjD0JAAG6ATiGpB8nAAAAAElFTkSuQmCC";
+        let mut server = server(vec![final_text()]).await;
+        let workspace = tempfile::tempdir().unwrap();
+        let (agent, _events) = agent(&server, workspace.path(), tools().build().unwrap());
+        let submission =
+            Submission::multimodal("look [Image #1]".to_owned(), [(5..15, PNG.into())]);
+
+        let turn = agent.prompt(submission.agent_prompt()).await.unwrap();
+        timeout(Duration::from_secs(10), turn)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let request = server.requests.recv().await.unwrap();
+        let content = &request["messages"].as_array().unwrap().last().unwrap()["content"];
+        let image = content
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|block| block["type"] == "image")
+            .expect("the prompt image should be sent as an image block");
+        assert_eq!(image["source"]["media_type"], "image/png");
+        assert_eq!(
+            image["source"]["data"],
+            PNG.strip_prefix("data:image/png;base64,").unwrap()
+        );
+        agent.shutdown().await.unwrap();
     }
 
     fn fast_agent(
