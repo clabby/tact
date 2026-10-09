@@ -32,7 +32,8 @@ similar) and give Tact its address (`web.public_url`). See "Remote access".
 - Machine token: `$TACT_HOME/web/token` (0600, 32 CSPRNG bytes, base64url). Registry:
   `$TACT_HOME/web/instances/<pid>.json` (pid, port, workspace, started_at), removed on exit; readers
   tolerate stale files. Assets: `$TACT_HOME/web/assets/v<version>` (bundle id
-  `tact-web-v<version>.tar.gz`, override `TACT_WEB_ASSETS`).
+  `tact-web-v<version>.tar.gz`, override `TACT_WEB_ASSETS`); a build from source uses
+  `$TACT_HOME/web/assets/development` instead, which `just install-dev` links.
 - The bundle is looked up on every request while it is missing, so one installed after startup is
   served without a restart; until then `/` shows a built-in page explaining the installation. A
   release build also downloads and verifies the matching bundle in the background on first start.

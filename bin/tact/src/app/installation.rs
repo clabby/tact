@@ -44,12 +44,22 @@ impl InstallationKind {
 
     /// The tag of the GitHub Release that published this build: `v<version>` for an official
     /// release and `dev-<revision>` for a pre-release. A build not made from a release archive has
-    /// no release of its own, so it names the official release of its version, whose web bundle it
-    /// shares.
+    /// no release of its own and names the official release of its version.
     pub(crate) fn release_tag(&self) -> String {
         match self {
             Self::PreRelease { revision } => format!("dev-{revision}"),
             _ => format!("v{}", env!("CARGO_PKG_VERSION")),
+        }
+    }
+
+    /// The directory under `<home>/web/assets` that holds this build's web bundle. A release
+    /// build keeps the bundle it downloaded for its release tag. A source build has its own
+    /// directory, where `just install-dev` links the bundle it built, so developing never replaces
+    /// a downloaded bundle and installing a release never discards a development one.
+    pub(crate) fn web_bundle_directory(&self) -> String {
+        match self {
+            Self::Development => "development".to_owned(),
+            _ => self.release_tag(),
         }
     }
 }
@@ -288,6 +298,11 @@ mod tests {
         };
         assert_eq!(pre_release.release_tag(), "dev-0123456789ab");
         assert!(!pre_release.is_development());
+        assert_eq!(pre_release.web_bundle_directory(), "dev-0123456789ab");
+        assert_eq!(
+            InstallationKind::Development.web_bundle_directory(),
+            "development"
+        );
         assert_eq!(
             InstallationKind::ReleaseArchive.release_tag(),
             format!("v{}", env!("CARGO_PKG_VERSION"))
