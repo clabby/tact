@@ -4,6 +4,7 @@ import { glyph } from "../ui/glyphs";
 import { createSphere } from "../ui/dot-sphere";
 import { openMenu } from "../ui/menu";
 import { orderSessions } from "./session-pins";
+import { machineUrl } from "../core/machine";
 import type { Connection } from "../core/store";
 import { toast } from "../ui/toast";
 import type { ModelCatalog, OpenSpec, PersistedSession, SessionSummary, SiblingInstance } from "../core/wire";
@@ -13,6 +14,10 @@ const isMac = /Mac|iPhone|iPad/.test(navigator.platform);
 
 export type SidebarHost = {
   api: ApiClient;
+  /** The linked machine this page works on, or null for the hub's own machine. */
+  machine: string | null;
+  /** Where pins are kept; private to the machine. */
+  storage: Pick<Storage, "getItem" | "setItem">;
   catalog(): ModelCatalog | null;
   /** Called after the user picked a session, so phones can close the drawer. */
   navigated(): void;
@@ -45,17 +50,19 @@ export class Sidebar {
   /** What the search field filters the live list by; History is searched on the server. */
   private filter = "";
   /** Sessions this browser keeps above the rest of the live list. */
-  private pinned = new Set<string>(JSON.parse(localStorage.getItem(PINS_KEY) ?? "[]") as string[]);
+  private pinned: Set<string>;
   private historyRequest: AbortController | null = null;
   private historyLoaded = false;
   private searchTimer = 0;
 
   constructor(private readonly root: HTMLElement, private readonly host: SidebarHost) {
+    this.pinned = new Set(JSON.parse(host.storage.getItem(PINS_KEY) ?? "[]") as string[]);
     root.innerHTML = `
       <div class="sidebar-head">
         <div class="brand"><span class="brand-mark" aria-hidden="true">t</span><div class="brand-text"><strong>Tact</strong><span class="brand-workspace"></span></div></div>
         <button type="button" class="icon-button drawer-close" aria-label="Hide sidebar" title="Hide sidebar (${isMac ? "⌘B" : "Ctrl B"})">${glyph("sidebar", "glyph glyph-fold")}${glyph("close", "glyph glyph-close")}</button>
       </div>
+      <button type="button" class="machine-button" aria-haspopup="menu" hidden><span class="machine-label"></span>${glyph("chevron-down")}</button>
       <div class="new-chat">
         <button type="button" class="new-chat-button">${glyph("plus")}<span>New chat</span></button>
         <button type="button" class="new-chat-model" aria-label="New chat with model" aria-haspopup="menu">${glyph("chevron-down")}</button>
@@ -76,6 +83,20 @@ export class Sidebar {
     this.footer = root.querySelector(".sidebar-foot")!;
     this.bind();
     this.renderFooter("connecting", []);
+  }
+
+  /** Offers the linked machines in a menu; with none linked there is nothing to choose and the menu stays hidden. */
+  setMachines(names: readonly string[]) {
+    const button = this.root.querySelector<HTMLButtonElement>(".machine-button")!;
+    button.hidden = names.length === 0;
+    button.querySelector(".machine-label")!.textContent = this.host.machine ?? "This machine";
+    button.onclick = () => openMenu(button, [null, ...names].map((name) => ({
+      label: name ?? "This machine",
+      checked: name === this.host.machine,
+      run: () => {
+        if (name !== this.host.machine) location.assign(machineUrl(location.href, name));
+      },
+    })), "Machine");
   }
 
   setWorkspace(repository: string, workspace: string) {
@@ -215,7 +236,7 @@ export class Sidebar {
 
   private togglePin(id: string) {
     if (!this.pinned.delete(id)) this.pinned.add(id);
-    localStorage.setItem(PINS_KEY, JSON.stringify([...this.pinned]));
+    this.host.storage.setItem(PINS_KEY, JSON.stringify([...this.pinned]));
     this.setLive(this.live, this.active);
   }
 

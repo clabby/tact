@@ -13,6 +13,8 @@ import type { CommandName, Commands, ModelCatalog, ModelInfo } from "../core/wir
 
 export type ComposerHost = {
   api: ApiClient;
+  /** The linked machine the session runs on, named in the prompt field; null for the hub's own machine. */
+  machine: string | null;
   catalog(): ModelCatalog | null;
   /** Whether the active session is busy, from the live summary. */
   running(): boolean;
@@ -697,7 +699,7 @@ export class Composer {
     this.sendButton.disabled = !this.session || blocked || this.submitting || !this.textarea.value.trim();
     this.queueButton.disabled = this.sendButton.disabled;
     this.sendButton.classList.toggle("busy", this.submitting);
-    this.textarea.placeholder = blocked ? "Compacting context…" : running ? "Steer the running turn" : "Message Tact";
+    this.textarea.placeholder = blocked ? "Compacting context…" : running ? "Steer the running turn" : this.host.machine ? `Message Tact on ${this.host.machine}` : "Message Tact";
     this.sendButton.setAttribute("aria-label", running ? "Steer" : "Send");
     this.sendButton.title = running ? "Steer (Enter), queue (Shift+Tab)" : "Send (Enter)";
   }

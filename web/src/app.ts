@@ -2,6 +2,7 @@ import "./shell/theme.css";
 import "./ui/controls.css";
 import "./shell/shell.css";
 import { ApiClient, ApiError, describeError } from "./core/api-client";
+import { isMachineName, machineBase, machineFailure, machineFromSearch, machineStorage } from "./core/machine";
 import { Transcript } from "./chat/chat";
 import { FindBar } from "./chat/find-bar";
 import { agentNote } from "./chat/agent-links";
@@ -26,7 +27,7 @@ import { openSheet } from "./ui/sheet";
 import { toast } from "./ui/toast";
 import { openMenu } from "./ui/menu";
 import { checkoutMenu, workspaceChip, workspaceLabel } from "./core/workspaces";
-import type { CommandName, Commands, ModelCatalog, SiblingInstance, Subagent, Workspaces } from "./core/wire";
+import { PROTOCOL_VERSION, type CommandName, type Commands, type ModelCatalog, type SiblingInstance, type Subagent, type Workspaces } from "./core/wire";
 
 const root = document.getElementById("app")!;
 const SIDEBAR_KEY = "tact.web.sidebar";
@@ -53,6 +54,49 @@ function showUnreachable(error: unknown, retry: () => void) {
   root.querySelector("button")!.addEventListener("click", retry);
 }
 
+/**
+ * A full-window card for a linked machine that cannot be used. Everything shown is text, and the
+ * way back to the hub's own machine is always offered.
+ */
+function showMachineGate(machine: string, card: { title: string; message: string; hint?: string; mark?: "alert" | "spinner" }) {
+  document.title = `${machine} · Tact`;
+  root.innerHTML = `<div class="gate"><div class="gate-card" role="alert">
+    <div class="gate-mark">${card.mark === "spinner" ? '<span class="spinner"></span>' : glyph("alert")}</div>
+    <h1></h1><p class="gate-message"></p><p class="gate-hint" hidden></p>
+    <a class="button">Use this machine</a>
+  </div></div>`;
+  root.querySelector<HTMLAnchorElement>(".gate-card a")!.href = location.pathname;
+  root.querySelector(".gate-card h1")!.textContent = card.title;
+  root.querySelector(".gate-message")!.textContent = card.message;
+  const hint = root.querySelector<HTMLElement>(".gate-hint")!;
+  hint.hidden = card.hint === undefined;
+  hint.textContent = card.hint ?? "";
+}
+
+function showRelink(machine: string) {
+  showMachineGate(machine, {
+    title: "Link this machine again",
+    message: `${machine} no longer accepts this Tact's token.`,
+    hint: `In a terminal on this computer, run: tact machine add ${machine} <url> --replace`,
+  });
+}
+
+function showUnregistered(machine: string) {
+  showMachineGate(machine, {
+    title: "No such linked machine",
+    message: `This Tact has no linked machine named ${machine}.`,
+    hint: "Link one with: tact machine add <name> <url>",
+  });
+}
+
+function showVersionMismatch(machine: string, version: number) {
+  showMachineGate(machine, {
+    title: "Update Tact on this machine",
+    message: `${machine} speaks protocol ${version}, but this page needs protocol ${PROTOCOL_VERSION}.`,
+    hint: "Install the same Tact version on both machines, then reload.",
+  });
+}
+
 class App {
   private readonly store = new Store();
   private readonly theme = new ThemeController();
@@ -63,6 +107,8 @@ class App {
   private readonly sidebar: Sidebar;
   private readonly stream: StreamClient;
   private readonly shell: HTMLElement;
+  /** Browser storage private to the machine this page works on. */
+  private readonly storage: Pick<Storage, "getItem" | "setItem">;
   private layout: Layout;
   private catalog: ModelCatalog | null = null;
   private subagents: SubagentsView | null = null;
@@ -88,7 +134,12 @@ class App {
   private pendingLink: HashLink | null = null;
   private linkActivated = false;
 
-  constructor(private readonly api: ApiClient) {
+  /**
+   * `hub` serves sign-in, the machine list, the phone link, and sibling instances. `api` serves
+   * everything about sessions: the hub itself, or the relay to the linked `machine`.
+   */
+  constructor(private readonly hub: ApiClient, private readonly api: ApiClient, private readonly machine: string | null) {
+    this.storage = machineStorage(localStorage, machine);
     root.innerHTML = `
       <div class="app">
         <aside class="sidebar" aria-label="Sessions"></aside>
@@ -96,7 +147,7 @@ class App {
         <main class="main">
           <header class="chat-header">
             <button type="button" class="icon-button menu-button" aria-label="Toggle sidebar" title="Toggle sidebar">${glyph("sidebar")}</button>
-            <div class="chat-title"><h1>Tact</h1><div class="chat-sub"><span class="model-dot"></span><span class="chat-model"></span><span class="chat-effort"></span><span class="chat-workspace" hidden></span></div></div>
+            <div class="chat-title"><h1>Tact</h1><div class="chat-sub"><span class="machine-chip" hidden></span><span class="model-dot"></span><span class="chat-model"></span><span class="chat-effort"></span><span class="chat-workspace" hidden></span></div></div>
             <nav class="segmented view-tabs" role="tablist" aria-label="View">
               <button type="button" class="segment" role="tab" id="tab-chat" aria-controls="view-chat" data-view="chat">Chat</button>
               <button type="button" class="segment" role="tab" id="tab-review" aria-controls="view-review" data-view="review">Review<span class="tab-count" hidden></span></button>
@@ -129,7 +180,8 @@ class App {
           this.showView("review");
           return true;
         },
-        seen: sessionStorage,
+        seen: machineStorage(sessionStorage, machine),
+        fileUrl: (path, session) => api.fileUrl(path, session),
         laidOut: () => this.rail.refresh(),
       },
     );
@@ -146,6 +198,7 @@ class App {
     this.findBar = new FindBar(root.querySelector("#view-chat")!, this.transcript);
     this.composer = new Composer(root.querySelector(".dock")!, {
       api,
+      machine,
       catalog: () => this.catalog,
       running: () => this.activeRunning(),
       openRecentPrompts: () => this.openRecentPrompts(),
@@ -157,6 +210,8 @@ class App {
     });
     this.sidebar = new Sidebar(root.querySelector(".sidebar")!, {
       api,
+      machine,
+      storage: this.storage,
       catalog: () => this.catalog,
       navigated: () => this.dispatch({ type: "toggle-drawer", open: false }),
       setTheme: (choice) => this.theme.set(choice),
@@ -165,7 +220,7 @@ class App {
       workspaceToken: (workspace) => this.workspaceToken(workspace),
     });
     this.stream = new StreamClient({
-      url: "./api/stream",
+      url: api.url("stream"),
       connect: (url) => new EventSource(url, { withCredentials: true }),
       onEvent: (event) => this.store.dispatch(event),
       onConnection: (connection) => this.store.setConnection(connection),
@@ -175,6 +230,13 @@ class App {
           return true;
         } catch (error) {
           if (error instanceof ApiError && error.status === 401) return false;
+          // A machine that stops accepting the hub's token, or leaves the registry, is not coming back by retrying.
+          const failure = machineFailure(error);
+          if (machine !== null && failure !== null) {
+            this.stream.stop();
+            (failure === "relink" ? showRelink : showUnregistered)(machine);
+            return true;
+          }
           throw error;
         }
       },
@@ -191,6 +253,7 @@ class App {
     this.applyLayout();
     this.transcript.show(null);
     this.composer.show(null);
+    this.renderHeader();
   }
 
   start() {
@@ -209,10 +272,14 @@ class App {
       this.renderHeader();
       this.sidebar.refreshWorkspaces();
     }).catch(() => {});
-    void this.api.instances().then(({ instances }) => {
-      this.instances = instances;
-      this.sidebar.renderFooter(this.store.state.connection, instances);
-    }).catch(() => {});
+    // Sibling instances are other hubs of this user's own machine; a linked machine's page has none.
+    if (this.machine === null) {
+      void this.hub.instances().then(({ instances }) => {
+        this.instances = instances;
+        this.sidebar.renderFooter(this.store.state.connection, instances);
+      }).catch(() => {});
+    }
+    void this.hub.machines().then(({ machines }) => this.sidebar.setMachines(machines.map(({ name }) => name))).catch(() => {});
     this.pendingLink = linkTarget(location.hash);
     addEventListener("hashchange", () => {
       this.pendingLink = linkTarget(location.hash);
@@ -236,6 +303,11 @@ class App {
           if (state.connection === "locked") {
             this.stream.stop();
             showLocked("This browser's login is no longer valid.");
+            return;
+          }
+          if (this.machine !== null && state.protocolVersion !== null && state.protocolVersion !== PROTOCOL_VERSION) {
+            this.stream.stop();
+            showVersionMismatch(this.machine, state.protocolVersion);
             return;
           }
           this.renderConnection();
@@ -451,7 +523,11 @@ class App {
     this.trackFinish(running);
     this.shell.classList.toggle("running", running);
     const unread = this.store.state.live.filter((summary) => summary.unread).length;
-    document.title = `${unread ? `(${unread}) ` : ""}${title} · Tact`;
+    const place = this.machine === null ? "" : `${this.machine} · `;
+    document.title = `${place}${unread ? `(${unread}) ` : ""}${title} · Tact`;
+    const chip = root.querySelector<HTMLElement>(".machine-chip")!;
+    chip.hidden = this.machine === null;
+    chip.textContent = this.machine ?? "";
     setAttentionBadge(unread > 0 || this.finishedUnseen);
   }
 
@@ -459,7 +535,9 @@ class App {
     const banner = root.querySelector<HTMLElement>(".connection-banner")!;
     const connection = this.store.state.connection;
     banner.hidden = connection === "open" || (connection === "connecting" && !this.store.state.session);
-    banner.innerHTML = `<span class="spinner"></span>${connection === "reconnecting" ? "Reconnecting to Tact…" : "Connecting…"}`;
+    const target = this.machine ?? "Tact";
+    banner.innerHTML = `<span class="spinner"></span><span></span>`;
+    banner.lastElementChild!.textContent = connection === "reconnecting" ? `Reconnecting to ${target}…` : "Connecting…";
     this.sidebar.renderFooter(connection, this.instances);
   }
 
@@ -504,6 +582,7 @@ class App {
     };
     this.review = mountReviewPanel(body, {
       api: this.api,
+      storage: this.storage,
       activeSession: () => this.store.state.session?.id ?? null,
       onActiveSessionChange: subscribe(this.reviewListeners.active),
       onWorkspaceChanged: subscribe(this.reviewListeners.workspace),
@@ -739,7 +818,7 @@ class App {
     palette.register(() => [
       { id: "memory", title: "Memory", group: "Tact", icon: "database", keywords: "memories", run: () => void openMemories(this.api) },
       { id: "config", title: "Edit configuration", group: "Tact", icon: "settings", keywords: "config settings", run: () => void openConfigEditor(this.api) },
-      { id: "phone", title: "Open on your phone (QR code)", group: "Tact", icon: "monitor", keywords: "qr scan mobile link", run: () => void openPhoneLink(this.api) },
+      { id: "phone", title: "Open on your phone (QR code)", group: "Tact", icon: "monitor", keywords: "qr scan mobile link", run: () => void openPhoneLink(this.hub, this.machine) },
       { id: "reload", title: "Reload configuration", group: "Tact", icon: "refresh", keywords: "config", run: () => {
         void this.api.command("reload_config").then(() => toast("Configuration reloaded."), (error) => toast(describeError(error), "danger"));
       } },
@@ -816,27 +895,44 @@ function isEditable(target: EventTarget | null) {
   return target instanceof HTMLElement && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName));
 }
 
+/** How long a linked machine that cannot be reached at start-up is left before the next attempt. */
+const MACHINE_RETRY_MS = 5000;
+
 async function main() {
-  const api = new ApiClient();
+  const hub = new ApiClient();
+  const machine = machineFromSearch(location.search);
+  if (machine !== null && !isMachineName(machine)) return showUnregistered(machine);
+  const api = machine === null ? hub : new ApiClient(machineBase(machine));
   const { token } = parseHashLink(location.hash);
   if (token) {
     // The token is a credential: drop it from the address bar and history before anything else,
     // keeping an entry link that came with it.
     history.replaceState(null, "", location.pathname + location.search + hashWithoutToken(location.hash));
     try {
-      await api.login(token);
+      await hub.login(token);
     } catch (error) {
       if (error instanceof ApiError && error.status === 401) return showLocked("This login link is invalid or has expired.");
       return showUnreachable(error, () => location.reload());
     }
   }
   try {
-    await api.instance();
+    const instance = await api.instance();
+    if (machine !== null && instance.protocol_version !== PROTOCOL_VERSION) {
+      return showVersionMismatch(machine, instance.protocol_version);
+    }
   } catch (error) {
     if (error instanceof ApiError && error.status === 401) return showLocked();
-    return showUnreachable(error, () => void main());
+    if (machine === null) return showUnreachable(error, () => void main());
+    switch (machineFailure(error)) {
+      case "relink": return showRelink(machine);
+      case "unregistered": return showUnregistered(machine);
+      case null:
+        showMachineGate(machine, { title: `Reconnecting to ${machine}…`, message: describeError(error), mark: "spinner" });
+        setTimeout(() => void main(), MACHINE_RETRY_MS);
+        return;
+    }
   }
-  new App(api).start();
+  new App(hub, api, machine).start();
 }
 
 void main();

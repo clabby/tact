@@ -231,17 +231,17 @@ export function openReflect(api: ApiClient, session: string) {
  * Shows a QR code that signs a phone in to this Tact. The address is the configured public origin,
  * else the origin this page was opened from; a link only this computer can reach is never shown.
  */
-export async function openPhoneLink(api: ApiClient) {
+export async function openPhoneLink(hub: ApiClient, machine: string | null) {
   const sheet = openSheet("Open on your phone");
   sheetMessage(sheet.body, "Preparing the link…");
   try {
-    const { public_origin, token } = await api.link();
+    const { public_origin, token } = await hub.link();
     const origin = shareableOrigin(public_origin, location.origin);
     if (!origin) {
       sheet.body.innerHTML = `<div class="phone-link"><p class="phone-caption">This page is open at an address only this computer can reach (${location.host}), so a phone cannot use a link built from it. Open Tact through your tunnel's address (for example a Tailscale name) and try again, or set <code>web.tailscale</code> or <code>web.public_url</code>.</p></div>`;
       return;
     }
-    const url = signInLink(origin, token);
+    const url = signInLink(origin, token, machine);
     sheet.body.innerHTML = `<div class="phone-link"><div class="qr"></div>
       <p class="phone-origin"></p>
       <p class="phone-caption">Scan with your phone's camera. It signs the phone in to this Tact, so treat the code like a password.</p>

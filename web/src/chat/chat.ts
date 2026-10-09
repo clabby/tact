@@ -49,7 +49,9 @@ export type TranscriptOptions = {
   /** Shows the review of the session's changes. */
   openReview?(): void;
   /** Remembers per transcript the last entry the reader saw, to mark what arrived since. */
-  seen?: Storage;
+  seen?: Pick<Storage, "getItem" | "setItem">;
+  /** The URL serving a workspace file that Markdown names as an image, resolved against `session`'s workspace. */
+  fileUrl(path: string, session?: string): string;
   /** Called after turns were laid out again, so summaries of them (the prompt rail) can follow. */
   laidOut?(): void;
   /** Shows a workspace file a message names in the review; false when the review lacks it. */
@@ -136,7 +138,7 @@ export class Transcript {
     private readonly scroller: HTMLElement,
     private readonly jump: HTMLButtonElement,
     private readonly theme: () => Theme,
-    private readonly options: TranscriptOptions = {},
+    private readonly options: TranscriptOptions,
   ) {
     this.list = document.createElement("div");
     this.list.className = "transcript";
@@ -797,8 +799,10 @@ export class Transcript {
   }
 
   /** Local images resolve against the viewed session workspace; a subagent key is session/agent. */
-  private imageSource = (destination: string) =>
-    localImageSource(destination, this.source?.key.split("/")[0]);
+  private imageSource = (destination: string) => {
+    const path = localImagePath(destination);
+    return path === null ? null : this.options.fileUrl(path, this.source?.key.split("/")[0]);
+  };
 
   /** Renders settled Markdown at once, highlighted, as assistant text is. */
   private markdown = (container: HTMLElement, text: string) => {
@@ -836,13 +840,14 @@ export class Transcript {
       recovered ? "retried" : "",
     ].filter(Boolean).join(" · ");
     element.innerHTML = `<button class="tool-row" type="button" aria-expanded="${open}">
-      <span class="tool-state" aria-label="${recovered ? "failed, retried" : entry.state}"></span>
+      <span class="tool-state"></span>
       <span class="tool-name"></span>
       <span class="tool-subject"><span class="tool-summary"></span></span>
       <span class="tool-meta"></span>
       ${glyph("chevron-right", "glyph chevron")}
     </button>`;
     const name = element.querySelector<HTMLElement>(".tool-name")!;
+    element.querySelector(".tool-state")!.setAttribute("aria-label", recovered ? "failed, retried" : entry.state);
     name.textContent = toolLabel(entry.name, entry.child_count);
     name.title = entry.name;
     element.querySelector(".tool-summary")!.textContent = entry.summary;
@@ -999,7 +1004,12 @@ export class Transcript {
     if (outcome.toolCalls) item(`${outcome.toolCalls} tool call${outcome.toolCalls === 1 ? "" : "s"}`);
     if (outcome.files) {
       const files = item(`${outcome.files} file${outcome.files === 1 ? "" : "s"}`);
-      files.insertAdjacentHTML("beforeend", ` <span class="add">+${outcome.additions}</span> <span class="del">−${outcome.deletions}</span>`);
+      for (const [className, text] of [["add", `+${outcome.additions}`], ["del", `−${outcome.deletions}`]]) {
+        const count = document.createElement("span");
+        count.className = className;
+        count.textContent = text!;
+        files.append(" ", count);
+      }
     }
     if (outcome.tests) item(outcome.tests.summary, outcome.tests.failed ? "danger" : "");
     if (outcome.failures.length) {
@@ -1298,8 +1308,13 @@ function tailView(outcome: ToolOutcome) {
 }
 
 function prependStats(meta: HTMLElement, additions: number, deletions: number) {
-  const stats = `<span class="add">+${additions}</span><span class="del">−${deletions}</span>`;
-  meta.innerHTML = meta.textContent ? `${stats} · ${meta.innerHTML}` : stats;
+  const added = document.createElement("span");
+  added.className = "add";
+  added.textContent = `+${additions}`;
+  const deleted = document.createElement("span");
+  deleted.className = "del";
+  deleted.textContent = `−${deletions}`;
+  meta.prepend(added, deleted, ...(meta.textContent ? [" · "] : []));
 }
 
 function clockTime(unixMs: number) {
@@ -1324,16 +1339,14 @@ async function copy(text: string, done: string) {
  * Local image destinations (absolute, file://, or workspace-relative) are served by the instance;
  * remote ones are never loaded by the page.
  */
-function localImageSource(destination: string, session?: string) {
+function localImagePath(destination: string) {
   if (!destination || /^([a-z][a-z0-9+.-]*:(?!\/\/\/)|\/\/)/i.test(destination)) return null;
-  let path = destination;
   try {
-    path = decodeURIComponent(destination);
+    return decodeURIComponent(destination);
   } catch {
     // A destination that is not percent-encoded is used as written.
+    return destination;
   }
-  const query = session ? `&session=${encodeURIComponent(session)}` : "";
-  return `./api/file?path=${encodeURIComponent(path)}${query}`;
 }
 
 function child<K extends keyof HTMLElementTagNameMap>(parent: HTMLElement, tag: K, className: string) {

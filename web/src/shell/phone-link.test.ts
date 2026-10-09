@@ -20,6 +20,10 @@ test("without a reachable origin there is no link to share", () => {
   expect(shareableOrigin("not a url", "http://localhost:7878")).toBeNull();
 });
 
+test("a phone signs in on the machine the page works on", () => {
+  expect(signInLink("https://h.ts.net", "a/b", "devbox")).toBe("https://h.ts.net/?m=devbox#k=a%2Fb");
+});
+
 test("the token goes in the fragment", () => {
   expect(signInLink("https://h.ts.net", "a/b")).toBe("https://h.ts.net/#k=a%2Fb");
 });

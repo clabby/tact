@@ -1,5 +1,12 @@
 // Wire types of the Tact web protocol. `docs/web.md` (and `web::bridge`) is the source of truth.
 
+/**
+ * The protocol version this bundle speaks. A server reporting another version is not used: its
+ * stream and API may mean something else. `tools/build.ts` declares the same number for the
+ * server's compatibility check.
+ */
+export const PROTOCOL_VERSION = 9;
+
 export type Effort = "low" | "medium" | "high" | "xhigh" | "max";
 export type Speed = "standard" | "fast" | "ultrafast";
 export type ReasoningMode = "standard" | "pro";

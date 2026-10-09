@@ -18,7 +18,11 @@ export function shareableOrigin(publicOrigin: string | null, pageOrigin: string)
   return isLocalOrigin(origin) ? null : origin;
 }
 
-/** The sign-in link for an origin; the token travels in the fragment, which is never sent. */
-export function signInLink(origin: string, token: string) {
-  return `${origin}/#k=${encodeURIComponent(token)}`;
+/**
+ * The sign-in link for an origin; the token travels in the fragment, which is never sent. It opens
+ * on `machine` when the page it was made on works on a linked machine.
+ */
+export function signInLink(origin: string, token: string, machine: string | null = null) {
+  const query = machine === null ? "" : `?m=${encodeURIComponent(machine)}`;
+  return `${origin}/${query}#k=${encodeURIComponent(token)}`;
 }

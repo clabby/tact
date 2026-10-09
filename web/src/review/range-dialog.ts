@@ -105,7 +105,7 @@ export class RangeDialog {
 
   private timelineMarkup() {
     return this.deps.targets().map((target) => `
-      <div class="commit-target" data-range-target="${target.index}">
+      <div class="commit-target" data-range-target="${escapeHtml(String(target.index))}">
         <button class="commit-target-main" data-range-expand aria-label="Expand range through ${escapeHtml(targetLabel(target))}: ${escapeHtml(target.title)}">
           <span class="commit-rail"><i></i><b></b></span>
           <span class="commit-id">${escapeHtml(targetLabel(target))}</span>

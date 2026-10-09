@@ -57,7 +57,10 @@ export function openSubagents(
     sheet.body.querySelector(".agent-scroller")!,
     sheet.body.querySelector(".agent-view .jump-latest")!,
     theme,
-    { empty: { title: "Pick a subagent", body: "Its transcript streams here while it works." } },
+    {
+      empty: { title: "Pick a subagent", body: "Its transcript streams here while it works." },
+      fileUrl: (path, session) => api.fileUrl(path, session),
+    },
   );
   const panes = sheet.body.querySelector<HTMLElement>(".agents")!;
   /** As in the terminal, the graph starts on active agents; "all" also shows settled ones. */
