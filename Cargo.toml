@@ -38,8 +38,10 @@ image = { version = "0.25.10", default-features = false, features = ["bmp", "dds
 jsonschema = { version = "0.48.5", default-features = false }
 miette = { version = "7.6.0", features = ["fancy"] }
 minisign-verify = "0.2.5"
-nanocodex = { git = "https://github.com/gakonst/nanocodex", rev = "b1f1a166be17870e9b15bcb8ee59526e80ccf759", features = ["claude"] }
-nanocodex-agent = { git = "https://github.com/gakonst/nanocodex", rev = "b1f1a166be17870e9b15bcb8ee59526e80ccf759" }
+# Temporary fork: upstream b1f1a166 plus the Claude tool-result history bound
+# (https://github.com/gakonst/nanocodex/pull/924). Return to upstream once merged.
+nanocodex = { git = "https://github.com/clabby/nanocodex", rev = "c43a30daba0f8c15cb39b8706de70672791e9191", features = ["claude"] }
+nanocodex-agent = { git = "https://github.com/clabby/nanocodex", rev = "c43a30daba0f8c15cb39b8706de70672791e9191" }
 png = "0.18.1"
 pulldown-cmark = { version = "0.13.4", default-features = false }
 ratatui = "0.30.2"
