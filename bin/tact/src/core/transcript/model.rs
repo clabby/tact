@@ -82,11 +82,11 @@ pub(crate) struct TranscriptModel {
     transient: Option<TransientStatus>,
     pending_error: Option<String>,
     pending_compaction_error: Option<String>,
-    /// Turns the worker accepted that have not finished in the current runtime. No run failure
-    /// will report the error of a turn that finishes without being in this set: the worker
-    /// rejected it before it started, or its agent stream already closed. Turn ids are unique only
+    /// Turns the worker accepted that have not finished in the current runtime. A turn that
+    /// finishes outside this set gets no run failure to report its error, because the worker
+    /// rejected it before it started or its agent stream already closed. Turn ids are unique only
     /// within one runtime of the session, which begins with a session start record and ends when
-    /// its agent stream closes; both boundaries clear this set.
+    /// its agent stream closes. Both boundaries clear this set.
     accepted_turns: HashSet<TurnId>,
     /// The accepted input of each steer that no run has applied yet, oldest first. A steer
     /// joins the transcript as a user message only once its run applies it, after its input
