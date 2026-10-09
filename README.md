@@ -5,196 +5,368 @@
 [![Crates.io MSRV](https://img.shields.io/crates/msrv/tact?style=for-the-badge)](https://crates.io/crates/tact)
 [![Crates.io Version](https://img.shields.io/crates/v/tact?style=for-the-badge)](https://crates.io/crates/tact)
 
-`tact` is a terminal interface for [Nanocodex](https://github.com/gakonst/nanocodex).
+Tact is a coding agent for your terminal, built on [Nanocodex](https://github.com/gakonst/nanocodex).
+It runs OpenAI's GPT-6 models out of the box and can also drive Anthropic's Claude models. Alongside
+the terminal UI, every Tact process serves a web interface you can open from a browser or your phone,
+with a built-in code review panel. Agents can delegate work to subagents, keep a small long-term
+memory across sessions, load skills, and call MCP servers.
 
 <https://github.com/user-attachments/assets/5c634ae8-5c74-47c9-bb8c-9c18cb7fc97d>
 
-## Execution environment
+- [Install](#install)
+- [Set up](#set-up)
+- [Web interface](#web-interface)
+- [Subagents](#subagents)
+- [Memory](#memory)
+- [Models, effort, and speed](#models-effort-and-speed)
+- [Sessions](#sessions)
+- [Skills](#skills)
+- [MCP servers](#mcp-servers)
+- [Scripting](#scripting)
+- [Configuration reference](#configuration-reference)
+- [Developing the web interface](#developing-the-web-interface)
 
-Tact does not sandbox agent commands by default. The agent can read and modify files and run
-processes with the same permissions as the user running Tact. For a containerized, credential-
-isolated setup, see the example [development environment](docker/dev/README.md), which keeps real
-OpenAI credentials outside the development container while mounting the workspace and Tact state
-read-write.
+> [!WARNING]
+> Tact does not sandbox agent commands. The agent can read and change files and run processes with
+> your user's permissions. If you want isolation, the example
+> [development container](docker/dev/README.md) runs Tact against a mounted workspace and keeps your
+> real OpenAI credentials outside the container.
 
-## Installation
+## Install
 
-The release installer supports x86-64 and ARM64 glibc-based Linux, as well as Intel and Apple
-Silicon Macs:
+The install script supports x86-64 and ARM64 Linux (glibc) and both Intel and Apple Silicon Macs.
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf \
   https://tact.clab.by/install.sh | sh
 ```
 
-It verifies the release checksum and installs `tact` in `~/.local/bin` without `sudo`. Set
-`TACT_INSTALL_DIR` to another absolute directory if you prefer a different location.
+It checks the release checksum and installs `tact` into `~/.local/bin` without `sudo`. Set
+`TACT_INSTALL_DIR` to an absolute path to install somewhere else.
 
-In a terminal the installer asks which channel to install, with arrow keys or `j`/`k` to move and
-enter to select: the latest signed **release** (the default) or the latest **pre-release** build of
-`main` (see [Pre-release builds](#pre-release-builds)). Without a terminal it installs the release.
-Set `TACT_CHANNEL=release` or `TACT_CHANNEL=pre-release` to choose without being asked, for
-example in scripts:
+When run in a terminal, the script asks whether you want the latest signed **release** (the default)
+or the latest **pre-release** build of `main`. Without a terminal it installs the release. To skip
+the question, set `TACT_CHANNEL` to `release` or `pre-release`.
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf \
   https://tact.clab.by/install.sh | TACT_CHANNEL=pre-release sh
 ```
 
-You can also install the published crate with Cargo:
+You can also install from crates.io or from source.
 
 ```sh
 cargo install tact --locked
-```
 
-To build the current source instead:
-
-```sh
+# or
 git clone https://github.com/clabby/tact.git
 cd tact
 cargo install --locked --path bin/tact
 ```
 
-### Updates
+### Updating
 
-Official release binaries can update themselves:
+Release binaries, whether from the install script or a release archive, update themselves with
+`tact update`. It verifies the release checksum and signature before replacing the binary. If
+Cargo installed Tact, `tact update` prints the `cargo install` command instead so Cargo's records
+stay correct. Every installation except a source build shows a notice when a new release is out.
+Source builds show a red `dev` badge in the composer footer.
 
-```sh
-tact update
-```
+### Pre-release builds
 
-The updater verifies both the release checksum and signature before replacing a release-installer
-binary. If Cargo owns the installation, tact instead prints `cargo install tact --locked` so
-Cargo's records stay accurate, and builds declared through `TACT_PACKAGE_MANAGER` defer to the
-named package manager. Automatic update notifications are shown by every installation except
-builds made from source, which show a red `◉ dev` badge in the composer footer.
-
-#### Pre-release builds
-
-Every change merged to `main` is built and published as a pre-release, so you can try a change
-before the next official release. Find the commit you want, which `tact --version` also prints for
-the build you are running, and install its build with at least its first seven hexadecimal digits:
+Every change merged to `main` is published as a pre-release. To try one, pass at least the first
+seven hex digits of its commit.
 
 ```sh
 tact update 0123abc
 ```
 
-A pre-release is a complete build: it ships the same four platform archives and web interface
-bundle as an official release, which tact downloads on first use exactly as it does for a release.
-Its composer footer shows a blue `◉ pre-release` badge, and `tact --version` reports the
-`pre-release` channel and its commit.
+A pre-release is a full build with the same platform archives and web bundle as a release. It shows
+a blue `pre-release` badge in the composer, and `tact --version` prints its channel and commit.
 
-- **Notifications.** A pre-release is treated as its Cargo version, so it is told when an official
-  release with a later version comes out, just as an official build is.
-- **Returning to a release.** `tact update` without a commit installs the latest official release,
-  even when it has the same version as the pre-release you are running.
-- **Trust.** Official releases are verified against a signing key published in the crates.io
-  package. Pre-releases are not published to crates.io, so they have no independent key: tact
-  verifies only the SHA-256 checksum of the archive, which makes them as trustworthy as the GitHub
-  Releases of `clabby/tact` themselves. Install official releases when that is not enough.
-- **Retention.** Only the five most recent pre-releases are kept. A commit older than that, or
-  one whose release workflow has not finished, reports that it has no build.
-- **Where it works.** Pre-releases replace a tact installed from a release archive or the install
-  script, and a build from source, which makes them easy to try from a checkout. The binary that
-  runs `tact update` is the one replaced, so `target/` holds the download until the next
-  `cargo build`. Builds owned by Cargo or a package manager are not replaced.
-- **Container images.** `ghcr.io/clabby/tact:dev` follows the latest pre-release, and
-  `ghcr.io/clabby/tact:dev-<commit>` pins one. `latest` and version tags stay official.
+- A pre-release still gets notified when an official release with a later version comes out.
+- Plain `tact update` takes you back to the latest release, even if the version number matches.
+- Official releases are checked against a signing key published in the crates.io package.
+  Pre-releases aren't on crates.io, so Tact only checks the archive's SHA-256 checksum. That makes a
+  pre-release exactly as trustworthy as the GitHub Releases of `clabby/tact`. Stick to official
+  releases if that isn't enough.
+- Only the five newest pre-releases are kept. Older commits, or commits whose release workflow
+  hasn't finished, have no build.
+- `tact update <commit>` replaces the binary that runs it. That works for install-script and
+  archive installs, and for source builds (the download sits in `target/` until the next
+  `cargo build`). It won't replace an install that Cargo or a package manager owns.
+- Container images work the same way. `ghcr.io/clabby/tact:dev` tracks the latest pre-release
+  and `ghcr.io/clabby/tact:dev-<commit>` pins one. `latest` and version tags are official releases.
 
 ### Packaging
 
-Distribution packagers can declare the package manager that owns the installation at build time:
+Packagers can declare which package manager owns the install at build time.
 
 ```sh
 TACT_PACKAGE_MANAGER=nix cargo build --release
 ```
 
-Such builds keep update notifications and the managed review interface, but `tact update` points
-at the owning package manager instead of replacing the binary in place. When building from a
-source archive without the git repository, the metadata reported by `tact --version` can be
-provided through the `TACT_GIT_SHA`, `TACT_GIT_BRANCH`, `TACT_GIT_COMMIT_TIMESTAMP`, and
-`TACT_GIT_DIRTY` environment variables.
+These builds keep update notifications and the web interface, but `tact update` points users at the
+package manager. When building from a source archive without git history, set `TACT_GIT_SHA`,
+`TACT_GIT_BRANCH`, `TACT_GIT_COMMIT_TIMESTAMP`, and `TACT_GIT_DIRTY` to fill in `tact --version`.
 
-## Authentication
+## Set up
 
-By default, tact uses the ChatGPT session stored by Codex in `$CODEX_HOME/auth.json` or
-`~/.codex/auth.json`. If that file does not exist, it uses `OPENAI_API_KEY`, then `openai.api_key`
-in the TOML configuration.
+Tact works with no configuration if you already use Codex, but several features are off by default.
+This section gets you signed in and turns everything on.
 
-To sign in with a ChatGPT subscription:
+### Sign in
+
+By default Tact reuses the ChatGPT login that Codex stores in `$CODEX_HOME/auth.json` (or
+`~/.codex/auth.json`). To sign in with a ChatGPT subscription from Tact itself, run these.
 
 ```sh
 tact auth login
 tact auth status
 ```
 
-`tact auth logout` removes the shared credential file, which also signs Codex out. To require
-API-key authentication even with a stored ChatGPT login, configure:
+The credential file is shared, so `tact auth logout` also signs Codex out.
+
+If there's no ChatGPT login, Tact falls back to `OPENAI_API_KEY`, then to `openai.api_key` in the config
+file. To always use an API key, even when a ChatGPT login exists, set `auth.mode = "api-key"` or pass
+`--auth api-key`. A nonblank `OPENAI_API_KEY` beats the configured key. If a credential is rejected, Tact
+reports the error rather than switching to another credential or billing source.
+
+The same OpenAI credentials power web search and image generation, including in Claude sessions.
+
+### The config file
+
+The config file is optional. Tact reads `$TACT_HOME/config.toml`, or `~/.tact/config.toml` when
+`TACT_HOME` is unset. Use `--config PATH` or `TACT_CONFIG` to pick another file. Two commands help.
+
+```sh
+tact config path   # where the active file lives
+tact config show   # every field, with file, env, CLI, and defaults applied
+```
+
+Command-line options win over environment variables, which win over the file. Relative paths in
+the file resolve from the file's directory.
+
+If the file holds an OpenAI or Anthropic API key or a memory token, Tact refuses to load it unless
+only your user can read it. On platforms where Tact can't check file permissions, use environment
+variables for those secrets instead. `tact config show` and `tact auth status` never print keys, and
+`auth status` tells you which source is in use.
+
+```sh
+chmod 600 ~/.tact/config.toml
+```
+
+### Turn on the extras
+
+Memory, skills, and Claude are off by default. Here's a config that turns all of them on.
 
 ```toml
-[auth]
-mode = "api-key"
+[memory]
+enabled = true
 
-[openai]
-api_key = "your-api-key"
+[skills]
+enabled = true
+roots = ["/path/to/your/skills"]
+
+[claude]
+enabled = true
+api_key = "sk-ant-api03-..." # or set ANTHROPIC_API_KEY
+
+[web]
+tailscale = true # optional, lets you reach the web UI from your tailnet
 ```
 
-You can also select API-key authentication with `tact --auth api-key`. A nonblank `OPENAI_API_KEY`
-overrides `openai.api_key`; a blank or absent environment value uses the configured key. Auto mode
-continues to prefer the stored ChatGPT login. A rejected credential returns an error without
-switching authentication or billing sources.
+Subagents and the web interface are on by default. Each feature has its own section below. After
+editing the file, choose **Reload config** from the Actions menu (`/`). Theme and UI changes apply right
+away. Most agent settings apply when a session starts or resumes, but effort and speed can also change
+mid-session. Changing the workspace needs a restart.
 
-Files containing an API key require private permissions on Unix, such as `chmod 600 ~/.tact/config.toml`.
-Config output, debug output, and authentication status redact the key; status identifies its source.
-The same OpenAI credentials authenticate web search and image generation, including those tools
-used by Claude sessions. Remove `openai.api_key` and unset `OPENAI_API_KEY` to remove API credentials.
+### Instructions
 
-## Non-interactive use
+Tact loads global instructions from `AGENTS.override.md` or `AGENTS.md` in `CODEX_HOME` (default
+`~/.codex`), then project instructions from the Git repository root down to the workspace. Use
+`agent.instructions` to replace the base instructions and `agent.append_instructions` to add your own.
+New sessions also get short built-in guidance on using code mode and, when subagents are on, on
+delegation. Your appended instructions come after it.
 
-For scripts and integrations, `tact run` submits one prompt and streams Nanocodex events as JSONL:
+## Web interface
+
+Every running Tact serves a web interface in the background. It's a second front end on the same
+process, not a separate client. The terminal and browser share the active session and each
+session's draft, queue, settings, and transcript. Either one can start, switch, fork, and close
+sessions. There is no headless mode, so the terminal has to stay open.
+
+Open the login URL that Tact shows. The token in its fragment is stored in `~/.tact/web/token` (mode
+0600) and shared by all of your Tact instances. **It grants the same access as a shell**, so treat
+the URL like a password.
+
+### Remote access
+
+The server listens on `127.0.0.1:7878` and picks the next free port if that one is taken. To reach it
+from another device, you have two options.
+
+- Set `web.tailscale = true`. The first time you ask for a QR code, Tact publishes the interface to
+  your tailnet with `tailscale serve`. It checks that Tailscale is online each time, and the
+  local interface works either way.
+- For an SSH forward or any other tunnel, set `web.public_url` to the tunnel's address.
+
+You can't set both.
+
+### Code review
+
+The side panel has a review tool. By default it shows the whole branch from trunk. You can narrow
+the range, watch the live diff, and leave overall or inline comments. **Send to chat** writes the
+review as Markdown into the session's draft so you can edit it before sending. You can also select
+lines and open a private question thread with the agent, or ask for an agent-written visual
+overview of the range. Overviews, AI reviews, and question threads belong to a session, run as
+clean-context prompts on its worker, and stop when the session closes. The review panel can target
+any checkout of the session's repository. See [workspaces](docs/workspaces.md) for how that works.
+
+### Settings and assets
+
+Configure the server under `[web]` (`enabled`, `bind`, `port`, `public_url`, `tailscale`,
+`max_live_sessions`), or turn it off with `--web=false` or `TACT_WEB`.
+
+The browser files ship as a separate bundle (`tact-web-v<version>.tar.gz`). Releases and pre-releases
+download and verify the matching bundle in the background on first start and install it under
+`~/.tact/web/assets/`. Until it's there, the server shows a page explaining how to install it, and it
+picks the bundle up without a restart. Source builds read `~/.tact/web/assets/development` instead. See
+[Developing the web interface](#developing-the-web-interface) for setup.
+
+The full design is in [docs/web.md](docs/web.md).
+
+## Subagents
+
+Subagents are on by default. An agent can hand focused tasks to clean child sessions, message
+them, and collect typed results, without sharing its own conversation history. For each task it
+picks a model and a `thinking` effort. Tact's built-in instructions include a guide for making that
+choice.
+
+A few limits apply. A Codex child can't use a higher tier than its Codex parent (Luna < Sol <
+Astra). No spawn can exceed the current `agent.thinking` setting, and nested children can't exceed
+their parent's effort. `agent.max_subagents` caps concurrency (default 32), and you can also adjust it with
+`-` and `+` in the `/subagents` panel.
+
+To turn subagents off, along with their tools and delegation instructions, set this.
+
+```toml
+[subagents]
+enabled = false
+```
+
+This applies when a session starts or resumes. The runtime is also published as the
+`tact-subagents` crate. See the [subagent design](docs/subagents.md) for details.
+
+## Memory
+
+Memory lets agents keep a small set of durable conclusions across sessions, such as your
+preferences or hard-won facts about a codebase. It's off by default, so turn it on like this.
+
+```toml
+[memory]
+enabled = true
+```
+
+Like other agent settings, turning memory on or off affects new and resumed sessions. The memory
+browser updates as soon as you reload config.
+
+Agents read and write memory only through explicit tool calls. Tact never pastes the memory corpus
+into prompts. With each later user message or steer, Tact adds a short, fixed reminder asking the agent to
+review the conversation and save anything durable.
+
+Local memory is global to your Tact config, not per workspace. It lives in `memory/v1.sqlite3` next
+to `config.toml`. By default it holds up to 512 records, 1 KiB each, and 256 KiB total. Change these
+with `memory.local.max_records`, `max_record_bytes`, and `max_total_bytes`.
+
+### Team memory
+
+To share memory with a team, point Tact at a remote backend. Each person gets their own namespace
+and either writer or read-only credentials.
+
+```toml
+[memory.remote]
+endpoint = "https://memory.example.com/"
+namespace = "alice"
+bearer_token = "replace-with-a-secret-token"
+workspace_roots = ["/path/to/team-projects"]
+```
+
+Each session uses exactly one backend. It's remote inside a listed workspace root (or a linked
+worktree of one) and local everywhere else. If the remote fails, the error goes back to the agent,
+and Tact never quietly falls back to local memory. Remote limits are set by the service, and the
+Cloudflare example applies the same three limits per namespace. A direct bearer token currently
+requires Unix, so Tact can check the file's permissions.
+
+These commands move records between backends.
 
 ```sh
-tact run "inspect the workspace"
+tact memory push --dry-run       # show what a push would send
+tact memory push                 # make your remote namespace match local memory
+tact memory pull --all           # merge remote records into local memory
+tact memory pull --namespace bob # or pick namespaces
 ```
 
-Override the configured model for a newly started agent:
+Push needs a writer credential and treats local memory as the source of truth. It deletes records
+in your namespace that don't exist locally, so run `--dry-run` first. Pull only merges and never
+deletes local records. Normal agent operations never push. The [memory guide](docs/memory.md)
+covers backend selection, the HTTP contract, privacy, and a local server walkthrough.
 
-```sh
-tact --model sol
-tact --model luna run "inspect the workspace"
-```
+## Models, effort, and speed
 
-New sessions use Sol unless a model is configured. `--model` accepts `luna`, `sol`, or `astra`, and their full IDs: `gpt-6-luna`, `gpt-6.1-sol`,
-and `gpt-6-astra`. `TACT_MODEL` provides the same per-launch override.
-Resumed sessions retain the model recorded when they were created. Sessions using retired
-model IDs cannot resume; start a new session with a supported model.
+New sessions use Sol unless you configure a model. Pick one with `agent.model`, `--model`,
+`TACT_MODEL`, or the model picker. `--model` takes either the short name or the full ID. The
+picker filters as you type by name, provider, or ID. Use Up and Down to select, Enter to apply, and
+Esc to cancel.
 
-When no effort is configured, Sol and Astra use low effort and Luna uses medium. A configured
-effort takes precedence. Tact supports low through max effort. Astra, Sol, and Luna support Pro
-mode independently of effort. Open `/effort`, press `p` to toggle the Pro checkbox, and press
-Enter to save. The Pro preference applies to new sessions.
+| Model | ID | Default effort |
+| --- | --- | --- |
+| `luna` | `gpt-6-luna` | medium |
+| `sol` | `gpt-6.1-sol` | low |
+| `astra` | `gpt-6-astra` | low |
+| `haiku-5.5` | `claude-haiku-5-5` | medium |
+| `sonnet-5.5` | `claude-sonnet-5-5` | high |
+| `opus-5.5` | `claude-opus-5-5` | medium |
+| `fable-5.1` | `claude-fable-5-1` | high |
 
-Click the speed icon or choose **Change speed** to open the Standard/Fast/Ultrafast dial.
-The Nerd Fonts turtle, rabbit, and rocket glyphs show Standard, Fast, and Ultrafast effective speeds.
-Speed is independent of effort and remains selected when switching models. Ultrafast uses the
-fastest tier supported by each model:
+Claude models need Claude enabled (see below). Every model supports effort from `low` through `max`,
+and a configured `agent.thinking` overrides the defaults. Resumed sessions keep the model they started
+with. Sessions on retired model IDs can't be resumed.
 
-| Model | Effective ultrafast preference |
+Astra, Sol, and Luna also support **Pro** mode, independent of effort. Open `/effort`, press `p` to toggle
+Pro, and press Enter to save. Pro applies to new sessions.
+
+### Speed
+
+Click the speed icon or choose **Change speed** to switch between Standard, Fast, and Ultrafast (the
+turtle, rabbit, and rocket icons, if you use a Nerd Font). Speed is separate from effort and sticks
+when you change models. Ultrafast picks the fastest tier each model supports.
+
+| Model | Ultrafast means |
 | --- | --- |
 | Astra, Sol | Ultrafast |
 | Luna, Opus 5.5 | Fast |
 | Haiku 5.5, Sonnet 5.5, Fable 5.1 | Standard |
 
-Astra and Sol send `service_tier = "ultrafast"`; access and pricing depend on the account.
-See [OpenAI ultrafast mode](https://developers.openai.com/api/docs/guides/ultrafast-mode).
+Astra and Sol send `service_tier = "ultrafast"`, and access and pricing depend on your account. See
+[OpenAI ultrafast mode](https://developers.openai.com/api/docs/guides/ultrafast-mode) for details.
+Opus fast mode uses Anthropic's [premium fast mode](https://platform.claude.com/docs/en/build-with-claude/fast-mode),
+which your API account needs access to. `agent.speed` stores your preference even when the current
+model runs slower. The older `agent.fast_mode` boolean still loads, but `agent.speed` wins, and saving a
+speed choice replaces it.
 
-OpenAI models use automatic prompt caching. Tact keeps request prefixes and conversation history
-stable across related turns, children, and restored sessions to support reuse. Cache hits depend on
-the provider and matching context. For the GPT-6 API models, the default minimum cache lifetime is
-30 minutes after a write or reuse; see [OpenAI prompt caching](https://developers.openai.com/api/docs/guides/prompt-caching).
+### Prompt caching
 
-Claude support requires an explicit config opt-in and an Anthropic API key in `claude.api_key`
-or `ANTHROPIC_API_KEY`:
+Both providers cache prompts automatically, and Tact keeps request prefixes stable across turns,
+children, and resumed sessions so the cache gets reused. Hits depend on the provider and matching
+context. GPT-6 caches last at least 30 minutes after a write or hit (see
+[OpenAI prompt caching](https://developers.openai.com/api/docs/guides/prompt-caching)). Claude cache
+entries last one hour and cover the system prompt, tools, and conversation prefix. Each hit resets
+the timer. One-hour cache writes cost twice the base input rate, and cache reads are discounted. An
+expired cache costs money and latency, not conversation history.
+
+### Claude
+
+Claude needs an explicit opt-in and an Anthropic API key.
 
 ```toml
 [claude]
@@ -202,88 +374,137 @@ enabled = true
 api_key = "sk-ant-api03-..."
 
 [agent]
-model = "sonnet-5.5" # or haiku-5.5, opus-5.5, fable-5.1
+model = "sonnet-5.5"
 thinking = "medium"
 ```
 
-Type in the model picker to filter by name, provider, or model ID. Use ↑/↓ to select a model,
-Enter to apply it, and Esc to cancel. The check mark identifies the current model.
+Check the key with `tact auth --provider claude status`. A nonblank `ANTHROPIC_API_KEY` overrides
+`claude.api_key`. On platforms where Tact can't verify file privacy, use the environment variable.
 
-With Claude enabled, `--model` and the model picker also accept `haiku-5.5`, `sonnet-5.5`, `opus-5.5`, and `fable-5.1`
-(native IDs `claude-haiku-5-5`, `claude-sonnet-5-5`, `claude-opus-5-5`, and `claude-fable-5-1`). All support
-`low`, `medium`, `high`, `xhigh`, and `max`. Their default efforts are medium for Haiku and Opus and high for Sonnet and Fable.
-Claude uses standard reasoning mode. Opus 5.5 supports accelerated processing through
-`agent.speed = "fast"` or the speed dial; Haiku 5.5, Sonnet 5.5, and Fable 5.1 use standard processing.
-The default speed is standard. Opus fast processing uses
-Anthropic's [premium fast-mode service](https://platform.claude.com/docs/en/build-with-claude/fast-mode),
-which requires access on the API account. Changes apply to subsequently accepted turns.
-Claude requests use automatic prompt caching with a one-hour TTL, covering the system prompt,
-tools, and reusable conversation prefix across long tool calls and user pauses. Cache hits refresh
-the TTL. One-hour cache writes cost twice the base input rate; repeated prefixes use discounted
-cache reads. Expiration affects cost and latency, not the saved conversation.
-Web search and image generation
-remain available to Claude and use OpenAI credentials. For an Anthropic-only setup, set
-`agent.web_search = false` and `agent.image_generation = false`. Codex children need the
-configured OpenAI credentials.
+Claude support is API-key only. Tact doesn't log into Claude subscriptions or read their
+credentials, and it rejects keys that don't start with `sk-ant-api` or `sk-ant-usr-` (a format check,
+not a validity check). Keys never go into prompts, session checkpoints, or shell and MCP
+environments. Codex can still use a ChatGPT subscription in the same task tree via
+`tact auth --provider codex login`.
 
-Check whether the Claude API key is configured:
+The `[claude]` section accepts `enabled`, `api_key`, `api_base_url` (Tact appends `/messages`), and
+`workspace_id`. Any other field is an error, including the retired `auth` and `subscription_store`
+settings, so remove those if you're upgrading. If your key isn't scoped to a workspace, set
+`workspace_id` to the ID from [Console workspace settings](https://platform.claude.com/settings/workspaces),
+and Tact sends it as `anthropic-workspace-id`. Start a new session after changing it.
 
-```sh
-tact auth --provider claude status
+Claude sessions use the same code mode runtime as Codex, with nested tools, memory, MCP, and
+mixed-provider subagents. Web search and image generation still use your OpenAI credentials, as do
+Codex children. For an Anthropic-only setup, set `agent.web_search = false` and
+`agent.image_generation = false`.
+
+Claude has a few limits for now. It always uses standard reasoning mode, can't fork a conversation, and can't
+change effort after the first prompt (start a new session instead). There's no dollar estimate for
+Claude usage. See [Claude integration](docs/claude-integration.md) for more.
+
+## Sessions
+
+Tact saves a checkpoint after each successful turn and keeps an append-only transcript in
+`sessions/v2.sqlite3` next to your config. A failed turn leaves the last good checkpoint in place. If a
+provider stops a session for policy reasons, the session can't be resumed, but you can still read
+its transcript. Checkpoints hold the full conversation unredacted, so treat them as private.
+
+- **Resume.** Choose **Resume session** in the Actions menu to search this workspace's sessions, or
+  run `tact --resume SESSION_ID`. Tact prints the resume command when it exits.
+- **Fork.** Press `Ctrl+T` or choose **Fork session** to open an independent copy next to the current
+  one. You can have one fork open at a time, and forks are saved and resumable like any session.
+- **Compact.** Enter `/compact` or choose **Compact context** while idle. Tact uses the provider's native
+  compaction and saves the result, so resuming picks up the compacted context. A failed compaction
+  leaves the saved session alone.
+- **Copy.** `/copy` copies the latest finished assistant message as raw Markdown, and `/copy N` copies
+  the Nth most recent. It skips reasoning, tool output, empty messages, and anything still
+  streaming, and works mid-turn. **Copy response** in the Actions menu does the same.
+
+### Reflection
+
+Choose **Reflect on session** while idle to have the agent review what it has learned. You can type
+extra instructions to narrow or widen the scope, press Enter with an empty composer for the default,
+or press Esc to cancel. The agent starts from the current conversation, finds related past sessions
+with `find_sessions`, and reads the most promising ones with `read_session`. It uses session lineage so
+forks don't count as independent evidence.
+
+The report checks each lesson against existing memories and instructions and recommends whether it
+belongs in memory, in always-on config, or nowhere. It also states how much evidence it looked at
+and how sure it is. Reflection is read-only. It won't update memory or change anything until you
+ask in a later message. The transcript shows a **Reflection started** marker instead of the
+internal prompt.
+
+## Skills
+
+Skills are local `SKILL.md` files with instructions the model can choose to follow. They're off by default
+because each session carries the skill catalog in its context. Skills can also tell the agent to
+run tools and shell commands, so only enable directories you trust.
+
+```toml
+[skills]
+enabled = true
+roots = ["skills", "/path/to/shared-skills"]
 ```
 
-An explicitly set, nonblank `ANTHROPIC_API_KEY` overrides `claude.api_key`. Configured keys are not
-added to shell or MCP environments. Config files containing a key must have private permissions
-on Unix, for example `chmod 600 ~/.tact/config.toml`, just like files containing a memory token.
-Config output, debug output, and authentication status do not display the key. Status identifies
-which source is selected. On platforms where file privacy cannot be verified, use the environment.
+When enabled, Tact also searches `$CODEX_HOME/skills` (or `~/.codex/skills`) and `~/.agents/skills`.
+Type `$` in the composer to search skills, and press Enter or Tab to insert one. New sessions pick up
+the current skills, and resumed sessions keep the catalog they started with.
 
-Claude supports API-key authentication only. Tact does not log into Claude subscriptions or
-read subscription credentials. Keys must use the `sk-ant-api` or `sk-ant-usr-` prefix; subscription
-tokens and other credential formats are rejected before a client is constructed. This checks
-the credential format, not its validity with Anthropic. Keys are not added to model prompts or
-session checkpoints. Codex can independently use a ChatGPT subscription through
-`tact auth --provider codex login`, including in mixed-provider task trees.
+## MCP servers
 
-For an API key that is not scoped to a workspace, set `claude.workspace_id` to the ID from
-[Console Settings → Workspaces](https://platform.claude.com/settings/workspaces). Tact sends it
-as `anthropic-workspace-id` for Claude roots, children, and auxiliary agents. Workspace-scoped
-keys can leave this unset. Start a new session after changing it.
+Tact supports local stdio servers and remote Streamable HTTP servers. Each server starts
+independently, so one broken server doesn't take down the session or the others.
 
-The `[claude]` section accepts `enabled`, `api_key`, `api_base_url`, and `workspace_id`. Unknown fields,
-including the retired `auth` and `subscription_store` settings, are rejected. Remove those
-fields and supply an API key to use Claude.
-
-`claude.api_base_url` selects a Messages API base URL; Tact appends `/messages`.
-
-Claude uses Tact's Code Mode `exec`/`wait` runtime, including nested tools, memory, MCP, and
-mixed-provider subagents. At this pinned upstream version, Claude cannot fork a conversation or
-change effort after its first prompt; start a new session to choose another effort. Claude usage
-has no dollar estimate from upstream. These limits are reported without substituting Codex
-behavior or pricing.
-
-See the [Claude integration](docs/claude-integration.md) for authentication ownership, Code Mode
-cleanup, and validation boundaries.
-
-## Configuration
-
-The configuration file is optional. Tact reads `$TACT_HOME/config.toml`, or
-`~/.tact/config.toml` when `TACT_HOME` is unset. Select another file with `--config PATH` or
-`TACT_CONFIG`.
-
-Use `config show` to discover every available field and inspect the complete effective
-configuration after file, environment, command-line, and default values have been applied:
+Here's how to add a local server.
 
 ```sh
-tact config path
-tact config show
+tact mcp add filesystem -- \
+  npx -y @modelcontextprotocol/server-filesystem /path/to/workspace
 ```
 
-`agent.speed` stores the requested preference even when the current model uses a slower supported
-speed. Existing `agent.fast_mode` booleans load as standard or fast; an explicit `agent.speed` wins.
-Saving a speed choice writes `agent.speed` and removes the legacy key.
+Use `--cwd PATH` to set its working directory. To pass a secret from your environment, put `--env NAME`
+before `--`. Tact copies the value into the config file without putting it in shell history or process
+arguments.
 
-The default effective configuration looks like this (paths depend on your environment):
+```sh
+tact mcp add --env API_TOKEN private-server -- command --flag
+```
+
+`tact config show` redacts the value, but protect the file like any other credential.
+
+Remote servers store environment variable names, not values.
+
+```sh
+tact mcp add docs --url https://example.com/mcp \
+  --bearer-token-env-var DOCS_MCP_TOKEN \
+  --header-env X-Tenant-ID=DOCS_TENANT_ID
+```
+
+Remote URLs must be HTTP or HTTPS and can't contain embedded credentials.
+
+## Scripting
+
+`tact run` sends one prompt and streams Nanocodex events as JSONL.
+
+```sh
+tact run "inspect the workspace"
+tact --model luna run "inspect the workspace"
+```
+
+Most options have environment variable equivalents, such as `TACT_WORKSPACE`, `TACT_THINKING`, and
+`TACT_RESUME`. `TACT_PROMPT` supplies the prompt for `tact run`. Run `tact --help` for the full list.
+
+Set `agent.completion_hook` to a shell command to run after each turn, for example to send a
+notification. It runs in the workspace, and Tact ignores its output and exit status. The terminal UI
+runs it in the background, and `tact run` waits for it before exiting.
+
+## Configuration reference
+
+Run `tact config show` to see your effective settings. The defaults look like this (paths depend on
+your machine).
+
+<details>
+<summary>Default configuration</summary>
 
 ```toml
 [auth]
@@ -325,6 +546,14 @@ max_total_bytes = 262144
 
 [subagents]
 enabled = true
+
+[web]
+enabled = true
+bind = "127.0.0.1"
+port = 7878
+public_url = ""
+tailscale = false
+max_live_sessions = 8
 
 [tui]
 mouse_scroll_lines = 3
@@ -373,222 +602,36 @@ model_opus = "red"
 model_fable = "cyan"
 ```
 
-Set `agent.completion_hook` to a shell command to run after each conversation turn finishes. Tact
-runs the command in the configured workspace and ignores its output and exit status. Interactive
-sessions start the hook asynchronously so it does not block the UI; `tact run` waits for the hook
-before exiting.
+</details>
 
-The workspace defaults to the directory where tact starts. Relative paths in the configuration are
-resolved from the configuration file's directory; relative command-line paths are resolved from the
-current directory. Command-line options take precedence over environment variables, which take
-precedence over the file.
-
-New sessions append concise built-in guidance for orchestrating related tool calls in code mode.
-When subagents are enabled, they also append guidance for delegation and multi-agent pipelines.
-Configured `append_instructions` follow that guidance.
-
-Tact loads global instructions from `AGENTS.override.md` or `AGENTS.md` in `CODEX_HOME`, which
-defaults to `~/.codex`, followed by project instructions from the Git repository root through the
-configured workspace.
-
-The main agent options can also come from the environment. For example, `--workspace`,
-`--thinking`, and `--resume` correspond to `TACT_WORKSPACE`, `TACT_THINKING`, and `TACT_RESUME`.
-The prompt for `tact run` can be supplied through `TACT_PROMPT`. Run `tact --help` for the complete
-command-line reference.
-
-The `/subagents` panel shows the current concurrency limit. Use `-` and `+` there to update it.
-
-Use **Reload config** in the Actions menu after editing the file. Theme and UI changes apply immediately.
-Most agent settings apply when a session starts or is restored, while effort and fast mode can also
-be changed during a session. Workspace changes require restarting tact.
-
-Set `[tui].mouse_scroll_lines` to control transcript rows scrolled per mouse-wheel event.
-The default is `3`; valid values are `1` through `65535`. Use `1` for finer scrolling. The setting
-applies to main, fork, and subagent transcripts. Use **Reload config** to apply a new value.
+The workspace defaults to the directory you start Tact in.
 
 ### Themes
 
-All theme options can be set directly under `[theme]` to apply to both palettes:
+`theme.mode` is `auto`, `light`, or `dark`. Auto follows the OS theme while Tact runs. Put color
+options directly under `[theme]` to set both palettes, or under `[theme.light]` or `[theme.dark]` to
+set one. Colors can be Ratatui names, indexed values like `239`, or RGB values like `"#AABBCC"`.
 
-```toml
-[theme]
-mode = "auto" # auto, light, or dark
-text = "reset"
-border = "dark-gray"
-muted = "dark-gray"
-accent = "blue"
-code_text = "#D7D7D7"
-code_background = "#262626"
-thinking_low = "gray"
-thinking_medium = "cyan"
-thinking_high = "yellow"
-thinking_xhigh = "red"
-thinking_max = "magenta"
-model_luna = "reset"
-model_sol = "yellow"
-model_astra = "magenta"
-model_haiku = "blue"
-model_sonnet = "green"
-model_opus = "red"
-model_fable = "cyan"
-```
+The `model_*` colors are used in the model picker, composer, and subagent views. By default they use your
+terminal's foreground (Luna) and its blue, yellow, magenta, green, red, and cyan slots, so your
+terminal theme controls them. Set an RGB value to pin one.
 
-The `model_*` colors apply to the model picker, composer, and subagent displays. Their defaults
-use the terminal's foreground for Luna and its yellow, magenta, green, red, and cyan slots for
-the other models in both light and dark mode, so the terminal theme controls their appearance. Set a color to an RGB value for a fixed override.
-Put any of the color options under `[theme.light]` or `[theme.dark]` to override that palette. Colors
-may be Ratatui names, indexed values such as `239`, or RGB values such as `"#AABBCC"`. Auto mode
-follows the operating-system theme while tact is running.
+### Scrolling
 
-### Custom Endpoints
+`tui.mouse_scroll_lines` sets how many transcript rows one mouse-wheel step scrolls, from `1` to `65535`
+(default `3`). It applies to main, fork, and subagent transcripts.
 
-Advanced deployments can set `agent.websocket_url` and `agent.api_base_url`, or use the
-`--websocket-url` and `--api-base-url` options. Leave them unset to use Nanocodex's defaults for the
-selected authentication method. Set `agent.transport = "https"` (or `--transport https`) for proxies
-that do not accept Responses WebSocket connections; tact then streams over HTTPS only.
+### Custom endpoints
 
-## Features
+For advanced deployments, set `agent.websocket_url` and `agent.api_base_url` (or `--websocket-url`
+and `--api-base-url`). Leave them unset to use Nanocodex's defaults for your auth method. If a proxy
+doesn't accept Responses WebSocket connections, set `agent.transport = "https"` (or
+`--transport https`) to stream over HTTPS only.
 
-### Subagents
+## Developing the web interface
 
-Subagents are enabled by default. Disable their tools and built-in delegation instructions with:
-
-```toml
-[subagents]
-enabled = false
-```
-
-The reusable runtime and Nanocodex tool surface are published as the `tact-subagents` crate.
-
-This setting applies when a session starts or is restored. Reloading the configuration does not
-change the tool surface of an already-running session. `agent.max_subagents` controls concurrency
-when the feature is enabled; setting it does not enable or disable subagents. See the
-[subagent design](docs/subagents.md) for the tool, lifecycle, messaging, and authority contracts.
-
-Agents name a model and a `thinking` effort for every delegated task. The choices are `luna`,
-`sol`, and `astra`; enabling Claude adds `haiku-5.5`, `sonnet-5.5`, `opus-5.5`, and `fable-5.1`. A Codex child
-cannot run a higher tier than a Codex parent (Luna < Sol < Astra), and no spawn may exceed the live
-`agent.thinking` cap or, for nested children, the parent's own effort. Tact's session instructions
-include a guide for choosing models and effort.
-
-### Memory
-
-Tact's bounded cross-session memory is disabled by default. Opt in explicitly:
-
-```toml
-[memory]
-enabled = true
-```
-
-Local memory is global to the selected Tact configuration, not scoped to a workspace. Tact stores it
-in `memory/v1.sqlite3` beside the selected `config.toml`. Set `memory.local.max_records`,
-`memory.local.max_record_bytes`, and `memory.local.max_total_bytes` to positive integers to
-independently limit the record count, UTF-8 content bytes per record, and total content bytes. The
-defaults are 512 records, 1 KiB per record, and 256 KiB total. These limits also apply to local
-snapshots used by explicit push and pull commands. Remote limits are configured by the service.
-The Cloudflare example applies the same three limits separately to each namespace.
-
-Agents access the selected local or remote backend only through explicit memory tool calls, and the
-corpus is never inserted into prompts automatically. For later user messages and in-flight steers,
-Tact adds a fixed, content-free checkpoint asking the agent to review the conversation and update
-memory when it finds a durable conclusion. See the [global memory design](docs/memory.md) for the
-tool contract, limits, privacy model, and evaluation criteria.
-
-To share memory with a team, configure an authenticated remote backend. Each person uses a distinct
-namespace and may receive either writer or read-only credentials. Tact chooses exactly one backend
-for each runtime: remote inside a configured workspace root or a linked worktree from one, and local
-outside all configured roots.
-
-```toml
-[memory.remote]
-endpoint = "https://memory.example.com/"
-namespace = "alice"
-bearer_token = "replace-with-a-secret-token"
-workspace_roots = ["/path/to/team-projects"]
-```
-
-Keep the configuration file private with mode `0600`: it contains the bearer token directly. Remote
-memory with a direct token currently requires Unix so Tact can verify the file permissions.
-`tact config show` and debug output redact the token. An in-scope remote error is returned to the
-caller and never falls back to local memory. Runtime operations never push local records.
-
-Use `tact memory push [--dry-run]` from any directory to reconcile the complete global local
-store to the writer's personal namespace. Use `tact memory pull --all` or repeat
-`--namespace NAME` to non-destructively merge remote records into the local schema v1
-store. The [memory guide](docs/memory.md#remote-memory) includes the selection and transfer
-contracts, the remote HTTP contract, and an in-memory server walkthrough.
-
-Config reload applies memory-browser availability immediately. Like other agent tool and prompt
-settings, the agent-facing memory setting applies when a new session starts or is restored; an
-already-running agent retains the tool surface and instructions with which it was created.
-
-### Manual compaction
-
-Enter `/compact` or choose **Compact context** from the Actions menu while the session is idle.
-Tact uses the selected provider's native compaction and shows **Compacting context…** in the composer.
-Successful compaction updates the saved session, so resume uses the compacted context. Failed compaction
-does not replace the previous saved state.
-
-### Reflection
-
-Choose **Reflect on session** from the Actions menu while the session is idle. The composer accepts
-optional instructions for the reflection; press Enter with an empty composer to use the default
-scope, or press Escape to cancel. Tact submits the reflection to the existing agent so it can use
-the conversation already in context.
-
-The transcript shows a muted **Reflection started** marker instead of the internal prompt, followed
-by the agent's report as a normal assistant response. Reflection is read-only: the report ends with
-findings and recommended actions for discussion, and memory updates or other durable actions require
-a later explicit request.
-
-The built-in workflow starts with the current conversation, uses `find_sessions` to discover a
-bounded set of relevant historical sessions, then uses `read_session` to inspect only the strongest
-candidates. Parent-session lineage helps the agent avoid counting related forks as independent
-evidence. It checks supported lessons against existing memories and active instructions, and
-recommends whether each lesson belongs in memory, always-on configuration, or nowhere. Additional
-instructions can narrow the topic or expand the workspace and task-family scope. The report states
-the coverage and uncertainty of its evidence; it does not apply its recommendations.
-
-### Web Interface
-
-Every running Tact serves a web interface in the background. It is a second front-end onto the
-sessions that process runs: the terminal and the browser share the active session and each
-session's draft, queue, settings, and transcript, and either can start, switch, fork, and close
-sessions. The terminal must stay open (there is no headless mode). The interface binds to
-`127.0.0.1:7878` by default (the next free port is used when that one is taken); put it behind
-Tailscale, an SSH forward, or similar to reach it from elsewhere. For Tailscale, set
-`tailscale = true` under `[web]` and Tact publishes the interface to your tailnet with
-`tailscale serve` the first time you ask for a QR code (Tact checks that Tailscale is online each
-time, and the local interface works regardless); for any other tunnel, set `public_url` to its
-address. The two settings are mutually exclusive.
-
-Open the login URL Tact shows for the web interface. Its fragment carries the machine token, which
-is stored in `~/.tact/web/token` (mode 0600) and shared by every Tact instance of your user. The
-token grants the same access as a shell, so treat the URL like a password. Configure the server in
-the `[web]` section (`enabled`, `bind`, `port`, `public_url`, `tailscale`, `max_live_sessions`) or pass
-`--web=false` (`TACT_WEB`) to turn it off. The design is described in [docs/web.md](docs/web.md).
-
-The review tool lives in the interface's side panel. It shows the full branch from trunk by
-default; you can narrow the range, inspect the live diff, leave overall or inline feedback, and
-**Send to chat**, which writes the review as Markdown into the active session's draft so you can
-edit it before sending. Inline selections can open a private question thread with the agent, and an
-agent-authored visual overview of the selected range can be generated on demand. Overviews,
-AI reviews, and question threads belong to a session, run as clean-context prompts on that
-session's worker, and stop when the session closes.
-
-The browser files are a separate bundle. Official releases publish `tact-web-v<version>.tar.gz`; the
-server serves the bundle installed at `~/.tact/web/assets/v<version>` (it is re-checked on request
-while missing, so installing it needs no restart). Until it is installed the server answers with a
-page that explains how to install it. Official releases and pre-releases download and verify the
-matching bundle in the background on first start; a pre-release's is named
-`tact-web-dev-<commit>.tar.gz` and installed at `~/.tact/web/assets/dev-<commit>`. A build from
-source reads `~/.tact/web/assets/development` instead, so replacing it with a download never
-touches a bundle linked by `just install-dev`.
-
-#### Developing the web interface
-
-Development builds do not download browser assets. Install Bun, then build and link the assets into
-the development Tact directory:
+Source builds don't download browser assets. Install [Bun](https://bun.sh), then build and link the
+assets into your development Tact directory.
 
 ```sh
 cd web
@@ -596,94 +639,6 @@ bun install --frozen-lockfile
 just install-dev
 ```
 
-To work on the interface in a browser with sample data, run:
-
-```sh
-just dev
-```
-
-`TACT_WEB_ASSETS=/absolute/path/to/web/dist` remains available as a manual override. The
-development server watches browser sources, rebuilds them, and reloads connected pages.
-
-### Copying Responses
-
-Type `/copy` and press Enter to copy the latest completed assistant message as raw Markdown.
-Use `/copy N` to copy the Nth most recent completed assistant message (`/copy 1` is the latest).
-Empty messages, reasoning, tool output, and messages still streaming are skipped. Copying uses
-only the current pane's transcript, including restored history, and works while a turn is running.
-You can also choose **Copy response** from the `/` Actions menu.
-
-### Session Forking
-
-Press `Ctrl+T` or choose **Fork session** from the Actions menu to open an independent session next
-to the current one. The fork starts from the stable conversation history available at that point;
-new prompts, model responses, and transcripts then remain independent in each pane.
-
-Tact supports one open fork at a time. Close the fork before creating another. Forked sessions are
-persisted separately and can be resumed like other sessions.
-
-### Resume
-
-Tact checkpoints each successful turn and keeps an append-only transcript. Ordinary failed turns
-retain the last successful checkpoint. A terminal provider policy stop makes the session
-non-resumable; its transcript remains available for inspection. Open **Resume session**
-from the Actions menu to search sessions for the current workspace, or resume a known ID directly:
-
-```sh
-tact --resume SESSION_ID
-```
-
-Tact prints the active session's resume command when it exits. Sessions are stored in
-`sessions/v2.sqlite3` beside the selected configuration.
-Checkpoints contain the complete model-visible conversation and are not redacted, so treat them as
-private data.
-
-### Skills
-
-Skills are local `SKILL.md` files containing instructions the model can choose to follow. They are
-disabled by default to avoid adding their catalogs to every session's persistent context. Skills
-can also direct tool and shell execution, so enable only directories you trust:
-
-```toml
-[skills]
-enabled = true
-roots = ["skills", "/path/to/shared-skills"]
-```
-
-Type `$` at a token boundary in the composer to search the active session's skills. Enter or Tab
-inserts the selected `$skill-name` into the prompt.
-
-When enabled, tact also searches `$CODEX_HOME/skills` (or `~/.codex/skills`) and
-`~/.agents/skills`. A new session discovers the current set of skills. Restored sessions keep the
-skill catalog they started with so their instructions remain stable.
-
-### MCP Servers
-
-Tact supports local stdio servers and remote Streamable HTTP servers. Add a local server with:
-
-```sh
-tact mcp add filesystem -- \
-  npx -y @modelcontextprotocol/server-filesystem /path/to/workspace
-```
-
-Use `--cwd PATH` to set its working directory. To pass a secret from tact's environment, put
-`--env NAME` before `--`; tact copies the value into that server's configuration without placing it
-in shell history or process arguments:
-
-```sh
-tact mcp add --env API_TOKEN private-server -- command --flag
-```
-
-The resulting TOML contains the copied value. `tact config show` redacts it, but you should still
-protect the configuration file as you would any credential file.
-
-Remote servers refer to environment-variable names instead of storing their values:
-
-```sh
-tact mcp add docs --url https://example.com/mcp \
-  --bearer-token-env-var DOCS_MCP_TOKEN \
-  --header-env X-Tenant-ID=DOCS_TENANT_ID
-```
-
-Remote URLs must use HTTP or HTTPS and cannot contain embedded credentials. Each server starts
-independently, so a broken server does not prevent the session or other servers from working.
+Run `just dev` to work on the interface in a browser with sample data. The dev server watches the
+sources, rebuilds, and reloads connected pages. `TACT_WEB_ASSETS=/absolute/path/to/web/dist` overrides the
+asset directory by hand.
