@@ -174,23 +174,6 @@ const TOOL_ORCHESTRATION_INSTRUCTIONS: &str = concat!(
     "result requires model judgment, user input, or a progress update."
 );
 
-const LEGACY_TOOL_ORCHESTRATION_INSTRUCTIONS: &str = concat!(
-    "Use code mode to orchestrate related tool calls when the next calls can be determined from ",
-    "tool results without additional model judgment or user input. Keep the complete lifecycle in ",
-    "one code-mode program: use `Promise.all` for independent calls, and use loops and conditionals ",
-    "for dependent calls. In particular, when `exec_command` returns a `session_id`, continue calling ",
-    "`write_stdin` in that program until the process exits. If the outer code-mode cell yields, wait ",
-    "on that cell; do not move nested process polling into separate model turns. Return only the ",
-    "results needed for the next reasoning step. When a bounded classification, predicate, or rubric ",
-    "score should determine the next action, use `decide` when available: provide the evidence in ",
-    "its input, ask focused questions, and branch on its typed answers in code mode. Put independent ",
-    "questions about shared evidence in one call; use separate calls when a later question depends ",
-    "on an earlier answer. Code owns the action, threshold, and handling of uncertainty or refusal; ",
-    "use `decide` for structured judgments, not open-ended reasoning or extraction. Use separate ",
-    "code-mode calls when an intermediate result requires model judgment, user input, or a progress ",
-    "update."
-);
-
 const DECIDE_TOOL_INSTRUCTIONS: &str = concat!(
     "When a bounded classification, predicate, or rubric score should determine the next action, ",
     "use `decide`: provide the evidence in its input, ask focused questions, and branch on its typed ",
@@ -373,13 +356,7 @@ impl SessionInstructions {
     ) -> Self {
         let subagents_enabled = config.subagents().enabled();
         let (mut text, skills) = match restored {
-            Some(restored) => {
-                let (mut text, skills) = Self::restored(restored);
-                let legacy = format!("{SECTION_SEPARATOR}{LEGACY_TOOL_ORCHESTRATION_INSTRUCTIONS}");
-                let current = format!("{SECTION_SEPARATOR}{TOOL_ORCHESTRATION_INSTRUCTIONS}");
-                text.0 = text.0.replace(&legacy, &current);
-                (text, skills)
-            }
+            Some(restored) => Self::restored(restored),
             None => {
                 let agent = config.agent();
                 let base = agent
@@ -534,10 +511,10 @@ impl PromptText {
 mod tests {
     use super::{
         AgentInstructions, CLAUDE_CODE_MODE_INSTRUCTIONS, CLAUDE_SUBAGENT_MODEL_INSTRUCTIONS,
-        DECIDE_TOOL_INSTRUCTIONS, LEGACY_TOOL_ORCHESTRATION_INSTRUCTIONS, MEMORY_INSTRUCTIONS,
-        PromptText, RestoredInstructions, SCRATCHPAD_INSTRUCTIONS, SECTION_SEPARATOR,
-        SESSION_REFERENCE_INSTRUCTIONS, SUBAGENT_INSTRUCTIONS, SUBAGENT_MODEL_INSTRUCTIONS,
-        SessionInstructions, TACT_INSTRUCTIONS, TOOL_ORCHESTRATION_INSTRUCTIONS, default_base,
+        DECIDE_TOOL_INSTRUCTIONS, MEMORY_INSTRUCTIONS, PromptText, RestoredInstructions,
+        SCRATCHPAD_INSTRUCTIONS, SECTION_SEPARATOR, SESSION_REFERENCE_INSTRUCTIONS,
+        SUBAGENT_INSTRUCTIONS, SUBAGENT_MODEL_INSTRUCTIONS, SessionInstructions, TACT_INSTRUCTIONS,
+        TOOL_ORCHESTRATION_INSTRUCTIONS, default_base,
     };
     use crate::{
         app::config::{Config, ConfigOverrides, SkillsConfig},
@@ -724,28 +701,6 @@ mod tests {
                     usize::from(enabled)
                 );
             }
-
-            let legacy = format!(
-                "Saved prompt.{}",
-                separated(LEGACY_TOOL_ORCHESTRATION_INSTRUCTIONS)
-            );
-            let restored = SessionInstructions::from_config(
-                &config,
-                &catalog,
-                Model::Codex(CodexModel::Sol),
-                Some(RestoredInstructions::new(legacy, Some(false))),
-                false,
-            );
-            assert!(
-                !restored
-                    .text
-                    .contains(LEGACY_TOOL_ORCHESTRATION_INSTRUCTIONS)
-            );
-            assert_eq!(count(&restored.text, TOOL_ORCHESTRATION_INSTRUCTIONS), 1);
-            assert_eq!(
-                count(&restored.text, DECIDE_TOOL_INSTRUCTIONS),
-                usize::from(enabled)
-            );
         }
     }
 
