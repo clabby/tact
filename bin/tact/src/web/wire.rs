@@ -9,6 +9,7 @@ use crate::{
     app::config::{ReasoningEffort, ReasoningMode, Speed},
     core::{
         context::ContextBudget,
+        live_sessions::{agent_route_label, route_label},
         protocol::{DraftImage, Origin, QueuedPrompt},
         transcript::{
             DirectedMessageEntry, EntryId, EntryKind, ToolEntry, ToolState, TranscriptEntry,
@@ -229,7 +230,7 @@ impl Significance {
         tool.state == ToolState::Failed
             || match tool.name.as_str() {
                 "apply_patch" | "update_plan" | "spawn_agent" | "send_agent_message"
-                | "close_agent" | "interrupt_agent" => true,
+                | "message_session" | "close_agent" | "interrupt_agent" => true,
                 "memory" => matches!(
                     tool.arguments.get("operation").and_then(Value::as_str),
                     Some("put" | "delete")
@@ -283,6 +284,12 @@ enum WireBody {
         /// The retained conversation in delivery order, so a client can show replies together.
         messages: Vec<WireMessage>,
     },
+    /// A message another live session sent through `message_session`.
+    SessionMessage {
+        /// The sending session's identifier.
+        from_session: String,
+        text: String,
+    },
     ForkedFrom {
         session: String,
     },
@@ -326,6 +333,13 @@ impl WireEntry {
             EntryKind::Reasoning { text } => WireBody::Reasoning { text: cap(text) },
             EntryKind::Tool(tool) => WireBody::tool(tool, Significance::of(model, entry.id, tool)),
             EntryKind::DirectedMessage(message) => WireBody::directed(message),
+            EntryKind::SessionMessage {
+                from_session_id,
+                text,
+            } => WireBody::SessionMessage {
+                from_session: from_session_id.clone(),
+                text: cap(text),
+            },
             EntryKind::ForkedFrom { session_id } => WireBody::ForkedFrom {
                 session: session_id.clone(),
             },
@@ -486,10 +500,8 @@ fn tool_summary(tool: &ToolEntry) -> String {
                     .find_map(|key| first.get(key)?.as_str())
                     .map(str::to_owned)
             }),
-        "send_agent_message" => arguments
-            .get("agent_id")
-            .and_then(Value::as_u64)
-            .map(|id| format!("→ #{id}")),
+        "send_agent_message" => Some(agent_route_label(arguments)),
+        "message_session" => Some(route_label(arguments)),
         "update_plan" => arguments
             .get("plan")
             .and_then(Value::as_array)

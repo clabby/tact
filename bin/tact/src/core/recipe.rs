@@ -14,6 +14,7 @@ use super::{
         CurrentSessionTool,
         sessions::{FindSessionsTool, ReadSessionTool},
     },
+    live_sessions::MessageSessionTool,
     session::AgentSnapshot,
 };
 use crate::app::{
@@ -195,7 +196,8 @@ impl AgentRecipe {
                 .into_builder()
                 .tool(CurrentSessionTool)
                 .tool(FindSessionsTool::new(config_path.clone()))
-                .tool(ReadSessionTool::new(config_path.clone()));
+                .tool(ReadSessionTool::new(config_path.clone()))
+                .tool(MessageSessionTool);
             if let Some(store) = memory.clone() {
                 builder = builder.tool(MemoryTool::new(
                     store,

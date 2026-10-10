@@ -9,7 +9,7 @@ import type { TranscriptData } from "../core/store";
 import type { Theme } from "../core/theme";
 import { promptParts } from "./user-prompt";
 import { presentDetail, TOOL_DEFAULT_OPEN, toolLabel } from "./tool-detail";
-import { renderThread, type Participants } from "./directed";
+import { receivedSessionMessageElement, renderThread, type Participants } from "./directed";
 import { runLabel, runSpan, type ToolEntry } from "./routine";
 import { resultText, turnMarkdown, turnOutcome, type TurnOutcome } from "./outcome";
 import { planTurn, segmentTurns, type LogItem, type Turn, type TurnPlan } from "./turns";
@@ -63,7 +63,7 @@ const FOLLOW_THRESHOLD = 72;
 const SEEN_AFTER_MS = 3000;
 
 /** Kinds whose rows carry a time and a link in the gutter. */
-const GUTTER_KINDS = new Set(["user", "assistant", "reasoning", "tool", "directed_message", "error", "compaction_failed", "interrupted"]);
+const GUTTER_KINDS = new Set(["user", "assistant", "reasoning", "tool", "directed_message", "session_message", "error", "compaction_failed", "interrupted"]);
 
 /**
  * The transcript of the active session, laid out as turns: the prompt, a work log that folds once
@@ -698,6 +698,9 @@ export class Transcript {
         });
         break;
       }
+      case "session_message":
+        element.replaceChildren(receivedSessionMessageElement(entry.from_session, entry.text, this.markdown));
+        break;
       case "turn_completed":
         if (context.outcome) this.renderOutcome(element, context.outcome, context.turn!);
         else marker(element, `Worked for ${formatDuration(entry.duration_ns)}`);

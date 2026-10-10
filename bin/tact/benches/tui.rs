@@ -26,6 +26,7 @@ mod app {
 #[path = "../src/core"]
 mod core {
     pub(crate) mod context;
+    pub(crate) mod live_sessions;
     pub(crate) mod pane;
     pub(crate) mod prompt;
     pub(crate) mod protocol;

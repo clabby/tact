@@ -1,8 +1,13 @@
 //! Bounded discovery and read-only access to V2 session transcripts.
 
-use crate::core::{
-    storage::{DecodedStoredRecord, SessionStorage, StorageError, StoredSession},
-    transcript::TranscriptRecord,
+use crate::{
+    app::config::ReasoningEffort,
+    core::{
+        live_sessions,
+        session::SessionLock,
+        storage::{DecodedStoredRecord, SessionStorage, StorageError, StoredSession},
+        transcript::TranscriptRecord,
+    },
 };
 use nanocodex::{
     Tool,
@@ -36,6 +41,8 @@ struct FindSessionsInput {
     #[serde(default)]
     workspace: Option<PathBuf>,
     #[serde(default)]
+    live_only: bool,
+    #[serde(default)]
     contains_any: Option<Vec<String>>,
     #[serde(default)]
     cursor: Option<SessionCursor>,
@@ -61,6 +68,12 @@ struct FoundSession {
     workspace: PathBuf,
     started_at_ms: u64,
     updated_at_ms: u64,
+    model: String,
+    effort: ReasoningEffort,
+    /// Whether some Tact process currently has the session open.
+    live: bool,
+    /// Whether the session is open in this process, so `message_session` can reach it.
+    messageable: bool,
     preview: String,
 }
 
@@ -261,10 +274,9 @@ impl FindSessionsTool {
             };
             bounded_session_search(
                 &storage,
+                &config_path,
                 &current_session,
-                input.workspace.as_deref(),
-                input.contains_any.as_deref(),
-                input.cursor,
+                input,
                 output_token_budget,
             )
         })
@@ -278,7 +290,7 @@ impl Tool for FindSessionsTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::function(
             "find_sessions",
-            "Finds bounded recent Tact V2 sessions before using read_session. It excludes the caller's current session, reports parent session IDs for lineage checks, optionally scopes to one exact workspace, and optionally matches ASCII-case-insensitive literal patterns against stored user prompts. Omit workspace only for cross-workspace discovery. Pass next_cursor back only when another page is needed.",
+            "Finds bounded recent Tact V2 sessions before using read_session. It excludes the caller's current session, reports parent session IDs for lineage checks, each session's model and effort, whether it is live in any Tact process, and whether it is messageable (live in this process). Optionally scopes to one exact workspace, to live sessions only, and to ASCII-case-insensitive literal patterns matched against stored user prompts. Omit workspace only for cross-workspace discovery. Pass next_cursor back only when another page is needed.",
             find_input_schema(),
         )
         .with_output_schema(find_output_schema())
@@ -296,17 +308,24 @@ impl Tool for FindSessionsTool {
 
 fn bounded_session_search(
     storage: &SessionStorage,
+    config_path: &Path,
     current_session: &str,
-    workspace: Option<&Path>,
-    contains_any: Option<&[String]>,
-    cursor: Option<SessionCursor>,
+    input: FindSessionsInput,
     output_token_budget: usize,
 ) -> Result<FindSessionsOutput, SessionToolError> {
+    let FindSessionsInput {
+        workspace,
+        live_only,
+        contains_any,
+        cursor,
+    } = input;
     let max_bytes = output_token_budget.saturating_mul(APPROX_BYTES_PER_TOKEN);
+    let live_sessions = live_only.then(|| SessionLock::held_sessions(config_path));
     let page = storage.find_sessions(
         current_session,
-        workspace,
-        contains_any,
+        workspace.as_deref(),
+        live_sessions.as_deref(),
+        contains_any.as_deref(),
         cursor
             .as_ref()
             .map(|cursor| (cursor.updated_at_ms, cursor.session_id.as_str())),
@@ -333,7 +352,7 @@ fn bounded_session_search(
             updated_at_ms: session.updated_at_unix_ms,
             session_id: session.session_id.clone(),
         };
-        output.sessions.push(found_session(session));
+        output.sessions.push(found_session(session, config_path));
         output.next_cursor = if index.saturating_add(1) < returned_sessions {
             Some(next.clone())
         } else {
@@ -352,18 +371,24 @@ fn bounded_session_search(
     Ok(output)
 }
 
-fn found_session(session: StoredSession) -> FoundSession {
+fn found_session(session: StoredSession, config_path: &Path) -> FoundSession {
     let mut characters = session.preview.chars();
     let mut preview = characters.by_ref().take(512).collect::<String>();
     if characters.next().is_some() {
         preview.push('…');
     }
+    let live = SessionLock::is_held(config_path, &session.session_id);
+    let messageable = live_sessions::is_live_here(&session.session_id);
     FoundSession {
         session_id: session.session_id,
         parent_session_id: session.parent_session_id,
         workspace: session.workspace,
         started_at_ms: session.started_at_unix_ms,
         updated_at_ms: session.updated_at_unix_ms,
+        model: session.model,
+        effort: session.effort,
+        live,
+        messageable,
         preview,
     }
 }
@@ -614,6 +639,10 @@ fn find_input_schema() -> Value {
                 "uniqueItems": true,
                 "description": "Optional ASCII-case-insensitive literal patterns matched against stored user prompts; a session is returned when any pattern matches."
             },
+            "live_only": {
+                "type": "boolean",
+                "description": "Return only sessions currently open in a Tact process. Defaults to false."
+            },
             "cursor": {
                 "type": "object",
                 "properties": {
@@ -647,9 +676,19 @@ fn find_output_schema() -> Value {
                         "workspace": { "type": "string" },
                         "started_at_ms": { "type": "integer", "minimum": 0 },
                         "updated_at_ms": { "type": "integer", "minimum": 0 },
+                        "model": { "type": "string" },
+                        "effort": { "type": "string" },
+                        "live": {
+                            "type": "boolean",
+                            "description": "Whether some Tact process currently has the session open."
+                        },
+                        "messageable": {
+                            "type": "boolean",
+                            "description": "Whether the session is live in this process, so message_session can reach it."
+                        },
                         "preview": { "type": "string" }
                     },
-                    "required": ["session_id", "parent_session_id", "workspace", "started_at_ms", "updated_at_ms", "preview"],
+                    "required": ["session_id", "parent_session_id", "workspace", "started_at_ms", "updated_at_ms", "model", "effort", "live", "messageable", "preview"],
                     "additionalProperties": false
                 }
             },

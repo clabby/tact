@@ -1344,11 +1344,11 @@ mod tests {
         for (id, summary) in [
             (
                 1,
-                "│  ▶ ← Message  #2 → you · reply · delivered · started · 2 messages ·  │",
+                "│  ▶ ← Message  #2 → me · reply · delivered · started · 2 messages ·   │",
             ),
             (
                 2,
-                "│  ▶ → Message  you → #1 · reply · delivered · started · 2 messages ·  │",
+                "│  ▶ → Message  me → #1 · reply · delivered · started · 2 messages ·   │",
             ),
         ] {
             let backend = render_transcript(&mut tree, id);
@@ -1374,11 +1374,11 @@ mod tests {
         assert_eq!(
             rows(&expanded)[14..21],
             [
-                "│› ▼ ← Message  #2 → you · reply · delivered · started · 2 messages ·  │",
+                "│› ▼ ← Message  #2 → me · reply · delivered · started · 2 messages ·   │",
                 "│      Verified: delivery precedes projection.                         │",
-                "│    │ you → #2 · question · deferred · pending                        │",
+                "│    │ me → #2 · question · deferred · pending                         │",
                 "│    │ Can you verify the event ordering?                              │",
-                "│    │ #2 → you · reply · deferred · delivered · started               │",
+                "│    │ #2 → me · reply · deferred · delivered · started                │",
                 "│    │ Verified: delivery precedes projection.                         │",
                 "│    └ thread #1 · 2 messages                                          │",
             ]

@@ -388,8 +388,41 @@ pub(crate) struct SessionLock {
 }
 
 impl SessionLock {
+    fn directory(config_path: &Path) -> PathBuf {
+        database_path(config_path).with_file_name("locks")
+    }
+
+    /// The sessions whose locks some process currently holds, in any order.
+    pub(crate) fn held_sessions(config_path: &Path) -> Vec<String> {
+        let Ok(entries) = fs::read_dir(Self::directory(config_path)) else {
+            return Vec::new();
+        };
+        entries
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                let path = entry.path();
+                let session_id = path
+                    .file_name()?
+                    .to_str()?
+                    .strip_suffix(".lock")?
+                    .to_owned();
+                Self::is_held(config_path, &session_id).then_some(session_id)
+            })
+            .collect()
+    }
+
+    /// Whether some process holds the session's lock. The probe briefly takes the lock when it is
+    /// free, so a process opening the session at that instant can observe it as locked.
+    pub(crate) fn is_held(config_path: &Path, session_id: &str) -> bool {
+        let path = Self::directory(config_path).join(format!("{session_id}.lock"));
+        let Ok(file) = File::options().write(true).open(path) else {
+            return false;
+        };
+        matches!(file.try_lock(), Err(TryLockError::WouldBlock))
+    }
+
     pub(crate) fn acquire(config_path: &Path, session_id: &str) -> Result<Self, SessionError> {
-        let directory = database_path(config_path).with_file_name("locks");
+        let directory = Self::directory(config_path);
         let path = directory.join(format!("{session_id}.lock"));
         let lock_error = |source| SessionError::Lock {
             path: path.clone(),
@@ -723,7 +756,8 @@ impl LoadedTranscript {
 mod tests {
     use super::{
         HistoryPage, LoadedTranscript, RecentPrompt, RecentPromptScope, RecentPrompts,
-        SessionError, SessionStore, SessionSummary, TerminalStopReason, encode_checkpoint,
+        SessionError, SessionLock, SessionStore, SessionSummary, TerminalStopReason,
+        encode_checkpoint,
     };
     use crate::{
         app::config::{ReasoningEffort, ReasoningMode, Speed},
@@ -1598,6 +1632,17 @@ mod tests {
         );
         drop(journal);
         writer.into_task().await.unwrap().unwrap();
+    }
+
+    #[test]
+    fn held_sessions_are_those_with_a_live_lock() {
+        let directory = tempdir().unwrap();
+        let config = directory.path().join("config.toml");
+        let _lock = SessionLock::acquire(&config, "held").unwrap();
+
+        assert!(SessionLock::is_held(&config, "held"));
+        assert!(!SessionLock::is_held(&config, "never-opened"));
+        assert_eq!(SessionLock::held_sessions(&config), ["held"]);
     }
 
     #[test]

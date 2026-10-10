@@ -88,6 +88,15 @@ impl EntryRenderer<'_> {
             EntryKind::DirectedMessage(thread) => {
                 markdown::Layout::plain(message::render(thread, width, theme, expanded))
             }
+            EntryKind::SessionMessage {
+                from_session_id,
+                text,
+            } => markdown::Layout::plain(message::render_session_message(
+                from_session_id,
+                text,
+                width,
+                theme,
+            )),
             EntryKind::ForkedFrom { session_id } => {
                 markdown::Layout::plain(vec![Line::from(Span::styled(
                     format!("◇ Forked from @@{session_id}"),

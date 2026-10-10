@@ -7,10 +7,11 @@
 
 use super::{
     CompactionFinished, DirectedMessageEntry, EffortChanged, EntryId, EntryKind, FastModeChanged,
-    LocalKind, MessageDelivery, MessagePhase, ReflectionStarted, SessionEnded, SessionOutcome,
-    SessionStarted, ShellFinished, ShellId, ShellStarted, SpeedChanged, ToolEntry, ToolState,
-    TranscriptEntry, TranscriptRecord, TransientStatus, UserImage, UserSteered, UserSubmitted,
-    WorkerSteerFailed, WorkerStopped, WorkerTurnFinished, WorkerTurnsInterrupted,
+    LocalKind, MessageDelivery, MessagePhase, ReflectionStarted, SessionEnded,
+    SessionMessageReceived, SessionOutcome, SessionStarted, ShellFinished, ShellId, ShellStarted,
+    SpeedChanged, ToolEntry, ToolState, TranscriptEntry, TranscriptRecord, TransientStatus,
+    UserImage, UserSteered, UserSubmitted, WorkerSteerFailed, WorkerStopped, WorkerTurnFinished,
+    WorkerTurnsInterrupted,
 };
 use nanocodex::{
     agent::events::{
@@ -299,6 +300,14 @@ impl TranscriptModel {
                     images: Vec::new(),
                 });
             }),
+            LocalKind::SessionMessageReceived => record
+                .decode_payload::<SessionMessageReceived>()
+                .map(|payload| {
+                    self.push(EntryKind::SessionMessage {
+                        from_session_id: payload.from_session_id,
+                        text: payload.text,
+                    });
+                }),
             LocalKind::CompactionStarted => {
                 self.manual_compaction = Some(ManualCompaction::Running);
                 self.transient = Some(TransientStatus::Compacting);
@@ -1488,9 +1497,9 @@ mod tests {
     use crate::{
         app::config::{ReasoningEffort, Speed},
         core::transcript::{
-            EffortChanged, LocalEvent, ReflectionStarted, SessionEnded, SessionOutcome,
-            ShellFinished, ShellId, ShellStarted, SpeedChanged, TranscriptRecord, TurnId,
-            UserSteered, UserSubmitted, WorkerTurnsInterrupted,
+            EffortChanged, LocalEvent, ReflectionStarted, SessionEnded, SessionMessageReceived,
+            SessionOutcome, ShellFinished, ShellId, ShellStarted, SpeedChanged, TranscriptRecord,
+            TurnId, UserSteered, UserSubmitted, WorkerTurnsInterrupted,
         },
     };
     use nanocodex::agent::events::{AgentEvent, AgentEventKind};
@@ -2695,6 +2704,28 @@ mod tests {
         assert!(matches!(
             &model.entries()[0].kind,
             EntryKind::User { text, .. } if text == "narrow the scope"
+        ));
+    }
+
+    #[test]
+    fn received_session_message_becomes_its_own_entry() {
+        let mut model = TranscriptModel::default();
+        let record = TranscriptRecord::from_local(
+            1,
+            1,
+            LocalEvent::SessionMessageReceived(SessionMessageReceived {
+                from_session_id: "9f3c1a7e-52d4".to_owned(),
+                text: "rebase before the pull request".to_owned(),
+            }),
+        )
+        .unwrap();
+
+        model.apply(&record);
+
+        assert!(matches!(
+            &model.entries()[0].kind,
+            EntryKind::SessionMessage { from_session_id, text }
+                if from_session_id == "9f3c1a7e-52d4" && text == "rebase before the pull request"
         ));
     }
 
