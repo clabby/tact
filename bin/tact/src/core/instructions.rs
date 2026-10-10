@@ -14,10 +14,11 @@
 //! 5. the skills catalog, when skills are enabled and any were discovered;
 //! 6. the memory guide, when a memory store is configured.
 //!
-//! Three *live sections* track the current configuration on every construction, including
+//! Four *live sections* track the current configuration on every construction, including
 //! resumes, because they describe capabilities that can change between runs: the subagent
 //! model guide (present iff subagents are enabled), the Claude model guide (present iff both
-//! subagents and Claude are enabled), and the Claude code-mode guide (added for Claude models).
+//! subagents and Claude are enabled), the decide tool guide (present iff Decisions are enabled),
+//! and the Claude code-mode guide (added for Claude models).
 //! Claude models additionally receive the workspace's AGENTS.md context after a fresh prompt.
 //!
 //! Per-turn control texts such as [`MEMORY_REVIEW_CHECKPOINT`] and
@@ -171,6 +172,15 @@ const TOOL_ORCHESTRATION_INSTRUCTIONS: &str = concat!(
     "on that cell; do not move nested process polling into separate model turns. Return only the ",
     "results needed for the next reasoning step. Use separate code-mode calls when an intermediate ",
     "result requires model judgment, user input, or a progress update."
+);
+
+const DECIDE_TOOL_INSTRUCTIONS: &str = concat!(
+    "When a bounded classification, predicate, or rubric score should determine the next action, ",
+    "use `decide`: provide the evidence in its input, ask focused questions, and branch on its typed ",
+    "answers in code mode. Put independent questions about shared evidence in one call; use separate ",
+    "calls when a later question depends on an earlier answer. Code owns the action, threshold, and ",
+    "handling of uncertainty or refusal; use `decide` for structured judgments, not open-ended ",
+    "reasoning or extraction."
 );
 
 pub(crate) const IMAGE_RENDERING_INSTRUCTIONS: &str = concat!(
@@ -371,6 +381,11 @@ impl SessionInstructions {
         } else {
             text.exclude_live(CLAUDE_SUBAGENT_MODEL_INSTRUCTIONS);
         }
+        if config.decisions().enabled() {
+            text.include_live(DECIDE_TOOL_INSTRUCTIONS);
+        } else {
+            text.exclude_live(DECIDE_TOOL_INSTRUCTIONS);
+        }
         if matches!(model, Model::Claude(_)) {
             text.include_live(CLAUDE_CODE_MODE_INSTRUCTIONS);
         }
@@ -496,9 +511,9 @@ impl PromptText {
 mod tests {
     use super::{
         AgentInstructions, CLAUDE_CODE_MODE_INSTRUCTIONS, CLAUDE_SUBAGENT_MODEL_INSTRUCTIONS,
-        MEMORY_INSTRUCTIONS, PromptText, RestoredInstructions, SCRATCHPAD_INSTRUCTIONS,
-        SECTION_SEPARATOR, SESSION_REFERENCE_INSTRUCTIONS, SUBAGENT_INSTRUCTIONS,
-        SUBAGENT_MODEL_INSTRUCTIONS, SessionInstructions, TACT_INSTRUCTIONS,
+        DECIDE_TOOL_INSTRUCTIONS, MEMORY_INSTRUCTIONS, PromptText, RestoredInstructions,
+        SCRATCHPAD_INSTRUCTIONS, SECTION_SEPARATOR, SESSION_REFERENCE_INSTRUCTIONS,
+        SUBAGENT_INSTRUCTIONS, SUBAGENT_MODEL_INSTRUCTIONS, SessionInstructions, TACT_INSTRUCTIONS,
         TOOL_ORCHESTRATION_INSTRUCTIONS, default_base,
     };
     use crate::{
@@ -645,6 +660,42 @@ mod tests {
                 assert_eq!(count(&text, SUBAGENT_INSTRUCTIONS), usize::from(subagents));
                 assert_eq!(count(&text, MEMORY_INSTRUCTIONS), usize::from(memory));
             }
+        }
+    }
+
+    #[test]
+    fn decision_guidance_tracks_tool_enablement_on_fresh_and_restored_prompts() {
+        let directory = tempdir().unwrap();
+        for enabled in [false, true] {
+            let config = load_config(
+                directory.path(),
+                &format!("[decisions]\nenabled = {enabled}\n"),
+                ConfigOverrides::default(),
+            );
+            let catalog = SkillCatalog::load(config.skills());
+            let fresh = SessionInstructions::from_config(
+                &config,
+                &catalog,
+                Model::Codex(CodexModel::Sol),
+                None,
+                false,
+            );
+            assert_eq!(
+                count(&fresh.text, DECIDE_TOOL_INSTRUCTIONS),
+                usize::from(enabled)
+            );
+
+            let restored = SessionInstructions::from_config(
+                &config,
+                &catalog,
+                Model::Codex(CodexModel::Sol),
+                Some(RestoredInstructions::new(
+                    fresh.text.to_string(),
+                    Some(false),
+                )),
+                false,
+            );
+            assert_eq!(restored.text, fresh.text);
         }
     }
 
