@@ -541,11 +541,38 @@ export class MockTact {
           return { prompts: recentPrompts.filter((prompt) => prompt.text.toLowerCase().includes(query)) };
         case "context_diagnostics": {
           const session = this.session((args as { session: string }).session);
+          const active = session.context.active_tokens;
+          const prefix = Math.min(active, 9_200);
+          const share = (fraction: number) => Math.round((active - prefix) * fraction);
+          const categories = [
+            ["prefix", prefix, 1], ["user", share(.06), 4], ["assistant", share(.08), 6], ["reasoning", share(.05), 6],
+            ["tool_calls", share(.03), 11], ["tool_output", share(.6), 11], ["compacted", share(.18), 1], ["other", 0, 0],
+          ] as const;
+          const counted = categories.reduce((sum, [, tokens]) => sum + tokens, 0);
           return {
-            model_window_tokens: WINDOW_TOKENS, auto_compact_token_limit: 244_800, active_tokens: session.context.active_tokens,
-            usage: { input: session.context.active_tokens, cached_input: Math.round(session.context.active_tokens * .8), uncached_input: Math.round(session.context.active_tokens * .2), output: 1_840, total: session.context.active_tokens + 1_840 },
+            model_window_tokens: WINDOW_TOKENS, auto_compact_token_limit: 244_800, active_tokens: active,
+            usage: { input: active, cached_input: Math.round(active * .8), uncached_input: Math.round(active * .2), output: 1_840, total: active + 1_840 },
             continuation: "previous_response", prompt_cache: true, compactions_started: 1, compactions_completed: 1,
             last_compaction: { trigger: "automatic", started_at_unix_ms: Date.now() - 3_600_000, completed_at_unix_ms: Date.now() - 3_597_000, before_tokens: 241_000, after_tokens: 31_200 },
+            breakdown: {
+              input_tokens: active,
+              categories: categories.map(([kind, tokens, items]) => ({ kind, tokens: kind === "tool_output" ? tokens + active - counted : tokens, items })),
+              tools: [
+                { name: "exec_command", calls: 6, call_tokens: share(.02), output_tokens: share(.42) },
+                { name: "read_file", calls: 4, call_tokens: share(.008), output_tokens: share(.15) },
+                { name: "apply_patch", calls: 1, call_tokens: share(.002), output_tokens: share(.03) },
+              ],
+              largest: [
+                { kind: "tool_output", tool: "exec_command", turn: 3, tokens: share(.2) },
+                { kind: "compacted", tool: null, turn: 1, tokens: share(.18) },
+                { kind: "tool_output", tool: "read_file", turn: 2, tokens: share(.09) },
+                { kind: "assistant", tool: null, turn: 3, tokens: share(.03) },
+              ],
+            },
+            history: Array.from({ length: 40 }, (_, index) => {
+              const input = index < 26 ? 60_000 + index * 7_000 : 31_200 + (index - 26) * (active - 31_200) / 13;
+              return { call: index + 1, input: Math.round(input), cached: Math.round(input * .78), output: 900 + index * 20, after_compaction: index === 26 };
+            }),
           };
         }
         case "memories":

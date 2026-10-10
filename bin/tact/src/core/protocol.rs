@@ -369,7 +369,7 @@ pub(crate) enum QueryReply {
     Files(FileMatches),
     Skills(SkillMatches),
     RecentPrompts(RecentPrompts),
-    ContextDiagnostics(ContextDiagnostics),
+    ContextDiagnostics(Box<ContextDiagnostics>),
     Memories {
         access: MemoryAccess,
         records: Vec<ListedMemory>,
