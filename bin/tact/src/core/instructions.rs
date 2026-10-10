@@ -14,10 +14,11 @@
 //! 5. the skills catalog, when skills are enabled and any were discovered;
 //! 6. the memory guide, when a memory store is configured.
 //!
-//! Three *live sections* track the current configuration on every construction, including
+//! Four *live sections* track the current configuration on every construction, including
 //! resumes, because they describe capabilities that can change between runs: the subagent
 //! model guide (present iff subagents are enabled), the Claude model guide (present iff both
-//! subagents and Claude are enabled), and the Claude code-mode guide (added for Claude models).
+//! subagents and Claude are enabled), the decide tool guide (present iff Decisions are enabled),
+//! and the Claude code-mode guide (added for Claude models).
 //! Claude models additionally receive the workspace's AGENTS.md context after a fresh prompt.
 //!
 //! Per-turn control texts such as [`MEMORY_REVIEW_CHECKPOINT`] and
@@ -169,6 +170,17 @@ const TOOL_ORCHESTRATION_INSTRUCTIONS: &str = concat!(
     "for dependent calls. In particular, when `exec_command` returns a `session_id`, continue calling ",
     "`write_stdin` in that program until the process exits. If the outer code-mode cell yields, wait ",
     "on that cell; do not move nested process polling into separate model turns. Return only the ",
+    "results needed for the next reasoning step. Use separate code-mode calls when an intermediate ",
+    "result requires model judgment, user input, or a progress update."
+);
+
+const LEGACY_TOOL_ORCHESTRATION_INSTRUCTIONS: &str = concat!(
+    "Use code mode to orchestrate related tool calls when the next calls can be determined from ",
+    "tool results without additional model judgment or user input. Keep the complete lifecycle in ",
+    "one code-mode program: use `Promise.all` for independent calls, and use loops and conditionals ",
+    "for dependent calls. In particular, when `exec_command` returns a `session_id`, continue calling ",
+    "`write_stdin` in that program until the process exits. If the outer code-mode cell yields, wait ",
+    "on that cell; do not move nested process polling into separate model turns. Return only the ",
     "results needed for the next reasoning step. When a bounded classification, predicate, or rubric ",
     "score should determine the next action, use `decide` when available: provide the evidence in ",
     "its input, ask focused questions, and branch on its typed answers in code mode. Put independent ",
@@ -177,6 +189,15 @@ const TOOL_ORCHESTRATION_INSTRUCTIONS: &str = concat!(
     "use `decide` for structured judgments, not open-ended reasoning or extraction. Use separate ",
     "code-mode calls when an intermediate result requires model judgment, user input, or a progress ",
     "update."
+);
+
+const DECIDE_TOOL_INSTRUCTIONS: &str = concat!(
+    "When a bounded classification, predicate, or rubric score should determine the next action, ",
+    "use `decide`: provide the evidence in its input, ask focused questions, and branch on its typed ",
+    "answers in code mode. Put independent questions about shared evidence in one call; use separate ",
+    "calls when a later question depends on an earlier answer. Code owns the action, threshold, and ",
+    "handling of uncertainty or refusal; use `decide` for structured judgments, not open-ended ",
+    "reasoning or extraction."
 );
 
 pub(crate) const IMAGE_RENDERING_INSTRUCTIONS: &str = concat!(
@@ -352,7 +373,13 @@ impl SessionInstructions {
     ) -> Self {
         let subagents_enabled = config.subagents().enabled();
         let (mut text, skills) = match restored {
-            Some(restored) => Self::restored(restored),
+            Some(restored) => {
+                let (mut text, skills) = Self::restored(restored);
+                let legacy = format!("{SECTION_SEPARATOR}{LEGACY_TOOL_ORCHESTRATION_INSTRUCTIONS}");
+                let current = format!("{SECTION_SEPARATOR}{TOOL_ORCHESTRATION_INSTRUCTIONS}");
+                text.0 = text.0.replace(&legacy, &current);
+                (text, skills)
+            }
             None => {
                 let agent = config.agent();
                 let base = agent
@@ -376,6 +403,11 @@ impl SessionInstructions {
             text.include_live(CLAUDE_SUBAGENT_MODEL_INSTRUCTIONS);
         } else {
             text.exclude_live(CLAUDE_SUBAGENT_MODEL_INSTRUCTIONS);
+        }
+        if config.decisions().enabled() {
+            text.include_live(DECIDE_TOOL_INSTRUCTIONS);
+        } else {
+            text.exclude_live(DECIDE_TOOL_INSTRUCTIONS);
         }
         if matches!(model, Model::Claude(_)) {
             text.include_live(CLAUDE_CODE_MODE_INSTRUCTIONS);
@@ -502,10 +534,10 @@ impl PromptText {
 mod tests {
     use super::{
         AgentInstructions, CLAUDE_CODE_MODE_INSTRUCTIONS, CLAUDE_SUBAGENT_MODEL_INSTRUCTIONS,
-        MEMORY_INSTRUCTIONS, PromptText, RestoredInstructions, SCRATCHPAD_INSTRUCTIONS,
-        SECTION_SEPARATOR, SESSION_REFERENCE_INSTRUCTIONS, SUBAGENT_INSTRUCTIONS,
-        SUBAGENT_MODEL_INSTRUCTIONS, SessionInstructions, TACT_INSTRUCTIONS,
-        TOOL_ORCHESTRATION_INSTRUCTIONS, default_base,
+        DECIDE_TOOL_INSTRUCTIONS, LEGACY_TOOL_ORCHESTRATION_INSTRUCTIONS, MEMORY_INSTRUCTIONS,
+        PromptText, RestoredInstructions, SCRATCHPAD_INSTRUCTIONS, SECTION_SEPARATOR,
+        SESSION_REFERENCE_INSTRUCTIONS, SUBAGENT_INSTRUCTIONS, SUBAGENT_MODEL_INSTRUCTIONS,
+        SessionInstructions, TACT_INSTRUCTIONS, TOOL_ORCHESTRATION_INSTRUCTIONS, default_base,
     };
     use crate::{
         app::config::{Config, ConfigOverrides, SkillsConfig},
@@ -651,6 +683,69 @@ mod tests {
                 assert_eq!(count(&text, SUBAGENT_INSTRUCTIONS), usize::from(subagents));
                 assert_eq!(count(&text, MEMORY_INSTRUCTIONS), usize::from(memory));
             }
+        }
+    }
+
+    #[test]
+    fn decision_guidance_tracks_tool_enablement_on_fresh_and_restored_prompts() {
+        let directory = tempdir().unwrap();
+        for enabled in [false, true] {
+            let config = load_config(
+                directory.path(),
+                &format!("[decisions]\nenabled = {enabled}\n"),
+                ConfigOverrides::default(),
+            );
+            let catalog = SkillCatalog::load(config.skills());
+            let fresh = SessionInstructions::from_config(
+                &config,
+                &catalog,
+                Model::Codex(CodexModel::Sol),
+                None,
+                false,
+            );
+            assert_eq!(
+                count(&fresh.text, DECIDE_TOOL_INSTRUCTIONS),
+                usize::from(enabled)
+            );
+
+            for stored in [
+                "Saved prompt.".to_owned(),
+                format!("Saved prompt.{}", separated(DECIDE_TOOL_INSTRUCTIONS)),
+            ] {
+                let restored = SessionInstructions::from_config(
+                    &config,
+                    &catalog,
+                    Model::Codex(CodexModel::Sol),
+                    Some(RestoredInstructions::new(stored, Some(false))),
+                    false,
+                );
+                assert_eq!(
+                    count(&restored.text, DECIDE_TOOL_INSTRUCTIONS),
+                    usize::from(enabled)
+                );
+            }
+
+            let legacy = format!(
+                "Saved prompt.{}",
+                separated(LEGACY_TOOL_ORCHESTRATION_INSTRUCTIONS)
+            );
+            let restored = SessionInstructions::from_config(
+                &config,
+                &catalog,
+                Model::Codex(CodexModel::Sol),
+                Some(RestoredInstructions::new(legacy, Some(false))),
+                false,
+            );
+            assert!(
+                !restored
+                    .text
+                    .contains(LEGACY_TOOL_ORCHESTRATION_INSTRUCTIONS)
+            );
+            assert_eq!(count(&restored.text, TOOL_ORCHESTRATION_INSTRUCTIONS), 1);
+            assert_eq!(
+                count(&restored.text, DECIDE_TOOL_INSTRUCTIONS),
+                usize::from(enabled)
+            );
         }
     }
 
