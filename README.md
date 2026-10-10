@@ -159,7 +159,7 @@ chmod 600 ~/.tact/config.toml
 
 ### Turn on the extras
 
-Memory, skills, and Claude are off by default. Here's a config that turns all of them on.
+Memory, skills, decisions, and Claude are off by default. Here's a config that turns all of them on.
 
 ```toml
 [memory]
@@ -168,6 +168,9 @@ enabled = true
 [skills]
 enabled = true
 roots = ["/path/to/your/skills"]
+
+[decisions]
+enabled = true
 
 [claude]
 enabled = true
@@ -311,6 +314,30 @@ Push needs a writer credential and treats local memory as the source of truth. I
 in your namespace that don't exist locally, so run `--dry-run` first. Pull only merges and never
 deletes local records. Normal agent operations never push. The [memory guide](docs/memory.md)
 covers backend selection, the HTTP contract, privacy, and a local server walkthrough.
+
+## Decisions
+
+Decisions give agents a `decide` tool backed by OpenAI's
+[Decisions API](https://developers.openai.com/api/docs/guides/decisions). Instead of writing prose,
+it answers typed questions about text or images: yes/no probabilities, a pick from a fixed set of
+options, or a score on a rubric. Agents use it for quick classification, routing, and triage.
+Decisions are off until you turn them on.
+
+```toml
+[decisions]
+enabled = true
+
+[openai]
+decisions_api_key = "sk-..." # only needed with a ChatGPT login and no API key
+```
+
+The Decisions API takes an OpenAI API key, and a ChatGPT subscription can't pay for it. Tact uses
+`OPENAI_API_KEY` or `openai.api_key` when either is set, whatever `auth.mode` says. Otherwise it uses
+`openai.decisions_api_key`. With decisions on and no key available, sessions fail to start and the
+error names the settings to fix.
+
+The tool works in Codex and Claude sessions, including subagents and code mode. Changes apply when a
+session starts or resumes.
 
 ## Models, effort, and speed
 
@@ -520,6 +547,7 @@ file = "/path/to/.codex/auth.json"
 
 [openai]
 api_key = ""
+decisions_api_key = ""
 
 [agent]
 workspace = "/path/to/workspace"
@@ -553,6 +581,9 @@ max_total_bytes = 262144
 
 [subagents]
 enabled = true
+
+[decisions]
+enabled = false
 
 [web]
 enabled = true

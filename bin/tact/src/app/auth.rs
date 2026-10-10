@@ -1,7 +1,7 @@
 //! Provider authentication selection and shared ChatGPT credential management.
 
 use crate::app::{
-    config::{AuthConfig, AuthMode, ClaudeConfig},
+    config::{AuthConfig, AuthMode, ClaudeConfig, DecisionsConfig},
     error::{AuthError, AuthResult, SecretError},
     secret::SecretString,
 };
@@ -29,16 +29,17 @@ enum SelectedAuth {
 }
 
 #[derive(Debug)]
-enum OpenAiApiKey {
+pub(crate) enum OpenAiApiKey {
     Environment(SecretString),
     Config(Arc<SecretString>),
+    DecisionsConfig(Arc<SecretString>),
 }
 
 impl OpenAiApiKey {
-    fn key(&self) -> &SecretString {
+    pub(crate) fn key(&self) -> &SecretString {
         match self {
             Self::Environment(key) => key,
-            Self::Config(key) => key,
+            Self::Config(key) | Self::DecisionsConfig(key) => key,
         }
     }
 
@@ -46,6 +47,7 @@ impl OpenAiApiKey {
         match self {
             Self::Environment(_) => OPENAI_API_KEY,
             Self::Config(_) => "openai.api_key",
+            Self::DecisionsConfig(_) => "openai.decisions_api_key",
         }
     }
 }
@@ -87,6 +89,38 @@ impl ClaudeApiKey {
             Self::Environment(_) => "ANTHROPIC_API_KEY",
             Self::Config(_) => "claude.api_key",
         }
+    }
+}
+
+impl DecisionsConfig {
+    /// Selects the OpenAI Platform key for Decisions API requests, or `None` when decisions are
+    /// disabled.
+    pub(crate) fn resolve_api_key(&self, auth: &AuthConfig) -> AuthResult<Option<OpenAiApiKey>> {
+        self.select_api_key(auth, || SecretString::from_environment(OPENAI_API_KEY))
+    }
+
+    /// An OpenAI API key is used whenever one is available, whatever the authentication mode.
+    /// A ChatGPT subscription cannot authorize Platform requests, so setups without an API key
+    /// must provide `openai.decisions_api_key`.
+    fn select_api_key<F>(
+        &self,
+        auth: &AuthConfig,
+        read_api_key: F,
+    ) -> AuthResult<Option<OpenAiApiKey>>
+    where
+        F: FnOnce() -> StdResult<Option<SecretString>, SecretError>,
+    {
+        if !self.enabled() {
+            return Ok(None);
+        }
+        let selected = match auth.configured_api_key(read_api_key)? {
+            Some(key) => key,
+            None => self
+                .api_key()
+                .map(|key| OpenAiApiKey::DecisionsConfig(Arc::clone(key)))
+                .ok_or(AuthError::DecisionsApiKeyUnavailable)?,
+        };
+        Ok(Some(selected))
     }
 }
 
@@ -166,13 +200,7 @@ impl AuthConfig {
             AuthMode::ApiKey => {}
         }
 
-        let selected = match read_api_key()? {
-            Some(key) => Some(OpenAiApiKey::Environment(key)),
-            None => self
-                .api_key()
-                .map(|key| OpenAiApiKey::Config(Arc::clone(key))),
-        };
-        selected
+        self.configured_api_key(read_api_key)?
             .map(SelectedAuth::ApiKey)
             .ok_or_else(|| match self.mode() {
                 AuthMode::ApiKey => AuthError::ApiKeyUnavailable,
@@ -180,6 +208,19 @@ impl AuthConfig {
                     path: self.file().to_path_buf(),
                 },
             })
+    }
+
+    /// The OpenAI API key from the environment, then the configuration file.
+    fn configured_api_key<F>(&self, read_api_key: F) -> AuthResult<Option<OpenAiApiKey>>
+    where
+        F: FnOnce() -> StdResult<Option<SecretString>, SecretError>,
+    {
+        Ok(match read_api_key()? {
+            Some(key) => Some(OpenAiApiKey::Environment(key)),
+            None => self
+                .api_key()
+                .map(|key| OpenAiApiKey::Config(Arc::clone(key))),
+        })
     }
 
     async fn print_chatgpt_status(&self) -> AuthResult<()> {
@@ -251,7 +292,7 @@ mod tests {
 
     use super::{OpenAiApiKey, SelectedAuth};
     use crate::app::{
-        config::{AuthConfig, AuthMode, ClaudeConfig},
+        config::{AuthConfig, AuthMode, ClaudeConfig, DecisionsConfig},
         error::{AuthError, SecretError},
         secret::SecretString,
     };
@@ -388,6 +429,67 @@ mod tests {
             })
         });
         assert!(matches!(result, Err(AuthError::Secret(_))));
+    }
+
+    #[test]
+    fn decisions_prefer_an_openai_api_key_then_the_decisions_key() {
+        let secret = |key: &str| Arc::new(SecretString::new(key.into()));
+        for mode in [AuthMode::Auto, AuthMode::ChatGpt, AuthMode::ApiKey] {
+            for (openai, environment, decisions, expected) in [
+                (
+                    None,
+                    None,
+                    Some("decisions-sentinel"),
+                    Some("openai.decisions_api_key"),
+                ),
+                (
+                    Some("config-sentinel"),
+                    None,
+                    Some("decisions-sentinel"),
+                    Some("openai.api_key"),
+                ),
+                (
+                    None,
+                    Some("env-sentinel"),
+                    Some("decisions-sentinel"),
+                    Some("OPENAI_API_KEY"),
+                ),
+                (None, None, None, None),
+            ] {
+                let auth = AuthConfig::new(mode, "unused.json".into(), openai.map(secret));
+                let config = DecisionsConfig::new(true, decisions.map(secret));
+                let result = config.select_api_key(&auth, || {
+                    Ok(environment.map(|key| SecretString::new(key.into())))
+                });
+                let Some(expected) = expected else {
+                    let error = result.unwrap_err();
+                    assert!(matches!(error, AuthError::DecisionsApiKeyUnavailable));
+                    continue;
+                };
+                let key = result.unwrap().expect("decisions are enabled");
+                assert_eq!(key.source(), expected);
+                assert_eq!(
+                    key.key().expose_secret(),
+                    environment.or(openai).or(decisions).unwrap()
+                );
+                assert!(!format!("{key:?}").contains("sentinel"));
+            }
+        }
+    }
+
+    #[test]
+    fn disabled_decisions_read_no_credentials() {
+        let api_key_read = Cell::new(false);
+        let auth = AuthConfig::new(AuthMode::ChatGpt, "unused.json".into(), None);
+        let selected = DecisionsConfig::new(false, None)
+            .select_api_key(&auth, || {
+                api_key_read.set(true);
+                Ok(None)
+            })
+            .unwrap();
+
+        assert!(selected.is_none());
+        assert!(!api_key_read.get());
     }
 
     #[test]

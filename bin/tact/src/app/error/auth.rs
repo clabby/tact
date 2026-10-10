@@ -16,6 +16,10 @@ pub(crate) enum AuthError {
     },
     #[error("OpenAI API-key authentication requires openai.api_key or OPENAI_API_KEY")]
     ApiKeyUnavailable,
+    #[error(
+        "decisions require an OpenAI API key; set openai.api_key or OPENAI_API_KEY, or set openai.decisions_api_key when signed in with ChatGPT"
+    )]
+    DecisionsApiKeyUnavailable,
     #[error("Claude API-key authentication requires claude.api_key or ANTHROPIC_API_KEY")]
     ClaudeApiKeyUnavailable,
     #[error(

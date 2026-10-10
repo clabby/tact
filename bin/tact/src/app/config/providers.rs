@@ -69,7 +69,8 @@ impl AuthConfig {
     }
 }
 
-/// Credentials for OpenAI Platform requests.
+/// Credentials for OpenAI Platform requests. `decisions_api_key` serves only the Decisions API,
+/// for setups whose model requests use a ChatGPT subscription instead of an API key.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub(super) struct OpenAiConfig {
@@ -78,6 +79,11 @@ pub(super) struct OpenAiConfig {
         serialize_with = "serialize_optional_secret"
     )]
     pub(super) api_key: Option<Arc<SecretString>>,
+    #[serde(
+        deserialize_with = "deserialize_optional_secret",
+        serialize_with = "serialize_optional_secret"
+    )]
+    pub(super) decisions_api_key: Option<Arc<SecretString>>,
 }
 
 /// Availability, credentials, and API routing for Claude models.
@@ -200,8 +206,9 @@ mod tests {
     #[test]
     fn openai_config_key_is_shared_and_redacted_with_chatgpt_authentication() {
         let secret = "openai-config-secret-sentinel";
+        let decisions_secret = "decisions-config-secret-sentinel";
         let config = load_config(&format!(
-            "[auth]\nmode = 'chatgpt'\n[openai]\napi_key = '{secret}'\n"
+            "[auth]\nmode = 'chatgpt'\n[openai]\napi_key = '{secret}'\ndecisions_api_key = '{decisions_secret}'\n"
         ))
         .unwrap();
         let key = config.auth().api_key().unwrap();
@@ -209,12 +216,25 @@ mod tests {
         let cloned = config.clone();
         assert!(Arc::ptr_eq(key, cloned.auth().api_key().unwrap()));
         assert!(Arc::ptr_eq(key, config.openai.api_key.as_ref().unwrap()));
+        let decisions_key = config.decisions().api_key().unwrap();
+        assert_eq!(decisions_key.expose_secret(), decisions_secret);
+        assert!(Arc::ptr_eq(
+            decisions_key,
+            config.openai.decisions_api_key.as_ref().unwrap()
+        ));
         let rendered = config.to_toml().unwrap();
         assert!(!rendered.contains(secret));
+        assert!(!rendered.contains(decisions_secret));
         assert!(!format!("{config:?}").contains(secret));
+        assert!(!format!("{config:?}").contains(decisions_secret));
         let document: toml::Value = toml::from_str(&rendered).unwrap();
         assert_eq!(document["openai"]["api_key"].as_str(), Some("[REDACTED]"));
+        assert_eq!(
+            document["openai"]["decisions_api_key"].as_str(),
+            Some("[REDACTED]")
+        );
         assert!(document["auth"].get("api_key").is_none());
+        assert!(document["decisions"].get("api_key").is_none());
     }
 
     #[test]

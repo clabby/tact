@@ -43,6 +43,7 @@ minisign-verify = "0.2.5"
 # (https://github.com/gakonst/nanocodex/pull/944). Return to upstream once both merge.
 nanocodex = { git = "https://github.com/clabby/nanocodex", rev = "36d3bbf96fcfec96921d21020d63eee938c305a2", features = ["claude"] }
 nanocodex-agent = { git = "https://github.com/clabby/nanocodex", rev = "36d3bbf96fcfec96921d21020d63eee938c305a2" }
+nanocodex-decisions = { git = "https://github.com/clabby/nanocodex", rev = "36d3bbf96fcfec96921d21020d63eee938c305a2" }
 png = "0.18.1"
 pulldown-cmark = { version = "0.13.4", default-features = false }
 ratatui = "0.30.2"

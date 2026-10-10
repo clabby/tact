@@ -40,6 +40,7 @@ miette.workspace = true
 minisign-verify.workspace = true
 nanocodex.workspace = true
 nanocodex-agent.workspace = true
+nanocodex-decisions.workspace = true
 png.workspace = true
 pulldown-cmark.workspace = true
 ratatui.workspace = true
