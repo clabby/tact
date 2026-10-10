@@ -9,9 +9,9 @@ use super::{
     CompactionFinished, DirectedMessageEntry, EffortChanged, EntryId, EntryKind, FastModeChanged,
     LocalKind, MessageDelivery, MessagePhase, ReflectionStarted, SessionEnded,
     SessionMessageReceived, SessionOutcome, SessionStarted, ShellFinished, ShellId, ShellStarted,
-    SpeedChanged, ToolEntry, ToolState, TranscriptEntry, TranscriptRecord, TransientStatus,
-    UserImage, UserSteered, UserSubmitted, WorkerSteerFailed, WorkerStopped, WorkerTurnFinished,
-    WorkerTurnsInterrupted,
+    SpeedChanged, ToolEntry, ToolState, TranscriptEntry, TranscriptRecord, TransientStatus, TurnId,
+    UserImage, UserSteered, UserSubmitted, WorkerSteerFailed, WorkerStopped, WorkerTurnAccepted,
+    WorkerTurnFinished, WorkerTurnsInterrupted,
 };
 use nanocodex::{
     agent::events::{
@@ -31,6 +31,9 @@ use tact_subagents::{
 };
 
 const MAX_RETAINED_MESSAGE_THREADS: usize = 256;
+/// The start of the note a Nanocodex driver puts in a prompt in place of an
+/// image the model cannot use.
+const OMITTED_IMAGE_NOTE: &str = "image content omitted because";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum EventVisibility {
@@ -79,6 +82,16 @@ pub(crate) struct TranscriptModel {
     transient: Option<TransientStatus>,
     pending_error: Option<String>,
     pending_compaction_error: Option<String>,
+    /// Turns the worker accepted that have not finished in the current runtime. A turn that
+    /// finishes outside this set gets no run failure to report its error, because the worker
+    /// rejected it before it started or its agent stream already closed. Turn ids are unique only
+    /// within one runtime of the session, which begins with a session start record and ends when
+    /// its agent stream closes. Both boundaries clear this set.
+    accepted_turns: HashSet<TurnId>,
+    /// The accepted input of each steer that no run has applied yet, oldest first. A steer
+    /// joins the transcript as a user message only once its run applies it, after its input
+    /// was accepted. The end of a run drops its unapplied steers, as do the runtime boundaries.
+    pending_steers: VecDeque<Vec<UserInput>>,
 }
 
 #[derive(Clone, Copy)]
@@ -283,6 +296,8 @@ impl TranscriptModel {
     fn apply_local(&mut self, kind: LocalKind, record: &TranscriptRecord) -> ModelChange {
         let changed = match kind {
             LocalKind::SessionStarted => record.decode_payload::<SessionStarted>().map(|payload| {
+                self.accepted_turns.clear();
+                self.pending_steers.clear();
                 if let Some(session_id) = payload.parent_session_id {
                     *self = self.fork_snapshot();
                     self.push(EntryKind::ForkedFrom { session_id });
@@ -295,9 +310,14 @@ impl TranscriptModel {
                 });
             }),
             LocalKind::UserSteered => record.decode_payload::<UserSteered>().map(|payload| {
+                let images = self
+                    .pending_steers
+                    .pop_front()
+                    .map(|input| accepted_images(&payload.text, input))
+                    .unwrap_or_default();
                 self.push(EntryKind::User {
                     text: payload.text,
-                    images: Vec::new(),
+                    images,
                 });
             }),
             LocalKind::SessionMessageReceived => record
@@ -361,10 +381,22 @@ impl TranscriptModel {
                 record
                     .decode_payload::<WorkerTurnFinished>()
                     .map(|payload| {
-                        if let Some(error) = payload.error {
-                            self.pending_error = Some(error);
+                        let accepted = self.accepted_turns.remove(&payload.id);
+                        match payload.error {
+                            Some(message) if !accepted => self.push_error(message),
+                            Some(error) => self.pending_error = Some(error),
+                            None => {}
                         }
                     })
+            }
+            LocalKind::WorkerTurnAccepted => {
+                return match record.decode_payload::<WorkerTurnAccepted>() {
+                    Ok(payload) => {
+                        self.accepted_turns.insert(payload.id);
+                        ModelChange::default()
+                    }
+                    Err(error) => self.projection_error(record, error, false),
+                };
             }
             LocalKind::WorkerTurnsInterrupted => return self.apply_interruption(record),
             LocalKind::WorkerSteerFailed => {
@@ -385,9 +417,7 @@ impl TranscriptModel {
                 }
                 self.agent_stream_closed();
             }),
-            LocalKind::ContextBudget
-            | LocalKind::ContextObserved
-            | LocalKind::WorkerTurnAccepted => return ModelChange::default(),
+            LocalKind::ContextBudget | LocalKind::ContextObserved => return ModelChange::default(),
         };
         match changed {
             Ok(()) => ModelChange {
@@ -501,11 +531,13 @@ impl TranscriptModel {
                 true
             }),
             AgentEventKind::RunCompleted => {
+                self.pending_steers.clear();
                 self.complete_turn(record);
                 Ok(true)
             }
             AgentEventKind::RunFailed => {
                 self.run_started_at_unix_ms.pop_front();
+                self.pending_steers.clear();
                 if run_was_cancelled(record) {
                     self.finish_cancelled();
                 } else {
@@ -577,12 +609,22 @@ impl TranscriptModel {
     fn input_accepted(&mut self, record: &TranscriptRecord) -> Result<bool, serde_json::Error> {
         #[derive(Deserialize)]
         struct InputAccepted {
+            #[serde(default)]
+            kind: Option<String>,
             input: PromptInput,
         }
         let payload = record.decode_payload::<InputAccepted>()?;
-        let PromptInput::Content(input) = payload.input else {
-            return Ok(false);
+        let input = match payload.input {
+            PromptInput::Content(input) => input,
+            PromptInput::Text(_) => Vec::new(),
         };
+        if payload.kind.as_deref() == Some("steer") {
+            self.pending_steers.push_back(input);
+            return Ok(false);
+        }
+        if input.is_empty() {
+            return Ok(false);
+        }
         let Some(entry) = self
             .entries
             .iter_mut()
@@ -594,21 +636,7 @@ impl TranscriptModel {
         let EntryKind::User { text, images } = &mut entry.kind else {
             return Ok(false);
         };
-        let markers = text.match_indices("[Image #").filter_map(|(start, _)| {
-            let suffix = &text[start + "[Image #".len()..];
-            let digits = suffix.bytes().take_while(u8::is_ascii_digit).count();
-            (digits > 0 && suffix.as_bytes().get(digits) == Some(&b']'))
-                .then_some(start..start + "[Image #".len() + digits + 1)
-        });
-        let attached = input
-            .into_iter()
-            .filter_map(|part| match part {
-                UserInput::Image { image_url, .. } => Some(image_url),
-                _ => None,
-            })
-            .zip(markers)
-            .map(|(data_url, range)| UserImage { range, data_url })
-            .collect::<Vec<_>>();
+        let attached = accepted_images(text, input);
         if *images == attached {
             return Ok(false);
         }
@@ -1002,12 +1030,17 @@ impl TranscriptModel {
         let message = error
             .or_else(|| self.pending_error.take())
             .unwrap_or_else(|| "The agent run failed".to_owned());
+        self.push_error(message);
+        self.finish_activity();
+    }
+
+    /// Shows `message` unless the last entry already shows it.
+    fn push_error(&mut self, message: String) {
         if !self.entries.last().is_some_and(|entry| {
             matches!(&entry.kind, EntryKind::Error { message: existing } if existing == &message)
         }) {
             self.push(EntryKind::Error { message });
         }
-        self.finish_activity();
     }
 
     fn finish_activity(&mut self) {
@@ -1076,6 +1109,8 @@ impl TranscriptModel {
         self.active_runs = 0;
         self.manual_compaction = None;
         self.run_started_at_unix_ms.clear();
+        self.accepted_turns.clear();
+        self.pending_steers.clear();
         self.fail_orphaned_tools();
         self.transient = self.is_active().then_some(TransientStatus::Thinking);
         changed
@@ -1301,6 +1336,34 @@ fn message_phase(phase: Option<AgentMessagePhase>) -> MessagePhase {
     }
 }
 
+/// Pairs the accepted images of a user message, and the notes that replace
+/// images a driver could not use, with the `[Image #N]` markers of its text in
+/// order, so an omitted image leaves only its own marker empty. Other text, such
+/// as prepended shell output or appended turn instructions, pairs with no marker.
+fn accepted_images(text: &str, input: Vec<UserInput>) -> Vec<UserImage> {
+    let markers = text.match_indices("[Image #").filter_map(|(start, _)| {
+        let suffix = &text[start + "[Image #".len()..];
+        let digits = suffix.bytes().take_while(u8::is_ascii_digit).count();
+        (digits > 0 && suffix.as_bytes().get(digits) == Some(&b']'))
+            .then_some(start..start + "[Image #".len() + digits + 1)
+    });
+    input
+        .into_iter()
+        .filter_map(|part| match part {
+            UserInput::Image { image_url, .. } => Some(Some(image_url)),
+            UserInput::Text { text } if text.starts_with(OMITTED_IMAGE_NOTE) => Some(None),
+            _ => None,
+        })
+        .zip(markers)
+        .filter_map(|(image, range)| {
+            Some(UserImage {
+                range,
+                data_url: image?,
+            })
+        })
+        .collect()
+}
+
 /// How an agent event surfaces when its payload cannot be projected.
 const fn visibility(kind: AgentEventKind) -> EventVisibility {
     match kind {
@@ -1495,11 +1558,12 @@ mod tests {
         merge_shell_result, visibility,
     };
     use crate::{
-        app::config::{ReasoningEffort, Speed},
+        app::config::{ReasoningEffort, ReasoningMode, Speed},
         core::transcript::{
             EffortChanged, LocalEvent, ReflectionStarted, SessionEnded, SessionMessageReceived,
-            SessionOutcome, ShellFinished, ShellId, ShellStarted, SpeedChanged, TranscriptRecord,
-            TurnId, UserSteered, UserSubmitted, WorkerTurnsInterrupted,
+            SessionOutcome, SessionStarted, ShellFinished, ShellId, ShellStarted, SpeedChanged,
+            TranscriptRecord, TurnId, UserSteered, UserSubmitted, WorkerTurnAccepted,
+            WorkerTurnFinished, WorkerTurnsInterrupted,
         },
     };
     use nanocodex::agent::events::{AgentEvent, AgentEventKind};
@@ -2369,6 +2433,135 @@ mod tests {
         );
     }
 
+    fn turn_accepted(id: u64) -> TranscriptRecord {
+        TranscriptRecord::from_local(
+            1,
+            1,
+            LocalEvent::WorkerTurnAccepted(WorkerTurnAccepted {
+                id: TurnId::new(id),
+            }),
+        )
+        .unwrap()
+    }
+
+    fn turn_finished(id: u64, error: &str) -> TranscriptRecord {
+        TranscriptRecord::from_local(
+            2,
+            2,
+            LocalEvent::WorkerTurnFinished(WorkerTurnFinished {
+                id: TurnId::new(id),
+                error: Some(error.to_owned()),
+                terminal_stop: None,
+            }),
+        )
+        .unwrap()
+    }
+
+    fn error_messages(model: &TranscriptModel) -> Vec<&str> {
+        model
+            .entries()
+            .iter()
+            .filter_map(|entry| match &entry.kind {
+                EntryKind::Error { message } => Some(message.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn rejected_prompt_shows_why_it_was_not_sent() {
+        let mut model = TranscriptModel::default();
+        model.apply(
+            &TranscriptRecord::from_local(
+                1,
+                1,
+                LocalEvent::UserSubmitted(UserSubmitted {
+                    id: TurnId::new(1),
+                    text: "look [Image #1]".to_owned(),
+                }),
+            )
+            .unwrap(),
+        );
+
+        let change = model.apply(&turn_finished(
+            1,
+            "invalid task request: Claude image exceeds 5 MiB",
+        ));
+
+        assert!(change.changed);
+        assert_eq!(
+            error_messages(&model),
+            ["invalid task request: Claude image exceeds 5 MiB"]
+        );
+    }
+
+    #[test]
+    fn accepted_turn_failure_reports_its_error_once() {
+        let mut model = TranscriptModel::default();
+        model.apply(&turn_accepted(1));
+        model.apply(&agent(AgentEventKind::RunStarted, json!({})));
+
+        model.apply(&turn_finished(1, "service unavailable"));
+        assert!(error_messages(&model).is_empty());
+        model.apply(&agent(AgentEventKind::RunFailed, json!({})));
+
+        assert_eq!(error_messages(&model), ["service unavailable"]);
+    }
+
+    #[test]
+    fn rejections_are_shown_after_an_earlier_runtime_stopped_mid_turn() {
+        let rejected = "invalid task request: Claude image exceeds 5 MiB";
+        let resumed = TranscriptRecord::from_local(
+            2,
+            2,
+            LocalEvent::SessionStarted(SessionStarted {
+                session_id: "session".to_owned(),
+                parent_session_id: None,
+                parent_sequence: None,
+                model: "claude-opus-5-5".to_owned(),
+                effort: ReasoningEffort::Medium,
+                reasoning_mode: ReasoningMode::Standard,
+                speed: Speed::Standard,
+                workspace: "/work".into(),
+                application_version: "test".to_owned(),
+            }),
+        )
+        .unwrap();
+        for resume in [Some(&resumed), None] {
+            let mut model = TranscriptModel::default();
+            model.apply(&turn_accepted(1));
+            match resume {
+                Some(record) => {
+                    model.apply(record);
+                }
+                None => {
+                    model.agent_stream_closed();
+                }
+            }
+
+            model.apply(&turn_finished(1, rejected));
+
+            assert_eq!(error_messages(&model), [rejected]);
+        }
+    }
+
+    #[test]
+    fn a_late_worker_error_after_the_stream_closes_is_not_repeated() {
+        let mut model = TranscriptModel::default();
+        model.apply(&turn_accepted(1));
+        model.apply(&agent(AgentEventKind::RunStarted, json!({})));
+        model.apply(&agent(
+            AgentEventKind::RunError,
+            json!({"message": "service unavailable"}),
+        ));
+        model.apply(&agent(AgentEventKind::RunFailed, json!({})));
+        model.agent_stream_closed();
+
+        model.apply(&turn_finished(1, "service unavailable"));
+
+        assert_eq!(error_messages(&model), ["service unavailable"]);
+    }
+
     #[test]
     fn closing_a_session_fails_tools_without_terminal_results() {
         let mut model = TranscriptModel::default();
@@ -2446,6 +2639,194 @@ mod tests {
         };
         assert_eq!(images, replayed);
         assert!(!model.apply(&accepted).changed);
+    }
+
+    #[test]
+    fn an_omitted_image_leaves_only_its_own_marker_empty() {
+        let text = "compare [Image #1] with [Image #2]";
+        let submitted = TranscriptRecord::from_local(
+            1,
+            1,
+            LocalEvent::UserSubmitted(UserSubmitted {
+                id: TurnId::new(3),
+                text: text.to_owned(),
+            }),
+        )
+        .unwrap();
+        // A note replaces the first image, and turn instructions follow the submission.
+        let accepted = agent(
+            AgentEventKind::InputAccepted,
+            json!({
+                "input": [
+                    {"type": "text", "text": "compare "},
+                    {"type": "text", "text": "image content omitted because it could not be processed"},
+                    {"type": "text", "text": " with "},
+                    {"type": "image", "image_url": "data:image/png;base64,second"},
+                    {"type": "text", "text": "\n\nturn instructions"}
+                ]
+            }),
+        );
+        let mut model = TranscriptModel::default();
+        model.apply(&submitted);
+        assert!(model.apply(&accepted).changed);
+        let EntryKind::User { images, .. } = &model.entries()[0].kind else {
+            panic!("user entry missing")
+        };
+        assert_eq!(images.len(), 1);
+        assert_eq!(&text[images[0].range.clone()], "[Image #2]");
+        assert_eq!(images[0].data_url, "data:image/png;base64,second");
+    }
+
+    #[test]
+    fn an_omitted_image_stays_on_its_marker_after_prepended_context() {
+        let text = "[Image #1][Image #2]";
+        let submitted = TranscriptRecord::from_local(
+            1,
+            1,
+            LocalEvent::UserSubmitted(UserSubmitted {
+                id: TurnId::new(3),
+                text: text.to_owned(),
+            }),
+        )
+        .unwrap();
+        // Shell output prepended to the prompt is not part of the journaled text.
+        let accepted = agent(
+            AgentEventKind::InputAccepted,
+            json!({
+                "input": [
+                    {"type": "text", "text": "$ ls\nscreenshot.png\n\n"},
+                    {"type": "image", "image_url": "data:image/png;base64,first"},
+                    {"type": "text", "text": "image content omitted because it could not be processed"},
+                    {"type": "text", "text": "\n\nturn instructions"}
+                ]
+            }),
+        );
+        let mut model = TranscriptModel::default();
+        model.apply(&submitted);
+        assert!(model.apply(&accepted).changed);
+        let EntryKind::User { images, .. } = &model.entries()[0].kind else {
+            panic!("user entry missing")
+        };
+        assert_eq!(images.len(), 1);
+        assert_eq!(&text[images[0].range.clone()], "[Image #1]");
+        assert_eq!(images[0].data_url, "data:image/png;base64,first");
+    }
+
+    #[test]
+    fn a_steers_images_attach_to_its_own_entry() {
+        let mut model = TranscriptModel::default();
+        model.apply(
+            &TranscriptRecord::from_local(
+                1,
+                1,
+                LocalEvent::UserSubmitted(UserSubmitted {
+                    id: TurnId::new(3),
+                    text: "look at [Image #1]".to_owned(),
+                }),
+            )
+            .unwrap(),
+        );
+        model.apply(&agent(
+            AgentEventKind::InputAccepted,
+            json!({
+                "kind": "prompt",
+                "input": [
+                    {"type": "text", "text": "look at "},
+                    {"type": "image", "image_url": "data:image/png;base64,prompt"}
+                ]
+            }),
+        ));
+        // A steer's input is accepted when it is admitted, but the steer joins
+        // the transcript only once the run applies it.
+        model.apply(&agent(
+            AgentEventKind::InputAccepted,
+            json!({
+                "kind": "steer",
+                "input": [
+                    {"type": "text", "text": "and "},
+                    {"type": "image", "image_url": "data:image/png;base64,steer"}
+                ]
+            }),
+        ));
+        model.apply(&agent(
+            AgentEventKind::RunSteered,
+            json!({"steer_index": 1, "instruction_bytes": 4}),
+        ));
+        model.apply(
+            &TranscriptRecord::from_local(
+                2,
+                2,
+                LocalEvent::UserSteered(UserSteered {
+                    text: "and [Image #2]".to_owned(),
+                }),
+            )
+            .unwrap(),
+        );
+        let images = model
+            .entries()
+            .iter()
+            .filter_map(|entry| match &entry.kind {
+                EntryKind::User { text, images } => Some((
+                    text.as_str(),
+                    images
+                        .iter()
+                        .map(|image| image.data_url.as_str())
+                        .collect::<Vec<_>>(),
+                )),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            images,
+            [
+                ("look at [Image #1]", vec!["data:image/png;base64,prompt"]),
+                ("and [Image #2]", vec!["data:image/png;base64,steer"]),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_finished_runs_unapplied_steer_does_not_supply_later_images() {
+        let steer = |image: &str| {
+            agent(
+                AgentEventKind::InputAccepted,
+                json!({
+                    "kind": "steer",
+                    "input": [{"type": "image", "image_url": format!("data:image/png;base64,{image}")}]
+                }),
+            )
+        };
+        let mut model = TranscriptModel::default();
+        model.apply(&agent(AgentEventKind::RunStarted, json!({})));
+        model.apply(&steer("unapplied"));
+        model.apply(&agent(AgentEventKind::RunCompleted, json!({})));
+        model.apply(&agent(AgentEventKind::RunStarted, json!({})));
+        model.apply(&steer("applied"));
+        model.apply(&agent(
+            AgentEventKind::RunSteered,
+            json!({"steer_index": 1, "instruction_bytes": 0}),
+        ));
+        model.apply(
+            &TranscriptRecord::from_local(
+                2,
+                2,
+                LocalEvent::UserSteered(UserSteered {
+                    text: "[Image #1]".to_owned(),
+                }),
+            )
+            .unwrap(),
+        );
+        let Some(EntryKind::User { images, .. }) = model.entries().last().map(|entry| &entry.kind)
+        else {
+            panic!("steer entry missing")
+        };
+        assert_eq!(
+            images
+                .iter()
+                .map(|image| image.data_url.as_str())
+                .collect::<Vec<_>>(),
+            ["data:image/png;base64,applied"]
+        );
     }
 
     #[test]

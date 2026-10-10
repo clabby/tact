@@ -1,7 +1,7 @@
 //! Displayable prompt text paired with model-only image content.
 
 use nanocodex::agent::input::{Prompt, UserInput};
-use std::{fmt, ops::Range};
+use std::{fmt, ops::Range, sync::Arc};
 
 /// Identifies a prompt waiting in a session's queue until it is sent or steered into the
 /// running turn.
@@ -27,7 +27,7 @@ pub(crate) struct Submission {
 #[derive(Clone, Eq, PartialEq)]
 struct SubmissionImage {
     range: Range<usize>,
-    data_url: String,
+    data_url: Arc<str>,
 }
 
 impl Submission {
@@ -40,7 +40,7 @@ impl Submission {
 
     pub(crate) fn multimodal(
         text: String,
-        images: impl IntoIterator<Item = (Range<usize>, String)>,
+        images: impl IntoIterator<Item = (Range<usize>, Arc<str>)>,
     ) -> Self {
         let images = images
             .into_iter()
@@ -85,6 +85,13 @@ impl Submission {
         &self.text
     }
 
+    /// The images in text order, each with the byte range of the marker it replaces.
+    pub(crate) fn images(&self) -> impl Iterator<Item = (Range<usize>, &Arc<str>)> {
+        self.images
+            .iter()
+            .map(|image| (image.range.clone(), &image.data_url))
+    }
+
     pub(crate) fn agent_prompt(&self) -> Prompt {
         if self.images.is_empty() {
             return self.text.clone().into();
@@ -98,7 +105,7 @@ impl Submission {
                 });
             }
             content.push(UserInput::Image {
-                image_url: image.data_url.clone(),
+                image_url: image.data_url.to_string(),
                 detail: None,
             });
             cursor = image.range.end;
@@ -143,7 +150,7 @@ mod tests {
     fn multimodal_prompt_replaces_markers_with_ordered_images() {
         let submission = Submission::multimodal(
             "before [Image #1] after".to_owned(),
-            [(7..17, "data:image/png;base64,a".to_owned())],
+            [(7..17, "data:image/png;base64,a".into())],
         );
         let prompt = submission.agent_prompt();
         let PromptInput::Content(content) = prompt.instruction else {

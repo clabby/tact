@@ -562,10 +562,14 @@ impl State {
                 queue,
                 busy,
             } => {
+                // Opened records are history from runtimes that have ended, so the projection
+                // closes their agent stream after replaying them, as the terminal's restored
+                // projection does.
                 let mut model = TranscriptModel::default();
                 for record in &records {
                     model.apply(record);
                 }
+                model.agent_stream_closed();
                 let last_activity_unix_ms = records
                     .last()
                     .map_or_else(now_unix_ms, |record| record.recorded_at_unix_ms());
@@ -996,7 +1000,7 @@ mod tests {
             protocol::{Busy, Draft, Origin, Publication, QueuedPrompt, SessionInfo},
             transcript::{
                 LocalEvent, SessionStarted, TranscriptModel, TranscriptRecord, TurnId,
-                UserSubmitted,
+                UserSubmitted, WorkerTurnAccepted, WorkerTurnFinished,
             },
         },
         web::{
@@ -1035,6 +1039,10 @@ mod tests {
             let records = prompt
                 .map(|text| vec![user_record(1, text)])
                 .unwrap_or_default();
+            self.open_restored(id, records);
+        }
+
+        fn open_restored(&self, id: &str, records: Vec<Arc<TranscriptRecord>>) {
             self.publish(Publication::Opened {
                 info: SessionInfo {
                     id: id.to_owned(),
@@ -1375,6 +1383,52 @@ mod tests {
         assert_eq!(entries[0]["text"], "before the fork");
         assert_eq!(entries[1]["kind"], "forked_from");
         assert_eq!(entries[1]["session"], "parent");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_restored_session_shows_why_a_later_prompt_was_not_sent() {
+        let fixture = fixture();
+        let unfinished = TranscriptRecord::from_local(
+            1,
+            1_001,
+            LocalEvent::WorkerTurnAccepted(WorkerTurnAccepted { id: TurnId::new(1) }),
+        )
+        .unwrap();
+        fixture.open_restored("s1", vec![Arc::new(unfinished)]);
+        fixture.activate("s1");
+        let rejection = "invalid task request: Claude image exceeds 5 MiB";
+        let submitted = TranscriptRecord::from_local(
+            2,
+            1_999,
+            LocalEvent::UserSubmitted(UserSubmitted {
+                id: TurnId::new(1),
+                text: "look [Image #1]".to_owned(),
+            }),
+        )
+        .unwrap();
+        let finished = TranscriptRecord::from_local(
+            3,
+            2_000,
+            LocalEvent::WorkerTurnFinished(WorkerTurnFinished {
+                id: TurnId::new(1),
+                error: Some(rejection.to_owned()),
+                terminal_stop: None,
+            }),
+        )
+        .unwrap();
+        for record in [submitted, finished] {
+            fixture.publish(Publication::Record {
+                session: "s1".into(),
+                record: Arc::new(record),
+            });
+        }
+        settle().await;
+
+        let mut subscription = fixture.hub.subscribe().unwrap();
+        let events = drain(&mut subscription);
+        let entries = &events[3].1["entries"];
+        assert_eq!(entries[1]["kind"], "error");
+        assert_eq!(entries[1]["message"], rejection);
     }
 
     #[tokio::test(start_paused = true)]
