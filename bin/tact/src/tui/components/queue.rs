@@ -229,18 +229,30 @@ impl MessageQueue {
         text
     }
 
-    pub(super) fn steer_applied(&mut self) -> Option<Submission> {
-        if let Some(id) = self
-            .items
-            .iter()
-            .find(|item| {
-                matches!(
-                    item.state,
-                    QueueItemState::AdmittedSteer | QueueItemState::CancelledSteer
-                )
-            })
-            .map(|item| item.id)
-        {
+    /// Consumes the steer the agent reports as applied and returns its prompt for persistence.
+    ///
+    /// A steer applied to an interrupted turn is normally part of the interrupted conversation.
+    /// When `discarded_on_interrupt` is set, the agent drops it with the turn, so it stays queued
+    /// for resubmission and nothing is returned. `interrupt_in_flight` states that an interrupt
+    /// was requested but not yet acknowledged, which dooms an admitted steer the same way.
+    pub(super) fn steer_applied(
+        &mut self,
+        discarded_on_interrupt: bool,
+        interrupt_in_flight: bool,
+    ) -> Option<Submission> {
+        if let Some(item) = self.items.iter_mut().find(|item| {
+            matches!(
+                item.state,
+                QueueItemState::AdmittedSteer | QueueItemState::CancelledSteer
+            )
+        }) {
+            let interrupted = interrupt_in_flight || item.state == QueueItemState::CancelledSteer;
+            if discarded_on_interrupt && interrupted {
+                item.state = QueueItemState::Queued;
+                self.sync_steering_wave();
+                return None;
+            }
+            let id = item.id;
             let text = self.remove_id(id);
             self.sync_steering_wave();
             return text;
@@ -707,13 +719,13 @@ mod tests {
         assert!(queue.steer_admitted(*second_id).is_none());
         assert_eq!(
             queue
-                .steer_applied()
+                .steer_applied(false, false)
                 .map(|prompt| prompt.display_text().to_owned()),
             Some("first steer".to_owned())
         );
         assert_eq!(
             queue
-                .steer_applied()
+                .steer_applied(false, false)
                 .map(|prompt| prompt.display_text().to_owned()),
             Some("second steer".to_owned())
         );
@@ -752,13 +764,13 @@ mod tests {
 
         assert_eq!(
             queue
-                .steer_applied()
+                .steer_applied(false, false)
                 .map(|prompt| prompt.display_text().to_owned()),
             Some("second steer".to_owned())
         );
         assert_eq!(
             queue
-                .steer_applied()
+                .steer_applied(false, false)
                 .map(|prompt| prompt.display_text().to_owned()),
             Some("third steer".to_owned())
         );
@@ -883,7 +895,10 @@ mod tests {
 
         assert!(queue.steer_admitted(id).is_none());
         assert_eq!(
-            queue.steer_applied().as_ref().map(Submission::display_text),
+            queue
+                .steer_applied(false, false)
+                .as_ref()
+                .map(Submission::display_text),
             Some("steer me")
         );
         assert!(queue.animation_deadline().is_none());

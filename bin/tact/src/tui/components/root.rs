@@ -390,6 +390,8 @@ pub(crate) struct RootNode {
     skills: Arc<[Skill]>,
     memory_enabled: bool,
     claude_enabled: bool,
+    /// An interrupt was requested and the worker has not yet reported the turns cancelled.
+    interrupt_in_flight: bool,
     interactive: bool,
     theme_mode: ThemeMode,
     tui: TuiConfig,
@@ -432,6 +434,7 @@ impl RootNode {
             skills: Arc::from([]),
             memory_enabled: false,
             claude_enabled: false,
+            interrupt_in_flight: false,
             interactive: true,
             theme_mode: ThemeMode::Auto,
             tui: TuiConfig::default(),
@@ -1154,6 +1157,7 @@ impl RootNode {
         });
         if confirmed {
             self.key_confirmation = None;
+            self.interrupt_in_flight = action == ConfirmationAction::Interrupt;
             return ComponentUpdate {
                 effects: vec![action.effect()],
                 render: RenderRequest::Immediate,
@@ -2353,6 +2357,7 @@ impl RootNode {
     }
 
     fn turns_cancelled(&mut self) -> ComponentUpdate<RootEffect> {
+        self.interrupt_in_flight = false;
         self.queue.cancel_steers();
         ComponentUpdate::render(RenderRequest::Immediate)
     }
@@ -2374,7 +2379,10 @@ impl RootNode {
     }
 
     fn steer_applied(&mut self) -> ComponentUpdate<RootEffect> {
-        let applied = self.queue.steer_applied();
+        let discarded_on_interrupt = matches!(self.composer.model(), Model::Claude(_));
+        let applied = self
+            .queue
+            .steer_applied(discarded_on_interrupt, self.interrupt_in_flight);
         self.finish_applied_steer(applied)
     }
 

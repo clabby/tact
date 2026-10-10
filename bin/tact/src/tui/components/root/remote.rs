@@ -82,6 +82,7 @@ impl RootNode {
             ),
             PaneCommand::Interrupt => {
                 self.key_confirmation = None;
+                self.interrupt_in_flight = true;
                 ComponentUpdate {
                     effects: vec![RootEffect::CancelTurns],
                     render: RenderRequest::Immediate,
