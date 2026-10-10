@@ -169,8 +169,14 @@ const TOOL_ORCHESTRATION_INSTRUCTIONS: &str = concat!(
     "for dependent calls. In particular, when `exec_command` returns a `session_id`, continue calling ",
     "`write_stdin` in that program until the process exits. If the outer code-mode cell yields, wait ",
     "on that cell; do not move nested process polling into separate model turns. Return only the ",
-    "results needed for the next reasoning step. Use separate code-mode calls when an intermediate ",
-    "result requires model judgment, user input, or a progress update."
+    "results needed for the next reasoning step. When a bounded classification, predicate, or rubric ",
+    "score should determine the next action, use `decide` when available: provide the evidence in ",
+    "its input, ask focused questions, and branch on its typed answers in code mode. Put independent ",
+    "questions about shared evidence in one call; use separate calls when a later question depends ",
+    "on an earlier answer. Code owns the action, threshold, and handling of uncertainty or refusal; ",
+    "use `decide` for structured judgments, not open-ended reasoning or extraction. Use separate ",
+    "code-mode calls when an intermediate result requires model judgment, user input, or a progress ",
+    "update."
 );
 
 pub(crate) const IMAGE_RENDERING_INSTRUCTIONS: &str = concat!(
