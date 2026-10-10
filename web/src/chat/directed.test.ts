@@ -12,11 +12,12 @@ const message = (id: number, fields: Partial<AgentMessage> = {}): AgentMessage =
 });
 
 describe("party", () => {
-  test("names agents by role, the viewer as you, the root as root, and unknown agents by id", () => {
+  test("names agents by role, the transcript's owner as me, other roots as root, and unknown agents by id", () => {
     expect(party(2, { agents }).label).toBe("protocol auditor");
-    expect(party(4, { viewer: 4, agents })).toMatchObject({ label: "you", title: "You: docs verifier · #4 · sol" });
+    expect(party(4, { viewer: 4, agents })).toMatchObject({ label: "me", title: "Me: docs verifier · #4 · sol" });
     expect(party(2, { viewer: 4, agents }).label).toBe("protocol auditor");
     expect(party(null, { viewer: 4, agents }).label).toBe("root");
+    expect(party(null, { agents }).label).toBe("me");
     expect(party(9, { agents })).toMatchObject({ label: "#9", color: "var(--faint)" });
   });
 });
@@ -69,4 +70,3 @@ describe("sentMessage", () => {
     expect(sentMessage({ agent_id: "2", message: "hi" }, null, undefined)).toBeNull();
   });
 });
-

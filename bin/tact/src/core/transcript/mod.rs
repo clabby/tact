@@ -14,10 +14,10 @@ pub(crate) use journal::TranscriptJournal;
 pub(crate) use model::{TranscriptModel, humanize_tool};
 pub(crate) use record::{
     CompactionFinished, ContextObserved, EffortChanged, FastModeChanged, LocalEvent, LocalKind,
-    RecordSource, ReflectionStarted, SCHEMA_VERSION, SessionEnded, SessionOutcome, SessionStarted,
-    ShellFinished, ShellId, ShellStarted, SpeedChanged, TerminalStopReason, TranscriptRecord,
-    TurnId, UserSteered, UserSubmitted, WorkerSteerFailed, WorkerStopped, WorkerTurnAccepted,
-    WorkerTurnFinished, WorkerTurnsInterrupted,
+    RecordSource, ReflectionStarted, SCHEMA_VERSION, SessionEnded, SessionMessageReceived,
+    SessionOutcome, SessionStarted, ShellFinished, ShellId, ShellStarted, SpeedChanged,
+    TerminalStopReason, TranscriptRecord, TurnId, UserSteered, UserSubmitted, WorkerSteerFailed,
+    WorkerStopped, WorkerTurnAccepted, WorkerTurnFinished, WorkerTurnsInterrupted,
 };
 use std::path::PathBuf;
 use thiserror::Error;

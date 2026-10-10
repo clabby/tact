@@ -120,6 +120,8 @@ export type EntryBody =
     messages: AgentMessage[];
   }
   | { kind: "forked_from"; session: string }
+  /** A message another live session sent through `message_session`; `from_session` is the sender. */
+  | { kind: "session_message"; from_session: string; text: string }
   | { kind: "effort_changed"; to: string }
   | { kind: "fast_mode_changed"; enabled: boolean }
   | { kind: "reflection_started" }

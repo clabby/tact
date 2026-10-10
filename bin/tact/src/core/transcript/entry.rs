@@ -67,6 +67,11 @@ pub(crate) enum EntryKind {
     },
     Tool(ToolEntry),
     DirectedMessage(DirectedMessageEntry),
+    /// A message from another live session, delivered by `message_session`.
+    SessionMessage {
+        from_session_id: String,
+        text: String,
+    },
     ForkedFrom {
         session_id: String,
     },

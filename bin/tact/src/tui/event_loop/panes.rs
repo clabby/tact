@@ -19,6 +19,7 @@ use crate::{
         ConfiguredAgent,
         agent_events::{self, ForwardedAgentEvent},
         extensions::Skill,
+        live_sessions::{LiveSessionMessage, LiveSessionRegistration},
         pane::PaneId,
         prompt::Submission,
         session::{self, AgentSnapshot, SessionLock},
@@ -202,6 +203,8 @@ pub(super) struct PaneRuntime {
     /// from the replaced session can be recognised and ignored.
     pub(super) generation: u64,
     pub(super) subagent_control: Subagents,
+    /// Keeps the session addressable by `message_session` while the pane owns it.
+    _live: LiveSessionRegistration,
     _lock: SessionLock,
 }
 
@@ -347,6 +350,7 @@ pub(super) struct PaneReports {
     pub(super) agent_events: mpsc::UnboundedReceiver<ForwardedAgentEvent>,
     pub(super) subagent_updates: mpsc::UnboundedReceiver<ForwardedSubagentUpdate>,
     pub(super) writer_completions: mpsc::UnboundedReceiver<WriterCompletion>,
+    pub(super) live_messages: mpsc::UnboundedReceiver<LiveSessionMessage>,
 }
 
 /// The registry of pane runtimes.
@@ -355,6 +359,7 @@ pub(super) struct Panes {
     agent_events: mpsc::UnboundedSender<ForwardedAgentEvent>,
     subagent_updates: mpsc::UnboundedSender<ForwardedSubagentUpdate>,
     writer_completions: mpsc::UnboundedSender<WriterCompletion>,
+    live_messages: mpsc::UnboundedSender<LiveSessionMessage>,
     /// Journal writers whose completion has not been received.
     writers_open: usize,
     /// Tasks closing the subagents of closed or replaced sessions.
@@ -366,11 +371,13 @@ impl Panes {
         let (agent_events, agent_event_reports) = mpsc::unbounded_channel();
         let (subagent_updates, subagent_update_reports) = mpsc::unbounded_channel();
         let (writer_completions, writer_completion_reports) = mpsc::unbounded_channel();
+        let (live_messages, live_message_reports) = mpsc::unbounded_channel();
         let panes = Self {
             runtimes: HashMap::new(),
             agent_events,
             subagent_updates,
             writer_completions,
+            live_messages,
             writers_open: 0,
             subagent_shutdowns: JoinSet::new(),
         };
@@ -378,6 +385,7 @@ impl Panes {
             agent_events: agent_event_reports,
             subagent_updates: subagent_update_reports,
             writer_completions: writer_completion_reports,
+            live_messages: live_message_reports,
         };
         (panes, reports)
     }
@@ -473,6 +481,7 @@ impl Panes {
             settings: agent.settings,
             generation,
             subagent_control: agent.subagent_control,
+            _live: LiveSessionRegistration::new(session_id, self.live_messages.clone()),
             _lock: lock,
         };
         self.runtimes.insert(pane, runtime);

@@ -39,6 +39,7 @@ pub(crate) enum LocalKind {
     SessionStarted,
     UserSubmitted,
     UserSteered,
+    SessionMessageReceived,
     ReflectionStarted,
     ShellStarted,
     ShellFinished,
@@ -64,6 +65,7 @@ impl LocalKind {
             Self::SessionStarted => "session.started",
             Self::UserSubmitted => "user.submitted",
             Self::UserSteered => "user.steered",
+            Self::SessionMessageReceived => "session_message.received",
             Self::ReflectionStarted => "reflection.started",
             Self::ShellStarted => "shell.started",
             Self::ShellFinished => "shell.finished",
@@ -88,6 +90,7 @@ impl LocalKind {
             "session.started" => Self::SessionStarted,
             "user.submitted" => Self::UserSubmitted,
             "user.steered" => Self::UserSteered,
+            "session_message.received" => Self::SessionMessageReceived,
             "reflection.started" => Self::ReflectionStarted,
             "shell.started" => Self::ShellStarted,
             "shell.finished" => Self::ShellFinished,
@@ -258,6 +261,7 @@ pub(crate) enum LocalEvent {
     SessionStarted(SessionStarted),
     UserSubmitted(UserSubmitted),
     UserSteered(UserSteered),
+    SessionMessageReceived(SessionMessageReceived),
     ReflectionStarted(ReflectionStarted),
     ShellStarted(ShellStarted),
     ShellFinished(ShellFinished),
@@ -281,6 +285,7 @@ impl LocalEvent {
             Self::SessionStarted(_) => LocalKind::SessionStarted,
             Self::UserSubmitted(_) => LocalKind::UserSubmitted,
             Self::UserSteered(_) => LocalKind::UserSteered,
+            Self::SessionMessageReceived(_) => LocalKind::SessionMessageReceived,
             Self::ReflectionStarted(_) => LocalKind::ReflectionStarted,
             Self::ShellStarted(_) => LocalKind::ShellStarted,
             Self::ShellFinished(_) => LocalKind::ShellFinished,
@@ -309,6 +314,14 @@ pub(crate) struct UserSubmitted {
 /// A prompt delivered into a running turn.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct UserSteered {
+    pub(crate) text: String,
+}
+
+/// A message another live session sent through `message_session`, whether it joined a running
+/// turn or started one. `text` is the sender's message without the delivery framing.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct SessionMessageReceived {
+    pub(crate) from_session_id: String,
     pub(crate) text: String,
 }
 
@@ -610,10 +623,11 @@ mod tests {
         AgentEventKind::ModelConnectionFailed,
     ];
 
-    const LOCAL_KINDS: [LocalKind; 19] = [
+    const LOCAL_KINDS: [LocalKind; 20] = [
         LocalKind::SessionStarted,
         LocalKind::UserSubmitted,
         LocalKind::UserSteered,
+        LocalKind::SessionMessageReceived,
         LocalKind::ReflectionStarted,
         LocalKind::ShellStarted,
         LocalKind::ShellFinished,

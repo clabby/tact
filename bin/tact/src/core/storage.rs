@@ -503,15 +503,33 @@ impl SessionStorage {
         &self,
         current_session: &str,
         workspace: Option<&Path>,
+        only_sessions: Option<&[String]>,
         contains_any: Option<&[String]>,
         cursor: Option<(u64, &str)>,
         limit: usize,
     ) -> Result<SessionSearchPage, StorageError> {
+        if only_sessions.is_some_and(<[String]>::is_empty) {
+            return Ok(SessionSearchPage {
+                sessions: Vec::new(),
+                next_cursor: None,
+            });
+        }
         let mut parameters = vec![Value::Text(current_session.to_owned())];
         let mut candidate_filters = String::new();
         if let Some(workspace) = workspace {
             parameters.push(Value::Text(workspace.to_string_lossy().into_owned()));
             candidate_filters.push_str(&format!("AND s.workspace = ?{}\n", parameters.len()));
+        }
+        if let Some(session_ids) = only_sessions {
+            let placeholders = session_ids
+                .iter()
+                .map(|session_id| {
+                    parameters.push(Value::Text(session_id.clone()));
+                    format!("?{}", parameters.len())
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            candidate_filters.push_str(&format!("AND s.session_id IN ({placeholders})\n"));
         }
         if let Some((updated_at, session_id)) = cursor {
             parameters.push(Value::Integer(to_sql_u64(updated_at)));
@@ -1303,6 +1321,7 @@ mod tests {
             .find_sessions(
                 "current",
                 Some(Path::new("/work")),
+                None,
                 Some(&patterns),
                 None,
                 1,
@@ -1317,6 +1336,7 @@ mod tests {
             .find_sessions(
                 "current",
                 Some(Path::new("/work")),
+                None,
                 Some(&patterns),
                 Some((200, "alpha")),
                 1,
@@ -1324,6 +1344,27 @@ mod tests {
             .unwrap();
         assert_eq!(second.sessions.len(), 1);
         assert_eq!(second.sessions[0].session_id, "beta");
+    }
+
+    #[test]
+    fn session_discovery_can_be_restricted_to_listed_sessions() {
+        let directory = tempdir().unwrap();
+        let config = directory.path().join("config.toml");
+        let mut storage = SessionStorage::open(&config).unwrap();
+        append_prompt(&mut storage, "alpha", 200, "one");
+        append_prompt(&mut storage, "beta", 100, "two");
+
+        let only_beta = ["beta".to_owned()];
+        let page = storage
+            .find_sessions("current", None, Some(&only_beta), None, None, 10)
+            .unwrap();
+        let ids = page.sessions.iter().map(|s| s.session_id.as_str());
+        assert_eq!(ids.collect::<Vec<_>>(), ["beta"]);
+
+        let none = storage
+            .find_sessions("current", None, Some(&[]), None, None, 10)
+            .unwrap();
+        assert!(none.sessions.is_empty());
     }
 
     fn append_prompt(storage: &mut SessionStorage, session_id: &str, at: u64, text: &str) {

@@ -10,6 +10,7 @@ export function searchableText(entry: WireEntry): string {
   switch (entry.kind) {
     case "user":
     case "assistant":
+    case "session_message":
       return entry.text;
     case "tool":
       return [entry.summary, entry.outcome?.summary ?? "", ...(entry.outcome?.tail ?? [])].join("\n");

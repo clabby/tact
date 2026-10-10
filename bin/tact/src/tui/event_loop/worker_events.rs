@@ -145,18 +145,26 @@ impl EventLoop {
             WorkerEvent::SteerAdmitted { pane, queue_id } => {
                 self.apply(AppEvent::SteerAdmitted { pane, id: queue_id })
                     .await?;
+                self.on_message_admitted(pane, queue_id)?;
             }
             WorkerEvent::SteerPromoted {
                 pane,
                 queue_id,
                 id,
                 prompt,
-            } => self.on_steer_promoted(pane, queue_id, id, &prompt)?,
+            } => {
+                if !self.on_message_started(pane, queue_id)? {
+                    self.on_steer_promoted(pane, queue_id, id, &prompt)?;
+                }
+            }
             WorkerEvent::SteerFailed {
                 pane,
                 queue_id,
                 error,
-            } => self.on_steer_failed(pane, queue_id, &error).await?,
+            } => {
+                self.messages.fail(queue_id, &error);
+                self.on_steer_failed(pane, queue_id, &error).await?;
+            }
             WorkerEvent::TurnsCancelled { pane, count, error } => {
                 self.on_turns_cancelled(pane, count, error)?;
             }

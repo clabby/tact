@@ -1,4 +1,4 @@
-//! Presenter for `send_agent_message`.
+//! Presenters for `send_agent_message` and `message_session`.
 //!
 //! The summary names the recipient and lists the message purpose, any non-default priority, and
 //! the delivery disposition from the receipt. Expanded details show the message body and delivery
@@ -6,17 +6,19 @@
 //! JSON objects or as JSON-encoded strings.
 
 use super::{super::markdown::wrap_plain, Presentation};
-use crate::{app::theme::Theme, core::transcript::ToolEntry};
+use crate::{
+    app::theme::Theme,
+    core::{
+        live_sessions::{agent_route_label, route_label},
+        transcript::ToolEntry,
+    },
+};
 use ratatui::style::Style;
 use serde_json::Value;
 use std::borrow::Cow;
 
 pub(super) fn present(tool: &ToolEntry, width: u16, theme: &Theme, expanded: bool) -> Presentation {
-    let recipient = tool
-        .arguments
-        .get("agent_id")
-        .and_then(Value::as_u64)
-        .map_or_else(|| "unknown agent".to_owned(), |id| format!("→ #{id}"));
+    let recipient = agent_route_label(&tool.arguments);
     let purpose = tool
         .arguments
         .get("purpose")
@@ -84,6 +86,46 @@ fn decoded_result(value: &Value) -> Option<Cow<'_, Value>> {
     Some(Cow::Borrowed(value))
 }
 
+/// Presents `message_session`, which addresses another live session by identifier. The receipt's
+/// `delivery` is `steered` or `started`.
+pub(super) fn present_session(
+    tool: &ToolEntry,
+    width: u16,
+    theme: &Theme,
+    expanded: bool,
+) -> Presentation {
+    let target = tool.arguments.get("session_id").and_then(Value::as_str);
+    let recipient = route_label(&tool.arguments);
+    let receipt = tool.result.as_ref().and_then(decoded_result);
+    let delivery = receipt
+        .as_deref()
+        .and_then(|receipt| receipt.get("delivery"))
+        .and_then(Value::as_str);
+    let mut presentation =
+        Presentation::new("Message", recipient).outcome(delivery.unwrap_or_default());
+    if !expanded {
+        return presentation;
+    }
+
+    let body = tool
+        .arguments
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let mut details = wrap_plain(body, width, Style::default().fg(theme.text()));
+    if let Some(delivery) = delivery {
+        details.extend(wrap_plain(
+            &format!("Delivery: {delivery}"),
+            width,
+            Style::default().fg(theme.muted()),
+        ));
+    }
+    presentation = presentation
+        .unselectable_details(details)
+        .footer(target.map_or_else(|| "message body".to_owned(), |id| format!("session {id}")));
+    presentation
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::fixtures::{collapsed, entry, expanded, rendered};
@@ -122,5 +164,27 @@ mod tests {
             ["Please verify the ordering.", "Delivery: steered"]
         );
         assert_eq!(expanded.footer.as_deref(), Some("message #9 · thread #4"));
+    }
+
+    #[test]
+    fn presents_session_target_body_and_delivery() {
+        let tool = ToolEntry {
+            result: Some(json!({"session_id": "0123456789abcdef", "delivery": "started"})),
+            ..entry(
+                "message_session",
+                json!({"session_id": "0123456789abcdef", "message": "Check the build."}),
+            )
+        };
+
+        let collapsed =
+            super::super::present(&tool, 80, &crate::app::theme::Theme::default(), false);
+        assert_eq!(collapsed.title, "Message");
+        assert_eq!(collapsed.outcome.as_deref(), Some("started"));
+        let expanded = expanded(&tool, 80);
+        assert_eq!(
+            rendered(&expanded.details),
+            ["Check the build.", "Delivery: started"]
+        );
+        assert_eq!(expanded.footer.as_deref(), Some("session 0123456789abcdef"));
     }
 }

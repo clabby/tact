@@ -43,7 +43,7 @@ type EntryBody = WireEntry extends infer Entry
 type ToolBody = Extract<EntryBody, { kind: "tool" }>;
 
 /** Tools whose calls are landmarks whatever their outcome. */
-const LANDMARK_TOOLS = new Set(["apply_patch", "update_plan", "spawn_agent", "send_agent_message", "close_agent", "interrupt_agent"]);
+const LANDMARK_TOOLS = new Set(["apply_patch", "update_plan", "spawn_agent", "send_agent_message", "message_session", "close_agent", "interrupt_agent"]);
 
 /**
  * The class of a call without Code Mode children. It mirrors `Significance::is_landmark` in
@@ -941,8 +941,10 @@ export class MockTact {
     const replace = add(tool("memory", "replace · local · 12@v3", { duration_ns: 9_000_000, has_detail: true }), 1);
     const remove = add(tool("memory", "delete · 9@v1", { state: "failed", duration_ns: 3_000_000, has_detail: true }), 1);
     add({ kind: "assistant", text: "One test failed: the draft echo arrived before the acknowledgement. I'll make the reply wait for the loop to apply the command.", complete: true, commentary: false }, 10);
-    const send = add(tool("send_agent_message", "→ #2", { duration_ns: 3_000_000, has_detail: true }), 3);
+    const send = add(tool("send_agent_message", "me → #2", { duration_ns: 3_000_000, has_detail: true }), 3);
+    const sessionMessage = add(tool("message_session", "me → 9f3c1a7e", { duration_ns: 2_000_000, has_detail: true }), 3);
     const plan = add(tool("update_plan", "2/4 done", { duration_ns: 1_000_000, has_detail: true }), 3);
+    add({ kind: "session_message", from_session: "4be07d21-8c19-47a3-b5d2-0e6f91a3c8d7", text: "I rebased onto main and the bridge tests pass. Please re-run the ordering suite on your side and tell me if the `draft echo` still races the acknowledgement." }, 5);
     add(directedThread(2, THREAD_SCHEMA), 20);
     add(directedThread(3, THREAD_FAILED), 20);
     patch(PATCH_ACK, "bin/tact/src/web/bridge.rs");
@@ -1017,6 +1019,14 @@ export class MockTact {
         message: "Does the version check also cover the `subagent_entry` event, or only `snapshot`? If only the snapshot, list the events a v1 client would misparse.",
       },
       result: JSON.stringify({ message_id: 16, thread_id: 4, disposition: "steered" }),
+      metadata: null,
+    });
+    detail(sessionMessage, {
+      arguments: {
+        session_id: "9f3c1a7e-52d4-4b0e-8a61-3c7d0e2b4f18",
+        message: "The ordering tests pass on main now. Please rebase your branch and rerun `cargo nextest run -p tact` before opening the pull request.",
+      },
+      result: JSON.stringify({ session_id: "9f3c1a7e-52d4-4b0e-8a61-3c7d0e2b4f18", delivery: "steered" }),
       metadata: null,
     });
     main.context.active_tokens = 142_600;

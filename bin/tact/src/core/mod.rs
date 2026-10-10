@@ -11,6 +11,7 @@ pub(crate) mod context;
 pub(crate) mod extensions;
 mod headless;
 mod instructions;
+pub(crate) mod live_sessions;
 #[cfg(test)]
 mod mixed_provider_tests;
 #[cfg(test)]

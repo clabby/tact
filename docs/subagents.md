@@ -198,6 +198,20 @@ has management authority. The recipient keeps its original output schema.
 The runtime reports message admission and delivery separately. A message may be started, queued,
 or steered. Failed or interrupted delivery is surfaced explicitly rather than treated as success.
 
+## Messaging live sessions
+
+`message_session` is separate from the task tree. Directed messages stay inside one tree, while
+`message_session` targets any session open in the same Tact process, by session ID, with no
+authority check beyond that. It is installed independently of the subagent tool group and is used
+only on explicit user request. Its description says so, and no instruction text promotes it.
+Every delivery steers (see the README for the user-facing contract).
+
+The tool resolves the target through a process-wide registry that each open pane joins. It sends
+the message to the event loop, which turns it into a worker steer for the target's pane and
+reports the worker's verdict back as `steered` or `started`. Composer steers use low queue IDs and
+these messages count down from the maximum, so the two never share an ID. `find_sessions` reports
+`live` from the session's lock file, which any process holds, and `messageable` from the registry.
+
 ## Waiting and lifecycle
 
 `wait_agent` accepts one or more agent IDs and returns when any selected agent reaches a terminal

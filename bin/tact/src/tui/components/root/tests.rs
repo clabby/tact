@@ -511,7 +511,7 @@ fn root_messages_render_once_in_main_and_are_projected_into_child_transcripts() 
         .join("\n");
 
     assert_eq!(main.matches("Message").count(), 1);
-    assert!(child.contains("← Message  root → you"));
+    assert!(child.contains("← Message  root → me"));
     assert!(child.contains("Please verify"));
     assert!(child.contains("ordering."));
 }

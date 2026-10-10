@@ -468,6 +468,32 @@ and how sure it is. Reflection is read-only. It won't update memory or change an
 ask in a later message. The transcript shows a **Reflection started** marker instead of the
 internal prompt.
 
+### Messaging other sessions
+
+Every session has the `find_sessions`, `read_session`, and `message_session` tools. `find_sessions` reports
+each session's model and effort, whether it is `live` (open in any Tact process, detected through
+its session lock), and whether it is `messageable` (open in this process). `live_only` limits a search to
+live sessions. A session meant to watch and orchestrate others can combine them: find live
+sessions, read their transcripts, and steer them.
+
+`message_session` takes a target session ID and a message of at most 16 KiB. It always steers. The
+message joins the target's running turn at its next safe boundary, or starts a new turn when the
+target is idle. The target sees the text prefixed with the sending session's ID, and its transcript
+records the message like a steer. The result says whether the target was `steered` or `started`.
+It is not a reply. Read the target's transcript to see what it did next.
+
+Only sessions open in the same Tact process can be messaged, including panes and forks beside the
+current one. A session that is live in another process shows `live: true` but fails with a
+not-live error. A session cannot message itself.
+
+Tact doesn't prompt agents to use `message_session`. The tool description tells the model to use it
+only when you explicitly ask it to message or steer another session. In the TUI and web UI the call
+appears as a **Message** row reading `me → <target>` with the delivery outcome, styled like
+subagent messages. `me` is the session whose transcript shows the call, which is always the sender.
+The target's transcript records each message it receives as a **Message** entry reading
+`<sender> → me`, with the message body and the sender's full session ID, whether the message
+joined a running turn or started one.
+
 ## Skills
 
 Skills are local `SKILL.md` files with instructions the model can choose to follow. They're off by default

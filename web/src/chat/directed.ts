@@ -20,13 +20,21 @@ export const CLAMP_LINES = 12;
 /** Characters per visual line at the transcript's width, used to count wrapped lines. */
 const WRAP_COLUMNS = 96;
 
-/** `id` is an agent, or `null` for the root session. Unknown agents read as their id. */
+/**
+ * `id` is an agent, or `null` for the root session. The transcript's owner reads as `me`: the
+ * viewing agent, or the root session in the session's own transcript. Unknown agents read as
+ * their id.
+ */
 export function party(id: number | null, { viewer, agents }: Participants): Party {
-  if (id === null) return { label: "root", title: "The root session", color: "var(--text)" };
+  if (id === null) {
+    return viewer === undefined
+      ? { label: "me", title: "Me: the root session", color: "var(--text)" }
+      : { label: "root", title: "The root session", color: "var(--text)" };
+  }
   const agent = agents.find((candidate) => candidate.id === id);
   const title = agent ? `${agent.role} · #${id} · ${agent.model}` : `Agent #${id}`;
   const color = agent ? modelColor(agent.model) : "var(--faint)";
-  if (id === viewer) return { label: "you", title: `You: ${title}`, color };
+  if (id === viewer) return { label: "me", title: `Me: ${title}`, color };
   return { label: agent?.role || `#${id}`, title, color };
 }
 
@@ -231,6 +239,62 @@ export function messageElement(
     });
     item.append(more);
   }
+  return item;
+}
+
+/**
+ * A `message_session` call: a message to another live session, shown like an agent message with
+ * `me` and the target's short identifier as the route and how the target took it (`steered` or
+ * `started`) as the delivery note. A result that is not a receipt is the failure.
+ */
+export function sessionMessageElement(args: unknown, result: unknown, markdown: Markdown): HTMLElement | null {
+  const fields = record(args);
+  if (typeof fields?.session_id !== "string" || typeof fields.message !== "string") return null;
+  let receipt: unknown = result;
+  if (typeof result === "string") {
+    try {
+      receipt = JSON.parse(result);
+    } catch {
+      receipt = { error: result };
+    }
+  }
+  const decoded = record(receipt);
+  const delivered = typeof decoded?.delivery === "string";
+  const note = delivered ? String(decoded?.delivery) : typeof decoded?.error === "string" ? decoded.error : null;
+  return sessionMessageCard({ label: "me" }, { label: fields.session_id.slice(0, 8), title: fields.session_id }, fields.message, note && { text: note, state: delivered ? "admitted" : "failed" }, markdown);
+}
+
+/** A message another live session sent this one: its sender's short identifier, then `me`. */
+export function receivedSessionMessageElement(fromSession: string, text: string, markdown: Markdown): HTMLElement {
+  return sessionMessageCard({ label: fromSession.slice(0, 8), title: fromSession }, { label: "me" }, text, null, markdown);
+}
+
+type SessionParty = { label: string; title?: string };
+
+/** The shared look of a session message: `from → to`, an optional delivery note, and the Markdown body. */
+function sessionMessageCard(from: SessionParty, to: SessionParty, text: string, note: { text: string; state: string } | null, markdown: Markdown) {
+  const item = document.createElement("article");
+  item.className = "dm-message";
+  const head = document.createElement("header");
+  head.className = "dm-message-head";
+  const arrow = span("dm-arrow", "→");
+  arrow.setAttribute("aria-label", "to");
+  const parts = [from, to].map(({ label, title }) => {
+    const element = span("dm-purpose", label);
+    if (title) element.title = title;
+    return element;
+  });
+  head.append(parts[0], arrow, parts[1]);
+  if (note) {
+    const trailing = span("dm-note", note.text);
+    trailing.dataset.state = note.state;
+    trailing.title = note.text;
+    head.append(trailing);
+  }
+  const body = document.createElement("div");
+  body.className = "markdown dm-body";
+  markdown(body, text);
+  item.append(head, body);
   return item;
 }
 

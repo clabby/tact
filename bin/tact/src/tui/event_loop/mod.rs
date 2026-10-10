@@ -23,6 +23,7 @@ mod effects;
 mod handoff;
 mod lifecycle;
 mod links;
+mod live_messages;
 mod memory;
 mod opens;
 mod pane_events;
@@ -38,6 +39,7 @@ use self::{
     background::{BackgroundTasks, TaskKind, TaskOutput},
     handoff::HandoffController,
     lifecycle::Lifecycle,
+    live_messages::PendingMessages,
     memory::Memory,
     opens::PendingOpens,
     panes::{PaneAgent, PaneReports, PaneSession, PaneSettings, Panes},
@@ -139,6 +141,8 @@ struct EventLoop {
     memory: Memory,
     recent_prompts: RecentPrompts,
     handoff: HandoffController,
+    /// Messages from other live sessions awaiting the worker's delivery verdict.
+    messages: PendingMessages,
     /// The first journal writer failure; it ends the loop with an error.
     writer_error: Option<TranscriptError>,
 }
@@ -325,6 +329,7 @@ impl EventLoop {
             memory,
             recent_prompts: RecentPrompts::default(),
             handoff: HandoffController::new(),
+            messages: PendingMessages::new(),
             writer_error: None,
         };
         if open_resume_selector {
@@ -367,6 +372,9 @@ impl EventLoop {
                     self.on_web_request(request).await?;
                 }
                 Some(request) = inbox.web_queries.recv(), if running => self.on_web_query(request),
+                Some(message) = inbox.panes.live_messages.recv(), if running => {
+                    self.on_live_session_message(message)?;
+                }
                 Some(request) = inbox.auxiliary_requests.recv(), if running => {
                     self.on_auxiliary_request(request)?;
                 }

@@ -3,7 +3,7 @@ import { glyph } from "../ui/glyphs";
 import { renderMarkdown } from "../core/markdown";
 import { presentMemory } from "./memory-detail";
 import { parsePlan, presentPlan } from "./plan-detail";
-import { messageElement, sentMessage, type Markdown, type Participants } from "./directed";
+import { messageElement, sentMessage, sessionMessageElement, type Markdown, type Participants } from "./directed";
 import { parseApplyPatch, patchFileDiff, patchStats } from "./patch";
 import type { Theme } from "../core/theme";
 import type { ToolDetail } from "../core/wire";
@@ -28,6 +28,7 @@ export const TOOL_LABELS: Record<string, string> = {
   close_agent: "Close",
   interrupt_agent: "Stop",
   send_agent_message: "Message",
+  message_session: "Message",
   current_session: "Session",
   read_session: "Session",
   find_sessions: "Sessions",
@@ -89,6 +90,12 @@ export function presentDetail(container: HTMLElement, name: string, detail: Tool
     const plan = parsePlan(args);
     if (plan) {
       container.replaceChildren(presentPlan(plan));
+      return;
+    }
+  } else if (name === "message_session") {
+    const message = sessionMessageElement(args, detail.result, context.markdown);
+    if (message) {
+      container.replaceChildren(message);
       return;
     }
   } else if (name === "send_agent_message") {

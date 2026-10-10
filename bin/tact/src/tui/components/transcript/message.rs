@@ -1,7 +1,10 @@
 //! Collapsible presentation for one directed-message thread.
 
 use super::markdown::{sanitize, wrap_plain, wrap_spans};
-use crate::{app::theme::Theme, core::transcript::DirectedMessageEntry};
+use crate::{
+    app::theme::Theme,
+    core::{live_sessions::short_session_id, transcript::DirectedMessageEntry},
+};
 use ratatui::{
     style::{Modifier, Style},
     text::{Line, Span},
@@ -27,6 +30,57 @@ pub(super) fn render(
     }
 
     append_messages(&mut lines, entry, width, theme);
+    lines
+}
+
+/// A message received from another live session: a header naming the sender and `me`, the body
+/// on a rail, and the sender's full session identifier in the footer. It is always shown in full
+/// because the receiving session's agent acted on it.
+pub(super) fn render_session_message(
+    from_session_id: &str,
+    text: &str,
+    width: u16,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    if width == 0 {
+        return Vec::new();
+    }
+    let prefix = vec![
+        Span::raw("  "),
+        Span::raw("  "),
+        Span::styled(
+            "← ",
+            Style::default()
+                .fg(theme.accent())
+                .add_modifier(Modifier::BOLD),
+        ),
+    ];
+    let content = vec![
+        Span::styled(
+            "Message",
+            Style::default()
+                .fg(theme.text())
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("  {} → me", short_session_id(from_session_id)),
+            Style::default().fg(theme.text()),
+        ),
+    ];
+    let mut lines = wrap_summary(prefix, content, width);
+    let detail_width = width.saturating_sub(6).max(1);
+    append_railed(
+        &mut lines,
+        wrap_plain(text, detail_width, Style::default().fg(theme.text())),
+        width,
+        theme,
+    );
+    append_footer(
+        &mut lines,
+        &format!("session {from_session_id}"),
+        width,
+        theme,
+    );
     lines
 }
 
@@ -234,7 +288,7 @@ fn route(message: &AgentMessage, perspective: MessageSender) -> String {
 
 fn sender_label(sender: MessageSender, perspective: MessageSender) -> String {
     if sender == perspective {
-        return "you".to_owned();
+        return "me".to_owned();
     }
     match sender {
         MessageSender::Root => "root".to_owned(),
@@ -244,7 +298,7 @@ fn sender_label(sender: MessageSender, perspective: MessageSender) -> String {
 
 fn agent_label(agent_id: AgentId, perspective: MessageSender) -> String {
     if perspective == (MessageSender::Agent { agent_id }) {
-        return "you".to_owned();
+        return "me".to_owned();
     }
     format!("#{agent_id}")
 }
@@ -313,10 +367,30 @@ fn first_line(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::render;
+    use super::{render, render_session_message};
     use crate::{app::theme::Theme, core::transcript::DirectedMessageEntry};
     use serde_json::json;
     use tact_subagents::{AgentMessageUpdate, MessageDeliveryState};
+
+    #[test]
+    fn received_session_message_names_the_sender_and_shows_the_body() {
+        let lines = render_session_message(
+            "9f3c1a7e-52d4-4b0e",
+            "Please rebase before opening the pull request.",
+            80,
+            &Theme::default(),
+        );
+        let rendered = lines.iter().map(ToString::to_string).collect::<Vec<_>>();
+
+        assert!(rendered[0].contains("← Message  9f3c1a7e → me"));
+        assert!(rendered[1].contains("Please rebase before opening the pull request."));
+        assert!(
+            rendered
+                .last()
+                .unwrap()
+                .contains("session 9f3c1a7e-52d4-4b0e")
+        );
+    }
 
     fn entry() -> DirectedMessageEntry {
         let update = serde_json::from_value::<AgentMessageUpdate>(json!({
@@ -370,7 +444,7 @@ mod tests {
     fn collapsed_thread_shows_direction_status_and_latest_body() {
         let rendered = render(&entry(), 120, &Theme::default(), false)[0].to_string();
 
-        assert!(rendered.contains("← Message  #2 → you"));
+        assert!(rendered.contains("← Message  #2 → me"));
         assert!(rendered.contains("reply · delivered · steered"));
         assert!(rendered.contains("2 messages"));
         assert!(rendered.contains("Yes. Delivery precedes projection."));
@@ -391,8 +465,8 @@ mod tests {
                 .count(),
             1
         );
-        assert!(rendered.contains("you → #2 · question · deferred · pending"));
-        assert!(rendered.contains("#2 → you · reply · urgent · delivered · steered"));
+        assert!(rendered.contains("me → #2 · question · deferred · pending"));
+        assert!(rendered.contains("#2 → me · reply · urgent · delivered · steered"));
         assert!(rendered.contains("thread #1 · 2 messages"));
     }
 
