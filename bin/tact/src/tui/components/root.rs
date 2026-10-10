@@ -1448,7 +1448,7 @@ impl RootNode {
             }
             Some(ActionsEffect::Trigger(Action::DebugContext)) => {
                 self.overlay = Some(Overlay::ContextDiagnostics(ContextDiagnosticsPanel::new(
-                    self.context_diagnostics.clone(),
+                    self.context_diagnostics.snapshot(),
                 )));
             }
             Some(ActionsEffect::Trigger(Action::Compact)) => {
@@ -1508,7 +1508,7 @@ impl RootNode {
             Some(ContextDiagnosticsEffect::Dismiss) => self.overlay = None,
             Some(ContextDiagnosticsEffect::Refresh) => {
                 if let Some(Overlay::ContextDiagnostics(panel)) = &mut self.overlay {
-                    panel.replace(self.context_diagnostics.clone());
+                    panel.replace(self.context_diagnostics.snapshot());
                 }
             }
             None => {}
@@ -2610,7 +2610,7 @@ impl Component for RootNode {
             RootEvent::ContextBudget(budget) => {
                 self.context_diagnostics.set_native_budget(budget);
                 if let Some(Overlay::ContextDiagnostics(panel)) = &mut self.overlay {
-                    panel.replace(self.context_diagnostics.clone());
+                    panel.replace(self.context_diagnostics.snapshot());
                 }
                 self.update_composer(
                     ComposerEvent::ContextBudget(budget),
@@ -2632,7 +2632,7 @@ impl Component for RootNode {
                 let turn_timer = turn_timer_event(&record);
                 let observation = self.context_diagnostics.observe(&record);
                 if let Some(Overlay::ContextDiagnostics(panel)) = &mut self.overlay {
-                    panel.replace(self.context_diagnostics.clone());
+                    panel.replace(self.context_diagnostics.snapshot());
                 }
                 let mut update = self.update_transcript(TranscriptEvent::Record(record));
                 if let Some(event) = turn_timer {
