@@ -38,6 +38,7 @@ pub(super) struct ConfigFile {
     pub(super) skills: SkillsConfigFile,
     pub(super) memory: MemoryConfigFile,
     pub(super) subagents: SubagentsConfigFile,
+    pub(super) decisions: DecisionsConfigFile,
     pub(super) web: WebConfigFile,
     pub(super) tui: TuiConfigFile,
     pub(super) theme: Theme,
@@ -163,6 +164,12 @@ pub(super) struct SubagentsConfigFile {
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
+pub(super) struct DecisionsConfigFile {
+    pub(super) enabled: Option<bool>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub(super) struct WebConfigFile {
     pub(super) enabled: Option<bool>,
     pub(super) bind: Option<IpAddr>,
@@ -214,6 +221,7 @@ impl ConfigFile {
     pub(super) fn has_credentials(&self) -> bool {
         !self.memory.remote.bearer_token.is_empty()
             || self.openai.api_key.is_some()
+            || self.openai.decisions_api_key.is_some()
             || self.claude.api_key.is_some()
     }
 
@@ -263,6 +271,7 @@ impl ConfigFile {
     fn discard_credentials(&mut self) {
         self.memory.remote.bearer_token.zeroize();
         drop(self.openai.api_key.take());
+        drop(self.openai.decisions_api_key.take());
         drop(self.claude.api_key.take());
     }
 }
@@ -361,13 +370,17 @@ mod tests {
     fn provider_config_keys_require_private_permissions_even_when_unused() {
         use std::os::unix::fs::PermissionsExt;
 
-        for provider in ["openai", "claude"] {
+        for (section, key) in [
+            ("openai", "api_key"),
+            ("openai", "decisions_api_key"),
+            ("claude", "api_key"),
+        ] {
             let directory = tempdir().unwrap();
             let config_path = directory.path().join("config.toml");
             let secret = "sk-ant-api-permission-fixture";
             fs::write(
                 &config_path,
-                format!("[auth]\nmode = 'chatgpt'\n[{provider}]\napi_key = '{secret}'\n"),
+                format!("[auth]\nmode = 'chatgpt'\n[{section}]\n{key} = '{secret}'\n"),
             )
             .unwrap();
             let load = || {
@@ -400,9 +413,13 @@ mod tests {
     #[cfg(not(unix))]
     #[test]
     fn provider_config_keys_require_verifiable_file_privacy() {
-        for provider in ["openai", "claude"] {
+        for (section, key) in [
+            ("openai", "api_key"),
+            ("openai", "decisions_api_key"),
+            ("claude", "api_key"),
+        ] {
             let secret = "sk-ant-api-permission-fixture";
-            let error = load_config(&format!("[{provider}]\napi_key = '{secret}'\n")).unwrap_err();
+            let error = load_config(&format!("[{section}]\n{key} = '{secret}'\n")).unwrap_err();
             assert!(matches!(
                 error,
                 Error::Config(ConfigError::UnsupportedSecretPermissions { .. })
