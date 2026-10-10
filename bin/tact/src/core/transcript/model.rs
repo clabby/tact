@@ -497,7 +497,11 @@ impl TranscriptModel {
             }
             AgentEventKind::RunFailed => {
                 self.run_started_at_unix_ms.pop_front();
-                self.finish_failed(None);
+                if run_was_cancelled(record) {
+                    self.finish_cancelled();
+                } else {
+                    self.finish_failed(None);
+                }
                 Ok(true)
             }
             AgentEventKind::ToolCall => self.tool_call(record),
@@ -778,7 +782,7 @@ impl TranscriptModel {
         let resumed_shell = self.shell_followups.remove(&payload.call_id);
         let shell_followup = payload.tool == "write_stdin";
         let result = if matches!(payload.tool.as_str(), "exec_command" | "write_stdin") {
-            normalize_result(payload.structured_result)
+            normalize_result(payload.structured_result.unwrap_or(payload.result))
         } else {
             normalize_result(payload.result)
         };
@@ -964,6 +968,14 @@ impl TranscriptModel {
             return;
         };
         self.push(EntryKind::TurnCompleted { duration_ns });
+    }
+
+    /// Ends a run the user interrupted. The interruption has its own entry, and the run error the
+    /// agent reported for the cancellation is not a failure to show.
+    fn finish_cancelled(&mut self) {
+        self.pending_error = None;
+        self.pending_compaction_error = None;
+        self.finish_activity();
     }
 
     fn finish_failed(&mut self, error: Option<String>) {
@@ -1418,8 +1430,22 @@ struct ToolResultPayload {
     status: String,
     duration_ns: u64,
     result: Value,
-    structured_result: Value,
+    /// Absent from the terminal event of a tool that a cancellation interrupted.
+    structured_result: Option<Value>,
     metadata: Option<Value>,
+}
+
+/// The `status` of a run's terminal event.
+#[derive(Deserialize)]
+struct RunTerminalPayload {
+    status: Option<String>,
+}
+
+/// Whether a run's terminal event reports that the run was cancelled.
+fn run_was_cancelled(record: &TranscriptRecord) -> bool {
+    record
+        .decode_payload::<RunTerminalPayload>()
+        .is_ok_and(|payload| payload.status.as_deref() == Some("cancelled"))
 }
 
 #[derive(Deserialize)]
@@ -2233,6 +2259,85 @@ mod tests {
 
         assert!(model.entries().is_empty());
         assert!(model.transient().is_some());
+    }
+
+    /// The Claude driver closes a tool that a cancellation interrupted with a bare terminal event:
+    /// no `structured_result` and no `metadata`.
+    #[test]
+    fn interrupted_tool_results_render_without_a_projection_error() {
+        const REASON: &str = "Tool execution interrupted; outcome unknown. Do not assume it did not run or automatically repeat it.";
+        for tool in ["wait", "exec_command"] {
+            let mut model = TranscriptModel::default();
+            model.apply(&agent(AgentEventKind::RunStarted, json!({})));
+            model.apply(&agent(
+                AgentEventKind::ToolCall,
+                json!({"call_id": "call-1", "tool": tool, "arguments": {}}),
+            ));
+            model.apply(&agent(
+                AgentEventKind::ToolResult,
+                json!({
+                    "call_id": "call-1", "tool": tool, "status": "cancelled",
+                    "duration_ns": 5_u64, "started_after_ns": null,
+                    "result": {"text": REASON}, "outcome_unknown": true,
+                }),
+            ));
+
+            assert!(
+                !model
+                    .entries()
+                    .iter()
+                    .any(|entry| matches!(entry.kind, EntryKind::Error { .. })),
+                "{tool}: {:?}",
+                model.entries()
+            );
+            let Some(EntryKind::Tool(entry)) = model.entries().first().map(|entry| &entry.kind)
+            else {
+                panic!("{tool}: the interrupted tool keeps its entry");
+            };
+            assert_eq!(entry.state, ToolState::Failed);
+        }
+    }
+
+    /// A cancelled run reports its cancellation as a run error and then a `cancelled` terminal. The
+    /// interruption has its own marker, so the cancellation is not also an error.
+    #[test]
+    fn cancelled_run_is_not_an_error() {
+        let mut model = TranscriptModel::default();
+        model.apply(&agent(AgentEventKind::RunStarted, json!({})));
+        model.apply(&agent(
+            AgentEventKind::RunError,
+            json!({"message": "the turn was cancelled"}),
+        ));
+        model.apply(&agent(
+            AgentEventKind::RunFailed,
+            json!({"status": "cancelled"}),
+        ));
+        model.apply(
+            &TranscriptRecord::from_local(
+                3,
+                3,
+                LocalEvent::WorkerTurnsInterrupted(WorkerTurnsInterrupted {
+                    count: 1,
+                    error: None,
+                }),
+            )
+            .unwrap(),
+        );
+
+        assert!(!model.is_active());
+        assert!(!matches!(
+            model.transient(),
+            Some(crate::core::transcript::TransientStatus::Error(_))
+        ));
+        let kinds = model
+            .entries()
+            .iter()
+            .map(|entry| &entry.kind)
+            .collect::<Vec<_>>();
+        assert!(
+            matches!(kinds.as_slice(), [EntryKind::Interrupted { count: 1 }]),
+            "{kinds:?}"
+        );
     }
 
     #[test]
