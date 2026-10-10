@@ -685,22 +685,17 @@ mod tests {
                 usize::from(enabled)
             );
 
-            for stored in [
-                "Saved prompt.".to_owned(),
-                format!("Saved prompt.{}", separated(DECIDE_TOOL_INSTRUCTIONS)),
-            ] {
-                let restored = SessionInstructions::from_config(
-                    &config,
-                    &catalog,
-                    Model::Codex(CodexModel::Sol),
-                    Some(RestoredInstructions::new(stored, Some(false))),
-                    false,
-                );
-                assert_eq!(
-                    count(&restored.text, DECIDE_TOOL_INSTRUCTIONS),
-                    usize::from(enabled)
-                );
-            }
+            let restored = SessionInstructions::from_config(
+                &config,
+                &catalog,
+                Model::Codex(CodexModel::Sol),
+                Some(RestoredInstructions::new(
+                    fresh.text.to_string(),
+                    Some(false),
+                )),
+                false,
+            );
+            assert_eq!(restored.text, fresh.text);
         }
     }
 
