@@ -3745,3 +3745,64 @@ mod qr_code_overlay {
         );
     }
 }
+
+#[test]
+fn claude_steer_applied_after_interrupt_is_submitted_with_the_queue() {
+    let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+    root.set_model(Model::Claude(nanocodex::ClaudeModel::Opus55));
+    root.turns.start_turn();
+    root.queue.push("later".to_owned());
+    root.queue.push("priority steer".to_owned());
+    root.queue.set_focused(true);
+    let steer = root.update(key(KeyCode::Enter, KeyModifiers::NONE));
+    let RootEffect::Steer { id, .. } = &steer.effects[0] else {
+        panic!("enter should issue a steer");
+    };
+    let id = *id;
+    root.update(super::RootEvent::SteerAdmitted(id));
+
+    root.update(super::RootEvent::TurnsCancelled);
+    let applied = root.update(run_steered());
+    let finished = root.update(super::RootEvent::WorkerTurnFinished {
+        terminal_expected: false,
+    });
+
+    assert!(applied.effects.is_empty());
+    assert_eq!(
+        finished.effects,
+        [RootEffect::Submit(
+            "priority steer\n\nlater".to_owned().into()
+        )]
+    );
+}
+
+#[test]
+fn claude_steer_applied_while_interrupting_is_submitted_after_the_interrupt() {
+    let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+    root.set_model(Model::Claude(nanocodex::ClaudeModel::Opus55));
+    root.turns.start_turn();
+    root.queue.push("steer".to_owned());
+    root.queue.set_focused(true);
+    let steer = root.update(key(KeyCode::Enter, KeyModifiers::NONE));
+    let RootEffect::Steer { id, .. } = &steer.effects[0] else {
+        panic!("enter should issue a steer");
+    };
+    let id = *id;
+    root.update(super::RootEvent::SteerAdmitted(id));
+
+    root.queue.set_focused(false);
+    root.update(key(KeyCode::Esc, KeyModifiers::NONE));
+    let interrupt = root.update(key(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(interrupt.effects, [RootEffect::CancelTurns]);
+    let applied = root.update(run_steered());
+    root.update(super::RootEvent::TurnsCancelled);
+    let finished = root.update(super::RootEvent::WorkerTurnFinished {
+        terminal_expected: false,
+    });
+
+    assert!(applied.effects.is_empty());
+    assert_eq!(
+        finished.effects,
+        [RootEffect::Submit("steer".to_owned().into())]
+    );
+}
