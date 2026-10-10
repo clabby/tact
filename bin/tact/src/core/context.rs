@@ -11,7 +11,7 @@ use nanocodex::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
-use std::{borrow::Cow, mem};
+use std::{borrow::Cow, collections::VecDeque, mem};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -169,9 +169,12 @@ pub(crate) struct ContextDiagnostics {
     pub(crate) compactions_started: u64,
     pub(crate) compactions_completed: u64,
     pub(crate) last_compaction: Option<CompactionDiagnostics>,
-    /// Absent until a model call reports usage, and for models that report none.
+    /// Absent until a model call reports usage, and for models that report none. Only a
+    /// [snapshot](Self::snapshot) carries it: observing a record keeps just the running attribution,
+    /// so a restored session does not build a breakdown for every call it replays.
     pub(crate) breakdown: Option<ContextBreakdown>,
-    /// The most recent calls, oldest first, bounded so a long session stays small.
+    /// The most recent calls, oldest first, bounded so a long session stays small. Only a
+    /// [snapshot](Self::snapshot) carries it.
     pub(crate) history: Vec<CallPoint>,
     #[serde(skip)]
     awaiting_post_compaction_usage: bool,
@@ -214,7 +217,31 @@ impl ContextDiagnostics {
         for record in records {
             diagnostics.observe(record);
         }
-        diagnostics
+        diagnostics.snapshot()
+    }
+
+    /// The projection with its breakdown and call history filled in, for a view to show. Building
+    /// them walks every tool and call, so it happens when a view asks and not on every record.
+    pub(crate) fn snapshot(&self) -> Self {
+        Self {
+            model_window_tokens: self.model_window_tokens,
+            auto_compact_token_limit: self.auto_compact_token_limit,
+            active_tokens: self.active_tokens,
+            usage: self.usage,
+            continuation: self.continuation,
+            prompt_cache: self.prompt_cache,
+            compactions_started: self.compactions_started,
+            compactions_completed: self.compactions_completed,
+            last_compaction: self.last_compaction,
+            breakdown: self
+                .attribution
+                .latest_input
+                .map(|input| self.attribution.breakdown(input)),
+            history: self.attribution.history.iter().copied().collect(),
+            awaiting_post_compaction_usage: self.awaiting_post_compaction_usage,
+            manual_compaction: self.manual_compaction,
+            attribution: Box::default(),
+        }
     }
 
     pub(crate) fn observe(&mut self, record: &TranscriptRecord) -> ContextObservation {
@@ -370,14 +397,8 @@ impl ContextDiagnostics {
             .map_or(0, |details| details.reasoning_tokens);
         let usage = usage_into_tokens(usage);
         self.set_usage(Some(usage));
-        if self.history.len() == HISTORY_CALLS {
-            self.history.remove(0);
-        }
-        self.history.push(
-            self.attribution
-                .complete_call(payload.call_index, usage, reasoning),
-        );
-        self.breakdown = Some(self.attribution.breakdown(usage.input));
+        self.attribution
+            .complete_call(payload.call_index, usage, reasoning);
         ContextObservation {
             completed_tokens: Some(usage.total),
         }
@@ -496,52 +517,82 @@ struct Attribution {
     runs: u64,
     /// The number of calls that reported usage.
     calls: u64,
+    /// The most recent calls, oldest first.
+    history: VecDeque<CallPoint>,
+    /// The input size of the latest call that reported usage, which the categories add up to.
+    latest_input: Option<u64>,
 }
 
 impl Attribution {
     fn observe(&mut self, kind: AgentEventKind, record: &TranscriptRecord) {
-        match kind {
-            AgentEventKind::RunStarted => {
-                self.runs += 1;
-                if let Ok(prompt) = record.decode_payload::<PromptDelivered>() {
-                    self.arrive(ContextCategory::User, None, prompt.instruction_bytes);
-                }
+        if !matches!(
+            kind,
+            AgentEventKind::RunStarted
+                | AgentEventKind::RunSteered
+                | AgentEventKind::AssistantMessage
+                | AgentEventKind::ToolCall
+                | AgentEventKind::ToolResult
+        ) {
+            return;
+        }
+        if kind == AgentEventKind::RunStarted {
+            self.runs += 1;
+        }
+        let Ok(payload) = record.decode_payload::<SizedPayload>() else {
+            return;
+        };
+        match (kind, payload) {
+            (
+                AgentEventKind::RunStarted | AgentEventKind::RunSteered,
+                SizedPayload {
+                    instruction_bytes: Some(bytes),
+                    ..
+                },
+            ) => self.arrive(ContextCategory::User, None, bytes),
+            (
+                AgentEventKind::AssistantMessage,
+                SizedPayload {
+                    model_call_index: Some(index),
+                    text: Some(text),
+                    ..
+                },
+            ) => self.produce(
+                index,
+                ContextCategory::Assistant,
+                None,
+                json_text_bytes(text),
+            ),
+            (
+                AgentEventKind::ToolCall,
+                SizedPayload {
+                    model_call_index: Some(index),
+                    tool: Some(tool),
+                    arguments: Some(arguments),
+                    ..
+                },
+            ) => {
+                let tool = self.tool_slot(&tool);
+                self.produce(
+                    index,
+                    ContextCategory::ToolCalls,
+                    Some(tool),
+                    json_text_bytes(arguments),
+                );
             }
-            AgentEventKind::RunSteered => {
-                if let Ok(prompt) = record.decode_payload::<PromptDelivered>() {
-                    self.arrive(ContextCategory::User, None, prompt.instruction_bytes);
-                }
-            }
-            AgentEventKind::AssistantMessage => {
-                if let Ok(message) = record.decode_payload::<AssistantOutput>() {
-                    self.produce(
-                        message.model_call_index,
-                        ContextCategory::Assistant,
-                        None,
-                        json_text_bytes(message.text),
-                    );
-                }
-            }
-            AgentEventKind::ToolCall => {
-                if let Ok(call) = record.decode_payload::<ToolCallOutput>() {
-                    let tool = self.tool_slot(&call.tool);
-                    self.produce(
-                        call.model_call_index,
-                        ContextCategory::ToolCalls,
-                        Some(tool),
-                        json_text_bytes(call.arguments),
-                    );
-                }
-            }
-            AgentEventKind::ToolResult => {
-                if let Ok(result) = record.decode_payload::<ToolResultInput>() {
-                    let tool = self.tool_slot(&result.tool);
-                    self.arrive(
-                        ContextCategory::ToolOutput,
-                        Some(tool),
-                        json_text_bytes(result.result),
-                    );
-                }
+            (
+                AgentEventKind::ToolResult,
+                SizedPayload {
+                    tool: Some(tool),
+                    result: Some(result),
+                    ..
+                },
+            ) => {
+                let tool = self.tool_slot(&tool);
+                self.arrive(
+                    ContextCategory::ToolOutput,
+                    Some(tool),
+                    json_text_bytes(result),
+                );
             }
             _ => {}
         }
@@ -591,8 +642,8 @@ impl Attribution {
         self.tools.len() - 1
     }
 
-    /// Accounts for the growth a completed call measured and returns its history point.
-    fn complete_call(&mut self, index: u32, usage: TokenUsage, reasoning: u64) -> CallPoint {
+    /// Accounts for the growth a completed call measured and adds the call to the history.
+    fn complete_call(&mut self, index: u32, usage: TokenUsage, reasoning: u64) {
         let stamp = CallStamp {
             run: self.runs,
             index,
@@ -656,14 +707,17 @@ impl Attribution {
             reasoning,
         });
         self.calls += 1;
-        let after_compaction = mem::take(&mut self.compaction_pending);
-        CallPoint {
+        if self.history.len() == HISTORY_CALLS {
+            self.history.pop_front();
+        }
+        self.history.push_back(CallPoint {
             call: self.calls,
             input: usage.input,
             cached: usage.cached_input,
             output: usage.output,
-            after_compaction,
-        }
+            after_compaction: mem::take(&mut self.compaction_pending),
+        });
+        self.latest_input = Some(usage.input);
     }
 
     /// Splits `tokens` among `items` by size, giving any share without a sized owner to `fallback`.
@@ -707,12 +761,15 @@ impl Attribution {
         }
     }
 
-    /// Starts a new context that keeps only the fixed prefix of the old one.
+    /// Starts a new context that keeps only the fixed prefix of the old one. The call history and
+    /// the latest input stay: they describe the session, and the next call replaces the input.
     fn compacted(&mut self) {
         let prefix = self.tokens[ContextCategory::Prefix as usize];
         *self = Self {
             runs: self.runs,
             calls: self.calls,
+            history: mem::take(&mut self.history),
+            latest_input: self.latest_input,
             compaction_pending: true,
             ..Self::default()
         };
@@ -811,52 +868,36 @@ fn apportion(total: u64, weights: &[u64]) -> Vec<u64> {
     shares
 }
 
-/// The decoded byte length of a JSON string, or the raw length of any other JSON value.
+/// The byte length of a JSON string's text, or the raw length of any other JSON value.
+///
+/// Every escape sequence stands for fewer bytes than it spells, so subtracting one byte per
+/// backslash approximates the decoded length without decoding it. The figure only weights how a
+/// measured growth is split among items, which makes that close enough, and counting bytes
+/// vectorizes where decoding them does not.
 fn json_text_bytes(value: &RawValue) -> u64 {
     let raw = value.get().trim();
     let Some(inner) = raw.strip_prefix('"').and_then(|raw| raw.strip_suffix('"')) else {
         return raw.len() as u64;
     };
-    let bytes = inner.as_bytes();
-    let (mut position, mut decoded) = (0, 0);
-    while position < bytes.len() {
-        position += match (bytes[position], bytes.get(position + 1)) {
-            (b'\\', Some(b'u')) => 6,
-            (b'\\', _) => 2,
-            _ => 1,
-        };
-        decoded += 1;
-    }
-    decoded
+    let escapes = inner.bytes().filter(|byte| *byte == b'\\').count();
+    (inner.len() - escapes) as u64
 }
 
+/// The fields of a record's payload that attribution measures, whichever kind of record it is.
+/// They are optional so a record that lacks one is skipped without building a decode error, which
+/// costs more than decoding the record.
 #[derive(Deserialize)]
-struct PromptDelivered {
-    instruction_bytes: u64,
-}
-
-#[derive(Deserialize)]
-struct AssistantOutput<'a> {
-    model_call_index: u32,
+struct SizedPayload<'a> {
+    instruction_bytes: Option<u64>,
+    model_call_index: Option<u32>,
     #[serde(borrow)]
-    text: &'a RawValue,
-}
-
-#[derive(Deserialize)]
-struct ToolCallOutput<'a> {
+    tool: Option<Cow<'a, str>>,
     #[serde(borrow)]
-    tool: Cow<'a, str>,
+    text: Option<&'a RawValue>,
     #[serde(borrow)]
-    arguments: &'a RawValue,
-    model_call_index: u32,
-}
-
-#[derive(Deserialize)]
-struct ToolResultInput<'a> {
+    arguments: Option<&'a RawValue>,
     #[serde(borrow)]
-    tool: Cow<'a, str>,
-    #[serde(borrow)]
-    result: &'a RawValue,
+    result: Option<&'a RawValue>,
 }
 
 #[derive(Deserialize)]

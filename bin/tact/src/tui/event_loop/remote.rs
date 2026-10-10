@@ -121,7 +121,7 @@ fn prepare(query: Query, state: &QueryState<'_>) -> Result<Answer<QueryReply>, C
             Answer::Ready(Ok(QueryReply::ContextDiagnostics(Box::new(
                 session_root(state.app, &session)?
                     .context_diagnostics()
-                    .clone(),
+                    .snapshot(),
             ))))
         }
         Query::Memories => {

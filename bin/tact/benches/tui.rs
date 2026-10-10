@@ -65,6 +65,7 @@ use crate::{
         theme::Theme,
     },
     core::{
+        context::ContextDiagnostics,
         pane::PaneId,
         session, storage,
         transcript::{LocalEvent, SessionStarted, TranscriptRecord, TurnId, UserSubmitted},
@@ -679,6 +680,26 @@ fn benchmarks(criterion: &mut Criterion) {
 
     sessions.bench_function("load_mixed_transcript", |bencher| {
         bencher.iter(|| black_box(mixed_fixture.load_transcript()));
+    });
+
+    sessions.bench_function("observe_semantic_context", |bencher| {
+        bencher.iter(|| {
+            let mut diagnostics = ContextDiagnostics::default();
+            for record in &restored_records {
+                black_box(diagnostics.observe(record));
+            }
+            black_box(diagnostics);
+        });
+    });
+
+    sessions.bench_function("observe_mixed_context", |bencher| {
+        bencher.iter(|| {
+            let mut diagnostics = ContextDiagnostics::default();
+            for record in &mixed_records {
+                black_box(diagnostics.observe(record));
+            }
+            black_box(diagnostics);
+        });
     });
 
     sessions.bench_function("project_semantic_transcript", |bencher| {
