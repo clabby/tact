@@ -346,9 +346,14 @@ diffs-container { --diffs-light-bg: var(--bg); --diffs-dark-bg: var(--bg); }
 .markdown code.file-link { cursor: pointer; text-decoration: underline dotted color-mix(in srgb, var(--accent) 60%, transparent); text-underline-offset: 3px; }
 .markdown code.file-link:hover { color: var(--accent); }
 
-/* Messages before a turn's answer narrate the work: quieter, and folded away with it. */
-.entry-assistant.narration { color: var(--muted); font-size: var(--text-md); }
-.turn-log > .entry-assistant.narration { margin-block: var(--space-2); }
+/*
+ * Messages before a turn's answer narrate the work: quieter, italic, and folded away with it. The
+ * log's sibling rule already puts a paragraph's distance above every row after the first, and flex
+ * margins do not collapse, so a margin below the narration would add to the gap under it alone.
+ */
+.entry-assistant.narration { color: var(--muted); font-size: var(--text-md); font-style: italic; }
+.entry-assistant.narration .markdown code { font-style: normal; }
+.turn-log > .entry-assistant.narration { margin-bottom: 0; }
 .entry-assistant.streaming .markdown > :last-child::after {
   content: ""; display: inline-block; width: 7px; height: 1.05em; margin-left: 2px; vertical-align: -2px;
   border-radius: 1px; background: var(--accent); animation: caret 1s steps(1) infinite;
