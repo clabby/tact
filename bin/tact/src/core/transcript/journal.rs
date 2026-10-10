@@ -725,12 +725,12 @@ mod tests {
 
         let (mut journal, writer) = TranscriptJournal::open(&config, "session").unwrap();
         journal.defer_start(started("session"));
-        journal
-            .append_local(LocalEvent::UserSubmitted(UserSubmitted {
-                id: TurnId::new(1),
-                text: "first".to_owned(),
-            }))
-            .unwrap();
+        // Appending sends the deferred session start and then the prompt. The writer can reject
+        // the start before the prompt is sent, so this append may already report the failure.
+        let _ = journal.append_local(LocalEvent::UserSubmitted(UserSubmitted {
+            id: TurnId::new(1),
+            text: "first".to_owned(),
+        }));
         let writer_error = writer.into_task().await.unwrap().unwrap_err();
         assert!(matches!(
             &writer_error,

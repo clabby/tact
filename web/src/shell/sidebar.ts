@@ -48,6 +48,8 @@ export class Sidebar {
   private pinned = new Set<string>(JSON.parse(localStorage.getItem(PINS_KEY) ?? "[]") as string[]);
   private historyRequest: AbortController | null = null;
   private historyLoaded = false;
+  /** Every History page loaded so far; rows for sessions that are live are not shown. */
+  private history: PersistedSession[] = [];
   private searchTimer = 0;
 
   constructor(private readonly root: HTMLElement, private readonly host: SidebarHost) {
@@ -86,9 +88,14 @@ export class Sidebar {
 
   /** Re-renders the live list; rows are small and few (bounded by max_live_sessions). */
   setLive(live: SessionSummary[], active: string | null) {
+    const closed = this.live.some((old) => !live.some((session) => session.id === old.id));
     this.live = orderSessions(live, this.pinned);
     this.active = active;
     this.renderLive();
+    // A closed session is only in History once it has been listed again, and the loaded pages
+    // predate it. A reload also recomputes which rows the live list now hides.
+    if (closed && this.historyLoaded) void this.loadHistory(true);
+    else this.renderHistory();
   }
 
   private renderLive() {
@@ -287,13 +294,8 @@ export class Sidebar {
       const page = await this.host.api.query("history", { query: this.historyQuery, cursor: this.historyCursor });
       if (this.historyRequest !== request) return;
       this.historyLoaded = true;
-      const rows = page.sessions.map((session) => this.historyRow(session));
-      if (reset) {
-        this.historyList.replaceChildren(...rows);
-        if (rows.length === 0) this.historyList.innerHTML = `<li class="list-empty">${query ? "No matches" : "No saved sessions"}</li>`;
-      } else {
-        this.historyList.append(...rows);
-      }
+      this.history = reset ? page.sessions : [...this.history, ...page.sessions];
+      this.renderHistory();
       this.historyCursor = page.next_cursor;
       this.more.hidden = page.next_cursor === null;
     } catch (error) {
@@ -302,6 +304,17 @@ export class Sidebar {
       this.historyList.firstElementChild!.textContent = describeError(error);
     } finally {
       this.more.disabled = false;
+    }
+  }
+
+  /** Live sessions already have a row above, so History lists only the others. */
+  private renderHistory() {
+    const live = new Set(this.live.map((session) => session.id));
+    const rows = this.history.filter((session) => !live.has(session.session_id)).map((session) => this.historyRow(session));
+    if (rows.length > 0) {
+      this.historyList.replaceChildren(...rows);
+    } else if (this.historyLoaded) {
+      this.historyList.innerHTML = `<li class="list-empty">${this.historyQuery ? "No matches" : "No saved sessions"}</li>`;
     }
   }
 
