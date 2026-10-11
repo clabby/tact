@@ -2961,7 +2961,7 @@ fn unsupported_models_preserve_speed_preference_for_forks_and_later_models() {
         assert_eq!(fork.composer().speed(), Speed::Ultrafast);
         assert!(render_root_text(&mut root, 80, 18).contains("medium 󰳗"));
         root.open_speed();
-        assert!(render_root_text(&mut root, 80, 18).contains("Uses standard with this model"));
+        assert!(render_root_text(&mut root, 80, 18).contains("Selected Speed: standard"));
         root.update(key(KeyCode::Esc, KeyModifiers::NONE));
     }
     root.set_model(Model::Codex(CodexModel::Sol));

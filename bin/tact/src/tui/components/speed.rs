@@ -7,8 +7,10 @@
 //! Enter emits [SpeedEffect::Apply] with the selected preference, and Esc or
 //! Backspace emits [SpeedEffect::Dismiss].
 //!
-//! The applied value is the preference, not the speed the model will use; when
-//! the model maps the preference to a different speed, the popup says so.
+//! Only the speeds the session's model actually runs at are offered. A stored
+//! preference the model cannot honor opens on the speed it resolves to, and
+//! confirming without moving leaves the stored preference untouched so it still
+//! applies to later models.
 
 use super::{
     dial::AnimatedDial,
@@ -42,18 +44,24 @@ pub(super) enum SpeedEffect {
 
 pub(super) struct SpeedSelector {
     dial: AnimatedDial,
-    model: Model,
+    speeds: Vec<Speed>,
+    initial: usize,
 }
 
 impl SpeedSelector {
     pub(super) fn new(initial: Speed, model: Model) -> Self {
-        let selected = Speed::ALL
+        let speeds = Speed::ALL
+            .into_iter()
+            .filter(|speed| speed.for_model(model) == *speed)
+            .collect::<Vec<_>>();
+        let selected = speeds
             .iter()
-            .position(|speed| *speed == initial)
-            .unwrap();
+            .position(|speed| *speed == initial.for_model(model))
+            .expect("a resolved speed is always supported");
         Self {
-            dial: AnimatedDial::new(selected, Speed::ALL.len()),
-            model,
+            dial: AnimatedDial::new(selected, speeds.len()),
+            speeds,
+            initial: selected,
         }
     }
 
@@ -62,7 +70,7 @@ impl SpeedSelector {
     }
 
     fn selected_speed(&self) -> Speed {
-        Speed::ALL[self.dial.selected()]
+        self.speeds[self.dial.selected()]
     }
 }
 
@@ -85,7 +93,11 @@ impl Component for SpeedSelector {
                     ComponentUpdate::render(RenderRequest::Immediate)
                 }
                 KeyCode::Enter => ComponentUpdate {
-                    effects: vec![SpeedEffect::Apply(self.selected_speed())],
+                    effects: vec![if self.dial.selected() == self.initial {
+                        SpeedEffect::Dismiss
+                    } else {
+                        SpeedEffect::Apply(self.selected_speed())
+                    }],
                     render: RenderRequest::Immediate,
                 },
                 KeyCode::Esc | KeyCode::Backspace => ComponentUpdate {
@@ -114,11 +126,10 @@ impl Component for SpeedSelector {
             return;
         }
         let selected = self.selected_speed();
-        let effective = selected.for_model(self.model);
         let labels = self
             .dial
             .render(frame, layout.body, theme, theme.speed(selected));
-        let mut lines = vec![Line::from(vec![
+        let lines = vec![Line::from(vec![
             Span::styled("Selected Speed:", Style::default().fg(theme.border())),
             Span::styled(
                 format!(" {}", selected.as_str()),
@@ -127,12 +138,6 @@ impl Component for SpeedSelector {
                     .add_modifier(Modifier::BOLD),
             ),
         ])];
-        if effective != selected {
-            lines.push(Line::styled(
-                format!("Uses {} with this model", effective.as_str()),
-                Style::default().fg(theme.muted()),
-            ));
-        }
         frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center), labels);
     }
 }
@@ -230,43 +235,43 @@ mod tests {
     }
 
     #[test]
-    fn fallback_is_shown_without_changing_the_preference() {
-        for (model, fallback) in [
+    fn only_speeds_the_model_runs_at_are_offered() {
+        for (model, expected) in [
+            (Model::Codex(CodexModel::Astra), &Speed::ALL[..]),
+            (Model::Codex(CodexModel::Sol), &Speed::ALL[..]),
             (
                 Model::Codex(CodexModel::Luna),
-                Some("Uses fast with this model"),
+                &[Speed::Standard, Speed::Fast][..],
             ),
             (
                 Model::Claude(ClaudeModel::Opus55),
-                Some("Uses fast with this model"),
+                &[Speed::Standard, Speed::Fast][..],
             ),
-            (
-                Model::Claude(ClaudeModel::Sonnet55),
-                Some("Uses standard with this model"),
-            ),
-            (
-                Model::Claude(ClaudeModel::Fable51),
-                Some("Uses standard with this model"),
-            ),
-            (Model::Codex(CodexModel::Astra), None),
-            (Model::Codex(CodexModel::Sol), None),
-            (
-                Model::Claude(ClaudeModel::Haiku55),
-                Some("Uses standard with this model"),
-            ),
+            (Model::Claude(ClaudeModel::Sonnet55), &[Speed::Standard][..]),
+            (Model::Claude(ClaudeModel::Fable51), &[Speed::Standard][..]),
+            (Model::Claude(ClaudeModel::Haiku55), &[Speed::Standard][..]),
         ] {
-            let mut selector = SpeedSelector::new(Speed::Ultrafast, model);
-            let rendered = text(&render(&mut selector, 60, 18));
-            assert!(rendered.contains("Selected Speed: ultrafast"));
-            match fallback {
-                Some(label) => assert!(rendered.contains(label)),
-                None => assert!(!rendered.contains("Uses ")),
-            }
-            assert_eq!(
-                selector.update(key(KeyCode::Enter, Instant::now())).effects,
-                [SpeedEffect::Apply(Speed::Ultrafast)]
-            );
+            let selector = SpeedSelector::new(Speed::Standard, model);
+            assert_eq!(selector.speeds, expected);
         }
+    }
+
+    #[test]
+    fn unsupported_preference_opens_on_its_fallback_and_is_preserved_on_confirm() {
+        let now = Instant::now();
+        let mut selector = SpeedSelector::new(Speed::Ultrafast, Model::Claude(ClaudeModel::Opus55));
+        assert_eq!(selector.selected_speed(), Speed::Fast);
+        assert!(text(&render(&mut selector, 60, 18)).contains("Selected Speed: fast"));
+        assert_eq!(
+            selector.update(key(KeyCode::Enter, now)).effects,
+            [SpeedEffect::Dismiss]
+        );
+        selector.update(key(KeyCode::Right, now));
+        assert_eq!(selector.selected_speed(), Speed::Standard);
+        assert_eq!(
+            selector.update(key(KeyCode::Enter, now)).effects,
+            [SpeedEffect::Apply(Speed::Standard)]
+        );
     }
 
     #[test]
