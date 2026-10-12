@@ -331,6 +331,7 @@ fn unavailable() -> ApiError {
 
 #[derive(Serialize)]
 struct InstanceInfo {
+    pid: u32,
     protocol_version: u32,
     workspace: String,
     repository: String,
@@ -441,6 +442,7 @@ async fn instance(State(state): State<Arc<AppState>>) -> Response<Body> {
     secure_json(
         StatusCode::OK,
         InstanceInfo {
+            pid: std::process::id(),
             protocol_version: PROTOCOL_VERSION,
             workspace: state.workspace.to_string_lossy().into_owned(),
             repository,
@@ -452,6 +454,7 @@ async fn instance(State(state): State<Arc<AppState>>) -> Response<Body> {
 
 #[derive(Deserialize, Serialize)]
 struct SiblingStatus {
+    pid: u32,
     live: usize,
     running: bool,
 }
@@ -515,7 +518,9 @@ async fn probe(state: &AppState, record: &InstanceRecord) -> Option<SiblingStatu
         .ok()?
         .error_for_status()
         .ok()?;
-    response.json().await.ok()
+    // A stale record can name a port that another process, including this one, now serves.
+    let status: SiblingStatus = response.json().await.ok()?;
+    (status.pid == record.pid).then_some(status)
 }
 
 fn entry_not_found() -> ApiError {
@@ -680,6 +685,7 @@ pub(super) fn secure(response: &mut Response<Body>) {
 mod tests {
     use super::{
         super::{
+            registry::{InstanceRecord, Registration},
             tailscale::Tailnet,
             testing::{self, Harness},
         },
@@ -1008,6 +1014,34 @@ mod tests {
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body["code"], "tailscale_unavailable", "{body}");
         assert!(body.get("token").is_none());
+    }
+
+    #[tokio::test]
+    async fn instances_omit_stale_records_whose_port_another_process_now_serves() {
+        let harness = Harness::new();
+        // The listener answers as this process, standing in for any live process that has
+        // since taken over the port of a crashed instance.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let app = harness.app.clone();
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        let _stale = Registration::create(
+            &harness.state.registry_directory,
+            &InstanceRecord {
+                pid: std::process::id() + 1,
+                port,
+                workspace: "/stale".into(),
+                started_at: 1,
+            },
+        )
+        .unwrap();
+
+        let (status, body) = harness.call(Method::GET, "/api/instances", None).await;
+
+        assert_eq!(status, StatusCode::OK);
+        let instances = body["instances"].as_array().unwrap();
+        assert_eq!(instances.len(), 1, "{body}");
+        assert_eq!(instances[0]["current"], true);
     }
 
     #[tokio::test]
