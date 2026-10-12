@@ -2,6 +2,7 @@ import {
   CodeView,
   type CodeViewLineSelection,
   type DiffLineAnnotation,
+  type FileDiffMetadata,
 } from "@pierre/diffs";
 import { WorkerPoolManager } from "@pierre/diffs/worker";
 import type { AnnotationMetadata, ReviewDiffItem } from "./annotations";
@@ -13,9 +14,10 @@ import { SEARCH_HIGHLIGHT } from "./search-bar";
 export type DiffViewDeps = {
   settings(): ReviewSettings;
   appearance(): "light" | "dark";
-  /** The paths the reviewer marked as seen; the seen toggle updates the set in place. */
-  seenFiles(): Set<string>;
-  seenChanged(path: string, seen: boolean): void;
+  /** The paths the reviewer marked as seen and has not seen change since. */
+  seenFiles(): ReadonlySet<string>;
+  /** The reviewer marked `file` as seen, or took the mark back. */
+  seenChanged(file: FileDiffMetadata, seen: boolean): void;
   renderAnnotation(annotation: DiffLineAnnotation<AnnotationMetadata>): HTMLElement;
   openComposer(selection: CodeViewLineSelection | null): void;
   selectedLinesChanged(selection: CodeViewLineSelection | null): void;
@@ -160,13 +162,8 @@ export class DiffView {
   }
 
   private toggleSeen(item: ReviewDiffItem) {
-    const files = this.deps.seenFiles();
-    const path = item.fileDiff.name;
-    const seen = !files.has(path);
-    if (seen) files.add(path);
-    else files.delete(path);
-
+    const seen = !this.deps.seenFiles().has(item.fileDiff.name);
     this.setCollapsed(item, seen);
-    this.deps.seenChanged(path, seen);
+    this.deps.seenChanged(item.fileDiff, seen);
   }
 }

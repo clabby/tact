@@ -51,7 +51,7 @@ const comment = (overrides: Partial<CommentMetadata>): CommentMetadata => ({
   id: 1, itemId: "a.txt", path: "a.txt", side: "additions", start_line: 31, end_line: 31, body: "note", ...overrides,
 });
 const feedback = (overrides: Partial<FeedbackState>): FeedbackState => ({
-  summary: "", comments: [], seenPaths: new Set(), ...overrides,
+  summary: "", comments: [], ...overrides,
 });
 const carry = (before: FileDiffMetadata[], after: FileDiffMetadata[], state: FeedbackState) =>
   carryFeedback(before, after, state, () => 99);
@@ -80,14 +80,12 @@ describe("carrying feedback across diff snapshots", () => {
     expect(carried.comments[0].outdated).toBe(true);
   });
 
-  test("seen marks survive only on files whose diff is unchanged", () => {
+  test("only files whose diff changed are reported as changed", () => {
     const both = (second: Edit[]) => parse(
       filePatch("a.txt", lines(60), first) + filePatch("b.txt", lines(60), second),
     );
     const previous = both([{ at: 5, remove: 1, add: ["b edit"] }]);
     const next = both([{ at: 5, remove: 1, add: ["b edit, revised"] }]);
-    const carried = carry(previous, next, feedback({ seenPaths: new Set(["a.txt", "b.txt", "gone.txt"]) }));
-    expect([...carried.seenPaths]).toEqual(["a.txt"]);
     expect(changedFileNames(previous, next)).toEqual(new Set(["b.txt"]));
   });
 

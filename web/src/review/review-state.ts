@@ -28,7 +28,6 @@ export type FeedbackState = {
   summary: string;
   comments: CommentMetadata[];
   draft?: CommentDraft;
-  seenPaths: Set<string>;
 };
 
 export type ReviewState = {
@@ -156,7 +155,7 @@ export function discardCurrentFeedback(state: ReviewState): ReviewState {
 }
 
 function emptyFeedback(): FeedbackState {
-  return { summary: "", comments: [], seenPaths: new Set() };
+  return { summary: "", comments: [] };
 }
 
 function storedQuestion(

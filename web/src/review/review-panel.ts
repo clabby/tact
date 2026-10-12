@@ -46,6 +46,7 @@ import {
 } from "./review-state";
 import { ReviewStatus } from "./review-status";
 import { SEARCH_HIGHLIGHT, SearchBar } from "./search-bar";
+import { SeenFiles } from "./seen-files";
 import { SettingsPopover } from "./settings-popover";
 import "./review-panel.css";
 
@@ -92,6 +93,7 @@ export function mountReviewPanel(container: HTMLElement, host: ReviewHost) {
 class ReviewPanel {
   private page?: ReviewPage;
   private files: FileDiffMetadata[] = [];
+  private readonly seen = new SeenFiles(localStorage);
   private items: ReviewDiffItem[] = [];
   private readonly pathToItem = new Map<string, string>();
   private nextCommentId = 1;
@@ -141,8 +143,9 @@ class ReviewPanel {
       settings: () => this.settings.current,
       appearance: () => appearance(this.settings.current, this.host.theme()),
       seenFiles: () => this.seenFiles(),
-      seenChanged: (path, seen) => {
-        if (!seen) this.search.fileExpanded(path);
+      seenChanged: (file, seen) => {
+        this.seen.mark(this.bootstrap.checkout.path, file, seen);
+        if (!seen) this.search.fileExpanded(file.name);
         this.fileTree.refreshDecorations();
       },
       renderAnnotation: (annotation) => this.annotationElement(annotation),
@@ -436,7 +439,7 @@ class ReviewPanel {
     }
     this.page = page;
     this.state = activatePage(this.state, page);
-    const seenFiles = this.seenFiles();
+    const seenFiles = this.seen.among(this.bootstrap.checkout.path, files);
     // Git's patch owns changed-line identity. Pierre may expand context already present in
     // that immutable patch, but browser-side re-diffing must never replace its hunks.
     const changed = preserveView ? changedFileNames(this.files, files) : undefined;
@@ -546,7 +549,7 @@ class ReviewPanel {
   }
 
   private seenFiles() {
-    return this.feedback.seenPaths;
+    return this.seen.among(this.bootstrap.checkout.path, this.files);
   }
 
   private bindEvents() {

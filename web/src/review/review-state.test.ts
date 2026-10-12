@@ -32,7 +32,6 @@ describe("review state transitions", () => {
   test("feedback and questions are isolated by generation and range", () => {
     let state = createReviewState(session);
     currentFeedback(state).summary = "first summary";
-    currentFeedback(state).seenPaths.add("src/main.rs");
     currentQuestions(state).push(createQuestionThread("thread-1", {
       itemId: "item",
       range: { from: 0, to: 2 },
@@ -44,12 +43,10 @@ describe("review state transitions", () => {
 
     state = activatePage(state, page(3, { from: 1, to: 2 }));
     expect(currentFeedback(state).summary).toBe("");
-    expect(currentFeedback(state).seenPaths.size).toBe(0);
     expect(currentQuestions(state)).toEqual([]);
 
     state = activatePage(state, firstPage);
     expect(currentFeedback(state).summary).toBe("first summary");
-    expect(currentFeedback(state).seenPaths).toContain("src/main.rs");
     expect(currentQuestions(state)).toHaveLength(1);
     expect(state.feedbackByOwner.has(feedbackOwner(3, { from: 0, to: 2 }))).toBe(true);
   });
@@ -58,7 +55,6 @@ describe("review state transitions", () => {
     let state = createReviewState(session);
     const feedback = currentFeedback(state);
     feedback.summary = "summary";
-    feedback.seenPaths.add("README.md");
     feedback.draft = {
       itemId: "item", path: "README.md", side: "additions", startLine: 1,
       endLine: 1, body: "draft", tab: "comment",
@@ -69,7 +65,7 @@ describe("review state transitions", () => {
     }, "Why?", 1, "operation-1"));
 
     state = discardCurrentFeedback(state);
-    expect(currentFeedback(state)).toEqual({ summary: "", comments: [], seenPaths: new Set() });
+    expect(currentFeedback(state)).toEqual({ summary: "", comments: [] });
     expect(currentQuestions(state)).toHaveLength(1);
   });
 

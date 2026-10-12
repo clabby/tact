@@ -46,7 +46,7 @@ function sideLines(file: FileDiffMetadata, side: Side) {
 }
 
 /** Identifies a file's rendered diff, so equal signatures mean the reviewer sees identical content. */
-function fileSignature(file: FileDiffMetadata) {
+export function fileSignature(file: FileDiffMetadata) {
   return JSON.stringify([
     file.name,
     file.prevName,
@@ -100,9 +100,9 @@ function relocate(
 }
 
 /**
- * Moves feedback from one snapshot of the diff to the next. Seen marks survive only on files whose
- * diff is unchanged. Comments and drafts follow their lines; those whose lines were edited or
- * removed stay as outdated comments so the reviewer's text is never lost.
+ * Moves feedback from one snapshot of the diff to the next. Comments and drafts follow their
+ * lines; those whose lines were edited or removed stay as outdated comments so the reviewer's text
+ * is never lost.
  */
 export function carryFeedback(
   previous: readonly FileDiffMetadata[],
@@ -110,13 +110,9 @@ export function carryFeedback(
   feedback: FeedbackState,
   nextCommentId: () => number,
 ): FeedbackState {
-  const changed = changedFileNames(previous, next);
   const carried: FeedbackState = {
     summary: feedback.summary,
     comments: [],
-    seenPaths: new Set([...feedback.seenPaths].filter(
-      (path) => next.some((file) => file.name === path) && !changed.has(path),
-    )),
   };
   const move = (
     anchored: { path: string; side: Side },
