@@ -496,6 +496,24 @@ button.outcome-item:hover { text-decoration: underline; text-underline-offset: 3
 @media (pointer: coarse) { .entry-link { visibility: hidden; } }
 .app[data-viewport="phone"] :is(.turn, .turn-log, .step-group-body, .batch) > .entry, .app[data-viewport="phone"] .step-group { margin-right: 0; padding-right: 0; }
 .app[data-viewport="phone"] .entry-link { display: none; }
+/*
+ * A settled reply's copy button floats over the margin beside the entry, below its link, so it
+ * takes no room in the transcript. It follows the link's placement: the time gutter when the
+ * transcript is wide, the right margin otherwise. Phones have no margin; the turn's copy button
+ * covers them.
+ */
+.message-copy {
+  position: absolute; display: grid; place-items: center; padding: 0; border: 0; border-radius: 4px;
+  background: transparent; color: var(--faint); opacity: 0; cursor: pointer;
+  transition: opacity var(--duration-fast), background var(--duration-fast), color var(--duration-fast);
+}
+.message-copy .glyph { width: 14px; height: 14px; }
+.message-copy:hover { background: var(--surface-hover); color: var(--text); }
+.message-copy[data-copied] { color: var(--success); }
+.entry-assistant:hover > .message-copy, .message-copy:focus-visible, .message-copy[data-copied] { opacity: 1; }
+@container transcript (min-width: 980px) { .message-copy { top: 26px; left: 42px; width: 22px; height: 22px; } }
+@container transcript (max-width: 979.98px) { .message-copy { top: 29px; right: 0; width: 18px; height: 18px; } }
+.app[data-viewport="phone"] .message-copy { display: none; }
 .tool-body { margin: var(--space-1) 0 var(--space-2) 24px; animation: rise var(--duration-base) var(--ease-out); }
 .tool-steps { margin: 0 0 var(--space-2); padding-left: 1.2em; color: var(--muted); font: var(--text-sm)/1.6 var(--font-mono); }
 .tool-io .tool-block + .tool-block { margin-top: var(--space-2); }

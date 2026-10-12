@@ -665,6 +665,7 @@ export class Transcript {
         element.classList.toggle("answer", context.role === "answer");
         element.classList.toggle("streaming", !entry.complete);
         this.renderBody(child(element, "div", "markdown"), entry, !entry.complete);
+        this.renderCopy(element, entry, context.role !== "narration");
         break;
       }
       case "reasoning": {
@@ -767,6 +768,42 @@ export class Transcript {
       time.textContent = clockTime(at!);
     }
     return anchor;
+  }
+
+  /** Settled replies carry a copy button for their Markdown source; narration and streaming text do not. */
+  private renderCopy(element: HTMLElement, entry: WireEntry & { kind: "assistant" }, wanted: boolean) {
+    const existing = element.querySelector(":scope > .message-copy");
+    if (!wanted || !entry.complete || !entry.text) {
+      existing?.remove();
+      return;
+    }
+    if (existing) return;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "message-copy";
+    button.title = "Copy response";
+    button.setAttribute("aria-label", "Copy response");
+    button.innerHTML = glyph("copy");
+    element.querySelector(":scope > .markdown")!.after(button);
+  }
+
+  private async copyMessage(button: HTMLElement, id: number) {
+    const entry = this.source?.data.entries.get(id);
+    if (entry?.kind !== "assistant") return;
+    try {
+      await navigator.clipboard.writeText(entry.text);
+    } catch {
+      toast("Could not copy to the clipboard.", "warning");
+      return;
+    }
+    button.dataset.copied = "";
+    button.innerHTML = glyph("check");
+    button.title = "Copied";
+    window.setTimeout(() => {
+      delete button.dataset.copied;
+      button.innerHTML = glyph("copy");
+      button.title = "Copy response";
+    }, 1500);
   }
 
   /**
@@ -1216,6 +1253,11 @@ export class Transcript {
       return;
     }
     const copyButton = target.closest<HTMLElement>(".outcome-copy");
+    const messageCopy = target.closest<HTMLElement>(".message-copy");
+    if (messageCopy) {
+      void this.copyMessage(messageCopy, Number(messageCopy.closest<HTMLElement>(".entry")!.dataset.id));
+      return;
+    }
     if (copyButton) {
       void this.copyTurn(Number(copyButton.closest<HTMLElement>(".turn-outcome")!.dataset.turn));
       return;
