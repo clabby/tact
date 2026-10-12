@@ -16,32 +16,36 @@ export function rangesEqual(left: ReviewRange | undefined, right: ReviewRange | 
   return left?.from === right?.from && left?.to === right?.to;
 }
 
-export function rangeLabel(targets: ReviewTarget[], range: ReviewRange) {
+/**
+ * `branchRange` is the current branch relative to its parent branch, which the server also opens
+ * the review with.
+ */
+export function rangeLabel(targets: ReviewTarget[], range: ReviewRange, branchRange: ReviewRange) {
   if (range.from === targets.length - 2 && range.to === targets.length - 1) {
     return "Uncommitted changes";
   }
-  if (range.from === 0 && range.to === targets.length - 1) {
-    return "Full branch";
-  }
+  if (rangesEqual(range, branchRange)) return "Full branch";
+  if (range.from === 0 && range.to === targets.length - 1) return "Entire stack";
   return `${targetLabel(targets[range.from])} → ${targetLabel(targets[range.to])}`;
 }
 
 export type RangePreset = {
-  id: "branch" | "latest" | "uncommitted";
+  id: "branch" | "stack" | "latest" | "uncommitted";
   label: string;
   range: ReviewRange;
 };
 
 /**
- * The one-click ranges: everything on the branch, the newest commit alone, and the uncommitted
- * work. Targets run from the trunk through the commits to the working tree, and a range reviews
+ * The one-click ranges: the current branch relative to its parent, the whole stack from the
+ * trunk, the newest commit alone, and the uncommitted work. Targets run from the trunk through the commits to the working tree, and a range reviews
  * the changes after `from` up to and including `to`. A preset that would repeat an earlier one
  * (a branch with no commits) is dropped.
  */
-export function rangePresets(targets: ReviewTarget[]): RangePreset[] {
+export function rangePresets(targets: ReviewTarget[], branchRange: ReviewRange): RangePreset[] {
   const last = targets.length - 1;
   const candidates: (RangePreset | null)[] = [
-    last >= 1 ? { id: "branch", label: "Full branch", range: { from: 0, to: last } } : null,
+    last >= 1 ? { id: "branch", label: "Full branch", range: branchRange } : null,
+    last >= 1 ? { id: "stack", label: "Entire stack", range: { from: 0, to: last } } : null,
     last >= 2 ? { id: "latest", label: "Latest commit", range: { from: last - 2, to: last - 1 } } : null,
     last >= 1 ? { id: "uncommitted", label: "Uncommitted", range: { from: last - 1, to: last } } : null,
   ];

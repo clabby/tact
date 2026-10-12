@@ -470,7 +470,7 @@ mod tests {
             let context = ReviewContext::load(&path)
                 .await
                 .unwrap_or_else(|error| panic!("{kind:?}: {error}"));
-            let snapshot = context.collect(context.full_range()).await.unwrap();
+            let snapshot = context.collect(context.stack_range()).await.unwrap();
 
             assert_eq!(
                 added_lines(&snapshot.patch),

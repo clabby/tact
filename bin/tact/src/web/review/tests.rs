@@ -475,14 +475,8 @@ async fn a_checkout_of_the_repository_is_reviewed_on_its_own() {
     assert_eq!(status, StatusCode::OK, "{other}");
     assert_eq!(other["checkout"]["path"], worktree.to_str().unwrap());
     assert_eq!(other["checkout"]["label"], "elsewhere");
-    assert_eq!(
-        patch_paths(&other["page"]),
-        paths(["only-here.txt", "tracked.txt"])
-    );
-    assert_eq!(
-        patch_paths(&own["page"]),
-        paths(["tracked.txt", "working.txt"])
-    );
+    assert_eq!(patch_paths(&other["page"]), paths(["only-here.txt"]));
+    assert_eq!(patch_paths(&own["page"]), paths(["working.txt"]));
     assert_ne!(own["checkout"]["path"], other["checkout"]["path"]);
 }
 
@@ -513,7 +507,7 @@ async fn a_review_of_another_checkout_names_it_when_composed() {
         let mut request = json!({
             "session": "s1",
             "generation": 0,
-            "range": full_range(),
+            "range": {"from": 1, "to": 2},
             "decision": "approve",
         });
         if let Some(checkout) = checkout {
@@ -541,12 +535,12 @@ async fn a_review_of_another_checkout_names_it_when_composed() {
     assert_eq!(
         other["markdown"],
         format!(
-            "## Review: Approved\n\n**Scope:** Full branch\n**Checkout:** `{}`\n",
+            "## Review: Approved\n\n**Scope:** Uncommitted changes\n**Checkout:** `{}`\n",
             checkout.display()
         )
     );
     assert_eq!(
         own["markdown"],
-        "## Review: Approved\n\n**Scope:** Full branch\n"
+        "## Review: Approved\n\n**Scope:** Uncommitted changes\n"
     );
 }

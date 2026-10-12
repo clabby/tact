@@ -169,6 +169,7 @@ class ReviewPanel {
     });
     this.rangeDialog = new RangeDialog(root, {
       targets: () => this.bootstrap.range_targets,
+      branchRange: () => this.bootstrap.default_range,
       currentRange: () => this.page?.selected_range ?? this.bootstrap.default_range,
       canChange: () => !this.loadingRange && !this.agentBusy,
       pendingFeedback: () => feedbackDescription(this.feedback),
@@ -468,7 +469,7 @@ class ReviewPanel {
     if (description) {
       description.textContent = page.scope;
       // The range button already names a preset scope; the description only adds detail.
-      description.hidden = page.scope === rangeLabel(this.bootstrap.range_targets, page.selected_range);
+      description.hidden = page.scope === rangeLabel(this.bootstrap.range_targets, page.selected_range, this.bootstrap.default_range);
     }
     this.renderStats();
     this.overview.render();
@@ -796,6 +797,7 @@ class ReviewPanel {
       if (epoch !== this.sessionEpoch || this.disposed) return;
     }
     const sameRange = sameCheckout && rangesEqual(page.selected_range, previousRange);
+    const sameScopes = sameTimeline && rangesEqual(review.default_range, this.bootstrap.default_range);
     const files = this.parsePage(page);
     if (sameRange && review.generation === previous.session.generation) {
       this.state = replaceQuestions({ ...previous, page }, review);
@@ -811,7 +813,7 @@ class ReviewPanel {
     }
     this.bootstrap = review;
     this.overview.restore();
-    if (!sameTimeline) this.rangeDialog.replaceTimeline();
+    if (!sameScopes) this.rangeDialog.replaceTimeline();
     this.installPage(this.state.page, files, sameRange);
     this.restoreAgentOperation();
   }
@@ -914,7 +916,7 @@ class ReviewPanel {
 
   private setRangeLoading(range: ReviewRange) {
     this.loadingRange = range;
-    this.showLoading(`Loading ${rangeLabel(this.bootstrap.range_targets, range)}`, "Capturing an immutable diff for this review.");
+    this.showLoading(`Loading ${rangeLabel(this.bootstrap.range_targets, range, this.bootstrap.default_range)}`, "Capturing an immutable diff for this review.");
     this.syncAgentControls();
   }
 
@@ -962,7 +964,7 @@ class ReviewPanel {
   private syncSelectedRange(range: ReviewRange) {
     const label = this.root.querySelector<HTMLElement>("#range-label");
     const button = this.root.querySelector<HTMLButtonElement>("#range-button");
-    if (label) label.textContent = rangeLabel(this.bootstrap.range_targets, range);
+    if (label) label.textContent = rangeLabel(this.bootstrap.range_targets, range, this.bootstrap.default_range);
     if (button) button.disabled = this.loadingRange !== undefined || this.agentBusy;
     const refresh = this.root.querySelector<HTMLButtonElement>("#refresh-notice");
     if (refresh) refresh.disabled = this.loadingRange !== undefined || this.agentBusy || this.refreshing;

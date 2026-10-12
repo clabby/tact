@@ -18,9 +18,10 @@ const targets: ReviewTarget[] = [
 
 describe("commit range selection", () => {
   test("labels presets and arbitrary commit intervals", () => {
-    expect(rangeLabel(targets, { from: 2, to: 3 })).toBe("Uncommitted changes");
-    expect(rangeLabel(targets, { from: 0, to: 3 })).toBe("Full branch");
-    expect(rangeLabel(targets, { from: 1, to: 2 })).toBe("b111111 → c222222");
+    expect(rangeLabel(targets, { from: 2, to: 3 }, { from: 1, to: 3 })).toBe("Uncommitted changes");
+    expect(rangeLabel(targets, { from: 1, to: 3 }, { from: 1, to: 3 })).toBe("Full branch");
+    expect(rangeLabel(targets, { from: 0, to: 3 }, { from: 1, to: 3 })).toBe("Entire stack");
+    expect(rangeLabel(targets, { from: 1, to: 2 }, { from: 1, to: 3 })).toBe("b111111 → c222222");
   });
 
   test("clicking outside the range widens the unambiguous boundary", () => {
@@ -53,8 +54,9 @@ describe("commit range selection", () => {
 
   test("presets cover the branch, its newest commit, and the uncommitted work", () => {
     const last = targets.length - 1;
-    expect(rangePresets(targets).map(({ id, range }) => [id, range])).toEqual([
-      ["branch", { from: 0, to: last }],
+    expect(rangePresets(targets, { from: 1, to: last }).map(({ id, range }) => [id, range])).toEqual([
+      ["branch", { from: 1, to: last }],
+      ["stack", { from: 0, to: last }],
       ["latest", { from: last - 2, to: last - 1 }],
       ["uncommitted", { from: last - 1, to: last }],
     ]);
@@ -62,7 +64,7 @@ describe("commit range selection", () => {
 
   test("presets that would repeat each other are dropped", () => {
     const trunkAndWorkingTree = [targets[0]!, targets.at(-1)!];
-    expect(rangePresets(trunkAndWorkingTree).map(({ id }) => id)).toEqual(["branch"]);
-    expect(rangePresets([targets[0]!])).toEqual([]);
+    expect(rangePresets(trunkAndWorkingTree, { from: 0, to: 1 }).map(({ id }) => id)).toEqual(["branch"]);
+    expect(rangePresets([targets[0]!], { from: 0, to: 0 })).toEqual([]);
   });
 });

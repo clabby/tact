@@ -14,6 +14,8 @@ import {
 export type RangeDialogDeps = {
   /** The branch timeline that ranges index into. */
   targets(): ReviewTarget[];
+  /** The current branch relative to its parent branch. */
+  branchRange(): ReviewRange;
   /** The range of the installed page. */
   currentRange(): ReviewRange;
   /** Whether the reviewer may start choosing another range. */
@@ -48,8 +50,8 @@ export class RangeDialog {
               <button class="icon-button" data-range-close aria-label="Close range selector">${icon("close")}</button>
             </header>
             <div class="range-builder">
-              <div class="segmented range-presets" id="range-presets" role="group" aria-label="Quick ranges">
-                ${rangePresets(this.deps.targets()).map((preset) => `<button type="button" class="segment" data-range-preset="${preset.id}" aria-pressed="false">${preset.label}</button>`).join("")}
+              <div class="segmented range-presets" id="range-presets" role="group" aria-label="Quick ranges" ${this.presets().length > 1 ? "" : "hidden"}>
+                ${this.presetsMarkup()}
               </div>
               <div class="range-endpoints" aria-label="Selected range endpoints" aria-live="polite">
                 <div class="range-endpoint">
@@ -77,9 +79,11 @@ export class RangeDialog {
 
   bind() {
     this.root.querySelector("#range-button")?.addEventListener("click", () => this.open());
-    for (const button of this.root.querySelectorAll<HTMLButtonElement>("[data-range-preset]")) {
-      button.addEventListener("click", () => this.previewPreset(button.dataset.rangePreset));
-    }
+    // Delegated, because the presets are redrawn when a snapshot changes the branch scopes.
+    this.root.querySelector("#range-presets")?.addEventListener("click", (event) => {
+      const button = (event.target as Element).closest<HTMLButtonElement>("[data-range-preset]");
+      if (button) this.previewPreset(button.dataset.rangePreset);
+    });
     this.bindTimeline();
     for (const button of this.root.querySelectorAll<HTMLButtonElement>("[data-range-close]")) {
       button.addEventListener("click", () => this.close());
@@ -95,12 +99,28 @@ export class RangeDialog {
     });
   }
 
-  /** Redraws the timeline after a snapshot changed the branch's commits. */
+  /** Redraws the quick ranges and timeline after a snapshot changed the branch's scopes. */
   replaceTimeline() {
+    const presets = this.root.querySelector<HTMLElement>("#range-presets");
+    if (presets) {
+      presets.innerHTML = this.presetsMarkup();
+      presets.hidden = this.presets().length <= 1;
+    }
     const timeline = this.root.querySelector<HTMLElement>("#commit-timeline");
     if (!timeline) return;
     timeline.innerHTML = this.timelineMarkup();
     this.bindTimeline();
+  }
+
+  /** One preset is just the range already shown below, so the quick ranges appear only as a choice. */
+  private presets() {
+    return rangePresets(this.deps.targets(), this.deps.branchRange());
+  }
+
+  private presetsMarkup() {
+    return this.presets()
+      .map((preset) => `<button type="button" class="segment" data-range-preset="${preset.id}" aria-pressed="false">${preset.label}</button>`)
+      .join("");
   }
 
   private timelineMarkup() {
@@ -204,7 +224,7 @@ export class RangeDialog {
       target.classList.toggle("outside", index < pending.from || index > pending.to);
     }
     for (const button of this.root.querySelectorAll<HTMLButtonElement>("[data-range-preset]")) {
-      const preset = rangePresets(this.deps.targets()).find((candidate) => candidate.id === button.dataset.rangePreset);
+      const preset = rangePresets(this.deps.targets(), this.deps.branchRange()).find((candidate) => candidate.id === button.dataset.rangePreset);
       button.setAttribute("aria-pressed", String(preset !== undefined && rangesEqual(preset.range, pending)));
     }
     this.syncRangeWarning();
@@ -305,7 +325,7 @@ export class RangeDialog {
   }
 
   private previewPreset(id: string | undefined) {
-    const preset = rangePresets(this.deps.targets()).find((candidate) => candidate.id === id);
+    const preset = rangePresets(this.deps.targets(), this.deps.branchRange()).find((candidate) => candidate.id === id);
     if (!preset || !this.pendingRange) return;
     this.pendingRange = { ...preset.range };
     this.previewRange = undefined;

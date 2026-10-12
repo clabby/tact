@@ -8,6 +8,7 @@ use crate::vcs::{Checkout, FilePatch, VcsError};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
+    collections::HashSet,
     path::{Path, PathBuf},
     process::{Output, Stdio},
     sync::Arc,
@@ -74,6 +75,9 @@ pub struct ReviewContext {
     repository: String,
     trunk: Trunk,
     range_points: Vec<RangePoint>,
+    /// The index of the target the current branch starts after: the newest commit that another
+    /// local branch points at, or the trunk merge base when the branch is not stacked.
+    branch_base: usize,
     version: WorkspaceVersion,
 }
 
@@ -121,7 +125,8 @@ impl WorkspaceVersion {
     pub async fn current(workspace: &Path) -> Result<Self, VcsError> {
         let root = Checkout::detect(workspace).await?;
         let trunk = resolve_trunk(&root).await?;
-        workspace_version_at(&root, &trunk).await
+        let branches = BranchTips::read(&root).await?;
+        workspace_version_at(&root, &trunk, &branches).await
     }
 
     /// An opaque, comparable rendering for clients.
@@ -135,8 +140,10 @@ impl ReviewContext {
     pub async fn load(workspace: &Path) -> Result<Self, VcsError> {
         let root = Checkout::detect(workspace).await?;
         let trunk = resolve_trunk(&root).await?;
-        let version = workspace_version_at(&root, &trunk).await?;
+        let branches = BranchTips::read(&root).await?;
+        let version = workspace_version_at(&root, &trunk, &branches).await?;
         let range_points = load_range_points(&root, &trunk).await?;
+        let branch_base = branches.base(&range_points);
         let repository = root
             .work_tree()
             .file_name()
@@ -148,6 +155,7 @@ impl ReviewContext {
             repository,
             trunk,
             range_points,
+            branch_base,
             version,
         })
     }
@@ -168,7 +176,7 @@ impl ReviewContext {
             .collect()
     }
 
-    /// The range a review opens with: the whole branch.
+    /// The range a review opens with: the current branch.
     pub fn default_range(&self) -> ReviewRange {
         self.full_range()
     }
@@ -178,7 +186,19 @@ impl ReviewContext {
         ReviewRange { from: to - 1, to }
     }
 
+    /// The current branch relative to its parent branch, through the working tree. In a stack of
+    /// branches this excludes the commits that belong to the branches below; without a parent
+    /// branch it matches [`Self::stack_range`].
     pub fn full_range(&self) -> ReviewRange {
+        ReviewRange {
+            from: self.branch_base,
+            to: self.range_points.len() - 1,
+        }
+    }
+
+    /// Everything from the trunk merge base through the working tree, including the commits of
+    /// the branches below the current one.
+    pub fn stack_range(&self) -> ReviewRange {
         ReviewRange {
             from: 0,
             to: self.range_points.len() - 1,
@@ -193,6 +213,9 @@ impl ReviewContext {
         }
         if range == self.full_range() {
             return Ok("Full branch".to_owned());
+        }
+        if range == self.stack_range() {
+            return Ok("Entire stack".to_owned());
         }
         let from = &self.range_points[range.from].target;
         let to = &self.range_points[range.to].target;
@@ -307,17 +330,23 @@ fn target_label(target: &ReviewTarget) -> &str {
 async fn workspace_version_at(
     root: &Checkout,
     trunk: &Trunk,
+    branches: &BranchTips,
 ) -> Result<WorkspaceVersion, VcsError> {
     let output = git_output(root, ["rev-parse", root.head()]).await?;
     ensure_success(output.status, &output.stderr)?;
     let head = String::from_utf8(output.stdout)?.trim().to_owned();
     let patch = working_tree_patch(root, &head, false).await?;
-    Ok(workspace_version(&trunk.merge_base, &head, &patch))
+    Ok(workspace_version(
+        &trunk.merge_base,
+        &head,
+        &patch,
+        &branches.listing,
+    ))
 }
 
-fn workspace_version(trunk: &str, head: &str, patch: &str) -> WorkspaceVersion {
+fn workspace_version(trunk: &str, head: &str, patch: &str, branches: &str) -> WorkspaceVersion {
     let mut digest = Sha256::new();
-    for value in [trunk, head, patch] {
+    for value in [trunk, head, patch, branches] {
         digest.update(value.len().to_le_bytes());
         digest.update(value.as_bytes());
     }
@@ -346,6 +375,70 @@ async fn resolve_trunk(root: &Checkout) -> Result<Trunk, VcsError> {
     }
 
     Err(VcsError::BaseNotFound)
+}
+
+/// The local branches that can be the parent of the checked-out branch. They decide where the
+/// current branch starts in a stack, so they are part of a review's version.
+struct BranchTips {
+    /// One `<commit> <name>` per line. Excludes the checked-out branch when there is one.
+    listing: String,
+    /// Whether the head is not on a branch, as in a jj checkout. Then the branch that owns the
+    /// head cannot be told apart from its parent, so the newest tip is assumed to be the head's
+    /// own branch.
+    detached: bool,
+}
+
+impl BranchTips {
+    async fn read(root: &Checkout) -> Result<Self, VcsError> {
+        let current = current_branch(root).await?;
+        let output = git_output(
+            root,
+            [
+                "for-each-ref",
+                "--format=%(objectname) %(refname:short)",
+                "refs/heads",
+            ],
+        )
+        .await?;
+        ensure_success(output.status, &output.stderr)?;
+        let mut listing = String::new();
+        for line in String::from_utf8(output.stdout)?.lines() {
+            if line.split_once(' ').map(|(_, name)| name) != current.as_deref() {
+                listing.push_str(line);
+                listing.push('\n');
+            }
+        }
+        Ok(Self {
+            listing,
+            detached: current.is_none(),
+        })
+    }
+
+    /// The index of the newest first-parent commit, up to and including the head, that the
+    /// parent branch points at, or 0 (the trunk merge base) when there is none.
+    fn base(&self, points: &[RangePoint]) -> usize {
+        let tips: HashSet<&str> = self
+            .listing
+            .lines()
+            .filter_map(|line| line.split_once(' ').map(|(commit, _)| commit))
+            .collect();
+        // The last point is the working tree.
+        let mut tipped =
+            points[..points.len() - 1]
+                .iter()
+                .enumerate()
+                .rev()
+                .filter(|(_, point)| {
+                    point
+                        .revision
+                        .as_deref()
+                        .is_some_and(|revision| tips.contains(revision))
+                });
+        if self.detached {
+            tipped.next();
+        }
+        tipped.next().map_or(0, |(index, _)| index)
+    }
 }
 
 async fn current_branch(root: &Checkout) -> Result<Option<String>, VcsError> {
@@ -689,7 +782,7 @@ mod tests {
         patch::LineSpan,
         testing::{
             added_lines, commit_file, expected_lines, git, repository,
-            repository_with_initial_branch,
+            repository_with_initial_branch, run,
         },
     };
     use std::{
@@ -841,6 +934,83 @@ mod tests {
                 }
             )]
         );
+    }
+
+    #[tokio::test]
+    async fn full_branch_starts_after_the_parent_bookmark_in_a_jj_stack() {
+        if std::process::Command::new("jj")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let directory = TempDir::new().unwrap();
+        let path = directory.path();
+        run("jj", path, &["git", "init", "--colocate", "."]);
+        fs::write(path.join("tracked.txt"), "initial\n").unwrap();
+        run("jj", path, &["commit", "-m", "initial"]);
+        run("jj", path, &["bookmark", "create", "main", "-r", "@-"]);
+        fs::write(path.join("one.txt"), "one\n").unwrap();
+        run("jj", path, &["commit", "-m", "parent change"]);
+        run("jj", path, &["bookmark", "create", "parent", "-r", "@-"]);
+        fs::write(path.join("two.txt"), "two\n").unwrap();
+        run("jj", path, &["commit", "-m", "child change"]);
+        run("jj", path, &["bookmark", "create", "child", "-r", "@-"]);
+        fs::write(path.join("work.txt"), "work\n").unwrap();
+
+        let context = ReviewContext::load(path).await.unwrap();
+        let snapshot = context.collect(context.full_range()).await.unwrap();
+        assert_eq!(
+            paths(&snapshot.patch),
+            BTreeSet::from(["two.txt".to_owned(), "work.txt".to_owned()])
+        );
+        let stack = context.collect(context.stack_range()).await.unwrap();
+        assert_eq!(paths(&stack.patch).len(), 3);
+    }
+
+    #[tokio::test]
+    async fn full_branch_starts_after_the_parent_branch_in_a_stack() {
+        let repository = repository();
+        git(repository.path(), &["checkout", "--quiet", "-b", "parent"]);
+        commit_file(repository.path(), "one.txt", "one\n", "parent change");
+        git(repository.path(), &["checkout", "--quiet", "-b", "child"]);
+        commit_file(repository.path(), "two.txt", "two\n", "child change");
+
+        let context = ReviewContext::load(repository.path()).await.unwrap();
+        assert_eq!(context.default_range(), ReviewRange { from: 1, to: 3 });
+        assert_eq!(context.stack_range(), ReviewRange { from: 0, to: 3 });
+        assert_eq!(
+            context.range_label(context.full_range()).unwrap(),
+            "Full branch"
+        );
+        assert_eq!(
+            context.range_label(context.stack_range()).unwrap(),
+            "Entire stack"
+        );
+        let snapshot = context.collect(context.full_range()).await.unwrap();
+        assert_eq!(
+            paths(&snapshot.patch),
+            BTreeSet::from(["two.txt".to_owned()])
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_child_branch_shares_its_parent_tip_and_branch_moves_change_the_version() {
+        let repository = repository();
+        git(repository.path(), &["checkout", "--quiet", "-b", "parent"]);
+        commit_file(repository.path(), "one.txt", "one\n", "parent change");
+        git(repository.path(), &["checkout", "--quiet", "-b", "child"]);
+        fs::write(repository.path().join("work.txt"), "work\n").unwrap();
+
+        let context = ReviewContext::load(repository.path()).await.unwrap();
+        assert_eq!(context.default_range(), ReviewRange { from: 1, to: 2 });
+        let version = WorkspaceVersion::current(repository.path()).await.unwrap();
+        assert_eq!(version, context.version());
+
+        git(repository.path(), &["branch", "--quiet", "-D", "parent"]);
+        let after = WorkspaceVersion::current(repository.path()).await.unwrap();
+        assert_ne!(after, version);
     }
 
     #[tokio::test]
@@ -1028,7 +1198,7 @@ mod tests {
         commit_file(repository.path(), "local.txt", "local\n", "local");
 
         let context = ReviewContext::load(repository.path()).await.unwrap();
-        let snapshot = context.collect(context.full_range()).await.unwrap();
+        let snapshot = context.collect(context.stack_range()).await.unwrap();
 
         assert_eq!(context.trunk_name(), "origin/main");
         assert_eq!(
