@@ -59,7 +59,7 @@ Static assets are public. Every `/api/*` route except `POST /api/login` requires
 
 | Endpoint | Response |
 | :-- | :-- |
-| `GET /api/instance` | `{ protocol_version, workspace, repository, live, running }` |
+| `GET /api/instance` | `{ pid, protocol_version, workspace, repository, live, running }` (`running` counts sessions with a turn or shell in flight) |
 | `GET /api/instances` | `{ instances: [{ pid, port, workspace, live, running, current }] }` (siblings that answer) |
 | `GET /api/sessions/{id}/entries/{n}` | `ToolDetail` of one entry (full arguments, result, metadata, each string truncated at 256 KiB) |
 | `GET /api/sessions/{id}/agents/{agent}/entries` | `{ entries: WireEntry[] }`, the projected transcript of one subagent |

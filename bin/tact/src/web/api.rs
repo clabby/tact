@@ -336,7 +336,7 @@ struct InstanceInfo {
     workspace: String,
     repository: String,
     live: usize,
-    running: bool,
+    running: usize,
 }
 
 /// The largest local image the transcript will display.
@@ -456,7 +456,7 @@ async fn instance(State(state): State<Arc<AppState>>) -> Response<Body> {
 struct SiblingStatus {
     pid: u32,
     live: usize,
-    running: bool,
+    running: usize,
 }
 
 #[derive(Serialize)]
@@ -465,7 +465,7 @@ struct InstanceEntry {
     port: u16,
     workspace: PathBuf,
     live: usize,
-    running: bool,
+    running: usize,
     current: bool,
 }
 
@@ -1045,26 +1045,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn instance_reports_live_sessions_and_busy_state() {
+    async fn instance_counts_its_live_and_running_sessions() {
         let harness = Harness::new();
         harness.open_session("s1").await;
-        harness.terminal.publisher.publish(Publication::Busy {
-            session: "s1".into(),
-            busy: crate::core::protocol::Busy {
-                turns: 1,
-                shells: 0,
-            },
-        });
-        while !harness.hub.any_busy() {
-            tokio::task::yield_now().await;
+        harness.open_session("s2").await;
+        harness.open_session("s3").await;
+        for session in ["s1", "s2"] {
+            harness.terminal.publisher.publish(Publication::Busy {
+                session: session.into(),
+                busy: crate::core::protocol::Busy {
+                    turns: 1,
+                    shells: 0,
+                },
+            });
         }
-
-        let (status, body) = harness.call(Method::GET, "/api/instance", None).await;
+        let mut reply = harness.call(Method::GET, "/api/instance", None).await;
+        for _ in 0..1000 {
+            if reply.1["running"] == 2 {
+                break;
+            }
+            tokio::task::yield_now().await;
+            reply = harness.call(Method::GET, "/api/instance", None).await;
+        }
+        let (status, body) = reply;
 
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["protocol_version"], 9);
-        assert_eq!(body["live"], 1);
-        assert_eq!(body["running"], true);
+        assert_eq!(body["live"], 3);
+        assert_eq!(body["running"], 2);
     }
 
     #[tokio::test]

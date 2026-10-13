@@ -30,6 +30,8 @@ import type { CommandName, Commands, ModelCatalog, SiblingInstance, Subagent, Wo
 
 const root = document.getElementById("app")!;
 const SIDEBAR_KEY = "tact.web.sidebar";
+/** How often the footer re-reads sibling instances so their running counts stay current. */
+const INSTANCE_REFRESH_MS = 5000;
 const isMac = /Mac|iPhone|iPad/.test(navigator.platform);
 
 /** The full-window message shown when this browser has no valid login. */
@@ -209,10 +211,8 @@ class App {
       this.renderHeader();
       this.sidebar.refreshWorkspaces();
     }).catch(() => {});
-    void this.api.instances().then(({ instances }) => {
-      this.instances = instances;
-      this.sidebar.renderFooter(this.store.state.connection, instances);
-    }).catch(() => {});
+    this.refreshInstances();
+    setInterval(() => this.refreshInstances(), INSTANCE_REFRESH_MS);
     this.pendingLink = linkTarget(location.hash);
     addEventListener("hashchange", () => {
       this.pendingLink = linkTarget(location.hash);
@@ -426,6 +426,13 @@ class App {
     } catch (error) {
       toast(describeError(error), "warning");
     }
+  }
+
+  private refreshInstances() {
+    void this.api.instances().then(({ instances }) => {
+      this.instances = instances;
+      this.sidebar.renderFooter(this.store.state.connection, instances);
+    }).catch(() => {});
   }
 
   private renderHeader() {

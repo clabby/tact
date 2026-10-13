@@ -114,8 +114,13 @@ export class Sidebar {
   }
 
   renderFooter(connection: Connection, instances: SiblingInstance[]) {
-    const running = this.live.filter((session) => session.state === "running").length;
     const others = instances.filter((instance) => !instance.current);
+    // This instance's sessions come from the live stream; the others' counts come from polling.
+    const live = others.reduce((total, instance) => total + instance.live, this.live.length);
+    const running = others.reduce(
+      (total, instance) => total + instance.running,
+      this.live.filter((session) => session.state === "running").length,
+    );
     const theme = this.host.themeChoice();
     const resolved = this.host.resolvedTheme();
     this.footer.innerHTML = `
@@ -127,9 +132,8 @@ export class Sidebar {
       <button type="button" class="icon-button theme-button" aria-haspopup="menu" aria-label="Theme: ${theme}" title="Theme: ${theme}">${glyph(resolved === "dark" ? "moon" : "sun")}</button>`;
     this.footer.querySelector(".instance-text strong")!.textContent = CONNECTION_LABELS[connection];
     this.footer.querySelector(".instance-text small")!.textContent = [
-      `${this.live.length} live`,
+      `${live} live`,
       running ? `${running} running` : "",
-      others.length ? `${others.length + 1} instances` : "",
     ].filter(Boolean).join(" · ");
     const themeButton = this.footer.querySelector<HTMLButtonElement>(".theme-button")!;
     themeButton.addEventListener("click", () => openMenu(themeButton, (["system", "light", "dark"] as const).map((choice) => ({

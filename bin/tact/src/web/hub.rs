@@ -184,9 +184,11 @@ impl Hub {
         self.shared.any_busy.load(Ordering::Acquire)
     }
 
-    /// The number of live sessions and whether any is running.
-    pub(super) fn counts(&self) -> (usize, bool) {
-        (self.state().sessions.len(), self.any_busy())
+    /// The number of live sessions and how many of them are running.
+    pub(super) fn counts(&self) -> (usize, usize) {
+        let state = self.state();
+        let running = state.sessions.iter().filter(|live| live.running()).count();
+        (state.sessions.len(), running)
     }
 
     pub(super) fn connected_clients(&self) -> usize {
