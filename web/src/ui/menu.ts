@@ -5,6 +5,8 @@ export type MenuItem = {
   /** Dim secondary text after the label, e.g. a path. */
   hint?: string;
   detail?: string;
+  /** Marks an item whose subject is busy: a pulsing dot, described to assistive tech by this text. */
+  busy?: string;
   /** A CSS colour for the leading dot, e.g. a model hue. */
   swatch?: string;
   checked?: boolean;
@@ -28,6 +30,8 @@ export function openMenu(anchor: HTMLElement, items: MenuItem[], label: string) 
   menu.className = "menu";
   menu.setAttribute("role", "menu");
   menu.setAttribute("aria-label", label);
+  // Every item gets the leading slot once any is busy, so the dots line up in one column.
+  const reserveBusySlot = items.some((item) => item.busy);
   const buttons = items.map((item, index) => {
     if (item.section && item.section !== items[index - 1]?.section) {
       const heading = document.createElement("div");
@@ -43,7 +47,7 @@ export function openMenu(anchor: HTMLElement, items: MenuItem[], label: string) 
     if (item.checked !== undefined) button.setAttribute("aria-checked", String(item.checked));
     button.disabled = item.disabled ?? false;
     button.classList.toggle("danger", item.danger ?? false);
-    button.innerHTML = `<span class="menu-swatch"></span><span class="menu-label"></span><span class="menu-hint"></span><span class="menu-detail"></span>`;
+    button.innerHTML = `<span class="menu-busy"></span><span class="menu-swatch"></span><span class="menu-label"></span><span class="menu-hint"></span><span class="menu-detail"></span>`;
     const swatch = button.querySelector<HTMLElement>(".menu-swatch")!;
     if (item.icon) swatch.outerHTML = item.icon;
     else if (item.swatch) swatch.style.background = item.swatch;
@@ -52,6 +56,13 @@ export function openMenu(anchor: HTMLElement, items: MenuItem[], label: string) 
     const hint = button.querySelector(".menu-hint")!;
     if (item.hint) hint.textContent = item.hint;
     else hint.remove();
+    const busy = button.querySelector(".menu-busy")!;
+    if (item.busy) {
+      busy.classList.add("active");
+      busy.setAttribute("role", "img");
+      busy.setAttribute("aria-label", item.busy);
+      busy.setAttribute("title", item.busy);
+    } else if (!reserveBusySlot) busy.remove();
     button.querySelector(".menu-detail")!.textContent = [item.detail, item.checked ? "✓" : ""].filter(Boolean).join(" ");
     button.addEventListener("click", () => {
       close();

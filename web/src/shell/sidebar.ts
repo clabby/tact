@@ -148,6 +148,7 @@ export class Sidebar {
     const button = this.footer.querySelector<HTMLButtonElement>(".instance-button")!;
     button.addEventListener("click", () => openMenu(button, instances.map((instance) => ({
       label: instance.workspace.split("/").pop() || instance.workspace,
+      busy: instance.running ? `${instance.running} running` : undefined,
       detail: instance.current ? "this" : `:${instance.port}`,
       checked: instance.current,
       run: () => {

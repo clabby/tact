@@ -808,6 +808,8 @@ button.outcome-item:hover { text-decoration: underline; text-underline-offset: 3
 .menu-hint { flex: 1; min-width: 0; overflow: hidden; color: var(--faint); font-size: var(--text-sm); text-overflow: ellipsis; white-space: nowrap; }
 .menu-section { padding: var(--space-2) 10px var(--space-1); color: var(--faint); font-size: var(--text-xs); font-weight: 600; letter-spacing: .06em; text-transform: uppercase; }
 .menu-detail { flex: none; color: var(--faint); font-size: var(--text-sm); white-space: nowrap; }
+.menu-busy { width: 7px; height: 7px; flex: none; border-radius: 50%; }
+.menu-busy.active { background: var(--accent); animation: pulse 1.4s ease-in-out infinite; }
 .menu-item[aria-checked="true"] .menu-detail { color: var(--accent); }
 
 .palette {
