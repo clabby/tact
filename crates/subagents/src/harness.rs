@@ -7,7 +7,7 @@ use super::{
     output::completion_instructions,
     runtime::{DelegationChange, Registry},
 };
-use nanocodex::{Nanocodex, NanocodexError, TurnControl};
+use nanocode::{Agent, NanocodexError, TurnControl};
 use std::{collections::VecDeque, sync::Weak};
 use tokio::{
     sync::{mpsc, oneshot, watch},
@@ -73,7 +73,7 @@ enum HarnessCommand {
 struct Harness {
     root_session_id: String,
     id: AgentId,
-    agent: Option<Nanocodex>,
+    agent: Option<Agent>,
     active: Option<ActiveTurn>,
     commands: mpsc::Receiver<HarnessCommand>,
     deferred: mpsc::Receiver<DeliveryCommand>,
@@ -88,7 +88,7 @@ struct Harness {
 
 struct ActiveTurn {
     control: TurnControl,
-    result: JoinHandle<nanocodex::agent::Result<nanocodex::TurnResult>>,
+    result: JoinHandle<nanocode::agent::Result<nanocode::TurnResult>>,
     _capacity: TurnCapacity,
 }
 
@@ -97,7 +97,7 @@ enum HarnessEvent {
     Deferred(Option<DeliveryCommand>),
     Urgent(Option<DeliveryCommand>),
     CapacityChanged,
-    TurnFinished(Box<Result<nanocodex::agent::Result<nanocodex::TurnResult>, JoinError>>),
+    TurnFinished(Box<Result<nanocode::agent::Result<nanocode::TurnResult>, JoinError>>),
 }
 
 impl HarnessHandle {
@@ -166,7 +166,7 @@ impl HarnessHandle {
 pub(super) fn spawn(
     root_session_id: String,
     id: AgentId,
-    agent: Nanocodex,
+    agent: Agent,
     capacity: Capacity,
     registry: Weak<Registry>,
     output_schema: String,
@@ -585,7 +585,7 @@ impl Harness {
 
     async fn turn_finished(
         &mut self,
-        result: Result<nanocodex::agent::Result<nanocodex::TurnResult>, JoinError>,
+        result: Result<nanocode::agent::Result<nanocode::TurnResult>, JoinError>,
     ) {
         self.active = None;
         self.publish_turn_result(result).await;
@@ -593,7 +593,7 @@ impl Harness {
 
     async fn publish_turn_result(
         &self,
-        result: Result<nanocodex::agent::Result<nanocodex::TurnResult>, JoinError>,
+        result: Result<nanocode::agent::Result<nanocode::TurnResult>, JoinError>,
     ) {
         let result = result.unwrap_or_else(|error| {
             Err(NanocodexError::InvalidRequest(format!(

@@ -1,8 +1,8 @@
 //! Model, effort, and reasoning-mode admission for children spawned beneath a parent.
 
 use super::state::AgentReservation;
-use crate::error::SpawnError;
-use nanocodex::{HarnessModel as Model, Model as CodexModel, ReasoningMode, Thinking};
+use crate::{HarnessModel as Model, error::SpawnError};
+use nanocode::{Model as CodexModel, ReasoningMode, Thinking};
 
 /// Orders reasoning efforts that a child may run at. Children must reason, so `none` is rejected.
 pub(super) fn thinking_rank(thinking: Thinking) -> Result<u8, SpawnError> {

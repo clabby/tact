@@ -8,7 +8,7 @@
 //! omits configured instructions.
 
 use chrono::Utc;
-use nanocodex::NanocodexError;
+use nanocode::NanocodexError;
 use std::{
     env,
     fs::{self, File},

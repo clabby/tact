@@ -30,14 +30,14 @@ children delegate further while the runtime enforces task-tree authority. Drain 
 for as long as the runtime lives; dropping it stops event forwarding.
 
 ```rust,no_run
-use nanocodex::{AgentEvents, Nanocodex, NanocodexError, ReasoningMode, Thinking};
-use nanocodex::tools::ToolsBuilder;
+use nanocode::{Agent, AgentEvents, NanocodexError, ReasoningMode, Thinking};
+use nanocode::tools::ToolsBuilder;
 use tact_subagents::{AgentContext, Speed, SubagentRoster, Subagents};
 
 fn build_child(
     context: AgentContext,
     speed: Speed,
-) -> Result<(Nanocodex, AgentEvents), NanocodexError> {
+) -> Result<(Agent, AgentEvents), NanocodexError> {
     // Build a clean session with the resolved model, effort, reasoning mode, and speed.
     # let _ = (context, speed);
     # unimplemented!()
@@ -69,8 +69,9 @@ tokio::spawn(async move {
 
 ## Models and effort
 
-Each spawn names its model and reasoning effort with Nanocodex's `HarnessModel` and `Thinking`
-types. A Codex child cannot run a higher tier than a Codex parent (Luna < Sol < Astra). Claude models
+Each spawn names its model and reasoning effort with `HarnessModel`, a closed copy of Nanocodex's
+built-in Codex and Claude model catalogs, and Nanocodex's `Thinking` type. A Codex child cannot run
+a higher tier than a Codex parent (Luna < Sol < Astra). Claude models
 (Haiku 5.5, Sonnet 5.5, Opus 5.5, and Fable 5.1) are rejected until `Subagents::set_claude_enabled(true)`;
 once enabled, any model may delegate to them and they may delegate to any model. Every spawn is
 bounded by the runtime's live effort cap, and a registered child cannot spawn above its own

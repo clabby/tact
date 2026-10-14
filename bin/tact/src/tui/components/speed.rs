@@ -19,7 +19,6 @@ use super::{
 };
 use crate::app::{config::Speed, theme::Theme};
 use crossterm::event::{Event, KeyCode, KeyEventKind};
-use nanocodex::HarnessModel as Model;
 use ratatui::{
     Frame,
     layout::{Alignment, Rect},
@@ -28,6 +27,7 @@ use ratatui::{
     widgets::Paragraph,
 };
 use std::time::Instant;
+use tact_subagents::HarnessModel as Model;
 
 const KEY_BINDINGS: [(&str, &str); 3] = [("←/→", "speed"), ("enter", "apply"), ("esc", "cancel")];
 
@@ -153,9 +153,10 @@ mod tests {
     };
     use crate::app::{config::Speed, theme::Theme};
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
-    use nanocodex::{ClaudeModel, HarnessModel as Model, Model as CodexModel};
+    use nanocode::{ClaudeModel, Model as CodexModel};
     use ratatui::{Terminal, backend::TestBackend};
     use std::time::Instant;
+    use tact_subagents::HarnessModel as Model;
 
     fn key(code: KeyCode, now: Instant) -> SpeedEvent {
         SpeedEvent::Terminal {

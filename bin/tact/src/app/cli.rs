@@ -14,14 +14,14 @@ use crate::{
     core::ConfiguredAgent,
     tui,
 };
-use clap::{ArgAction, Parser, Subcommand, builder::NonEmptyStringValueParser};
+use clap::{ArgAction, Parser, Subcommand, ValueEnum, builder::NonEmptyStringValueParser};
 use crossterm::style::{Color, Stylize};
-use nanocodex::{HarnessFamily, HarnessModel as Model};
 use std::{env, env::VarError, fmt, path::PathBuf};
 use tact_memory::{
     LocalMemoryStore, RemoteClientError, RemoteMemoryClient, RemoteToken,
     transfer::{self, TransferError},
 };
+use tact_subagents::HarnessModel as Model;
 use tokio_util::sync::CancellationToken;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
@@ -183,13 +183,20 @@ pub(crate) struct Cli {
     command: Option<Command>,
 }
 
+/// A provider whose credentials `tact auth` manages.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum AuthProvider {
+    Codex,
+    Claude,
+}
+
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Manage authentication.
     Auth {
         /// Provider whose credentials to manage: codex or claude.
         #[arg(long, global = true, default_value = "codex", value_name = "PROVIDER")]
-        provider: HarnessFamily,
+        provider: AuthProvider,
         #[command(subcommand)]
         command: AuthCommand,
     },
@@ -593,8 +600,8 @@ fn remote_client(
 }
 
 impl AuthCommand {
-    async fn run(self, config: &Config, provider: HarnessFamily) -> Result<()> {
-        if provider == HarnessFamily::Codex {
+    async fn run(self, config: &Config, provider: AuthProvider) -> Result<()> {
+        if provider == AuthProvider::Codex {
             match self {
                 Self::Login { no_open } => config.auth().login(!no_open).await?,
                 Self::Status => config.auth().status().await?,
@@ -723,7 +730,7 @@ mod tests {
         error::{CliError, ConfigError, Error},
     };
     use clap::{CommandFactory, Parser, error::ErrorKind};
-    use nanocodex::{HarnessModel as Model, Model as CodexModel};
+    use nanocode::Model as CodexModel;
     use std::{
         env::VarError,
         ffi::OsString,
@@ -734,6 +741,7 @@ mod tests {
             atomic::{AtomicUsize, Ordering},
         },
     };
+    use tact_subagents::HarnessModel as Model;
     use tempfile::tempdir;
 
     #[test]
@@ -864,7 +872,10 @@ mod tests {
                 else {
                     panic!("expected login")
                 };
-                assert_eq!(actual.as_str(), provider);
+                assert_eq!(
+                    actual,
+                    <super::AuthProvider as clap::ValueEnum>::from_str(provider, false).unwrap()
+                );
                 assert!(no_open);
             }
             for command in ["status", "logout"] {
@@ -877,7 +888,7 @@ mod tests {
         assert!(matches!(
             cli.command,
             Some(Command::Auth {
-                provider: nanocodex::HarnessFamily::Codex,
+                provider: super::AuthProvider::Codex,
                 ..
             })
         ));
@@ -901,7 +912,7 @@ mod tests {
             super::AuthCommand::Logout,
         ] {
             let error = command
-                .run(&config, nanocodex::HarnessFamily::Claude)
+                .run(&config, super::AuthProvider::Claude)
                 .await
                 .unwrap_err();
             assert!(matches!(
@@ -930,7 +941,7 @@ mod tests {
             super::AuthCommand::Logout,
         ] {
             command
-                .run(&config, nanocodex::HarnessFamily::Claude)
+                .run(&config, super::AuthProvider::Claude)
                 .await
                 .unwrap();
         }

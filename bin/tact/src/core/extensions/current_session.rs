@@ -1,6 +1,6 @@
 //! Access to the identity of the agent's active session.
 
-use nanocodex::{
+use nanocode::{
     Tool,
     tools::contract::{
         ToolContext, ToolDefinition, ToolInput, ToolOutput, ToolResult, async_trait,
@@ -51,7 +51,7 @@ struct EmptyInput {}
 #[cfg(test)]
 mod tests {
     use super::CurrentSessionTool;
-    use nanocodex::{
+    use nanocode::{
         Tool,
         tools::contract::{ToolContext, ToolInput, ToolOutputBody},
     };

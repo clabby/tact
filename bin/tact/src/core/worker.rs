@@ -31,16 +31,17 @@ use super::{
 };
 use crate::app::config::{ReasoningEffort, Speed};
 use futures_util::future::join_all;
-use nanocodex::{
-    AgentEvents, HarnessModel, Nanocodex, NanocodexError, TurnControl,
+use nanocode::{
+    Agent, AgentEvents, ForkRequest, NanocodexError, TurnControl,
     agent::input::{Prompt, PromptInput, UserInput},
 };
+use nanocode_backend_codex::ErrorExt;
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     time::Instant,
 };
-use tact_subagents::AgentContext;
+use tact_subagents::{AgentContext, HarnessModel};
 use thiserror::Error;
 use tokio::{
     sync::{mpsc, oneshot},
@@ -77,13 +78,13 @@ pub(crate) enum WorkerCommand {
     },
     OpenAgent {
         pane: PaneId,
-        agent: Nanocodex,
+        agent: Agent,
         context: AgentContext,
         memory_review: MemoryReviewState,
     },
     ReplaceAgent {
         pane: PaneId,
-        agent: Nanocodex,
+        agent: Agent,
         context: AgentContext,
         memory_review: MemoryReviewState,
     },
@@ -248,14 +249,11 @@ impl Updates {
     }
 
     /// Claude reports its context budget before the first turn; Codex reports it with each turn.
-    async fn observe_initial_context(&self, agent: &Nanocodex, model: HarnessModel, pane: PaneId) {
+    async fn observe_initial_context(&self, agent: &Agent, model: HarnessModel, pane: PaneId) {
         if matches!(model, HarnessModel::Claude(_))
-            && let Ok(snapshot) = agent
-                .runtime_snapshot()
-                .await
-                .and_then(AgentSnapshot::from_claude)
+            && let Ok(checkpoint) = agent.checkpoint().await
         {
-            self.publish_context_budget(&snapshot, agent.session_id(), pane);
+            self.publish_context_budget(&checkpoint.into(), agent.session_id(), pane);
         }
     }
 }
@@ -283,8 +281,8 @@ struct FinishedTurn {
 }
 
 async fn complete_turn(
-    agent: &Nanocodex,
-    result: Result<nanocodex::agent::TurnResult, NanocodexError>,
+    agent: &Agent,
+    result: Result<nanocode::agent::TurnResult, NanocodexError>,
     claude: bool,
     auxiliary: bool,
     pane: PaneId,
@@ -294,16 +292,15 @@ async fn complete_turn(
         Ok(None)
     } else if claude {
         agent
-            .runtime_snapshot()
+            .checkpoint()
             .await
-            .and_then(AgentSnapshot::from_claude)
-            .map(Some)
+            .map(|checkpoint| Some(checkpoint.into()))
     } else {
         Ok(result
             .as_ref()
             .ok()
-            .and_then(|result| result.snapshot())
-            .map(|snapshot| AgentSnapshot::Codex(Box::new(snapshot))))
+            .and_then(nanocode::TurnResult::checkpoint)
+            .map(AgentSnapshot::from))
     };
     if let Ok(Some(snapshot)) = &snapshot {
         updates.publish_context_budget(snapshot, agent.session_id(), pane);
@@ -517,7 +514,7 @@ struct SteerRequest {
 }
 
 struct PaneAgent {
-    agent: Nanocodex,
+    agent: Agent,
     context: AgentContext,
     memory_review: MemoryReviewState,
 }
@@ -549,16 +546,16 @@ impl TurnRequest {
 
 /// An agent created for one auxiliary job, isolated from the pane's conversation.
 struct IsolatedAgent {
-    agent: Nanocodex,
+    agent: Agent,
     /// Discards the isolated agent's events; nothing presents them.
     drain: JoinHandle<()>,
 }
 
 impl IsolatedAgent {
-    async fn create(parent: &Nanocodex, context: AuxiliaryContext) -> Result<Self, NanocodexError> {
+    async fn create(parent: &Agent, context: AuxiliaryContext) -> Result<Self, NanocodexError> {
         let (agent, mut events) = match context {
             AuxiliaryContext::Clean => parent.spawn().await?,
-            AuxiliaryContext::CurrentConversation => parent.fork().await?,
+            AuxiliaryContext::CurrentConversation => parent.fork(ForkRequest::latest()).await?,
         };
         let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
         Ok(Self { agent, drain })
@@ -911,7 +908,7 @@ fn terminal_stop_reason(error: &NanocodexError) -> Option<TerminalStopReason> {
 }
 
 pub(crate) fn spawn(
-    agent: Nanocodex,
+    agent: Agent,
     context: AgentContext,
     memory_review: MemoryReviewState,
     shutdown: CancellationToken,
@@ -1133,23 +1130,12 @@ impl Worker {
                 return;
             }
         };
-        let claude = matches!(agent.context.model, HarnessModel::Claude(_));
         let agent = agent.agent.clone();
         let task = self.compactions.spawn(async move {
             let started = Instant::now();
             let operation = async {
                 agent.compact().await?;
-                if claude {
-                    agent
-                        .runtime_snapshot()
-                        .await
-                        .and_then(AgentSnapshot::from_claude)
-                } else {
-                    agent
-                        .snapshot()
-                        .await
-                        .map(|snapshot| AgentSnapshot::Codex(Box::new(snapshot)))
-                }
+                agent.checkpoint().await.map(AgentSnapshot::from)
             };
             let result = operation.await.map(Box::new);
             CompletedCompaction {
@@ -1325,7 +1311,7 @@ impl Worker {
         if matches!(parent.context.model, HarnessModel::Claude(_)) {
             return Err(WorkerError::ClaudeCannotFork);
         }
-        let (agent, events) = parent.agent.fork().await?;
+        let (agent, events) = parent.agent.fork(ForkRequest::latest()).await?;
         let agent = PaneAgent {
             agent,
             context: parent.context,
@@ -1385,9 +1371,8 @@ mod tests {
             transcript::{TerminalStopReason, TurnId},
         },
     };
-    use nanocodex::{
-        AgentEvents, HarnessModel as Model, Model as CodexModel, Nanocodex, NanocodexError, OpenAi,
-        ReasoningMode, Thinking,
+    use nanocode::{
+        Agent, AgentEvents, Model as CodexModel, NanocodexError, OpenAi, ReasoningMode, Thinking,
         agent::input::{Prompt, PromptInput, UserInput},
         oai::{
             ResponseError,
@@ -1409,7 +1394,7 @@ mod tests {
         task::{Context, Poll},
         time::Duration,
     };
-    use tact_subagents::AgentContext;
+    use tact_subagents::{AgentContext, HarnessModel as Model};
     use tokio::{
         sync::{Notify, mpsc, oneshot},
         time::timeout,
@@ -1434,7 +1419,7 @@ mod tests {
         }
 
         fn call(&mut self, request: ResponsesAttempt) -> Self::Future {
-            use nanocodex::oai::{
+            use nanocode::oai::{
                 responses::{ResponseItem, ResponseItemId},
                 tower::{CompactionOutput, ResponsePipelineStats, ResponsesOutput},
             };
@@ -1527,7 +1512,7 @@ mod tests {
             })
             .build()
             .unwrap();
-        let (agent, mut events) = Nanocodex::builder(openai).build().unwrap();
+        let (agent, mut events) = Agent::builder(openai).build().unwrap();
         let shutdown = CancellationToken::new();
         let (commands, mut updates) = spawn(
             agent,
@@ -1600,7 +1585,7 @@ mod tests {
             })
             .build()
             .unwrap();
-        let (agent, mut events) = Nanocodex::builder(openai).build().unwrap();
+        let (agent, mut events) = Agent::builder(openai).build().unwrap();
         let directory = tempfile::tempdir().unwrap();
         let config = directory.path().join("config.toml");
         let shutdown = CancellationToken::new();
@@ -1620,12 +1605,7 @@ mod tests {
             .unwrap();
         let snapshot = compacted(&mut updates).await.unwrap();
         session::SessionStore::new(&config)
-            .save_checkpoint(
-                "session",
-                &snapshot.into_codex().unwrap(),
-                "instructions",
-                false,
-            )
+            .save_checkpoint("session", &snapshot, "instructions", false)
             .unwrap();
         commands.send(WorkerCommand::Compact(PaneId::Main)).unwrap();
         timeout(Duration::from_secs(5), receive.recv()).await.unwrap().unwrap().send(Err(ResponsesError::HttpRejected {
@@ -1656,7 +1636,7 @@ mod tests {
             session_id: "session".to_owned(),
             parent_session_id: None,
             parent_sequence: None,
-            model: nanocodex::oai::MODEL.to_owned(),
+            model: nanocode::oai::MODEL.to_owned(),
             effort: ReasoningEffort::Medium,
             reasoning_mode: crate::app::config::ReasoningMode::Standard,
             speed: Speed::Standard,
@@ -1750,7 +1730,7 @@ mod tests {
     }
 
     struct CapturedRequest {
-        model: nanocodex::Model,
+        model: nanocode::Model,
         thinking: Thinking,
         input: String,
         release: oneshot::Sender<()>,
@@ -1801,12 +1781,12 @@ mod tests {
     fn capture_agent(
         sender: mpsc::UnboundedSender<CapturedRequest>,
         context: AgentContext,
-    ) -> (Nanocodex, AgentEvents) {
+    ) -> (Agent, AgentEvents) {
         let openai = OpenAi::builder("test-key")
             .service(move || CaptureService(sender.clone()))
             .build()
             .unwrap();
-        Nanocodex::builder(openai)
+        Agent::builder(openai)
             .model(context.model.as_str().parse::<CodexModel>().unwrap())
             .thinking(context.thinking)
             .reasoning_mode(context.reasoning_mode)
@@ -1863,7 +1843,7 @@ mod tests {
     #[tokio::test]
     async fn manual_compaction_captures_claude_native_state_and_shuts_down_pending_work() {
         use axum::{Router, http::StatusCode, routing::post};
-        use nanocodex::{Claude, ClaudeModel, claude::ClaudeClient};
+        use nanocode::{Claude, ClaudeModel, claude::ClaudeClient};
         let _ = rustls::crypto::ring::default_provider().install_default();
         let (requested, mut requests) =
             mpsc::unbounded_channel::<oneshot::Sender<Option<String>>>();
@@ -1887,7 +1867,7 @@ mod tests {
             format!("http://{address}/v1/messages"),
             "synthetic-key",
         );
-        let (agent, mut events) = Nanocodex::builder(Claude::new(
+        let (agent, mut events) = Agent::builder(Claude::new(
             client,
             Model::Claude(ClaudeModel::Opus55).as_str(),
         ))
@@ -1930,8 +1910,7 @@ mod tests {
         let expected = serde_json::to_value(&snapshot).unwrap();
         assert!(
             expected["payload"]
-                .as_str()
-                .unwrap()
+                .to_string()
                 .contains("compacted native summary")
         );
         commands.send(WorkerCommand::Compact(PaneId::Main)).unwrap();
@@ -1945,8 +1924,7 @@ mod tests {
             compacted(&mut updates).await,
             Err(WorkerError::Agent(_))
         ));
-        let actual =
-            super::AgentSnapshot::from_claude(probe.runtime_snapshot().await.unwrap()).unwrap();
+        let actual = super::AgentSnapshot::from(probe.checkpoint().await.unwrap());
         assert_eq!(serde_json::to_value(actual).unwrap(), expected);
         drop(probe);
         commands.send(WorkerCommand::Compact(PaneId::Main)).unwrap();
@@ -1966,9 +1944,7 @@ mod tests {
     async fn claude_success_publishes_a_native_checkpoint_and_rejects_fork() {
         let _ = rustls::crypto::ring::default_provider().install_default();
         use axum::{Router, routing::post};
-        use nanocodex::{
-            Claude, ClaudeModel, HarnessModel, agent::ChildSnapshot, claude::ClaudeClient,
-        };
+        use nanocode::{Claude, ClaudeModel, ModelSelection, claude::ClaudeClient};
         let frames = claude_text_frames("done");
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -1996,7 +1972,7 @@ mod tests {
             format!("http://{address}/v1/messages"),
             "synthetic-key",
         );
-        let (agent, mut events) = Nanocodex::builder(Claude::new(
+        let (agent, mut events) = Agent::builder(Claude::new(
             client,
             Model::Claude(ClaudeModel::Opus55).as_str(),
         ))
@@ -2068,20 +2044,15 @@ mod tests {
         })
         .await
         .unwrap();
-        let ChildSnapshot::Native {
-            model,
-            session_id,
-            thinking,
-            has_conversation,
-            payload,
-        } = snapshot.into_claude().unwrap()
-        else {
-            panic!("expected native checkpoint")
-        };
-        assert_eq!(model, HarnessModel::Claude(ClaudeModel::Opus55));
-        assert_eq!(session_id, expected_session);
-        assert_eq!(thinking, Thinking::High);
-        assert!(has_conversation);
+        let checkpoint = snapshot.into_checkpoint();
+        assert_eq!(
+            checkpoint.model(),
+            ModelSelection::Claude(ClaudeModel::Opus55)
+        );
+        assert_eq!(checkpoint.session_id(), expected_session);
+        assert_eq!(checkpoint.thinking(), Thinking::High);
+        assert!(checkpoint.has_conversation());
+        let payload = checkpoint.payload().to_string();
         assert!(payload.contains("hello"));
         assert!(payload.contains("done"));
         commands
@@ -2137,10 +2108,7 @@ mod tests {
         })
         .await
         .unwrap();
-        let snapshot = crate::core::session::AgentSnapshot::from_claude(
-            probe.runtime_snapshot().await.unwrap(),
-        )
-        .unwrap();
+        let snapshot = crate::core::session::AgentSnapshot::from(probe.checkpoint().await.unwrap());
         assert_eq!(Some(budget), snapshot.context_budget());
         drop(probe);
         shutdown.cancel();
@@ -2369,7 +2337,7 @@ mod tests {
         ];
         for (source, stopped) in cases {
             let error =
-                NanocodexError::Response(ResponseError::from(ResponsesServiceError::from(source)));
+                NanocodexError::from(ResponseError::from(ResponsesServiceError::from(source)));
             let (updates, mut received) = mpsc::unbounded_channel();
             ActiveTurns::default().finish(
                 Ok(FinishedTurn {
@@ -2429,7 +2397,7 @@ mod tests {
         reasoning_mode: ReasoningMode::Standard,
     };
 
-    fn pending_agent(called: Arc<Notify>, calls: Arc<AtomicUsize>) -> (Nanocodex, AgentEvents) {
+    fn pending_agent(called: Arc<Notify>, calls: Arc<AtomicUsize>) -> (Agent, AgentEvents) {
         let openai = OpenAi::builder("test-key")
             .service(move || PendingService {
                 called: Arc::clone(&called),
@@ -2437,7 +2405,7 @@ mod tests {
             })
             .build()
             .unwrap();
-        Nanocodex::builder(openai).build().unwrap()
+        Agent::builder(openai).build().unwrap()
     }
 
     fn prompt_text(prompt: Prompt) -> String {

@@ -2,11 +2,8 @@
 
 use super::headless::RunOutcome;
 use crate::app::error::RuntimeError;
-use nanocodex::{
-    HarnessModel as Model,
-    agent::events::{
-        AgentEvent, AgentEventData, AgentEventKind, EventUsage, RunEvent, RunTerminal,
-    },
+use nanocode::agent::events::{
+    AgentEvent, AgentEventData, AgentEventKind, EventUsage, RunEvent, RunTerminal,
 };
 use serde::Serialize;
 use std::{
@@ -16,7 +13,8 @@ use std::{
     path::PathBuf,
 };
 use tact_subagents::{
-    AgentDescriptor, AgentId, AgentMessageUpdate, AgentStatus, AgentUpdate, ScopedAgentUpdate,
+    AgentDescriptor, AgentId, AgentMessageUpdate, AgentStatus, AgentUpdate, HarnessModel as Model,
+    ScopedAgentUpdate,
 };
 use tokio::{
     sync::{mpsc, oneshot},
@@ -393,13 +391,16 @@ impl<'a> From<&'a AgentDescriptor> for AgentRecord<'a> {
 #[cfg(test)]
 mod tests {
     use super::{OrchestrationRecorder, RunOutcome};
-    use nanocodex::{
-        HarnessModel as Model, Model as CodexModel, ReasoningMode, Thinking,
+    use nanocode::{
+        Model as CodexModel, ReasoningMode, Thinking,
         agent::events::{AgentEvent, AgentEventKind},
     };
     use serde_json::{Value, json, value::to_raw_value};
     use std::{fs, sync::Arc};
-    use tact_subagents::{AgentDescriptor, AgentId, AgentStatus, AgentUpdate, ScopedAgentUpdate};
+    use tact_subagents::{
+        AgentDescriptor, AgentId, AgentStatus, AgentUpdate, HarnessModel as Model,
+        ScopedAgentUpdate,
+    };
     use tempfile::tempdir;
     use tokio::sync::mpsc;
 

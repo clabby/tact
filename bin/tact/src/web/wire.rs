@@ -752,7 +752,7 @@ mod tests {
     use crate::core::transcript::{
         LocalEvent, ToolEntry, ToolState, TranscriptModel, TranscriptRecord, TurnId, UserSubmitted,
     };
-    use nanocodex::agent::events::{AgentEvent, AgentEventKind};
+    use nanocode::agent::events::{AgentEvent, AgentEventKind};
     use serde_json::{Value, json, value::to_raw_value};
     use std::sync::Arc;
 

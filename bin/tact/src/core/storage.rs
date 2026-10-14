@@ -7,7 +7,7 @@ use crate::{
         TerminalStopReason, TranscriptRecord, TurnId, WorkerTurnAccepted,
     },
 };
-use nanocodex::agent::events::AgentEventKind;
+use nanocode::agent::events::AgentEventKind;
 use rusqlite::{
     Connection, OpenFlags, OptionalExtension, Transaction, ffi::ErrorCode, params,
     params_from_iter, types::Value,

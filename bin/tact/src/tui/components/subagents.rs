@@ -28,7 +28,7 @@ use crate::{
     tui::format::sanitize_terminal_text_inline,
 };
 use crossterm::event::{Event, KeyCode, KeyEventKind};
-use nanocodex::{ReasoningMode, agent::events::AgentEvent};
+use nanocode::{ReasoningMode, agent::events::AgentEvent};
 use ratatui::{
     Frame,
     layout::Rect,
@@ -1100,8 +1100,8 @@ mod tests {
     use crossterm::event::{
         Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     };
-    use nanocodex::{
-        HarnessModel as Model, Model as CodexModel, ReasoningMode, Thinking,
+    use nanocode::{
+        Model as CodexModel, ReasoningMode, Thinking,
         agent::events::{AgentEvent, AgentEventKind},
     };
     use ratatui::{Terminal, backend::TestBackend, style::Color};
@@ -1111,7 +1111,10 @@ mod tests {
         sync::Arc,
         time::{Duration, Instant},
     };
-    use tact_subagents::{AgentDescriptor, AgentId, AgentMessageUpdate, AgentStatus, AgentUpdate};
+    use tact_subagents::{
+        AgentDescriptor, AgentId, AgentMessageUpdate, AgentStatus, AgentUpdate,
+        HarnessModel as Model,
+    };
 
     const SCROLL_LINES: NonZeroU16 = NonZeroU16::new(3).unwrap();
 

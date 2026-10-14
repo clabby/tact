@@ -3,7 +3,7 @@
 use super::{
     MemoryAccess, MemoryKey, MemoryLimits, MemoryRecord, MemoryStore, SelectedMemoryStore,
 };
-use nanocodex::{
+use nanocode::{
     Tool,
     tools::contract::{
         ToolContext, ToolDefinition, ToolInput, ToolOutput, ToolResult, async_trait,
@@ -446,7 +446,7 @@ fn memory_record_schema() -> Value {
 mod tests {
     use super::{MemoryOperation, MemoryTool, MemoryToolError, MutationAuthorizer};
     use crate::{MemoryError, MemoryLimits, MemoryStore, SelectedMemoryStore};
-    use nanocodex::{
+    use nanocode::{
         Tool,
         tools::contract::{
             DEFAULT_TOOL_OUTPUT_TOKENS, ToolContext, ToolError, ToolInput, ToolOutputBody,

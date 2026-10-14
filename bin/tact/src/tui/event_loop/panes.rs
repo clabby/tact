@@ -32,7 +32,7 @@ use crate::{
         worker::{self, WorkerCommand},
     },
 };
-use nanocodex::{AgentEvents, HarnessModel as Model};
+use nanocode::AgentEvents;
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -41,7 +41,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
 };
-use tact_subagents::{ScopedAgentUpdate, Subagents};
+use tact_subagents::{HarnessModel as Model, ScopedAgentUpdate, Subagents};
 use tokio::{sync::mpsc, task::JoinSet};
 
 /// The settings a pane's agent runs with.
@@ -676,7 +676,7 @@ impl Panes {
     /// Records in every journal how its session ended at shutdown and closes the journals.
     pub(super) fn close_journals(
         &mut self,
-        worker_error: Option<&nanocodex::NanocodexError>,
+        worker_error: Option<&nanocode::NanocodexError>,
     ) -> Result<()> {
         let outcome = if worker_error.is_some() {
             SessionOutcome::Failed

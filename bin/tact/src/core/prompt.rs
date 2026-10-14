@@ -1,6 +1,6 @@
 //! Displayable prompt text paired with model-only image content.
 
-use nanocodex::agent::input::{Prompt, UserInput};
+use nanocode::agent::input::{Prompt, UserInput};
 use std::{fmt, ops::Range, sync::Arc};
 
 /// Identifies a prompt waiting in a session's queue until it is sent or steered into the
@@ -138,7 +138,7 @@ impl From<String> for Submission {
 #[cfg(test)]
 mod tests {
     use super::Submission;
-    use nanocodex::agent::input::{PromptInput, UserInput};
+    use nanocode::agent::input::{PromptInput, UserInput};
 
     #[test]
     fn text_submission_uses_text_input() {

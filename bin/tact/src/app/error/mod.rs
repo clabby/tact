@@ -16,7 +16,7 @@ pub(crate) use config::{
     ConfigEditError, ConfigError, ConfigSyntaxError, McpUrlError, RemoteMemoryConfigError,
 };
 use miette::Diagnostic;
-use nanocodex::{
+use nanocode::{
     NanocodexError,
     oai::{OpenAiError, events::EventError},
     tools::mcp::McpBuildError,

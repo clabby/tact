@@ -14,7 +14,6 @@ use crate::app::{
     model,
     theme::Theme,
 };
-use nanocodex::HarnessModel as Model;
 use serde::Deserialize;
 use std::{
     collections::BTreeMap,
@@ -25,6 +24,7 @@ use std::{
     path::{Path, PathBuf},
     result::Result as StdResult,
 };
+use tact_subagents::HarnessModel as Model;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 #[derive(Default, Deserialize)]

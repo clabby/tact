@@ -26,7 +26,7 @@ use crate::{
 };
 use chrono::{DateTime, Utc};
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
-use nanocodex::{ClaudeModel, HarnessModel, Model as CodexModel};
+use nanocode::{ClaudeModel, Model as CodexModel};
 use ratatui::{
     Frame,
     layout::Rect,
@@ -35,6 +35,7 @@ use ratatui::{
     widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
 };
 use std::{borrow::Cow, cmp::Reverse, iter};
+use tact_subagents::HarnessModel;
 use unicode_width::UnicodeWidthStr;
 
 const TITLE: &str = "Context diagnostics";

@@ -11,12 +11,12 @@ use crate::app::{
     secret::SecretString,
 };
 use clap::ValueEnum;
-use nanocodex::HarnessModel as Model;
 use serde::{Deserialize, Serialize};
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
+use tact_subagents::HarnessModel as Model;
 
 /// Authentication method used by `tact`.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, ValueEnum)]
@@ -148,8 +148,9 @@ mod tests {
         },
         error::{ConfigError, Error},
     };
-    use nanocodex::{ClaudeModel, HarnessModel as Model};
+    use nanocode::ClaudeModel;
     use std::sync::Arc;
+    use tact_subagents::HarnessModel as Model;
     use tempfile::tempdir;
 
     #[test]

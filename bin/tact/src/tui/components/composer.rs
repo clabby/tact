@@ -36,7 +36,7 @@ pub(crate) use draft::ComposerDraft;
 use draft::{Direction, DraftBuffer};
 use history::PromptHistory;
 use layout::grapheme_at_column;
-use nanocodex::{HarnessModel as Model, Model as CodexModel};
+use nanocode::Model as CodexModel;
 use ratatui::{
     Frame,
     buffer::Buffer,
@@ -52,6 +52,7 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
+use tact_subagents::HarnessModel as Model;
 use unicode_width::UnicodeWidthStr;
 
 const MIN_CONTENT_ROWS: usize = 3;
@@ -1296,8 +1297,8 @@ mod tests {
         core::context::ContextBudget,
     };
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
-    use nanocodex::{
-        ClaudeModel, HarnessModel as Model, Model as CodexModel,
+    use nanocode::{
+        ClaudeModel, Model as CodexModel,
         agent::input::{PromptInput, UserInput},
     };
     use ratatui::{
@@ -1311,6 +1312,7 @@ mod tests {
         path::Path,
         time::{Duration, Instant},
     };
+    use tact_subagents::HarnessModel as Model;
     use unicode_width::UnicodeWidthStr;
 
     fn new_composer() -> Composer {
