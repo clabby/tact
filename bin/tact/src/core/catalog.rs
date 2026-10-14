@@ -96,7 +96,10 @@ fn open(config_path: &Path) -> Result<SessionStore, CatalogError> {
 
 /// Runs catalog work on a dedicated current-thread runtime, so durable session drivers never
 /// outlive the call and synchronous callers inside Tokio never nest runtimes.
-fn run<T, F>(work: impl FnOnce(SessionStore) -> F + Send, config_path: &Path) -> Result<T, CatalogError>
+fn run<T, F>(
+    work: impl FnOnce(SessionStore) -> F + Send,
+    config_path: &Path,
+) -> Result<T, CatalogError>
 where
     T: Send,
     F: Future<Output = Result<T, CatalogError>>,
@@ -197,7 +200,10 @@ async fn new_record(
 }
 
 /// The latest resume point of a cataloged session.
-pub(crate) fn load(config_path: &Path, session_id: &str) -> Result<Option<ResumeState>, CatalogError> {
+pub(crate) fn load(
+    config_path: &Path,
+    session_id: &str,
+) -> Result<Option<ResumeState>, CatalogError> {
     run(
         |store| async move {
             if store.summary(session_id).await?.is_none() {
@@ -208,9 +214,14 @@ pub(crate) fn load(config_path: &Path, session_id: &str) -> Result<Option<Resume
                 session_id: session_id.to_owned(),
                 reason,
             };
-            let Some(checkpoint) = stored.session_checkpoint()? else {
+            let Some(checkpoint) = stored.checkpoint.clone() else {
                 return Ok(None);
             };
+            let checkpoint = serde_json::from_value::<SessionCheckpoint>(checkpoint)
+                .map_err(|error| invalid(error.to_string()))?;
+            checkpoint
+                .validate()
+                .map_err(|error| invalid(error.to_string()))?;
             let resume = stored
                 .turns
                 .iter()
