@@ -3497,7 +3497,7 @@ mod parity_tests {
     }
 
     #[test]
-    #[ignore = "Nanocodex 56d35fb offers no model with Pro reasoning"]
+    #[ignore = "the pinned Nanocodex offers no model with Pro reasoning"]
     fn reasoning_modes_follow_the_model_catalog() {
         let mut harness = Harness::new();
         let effects = harness

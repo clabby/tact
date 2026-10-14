@@ -421,7 +421,7 @@ async fn configured_api_key_and_model_tiers_reach_both_transports() {
 }
 
 #[tokio::test]
-#[ignore = "Nanocodex 56d35fb offers no model with Pro reasoning"]
+#[ignore = "the pinned Nanocodex offers no model with Pro reasoning"]
 async fn configured_pro_mode_reaches_both_transports() {
     if run_isolated("core::openai_tests::configured_pro_mode_reaches_both_transports").await {
         return;

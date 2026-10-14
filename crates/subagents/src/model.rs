@@ -523,7 +523,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Nanocodex 56d35fb offers no model with Pro reasoning"]
+    #[ignore = "the pinned Nanocodex offers no model with Pro reasoning"]
     fn agent_context_keeps_pro_only_on_models_that_support_it() {
         for model in crate::SUPPORTED_MODELS {
             let standard = AgentContext::new(model, Thinking::High, ReasoningMode::Standard);
