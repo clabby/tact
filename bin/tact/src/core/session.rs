@@ -722,9 +722,10 @@ impl SessionStore {
         }
         let encoded = storage.load_resume_state(session_id)?.ok_or_else(missing)?;
         let state = decode_resume_state(session_id, &encoded)?;
-        let session = storage.session(session_id)?.ok_or_else(missing)?;
         // A session resumed before the bulk import moves into the catalog now.
-        catalog::import_legacy_session(&self.config_path, &session, &state)?;
+        if let Some(session) = storage.session(session_id)? {
+            catalog::import_legacy_session(&self.config_path, &session, &state)?;
+        }
         Ok(state)
     }
 

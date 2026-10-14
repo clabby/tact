@@ -214,9 +214,14 @@ pub(crate) fn load(
                 session_id: session_id.to_owned(),
                 reason,
             };
-            let Some(checkpoint) = stored.session_checkpoint()? else {
+            let Some(checkpoint) = stored.checkpoint.clone() else {
                 return Ok(None);
             };
+            let checkpoint = serde_json::from_value::<SessionCheckpoint>(checkpoint)
+                .map_err(|error| invalid(error.to_string()))?;
+            checkpoint
+                .validate()
+                .map_err(|error| invalid(error.to_string()))?;
             let resume = stored
                 .turns
                 .iter()
